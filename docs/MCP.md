@@ -15,7 +15,10 @@ scraping. It exposes the same operations as the CLI and `docs/API.md`, with the 
 `predict_batch` and `val`; each training run has its own `device`. `--tensor-cores` (env `FOLO_GPU_TENSOR_CORES=1`)
 asks for the GPU's tensor cores in embedded mode, as `folo serve --tensor-cores` does: `train { amp: true }` needs
 them (`folo_info`'s `capabilities.amp` says whether they are on). They have to be asked for before the GPU is
-first used, so it is a start-up flag, not a runtime switch; with `--server`, the `folo serve` decides. Setup snippets for
+first used, so it is a start-up flag, not a runtime switch; with `--server`, the `folo serve` decides.
+One process owns a data dir at a time (docs/CLI.md, `serve`): when a `folo serve` already owns `--data-dir` (FOLO
+Desktop starts one), the embedded mode goes through that server, as `--server` would; with `--confine` it fails
+with `data_dir_in_use` instead. Setup snippets for
 Claude Code and Codex are in the README ([Use FOLO from an agent](../README.md#use-folo-from-an-agent)). The implementation is the
 `folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp/`.
 

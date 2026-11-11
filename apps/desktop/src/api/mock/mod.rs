@@ -20,7 +20,7 @@ use std::time::Instant;
 use super::time;
 use super::*;
 use cloud::Ended;
-use datasets::DatasetFixture;
+pub(super) use datasets::DatasetFixture;
 use training::{Clock, RunFixture, initial_logs};
 
 /// The fixtures' "now": 2026-11-08T07:30:00Z.
@@ -49,6 +49,8 @@ pub struct MockBackend {
     measured: Mutex<(Vec<TrainThroughput>, Vec<InferThroughput>)>,
     /// Cloud connections (one RunPod connection unless a variant says otherwise).
     connections: Mutex<Vec<CloudConnection>>,
+    /// Vision benchmarks and coding-agent fixtures (lazily seeded on first use).
+    benches: Arc<super::mock_bench::MockBench>,
     clock: Clock,
 }
 
@@ -67,6 +69,12 @@ impl MockBackend {
     /// its instance (the cloud screenshots).
     pub fn with_cloud_runs(live_step: u32, frozen: bool) -> Self {
         Self::build(live_step, frozen, true)
+    }
+
+    #[allow(dead_code)]
+    pub fn without_bench(mut self) -> Self {
+        self.benches = Arc::new(super::mock_bench::MockBench::disabled(self.frozen, self.started));
+        self
     }
 
     pub fn failing(mut self) -> Self {

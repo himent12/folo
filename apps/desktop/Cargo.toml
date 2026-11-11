@@ -22,6 +22,7 @@ path = "src/main.rs"
 gpui = "0.2.2"
 # The API types shared with folo-server and the CLI (root workspace, by path).
 folo-api = { path = "../../crates/folo-api" }
+folo-bench = { path = "../../crates/folo-bench" }
 # Local inference in Playground: folo-vision's predictor, in process, on folo-gpu or the CPU.
 # Cargo.lock: gpu-allocator must use the `windows` crate wgpu-hal uses (0.62 today). Cargo may pick
 # gpui's older `windows` for it (wgpu-hal's DX12 backend then fails to compile); fix the lock entry

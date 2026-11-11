@@ -4,13 +4,14 @@ use crate::api::time;
 use crate::api::*;
 use crate::synth::{Scene, hash};
 
-pub(super) struct DatasetFixture {
-    pub(super) ds: Dataset,
-    seed: u64,
-    max_objects: u32,
-    small: bool,
+#[derive(Clone)]
+pub(in crate::api) struct DatasetFixture {
+    pub(in crate::api) ds: Dataset,
+    pub(in crate::api) seed: u64,
+    pub(in crate::api) max_objects: u32,
+    pub(in crate::api) small: bool,
     /// Per-image boxes, computed once from the scenes.
-    pub(super) images: Vec<ImageInfo>,
+    pub(in crate::api) images: Vec<ImageInfo>,
 }
 
 impl DatasetFixture {

@@ -41,6 +41,7 @@ impl FoloApp {
                 display: window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string()),
             }),
             theme: Some(if self.mode == Mode::Light { "light" } else { "dark" }.into()),
+            spawn_server: Some(self.spawn_server),
         };
         if let Err(e) = crate::window_state::save(path, &state) {
             eprintln!("folo-desktop: couldn't remember the window in {}: {e}", path.display());

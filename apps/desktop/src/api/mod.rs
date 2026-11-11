@@ -6,6 +6,7 @@
 
 pub mod http;
 pub mod mock;
+mod mock_bench;
 pub mod time;
 pub mod types;
 
@@ -202,6 +203,94 @@ pub trait Backend: Send + Sync + 'static {
         Err(no_cloud())
     }
 
+    // ---------- vision benchmarks (`/api/bench`, servers with `vision_bench`) ----------
+
+    fn bench_catalog(&self) -> ApiResult<BenchCatalog> {
+        Err(no_bench())
+    }
+    fn benches(&self) -> ApiResult<Vec<Bench>> {
+        Err(no_bench())
+    }
+    fn create_bench(&self, _req: &CreateBench) -> ApiResult<Bench> {
+        Err(no_bench())
+    }
+    fn update_bench(&self, _id: &str, _req: &UpdateBench) -> ApiResult<Bench> {
+        Err(no_bench())
+    }
+    fn delete_bench(&self, _id: &str) -> ApiResult<()> {
+        Err(no_bench())
+    }
+    fn design_bench(&self, _id: &str, _req: &DesignBench) -> ApiResult<BenchDesign> {
+        Err(no_bench())
+    }
+    fn bench_images(
+        &self,
+        _id: &str,
+        _offset: u32,
+        _limit: u32,
+        _condition: Option<(&str, u8)>,
+    ) -> ApiResult<BenchImagePage> {
+        Err(no_bench())
+    }
+    fn bench_image(
+        &self,
+        _id: &str,
+        _image_id: &str,
+        _condition: Option<(&str, u8)>,
+        _thumb: Option<u32>,
+    ) -> ApiResult<ImageData> {
+        Err(no_bench())
+    }
+    fn bench_entries(&self, _id: &str) -> ApiResult<Vec<BenchEntry>> {
+        Err(no_bench())
+    }
+    fn start_bench_entry(&self, _id: &str, _req: &StartBenchEntry) -> ApiResult<BenchEntry> {
+        Err(no_bench())
+    }
+    fn bench_result(&self, _id: &str, _entry_id: &str) -> ApiResult<BenchResult> {
+        Err(no_bench())
+    }
+    fn bench_entry_images(
+        &self,
+        _id: &str,
+        _entry_id: &str,
+        _sort: &str,
+        _offset: u32,
+        _limit: u32,
+    ) -> ApiResult<BenchEntryImagePage> {
+        Err(no_bench())
+    }
+    fn stop_bench_entry(&self, _id: &str, _entry_id: &str) -> ApiResult<BenchEntry> {
+        Err(no_bench())
+    }
+    fn delete_bench_entry(&self, _id: &str, _entry_id: &str) -> ApiResult<()> {
+        Err(no_bench())
+    }
+    fn bench_loops(&self, _id: &str) -> ApiResult<Vec<BenchLoop>> {
+        Err(no_bench())
+    }
+    fn start_bench_loop(&self, _id: &str, _req: &StartBenchLoop) -> ApiResult<BenchLoop> {
+        Err(no_bench())
+    }
+    fn stop_bench_loop(&self, _id: &str, _loop_id: &str) -> ApiResult<BenchLoop> {
+        Err(no_bench())
+    }
+    fn delete_bench_loop(&self, _id: &str, _loop_id: &str) -> ApiResult<()> {
+        Err(no_bench())
+    }
+    fn bench_events(&self, _id: &str) -> ApiResult<BenchSubscription> {
+        Err(no_bench())
+    }
+
+    // ---------- coding agents & labeling jobs (`/api/label`) ----------
+
+    fn label_agents(&self) -> ApiResult<Vec<LabelAgent>> {
+        Err(no_label())
+    }
+    fn label_jobs(&self) -> ApiResult<Vec<LabelJob>> {
+        Err(no_label())
+    }
+
     /// Whether models can be downloaded and run in this process ([`Backend::model_weights`]).
     fn local_inference(&self) -> bool {
         false
@@ -219,6 +308,17 @@ fn no_cloud() -> ApiError {
     ApiError::new("not_supported", "This server can't train in the cloud")
 }
 
+/// What a server without `vision_bench` answers to every vision-benchmark call.
+fn no_bench() -> ApiError {
+    ApiError::new("not_supported", "Vision benchmarks need a real folo serve")
+        .with_hint("Start folo serve without --mock, or switch to the built-in demo in Settings.")
+}
+
+/// What a server without `agent_labeling` answers to every labeling call.
+fn no_label() -> ApiError {
+    ApiError::new("not_supported", "This server does not run coding agents")
+}
+
 /// A `.folo` file and its ETag.
 pub struct Weights {
     pub bytes: Vec<u8>,
@@ -227,26 +327,29 @@ pub struct Weights {
 
 /// A live event stream. Dropping it tells the producer to stop: the mock's worker at its next tick,
 /// the HTTP reader at the next line it receives (at the latest the server's 15 s keep-alive).
-pub struct Subscription {
-    rx: Receiver<RunEvent>,
+pub struct EventStream<E> {
+    rx: Receiver<E>,
     cancel: Arc<AtomicBool>,
 }
 
-impl Subscription {
-    pub fn new(rx: Receiver<RunEvent>) -> (Self, Arc<AtomicBool>) {
+pub type Subscription = EventStream<RunEvent>;
+pub type BenchSubscription = EventStream<BenchEvent>;
+
+impl<E> EventStream<E> {
+    pub fn new(rx: Receiver<E>) -> (Self, Arc<AtomicBool>) {
         let cancel = Arc::new(AtomicBool::new(false));
         (Self { rx, cancel: cancel.clone() }, cancel)
     }
 }
 
-impl std::ops::Deref for Subscription {
-    type Target = Receiver<RunEvent>;
-    fn deref(&self) -> &Receiver<RunEvent> {
+impl<E> std::ops::Deref for EventStream<E> {
+    type Target = Receiver<E>;
+    fn deref(&self) -> &Receiver<E> {
         &self.rx
     }
 }
 
-impl Drop for Subscription {
+impl<E> Drop for EventStream<E> {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
     }

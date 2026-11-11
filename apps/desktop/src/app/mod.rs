@@ -51,6 +51,7 @@ actions!(
         GoDatasets,
         GoRuns,
         GoModels,
+        GoBenchmarks,
         GoPlayground,
         GoSettings,
         ToggleTheme,
@@ -76,6 +77,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-3", GoRuns, None),
         KeyBinding::new("ctrl-4", GoModels, None),
         KeyBinding::new("ctrl-5", GoPlayground, None),
+        KeyBinding::new("ctrl-6", GoBenchmarks, None),
         KeyBinding::new("ctrl-,", GoSettings, None),
         KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
         KeyBinding::new("f11", ToggleFullscreen, None),
@@ -100,6 +102,11 @@ pub enum Route {
     Run(String),
     Models,
     Model(String),
+    /// Vision benchmarks (servers with `vision_bench`).
+    Benches,
+    Bench(String),
+    /// An entry of a benchmark: (benchmark, entry).
+    BenchEntry(String, String),
     Playground,
     Settings,
 }
@@ -110,12 +117,14 @@ pub enum Section {
     Datasets,
     Runs,
     Models,
+    Benchmarks,
     Playground,
     Settings,
 }
 
 impl Route {
-    /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `playground`, `settings`.
+    /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `benchmarks`, `bench:ID`,
+    /// `bench-entry:ID/ENTRY`, `playground`, `settings`.
     pub fn parse(s: &str) -> Option<Route> {
         let (kind, id) = s.split_once(':').map_or((s, None), |(k, i)| (k, Some(i.to_string())));
         Some(match (kind, id) {
@@ -126,6 +135,12 @@ impl Route {
             ("run", Some(id)) => Route::Run(id),
             ("models", None) => Route::Models,
             ("model", Some(id)) => Route::Model(id),
+            ("benchmarks" | "benches", None) => Route::Benches,
+            ("bench", Some(id)) => Route::Bench(id),
+            ("bench-entry", Some(id)) => {
+                let (b, e) = id.split_once('/')?;
+                Route::BenchEntry(b.to_string(), e.to_string())
+            }
             ("playground", None) => Route::Playground,
             ("settings", None) => Route::Settings,
             _ => return None,
@@ -138,6 +153,7 @@ impl Route {
             Route::Datasets | Route::Dataset(_) => Section::Datasets,
             Route::Runs | Route::Run(_) => Section::Runs,
             Route::Models | Route::Model(_) => Section::Models,
+            Route::Benches | Route::Bench(_) | Route::BenchEntry(..) => Section::Benchmarks,
             Route::Playground => Section::Playground,
             Route::Settings => Section::Settings,
         }
@@ -358,7 +374,7 @@ pub struct FoloApp {
     pub server_mode: ServerMode,
     pub server_url: Entity<TextInput>,
     pub spawn_server: bool,
-    /// A `folo serve --mock` this app started (stopped when the app quits).
+    /// A local `folo serve` this app started (stopped when the app quits).
     server_proc: Option<crate::api::http::ServerProcess>,
     /// Startup / switch in progress: what the app is doing ("Starting folo serve…").
     pub connecting: Option<SharedString>,
@@ -391,6 +407,10 @@ pub struct FoloApp {
     pub throughput: Load<crate::api::ThroughputTable>,
     /// Cloud connections, instances and offers, and their dialogs (servers with `cloud`).
     pub cloud: crate::cloud::CloudState,
+    /// Vision benchmarks: lists, leaderboards, results, the open benchmark's stream (`vision_bench`).
+    pub bench: crate::bench::BenchState,
+    /// A page to open on the next render (set where no window is at hand, e.g. after a request).
+    pub route_pending: Option<Route>,
     /// Which half of it shows: training (0) or inference (1); reference rows too or measured only.
     pub tp_view: usize,
     pub tp_all: bool,
@@ -563,6 +583,8 @@ impl FoloApp {
             nr_estimate_last: None,
             throughput: Load::Idle,
             cloud: Default::default(),
+            bench: Default::default(),
+            route_pending: None,
             tp_view: 0,
             tp_all: false,
             bench_busy: false,

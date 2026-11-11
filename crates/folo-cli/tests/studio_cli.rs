@@ -123,12 +123,12 @@ fn server_commands_split_like_studios() {
     let mut c: folo_api::TrainConfig =
         serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
     c.augment.hsv = [0.0, 0.5, 0.3];
-    for name in ["r6 n", "O'Brien's run", "it\u{2019}s", "--amp", "plain"] {
+    for name in ["fasteners n", "O'Brien's run", "it\u{2019}s", "--amp", "plain"] {
         c.name = name.into();
         for weights in [None, Some("folo-n-coco"), Some("C:/Users/Ann O'Neil/best.folo")] {
             let cmd = folo_server::cli::train_command(
                 &c,
-                "C:/data sets/r6",
+                "C:/data sets/fasteners",
                 folo_api::DatasetFormat::Coco,
                 weights,
             );

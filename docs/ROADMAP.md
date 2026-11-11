@@ -23,7 +23,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 ## M3 — fast
 - [x] gpu backend implements core Backend (#31); whole models on the GPU, fused Conv+BN+SiLU / BN / optimizer kernels (#38)
 - [x] benchmarks: Ultralytics baselines (#14); folo-n beats yolo26n on GPU fwd b1 (2.99 vs 4.95 ms), GPU e2e b1/b16 and CPU fwd (#55; docs/BENCHMARKS.md)
-- [x] GPU training end to end with the loss and assigner on the device: 219 img/s vs yolo26n 202 (#46); R6 runs (#46, #67)
+- [x] GPU training end to end with the loss and assigner on the device: 219 img/s vs yolo26n 202 (#46, #67)
 - [x] inference round 2: pack-free CPU conv, GPU letterbox and candidate decode (#55)
 - [x] f16 whole-model inference (#80); tensor-core f16 GEMM/conv, opt-in (#89)
 - [x] AMP training on tensor cores: folo-n 307 img/s vs yolo26n AMP 252 (#101); /api/system capabilities (#108)
@@ -40,8 +40,8 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [~] COCO long schedule: folo-n 300 epochs from scratch, `weights-v2` draft (#144)
 - [x] dogfooding: reports 1 (#59 → #69) and 2 (#93 → #99)
 - [x] ONNX export with onnxruntime parity in CI (#87)
-- [x] COCO-pretrained folo-n: loader + COCOeval + `folo weights` (#72); 50 epochs from scratch, val2017 AP 0.314 / AP50 0.455 (pycocotools parity); R6 fine-tune from COCO beats the 410-epoch scratch run in 100 epochs; `weights-v1` draft release (#128)
-- [~] COCO 300-epoch folo-n (#144): **paused at epoch 62 of 300** (8.0 h, AMP), val2017 AP 0.317 / AP50 0.458; interim `folo-n-coco-v2` in the `weights-v2` draft release. Resume: `folo train --resume D:\folo-data\runs-coco\coco-folo-n-long\weights\last.folo --data D:\folo-data\coco` (about 29 h left; examples/coco/README.md, Resume (v2)); then re-evaluate, export and redo the R6 fine-tune comparison
+- [x] COCO-pretrained folo-n: loader + COCOeval + `folo weights` (#72); 50 epochs from scratch, val2017 AP 0.314 / AP50 0.455 (pycocotools parity); `weights-v1` draft release (#128)
+- [~] COCO 300-epoch folo-n (#144): **paused at epoch 62 of 300** (8.0 h, AMP), val2017 AP 0.317 / AP50 0.458; interim `folo-n-coco-v2` in the `weights-v2` draft release. Resume: `folo train --resume D:\folo-data\runs-coco\coco-folo-n-long\weights\last.folo --data D:\folo-data\coco` (about 29 h left; examples/coco/README.md, Resume (v2)); then re-evaluate and export
 - [x] `Model.head` / `trained_with` (#117); [x] `Model.precision` / `fused` (#123); [x] operating-point conf, resolved optimizer/LR, queue control, ONNX download (#129); [x] measured throughput, run estimates, benchmark probe (#130)
 
 - [x] agent labeling: unlabeled images → boxes by Claude Code or Codex (one tool-free model request per batch) →
@@ -62,7 +62,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
   port (Vast.ai, Lambda); spot instances with automatic resume
 
 ## M5 — polish
-- [x] README showcase, QUICKSTART, screenshots, llms.txt (#71); R6 example (examples/r6)
+- [x] README showcase, QUICKSTART, screenshots, llms.txt (#71)
 - [x] dogfooding report 3 (#134) and its fixes: GPU memory released after runs, published weights as models, AMP refused up front, server-built CLI command (#140); eval provenance (#138)
 - [x] test hygiene: every test cleans up its temp dirs, `FOLO_TEST_TMP`, CI fails on leftovers (#160)
 - [x] docs site: `site/`, generated from docs/, README.md and the examples (search, link checking, llms.txt; #122); build

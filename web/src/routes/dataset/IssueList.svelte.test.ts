@@ -85,7 +85,7 @@ describe('IssueList: the dataset check command', () => {
   const command = () => target.querySelector('pre code')?.textContent;
   for (const [path, want] of [
     ["D:/O'Brien/data", "folo dataset check 'D:/O''Brien/data' --fix-dry-run --json"],
-    ['D:/My Datasets/$r6', "folo dataset check 'D:/My Datasets/$r6' --fix-dry-run --json"],
+    ['D:/My Datasets/$shapes', "folo dataset check 'D:/My Datasets/$shapes' --fix-dry-run --json"],
     ['D:/data/shapes-hard', 'folo dataset check D:/data/shapes-hard --fix-dry-run --json'],
   ] as const) {
     it(`quotes ${path} for PowerShell`, async () => {

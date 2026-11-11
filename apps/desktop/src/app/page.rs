@@ -20,6 +20,9 @@ impl FoloApp {
             Route::Run(id) => self.run_view(&id, window, cx),
             Route::Models => self.models(window, cx),
             Route::Model(id) => self.model_view(&id, window, cx),
+            Route::Benches => self.benches(window, cx),
+            Route::Bench(id) => self.bench_view(&id, window, cx),
+            Route::BenchEntry(b, e) => self.bench_entry_view(&b, &e, window, cx),
             Route::Playground => self.playground(window, cx),
             Route::Settings => self.settings(window, cx),
         }

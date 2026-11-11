@@ -128,7 +128,7 @@ fn server_cli_commands_train_the_servers_config() {
     use clap::Parser;
     use folo_vision::model::HeadMode;
     let base: folo_api::TrainConfig =
-        serde_json::from_value(json!({ "dataset_id": "ds_1", "name": "r6-n" })).unwrap();
+        serde_json::from_value(json!({ "dataset_id": "ds_1", "name": "fasteners-n" })).unwrap();
     let mut all = base.clone();
     all.name = "my run 'two'".into();
     all.arch = folo_api::Arch::S;
@@ -152,7 +152,7 @@ fn server_cli_commands_train_the_servers_config() {
     // A name that looks like a flag.
     let mut flaglike = base.clone();
     flaglike.name = "--amp".into();
-    let data = "C:/data sets/r6";
+    let data = "C:/data sets/fasteners";
     let (auto, coco) = (folo_api::DatasetFormat::Auto, folo_api::DatasetFormat::Coco);
     // (config, registered format, --weights, the head of the weights file: the CLI's default without --head)
     let cases = [

@@ -12,15 +12,18 @@ use crate::ui::*;
 
 use super::focus::REVEAL;
 use super::{
-    Back, Dismiss, FocusNext, FocusPrev, FoloApp, GoDatasets, GoModels, GoOverview, GoPlayground, GoRuns,
-    GoSettings, NewRunAction, NextRegion, OpenImage, OpenPalette, PrevRegion, Route, Submit,
-    ToggleFullscreen, ToggleTheme,
+    Back, Dismiss, FocusNext, FocusPrev, FoloApp, GoBenchmarks, GoDatasets, GoModels, GoOverview,
+    GoPlayground, GoRuns, GoSettings, NewRunAction, NextRegion, OpenImage, OpenPalette, PrevRegion, Route,
+    Submit, ToggleFullscreen, ToggleTheme,
 };
 
 // ---------- render ----------
 
 impl Render for FoloApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(r) = self.route_pending.take() {
+            self.navigate(r, window, cx);
+        }
         if std::mem::take(&mut self.restore_pending) {
             self.restore_focus(window);
         }
@@ -79,6 +82,7 @@ impl Render for FoloApp {
             .on_action(cx.listener(|this, _: &GoDatasets, w, cx| this.nav_shortcut(Route::Datasets, w, cx)))
             .on_action(cx.listener(|this, _: &GoRuns, w, cx| this.nav_shortcut(Route::Runs, w, cx)))
             .on_action(cx.listener(|this, _: &GoModels, w, cx| this.nav_shortcut(Route::Models, w, cx)))
+            .on_action(cx.listener(|this, _: &GoBenchmarks, w, cx| this.nav_shortcut(Route::Benches, w, cx)))
             .on_action(
                 cx.listener(|this, _: &GoPlayground, w, cx| this.nav_shortcut(Route::Playground, w, cx)),
             )

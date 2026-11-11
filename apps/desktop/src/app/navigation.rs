@@ -37,10 +37,12 @@ impl FoloApp {
     }
 
     pub fn parent_route(&self) -> Option<Route> {
-        match self.route {
+        match &self.route {
             Route::Dataset(_) => Some(Route::Datasets),
             Route::Run(_) => Some(Route::Runs),
             Route::Model(_) => Some(Route::Models),
+            Route::Bench(_) => Some(Route::Benches),
+            Route::BenchEntry(b, _) => Some(Route::Bench(b.clone())),
             _ => None,
         }
     }
@@ -54,6 +56,7 @@ impl FoloApp {
         if self.route == Route::Settings {
             self.reload_cloud();
         }
+        self.after_bench_navigate();
         self.page_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.chart_hover = None;
         self.export_open = false;

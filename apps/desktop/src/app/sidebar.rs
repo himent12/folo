@@ -33,6 +33,7 @@ impl FoloApp {
             (Section::Datasets, "Datasets", "icons/images.svg", Route::Datasets, "2"),
             (Section::Runs, "Runs", "icons/activity.svg", Route::Runs, "3"),
             (Section::Models, "Models", "icons/box.svg", Route::Models, "4"),
+            (Section::Benchmarks, "Benchmarks", "icons/target.svg", Route::Benches, "6"),
             (Section::Playground, "Playground", "icons/scan-eye.svg", Route::Playground, "5"),
         ];
         let items: Vec<AnyElement> = nav
@@ -345,6 +346,7 @@ fn shortcut_label(key: &str) -> &'static str {
         "3" => "Ctrl 3",
         "4" => "Ctrl 4",
         "5" => "Ctrl 5",
+        "6" => "Ctrl 6",
         _ => "Ctrl ,",
     }
 }

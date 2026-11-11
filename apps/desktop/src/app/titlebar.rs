@@ -217,6 +217,7 @@ impl FoloApp {
             | Route::Datasets
             | Route::Runs
             | Route::Models
+            | Route::Benches
             | Route::Playground
             | Route::Settings => {
                 vec![]
@@ -232,6 +233,14 @@ impl FoloApp {
             Route::Model(id) => vec![
                 ("Models".into(), Some(Route::Models)),
                 (self.store.model(id).map_or(id.clone(), |m| m.name.clone()).into(), None),
+            ],
+            Route::Bench(id) => {
+                vec![("Benchmarks".into(), Some(Route::Benches)), (self.bench_name(id).into(), None)]
+            }
+            Route::BenchEntry(b, e) => vec![
+                ("Benchmarks".into(), Some(Route::Benches)),
+                (self.bench_name(b).into(), Some(Route::Bench(b.clone()))),
+                (self.bench_entry_name(b, e).into(), None),
             ],
         }
     }

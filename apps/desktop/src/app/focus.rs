@@ -114,6 +114,7 @@ impl FoloApp {
                 Section::Datasets => "Datasets",
                 Section::Runs => "Runs",
                 Section::Models => "Models",
+                Section::Benchmarks => "Benchmarks",
                 Section::Playground => "Playground",
                 Section::Settings => "Settings",
             }

@@ -199,6 +199,13 @@ pub const CODES: &[Code] = &[
     c("runtime", 500, 1, "the async runtime could not start (CLI)"),
     c("bind_failed", 500, 1, "`folo serve` could not bind its address (CLI)"),
     c("serve_failed", 500, 1, "`folo serve` stopped with an error (CLI)"),
+    c(
+        "data_dir_in_use",
+        409,
+        1,
+        "another `folo serve` or embedded `folo mcp` already uses this data dir (CLI)",
+    ),
+    c("data_dir_lock_failed", 500, 1, "the data dir's `serve.lock` could not be locked (CLI)"),
     c("mcp_failed", 500, 1, "`folo mcp` stopped with an error (CLI)"),
     c("gh_failed", 502, 1, "`folo weights pull`: the GitHub CLI is missing or its download failed (CLI)"),
     c(

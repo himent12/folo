@@ -73,11 +73,11 @@ impl MockStore {
             "2026-10-19T14:02:00Z",
             3,
         );
-        let r6 = ProcDataset::new(
+        let fasteners = ProcDataset::new(
             "ds_3b9d",
-            "r6-operators",
-            Theme::Operators,
-            &["body", "Head"],
+            "fasteners",
+            Theme::Fasteners,
+            &["bolt", "nut"],
             1920,
             1080,
             Splits { train: 700, val: 160, test: 0 },
@@ -86,7 +86,7 @@ impl MockStore {
             0,
         );
         let datasets: Vec<Arc<DatasetEntry>> =
-            [shapes, traffic, r6].into_iter().map(|d| Arc::new(DatasetEntry::Proc(d))).collect();
+            [shapes, traffic, fasteners].into_iter().map(|d| Arc::new(DatasetEntry::Proc(d))).collect();
 
         let oom = "gpu:0 out of memory: tried to allocate 2.25 GiB (15.21 GiB of 15.99 GiB in use); \
                    lower --batch or --imgsz";
@@ -163,7 +163,7 @@ impl MockStore {
             },
             RunDef {
                 id: "run_3c01",
-                name: "r6-n",
+                name: "fasteners-n",
                 ds: 2,
                 arch: Arch::N,
                 epochs: 80,
@@ -171,7 +171,7 @@ impl MockStore {
                 quality: 0.61,
                 created: "2026-10-28T11:20:00Z",
                 end: End::Completed,
-                model: Some(("m_53d1", "r6-n-best")),
+                model: Some(("m_53d1", "fasteners-n-best")),
                 amp: true,
                 head: Head::O2m,
             },
@@ -269,7 +269,7 @@ impl MockStore {
                         basis: basis.clone(),
                         model: Model {
                             id: "m_53d2".into(),
-                            name: "r6-n-best-f16".into(),
+                            name: "fasteners-n-best-f16".into(),
                             bytes: model_bytes(params, true),
                             created: rfc3339(finished + 3600.0),
                             // A `folo-f16` export: fused F16 weights, and no `folo.train` (a checkpoint key).
@@ -286,22 +286,22 @@ impl MockStore {
             runs.push((Arc::new(run), Arc::clone(entry)));
         }
 
-        // The live run: r6-operators, folo-s, 100 epochs at 6 s each, looping.
-        let r6 = &datasets[2];
+        // The live run: fasteners, folo-s, 100 epochs at 6 s each, looping.
+        let fasteners = &datasets[2];
         let config = TrainConfig {
-            name: "r6-s".into(),
-            dataset_id: r6.meta().id.clone(),
+            name: "fasteners-s".into(),
+            dataset_id: fasteners.meta().id.clone(),
             arch: Arch::S,
             ..serde_json::from_str(r#"{"dataset_id":""}"#).expect("defaults")
         };
-        let spe = steps_per_epoch(r6.meta().splits.train, config.batch);
+        let spe = steps_per_epoch(fasteners.meta().splits.train, config.batch);
         let curve = Curve::new(0x3c02, 0.68, 2, &config, spe);
         let (epoch_s, queue_s) = (6.0, 3.0);
         let clock = LiveClock::new(epoch_s, queue_s, 12.0, true, queue_s + 12.3 * epoch_s);
         let live = SimRun::new(
             "run_3c02".into(),
             config,
-            r6.meta().classes.clone(),
+            fasteners.meta().classes.clone(),
             spe,
             curve,
             DEVICE.into(),
@@ -309,8 +309,8 @@ impl MockStore {
             false,
             Timeline::Live(std::sync::Mutex::new(clock)),
         )
-        .resolved_for(r6.meta().splits.train);
-        runs.push((Arc::new(live), Arc::clone(r6)));
+        .resolved_for(fasteners.meta().splits.train);
+        runs.push((Arc::new(live), Arc::clone(fasteners)));
 
         MockStore {
             datasets: RwLock::new(datasets),

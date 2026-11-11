@@ -262,14 +262,26 @@ impl FoloApp {
         if self.hold_loading || !self.store.images_px.begin(&key) {
             return None;
         }
+        let thumb = (kind == ImgKind::Thumb).then_some(320);
+        let (ds, im) = (key.dataset.clone(), key.image.clone());
+        self.load_cached_image(key, move |api| api.image(&ds, &im, thumb), cx);
+        None
+    }
+
+    /// Fetches and decodes an image off the UI thread into the slot `key` (already marked loading),
+    /// dropping it if the data source changed meanwhile.
+    pub fn load_cached_image(
+        &mut self,
+        key: ImgKey,
+        call: impl FnOnce(&dyn Backend) -> ApiResult<ImageData> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let api = self.store.api.clone();
         let generation = self.backend_gen;
-        let thumb = (kind == ImgKind::Thumb).then_some(320);
         cx.spawn(async move |this, cx| {
-            let k2 = key.clone();
             let img = cx
                 .background_executor()
-                .spawn(async move { api.image(&k2.dataset, &k2.image, thumb).ok().and_then(to_render_image) })
+                .spawn(async move { call(&*api).ok().and_then(to_render_image) })
                 .await;
             this.update(cx, |this, cx| {
                 if this.backend_gen != generation {
@@ -287,7 +299,6 @@ impl FoloApp {
             .ok();
         })
         .detach();
-        None
     }
 
     /// Subscribe to live events of every active run.
@@ -422,6 +433,9 @@ impl FoloApp {
                             } else {
                                 this.toast(Tone::Danger, format!("{name} failed"), None, cx);
                             }
+                        }
+                        if this.bench_pump(tick, cx) {
+                            changed = true;
                         }
                         if tick.is_multiple_of(20) {
                             this.store.system = Load::Idle;

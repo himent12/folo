@@ -36,7 +36,7 @@ async fn models() {
     .await;
     err(&app, get("/api/models/m_none"), StatusCode::NOT_FOUND, "model_not_found").await;
 
-    // Head and training settings: shapes-s is an o2o model, r6-n was trained with AMP, its f16 export has no
+    // Head and training settings: shapes-s is an o2o model, fasteners-n was trained with AMP, its f16 export has no
     // `folo.train`; each matches its run's config.
     let by_id = |id: &str| list.models.iter().find(|m| m.id == id).unwrap();
     assert_eq!(by_id("m_31ab").head, Head::O2o);
@@ -149,7 +149,7 @@ async fn predictions_stay_within_the_model_classes() {
     // A matching model keeps the dataset's classes.
     let req = json!({ "model_id": "m_53d1", "dataset_id": "ds_3b9d", "image_id": "000700", "conf": 0.0 });
     let p: PredictResponse = ok(&app, post_json("/api/predict", req)).await;
-    assert!(p.boxes.iter().any(|b| b.name == "body"));
+    assert!(p.boxes.iter().any(|b| b.name == "bolt"));
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@ A fresh agent covered what landed between report 2 (#93) and #131, as three peop
    cross-checked every command and number in README, QUICKSTART and AGENT_COOKBOOK against the clap definitions and
    docs/BENCHMARKS.md.
 2. **A practitioner fine-tuning their own data.** They pulled `folo-n-coco` from the draft `weights-v1` release and
-   fine-tuned it on a copy of R6 (2,030 train / 203 val / 93 test frames at 1920×1080; r6-fresh was never touched).
+   fine-tuned it on a 1080p dataset (`fasteners`, 2,030 train / 203 val / 93 test frames at 1920×1080).
    They trained four ways: f32, `--head o2o`, `--amp`, and `--amp --head o2o`. Then they checked `--half` and
    `--tensor-cores`, the ONNX export in onnxruntime, `folo val --coco`, and the runs in Studio (Playwright, headless
    Chrome) and in FOLO Desktop (release build, `tools/shoot.ps1` on real data).
@@ -27,7 +27,7 @@ A fresh agent covered what landed between report 2 (#93) and #131, as three peop
 under a second, its link checker passes, and search finds `--amp`, `o2o`, `weights pull` and `queue` in the right
 sections. On the practitioner's side:
 - `folo weights pull folo-n-coco` worked against the draft release in 3.7 s, checksum verified.
-- 20 epochs fine-tuned from it reached mAP50-95 0.432 on R6 val in 6 min 14 s.
+- 20 epochs fine-tuned from it reached mAP50-95 0.432 on val in 6 min 14 s.
 - `--head o2o` trained and then predicted without NMS.
 - `--amp` trained 1.3× faster per mosaic-free epoch.
 - The f32 ONNX export matched `folo predict` box for box with score difference 0.0000 once the inputs agreed.
@@ -52,7 +52,7 @@ Nothing blocked a job. These were the worst problems:
 ## DOGFOOD-2 fixes: held or regressed
 | # | fix | status now | evidence |
 |---|---|---|---|
-| X1 | timing split | **held** | `predict` on R6 frames: inference 3.0 ms, postprocess 0.24–1.8 ms; o2o model: postprocess 0.41 ms |
+| X1 | timing split | **held** | `predict` on 1080p frames: inference 3.0 ms, postprocess 0.24–1.8 ms; o2o model: postprocess 0.41 ms |
 | X2 | short-run warnings, capped warmup and close mosaic | **held** in the engine; **the UIs ignore the cap** | a 4-epoch fine-tune: `run_status` "warning: warmup takes 96 of the run's 128 optimizer steps …"; "close_mosaic 10 is more than half of the 15 epochs: mosaic closes for the last 7 instead". Studio and Desktop still draw 10 closing epochs (S2) |
 | M1 | `folo_info.data_dir` in proxy mode | **held** | `"data_dir": "D:/folo-dogfood3/studio"` |
 | M2 | image resources at 512 px, `?size=` | **held** | `folo://datasets/ds_ba61/images/2233?size=256`: 14.8 KB |
@@ -71,8 +71,8 @@ Nothing blocked a job. These were the worst problems:
 | docs site: `npm run check` / `npm run build` | 2.8 s / 0.4 s (25 pages) |
 | `folo weights pull folo-n-coco` (10.6 MB, draft release) | 3.7 s, sha256 verified |
 | README quickstart `train` (folo-n, 30 epochs, 320) | **82.5 s**, mAP50 0.955 / mAP50-95 0.823 (README said 137 s, 0.948 / 0.814; report 2 got the same 0.955 / 0.823) |
-| Studio: register R6 (2,326 frames, 1080p) | 0.75 s |
-| `folo dataset convert r6 r6-coco --to coco` | 0.8 s |
+| Studio: register 1080p dataset (2,326 frames) | 0.75 s |
+| `folo dataset convert fasteners fasteners-coco --to coco` | 0.8 s |
 | fine-tune from `folo-n-coco`, f32, 20 epochs, 640 (CLI) | 373.7 s; best mAP50-95 **0.432** (val), 0.426 (test); mosaic epochs 23–33 s, mosaic-free 9.6–10.5 s |
 | the same with `--head o2o` | 394.1 s; best 0.414 (val), 0.413 test (o2o branch, no NMS), 0.415 with `--head o2m` |
 | MCP (proxy), `amp: true`, 15 epochs | 322 s (the Desktop build overlapped epochs 1–8); best 0.427; mosaic-free epochs **7.1–8.2 s** vs 9.6–10.5 s in f32 (1.3×); mosaic epochs about 24 s in both |
@@ -111,9 +111,9 @@ or inconsistent. IDs group findings by surface:
 #### X1. `folo serve` keeps its training runs' GPU memory after they finish (annoying, high; fixed by `fix/dogfood-3`)
 - **Repro:**
   1. `folo serve --data-dir D:/folo-dogfood3/studio --port 7979 --tensor-cores`.
-  2. Train two R6 fine-tunes through it (MCP proxy, `amp: true`, 15 epochs each) and let both complete.
+  2. Train two fine-tunes through it (MCP proxy, `amp: true`, 15 epochs each) and let both complete.
   3. With nothing training, `nvidia-smi` reports 8089 MiB in use; the idle baseline is about 1.1 GB.
-  4. Run `folo train --weights folo-n-coco --data r6 --epochs 6 --close-mosaic 2` from the CLI.
+  4. Run `folo train --weights folo-n-coco --data fasteners --epochs 6 --close-mosaic 2` from the CLI.
 - **Happened:** that CLI run's epochs took 24 / 24 / 25 / **73 / 59 / 99 s**, 321 s in total. After stopping the
   server (8089 → 1056 MiB), the same command took **114 s** (epochs 23–24 s, then 9.7 s).
 - **Expected:** a finished run gives its buffer pool back, or trims it to a small cap, so the shared GPU is usable.
@@ -137,7 +137,7 @@ or inconsistent. IDs group findings by surface:
   MCP, then Studio.
 
 #### X3. The training ETA was 2–5× off on loader-bound runs (annoying; fixed in this PR)
-- **Repro:** fine-tune on R6 (1080p JPEGs, mosaic). With MCP `run_status` every 30 s on the `amp + o2o` run:
+- **Repro:** fine-tune on 1080p JPEGs with mosaic. With MCP `run_status` every 30 s on the `amp + o2o` run:
   - at epoch 1 it said "ETA 103 s" when about 200 s were left;
   - at epoch 3, "89 s" for about 170 s.
 - **Cause 1.** The per-batch clock started *after* the loader handed over the batch, so the wait for the loader
@@ -147,7 +147,7 @@ or inconsistent. IDs group findings by surface:
 - **Fixed:** `Clock` keeps per-phase wall and step times. The remaining mosaic epochs are charged at the mosaic wall
   time per batch. The closed epochs are charged at their own wall time once they have run, and before that at the
   mosaic batches' *step* time, since without mosaic the loader keeps up (`eta_s`, unit-tested).
-- **A/B** with the same 6-epoch R6 fine-tune, back to back, ETA ÷ actual remaining time, at 15 / 30 / 50 / 75% of
+- **A/B** with the same 6-epoch fine-tune, back to back, ETA ÷ actual remaining time, at 15 / 30 / 50 / 75% of
   the run:
 
   | binary | 15% | 30% | 50% | 75% |
@@ -161,7 +161,7 @@ or inconsistent. IDs group findings by surface:
   the ETA could too.
 
 #### X4. Mosaic epochs on 1080p frames are loader-bound, so `--amp` only helps without mosaic (annoying)
-- **Measured** (folo-n, 640, batch 16, R6):
+- **Measured** (folo-n, 640, batch 16, 1080p JPEGs):
 
   | | mosaic epochs | mosaic-free epochs |
   |---|---|---|
@@ -187,10 +187,10 @@ or inconsistent. IDs group findings by surface:
 ### CLI
 
 #### C1. `val --coco` on a YOLO dataset said no dataset was found (polish; fixed in this PR)
-- **Repro:** `folo val --model best.folo --data r6 --coco`.
-- **Happened:** "--coco: could not detect a dataset in r6: expected a data.yaml, COCO instances JSON, or
-  images/ + labels/ folders". r6 has a data.yaml.
-- **Now:** "--coco: D:/…/r6 is a YOLO dataset, not a COCO one". The hint names `folo dataset convert r6 <out> --to
+- **Repro:** `folo val --model best.folo --data fasteners --coco`.
+- **Happened:** "--coco: could not detect a dataset in fasteners: expected a data.yaml, COCO instances JSON, or
+  images/ + labels/ folders". `fasteners` has a data.yaml.
+- **Now:** "--coco: D:/…/fasteners is a YOLO dataset, not a COCO one". The hint names `folo dataset convert fasteners <out> --to
   coco`, which worked: the converted copy evaluated at AP 0.433, with the full COCOeval table.
 - **Test:** folo-data `coco_ground_truth_of_a_yolo_dataset_says_it_is_yolo`.
 
@@ -251,9 +251,9 @@ or inconsistent. IDs group findings by surface:
 ### Studio
 
 #### S1. The New run "CLI command" for a fine-tune does not run (annoying)
-- **Repro:** New run → r6 → folo-n → Start from `folo-n-coco` → Mixed precision on → "CLI command":
-  `folo train --data D:/folo-dogfood3/r6 --model folo-n --epochs 15 --batch 16 --imgsz 640 --amp --weights
-  m_d849e303 --head o2m --name r6-n-2`.
+- **Repro:** New run → fasteners → folo-n → Start from `folo-n-coco` → Mixed precision on → "CLI command":
+  `folo train --data D:/folo-dogfood3/fasteners --model folo-n --epochs 15 --batch 16 --imgsz 640 --amp --weights
+  m_d849e303 --head o2m --name fasteners-n-2`.
 - **Happened:** exit 2, because `--model` and `--weights` conflict. Without `--model` it is exit 3: "m_d849e303 does
   not exist", since the CLI takes a path or a published name, not a server model id.
 - **Fix:** leave `--model` out when fine-tuning, and give the model's file path. The API does not expose it today:
@@ -269,7 +269,7 @@ or inconsistent. IDs group findings by surface:
   `min(close_mosaic, floor(epochs / 2))`. Or have the API return the effective value in `Run.resolved`.
 
 #### S3. The New run time estimate was 3.5× optimistic (annoying)
-- **Repro:** r6, folo-n, 15 epochs, from `folo-n-coco`, Mixed precision on.
+- **Repro:** fasteners, folo-n, 15 epochs, from `folo-n-coco`, Mixed precision on.
 - **Happened:**
   - Studio said "Est. time ~2 min (~640 img/s)"; the run took 5 min 22 s at 80–93 img/s.
   - For folo-s, 100 epochs from scratch, it said "~19 min (~320 img/s)". The step-only benchmark rate leaves out
@@ -303,7 +303,7 @@ or inconsistent. IDs group findings by surface:
 
 #### D1. The run screen: close-mosaic marker and missing precision (polish)
 - **Close mosaic:** the marker sits at epoch 5 of 15 (S2).
-- **Header:** "folo-n · r6 · RTX 4080 SUPER · Vulkan · started 4 min ago". It does not show Mixed precision or the
+- **Header:** "folo-n · fasteners · RTX 4080 SUPER · Vulkan · started 4 min ago". It does not show Mixed precision or the
   head.
 - **What worked:**
   - `--server … --open run:<id>` and `tools/shoot.ps1 -Exe <release>`;
@@ -331,7 +331,7 @@ or inconsistent. IDs group findings by surface:
   `folo-mcp docs_name_every_tool` (README, QUICKSTART, MCP.md and llms.txt against `TOOLS`).
 
 #### P2. The resize ONNX users must match was undocumented (polish; fixed in this PR)
-- **Repro:** letterbox an R6 frame with PIL's `BILINEAR` and run the decoded ONNX export (`--dynamic`, rect input as
+- **Repro:** letterbox a 1080p frame with PIL's `BILINEAR` and run the decoded ONNX export (`--dynamic`, rect input as
   `predict` uses).
 - **Happened:** all 43 boxes matched `folo predict`, but scores differed by up to **0.147**. Feeding both the same
   pre-resized 640×360 PNGs gave a score difference of **0.0000**.
@@ -372,7 +372,7 @@ or inconsistent. IDs group findings by surface:
   - It trains, validates and predicts without NMS.
   - `--head o2m` evaluates the other branch of the same file.
   - Exports with `--decode`.
-  - o2m vs o2o on the same R6 budget: 0.432 vs 0.414 (f32), 0.427 vs 0.394 (AMP).
+  - o2m vs o2o on the same budget: 0.432 vs 0.414 (f32), 0.427 vs 0.394 (AMP).
 - **AMP.**
   - The loss-scale log lines are clear (4 overflow skips in epoch 1, then none).
   - `trained_with.amp` shows on the model in the API, MCP, Studio ("Trained in Mixed precision (f16)") and Desktop.

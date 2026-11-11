@@ -2,7 +2,7 @@
 
 The native FOLO app, built in Rust with [GPUI](https://gpui.rs) (Zed's GPU-accelerated UI framework). Same screens and
 design language as FOLO Studio (`web/`): Overview, Datasets, Runs (with a live training dashboard), Models,
-Playground and Settings, plus a command palette, keyboard navigation, toasts, and dark and light themes.
+Benchmarks, Playground and Settings, plus a command palette, keyboard navigation, toasts, and dark and light themes.
 
 It is a separate cargo workspace, so the root workspace and its CI stay GPUI-free. See `docs/ARCHITECTURE.md`
 (Front ends) and `docs/API.md` (its data contract).
@@ -11,7 +11,7 @@ It is a separate cargo workspace, so the root workspace and its CI stay GPUI-fre
 
 ```powershell
 $env:CARGO_TARGET_DIR = "D:\folo-build\desktop"   # keep build output off C:
-cargo run                                          # finds or starts folo serve, else demo data
+cargo run                                          # connects to or starts folo serve (real store, bare)
 cargo run -- --server http://127.0.0.1:7878        # a specific server
 cargo run -- --mock                                # built-in demo data
 cargo run -- --theme light
@@ -19,7 +19,7 @@ cargo run -- --scenario run-live+hover             # a fixed, deterministic stat
 cargo run -- --help                                # every option (`--version`: the version); prints and exits
 ```
 
-Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1–5` screens · `Ctrl ,` settings ·
+Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1–5` screens · `Ctrl 6` benchmarks · `Ctrl ,` settings ·
 `Ctrl Shift L` theme · `F11` full screen · `Alt ←` back · `Esc` close or go up · `Tab` / arrows move focus ·
 `F6` next region.
 
@@ -78,6 +78,7 @@ src/api/          Backend trait (the client seam), wire types for docs/API.md, t
 src/synth.rs      procedural "shapes" scenes behind the mock's images
 src/local.rs      local inference: folo-vision's Predictor in process, on folo-gpu or the CPU
 src/store/        fetched state, live run data (SSE events), the decoded-image cache
+src/bench.rs      vision benchmarks: what the Benchmarks screens hold, the open benchmark's stream, their actions
 src/app/          root view: chrome, sidebar, routing, fetching, live event pump, actions
 src/controls/     focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
 src/ui/           stateless pieces: type, panels, badges, metrics, progress, skeletons, empty states
@@ -102,12 +103,33 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
   reloads; an unreachable server still runs the loaded copy). The demo data has no weights, so there it is Server only.
   `FOLO_SERVER=… cargo test real_server -- --ignored` checks local results against the server's.
 - **`MockBackend`** is built-in demo data (procedural shapes datasets, models and runs with a live simulator) used
-  for screenshots, tests and when no server is available. It also has cloud compute (docs/CLOUD.md), as
+  for screenshots and tests, and when picked (`--mock`, `--scenario`, Settings › Connection); an unreachable server
+  shows as unreachable, never as demo data. It also has cloud compute (docs/CLOUD.md), as
   `folo serve --mock` does: the real providers' fields, one RunPod connection with a fixed offer list, one cloud
   run released long ago (with its final cost and terminated instance), and runs created with a GPU under Run on
   going through every phase. `MockBackend::with_cloud_runs` adds one uploading its data and one training (the
   cloud scenarios: `+cloud`, `cloud-…`, `run-cloud+…`); `+empty` scenarios have no connection and `+trouble` ones
   a revoked key and a termination the provider hasn't confirmed.
+
+## Benchmarks
+
+With a server that lists the `vision_bench` feature (docs/BENCH.md), **Benchmarks** in the sidebar (`Ctrl 6`) lists
+the server's benchmarks and makes new ones (from a dataset split, or the labeled images of a labeling job, with the
+default plan). A benchmark's page has three tabs:
+
+- **Leaderboard**: the entries ranked by score, with the five axes on the score's 0–100 scale, running entries with
+  their progress (live over the benchmark's event stream), and Run: a model of the server that knows the
+  benchmark's classes (the others are listed, off), or a coding agent (servers with `agent_labeling`).
+- **Plan**: each condition with the benchmark's first image under it, its severities and its share of robustness;
+  **Design with an agent** proposes a plan beside the current one while no entry has run.
+- **Loops**: the self-improvement loops with their verdicts, and **New loop** (a teacher with the benchmark's
+  classes in its order, the pool it labels, generations, epochs per student).
+
+An entry's page shows the score and its axes, accuracy, self-labeling, robustness per condition and severity, per
+class, calibration and localization, then its images worst first with the truth (dashed) and its detections.
+Without the feature the section says so. The built-in demo has three benchmarks (`src/api/mock_bench.rs`, scored by
+`folo-bench` itself); `FOLO_SERVER=… cargo test real_server_bench -- --ignored` checks every benchmark call against
+a real server.
 
 ## Cloud compute
 
@@ -117,9 +139,10 @@ its cost and a Terminate; New run's Compute section picks where a run trains (th
 GPU offer and Stop after, with the cost beside Start training); a cloud run's page shows its phases, instance,
 cost and time limit. `src/cloud.rs` holds the state and the rules those surfaces share.
 
-By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts
-`folo serve --mock` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit; if that
-fails it falls back to the built-in demo data and says so. `--server URL` and `--mock` pick a source explicitly;
+By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts a
+local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening
+bare against the real data dir (`$FOLO_HOME` or `~/.folo`). When that data dir already has a `folo serve` (another
+window's), it connects to that one instead (`data_dir_in_use`, docs/CLI.md). `--server URL` and `--mock` pick a source explicitly;
 Settings › Connection switches at runtime. `--open run:<id>` (or `dataset:`, `model:`, `runs`, …) starts on a screen.
 
 ## Design tokens

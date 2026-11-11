@@ -41,7 +41,7 @@ const GPU_TRAIN: &[TrainAnchor] = &[
         amp: false,
         mosaic: 105.0,
         close_mosaic: 110.0,
-        note: "FOLO trainer, R6 (300 epochs, batch 16)",
+        note: "FOLO trainer, 1080p JPEGs (300 epochs, batch 16)",
     },
     TrainAnchor {
         arch: Arch::N,

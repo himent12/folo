@@ -1,11 +1,11 @@
 [
   {
     "name": "from scratch",
-    "command": "folo train --data D:/folo-dogfood3/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --name r6-s",
+    "command": "folo train --data D:/folo-dogfood3/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/folo-dogfood3/r6",
+      "D:/folo-dogfood3/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -15,10 +15,10 @@
       "--imgsz",
       "640",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/folo-dogfood3/r6",
+      "data": "D:/folo-dogfood3/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -41,16 +41,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "fine-tune from a path",
-    "command": "folo train --data D:/folo-dogfood3/r6 --weights D:/folo/data/models/fasteners-n-best.folo --epochs 15 --batch 16 --imgsz 640 --head o2m --name r6-n-2",
+    "command": "folo train --data D:/folo-dogfood3/fasteners --weights D:/folo/data/models/fasteners-n-best.folo --epochs 15 --batch 16 --imgsz 640 --head o2m --name fasteners-n-2",
     "argv": [
       "train",
       "--data",
-      "D:/folo-dogfood3/r6",
+      "D:/folo-dogfood3/fasteners",
       "--weights",
       "D:/folo/data/models/fasteners-n-best.folo",
       "--epochs",
@@ -62,10 +62,10 @@
       "--head",
       "o2m",
       "--name",
-      "r6-n-2"
+      "fasteners-n-2"
     ],
     "expect": {
-      "data": "D:/folo-dogfood3/r6",
+      "data": "D:/folo-dogfood3/fasteners",
       "model": null,
       "weights": "D:/folo/data/models/fasteners-n-best.folo",
       "epochs": 15,
@@ -88,16 +88,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-n-2"
+      "name": "fasteners-n-2"
     }
   },
   {
     "name": "fine-tune, mixed precision, end to end",
-    "command": "folo train --data D:/folo-dogfood3/r6 --weights D:/folo/data/models/fasteners-n-best.folo --epochs 15 --batch 16 --imgsz 640 --device gpu:0 --amp --head o2o --name r6-n-2",
+    "command": "folo train --data D:/folo-dogfood3/fasteners --weights D:/folo/data/models/fasteners-n-best.folo --epochs 15 --batch 16 --imgsz 640 --device gpu:0 --amp --head o2o --name fasteners-n-2",
     "argv": [
       "train",
       "--data",
-      "D:/folo-dogfood3/r6",
+      "D:/folo-dogfood3/fasteners",
       "--weights",
       "D:/folo/data/models/fasteners-n-best.folo",
       "--epochs",
@@ -112,10 +112,10 @@
       "--head",
       "o2o",
       "--name",
-      "r6-n-2"
+      "fasteners-n-2"
     ],
     "expect": {
-      "data": "D:/folo-dogfood3/r6",
+      "data": "D:/folo-dogfood3/fasteners",
       "model": null,
       "weights": "D:/folo/data/models/fasteners-n-best.folo",
       "epochs": 15,
@@ -138,16 +138,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-n-2"
+      "name": "fasteners-n-2"
     }
   },
   {
     "name": "mixed precision",
-    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --amp --name r6-s",
+    "command": "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --amp --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -158,10 +158,10 @@
       "640",
       "--amp",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -184,16 +184,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "end to end",
-    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --head o2o --name r6-s",
+    "command": "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --head o2o --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -205,10 +205,10 @@
       "--head",
       "o2o",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -231,16 +231,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "device auto",
-    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --name r6-s",
+    "command": "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -250,10 +250,10 @@
       "--imgsz",
       "640",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -276,16 +276,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "device cpu",
-    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --device cpu --name r6-s",
+    "command": "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --device cpu --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -297,10 +297,10 @@
       "--device",
       "cpu",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -323,16 +323,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "device gpu:0",
-    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --device gpu:0 --name r6-s",
+    "command": "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --device gpu:0 --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -344,10 +344,10 @@
       "--device",
       "gpu:0",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -370,16 +370,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "device gpu:1",
-    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --device gpu:1 --name r6-s",
+    "command": "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --device gpu:1 --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -391,10 +391,10 @@
       "--device",
       "gpu:1",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -417,16 +417,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "adamw at a custom lr0",
-    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --optimizer adamw --lr0 0.002 --name r6-s",
+    "command": "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --optimizer adamw --lr0 0.002 --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -440,10 +440,10 @@
       "--lr0",
       "0.002",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -466,16 +466,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "sgd at a custom lr0",
-    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --optimizer sgd --lr0 0.05 --name r6-s",
+    "command": "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --optimizer sgd --lr0 0.05 --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -489,10 +489,10 @@
       "--lr0",
       "0.05",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -515,16 +515,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "augmentation and seed",
-    "command": "folo train --data D:/r6 --model folo-m --epochs 300 --batch 8 --imgsz 960 --mosaic 0.5 --mixup 0.1 --hsv 0 0.5 0.3 --fliplr 0 --scale 0.25 --translate 0.2 --close-mosaic 0 --seed 42 --name r6-s",
+    "command": "folo train --data D:/fasteners --model folo-m --epochs 300 --batch 8 --imgsz 960 --mosaic 0.5 --mixup 0.1 --hsv 0 0.5 0.3 --fliplr 0 --scale 0.25 --translate 0.2 --close-mosaic 0 --seed 42 --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-m",
       "--epochs",
@@ -552,10 +552,10 @@
       "--seed",
       "42",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-m",
       "weights": null,
       "epochs": 300,
@@ -578,16 +578,16 @@
       "translate": 0.2,
       "close_mosaic": 0,
       "seed": 42,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "a dataset path with spaces",
-    "command": "folo train --data 'C:/Users/me/My Datasets/r6' --model folo-n --epochs 100 --batch 16 --imgsz 640 --name r6-s",
+    "command": "folo train --data 'C:/Users/me/My Datasets/fasteners' --model folo-n --epochs 100 --batch 16 --imgsz 640 --name fasteners-s",
     "argv": [
       "train",
       "--data",
-      "C:/Users/me/My Datasets/r6",
+      "C:/Users/me/My Datasets/fasteners",
       "--model",
       "folo-n",
       "--epochs",
@@ -597,10 +597,10 @@
       "--imgsz",
       "640",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
-      "data": "C:/Users/me/My Datasets/r6",
+      "data": "C:/Users/me/My Datasets/fasteners",
       "model": "folo-n",
       "weights": null,
       "epochs": 100,
@@ -623,12 +623,12 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "a Windows path",
-    "command": "folo train --data D:\\data\\shapes --model folo-l --epochs 100 --batch 16 --imgsz 640 --name r6-s",
+    "command": "folo train --data D:\\data\\shapes --model folo-l --epochs 100 --batch 16 --imgsz 640 --name fasteners-s",
     "argv": [
       "train",
       "--data",
@@ -642,7 +642,7 @@
       "--imgsz",
       "640",
       "--name",
-      "r6-s"
+      "fasteners-s"
     ],
     "expect": {
       "data": "D:\\data\\shapes",
@@ -668,12 +668,12 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-s"
+      "name": "fasteners-s"
     }
   },
   {
     "name": "an apostrophe in the dataset path and the name",
-    "command": "folo train --data 'D:/O''Brien/data' --model folo-s --epochs 100 --batch 16 --imgsz 640 --name 'Bob''s r6'",
+    "command": "folo train --data 'D:/O''Brien/data' --model folo-s --epochs 100 --batch 16 --imgsz 640 --name 'Bob''s fasteners'",
     "argv": [
       "train",
       "--data",
@@ -687,7 +687,7 @@
       "--imgsz",
       "640",
       "--name",
-      "Bob's r6"
+      "Bob's fasteners"
     ],
     "expect": {
       "data": "D:/O'Brien/data",
@@ -713,16 +713,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "Bob's r6"
+      "name": "Bob's fasteners"
     }
   },
   {
     "name": "a name that starts with a dash",
-    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --name=--amp",
+    "command": "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --name=--amp",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--model",
       "folo-s",
       "--epochs",
@@ -734,7 +734,7 @@
       "--name=--amp"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": "folo-s",
       "weights": null,
       "epochs": 100,
@@ -762,11 +762,11 @@
   },
   {
     "name": "an apostrophe in the weights path",
-    "command": "folo train --data D:/r6 --weights 'C:/Users/O''Brien/FOLO models/fasteners-n-best.folo' --epochs 15 --batch 16 --imgsz 640 --head o2m --name r6-n-2",
+    "command": "folo train --data D:/fasteners --weights 'C:/Users/O''Brien/FOLO models/fasteners-n-best.folo' --epochs 15 --batch 16 --imgsz 640 --head o2m --name fasteners-n-2",
     "argv": [
       "train",
       "--data",
-      "D:/r6",
+      "D:/fasteners",
       "--weights",
       "C:/Users/O'Brien/FOLO models/fasteners-n-best.folo",
       "--epochs",
@@ -778,10 +778,10 @@
       "--head",
       "o2m",
       "--name",
-      "r6-n-2"
+      "fasteners-n-2"
     ],
     "expect": {
-      "data": "D:/r6",
+      "data": "D:/fasteners",
       "model": null,
       "weights": "C:/Users/O'Brien/FOLO models/fasteners-n-best.folo",
       "epochs": 15,
@@ -804,16 +804,16 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-n-2"
+      "name": "fasteners-n-2"
     }
   },
   {
     "name": "fine-tune from published weights",
-    "command": "folo train --data D:/folo-dogfood3/r6 --weights folo-n-coco --epochs 15 --batch 16 --imgsz 640 --head o2m --name r6-n-2",
+    "command": "folo train --data D:/folo-dogfood3/fasteners --weights folo-n-coco --epochs 15 --batch 16 --imgsz 640 --head o2m --name fasteners-n-2",
     "argv": [
       "train",
       "--data",
-      "D:/folo-dogfood3/r6",
+      "D:/folo-dogfood3/fasteners",
       "--weights",
       "folo-n-coco",
       "--epochs",
@@ -825,10 +825,10 @@
       "--head",
       "o2m",
       "--name",
-      "r6-n-2"
+      "fasteners-n-2"
     ],
     "expect": {
-      "data": "D:/folo-dogfood3/r6",
+      "data": "D:/folo-dogfood3/fasteners",
       "model": null,
       "weights": "folo-n-coco",
       "epochs": 15,
@@ -851,7 +851,7 @@
       "translate": 0.1,
       "close_mosaic": 10,
       "seed": 0,
-      "name": "r6-n-2"
+      "name": "fasteners-n-2"
     }
   }
 ]
