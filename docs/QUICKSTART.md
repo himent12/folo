@@ -150,7 +150,9 @@ are re-initialised, and everything else is kept. As a check: fine-tuning the sha
 
 `folo-n-coco-v2` is folo-n trained from scratch on COCO ([examples/coco](../examples/coco/README.md)): val2017 AP
 0.317, from a 300-epoch run paused at epoch 62 (`folo-n-coco`, AP 0.314 after 50 epochs, is the first one).
-`folo weights list` shows every published name. Two commands fine-tune it on your dataset:
+`folo-s-coco` is the larger folo-s, trained from scratch on COCO for 56 epochs: val2017 AP 0.416 (fine-tuning from
+it takes the weights' architecture, folo-s). `folo weights list` shows every published name. Two commands fine-tune
+one on your dataset:
 
 ```sh
 folo weights pull folo-n-coco-v2                                  # into ~/.folo/weights/, checksum verified

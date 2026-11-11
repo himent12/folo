@@ -14,8 +14,9 @@ plus training, evaluation and export. You drive it from one `folo` binary, an HT
   at 640 in Chrome).
 
 > **Status: early (v0.1).** The detector trains and infers on CPU and GPU, and it passes its convergence gate.
-> COCO-pretrained folo-n weights are published as GitHub releases (`folo-n-coco`, val2017 AP 0.314 after 50 epochs
-> from scratch; the interim `folo-n-coco-v2`, AP 0.317 at epoch 62 of a paused 300-epoch run). The repository is
+> COCO-pretrained weights are published as GitHub releases: `folo-s-coco`, val2017 AP 0.416 after 56 epochs from
+> scratch, and for folo-n `folo-n-coco` (AP 0.314 after 50 epochs) and the interim `folo-n-coco-v2` (AP 0.317 at
+> epoch 62 of a paused 300-epoch run). The repository is
 > private for now, so `folo weights pull` still needs access to it (through `gh`); once it is public, it needs nothing.
 > See [Project status](#project-status).
 
@@ -41,12 +42,14 @@ the method, the raw JSON and how much noise to expect.
 
 Accuracy is a separate question: on COCO val2017, folo-n reaches AP 0.317 after 62 epochs from scratch (a 300-epoch
 run, paused there; 0.314 for the finished 50-epoch run), against
-0.409 published for yolo26n, which was pretrained on Objects365 and then trained 245 epochs on COCO
+0.409 published for yolo26n, which was pretrained on Objects365 and then trained 245 epochs on COCO; folo-s reaches
+AP 0.416 after 56 epochs from scratch, against 0.480 for yolo26s
 ([examples/coco](examples/coco/README.md), docs/BENCHMARKS.md, Accuracy). Trained the same way on the same images (a
 20,000-image COCO proxy at 320 px, 20 epochs, from scratch), FOLO's trainer and Ultralytics' land level with each
 other per epoch (SGD 0.086 vs 0.085 AP, MuSGD 0.113–0.116 vs 0.113, both optimizers chosen explicitly), so the gap is
-data and schedule, not the trainer; full COCO at an equal budget has not been run, nor has `auto`'s MuSGD recipe for
-long runs (rule 3: momentum 0.9, warmup_bias_lr 0; the proxy runs used 0.937 and 0.1).
+data and schedule, not the trainer; full COCO at an equal budget has not been run. The folo-s run is the first full
+COCO run of `auto`'s MuSGD recipe for long runs (rule 3: momentum 0.9, warmup_bias_lr 0; the proxy runs used 0.937
+and 0.1); it shows the recipe works, not how much it gains over SGD there.
 
 These are the hill-climb build's numbers (2026-11-09, quiet machine, alternated with the earlier build). FOLO is not
 ahead everywhere: folo-s ties yolo26s on batch-16 forward throughput, and CPU batch-1 latency did not move in the
@@ -237,8 +240,10 @@ What works today (v0.1):
 - COCO-pretrained weights: `folo-n-coco`, folo-n trained from scratch on COCO for 50 epochs, val2017 AP 0.314 /
   AP50 0.455 (pycocotools-exact, [examples/coco](examples/coco/README.md)), in the published release `weights-v1`.
   `folo-n-coco-v2` (release `weights-v2`) is the interim result of a 300-epoch run paused at epoch 62: AP 0.317 /
-  AP50 0.458. `folo weights pull <name>` downloads them over plain HTTPS; while the repository is private, that is
-  refused and it falls back to a logged-in `gh`.
+  AP50 0.458. `folo-s-coco` (release `weights-v3`) is folo-s trained from scratch on COCO for 56 epochs on a rented
+  GPU: AP 0.416 / AP50 0.580, 0.05–0.06 AP behind the published YOLO11s / YOLO26s. `folo weights pull <name>`
+  downloads them over plain HTTPS; while the repository is private, that is refused and it falls back to a
+  logged-in `gh`.
 - YOLO and COCO datasets: reading, stats, checks and conversion. mAP that matches pycocotools.
 - `val`, `predict` and export to `.folo` (f32 or f16, a safetensors-compatible format) and ONNX (opset 17, f32 or
   f16, optional in-graph decode and dynamic shapes; parity-tested in onnxruntime).

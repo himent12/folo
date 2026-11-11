@@ -138,6 +138,12 @@ resolve as before. Old checkpoints resume with their rule (1 or 2:
 SGD); `--set auto_rule=2` keeps SGD for a new long run. The web mock and FOLO Desktop now compute `auto` with the
 same rule (Desktop calls `folo_nn::optim::auto_optimizer`; the web mock mirrors it in TypeScript).
 
+*Note, 2026-11-11 (PR #175):* the first run that resolved `auto` to MuSGD at full scale is folo-s on COCO
+(examples/coco, folo-s): rule 3, MuSGD lr0 0.01, momentum 0.9, warmup_bias_lr 0, 56 epochs (103,544 optimizer
+steps) under AMP, no non-finite batch (44 steps skipped for gradient overflow), val2017 AP 0.416. It shows the
+shipped rule-3 recipe works at scale. It is one run with no SGD twin, so the full-scale size of the +38 % seen on the
+proxy (follow-up 4) is still not measured.
+
 ## Reference diff (FOLO vs Ultralytics 8.4.198, step by step)
 
 Read against the installed reference (`ultralytics/utils/loss.py`, `utils/tal.py`, `engine/trainer.py`,
@@ -226,6 +232,8 @@ without it get the §7 defaults.
 4. **Long COCO with MuSGD**: the 300-epoch folo-n run (examples/coco) resumed from its SGD checkpoint keeps SGD
    (rule 1). A new long run under rule 3 is the full-scale check of the +38 % seen on the proxy, and the first run of
    the shipped rule-3 recipe (momentum 0.9, warmup_bias_lr 0; the proxy rows used 0.937 and 0.1).
+   *2026-11-11:* the recipe's first full-scale run is done (folo-s on COCO, AP 0.416; the note under "Shipped:
+   `auto` rule 3"); the comparison with SGD at full scale is still open.
 
 ### Round 1 follow-ups
 

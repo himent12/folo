@@ -1,4 +1,4 @@
-# COCO: folo-n pretrained from scratch
+# COCO: folo-n and folo-s pretrained from scratch
 
 folo-n trained **from scratch** on COCO train2017 at 640 px on one RTX 4080 SUPER for **50 epochs** (8.7 h of
 epochs), evaluated on val2017 with FOLO's pycocotools-exact evaluator, and published as `folo-n-coco` (release `weights-v1`,
@@ -11,8 +11,13 @@ is **50 epochs on COCO alone, from random init**. Data, schedule, recipe and arc
 like-for-like comparison, and how much of the gap each accounts for is not known ([Results](#results-val2017)).
 
 **v2 (interim): AP 0.317 / AP50 0.458** after 62 epochs of a 300-epoch schedule that was paused there, published as
-`folo-n-coco-v2` (release `weights-v2`). It can be resumed from its checkpoint
-([v2](#v2-a-300-epoch-schedule-paused-at-epoch-62)).
+`folo-n-coco-v2` (release `weights-v2`). It stays paused for now (the budget went to folo-s and the fine-tuning
+benchmark) and can be resumed from its checkpoint ([v2](#v2-a-300-epoch-schedule-paused-at-epoch-62)).
+
+**folo-s: AP 0.416 / AP50 0.580** after 56 epochs from scratch on one rented RTX PRO 4000 Blackwell (9.5 h of epochs,
+about $5.60 for the pod), published as `folo-s-coco` (release `weights-v3`): `folo weights pull folo-s-coco`. That is 0.05–0.06 AP
+behind the published YOLO11s (0.470) and YOLO26s (0.480), and the first full-scale run of `auto`'s MuSGD rule
+([folo-s](#folo-s-56-epochs-on-a-rented-gpu)).
 
 ## Data
 
@@ -323,4 +328,114 @@ folo train --resume D:/folo-data/runs-coco/coco-folo-n-long/weights/last.folo --
 Checked on a copy of the run folder: it resumes "after epoch 62 (optimizer step 114590)" with mixed precision and the
 stored loss scale (16384). At the measured 442 s per epoch, the remaining 238 epochs take about 29 h. Run it hidden,
 in its own process group, and never next to a `folo serve` that holds GPU memory. When it finishes, re-run the
-evaluation and export a final `folo-n-coco-v2` (or v3).
+evaluation and publish the final folo-n weights in a new release (`weights-v3` is folo-s's).
+
+**It stays paused for now** (2026-11-11). The next round of training ran on rented GPUs with a fixed budget of about
+$9, nothing on the dev PC, and the remaining 238 epochs (about 29 h here, 25–45 h on what $9 rents) did not fit that
+budget next to [folo-s](#folo-s-56-epochs-on-a-rented-gpu) and the fine-tuning benchmark (docs/BENCHMARKS.md), so the
+owner chose those. The checkpoint is kept and resumes as above.
+
+## folo-s: 56 epochs on a rented GPU
+
+folo-s (9,458,736 parameters, 21.59 GFLOPs at 640; docs/MODEL.md) trained **from scratch** on COCO train2017 at
+640 px for **56 epochs**, evaluated on val2017 with the same pycocotools-exact evaluator, and published as
+`folo-s-coco` (release `weights-v3`): **val2017 AP 0.416 / AP50 0.580**.
+
+```sh
+folo train --data /data/coco --model folo-s --imgsz 640 --batch 32 --epochs 56 --amp \
+  --patience 1000 --workers 12 --device gpu:0 --seed 0 --project /data/runs --name coco-folo-s
+```
+
+**What the recipe resolved to** (the run's `config.json`): `optimizer: auto` → **MuSGD** (`auto_rule` 3: 103,544
+optimizer steps > 10,000) at lr0 0.01, momentum 0.9, warmup_bias_lr 0, weight decay 5e-4, linear decay to `lr0 ·
+lrf` (lrf 0.01; no `--cos-lr`), batch 32 × accumulate 2 (nominal batch 64), 1849 optimizer steps per epoch (3697
+batches), 5547 warmup steps (3 epochs), EMA, mosaic 1.0 closed for the last 10 epochs, the default augmentation, AMP
+(f16 activations on tensor cores, loss scale 65536 at the start). This is the first run in which `auto` resolved to
+MuSGD at full scale (docs/MODEL.md §8.2).
+
+**Hardware.** One rented **NVIDIA RTX PRO 4000 Blackwell** (24 GB, a 140 W card; RunPod Secure Cloud, $0.57/h,
+12 vCPUs of an AMD EPYC 7352, NVIDIA driver 595.91.07, Vulkan through the driver's EGL library), running the Linux
+build of commit `ee846c88` (FOLO 0.1.0). The pod was set up by hand (`ubuntu:22.04` + sshd) rather than as a FOLO
+cloud run, because a cloud run uploads the dataset from this machine (docs/CLOUD.md, Limits), 20 GB over a home line.
+On the pod, COCO came straight from cocodataset.org: 3 minutes for the 20 GB with `aria2c -x 8`, MD5s checked as in
+[Data](#data), 7.5 minutes until unpacked.
+
+**Speed and cost.** A probe before the run measured about 165 img/s at batch 16 and 177.5 img/s at batch 64,
+GPU-bound (GPU at 95–100%, the loader under 4 of the 12 vCPUs); batch 32 was chosen because batch 64's 17.3 GB of
+24 was judged too close. The run took **607–628 s per epoch** with validation (607–610 s after the first): 56 epochs
+in 34,156 s = **9.49 h**. For scale, the RTX 4080 SUPER's AMP training step for folo-s is 273 img/s (SGD, the step
+alone). The pod ran 9.85 h in all (setup, two 200 s probes, the run, evaluation and export), about **$5.60**.
+
+### Curve (folo-s; internal val: network-input boxes, no crowd regions)
+
+| epoch | box | cls | dfl | val P | val R | val mAP50 | val mAP50-95 | epoch time |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 2.903 | 4.611 | 3.314 | 0.098 | 0.093 | 0.045 | 0.023 | 628 s |
+| 3 (end of warmup) | 1.605 | 2.450 | 1.682 | 0.374 | 0.260 | 0.245 | 0.152 | 608 s |
+| 5 | 1.422 | 1.998 | 1.481 | 0.499 | 0.346 | 0.368 | 0.244 | 610 s |
+| 10 | 1.285 | 1.653 | 1.339 | 0.521 | 0.442 | 0.457 | 0.316 | 609 s |
+| 20 | 1.203 | 1.442 | 1.257 | 0.576 | 0.472 | 0.501 | 0.352 | 610 s |
+| 30 | 1.156 | 1.329 | 1.219 | 0.606 | 0.503 | 0.535 | 0.381 | 610 s |
+| 40 | 1.118 | 1.237 | 1.189 | 0.642 | 0.511 | 0.555 | 0.397 | 609 s |
+| 46 (last with mosaic) | 1.094 | 1.175 | 1.171 | 0.625 | 0.535 | 0.565 | 0.406 | 609 s |
+| 47 (mosaic off) | 1.075 | 1.086 | 1.150 | 0.647 | 0.524 | 0.566 | 0.407 | 609 s |
+| 50 | 1.051 | 1.031 | 1.132 | 0.633 | 0.537 | 0.570 | 0.409 | 609 s |
+| **56** (best) | 1.013 | 0.940 | 1.108 | 0.670 | 0.524 | 0.573 | **0.412** | 607 s |
+
+mAP50-95 rose in every one of the 56 epochs, so the best epoch is the last. The last six gains were 0.0007, 0.0007,
+0.0004, 0.0005, 0.0002 and 0.0001: that is the schedule reaching its learning-rate floor, not a plateau at a healthy
+learning rate, so 0.416 is what this epoch budget reached, not what folo-s can reach. No batch was non-finite; the
+loss scaler skipped 44 of 103,544 optimizer steps for gradient overflow (the scale ended at 32768). For comparison,
+folo-n v1 (SGD, 50 epochs) had 0.064 at epoch 3, 0.203 at epoch 10 and 0.310 at epoch 50; that is another model
+size and another optimizer, so it isolates neither.
+
+### Results (folo-s, val2017)
+
+`best.folo` is `last.folo` (the same file, epoch 56) and the published file; `folo val --coco` on the pod's GPU,
+640 px, the MODEL.md §9.3 validation settings, 5000 images, 36,335 boxes plus 446 crowd regions:
+
+| | AP | AP50 | AP75 | AP_S | AP_M | AP_L | AR1 | AR10 | AR100 | AR_S | AR_M | AR_L |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **f32** | **0.4162** | **0.5798** | 0.4519 | 0.2289 | 0.4594 | 0.5845 | 0.3385 | 0.5600 | 0.6164 | 0.4118 | 0.6777 | 0.7850 |
+| f16 (`--half`, the fused f16 file) | 0.4162 | 0.5799 | 0.4520 | 0.2288 | 0.4595 | 0.5844 | 0.3386 | 0.5601 | 0.6164 | 0.4118 | 0.6776 | 0.7847 |
+
+**pycocotools agrees**: its own `COCOeval` on the same detections (`--save-json`, 631,524 detections in f32 at
+`conf > 0.001`) gives all 12 stats equal to four decimals, f32 and f16. `--half --tensor-cores` gives the f16 numbers
+exactly. `folo val` took 25 s for the 5000 images on the pod in f32 and f16, 17 s with tensor cores.
+
+**Against the incumbent.** Ultralytics publishes AP 0.470 for YOLO11s and 0.480 for YOLO26s (Objects365
+pretraining, a long COCO schedule, evolved hyperparameters; [the YOLO26 paper](https://arxiv.org/abs/2606.03748)).
+folo-s at 56 epochs from random init on COCO alone is **0.05–0.06 AP behind them**, and above the published nano
+models (YOLO11n 0.395, YOLO26n 0.409). As for folo-n, data, schedule, recipe and architecture all differ, so the gap
+cannot be split into those causes.
+
+### Publish (folo-s)
+
+```sh
+# on the pod
+folo export --model /data/runs/coco-folo-s/weights/best.folo --format weights \
+  --output /data/out/folo-s-coco.folo                               # EMA, unfused, f32, no optimizer state
+folo export --model /data/out/folo-s-coco.folo --format folo-f16 --output /data/out/folo-s-coco-f16.folo
+cd /data/out && sha256sum folo-s-coco.folo folo-s-coco-f16.folo > SHA256SUMS
+# here, with the three files copied back
+gh release create weights-v3 --latest=false --repo himent12/folo --title "FOLO pretrained weights v3 (folo-s)" \
+  --notes-file notes.md folo-s-coco.folo folo-s-coco-f16.folo SHA256SUMS
+```
+
+| asset | what | bytes | SHA-256 |
+|---|---|---:|---|
+| `folo-s-coco.folo` | folo-s, 80 classes, EMA weights of epoch 56, unfused f32: fine-tune or predict | 37,998,320 | `a9d7f588aadd62acadb629f50c86038cc7abc07cdb41612a5d90668b32a57e60` |
+| `folo-s-coco-f16.folo` | the same, BatchNorm fused, f16: inference only | 18,906,424 | `0bb9620e3ca75520f1ed10f582b85960bf5eae214e0c538b0941391ee2c52e99` |
+
+`weights-v3` was published on 2026-11-11 (UTC) with `--latest=false`, like the other weights releases
+([RELEASE.md, Weights releases](../../docs/RELEASE.md#weights-releases)). It pulls and verifies as v1 does:
+
+```sh
+folo weights pull folo-s-coco          # → ~/.folo/weights/folo-s-coco.folo, sha256 verified
+folo weights pull folo-s-coco-f16
+folo train --data <your dataset> --weights folo-s-coco ...    # takes the weights' architecture (folo-s)
+folo predict --model folo-s-coco-f16 --half <images>
+```
+
+Without `folo`: `gh release download weights-v3 --repo himent12/folo --pattern 'folo-s-coco*' --pattern SHA256SUMS`,
+then `sha256sum -c --ignore-missing SHA256SUMS`.

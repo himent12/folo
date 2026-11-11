@@ -358,7 +358,10 @@ Speed only counts at comparable accuracy, so this section tracks FOLO's accuracy
 the same detections with pycocotools itself, all 12 stats equal to 6e-16). folo-n trained from scratch for 50 epochs
 (8.7 h on the RTX 4080 SUPER), published as `folo-n-coco` (release `weights-v1`). v2 runs the same recipe with
 mixed precision on a 300-epoch schedule; it was **paused after epoch 62** (8.0 h) and its weights at the pause are the
-interim `folo-n-coco-v2` (release `weights-v2`):
+interim `folo-n-coco-v2` (release `weights-v2`). folo-s was trained from scratch for **56 epochs** with AMP on one
+rented RTX PRO 4000 Blackwell (9.5 h of epochs, about $5.60 for the pod), published as `folo-s-coco` (release `weights-v3`):
+
+*Nano*
 
 | model | params | training | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
@@ -369,17 +372,35 @@ interim `folo-n-coco-v2` (release `weights-v2`):
 | YOLO11n (Ultralytics, published) | 2.6 M | Ultralytics recipe (not given on its model page) | 0.395 | | | | | |
 | YOLO26n (Ultralytics, published) | 2.4 M | 150 epochs Objects365-v1, then 245 epochs COCO, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.409 (e2e 0.401) | | | | | |
 
-**This is not like for like:** YOLO26n's number comes from more data (Objects365 pretraining), a longer schedule and a
-tuned recipe (YOLO11n's is not documented on its model page), and the architectures differ. The gap cannot be split
-into those causes. The FOLO run ended
-at its schedule's floor, not at a plateau: mAP50-95 rose every epoch, by 0.0009 per epoch over the last five. The
-longer v2 schedule passed v1 at epoch 58 and was still gaining about 0.0008 per epoch when it was paused at epoch 62,
-before its learning-rate decay and close-mosaic phases; the remaining 238 epochs (about 29 h) have not been run, so
-what the full schedule reaches is not known. Until a long run exists, FOLO's accuracy on full COCO is **behind the
-published nano models by 0.08–0.09 AP** (v2 interim; 0.08–0.10 for v1), and the speed rows above should be read with
-that in mind. **The published 0.314 / 0.317 are unchanged by the hill-climb**: both checkpoints were trained with
-SGD before it, and the trainer changes below (the `auto` rule, MuSGD) only show at full scale once a long COCO run is
-redone with them.
+*Small*
+
+| model | params | training | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| **folo-s, f32** | 9.5 M | **56 epochs from scratch**, FOLO trainer, `auto` → MuSGD (rule 3), AMP | **0.416** | 0.580 | 0.452 | 0.229 | 0.459 | 0.584 |
+| folo-s, f16 (`--half`) | 9.5 M | the same weights, fused f16 file | 0.416 | 0.580 | 0.452 | 0.229 | 0.460 | 0.584 |
+| YOLO11s (Ultralytics, published) | | Ultralytics recipe (not given on its model page) | 0.470 | | | | | |
+| YOLO26s (Ultralytics, published) | 9.5 M | Objects365 pretraining, a long COCO schedule, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.480 | | | | | |
+
+**This is not like for like:** YOLO26's numbers come from more data (Objects365 pretraining), a longer schedule and a
+tuned recipe (YOLO11's is not documented on its model pages), and the architectures differ. The gaps cannot be split
+into those causes, and no equal-budget COCO comparison has been run.
+
+- **folo-n.** v1 ended at its schedule's floor, not at a plateau: mAP50-95 rose every epoch, by 0.0009 per epoch over
+  the last five. The longer v2 schedule passed v1 at epoch 58 and was still gaining about 0.0008 per epoch when it
+  was paused at epoch 62, before its learning-rate decay and close-mosaic phases. **It is still paused**: all
+  training for this round ran on rented GPUs with a fixed budget of about $9, and the remaining 238 epochs (about
+  29 h on the RTX 4080 SUPER, 25–45 h on what $9 rents) did not fit next to folo-s and the fine-tuning benchmark, so
+  the owner left it paused. It can be resumed from its checkpoint
+  ([examples/coco, Resume (v2)](../examples/coco/README.md#resume-v2)); what the full schedule reaches is not known.
+  folo-n is **0.08–0.09 AP behind the published nano models** (v2 interim; 0.08–0.10 for v1).
+- **folo-s.** 56 epochs (103,544 optimizer steps, 9.49 h of epochs on a 140 W card) reach **AP 0.416 / AP50 0.580**,
+  **0.05–0.06 AP behind YOLO11s / YOLO26s** and above both published nano models. That is the epoch budget's floor,
+  not a plateau: internal mAP50-95 rose in every one of the 56 epochs, and the last six gains (0.0007 to 0.0001)
+  shrank with the linear decay to `lr0 · lrf`, not at a healthy learning rate.
+
+The speed rows above should be read with these gaps in mind. **The folo-n 0.314 / 0.317 are unchanged by the
+hill-climb**: both checkpoints were trained with SGD before it. folo-s is the first full-scale run with the
+hill-climb's trainer (the `auto` rule, MuSGD).
 
 **Equal budget on a COCO proxy** (the hill-climb's learn agent, [hill/learn.md](hill/learn.md)): 20,000 train2017 /
 2,000 val2017 images pre-shrunk to 320 px (all 80 classes), folo-n against Ultralytics 8.4.198 YOLO11n, both from
@@ -404,8 +425,14 @@ scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed 
 - **MuSGD** (rule 3): the reference's `auto` choice since 8.4 for runs over 10,000 iterations (full COCO), now
   implemented in folo-nn (docs/MODEL.md §8.2) and `auto`'s long-run choice. +0.031 AP over SGD on the proxy (ten
   times the seed noise), level with the reference's own MuSGD, at about 17% more step time; it passes SGD's 20-epoch
-  AP at about epoch 13. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run. Old checkpoints resume with the rule they started with (`TrainConfig.auto_rule`), so the
-  paused 300-epoch COCO run keeps SGD.
+  AP at about epoch 13. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3
+  ships momentum 0.9 and warmup_bias_lr 0 (the proxy's 6,260 iterations and the shapes gate resolve AdamW). **The
+  shipped rule-3 recipe has since run once at full scale** (2026-11-11): the folo-s COCO run above resolved `auto` to
+  MuSGD (103,544 optimizer steps > 10,000; lr0 0.01, momentum 0.9, warmup_bias_lr 0), trained 56 epochs under AMP
+  without a non-finite batch (44 of 103,544 steps skipped for gradient overflow) and reached AP 0.416. That shows the
+  rule-3 recipe works at scale. It is one run with no SGD twin at that scale, so it does not show how much MuSGD gains
+  over SGD on full COCO. Old checkpoints resume with the rule they started with (`TrainConfig.auto_rule`), so the
+  paused 300-epoch folo-n COCO run keeps SGD.
 
 ### Fine-tuning on small datasets
 
@@ -987,9 +1014,9 @@ By expected gain, from the leftovers of the hill-climb notebooks (each has the m
 3. **A persistent pipeline cache**: the first epoch on the GPU is mostly pipeline compilation (4–15 s), and the
    merged build's first f32 epoch is 4 s slower than `main`'s ([The trainer](#the-trainer-row-10)).
 4. **MuSGD step cost** (about 17% of the step): one fused Newton–Schulz kernel per column bucket instead of about 15
-   dispatches per conv weight per step; then the full-scale check, a long COCO run under `auto` rule 3 (the first run of the shipped rule-3 recipe:
-   momentum 0.9, warmup_bias_lr 0), and the AdamW
-   floor at 0.002 behind the shapes gate ([hill/learn.md](hill/learn.md)).
+   dispatches per conv weight per step; then MuSGD's gain over SGD at full scale (the folo-s COCO run showed the
+   shipped rule-3 recipe works, [Accuracy](#accuracy), but had no SGD twin), and the AdamW floor at 0.002 behind the
+   shapes gate ([hill/learn.md](hill/learn.md)).
 5. **f32 GEMMs and weight gradients**: split-K or stream-K for the 40 px-and-below layers of the forward, a
    transposed formulation for `C_in·9 ≫ C_out` weight gradients, a direct reduction for the tensor-core stem weight
    gradient (`N = 27` on a 16×256 tile, 1.7 ms per AMP step), and the f16 weight copies written by the optimizer

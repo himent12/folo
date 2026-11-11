@@ -243,8 +243,10 @@ while the server runs lists at once; the server reads the same cache (`$FOLO_WEI
 | `folo-n-coco-f16` | `weights-v1` | the same, fused and cast to f16 (`folo export`): inference only |
 | `folo-n-coco-v2` | `weights-v2` | interim: folo-n from scratch on COCO, epoch 62 of a paused 300-epoch run (EMA, f32, unfused), val2017 AP 0.317 against v1's 0.314. examples/coco/README.md, v2 |
 | `folo-n-coco-v2-f16` | `weights-v2` | the same, fused and cast to f16 (`folo export`): inference only |
+| `folo-s-coco` | `weights-v3` | folo-s trained from scratch on COCO train2017 at 640 px, 56 epochs (EMA, f32, unfused): fine-tune or predict. val2017 AP 0.416. examples/coco/README.md, folo-s |
+| `folo-s-coco-f16` | `weights-v3` | the same, fused and cast to f16 (`folo export`): inference only |
 
-`weights-v1` and `weights-v2` are published releases. `folo weights pull` downloads their files over plain HTTPS
+`weights-v1`, `weights-v2` and `weights-v3` are published releases. `folo weights pull` downloads their files over plain HTTPS
 first, which is all a public release needs: no `gh`, no account, nothing but the `folo` binary. The repository is
 private for now, so that download answers `404` and the pull falls back to `gh release download`: until the
 repository is public, pulling needs an account with access to it and a logged-in [`gh`](https://cli.github.com)

@@ -55,7 +55,8 @@ with a pre-release suffix (`0.2.0-rc.1`) makes a pre-release.
    - the notes: edit them into the release notes (highlights, benchmarks, known issues; from the CHANGELOG section),
      `gh release edit v0.2.0 --notes-file notes.md`. A re-run of the workflow for the draft keeps them;
    - optionally download an archive and run the [checks below](#checking-a-build).
-5. **Publish**: `gh release edit v0.2.0 --draft=false` (or "Publish release" on GitHub). Only now do
+5. **Publish**: `gh release edit v0.2.0 --draft=false --latest` (or "Publish release" on GitHub, with "Set as the
+   latest release" ticked; [Weights releases](#weights-releases) says why the flag matters). Only now do
    `releases/latest/download/...` and the install scripts (`scripts/install.sh`, `scripts/install.ps1`) see it.
    Check with a fresh install: `sh scripts/install.sh --dir /tmp/folo-check && /tmp/folo-check/folo --version`.
 
@@ -156,6 +157,20 @@ look for FOLO's binaries in the weights release. A published weights release dow
 repository is private that answers `404` and the pull goes through `gh` (docs/CLI.md, Weights). Do not replace a
 published file: caches keep the copy they have (`pull` skips a cached name without `--force`), so a new result is a
 new name.
+
+| tag | names | published |
+|---|---|---|
+| `weights-v1` | `folo-n-coco`, `folo-n-coco-f16` | 2026-11-11 (created as a draft) |
+| `weights-v2` | `folo-n-coco-v2`, `folo-n-coco-v2-f16` | 2026-11-11 (created as a draft) |
+| `weights-v3` | `folo-s-coco`, `folo-s-coco-f16` | 2026-11-11 |
+
+All three carry `--latest=false`.
+
+**Known issue: "latest" is a weights release.** The app release `v0.1.0` is still a draft, and no published release
+is marked latest, so GitHub picks one: today that is `weights-v2`. Until an app release is published and marked
+latest, `releases/latest/download/...` and `install.sh` without `--version` do not find the binaries. The fix
+is one flag for whoever publishes `v0.1.0`: `gh release edit v0.1.0 --draft=false --latest` (publish it with
+`--latest`).
 
 ## Building a release binary locally
 ```sh
