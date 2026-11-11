@@ -238,7 +238,7 @@ export default function Overview() {
                           <th class="r" style:width="88px">
                             mAP50-95
                           </th>
-                          <th class="hide-sm" style:width="120px">
+                          <th class="hide-sm trend" style:width="120px">
                             mAP50-95 trend
                           </th>
                           <th class="r hide-sm" style:width="96px">
@@ -280,7 +280,7 @@ export default function Overview() {
                                   <Skeleton w="40px" h="12px" />
                                 </span>
                               </td>
-                              <td class="hide-sm">
+                              <td class="hide-sm trend">
                                 <Skeleton w="88px" h="12px" />
                               </td>
                               <td class="r hide-sm">
@@ -300,12 +300,14 @@ export default function Overview() {
                           {(r) => (
                             <tr class="link" onclick={() => router.go(`/runs/${r().id}`)}>
                               <td>
-                                <a class="run-name" href={href(`/runs/${r().id}`)} onclick={(e) => e.stopPropagation()}>
+                                <a class="run-name" href={href(`/runs/${r().id}`)} onclick={(e) => e.stopPropagation()} use:tooltip={r().name}>
                                   {r().name}
                                 </a>{' '}
                                 <span class="sub">
                                   <Meta line>
-                                    <span class="ds">{dsById.get().get(r().config.dataset_id)?.name ?? r().config.dataset_id}</span>
+                                    <span class="ds" use:tooltip={dsById.get().get(r().config.dataset_id)?.name}>
+                                      {dsById.get().get(r().config.dataset_id)?.name ?? r().config.dataset_id}
+                                    </span>
                                     <Ident value={r().config.arch} />
                                   </Meta>
                                 </span>
@@ -327,7 +329,7 @@ export default function Overview() {
                                 </div>
                               </td>
                               <td class="r num">{r().best ? metric(r().best!.map50_95) : <NoValue />}</td>
-                              <td class="hide-sm">
+                              <td class="hide-sm trend">
                                 <RunSpark run={r()} />
                               </td>
                               <td class="r faint hide-sm">{ago(r().created)}</td>
@@ -609,8 +611,17 @@ css`
   .live {
     min-width: 0;
   }
+  /* The table fits its card at every width, never scrolling sideways: the trend goes first when the card is narrower
+     than all six columns (a 1280 px laptop puts Best models beside it), and a long run name ends in an ellipsis
+     rather than widen its column (its meta line sets the column's least width). */
   .scroll {
+    container-type: inline-size;
     overflow-x: auto;
+  }
+  @container (max-width: 739px) {
+    .trend {
+      display: none;
+    }
   }
   /* Skeleton bars centred in the line box of the text they stand for (13/20 body, 12/16 meta). */
   .l-20,
@@ -625,8 +636,31 @@ css`
   .l-20.end {
     justify-content: flex-end;
   }
+  /* Neither line sets the Run column's least width (the container query above keeps it 170 px or more): the name ends
+     in an ellipsis, and on its meta line only the dataset's name does, never the size beside it (a fact). */
+  .run-name,
+  .sub {
+    width: 0;
+    min-width: 100%;
+  }
   .run-name {
     display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  @media (min-width: 768px) {
+    .sub :global(.ui-meta.line) {
+      display: flex;
+      flex-wrap: nowrap;
+    }
+    .sub :global(.ui-meta.line > *) {
+      flex: none;
+    }
+    .sub :global(.ui-meta.line > .ds) {
+      flex: 0 1 auto;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
   }
   /* Stale data: one notice over the page, the panels keep what they have. */
   .stale {
