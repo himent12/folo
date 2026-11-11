@@ -1,9 +1,11 @@
 """Bookkeeping shared by the runners and the renderer: run keys, result files, the summary.
 
-A run is one (tool, dataset, variant, seed): tool `folo` or `ultralytics`, variant `pretrained` (fine-tuned from
-COCO weights) or `scratch` (no weights: the control). Its result is one JSON file, `<tool>-<dataset>-<variant>-
-s<seed>.json`, written atomically once the run is scored; a runner skips every run whose file exists, so a matrix can
-be stopped and started again.
+A run is one (tool, model, dataset, variant, seed): tool `folo` or `ultralytics`, model the architecture
+(`folo-n`, `folo-s`, ... for FOLO; the checkpoint's stem, `yolo26n`, `yolo26s`, ... for Ultralytics), variant
+`pretrained` (fine-tuned from COCO weights) or `scratch` (no weights: the control). Its result is one JSON file,
+`<model>-<dataset>-<variant>-s<seed>.json`, written atomically once the run is scored; a runner skips every run whose
+file exists, so a matrix can be stopped and started again. Models of the same size letter (folo-n and yolo26n,
+folo-s and yolo26s) are compared in one table.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ RESULT_VERSION = 1
 @dataclass(frozen=True)
 class RunKey:
     tool: str
+    model: str
     dataset: str
     variant: str
     seed: int
@@ -33,13 +36,20 @@ class RunKey:
             raise ValueError(f"tool {self.tool!r} is not one of {TOOLS}")
         if self.variant not in VARIANTS:
             raise ValueError(f"variant {self.variant!r} is not one of {VARIANTS}")
+        if (self.tool == "folo") != self.model.startswith("folo-") or not self.model:
+            raise ValueError(f"model {self.model!r} does not belong to tool {self.tool!r}")
 
     @property
     def stem(self) -> str:
-        return f"{self.tool}-{self.dataset}-{self.variant}-s{self.seed}"
+        return f"{self.model}-{self.dataset}-{self.variant}-s{self.seed}"
 
     def result_path(self, results_dir: Path) -> Path:
         return Path(results_dir) / f"{self.stem}.json"
+
+
+def size_of(model: str) -> str:
+    """The size letter that pairs models across tools: `folo-n` and `yolo26n` are `n`; anything else is itself."""
+    return model[-1] if model and model[-1] in "nsmlx" else model
 
 
 def parse_seeds(text: str) -> list[int]:
@@ -82,6 +92,7 @@ def result_record(key: RunKey, **fields) -> dict:
     rec = {
         "version": RESULT_VERSION,
         "tool": key.tool,
+        "model": key.model,
         "dataset": key.dataset,
         "variant": key.variant,
         "seed": key.seed,
@@ -132,13 +143,13 @@ def _stat(values: list[float]) -> dict | None:
 
 
 def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
-    """Group runs by (dataset, tool, variant): AP / AP50 / AP75 / training time over seeds, with which seeds are
-    present, and `complete` once `expected_seeds` seeds are (1 for the scratch control)."""
+    """Group runs by (dataset, tool, model, variant): AP / AP50 / AP75 / training time over seeds, with which seeds
+    are present, and `complete` once `expected_seeds` seeds are (1 for the scratch control)."""
     groups: dict[tuple, list[dict]] = {}
     for r in results:
-        groups.setdefault((r["dataset"], r["tool"], r["variant"]), []).append(r)
+        groups.setdefault((r["dataset"], r["tool"], r["model"], r["variant"]), []).append(r)
     rows = []
-    for (dataset, tool, variant), rs in sorted(groups.items()):
+    for (dataset, tool, model, variant), rs in sorted(groups.items()):
         rs = sorted(rs, key=lambda r: r["seed"])
         want = 1 if variant == "scratch" else expected_seeds
         metric = lambda k: [r["metrics"][k] for r in rs if r.get("metrics") and r["metrics"].get(k) is not None]
@@ -146,6 +157,7 @@ def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
             {
                 "dataset": dataset,
                 "tool": tool,
+                "model": model,
                 "variant": variant,
                 "seeds": [r["seed"] for r in rs],
                 "complete": len(rs) >= want,

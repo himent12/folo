@@ -199,8 +199,9 @@ class Scorer(unittest.TestCase):
         self.assertEqual((empty["ap"], empty["detections"]), (0.0, 0))
 
 
-def result(tool, dataset, variant, seed, ap, epochs=100, wall=60.0):
-    key = common.RunKey(tool, dataset, variant, seed)
+def result(tool, dataset, variant, seed, ap, epochs=100, wall=60.0, model=None):
+    model = model or {"folo": "folo-n", "ultralytics": "yolo26n"}[tool]
+    key = common.RunKey(tool, model, dataset, variant, seed)
     return common.result_record(
         key, epochs_planned=epochs, metrics={"ap": ap, "ap50": ap + 0.2, "ap75": ap}, train_wall_s=wall, gpu="RTX 4090"
     )
@@ -208,13 +209,19 @@ def result(tool, dataset, variant, seed, ap, epochs=100, wall=60.0):
 
 class Results(unittest.TestCase):
     def test_run_key(self):
-        k = common.RunKey("folo", "bccd", "pretrained", 2)
-        self.assertEqual(k.stem, "folo-bccd-pretrained-s2")
-        self.assertEqual(k.result_path(Path("r")), Path("r") / "folo-bccd-pretrained-s2.json")
+        k = common.RunKey("folo", "folo-n", "bccd", "pretrained", 2)
+        self.assertEqual(k.stem, "folo-n-bccd-pretrained-s2")
+        self.assertEqual(k.result_path(Path("r")), Path("r") / "folo-n-bccd-pretrained-s2.json")
+        self.assertEqual(common.RunKey("ultralytics", "yolo26s", "bccd", "pretrained", 0).stem, "yolo26s-bccd-pretrained-s0")
         with self.assertRaises(ValueError):
-            common.RunKey("yolo", "bccd", "pretrained", 0)
+            common.RunKey("yolo", "yolo26n", "bccd", "pretrained", 0)
         with self.assertRaises(ValueError):
-            common.RunKey("folo", "bccd", "finetuned", 0)
+            common.RunKey("folo", "folo-n", "bccd", "finetuned", 0)
+        with self.assertRaises(ValueError):
+            common.RunKey("folo", "yolo26n", "bccd", "pretrained", 0)  # model of the other tool
+        with self.assertRaises(ValueError):
+            common.RunKey("ultralytics", "folo-s", "bccd", "pretrained", 0)
+        self.assertEqual([common.size_of(m) for m in ("folo-n", "yolo26n", "folo-s", "yolo26s", "rtdetr")], ["n", "n", "s", "s", "rtdetr"])
         with self.assertRaises(ValueError):
             common.result_record(k, colour="red")
 
@@ -265,7 +272,8 @@ class Render(unittest.TestCase):
 
     def test_no_results_renders_an_empty_table_without_numbers(self):
         text, summary = render_table.render([], self.META, epochs=100, seeds=3)
-        self.assertIn("No 100-epoch run has been measured yet", text)
+        self.assertIn("folo-n against yolo26n: no 100-epoch run has been measured yet", text)
+        self.assertNotIn("folo-s", text)  # no folo-s table without folo-s results
         self.assertIn("| bccd | not run | not run | not run |", text)
         self.assertEqual(summary["runs"], 0)
 
@@ -277,12 +285,26 @@ class Render(unittest.TestCase):
             result("folo", "bccd", "pretrained", 2, 0.9, epochs=3),  # a smoke run: left out
         ]
         text, summary = render_table.render(rs, self.META, epochs=100, seeds=3)
-        self.assertIn("**Partial**: 3 of the 7 runs", text)
+        self.assertIn("**folo-n against yolo26n, partial**: 3 of the 7 runs", text)
         self.assertIn("1 result files of runs with another epoch count", text)
         self.assertIn("0.600 (0.500–0.700), 2 of 3 seeds", text)
         self.assertIn("0.400, 1 of 3 seeds", text)
         self.assertIn("+0.200", text)
         self.assertEqual(summary["ignored_other_epochs"], 1)
+
+    def test_each_size_gets_its_own_table(self):
+        rs = [
+            result("folo", "bccd", "pretrained", 0, 0.5),
+            result("folo", "bccd", "pretrained", 0, 0.6, model="folo-s"),
+            result("ultralytics", "bccd", "pretrained", 0, 0.7, model="yolo26s"),
+        ]
+        text, summary = render_table.render(rs, self.META, epochs=100, seeds=3)
+        self.assertIn("**folo-n against yolo26n, partial**: 1 of the 7 runs", text)
+        self.assertIn("**folo-s against yolo26s, partial**: 2 of the 7 runs", text)
+        self.assertIn("| folo-s fine-tuned AP | AP50 | yolo26s fine-tuned AP |", text)
+        self.assertIn("-0.100", text)  # folo-s 0.6 against yolo26s 0.7, not against folo-n's row
+        self.assertLess(text.index("folo-n against"), text.index("folo-s against"))
+        self.assertEqual(len(summary["groups"]), 3)
 
     def test_update_replaces_between_markers_only(self):
         with tempfile.TemporaryDirectory() as t:
@@ -306,22 +328,37 @@ class Runners(unittest.TestCase):
 
     def test_train_config(self):
         class A:
-            epochs, batch, imgsz, weights = 100, 16, 640, "folo-n-coco-v2"
+            epochs, batch, imgsz, weights, device = 100, 16, 640, "folo-n-coco-v2", "cpu"
 
-        pre = run_folo.train_config(common.RunKey("folo", "bccd", "pretrained", 1), "ds_1", A, None)
+        pre = run_folo.train_config(common.RunKey("folo", "folo-n", "bccd", "pretrained", 1), "ds_1", A, None)
         self.assertEqual(pre["weights"], "folo-n-coco-v2")
         self.assertEqual((pre["seed"], pre["epochs"], pre["batch"], pre["imgsz"]), (1, 100, 16, 640))
-        self.assertEqual(pre["name"], "ft-bccd-pretrained-s1")
+        self.assertEqual((pre["arch"], pre["device"]), ("folo-n", "cpu"))
+        self.assertEqual(pre["name"], "ft-folo-n-bccd-pretrained-s1")
         self.assertNotIn("compute", pre)
         self.assertNotIn("optimizer", pre)  # FOLO's default (auto)
-        scr = run_folo.train_config(common.RunKey("folo", "bccd", "scratch", 0), "ds_1", A, {"connection_id": "c"})
+        scr = run_folo.train_config(common.RunKey("folo", "folo-s", "bccd", "scratch", 0), "ds_1", A, {"connection_id": "c"})
         self.assertNotIn("weights", scr)
         self.assertEqual(scr["compute"], {"connection_id": "c"})
+        self.assertEqual((scr["arch"], scr["device"]), ("folo-s", "auto"))  # a cloud run trains on its pod's GPU
 
     def test_wall_seconds(self):
         run = {"started": "2026-11-10T10:00:00Z", "finished": "2026-11-10T10:02:30.5Z"}
         self.assertAlmostEqual(run_folo.wall_seconds(run), 150.5)
         self.assertIsNone(run_folo.wall_seconds({"started": None, "finished": None}))
+
+    def test_ultralytics_weights(self):
+        self.assertEqual(run_ultralytics.model_name(Path("w/yolo26s.pt")), "yolo26s")
+        with tempfile.TemporaryDirectory() as t:
+            fake = Path(t) / "yolo26n.pt"
+            fake.write_bytes(b"not the published file")
+            with self.assertRaises(SystemExit):
+                run_ultralytics.ensure_weights(fake, False)  # a known name must have its known sha256
+            other = Path(t) / "yolo26s.pt"
+            other.write_bytes(b"x")
+            self.assertEqual(run_ultralytics.ensure_weights(other, False), datasets.sha256_file(other))
+            with self.assertRaises(SystemExit):
+                run_ultralytics.ensure_weights(Path(t) / "missing.pt", True)  # only yolo26<size>.pt is downloaded
 
     def test_epochs_in_results_csv(self):
         with tempfile.TemporaryDirectory() as t:

@@ -56,7 +56,7 @@ def render(results: list[dict], metas: list[dict], epochs: int, seeds: int) -> t
     summary = common.summarize(kept, expected_seeds=seeds)
     summary["epochs"] = epochs
     summary["ignored_other_epochs"] = ignored
-    groups = {(g["dataset"], g["tool"], g["variant"]): g for g in summary["groups"]}
+    groups = {(g["dataset"], g["tool"], g["model"], g["variant"]): g for g in summary["groups"]}
     lines = []
 
     names = [m["name"] for m in metas] or sorted({g[0] for g in groups})
@@ -89,26 +89,42 @@ def render(results: list[dict], metas: list[dict], epochs: int, seeds: int) -> t
         )
         lines.append("")
 
-    n_runs = len(kept)
+    # One table per size letter: folo-n against yolo26n (always shown), folo-s against yolo26s once it has results.
+    sizes = sorted({common.size_of(g[2]) for g in groups} | {"n"}, key=lambda z: ("nsmlx".find(z), z))
+    for size in sizes:
+        models = {t: sorted({g[2] for g in groups if g[1] == t and common.size_of(g[2]) == size}) for t in common.TOOLS}
+        fm = (models["folo"] or [f"folo-{size}"])[0]
+        um = (models["ultralytics"] or [f"yolo26{size}"])[0]
+        lines.extend(results_table(groups, names, fm, um, seeds, epochs, ignored if size == sizes[0] else 0))
+    gpus = sorted({gpu for grp in summary["groups"] for gpu in grp["gpus"]})
+    if gpus:
+        lines.append("Trained on: " + "; ".join(gpus) + ".")
+    return "\n".join(lines).rstrip("\n") + "\n", summary
+
+
+def results_table(groups: dict, names: list[str], fm: str, um: str, seeds: int, epochs: int, ignored: int) -> list[str]:
+    """The status line and the results table of the FOLO model `fm` against the Ultralytics model `um`."""
+    lines = []
+    n_runs = sum(len(g["seeds"]) for k, g in groups.items() if k[2] in (fm, um))
     planned = len(names) * (2 * seeds + 1)
+    title = f"{fm} against {um}"
     if n_runs == 0:
         lines.append(
-            f"**No {epochs}-epoch run has been measured yet**: the table below is empty until the matrix "
+            f"**{title}: no {epochs}-epoch run has been measured yet**: the table below is empty until the matrix "
             f"({planned} runs) has run."
         )
     elif n_runs < planned:
-        lines.append(f"**Partial**: {n_runs} of the {planned} runs of the matrix have been measured.")
+        lines.append(f"**{title}, partial**: {n_runs} of the {planned} runs of the matrix have been measured.")
     else:
-        lines.append(f"All {planned} runs of the matrix measured.")
+        lines.append(f"**{title}**: all {planned} runs of the matrix measured.")
     if ignored:
         lines.append(f"({ignored} result files of runs with another epoch count, such as smoke runs, are left out.)")
     lines.append("")
-
     rows = []
     for n in names:
-        fp = groups.get((n, "folo", "pretrained"))
-        up = groups.get((n, "ultralytics", "pretrained"))
-        fs = groups.get((n, "folo", "scratch"))
+        fp = groups.get((n, "folo", fm, "pretrained"))
+        up = groups.get((n, "ultralytics", um, "pretrained"))
+        fs = groups.get((n, "folo", fm, "scratch"))
         g = lambda grp, k: grp.get(k) if grp else None
         delta = ""
         if fp and up and fp["ap"] and up["ap"]:
@@ -127,29 +143,21 @@ def render(results: list[dict], metas: list[dict], epochs: int, seeds: int) -> t
                 minutes(g(up, "train_wall_s")),
             ]
         )
-    lines.append(
-        table(
-            [
-                "dataset",
-                "folo-n fine-tuned AP",
-                "AP50",
-                "yolo26n fine-tuned AP",
-                "AP50",
-                "FOLO − Ultralytics (AP)",
-                "folo-n from scratch AP",
-                "AP50",
-                "folo-n min / run",
-                "yolo26n min / run",
-            ],
-            rows,
-            "lllllrllrr",
-        )
-    )
-    gpus = sorted({gpu for grp in summary["groups"] for gpu in grp["gpus"]})
-    if gpus:
-        lines.append("")
-        lines.append("Trained on: " + "; ".join(gpus) + ".")
-    return "\n".join(lines) + "\n", summary
+    head = [
+        "dataset",
+        f"{fm} fine-tuned AP",
+        "AP50",
+        f"{um} fine-tuned AP",
+        "AP50",
+        "FOLO − Ultralytics (AP)",
+        f"{fm} from scratch AP",
+        "AP50",
+        f"{fm} min / run",
+        f"{um} min / run",
+    ]
+    lines.append(table(head, rows, "lllllrllrr"))
+    lines.append("")
+    return lines
 
 
 def update(doc: Path, text: str) -> None:

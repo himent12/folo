@@ -1,14 +1,18 @@
-"""Fine-tune folo-n through a running `folo serve` (local GPU or cloud) and score every run with the common scorer.
+"""Fine-tune a FOLO detector (folo-n by default) through a running `folo serve` (local or cloud) and score every run
+with the common scorer.
 
-    # local: a server on this machine trains the runs one after another
+    # cloud: the server is a control plane, one rented pod per run, three side by side
     python bench/finetune/run_folo.py --server http://127.0.0.1:7979 --data-root D:/folo-data/finetune \
-        --work-dir D:/folo-data/runs-finetune/folo --results bench/finetune/results --seeds 0,1,2 --epochs 100
+        --work-dir D:/folo-data/runs-finetune/folo --results bench/finetune/results --seeds 0,1,2 --epochs 100 \
+        --compute cc_1f2e:"NVIDIA GeForce RTX 4090@community" --max-hours 0.5 --parallel 3 --budget-usd 1.0
 
-    # cloud: the same server as a control plane, one rented pod per run, three side by side
-    python bench/finetune/run_folo.py --server http://127.0.0.1:7979 ... --compute cc_1f2e:"NVIDIA GeForce RTX 4090@community" \
-        --max-hours 0.5 --parallel 3 --budget-usd 1.0
+    # local: the server trains the runs one after another on --device (a smoke run on the CPU here)
+    python bench/finetune/run_folo.py --server http://127.0.0.1:7979 ... --device cpu --epochs 2 --imgsz 320
 
-For each (dataset, variant, seed) it registers the dataset (`POST /api/datasets`, YOLO), starts a run (`POST
+    # another size: --arch names the model, --weights must be one of that architecture
+    python bench/finetune/run_folo.py ... --arch folo-s --weights <published name or model id of folo-s weights>
+
+For each (dataset, variant, seed) of --arch it registers the dataset (`POST /api/datasets`, YOLO), starts a run (`POST
 /api/runs` with FOLO's defaults: epochs, batch 16, 640 px, `optimizer: auto`, `weights` = --weights for the
 `pretrained` variant, none for `scratch`, and `compute` for a cloud run), follows it to the end, then evaluates the
 run's best model (`Run.model_id`, its `weights/best.folo`) on the evaluation split with this machine's `folo val
@@ -111,12 +115,12 @@ def train_config(key: common.RunKey, dataset_id: str, args, compute: dict | None
     cfg = {
         "name": run_name(key),
         "dataset_id": dataset_id,
-        "arch": "folo-n",
+        "arch": key.model,
         "epochs": args.epochs,
         "batch": args.batch,
         "imgsz": args.imgsz,
         "seed": key.seed,
-        "device": "auto",
+        "device": "auto" if compute else args.device,
     }
     if key.variant == "pretrained":
         cfg["weights"] = args.weights
@@ -126,7 +130,7 @@ def train_config(key: common.RunKey, dataset_id: str, args, compute: dict | None
 
 
 def run_name(key: common.RunKey) -> str:
-    return f"ft-{key.dataset}-{key.variant}-s{key.seed}"
+    return f"ft-{key.model}-{key.dataset}-{key.variant}-s{key.seed}"
 
 
 def parse_time(s: str | None) -> datetime | None:
@@ -172,6 +176,25 @@ class Matrix:
         self.lock = threading.Lock()
         self.dataset_ids: dict[str, str] = {}
         self.spent: dict[str, float] = {}  # run id -> cloud cost so far
+        self.base: dict | None = None  # the --weights model as the server lists it (pretrained variant)
+
+    def base_model(self) -> dict:
+        """The --weights model on the server (a published name or a model id), checked to be an --arch model, so a
+        run cannot train another architecture than its result file names."""
+        if self.base is None:
+            want = self.args.weights
+            models = self.api.get("/api/models")["models"]
+            hits = [m for m in models if want in (m["id"], m["name"])]
+            if not hits:
+                raise SystemExit(f"--weights {want!r}: no such model on the server (folo weights pull {want}?)")
+            m = hits[0]
+            if m["arch"] != self.args.arch:
+                raise SystemExit(f"--weights {want!r} is a {m['arch']} model, not --arch {self.args.arch}")
+            m = dict(m)
+            p = Path(m.get("path") or "")
+            m["sha256"] = datasets.sha256_file(p) if p.is_file() else None
+            self.base = m
+        return self.base
 
     # ---------------------------------------------------------------------------------------------------------
     def log(self, msg: str) -> None:
@@ -253,6 +276,8 @@ class Matrix:
         data_dir = (Path(self.args.data_root) / key.dataset).resolve()
         gt_path = data_dir / "annotations" / f"instances_{spec.eval_split}.json"
         model = self.api.get(f"/api/models/{run['model_id']}")
+        if model.get("arch") != key.model:
+            raise RuntimeError(f"{key.stem}: the run trained a {model.get('arch')}, not {key.model}")
         weights = Path(model.get("path") or "")
         if not weights.is_file():
             weights = self.work / key.stem / "best.folo"
@@ -281,7 +306,7 @@ class Matrix:
             imgsz=run["config"]["imgsz"],
             batch=run["config"]["batch"],
             weights=(
-                {"name": self.args.weights, "sha256": weights_sha256(self.args.weights)}
+                {"name": self.args.weights, "sha256": self.base_model()["sha256"]}
                 if key.variant == "pretrained"
                 else None
             ),
@@ -399,31 +424,26 @@ class Matrix:
             return []
 
 
-_SHA = {}
-
-
-def weights_sha256(name_or_path: str) -> str | None:
-    """sha256 of the weights file the run started from (a path, or a published name in the folo weights cache)."""
-    if name_or_path in _SHA:
-        return _SHA[name_or_path]
-    import os
-
-    p = Path(name_or_path)
-    if not p.is_file():
-        home = Path(os.environ.get("FOLO_WEIGHTS_DIR") or Path(os.environ.get("FOLO_HOME") or Path.home() / ".folo") / "weights")
-        p = home / f"{name_or_path}.folo"
-    _SHA[name_or_path] = datasets.sha256_file(p) if p.is_file() else None
-    return _SHA[name_or_path]
-
-
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Fine-tune folo-n through folo serve")
+    ap = argparse.ArgumentParser(description="Fine-tune a FOLO detector through folo serve")
     ap.add_argument("--server", required=True, help="the folo serve URL (the control plane for cloud runs)")
     ap.add_argument("--token", default=None, help="its --token, if it has one (or FOLO_TOKEN)")
     ap.add_argument("--data-root", required=True, help="folder of datasets.py fetch")
     ap.add_argument("--work-dir", required=True, help="state.json, detections and downloaded weights go here")
     ap.add_argument("--results", required=True)
-    ap.add_argument("--weights", default="folo-n-coco-v2", help="published name or .folo of the pretrained variant")
+    ap.add_argument("--arch", default="folo-n", help="the architecture trained (and in the result names): folo-n, folo-s, ...")
+    ap.add_argument(
+        "--weights",
+        default="folo-n-coco-v2",
+        help="the pretrained variant's weights: a published name or a model id on the server (a .folo file in its "
+        "<data dir>/models/ lists as one); must be an --arch model",
+    )
+    ap.add_argument(
+        "--device",
+        default=None,
+        help="TrainConfig.device of local runs (cpu, gpu:<n>, auto), required without --compute so that no run lands "
+        "on a shared GPU by default; cloud runs always use auto (the pod's GPU)",
+    )
     ap.add_argument("--datasets", default=",".join(datasets.SPECS))
     ap.add_argument("--variants", default="pretrained,scratch")
     ap.add_argument("--seeds", default="0,1,2", help="seeds of the pretrained variant")
@@ -449,8 +469,14 @@ def main(argv: list[str] | None = None) -> int:
     for name in names:
         for v in variants:
             for seed in common.parse_seeds(args.seeds if v == "pretrained" else args.scratch_seeds):
-                keys.append(common.RunKey("folo", name, v, seed))
+                keys.append(common.RunKey("folo", args.arch, name, v, seed))
+    if args.compute and args.device not in (None, "auto"):
+        raise SystemExit("--device is for local runs; a cloud run trains on its pod's GPU (device auto)")
+    if not args.compute and args.device is None:
+        raise SystemExit("local runs need --device (cpu, gpu:<n> or auto); cloud runs need --compute")
     m = Matrix(args)
+    if "pretrained" in variants:
+        m.base_model()  # fail before anything starts on a wrong --weights / --arch
     todo = [k for k in keys if not k.result_path(m.results).is_file()]
     for k in keys:
         if k not in todo:

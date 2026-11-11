@@ -1,7 +1,8 @@
-"""Fine-tune Ultralytics YOLO26n on the benchmark datasets and score every run with the common scorer.
+"""Fine-tune an Ultralytics model (YOLO26n by default) on the benchmark datasets and score every run with the common
+scorer.
 
     python bench/finetune/run_ultralytics.py --data-root D:/folo-data/finetune --work-dir D:/folo-data/runs-finetune/ul \
-        --results bench/finetune/results --weights yolo26n.pt --seeds 0,1,2 --epochs 100
+        --results bench/finetune/results --weights yolo26n.pt --device 0 --seeds 0,1,2 --epochs 100
 
 Self-contained: it needs only torch, ultralytics, pycocotools and Pillow, and the files of this folder
 (datasets.py, scorer.py, common.py), so it runs on a plain PyTorch pod as on Windows (run_ultralytics_pod.sh).
@@ -36,15 +37,17 @@ sys.path.insert(0, str(HERE))
 import common  # noqa: E402
 import datasets  # noqa: E402
 
-YOLO26N_URL = "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt"
-YOLO26N_SHA256 = "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef"
+# Ultralytics publishes its COCO checkpoints in this release; --download-weights fetches yolo26<size>.pt from it.
+ASSETS_URL = "https://github.com/ultralytics/assets/releases/download/v8.4.0"
+# sha256 of the checkpoints measured so far; a file of one of these names must match (others are only recorded).
+KNOWN_SHA256 = {"yolo26n.pt": "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef"}
 
 os.environ["YOLO_AUTOINSTALL"] = "false"  # never pip-install into the environment
 
 
 def isolate_ultralytics(work_dir: Path, weights: Path) -> None:
     """Settings, weights, datasets and runs under work_dir; no telemetry or integrations. The AMP check loads
-    `yolo26n.pt` by name, so a copy of the weights is put in the weights dir (no download)."""
+    `yolo26n.pt` by name, so a copy of the weights is put in the weights dir (no download) when they are that file."""
     assert "ultralytics" not in sys.modules, "isolate_ultralytics() must run before ultralytics is imported"
     os.environ["YOLO_CONFIG_DIR"] = str(work_dir / "ultralytics-config")
     (work_dir / "weights").mkdir(parents=True, exist_ok=True)
@@ -79,18 +82,24 @@ def isolate_ultralytics(work_dir: Path, weights: Path) -> None:
 
 
 def ensure_weights(path: Path, download: bool) -> str:
-    """sha256 of the weights file; with `download`, fetch yolo26n.pt from Ultralytics' release when missing."""
+    """sha256 of the weights file; with `download`, fetch a published `yolo26<size>.pt` when it is missing."""
     if not path.is_file():
-        if not download or path.name != "yolo26n.pt":
-            raise SystemExit(f"{path} not found (pass --download-weights to fetch yolo26n.pt)")
+        if not download or not (path.name.startswith("yolo26") and path.suffix == ".pt"):
+            raise SystemExit(f"{path} not found (pass --download-weights to fetch a published yolo26<size>.pt)")
         path.parent.mkdir(parents=True, exist_ok=True)
-        req = urllib.request.Request(YOLO26N_URL, headers={"User-Agent": datasets.USER_AGENT})
+        req = urllib.request.Request(f"{ASSETS_URL}/{path.name}", headers={"User-Agent": datasets.USER_AGENT})
         with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as f:
             shutil.copyfileobj(r, f)
     digest = datasets.sha256_file(path)
-    if path.name == "yolo26n.pt" and digest != YOLO26N_SHA256:
-        raise SystemExit(f"{path}: sha256 {digest} is not the published yolo26n.pt ({YOLO26N_SHA256})")
+    want = KNOWN_SHA256.get(path.name)
+    if want and digest != want:
+        raise SystemExit(f"{path}: sha256 {digest} is not the published {path.name} ({want})")
     return digest
+
+
+def model_name(weights: Path) -> str:
+    """The model a checkpoint names: its stem (`yolo26n.pt` -> `yolo26n`)."""
+    return weights.stem
 
 
 def epochs_in(results_csv: Path) -> int | None:
@@ -102,7 +111,7 @@ def epochs_in(results_csv: Path) -> int | None:
 
 def run_one(args) -> None:
     """Train and score one run (in this process); writes its result file."""
-    key = common.RunKey("ultralytics", args.dataset, "pretrained", args.seed)
+    key = common.RunKey("ultralytics", model_name(Path(args.weights)), args.dataset, "pretrained", args.seed)
     spec = datasets.SPECS[args.dataset]
     data_dir = Path(args.data_root) / args.dataset
     yaml = data_dir / "data.yaml"
@@ -165,7 +174,8 @@ def run_one(args) -> None:
     det_path = run_dir / f"detections-{spec.eval_split}.json"
     det_path.write_text(json.dumps(dets))
     metrics = scorer.score(gt, dets)
-    gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() and str(args.device) != "cpu" else platform.processor() or "cpu"
+    on_gpu = torch.cuda.is_available() and str(args.device) != "cpu"
+    gpu = torch.cuda.get_device_name(0) if on_gpu else f"cpu ({platform.processor() or platform.machine()})"
     rec = common.result_record(
         key,
         epochs_planned=args.epochs,
@@ -185,7 +195,13 @@ def run_one(args) -> None:
             "python": platform.python_version(),
             "dataset_layout_sha256": json.loads((data_dir / "meta.json").read_text())["layout_sha256"],
         },
-        compute={"where": args.compute_label or platform.node(), "patience": patience, "amp": "ultralytics default (True)"},
+        compute={
+            "where": args.compute_label or platform.node(),
+            "device": str(args.device),
+            "patience": patience,
+            # Ultralytics' default amp=True, which it turns off itself on the CPU or when its AMP check fails.
+            "amp": bool(getattr(model.trainer, "amp", False)),
+        },
     )
     rec["detections_file"] = str(det_path)
     rec["run_dir"] = str(run_dir)
@@ -198,14 +214,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--data-root", required=True, help="folder of datasets.py fetch")
     ap.add_argument("--work-dir", required=True, help="Ultralytics settings, weights and runs go here")
     ap.add_argument("--results", required=True, help="one result JSON per run is written here")
-    ap.add_argument("--weights", default="yolo26n.pt", help="the pretrained checkpoint (default yolo26n.pt)")
-    ap.add_argument("--download-weights", action="store_true", help="fetch yolo26n.pt when --weights is missing")
+    ap.add_argument("--weights", default="yolo26n.pt", help="the pretrained checkpoint (default yolo26n.pt; its stem names the model)")
+    ap.add_argument("--download-weights", action="store_true", help="fetch a published yolo26<size>.pt when --weights is missing")
     ap.add_argument("--datasets", default=",".join(datasets.SPECS), help="comma-separated (default: all)")
     ap.add_argument("--seeds", default="0,1,2")
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--batch", type=int, default=16)
-    ap.add_argument("--device", default="0", help="Ultralytics device: 0, cpu, ...")
+    ap.add_argument(
+        "--device", required=True, help="Ultralytics device: 0 (the first GPU, on a pod), cpu (smoke runs on a shared PC)"
+    )
     ap.add_argument("--workers", type=int, default=None, help="data loader workers (default: Ultralytics' 8)")
     ap.add_argument("--fetch", action="store_true", help="fetch the datasets into --data-root first")
     ap.add_argument("--compute-label", default=None, help="where this runs, for the result files (e.g. runpod RTX 4090)")
@@ -226,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     failed = []
     for name in names:
         for seed in seeds:
-            key = common.RunKey("ultralytics", name, "pretrained", seed)
+            key = common.RunKey("ultralytics", model_name(weights), name, "pretrained", seed)
             if key.result_path(Path(args.results)).is_file():
                 print(f"{key.stem}: done already, skipped", flush=True)
                 continue

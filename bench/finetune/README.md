@@ -3,7 +3,9 @@
 Most people train on a few hundred of their own images, starting from pretrained weights. This harness measures
 that: it fine-tunes **folo-n** from FOLO's COCO weights and **Ultralytics YOLO26n** from `yolo26n.pt` on four small
 public datasets and scores both with **one scorer** (pycocotools against one ground truth). The numbers go into
-[docs/BENCHMARKS.md](../../docs/BENCHMARKS.md), *Fine-tuning on small datasets*.
+[docs/BENCHMARKS.md](../../docs/BENCHMARKS.md), *Fine-tuning on small datasets*. The harness is not tied to the
+nano size: `run_folo.py --arch folo-s --weights <folo-s weights>` and `run_ultralytics.py --weights yolo26s.pt` add
+an `s` row, and the renderer pairs models by size letter (folo-n with yolo26n, folo-s with yolo26s), one table each.
 
 | file | what it does |
 |---|---|
@@ -53,9 +55,9 @@ it differently). Nothing but the code and `datasets.json` is committed.
   times.
 - **No early stopping** for either: both default to `patience: 100`, which cannot stop a 100-epoch run (FOLO's is
   not settable through the API; `run_ultralytics.py` passes `patience=max(100, epochs)`).
-- **FOLO**: `POST /api/runs` with `weights: "folo-n-coco-v2"` (the interim COCO weights, AP 0.317; the matrix is
-  re-run with the final ones), `epochs`, `batch`, `imgsz`, `seed`, everything else FOLO's default (`optimizer:
-  auto`, f32, its augmentation). What `auto` resolved to is in each result's `versions.resolved`.
+- **FOLO**: `POST /api/runs` with `weights: "folo-n-coco-v2"` (COCO AP 0.317, epoch 62 of a paused 300-epoch
+  run; these are the weights of this comparison), `arch`, `epochs`, `batch`, `imgsz`, `seed`, everything else
+  FOLO's default (`optimizer: auto`, f32, its augmentation). What `auto` resolved to is in each result's `versions.resolved`.
 - **Ultralytics 8.4.198**: `YOLO("yolo26n.pt").train(data=..., epochs=100, imgsz=640, batch=16, seed=s,
   deterministic=True)` with its defaults (`optimizer: auto`, AMP on, its augmentation); `plots=False` changes no
   number.
@@ -71,7 +73,9 @@ it differently). Nothing but the code and `datasets.json` is committed.
 - **Training time** is the wall time of training (all epochs, with the per-epoch validation both tools run): FOLO
   from the run's `started` to `finished`, Ultralytics around `train()`.
 - **Hardware**: the real matrix runs on rented RunPod GPUs of one type (FOLO through its own cloud feature, one pod
-  per run; Ultralytics on one plain PyTorch pod), never on the shared dev GPU; each result records its GPU.
+  per run; Ultralytics on one plain PyTorch pod). Nothing trains on the dev PC's GPU: smoke runs there train on
+  the CPU (`run_folo.py --device cpu`, `run_ultralytics.py --device cpu`; `--device` has no default in
+  `run_ultralytics.py` for that reason). Each result records the device it trained on.
 
 ## Running it
 
@@ -79,17 +83,22 @@ it differently). Nothing but the code and `datasets.json` is committed.
 # datasets (any machine)
 python bench/finetune/datasets.py fetch --root D:/folo-data/finetune
 
-# FOLO: a folo serve (local, or a control plane with a RunPod connection; docs/CLOUD.md)
+# FOLO: a folo serve as the control plane of a RunPod connection (docs/CLOUD.md), one pod per run
 folo weights pull folo-n-coco-v2
 folo serve --port 7979 --data-dir D:/folo-data/runs-finetune/serve
 python bench/finetune/run_folo.py --server http://127.0.0.1:7979 --data-root D:/folo-data/finetune \
     --work-dir D:/folo-data/runs-finetune/folo --results bench/finetune/results --folo folo \
-    [--compute <connection id>:<offer id> --max-hours 0.5 --parallel 3 --budget-usd 1.0]
+    --compute <connection id>:<offer id> --max-hours 0.5 --parallel 3 --budget-usd 1.0
+# a CPU smoke run on that server instead (into a scratch results folder)
+python bench/finetune/run_folo.py ... --results D:/folo-verify/smoke --datasets medical-pills --seeds 0 \
+    --epochs 2 --imgsz 320 --device cpu --val-device cpu
 
-# Ultralytics: locally, or on a pod with run_ultralytics_pod.sh next to this folder's .py files
-python bench/finetune/run_ultralytics.py --data-root D:/folo-data/finetune --work-dir D:/folo-data/runs-finetune/ul \
-    --results bench/finetune/results --weights yolo26n.pt
+# Ultralytics: on a pod, with run_ultralytics_pod.sh next to this folder's .py files (WEIGHTS=yolo26s.pt: an s row)
 SEEDS=0,1,2 EPOCHS=100 SERVE_PORT=8888 bash run_ultralytics_pod.sh /workspace/finetune
+# or anywhere else; a CPU smoke run:
+python bench/finetune/run_ultralytics.py --data-root D:/folo-data/finetune --work-dir D:/folo-verify/smoke-ul \
+    --results D:/folo-verify/smoke --weights yolo26n.pt --datasets medical-pills --seeds 0 --epochs 2 \
+    --imgsz 320 --device cpu
 
 # the table
 python bench/finetune/render_table.py bench/finetune/results --update docs/BENCHMARKS.md
@@ -99,8 +108,9 @@ Python 3.10+ with `requests`, Pillow and pycocotools (plus torch and ultralytics
 runners skip a run whose result file exists, so a matrix can be stopped and started again; `run_folo.py` follows a
 run it started before (its `state.json`, or a run of the same name on the server) instead of starting it twice,
 and on Ctrl+C, an error or `--budget-usd` it stops every run it started that is still active and terminates any
-cloud instance of those runs that is still live before it exits. Smoke runs (`--epochs 3`) belong in a scratch
-results folder: the renderer leaves out runs of another epoch count anyway.
+cloud instance of those runs that is still live before it exits. Smoke runs belong in a scratch results folder:
+the renderer leaves out runs of another epoch count anyway. Result files are named
+`<model>-<dataset>-<variant>-s<seed>.json` (`folo-n-bccd-pretrained-s0.json`, `yolo26n-bccd-pretrained-s0.json`).
 
 ## The scorer, checked
 
