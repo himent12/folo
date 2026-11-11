@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # No god files (AGENTS.md, Ground rules): every tracked source file stays under 1000 lines, every line counted (a
 # last line without a newline too). Lists the files at or over the limit and fails if there is one. Everything that
-# is not source code (docs, data, lock files) is exempt, and so is vendored code (web/framework/vendor). CI runs it on every pull request (site.yml).
+# is not source code (docs, data, lock files) is exempt, and so is vendored code (web/framework/vendor). CI runs it
+# on every pull request (site.yml).
 #
 #   bash tools/file-size.sh          the check
 #   bash tools/file-size.sh 800      the same with another limit, to see what is getting close
@@ -10,7 +11,8 @@ limit="${1:-1000}"
 cd "$(git rev-parse --show-toplevel)"
 over="$(
   git ls-files -z -- \
-    '*.rs' '*.ts' '*.tsx' '*.mjs' '*.js' '*.cjs' '*.py' '*.css' '*.wgsl' '*.sh' '*.ps1' '*.html'     ':!web/framework/vendor' |
+    '*.rs' '*.ts' '*.tsx' '*.mjs' '*.js' '*.cjs' '*.py' '*.css' '*.wgsl' '*.sh' '*.ps1' '*.html' \
+    ':!web/framework/vendor' |
     { xargs -0 grep -c '' /dev/null || true; } |
     awk -v limit="$limit" '{
       i = match($0, /:[0-9]+$/)
