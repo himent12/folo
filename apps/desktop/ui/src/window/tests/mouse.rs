@@ -32,6 +32,14 @@ fn hover_style_appears_and_moves_within_the_hitbox_cost_no_frame() {
     assert!(app.is_dirty(window), "leaving redraws");
     app.frame(window);
     assert_eq!(quads_of(&mut app, window, color(1)).len(), 1);
+    // Leaving the window (no `MouseExited` on Windows: the hover callback) clears hover too.
+    mouse_move(&mut app, window, 10., 10.);
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(2)).len(), 1);
+    with_window(&mut app, window, |window, cx| window.on_hover_status_change(false, cx));
+    assert!(app.is_dirty(window));
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1, "no hover once the mouse left the window");
 }
 
 #[test]

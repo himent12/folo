@@ -375,10 +375,7 @@ fn wire_callbacks(platform_window: &dyn PlatformWindow, app: Weak<AppCell>, hand
     platform_window.on_hover_status_change(Box::new({
         let app = app.clone();
         move |hovered| {
-            update_window(&app, handle, |window, _| {
-                window.hovered.set(hovered);
-                window.refresh();
-            });
+            update_window(&app, handle, |window, cx| window.on_hover_status_change(hovered, cx));
         }
     }));
     platform_window.on_should_close(Box::new({
