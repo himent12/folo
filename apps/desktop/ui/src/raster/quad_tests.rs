@@ -169,3 +169,30 @@ fn opaque_core_only_covers_background_pixels() {
         }
     }
 }
+
+/// A dashed border's dash count per side uses the GPU's fused `mad`: the 1.5 px border of a 21 px
+/// tall box (a benchmark entry's truth box at scale 1.5) shows 5 runs down its left column (the
+/// two corners' and 3 on the side), as in the GPUI capture, not the 4 that two roundings give.
+#[test]
+fn dashed_side_counts_dashes_like_the_gpu() {
+    let w = Edges { top: px(1.5), right: px(1.5), bottom: px(1.5), left: px(1.5) };
+    let q = Quad {
+        bounds: Bounds::new(point(px(0.), px(0.)), size(px(19.99997), px(21.))),
+        clip: Bounds::new(point(px(0.), px(0.)), size(px(40.), px(40.))),
+        background: hsla(0., 0., 0., 0.).into(),
+        border_color: hsla(0.7, 1., 0.74, 1.),
+        corner_radii: Corners::default(),
+        border_widths: w,
+        border_style: BorderStyle::Dashed,
+    };
+    let sh = QuadShader::new(&q);
+    // Runs of border down the left column.
+    let mut dashes = 0;
+    let mut inside = false;
+    for y in 0..21 {
+        let on = sh.eval(0, y)[3] > 0.5;
+        dashes += (on && !inside) as u32;
+        inside = on;
+    }
+    assert_eq!(dashes, 5);
+}
