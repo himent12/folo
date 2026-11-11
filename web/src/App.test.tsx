@@ -109,6 +109,28 @@ describe('a screen whose chunk fails to load', () => {
     await until(() => document.activeElement !== document.body && main().contains(document.activeElement), 'focus in the screen');
   });
 
+  it('leaves focus the user moved out of main before the recovered screen takes it', async () => {
+    let tries = 0;
+    const screens = new Screens((name) =>
+      name === 'models' ? () => (++tries === 1 ? Promise.reject(new TypeError('Failed to fetch dynamically imported module')) : Promise.resolve(screen('the models'))) : undefined,
+    );
+    router.route = parse('#/models');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('[role="alert"]'), 'the error');
+    await settle();
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((f) => (frames.push(f), frames.length));
+    const outside = target.appendChild(document.createElement('button'));
+    const retry = [...main().querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Retry')!;
+    retry.focus();
+    retry.click();
+    await until(() => main().querySelector('.fake') && frames.length > 0, 'the models page and its focus frame');
+    outside.focus();
+    for (const f of frames.splice(0)) f(0);
+    flush();
+    expect(document.activeElement).toBe(outside);
+  });
+
   it('shows the screen once a later preload (a link hovered) brings the chunk in', async () => {
     let tries = 0;
     const screens = new Screens((name) =>

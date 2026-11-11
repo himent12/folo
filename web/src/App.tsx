@@ -127,17 +127,22 @@ export default function App(props: AppProps) {
     const { path, comp } = screen.get();
     // The screen that replaces its own load error (Retry) takes focus too when the error had it: the button it was on
     // is gone, so focus would fall to the body.
-    const at = document.activeElement;
-    const recovered = shownComp === failed && comp !== failed && (at === null || at === document.body || !!mainEl?.contains(at));
+    // Checked again in the frame: focus the user moves out of `main` meanwhile stays where they put it.
+    const focusFree = () => {
+      const at = document.activeElement;
+      return at === null || at === document.body || !!mainEl?.contains(at);
+    };
+    const newPage = path !== null && isNewPage(shownPath, path);
+    const recovered = shownComp === failed && comp !== failed && focusFree();
     shownComp = comp;
-    if (path === null || (!isNewPage(shownPath, path) && !recovered)) return;
+    if (path === null || (!newPage && !recovered)) return;
     shownPath = path;
     releaseFocus?.();
     releaseFocus = null;
     void tick().then(() =>
       requestAnimationFrame(() => {
         // `mainEl` is gone if the app was torn down before the frame.
-        if (mainEl?.isConnected && router.route.path === path) releaseFocus = holdRouteFocus(mainEl);
+        if (mainEl?.isConnected && router.route.path === path && (newPage || focusFree())) releaseFocus = holdRouteFocus(mainEl);
       }),
     );
   });
