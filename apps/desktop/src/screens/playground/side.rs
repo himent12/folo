@@ -22,8 +22,13 @@ impl FoloApp {
     pub(super) fn play_side(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let models = self.store.models.ready().cloned().unwrap_or_default();
-        let sel =
-            self.play_model.as_ref().and_then(|id| models.iter().position(|m| &m.id == id)).unwrap_or(0);
+        // The picked model while it exists, else the best one.
+        let best = self.store.best_model(None).map(|m| m.id.clone());
+        let sel = [self.play_model.as_ref(), best.as_ref()]
+            .into_iter()
+            .flatten()
+            .find_map(|id| models.iter().position(|m| &m.id == id))
+            .unwrap_or(0);
         let model = models.get(sel).cloned();
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.
@@ -178,6 +183,9 @@ impl FoloApp {
                     // click away while the slider is elsewhere.
                     // A fixed row, so using it moves nothing: a secondary link while the slider is
                     // elsewhere, a quiet note once it's there (accent stays the slider's).
+                    // Always there for a picked model (empty without a best-F1 threshold), so picking
+                    // one doesn't push what is under it down.
+                    .when(best_conf.is_none() && model.is_some(), |d| d.child(div().h(px(20.))))
                     .when_some(best_conf, |d, c| {
                         let at = (c - self.play_conf).abs() < 0.0005;
                         let row = div().h(px(20.)).flex().justify_end().items_center();
@@ -453,6 +461,8 @@ impl FoloApp {
                     ))
                     .child(
                         div()
+                            // Another device's boxes while the picked one runs: dimmed.
+                            .when(self.play_pred_dim && self.play_pred_pending, |d| d.opacity(0.5))
                             .px(px(8.))
                             .py(px(4.))
                             .flex()
@@ -702,7 +712,7 @@ impl FoloApp {
 /// model found nothing (precision and recall 0), where that threshold is only the end of the search
 /// grid and using it would hide every detection.
 fn offered_conf(m: &crate::api::ModelMetrics) -> Option<f32> {
-    m.best_f1_conf.filter(|_| m.precision > 0. || m.recall > 0.)
+    operating_conf(m.best_f1_conf, m.precision, m.recall)
 }
 
 #[cfg(test)]

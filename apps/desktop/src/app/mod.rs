@@ -16,6 +16,8 @@ mod playground;
 mod preferences;
 mod render;
 mod sidebar;
+#[cfg(test)]
+pub(crate) mod tests;
 mod titlebar;
 
 use std::cell::RefCell;
@@ -37,7 +39,7 @@ use crate::ui::*;
 pub use focus::focus_ring;
 pub use forms::{
     ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, format_lr,
-    parse_images, retry_batch,
+    retry_batch, synth_errors,
 };
 pub use playground::PLAY_CONF_FLOOR;
 pub use sidebar::logo;
@@ -167,6 +169,15 @@ pub type FilterCache = ((String, Option<Split>, Option<u32>, bool, usize, usize)
 
 pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'static) -> Action {
     Rc::new(f)
+}
+
+/// What the delete confirmation is about.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DeleteTarget {
+    /// A run that is not active: its folder, weights and models go.
+    Run(String),
+    /// A dataset: unregistered, its files stay.
+    Dataset(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -367,6 +378,8 @@ pub struct FoloApp {
     /// The latest prediction hasn't answered: shown results are the previous ones (an IoU change
     /// keeps them up meanwhile).
     pub play_pred_pending: bool,
+    /// The shown result is another device's, kept (dimmed) while the one now picked runs.
+    pub play_pred_dim: bool,
     /// Image generation and model the current `play_pred` belongs to.
     play_pred_for: Option<(u64, String)>,
 
@@ -389,6 +402,9 @@ pub struct FoloApp {
     /// The draft's dataset by id (the list can gain datasets at the front while the draft waits,
     /// so its index alone could point at another one).
     pub new_run_draft_ds: Option<String>,
+    /// The architecture, image size and epochs of the last run started from the dialog: a fresh
+    /// New run opens on them (this session), not on the defaults again.
+    pub new_run_last: Option<(usize, usize, f32)>,
     /// `--open new-run`: open the dialog once the dataset list is in (it needs one to start from).
     pub open_new_run_pending: bool,
     /// The Generate synthetic dataset dialog.
@@ -399,6 +415,7 @@ pub struct FoloApp {
     /// The window is below 1120 px wide (16 px page gutters); set each render.
     pub narrow: bool,
     pub confirm_stop: Option<String>,
+    pub confirm_delete: Option<DeleteTarget>,
     /// The server's estimate for the New run form's config, keyed by that config (servers with
     /// `run_estimate`); the last good answer stands while a changed config is out.
     pub nr_estimate: Option<(String, Load<crate::api::RunEstimate>)>,
@@ -561,6 +578,7 @@ impl FoloApp {
             play_image_gen: 0,
             play_pred_seq: 0,
             play_pred_pending: false,
+            play_pred_dim: false,
             play_pred_for: None,
             server_mode: ServerMode::Mock,
             server_url,
@@ -573,12 +591,14 @@ impl FoloApp {
             new_run: None,
             new_run_draft: None,
             new_run_draft_ds: None,
+            new_run_last: None,
             open_new_run_pending: false,
             synth: None,
             synth_seq: 0,
             restore_pending: false,
             narrow: false,
             confirm_stop: None,
+            confirm_delete: None,
             nr_estimate: None,
             nr_estimate_last: None,
             throughput: Load::Idle,

@@ -10,7 +10,7 @@ use folo_ui::{
 
 use super::duration_of;
 use crate::api::{Run, RunExt, RunStatus, time};
-use crate::app::{FoloApp, Route, act};
+use crate::app::{DeleteTarget, FoloApp, Route, act};
 use crate::charts::sparkline;
 use crate::controls::Btn;
 use crate::screens::{detail_header, loading_rows, page_header};
@@ -109,10 +109,12 @@ impl FoloApp {
                     );
                 }
                 let rid = r.id.clone();
+                // A run still waiting leaves the queue; nothing of it is stopped.
+                let waiting = r.status == RunStatus::Queued && r.cloud.is_none();
                 actions.push(
                     self.button(
                         "run-stop",
-                        "Stop run",
+                        if waiting { "Remove from queue" } else { "Stop run" },
                         Btn::Danger,
                         Some("icons/stop.svg"),
                         window,
@@ -199,6 +201,30 @@ impl FoloApp {
             }
             RunStatus::Stopping => {}
         }
+        // Delete leads the actions (the way forward stays last): a run still active says why not.
+        let delete = if r.status.is_active() {
+            self.button_disabled(
+                "run-delete",
+                "Delete",
+                Btn::Secondary,
+                Some("icons/trash-2.svg"),
+                "Stop it first: an active run can't be deleted",
+                window,
+                cx,
+            )
+        } else {
+            let target = DeleteTarget::Run(r.id.clone());
+            self.button(
+                "run-delete",
+                "Delete",
+                Btn::Secondary,
+                Some("icons/trash-2.svg"),
+                window,
+                cx,
+                act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
+            )
+        };
+        actions.insert(0, delete.into_any_element());
         let title = div()
             .flex()
             .items_center()
@@ -218,6 +244,8 @@ impl FoloApp {
         // Where it runs, how far the hand-over is and what it costs, ahead of the training itself.
         if let Some(c) = r.cloud.clone() {
             body = body.child(self.cloud_run_panel(&r, &c, now, window, cx));
+        } else if r.status == RunStatus::Queued {
+            body = body.child(self.queue_panel(&r, cx));
         }
         let data = self.store.run_data.get(id).map(|l| match l {
             Load::Ready(d) => Ok((
@@ -249,6 +277,35 @@ impl FoloApp {
         body = body.child(div().flex().child(samples)).child(div().flex().child(logs));
         body = body.child(self.config_panel(&r, &ds_name, window, cx));
         self.page_frame(&t, header, body, cx)
+    }
+
+    /// A waiting run's place in the training queue and what it waits for.
+    fn queue_panel(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let runs = self.store.runs.ready().map(|r| r.as_slice()).unwrap_or_default();
+        let ahead = crate::api::training_now(runs, &r.id).map(|a| (a.name.as_str(), a.eta_s));
+        panel(&t)
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(16.))
+            .py(px(14.))
+            .child(icon("icons/timer.svg", 18., t.text_secondary))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        text(ty::BASE, t.text_primary)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(queue_text(r.queue_position)),
+                    )
+                    .child(text(ty::SM, t.text_secondary).child(queue_wait_text(r.queue_position, ahead))),
+            )
+            .into_any_element()
     }
 
     fn failure_banner(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
@@ -319,14 +376,17 @@ impl FoloApp {
         let compact = short;
         let big = if narrow { ty::XL } else { ty::X2XL };
         let live = r.status == RunStatus::Running;
+        // Waiting to train for the first time: nothing is "final" or "last" yet.
+        let unstarted = r.status == RunStatus::Queued && r.epoch == 0;
         // Change since the previous epoch only means something while training.
         let delta = match (last, prev) {
             (Some(l), Some(p)) if live => {
-                let d = l.val.map50_95 - p;
-                let (c, s) = if d >= 0.0 {
-                    (t.success_text, format!("+{d:.3}"))
-                } else {
-                    (t.danger_text, format!("{d:.3}"))
+                // Green up, red down, and neutral when it rounds to no change.
+                let (s, dir) = score_delta(l.val.map50_95 - p);
+                let c = match dir {
+                    std::cmp::Ordering::Greater => t.success_text,
+                    std::cmp::Ordering::Less => t.danger_text,
+                    std::cmp::Ordering::Equal => t.text_tertiary,
                 };
                 let best = r.best.as_ref().map_or(String::new(), |b| format!("· best {}", f3(b.map50_95)));
                 Some(
@@ -392,6 +452,8 @@ impl FoloApp {
                 // "final" only for a run that finished; a stopped or failed one ends on its last evaluated epoch.
                 if live {
                     "mAP50-95 · latest"
+                } else if unstarted {
+                    "mAP50-95"
                 } else if r.status == RunStatus::Completed {
                     "mAP50-95 · final"
                 } else {
@@ -423,7 +485,7 @@ impl FoloApp {
                 // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
                 // P/R chart below states the match rule, so the tile's line fits at 1280.
                 .child(text(ty::SM, t.text_tertiary).ellipsis().child(pr_caption(
-                    last.and_then(|e| e.val.best_f1_conf),
+                    last.and_then(|e| operating_conf(e.val.best_f1_conf, e.val.precision, e.val.recall)),
                     self.eval_split(r),
                     false,
                 ))),
@@ -431,7 +493,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(caption(&t, if live { "Throughput" } else { "Final throughput" }))
+                .child(caption(&t, if live || unstarted { "Throughput" } else { "Final throughput" }))
                 .child(
                     div()
                         .flex()

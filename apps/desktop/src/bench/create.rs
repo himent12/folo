@@ -43,6 +43,13 @@ impl SourcePick {
         }
     }
 
+    /// `split` (an index into [`BENCH_SPLITS`]) when it has images, else the first split that has
+    /// some (an empty one can't make a benchmark), else `split` as it is.
+    pub fn split_with_images(&self, split: usize) -> usize {
+        let has = |i: usize| self.images(BENCH_SPLITS[i]) > 0;
+        if has(split) { split } else { (0..BENCH_SPLITS.len()).find(|&i| has(i)).unwrap_or(split) }
+    }
+
     /// The source a request sends.
     pub fn source(&self, split: Split) -> BenchSource {
         match self {
@@ -80,10 +87,10 @@ impl FoloApp {
     /// Opens the New benchmark form, named after the first source.
     pub fn open_new_bench(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_agents(cx);
-        let name = self
-            .bench_sources()
-            .first()
-            .map_or_else(|| "benchmark".to_string(), |s| s.suggested_name(BENCH_SPLITS[0]));
+        // The first source's validation split, or the first of its splits that has images.
+        let first = self.bench_sources().into_iter().next();
+        let split = first.as_ref().map_or(0, |s| s.split_with_images(0));
+        let name = first.map_or_else(|| "benchmark".to_string(), |s| s.suggested_name(BENCH_SPLITS[split]));
         let input = cx.new(|cx| {
             let mut i = TextInput::new("Benchmark name", cx);
             i.set_text(name, cx);
@@ -93,7 +100,7 @@ impl FoloApp {
         self.bench.form_seq += 1;
         let seq = self.bench.form_seq;
         self.bench.new_bench =
-            Some(NewBenchForm { name: input, seq, dataset: 0, split: 0, submitting: false, error: None });
+            Some(NewBenchForm { name: input, seq, dataset: 0, split, submitting: false, error: None });
         window.focus(&fh);
         cx.notify();
     }
@@ -106,6 +113,12 @@ impl FoloApp {
         let old = suggested(f.dataset, f.split);
         f.dataset = source.unwrap_or(f.dataset);
         f.split = split.unwrap_or(f.split).min(BENCH_SPLITS.len() - 1);
+        // Another source: off a split it has no images in (the control disables those).
+        if source.is_some()
+            && let Some(s) = sources.get(f.dataset)
+        {
+            f.split = s.split_with_images(f.split);
+        }
         f.error = None;
         let current = f.name.read(cx).text().to_string();
         if old.is_none_or(|o| o == current)
@@ -206,6 +219,16 @@ mod tests {
         assert_eq!(ds.suggested_name(Split::Val), "pond val");
         assert_eq!(ds.images(Split::Train), 800);
         assert_eq!(ds.images(Split::Test), 0);
+        // BENCH_SPLITS is val, test, train: an empty test split gives way to val, an empty val
+        // and test to train.
+        assert_eq!(ds.split_with_images(1), 0);
+        assert_eq!(ds.split_with_images(2), 2);
+        let train_only = SourcePick::Dataset {
+            id: "ds_2".into(),
+            name: "t".into(),
+            splits: Splits { train: 9, val: 0, test: 0 },
+        };
+        assert_eq!(train_only.split_with_images(0), 2);
         assert_eq!(
             ds.source(Split::Test),
             BenchSource::Dataset { dataset_id: "ds_1".into(), split: Some(Split::Test) }

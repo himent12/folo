@@ -1,5 +1,6 @@
 //! Client-side state: what has been fetched from the backend, live run data, and decoded images.
 
+mod best;
 mod images;
 mod live;
 
@@ -8,6 +9,7 @@ use std::sync::Arc;
 
 use crate::api::*;
 
+pub use best::better_model;
 pub use images::{ImageCache, ImgKey, ImgKind, ImgSlot, to_render_image};
 pub use live::{Derived, RunData};
 
@@ -139,6 +141,11 @@ impl Store {
         self.datasets.ready()?.iter().find(|d| d.id == id)
     }
 
+    /// The server stopped answering (the last `/system` refresh couldn't connect).
+    pub fn unreachable(&self) -> bool {
+        matches!(&self.health, Load::Failed(e) if e.code == "server_unreachable")
+    }
+
     /// What the periodic `/system` refresh says about the connection (`err`: its error, if any).
     /// `health`, which the status line shows, is fetched once per connection; without this a server
     /// that went away mid-session still read "Connected". Unreachable marks it down; the first answer
@@ -165,10 +172,10 @@ mod tests {
         let down = ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7911");
         // The 2 s refresh fails to connect: the status line must stop saying "Connected".
         store.note_reachability(Some(&down));
-        assert!(matches!(store.health, Load::Failed(ref e) if e.code == "server_unreachable"));
+        assert!(store.unreachable());
         // It answers again: health is checked again (Idle is fetched by the next ensure_core).
         store.note_reachability(None);
-        assert!(store.health.needs_fetch());
+        assert!(store.health.needs_fetch() && !store.unreachable());
         // A connected server's answers and its other errors (a 500) leave a good status alone.
         store.health = api.health().into();
         store.note_reachability(None);

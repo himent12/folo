@@ -6,7 +6,7 @@ use super::merge::upsert_entry;
 use super::state::Contender;
 use crate::api::*;
 use crate::app::FoloApp;
-use crate::store::Load;
+use crate::store::{Load, better_model};
 use crate::ui::Tone;
 
 /// A class name as the server compares them: trimmed, without case.
@@ -102,8 +102,8 @@ impl FoloApp {
         );
     }
 
-    /// Who Run would start on `b`: the contestant picked while it can still run there, else the newest
-    /// model that knows its classes, else the first installed agent.
+    /// Who Run would start on `b`: the contestant picked while it can still run there, else the best
+    /// model that knows its classes (one trained on its dataset first), else the first installed agent.
     pub fn bench_run_model(&self, b: &Bench) -> Option<Contender> {
         let options = self.bench_contenders(b);
         self.bench
@@ -114,17 +114,25 @@ impl FoloApp {
             .or_else(|| options.into_iter().next())
     }
 
-    /// Everyone the leaderboard of `b` can run: the models that know its classes, newest first, then
-    /// the installed agents (which are asked for its classes by name).
+    /// Everyone the leaderboard of `b` can run: the models that know its classes, those trained on
+    /// its dataset first, each part best first (`better_model`), then the installed agents (which
+    /// are asked for its classes by name).
     pub fn bench_contenders(&self, b: &Bench) -> Vec<Contender> {
-        let models = self
+        let dataset = match &b.source {
+            BenchSource::Dataset { dataset_id, .. } => Some(dataset_id.as_str()),
+            BenchSource::LabelJob { .. } => None,
+        };
+        let mut models: Vec<&Model> = self
             .store
             .models
             .ready()
             .into_iter()
             .flatten()
             .filter(|m| model_fits(&m.classes, &b.classes))
-            .map(|m| Contender::Model(m.id.clone()));
+            .collect();
+        let elsewhere = |m: &Model| dataset.is_none_or(|d| self.store.model_dataset(m) != Some(d));
+        models.sort_by(|a, b| elsewhere(a).cmp(&elsewhere(b)).then_with(|| better_model(a, b)));
+        let models = models.into_iter().map(|m| Contender::Model(m.id.clone()));
         let agents = self.bench_agents().into_iter().map(|a| Contender::Agent(a.id));
         models.chain(agents).collect()
     }

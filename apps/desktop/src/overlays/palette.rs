@@ -106,6 +106,27 @@ impl FoloApp {
                 }),
             });
         }
+        // The open page's run or dataset can be deleted from here too (a run once it isn't active).
+        let page_delete =
+            match &self.route {
+                Route::Run(id) => self.store.run(id).filter(|r| !r.status.is_active()).map(|r| {
+                    (r.name.clone(), crate::app::DeleteTarget::Run(id.clone()), "run and its models")
+                }),
+                Route::Dataset(id) => self.store.dataset_summary(id).map(|d| {
+                    (d.name.clone(), crate::app::DeleteTarget::Dataset(id.clone()), "dataset; its files stay")
+                }),
+                _ => None,
+            };
+        if let Some((name, target, detail)) = page_delete {
+            items.push(PaletteItem {
+                group: "Actions",
+                icon: "icons/trash-2.svg",
+                title: format!("Delete {name}"),
+                detail: detail.into(),
+                keys: &[],
+                action: act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
+            });
+        }
         for (name, icon_path, route, keys) in nav {
             items.push(PaletteItem {
                 group: "Go to",
@@ -156,7 +177,11 @@ impl FoloApp {
                     group: "Datasets",
                     icon: "icons/images.svg",
                     title: d.name.clone(),
-                    detail: format!("{} images · {}", int(d.splits.total()), d.format.label()),
+                    detail: format!(
+                        "{} · {}",
+                        counted(d.splits.total(), "image", "images"),
+                        d.format.label()
+                    ),
                     keys: &[],
                     action: act(move |this, w, cx| this.navigate(Route::Dataset(id.clone()), w, cx)),
                 });
@@ -387,9 +412,9 @@ impl FoloApp {
                             )
                             .child(div().flex_1())
                             .child(text(ty::SM, t.text_tertiary).tnum().child(if searching {
-                                format!("{n} results")
+                                counted(n as u64, "result", "results")
                             } else {
-                                format!("{n} items")
+                                counted(n as u64, "item", "items")
                             })),
                     ),
             );

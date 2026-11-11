@@ -129,16 +129,17 @@ impl FoloApp {
                 .map(|d| {
                     (
                         SharedString::from(d.name.clone()),
-                        Some(SharedString::from(format!("{} images", int(d.splits.total())))),
+                        Some(SharedString::from(counted(d.splits.total(), "image", "images"))),
                     )
                 })
                 .collect(),
             ds_i,
             window,
             cx,
-            Rc::new(|this, i, _, _| {
+            Rc::new(|this, i, _, cx| {
                 if let Some(f) = this.new_run.as_mut() {
                     f.dataset = i;
+                    this.resuggest_run_name(cx);
                 }
             }),
         );
@@ -167,7 +168,20 @@ impl FoloApp {
         let arch_seg = div()
             .w_full()
             .font_family(crate::theme::MONO)
-            .child(seg(self, "nr-arch", &["n", "s", "m", "l", "x"], arch, window, cx, |f, i| f.arch = i))
+            .child(self.segmented_fill(
+                "nr-arch",
+                &["n", "s", "m", "l", "x"],
+                arch,
+                window,
+                cx,
+                Rc::new(|this, i, _, cx| {
+                    if let Some(f) = this.new_run.as_mut() {
+                        f.arch = i;
+                        // The suggested name carries the architecture's letter.
+                        this.resuggest_run_name(cx);
+                    }
+                }),
+            ))
             .into_any_element();
         let batch_labels: Vec<String> = BATCHES.iter().map(|b| b.to_string()).collect();
         let batch_refs: Vec<&str> = batch_labels.iter().map(String::as_str).collect();
@@ -513,8 +527,10 @@ impl FoloApp {
                                     close_slider,
                                     close_bad.then_some("Enter a whole number up to the epoch count"),
                                 ))
-                                // Which epochs those are (the label already says what they do).
-                                .child(text(ty::SM, t.text_tertiary).child({
+                                // Which epochs those are (the label already says what they do);
+                                // none while either count is invalid (it would describe the last
+                                // good one).
+                                .when(!epochs_bad && !close_bad, |d| d.child(text(ty::SM, t.text_tertiary).child({
                                     // As the engine runs it: capped at half the run.
                                     let last = epochs.round().max(1.) as u32;
                                     let asked = close_mosaic.round() as u32;
@@ -528,7 +544,7 @@ impl FoloApp {
                                         1 => format!("Epoch {last} trains on whole images{capped}"),
                                         _ => format!("Epochs {}–{last} train on whole images{capped}", last - n + 1),
                                     }
-                                })),
+                                }))),
                         ),
                     ),
             )

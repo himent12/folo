@@ -167,7 +167,7 @@ pub struct BenchState {
     pub image_sort: ImageSort,
     /// Per benchmark: its first image, shown under each condition on the Plan tab.
     pub previews: HashMap<String, Load<BenchImagePage>>,
-    /// Who runs on the open benchmark (the newest model until one is picked).
+    /// Who runs on the open benchmark (the best model until one is picked).
     pub run_model: Option<Contender>,
     /// A Run model request is out.
     pub starting: bool,

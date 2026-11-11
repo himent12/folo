@@ -137,7 +137,24 @@ impl FoloApp {
     pub(super) fn system_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let Some(s) = self.store.system.ready().cloned() else {
-            return panel(&t).h(px(48.)).child(skeleton(&t, "sys-strip")).into_any_element();
+            // Failed, it says so (not a grey bar that looks like it is loading for ever).
+            let Some(e) = self.store.system.error() else {
+                return panel(&t).h(px(48.)).child(skeleton(&t, "sys-strip")).into_any_element();
+            };
+            let what = if e.code == "server_unreachable" {
+                "Server unreachable: no live CPU, memory or GPU figures"
+            } else {
+                "System figures didn't load"
+            };
+            return panel(&t)
+                .h(px(48.))
+                .px(px(16.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(icon("icons/circle-alert.svg", 14., t.text_tertiary))
+                .child(text(ty::SM, t.text_secondary).child(what))
+                .into_any_element();
         };
         let cell = |label: String, value: String, frac: f32, color: folo_ui::Hsla| {
             div()
@@ -153,15 +170,31 @@ impl FoloApp {
         };
         let mut row = div().h(px(48.)).flex().items_center();
         if let Some(g) = s.gpus.first() {
-            let util = g.util.unwrap_or(0.0);
             row = row
-                .child(cell(
-                    crate::ui::short_gpu(&g.name),
-                    g.util.map_or("–".into(), |u| format!("{:.0}% load", u * 100.)),
-                    util,
-                    // A meter, not an action: neutral like CPU and memory, amber when saturated.
-                    if util > 0.95 { t.warning_solid } else { t.text_tertiary },
-                ))
+                .child(match g.util {
+                    Some(u) => cell(
+                        gpu_label(g),
+                        format!("{:.0}% load", u * 100.),
+                        u,
+                        // A meter, not an action: neutral like CPU and memory, amber when saturated.
+                        if u > 0.95 { t.warning_solid } else { t.text_tertiary },
+                    ),
+                    // No load reported (wgpu can't on every platform): what is known, no empty meter.
+                    None => div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(16.))
+                        .child(
+                            text(ty::SM, t.text_secondary)
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .child(gpu_label(g)),
+                        )
+                        .child(text(ty::SM, t.text_tertiary).min_w_0().ellipsis().child("load unknown")),
+                })
                 .child(vline(&t));
         }
         let mem = s.memory.used_bytes as f32 / s.memory.total_bytes.max(1) as f32;

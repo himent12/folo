@@ -287,21 +287,20 @@ impl FoloApp {
             .border_t_1()
             .border_color(t.line_subtle);
         if let Some(g) = s.gpus.first() {
-            // wgpu can't report memory or load on every platform: say so instead of "0 B · 0%".
-            let util = g.util.unwrap_or(0.0);
-            let label = if g.memory_bytes > 0 {
-                let (vram, vu) = bytes(g.memory_bytes);
-                // Its total memory, named (the meter beside it is load, not memory use).
-                format!("{} · {vram} {vu} VRAM", crate::ui::short_gpu(&g.name))
-            } else {
-                format!("{} · VRAM unknown", crate::ui::short_gpu(&g.name))
-            };
-            row = row.child(meter(
-                label,
-                g.util.map_or("–".into(), |u| format!("{:.0}% load", u * 100.)),
-                util,
-                if util > 0.95 { t.warning_solid } else { t.text_tertiary },
-            ));
+            // Its total memory named (the meter is load, not memory use); wgpu can't report load
+            // on every platform, and then there is no meter rather than an empty one and a "–".
+            row = row.child(match g.util {
+                Some(u) => meter(
+                    gpu_label(g),
+                    format!("{:.0}% load", u * 100.),
+                    u,
+                    if u > 0.95 { t.warning_solid } else { t.text_tertiary },
+                )
+                .into_any_element(),
+                None => {
+                    text(ty::SM, t.text_tertiary).whitespace_nowrap().child(gpu_label(g)).into_any_element()
+                }
+            });
         }
         let mem = s.memory.used_bytes as f32 / s.memory.total_bytes.max(1) as f32;
         let (used, _) = bytes(s.memory.used_bytes);

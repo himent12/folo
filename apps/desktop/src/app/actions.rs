@@ -6,10 +6,11 @@ use folo_ui::{AppContext, Context, Focusable, Window};
 
 use crate::api::*;
 use crate::input::TextInput;
+use crate::store::Load;
 use crate::ui::*;
 
 use super::forms::{SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, parse_images};
-use super::{FoloApp, Route, ServerMode, act};
+use super::{DeleteTarget, FoloApp, Route, ServerMode, act};
 
 impl FoloApp {
     // ---------- actions ----------
@@ -71,16 +72,10 @@ impl FoloApp {
             return;
         }
         let name = f.name.read(cx).text().trim().to_string();
+        // Each field says what's wrong under itself, and Generate is off until both are right
+        // (Enter included).
         let images = parse_images(&f.images.read(cx).text());
-        let (Some(images), false) = (images, name.is_empty()) else {
-            f.error = Some(if name.is_empty() {
-                "Give the dataset a name.".into()
-            } else {
-                "Images: a whole number from 1 to 100,000.".into()
-            });
-            cx.notify();
-            return;
-        };
+        let (Some(images), false) = (images, name.is_empty()) else { return };
         f.submitting = true;
         f.error = None;
         let form = f.id;
@@ -109,7 +104,7 @@ impl FoloApp {
                     Err(e) if mine => {
                         if let Some(f) = this.synth.as_mut() {
                             f.submitting = false;
-                            f.error = Some(e.message);
+                            f.error = Some(e);
                         }
                     }
                     // Its dialog is gone (dismissed, or another one open): say so instead.
@@ -165,20 +160,17 @@ impl FoloApp {
         .detach();
     }
 
-    /// A new dataset from the server: list it first and say so, with a way to open it.
+    /// A new dataset from the server: list it where the server lists it and say so, with a way to
+    /// open it.
     fn dataset_added(&mut self, ds: crate::api::Dataset, verb: &str, cx: &mut Context<Self>) {
         let (id, name) = (ds.id.clone(), ds.name.clone());
-        let body = format!("{} images · {}", int(ds.splits.total()), ds.classes.join(", "));
+        let body = format!("{} · {}", counted(ds.splits.total(), "image", "images"), ds.classes.join(", "));
         // Registering a folder twice answers with the dataset it already is: say so, and leave
         // the list's order alone.
         // Unknown while the list isn't loaded: neither "added" nor "already added" is claimed then.
         let existed = self.store.datasets.ready().map(|l| l.iter().any(|d| d.id == ds.id));
         if let Some(list) = self.store.datasets.ready_mut() {
-            if let Some(slot) = list.iter_mut().find(|d| d.id == ds.id) {
-                *slot = ds;
-            } else {
-                list.insert(0, ds);
-            }
+            upsert_dataset(list, ds);
         }
         self.toast_with(
             if existed == Some(true) { Tone::Info } else { Tone::Accent },
@@ -265,6 +257,84 @@ impl FoloApp {
         );
     }
 
+    /// Deletes what the confirmation named; on success its page (if open) gives way to the list.
+    pub fn delete_confirmed(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.confirm_delete.take() else { return };
+        let name = match &target {
+            DeleteTarget::Run(id) => self.store.run(id).map_or(id.clone(), |r| r.name.clone()),
+            DeleteTarget::Dataset(id) => {
+                self.store.dataset_summary(id).map_or(id.clone(), |d| d.name.clone())
+            }
+        };
+        let call = target.clone();
+        self.fetch(
+            cx,
+            move |api| match &call {
+                DeleteTarget::Run(id) => api.delete_run(id),
+                DeleteTarget::Dataset(id) => api.delete_dataset(id),
+            },
+            move |this, r, cx| match r {
+                Ok(()) => {
+                    let body = match &target {
+                        DeleteTarget::Run(id) => {
+                            this.forget_run(id);
+                            None
+                        }
+                        DeleteTarget::Dataset(id) => {
+                            this.forget_dataset(id);
+                            Some("Its files are still on disk.".into())
+                        }
+                    };
+                    this.toast(Tone::Info, format!("Deleted {name}"), body, cx);
+                }
+                Err(e) => {
+                    this.toast(Tone::Danger, format!("Couldn't delete {name}"), Some(e.message.into()), cx)
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// Drops a deleted run (and the models it made, fetched again) from what the app holds, and
+    /// leaves its page for the list.
+    fn forget_run(&mut self, id: &str) {
+        if let Some(runs) = self.store.runs.ready_mut() {
+            runs.retain(|r| r.id != id);
+        }
+        self.store.run_data.remove(id);
+        self.store.samples.remove(id);
+        self.store.logs.remove(id);
+        let made: Vec<String> = self
+            .store
+            .models
+            .ready()
+            .into_iter()
+            .flatten()
+            .filter(|m| m.run_id.as_deref() == Some(id))
+            .map(|m| m.id.clone())
+            .collect();
+        if self.play_model.as_ref().is_some_and(|m| made.contains(m)) {
+            self.play_model = None;
+            self.play_pred = Load::Idle;
+        }
+        self.store.models = Load::Idle;
+        if matches!(&self.route, Route::Run(r) if r == id) {
+            self.route_pending = Some(Route::Runs);
+        }
+    }
+
+    /// Drops an unregistered dataset from what the app holds, and leaves its page for the list.
+    fn forget_dataset(&mut self, id: &str) {
+        if let Some(list) = self.store.datasets.ready_mut() {
+            list.retain(|d| d.id != id);
+        }
+        self.store.dataset.remove(id);
+        self.store.images.remove(id);
+        if matches!(&self.route, Route::Dataset(d) if d == id) {
+            self.route_pending = Some(Route::Datasets);
+        }
+    }
+
     pub fn stop_run(&mut self, id: String, cx: &mut Context<Self>) {
         self.confirm_stop = None;
         let rid = id.clone();
@@ -285,12 +355,22 @@ impl FoloApp {
                     let name = run.name.clone();
                     let epoch = run.epoch;
                     let stopping = run.status == RunStatus::Stopping;
+                    let dequeued = prev == Some(RunStatus::Queued) && run.cloud.is_none();
                     if let Some(runs) = this.store.runs.ready_mut()
                         && let Some(slot) = runs.iter_mut().find(|r| r.id == run.id)
                     {
                         *slot = run;
                     }
-                    let (title, body) = if stopping {
+                    let (title, body) = if dequeued {
+                        (
+                            format!("Removed {name} from the queue"),
+                            if epoch > 0 {
+                                format!("Its epoch {epoch} checkpoint is kept.")
+                            } else {
+                                "It hadn't started training.".to_string()
+                            },
+                        )
+                    } else if stopping {
                         (
                             format!("Stopping {name}"),
                             "Finishing the current step; the last checkpoint is kept.".to_string(),
@@ -339,5 +419,33 @@ impl FoloApp {
                 Err(e) => this.toast(Tone::Danger, "Export failed", Some(e.message.into()), cx),
             },
         );
+    }
+}
+
+/// Puts a dataset the server answered with into the list in the server's order (oldest first,
+/// docs/API.md: a new one last), or replaces it in place when it is already there, so the list
+/// reads the same now and after a restart.
+fn upsert_dataset(list: &mut Vec<crate::api::Dataset>, ds: crate::api::Dataset) {
+    match list.iter_mut().find(|d| d.id == ds.id) {
+        Some(slot) => *slot = ds,
+        None => list.push(ds),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::Backend;
+
+    #[test]
+    fn a_new_dataset_goes_where_the_server_lists_it() {
+        let api = crate::api::mock::MockBackend::new(4200, true);
+        let all = api.datasets().unwrap();
+        let mut list = all[..2].to_vec();
+        super::upsert_dataset(&mut list, all[2].clone());
+        let ids: Vec<&str> = list.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, [&all[0].id, &all[1].id, &all[2].id].map(String::as_str));
+        // Added again (a folder registered twice): replaced where it is.
+        super::upsert_dataset(&mut list, crate::api::Dataset { name: "again".into(), ..all[0].clone() });
+        assert_eq!((list.len(), list[0].name.as_str()), (3, "again"));
     }
 }

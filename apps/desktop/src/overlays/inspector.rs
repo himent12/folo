@@ -466,8 +466,8 @@ impl FoloApp {
                             .child(badge(
                                 &t,
                                 match &preds {
-                                    Some(_) => format!("{} labels", meta.boxes.len()),
-                                    None => format!("{} boxes", meta.boxes.len()),
+                                    Some(_) => counted(meta.boxes.len() as u64, "label", "labels"),
+                                    None => counted(meta.boxes.len() as u64, "box", "boxes"),
                                 },
                                 Tone::Neutral,
                             ))

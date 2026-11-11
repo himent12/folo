@@ -19,6 +19,20 @@ use crate::ui::*;
 /// page header with it, is centred in the page.
 pub(super) const COLUMN_MAX: f32 = 880.;
 
+/// Settings › Keyboard's "Go to" column: every page shortcut `app::bind_keys` binds.
+const GO_TO_KEYS: [(&str, &[&str]); 9] = [
+    ("Overview", &["Ctrl", "1"]),
+    ("Datasets", &["Ctrl", "2"]),
+    ("Runs", &["Ctrl", "3"]),
+    ("Models", &["Ctrl", "4"]),
+    ("Playground", &["Ctrl", "5"]),
+    ("Benchmarks", &["Ctrl", "6"]),
+    ("Settings", &["Ctrl", "Comma"]),
+    // Sidebar, search, page.
+    ("Next region", &["F6"]),
+    ("Previous region", &["Shift", "F6"]),
+];
+
 impl FoloApp {
     pub fn settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
@@ -235,17 +249,7 @@ impl FoloApp {
             ("Close / back", &["Esc"]),
             ("Start training (in the dialog)", &["Ctrl", "Enter"]),
         ];
-        let go_to: [(&str, &[&str]); 8] = [
-            ("Overview", &["Ctrl", "1"]),
-            ("Datasets", &["Ctrl", "2"]),
-            ("Runs", &["Ctrl", "3"]),
-            ("Models", &["Ctrl", "4"]),
-            ("Playground", &["Ctrl", "5"]),
-            ("Settings", &["Ctrl", "Comma"]),
-            // Sidebar, search, page.
-            ("Next region", &["F6"]),
-            ("Previous region", &["Shift", "F6"]),
-        ];
+        let go_to = GO_TO_KEYS;
         let col = |title: &str, items: &[(&str, &[&str])]| {
             div()
                 .flex_1()
@@ -313,5 +317,16 @@ impl FoloApp {
             .child(keys)
             .child(about);
         self.page_frame(&t, header, body, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_page_shortcut_is_listed() {
+        // Ctrl+1–6 go to the six pages (app::bind_keys); Ctrl+6 was missing from the list.
+        for n in ["1", "2", "3", "4", "5", "6"] {
+            assert!(super::GO_TO_KEYS.iter().any(|(_, k)| *k == ["Ctrl", n]), "Ctrl {n}");
+        }
     }
 }

@@ -133,7 +133,7 @@ impl FoloApp {
                     .child(
                         panel(&t)
                             .child(panel_header(&t, "Class balance").child(
-                                text(ty::SM, t.text_tertiary).tnum().child(format!("{} boxes", int(total))),
+                                text(ty::SM, t.text_tertiary).tnum().child(counted(total, "box", "boxes")),
                             ))
                             .child(class_rows),
                     )

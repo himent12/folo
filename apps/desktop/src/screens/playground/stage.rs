@@ -434,32 +434,37 @@ impl FoloApp {
                         }
                     }))
                     .child(
-                        canvas(
-                            |_, _, _| (),
-                            move |b, _, window, cx| {
-                                let inner = Bounds::new(
-                                    b.origin + folo_ui::point(px(16.), px(16.)),
-                                    b.size - folo_ui::size(px(32.), px(32.)),
-                                );
-                                paint_cell.set(Some(inner));
-                                paint_image_with_boxes(
-                                    &tt,
-                                    window,
-                                    cx,
-                                    inner,
-                                    Some(&image),
-                                    dims,
-                                    &paint_boxes,
-                                    Fit::Contain,
-                                    zoom,
-                                    pan,
-                                    true,
-                                    false,
-                                    0.,
-                                );
-                            },
-                        )
-                        .size_full(),
+                        div()
+                            .size_full()
+                            .when(self.play_pred_dim && self.play_pred_pending, |d| d.opacity(0.5))
+                            .child(
+                                canvas(
+                                    |_, _, _| (),
+                                    move |b, _, window, cx| {
+                                        let inner = Bounds::new(
+                                            b.origin + folo_ui::point(px(16.), px(16.)),
+                                            b.size - folo_ui::size(px(32.), px(32.)),
+                                        );
+                                        paint_cell.set(Some(inner));
+                                        paint_image_with_boxes(
+                                            &tt,
+                                            window,
+                                            cx,
+                                            inner,
+                                            Some(&image),
+                                            dims,
+                                            &paint_boxes,
+                                            Fit::Contain,
+                                            zoom,
+                                            pan,
+                                            true,
+                                            false,
+                                            0.,
+                                        );
+                                    },
+                                )
+                                .size_full(),
+                            ),
                     )
                     // Focused, the stage says so: a focus-coloured inset edge (2 px from the
                     // keyboard, like every ring; 1 px after a click), and from the keyboard, its keys.

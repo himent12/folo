@@ -37,6 +37,16 @@ fn rough_range(lo: f64, hi: f64) -> String {
     }
 }
 
+/// A server estimate as the footer writes it, its point and range ("10 min", "7–15 min"): the point
+/// never outside the range, nor in a finer unit than the range's ends (a server's point below its
+/// low end read "≈ 5 s (1–3 min)").
+fn estimate_text(point: f64, lo: f64, hi: f64) -> (String, String) {
+    let (lo, hi) = (lo.min(hi).max(0.), lo.max(hi));
+    let p = point.clamp(lo, hi);
+    let point = if hi >= 60. && p < 60. { "1 min".to_string() } else { rough_duration(p) };
+    (point, rough_range(lo, hi))
+}
+
 /// Rough training cost of a configuration on this machine: (seconds, VRAM GiB).
 pub fn estimate(arch: usize, epochs: f32, batch: u32, imgsz: u32, images: u32) -> (f64, f32) {
     const GFLOPS: [f32; 5] = [6.6, 21.5, 48.0, 104.0, 165.0];
@@ -193,12 +203,10 @@ impl FoloApp {
                 None,
             ),
             Est::Server(e, updating) => {
-                let range = rough_range(e.est_total_s_low, e.est_total_s_high);
+                let (point, range) = estimate_text(e.est_total_s, e.est_total_s_low, e.est_total_s_high);
                 let headline = match vram {
-                    Some(v) => {
-                        format!("≈ {} ({range}) · ≈ {v:.1} GiB GPU memory", rough_duration(e.est_total_s))
-                    }
-                    None => format!("≈ {} ({range}) on the CPU", rough_duration(e.est_total_s)),
+                    Some(v) => format!("≈ {point} ({range}) · ≈ {v:.1} GiB GPU memory"),
+                    None => format!("≈ {point} ({range}) on the CPU"),
                 };
                 // What the figures are, said plainly: measured here or reference rates, and how far
                 // to trust them (the server's own confidence).
@@ -446,6 +454,14 @@ mod tests {
         assert_eq!(super::rough_duration(576.), "10 min");
         assert_eq!(super::rough_duration(25.), "25 s");
         assert_eq!(super::rough_duration(5100.), "1 h 25 min");
+    }
+
+    #[test]
+    fn a_point_estimate_stays_inside_its_range() {
+        assert_eq!(estimate_text(5., 50., 170.), ("1 min".to_string(), "1–3 min".to_string()));
+        assert_eq!(estimate_text(900., 420., 600.), ("10 min".to_string(), "7–10 min".to_string()));
+        assert_eq!(estimate_text(576., 420., 900.), ("10 min".to_string(), "7–15 min".to_string()));
+        assert_eq!(estimate_text(20., 10., 40.), ("20 s".to_string(), "10–40 s".to_string()));
     }
 
     #[test]

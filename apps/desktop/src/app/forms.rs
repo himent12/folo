@@ -8,7 +8,28 @@ pub fn parse_close(s: &str, epochs: f32) -> Option<u32> {
     s.trim().parse::<u32>().ok().filter(|v| (*v as f32) <= epochs)
 }
 
+/// Close mosaic's default for a run of `epochs`: the trainer's 10 under its own cap (half the run),
+/// as Studio's New run has it.
+pub fn auto_close_mosaic(epochs: u32) -> u32 {
+    capped_close_mosaic(10, epochs)
+}
+
 impl NewRunForm {
+    /// While close mosaic is still the form's default, it follows the epoch count: the text its
+    /// field should show now, when the value moved.
+    pub fn follow_epochs(&mut self) -> Option<String> {
+        if !self.close_auto || self.epochs_invalid {
+            return None;
+        }
+        let v = auto_close_mosaic(self.epochs.round() as u32);
+        self.close_invalid = false;
+        if self.close_mosaic.round() as u32 == v {
+            return None;
+        }
+        self.close_mosaic = v as f32;
+        Some(v.to_string())
+    }
+
     /// Validate the close-mosaic text against the current epoch count.
     pub fn check_close(&mut self, s: &str) {
         match parse_close(s, self.epochs) {
@@ -63,6 +84,15 @@ pub fn parse_images(s: &str) -> Option<u64> {
     s.trim().replace([',', '_', ' '], "").parse::<u64>().ok().filter(|v| (1..=100_000).contains(v))
 }
 
+/// What is wrong with the Generate synthetic form's name and image count as typed, each shown
+/// under its field at once (and Generate waits until both are right).
+pub fn synth_errors(name: &str, images: &str) -> (Option<&'static str>, Option<&'static str>) {
+    (
+        name.trim().is_empty().then_some("Give the dataset a name"),
+        parse_images(images).is_none().then_some("A whole number from 1 to 100,000"),
+    )
+}
+
 pub struct SynthForm {
     /// Which opening of the dialog this is: a late answer only touches its own dialog.
     pub id: u64,
@@ -71,11 +101,20 @@ pub struct SynthForm {
     pub imgsz: usize,
     pub classes: usize,
     pub submitting: bool,
-    pub error: Option<String>,
+    pub error: Option<ApiError>,
+}
+
+/// The name New run suggests: the dataset, the architecture's letter and the run's number
+/// ("shapes-n-4").
+pub fn suggested_name(dataset: &str, arch: Arch, n: usize) -> String {
+    format!("{dataset}-{}-{n}", arch.as_str().trim_start_matches("folo-"))
 }
 
 pub struct NewRunForm {
     pub name: Entity<TextInput>,
+    /// The name the form suggested while the field still holds it: it follows the dataset and the
+    /// architecture until the name is typed (then `None`).
+    pub name_suggested: Option<String>,
     pub dataset: usize,
     pub arch: usize,
     pub epochs: f32,
@@ -106,6 +145,9 @@ pub struct NewRunForm {
     pub lr_invalid: bool,
     pub close_input: Entity<TextInput>,
     pub close_invalid: bool,
+    /// Close mosaic is the form's default and follows the epoch count (`follow_epochs`) until it
+    /// is set by hand.
+    pub close_auto: bool,
     /// Mixed-precision training (f16 on tensor cores). Sent only for a GPU device.
     pub amp: bool,
     /// The NMS-free end-to-end head (`head: o2o`); off is the default one-to-many head.
@@ -241,7 +283,14 @@ mod retry_tests {
 
 #[cfg(test)]
 mod form_tests {
-    use super::{format_lr, parse_epochs, parse_lr};
+    use super::{format_lr, parse_epochs, parse_lr, suggested_name};
+
+    #[test]
+    fn suggested_names_follow_the_choices() {
+        assert_eq!(suggested_name("shapes-ux", crate::api::Arch::S, 4), "shapes-ux-s-4");
+        assert_eq!(suggested_name("shapes-ux", crate::api::Arch::N, 4), "shapes-ux-n-4");
+        assert_eq!(suggested_name("bccd", crate::api::Arch::X, 12), "bccd-x-12");
+    }
 
     #[test]
     fn typed_numbers_validate() {
@@ -287,6 +336,13 @@ mod tests {
     }
 
     #[test]
+    fn close_mosaic_default_is_studios() {
+        // 10, never more than half the run (Studio's autoCloseMosaic: 0, 1, 2, 10, 10).
+        let auto: Vec<u32> = [1, 2, 5, 20, 100].into_iter().map(super::auto_close_mosaic).collect();
+        assert_eq!(auto, [0, 1, 2, 10, 10]);
+    }
+
+    #[test]
     fn close_mosaic_bounded_by_epochs() {
         // 200 is invalid at 100 epochs and valid once epochs rise to 300 ...
         assert_eq!(parse_close("200", 100.), None);
@@ -306,5 +362,12 @@ mod tests {
         assert_eq!(parse_images("0"), None);
         assert_eq!(parse_images("100001"), None);
         assert_eq!(parse_images("ten"), None);
+        use super::synth_errors;
+        assert_eq!(synth_errors("shapes", "1,000"), (None, None));
+        assert_eq!(
+            synth_errors("  ", "0"),
+            (Some("Give the dataset a name"), Some("A whole number from 1 to 100,000"))
+        );
+        assert_eq!(synth_errors("s", "200000").1, Some("A whole number from 1 to 100,000"));
     }
 }

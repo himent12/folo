@@ -79,9 +79,10 @@ impl FoloApp {
                             m
                         })
                         .into();
+                    // Playground starts on the best model (not the newest checkpoint, which may
+                    // have learned nothing yet).
                     if this.play_model.is_none() {
-                        this.play_model =
-                            this.store.models.ready().and_then(|m| m.first()).map(|m| m.id.clone());
+                        this.play_model = this.store.best_model(None).map(|m| m.id.clone());
                     }
                 },
             );
@@ -97,7 +98,11 @@ impl FoloApp {
                     {
                         this.store.gpu_util.push_back(g);
                     }
+                    let was_down = this.store.unreachable();
                     this.store.note_reachability(r.as_ref().err());
+                    if was_down && !this.store.unreachable() {
+                        this.reconnected(cx);
+                    }
                     // Back after being unreachable: check its health now, not in 2 s.
                     if this.store.health.needs_fetch() {
                         this.ensure_core(cx);

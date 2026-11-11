@@ -82,17 +82,29 @@ impl FoloApp {
         });
         let picked = sources.get(dataset);
         let is_dataset = matches!(picked, Some(SourcePick::Dataset { .. }));
-        let split_names: Vec<&str> = BENCH_SPLITS.iter().map(|s| s.as_str()).collect();
+        // Each split with its image count (a no-break space: the control's quieter count style);
+        // an empty one is there but off, with the reason.
+        let counts: Vec<u64> = BENCH_SPLITS.iter().map(|s| picked.map_or(0, |p| p.images(*s))).collect();
+        let split_names: Vec<String> = BENCH_SPLITS
+            .iter()
+            .zip(&counts)
+            .map(|(s, n)| format!("{}\u{a0}{}", s.as_str(), int(*n)))
+            .collect();
+        let split_refs: Vec<&str> = split_names.iter().map(String::as_str).collect();
+        let split_off: Vec<Option<SharedString>> =
+            counts.iter().map(|n| (*n == 0).then(|| "No images in this split".into())).collect();
         let split_ctl = is_dataset.then(|| {
-            self.segmented(
+            self.segmented_with(
                 "bench-new-split",
-                &split_names,
+                &split_refs,
                 split,
+                &split_off,
                 window,
                 cx,
                 std::rc::Rc::new(|this, i, _, cx| this.pick_bench_source(None, Some(i), cx)),
             )
         });
+        let empty = picked.is_none_or(|p| p.images(BENCH_SPLITS[split]) == 0);
         // How many images it would copy (up to 500 by default, a seeded sample of more).
         let note = match picked.map(|p| (p, p.images(BENCH_SPLITS[split]))) {
             Some((_, n)) if n > 500 => {
@@ -102,7 +114,7 @@ impl FoloApp {
                 format!("{} labeled images of the job, copied and frozen with their boxes.", int(n))
             }
             Some((_, 0)) => "This split has no images: pick another.".to_string(),
-            Some((_, n)) => format!("{} images, copied and frozen with their boxes.", int(n)),
+            Some((_, n)) => format!("{}, copied and frozen with their boxes.", counted(n, "image", "images")),
             None => "Add a dataset first: a benchmark copies its images.".to_string(),
         };
         let create = if submitting {
@@ -112,6 +124,20 @@ impl FoloApp {
                 Btn::Primary,
                 Some("icons/plus.svg"),
                 "Creating the benchmark",
+                window,
+                cx,
+            )
+        } else if empty {
+            self.button_disabled(
+                "bench-new-create",
+                "Create benchmark",
+                Btn::Primary,
+                Some("icons/plus.svg"),
+                if picked.is_none() {
+                    "Add a dataset first"
+                } else {
+                    "This split has no images: pick another"
+                },
                 window,
                 cx,
             )

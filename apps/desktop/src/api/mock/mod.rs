@@ -51,6 +51,8 @@ pub struct MockBackend {
     connections: Mutex<Vec<CloudConnection>>,
     /// Vision benchmarks and coding-agent fixtures (lazily seeded on first use).
     benches: Arc<super::mock_bench::MockBench>,
+    /// Datasets unregistered and runs deleted through the API (a deleted run's models go with it).
+    removed: Mutex<std::collections::HashSet<String>>,
     clock: Clock,
 }
 
@@ -139,8 +141,13 @@ impl MockBackend {
     fn fixture(&self, id: &str) -> ApiResult<&DatasetFixture> {
         self.datasets
             .iter()
-            .find(|d| d.ds.id == id)
+            .find(|d| d.ds.id == id && !self.is_removed(id))
             .ok_or_else(|| ApiError::new("dataset_not_found", format!("No dataset with id {id}")))
+    }
+
+    /// A dataset or run deleted through the API.
+    fn is_removed(&self, id: &str) -> bool {
+        self.removed.lock().unwrap().contains(id)
     }
 
     /// Current step of a run fixture, advancing live runs with the clock.

@@ -542,6 +542,7 @@ impl MockBackend {
             empty: false,
             connections: Mutex::new(vec![runpod_connection()]),
             benches: Arc::new(crate::api::mock_bench::MockBench::new(frozen, now)),
+            removed: Mutex::default(),
             clock,
         }
     }

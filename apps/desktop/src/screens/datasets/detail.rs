@@ -108,6 +108,18 @@ impl FoloApp {
                 act(move |this, w, cx| this.open_new_run(Some(&did), w, cx)),
             )
             .into_any_element();
+        let target = crate::app::DeleteTarget::Dataset(ds.id.clone());
+        let delete = self
+            .button(
+                "ds-delete",
+                "Delete",
+                Btn::Secondary,
+                Some("icons/trash-2.svg"),
+                window,
+                cx,
+                act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
+            )
+            .into_any_element();
         let path = ds.path.clone();
         let reveal = self
             .button(
@@ -123,11 +135,14 @@ impl FoloApp {
         // Short windows (the 620 px minimum): the path joins the title line, gaps tighten and the
         // stats strip compacts, so the first image row starts near 300 px.
         let short = window.viewport_size().height < px(700.);
+        // Cut short in a narrow window: the full path on hover, as the cut name above has.
         let path_el = || {
-            text(ty::SM, t.text_tertiary)
-                .font_family(crate::theme::MONO)
-                .ellipsis()
-                .child(display_path(&ds.path))
+            div().id("ds-path").min_w_0().tooltip(crate::controls::tip(display_path(&ds.path), None)).child(
+                text(ty::SM, t.text_tertiary)
+                    .font_family(crate::theme::MONO)
+                    .ellipsis()
+                    .child(display_path(&ds.path)),
+            )
         };
         let title = div()
             .flex()
@@ -154,8 +169,8 @@ impl FoloApp {
         let header = detail_header(
             &t,
             title,
-            if short { div() } else { path_el() },
-            vec![reveal.into_any_element(), train.into_any_element()],
+            if short { div().into_any_element() } else { path_el().into_any_element() },
+            vec![delete, reveal.into_any_element(), train.into_any_element()],
         );
 
         if ds.stats.as_ref().is_some_and(|s| s.broken_labels > 0) {
