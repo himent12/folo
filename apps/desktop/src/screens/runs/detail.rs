@@ -109,10 +109,12 @@ impl FoloApp {
                     );
                 }
                 let rid = r.id.clone();
+                // A run still waiting leaves the queue; nothing of it is stopped.
+                let waiting = r.status == RunStatus::Queued && r.cloud.is_none();
                 actions.push(
                     self.button(
                         "run-stop",
-                        "Stop run",
+                        if waiting { "Remove from queue" } else { "Stop run" },
                         Btn::Danger,
                         Some("icons/stop.svg"),
                         window,
@@ -218,6 +220,8 @@ impl FoloApp {
         // Where it runs, how far the hand-over is and what it costs, ahead of the training itself.
         if let Some(c) = r.cloud.clone() {
             body = body.child(self.cloud_run_panel(&r, &c, now, window, cx));
+        } else if r.status == RunStatus::Queued {
+            body = body.child(self.queue_panel(&r, cx));
         }
         let data = self.store.run_data.get(id).map(|l| match l {
             Load::Ready(d) => Ok((
@@ -249,6 +253,35 @@ impl FoloApp {
         body = body.child(div().flex().child(samples)).child(div().flex().child(logs));
         body = body.child(self.config_panel(&r, &ds_name, window, cx));
         self.page_frame(&t, header, body, cx)
+    }
+
+    /// A waiting run's place in the training queue and what it waits for.
+    fn queue_panel(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let runs = self.store.runs.ready().map(|r| r.as_slice()).unwrap_or_default();
+        let ahead = crate::api::training_now(runs, &r.id).map(|a| (a.name.as_str(), a.eta_s));
+        panel(&t)
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(16.))
+            .py(px(14.))
+            .child(icon("icons/timer.svg", 18., t.text_secondary))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        text(ty::BASE, t.text_primary)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(queue_text(r.queue_position)),
+                    )
+                    .child(text(ty::SM, t.text_secondary).child(queue_wait_text(r.queue_position, ahead))),
+            )
+            .into_any_element()
     }
 
     fn failure_banner(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
@@ -319,6 +352,8 @@ impl FoloApp {
         let compact = short;
         let big = if narrow { ty::XL } else { ty::X2XL };
         let live = r.status == RunStatus::Running;
+        // Waiting to train for the first time: nothing is "final" or "last" yet.
+        let unstarted = r.status == RunStatus::Queued && r.epoch == 0;
         // Change since the previous epoch only means something while training.
         let delta = match (last, prev) {
             (Some(l), Some(p)) if live => {
@@ -392,6 +427,8 @@ impl FoloApp {
                 // "final" only for a run that finished; a stopped or failed one ends on its last evaluated epoch.
                 if live {
                     "mAP50-95 · latest"
+                } else if unstarted {
+                    "mAP50-95"
                 } else if r.status == RunStatus::Completed {
                     "mAP50-95 · final"
                 } else {
@@ -431,7 +468,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(caption(&t, if live { "Throughput" } else { "Final throughput" }))
+                .child(caption(&t, if live || unstarted { "Throughput" } else { "Final throughput" }))
                 .child(
                     div()
                         .flex()

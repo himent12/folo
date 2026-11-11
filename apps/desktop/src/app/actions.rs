@@ -285,12 +285,22 @@ impl FoloApp {
                     let name = run.name.clone();
                     let epoch = run.epoch;
                     let stopping = run.status == RunStatus::Stopping;
+                    let dequeued = prev == Some(RunStatus::Queued) && run.cloud.is_none();
                     if let Some(runs) = this.store.runs.ready_mut()
                         && let Some(slot) = runs.iter_mut().find(|r| r.id == run.id)
                     {
                         *slot = run;
                     }
-                    let (title, body) = if stopping {
+                    let (title, body) = if dequeued {
+                        (
+                            format!("Removed {name} from the queue"),
+                            if epoch > 0 {
+                                format!("Its epoch {epoch} checkpoint is kept.")
+                            } else {
+                                "It hadn't started training.".to_string()
+                            },
+                        )
+                    } else if stopping {
                         (
                             format!("Stopping {name}"),
                             "Finishing the current step; the last checkpoint is kept.".to_string(),

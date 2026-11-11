@@ -28,9 +28,12 @@ impl FoloApp {
             .and_then(|d| d.ready())
             .map(|d| d.metrics.epochs.last().map(|e| e.epoch));
         let rid = id.to_string();
+        // A run still waiting in the queue leaves it: nothing is stopped or lost.
+        let waiting =
+            run.as_ref().is_some_and(|r| r.status == crate::api::RunStatus::Queued && r.cloud.is_none());
         let cancel = self.button(
             "stop-cancel",
-            "Keep training",
+            if waiting { "Keep in queue" } else { "Keep training" },
             Btn::Secondary,
             None,
             window,
@@ -43,7 +46,7 @@ impl FoloApp {
         );
         let stop = self.button(
             "stop-confirm",
-            "Stop run",
+            if waiting { "Remove from queue" } else { "Stop run" },
             Btn::DangerCommit,
             Some("icons/stop.svg"),
             window,
@@ -63,6 +66,7 @@ impl FoloApp {
                     .whitespace_normal()
                     // The epoch in progress is discarded; last.folo is the last finished epoch's.
                     .child(match finished {
+                        _ if waiting => "It hasn't started training, so nothing is lost: it leaves the queue and the runs behind it move up.".to_string(),
                         Some(Some(e)) => format!("Stops after the current batch and keeps the epoch {e} checkpoint for export or resume. Progress after epoch {e} is lost."),
                         Some(None) => "Stops after the current batch. No epoch has finished yet, so there is no checkpoint to keep.".to_string(),
                         None => "Stops after the current batch and keeps the last finished epoch's checkpoint for export or resume. Progress after it is lost.".to_string(),
@@ -73,7 +77,7 @@ impl FoloApp {
             &t,
             "stop-dialog",
             440.,
-            &format!("Stop {name}?"),
+            &if waiting { format!("Remove {name} from the queue?") } else { format!("Stop {name}?") },
             None,
             body,
             footer,

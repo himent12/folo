@@ -27,6 +27,25 @@ pub fn queue_text(position: Option<u32>) -> String {
     }
 }
 
+/// What a run waiting in the training queue waits for, as its page says it: the run that holds
+/// the device (`ahead`: its name and time left) and the queued runs in front of it.
+pub fn queue_wait_text(position: Option<u32>, ahead: Option<(&str, Option<f64>)>) -> String {
+    let left = |eta: Option<f64>| {
+        eta.map_or("time left not known".to_string(), |s| format!("{} left", crate::api::time::duration(s)))
+    };
+    match (position.filter(|p| *p > 1), ahead) {
+        (Some(p), Some((name, eta))) => {
+            format!("Starts after {name} ({}) and {}.", left(eta), plural(p as usize - 1, "queued run"))
+        }
+        (Some(p), None) => format!("Starts after {}.", plural(p as usize - 1, "queued run")),
+        (None, Some((name, Some(eta)))) => {
+            format!("Starts when {name} finishes, in about {}.", crate::api::time::duration(eta))
+        }
+        (None, Some((name, None))) => format!("Starts when {name} finishes."),
+        (None, None) => "Starts as soon as the device is free.".to_string(),
+    }
+}
+
 /// A confidence threshold as every surface writes it: "0.31", or "0.314" when the third decimal
 /// carries information (the API's best-F1 grid is 0.001).
 pub fn fmt_conf(c: f32) -> String {
@@ -253,6 +272,22 @@ mod tests {
         assert_eq!(fmt_conf(0.314), "0.314");
         assert_eq!(fmt_conf(0.024), "0.024");
         assert_eq!(fmt_conf(0.35), "0.35");
+    }
+
+    #[test]
+    fn a_queued_run_says_what_it_waits_for() {
+        use super::queue_wait_text;
+        assert_eq!(queue_wait_text(Some(1), None), "Starts as soon as the device is free.");
+        assert_eq!(
+            queue_wait_text(Some(1), Some(("shapes-s-4", Some(1080.)))),
+            "Starts when shapes-s-4 finishes, in about 18m 00s."
+        );
+        assert_eq!(queue_wait_text(None, Some(("a", None))), "Starts when a finishes.");
+        assert_eq!(
+            queue_wait_text(Some(3), Some(("a", Some(90.)))),
+            "Starts after a (1m 30s left) and 2 queued runs."
+        );
+        assert_eq!(queue_wait_text(Some(2), None), "Starts after 1 queued run.");
     }
 
     #[test]
