@@ -30,12 +30,20 @@ impl ThumbGeo {
 }
 
 /// Paint the thumb (GPUI draws none), so overflow is visible.
-pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut folo_ui::Window) {
+pub fn paint_thumb(
+    t: &Theme,
+    handle: &ScrollHandle,
+    hot: bool,
+    window: &mut folo_ui::Window,
+    cx: &folo_ui::App,
+) {
     let Some(g) = ThumbGeo::of(handle) else { return };
     // An overlay thumb: shown while dragged, while the pointer is over its area, and for a moment
     // after the content scrolls; otherwise the content has the space to itself. Movement is
     // recorded on every paint, whatever else shows the thumb.
-    let scrolled = recently_scrolled(handle);
+    // The executor's clock, not the wall clock: a headless `--shot` runs on a fake clock and settles
+    // like the real app (the thumb hides 800 ms after a scenario's scroll, before the capture).
+    let scrolled = recently_scrolled(handle, cx.background_executor().now());
     let over = handle.bounds().contains(&window.mouse_position());
     if !(hot || over || scrolled) {
         return;
@@ -113,12 +121,11 @@ pub fn scroll_edges(
     std::iter::once(painter.absolute().top_0().left_0().size_full())
 }
 
-/// Whether `handle`'s content moved in the last 800 ms.
-fn recently_scrolled(handle: &ScrollHandle) -> bool {
+/// Whether `handle`'s content moved in the 800 ms before `now`.
+fn recently_scrolled(handle: &ScrollHandle, now: std::time::Instant) -> bool {
     let b = handle.bounds();
     let key = (f32::from(b.origin.x), f32::from(b.origin.y));
     let y = f32::from(handle.offset().y);
-    let now = std::time::Instant::now();
     SCROLLED.with(|s| {
         let mut s = s.borrow_mut();
         match s.iter_mut().find(|(k, _, _)| *k == key) {

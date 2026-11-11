@@ -9,7 +9,8 @@
 //! fades have finished) or `--shot-time` has passed (default 2200 ms, the delay `tools/shoot.ps1` waited
 //! before capturing GPUI: repeating pulses and shimmers are caught at that time). The app's frozen
 //! scenarios run no timers of their own, so only animations see the clock move. The PNG is
-//! `width * scale` x `height * scale` pixels.
+//! `width * scale` x `height * scale` pixels. With `FOLO_UI_SCENE_DUMP=<file>` the frame's primitives
+//! are also written there, one per line (`Debug`), for parity work.
 
 use std::{path::PathBuf, rc::Rc, time::Duration};
 
@@ -80,6 +81,11 @@ impl Shot {
         let window = *harness.windows().first().context("the app opened no window")?;
         harness.settle_advancing(window, self.settle_time, SETTLE_STEP);
         let frame = harness.frame(window).clone();
+        if let Some(dump) = std::env::var_os("FOLO_UI_SCENE_DUMP") {
+            // One primitive per line, in painter's order (parity work: which primitive drew a pixel).
+            let text: String = harness.scene(window).primitives.iter().map(|p| format!("{p:?}\n")).collect();
+            std::fs::write(&dump, text).with_context(|| format!("writing {}", dump.display()))?;
+        }
         write_png(&self.path, &frame)
     }
 }
