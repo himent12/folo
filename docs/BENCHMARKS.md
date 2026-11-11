@@ -427,6 +427,13 @@ pairs models by size, so a folo-s against yolo26s table is added the same way on
   own metric says 0.4023, computed differently).
 - BCCD is scored on its test split, the other three (which have no test split) on val. The evaluation splits are
   small (23 to 223 images), so differences of a few hundredths are within the seed spread; the min–max shows it.
+- **Where it ran** (2026-11-11): every run on one GPU type, an NVIDIA A40 (48 GB) rented from RunPod's Secure Cloud.
+  FOLO through its own cloud feature (docs/CLOUD.md), one pod per run, the Linux build of commit `ee846c88`, f32 on
+  Vulkan; `folo val` of the copied-back `best.folo` on the CPU of the control plane. Ultralytics 8.4.198 with torch
+  2.5.1+cu124 on one `ubuntu:22.04` pod (NVIDIA driver 595.91): seed 0 of every dataset alone on the GPU, seeds 1
+  and 2 two at a time (to fit the budget), which changes no number but their training time. The from-scratch
+  control of brain-tumor was not run (the $1.50 budget of the matrix was spent; it would have cost about $0.10).
+  The whole matrix cost about $1.45.
 
 <!-- finetune:begin -->
 | dataset | domain | licence | classes | train images | train boxes | scored on: images / boxes |
@@ -436,15 +443,38 @@ pairs models by size, so a folo-s against yolo26s table is added the same way on
 | [Signatures on documents](https://docs.ultralytics.com/datasets/detect/signature/) | documents | AGPL-3.0 | 1 | 143 | 143 | val: 35 / 35 |
 | [Medical pills](https://docs.ultralytics.com/datasets/detect/medical-pills/) | industrial / product photos | AGPL-3.0 | 1 | 92 | 1623 | val: 23 / 399 |
 
-**folo-n against yolo26n: no 100-epoch run has been measured yet**: the table below is empty until the matrix (28 runs) has run.
+**folo-n against yolo26n, partial**: 27 of the 28 runs of the matrix have been measured.
 
 | dataset | folo-n fine-tuned AP | AP50 | yolo26n fine-tuned AP | AP50 | FOLO − Ultralytics (AP) | folo-n from scratch AP | AP50 | folo-n min / run | yolo26n min / run |
 |---|---|---|---|---|---:|---|---|---:|---:|
-| bccd | not run | not run | not run | not run |  | not run | not run |  |  |
-| brain-tumor | not run | not run | not run | not run |  | not run | not run |  |  |
-| signature | not run | not run | not run | not run |  | not run | not run |  |  |
-| medical-pills | not run | not run | not run | not run |  | not run | not run |  |  |
+| bccd | 0.607 (0.606–0.607) | 0.883 (0.875–0.892) | 0.626 (0.621–0.634) | 0.911 (0.911–0.911) | -0.020 | 0.590 | 0.900 | 3.2 | 3.6 |
+| brain-tumor | 0.452 (0.439–0.460) | 0.613 (0.605–0.617) | 0.436 (0.413–0.459) | 0.591 (0.564–0.612) | +0.017 | not run | not run | 10.1 | 11.7 |
+| signature | 0.989 (0.987–0.992) | 1.000 (1.000–1.000) | 0.982 (0.975–0.987) | 1.000 (1.000–1.000) | +0.007 | 0.920 | 1.000 | 3.5 | 2.6 |
+| medical-pills | 0.804 (0.801–0.807) | 0.995 (0.995–0.996) | 0.803 (0.800–0.806) | 0.998 (0.998–0.998) | +0.002 | 0.737 | 0.984 | 2.5 | 2.2 |
+
+Minutes per run of yolo26n: only the runs that had the GPU to themselves; the others trained two at a time on one GPU (their accuracy counts, their time does not).
+
+Trained on: NVIDIA A40; NVIDIA A40 (vulkan).
 <!-- finetune:end -->
+
+**Reading.** Despite the weaker starting point (COCO AP 0.317 against 0.409), folo-n fine-tuned to the same accuracy
+as YOLO26n on three of the four datasets and lost on one:
+- **BCCD (blood cells): YOLO26n is better**, by 0.020 AP (0.607 against 0.626) and 0.028 AP50, and the seed ranges
+  do not overlap (folo-n 0.606–0.607, YOLO26n 0.621–0.634). This is the dataset with the most objects per image
+  (about 14, small and touching), where the stronger pretraining is most likely to show.
+- **Brain tumor (MRI): level.** folo-n's mean is 0.017 higher, but YOLO26n's seeds spread over 0.413–0.459 and
+  folo-n's over 0.439–0.460, so the difference is inside the noise of three seeds on 223 images.
+- **Signatures and pills: level** (differences of 0.007 and 0.002 AP, inside the seed spread). Signatures are
+  saturated for both (AP50 1.000, AP 0.98–0.99 on 35 images): this dataset cannot tell the two apart.
+- **What the pretrained weights buy** (folo-n from scratch, one seed, the same 100 epochs): 0.017 AP on BCCD,
+  0.067 on pills and 0.069 on signatures. From-scratch training on these small sets gets surprisingly close, which
+  says as much about the datasets (few classes, large or regular objects) as about the weights.
+- **Training time** is close: folo-n (f32 on Vulkan) took 0.9 to 1.4 times as long per run as YOLO26n (AMP on
+  CUDA) on the small sets and less on brain-tumor (10.1 against 11.7 minutes). The two clocks are not identical:
+  FOLO's runs from the cloud run's `started` to `finished` (it includes copying the checkpoints back), Ultralytics'
+  is the wall time of `train()` (its label cache and AMP check included); YOLO26n's minutes are of seed 0 alone.
+- Four datasets and three seeds are a small sample: this says FOLO's fine-tuning is competitive on small, simple
+  datasets, not that it matches YOLO26n in general (on full COCO it is 0.09 AP behind).
 
 ## FOLO on the GPU
 

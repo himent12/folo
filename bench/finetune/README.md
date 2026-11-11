@@ -112,6 +112,20 @@ cloud instance of those runs that is still live before it exits. Smoke runs belo
 the renderer leaves out runs of another epoch count anyway. Result files are named
 `<model>-<dataset>-<variant>-s<seed>.json` (`folo-n-bccd-pretrained-s0.json`, `yolo26n-bccd-pretrained-s0.json`).
 
+## The 2026-11-11 matrix
+
+`results/` holds one file per run of the first matrix (27 of 28 runs; the brain-tumor from-scratch control did not
+fit the budget) and `summary.json`; the tables and their reading are in docs/BENCHMARKS.md. It ran on RunPod A40s
+(Secure Cloud, $0.59/h), about $1.45 in all:
+- FOLO: `run_folo.py --compute cc_…:"NVIDIA A40@secure" --max-hours 0.5 --parallel 4` against a local control
+  plane serving the Linux build of `ee846c88`. RunPod often refused a launch for capacity right after offering
+  "high" stock; `run_folo.py` retries those (nothing is rented). A fine-tune cost $0.025–0.11 (pills to
+  brain-tumor), about 40 s of it the pod's boot and upload.
+- Ultralytics: one `ubuntu:22.04` pod whose start command arms a self-terminating watchdog, installs python3 and
+  torch 2.5.1+cu124, fetches this folder as a tarball and runs `PASSES="0:1 1,2:2" bash run_ultralytics_pod.sh`;
+  the results were copied off its HTTP port and the pod terminated. A first attempt on a `runpod/pytorch` devel
+  image never started its container within 12 minutes (the image pull) and was terminated.
+
 ## The scorer, checked
 
 `crosscheck_coco.py` scores both tools' COCO models on COCO val2017 (all 5,000 images, the original annotations
