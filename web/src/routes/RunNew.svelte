@@ -6,15 +6,13 @@
   import { tick, untrack } from 'svelte';
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Arch, Augment, Dataset, DatasetImage, Device, Model, Optimizer, Run, RunEstimate, TrainConfig } from '$lib/api/types';
-  import { modelChoices, scoreContext, scoreMeta } from '$lib/scoreSummary';
-  import { FROM_SCRATCH } from '$lib/lineage';
-  import { publishedSummary } from '$lib/published';
-  import { compact, deviceName, num, sentence } from '$lib/format';
+  import type { Arch, Augment, DatasetImage, Optimizer, RunEstimate, TrainConfig } from '$lib/api/types';
+  import { modelChoices, scoreMeta } from '$lib/scoreSummary';
+  import { sentence } from '$lib/format';
   import { hasCloud } from '$lib/cloud';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
-  import { REF_CPU, REF_GPU, referenceSource } from '$lib/reference';
-  import { basisLine, confidenceLine, hasFeature, referenceBasis, updatedWords } from '$lib/throughput';
+  import { REF_CPU, REF_GPU } from '$lib/reference';
+  import { hasFeature } from '$lib/throughput';
   import { href, router } from '$lib/router.svelte';
   import { serverCommand, trainCommand } from '$lib/trainCli';
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -27,12 +25,16 @@
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import { toast } from '$lib/ui/toast.svelte';
-  import { HEAD_LABEL, optimizerLabel } from './run/resolved';
   import { CloudPick } from './runnew/cloudPick.svelte';
   import { arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
   import { ampBlockOf } from './runnew/amp';
-  import { FIELD, JUMP, jumpTarget, type Jump } from './runnew/jump';
-  import { roughBytes } from './runnew/summary';
+  import { firstError, formErrors, isInt, landOn, type Jump } from './runnew/jump';
+  import { cloudCostOf, closeMosaicShown, reviewRows, roughBytes, shownEstimate } from './runnew/summary';
+  import { trainConfig } from './runnew/config';
+  import { deviceLabelOf, deviceMessage } from './runnew/device';
+  import { oomChangesOf } from './runnew/retry';
+  import { isPublished, scoreContextOf, startHintOf } from './runnew/weights';
+  import { sampleImagesOf, trainSizesOf } from './runnew/trainImages';
   import DatasetSection from './runnew/DatasetSection.svelte';
   import ModelSection from './runnew/ModelSection.svelte';
   import TrainingSection from './runnew/TrainingSection.svelte';
@@ -46,7 +48,6 @@
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'New run' });
   // This page is the create action: the top bar's New run steps aside instead of showing a pressed, disabled copy.
   ownCreateAction();
-
 
   const q = router.route.query;
   const defaults: Augment = { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 };
@@ -171,26 +172,15 @@
   // chosen size's and switching size drops another size's choice. Published weights (`folo weights pull`, `source:
   // published`) are listed whatever the size, in a group of their own: picking them sets the size to theirs. Fused
   // weights (an export) load for inference only, so they are never a starting point.
-  const isPublished = (m: Model) => m.source === 'published';
   const startable = $derived((models.data ?? []).filter((m) => m.fused !== true));
   const weightOptions = $derived(startable.filter((m) => !isPublished(m) && m.arch === arch));
   const publishedOptions = $derived(startable.filter(isPublished));
   // Each starting point's score with what it is on (lib/scoreSummary): grouped by dataset and split, best first.
-  const scoreCtx = $derived.by(() => {
-    const runById = new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r]));
-    const dsById = new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d]));
-    return (m: Model) => scoreContext(m, runById, dsById);
-  });
+  const scoreCtx = $derived(scoreContextOf(runs, datasets));
   const weightChoices = $derived(modelChoices(weightOptions, scoreCtx));
   const picked = $derived(weights === 'none' ? undefined : startable.find((m) => m.id === weights));
   /** Start from's hint: the picked weights' score with all of its context, and what published weights are. */
-  const startHint = $derived.by(() => {
-    if (!picked) return 'Fine-tuning from a trained model converges much faster.';
-    // Published weights: what they are for, in plain words; their provenance and score are in the ⓘ beside the label
-    // (pickedAbout). Trained ones are their score with its context.
-    if (isPublished(picked)) return publishedSummary(picked);
-    return scoreMeta(picked.metrics?.map50_95, scoreCtx(picked)) || 'Fine-tuning from a trained model converges much faster.';
-  });
+  const startHint = $derived(startHintOf(picked, scoreCtx));
   /** Published weights' provenance: the server's description, then the score with what it is on. */
   const pickedAbout = $derived(
     picked && isPublished(picked) ? [picked.about, scoreMeta(picked.metrics?.map50_95, scoreCtx(picked))].filter(Boolean).join(' · ') : null,
@@ -223,28 +213,11 @@
   });
 
   // A few training images for the augmentation preview.
-  const sampleImages = new Resource<DatasetImage[]>(async (s) => {
-    const id = datasetId;
-    if (!id) return [];
-    return (await hub.api.datasetImages(id, { split: 'train', offset: 0, limit: 12 }, s)).images.filter((i) => i.boxes.length > 0);
-  });
+  const sampleImages = new Resource<DatasetImage[]>((s) => sampleImagesOf(datasetId, s));
 
   // The training images' sizes, to train a dataset of small images at its own size. Read only for a dataset small
   // enough to list in a few pages (the stats do not carry image sizes); otherwise null, and the size stays 640.
-  const trainSizes = new Resource(async (s) => {
-    const id = datasetId;
-    if (!id) return null;
-    const MAX = 2000;
-    const sizes: (readonly [number, number])[] = [];
-    let total = Infinity;
-    for (let page = 0; page < 8 && sizes.length < Math.min(total, MAX); page++) {
-      const r = await hub.api.datasetImages(id, { split: 'train', offset: sizes.length, limit: 1000 }, s);
-      total = r.total;
-      if (total > MAX || !r.images.length) break;
-      sizes.push(...r.images.map((i) => [i.width, i.height] as const));
-    }
-    return { id, sizes: sizes.length === total ? sizes : null };
-  });
+  const trainSizes = new Resource((s) => trainSizesOf(datasetId, s));
   const datasetImgsz = $derived(trainSizes.data && trainSizes.data.id === datasetId ? defaultImgsz(trainSizes.data.sizes) : null);
   // Until the current dataset's sizes are known (or when they cannot be read), an unchosen size is the 640 default:
   // never the size fitted to the dataset picked before.
@@ -253,9 +226,6 @@
     if (!untrack(() => imgszChosen)) imgsz = String(d ?? 640);
   });
 
-
-  /** Number inputs bind `null` when cleared; accept only finite whole numbers in range. */
-  const isInt = (v: unknown, lo: number, hi: number) => typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
 
   const batchN = $derived(Math.max(1, Math.round(Number(batch) || 16)));
   const imgszN = $derived(Number(imgsz) || 640);
@@ -294,16 +264,7 @@
 
   // A retry of a run that ran out of GPU memory: what changed since, and an estimate that agrees with the failure.
   const oomRun = $derived(source.data && source.data.status === 'failed' && isOom(source.data.error) ? source.data : null);
-  const oomChanges = $derived.by(() => {
-    const c = oomRun?.config;
-    if (!c) return [];
-    const out: { key: 'batch' | 'imgsz' | 'model' | 'device'; was: string; now: string }[] = [];
-    if (c.batch !== batchN) out.push({ key: 'batch', was: `batch ${c.batch}`, now: `batch ${batchN}` });
-    if (c.imgsz !== imgszN) out.push({ key: 'imgsz', was: `${c.imgsz} px`, now: `${imgszN} px` });
-    if (c.arch !== arch) out.push({ key: 'model', was: c.arch, now: arch });
-    if (c.device !== device) out.push({ key: 'device', was: c.device, now: device });
-    return out;
-  });
+  const oomChanges = $derived(oomChangesOf(oomRun, batchN, imgszN, arch, device));
   const was = (key: string) => oomChanges.find((x) => x.key === key)?.was;
   // The estimate is rough; when it thought the failed settings fit, it is scaled up until they no longer do.
   // The run page forecasts its fixes with the same correction (lib/oom), so the retry it offers is shown here as fitting.
@@ -321,63 +282,18 @@
   // (they name its backends) fold into the field's technical details.
   let deviceError = $state<{ device: string; gone: boolean; detail: string } | null>(null);
   const deviceErr = $derived(deviceError && deviceError.device === device ? deviceError : null);
-  /** A device in a sentence, named once with its value: "Auto", "GPU 1 (gpu:1)", "CPU" (values elsewhere: `gpu:1`). */
-  const devWord = (d: string) => (d === 'auto' ? 'Auto' : d === 'cpu' ? 'CPU' : `${d.replace(/^gpu:/, 'GPU ')} (${d})`);
-  const deviceMsg = $derived.by(() => {
-    const e = deviceErr;
-    if (!e) return null;
-    if (!e.gone) return `This server cannot train on ${devWord(e.device)}. Pick Auto or CPU.`;
-    const others = [...(system.data?.gpus ?? []).map((g) => `gpu:${g.ordinal}`).filter((d) => d !== e.device), 'cpu'].map(devWord);
-    return `${devWord(e.device)} is no longer available. Pick Auto, ${others.length > 1 ? `${others.slice(0, -1).join(', ')} or ${others.at(-1)}` : others[0]}.`;
-  });
+  const deviceMsg = $derived(deviceMessage(deviceErr, system));
 
-  const errors = $derived({
-    name: !name.trim() ? 'Give the run a name.' : /[^\w.-]/.test(name.trim()) ? 'Letters, digits, dot, dash and underscore only.' : null,
-    epochs: !isInt(epochs, 1, 10000) ? 'A whole number from 1 to 10,000.' : null,
-    lr0: !(typeof lr0 === 'number' && lr0 > 0 && lr0 < 10) ? 'Greater than 0 and below 10.' : null,
-    seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
-    close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
-    dataset: !dataset ? 'Pick a dataset.' : null,
-    weights: weights !== 'none' && picked?.arch !== arch ? 'Pick weights of the same model size.' : null,
-    // The field says what to pick; the line beside Start only names the problem and leads there.
-    device: deviceErr && !onCloud ? `${devWord(device)} is not available.` : null,
-    amp: ampErr && ampOn && !onCloud ? 'Not available on this server now.' : null,
-    runon: cloudOn ? cloudPick.errors.runon : null,
-    offer: onCloud ? cloudPick.errors.offer : null,
-    hours: onCloud ? cloudPick.errors.hours : null,
-  });
+  const errors = $derived(formErrors(name, epochs, lr0, seed, augment, dataset, weights, picked, arch, deviceErr, onCloud, device, ampErr, ampOn, cloudOn, cloudPick));
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
-  const why = $derived.by(() => {
-    for (const [k, v] of Object.entries(errors)) if (v) return { text: `${FIELD[k as keyof typeof errors]}: ${v}`, key: JUMP[k as keyof typeof errors] };
-    return null;
-  });
+  const why = $derived(firstError(errors));
   const showWhy = $derived(!valid && !!why && prefilled);
   // The trainer's own short-run warnings (too few steps from scratch, mostly warmup): not errors, a warning with the fix.
   const short = $derived(errors.epochs ? null : shortRun(dataset?.splits.train ?? 0, epochs, batchN, weights === 'none'));
   const selArch = $derived(arches.find((a) => a.arch === arch));
 
-  const config = $derived<TrainConfig>({
-    name: name.trim(),
-    dataset_id: datasetId,
-    arch,
-    epochs,
-    batch: batchN,
-    imgsz: imgszN,
-    // A cloud run's worker picks its own GPU (docs/API.md, Cloud runs).
-    device: onCloud ? 'auto' : (device as Device),
-    optimizer,
-    lr0,
-    weights: weights === 'none' ? null : weights,
-    augment: { ...augment, hsv: [...augment.hsv] as [number, number, number], close_mosaic: Math.min(augment.close_mosaic, epochs) },
-    seed,
-    // Only to servers that report capabilities (older ones predate `amp`), or train it in the cloud.
-    ...(caps || onCloud ? { amp: ampOn } : {}),
-    // Left out for the default (missing means `o2m`, docs/API.md), so older servers see the request they know.
-    ...(e2e ? { head: 'o2o' as const } : {}),
-    // Only once a connection and its GPU are chosen, and only to servers with the feature.
-    ...(onCloud && cloudPick.compute ? { compute: cloudPick.compute } : {}),
-  });
+  const config = $derived<TrainConfig>(trainConfig(name, datasetId, arch, epochs, batchN, imgszN, onCloud, device, optimizer, lr0, weights, augment, seed, caps, ampOn, e2e, cloudPick));
 
   // The server's estimate (POST /api/runs/estimate, feature `run_estimate`): the first asked at once, every later one
   // 300 ms after the settings stop changing, whether or not the last one was answered (a slow or failing server is not
@@ -433,15 +349,7 @@
       ctrl.abort();
     };
   });
-  /**
-   * Close mosaic as the trainer applies it: the server's count for these settings (`RunEstimate.close_mosaic`), else
-   * the trainer's cap of the request (at most half the run), which the server's agrees with.
-   */
-  const closeEff = $derived.by(() => {
-    if (errors.close || errors.epochs) return null;
-    const n = served?.key === estKey ? served.est.close_mosaic : undefined;
-    return typeof n === 'number' && Number.isFinite(n) ? n : closeMosaicEpochs(augment.close_mosaic, epochs);
-  });
+  const closeEff = $derived(closeMosaicShown(errors, served, estKey, augment, epochs));
   /**
    * Whether the figures shown answer earlier settings: the last answer stays up while the request for these is out, so
    * the form never empties as it is edited, but it is not these settings' figure (DESIGN_DIRECTION §2.8, "a figure is
@@ -449,42 +357,7 @@
    * dock, and the basis line reads "Updating…" until the answer for these settings is in.
    */
   const estStale = $derived(!!served && served.key !== estKey);
-  /** What the Summary and the dock show: the server's estimate when there is one, else the reference's. */
-  const shown = $derived.by(() => {
-    const r = served?.est;
-    if (r)
-      return {
-        lo: r.est_total_s_low,
-        hi: r.est_total_s_high,
-        vram: r.est_peak_vram_bytes ?? 0,
-        vramMeasured: r.vram_source === 'measured',
-        basis: onCloud ? 'The reference machine’s speed' : basisLine(r),
-        rough: r.confidence === 'low',
-        how: onCloud ? sentence(r.basis.note) : confidenceLine(r),
-        phases: r.phases,
-        // A measured basis whose validation rate is still the reference's says so on that line.
-        val: { images: r.val_images, rate: r.val_imgs_per_s, reference: r.basis.source === 'measured' && r.val_source === 'reference' },
-        startup: r.startup_s,
-        updated: r.basis.source === 'measured' && r.basis.updated ? updatedWords(r.basis) : null,
-      };
-    return {
-      lo: est.lowSeconds,
-      hi: est.highSeconds,
-      vram: est.vramBytes,
-      vramMeasured: false,
-      basis: referenceBasis(refMachine, onCpu),
-      rough: true,
-      how: !canEstimate
-        ? `Estimated from ${referenceSource(onCpu)}, scaled to these settings: this server does not estimate runs.`
-        : estimating
-          ? "Loading this server's estimate."
-          : `Estimated from ${referenceSource(onCpu)}, scaled to these settings: this server could not estimate them.`,
-      phases: est.phases,
-      val: { images: est.valImages, rate: est.valImgsPerS, reference: false },
-      startup: est.startupS,
-      updated: null,
-    };
-  });
+  const shown = $derived(shownEstimate(served, est, onCloud, refMachine, onCpu, canEstimate, estimating));
   // Measured peaks need no scaling: only the reference model is corrected by a failed run.
   const vram = $derived(shown.vram * (shown.vramMeasured ? 1 : scale));
   const vramPct = $derived(gpuMem ? vram / gpuMem : 0);
@@ -501,16 +374,7 @@
   const vramFit = $derived(!memShown ? null : !gpuMem ? ('unknown' as const) : noFit ? ('no' as const) : ('fits' as const));
   // The time limit follows the estimate's high end until it is set by hand.
   $effect(() => cloudPick.follow(estReady ? shown.hi : null));
-  /**
-   * What a cloud run costs: the server's range for these settings (`RunEstimate.cost`), else the offer's price over the
-   * time shown; the most it can cost, at its time limit. Null without a price (compute that is not billed).
-   */
-  const cloudCost = $derived.by(() => {
-    const price = onCloud ? (cloudPick.offer?.price_per_hour ?? null) : null;
-    if (price === null) return null;
-    const c = served?.est.cost;
-    return c ? { lo: c.est_usd_low, hi: c.est_usd_high } : { lo: (price * shown.lo) / 3600, hi: (price * shown.hi) / 3600 };
-  });
+  const cloudCost = $derived(cloudCostOf(onCloud, cloudPick, served, shown));
 
   // Settings forecast not to fit: the one primary becomes the change that fits ("Use batch 8"), chosen by lib/oom's
   // `fitFix` from the same forecast as the figure above (the server's estimate, else the reference model) with 10% of
@@ -590,38 +454,9 @@
     }
   }
 
-
   // ---------- review ----------
-  const shortGpu = deviceName;
-  const deviceLabel = $derived.by(() => {
-    if (device === 'auto') return `Auto${gpu ? ` · ${shortGpu(gpu.name)}` : ''}`;
-    if (device === 'cpu') return 'CPU';
-    const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === device);
-    return g ? `${device} · ${shortGpu(g.name)}` : device;
-  });
-  /** The settings that shape the run, each a way back to its control. Optimizer and head only once not the default. */
-  const review = $derived<{ key: Jump; label: string; value: string; mono?: boolean; warn?: boolean }[]>([
-    { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—', warn: !!errors.dataset },
-    { key: 'model', label: 'Model', value: arch, mono: true },
-    { key: 'epochs', label: 'Epochs', value: errors.epochs ? '—' : num(epochs), warn: !!errors.epochs },
-    { key: 'batch', label: 'Batch', value: String(batchN) },
-    { key: 'imgsz', label: 'Image size', value: `${imgszN} px` },
-    // A cloud run says where it runs ("RunPod · RTX 4090") in the device's place.
-    onCloud
-      ? { key: 'runon' as const, label: 'Runs on', value: cloudPick.offer ? `${cloudPick.provider} · ${cloudPick.offer.gpu}` : cloudPick.provider, warn: !!errors.runon || !!errors.offer }
-      : { key: 'device' as const, label: 'Device', value: deviceLabel, warn: !!deviceMsg },
-    ...(caps || onCloud ? [{ key: 'amp' as const, label: 'Mixed precision', value: ampOn ? 'On' : 'Off' }] : []),
-    {
-      key: 'weights',
-      label: 'Start from',
-      value: weights === 'none' ? FROM_SCRATCH : (picked?.name ?? weights),
-      mono: weights !== 'none',
-      warn: !!errors.weights,
-    },
-    ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizerLabel(optimizer) }] : []),
-    ...(e2e ? [{ key: 'head' as const, label: 'Head', value: HEAD_LABEL.o2o }] : []),
-  ]);
-
+  const deviceLabel = $derived(deviceLabelOf(device, gpu, system));
+  const review = $derived(reviewRows(dataset, errors, arch, epochs, batchN, imgszN, onCloud, cloudPick, deviceLabel, deviceMsg, caps, ampOn, weights, picked, optimizer, e2e));
 
   async function jump(key: Jump) {
     sumOpen = false;
@@ -629,18 +464,7 @@
     if (key === 'close') augOpen = true;
     await tick();
     // A closing dialog hands focus back to its opener; move on after that.
-    requestAnimationFrame(() => {
-      const el = jumpTarget(key);
-      if (!el) return;
-      const box = el.closest<HTMLElement>('.field, .card, .arch, .ds-pick, .a-pick') ?? el;
-      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-      box.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
-      el.focus({ preventScroll: true, focusVisible: true } as FocusOptions);
-      // Where the browser keeps the focus ring hidden after a mouse click, mark the landing spot until focus leaves.
-      if (el.matches(':focus-visible')) return;
-      box.dataset.jumped = '';
-      el.addEventListener('blur', () => delete box.dataset.jumped, { once: true });
-    });
+    requestAnimationFrame(() => landOn(key));
   }
 </script>
 
@@ -650,31 +474,8 @@
 
 {#snippet figures(where: string)}
   <EstimateFigures
-    {where}
-    {estReady}
-    {sched}
-    {batchN}
-    {est}
-    bind:stepsOpen
-    {shown}
-    {estStale}
-    {estimating}
-    {memShown}
-    {vram}
-    {onCloud}
-    {cloudPick}
-    {cloudCost}
-    {gpuMem}
-    {scale}
-    {onCpu}
-    {vramLevel}
-    {vramPct}
-    {noFit}
-    {fix}
-    {fixLoading}
-    {short}
-    bind:shortWhy
-    bind:epochs
+    {where} {estReady} {sched} {batchN} {est} bind:stepsOpen {shown} {estStale} {estimating} {memShown} {vram} {onCloud} {cloudPick} {cloudCost}
+    {gpuMem} {scale} {onCpu} {vramLevel} {vramPct} {noFit} {fix} {fixLoading} {short} bind:shortWhy bind:epochs
   />
 {/snippet}
 
@@ -713,53 +514,12 @@
         <DatasetSection {datasets} bind:datasetId {dataset} {errors} />
 
         <ModelSection
-          bind:arch
-          bind:weights
-          {tp}
-          {oomRun}
-          {was}
-          {pickedPublished}
-          {selArch}
-          {startHint}
-          {pickedAbout}
-          {errors}
-          {weightChoices}
-          {publishedOptions}
-          {scoreCtx}
-          {pickWeights}
+          bind:arch bind:weights {tp} {oomRun} {was} {pickedPublished} {selArch} {startHint} {pickedAbout} {errors} {weightChoices} {publishedOptions} {scoreCtx} {pickWeights}
         />
 
         <TrainingSection
-          bind:epochs
-          bind:batch
-          bind:imgsz
-          bind:imgszChosen
-          bind:device
-          bind:optimizer
-          bind:amp
-          bind:ampRefused
-          bind:e2e
-          bind:lr0
-          bind:seed
-          bind:advancedOpen
-          {arch}
-          {errors}
-          {was}
-          {oomRun}
-          {dataset}
-          {datasetImgsz}
-          {IMGSZ}
-          {cloudOn}
-          {onCloud}
-          {cloudPick}
-          {system}
-          {gpu}
-          {deviceMsg}
-          {deviceErr}
-          {caps}
-          {ampBlock}
-          {ampErr}
-          {ampOn}
+          bind:epochs bind:batch bind:imgsz bind:imgszChosen bind:device bind:optimizer bind:amp bind:ampRefused bind:e2e bind:lr0 bind:seed bind:advancedOpen
+          {arch} {errors} {was} {oomRun} {dataset} {datasetImgsz} {IMGSZ} {cloudOn} {onCloud} {cloudPick} {system} {gpu} {deviceMsg} {deviceErr} {caps} {ampBlock} {ampErr} {ampOn}
         />
 
         <AugmentSection bind:augment bind:augOpen bind:closeEdited {defaults} {errors} {closeEff} {epochs} {dataset} {sampleImages} />
@@ -803,27 +563,8 @@
       </aside>
 
       <StartDock
-        {startVisible}
-        {showWhy}
-        {why}
-        {whyLine}
-        bind:sumOpen
-        {shown}
-        {estReady}
-        {estStale}
-        {cloudCost}
-        {memShown}
-        {noFit}
-        {gpuMem}
-        {vram}
-        {short}
-        {dataset}
-        {arch}
-        {fix}
-        {fixLoading}
-        {applyFix}
-        {submitting}
-        {valid}
+        {startVisible} {showWhy} {why} {whyLine} bind:sumOpen {shown} {estReady} {estStale} {cloudCost} {memShown} {noFit} {gpuMem} {vram} {short} {dataset} {arch}
+        {fix} {fixLoading} {applyFix} {submitting} {valid}
       />
 
       <!-- Inside the form, so its Start button submits it. -->
