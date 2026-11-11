@@ -1,7 +1,7 @@
 // Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/shaders.hlsl (polychrome_sprite_fragment)
 //! Images: resampled once to their destination size (linear filtering at texel centres, as the GPU's
-//! sampler; optional grayscale with GPUI's luminance weights), cached as premultiplied pixels, then
-//! blitted with opacity and rounded-corner coverage.
+//! sampler reads GPUI's atlas; optional grayscale with GPUI's luminance weights), cached as
+//! premultiplied pixels, then blitted with opacity and rounded-corner coverage.
 
 use super::blend::{ONE, alpha16, over_pm8, sat};
 use super::geom::{IRect, ceil_i32, floor_i32};
@@ -49,19 +49,24 @@ impl ImageCopy {
         }
         let ax = Axis::new(dst[0], dst[2], iw as i32);
         let ay = Axis::new(dst[1], dst[3], ih as i32);
-        let cols: Vec<_> = (0..w as i32).map(|i| ax.at(i)).collect();
+        let cols: Vec<_> = (0..w as i32).map(|i| atlas_texels(&ax, i, iw)).collect();
         let mut px = Vec::with_capacity(w * h);
         let mut opaque = true;
         const GRAY: [f32; 3] = [0.2126, 0.7152, 0.0722];
+        let row = |y: Option<usize>| y.map(|y| &bytes[y * iw * 4..(y + 1) * iw * 4]);
         for j in 0..h as i32 {
-            let (y0, y1, fy) = ay.at(j);
-            let r0 = &bytes[y0 * iw * 4..(y0 + 1) * iw * 4];
-            let r1 = &bytes[y1 * iw * 4..(y1 + 1) * iw * 4];
+            let (y0, y1, fy) = atlas_texels(&ay, j, ih);
+            let (r0, r1) = (row(y0), row(y1));
             for &(x0, x1, fx) in &cols {
+                // A texel outside the image is transparent black (`None`).
+                let texel = |r: Option<&[u8]>, x: Option<usize>, c: usize| match (r, x) {
+                    (Some(r), Some(x)) => r[x * 4 + c] as u32,
+                    _ => 0,
+                };
                 // Channels in BGRA order, each `value * 65536`.
                 let s: [u32; 4] = std::array::from_fn(|c| {
-                    let top = r0[x0 * 4 + c] as u32 * (256 - fx) + r0[x1 * 4 + c] as u32 * fx;
-                    let bot = r1[x0 * 4 + c] as u32 * (256 - fx) + r1[x1 * 4 + c] as u32 * fx;
+                    let top = texel(r0, x0, c) * (256 - fx) + texel(r0, x1, c) * fx;
+                    let bot = texel(r1, x0, c) * (256 - fx) + texel(r1, x1, c) * fx;
                     top * (256 - fy) + bot * fy
                 });
                 let k = 1. / (255. * 65536.);
@@ -79,6 +84,30 @@ impl ImageCopy {
         }
         ImageCopy { w, px, opaque }
     }
+}
+
+/// The smallest side of a GPUI atlas texture (`DEFAULT_ATLAS_SIZE`).
+const ATLAS_MIN: usize = 1024;
+
+/// The two texels destination pixel `i` blends and the second one's weight, as GPUI's sampler sees
+/// them: the image is a tile of a zero-initialised atlas with no padding, sampled linearly with
+/// WRAP addressing, so a texel past the image's edge is transparent black (`None`), except along a
+/// side of at least `ATLAS_MIN` pixels, where the image spans its own texture and the sampler wraps
+/// around to its opposite edge. Magnified images get a darker rim from it, as in the GPUI captures.
+/// (A neighbouring tile in a shared atlas would be read instead of black: not modelled.)
+#[inline]
+fn atlas_texels(axis: &Axis, i: i32, n: usize) -> (Option<usize>, Option<usize>, u32) {
+    let (t0, f) = axis.raw(i);
+    let at = |t: i64| {
+        if (0..n as i64).contains(&t) {
+            Some(t as usize)
+        } else if n >= ATLAS_MIN {
+            Some(t.rem_euclid(n as i64) as usize)
+        } else {
+            None
+        }
+    };
+    (at(t0), at(t0 + 1), f)
 }
 
 /// How an image is blitted: its copy, where the copy's (0, 0) lands, opacity, and the rounded corners.
@@ -172,5 +201,44 @@ impl ImageDraw {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid(w: u32, h: u32, bgra: [u8; 4]) -> RenderImage {
+        let buf = ::image::RgbaImage::from_fn(w, h, |_, _| ::image::Rgba(bgra));
+        RenderImage::new([::image::Frame::new(buf)])
+    }
+
+    /// A magnified image's edge pixels blend with the transparent texels around its atlas tile, as
+    /// GPUI's sampler does: the rim gets `c * (1 - f)` at alpha `1 - f`; the inside stays solid.
+    #[test]
+    fn magnified_edges_blend_with_the_empty_atlas() {
+        // 4 texels over 8 pixels: pixel 0 samples texel coordinate -0.25, a quarter from texel -1.
+        let img = solid(4, 4, [200, 100, 50, 255]);
+        let copy = ImageCopy::new(&img, 0, false, 8, 8, [0., 0., 8., 8.]);
+        assert!(!copy.opaque);
+        let (corner, edge, inside) = (copy.px[0], copy.px[3], copy.px[3 * 8 + 3]);
+        assert_eq!(inside, 0xff_32_64_c8);
+        // Edge (row 0): alpha 0.75, premultiplied colour times 0.75 * 0.75.
+        assert_eq!(edge >> 24, 191);
+        assert_eq!(edge & 0xff, (200. * 0.75 * 0.75 + 0.5) as u32);
+        // Corner: 0.75 on both axes.
+        assert_eq!(corner >> 24, (255. * 0.5625 + 0.5) as u32);
+        // Drawn at its own size, every pixel samples a texel centre: nothing from outside.
+        assert!(ImageCopy::new(&img, 0, false, 4, 4, [0., 0., 4., 4.]).opaque);
+    }
+
+    /// A side of 1024 or more fills its own atlas texture, so WRAP reads the opposite edge.
+    #[test]
+    fn wide_images_wrap() {
+        let ax = Axis::new(0., 2048., 1024);
+        assert_eq!(atlas_texels(&ax, 0, 1024), (Some(1023), Some(0), 192));
+        let ax = Axis::new(0., 1000., 500);
+        assert_eq!(atlas_texels(&ax, 0, 500), (None, Some(0), 192));
+        assert_eq!(atlas_texels(&ax, 999, 500), (Some(499), None, 64));
     }
 }

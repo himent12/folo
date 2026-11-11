@@ -140,6 +140,14 @@ impl Axis {
         Axis { k0, k, n }
     }
 
+    /// The unclamped index of the first texel and the weight of the second (`0..=256`) for
+    /// destination pixel `i`.
+    #[inline(always)]
+    pub fn raw(&self, i: i32) -> (i64, u32) {
+        let u = self.k0 + self.k * i as i64;
+        (u >> 32, ((u >> 24) & 0xff) as u32)
+    }
+
     /// Texel indices and the weight of the second (`0..=256`) for destination pixel `i`.
     #[inline(always)]
     pub fn at(&self, i: i32) -> (usize, usize, u32) {

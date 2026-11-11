@@ -1,5 +1,6 @@
 // Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/shaders.hlsl (underline_fragment)
-//! Paths (coverage from tiny-skia, cached by geometry) and underlines (straight and wavy).
+//! Paths (4x multisampled coverage, as GPUI's path target, from tiny-skia's aliased fills, cached by
+//! geometry) and underlines (straight and wavy).
 
 use super::blend::{ONE, Src, Tint, sat};
 use super::geom::IRect;
@@ -31,6 +32,14 @@ pub(crate) fn geometry_hash(p: &PathData) -> u64 {
         }
     }
     finish(h)
+}
+
+/// The SVG miter limit (tiny-skia's: bevel when `1 / sin(angle / 2)` exceeds it) that lyon's
+/// `miter_limit` amounts to. lyon's normal at a join has length `1 / sin(angle / 2)` and it bevels
+/// when `normal.square_length() > miter_limit^2 * 4` (`miter_limit_is_exceeded`, lyon_tessellation
+/// 1.0.23, GPUI's), so its default 4 keeps miters up to a ratio of 8.
+pub(crate) fn svg_miter_limit(lyon_limit: f32) -> f32 {
+    lyon_limit * 2.
 }
 
 /// A path's coverage over `rect` (absolute device px), one byte per pixel.
@@ -78,7 +87,7 @@ impl PathMask {
             PathKind::Stroke(s) => {
                 let stroke = tiny_skia::Stroke {
                     width: s.width.0,
-                    miter_limit: s.miter_limit,
+                    miter_limit: svg_miter_limit(s.miter_limit),
                     line_cap: match s.cap {
                         LineCap::Butt => tiny_skia::LineCap::Butt,
                         LineCap::Square => tiny_skia::LineCap::Square,
@@ -97,12 +106,31 @@ impl PathMask {
                 (path.stroke(&stroke, 1.0), tiny_skia::FillRule::Winding)
             }
         };
-        if let Some(path) = path {
-            mask.fill_path(&path, rule, true, tiny_skia::Transform::identity());
+        let Some(path) = path else {
+            return empty();
+        };
+        // GPUI draws paths into a 4x MSAA target (D3D11's standard pattern) and resolves it: a
+        // pixel's coverage is the share of its four samples inside the path. Each sample is one
+        // aliased fill (centre sampling) of the path moved by minus the sample's offset.
+        let mut sum = vec![0u16; (w * h) as usize];
+        for (dx, dy) in MSAA_4X {
+            mask.clear();
+            let t = tiny_skia::Transform::from_translate(-dx, -dy);
+            mask.fill_path(&path, rule, false, t);
+            for (s, &m) in sum.iter_mut().zip(mask.data()) {
+                *s += (m != 0) as u16;
+            }
         }
-        PathMask { rect, data: mask.data().to_vec() }
+        PathMask { rect, data: sum.into_iter().map(|n| QUARTERS[n as usize]).collect() }
     }
 }
+
+/// D3D11's standard 4x sample positions, in pixels from the pixel's centre.
+const MSAA_4X: [(f32, f32); 4] =
+    [(-2. / 16., -6. / 16.), (6. / 16., -2. / 16.), (-6. / 16., 2. / 16.), (2. / 16., 6. / 16.)];
+
+/// The mask byte for 0..=4 covered samples (the resolve's 8-bit UNORM rounding of `n / 4`).
+const QUARTERS: [u8; 5] = [0, 64, 128, 191, 255];
 
 /// How a path is painted over its coverage.
 pub(crate) enum PathPaint {
@@ -171,5 +199,57 @@ pub(crate) fn draw_underline(t: &mut Target, u: &Underline, color: [f32; 4], r: 
             let s = Src::new([color[0], color[1], color[2], color[3] * alpha]);
             *p = s.over(*p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Contour, LineCap, LineJoin, PathData, PathKind, ScaledPixels, StrokeStyle, point};
+
+    fn pt(x: f32, y: f32) -> crate::Point<ScaledPixels> {
+        point(ScaledPixels(x), ScaledPixels(y))
+    }
+
+    /// Coverage counts GPUI's four MSAA samples: an edge through a column covers the samples left
+    /// of it, in quarters (D3D11's standard pattern, x offsets -6, -2, 2, 6 sixteenths).
+    #[test]
+    fn coverage_is_four_samples() {
+        let rect = |x1: f32| {
+            let c = Contour { points: vec![pt(0., 0.), pt(x1, 0.), pt(x1, 4.), pt(0., 4.)], closed: true };
+            PathMask::new(&PathData::new(vec![c], PathKind::Fill(FillRule::NonZero)), IRect::new(0, 0, 4, 4))
+        };
+        // Samples of column 2 sit at x = 2.125, 2.375, 2.625, 2.875.
+        for (x1, want) in [(2.1, 0), (2.2, 64), (2.5, 128), (2.7, 191), (2.9, 255)] {
+            let m = rect(x1);
+            assert_eq!(m.data[4 + 1], 255, "{x1}");
+            assert_eq!(m.data[4 + 2], want, "{x1}");
+        }
+    }
+
+    /// lyon's miter limit 4 keeps a miter up to a ratio `1 / sin(angle / 2)` of 8: a 10-degree
+    /// spike (ratio 11.5) is beveled, a 20-degree one (ratio 5.8, beyond SVG's 4) keeps its point.
+    #[test]
+    fn miter_limit_is_lyons() {
+        assert_eq!(svg_miter_limit(4.), 8.);
+        let spike = |deg: f32| {
+            let h = 20. / (deg.to_radians() / 2.).tan();
+            let c = Contour { points: vec![pt(10., 4.), pt(30., 4. + h), pt(50., 4.)], closed: false };
+            let kind = PathKind::Stroke(StrokeStyle {
+                width: ScaledPixels(2.),
+                cap: LineCap::Butt,
+                join: LineJoin::Miter,
+                miter_limit: 4.,
+                dash: None,
+            });
+            let m = PathMask::new(&PathData::new(vec![c], kind), IRect::new(0, 0, 60, 400));
+            // The lowest covered row in the spike's column.
+            (0..400).rev().find(|&y| m.data[y * 60 + 30] != 0).unwrap() as f32
+        };
+        // Tip of the centre line at 4 + h; a miter reaches about one ratio of half widths past it.
+        let h20 = 20. / 10f32.to_radians().tan();
+        assert!(spike(20.) > 4. + h20 + 2.5, "{} vs {}", spike(20.), h20);
+        let h10 = 20. / 5f32.to_radians().tan();
+        assert!(spike(10.) < 4. + h10 + 1.5, "{} vs {}", spike(10.), h10);
     }
 }
