@@ -166,7 +166,14 @@ export default function StatsTab(props: StatsTabProps) {
                            under its finding's row (the grid packs the next finding into the cell beside it), never a card
                            that spans both columns among half-width ones. */
                         <li class="evidence" id={`ds-ev-${h().id}`}>
-                          <IssueList datasetId={props.dataset.id} path={props.dataset.path} severity={h().issues} severityFilter={false} counts={props.counts} />
+                          <IssueList
+                            datasetId={props.dataset.id}
+                            path={props.dataset.path}
+                            severity={h().issues}
+                            kinds={h().kinds}
+                            severityFilter={false}
+                            counts={props.counts}
+                          />
                         </li>
                       ) : null}
                     </>

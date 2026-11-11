@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DatasetIssue, DatasetIssuesQuery } from '$lib/api/types';
-import { issueCaption, loadIssues } from './issues';
+import { issueCaption, loadIssues, loadKinds } from './issues';
 
 // A server with 1,500 empty-image notes first and two errors after them, paged at most 1000 per request.
 const all: DatasetIssue[] = [
@@ -27,6 +27,23 @@ describe('loadIssues', () => {
     const r = await loadIssues(api, 'ds', 'info', 1200);
     expect(r.total).toBe(1500);
     expect(r.list).toHaveLength(1200);
+  });
+});
+
+describe('loadKinds', () => {
+  it("reads a finding's own kinds only, merged in dataset order", async () => {
+    const withImage = {
+      async datasetIssues(id: string, q: DatasetIssuesQuery) {
+        const r = await api.datasetIssues(id, q);
+        return q.kind === 'corrupt_image'
+          ? { total: 1, issues: [{ kind: 'corrupt_image' as const, severity: 'error' as const, file: 'images/fake.jpg', line: null, message: 'cannot decode' }] }
+          : r;
+      },
+    };
+    const r = await loadKinds(withImage, 'ds', 'error', ['broken_label', 'class_overflow']);
+    expect(r.total).toBe(2);
+    expect(r.list.map((i) => i.kind)).toEqual(['class_overflow', 'broken_label']);
+    expect(r.byKind).toEqual({ broken_label: 1, class_overflow: 1 });
   });
 });
 

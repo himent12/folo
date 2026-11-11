@@ -1,6 +1,6 @@
 // Dataset health checks and histogram labels. Pure functions so the thresholds are easy to test and tune.
 
-import type { Dataset, DatasetStats, Histogram, IssueCounts, IssueSeverity } from '$lib/api/types';
+import type { Dataset, DatasetStats, Histogram, IssueCounts, IssueKind, IssueSeverity } from '$lib/api/types';
 import { TRAINED_ON } from '$lib/evaluated';
 import { num } from '$lib/format';
 
@@ -22,6 +22,8 @@ export interface HealthItem {
   action?: { label: string; path: string };
   /** The `folo dataset check` issues behind it, listed from this severity on. */
   issues?: IssueSeverity;
+  /** Only these kinds of that severity, when the finding is about some of them (broken labels, not unreadable images). */
+  kinds?: IssueKind[];
   /**
    * How many file issues it stands for (one per broken label file; the check's count otherwise). Findings without it
    * are dataset-wide observations (class balance, box sizes, splits), counted apart from the files.
@@ -132,8 +134,9 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       title: `${int(s.broken_labels)} broken label ${s.broken_labels === 1 ? 'file' : 'files'}`,
       short: `${int(s.broken_labels)} broken label ${s.broken_labels === 1 ? 'file' : 'files'}`,
       tiny: `${int(s.broken_labels)} broken`,
-      detail: 'These labels could not be parsed, so their images are skipped in training. Fix or delete them, then re-register the dataset.',
+      detail: 'These labels could not be parsed, so their images are skipped in training. Fix or delete them: this page updates by itself when the files change.',
       issues: 'error',
+      kinds: ['broken_label', 'class_overflow', 'out_of_range_box'],
       files: s.broken_labels,
     });
     // The check's image errors count too: unreadable or missing images. Its label errors (broken_label,
@@ -146,8 +149,9 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
         title: `${int(other)} unreadable or missing ${other === 1 ? 'image' : 'images'}`,
         short: `${int(other)} unreadable ${other === 1 ? 'image' : 'images'}`,
         tiny: `${int(other)} unreadable`,
-        detail: 'Images that cannot be read are left out of training. Fix or remove them.',
+        detail: 'Images that cannot be read are left out of training. Fix or remove them: this page updates by itself.',
         issues: 'error',
+        kinds: ['corrupt_image', 'missing_image'],
         files: other,
       });
     }

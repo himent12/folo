@@ -91,6 +91,11 @@ describe('healthChecks with the check counts', () => {
     const broken = healthChecks(ds(), st({ broken_labels: 3 }), counts(3, 0));
     expect(broken.map((x) => x.id)).toEqual(['broken']);
     expect(broken[0]?.issues).toBe('error');
+    // Its list is its own label files (the unreadable images are a finding of their own), and it never asks for a
+    // re-registration: the stats refresh by themselves.
+    expect(broken[0]?.kinds).toEqual(['broken_label', 'class_overflow', 'out_of_range_box']);
+    expect(broken[0]?.detail).toContain('this page updates by itself');
+    expect(broken[0]?.detail).not.toContain('re-register');
     // Label errors of every kind are the broken files; only image errors (unreadable, missing) are a finding of their own.
     const labels = healthChecks(ds(), st({ broken_labels: 3 }), { ...counts(3, 0), by_kind: { broken_label: 1, class_overflow: 1, out_of_range_box: 1 } });
     expect(labels.map((x) => x.id)).toEqual(['broken']);
