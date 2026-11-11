@@ -402,6 +402,9 @@ pub struct FoloApp {
     /// The draft's dataset by id (the list can gain datasets at the front while the draft waits,
     /// so its index alone could point at another one).
     pub new_run_draft_ds: Option<String>,
+    /// The architecture, image size and epochs of the last run started from the dialog: a fresh
+    /// New run opens on them (this session), not on the defaults again.
+    pub new_run_last: Option<(usize, usize, f32)>,
     /// `--open new-run`: open the dialog once the dataset list is in (it needs one to start from).
     pub open_new_run_pending: bool,
     /// The Generate synthetic dataset dialog.
@@ -588,6 +591,7 @@ impl FoloApp {
             new_run: None,
             new_run_draft: None,
             new_run_draft_ds: None,
+            new_run_last: None,
             open_new_run_pending: false,
             synth: None,
             synth_seq: 0,

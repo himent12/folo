@@ -222,3 +222,29 @@ fn another_device_keeps_the_boxes_up_until_it_answers() {
     app.run_until_idle();
     drive(&mut app, window, |this, _, _| assert!(!this.play_pred_dim && !this.play_pred_pending));
 }
+
+#[test]
+fn new_run_opens_on_the_last_started_choices() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.open_new_run(None, w, cx);
+        let f = this.new_run.as_mut().unwrap();
+        (f.arch, f.imgsz) = (0, 0);
+        let input = f.epochs_input.clone();
+        input.update(cx, |i, cx| i.set_text("30", cx));
+    });
+    drive(&mut app, window, |this, w, cx| this.submit_new_run(w, cx));
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.new_run.is_none(), "started");
+        this.open_new_run(None, w, cx);
+    });
+    let name = run_name(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        let f = this.new_run.as_ref().unwrap();
+        assert_eq!((f.arch, f.imgsz, f.epochs as u32), (0, 0, 30));
+        assert_eq!(f.epochs_input.read(cx).text().to_string(), "30");
+        // Close mosaic follows the remembered epochs (half of 30 caps nothing: 10).
+        assert_eq!(f.close_mosaic as u32, 10);
+    });
+    assert!(name.contains("-n-"), "{name}");
+}

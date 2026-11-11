@@ -130,7 +130,9 @@ impl FoloApp {
             .ready()
             .and_then(|d| d.get(idx))
             .map_or("shapes".to_string(), |d| d.name.clone());
-        let suggested = suggested_name(&ds_name, ARCHS[1], n);
+        // The last started run's choices, else the defaults (s, 640 px, 100 epochs).
+        let (arch, imgsz, epochs) = self.new_run_last.unwrap_or((1, 2, 100.0));
+        let suggested = suggested_name(&ds_name, ARCHS[arch], n);
         let name = cx.new(|cx| {
             let mut i = TextInput::new("run name", cx);
             i.set_text(suggested.clone(), cx);
@@ -139,9 +141,10 @@ impl FoloApp {
         let fh = name.read(cx).focus_handle(cx);
         let epochs_input = cx.new(|cx| {
             let mut i = TextInput::new("100", cx);
-            i.set_text("100", cx);
+            i.set_text(format!("{epochs:.0}"), cx);
             i
         });
+        let close = auto_close_mosaic(epochs.round() as u32);
         let lr_input = cx.new(|cx| {
             let mut i = TextInput::new("0.01", cx);
             i.set_text("0.010", cx);
@@ -149,7 +152,7 @@ impl FoloApp {
         });
         let close_input = cx.new(|cx| {
             let mut i = TextInput::new("10", cx);
-            i.set_text("10", cx);
+            i.set_text(close.to_string(), cx);
             i
         });
         let hours_input = cx.new(|cx| {
@@ -240,10 +243,10 @@ impl FoloApp {
             name,
             name_suggested: Some(suggested),
             dataset: idx,
-            arch: 1,
-            epochs: 100.0,
+            arch,
+            epochs,
             batch: batch_index(16),
-            imgsz: 2,
+            imgsz,
             device: 0,
             optimizer: 0,
             optimizer_unknown: false,
@@ -251,7 +254,7 @@ impl FoloApp {
             mosaic: 1.0,
             mixup: 0.0,
             fliplr: 0.5,
-            close_mosaic: 10.0,
+            close_mosaic: close as f32,
             scale: 0.5,
             note: None,
             base: None,
@@ -516,6 +519,8 @@ impl FoloApp {
                         }
                         // An earlier, dismissed submission leaves the form now open alone.
                         if mine {
+                            // The next New run starts from these choices.
+                            this.new_run_last = this.new_run.as_ref().map(|f| (f.arch, f.imgsz, f.epochs));
                             this.new_run = None;
                             this.overlay_return = None;
                             let prev = std::mem::replace(&mut this.route, Route::Run(id));
