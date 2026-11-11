@@ -46,8 +46,8 @@ function deferred<T>() {
 }
 
 /** The fresh job's page with image `image` open in the editor (its 40 images are pending, without boxes). */
-async function openEditor(image = '1') {
-  const at = `#/datasets/label/lb_7c21?image=${image}`;
+async function openEditor(image = '1', job = 'lb_7c21') {
+  const at = `#/datasets/label/${job}?image=${image}`;
   history.replaceState(null, '', at);
   router.route = parse(at);
   c = mount(LabelJobPage, { target });
@@ -290,6 +290,34 @@ describe('the labeling editor: asking the agent again', () => {
       expect(line()).toMatch(/New boxes/);
     });
     expect(line()).not.toMatch(/is labeling this image again/);
+  });
+});
+
+describe('the labeling editor: reviewing', () => {
+  // lb_51d0: 36 images labeled, the first 22 reviewed.
+  it('marks labels that look right reviewed with Enter and opens the next image to review', async () => {
+    await openEditor('23', 'lb_51d0');
+    expect(footer()).toMatch(/Labels right\?/);
+    expect(inEditor('Save')).toBeUndefined();
+    expect(key('Enter').defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(router.route.query.get('image')).toBe('24'));
+    const page = await hub.api.labelImages('lb_51d0', { limit: 24 });
+    expect(page.images[22]).toMatchObject({ id: '23', source: 'agent', reviewed: true });
+    expect(page.images[23]!.reviewed).toBe(false);
+  });
+
+  it('says a reviewed image is reviewed, and can take it back; Enter on a button is the button’s', async () => {
+    await openEditor('5', 'lb_51d0');
+    expect(footer()).toMatch(/^Reviewed\./);
+    expect(inEditor('Looks right')).toBeUndefined();
+    expect(key('Enter').defaultPrevented).toBe(false);
+    click(inEditor('Mark not reviewed'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(inEditor('Looks right')).toBeDefined();
+    });
+    expect(key('Enter', {}, inEditor('Discard')!).defaultPrevented).toBe(false);
+    expect(router.route.query.get('image')).toBe('5');
   });
 });
 

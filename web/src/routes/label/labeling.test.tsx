@@ -277,6 +277,13 @@ describe('the job page', () => {
     expect(primaries()).toHaveLength(1);
     expect(text()).toMatch(/Tokens and cost as reported by the agent/);
     expect(button('Label all again')).toBeTruthy();
+    // How far review has got: in the header, and as filters.
+    await vi.waitFor(() => {
+      flushSync();
+      expect(text()).toMatch(/22 of 36 reviewed/);
+    });
+    const chips = [...document.querySelectorAll('[role="radio"]')].map((r) => r.textContent?.trim());
+    expect(chips).toEqual(expect.arrayContaining(['To review14', 'Reviewed22']));
   });
 
   it('after a failed run: its cause, the fix and Try again', async () => {

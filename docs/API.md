@@ -770,9 +770,11 @@ exported more than once.
   `{ "total", "images": [LabelImage] }`, in the order the images were added. `limit` defaults to 100 and is capped
   at 1000; `total` counts all matches before `offset` / `limit`; any other `status` is `400 invalid_query`.
 - `GET /api/label/jobs/{id}/images/{image_id}` → the image bytes; `?thumb=256` as for dataset images.
-- `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes": [Box] }` → `LabelImage`: labels drawn by hand.
-  They replace the image's boxes; the image becomes `labeled` with `source: "manual"` (an empty list labels it
-  as a background image). Boxes are clipped to the image; one with a `class` outside the job's classes, a
+- `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes"?: [Box], "reviewed"?: bool }` → `LabelImage`:
+  labels drawn by hand, and whether a person checked them. `boxes` replace the image's boxes; the image becomes
+  `labeled` with `source: "manual"` and `reviewed: true` (an empty list labels it as a background image).
+  `reviewed` alone marks the labels it has as checked (or not) and leaves boxes and `source` alone; only a
+  `labeled` image can be marked reviewed (`400 invalid_body` otherwise, and for a body with neither field). Boxes are clipped to the image; one with a `class` outside the job's classes, a
   non-finite coordinate, or less than a pixel left after clipping is `400 invalid_body`, as are more than 1000
   boxes. `409 label_job_active` while the image is in an agent call (`labeling`). Every other image of a running
   job can be edited: one that still waited for the run leaves it (`run.total` drops by one), so labels drawn by
@@ -875,7 +877,8 @@ exported more than once.
   "status": "pending|labeling|labeled|failed",
   "boxes": [Box],                       // pixel xyxy; kept while the image is labeled again
   "source": null | "agent|manual",      // who drew `boxes`
-  "error": null | "..." }               // why the last agent call failed
+  "error": null | "...",                // why the last agent call failed
+  "reviewed": false }                   // a person checked its labels (labeled images only); an agent run clears it
 // StartLabeling (only agent is required; the rest shows the defaults)
 { "agent": "claude", "model": null, "effort": null, "scope": "unlabeled", "image_ids": null, "note": "",
   "batch": null, "parallel": null }

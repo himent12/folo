@@ -92,5 +92,6 @@ export function imageState(img: LabelImage): string {
   if (img.status === 'pending') return 'Not labeled yet';
   const n = img.boxes.length;
   const what = n === 0 ? 'No objects' : `${num(n)} ${n === 1 ? 'box' : 'boxes'}`;
-  return img.source === 'manual' ? `${what}, edited by hand` : `${what}, drawn by the agent`;
+  const by = img.source === 'manual' ? `${what}, edited by hand` : `${what}, drawn by the agent`;
+  return img.reviewed ? `${by}, reviewed` : by;
 }

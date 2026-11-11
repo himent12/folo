@@ -186,6 +186,7 @@ impl Labeler {
                 boxes: Vec::new(),
                 source: None,
                 error: None,
+                reviewed: false,
             });
         }
         let added: Vec<LabelImage> = state.file.images[first_new..].iter().map(|r| state.image(r)).collect();
@@ -250,13 +251,23 @@ impl Labeler {
         })
     }
 
-    /// `PUT /api/label/jobs/{id}/images/{image_id}`: boxes drawn by hand.
+    /// `PUT /api/label/jobs/{id}/images/{image_id}`: boxes drawn by hand, and whether a person checked the labels.
     pub fn update_image(&self, id: &str, image_id: &str, req: UpdateLabelImage) -> Result<LabelImage> {
         let job = self.job(id)?;
         let mut state = job.live()?;
         let classes = state.file.classes.len();
         let record = state.record(image_id)?;
-        let boxes = check_boxes(&req.boxes, classes, (record.width, record.height))?;
+        let boxes = match &req.boxes {
+            Some(boxes) => Some(check_boxes(boxes, classes, (record.width, record.height))?),
+            None if req.reviewed.is_none() => return Err(invalid("give `boxes`, `reviewed` or both")),
+            // Only labels can be right: an image without them is saved with its boxes (none: a background image).
+            None if req.reviewed == Some(true) && record.status != LabelImageStatus::Labeled => {
+                return Err(invalid(format!(
+                    "image '{image_id}' has no labels to mark reviewed: save its boxes instead"
+                )));
+            }
+            None => None,
+        };
         // What the change replaces, to put back when it cannot be saved ([`State::claim`] takes the image out of
         // a run waiting for it).
         let old = record.clone();
@@ -264,10 +275,16 @@ impl Labeler {
         let total = state.file.run.as_ref().map(|r| r.total);
         state.claim(image_id)?;
         let record = state.record_mut(image_id).expect("the record was just read");
-        record.boxes = boxes;
-        record.status = LabelImageStatus::Labeled;
-        record.source = Some(LabelSource::Manual);
-        record.error = None;
+        if let Some(boxes) = boxes {
+            record.boxes = boxes;
+            record.status = LabelImageStatus::Labeled;
+            record.source = Some(LabelSource::Manual);
+            record.error = None;
+            record.reviewed = true;
+        }
+        if let Some(reviewed) = req.reviewed {
+            record.reviewed = reviewed;
+        }
         if let Err(e) = job.save(&state) {
             *state.record_mut(image_id).expect("the record was just read") = old;
             if let (Some(run), Some(total)) = (state.file.run.as_mut(), total) {

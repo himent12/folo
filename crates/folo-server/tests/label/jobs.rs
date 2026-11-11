@@ -335,3 +335,40 @@ async fn folder_images_are_read_in_place() {
     send(app, delete(&format!("/api/label/jobs/{}", job.id))).await;
     assert!(photos.join("a.png").is_file() && photos.join("day 2").join("a.png").is_file());
 }
+
+#[tokio::test]
+async fn a_person_marks_images_reviewed_and_the_agent_relabeling_one_clears_it() {
+    let t = TestDir::new("label-reviewed");
+    let f = fixture(&t.join("home"), vec![]);
+    let app = &f.app;
+    let job = job_with_images(app, 3).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    let page = images(app, &job.id, "").await;
+    let (a, b) = (page.images[0].id.clone(), page.images[1].id.clone());
+    let image = |id: &str| format!("{uri}/images/{id}");
+
+    // Without labels there is nothing to mark right; a request asking nothing is refused.
+    let none = put(&image(&a), json!({ "reviewed": true }));
+    assert!(err(app, none, StatusCode::BAD_REQUEST, "invalid_body").await.message.contains("save its boxes"));
+    err(app, put(&image(&a), json!({})), StatusCode::BAD_REQUEST, "invalid_body").await;
+
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    idle(app, &job.id).await;
+    let labeled = images(app, &job.id, "").await;
+    assert!(labeled.images.iter().all(|i| i.status == LabelImageStatus::Labeled && !i.reviewed));
+
+    // "Looks right": the agent's boxes stay its own, now reviewed. Saved boxes are reviewed too, and it can be undone.
+    let right: LabelImage = ok(app, put(&image(&a), json!({ "reviewed": true }))).await;
+    assert_eq!((right.reviewed, right.source), (true, Some(LabelSource::Agent)));
+    assert_eq!(right.boxes, labeled.images[0].boxes);
+    let saved: LabelImage = ok(app, put(&image(&b), json!({ "boxes": [] }))).await;
+    assert!(saved.reviewed);
+    let undone: LabelImage = ok(app, put(&image(&b), json!({ "reviewed": false }))).await;
+    assert_eq!((undone.reviewed, undone.source), (false, Some(LabelSource::Manual)));
+
+    // The agent labels the reviewed image again: its new boxes are not reviewed.
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), json!({ "agent": "claude", "image_ids": [a] }))).await;
+    idle(app, &job.id).await;
+    let again = images(app, &job.id, "").await;
+    assert_eq!((again.images[0].source, again.images[0].reviewed), (Some(LabelSource::Agent), false));
+}

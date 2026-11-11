@@ -392,6 +392,10 @@ pub struct LabelImage {
     pub source: Option<LabelSource>,
     /// Why the last agent call for it failed (`status: failed`), else `null`.
     pub error: Option<String>,
+    /// A person checked its labels: saved boxes drawn by hand, or marked them right. Only a `labeled` image is
+    /// reviewed; an agent that labels it again clears it.
+    #[serde(default)]
+    pub reviewed: bool,
 }
 
 /// `GET /api/label/jobs/{id}/images`.
@@ -408,8 +412,12 @@ pub struct LabelImagePage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UpdateLabelImage {
-    /// The image's boxes, pixel `xyxy`, replacing what it has.
-    pub boxes: Vec<BBox>,
+    /// The image's boxes, pixel `xyxy`, replacing what it has; absent: they stay (to mark them reviewed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boxes: Option<Vec<BBox>>,
+    /// Marks the image reviewed or not; absent: reviewed when `boxes` are given, else unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed: Option<bool>,
 }
 
 /// Which images an agent run labels.

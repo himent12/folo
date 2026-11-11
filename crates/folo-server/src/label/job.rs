@@ -43,6 +43,9 @@ pub struct Record {
     pub boxes: Vec<BBox>,
     pub source: Option<LabelSource>,
     pub error: Option<String>,
+    /// A person checked its labels (see `LabelImage::reviewed`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reviewed: bool,
 }
 
 /// `job.json`.
@@ -160,6 +163,7 @@ impl State {
             boxes: r.boxes.clone(),
             source: r.source,
             error: r.error.clone(),
+            reviewed: r.reviewed && r.status == LabelImageStatus::Labeled,
         }
     }
 
@@ -478,6 +482,7 @@ mod tests {
             boxes: vec![BBox { class: 0, x1: 0.0, y1: 0.0, x2: 5.0, y2: 5.0 }; boxes],
             source: None,
             error: None,
+            reviewed: false,
         };
         file.images = vec![
             record("1", LabelImageStatus::Pending, 0),
