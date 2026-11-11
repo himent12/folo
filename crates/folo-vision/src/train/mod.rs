@@ -33,6 +33,9 @@
 //!
 //! The device is a parameter: inputs, the loss and the optimizers follow the model's device, which
 //! [`place_model`] sets (`Module::to_device`).
+//!
+//! [`detection_loss`]: crate::loss::detection_loss
+//! [`dual_loss`]: crate::loss::dual_loss
 
 mod checkpoint;
 mod config;

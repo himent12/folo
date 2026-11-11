@@ -74,7 +74,7 @@ unsafe fn arows_kernel_avx2_entry(
     unsafe { arows_kernel_avx2(kc, a, b, c, ldc, mr, nr, acc) }
 }
 
-/// AVX2/FMA [`ARowsKernel`]: [`kernel_avx2`] with the six A values of each K step broadcast from six rows.
+/// AVX2/FMA [`ARowsKernel`]: `kernel_avx2` with the six A values of each K step broadcast from six rows.
 ///
 /// # Safety
 /// As [`arows_kernel_generic`], and the CPU supports AVX2 and FMA.

@@ -18,7 +18,7 @@ const SMALL_C_MAX_K: usize = 256;
 /// Below this many flops [`small_c_forward`] runs on the calling thread (the GEMM's threshold).
 const SMALL_C_PAR_FLOPS: usize = 1 << 21;
 
-/// Whether [`conv2d_forward_parts`] (overwriting) takes [`small_c_forward`].
+/// Whether [`super::conv2d_forward_parts`] (overwriting) takes [`small_c_forward`].
 pub(super) fn uses_small_c(g: &ConvGeom) -> bool {
     g.p.groups == 1 && g.c <= SMALL_C && !g.is_pointwise() && g.ohw() > 0 && g.kdim() <= SMALL_C_MAX_K
 }

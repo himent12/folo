@@ -1,5 +1,7 @@
 //! The loss on a folo-gpu device: [`folo_gpu::detect`]'s kernels (assigner, fused BCE, fused CIoU + DFL), and
 //! their assignment downloaded in [`assign_batch`]'s form for tests and tools.
+//!
+//! [`assign_batch`]: super::assign_batch
 
 use folo_core::{Result, Tensor};
 
@@ -60,6 +62,9 @@ pub(super) fn detection_loss_device(
 
 /// [`assign_batch`] on a folo-gpu device (the kernels [`detection_loss`] uses there), downloaded into the same
 /// [`BatchAssignment`] form (image, then anchor order). For tests and tools: training never downloads it.
+///
+/// [`assign_batch`]: super::assign_batch
+/// [`detection_loss`]: super::detection_loss
 pub fn assign_batch_device(
     box_raw: &Tensor,
     cls_raw: &Tensor,

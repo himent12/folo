@@ -83,7 +83,7 @@ unsafe fn rows_kernel_avx2_entry(
     unsafe { rows_kernel_avx2(kc, a, rows, j, c, ldc, mr, acc, epi) }
 }
 
-/// AVX2/FMA 6x16 [`RowsKernel`]: the 6x16 register tile of [`kernel_avx2`], with each B row loaded from its
+/// AVX2/FMA 6x16 [`RowsKernel`]: the 6x16 register tile of `kernel_avx2`, with each B row loaded from its
 /// own pointer instead of a packed panel.
 ///
 /// # Safety
@@ -169,7 +169,9 @@ pub(crate) struct ColumnMap {
 /// `out = A * B` for an `m x k` A and a `k x n` B given by row pointers (read in place, never packed), with
 /// C's columns mapped into `out` (row stride `map.ow * (n / map.wp)`) by `map`. `epi` applies to every
 /// finished output element once, as in [`gemm_ex`]. Tiles, K order and therefore results are those of
-/// [`gemm_blocked`]: each element is summed over `KC` blocks in order by one task, whatever `threads` is.
+/// `gemm_blocked`: each element is summed over `KC` blocks in order by one task, whatever `threads` is.
+///
+/// [`gemm_ex`]: super::gemm_ex
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gemm_rows<A: Operand>(
     m: usize,

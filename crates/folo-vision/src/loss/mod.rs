@@ -34,6 +34,8 @@
 //!
 //! Every sum over many elements is a fixed tree of per-row sums, so the loss and its gradients do not depend on
 //! thread scheduling: repeated runs are bitwise identical.
+//!
+//! [`assign`]: crate::assign::assign
 
 mod assignment;
 mod device;

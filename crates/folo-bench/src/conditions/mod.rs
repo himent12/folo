@@ -18,10 +18,12 @@
 
 mod catalog;
 mod encoding;
+mod render;
 mod transform;
 
 pub use catalog::markdown_table;
-pub use encoding::{Rendered, decode, encode_jpeg, render, variant_seed};
+pub use encoding::{decode, encode_jpeg, variant_seed};
+pub use render::{Rendered, render};
 pub use transform::{apply, moved_boxes};
 
 /// The JPEG quality of the canonical encoding of a variant ([`encode_jpeg`]).

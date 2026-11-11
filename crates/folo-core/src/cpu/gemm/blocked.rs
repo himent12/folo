@@ -124,6 +124,8 @@ pub(super) fn pack_lhs_panels(
 ///
 /// The result does not depend on `threads`: every element of C is computed by one task in a fixed K order, and
 /// the K split (see [`k_split_parts`]) is a function of the shape only.
+///
+/// [`gemm`]: super::gemm
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gemm_ex<A: Operand, B: Operand>(
     m: usize,

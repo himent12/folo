@@ -15,6 +15,8 @@ use crate::cpu::gemm::{ColumnMap, NR};
 ///
 /// Planes are spaced an odd number of cache lines apart: rows of B that are a whole number of 4 KiB pages
 /// apart (as the planes of a 160x160 or 80x80 image are) would all compete for the same L1 sets.
+///
+/// [`gemm_rows`]: crate::cpu::gemm::gemm_rows
 pub(super) struct ShiftedRows {
     /// The phase planes, with slack after the last one.
     pub(super) buf: Vec<f32>,

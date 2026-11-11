@@ -172,6 +172,9 @@ pub fn ciou(b1: &Tensor, b2: &Tensor) -> Result<Tensor> {
 ///
 /// The assignment is a constant, so this is the function whose gradient training uses; [`detection_loss`] is
 /// `assign_batch` followed by this. Errors if the assignment does not match the outputs' shapes.
+///
+/// [`assign_batch`]: super::assign_batch
+/// [`detection_loss`]: super::detection_loss
 pub fn loss_with_assignment(
     box_raw: &Tensor,
     cls_raw: &Tensor,

@@ -20,6 +20,8 @@ pub(super) fn input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
 
 /// Marks every object schema with `properties` (the root and the `$defs`) `additionalProperties: false`: tools
 /// reject arguments they do not know ([`unknown_argument`]) instead of silently ignoring a typo.
+///
+/// [`unknown_argument`]: super::arguments::unknown_argument
 fn close_objects(s: &mut JsonObject) {
     if s.contains_key("properties") && !s.contains_key("additionalProperties") {
         s.insert("additionalProperties".into(), Value::Bool(false));
