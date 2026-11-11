@@ -118,6 +118,9 @@ The API is GPUI's where the app uses it. Below it, these differ by design:
   colours, grid placement.
 - The text element truncates a copy of its runs on every measure (GPUI 0.2.2 shortened them in place, which
   sliced multi-byte characters on a later measure and panicked; the app carried a patched GPUI for it).
+- The line layout cache's key for a wrapped line holds the line limit (`line_clamp`), so a text drawn
+  with two clamps, in one frame or one after the other, is wrapped to each (GPUI 0.2.2's key left it
+  out: the first clamp asked for a text, font and width was reused, also in later frames).
 - A shown tooltip hides on the mouse move that leaves its element (GPUI 0.2.2 waited for the next
   prepaint, so a tooltip on an element without a hover style stayed up), and a tooltip's timer and
   visibility callback hold its state weakly (GPUI's cycle leaked the state and the tooltip view once the

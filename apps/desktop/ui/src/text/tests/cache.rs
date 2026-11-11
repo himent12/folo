@@ -109,3 +109,24 @@ fn truncated_layouts_are_not_carried_over_by_reuse() {
     shape(&window, "discarded", 13.);
     assert_eq!(platform.layout_calls(), 3);
 }
+
+#[test]
+fn the_line_clamp_is_part_of_a_wrapped_key() {
+    let (platform, window) = counting();
+    let text = SharedString::from("alpha beta gamma delta epsilon zeta eta theta");
+    let one = runs(&[text.len()]);
+    let lines = |clamp| {
+        let lines = window.shape_text(text.clone(), px(10.), &one, Some(px(65.)), clamp).unwrap();
+        lines.iter().map(|line| line.wrap_boundaries().len() + 1).sum::<usize>()
+    };
+    // Within a frame, and in later frames, in both orders.
+    assert_eq!((lines(Some(2)), lines(Some(4)), lines(None)), (2, 4, 7));
+    window.finish_frame();
+    assert_eq!((lines(Some(4)), lines(Some(2))), (4, 2));
+    // The clamps share one shaped line.
+    assert_eq!(platform.layout_calls(), 1);
+    window.finish_frame();
+    assert_eq!(lines(Some(4)), 4);
+    window.finish_frame();
+    assert_eq!(lines(Some(2)), 2);
+}

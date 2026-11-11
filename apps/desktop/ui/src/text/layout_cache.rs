@@ -1,6 +1,10 @@
 // Adapted from GPUI (Apache-2.0): crates/gpui/src/text_system/line_layout.rs (LineLayoutCache)
 //! The per-window line layout cache: layouts used in the previous frame are kept and reused, and
 //! `finish_frame` swaps the frames, so a frame whose text did not change shapes nothing.
+//!
+//! A key holds everything a layout depends on: the text, size, font runs, wrap width and line limit (a
+//! wrapped layout's boundaries stop at the limit; GPUI's key leaves it out, so the first clamp asked
+//! for a text and width won, even in later frames).
 
 use super::fx_hash::FxHashMap;
 use crate::{FontRun, LineLayout, Pixels, PlatformTextSystem, SharedString, WrappedLineLayout, px};
@@ -106,8 +110,11 @@ impl LineLayoutCache {
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
-        let key = &CacheKeyRef { text: text.as_ref(), font_size, runs, wrap_width, force_width: None }
-            as &dyn AsCacheKeyRef;
+        // Without a wrap width there are no boundaries to limit.
+        let max_lines = wrap_width.and(max_lines);
+        let key =
+            &CacheKeyRef { text: text.as_ref(), font_size, runs, wrap_width, max_lines, force_width: None }
+                as &dyn AsCacheKeyRef;
 
         let current_frame = self.current_frame.upgradable_read();
         if let Some(layout) = current_frame.wrapped_lines.get(key) {
@@ -135,6 +142,7 @@ impl LineLayoutCache {
                 font_size,
                 runs: SmallVec::from(runs),
                 wrap_width,
+                max_lines,
                 force_width: None,
             });
 
@@ -157,8 +165,14 @@ impl LineLayoutCache {
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
-        let key = &CacheKeyRef { text: text.as_ref(), font_size, runs, wrap_width: None, force_width }
-            as &dyn AsCacheKeyRef;
+        let key = &CacheKeyRef {
+            text: text.as_ref(),
+            font_size,
+            runs,
+            wrap_width: None,
+            max_lines: None,
+            force_width,
+        } as &dyn AsCacheKeyRef;
 
         let current_frame = self.current_frame.upgradable_read();
         if let Some(layout) = current_frame.lines.get(key) {
@@ -192,6 +206,7 @@ impl LineLayoutCache {
                 font_size,
                 runs: SmallVec::from(runs),
                 wrap_width: None,
+                max_lines: None,
                 force_width,
             });
             let layout = Arc::new(layout);
@@ -212,6 +227,7 @@ struct CacheKey {
     font_size: Pixels,
     runs: SmallVec<[FontRun; 1]>,
     wrap_width: Option<Pixels>,
+    max_lines: Option<usize>,
     force_width: Option<Pixels>,
 }
 
@@ -221,6 +237,7 @@ struct CacheKeyRef<'a> {
     font_size: Pixels,
     runs: &'a [FontRun],
     wrap_width: Option<Pixels>,
+    max_lines: Option<usize>,
     force_width: Option<Pixels>,
 }
 
@@ -245,6 +262,7 @@ impl AsCacheKeyRef for CacheKey {
             font_size: self.font_size,
             runs: self.runs.as_slice(),
             wrap_width: self.wrap_width,
+            max_lines: self.max_lines,
             force_width: self.force_width,
         }
     }

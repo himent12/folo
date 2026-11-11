@@ -107,3 +107,58 @@ fn text_height_is_lines_times_line_height() {
     let quad = super::quads(&scene).into_iter().find(|q| super::solid(q) == rgb(0x123456).into()).unwrap();
     assert_eq!(quad.bounds, super::sb(0., 0., 40., 40.));
 }
+
+/// The reviewer's case: only the clamp changes between frames. Each frame must show what a new window
+/// with that clamp shows (the line layout cache once kept the first clamp's wrapping).
+#[test]
+fn changing_only_the_line_clamp_rewraps_in_the_next_frame() {
+    use crate::AppContext as _;
+    use std::{cell::Cell, rc::Rc};
+    const TEXT: &str = "alpha beta gamma delta epsilon zeta eta theta";
+    fn view(
+        clamp: Rc<Cell<usize>>,
+    ) -> impl FnMut(&mut crate::Window, &mut crate::Context<super::TestView>) -> crate::AnyElement {
+        move |_, _| text_box(65.).line_clamp(clamp.get()).child(TEXT).into_any_element()
+    }
+    let fresh = |clamp: usize| {
+        let (mut app, window) = open(view(Rc::new(Cell::new(clamp))));
+        let scene = draw(&mut app, window);
+        (lines(&sprites(&scene)).len(), app.frame(window).pixels.clone())
+    };
+    for (from, to) in [(2, 4), (4, 2)] {
+        let clamp = Rc::new(Cell::new(from));
+        let (mut app, window) = open(view(clamp.clone()));
+        draw(&mut app, window);
+        clamp.set(to);
+        app.update(|cx| cx.update_window(window, |_, window, _| window.refresh())).unwrap();
+        let scene = draw(&mut app, window);
+        let (want_lines, want_pixels) = fresh(to);
+        assert_eq!(want_lines, to, "clamp {to} limits the text");
+        assert_eq!(lines(&sprites(&scene)).len(), want_lines, "clamp {from} -> {to}: lines");
+        assert!(app.frame(window).pixels == want_pixels, "clamp {from} -> {to}: pixels");
+    }
+}
+
+/// Two elements with the same text, font and width but different clamps, in one frame: each is wrapped
+/// to its own clamp, whichever comes first.
+#[test]
+fn two_clamps_of_one_text_in_one_frame_wrap_independently() {
+    const TEXT: &str = "alpha beta gamma delta epsilon zeta eta theta";
+    for (first, second) in [(2, 4), (4, 2)] {
+        let (mut app, window) = open(move |_, _| {
+            div()
+                .flex()
+                .flex_row()
+                .child(text_box(65.).line_clamp(first).child(TEXT))
+                .child(text_box(65.).line_clamp(second).child(TEXT))
+                .into_any_element()
+        });
+        let sprites = sprites(&draw(&mut app, window));
+        let column = |left: bool| {
+            let sprites: Vec<_> =
+                sprites.iter().filter(|s| (s.bounds.origin.x.0 < 65.) == left).cloned().collect();
+            lines(&sprites).len()
+        };
+        assert_eq!((column(true), column(false)), (first, second));
+    }
+}

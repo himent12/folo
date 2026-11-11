@@ -61,12 +61,13 @@ fn random_node(rng: &mut Rng, depth: u32) -> Node {
 /// Changes one random thing (a text, a style, a child added or removed), or nothing.
 fn mutate(rng: &mut Rng, node: &mut Node) {
     match node {
-        Node::Text { words, nowrap, truncate, .. } => match rng.below(4) {
+        Node::Text { words, nowrap, truncate, clamp } => match rng.below(5) {
             0 => words.push(rng.below(WORDS.len() as u64) as usize),
             1 if words.len() > 1 => {
                 words.pop();
             }
             2 => *nowrap = !*nowrap,
+            3 => *clamp = !*clamp,
             _ => *truncate = !*truncate,
         },
         Node::Box { children, kind, width, grow, .. } => {

@@ -118,11 +118,7 @@ fn line_clamp_limits_the_wrapped_lines() {
     let lines =
         window.shape_text(text.into(), px(16.), &runs(&[text.len()]), Some(px(72.)), Some(2)).unwrap();
     assert_eq!(lines[0].wrap_boundaries().len(), 1);
-    // The clamp is not part of GPUI's cache key: within a frame the first clamp wins.
-    let lines =
-        window.shape_text(text.into(), px(16.), &runs(&[text.len()]), Some(px(72.)), Some(1)).unwrap();
-    assert_eq!(lines[0].wrap_boundaries().len(), 1);
-    let window = window_text_system();
+    // The clamp is part of the cache key (GPUI's is not, so there the first clamp won).
     let lines =
         window.shape_text(text.into(), px(16.), &runs(&[text.len()]), Some(px(72.)), Some(1)).unwrap();
     assert!(lines[0].wrap_boundaries().is_empty());

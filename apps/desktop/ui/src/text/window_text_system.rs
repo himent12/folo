@@ -106,7 +106,6 @@ impl WindowTextSystem {
 
         let mut lines = SmallVec::new();
         let mut line_start = 0;
-        let max_wrap_lines = line_clamp.unwrap_or(usize::MAX);
         let mut wrapped_lines = 0;
 
         let mut process_line = |line_text: SharedString| {
@@ -165,7 +164,9 @@ impl WindowTextSystem {
                 font_size,
                 &font_runs,
                 wrap_width,
-                Some(max_wrap_lines - wrapped_lines),
+                // The lines this one may still use (GPUI passes `usize::MAX` less the lines so far
+                // when there is no clamp, which limits nothing).
+                line_clamp.map(|max_lines| max_lines - wrapped_lines),
             );
             wrapped_lines += layout.wrap_boundaries.len();
 
