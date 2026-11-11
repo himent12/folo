@@ -33,7 +33,7 @@ own review loop; the orchestrator merges.
   `docs/ROADMAP.md`, and starts the next wave. On a merge conflict it asks the implementer (or a new one) to rebase.
 
 ## UI threads
-`web/` (Studio) and `apps/desktop/` (GPUI) each have a long-running top-level thread that hill-climbs its UI:
+`web/` (Studio) and `apps/desktop/` (Desktop) each have a long-running top-level thread that hill-climbs its UI:
 build → screenshot every screen and state → two independent design reviews (Claude Opus 5.5 and GPT-6.1 Sol) that
 score a fixed rubric 1–10 → fix → repeat until **both reviewers give ≥ 9 on every rubric line**. Each round lands as a
 PR through the same review loop above.

@@ -10,7 +10,7 @@ source of truth; both apps generate their theme from it and never hard-code a co
   documented as told apart stay apart under colour-vision deficiency (OKLab ΔE ≥ 7, ×100, under normal vision and
   simulated protan / deutan / tritan: adjacent chart series, the loss components). `npm run check` (CI's web job)
   runs it, so a token change that breaks a pairing fails CI. Add a rule there when you document a new pairing here.
-- Desktop: a Rust generator reads `tokens.json` and writes the GPUI theme.
+- Desktop: a Rust generator (`apps/desktop/build.rs`) reads `tokens.json` and writes the theme's tables.
 
 ## Character
 Precise, fast, instrument-grade: Linear × Vercel × a camera viewfinder. Dense but calm. The content (detection boxes,

@@ -3,7 +3,7 @@
 **FOLO Only Looks Once.** A from-scratch, very fast vision framework in Rust: a YOLO-style real-time object detector
 with its own tensors, autograd, CPU kernels and GPU kernels (wgpu: Vulkan, DX12, Metal, and WebGPU in the browser),
 plus training, evaluation and export. You drive it from one `folo` binary, an HTTP API, an MCP server for agents,
-**FOLO Studio** (a web app) or **FOLO Desktop** (a native GPUI app).
+**FOLO Studio** (a web app) or **FOLO Desktop** (a native app).
 
 - **One binary, no Python.** `folo train`, `val`, `predict`, `export`, `serve` and `mcp` run on the same Rust engine.
   No PyTorch or CUDA toolkit is needed: the GPU kernels are our own WGSL, so a Vulkan, DX12 or Metal GPU that meets
@@ -154,8 +154,8 @@ in-browser module.
 
 ![FOLO Desktop: a live training run](docs/img/desktop-run-live.webp)
 
-The same screens, built natively in Rust on [GPUI](https://gpui.rs) (Zed's GPU-accelerated UI framework). It also has
-a command palette, keyboard navigation, and dark and light themes. It talks to a local `folo serve` over the same
+The same screens, built natively in Rust on folo-ui, its own UI framework (rendered on the CPU, so the GPU stays free
+for training and inference). It also has a command palette, keyboard navigation, and dark and light themes. It talks to a local `folo serve` over the same
 HTTP API. If no server answers on `$FOLO_SERVER` (default `http://127.0.0.1:7878`), it starts a local `folo serve`
 for you, empty until you add datasets and runs (its data dir is `$FOLO_HOME` or `~/.folo`). `--server` points it at
 another server, and `--mock` (or Settings › Connection) shows the built-in demo data.
@@ -168,7 +168,7 @@ cargo run --release -- --server http://127.0.0.1:7878 # a specific server
 
 ![FOLO Desktop: the image inspector](docs/img/desktop-inspector.webp)
 
-Desktop is its own cargo workspace, so the engine's builds and CI stay GPUI-free. See
+Desktop is its own cargo workspace (the app and folo-ui), so the engine's builds and CI do not build it. See
 [apps/desktop/README.md](apps/desktop/README.md).
 
 ## Use FOLO from an agent

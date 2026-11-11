@@ -47,7 +47,7 @@ The components are fine; the page structure is not.
   - Focus rings and the best dot.
   - Running in a table is a lime dot with plain text.
 - **Truncation:** every truncating element gets a fixed width per breakpoint; breakpoints drop whole columns rather
-  than relying on flex shrink (GPUI truncates against pre-shrink width).
+  than relying on flex shrink (text truncates against pre-shrink width).
 - **Motion:** live points ease in 240 ms, the tab underline 160 ms, hover 120 ms, popovers 160–200 ms. Numbers never
   animate.
 

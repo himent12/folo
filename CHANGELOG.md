@@ -114,6 +114,15 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 - The window opens where it was closed: its size, place and maximized or full-screen state, and the theme, are
   kept in `~/.folo/desktop.json` (not for `--scenario`, `--width` or `--height`). It reopens on the display it
   was on, also with displays at different scales; a place on a display that is gone opens centred on the main one.
+- FOLO Desktop runs on its own UI framework, **folo-ui** ([apps/desktop/ui/README.md](apps/desktop/ui/README.md)),
+  instead of GPUI. Nothing you see changes: the same screens, layout, text, colours, keys and window behaviour.
+  It is lighter: the UI renders on the CPU and redraws only what changed, so it takes no GPU memory (GPUI held
+  48–93 MB of it), about half the working set, and a smaller binary (release build 41.7 → 33.9 MB).
+- For developers: folo-ui keeps GPUI's API for what the app uses, so the app's code reads as before; the
+  vendored GPUI and its patch are gone. `tools/shoot.ps1` and `shoot-all.ps1` render headless through
+  `folo-desktop --shot` (no window, no cursor; every scenario in about 25 s, `-Scale` instead of the display's);
+  `capture.ps1`, `capture-all.ps1` and `perf.ps1` check the real window off screen. CI now also builds and tests
+  the app on Linux, renders a headless screenshot there, and type-checks folo-ui for macOS.
 
 ### Server
 - DNS rebinding: a server on loopback (the default `--host 127.0.0.1`, also `--mock`) answers only requests whose
