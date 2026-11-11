@@ -1,3 +1,5 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/text_system/line_wrapper.rs (tests),
+// crates/gpui/src/elements/text.rs (folo_truncation_tests)
 //! GPUI's `LineWrapper` tests (`text_system/line_wrapper.rs`), and the FOLO truncation tests
 //! (`elements/text.rs`, `folo_truncation_tests`) against the non-mutating `truncate_line`.
 

@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/direct_write.rs (state, add_fonts)
 //! The DirectWrite `PlatformTextSystem` (Windows), used the way GPUI 0.2.2 uses it
 //! (`platform/windows/direct_write.rs`): the same calls with the same parameters, so line widths and
 //! glyph masks are identical. Unlike GPUI it creates no GPU device (colour glyph layers are composed on

@@ -248,7 +248,7 @@ impl WindowTextSystem {
         }
 
         let layout =
-            self.line_layout_cache.layout_line(&SharedString::new(text), font_size, &font_runs, force_width);
+            self.line_layout_cache.layout_line(SharedString::new(text), font_size, &font_runs, force_width);
 
         self.font_runs_pool.lock().push(font_runs);
 

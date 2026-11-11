@@ -203,7 +203,7 @@ fn a_glyph_mask_fills_its_raster_bounds() {
     let row = |y: usize| mask[y * w..(y + 1) * w].iter().any(|&a| a > 0);
     let col = |x: usize| (0..h).any(|y| mask[y * w + x] > 0);
     assert!(row(0) && row(h - 1) && col(0) && col(w - 1), "tight bounds");
-    assert!(mask.iter().any(|&a| a == 255), "solid stems");
+    assert!(mask.contains(&255), "solid stems");
     // A space has no raster.
     let space = params(&ts, id, ' ', 13., 1.5, 0);
     assert_eq!(ts.glyph_raster_bounds(&space).unwrap().size.width, DevicePixels(0));
@@ -251,7 +251,7 @@ fn an_emoji_gives_a_colour_mask() {
     let bounds = ts.glyph_raster_bounds(&p).unwrap();
     let (size, bgra) = ts.rasterize_glyph(&p, bounds).unwrap();
     assert_eq!(bgra.len(), size.width.0 as usize * size.height.0 as usize * 4);
-    let pixels: Vec<&[u8]> = bgra.chunks_exact(4).collect();
+    let pixels: &[[u8; 4]] = bgra.as_chunks::<4>().0;
     assert!(pixels.iter().all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]), "premultiplied");
     assert!(pixels.iter().any(|p| p[3] > 200 && p[2] > p[0] + 40), "a warm, opaque face");
     assert!(pixels.iter().any(|p| p[3] == 0), "transparent corners");

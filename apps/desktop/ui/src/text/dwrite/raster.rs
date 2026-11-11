@@ -313,7 +313,7 @@ fn unorm8(value: f32) -> u8 {
 /// `SRC_ALPHA, INV_SRC_ALPHA`; a renderer that wants GPUI's exact emoji pixels applies this to the
 /// BGRA premultiplied mask from `rasterize_glyph` and blends straight.
 pub fn unpremultiply_like_gpui(bgra: &mut [u8]) {
-    for chunk in bgra.chunks_exact_mut(4) {
+    for chunk in bgra.as_chunks_mut::<4>().0 {
         let a = chunk[3] as f32;
         if a > 0.0 {
             let inv_a = 255.0 / a;
@@ -333,7 +333,7 @@ mod tests {
     fn layers_blend_premultiplied_over_each_other() {
         // Identity correction (gamma ratios 0, contrast 0) keeps the coverage as is.
         let blend = GlyphBlend::new([0.; 4], 0.);
-        let mut target = vec![0u8; 2 * 1 * 4];
+        let mut target = vec![0u8; 2 * 4];
         let full = [255u8, 255];
         let red = Layer { left: 0, top: 0, width: 2, height: 1, alpha: &full, color: [1., 0., 0., 1.] };
         compose_layer(&mut target, 2, 1, &red, &blend);

@@ -105,7 +105,12 @@ mod tests {
             assert_eq!(apply_contrast_and_gamma_correction(0.0, color, 1.0, ratios), 0.0);
             assert!((apply_contrast_and_gamma_correction(1.0, color, 1.0, ratios) - 1.0).abs() < 1e-6);
         }
-        // Black text on a light background: edges get heavier.
-        assert!(apply_contrast_and_gamma_correction(0.5, [0., 0., 0.], 1.0, ratios) > 0.5);
+        // Black text, half coverage, worked by hand from the HLSL: contrast k = 1 gives 2/3, then
+        // a + a (1 - a) (g1 a + g3) with g1 = -0.8911 / 4 * 1024 / 255, g3 = -0.3234 / 4 * 1024 / 255.
+        let (g1, g3) = (-0.8911 / 4.0 * 1024.0 / 255.0, -0.3234 / 4.0 * 1024.0 / 255.0);
+        let a: f64 = 2.0 / 3.0;
+        let want = a + a * (1.0 - a) * (g1 * a + g3);
+        let got = apply_contrast_and_gamma_correction(0.5, [0., 0., 0.], 1.0, ratios) as f64;
+        assert!((got - want).abs() < 1e-5, "{got} vs {want}");
     }
 }
