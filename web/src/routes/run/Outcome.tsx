@@ -11,6 +11,7 @@
 import Box from '$icons/box';
 import CircleCheck from '$icons/circle-check';
 import Clock from '$icons/clock';
+import Database from '$icons/database';
 import Play from '$icons/play';
 import RotateCcw from '$icons/rotate-ccw';
 import ScanSearch from '$icons/scan-search';
@@ -27,6 +28,7 @@ import Button from '$lib/ui/Button';
 import Ident from '$lib/ui/Ident';
 import type { IconType } from '$lib/ui/types';
 import Callout from './Callout';
+import { failedTitle, failureSummary } from './failure';
 import { plain, scheduleTitle, shortCause, suggestedEpochs } from './warnings';
 
 export interface OutcomeProps {
@@ -44,6 +46,8 @@ export interface OutcomeProps {
   waitingActions?: () => JSX.Element;
   /** The trainer's schedule warnings, as it wrote them (./warnings). */
   warnings?: string[];
+  /** The run's dataset's name, for a failure that names it. */
+  datasetName?: string;
   /**
    * `/api/system`: the GPU's memory and whether the server estimates runs, to forecast the fixes. Undefined while it
    * loads; null when it could not be read (the fixes are then offered unforecast).
@@ -53,8 +57,11 @@ export interface OutcomeProps {
 
 const NONE: string[] = [];
 
-/** A run has a checkpoint to continue from: an epoch finished (`Run.epoch` of an ended run counts finished epochs). */
-export const canContinue = (run: Pick<Run, 'epoch' | 'model_id'>) => run.epoch > 0 || !!run.model_id;
+/**
+ * A run has a checkpoint to continue from: a stopped run with weights has a model, a failed one a best epoch (an
+ * epoch finished, so its checkpoint was written).
+ */
+export const canContinue = (run: Pick<Run, 'best' | 'model_id'>) => !!run.model_id || !!run.best;
 
 /** A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. */
 function stoppedTitle(run: Run) {
@@ -125,6 +132,8 @@ export default function Outcome(props: OutcomeProps) {
   );
 
   const status = () => props.run.status;
+  /** A failure's cause in plain words (./failure), by its error code; null: the server's message is the cause. */
+  const summary = computed(() => (props.run.status === 'failed' ? failureSummary(props.run.error_code, props.datasetName ?? 'this run') : null));
   /**
    * The hand-off of a run with a model, beside its result whatever else the callout says (a too-short warning keeps
    * it): Open model, and Try in Playground unless the model scored exactly 0 (nothing to see there).
@@ -210,35 +219,40 @@ export default function Outcome(props: OutcomeProps) {
           Batch {props.run.config.batch} at {props.run.config.imgsz} px with <Ident value={props.run.config.arch} /> did not fit, at epoch {props.run.epoch}.
         </Callout>
       ) : status() === 'failed' ? (
+        // What went wrong in plain words by its error code, the server's own message under Details. A failure is not
+        // about the run's length: a schedule warning stays a line of its own, its fix behind Details with its reasons.
         <Callout
           tone="danger"
           icon={TriangleAlert}
-          title={`Failed at epoch ${props.run.epoch}`}
+          title={failedTitle(props.run)}
           role="alert"
-          moreLabel={short.get() ? 'Why?' : 'More fixes'}
+          moreLabel="Details"
           also={short.get()}
           actions={() => (
             <>
-              {short.get() ? scheduleFix() : null}
+              {props.run.error_code === 'data_error' ? (
+                <Button size="sm" icon={Database} href={href(`/datasets/${props.run.config.dataset_id}`)}>
+                  Check dataset
+                </Button>
+              ) : null}
               {/* Anything but out of memory can continue from the last checkpoint. */}
               {resumeAction()}
             </>
           )}
           more={() => (
             <>
-              {short.get() ? (
-                why()
-              ) : (
-                <div class="alts cta-row">
-                  <Button size="sm" icon={RotateCcw} href={href(retryPath(props.run.id))}>
-                    New run like this
-                  </Button>
-                </div>
-              )}
+              {summary.get() && props.run.error ? <code class="mono">{props.run.error}</code> : null}
+              <div class="alts cta-row">
+                <Button size="sm" icon={RotateCcw} href={href(retryPath(props.run.id))}>
+                  New run like this
+                </Button>
+                {short.get() ? scheduleFix() : null}
+              </div>
+              {short.get() ? why() : null}
             </>
           )}
         >
-          {props.run.error}
+          {summary.get() ?? props.run.error}
         </Callout>
       ) : status() === 'completed' && short.get() ? (
         // A run that completed but was too short to learn: the outcome and the warning in one callout, the fix its first

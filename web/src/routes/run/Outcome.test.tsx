@@ -138,13 +138,31 @@ describe('Outcome', () => {
   it('keeps any other failure in full with Resume', () => {
     const onresume = vi.fn();
     const r = render(failed('dataset folder D:/data/shapes-hard is gone'), onresume);
-    expect(r.target.querySelector('.c-title')?.textContent).toBe('Failed at epoch 23');
+    expect(r.target.querySelector('.c-title')?.textContent).toBe('Failed in epoch 23');
     expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe('dataset folder D:/data/shapes-hard is gone');
-    expect(r.labels).toEqual(['Resume', 'More fixes']);
+    expect(r.labels).toEqual(['Resume', 'Details']);
     expect(r.more()).toEqual(['New run like this']);
     r.buttons[0]?.click();
     expect(onresume).toHaveBeenCalledOnce();
     r.done();
+  });
+
+  it('says a failure in plain words by its code, links the dataset, and keeps the raw error under Details', () => {
+    const error = 'io error at D:/data/bccd copy/images/train/BloodImage_00307.jpg: The system cannot find the path specified. (os error 3)';
+    // An older server's failed run: its epoch is the last one finished, its steps say it was in the next.
+    const run = { ...failed(error), error_code: 'data_error', epoch: 1, step: 25, steps_per_epoch: 13, best: null };
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(Outcome, { target, props: { run, elapsed: 30, onresume: vi.fn(), warnings: [], datasetName: 'bccd-copy' } });
+    flushSync();
+    expect(target.querySelector('.c-title')?.textContent).toBe('Failed in epoch 2');
+    expect(target.querySelector('.c-msg')?.textContent?.trim()).toBe('Files of dataset bccd-copy went missing or changed during training.');
+    const acts = [...target.querySelectorAll<HTMLElement>('.c-acts a, .c-acts button')];
+    expect(acts.map((b) => b.textContent?.trim())).toEqual(['Check dataset', 'Start again', 'Details']);
+    expect(acts[0]!.getAttribute('href')).toBe('#/datasets/ds_shapes_hard');
+    expect(target.querySelector('.c-detail code')?.textContent).toBe(error);
+    unmount(c);
+    target.remove();
   });
 
   const SHORT =
@@ -169,10 +187,10 @@ describe('Outcome', () => {
     r.done();
   });
 
-  it('keeps the same one-callout pattern for a stopped or failed short run, with Resume beside the fix', () => {
+  it('keeps the same one-callout pattern for a stopped or failed short run; a failure keeps the fix under Details', () => {
     for (const [status, labels] of [
       ['stopped', ['Train 8 epochs', 'Resume', 'Open model', 'Try in Playground', 'Why?']],
-      ['failed', ['Train 8 epochs', 'Resume', 'Why?']],
+      ['failed', ['Resume', 'Details']],
     ] as const) {
       const r = render(short(status), vi.fn(), [SHORT]);
       expect(r.target.querySelectorAll('.callout')).toHaveLength(1);
@@ -218,7 +236,7 @@ describe('Outcome', () => {
     expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe('The last checkpoint was kept and saved as a model.');
     expect(r.labels[0]).toBe('Resume');
     r.done();
-    r = render({ ...run, started: null, epoch: 0, model_id: null });
+    r = render({ ...run, started: null, epoch: 0, model_id: null, best: null });
     expect(r.target.querySelector('.c-title')?.textContent).toBe('Interrupted: the server stopped before it started');
     expect(r.labels).toEqual(['Start again']);
     r.done();

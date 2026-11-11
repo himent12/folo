@@ -105,7 +105,9 @@ impl RunEntry {
         r.error_code = code;
         r.eta_s = None;
         r.finished = Some(now());
-        r.epoch = st.file.epochs_done;
+        // A failed run names the epoch it failed in (the one its steps were in); any other the last one it finished.
+        r.epoch =
+            if status == RunStatus::Failed { r.epoch.max(st.file.epochs_done) } else { st.file.epochs_done };
         r.model_id = model_id_of(&self.id, &self.dir, status).or(r.model_id.take());
         self.persist(st);
         self.send(RunEvent::Status(status_event(&st.file.run)));

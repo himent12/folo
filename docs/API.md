@@ -491,7 +491,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   //   older servers), next to "error" (the message); the final `status` event carries it too. A `stopped` run has
   //   "interrupted" when the server stopped or restarted while it trained or waited (not a client's stop)
   "started": "..." | null, "finished": null | "...",
-  "epoch": 12,             // epoch in progress, 1-based (0 before the first step; the last epoch once finished)
+  "epoch": 12,             // epoch in progress, 1-based (0 before the first step); once ended, the last epoch it
+                           // finished (completed, stopped) or the one it failed in (failed)
   "epochs": 100,
   "step": 575,             // optimizer steps completed over all epochs
   "steps_per_epoch": 50,  // 0 until the trainer is built (before the first `running` status; events carry it)

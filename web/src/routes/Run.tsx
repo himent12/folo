@@ -526,6 +526,7 @@ export default function Run() {
               waitingIcon={handover.get() && beforeTraining(handover.get()!.phase) ? CloudUpload : undefined}
               waitingActions={canStart.get() ? startNext : undefined}
               warnings={warnings.get()}
+              datasetName={dataset.get()?.name}
               system={system.data ?? (system.error ? null : undefined)}
             />
 

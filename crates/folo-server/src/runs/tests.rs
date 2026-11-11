@@ -284,3 +284,30 @@ fn run_model_ids() {
     assert_eq!(run_model_id("run_7d1e", false), "m_7d1e");
     assert_eq!(run_model_id("run_7d1e", true), "m_7d1e-last");
 }
+
+/// A failed run names the epoch it failed in (its steps were in epoch 2, one epoch had finished); a stopped one the
+/// last epoch it finished (its checkpoint's).
+#[test]
+fn a_failed_run_names_the_epoch_it_failed_in() {
+    let dir = TestDir::new("runs-failed-epoch");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"f"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+    };
+    let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let loss = r#""loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1"#;
+    let step: Step = serde_json::from_str(&format!(r#"{{"epoch":2,"step":25,{loss}}}"#)).unwrap();
+    e.on_event(&RunEvent::Step(step));
+    for (status, epoch) in [(RunStatus::Failed, 2), (RunStatus::Stopped, 1)] {
+        let mut st = e.state.lock().unwrap();
+        st.file.epochs_done = 1;
+        st.file.run.epoch = 2;
+        e.finish(&mut st, status, None);
+        assert_eq!(st.file.run.epoch, epoch, "{status:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
