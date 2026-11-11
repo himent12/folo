@@ -183,6 +183,9 @@ impl FoloApp {
                     // click away while the slider is elsewhere.
                     // A fixed row, so using it moves nothing: a secondary link while the slider is
                     // elsewhere, a quiet note once it's there (accent stays the slider's).
+                    // Always there for a picked model (empty without a best-F1 threshold), so picking
+                    // one doesn't push what is under it down.
+                    .when(best_conf.is_none() && model.is_some(), |d| d.child(div().h(px(20.))))
                     .when_some(best_conf, |d, c| {
                         let at = (c - self.play_conf).abs() < 0.0005;
                         let row = div().h(px(20.)).flex().justify_end().items_center();
@@ -458,6 +461,8 @@ impl FoloApp {
                     ))
                     .child(
                         div()
+                            // Another device's boxes while the picked one runs: dimmed.
+                            .when(self.play_pred_dim && self.play_pred_pending, |d| d.opacity(0.5))
                             .px(px(8.))
                             .py(px(4.))
                             .flex()

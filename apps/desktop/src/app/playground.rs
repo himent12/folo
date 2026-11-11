@@ -120,6 +120,7 @@ impl FoloApp {
         }
         self.play_pred = Load::Idle;
         self.play_pred_pending = false;
+        self.play_pred_dim = false;
         self.play_pred_for = None;
         self.play_hover = None;
         self.play_zoom = 1.0;
@@ -131,9 +132,15 @@ impl FoloApp {
     pub fn set_play_target(&mut self, target: Option<crate::local::Target>, cx: &mut Context<Self>) {
         if self.play_target != target {
             self.play_target = target;
-            // Another device's answer (and timing): "Detecting…" while it runs, not the previous
-            // result, or an OOM error and its Retry still live during the CPU fallback.
-            self.rerun_predict(cx);
+            if matches!(self.play_pred, Load::Ready(_)) {
+                // The same image and model: the boxes stay up, dimmed and "Updating…", until the
+                // other device answers, instead of blanking to placeholder rows.
+                self.play_pred_dim = true;
+                self.run_predict(cx);
+            } else {
+                // An error (an OOM and its Retry) isn't left live during the fallback.
+                self.rerun_predict(cx);
+            }
         }
     }
 
@@ -161,6 +168,7 @@ impl FoloApp {
     /// rerun of the same image and model, an IoU change, keeps the old result up instead.
     pub fn rerun_predict(&mut self, cx: &mut Context<Self>) {
         self.play_pred_for = None;
+        self.play_pred_dim = false;
         self.run_predict(cx);
     }
 
@@ -220,6 +228,7 @@ impl FoloApp {
                     this.play_pred = r.into();
                     this.play_pred_for = Some(key);
                     this.play_pred_pending = false;
+                    this.play_pred_dim = false;
                 }
             },
         );

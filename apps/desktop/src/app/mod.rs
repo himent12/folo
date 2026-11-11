@@ -378,6 +378,8 @@ pub struct FoloApp {
     /// The latest prediction hasn't answered: shown results are the previous ones (an IoU change
     /// keeps them up meanwhile).
     pub play_pred_pending: bool,
+    /// The shown result is another device's, kept (dimmed) while the one now picked runs.
+    pub play_pred_dim: bool,
     /// Image generation and model the current `play_pred` belongs to.
     play_pred_for: Option<(u64, String)>,
 
@@ -573,6 +575,7 @@ impl FoloApp {
             play_image_gen: 0,
             play_pred_seq: 0,
             play_pred_pending: false,
+            play_pred_dim: false,
             play_pred_for: None,
             server_mode: ServerMode::Mock,
             server_url,

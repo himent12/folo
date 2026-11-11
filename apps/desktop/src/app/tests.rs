@@ -198,3 +198,27 @@ fn deleting_a_run_or_a_dataset_leaves_its_page_for_the_list() {
         assert_eq!(this.route_pending, Some(Route::Datasets));
     });
 }
+
+#[test]
+fn another_device_keeps_the_boxes_up_until_it_answers() {
+    use crate::store::Load;
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, cx| {
+        this.play_model = Some("m_44c0".into());
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+    });
+    assert!(drive(&mut app, window, |this, _, _| this.play_pred.ready().is_some()), "the first result is in");
+    // Another device: the same boxes stay up (dimmed) while it runs, no placeholder rows.
+    let during = app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                this.set_play_target(Some(crate::local::Target::Cpu), cx);
+                (matches!(this.play_pred, Load::Ready(_)), this.play_pred_dim, this.play_pred_pending)
+            })
+            .unwrap()
+    });
+    assert_eq!(during, (true, true, true));
+    // Its answer (here the demo's refusal) replaces them, undimmed.
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| assert!(!this.play_pred_dim && !this.play_pred_pending));
+}
