@@ -381,11 +381,12 @@ impl FoloApp {
         // Change since the previous epoch only means something while training.
         let delta = match (last, prev) {
             (Some(l), Some(p)) if live => {
-                let d = l.val.map50_95 - p;
-                let (c, s) = if d >= 0.0 {
-                    (t.success_text, format!("+{d:.3}"))
-                } else {
-                    (t.danger_text, format!("{d:.3}"))
+                // Green up, red down, and neutral when it rounds to no change.
+                let (s, dir) = score_delta(l.val.map50_95 - p);
+                let c = match dir {
+                    std::cmp::Ordering::Greater => t.success_text,
+                    std::cmp::Ordering::Less => t.danger_text,
+                    std::cmp::Ordering::Equal => t.text_tertiary,
                 };
                 let best = r.best.as_ref().map_or(String::new(), |b| format!("· best {}", f3(b.map50_95)));
                 Some(
@@ -484,7 +485,7 @@ impl FoloApp {
                 // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
                 // P/R chart below states the match rule, so the tile's line fits at 1280.
                 .child(text(ty::SM, t.text_tertiary).ellipsis().child(pr_caption(
-                    last.and_then(|e| e.val.best_f1_conf),
+                    last.and_then(|e| operating_conf(e.val.best_f1_conf, e.val.precision, e.val.recall)),
                     self.eval_split(r),
                     false,
                 ))),

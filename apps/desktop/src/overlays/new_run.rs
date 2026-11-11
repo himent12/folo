@@ -129,7 +129,7 @@ impl FoloApp {
                 .map(|d| {
                     (
                         SharedString::from(d.name.clone()),
-                        Some(SharedString::from(format!("{} images", int(d.splits.total())))),
+                        Some(SharedString::from(counted(d.splits.total(), "image", "images"))),
                     )
                 })
                 .collect(),

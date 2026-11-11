@@ -35,7 +35,18 @@ impl FoloApp {
                 .run_data
                 .get(&r.id)
                 .and_then(|x| x.ready())
-                .map(|x| x.metrics.epochs.iter().map(|e| (e.epoch as f32, e.val.best_f1_conf)).collect())
+                .map(|x| {
+                    x.metrics
+                        .epochs
+                        .iter()
+                        .map(|e| {
+                            (
+                                e.epoch as f32,
+                                operating_conf(e.val.best_f1_conf, e.val.precision, e.val.recall),
+                            )
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             let total = if r.status.is_active() || r.status == RunStatus::Completed {
                 r.epochs as f32

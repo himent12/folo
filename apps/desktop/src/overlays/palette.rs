@@ -177,7 +177,11 @@ impl FoloApp {
                     group: "Datasets",
                     icon: "icons/images.svg",
                     title: d.name.clone(),
-                    detail: format!("{} images · {}", int(d.splits.total()), d.format.label()),
+                    detail: format!(
+                        "{} · {}",
+                        counted(d.splits.total(), "image", "images"),
+                        d.format.label()
+                    ),
                     keys: &[],
                     action: act(move |this, w, cx| this.navigate(Route::Dataset(id.clone()), w, cx)),
                 });
@@ -408,9 +412,9 @@ impl FoloApp {
                             )
                             .child(div().flex_1())
                             .child(text(ty::SM, t.text_tertiary).tnum().child(if searching {
-                                format!("{n} results")
+                                counted(n as u64, "result", "results")
                             } else {
-                                format!("{n} items")
+                                counted(n as u64, "item", "items")
                             })),
                     ),
             );

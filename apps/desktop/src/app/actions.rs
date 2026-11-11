@@ -163,7 +163,7 @@ impl FoloApp {
     /// A new dataset from the server: list it first and say so, with a way to open it.
     fn dataset_added(&mut self, ds: crate::api::Dataset, verb: &str, cx: &mut Context<Self>) {
         let (id, name) = (ds.id.clone(), ds.name.clone());
-        let body = format!("{} images · {}", int(ds.splits.total()), ds.classes.join(", "));
+        let body = format!("{} · {}", counted(ds.splits.total(), "image", "images"), ds.classes.join(", "));
         // Registering a folder twice answers with the dataset it already is: say so, and leave
         // the list's order alone.
         // Unknown while the list isn't loaded: neither "added" nor "already added" is claimed then.

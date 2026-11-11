@@ -275,6 +275,21 @@ mod tests {
     }
 
     #[test]
+    fn counts_scores_and_operating_points_read_right() {
+        use super::{counted, operating_conf, score_delta};
+        use std::cmp::Ordering;
+        assert_eq!(counted(1, "box", "boxes"), "1 box");
+        assert_eq!(counted(1200, "box", "boxes"), "1,200 boxes");
+        assert_eq!(counted(0, "result", "results"), "0 results");
+        assert_eq!(score_delta(0.0004), ("±0.000".to_string(), Ordering::Equal));
+        assert_eq!(score_delta(-0.0004), ("±0.000".to_string(), Ordering::Equal));
+        assert_eq!(score_delta(0.012), ("+0.012".to_string(), Ordering::Greater));
+        assert_eq!(score_delta(-0.004), ("-0.004".to_string(), Ordering::Less));
+        assert_eq!(operating_conf(Some(1.0), 0., 0.), None);
+        assert_eq!(operating_conf(Some(0.31), 0.5, 0.), Some(0.31));
+    }
+
+    #[test]
     fn a_queued_run_says_what_it_waits_for() {
         use super::queue_wait_text;
         assert_eq!(queue_wait_text(Some(1), None), "Starts as soon as the device is free.");
@@ -350,6 +365,30 @@ pub fn short_gpu(name: &str) -> String {
 /// "1 dataset", "3 datasets".
 pub fn plural(n: usize, noun: &str) -> String {
     if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+}
+
+/// A count with thousands separators and the noun that fits it: "1 box", "1,200 boxes".
+pub fn counted(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", int(n), if n == 1 { one } else { many })
+}
+
+/// An epoch-over-epoch change of a score, as the KPI writes it ("+0.012", "-0.004") and which way
+/// it went: a change that rounds to nothing reads "±0.000", neither good nor bad.
+pub fn score_delta(d: f32) -> (String, std::cmp::Ordering) {
+    let shown = (d * 1000.).round() / 1000.;
+    if shown == 0. {
+        ("±0.000".into(), std::cmp::Ordering::Equal)
+    } else if shown > 0. {
+        (format!("+{shown:.3}"), std::cmp::Ordering::Greater)
+    } else {
+        (format!("{shown:.3}"), std::cmp::Ordering::Less)
+    }
+}
+
+/// The best-F1 confidence worth naming: none when nothing was detected (precision and recall both
+/// 0, where the engine's "best" threshold is just its top end and finds nothing).
+pub fn operating_conf(conf: Option<f32>, precision: f32, recall: f32) -> Option<f32> {
+    conf.filter(|_| precision > 0. || recall > 0.)
 }
 
 #[cfg(test)]

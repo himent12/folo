@@ -707,7 +707,7 @@ impl FoloApp {
 /// model found nothing (precision and recall 0), where that threshold is only the end of the search
 /// grid and using it would hide every detection.
 fn offered_conf(m: &crate::api::ModelMetrics) -> Option<f32> {
-    m.best_f1_conf.filter(|_| m.precision > 0. || m.recall > 0.)
+    operating_conf(m.best_f1_conf, m.precision, m.recall)
 }
 
 #[cfg(test)]

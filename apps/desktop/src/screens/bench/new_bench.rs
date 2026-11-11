@@ -114,7 +114,7 @@ impl FoloApp {
                 format!("{} labeled images of the job, copied and frozen with their boxes.", int(n))
             }
             Some((_, 0)) => "This split has no images: pick another.".to_string(),
-            Some((_, n)) => format!("{} images, copied and frozen with their boxes.", int(n)),
+            Some((_, n)) => format!("{}, copied and frozen with their boxes.", counted(n, "image", "images")),
             None => "Add a dataset first: a benchmark copies its images.".to_string(),
         };
         let create = if submitting {
