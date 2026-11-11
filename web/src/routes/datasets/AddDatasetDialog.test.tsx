@@ -148,6 +148,13 @@ describe('AddDatasetDialog', () => {
     expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');
   });
 
+  it('says where the images went when none can train (a COCO test file registered alone)', async () => {
+    const ds = await hub.api.dataset('ds_shapes');
+    vi.spyOn(hub.api, 'createDataset').mockResolvedValue({ ...ds, id: 'ds_new', name: 'bccd', splits: { train: 0, val: 0, test: 72 } });
+    await register('D:/data/bccd/annotations/instances_test.json', [{ id: 'ds_shapes' }]);
+    expect(toast.items[0]).toMatchObject({ title: 'Dataset registered', detail: 'bccd · all 72 images are in the test split, none to train on' });
+  });
+
   it('announces a dataset that was not in the list as new', async () => {
     const go = await register('D:/data/shapes', [{ id: 'ds_fasteners' }]);
     expect(toast.items[0]).toMatchObject({ tone: 'success', title: 'Dataset registered' });

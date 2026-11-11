@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Dataset, DatasetStats } from '$lib/api/types';
-import { bySeverity, countBinLabel, findingCount, healthChecks, shareBelow, sizeBinLabel } from './health';
+import { bySeverity, countBinLabel, findingCount, healthChecks, noTraining, shareBelow, sizeBinLabel } from './health';
 
 const ds = (over: Partial<Dataset> = {}): Dataset => ({
   id: 'ds_x',
@@ -133,5 +133,15 @@ describe('bySeverity', () => {
       ['Notes', ['empty']],
     ]);
     expect(bySeverity(healthChecks(ds(), st()))).toEqual([]);
+  });
+});
+
+describe('noTraining', () => {
+  it('says where the images are when none can train, and nothing when some can', () => {
+    expect(noTraining(ds())).toBeNull();
+    expect(noTraining(ds({ splits: { train: 0, val: 0, test: 72 } }))?.where).toBe('all 72 images are in the test split');
+    expect(noTraining(ds({ splits: { train: 0, val: 1, test: 0 } }))?.where).toBe('its 1 image is in the val split');
+    expect(noTraining(ds({ splits: { train: 0, val: 1200, test: 30 } }))?.where).toBe('its 1,230 images are in the val and test splits');
+    expect(noTraining(ds({ splits: { train: 0, val: 0, test: 0 } }))?.where).toBe('it has no images');
   });
 });

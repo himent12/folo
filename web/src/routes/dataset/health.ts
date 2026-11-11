@@ -2,6 +2,7 @@
 
 import type { Dataset, DatasetStats, Histogram, IssueCounts, IssueSeverity } from '$lib/api/types';
 import { TRAINED_ON } from '$lib/evaluated';
+import { num } from '$lib/format';
 
 export type Severity = 'danger' | 'warning' | 'info' | 'ok';
 
@@ -83,6 +84,23 @@ const share = (x: number) => `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%`;
 
 export function imageCount(d: Pick<Dataset, 'splits'>): number {
   return d.splits.train + d.splits.val + d.splits.test;
+}
+
+/**
+ * Why the dataset cannot train a model, or null when it can: it has no images in its train split. `where` says where
+ * its images are instead ("all 72 images are in the test split"), for the page and the toast after registering.
+ */
+export function noTraining(d: Pick<Dataset, 'splits'>): { reason: string; where: string } | null {
+  if (d.splits.train > 0) return null;
+  const n = imageCount(d);
+  const parts = (['val', 'test'] as const).filter((s) => d.splits[s] > 0);
+  const where =
+    n === 0
+      ? 'it has no images'
+      : parts.length === 1
+        ? `${n === 1 ? 'its 1 image is' : `all ${num(n)} images are`} in the ${parts[0]} split`
+        : `its ${num(n)} images are in the val and test splits`;
+  return { reason: 'No training images in this dataset', where };
 }
 
 /** Fraction of `h`'s mass in bins that lie entirely below `limit`. */

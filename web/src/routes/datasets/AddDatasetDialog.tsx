@@ -16,6 +16,7 @@ import Input from '$lib/ui/Input';
 import Segmented from '$lib/ui/Segmented';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
+import { noTraining } from '../dataset/health';
 import { cleanPath, isFullPath, NAME_RE, suggestName } from './names';
 
 type Mode = 'folder' | 'synthetic';
@@ -159,7 +160,9 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
             });
       const known = before.some((d) => d.id === ds.id);
       const title = known ? `Already registered as ${ds.name}` : m === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready';
-      const count = `${ds.name} · ${num(ds.splits.train + ds.splits.val + ds.splits.test)} images`;
+      // Where the images went, when none can train (a COCO test file registered alone puts them all in test).
+      const nt = noTraining(ds);
+      const count = nt ? `${ds.name} · ${nt.where}, none to train on` : `${ds.name} · ${num(ds.splits.train + ds.splits.val + ds.splits.test)} images`;
       work.set(null);
       if (!open.peek()) {
         // Dismissed while it ran: wherever the person is now, they stay there; the toast offers the dataset.

@@ -4,6 +4,7 @@ import ImageOff from '$icons/image-off';
 import Play from '$icons/play';
 import Scan from '$icons/scan';
 import Trash from '$icons/trash-2';
+import TriangleAlert from '$icons/triangle-alert';
 import X from '$icons/x';
 import { computed, css, effect, Index, Key, MediaQuery, signal } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
@@ -16,6 +17,7 @@ import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
+import Gate from '$lib/ui/Gate';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import { DialogStatus } from '$lib/ui/feedback';
@@ -32,7 +34,7 @@ import { toast } from '$lib/ui/toast';
 import ToggleButton from '$lib/ui/ToggleButton';
 import ClassPicker from './dataset/ClassPicker';
 import DisplayMenu from './dataset/DisplayMenu';
-import { findingCount, findingLabel, healthChecks, imageCount } from './dataset/health';
+import { findingCount, findingLabel, healthChecks, imageCount, noTraining } from './dataset/health';
 import ImageGrid from './dataset/ImageGrid';
 import Inspector from './dataset/Inspector';
 import { ImagePager } from './dataset/pager';
@@ -174,6 +176,11 @@ export default function Dataset() {
     return dd?.stats ? findingCount(healthChecks(dd, dd.stats, counts.get())) : 0;
   });
   const filtered = computed(() => cls.get() !== undefined || split.get() !== 'all');
+  /** Why Train is off: no image is in the train split (a COCO test file registered alone puts them all in test). */
+  const untrainable = computed(() => {
+    const dd = d();
+    return dd ? noTraining(dd) : null;
+  });
   const splitOptions = computed(() => {
     const dd = d();
     if (!dd) return [];
@@ -290,16 +297,28 @@ export default function Dataset() {
             )}
             actions={() => (
               <>
-                {phone() ? (
-                  /* Phones: the page's main action keeps a word (an icon-only lime square does not say what it does). */
-                  <Button variant="primary" icon={Play} aria-label="Train on this dataset" href={href(`/runs/new?dataset=${encodeURIComponent(dd().id)}`)}>
-                    Train
-                  </Button>
-                ) : (
-                  <Button variant="primary" icon={Play} href={href(`/runs/new?dataset=${encodeURIComponent(dd().id)}`)}>
-                    Train on this dataset
-                  </Button>
-                )}
+                {/* A dataset with no training images cannot train: the action says so instead of leading to a run that fails. */}
+                <Gate reason={untrainable.get()?.reason}>
+                  {(why) =>
+                    phone() ? (
+                      /* Phones: the page's main action keeps a word (an icon-only lime square does not say what it does). */
+                      <Button
+                        variant="primary"
+                        icon={Play}
+                        aria-label="Train on this dataset"
+                        disabled={!!why()}
+                        aria-describedby={why()}
+                        href={href(`/runs/new?dataset=${encodeURIComponent(dd().id)}`)}
+                      >
+                        Train
+                      </Button>
+                    ) : (
+                      <Button variant="primary" icon={Play} disabled={!!why()} aria-describedby={why()} href={href(`/runs/new?dataset=${encodeURIComponent(dd().id)}`)}>
+                        Train on this dataset
+                      </Button>
+                    )
+                  }
+                </Gate>
                 <Menu label="More dataset actions" items={moreItems} />
               </>
             )}
@@ -318,6 +337,15 @@ export default function Dataset() {
             </div>
 
             <div id="ds-tab-panel" role="tabpanel" aria-labelledby={`ds-tab-${tab.get()}`} class="panel">
+              {untrainable.get() ? (
+                <p class="no-train">
+                  <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+                  <span>
+                    No training images: {untrainable.get()!.where}. Training needs a train split, such as <span class="mono">images/train/</span> in a YOLO
+                    folder or a COCO <span class="mono">instances_train.json</span>.
+                  </span>
+                </p>
+              ) : null}
               {tab.get() === 'stats' ? (
                 <>
                   {dd().stats ? (
@@ -559,6 +587,18 @@ css`
     .clear {
       height: 44px;
     }
+  }
+  .no-train {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .no-train :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--warning-text);
   }
   .confirm {
     color: var(--text-secondary);
