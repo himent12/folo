@@ -3,6 +3,7 @@ import { flush as flushSync } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../framework/testing';
 import { hub } from '$lib/api/index';
+import { ApiError } from '$lib/api/client';
 import { MockApi, type Scenario } from '$lib/api/mock';
 import { resetWasmProbe } from '$lib/inference/browser';
 import { prefs } from '$lib/prefs';
@@ -271,5 +272,27 @@ describe('Playground: the session', () => {
     await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
     expect(session.get()?.source).toMatchObject({ kind: 'dataset', img: { id: img.id }, at: 2 });
     expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.4');
+  });
+});
+
+describe('Playground: a failure is said once', () => {
+  it('shows a failed prediction in place, with no toast', async () => {
+    const { toast } = await import('$lib/ui/toast');
+    toast.items = [];
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    api.predict = async () => {
+      throw new ApiError(422, 'image_decode_failed', 'not an image', 'send a JPEG, PNG, BMP or WebP file');
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('.notice'), 'the notice');
+    expect(target.querySelector('.notice .title')?.textContent).toBe('Prediction failed');
+    expect(toast.items).toEqual([]);
   });
 });

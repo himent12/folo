@@ -413,9 +413,10 @@ export default function Playground() {
           weightsMissing.set(true);
           return;
         }
+        // Said once, in place above the image (with its ways out): no toast repeats it, and no earlier result stays on
+        // screen as if it were this run's.
+        pred.set(null);
         error.set(e);
-        // Out of GPU memory is answered in place, with its ways out; a toast would only repeat it.
-        if (!(on === 'server' && isOom(e))) toast.error(e, 'Prediction failed');
       },
     );
     return () => ctrl.abort();
