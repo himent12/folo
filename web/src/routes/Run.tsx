@@ -426,6 +426,8 @@ export default function Run() {
         <RunSkeleton />
       ) : (
         <>
+          {/* A box of no layout of its own: what lets the styles below reach the page's title. */}
+          <div class="run-page">
           <Page
             title={R().name}
             inlineActions
@@ -637,6 +639,7 @@ export default function Run() {
               </>
             )}
           </Page>
+          </div>
 
           <Dialog
             bind:open={stopOpen}
@@ -671,6 +674,19 @@ export default function Run() {
 }
 
 css`
+  .run-page {
+    display: contents;
+  }
+  /* A long name (run names were not capped before 64 characters) takes two lines at most, broken anywhere, never a
+     wall of four; the breadcrumb and Config have it too. */
+  .run-page :global(h1[data-route-focus]) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
   :global(.ident.id) {
     font-size: var(--type-sm-size);
   }
