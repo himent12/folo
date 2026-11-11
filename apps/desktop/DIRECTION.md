@@ -70,7 +70,7 @@ The components are fine; the page structure is not.
   - The per-class table is the PR legend: a hovered or focused row isolates its curve and dims the others to 25 %.
 - **Dataset detail:** one 40 px line with tabs left, and split, Fit/Fill, Boxes and size right. The class chips row is
   below it, with the result count at its end.
-- **Settings:** one 760 px column, left-aligned.
+- **Settings:** one column of at most 880 px, centred in the page with its header.
 - **New run:** each slider and its exact field on one row.
 
 ## Priority
