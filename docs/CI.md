@@ -74,13 +74,14 @@ redirected too, the check also catches a binary that writes to the temp dir. Loc
 `FOLO_TEST_TMP` must be an absolute path, since cargo runs each test binary in its own package folder.
 
 ## Runners
-Linux jobs run on GitHub-hosted runners (`ubuntu-latest`). Windows jobs run on the dev PC, which has the GPU the
-GPU tests need. Two repository variables choose, each a JSON `runs-on` value for a self-hosted runner; an unset
-variable means GitHub-hosted (`ubuntu-latest` / `windows-latest`):
+Linux jobs run on GitHub-hosted runners: `ubuntu-latest`, except the release workflow's Linux CLI build and its
+Linux install test, which use `ubuntu-22.04` (docs/RELEASE.md, Runners). Windows jobs run on the dev PC, which
+has the GPU the GPU tests need. Two repository variables choose, each a JSON `runs-on` value for a self-hosted
+runner; an unset variable means GitHub-hosted (`ubuntu-latest` or `ubuntu-22.04`, `windows-latest`):
 
 | variable | value | runner |
 |---|---|---|
-| `RUNS_ON_LINUX` | unset | GitHub-hosted `ubuntu-latest` |
+| `RUNS_ON_LINUX` | unset | GitHub-hosted `ubuntu-latest` (`ubuntu-22.04` for the release CLI build and install test) |
 | `RUNS_ON_WINDOWS` | `["self-hosted","folo-win"]` | `folo-win-local`, `folo-win-local-2`: the dev PC, runners in `D:\gha\win`, `D:\gha\win2` (each with its own target dir `D:\gha\folo-target-<runner name>`) |
 
 The repository is private, so GitHub-hosted jobs use the account's Actions minutes (Windows counts double, which

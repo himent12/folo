@@ -99,7 +99,7 @@ Fastest path for an agent:
 - [Roadmap](docs/ROADMAP.md): milestones, with what is merged, in progress and next
 - [Releasing](docs/RELEASE.md): versioning, the tag → draft release workflow, the install scripts
   (`scripts/install.sh`, `scripts/install.ps1`) and the embedded Studio
-- [CI](docs/CI.md): the CI jobs and the self-hosted runners
+- [CI](docs/CI.md): the CI jobs and their runners
 - [Docs site](site/README.md): the static site generated from these docs (`cd site && npm run build`), with search,
   link checking, and this file plus llms-full.txt (every page's Markdown in one file)
 - [boat.dev](docs/BOAT.md): CPU-only cloud sandboxes for offloading Linux builds and CPU-heavy work
