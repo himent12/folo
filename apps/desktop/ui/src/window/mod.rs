@@ -46,14 +46,13 @@ use std::{
 
 use smallvec::SmallVec;
 
+use crate::raster;
 use crate::{
     AnyDrag, AnyView, App, AppCell, Bounds, DisplayId, Framebuffer, GlyphBlend, GroupHitboxes, Modifiers,
     Pixels, PlatformWindow, Point, RenderGlyphParams, RenderSvgParams, Size, SvgRenderer,
     TextStyleRefinement, WindowBounds, WindowOptions, WindowParams, WindowTextSystem,
     element::ElementIdStack, px,
 };
-// `crate::raster` once the raster package lands (same names and signatures).
-pub(crate) use crate::pending::raster_pending as raster;
 
 /// The `on_window_should_close` handler.
 pub(crate) type ShouldCloseHandler = Box<dyn FnMut(&mut Window, &mut App) -> bool>;

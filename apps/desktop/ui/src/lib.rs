@@ -38,9 +38,6 @@ pub mod prelude;
 mod view;
 mod window;
 
-// Skeleton stand-ins for other packages' names (see the file); removed as those packages land.
-mod pending;
-
 pub use assets::*;
 pub use color::*;
 pub use easing::*;
@@ -65,6 +62,5 @@ pub use executor::*;
 pub use headless_app::*;
 pub use interactive::*;
 pub use keymap::*;
-pub use pending::*;
 pub use view::*;
 pub use window::*;

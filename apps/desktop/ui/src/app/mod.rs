@@ -92,7 +92,7 @@ fn default_platform(text_system: Arc<dyn crate::PlatformTextSystem>) -> anyhow::
         if std::env::var("FOLO_UI_PLATFORM").is_ok_and(|platform| platform == "winit") {
             return Ok(Rc::new(crate::platform::winit::WinitPlatform::new(text_system)?));
         }
-        crate::pending::platform_pending::windows_platform(text_system)
+        Ok(Rc::new(crate::platform::windows::WindowsPlatform::new(text_system)?))
     }
     #[cfg(not(windows))]
     {
