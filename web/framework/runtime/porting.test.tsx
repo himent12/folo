@@ -191,6 +191,55 @@ describe('text runs', () => {
     unmount();
   });
 
+  it('snippets in an array part (nested, of any length) keep their nodes through a later split elsewhere', () => {
+    const a = signal<JSX.Element>('a');
+    const b = signal<JSX.Element>('b');
+    const made: string[] = [];
+    const button = () => {
+      made.push('button');
+      return <button>btn</button>;
+    };
+    const em = () => {
+      made.push('em');
+      return <em>em</em>;
+    };
+    const Frag = () => <>start {a.get()} mid {b.get()} end</>;
+    const { container, unmount } = render(() => (
+      <div>
+        <Frag />
+      </div>
+    ));
+    const div = container.querySelector('div')!;
+    a.set([button, [' and ', em]] as unknown as JSX.Element);
+    flush();
+    expect(div.textContent).toBe('start btn and em mid b end');
+    const btn = div.querySelector('button')!;
+    const e = div.querySelector('em')!;
+    const i = document.createElement('i');
+    i.textContent = 'i';
+    b.set(i);
+    flush();
+    expect(div.textContent).toBe('start btn and em mid i end');
+    expect(div.querySelector('button')).toBe(btn);
+    expect(div.querySelector('em')).toBe(e);
+    expect(made).toEqual(['button', 'em']);
+    // A new array, longer: its snippets render once each, nothing of the old one is left.
+    a.set([em, button, button] as unknown as JSX.Element);
+    flush();
+    expect(div.textContent).toBe('start embtnbtn mid i end');
+    expect(made).toEqual(['button', 'em', 'em', 'button', 'button']);
+    const buttons = [...div.querySelectorAll('button')];
+    b.set('plain');
+    flush();
+    expect(div.textContent).toBe('start embtnbtn mid plain end');
+    expect([...div.querySelectorAll('button')]).toEqual(buttons);
+    expect(made).toHaveLength(5);
+    a.set([] as unknown as JSX.Element);
+    flush();
+    expect(div.textContent).toBe('start  mid plain end');
+    unmount();
+  });
+
   it("a split part's outro keeps it in the DOM with the run's text until the outro ends", async () => {
     const ends: string[] = [];
     const slow = (node: Element) => {

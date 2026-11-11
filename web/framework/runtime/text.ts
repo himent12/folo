@@ -29,6 +29,16 @@ function unwrap(v: unknown): unknown {
   return v;
 }
 
+/**
+ * A split part's value with every snippet in it, in arrays at any depth too, wrapped in a memo created now (in the
+ * part's memo, which owns them): reading the value again reads those memos, never calls a snippet again (`insert`
+ * would wrap a bare one anew on each read).
+ */
+function settle(v: unknown): unknown {
+  if (typeof v === 'function') return isReader(v) ? v : memo(v as () => unknown);
+  return Array.isArray(v) ? v.map(settle) : v;
+}
+
 function staticText(parts: Part[]): string | null {
   let s = '';
   for (const p of parts) {
@@ -91,9 +101,9 @@ function bind(node: Text, parts: Part[], owner: Owner | null, nodes: Nodes | nul
       const after = parts.slice(i + 1);
       runWithOwner(owner, () => {
         bind(node, before, owner, nodes);
-        // The part's content, owned by the run and created once per value (a snippet is called once): an insert that
-        // reads it again (the fragment's, when another part splits later) gets the same nodes, never new ones.
-        const rendered = memo(() => content!.get());
+        // The part's content, owned by the run and created once per value (each snippet in it called once): an insert
+        // that reads it again (the fragment's, when another part splits later) gets the same nodes, never new ones.
+        const rendered = memo(() => settle(content!.get()));
         if (nodes !== null) {
           const rest = after.length > 0 ? document.createTextNode('') : null;
           const added: JSX.Element[] = rest !== null ? [rendered as JSX.Element, rest] : [rendered as JSX.Element];
