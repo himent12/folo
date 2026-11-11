@@ -349,10 +349,8 @@ pub(crate) fn prepare(
                 None => Prepared::Pending(Job::Shadow(key, shape)),
             }
         }
-        Primitive::MonoSprite(s) => match s.kind {
-            SpriteKind::Glyph => Prepared::Glyph(glyphs.index(caches, s.color, blend)),
-            SpriteKind::Svg => Prepared::Lazy,
-        },
+        // Icons take the glyph correction too (GPUI's one monochrome sprite shader).
+        Primitive::MonoSprite(s) => Prepared::Glyph(glyphs.index(caches, s.color, blend)),
         Primitive::ColorSprite(_) | Primitive::Underline(_) => Prepared::Lazy,
         Primitive::Image(m) => {
             let (_, key, dst) = image_key(m, frame);
@@ -412,11 +410,12 @@ pub(crate) fn draw(t: &mut Target, prim: &Primitive, used: Use, r: IRect) {
                 }
             }
             SpriteKind::Svg => {
-                let c = rgba(s.color);
-                let b = &s.bounds;
-                let ax = Axis::new(b.origin.x.0, b.size.width.0, s.mask.size.width.0);
-                let ay = Axis::new(b.origin.y.0, b.size.height.0, s.mask.size.height.0);
-                draw_svg(t, &s.mask, &ax, &ay, alpha16(c[3]), &Tint::new(c), r);
+                if let Use::Glyph((lut, tint)) = used {
+                    let b = &s.bounds;
+                    let ax = Axis::new(b.origin.x.0, b.size.width.0, s.mask.size.width.0);
+                    let ay = Axis::new(b.origin.y.0, b.size.height.0, s.mask.size.height.0);
+                    draw_svg(t, &s.mask, &ax, &ay, lut, tint, r);
+                }
             }
         },
         Primitive::ColorSprite(s) => draw_color(t, &s.mask, origin_of(&s.bounds), alpha16(s.opacity), r),

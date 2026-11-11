@@ -2,7 +2,7 @@
 // (apply_contrast_and_gamma_correction and its helpers)
 //! Monochrome sprites (glyphs and SVG icons) and colour sprites (emoji).
 //!
-//! A glyph's corrected alpha depends only on its mask byte, the text colour and the `GlyphBlend`,
+//! A glyph's (or an icon's) corrected alpha depends only on its mask byte, the text colour and the `GlyphBlend`,
 //! so it is a 256-entry table per (colour, blend), and the blit is "look up, skip zero, blend".
 
 use super::blend::{ONE, Tint, alpha16, over_pm8, sat};
@@ -163,13 +163,16 @@ fn sample(mask: &[u8], w: usize, ax: (usize, usize, u32), ay: (usize, usize, u32
     top * (256 - fy) + bot * fy
 }
 
-/// An SVG icon: the mask (often 2x) is sampled linearly over the sprite's bounds; plain alpha.
+/// An SVG icon: the mask (often 2x) is sampled linearly over the sprite's bounds, then corrected like
+/// a glyph. GPUI's `monochrome_sprite_fragment` applies the contrast and gamma correction to every
+/// monochrome sprite, icons included, at the filtered sample: here `lut` (the colour's glyph table,
+/// alpha included) is interpolated between the two mask levels around the sample.
 pub(crate) fn draw_svg(
     t: &mut Target,
     mask: &AlphaMask,
     ax: &Axis,
     ay: &Axis,
-    alpha: u32,
+    lut: &AlphaLut,
     tint: &Tint,
     r: IRect,
 ) {
@@ -177,21 +180,33 @@ pub(crate) fn draw_svg(
     if w == 0 || mask.size.height.0 <= 0 {
         return;
     }
-    // A = s / (255 * 65536) * alpha, with alpha in 0..=ONE.
-    let k = ((alpha as u64) << 32) / (255 * 65536);
     for y in r.y0..r.y1 {
         let sy = ay.at(y);
         let row = t.row(y, r.x0, r.x1);
         for (x, p) in (r.x0..r.x1).zip(row.iter_mut()) {
             let s = sample(&mask.data, w, ax.at(x), sy);
             if s != 0 {
-                let a = ((s as u64 * k + (1 << 31)) >> 32) as u32;
+                let a = svg_alpha(lut, s);
                 if a != 0 {
-                    *p = tint.over(*p, a.min(ONE));
+                    *p = tint.over(*p, a);
                 }
             }
         }
     }
+}
+
+/// The table's alpha at a filtered sample `s` (`value * 65536`, `0..=255 * 65536`), linear between
+/// the two mask levels around it.
+#[inline(always)]
+fn svg_alpha(lut: &AlphaLut, s: u32) -> u32 {
+    let i = (s >> 16) as usize;
+    let f = (s & 0xffff) as u64;
+    let a0 = lut.0[i] as u64;
+    if f == 0 {
+        return a0 as u32;
+    }
+    let a1 = lut.0[(i + 1).min(255)] as u64;
+    ((a0 * (65536 - f) + a1 * f + (1 << 15)) >> 16).min(ONE as u64) as u32
 }
 
 /// An emoji: premultiplied BGRA, 1:1, times `opacity` (`0..=ONE`).
@@ -276,6 +291,31 @@ mod tests {
         let w = apply_contrast_and_gamma_correction(0.5, [1.; 3], 1.0, g);
         let want = 0.5 + 0.25 * ((0.1 - 0.1) * 0.5 + (0.05 - 0.05));
         assert!((w - want).abs() < 1e-6);
+    }
+
+    /// An icon's filtered sample gets the glyph correction (GPUI's mono sprite shader), not plain
+    /// alpha: the interpolated table equals the float formula at in-between samples too.
+    #[test]
+    fn svg_samples_get_the_glyph_correction() {
+        let blend = GlyphBlend::new([0.149_355_4, -0.226_006_7, 0.026_559_83, -0.034_591_47], 1.0);
+        for c in [[0.93, 0.94, 0.95, 1.], [0.1, 0.12, 0.14, 1.], [0.6, 0.62, 0.66, 0.8]] {
+            let lut = AlphaLut::glyph(c, &blend);
+            for s in (0..=255 * 65536u32).step_by(65536 / 4 + 7) {
+                let v = s as f32 / (255. * 65536.);
+                let want = sat(c[3]
+                    * apply_contrast_and_gamma_correction(v, [c[0], c[1], c[2]], 1.0, blend.gamma_ratios));
+                let got = svg_alpha(&lut, s) as f32 / ONE as f32;
+                assert!((got - want).abs() < 0.5 / 255., "{c:?} {v}: {got} vs {want}");
+            }
+            // A dark icon on a light background is darker than plain alpha would draw it.
+            if c[0] < 0.5 {
+                assert!(svg_alpha(&lut, 128 << 16) > 128 * ONE / 255);
+            }
+        }
+        // No correction: plain alpha.
+        let lut = AlphaLut::glyph([1., 1., 1., 1.], &GlyphBlend::IDENTITY);
+        assert_eq!(svg_alpha(&lut, 255 << 16), ONE);
+        assert_eq!(svg_alpha(&lut, (51 << 16) + 32768), alpha16(51.5 / 255.));
     }
 
     #[test]

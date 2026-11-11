@@ -176,8 +176,9 @@ pub struct Shadow {
     pub blur_radius: ScaledPixels,
 }
 
-/// What a monochrome sprite's mask is: a glyph gets the text backend's contrast / gamma correction,
-/// an SVG mask is plain alpha.
+/// What a monochrome sprite's mask is: a glyph is drawn 1:1, an SVG mask is sampled linearly over the
+/// sprite's bounds. Both get the text backend's contrast / gamma correction (GPUI's one monochrome
+/// sprite shader).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpriteKind {
     /// A text glyph.

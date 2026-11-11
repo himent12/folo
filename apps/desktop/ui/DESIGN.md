@@ -112,8 +112,9 @@ Painter's order: a primitive is drawn over every earlier one. Each primitive car
 
 - `Quad { bounds, clip, background: Background, border_color, corner_radii, border_widths, border_style }`
 - `Shadow { bounds, clip, corner_radii, color, blur_radius }`
-- `MonoSprite { bounds, clip, color, mask: Arc<AlphaMask>, kind: Glyph | Svg }` (a glyph gets the text
-  backend's contrast / gamma correction, an SVG mask is plain alpha)
+- `MonoSprite { bounds, clip, color, mask: Arc<AlphaMask>, kind: Glyph | Svg }` (both get the text
+  backend's contrast / gamma correction, as GPUI's one monochrome sprite shader applies it; an SVG mask
+  is sampled linearly over the bounds, a glyph is drawn 1:1)
 - `ColorSprite { bounds, clip, mask: Arc<ColorMask>, opacity }` (colour emoji)
 - `Image { bounds, clip, corner_radii, image: Arc<RenderImage>, frame, grayscale, opacity }`
 - `Path { bounds, clip, path: Arc<PathData>, paint: Background }` (fill or stroke, already resolved to
