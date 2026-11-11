@@ -3,8 +3,18 @@
 //! window redraws; the window asks it each frame (`check_visible_and_update`) whether it is still wanted,
 //! and it hides as soon as the mouse leaves its element (the app's tooltips are not hoverable). A mouse
 //! down or a scroll anywhere outside the tooltip hides it too. Owner tag: `"window"`.
+//!
+//! Two departures from GPUI 0.2.2, both fixing its bugs: a mouse move that leaves the element hides a
+//! shown tooltip at once (GPUI's mouse handler leaves that to the next prepaint, so without a hover style
+//! or another redraw the tooltip stayed up), and the show timer and the shown tooltip hold the state
+//! weakly (GPUI's held it strongly from inside it, a cycle that leaked the state and the tooltip's view
+//! once the element went away).
 
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    rc::{Rc, Weak},
+    time::Duration,
+};
 
 use crate::{
     AnyTooltip, App, AsyncApp, Bounds, DispatchPhase, MouseDownEvent, MouseMoveEvent, Pixels,
@@ -91,7 +101,7 @@ pub(crate) fn register_tooltip_mouse_handlers(
 }
 
 /// A mouse move: start the show timer when the element becomes hovered (bubble phase), cancel it when
-/// the mouse leaves before it fires.
+/// the mouse leaves before it fires, hide the tooltip when it leaves after.
 fn handle_tooltip_mouse_move(
     active_tooltip: &TooltipState,
     build_tooltip: &TooltipBuilder,
@@ -102,11 +112,17 @@ fn handle_tooltip_mouse_move(
     cx: &mut App,
 ) {
     // Read the state into a value first: a `match` on `borrow()` would hold the borrow through the arms.
-    let waiting = match active_tooltip.borrow().as_ref() {
-        None => false,
-        Some(ActiveTooltip::WaitingForShow { .. }) => true,
-        Some(ActiveTooltip::Visible { .. }) => return,
+    let (waiting, visible) = match active_tooltip.borrow().as_ref() {
+        None => (false, false),
+        Some(ActiveTooltip::WaitingForShow { .. }) => (true, false),
+        Some(ActiveTooltip::Visible { .. }) => (false, true),
     };
+    if visible {
+        if !check_is_hovered(window) {
+            clear_active_tooltip(active_tooltip, window);
+        }
+        return;
+    }
     let schedule = if waiting {
         if !check_is_hovered(window) {
             // Cancelling: dropping the task stops the timer.
@@ -120,15 +136,19 @@ fn handle_tooltip_mouse_move(
         return;
     }
     let handle = window.window_handle();
+    // The task is stored in the state it updates: it holds the state weakly, so an element that goes
+    // away before the delay ends frees both (and nothing is built).
     let task = cx.spawn({
-        let active_tooltip = active_tooltip.clone();
+        let weak_tooltip = Rc::downgrade(active_tooltip);
         let build_tooltip = build_tooltip.clone();
         let check_is_hovered = check_is_hovered_during_prepaint.clone();
         async move |cx: &mut AsyncApp| {
             cx.background_executor().timer(TOOLTIP_SHOW_DELAY).await;
+            let Some(active_tooltip) = weak_tooltip.upgrade() else { return };
             let _ = handle.update(cx, |_, window, cx| {
                 let view = build_tooltip(window, cx);
-                let state = active_tooltip.clone();
+                // The callback is stored in the state too: weak for the same reason.
+                let state = weak_tooltip.clone();
                 let check_visible_and_update: crate::interactive::TooltipVisibility =
                     Rc::new(move |bounds, window, _cx| {
                         check_visible_and_update(&state, &check_is_hovered, bounds, window)
@@ -145,11 +165,13 @@ fn handle_tooltip_mouse_move(
 
 /// Called by the window at each prepaint of a shown tooltip: hides it once its element is not hovered.
 fn check_visible_and_update(
-    active_tooltip: &TooltipState,
+    active_tooltip: &Weak<RefCell<Option<ActiveTooltip>>>,
     check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
     _tooltip_bounds: Bounds<Pixels>,
     window: &mut Window,
 ) -> bool {
+    let Some(active_tooltip) = active_tooltip.upgrade() else { return false };
+    let active_tooltip = &active_tooltip;
     let visible = matches!(active_tooltip.borrow().as_ref(), Some(ActiveTooltip::Visible { .. }));
     if visible && !check_is_hovered(window) {
         clear_active_tooltip(active_tooltip, window);
