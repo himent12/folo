@@ -424,3 +424,166 @@ fn global_actions_dispatch_capture_then_bubble() {
     });
     assert_eq!(*log.borrow(), ["second", "first"], "bubble runs the last registered first");
 }
+
+#[test]
+fn quit_from_an_update_of_an_entity_with_an_app_quit_handler() {
+    let mut app = app();
+    let counter: Entity<Counter> = app.update(|cx| {
+        cx.new(|cx: &mut Context<Counter>| {
+            let mut c = Counter::default();
+            c.subs.push(cx.on_app_quit(|this, _| {
+                this.count += 1;
+                async {}
+            }));
+            c
+        })
+    });
+    // The handler leases `counter`, which this update holds: shutdown waits for the update to end.
+    app.update(|cx| counter.update(cx, |_, cx| cx.quit()));
+    assert_eq!(app.read(|cx| counter.read(cx).count), 1);
+    assert!(app.platform().quit_requested.get());
+}
+
+/// A root view that registers an `on_app_quit` handler, as the app's does.
+struct QuitView {
+    quits: Rc<Cell<usize>>,
+    _sub: Option<Subscription>,
+}
+
+impl crate::Render for QuitView {
+    fn render(&mut self, _: &mut crate::Window, _: &mut Context<Self>) -> impl crate::IntoElement {
+        crate::div()
+    }
+}
+
+#[test]
+fn closing_the_last_window_quits_through_on_window_closed() {
+    // The app's path: `on_window_closed(|cx| cx.quit())` and the platform closes the window. Shutdown runs
+    // once; the root view's own handler does not, since the view is released with its window (as on GPUI,
+    // whose shutdown runs after the loop has ended).
+    let mut app = app();
+    let (view_quits, app_quits) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+    app.update(|cx| {
+        let view_quits = view_quits.clone();
+        cx.open_window(crate::WindowOptions::default(), move |_, cx| {
+            cx.new(move |cx: &mut Context<QuitView>| {
+                let sub = cx.on_app_quit(|this, _| {
+                    this.quits.set(this.quits.get() + 1);
+                    async {}
+                });
+                QuitView { quits: view_quits, _sub: Some(sub) }
+            })
+        })
+        .expect("open a window");
+        let app_quits = app_quits.clone();
+        cx.on_app_quit(move |_| {
+            app_quits.set(app_quits.get() + 1);
+            async {}
+        })
+        .detach();
+        cx.on_window_closed(|cx| cx.quit()).detach();
+    });
+    let close = app.platform().windows.borrow()[0].callbacks.borrow_mut().close.take();
+    close.expect("the window registered on_close")();
+    assert_eq!((app_quits.get(), view_quits.get()), (1, 0));
+    assert!(app.read(|cx| cx.windows().is_empty()));
+    assert!(app.platform().quit_requested.get());
+}
+
+#[test]
+fn quit_polls_every_app_quit_future_together() {
+    // The first future waits for what the second sends: awaited one after another, neither finishes.
+    let mut app = app();
+    let (tx, rx) = crate::oneshot::channel::<()>();
+    let done = Rc::new(Cell::new(false));
+    app.update(|cx| {
+        let (mut rx, done) = (Some(rx), done.clone());
+        cx.on_app_quit(move |_| {
+            let (rx, done) = (rx.take(), done.clone());
+            async move {
+                if let Some(rx) = rx {
+                    done.set(rx.await.is_ok());
+                }
+            }
+        })
+        .detach();
+        let mut tx = Some(tx);
+        cx.on_app_quit(move |_| {
+            let tx = tx.take();
+            async move {
+                if let Some(tx) = tx {
+                    tx.send(()).ok();
+                }
+            }
+        })
+        .detach();
+    });
+    app.update(|cx| cx.quit());
+    assert!(done.get(), "the first quit future saw the second's signal");
+}
+
+#[test]
+fn a_subscription_dropped_after_its_callback_subscribed_again_is_removed() {
+    // The callback adds an observer of the same emitter, then drops its own subscription.
+    let mut app = app();
+    let source = app.update(|cx| cx.new(|_| Counter::default()));
+    let seen = Rc::new(Cell::new(0));
+    let slot: Rc<RefCell<Option<Subscription>>> = Rc::default();
+    let added: Rc<RefCell<Vec<Subscription>>> = Rc::default();
+    let sub = app.update(|cx| {
+        let (seen, slot, added) = (seen.clone(), slot.clone(), added.clone());
+        cx.observe(&source, move |source, cx| {
+            seen.set(seen.get() + 1);
+            added.borrow_mut().push(cx.observe(&source, |_, _| {}));
+            let original = slot.borrow_mut().take();
+            drop(original);
+        })
+    });
+    *slot.borrow_mut() = Some(sub);
+    app.update(|cx| source.update(cx, |_, cx| cx.notify()));
+    app.update(|cx| source.update(cx, |_, cx| cx.notify()));
+    assert_eq!(seen.get(), 1, "the dropped subscription's callback no longer runs");
+    drop(added.take());
+    assert!(!app.read(|cx| cx.observers.has(&source.entity_id())), "nothing is left for the emitter");
+}
+
+#[test]
+fn dropping_the_app_drops_its_queued_tasks_and_dispatcher() {
+    let mut app = app();
+    let dispatcher = Arc::downgrade(app.dispatcher());
+    let drops = Rc::new(Cell::new(0));
+    // A task waiting on a timer, and one queued and never pumped: both runnables sit in the dispatcher's
+    // queues, and each one's scheduler holds the dispatcher.
+    app.update(|cx| {
+        let tracked = Tracked(drops.clone());
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            drop(tracked);
+        })
+        .detach()
+    });
+    app.run_until_idle();
+    let tracked = Tracked(drops.clone());
+    app.update(|cx| cx.spawn(async move |_| drop(tracked)).detach());
+    drop(app);
+    assert_eq!(drops.get(), 2, "both tasks' state is dropped with the app");
+    assert!(dispatcher.upgrade().is_none(), "nothing keeps the dispatcher alive");
+}
+
+#[test]
+fn a_main_thread_task_woken_off_the_main_thread_after_the_app_is_gone_does_not_panic() {
+    let mut app = app();
+    let (tx, rx) = crate::oneshot::channel::<()>();
+    app.update(|cx| {
+        cx.spawn(async move |cx| {
+            cx.background_spawn(async move { rx.await.ok() }).await;
+        })
+        .detach()
+    });
+    app.run_until_idle();
+    drop(app);
+    // Waking the background task from another thread cancels it there, which wakes the main-thread task
+    // awaiting it on that thread: that task must not be dropped there (async-task panics).
+    let sender = std::thread::spawn(move || tx.send(()).ok());
+    assert!(sender.join().is_ok());
+}

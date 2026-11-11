@@ -21,6 +21,8 @@ pub(crate) struct SubscriberSetState<EmitterKey, Callback> {
     pub(crate) subscribers: BTreeMap<EmitterKey, Option<BTreeMap<usize, Subscriber<Callback>>>>,
     /// Subscriptions dropped while their key was being run.
     pub(crate) dropped_subscribers: Vec<(EmitterKey, usize)>,
+    /// Keys whose callbacks `retain` has taken out and is running (innermost last).
+    pub(crate) dispatching: Vec<EmitterKey>,
     /// The next subscriber id.
     pub(crate) next_subscriber_id: usize,
 }
@@ -43,6 +45,7 @@ where
         SubscriberSet(Rc::new(RefCell::new(SubscriberSetState {
             subscribers: BTreeMap::new(),
             dropped_subscribers: Vec::new(),
+            dispatching: Vec::new(),
             next_subscriber_id: 0,
         })))
     }
@@ -71,21 +74,22 @@ where
             // handles whose release touches this set again.
             let removed = {
                 let mut lock = this.borrow_mut();
-                let Some(subscribers) = lock.subscribers.get_mut(&emitter_key) else { return };
-                match subscribers {
-                    Some(subscribers) => {
+                let removed = match lock.subscribers.get_mut(&emitter_key) {
+                    Some(Some(subscribers)) => {
                         let removed = subscribers.remove(&subscriber_id);
                         if subscribers.is_empty() {
                             lock.subscribers.remove(&emitter_key);
                         }
                         removed
                     }
-                    // The key's callbacks are being run: remove it when they are put back.
-                    None => {
-                        lock.dropped_subscribers.push((emitter_key, subscriber_id));
-                        None
-                    }
+                    _ => None,
+                };
+                // Not found while the key's callbacks are being run: it is one of them (the slot holds
+                // only callbacks added meanwhile, if any). Remove it when they are put back.
+                if removed.is_none() && lock.dispatching.contains(&emitter_key) {
+                    lock.dropped_subscribers.push((emitter_key, subscriber_id));
                 }
+                removed
             };
             drop(removed);
         });
@@ -110,9 +114,14 @@ where
     /// Calls each active callback of `emitter`; a callback returning `false` is removed. Callbacks added
     /// for `emitter` meanwhile are kept (inactive until activated); ones dropped meanwhile are removed.
     pub(crate) fn retain(&self, emitter: &EmitterKey, mut f: impl FnMut(&mut Callback) -> bool) {
-        let Some(mut subscribers) =
-            self.0.borrow_mut().subscribers.get_mut(emitter).and_then(|subscribers| subscribers.take())
-        else {
+        let Some(mut subscribers) = ({
+            let mut lock = self.0.borrow_mut();
+            let taken = lock.subscribers.get_mut(emitter).and_then(|subscribers| subscribers.take());
+            if taken.is_some() {
+                lock.dispatching.push(emitter.clone());
+            }
+            taken
+        }) else {
             return;
         };
 
@@ -120,6 +129,9 @@ where
             .retain(|_, subscriber| if subscriber.active.get() { f(&mut subscriber.callback) } else { true });
 
         let mut lock = self.0.borrow_mut();
+        if let Some(ix) = lock.dispatching.iter().rposition(|key| key == emitter) {
+            lock.dispatching.remove(ix);
+        }
         if let Some(Some(new_subscribers)) = lock.subscribers.remove(emitter) {
             subscribers.extend(new_subscribers);
         }

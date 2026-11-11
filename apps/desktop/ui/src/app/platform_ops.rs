@@ -4,6 +4,7 @@
 use std::{
     path::{Path, PathBuf},
     rc::Rc,
+    task::Poll,
     time::Duration,
 };
 
@@ -56,26 +57,32 @@ impl App {
 
     /// Quits: runs the quit observers (waiting briefly for their futures), then stops the platform loop.
     ///
-    /// GPUI's `quit` asks the platform, whose quit callback runs `shutdown`; our platforms have no quit
-    /// callback, so this is `shutdown` then `platform.quit()`: the `on_app_quit` callbacks run once, every
-    /// window is dropped, and their futures get `SHUTDOWN_TIMEOUT` (100 ms, as GPUI) on this thread.
+    /// GPUI's `quit` asks the platform, whose quit callback runs `shutdown` once the loop has ended, outside
+    /// any update; our platforms have no quit callback, so `quit` queues `shutdown` as an effect: it runs
+    /// once the update that called `quit` has returned the entities and windows it leased (an
+    /// `on_app_quit` handler of the entity being updated can update it). Later calls do nothing.
     pub fn quit(&mut self) {
         if self.quitting {
             return;
         }
         self.quitting = true;
-        let futures: Vec<_> =
+        self.update(|cx| cx.defer(App::shutdown));
+    }
+
+    /// GPUI's `shutdown`, then `platform.quit()`: the `on_app_quit` callbacks run once, every window is
+    /// dropped, and their futures are polled together (GPUI's `join_all`) for up to `SHUTDOWN_TIMEOUT`
+    /// (100 ms, as GPUI) on this thread.
+    fn shutdown(&mut self) {
+        let mut futures: Vec<_> =
             self.quit_observers.remove(&()).into_iter().map(|mut on_quit| on_quit(self)).collect();
-        // A leased window (the update that called `quit`) is dropped when that update ends.
         let windows: Vec<_> = self.windows.drain().collect();
         self.window_order.clear();
         drop(windows);
 
-        let all = async move {
-            for future in futures {
-                future.await;
-            }
-        };
+        let all = std::future::poll_fn(move |cx| {
+            futures.retain_mut(|future| future.as_mut().poll(cx).is_pending());
+            if futures.is_empty() { Poll::Ready(()) } else { Poll::Pending }
+        });
         if self.background_executor.block_with_timeout(SHUTDOWN_TIMEOUT, all).is_none() {
             eprintln!("folo-ui: timed out waiting for on_app_quit");
         }
