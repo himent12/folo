@@ -431,7 +431,7 @@ export default function Models() {
                         return (
                           <tr class="link" data-row aria-label={m().name} onclick={() => router.go(`/models/${m().id}`)}>
                             <td>
-                              <a class="name" href={href(`/models/${m().id}`)} title={m().about ?? m().id} onclick={(e) => e.stopPropagation()}>
+                              <a class="name" href={href(`/models/${m().id}`)} title={m().about ?? m().name} onclick={(e) => e.stopPropagation()}>
                                 {m().name}
                               </a>
                             </td>
@@ -858,6 +858,16 @@ css`
       display: grid;
       justify-items: end;
       flex-shrink: 0;
+    }
+    /* "best" over the score, not beside it: the side stays narrow, so the name's meta line never wraps (and rows with
+       and without the word are the same height). */
+    .m-side .map {
+      display: grid;
+      justify-items: end;
+    }
+    .m-side .best {
+      margin-right: 0;
+      line-height: var(--type-sm-line);
     }
     .m-col {
       margin-left: auto;

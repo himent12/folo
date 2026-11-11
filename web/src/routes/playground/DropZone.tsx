@@ -172,10 +172,15 @@ css`
   .sample:focus-visible {
     outline-offset: 2px;
   }
+  /* One line over the image, cut with an ellipsis (the button's title has the whole name), never wrapping over it. */
   .tag {
     position: absolute;
     left: 4px;
     bottom: 4px;
+    max-width: calc(100% - 8px);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
     padding: 0 4px;
     border-radius: var(--radius-xs);
     background: var(--bg-overlay);
