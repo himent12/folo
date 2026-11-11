@@ -21,6 +21,7 @@ import { prefs } from '$lib/prefs';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
+import { watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -34,6 +35,7 @@ import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
 import LiveRunCard from './overview/LiveRunCard';
 import { modelsMayHaveChanged } from './overview/runChanges';
+import { slotRun } from './overview/slot';
 import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
 
@@ -49,11 +51,16 @@ export default function Overview() {
     const list = await hub.api.datasets(s);
     return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
   });
+  // The run list the sidebar's live card reads (the shell polls it every 2 s, shell/RunWatch) while it is current, so the
+  // Training card and Recent runs never say something the sidebar contradicts; this page's own list when the shell's
+  // stopped refreshing.
+  const runList = computed(() => (watched.runs && (watched.since === null || !runs.data) ? watched.runs : runs.data));
+  const runsFailed = computed(() => !!runs.error && !runList.get());
 
   // A run that ended saved a model (and a deleted one took its models with it): Best models catches up then (./overview/runChanges).
   let seenRuns: Run[] | undefined;
   effect(() => {
-    const next = runs.data;
+    const next = runList.get();
     if (!next) return;
     untrack(() => {
       if (modelsMayHaveChanged(seenRuns, next)) void models.refresh();
@@ -61,15 +68,16 @@ export default function Overview() {
     });
   });
 
-  const live = computed(() => runs.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
+  // The run training, or starting (./overview/slot): a run just started shows here at once, as it does in the sidebar.
+  const live = computed(() => slotRun(runList.get()));
   const recent = computed(() => {
     const id = live.get()?.id;
-    return (runs.data ?? []).filter((r) => r.id !== id).slice(0, 6);
+    return (runList.get() ?? []).filter((r) => r.id !== id).slice(0, 6);
   });
   const all = [runs, models, datasets];
   // Nothing loaded and every request failed: one page-level block says why and how to recover, instead of four panels
   // each saying the same thing (DESIGN_DIRECTION §2.8).
-  const down = computed(() => all.every((r) => !!r.error && !r.data));
+  const down = computed(() => runsFailed.get() && [models, datasets].every((r) => !!r.error && !r.data));
   // Something loaded, then the server stopped answering: keep it, and say once that it is stale. Two clocks, never
   // confused (lib/api/freshness): the lists' snapshots and the live run's stream. While the stream still streams, only
   // the lists are behind, and the notice says exactly that; the live card stays live. When the stream went quiet too,
@@ -79,14 +87,14 @@ export default function Overview() {
   const streamLost = signal<number | null>(null);
   const streaming = computed(() => !!live.get() && streamLost.get() === null);
   const now = new Now(() => stale.get());
-  const fresh = computed(() => datasets.data?.length === 0 && runs.data?.length === 0 && models.data?.length === 0);
+  const fresh = computed(() => datasets.data?.length === 0 && runList.get()?.length === 0 && models.data?.length === 0);
   function retryAll() {
     void runs.refresh();
     void models.refresh();
     void datasets.refresh();
   }
   const dsById = computed(() => new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
-  const runById = computed(() => new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r])));
+  const runById = computed(() => new Map<string, Run>((runList.get() ?? []).map((r) => [r.id, r])));
   // A score ranks only against scores on the same dataset and split (lib/scoreSummary): the best of each comparable
   // group, its dataset named above it and any split but validation tagged beside the score. Imported and published
   // weights have no known split here, so they are counted under the list, not ranked in it.
@@ -98,7 +106,7 @@ export default function Overview() {
   const topModels = computed(() => ranking.get().groups.slice(0, 6).map((g) => ({ m: g.items[0]!, ctx: g.ctx })));
   const unranked = computed(() => ranking.get().unranked.length + Math.max(0, ranking.get().groups.length - 6));
   // The ranking needs each model's run and dataset: wait for both (a failed one leaves the splits unknown).
-  const rankReady = computed(() => !!models.data && (!!runs.data || !!runs.error) && (!!datasets.data || !!datasets.error));
+  const rankReady = computed(() => !!models.data && (!!runList.get() || !!runs.error) && (!!datasets.data || !!datasets.error));
   const firstDatasets = computed(() => (datasets.data ?? []).slice(0, 6));
 
   const retry = () => (
@@ -171,11 +179,11 @@ export default function Overview() {
             </div>
           ) : null}{' '}
           <div class="live">
-            {runs.error && !runs.data ? (
+            {runsFailed.get() ? (
               <Panel title="Training">
                 <ErrorState error={runs.error} retry={() => runs.refresh()} compact />
               </Panel>
-            ) : !runs.data ? (
+            ) : !runList.get() ? (
               // The live card itself with placeholder values, so nothing jumps when it arrives.
               <LiveRunCard run={null} />
             ) : live.get() ? (
@@ -191,7 +199,7 @@ export default function Overview() {
                 <EmptyState
                   icon={Activity}
                   title="Nothing is training"
-                  description={runs.data.length ? 'Start a run to watch its loss, mAP and samples update live here.' : 'Train your first detector: pick a dataset, a model size and go.'}
+                  description={runList.get()!.length ? 'Start a run to watch its loss, mAP and samples update live here.' : 'Train your first detector: pick a dataset, a model size and go.'}
                   actions={() => (
                     <Button variant="primary" icon={Plus} href={href('/runs/new')}>
                       New run
@@ -205,7 +213,7 @@ export default function Overview() {
             <div class="col-main">
               <Panel
                 title="Recent runs"
-                meta={runs.data ? `${recent.get().length} of ${runs.data.length}` : undefined}
+                meta={runList.get() ? `${recent.get().length} of ${runList.get()!.length}` : undefined}
                 pad="none"
                 id="recent-runs"
                 actions={() => (
@@ -217,8 +225,8 @@ export default function Overview() {
                 {/* The table frame in every state: placeholder rows while loading, the message inside it when there is
                     nothing (without column heads over it, as on the list pages). */}
                 <div class="scroll">
-                  <table class="table tall" aria-busy={!runs.data} aria-label="Recent runs">
-                    {(runs.data ? recent.get().length > 0 : !runs.error) ? (
+                  <table class="table tall" aria-busy={!runList.get()} aria-label="Recent runs">
+                    {(runList.get() ? recent.get().length > 0 : !runs.error) ? (
                       <thead>
                         {/* Fixed widths on the shared header row: one geometry loading and loaded. */}
                         <tr>
@@ -240,11 +248,11 @@ export default function Overview() {
                       </thead>
                     ) : null}
                     <tbody>
-                      {runs.error && !runs.data ? (
+                      {runsFailed.get() ? (
                         <TableState cols={6}>
                           <ErrorState error={runs.error} retry={() => runs.refresh()} />
                         </TableState>
-                      ) : !runs.data ? (
+                      ) : !runList.get() ? (
                         <For each={[0, 1, 2, 3, 4, 5]} key={(i) => i}>
                           {() => (
                             <tr aria-hidden="true">

@@ -13,6 +13,7 @@ import { lr, metric, num } from '$lib/format';
 import { etaText, lastKnown, Now } from '$lib/api/freshness';
 import StatusBadge, { statusWord } from '$lib/ui/StatusBadge';
 import { deviceParts } from './device';
+import { starting } from './slot';
 import { runEvalSource, scoresTitle } from '$lib/evaluated';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
@@ -30,7 +31,7 @@ export interface LiveRunCardProps {
 }
 
 /**
- * `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. `lost`
+ * `run`: the run in the training slot (./slot), training or starting. `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. `lost`
  * (bindable) reports when the run's stream went quiet (`LiveRun.lost`), so the page can tell a server that stopped
  * answering from lists that alone failed to refresh. `dataset`: undefined while the datasets load, null when the run's
  * is not to be had (its split then unknown: "Evaluation").
@@ -119,7 +120,12 @@ export default function LiveRunCard(props: LiveRunCardProps) {
         <div class="title-row">
           {run.get() ? (
             <>
-              <StatusBadge run={r()} lastKnown={live.lost !== null ? lastKnown(statusWord(r()), live.lost, now.current) : undefined} />{' '}
+              {starting(r()) ? (
+                // Taken by the worker or next with the slot free (./slot): about to train, not waiting.
+                <StatusBadge state={{ status: 'queued', label: 'Starting' }} lastKnown={live.lost !== null ? lastKnown('Starting', live.lost, now.current) : undefined} />
+              ) : (
+                <StatusBadge run={r()} lastKnown={live.lost !== null ? lastKnown(statusWord(r()), live.lost, now.current) : undefined} />
+              )}{' '}
               <h2 id="live-title">
                 <a href={href(`/runs/${r().id}`)}>{r().name}</a>
               </h2>
