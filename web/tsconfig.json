@@ -15,7 +15,13 @@
     "resolveJsonModule": true,
     "allowJs": false,
     "types": ["vite/client"],
-    "paths": { "$lib": ["./src/lib"], "$lib/*": ["./src/lib/*"] }
+    "paths": {
+      "$lib": ["./src/lib"],
+      "$lib/*": ["./src/lib/*"],
+      "fw": ["./framework/runtime/index.ts"],
+      "fw/*": ["./framework/runtime/*"]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte"]
+  // The fw app's .tsx files are checked by tsconfig.next.json; shared .ts files that import fw resolve it here.
+  "include": ["src/**/*.ts", "src/**/*.svelte", "framework/jsx.d.ts", "framework/icons.d.ts"]
 }

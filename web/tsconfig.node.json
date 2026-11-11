@@ -6,10 +6,11 @@
     "strict": true,
     "noImplicitAny": false,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "allowJs": true,
     "checkJs": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "scripts/**/*.mjs"]
+  "include": ["vite.config.ts", "scripts/**/*.mjs", "framework/*/vite.config.ts"]
 }

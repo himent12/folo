@@ -10,25 +10,52 @@
 // truncated box, or clipped past its box without one: DESIGN_DIRECTION §2.3, never cut a fact), and every blank section: a selected tab or section picker whose content
 // renders nothing, a page with almost nothing under its header, every control another element paints over, and every
 // select too narrow for its current value. The list prints at the end and goes to qa.txt.
+// --app legacy|next picks the entry page: `/` (the Svelte app, default) or `/next.html` (its port); same scenes, URLs
+// (`?mock=1&<search>#<path>`), viewports and clock, so a scene's two shots are comparable. --exact is what
+// `scripts/parity.mjs` shoots with: the clock paused at FIXED_NOW as for --qa (time moves only by the scenes' runFor),
+// fonts loaded, animations frozen at the shot, scenes in parallel, a normalized DOM (`<shot>.dom.txt`) next to each
+// shot and `shoot.json` (shots, failures). --out <dir> writes there instead of shots/<round>; --base <url> uses a
+// running server; --prod shoots the production build (as --qa does); --jobs N states at once (--qa, --exact);
+// --only a,b takes a comma list.
 // --qa runs only those checks, where phone layouts break: every scene at the tablet and mobile sizes it lists, in dark
 // (or the one theme a scene is made for), and in light too where the page shows a phone section picker (Run, Model).
 // Phone states run under a coarse pointer (touch: 44 px targets, 16 px field text), where controls grow and rows that
 // fit with a mouse can collide. Each state gets its scene's setup; nothing is captured or saved.
-import { build, createServer, preview } from 'vite';
+import { createServer, preview } from 'vite';
 import { chromium } from 'playwright-core';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, EOL } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scenes } from './scenes.mjs';
+import { quiet, quietWaits } from './scenes/drive.mjs';
+import { buildApps } from './entries.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
-const onlyIdx = args.indexOf('--only');
-const only = onlyIdx >= 0 ? args[onlyIdx + 1] : undefined;
+/** Flags that take a value: their values are not the round's name. */
+const VALUED = ['--only', '--app', '--out', '--base', '--jobs'];
+const opt = (/** @type {string} */ flag) => {
+  const i = args.indexOf(flag);
+  return i >= 0 ? args[i + 1] : undefined;
+};
+const only = opt('--only');
+/** `--only a,b`: a state is shot when its name contains any of them. */
+const onlyParts = only ? only.split(',').map((s) => s.trim()).filter(Boolean) : [];
+const picked = (/** @type {string} */ name) => !onlyParts.length || onlyParts.some((p) => name.includes(p));
 const qa = args.includes('--qa');
-const round = args.find((a, i) => !a.startsWith('--') && (onlyIdx < 0 || i !== onlyIdx + 1)) ?? new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
-const outDir = resolve(root, 'shots', round);
+const exact = args.includes('--exact');
+const app = opt('--app') ?? 'legacy';
+if (app !== 'legacy' && app !== 'next') throw new Error(`--app ${app}: expected legacy or next`);
+/** The entry page of each app; the query and the hash route are the same for both. */
+const ENTRY = { legacy: '/', next: '/next.html' };
+/** CSS scope classes the reports leave out: Svelte's, and the new framework's (FOLO_SCOPE_PREFIX overrides it). */
+const SCOPE_PREFIXES = ['svelte-', process.env.FOLO_SCOPE_PREFIX ?? 'f-'];
+const round =
+  args.find((a, i) => !a.startsWith('--') && !VALUED.includes(args[i - 1])) ?? new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+const outDir = opt('--out') ? resolve(/** @type {string} */ (opt('--out'))) : resolve(root, 'shots', round);
+/** The clock paused at FIXED_NOW (time moves only by the scenes' runFor), the same on every machine and every run. */
+const paused = qa || exact;
 const started = Date.now();
 
 const VIEWPORTS = {
@@ -50,9 +77,15 @@ const FIXED_NOW = new Date('2026-11-08T14:30:00Z');
 const listen = { host: '127.0.0.1', port: 5199, strictPort: false };
 /** @type {{ resolvedUrls: import('vite').ResolvedServerUrls | null, close(): Promise<void> }} */
 let server;
-if (qa) {
-  const outDir = resolve(root, 'node_modules/.qa-dist');
-  await build({ root, logLevel: 'error', build: { outDir, emptyOutDir: true, sourcemap: false, reportCompressedSize: false } });
+const given = opt('--base');
+/** Why next.html did not build (--prod), or null. @type {string | null} */
+let nextError = null;
+if (given) {
+  server = { resolvedUrls: { local: [given], network: [] }, close: async () => {} };
+} else if (qa || args.includes('--prod')) {
+  const outDir = resolve(root, qa ? 'node_modules/.qa-dist' : 'node_modules/.shoot-dist');
+  // --qa checks the Svelte app alone: index.html is its one entry, whatever vite.config.ts lists.
+  nextError = (await buildApps(root, outDir, { next: !qa })).nextError;
   server = await preview({ root, logLevel: 'error', build: { outDir }, preview: listen });
 } else {
   const dev = await createServer({ root, logLevel: 'error', server: listen });
@@ -60,6 +93,25 @@ if (qa) {
   server = dev;
 }
 const base = (server.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5199/').replace(/\/$/, '');
+
+/**
+ * Whether the server serves `--app`'s entry page: for next, `/next.html` must answer 200 with a page that is not
+ * index.html (a dev or preview server's SPA fallback answers any path with index.html, which would shoot the legacy
+ * app under the next app's name).
+ * @returns {Promise<string | null>} why not, or null
+ */
+async function entryMissing() {
+  if (app === 'legacy') return null;
+  try {
+    const [n, l] = await Promise.all([fetch(`${base}${ENTRY.next}`), fetch(`${base}/`)]);
+    if (!n.ok) return `${ENTRY.next} answers ${n.status}`;
+    const [nt, lt] = await Promise.all([n.text(), l.text()]);
+    if (nt === lt) return `${ENTRY.next} is not served (the server answers it with index.html)`;
+    return null;
+  } catch (e) {
+    return `${ENTRY.next}: ${e instanceof Error ? e.message : e}`;
+  }
+}
 
 if (!qa) {
   if (!only) rmSync(outDir, { recursive: true, force: true });
@@ -75,6 +127,139 @@ async function settle(page) {
   }
   await page.clock.runFor(50);
   await page.waitForTimeout(150);
+  // A face a setup brought on screen (a mono figure in a dialog) loads after the first fonts.ready.
+  if (exact) await quiet(page);
+}
+
+/**
+ * --exact: makes `page` wait for its real-time work before and after every step of its paused clock (and before each
+ * look of drive.mjs's waits). With the clock paused, a step fires the mock's timers; what follows them in real time
+ * (a canvas encoded to a blob, an image loading or decoding, a lazy chunk, a font) would otherwise land before or after
+ * the next step depending on the machine's load, and with it how many steps a wait takes and the live run's progress.
+ * Counted in the page: pending blob encodes, bitmaps, image decodes and fetches, images not yet complete, fonts
+ * loading, DOM mutations; outside it, requests in flight. Quiet: all zero and no mutation over two 25 ms polls, a frame's
+ * ResizeObserver work included (3 s cap).
+ * @param {import('playwright-core').Page} page
+ */
+async function makeQuiet(page) {
+  let inflight = 0;
+  page.on('request', () => inflight++);
+  page.on('requestfinished', () => inflight--);
+  page.on('requestfailed', () => inflight--);
+  await page.addInitScript(() => {
+    let pending = 0;
+    let mutations = 0;
+    const track = (/** @type {any} */ obj, /** @type {string} */ key) => {
+      const f = obj?.[key];
+      if (typeof f !== 'function') return;
+      obj[key] = function (/** @type {unknown[]} */ ...a) {
+        pending++;
+        try {
+          return Promise.resolve(f.apply(this, a)).finally(() => pending--);
+        } catch (e) {
+          pending--;
+          throw e;
+        }
+      };
+    };
+    track(globalThis.OffscreenCanvas?.prototype, 'convertToBlob');
+    track(globalThis, 'createImageBitmap');
+    track(HTMLImageElement.prototype, 'decode');
+    track(globalThis, 'fetch');
+    const toBlob = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = function (cb, ...rest) {
+      pending++;
+      return toBlob.call(this, (b) => {
+        pending--;
+        cb(b);
+      }, ...rest);
+    };
+    new MutationObserver(() => mutations++).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    Object.defineProperty(globalThis, '__foloQuiet', {
+      value: () => [pending + [...document.images].filter((im) => !im.complete).length + (document.fonts.status === 'loading' ? 1 : 0), mutations],
+    });
+  });
+  const wait = async () => {
+    let last = -1;
+    let still = 0;
+    for (const end = Date.now() + 3000; Date.now() < end; ) {
+      /** @type {[number, number] | null} */
+      const s = await page.evaluate(() => /** @type {any} */ (globalThis).__foloQuiet?.() ?? null).catch(() => null);
+      still = s && s[0] === 0 && inflight <= 0 && s[1] === last ? still + 1 : 0;
+      if (still >= 2) return;
+      last = s ? s[1] : -1;
+      await page.waitForTimeout(25);
+    }
+  };
+  quietWaits.set(page, wait);
+  const runFor = page.clock.runFor.bind(page.clock);
+  // A long step is taken in parts (250 ms, or a 20th of it), quiet between them: the clock yields to the page between
+  // timers, so real-time work a timer starts (a stream subscribed once a chunk has loaded) would otherwise land
+  // wherever the machine's speed puts it inside the step.
+  page.clock.runFor = async (/** @type {number | string} */ ms) => {
+    await wait();
+    if (typeof ms !== 'number') return runFor(ms).then(wait);
+    const part = Math.max(250, Math.ceil(ms / 20));
+    for (let left = ms; left > 0; left -= part) {
+      await runFor(Math.min(part, left));
+      await wait();
+    }
+  };
+}
+
+/**
+ * The page's DOM, normalized for comparing the two apps (`<shot>.dom.txt`): one line per element (tag, attributes
+ * sorted, classes sorted without the scope classes, style declarations sorted, the live value / checked state of form
+ * fields) and per text run (adjacent text nodes joined, whitespace collapsed, blank runs dropped), indented by depth.
+ * Comments (Svelte's anchors) are dropped; `blob:` URLs, which are random, read `blob:*`.
+ * @param {import('playwright-core').Page} page
+ */
+async function domDump(page) {
+  return page.evaluate((prefixes) => {
+    /** @type {string[]} */
+    const out = [];
+    const q = (/** @type {string} */ v) => JSON.stringify(v.replace(/blob:[^\s"')]+/g, 'blob:*'));
+    const walk = (/** @type {Node} */ node, /** @type {number} */ depth) => {
+      const pad = '  '.repeat(depth);
+      let text = '';
+      const flush = () => {
+        const t = text.replace(/\s+/g, ' ').trim();
+        if (t) out.push(`${pad}${JSON.stringify(t)}`);
+        text = '';
+      };
+      for (const n of node.childNodes) {
+        if (n.nodeType === Node.TEXT_NODE) {
+          text += n.textContent ?? '';
+          continue;
+        }
+        if (n.nodeType !== Node.ELEMENT_NODE) continue;
+        flush();
+        const el = /** @type {Element} */ (n);
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'script') continue;
+        /** @type {[string, string][]} */
+        const attrs = [];
+        for (const a of el.attributes) {
+          if (a.name.startsWith('data-svelte')) continue;
+          if (a.name === 'class') {
+            const cls = [...el.classList].filter((c) => !prefixes.some((p) => c.startsWith(p))).sort();
+            if (cls.length) attrs.push(['class', cls.join(' ')]);
+          } else if (a.name === 'style') {
+            const decl = a.value.split(';').map((d) => d.trim().replace(/\s*:\s*/, ': ')).filter(Boolean).sort();
+            if (decl.length) attrs.push(['style', decl.join('; ')]);
+          } else attrs.push([a.name, a.value]);
+        }
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) attrs.push([':value', el.value]);
+        if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) attrs.push([':checked', String(el.checked)]);
+        attrs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+        out.push(`${pad}<${tag}${attrs.map(([k, v]) => ` ${k}=${q(v)}`).join('')}>`);
+        walk(el, depth + 1);
+      }
+      flush();
+    };
+    walk(document.body, 0);
+    return out.join('\n') + '\n';
+  }, SCOPE_PREFIXES);
 }
 
 /**
@@ -88,7 +273,7 @@ async function settle(page) {
  * @returns {Promise<{ selector: string, px: number, text: string }[]>}
  */
 async function overflowCheck(page) {
-  return page.evaluate(() => {
+  return page.evaluate((prefixes) => {
     const out = [];
     const doc = document.documentElement;
     const pageOver = doc.scrollWidth - doc.clientWidth;
@@ -112,7 +297,7 @@ async function overflowCheck(page) {
     };
     const describe = (/** @type {Element} */ el) => {
       const part = (/** @type {Element} */ e) => {
-        const cls = [...e.classList].filter((c) => !c.startsWith('svelte-')).slice(0, 3);
+        const cls = [...e.classList].filter((c) => !prefixes.some((p) => c.startsWith(p))).slice(0, 3);
         return `${e.tagName.toLowerCase()}${e.id ? `#${e.id}` : ''}${cls.length ? `.${cls.join('.')}` : ''}`;
       };
       const parts = [];
@@ -209,7 +394,7 @@ async function overflowCheck(page) {
       });
     }
     return out;
-  });
+  }, SCOPE_PREFIXES);
 }
 
 /**
@@ -355,11 +540,11 @@ async function blankCheck(page) {
  * @returns {Promise<{ selector: string, text: string }[]>}
  */
 async function coverCheck(page) {
-  return page.evaluate(() => {
+  return page.evaluate((prefixes) => {
     /** @type {{ selector: string, text: string }[]} */
     const out = [];
     const describe = (/** @type {Element} */ e) => {
-      const cls = [...e.classList].filter((c) => !c.startsWith('svelte-')).slice(0, 2);
+      const cls = [...e.classList].filter((c) => !prefixes.some((p) => c.startsWith(p))).slice(0, 2);
       return `${e.tagName.toLowerCase()}${cls.length ? `.${cls.join('.')}` : ''}`;
     };
     const name = (/** @type {Element} */ el) =>
@@ -404,7 +589,7 @@ async function coverCheck(page) {
       }
     }
     return out;
-  });
+  }, SCOPE_PREFIXES);
 }
 
 /**
@@ -441,6 +626,18 @@ async function selectCheck(page) {
 }
 
 /**
+ * --exact's Chrome: the same pixels for the same page every time. Rastering on the GPU (headless Chrome uses the real
+ * one on Windows) leaves a few pixels of an edge or an image a level or two apart between shoots, so everything is
+ * drawn in software. Chrome also picks, by timing, between paths that draw an image differently: a 2D canvas on the
+ * GPU or the CPU (the mock paints its images on one), a JPEG decoded to YUV planes or to RGB, an image decoded during
+ * raster or later (checker-imaging), a tile rastered whole or in part, text antialiased for LCD or in grey (by whether its
+ * layer is opaque, which an animation or a backdrop changes).
+ */
+const EXACT_ARGS = exact
+  ? ['--disable-gpu', '--disable-lcd-text', '--disable-partial-raster', '--disable-accelerated-2d-canvas', '--disable-checker-imaging', '--disable-features=DecodeJpeg420ImagesToYUV,DecodeLossyWebPImagesToYUV', '--force-color-profile=srgb']
+  : [];
+
+/**
  * The installed Chrome, else the Chromium `npx playwright-core install chromium` downloads (CI's Linux runners have no
  * Chrome). FOLO_SHOOT_BROWSER=chrome or chromium picks one and fails if it is missing.
  */
@@ -448,13 +645,13 @@ async function launch() {
   const want = process.env.FOLO_SHOOT_BROWSER;
   if (want !== 'chromium') {
     try {
-      return await chromium.launch({ channel: 'chrome', headless: true });
+      return await chromium.launch({ channel: 'chrome', headless: true, args: EXACT_ARGS });
     } catch (e) {
       if (want === 'chrome') throw e;
     }
   }
   try {
-    const b = await chromium.launch({ headless: true });
+    const b = await chromium.launch({ headless: true, args: EXACT_ARGS });
     console.log(`Using Playwright's Chromium ${b.version()} (no Chrome, or FOLO_SHOOT_BROWSER=chromium).`);
     return b;
   } catch (e) {
@@ -470,6 +667,17 @@ const browser = await launch();
 const yellow = (/** @type {string} */ t) => `\u001b[1;33m${t}\u001b[0m`;
 let count = 0;
 const failures = [];
+/** Each failed state's first problem, for shoot.json. @type {Record<string, string>} */
+const failed = {};
+/** The shots taken. @type {string[]} */
+const shots = [];
+const fail = (/** @type {string} */ name, /** @type {string} */ why) => {
+  failures.push(`${name}: ${why}`);
+  failed[name] ??= why;
+};
+/** Why `--app`'s entry page cannot be shot (next.html not there yet), or null. */
+const missing = app === 'next' && nextError ? nextError : await entryMissing();
+if (missing) console.warn(`${yellow('! missing')} ${missing}: every state fails`);
 /** Overflow (`px` > 0) and blank sections (`px` 0), one list. @type {{ name: string, selector: string, px: number, text: string }[]} */
 const overflows = [];
 
@@ -483,6 +691,10 @@ const overflows = [];
  */
 async function shoot(scene, theme, vp, touch = false) {
   const name = `${scene.name}--${theme}--${vp}${touch ? '+touch' : ''}`;
+  if (missing) {
+    failed[name] = missing;
+    return false;
+  }
   const context = await browser.newContext({
     viewport: VIEWPORTS[vp],
     hasTouch: touch,
@@ -491,24 +703,38 @@ async function shoot(scene, theme, vp, touch = false) {
     reducedMotion: 'reduce',
   });
   const page = await context.newPage();
-  page.on('pageerror', (e) => failures.push(`${name}: ${e.message}`));
+  page.on('pageerror', (e) => fail(name, e.message));
   let picker = false;
   try {
     // An installed clock keeps running in real time, so where a page's timers stand at the check depends on load. --qa
     // pauses it at FIXED_NOW before the page loads (installed an hour early: pauseAt only moves forward), so time then
-    // moves only by the scenes' runFor, the same on every machine.
-    await page.clock.install({ time: qa ? FIXED_NOW.getTime() - 3_600_000 : FIXED_NOW });
-    if (qa) await page.clock.pauseAt(FIXED_NOW);
+    // moves only by the scenes' runFor, the same on every machine. --exact too: a scene's shots then match.
+    await page.clock.install({ time: paused ? FIXED_NOW.getTime() - 3_600_000 : FIXED_NOW });
+    if (paused) await page.clock.pauseAt(FIXED_NOW);
     await page.addInitScript((t) => {
       localStorage.setItem('folo.theme', t);
       localStorage.setItem('folo.shoot', '1');
     }, theme);
-    await page.goto(`${base}/?mock=1${scene.search ? `&${scene.search}` : ''}#${scene.path}`, { waitUntil: 'networkidle' });
+    // --exact: the mock's latency jitter (Math.random, src/lib/api/mock/server.ts) decides how many of the scenes'
+    // 250 ms clock steps a wait takes, so the live run's progress drifts between shoots. A constant draw gives every
+    // call its nominal latency, whatever order an app makes its calls in.
+    if (exact) {
+      await page.addInitScript(() => (Math.random = () => 0.5));
+      await makeQuiet(page);
+    }
+    const res = await page.goto(`${base}${ENTRY[app]}?mock=1${scene.search ? `&${scene.search}` : ''}#${scene.path}`, { waitUntil: 'networkidle' });
+    if (res && !res.ok()) throw new Error(`${ENTRY[app]} answered ${res.status()}`);
     await page.evaluate(() => document.fonts.ready);
     // Let the mock's live run advance a little, deterministically.
     await page.clock.runFor(scene.advance ?? 2000);
     if (scene.setup) await scene.setup(page, { vp, theme });
     await settle(page);
+    // --exact (parity) skips the layout checks: they take time and change nothing the shot shows.
+    if (exact) {
+      count++;
+      await shot(page, scene, vp, name);
+      return false;
+    }
     // Content cut off or spilling sideways (the page included: wide content must scroll inside its own box).
     for (const o of await overflowCheck(page)) {
       overflows.push({ name, ...o });
@@ -530,6 +756,24 @@ async function shoot(scene, theme, vp, touch = false) {
     );
     count++;
     if (qa) return picker;
+    await shot(page, scene, vp, name);
+  } catch (e) {
+    fail(name, e instanceof Error ? e.message : String(e));
+  } finally {
+    await context.close();
+  }
+  return picker;
+}
+
+/**
+ * Takes a state's shot (with --exact, its DOM dump too): from the top unless the scene keeps its scroll.
+ * @param {import('playwright-core').Page} page
+ * @param {import('./scenes.mjs').Scene} scene
+ * @param {string} vp
+ * @param {string} name
+ */
+async function shot(page, scene, vp, name) {
+  {
     const full = scene.fullPage ?? (vp !== 'mobile' && vp !== 'small');
     // Capture what a user sees: from the top, with no stray focus ring on the skip link. For full-page shots the
     // viewport grows to the document's height, so sticky and fixed bars (top bar, tab bar, docks) sit where they
@@ -557,19 +801,20 @@ async function shoot(scene, theme, vp, touch = false) {
         await settle(page);
       }
     }
-    await page.screenshot({ path: resolve(outDir, `${name}.png`), fullPage: full });
-  } catch (e) {
-    failures.push(`${name}: ${e instanceof Error ? e.message : e}`);
-  } finally {
-    await context.close();
+    if (exact) writeFileSync(resolve(outDir, `${name}.dom.txt`), await domDump(page));
+    // --exact: finite animations and transitions jump to their end and infinite ones (spinners, the skeletons'
+    // shimmer, the live pulse) back to their start, since the compositor runs them in real time whatever the clock.
+    await page.screenshot({ path: resolve(outDir, `${name}.png`), fullPage: full, ...(exact ? { animations: /** @type {const} */ ('disabled'), caret: /** @type {const} */ ('hide') } : {}) });
+    shots.push(name);
   }
-  return picker;
 }
 
 /** --qa's sizes: tablet, mobile and small (the scenes listing it); FOLO_QA_SIZES=laptop,tablet (comma-separated) checks others on demand. */
 const qaSizes = (process.env.FOLO_QA_SIZES ?? 'tablet,mobile,small').split(',').map((v) => v.trim());
 /** --qa's states, run by a small pool below. @type {(() => Promise<void>)[]} */
 const qaJobs = [];
+/** The shots, in order: one at a time, or with --exact by the same pool. @type {(() => Promise<void>)[]} */
+const shotJobs = [];
 try {
   for (const scene of scenes) {
     const themes = scene.themes ?? ['dark', 'light'];
@@ -577,7 +822,7 @@ try {
     if (!qa) {
       for (const theme of themes) {
         for (const vp of viewports) {
-          if (!only || `${scene.name}--${theme}--${vp}`.includes(only)) await shoot(scene, theme, vp);
+          if (picked(`${scene.name}--${theme}--${vp}`)) shotJobs.push(() => shoot(scene, theme, vp).then(() => {}));
         }
       }
       continue;
@@ -585,7 +830,7 @@ try {
     // --qa: the tablet and phone sizes in dark (or the one theme a scene is made for), and light too behind a picker.
     const first = themes.includes('dark') ? 'dark' : themes[0];
     for (const vp of viewports.filter((v) => qaSizes.includes(v))) {
-      if (only && !`${scene.name}--${first}--${vp}`.includes(only)) continue;
+      if (!picked(`${scene.name}--${first}--${vp}`)) continue;
       // A phone is a touch screen, and touch is the stricter case, so a phone state is checked once, under a coarse
       // pointer. A scene about a fine or a coarse pointer in particular (keyboard shortcuts, the touch hint) sets
       // `touch: false` and keeps the mouse.
@@ -601,9 +846,10 @@ try {
   if (!(Number.isInteger(shard) && Number.isInteger(shards) && shard >= 1 && shard <= shards)) throw new Error(`FOLO_QA_SHARD=${process.env.FOLO_QA_SHARD}: expected i/n with 1 <= i <= n`);
   const mine = qaJobs.filter((_, i) => i % shards === shard - 1);
   qaJobs.length = 0;
-  qaJobs.push(...mine);
-  // Each state has its own context and paused clock, so --qa runs several at once: FOLO_QA_JOBS, default up to 8.
-  const jobs = Math.max(1, Number(process.env.FOLO_QA_JOBS) || Math.min(8, availableParallelism()));
+  qaJobs.push(...mine, ...shotJobs);
+  // Each state has its own context and paused clock, so --qa (and --exact) runs several at once: --jobs or
+  // FOLO_QA_JOBS, default up to 8. A plain shoot's clock runs in real time: one state at a time, as it always has.
+  const jobs = qa || exact ? Math.max(1, Number(opt('--jobs')) || Number(process.env.FOLO_QA_JOBS) || Math.min(8, availableParallelism())) : 1;
   await Promise.all(
     Array.from({ length: jobs }, async () => {
       for (let job = qaJobs.shift(); job; job = qaJobs.shift()) await job();
@@ -617,6 +863,8 @@ try {
 const secs = Math.round((Date.now() - started) / 1000);
 const part = process.env.FOLO_QA_SHARD ? ` (shard ${process.env.FOLO_QA_SHARD})` : '';
 console.log(qa ? `QA: ${count} scene states checked in ${secs} s${part}` : `${count} shots -> ${outDir} (${secs} s)`);
+// What parity.mjs reads: which states were shot and why the others were not.
+if (exact) writeFileSync(resolve(outDir, 'shoot.json'), JSON.stringify({ app, entry: ENTRY[app], base, only: only ?? null, missing, secs, shots: shots.sort(), failed }, null, 1));
 // The QA list (overflow, blank sections and covered controls): printed last, boxed in yellow. The shoot saves it next to the shots and
 // never fails on it; --qa fails on it.
 const report = resolve(outDir, only ? `qa-${only.replace(/[^\w-]+/g, '_')}.txt` : 'qa.txt');
@@ -642,5 +890,9 @@ if (overflows.length) {
 }
 if (failures.length) {
   console.error(`${failures.length} problem(s):\n  ${failures.join('\n  ')}`);
+  process.exitCode = 1;
+}
+if (missing) {
+  console.error(`${Object.keys(failed).length} state(s) not shot: ${missing}`);
   process.exitCode = 1;
 }
