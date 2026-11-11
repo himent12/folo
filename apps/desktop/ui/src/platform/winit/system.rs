@@ -29,17 +29,12 @@ impl Clipboard {
     }
 }
 
-/// Where a dialog runs: on its own thread (Linux, Windows), or handed to the main thread (macOS's
-/// panels must be shown from it).
-pub(crate) type RunDialog<'a> = dyn Fn(Box<dyn FnOnce() + Send>) + 'a;
-
 /// Shows the open dialog `options` describe; the receiver gets the paths (`None`: cancelled).
 pub(crate) fn prompt_for_paths(
     options: PathPromptOptions,
-    run: &RunDialog<'_>,
 ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
     let (tx, rx) = oneshot::channel();
-    run(Box::new(move || {
+    on_thread(move || {
         let mut dialog = rfd::FileDialog::new();
         if let Some(prompt) = &options.prompt {
             dialog = dialog.set_title(prompt.as_ref());
@@ -52,7 +47,7 @@ pub(crate) fn prompt_for_paths(
             (false, false) => dialog.pick_file().map(|p| vec![p]),
         };
         let _ = tx.send(Ok(paths));
-    }));
+    });
     rx
 }
 
@@ -60,23 +55,24 @@ pub(crate) fn prompt_for_paths(
 pub(crate) fn prompt_for_new_path(
     directory: &Path,
     suggested_name: Option<&str>,
-    run: &RunDialog<'_>,
 ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
     let (tx, rx) = oneshot::channel();
     let directory = directory.to_path_buf();
     let suggested_name = suggested_name.map(str::to_owned);
-    run(Box::new(move || {
+    on_thread(move || {
         let mut dialog = rfd::FileDialog::new().set_directory(&directory);
         if let Some(name) = &suggested_name {
             dialog = dialog.set_file_name(name);
         }
         let _ = tx.send(Ok(dialog.save_file()));
-    }));
+    });
     rx
 }
 
-/// Runs `job` on a new thread (what `RunDialog` is off macOS).
-pub(crate) fn on_thread(job: Box<dyn FnOnce() + Send>) {
+/// Runs a dialog on its own thread, so the event loop keeps running while it is up. On macOS rfd hands
+/// the panel to the main thread itself (GCD's main queue, which the running `NSApplication` serves), so
+/// AppKit's main-thread rule holds without the dialog running inside a winit callback.
+fn on_thread(job: impl FnOnce() + Send + 'static) {
     let _ = std::thread::Builder::new().name("folo-ui-dialog".into()).spawn(job);
 }
 

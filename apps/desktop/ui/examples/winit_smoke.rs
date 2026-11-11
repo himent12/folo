@@ -243,31 +243,45 @@ mod smoke {
             format!("resize drew a frame requiring presentation ({options:?})"),
         );
 
-        // Partial present after a full one.
+        // Presents of a full 1920x1200 frame and of a 64x64 rectangle (device pixels).
         let scale = window.borrow().scale_factor();
-        let (w, h) = ((800. * scale).round() as u32, (500. * scale).round() as u32);
+        window.borrow_mut().resize(size(px(1920. / scale), px(1200. / scale)));
+        let target = size(px(1920. / scale), px(1200. / scale));
+        wait_for(dispatcher, Duration::from_secs(2), || {
+            seen.resizes.borrow().iter().any(|(s, _)| *s == target)
+        })
+        .await;
+        let (w, h) = (1920, 1200);
         let mut frame = pattern(w, h);
-        window.borrow_mut().present(
-            &frame,
-            &[Bounds::new(
-                point(DevicePixels(0), DevicePixels(0)),
-                size(DevicePixels(w as i32), DevicePixels(h as i32)),
-            )],
-        );
-        for x in 10..74 {
-            for y in 10..74 {
-                frame.set_pixel(x, y, 0x00ff_0000);
-            }
-        }
-        let damage = [Bounds::new(
-            point(DevicePixels(10), DevicePixels(10)),
-            size(DevicePixels(64), DevicePixels(64)),
+        let whole = [Bounds::new(
+            point(DevicePixels(0), DevicePixels(0)),
+            size(DevicePixels(w as i32), DevicePixels(h as i32)),
         )];
-        let started = Instant::now();
-        window.borrow_mut().present(&frame, &damage);
+        let mut full_ms = f64::MAX;
+        for _ in 0..5 {
+            window.borrow_mut().present(&frame, &whole);
+            let started = Instant::now();
+            window.borrow_mut().present(&frame, &whole);
+            full_ms = full_ms.min(started.elapsed().as_secs_f64() * 1e3);
+        }
+        let mut rect_ms = f64::MAX;
+        for round in 0..5u32 {
+            for x in 10..74 {
+                for y in 10..74 {
+                    frame.set_pixel(x, y, 0x00ff_0000 + round);
+                }
+            }
+            let damage = [Bounds::new(
+                point(DevicePixels(10), DevicePixels(10)),
+                size(DevicePixels(64), DevicePixels(64)),
+            )];
+            let started = Instant::now();
+            window.borrow_mut().present(&frame, &damage);
+            rect_ms = rect_ms.min(started.elapsed().as_secs_f64() * 1e3);
+        }
         report.check(
             true,
-            format!("partial present of 64x64 took {:.2} ms", started.elapsed().as_secs_f64() * 1e3),
+            format!("present: full 1920x1200 {full_ms:.2} ms, 64x64 rectangle {rect_ms:.3} ms (best of 5)"),
         );
 
         dispatcher_jobs(dispatcher, report).await;

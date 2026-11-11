@@ -58,8 +58,6 @@ struct Shared {
     dispatcher: Arc<WinitDispatcher>,
     cursor: Cell<CursorStyle>,
     clipboard: RefCell<system::Clipboard>,
-    /// Jobs for the main thread outside any callback (macOS file dialogs).
-    main_jobs: RefCell<Vec<Box<dyn FnOnce() + Send>>>,
     offscreen: bool,
     quit: Cell<bool>,
 }
@@ -136,7 +134,6 @@ impl WinitPlatform {
                 dispatcher,
                 cursor: Cell::new(CursorStyle::Arrow),
                 clipboard: RefCell::new(system::Clipboard::default()),
-                main_jobs: RefCell::new(Vec::new()),
                 offscreen: offscreen_requested(),
                 quit: Cell::new(false),
             }),
@@ -147,17 +144,6 @@ impl WinitPlatform {
     /// The concrete dispatcher (for `drain_main` in tests and tools).
     pub fn winit_dispatcher(&self) -> Arc<WinitDispatcher> {
         self.shared.dispatcher.clone()
-    }
-
-    fn run_dialog(&self) -> impl Fn(Box<dyn FnOnce() + Send>) + '_ {
-        move |job| {
-            if cfg!(target_os = "macos") {
-                // AppKit panels must come from the main thread, outside the caller's borrows.
-                self.shared.main_jobs.borrow_mut().push(job);
-            } else {
-                system::on_thread(job);
-            }
-        }
     }
 }
 
@@ -260,7 +246,7 @@ impl Platform for WinitPlatform {
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
-        system::prompt_for_paths(options, &self.run_dialog())
+        system::prompt_for_paths(options)
     }
 
     fn prompt_for_new_path(
@@ -268,7 +254,7 @@ impl Platform for WinitPlatform {
         directory: &Path,
         suggested_name: Option<&str>,
     ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
-        system::prompt_for_new_path(directory, suggested_name, &self.run_dialog())
+        system::prompt_for_new_path(directory, suggested_name)
     }
 
     fn reveal_path(&self, path: &Path) {
@@ -338,10 +324,6 @@ impl ApplicationHandler<UserEvent> for LoopHandler {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let _guard = self.shared.enter(event_loop);
-        let jobs = std::mem::take(&mut *self.shared.main_jobs.borrow_mut());
-        for job in jobs {
-            job();
-        }
         let now = Instant::now();
         let mut wake_at: Option<Instant> = None;
         for window in self.shared.live_windows() {
