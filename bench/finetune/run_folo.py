@@ -127,11 +127,17 @@ class Matrix(Ownership):
         self.dataset_ids: dict[str, str] = {}
         self.layouts: dict[str, str] = {}  # dataset -> layout digest, hashed from its files once per invocation
         self.spent: dict[str, float] = {}  # run id -> cloud cost so far
+        self.unsettled = False  # a worker outlived `settle`: the work dir's lock is kept
         self.finished: set[str] = set()  # run ids that completed (their cost is a full run's)
         self.base: dict | None = None  # the --weights model as the server lists it (pretrained variant)
 
     def release(self) -> None:
-        """Let go of the work dir (after clean-up)."""
+        """Let go of the work dir (after clean-up). Not while a worker has not returned (`unsettled`): it can still
+        write state.json, so another runner must not get the work dir before this process is gone (the OS drops
+        the lock then)."""
+        if self.unsettled:
+            self.log("a worker has not returned: the work dir stays locked until this process ends")
+            return
         run_state.unlock_work_dir(self.work_lock)
 
     def base_model(self) -> dict:

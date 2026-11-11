@@ -135,10 +135,13 @@ submitting it, so launches side by side cannot overrun it. Work dirs of the runn
 2026-11-11 matrix's) are not resumed.
 
 **Limits.** `POST /api/runs` has no idempotency key, so a creation that times out can commit after every lookup
-made for it: such a repeat is found and stopped within one reconciliation interval while the matrix runs; one
-that commits after the runner has ended is bounded only by its own `max_hours`, which is why `--max-hours` should
-stay close to a run's real length (0.5 h here). The real fix is server-side: an idempotency key on `POST
-/api/runs` (a repeat of the same key answers the run it created).
+made for it. Such a repeat is looked for once its name's own POST has been answered, at the next reconciliation
+(`--reconcile-s`, 30 s, plus however long the listing and its retries take), and then stopped; one that had
+already ended is charged to the budget without a stop. A repeat that commits after clean-up's last listing (also
+while clean-up still waits for other runs to end) or after the runner has ended is bounded only by its own
+`max_hours`, which is why `--max-hours` should stay close to a run's real length (0.5 h here). A runner whose
+worker never returned keeps its work dir locked until its process ends. The real fix is server-side: an
+idempotency key on `POST /api/runs` (a repeat of the same key answers the run it created).
 
 Smoke runs belong in a scratch results folder:
 the renderer leaves out runs of another epoch count anyway. Result files are named

@@ -9,8 +9,10 @@ runner looked it up and sent it again: two runs of one name, two pods. The expos
   charged to the budget (`spent`);
 - clean-up, after an error, Ctrl+C or a normal end, first lets no new creation start and lets the workers settle
   (`close`, `settle`), then lists the owner's runs (retried), stops every live one, and reaps their instances.
-A POST that commits later still is found within one reconciliation interval while the matrix runs; after it ends,
-only the cloud run's own `max_hours` bounds it.
+A repeat is looked for once its name's POST has been answered: a POST that commits later is found at the next
+reconciliation after that (an interval, plus however long the listing and its retries take), and one that commits
+after clean-up's last listing, also while clean-up still waits for other runs, is bounded only by the cloud run's
+own `max_hours`. A repeat that had already ended when it was found is not stopped but still charged.
 
 What clean-up cannot confirm (a creation whose worker never returned, a listing that failed, a run not seen ended,
 an instance not seen terminated) is returned as a problem: run_folo.py prints them with the commands that finish
@@ -43,7 +45,7 @@ def cost_of(run: dict) -> float | None:
 class Ownership:
     """Expects of the Matrix: api, args, state, lock, stop, log, pause, results, and the run books `active` (run id
     -> stem), `tracked` (name -> the run kept for it), `inflight` (name -> stem: a POST on its way), `discarded`
-    (repeats: run id -> stem), `restop` (repeats whose stop failed), `spent` and `closing`."""
+    (repeats: run id -> stem), `restop` (repeats whose stop failed), `spent`, `closing` and `unsettled`."""
 
     discovery_attempts = 6  # GET /api/runs in clean-up: about 30 s of backoff in all
 
@@ -53,12 +55,17 @@ class Ownership:
             self.closing = True
         self.stop.set()
 
-    def settle(self, futures, timeout_s: float) -> None:
+    def settle(self, futures, timeout_s: float) -> bool:
         """Wait for the workers to return, at most `timeout_s` (a POST in flight ends within the API's request
-        timeout). Creations still in flight after that are reported by `clean_up` as unresolved."""
-        done, running = wait(list(futures), timeout=timeout_s)
+        timeout); True when all did. Creations still in flight after that are reported by `clean_up` as unresolved,
+        and the work dir stays locked until the process ends (`unsettled`): such a worker can still write the state.
+        Futures the pool cancelled before they started never ran and are not waited for (`wait` would count them
+        as pending for the whole timeout)."""
+        done, running = wait([f for f in futures if not f.cancelled()], timeout=timeout_s)
         if running:
             self.log(f"{len(running)} worker(s) still busy after {timeout_s:.0f} s")
+            self.unsettled = True
+        return not running
 
     # ---------------------------------------------------------------------------------------------------------
     def discard(self, run: dict, stem: str) -> None:
@@ -96,6 +103,7 @@ class Ownership:
             if self.request_stop(r["id"], known[r["id"]]) is not False:
                 with self.lock:
                     self.restop.discard(r["id"])
+        self.charge_ended_repeats(owned, tracked, inflight)
         live: dict[str, list[dict]] = {}
         for r in owned:
             if not ended(r) and r["id"] not in known:
@@ -115,6 +123,17 @@ class Ownership:
                     self.discard(r, self.state.stem_of(name))
                     found.append(r["id"])
         return found
+
+    def charge_ended_repeats(self, owned: list[dict], tracked: dict, inflight: set) -> None:
+        """A repeat that ended before it was found (a late commit that failed or finished on its own) needs no stop,
+        but its pod was rented: every ended run of a tracked name that is not the tracked run counts in `spent`."""
+        with self.lock:
+            for r in owned:
+                keep = tracked.get(r["name"])
+                if keep is None or r["id"] == keep or r["name"] in inflight or not ended(r):
+                    continue
+                if cost_of(r) is not None:
+                    self.spent[r["id"]] = cost_of(r)
 
     def maybe_reconcile(self) -> None:
         now = time.monotonic()
@@ -168,8 +187,12 @@ class Ownership:
                         )
             else:
                 owner = self.state.owner
-                for r in listing:
-                    if run_state.owned(r.get("name"), owner) and not ended(r):
+                owned = [r for r in listing if run_state.owned(r.get("name"), owner)]
+                with self.lock:
+                    tracked = dict(self.tracked)
+                self.charge_ended_repeats(owned, tracked, set(unresolved))
+                for r in owned:
+                    if not ended(r):
                         runs.setdefault(r["id"], self.state.stem_of(r["name"]))
                 # Every intent without a run id is now found (live: stopped below) or confirmed absent.
             unsent = {rid for rid, stem in runs.items() if self.request_stop(rid, stem) is False}

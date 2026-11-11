@@ -91,6 +91,26 @@ class LateCommits(Case):
         self.assertEqual(self.server.stops, [late["id"]])
 
 
+    def test_a_late_repeat_that_ended_before_it_was_found_is_charged_without_a_stop(self):
+        for last_pass in ("reconcile", "clean_up"):
+            with self.subTest(last_pass):
+                m = self.matrix(last_pass, server=type(self.server)(), budget_usd=1.0)
+                server = m.api
+                name, fp, spec = identity(m)
+                run = m.launch(KEY, name, fp, spec)
+                late = server.add_run(name, status="failed", cost=0.04)  # committed late, ended on its own
+                if last_pass == "reconcile":
+                    self.assertEqual(m.reconcile(), [])  # nothing to stop
+                else:
+                    server.run(run["id"])["status"] = "completed"
+                    server.run(run["id"])["cloud"]["phase"] = "released"
+                    m.close()
+                    self.assertEqual(m.clean_up(), [])
+                self.assertEqual(server.stops, [])
+                self.assertAlmostEqual(m.spent[late["id"]], 0.04)
+                self.assertNotIn(run["id"], m.discarded)
+
+
 class Shutdown(Case):
     """B: clean-up must not finish before a launch in flight has registered."""
 
@@ -120,11 +140,30 @@ class Shutdown(Case):
         fut = self.pool.submit(m.launch, KEY, name, fp, spec)
         until(lambda: m.inflight)
         m.close()
-        m.settle([fut], timeout_s=0.2)  # the POST hangs past the bound
+        self.assertFalse(m.settle([fut], timeout_s=0.2))  # the POST hangs past the bound
         problems = m.clean_up()
+        # The worker can still write state.json when it returns: the work dir stays this runner's until then.
+        m.release()
+        with self.assertRaises(SystemExit):
+            self.matrix()
+        m.unsettled = False  # the test is over: its clean-up frees the work dir
         self.assertTrue(any(name in p and "unresolved" in p for p in problems), problems)
         self.assertEqual(run_folo.finish(m, [], {}, problems), 1)
         self.assertIn(name, "\n".join(m.logged))
+
+    def test_settling_does_not_wait_for_futures_the_pool_cancelled(self):
+        m = self.matrix()
+        pool = ThreadPoolExecutor(max_workers=1)
+        release = threading.Event()
+        busy = pool.submit(release.wait)
+        queued = pool.submit(lambda: None)  # behind `busy`: cancelled by the shutdown, never runs
+        pool.shutdown(wait=False, cancel_futures=True)
+        release.set()
+        t0 = time.monotonic()
+        self.assertTrue(m.settle([busy, queued], timeout_s=30))
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertTrue(queued.cancelled())
+        self.assertFalse(m.unsettled)
 
     def test_nothing_is_submitted_after_close(self):
         m = self.matrix()
