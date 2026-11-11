@@ -149,6 +149,11 @@ css`
     font-weight: var(--type-xl-weight);
     overflow-wrap: anywhere;
   }
+  /* Route changes focus the title (App, shell/routeFocus) so a screen reader announces the page; it is not a control,
+     so it wears no ring, also after a keyboard navigation (G R, Esc, the palette), where the browser would draw one. */
+  h1:focus-visible {
+    outline: none;
+  }
   .sub {
     display: flex;
     align-items: center;

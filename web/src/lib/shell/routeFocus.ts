@@ -16,7 +16,7 @@ export function routeFocusTarget(main: HTMLElement): HTMLElement {
 
 /**
  * Moves focus to the new page and starts it at the top, unless Back / Forward is bringing it back to where it was
- * (./entryMemory). Programmatic focus shows no ring unless the keyboard led here.
+ * (./entryMemory). The title takes no ring (shell/Page): it is not a control.
  */
 export function focusRoute(main: HTMLElement): HTMLElement {
   const target = routeFocusTarget(main);
