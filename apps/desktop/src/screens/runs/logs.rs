@@ -1,7 +1,7 @@
 //! A run's log panel: its lines, keyboard scrolling and copying.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
     Window, div, px,
 };
@@ -36,7 +36,7 @@ impl FoloApp {
                         div()
                             .id("log-scroll")
                             .track_focus(&log_fh)
-                            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                            .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, _, cx| {
                                 let s = &this.log_scroll;
                                 let (y, max) = (-s.offset().y, s.max_offset().height);
                                 let page = (s.bounds().size.height - px(LOG_LINE)).max(px(LOG_LINE));
@@ -50,7 +50,7 @@ impl FoloApp {
                                     _ => return,
                                 };
                                 let to = to.clamp(px(0.), max);
-                                s.set_offset(gpui::point(s.offset().x, -to));
+                                s.set_offset(folo_ui::point(s.offset().x, -to));
                                 // The key decides following now (a reflow before the next frame
                                 // could otherwise hide the move).
                                 this.log_follow = max - to < px(8.);
@@ -220,7 +220,7 @@ impl FoloApp {
             })
             .collect();
         let n = lines.len();
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(text));
         self.toast(Tone::Neutral, format!("Copied {} log lines", crate::ui::int(n as u64)), None, cx);
     }
 }

@@ -1,7 +1,7 @@
 //! A benchmark's Plan tab: its conditions, each previewed on the first image.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::cells::num_cell;
 use super::format::{agent_name, pct};
@@ -142,7 +142,7 @@ impl FoloApp {
             .child(th(&t, "Severities").w(px(150.)).flex_none())
             .child(num_cell(110., th(&t, "Share of robustness")));
         let row =
-            |thumb: AnyElement, name: String, what: String, group: &str, sev: gpui::Div, share: String| {
+            |thumb: AnyElement, name: String, what: String, group: &str, sev: folo_ui::Div, share: String| {
                 div()
                     .flex()
                     .items_center()

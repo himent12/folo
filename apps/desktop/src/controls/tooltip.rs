@@ -1,7 +1,7 @@
 //! Tooltips: hover tips, focus tips, help icons and the disclosure of cut labels.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, AnyView, AppContext, Context, Div, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -37,7 +37,7 @@ impl Render for Tip {
 pub fn tip(
     text: impl Into<SharedString>,
     keys: Option<&'static str>,
-) -> impl Fn(&mut Window, &mut gpui::App) -> AnyView + 'static {
+) -> impl Fn(&mut Window, &mut folo_ui::App) -> AnyView + 'static {
     let text: SharedString = text.into();
     move |_, cx| cx.new(|_| Tip(text.clone(), keys.map(Into::into))).into()
 }
@@ -75,8 +75,8 @@ impl FoloApp {
                 // edge would otherwise push it out), like `focus_tip`.
                 d.child(
                     div().absolute().top(px(28.)).left(px(-4.)).child(
-                        gpui::deferred(
-                            gpui::anchored().snap_to_window_with_margin(px(8.)).child(
+                        folo_ui::deferred(
+                            folo_ui::anchored().snap_to_window_with_margin(px(8.)).child(
                                 div()
                                     .w(px(260.))
                                     .p(px(8.))
@@ -132,8 +132,8 @@ pub fn focus_tip(t: &Theme, text_: impl Into<SharedString>, below: f32) -> Div {
     // The box the tip is laid out in: it sizes to its text up to this width, then wraps (a narrow
     // control, like a rail icon, would otherwise wrap it word by word).
     div().absolute().top(px(below + 6.)).left_0().w(px(320.)).child(
-        gpui::deferred(
-            gpui::anchored().snap_to_window_with_margin(px(8.)).child(
+        folo_ui::deferred(
+            folo_ui::anchored().snap_to_window_with_margin(px(8.)).child(
                 div()
                     .px(px(8.))
                     .py(px(4.))

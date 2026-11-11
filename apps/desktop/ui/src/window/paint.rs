@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/window.rs (`PaintQuad`, `quad`, `fill`, `outline`)
 //! The element-author paint API on `Window` (GPUI's signatures): quads, paths, images, SVG icons, glyphs,
 //! emoji, shadows, underlines, plus `PaintQuad`, `ContentMask` and the `quad` / `fill` / `outline` helpers.
 //! Owner tag: `"window"`.

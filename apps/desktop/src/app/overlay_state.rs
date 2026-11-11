@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use gpui::{App, AppContext, Context, Focusable, ScrollHandle, SharedString, Window};
+use folo_ui::{App, AppContext, Context, Focusable, ScrollHandle, SharedString, Window};
 
 use crate::input::{InputEvent, TextInput};
 use crate::ui::*;

@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/element.rs (the `Element` trait), crates/gpui/src/util.rs (`FluentBuilder`)
 //! The element protocol: `Element`, `IntoElement`, `AnyElement`, `Render`, `RenderOnce`, `ParentElement`,
 //! element ids and layout ids. Owner tag: `"elements"`.
 //!

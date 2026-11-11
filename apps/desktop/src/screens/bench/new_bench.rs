@@ -1,7 +1,7 @@
 //! The New benchmark form, and the source picker it shares with the New loop form.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, Focusable, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
 };
 

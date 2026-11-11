@@ -1,7 +1,7 @@
 //! An entry's images panel: sorted, paged, with what the contestant found on each.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };

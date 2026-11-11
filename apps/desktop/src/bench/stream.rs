@@ -2,7 +2,7 @@
 
 use std::sync::mpsc::TryRecvError;
 
-use gpui::Context;
+use folo_ui::Context;
 
 use super::load::route_bench;
 use super::merge::{upsert_entry, upsert_loop};

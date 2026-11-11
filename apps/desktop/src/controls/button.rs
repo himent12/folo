@@ -1,7 +1,7 @@
 //! Buttons: their kinds and colours, icon buttons and the zoom readout.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     Context, Div, FontWeight, Hsla, InteractiveElement, ParentElement, SharedString, Stateful,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -37,7 +37,7 @@ impl FoloApp {
         let (bg, fg, border, hover) = btn_colors(&t, kind);
         // Pressed is a real step past hover, not a fade.
         let pressed = match kind {
-            Btn::Primary => crate::theme::over(t.accent_solid, gpui::hsla(0., 0., 0., 0.14)),
+            Btn::Primary => crate::theme::over(t.accent_solid, folo_ui::hsla(0., 0., 0., 0.14)),
             Btn::Secondary => crate::theme::over(t.bg_raised, t.bg_active),
             Btn::Danger | Btn::DangerCommit => crate::theme::alpha(t.danger_solid, 0.28),
         };
@@ -199,7 +199,7 @@ pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
         Btn::Primary => (
             t.accent_solid,
             t.accent_on,
-            Some(if t.is_dark() { gpui::transparent_black() } else { t.line_default }),
+            Some(if t.is_dark() { folo_ui::transparent_black() } else { t.line_default }),
             t.accent_solid_hover,
         ),
         Btn::Secondary => {

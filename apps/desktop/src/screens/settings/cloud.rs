@@ -1,7 +1,7 @@
 //! Settings › Cloud: the cloud connections and the instances FOLO launched.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -170,7 +170,7 @@ impl FoloApp {
         // working connection still has against it (an unencrypted URL, a worker that cannot be installed). Not
         // beside the buttons: a wrapped line in the column that shrinks for them paints at the width it was first
         // measured at, under the buttons.
-        let line = |mark: &'static str, mark_c: gpui::Hsla, ink: gpui::Hsla, words: &str| {
+        let line = |mark: &'static str, mark_c: folo_ui::Hsla, ink: folo_ui::Hsla, words: &str| {
             div()
                 .flex()
                 .items_start()
@@ -294,8 +294,8 @@ impl FoloApp {
         let table_w = self.content_width(window).min(COLUMN_MAX);
         let show_started = table_w - fixed - (72. + GAP) >= gpu_need;
         let cell =
-            |w: f32, right: bool, el: gpui::Div| el.w(px(w)).flex_none().when(right, |d| d.text_right());
-        let cols = |d: gpui::Div| d.flex().items_center().gap(px(GAP)).px(px(16.)).h(px(36.));
+            |w: f32, right: bool, el: folo_ui::Div| el.w(px(w)).flex_none().when(right, |d| d.text_right());
+        let cols = |d: folo_ui::Div| d.flex().items_center().gap(px(GAP)).px(px(16.)).h(px(36.));
         let head = cols(div())
             .border_b_1()
             .border_color(t.line_subtle)

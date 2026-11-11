@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use gpui::{
+use folo_ui::{
     App, BorderStyle, Bounds, Corners, Edges, FontWeight, Hsla, Pixels, Point, RenderImage, SharedString,
     TextRun, Window, fill, point, px, quad, size, transparent_black,
 };
@@ -87,10 +87,10 @@ pub fn image_rect(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (
 fn run(text: &str, family: &'static str, weight: FontWeight, color: Hsla) -> TextRun {
     TextRun {
         len: text.len(),
-        font: gpui::Font {
+        font: folo_ui::Font {
             weight,
-            features: gpui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
-            ..gpui::font(family)
+            features: folo_ui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
+            ..folo_ui::font(family)
         },
         color,
         background_color: None,
@@ -117,7 +117,7 @@ pub fn paint_image_with_boxes(
     corner: f32,
 ) {
     let rect = image_rect(bounds, w.max(1.), h.max(1.), fit, zoom, pan);
-    window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+    window.with_content_mask(Some(folo_ui::ContentMask { bounds }), |window| {
         match img {
             Some(img) => {
                 let r = if fit == Fit::Cover { corner } else { 0. };
@@ -450,15 +450,15 @@ pub fn paint_image_with_boxes(
 struct Chip {
     bounds: Bounds<Pixels>,
     bg: Hsla,
-    name: gpui::ShapedLine,
-    score: gpui::ShapedLine,
+    name: folo_ui::ShapedLine,
+    score: folo_ui::ShapedLine,
     gap: Pixels,
     ty: Pixels,
     lh: Pixels,
 }
 
 impl Chip {
-    fn paint(self, window: &mut Window, cx: &mut gpui::App) {
+    fn paint(self, window: &mut Window, cx: &mut folo_ui::App) {
         // Dimmed chips fade their fill with the box; the text stays readable.
         window.paint_quad(fill(self.bounds, self.bg).corner_radii(px(tokens::radius::XS)));
         let x = self.bounds.origin.x + px(5.);
@@ -468,7 +468,7 @@ impl Chip {
 }
 
 fn rgba(v: u32) -> Hsla {
-    gpui::rgba(v).into()
+    folo_ui::rgba(v).into()
 }
 
 /// Zoom to `new_zoom` keeping the image point under `cursor` fixed; returns the new pan.

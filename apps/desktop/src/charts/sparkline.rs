@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Bounds, Hsla, IntoElement, PathBuilder, Pixels, Point, Styled, canvas, fill,
     linear_color_stop, linear_gradient, point, px, size,
 };

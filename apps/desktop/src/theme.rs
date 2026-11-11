@@ -4,12 +4,12 @@
 //! scale, spacing, radii, sizes and motion constants. This module adds the runtime pieces: the
 //! current mode as a GPUI global, colour helpers and the class palette.
 
-use gpui::{App, BoxShadow, Global, Hsla, Rgba, point, px};
+use folo_ui::{App, BoxShadow, Global, Hsla, Rgba, point, px};
 
 #[allow(dead_code, clippy::all)]
 pub mod tokens {
     use super::rgba32;
-    use gpui::Hsla;
+    use folo_ui::Hsla;
     include!(concat!(env!("OUT_DIR"), "/tokens.rs"));
 }
 
@@ -20,7 +20,7 @@ pub const MONO: &str = "Geist Mono";
 
 /// `0xRRGGBBAA` to a colour.
 pub fn rgba32(v: u32) -> Hsla {
-    gpui::rgba(v).into()
+    folo_ui::rgba(v).into()
 }
 
 pub fn alpha(c: Hsla, a: f32) -> Hsla {

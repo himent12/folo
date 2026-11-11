@@ -1,7 +1,7 @@
 //! Legend swatches: line samples, colour squares and class colours.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{Div, Hsla, ParentElement, Styled, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{Div, Hsla, ParentElement, Styled, div, px};
 
 use super::format::sci;
 use super::text::text;

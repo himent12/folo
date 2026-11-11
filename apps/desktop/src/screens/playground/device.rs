@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use gpui::{
+use folo_ui::{
     AnyElement, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
 };
 

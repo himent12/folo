@@ -36,9 +36,9 @@ impl FoloApp {
         t: &crate::theme::Theme,
         r: &Run,
         size: crate::theme::TypeStep,
-        color: gpui::Hsla,
+        color: folo_ui::Hsla,
         id: &str,
-    ) -> gpui::Div {
+    ) -> folo_ui::Div {
         let ds = self
             .store
             .dataset_summary(&r.config.dataset_id)

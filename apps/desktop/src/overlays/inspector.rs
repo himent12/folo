@@ -2,8 +2,8 @@
 //! zoom and pan, the label list, and stepping through the filtered images.
 
 use crate::api::Label;
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, ParentElement, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled,
     Window, canvas, div, px,
@@ -147,7 +147,7 @@ impl FoloApp {
             .flex_1()
             .min_w_0()
             .bg(t.bg_inset)
-            .cursor(if zoom > 1.0 { gpui::CursorStyle::OpenHand } else { gpui::CursorStyle::Arrow })
+            .cursor(if zoom > 1.0 { folo_ui::CursorStyle::OpenHand } else { folo_ui::CursorStyle::Arrow })
             .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, w, cx| {
                 let Some(b) = wheel_cell.get() else { return };
                 let Some(insp) = this.inspector.as_mut() else { return };
@@ -219,13 +219,13 @@ impl FoloApp {
                 canvas(
                     |_, _, _| (),
                     move |b, _, window, cx| {
-                        let inner = gpui::Bounds::new(
-                            b.origin + gpui::point(px(24.), px(24.)),
+                        let inner = folo_ui::Bounds::new(
+                            b.origin + folo_ui::point(px(24.), px(24.)),
                             // 24 px on every side (the zoom controls live in the header now).
-                            b.size - gpui::size(px(48.), px(48.)),
+                            b.size - folo_ui::size(px(48.), px(48.)),
                         );
                         paint_cell.set(Some(inner));
-                        window.with_content_mask(Some(gpui::ContentMask { bounds: b }), |window| {
+                        window.with_content_mask(Some(folo_ui::ContentMask { bounds: b }), |window| {
                             paint_image_with_boxes(
                                 &tt,
                                 window,

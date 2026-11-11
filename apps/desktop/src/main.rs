@@ -27,7 +27,7 @@ mod window_state;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use gpui::{
+use folo_ui::{
     App, AppContext, Application, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions, point, px, size,
 };
@@ -231,9 +231,9 @@ fn main() {
 /// Where a remembered window opens: its saved bounds on the display it was on (matched by UUID) or
 /// another that still shows its title bar, else centred on the primary display
 /// (`window_state::place`), maximized or full screen as it was.
-fn restored_bounds(p: window_state::Placement, cx: &App) -> (WindowBounds, Option<gpui::DisplayId>) {
+fn restored_bounds(p: window_state::Placement, cx: &App) -> (WindowBounds, Option<folo_ui::DisplayId>) {
     use window_state::{Rect, WindowMode};
-    let rect = |b: Bounds<gpui::Pixels>| Rect {
+    let rect = |b: Bounds<folo_ui::Pixels>| Rect {
         x: b.origin.x.into(),
         y: b.origin.y.into(),
         width: b.size.width.into(),

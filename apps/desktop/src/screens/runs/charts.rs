@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -360,8 +360,8 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(ga.abs())).child(a))
-                    .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(gb)).child(b))
+                    .child(div().flex().min_w_0().flex_grow().flex_basis(folo_ui::relative(ga.abs())).child(a))
+                    .child(div().flex().min_w_0().flex_grow().flex_basis(folo_ui::relative(gb)).child(b))
             }
         };
         let grid = div()

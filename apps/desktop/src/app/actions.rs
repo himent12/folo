@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use gpui::{AppContext, Context, Focusable, Window};
+use folo_ui::{AppContext, Context, Focusable, Window};
 
 use crate::api::*;
 use crate::input::TextInput;
@@ -130,7 +130,7 @@ impl FoloApp {
             );
             return;
         }
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+        let rx = cx.prompt_for_paths(folo_ui::PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,

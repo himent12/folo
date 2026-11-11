@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
@@ -568,7 +568,7 @@ impl FoloApp {
                     .cursor_pointer()
                     // Over an image a fill wouldn't show: the edge answers, as on dataset tiles.
                     .border_1()
-                    .border_color(gpui::transparent_black())
+                    .border_color(folo_ui::transparent_black())
                     .hover(|s| s.border_color(t.line_strong))
                     .active(|s| s.border_color(t.text_tertiary))
                     .child(div().size_full().rounded(px(radius::SM)).overflow_hidden().bg(t.bg_inset).child(

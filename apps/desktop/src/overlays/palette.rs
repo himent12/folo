@@ -1,8 +1,8 @@
 //! The command palette: its items (pages, actions, datasets, runs, models) and fuzzy matching.
 
 use crate::api::{Label, SplitsExt};
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, MouseMoveEvent, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };

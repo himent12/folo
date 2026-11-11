@@ -10,7 +10,7 @@ pub mod settings;
 
 use std::sync::Arc;
 
-use gpui::{
+use folo_ui::{
     AnyElement, Context, Div, FontWeight, IntoElement, ParentElement, RenderImage, SharedString, Styled,
     Window, canvas, div, px,
 };
@@ -221,7 +221,7 @@ pub fn loading_rows(t: &Theme, id: &str, rows: usize) -> Div {
                 // Relative widths so placeholders fit any panel.
                 div()
                     .h(px(10.))
-                    .w(gpui::relative(0.3 + (i % 3) as f32 * 0.08))
+                    .w(folo_ui::relative(0.3 + (i % 3) as f32 * 0.08))
                     .min_w_0()
                     .child(skeleton(t, format!("{id}-b{i}"))),
             )

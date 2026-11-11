@@ -1,6 +1,6 @@
 //! The colour theme, and the window state remembered between launches.
 
-use gpui::{App, Context, Window};
+use folo_ui::{App, Context, Window};
 
 use crate::theme::{Mode, Theme};
 
@@ -26,9 +26,9 @@ impl FoloApp {
             return;
         };
         let (b, mode) = match window.window_bounds() {
-            gpui::WindowBounds::Windowed(b) => (b, WindowMode::Windowed),
-            gpui::WindowBounds::Maximized(b) => (b, WindowMode::Maximized),
-            gpui::WindowBounds::Fullscreen(b) => (b, WindowMode::Fullscreen),
+            folo_ui::WindowBounds::Windowed(b) => (b, WindowMode::Windowed),
+            folo_ui::WindowBounds::Maximized(b) => (b, WindowMode::Maximized),
+            folo_ui::WindowBounds::Fullscreen(b) => (b, WindowMode::Fullscreen),
         };
         let mode = crate::window_state::closing_mode(mode, self.shown_mode);
         let state = State {

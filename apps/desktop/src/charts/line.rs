@@ -3,8 +3,8 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, App, Bounds, Hsla, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement,
     PathBuilder, Pixels, Point, StatefulInteractiveElement, Styled, Window, canvas, div, fill,
     linear_color_stop, linear_gradient, point, px, size,
@@ -66,7 +66,7 @@ pub fn line_chart(t: &Theme, spec: LineChart) -> AnyElement {
     let id = spec.id.clone();
     let height = spec.height;
     div()
-        .id(gpui::ElementId::Name(id.clone()))
+        .id(folo_ui::ElementId::Name(id.clone()))
         .w_full()
         .h(px(height))
         .flex_none()
@@ -381,7 +381,7 @@ fn paint_line_chart(
     }
     let columns = (plot.size.width / px(1.)).max(1.0) as usize;
     window.with_content_mask(
-        Some(gpui::ContentMask {
+        Some(folo_ui::ContentMask {
             bounds: Bounds::new(
                 point(plot.left() - px(4.), plot.top() - px(4.)),
                 size(plot.size.width + px(8.), plot.size.height + px(5.)),
@@ -621,13 +621,13 @@ fn paint_line_chart(
         .min_by_key(|&(x, y)| covered(x, y))
         .unwrap_or((sides[0], top_y));
     let rect = Bounds::new(point(bx, by), size(w, h));
-    window.paint_quad(gpui::quad(
+    window.paint_quad(folo_ui::quad(
         rect,
         px(6.),
         t.bg_overlay,
         px(1.),
         t.line_strong,
-        gpui::BorderStyle::Solid,
+        folo_ui::BorderStyle::Solid,
     ));
     paint_text(window, cx, &title, point(bx + px(10.), by + px(6.)), t.text_tertiary, fs, false);
     for (i, (color, name, value)) in rows.iter().enumerate() {

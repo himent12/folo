@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     Animation, AnimationExt, Div, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, div,
     px, relative,
 };
@@ -87,7 +87,7 @@ pub fn progress(t: &Theme, frac: f32, color: Hsla, height: f32) -> Div {
 }
 
 /// A placeholder block that shimmers while data loads.
-pub fn skeleton(t: &Theme, id: impl Into<SharedString>) -> gpui::AnyElement {
+pub fn skeleton(t: &Theme, id: impl Into<SharedString>) -> folo_ui::AnyElement {
     let base = t.bg_active;
     let id: SharedString = id.into();
     let block = div().size_full().rounded(px(radius::SM)).bg(base);
@@ -96,7 +96,7 @@ pub fn skeleton(t: &Theme, id: impl Into<SharedString>) -> gpui::AnyElement {
     }
     block
         .with_animation(
-            gpui::ElementId::Name(format!("skel-{id}").into()),
+            folo_ui::ElementId::Name(format!("skel-{id}").into()),
             Animation::new(Duration::from_millis(1400)).repeat(),
             move |d, p| {
                 let w = (p * std::f32::consts::TAU).sin() * 0.5 + 0.5;

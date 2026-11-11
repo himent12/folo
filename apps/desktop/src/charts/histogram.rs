@@ -4,8 +4,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Bounds, Hsla, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement, Pixels,
     SharedString, StatefulInteractiveElement, Styled, canvas, div, fill, point, px, size,
 };
@@ -30,7 +30,7 @@ pub fn histogram(
     let paint_cell = cell.clone();
     let leave = on_hover.clone();
     div()
-        .id(gpui::ElementId::Name(id.into()))
+        .id(folo_ui::ElementId::Name(id.into()))
         .w_full()
         .h(px(height))
         .when_some(on_hover, |d, f| {
@@ -73,7 +73,7 @@ pub fn histogram(
                         let col = if hovered.is_some() && !hot { alpha(color, 0.45) } else { color };
                         window.paint_quad(
                             fill(Bounds::new(point(x, plot.bottom() - h), size(bw, h)), col).corner_radii(
-                                gpui::Corners {
+                                folo_ui::Corners {
                                     top_left: px(2.),
                                     top_right: px(2.),
                                     bottom_left: px(0.),

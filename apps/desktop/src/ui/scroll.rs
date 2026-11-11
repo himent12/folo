@@ -1,6 +1,6 @@
 //! Scroll chrome: the thumb's geometry and painting, and the edge fades.
 
-use gpui::{Bounds, Hsla, Pixels, ScrollHandle, Styled, fill, point, px, size};
+use folo_ui::{Bounds, Hsla, Pixels, ScrollHandle, Styled, fill, point, px, size};
 
 use crate::theme::Theme;
 
@@ -30,7 +30,7 @@ impl ThumbGeo {
 }
 
 /// Paint the thumb (GPUI draws none), so overflow is visible.
-pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut gpui::Window) {
+pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut folo_ui::Window) {
     let Some(g) = ThumbGeo::of(handle) else { return };
     // An overlay thumb: shown while dragged, while the pointer is over its area, and for a moment
     // after the content scrolls; otherwise the content has the space to itself. Movement is
@@ -66,12 +66,12 @@ pub fn scroll_edges(
     bg: Hsla,
     inset: f32,
     radius: f32,
-) -> impl Iterator<Item = gpui::Canvas<()>> {
+) -> impl Iterator<Item = folo_ui::Canvas<()>> {
     // Read at paint time, after this frame's layout set the scroll extent: a fade decided while
     // building the frame used the last frame's extent, so a window's first frames (and a still
     // capture) showed no fade over content below the fold.
     let h = handle.clone();
-    let painter = gpui::canvas(
+    let painter = folo_ui::canvas(
         |_, _, _| (),
         move |b, _, window, _| {
             let y = h.offset().y;
@@ -85,21 +85,21 @@ pub fn scroll_edges(
             let fade = |top: bool| {
                 let at = if top { b.top() + inset } else { b.bottom() - inset - px(24.) };
                 let corners = if top {
-                    gpui::Corners { top_left: r, top_right: r, ..Default::default() }
+                    folo_ui::Corners { top_left: r, top_right: r, ..Default::default() }
                 } else {
-                    gpui::Corners { bottom_left: r, bottom_right: r, ..Default::default() }
+                    folo_ui::Corners { bottom_left: r, bottom_right: r, ..Default::default() }
                 };
-                gpui::quad(
+                folo_ui::quad(
                     Bounds::new(point(b.left() + inset, at), size(w, px(24.))),
                     corners,
-                    gpui::linear_gradient(
+                    folo_ui::linear_gradient(
                         if top { 180. } else { 0. },
-                        gpui::linear_color_stop(bg, 0.25),
-                        gpui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
+                        folo_ui::linear_color_stop(bg, 0.25),
+                        folo_ui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
                     ),
                     px(0.),
-                    gpui::transparent_black(),
-                    gpui::BorderStyle::default(),
+                    folo_ui::transparent_black(),
+                    folo_ui::BorderStyle::default(),
                 )
             };
             if above {

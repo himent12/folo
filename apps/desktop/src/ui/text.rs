@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{Div, FontFeatures, FontWeight, Hsla, ParentElement, SharedString, Styled, Svg, div, px, svg};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{Div, FontFeatures, FontWeight, Hsla, ParentElement, SharedString, Styled, Svg, div, px, svg};
 
 use crate::theme::{Theme, TypeStep, radius, ty};
 
@@ -47,7 +47,7 @@ pub fn caption(t: &Theme, label: &str) -> Div {
 /// one text element, so words space and wrap as body text does, with code in Geist Mono on a
 /// chip fill (a no-break space either side for its padding).
 pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
-    let (sans, mono) = (gpui::font(crate::theme::SANS), gpui::font(crate::theme::MONO));
+    let (sans, mono) = (folo_ui::font(crate::theme::SANS), folo_ui::font(crate::theme::MONO));
     let mut text = String::new();
     let mut runs = Vec::new();
     for (i, part) in content.split('`').enumerate() {
@@ -59,7 +59,7 @@ pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
         // break at one, so a command that must stay whole belongs on its own chip line.
         let seg =
             if code { format!("\u{a0}{}\u{a0}", part.replace(' ', "\u{a0}")) } else { part.to_string() };
-        runs.push(gpui::TextRun {
+        runs.push(folo_ui::TextRun {
             len: seg.len(),
             font: if code { mono.clone() } else { sans.clone() },
             color: if code { t.text_primary } else { color },
@@ -74,7 +74,7 @@ pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
         .line_height(px(s.line))
         .text_color(color)
         .text_center()
-        .child(gpui::StyledText::new(text).with_runs(runs))
+        .child(folo_ui::StyledText::new(text).with_runs(runs))
 }
 
 pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
@@ -111,7 +111,7 @@ pub fn meta_row(
     size: TypeStep,
     color: Hsla,
     lead: impl Into<SharedString>,
-    tag: Option<gpui::Stateful<Div>>,
+    tag: Option<folo_ui::Stateful<Div>>,
     rest: &[String],
 ) -> Div {
     let rest: Vec<&str> = rest.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();

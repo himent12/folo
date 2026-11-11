@@ -1,7 +1,7 @@
 //! The New loop form on the Loops tab.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
 
 use crate::api::{Bench, BenchSource};
 use crate::app::{FoloApp, act};

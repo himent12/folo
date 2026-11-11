@@ -27,6 +27,6 @@ pub use text::{mono_width, text_width};
 
 use std::rc::Rc;
 
-use gpui::{App, Window};
+use folo_ui::{App, Window};
 
 pub type HoverFn = Rc<dyn Fn(Option<f32>, &mut Window, &mut App)>;

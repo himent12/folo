@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gpui::Context;
+use folo_ui::Context;
 
 use super::state::{ENTRY_IMAGES_PAGE, EntryImages};
 use crate::app::FoloApp;
@@ -104,7 +104,7 @@ impl FoloApp {
         image: &str,
         condition: Option<(&str, u8)>,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<gpui::RenderImage>> {
+    ) -> Option<Arc<folo_ui::RenderImage>> {
         let (dataset, img) = bench_img_key(bench, image, condition);
         let key = ImgKey { dataset, image: img, kind: ImgKind::Thumb };
         match self.store.images_px.get(&key) {

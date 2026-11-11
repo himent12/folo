@@ -4,7 +4,7 @@
 //! hover/focus so states that normally need a pointer are visible. Names compose with `+`:
 //! `run-live+light` is the live run dashboard in the light theme.
 
-use gpui::{Context, Window};
+use folo_ui::{Context, Window};
 
 use crate::app::{FoloApp, Route, RunFilter, SampleView};
 use crate::store::Load;
@@ -356,7 +356,7 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
                 f.amp = true;
                 f.advanced = true;
             }
-            app.dialog_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(-4000.)));
+            app.dialog_scroll.set_offset(folo_ui::point(folo_ui::px(0.), folo_ui::px(-4000.)));
         }
     }
     if screen == "toast" {

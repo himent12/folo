@@ -1,6 +1,6 @@
 //! The Playground page's layout, and what it shows: the boxes that pass and the one inspected.
 
-use gpui::{
+use folo_ui::{
     AnyElement, Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
 };
 

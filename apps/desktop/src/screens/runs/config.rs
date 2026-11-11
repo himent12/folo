@@ -1,7 +1,7 @@
 //! A run's configuration panel and its `folo train` command.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
@@ -19,7 +19,7 @@ impl FoloApp {
             move |api| api.run_cli(&id),
             |this, r, cx| match r {
                 Ok(c) => {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(c.cli.clone()));
+                    cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(c.cli.clone()));
                     this.toast(
                         Tone::Neutral,
                         "Copied the training command",

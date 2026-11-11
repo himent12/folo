@@ -22,5 +22,7 @@ when you adapt another file.
 | `scene.rs` | `scene.rs` (`BorderStyle`, primitive field names) |
 | `image.rs` | `assets.rs` (`RenderImage`) |
 | `text/types.rs` | `text_system.rs`, `text_system/line_layout.rs`, `text_system/font_features.rs`, `text_system/font_fallbacks.rs`, `style.rs` (`UnderlineStyle`, `StrikethroughStyle`), `platform.rs` (`PlatformTextSystem`) |
+| `element.rs` | `element.rs` (the `Element` trait), `util.rs` (`FluentBuilder`) |
+| `window/paint.rs` | `window.rs` (`PaintQuad`, `quad`, `fill`, `outline`) |
 
 The Apache License 2.0 text is in the repository root, `LICENSE-APACHE`.

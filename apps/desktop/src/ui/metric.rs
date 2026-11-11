@@ -1,7 +1,7 @@
 //! Metrics: value pairs, KPI values and stats, durations and key/value rows.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{Div, IntoElement, ParentElement, SharedString, Styled, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{Div, IntoElement, ParentElement, SharedString, Styled, div, px};
 
 use super::text::{StyledExt, caption, text};
 use crate::theme::{Theme, TypeStep, ty};

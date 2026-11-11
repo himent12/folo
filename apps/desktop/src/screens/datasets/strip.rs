@@ -1,7 +1,7 @@
 //! A dataset's stat strip: counts, splits and label health.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -40,8 +40,8 @@ impl FoloApp {
             .rounded_full()
             .overflow_hidden()
             .gap(px(2.))
-            .child(div().h_full().w(gpui::relative(ds.splits.train as f32 / total)).bg(split_c[0]))
-            .child(div().h_full().w(gpui::relative(ds.splits.val as f32 / total)).bg(split_c[1]))
+            .child(div().h_full().w(folo_ui::relative(ds.splits.train as f32 / total)).bg(split_c[0]))
+            .child(div().h_full().w(folo_ui::relative(ds.splits.val as f32 / total)).bg(split_c[1]))
             .when(ds.splits.test > 0, |d| d.child(div().h_full().flex_1().bg(split_c[2])));
         let legend = div().flex().gap(px(10.)).children(
             [
@@ -60,7 +60,7 @@ impl FoloApp {
                     .child(text(ty::SM, t.text_tertiary).tnum().child(format!("{n} {}", int(c))))
             }),
         );
-        let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(pad)).child(content);
+        let tile = |content: folo_ui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(pad)).child(content);
         let boxes = s.map_or(0, |s| s.boxes);
         let per = boxes as f32 / total;
         let broken = s.map_or(0, |s| s.broken_labels);
@@ -138,7 +138,7 @@ impl FoloApp {
                                 this.ds_class = None;
                             }
                             this.ds_tab = DsTab::Images;
-                            this.grid_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                            this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
                             cx.notify();
                         }),
                     )
@@ -207,7 +207,7 @@ impl FoloApp {
                         window,
                         cx,
                         act(move |this, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(cmd.clone()));
+                            cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(cmd.clone()));
                             this.toast(
                                 Tone::Neutral,
                                 "Copied the check command",
@@ -226,12 +226,12 @@ impl FoloApp {
 }
 
 /// Under the broken-label count: the check command to copy, or that every label is valid.
-fn broken_detail(t: &crate::theme::Theme, narrow: bool) -> gpui::Div {
+fn broken_detail(t: &crate::theme::Theme, narrow: bool) -> folo_ui::Div {
     if narrow { copy_cmd(t, "Copy check") } else { copy_cmd(t, "Copy check command") }
 }
 
 /// "2 errors · 1 warning" in their severity colours.
-fn severity_detail(t: &crate::theme::Theme, c: &crate::api::IssueCounts) -> gpui::Div {
+fn severity_detail(t: &crate::theme::Theme, c: &crate::api::IssueCounts) -> folo_ui::Div {
     let n = |k: u64, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
     div()
         .flex()
@@ -254,7 +254,7 @@ fn severity_detail(t: &crate::theme::Theme, c: &crate::api::IssueCounts) -> gpui
         })
 }
 
-fn copy_cmd(t: &crate::theme::Theme, label: &'static str) -> gpui::Div {
+fn copy_cmd(t: &crate::theme::Theme, label: &'static str) -> folo_ui::Div {
     div()
         .flex()
         .items_center()

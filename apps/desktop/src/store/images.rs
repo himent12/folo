@@ -4,7 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use gpui::RenderImage;
+use folo_ui::RenderImage;
 
 use crate::api::*;
 

@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -101,7 +101,7 @@ impl FoloApp {
             });
         }
         let ids: Vec<String> = visible.iter().map(|r| r.id.clone()).collect();
-        let cols = |d: gpui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
+        let cols = |d: folo_ui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
         // Single-line rows; secondary facts get their own columns as the window allows, age before
         // setup (so the default 1280 window tells an hour-old run from a week-old one). Budget
         // (content width, Run keeps its 148 px and Arch its 96 for an e2e tag; 1000 px at 1280 with

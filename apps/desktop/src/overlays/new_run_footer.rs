@@ -1,8 +1,8 @@
 //! The New run dialog's footer: the time and memory estimate (the server's, or the app's own
 //! reference figures), a cloud run's cost, Cancel and Start; and the dialog's frame.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, ParentElement, StatefulInteractiveElement,
     Styled, Window, div, px,
 };

@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use gpui::{
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -111,7 +111,7 @@ impl FoloApp {
                                             .inset_0()
                                             .rounded(px(radius::MD))
                                             .border_2()
-                                            .border_color(gpui::transparent_black())
+                                            .border_color(folo_ui::transparent_black())
                                             .group_hover(SharedString::from(format!("smp-{n}")), |s| {
                                                 s.border_1().border_color(t.line_strong)
                                             })

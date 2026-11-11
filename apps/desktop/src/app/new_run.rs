@@ -4,8 +4,8 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::point;
-use gpui::{App, AppContext, Context, Focusable, Window, px};
+use folo_ui::point;
+use folo_ui::{App, AppContext, Context, Focusable, Window, px};
 
 use crate::api::*;
 use crate::input::{InputEvent, TextInput};

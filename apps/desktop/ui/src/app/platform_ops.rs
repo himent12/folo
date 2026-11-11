@@ -59,3 +59,19 @@ impl App {
         todo!("runtime")
     }
 }
+
+impl crate::Bounds<crate::Pixels> {
+    /// Bounds of `size` centred on display `display_id` (or the primary display), as GPUI's.
+    pub fn centered(
+        display_id: Option<crate::DisplayId>,
+        size: crate::Size<crate::Pixels>,
+        cx: &App,
+    ) -> Self {
+        let display = display_id
+            .and_then(|id| cx.displays().into_iter().find(|d| d.id() == id))
+            .or_else(|| cx.primary_display());
+        display.map_or(crate::Bounds { origin: crate::Point::default(), size }, |display| {
+            crate::Bounds::centered_at(display.bounds().center(), size)
+        })
+    }
+}

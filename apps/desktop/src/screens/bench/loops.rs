@@ -1,6 +1,6 @@
 //! A benchmark's Loops tab and its table.
 
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::cells::{name_with_badges, num_cell};
 use super::format::loop_tone;

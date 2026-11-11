@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gpui::{AppContext, Context, Entity, Focusable, Window};
+use folo_ui::{AppContext, Context, Entity, Focusable, Window};
 
 use crate::api::*;
 use crate::app::FoloApp;

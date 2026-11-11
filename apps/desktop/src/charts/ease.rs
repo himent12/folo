@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gpui::{SharedString, Window};
+use folo_ui::{SharedString, Window};
 
 use super::spec::LineChart;
 

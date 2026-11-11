@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gpui::{App, Hsla, Pixels, Point, SharedString, TextRun, Window, point, px};
+use folo_ui::{App, Hsla, Pixels, Point, SharedString, TextRun, Window, point, px};
 
 use crate::theme::SANS;
 
@@ -17,9 +17,9 @@ pub fn paint_text(
 ) -> Pixels {
     let run = TextRun {
         len: text.len(),
-        font: gpui::Font {
-            features: gpui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
-            ..gpui::font(SANS)
+        font: folo_ui::Font {
+            features: folo_ui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
+            ..folo_ui::font(SANS)
         },
         color,
         background_color: None,
@@ -38,8 +38,8 @@ pub fn paint_text(
 pub fn mono_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
     let run = TextRun {
         len: text.len(),
-        font: gpui::font(crate::theme::MONO),
-        color: gpui::black(),
+        font: folo_ui::font(crate::theme::MONO),
+        color: folo_ui::black(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -50,11 +50,11 @@ pub fn mono_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
 pub fn text_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
     let run = TextRun {
         len: text.len(),
-        font: gpui::Font {
-            features: gpui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
-            ..gpui::font(SANS)
+        font: folo_ui::Font {
+            features: folo_ui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
+            ..folo_ui::font(SANS)
         },
-        color: gpui::black(),
+        color: folo_ui::black(),
         background_color: None,
         underline: None,
         strikethrough: None,

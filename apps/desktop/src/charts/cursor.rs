@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn cursor_past_the_data_has_no_chip() {
         let pts: Vec<(f32, f32)> = (0..=40).map(|i| (i as f32, 0.5)).collect();
-        let s = vec![Series::new("a", gpui::hsla(0., 0., 0., 1.), Arc::new(pts))];
+        let s = vec![Series::new("a", folo_ui::hsla(0., 0., 0., 1.), Arc::new(pts))];
         // Epoch 100 of 120 with data through 40: no snap, so no tick is hidden.
         assert_eq!(cursor_x(&s, 100., 120.), None);
         assert_eq!(cursor_x(&s, 39.6, 120.), Some(40.));

@@ -1,8 +1,8 @@
 //! Pointer drags that continue outside the element they started on: sliders, scroll thumbs and
 //! image pans.
 
-use gpui::point;
-use gpui::{Context, MouseMoveEvent, MouseUpEvent, Window, px};
+use folo_ui::point;
+use folo_ui::{Context, MouseMoveEvent, MouseUpEvent, Window, px};
 
 use super::FoloApp;
 

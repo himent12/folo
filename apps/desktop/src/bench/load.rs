@@ -1,6 +1,6 @@
 //! Loading: the list, the catalog, a benchmark's entries and loops, one reload at a time, and results.
 
-use gpui::Context;
+use folo_ui::Context;
 
 use super::merge::{merge_snapshot, upsert_entry, upsert_loop};
 use super::state::{BenchState, BenchTab, Reload};

@@ -1,6 +1,6 @@
 //! "Design with an agent": opening it, asking for a plan and using the proposal.
 
-use gpui::{AppContext, Context, Focusable, Window};
+use folo_ui::{AppContext, Context, Focusable, Window};
 
 use super::state::DesignForm;
 use crate::api::*;

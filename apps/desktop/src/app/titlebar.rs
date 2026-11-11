@@ -1,8 +1,8 @@
 //! The title bar: breadcrumbs, search, the window's caption buttons, and the caption areas that
 //! stay above a scrim.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea, div, px,
 };
@@ -18,7 +18,7 @@ pub(super) const TITLEBAR: f32 = tsize::TOPBAR - 8.;
 
 /// The title bar's row, its hairline (uncoloured) included. `titlebar()` and `caption_controls`
 /// both lay out on it, so their caption buttons are the same size in the same place.
-fn titlebar_row() -> gpui::Div {
+fn titlebar_row() -> folo_ui::Div {
     div().h(px(TITLEBAR)).flex_none().flex().items_center().border_b_1()
 }
 
@@ -29,7 +29,7 @@ impl FoloApp {
         let maximized = window.is_maximized();
         let fullscreen = window.is_fullscreen();
         let win_btn =
-            |base: gpui::Stateful<gpui::Div>, id: &'static str, icon_path: &'static str, close: bool| {
+            |base: folo_ui::Stateful<folo_ui::Div>, id: &'static str, icon_path: &'static str, close: bool| {
                 base.group(id)
                     .flex()
                     .items_center()
@@ -37,7 +37,7 @@ impl FoloApp {
                     .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
                     .active(|s| s.opacity(0.8))
                     .child(
-                        gpui::svg()
+                        folo_ui::svg()
                             .path(icon_path)
                             .size(px(10.))
                             .flex_none()
@@ -126,7 +126,7 @@ impl FoloApp {
                     .hover(|s| s.border_color(t.line_strong))
                     .active(|s| s.bg(t.bg_active))
                     .on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx)))
-                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| {
+                    .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, w, cx| {
                         if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
                             this.open_palette(w, cx);
                             cx.stop_propagation();
@@ -158,7 +158,7 @@ impl FoloApp {
         area: WindowControlArea,
         fullscreen: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> folo_ui::Stateful<folo_ui::Div> {
         div()
             .id(id)
             .w(px(crate::theme::layout::DESKTOP_CAPTION_BUTTON))
@@ -187,7 +187,7 @@ impl FoloApp {
     /// dimmed crumbs and search field take no clicks under an overlay) and the three buttons,
     /// where `titlebar()` puts them. A press here neither reaches the scrim (which would dismiss
     /// the overlay) nor the page.
-    pub fn caption_controls(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    pub fn caption_controls(&self, window: &Window, cx: &mut Context<Self>) -> folo_ui::Stateful<folo_ui::Div> {
         let fullscreen = window.is_fullscreen();
         titlebar_row()
             .id("caption-controls")
