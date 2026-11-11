@@ -77,7 +77,7 @@ src/theme.rs      the active theme (Colors from tokens, dark/light), class palet
 src/api/          Backend trait (the client seam), wire types for docs/API.md, the in-app mock
 src/synth.rs      procedural "shapes" scenes behind the mock's images
 src/local.rs      local inference: folo-vision's Predictor in process, on folo-gpu or the CPU
-src/store.rs      fetched state, live run data (SSE events), the decoded-image cache
+src/store/        fetched state, live run data (SSE events), the decoded-image cache
 src/app/          root view: chrome, sidebar, routing, fetching, live event pump, actions
 src/controls/     focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
 src/ui/           stateless pieces: type, panels, badges, metrics, progress, skeletons, empty states
