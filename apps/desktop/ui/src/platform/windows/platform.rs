@@ -257,11 +257,11 @@ impl Platform for WindowsPlatform {
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
-        clipboard::write_to_clipboard(item);
+        clipboard::write_to_clipboard(self.shared.message_window(), item);
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        clipboard::read_from_clipboard()
+        clipboard::read_from_clipboard(self.shared.message_window())
     }
 }
 
