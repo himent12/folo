@@ -69,7 +69,7 @@ struct BenchFixture {
     entries: Vec<EntryFixture>,
     loops: Vec<BenchLoop>,
     /// Loops started through the API, by id: when they started (seconds of the demo's clock). They
-    /// run through their generations as [`step_loop`] says; the seeded ones keep their state.
+    /// run through their generations as [`loops::step_loop`] says; the seeded ones keep their state.
     loop_live: HashMap<String, f64>,
 }
 
