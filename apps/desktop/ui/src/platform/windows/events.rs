@@ -436,7 +436,11 @@ impl WindowInner {
         self.cancel_presses(hwnd);
     }
 
-    /// A mouse up for each button pressed in the window, where the cursor is now.
+    /// A mouse up for each button pressed in the window, outside the window: where a real release lands
+    /// when the button comes up elsewhere. The press was cancelled, not completed, so it must click and
+    /// drop nothing, even with the cursor still over the element pressed; what ends a press wherever it
+    /// is released (`on_mouse_up_out`, the pressed style) still runs. At the cursor if it is outside the
+    /// client area, else just above and left of it.
     fn cancel_presses(&self, hwnd: HWND) {
         let (buttons, click_count, scale_factor) = {
             let mut state = self.state.borrow_mut();
@@ -446,10 +450,15 @@ impl WindowInner {
             return;
         }
         let mut p = POINT::default();
+        let mut client = RECT::default();
         // SAFETY: valid out pointers; reading the cursor position does not move it.
         unsafe {
             let _ = GetCursorPos(&mut p);
             let _ = ScreenToClient(hwnd, &mut p);
+            let _ = GetClientRect(hwnd, &mut client);
+        }
+        if p.x >= client.left && p.x < client.right && p.y >= client.top && p.y < client.bottom {
+            p = POINT { x: client.left - 1, y: client.top - 1 };
         }
         let position = logical_point(p.x as f32, p.y as f32, scale_factor);
         for button in buttons {

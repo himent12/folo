@@ -246,6 +246,11 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
   set / take input handler, update_ime_position, the `on_*` callbacks GPUI has (request_frame, input, resize,
   moved, active_status_change, should_close, close, hit_test_window_control), and
   `present(&mut self, frame: &Framebuffer, damage: &[Bounds<DevicePixels>])` in place of `draw(scene)`.
+- **A cancelled press.** When a button pressed in the window will never be released there (the mouse
+  capture went elsewhere, the window was deactivated), the backend reports a mouse up outside the window,
+  where a real release lands when the button comes up elsewhere: it ends drags and selections
+  (`on_mouse_up_out`, the pressed style) and clicks and drops nothing, even with the cursor still over the
+  element pressed.
 - `PlatformDispatcher`: `dispatch` (background, a pool that grows on demand and lets idle threads exit),
   `dispatch_on_main_thread`, `dispatch_after`, `is_main_thread`.
 - **Frames.** The window draws when it is dirty, at most once per display refresh; while a frame asks for

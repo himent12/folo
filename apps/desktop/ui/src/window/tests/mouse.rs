@@ -271,6 +271,69 @@ fn a_file_drop_reaches_on_drop_and_drag_moves_see_the_paths() {
     );
 }
 
+/// A press the platform cancels (the capture went elsewhere, the window was deactivated) arrives as a
+/// release outside the window (`platform/windows/events.rs`, `cancel_presses`), where a real release
+/// lands when the button comes up elsewhere: it clicks nothing and drops nothing, although the pointer is
+/// still over the element pressed, and what ends a press wherever it is released still runs.
+#[test]
+fn a_cancelled_press_clicks_and_drops_nothing_and_ends_drags() {
+    let events = log();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, {
+        let events = events.clone();
+        move |_, _| {
+            let push = |name: &'static str| {
+                let events = events.clone();
+                move || events.borrow_mut().push(name.to_string())
+            };
+            let (root_up, root_up_out, up, click, drop) =
+                (push("root up"), push("root up out"), push("up"), push("click"), push("drop"));
+            div()
+                .size_full()
+                .on_mouse_up(MouseButton::Left, move |_, _, _| root_up())
+                .on_mouse_up_out(MouseButton::Left, move |_, _, _| root_up_out())
+                .child(
+                    div()
+                        .id("button")
+                        .w(px(50.))
+                        .h(px(20.))
+                        .on_mouse_up(MouseButton::Left, move |_, _, _| up())
+                        .on_click(move |_, _, _| click())
+                        .on_drop(move |_: &crate::ExternalPaths, _, _| drop()),
+                )
+                .into_any_element()
+        }
+    });
+    let take = || std::mem::take(&mut *events.borrow_mut());
+    let cancel = |app: &mut HeadlessApp| mouse_up(app, window, -1., -1.);
+
+    // Pressed on the button and cancelled with the pointer still over it.
+    mouse_move(&mut app, window, 10., 10.);
+    mouse_down(&mut app, window, 10., 10.);
+    cancel(&mut app);
+    assert_eq!(take(), ["root up out"], "the root's drag end runs, nothing is clicked");
+    // The pending press is gone: a later release over the button clicks nothing either.
+    app.frame(window);
+    mouse_up(&mut app, window, 10., 10.);
+    assert_eq!(take(), ["up", "root up"]);
+
+    // A drag over the button, cancelled: no drop, and the drag is over.
+    let paths = crate::ExternalPaths(smallvec::smallvec![std::path::PathBuf::from("a.png")]);
+    app.simulate_input(
+        window,
+        PlatformInput::FileDrop(crate::FileDropEvent::Entered { position: point(px(10.), px(10.)), paths }),
+    );
+    assert!(with_window(&mut app, window, |window, _| window.active_drag.is_some()));
+    cancel(&mut app);
+    assert_eq!(take(), ["root up out"]);
+    assert!(with_window(&mut app, window, |window, _| window.active_drag.is_none()), "the drag ended");
+
+    // A press released over the button still clicks.
+    app.frame(window);
+    mouse_down(&mut app, window, 10., 10.);
+    mouse_up(&mut app, window, 10., 10.);
+    assert_eq!(take(), ["click", "up", "root up"]);
+}
+
 /// A target that logs its drops, filling a 200 x 100 window's top-left 100 x 50 (hover colour 2).
 fn drop_target(
     events: &Log,
