@@ -238,6 +238,11 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
     };
   });
   const show = (e: string | null) => (touched.get() ? e : null);
+  /** The Images field says a value out of range as soon as it is typed, not on submit (an empty one is said then). */
+  const imagesShown = computed(() => {
+    const text = kind.get() === 'model' ? modelImages.get() : agentImages.get();
+    return touched.get() || text.trim() ? errs.get().images : null;
+  });
   const missingWhy = computed(() => {
     const k = kind.get();
     if (k === 'model') {
@@ -269,7 +274,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
             ? 'Enter a name'
             : null;
   });
-  const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : undefined));
+  const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : (imagesShown.get() ?? undefined)));
   const reason = computed(() => missingWhy.get() ?? (shownErr.get() ? 'Fix the fields first' : null));
 
   /** Sends the file: one request, or an open entry in parts with its bar; nothing is left behind if it fails. */
@@ -469,7 +474,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
             <Field
               label="Images"
               for={`${uid}-mimages`}
-              error={show(errs.get().images)}
+              error={imagesShown.get()}
               hint="Empty runs all of them. Fewer runs the first of the benchmark's seeded order, a fair sample, but the entry is partial."
             >
               <div class="narrow">
@@ -478,7 +483,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
                   bind:value={modelImages}
                   inputmode="numeric"
                   placeholder={`All ${num(props.bench.images)}`}
-                  invalid={!!show(errs.get().images)}
+                  invalid={!!imagesShown.get()}
                 />
               </div>
             </Field>
@@ -512,7 +517,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
             <Field
               label="Images"
               for={`${uid}-aimages`}
-              error={show(errs.get().images)}
+              error={imagesShown.get()}
               hint={
                 agent.get() && agentCalls.get()
                   ? `The first of the benchmark's seeded order, a fair sample: about ${num(agentCalls.get())} calls to ${agent.get()!.name} (${modelLabel(props.choice.model || null, agent.get())}).`
@@ -520,7 +525,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
               }
             >
               <div class="narrow">
-                <Input id={`${uid}-aimages`} bind:value={agentImages} inputmode="numeric" invalid={!!show(errs.get().images)} />
+                <Input id={`${uid}-aimages`} bind:value={agentImages} inputmode="numeric" invalid={!!imagesShown.get()} />
               </div>
             </Field>
             {props.bench.plan.conditions.length ? (

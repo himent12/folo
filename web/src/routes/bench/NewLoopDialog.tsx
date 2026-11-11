@@ -270,6 +270,11 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     };
   });
   const show = (e: string | null) => (touched.get() ? e : null);
+  /** A number field says a value out of range as soon as it is typed, not on submit (an empty one is said then). */
+  const showNow = (text: string, e: string | null) => (touched.get() || text.trim() ? e : null);
+  const liveErr = computed(
+    () => showNow(epochs.get(), errs.get().epochs) ?? showNow(imgsz.get(), errs.get().imgsz) ?? showNow(minConf.get(), errs.get().conf),
+  );
   const missingWhy = computed(() => {
     const models = props.models;
     const t = teacher.get();
@@ -299,7 +304,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
                     : null) ?? (needConf.get() && chosen.get() === null ? 'Choose a confidence: its entry found no threshold' : null)
     );
   });
-  const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : undefined));
+  const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : (liveErr.get() ?? undefined)));
   const reason = computed(() => missingWhy.get() ?? (shownErr.get() ? 'Fix the fields first' : null));
   const summary = computed(() => {
     const ep = epochs.get();
@@ -467,16 +472,16 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
             >
               <Select id={`${uid}-w`} bind:value={weightsBind} options={weightOptions.get()} />
             </Field>
-            <Field label="Epochs" for={`${uid}-ep`} error={fieldErr('epochs') ?? show(errs.get().epochs)}>
-              <Input id={`${uid}-ep`} bind:value={epochs} inputmode="numeric" invalid={!!show(errs.get().epochs)} />
+            <Field label="Epochs" for={`${uid}-ep`} error={fieldErr('epochs') ?? showNow(epochs.get(), errs.get().epochs)}>
+              <Input id={`${uid}-ep`} bind:value={epochs} inputmode="numeric" invalid={!!showNow(epochs.get(), errs.get().epochs)} />
             </Field>
             <Field
               label="Image size"
               for={`${uid}-sz`}
-              error={fieldErr('imgsz') ?? show(errs.get().imgsz)}
+              error={fieldErr('imgsz') ?? showNow(imgsz.get(), errs.get().imgsz)}
               hint={teacher.get() ? `The teacher’s is ${teacher.get()!.imgsz} px.` : undefined}
             >
-              <Input id={`${uid}-sz`} bind:value={sizeBind} inputmode="numeric" suffix="px" invalid={!!show(errs.get().imgsz)} />
+              <Input id={`${uid}-sz`} bind:value={sizeBind} inputmode="numeric" suffix="px" invalid={!!showNow(imgsz.get(), errs.get().imgsz)} />
             </Field>
           </div>
         </fieldset>
@@ -492,11 +497,11 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
             <Field
               label="Keep labels from confidence"
               for={`${uid}-conf`}
-              error={show(errs.get().conf)}
+              error={showNow(minConf.get(), errs.get().conf)}
               hint={needConf.get() ? 'Required for this teacher.' : undefined}
             >
               <div class="narrow">
-                <Input id={`${uid}-conf`} bind:value={minConf} inputmode="decimal" placeholder="e.g. 0.30" invalid={!!show(errs.get().conf)} />
+                <Input id={`${uid}-conf`} bind:value={minConf} inputmode="decimal" placeholder="e.g. 0.30" invalid={!!showNow(minConf.get(), errs.get().conf)} />
               </div>
             </Field>
           ) : null}

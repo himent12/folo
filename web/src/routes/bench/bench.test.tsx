@@ -108,12 +108,15 @@ describe('New benchmark', () => {
     splits.at(-1)!.click();
     flushSync();
     expect(document.querySelector('.note.warn')).not.toBeNull();
-    // An image limit outside 1–5000 is refused at the field, and holds Create.
-    type(document.querySelector('input[id$="-max"]')!, '0');
+    // An image limit outside 1–5000 is refused at the field as soon as it is typed (no "It takes all …" for it), and
+    // holds Create.
+    type(document.querySelector('input[id$="-max"]')!, '-5');
+    expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/5,000/);
+    expect(document.body.textContent).not.toMatch(/It takes all/);
+    expect(why(submit())).toBeTruthy();
     send();
     flushSync();
     expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/5,000/);
-    expect(why(submit())).toBeTruthy();
   });
 
   it('creates it with the default plan and opens its page', async () => {
@@ -178,6 +181,15 @@ describe('Add entry', () => {
     [...help.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Use an agent')!.click();
     flushSync();
     expect(document.querySelector('.no-model')).toBeNull();
+  });
+
+  it('says an image count out of range as soon as it is typed', async () => {
+    await dialog('model');
+    type(document.querySelector('input[id$="-mimages"]')!, '99999');
+    expect(document.querySelector('.field.invalid [role="alert"]')?.textContent).toMatch(/A whole number from 1 to/);
+    expect(why(submit())).toBe('Fix the fields first');
+    type(document.querySelector('input[id$="-mimages"]')!, '');
+    expect(document.querySelector('.field.invalid')).toBeNull();
   });
 
   it('starts an agent entry with the defaults', async () => {
