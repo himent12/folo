@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 import { fileURLToPath } from 'node:url';
 import { fw } from './framework/compiler/index.ts';
+import { builtCssCheck } from './scripts/builtCss.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const api = process.env.FOLO_API ?? 'http://127.0.0.1:7878';
@@ -8,7 +9,8 @@ const runtime = fileURLToPath(new URL('./framework/runtime', import.meta.url));
 
 export default defineConfig({
   // fw compiles the app's .tsx (JSX + scoped css``) and serves the lucide icons (`$icons/<name>`).
-  plugins: [fw()],
+  // builtCssCheck fails a build whose CSS lost an unprefixed declaration (scripts/builtCss.mjs).
+  plugins: [fw(), builtCssCheck()],
   resolve: {
     alias: [
       { find: '$lib', replacement: fileURLToPath(new URL('./src/lib', import.meta.url)) },

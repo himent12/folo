@@ -11,9 +11,11 @@ import { prefs } from '$lib/prefs';
 import { router, type Route } from '$lib/router';
 import CommandPalette from '$lib/shell/CommandPalette';
 import ConnectionStatus from '$lib/shell/ConnectionStatus';
+import { installEntryMemory } from '$lib/shell/entryMemory';
 // The extension: runWatch.ts (its logic) differs from this file's name only in case.
 import RunWatch from '$lib/shell/RunWatch.tsx';
 import { holdRouteFocus, isNewPage } from '$lib/shell/routeFocus';
+import OfflineNotice from '$lib/shell/OfflineNotice';
 import { installShortcuts } from '$lib/shell/shortcuts';
 import ShortcutsDialog from '$lib/shell/ShortcutsDialog';
 import Sidebar from '$lib/shell/Sidebar';
@@ -48,6 +50,7 @@ export default function App(props: AppProps) {
 
   onMount(() => {
     void hub.connect();
+    const forget = installEntryMemory();
     const uninstall = installShortcuts({
       palette: () => paletteOpen.set(!paletteOpen.peek()),
       shortcuts: () => shortcutsOpen.set(true),
@@ -62,6 +65,7 @@ export default function App(props: AppProps) {
     document.addEventListener('touchstart', intent, { passive: true });
     document.addEventListener('keydown', onkey);
     return () => {
+      forget();
       uninstall();
       document.removeEventListener('pointerover', intent);
       document.removeEventListener('focusin', intent);
@@ -156,6 +160,7 @@ export default function App(props: AppProps) {
         <Sidebar live={(collapsed) => <SidebarLive collapsed={collapsed()} />} footer={(collapsed) => <ConnectionStatus collapsed={collapsed()} />} />
         <div class="main">
           <Topbar onsearch={() => paletteOpen.set(true)} />
+          <OfflineNotice />
           <main id="content" tabindex={-1} ref={(e) => (mainEl = e)}>
             <Key when={screen.get()}>{() => <Dynamic component={untrack(() => screen.get().comp)} />}</Key>
           </main>

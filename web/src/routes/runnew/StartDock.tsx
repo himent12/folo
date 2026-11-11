@@ -169,7 +169,6 @@ css`
       padding: var(--space-3) var(--space-4);
       background: color-mix(in srgb, var(--bg-app) 90%, transparent);
       backdrop-filter: blur(12px) saturate(1.4);
-      -webkit-backdrop-filter: blur(12px) saturate(1.4);
       border-top: 1px solid var(--line-subtle);
       transition:
         transform var(--dur-base) var(--ease-out),

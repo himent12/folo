@@ -9,7 +9,7 @@ npm ci
 npm run dev       # http://localhost:5173, proxies /api to FOLO_API (default http://127.0.0.1:7878)
 npm run check     # generated tokens are fresh, contrast, icons vendored, tsc (app, framework, scripts), spacing lint
 npm test          # vitest (logic, components, the framework)
-npm run build     # -> dist/, served by `folo serve`
+npm run build     # -> dist/, served by `folo serve`; fails if a built stylesheet lost an unprefixed declaration
 npm run shoot r1  # screenshots of every screen/state -> shots/r1/ (uses the installed Chrome)
 npm run qa        # the shoot's layout checks on the production build at tablet/phone sizes, no shots; fails on any (CI)
 FOLO_API=http://127.0.0.1:7979 npm run smoke   # every route against a running `folo serve`, reports errors

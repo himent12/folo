@@ -68,15 +68,18 @@ import type {
   TrainConfig,
   UpdateLabelJob,
 } from './types';
+import type { Reachability } from './reach';
 import { BENCH_EVENTS, LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
 import { uploadInChunks, type UploadProgress } from './upload';
 
 export class ApiError extends Error {
+  /** `request`: what was asked, `GET /api/runs` (no query), when known: ErrorState names what could not be loaded. */
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
     readonly hint?: string | null,
+    readonly request?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -309,8 +312,27 @@ export function qs(params: Record<string, string | number | undefined | null>): 
 export class HttpApi implements Api {
   readonly mock = false;
 
-  /** `base` is the server origin ('' for same origin, e.g. behind the Vite proxy or `folo serve`). */
-  constructor(readonly base: string = '') {}
+  /**
+   * `base` is the server origin ('' for same origin, e.g. behind the Vite proxy or `folo serve`). `reach` hears whether
+   * each request and event stream reached the server (the hub's: `hub.offline`); a one-off check passes none.
+   */
+  constructor(
+    readonly base: string = '',
+    readonly reach?: Reachability,
+  ) {}
+
+  /** An event stream whose opening and dropping also tell `reach` whether the server is there. */
+  #stream<M>(url: string, events: readonly (keyof M & string)[], handlers: EventHandlers<M>): () => void {
+    const reach = this.reach;
+    if (!reach) return openEventStream(url, events, handlers);
+    const own = handlers.connection as ((state: 'open' | 'reconnecting') => void) | undefined;
+    const connection = (state: 'open' | 'reconnecting') => {
+      if (state === 'open') reach.ok();
+      else reach.failed();
+      own?.(state);
+    };
+    return openEventStream(url, events, { ...handlers, connection } as EventHandlers<M>);
+  }
 
   async #req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const init: RequestInit = { method, signal, headers: { accept: 'application/json' } };
@@ -319,24 +341,27 @@ export class HttpApi implements Api {
       init.body = JSON.stringify(body);
       init.headers = { ...init.headers, 'content-type': 'application/json' };
     }
+    const request = `${method} /api${path.split('?')[0]}`;
     let res: Response;
     try {
       res = await fetch(`${this.base}/api${path}`, init);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') throw e;
-      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+      this.reach?.failed();
+      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.', request);
     }
+    this.reach?.ok();
     if (res.status === 204) return undefined as T;
     const text = await res.text();
     let json: unknown;
     try {
       json = text ? JSON.parse(text) : undefined;
     } catch {
-      throw new ApiError(res.status, 'bad_response', `The server sent a response that is not JSON (HTTP ${res.status}).`);
+      throw new ApiError(res.status, 'bad_response', `The server sent a response that is not JSON (HTTP ${res.status}).`, null, request);
     }
     if (!res.ok) {
       const err = (json as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
-      throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Request failed (HTTP ${res.status}).`, err?.hint);
+      throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Request failed (HTTP ${res.status}).`, err?.hint, request);
     }
     return json as T;
   }
@@ -441,7 +466,7 @@ export class HttpApi implements Api {
     return this.#req<RunSamples>('GET', `/runs/${encodeURIComponent(id)}/samples${qs({ epoch })}`, undefined, signal);
   }
   runEvents(id: string, handlers: RunEventHandlers) {
-    return openEventStream(`${this.base}/api/runs/${encodeURIComponent(id)}/events`, RUN_EVENTS, handlers);
+    return this.#stream(`${this.base}/api/runs/${encodeURIComponent(id)}/events`, RUN_EVENTS, handlers);
   }
 
   async labelAgents(signal?: AbortSignal) {
@@ -494,7 +519,7 @@ export class HttpApi implements Api {
     return this.#req<LabelJob>('POST', `/label/jobs/${encodeURIComponent(jobId)}/stop`);
   }
   labelEvents(jobId: string, handlers: LabelEventHandlers) {
-    return openEventStream(`${this.base}/api/label/jobs/${encodeURIComponent(jobId)}/events`, LABEL_EVENTS, handlers);
+    return this.#stream(`${this.base}/api/label/jobs/${encodeURIComponent(jobId)}/events`, LABEL_EVENTS, handlers);
   }
   labelLogs(jobId: string, limit?: number, signal?: AbortSignal) {
     return this.#req<{ lines: LogLine[] }>('GET', `/label/jobs/${encodeURIComponent(jobId)}/logs${qs({ limit })}`, undefined, signal);
@@ -586,7 +611,7 @@ export class HttpApi implements Api {
     return this.#req<void>('DELETE', `/bench/benchmarks/${encodeURIComponent(id)}/loops/${encodeURIComponent(loopId)}`);
   }
   benchEvents(id: string, handlers: BenchEventHandlers) {
-    return openEventStream(`${this.base}/api/bench/benchmarks/${encodeURIComponent(id)}/events`, BENCH_EVENTS, handlers);
+    return this.#stream(`${this.base}/api/bench/benchmarks/${encodeURIComponent(id)}/events`, BENCH_EVENTS, handlers);
   }
 
   async modelWeights(id: string, signal?: AbortSignal) {
@@ -595,6 +620,7 @@ export class HttpApi implements Api {
       res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`, { signal });
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') throw e;
+      this.reach?.failed();
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     }
     if (res.ok) return res.arrayBuffer();
@@ -610,6 +636,7 @@ export class HttpApi implements Api {
       res = await fetch(url, { signal });
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') throw e;
+      this.reach?.failed();
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     }
     if (!res.ok) {

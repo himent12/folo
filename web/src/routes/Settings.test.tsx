@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { prefs } from '$lib/prefs';
@@ -52,6 +53,21 @@ describe('Settings', () => {
     await until(() => jump.textContent?.includes('System'), 'the System section');
     expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).not.toContain('Cloud');
     expect(target.querySelector('#cloud')).toBeNull();
+  });
+
+  it('says when the system information failed, with Retry, instead of leaving System out (shell F11c)', async () => {
+    const api = new MockApi('normal', 0);
+    const real = api.system.bind(api);
+    let fail = true;
+    vi.spyOn(api, 'system').mockImplementation(() => (fail ? Promise.reject(new ApiError(500, 'internal', 'boom', null, 'GET /api/system')) : real()));
+    hub.api = api;
+    c = mount(Settings, { target });
+    const panel = await until(() => target.querySelector('#system .err'), 'the error');
+    expect(panel.querySelector('.title')?.textContent).toBe('Could not load the system information');
+    expect([...target.querySelectorAll<HTMLElement>('nav.jump a')].map((a) => a.textContent)).toContain('System');
+    fail = false;
+    [...panel.querySelectorAll('button')].find((b) => b.textContent?.includes('Retry'))!.click();
+    await until(() => target.querySelector('#system') && !target.querySelector('#system .err'), 'the System section');
   });
 
   it('describes the server URL field by its hint', () => {

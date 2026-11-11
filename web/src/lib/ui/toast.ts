@@ -21,12 +21,32 @@ export interface Toast {
   /** Line 2: a sentence, or facts (each one a ui/Meta item: "Finished training · best mAP50-95 0.535 at epoch 60"). */
   detail?: string | string[];
   action?: { label: string; run: () => void };
-  /** ms before auto-dismiss; 0 keeps it until closed (errors and toasts with an action, by default: WCAG 2.2.1). */
+  /** ms before auto-dismiss (TOAST_MS by tone and action); 0 keeps it until closed. */
   timeout: number;
+  /**
+   * The action it reports on ("predict"): a newer toast with the same key takes its place, so an error goes as soon as
+   * the next try of the same action succeeds.
+   */
+  key?: string;
 }
 
 /** How long a success or a note without an action stays (DESIGN_DIRECTION 9): long enough to read two lines. */
 export const AUTO_DISMISS_MS = 6000;
+/**
+ * How long each kind stays, paused while the pointer or focus is in the stack (so nobody races a timer to read or to
+ * act: WCAG 2.2.1): a note 6 s; one that offers an action twice that; an error longer still, or until the same action
+ * (`key`) reports again.
+ */
+export const TOAST_MS = { note: AUTO_DISMISS_MS, action: 12_000, error: 20_000 };
+
+/** Options of the shorthands: the action the toast reports on (Toast.key). */
+export interface ToastOptions {
+  key?: string;
+}
+
+/** Two toasts that say the same thing: the second takes the first one's place instead of stacking under it. */
+const same = (a: Omit<Toast, 'id' | 'timeout'>, b: Toast) =>
+  a.tone === b.tone && a.title === b.title && JSON.stringify(a.detail ?? null) === JSON.stringify(b.detail ?? null);
 
 class Toasts {
   #items = signal<Toast[]>([]);
@@ -43,25 +63,26 @@ class Toasts {
 
   show(t: Omit<Toast, 'id' | 'timeout'> & { timeout?: number }): number {
     const id = ++this.#id;
-    // An error, or a toast that offers an action, stays until it is closed: nobody should have to race a timer to read
-    // what went wrong or to take the action. The rest (a success, a note) go after 6 s, paused while hovered or focused.
-    const toast: Toast = { timeout: t.tone === 'error' || t.action ? 0 : AUTO_DISMISS_MS, ...t, id };
+    const timeout = t.tone === 'error' ? TOAST_MS.error : t.action ? TOAST_MS.action : TOAST_MS.note;
+    const toast: Toast = { timeout, ...t, id };
+    // The toast it replaces: the last report of the same action, or one saying the very same thing.
+    for (const old of this.items) if ((t.key !== undefined && old.key === t.key) || same(t, old)) this.dismiss(old.id);
     this.items = this.#held ? [...this.items, toast] : [...this.items.slice(-3), toast];
     if (toast.timeout > 0 && !this.#held) this.#timers.set(id, setTimeout(() => this.dismiss(id), toast.timeout));
     return id;
   }
 
-  success(title: string, detail?: string, action?: Toast['action']) {
-    return this.show({ tone: 'success', title, detail, action });
+  success(title: string, detail?: string, action?: Toast['action'], opts: ToastOptions = {}) {
+    return this.show({ tone: 'success', title, detail, action, ...opts });
   }
 
-  info(title: string, detail?: string, action?: Toast['action']) {
-    return this.show({ tone: 'info', title, detail, action });
+  info(title: string, detail?: string, action?: Toast['action'], opts: ToastOptions = {}) {
+    return this.show({ tone: 'info', title, detail, action, ...opts });
   }
 
   /** Shows an error; ApiErrors contribute their message and hint. */
-  error(err: unknown, title = 'Something went wrong') {
-    return this.show({ tone: 'error', title, detail: errorDetail(err) });
+  error(err: unknown, title = 'Something went wrong', opts: ToastOptions = {}) {
+    return this.show({ tone: 'error', title, detail: errorDetail(err), ...opts });
   }
 
   dismiss(id: number) {

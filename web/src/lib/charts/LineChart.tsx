@@ -688,6 +688,8 @@ css`
     display: block;
     overflow: visible;
     touch-action: pan-y;
+    /* A press and drag over the plot reads values; it never selects the tick labels (runs F18). */
+    user-select: none;
   }
   /* Over a line a click acts on (\`pick\`, \`onpick\`). */
   svg.picking {

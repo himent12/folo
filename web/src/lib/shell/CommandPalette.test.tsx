@@ -157,3 +157,23 @@ describe('CommandPalette with no query', () => {
     localStorage.removeItem('folo.palette.recent');
   });
 });
+
+describe('CommandPalette: Settings and touch (shell F14, F17)', () => {
+  it("finds Settings' sections by what they hold, and opens the section", async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const input = await openWith('cloud', '[id="pi-settings-cloud"]');
+    expect(options()).toEqual(['Cloud']);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    expect(go).toHaveBeenCalledWith('/settings?section=cloud');
+  });
+
+  it('shows no key hints, footer or sidebar action on a touch-only device', async () => {
+    const real = window.matchMedia;
+    vi.spyOn(window, 'matchMedia').mockImplementation((q: string) => ({ ...real.call(window, q), matches: q.includes('hover: none') }) as MediaQueryList);
+    await openWith('o', '[role="option"]');
+    expect(options()).toContain('Overview');
+    expect(options()).not.toContain('Collapse sidebar');
+    expect(document.querySelector('.palette footer')).toBeNull();
+    expect(document.querySelector('.palette kbd')).toBeNull();
+  });
+});

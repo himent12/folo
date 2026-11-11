@@ -12,7 +12,7 @@ export default function ConnectionStatus(props: { collapsed: boolean }) {
   );
   const detail = computed(() =>
     hub.offline
-      ? `No answer from ${hub.serverUrl}`
+      ? `No answer from ${hub.serverUrl}. Retrying…`
       : hub.mode === 'live'
         ? `folo serve ${hub.version ?? ''} at ${hub.serverUrl}`
         : hub.mode === 'mock'

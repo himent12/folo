@@ -3,7 +3,8 @@ import Check from '$icons/check';
 import CircleCheck from '$icons/circle-check';
 import FlaskConical from '$icons/flask-conical';
 import PlugZap from '$icons/plug-zap';
-import { computed, css, signal } from 'fw';
+import WifiOff from '$icons/wifi-off';
+import { computed, css, effect, signal } from 'fw';
 import { HttpApi } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { prefs } from '$lib/prefs';
@@ -14,6 +15,22 @@ import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
 
 type Test = { ok: true; version: string; mock: boolean; ms: number } | { ok: false; message: string };
+
+/**
+ * The address to use for what was typed: trimmed, no trailing slash, and `http://` assumed when no scheme was typed
+ * (`localhost:7915`, `127.0.0.1:7915`), as a browser's address bar does. Empty stays empty (this page's server).
+ */
+export function serverAddress(typed: string): string {
+  const v = typed.trim().replace(/\/+$/, '');
+  return v && !/^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? `http://${v}` : v;
+}
+
+/** What is wrong with an address (as `serverAddress` gives it), in words for the field; null when it will do. */
+export function addressProblem(address: string): string | null {
+  if (!address) return null;
+  if (!/^https?:\/\//i.test(address)) return 'The server URL must start with http:// or https://.';
+  return /^https?:\/\/[^\s/]+(?:\/\S*)?$/i.test(address) ? null : 'Use a full address like http://127.0.0.1:7878.';
+}
 
 export default function ConnectionPanel() {
   // ---- connection ----
@@ -32,23 +49,33 @@ export default function ConnectionPanel() {
   });
   const forced =typeof location !== 'undefined' && new URLSearchParams(location.search).get('mock') === '1';
 
-  const normalized = computed(() => url.get().trim().replace(/\/+$/, ''));
-  const invalid = computed(() => normalized.get() !== '' && !/^https?:\/\/[^\s/]+/i.test(normalized.get()));
+  const normalized = computed(() => serverAddress(url.get()));
+  const problem = computed(() => addressProblem(normalized.get()));
+  const invalid = computed(() => problem.get() !== null);
   const dirty = computed(() => normalized.get() !== prefs.serverUrl);
+  // A test result is about the address it tested: another address clears it (and a test still out is dropped).
+  let tested = 0;
+  effect(() => {
+    void normalized.get();
+    tested++;
+    test.set(null);
+    testing.set(false);
+  });
 
   async function runTest() {
     if (invalid.peek()) return;
     testing.set(true);
     test.set(null);
+    const mine = tested;
     const t0 = performance.now();
     try {
       const h = await new HttpApi(normalized.peek()).health(AbortSignal.timeout(3000));
-      test.set({ ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 });
+      if (mine === tested) test.set({ ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 });
     } catch (e) {
       const timeout = e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError');
-      test.set({ ok: false, message: timeout ? 'No answer within 3 s.' : e instanceof Error ? e.message : String(e) });
+      if (mine === tested) test.set({ ok: false, message: timeout ? 'No answer within 3 s.' : e instanceof Error ? e.message : String(e) });
     } finally {
-      testing.set(false);
+      if (mine === tested) testing.set(false);
     }
   }
 
@@ -65,11 +92,13 @@ export default function ConnectionPanel() {
   return (
     <Panel title="Connection" id="connection" divided>
       <div class="stack">
-        <div class="status" data-mode={hub.mode}>
+        <div class="status" data-mode={hub.offline ? 'offline' : hub.mode}>
           {/* Demo data is a mode, not a degraded state: the sidebar's neutral flask, never the warning hue. A server
               that answers gets the mark and the word Settings > Cloud gives a working connection (a check in a
               circle, "Connected"), not a ringed dot and "Live". */}
-          {hub.mode === 'mock' ? (
+          {hub.offline ? (
+            <WifiOff class="led-glyph off" size={16} strokeWidth={1.75} aria-hidden="true" />
+          ) : hub.mode === 'mock' ? (
             <FlaskConical class="led-glyph" size={16} strokeWidth={1.75} aria-hidden="true" />
           ) : hub.mode === 'live' ? (
             <CircleCheck class="led-glyph ok" size={16} strokeWidth={1.75} aria-hidden="true" />
@@ -77,7 +106,14 @@ export default function ConnectionPanel() {
             <span class="led" aria-hidden="true"></span>
           )}
           <div class="status-text">
-            {hub.mode === 'live' ? (
+            {hub.offline ? (
+              <>
+                <p class="s-title">Server offline</p>
+                <p class="s-desc">
+                  No answer from <span class="mono">{hub.serverUrl}</span>. Retrying…
+                </p>
+              </>
+            ) : hub.mode === 'live' ? (
               <>
                 <p class="s-title">
                   Connected <span class="mono faint">folo serve {hub.version}</span>
@@ -111,7 +147,7 @@ export default function ConnectionPanel() {
           </div>
         </div>
 
-        <Field label="Server URL" for="server-url" hint="Leave blank to use this server." error={invalid.get() ? 'Use a full address like http://127.0.0.1:7878.' : null}>
+        <Field label="Server URL" for="server-url" hint="Leave blank to use this server." error={problem.get()}>
           <div class="url-row">
             <Input
               id="server-url"
@@ -229,6 +265,9 @@ css`
   }
   .status :global(.led-glyph.ok) {
     color: var(--success-text);
+  }
+  .status :global(.led-glyph.off) {
+    color: var(--danger-text);
   }
   .status-text {
     display: grid;
