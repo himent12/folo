@@ -74,21 +74,29 @@ redirected too, the check also catches a binary that writes to the temp dir. Loc
 `FOLO_TEST_TMP` must be an absolute path, since cargo runs each test binary in its own package folder.
 
 ## Runners
-The repository is private, so GitHub-hosted minutes are limited (Windows counts double). FOLO therefore runs CI on its
-own runners, selected by two repository variables holding a JSON `runs-on` value:
+Linux jobs run on GitHub-hosted runners (`ubuntu-latest`). Windows jobs run on the dev PC, which has the GPU the
+GPU tests need. Two repository variables choose, each a JSON `runs-on` value for a self-hosted runner; an unset
+variable means GitHub-hosted (`ubuntu-latest` / `windows-latest`):
 
 | variable | value | runner |
 |---|---|---|
-| `RUNS_ON_LINUX` | `["self-hosted","folo-linux"]` | `folo-linux-boat`, `folo-linux-boat-2..4`: boat.dev `large` sandboxes (8 vCPU, 16 GB, Ubuntu 24.04), runner in `~/gha` |
+| `RUNS_ON_LINUX` | unset | GitHub-hosted `ubuntu-latest` |
 | `RUNS_ON_WINDOWS` | `["self-hosted","folo-win"]` | `folo-win-local`, `folo-win-local-2`: the dev PC, runners in `D:\gha\win`, `D:\gha\win2` (each with its own target dir `D:\gha\folo-target-<runner name>`) |
 
-Linux runners are managed with `python tools/gha_boat_runner.py up|renew|down <n>` (sandbox ids in
-`~/.folo/gha_linux<n>_sid`).
+The repository is private, so GitHub-hosted jobs use the account's Actions minutes (Windows counts double, which
+is the other reason Windows stays on the dev PC). When the account's billing is blocked, GitHub refuses to start
+a hosted job: it fails within seconds with "recent account payments have failed or your spending limit needs to
+be increased", and nothing in the repository can fix that (GitHub, Settings, Billing & plans).
 
-To fall back to GitHub-hosted runners, delete the variable (`gh variable delete RUNS_ON_LINUX`); the workflow then
-uses `ubuntu-latest` / `windows-latest`. Self-hosted jobs keep a persistent `CARGO_TARGET_DIR` outside the checkout,
-so incremental builds stay warm. That folder only grows (two Linux runners once reached 119 GB and failed tests
-with "No space left on device"), so `rust (linux)` starts from an empty one when the runner has under 20 GB free.
+Hosted jobs cache their build with `Swatinem/rust-cache` and the npm cache of `actions/setup-node`. To move a
+platform to a self-hosted runner, set its variable (`gh variable set RUNS_ON_LINUX --body '["self-hosted","<label>"]'`);
+to move it back, delete the variable (`gh variable delete RUNS_ON_LINUX`). Self-hosted jobs keep a persistent
+`CARGO_TARGET_DIR` outside the checkout, so incremental builds stay warm. That folder only grows, so on a
+self-hosted Linux runner `rust (linux)` starts from an empty one when the runner has under 20 GB free.
+
+Until November 2026 the Linux jobs ran on boat.dev sandboxes registered as self-hosted runners. Each sandbox
+expired after 24 hours and took its runner offline, and jobs for an offline runner queue instead of failing (a
+pull request's checks once sat queued for an hour and a half), so they were removed.
 
 The same variables drive every workflow, `release.yml` included (its Linux and Windows jobs, including the CLI
 build matrix that its `plan` job writes). Release builds are the exception to the persistent target dir: they always start
@@ -102,15 +110,8 @@ billing must be fixed before macOS release builds can run).
 - Windows (dev PC): start with `Start-Process D:\gha\win\run.cmd -WindowStyle Hidden`. After a reboot, start it again.
   Prerequisite: Git for Windows' `bin` and `usr\bin` on the runner's PATH (actions such as `dtolnay/rust-toolchain`
   run bash). It is set in `D:\gha\win\.env` (`PATH=...`), which the runner reads at start.
-- Linux (boat.dev): each sandbox has a 24 h TTL, and an expired one takes its runner offline: jobs then queue for
-  the runners that are left (with one of four online, a pull request waited over 20 minutes). The `runners`
-  workflow (`.github/workflows/runners.yml`) renews them all every 6 hours from the dev PC's runner, so they stay
-  up while that PC is on; run it by hand (`gh workflow run runners`) after the PC was off for a day. By hand:
-  `python tools/gha_boat_runner.py renew <n>` (it extends the TTL and restarts the listener if needed), replace
-  with `down <n>` then `up <n>`. Runner `n = 1` is the original
-  `folo-linux-boat`; `n >= 2` are `folo-linux-boat-<n>`. Sandbox ids are in `~/.folo/gha_linux<n>_sid` on the dev PC.
-  The script fetches registration tokens from `gh` at runtime and never prints them. Never print or commit tokens or
-  the boat key (docs/BOAT.md).
+- Linux: nothing to operate, the runners are GitHub's. A hosted job that fails in seconds with no steps was
+  refused by GitHub (billing, above), not broken by the change under test.
 - **Security.** Self-hosted runners execute code from PRs (tests, build scripts, npm lifecycle scripts) with the
   runner account's access. The Windows runner uses the developer account, which can read `~/.folo/boat.key` and the
   gh credentials. That is the same trust boundary FOLO's agents already work in, since they build and run the same
@@ -118,8 +119,8 @@ billing must be fixed before macOS release builds can run).
   runners for a public repository or for PRs from forks; keep dependencies pinned through Cargo.lock and
   package-lock.json; and review new dependencies in PRs. If FOLO ever accepts outside contributions, move CI to a
   dedicated account or VM with no developer credentials (or back to GitHub-hosted runners) first.
-- An offline runner does not trigger the fallback: jobs queue (up to 24 h). If a runner is down for long, delete the
-  variable to switch to GitHub-hosted runners.
+- An offline self-hosted runner does not trigger the fallback: its jobs queue (up to 24 h). If the dev PC is off
+  for long, delete `RUNS_ON_WINDOWS` to run the Windows jobs on GitHub-hosted runners (which have no GPU).
 
 ## Unstable self-hosted Windows host
 The dev PC (an i7-14700KF) occasionally crashes rustc or rustfmt under heavy parallel load (`STATUS_ACCESS_VIOLATION`
