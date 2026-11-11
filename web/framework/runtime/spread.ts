@@ -4,7 +4,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { renderEffect } from './core';
-import { applyStyle, clsx, hasSetter, propName, setAttribute, toClass, type ClassValue, type StyleValue } from './dom';
+import { applyStyle, applyStyleDirs, clsx, hasSetter, propName, setAttribute, toClass, type ClassValue, type StyleValue } from './dom';
 import { DELEGATED, on, setDelegated } from './events';
 
 const SKIP = new Set(['children', 'ref', '$$scope']);
@@ -13,7 +13,8 @@ const SKIP = new Set(['children', 'ref', '$$scope']);
  * Internal: applies `props` (an object, or a function returning one) to `el`; `scope` is the file's CSS scope class,
  * `dirs` the element's `class:` directives (kept on when the spread sets `class`).
  */
-export function spread(el: Element, props: object | (() => object), scope?: string, dirs?: () => Record<string, unknown>): void {
+export function spread(el: Element, props: object | (() => object), scope?: string, dirs?: () => Record<string, unknown>, styleDirs?: () => Record<string, unknown>): void {
+  let prevStyleDirs: Record<string, unknown> | undefined;
   let prev: Record<string, unknown> = {};
   let styleState: StyleValue | object = UNSET;
   const handlers: Record<string, unknown> = {};
@@ -40,7 +41,10 @@ export function spread(el: Element, props: object | (() => object), scope?: stri
       if (key === 'class') continue;
       const value = next[key];
       if (key === 'style') {
-        if (value !== prev.style || styleState === UNSET) styleState = applyStyle(el, value as StyleValue, styleState);
+        if (value !== prev.style || styleState === UNSET) {
+          styleState = applyStyle(el, value as StyleValue, styleState);
+          if (prevStyleDirs !== undefined) applyStyleDirs(el, prevStyleDirs, undefined, true);
+        }
         continue;
       }
       if (value === prev[key] && !(value === undefined && el.hasAttribute(key))) continue;
@@ -86,6 +90,9 @@ export function spread(el: Element, props: object | (() => object), scope?: stri
       else if (typeof value !== 'function') setAttribute(el, name, value);
     }
     prev = next;
+    const sd = styleDirs?.();
+    if (sd !== undefined) applyStyleDirs(el, sd, prevStyleDirs, false);
+    prevStyleDirs = sd;
   });
 }
 

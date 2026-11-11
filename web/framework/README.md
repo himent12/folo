@@ -58,9 +58,14 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
   created when the condition flips, as `{#if}` does.
 - Components are calls with a props object of getters (`get title() { return expr }`), so `props.title` read where it
   is used is tracked; children are a function (Svelte's snippet), a single `{(x) => ...}` child is passed through.
+  A prop expression Svelte would memoize (`$.derived`: it calls something, or is more than an identifier or member
+  read) reads a lazy computed (`propMemo`), so the child re-runs only when the value changes.
 - Every JS expression stays at its original place in the output (generated code fills the gaps between them), so the
   source map is exact for all embedded code.
-- Text follows JSX whitespace rules (see PORTING.md §8 for the Svelte differences).
+- Text follows JSX whitespace rules (see PORTING.md §8 for the Svelte differences). Adjacent static text and
+  expressions compile to one text node with one binding (`run`), where Svelte makes one: Chrome shapes per text node.
+  An expression that renders a node or a snippet splits its run into one insert per part, once.
+- Booleans on attributes follow Svelte: dropped on false only for its boolean attributes, stringified otherwise.
 
 ### Reactivity (`runtime/core.ts`)
 
@@ -97,7 +102,10 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
 ### Scoped CSS (`compiler/css.ts`)
 
 `css\`...\`` in a `.tsx` is extracted at build time, scoped, and served as the virtual module `<file>.fw.css` that the
-file imports (Vite's CSS pipeline does the rest; HMR updates it). The scoping mirrors Svelte 5's
+file imports after its own imports, as vite-plugin-svelte does, so the bundle has Svelte's cascade order (a file's
+rules after its children's; `parity/css-order.mjs` checks the built order against the Svelte app's). Vite's CSS
+pipeline does the rest; HMR updates it. The plugin also fails the build on an import that resolves to a file whose
+name differs in case (`$lib/ui/Field` → `field.ts` on a case-insensitive disk). The scoping mirrors Svelte 5's
 `phases/2-analyze/css` and `3-transform/css`: the first scoped compound of a selector gets `.fw-xxxx` (+0-1-0), later
 ones `:where(.fw-xxxx)`, nested rules under a local rule `:where(...)` only, `:global(...)`/`:global {}` and leading or
 trailing `:global` unscoped, `:is/:where/:has` arguments scoped like the selector, `:not` arguments only when complex

@@ -196,6 +196,24 @@ export function bindable(props: AnyProps, key: string, fallback?: unknown): Sign
   };
 }
 
+const MEMOS = Symbol('fw.memos');
+
+/**
+ * Internal: a component prop memoized as Svelte 5 memoizes non-trivial prop expressions (`$.derived`): the getter
+ * reads a lazy computed, so the child sees a new value (and its effects re-run) only when the value changed.
+ */
+export function propMemo(holder: object, key: string, fn: () => unknown): unknown {
+  let memos = (holder as Record<symbol, Record<string, ReturnType<typeof computed>> | undefined>)[MEMOS];
+  if (memos === undefined) Object.defineProperty(holder, MEMOS, { value: (memos = {}) });
+  return (memos[key] ??= computed(fn)).get();
+}
+
+/** Internal: a memoized spread source (`{...attrs()}` on a component), read lazily. */
+export function derive(fn: () => unknown): () => unknown {
+  const c = computed(fn);
+  return () => c.get();
+}
+
 /** Internal: a `bind:name={sig}` on a component, as a getter/setter pair for `mergeProps`. */
 export function bound(name: string, sig: { get(): unknown; set(v: unknown): void }): AnyProps {
   const out: AnyProps = {};

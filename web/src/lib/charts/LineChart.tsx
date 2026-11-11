@@ -1,6 +1,6 @@
 // fw port of LineChart.svelte.
 import { scaleLinear, scaleLog } from 'd3-scale';
-import { bindable, computed, createUniqueId, css, cubicOut, defaults, effect, For, MediaQuery, signal, tick, Tween, untrack, type Component } from 'fw';
+import { bindable, computed, createUniqueId, css, cubicOut, defaults, effect, For, MediaQuery, signal, tick, Tween, untrack } from 'fw';
 import { prefs } from '$lib/prefs';
 import { media } from '$lib/design/tokens';
 import { motion } from '$lib/ui/motion';
@@ -20,7 +20,7 @@ import { textMeasurer } from './textWidth';
 import type { Marker, Series, XMark } from './lineSeries';
 import ChartLegend from './ChartLegend';
 import ChartTooltip from './ChartTooltip';
-import LineEndsComponent, { type LineEndsProps } from './LineEnds';
+import LineEnds from './LineEnds';
 
 export type { Marker, Series, XMark };
 
@@ -94,10 +94,6 @@ export interface LineChartProps {
   picked?: string | null;
   onpick?: (id: string) => void;
 }
-
-// LineEnds' 18 required props make jsx.d.ts's `EitherRequired` (prop or `bind:prop`) a 2^18-member union (TS2590);
-// typed as all-optional here, the same component, the same props (LineChart passes every one).
-const LineEnds = LineEndsComponent as unknown as Component<Partial<LineEndsProps>>;
 
 /** Two numeric pairs (domains, extents) are equal: the same numbers, whatever the array. */
 const samePair = (a: readonly number[], b: readonly number[]) => a[0] === b[0] && a[1] === b[1];

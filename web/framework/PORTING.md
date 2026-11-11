@@ -36,10 +36,16 @@ property read (`props.x`, `obj.y`).
 | `foo.ts` that imports `svelte` / `@lucide/svelte` | `foo.fw.ts` beside it (e.g. `ui/field.fw.ts`, `ui/types.fw.ts`) |
 | `Foo.svelte.test.ts` | `Foo.test.tsx` |
 | `<script module>` exports | top-level `export`s of `Foo.tsx` |
-| `import X from './X.svelte'` | `import X from './X'` (resolves `X.tsx`) |
+| `import X from './X.svelte'` | `import X from './X'` (resolves `X.tsx`); **`import X from './X.tsx'` when a lowercase twin `x.ts` exists** (`$lib/ui/Field.tsx`, because of `field.ts`) |
 | `import Icon from '@lucide/svelte/icons/x'` | `import Icon from '$icons/x'` (same icon data, same `<svg>` output) |
 | `import type { IconType } from './types'` | `import type { IconType } from './types.fw'` |
 | `import { getField } from './field'` | `import { getField } from './field.fw'` |
+
+**Case.** Windows and macOS disks ignore case, and module resolution tries `.ts` before `.tsx`: `$lib/ui/Field`
+would load `field.ts` there (and `Field.tsx` on Linux). Whenever a component has a lowercase twin, import it with
+its extension: `import Field from '$lib/ui/Field.tsx'` (`tsconfig.next.json` allows `.tsx` imports). The fw Vite
+plugin makes this a build error: an import that resolves to a file whose name differs in case from what it asked for
+fails with the fix in the message, so the wrong module is never picked silently.
 
 Keep the old files until the final switch. Never edit a `.svelte` / `.svelte.ts` file: the Svelte app is the baseline
 the parity checks diff against. Pure `.ts` modules with no Svelte import (`tooltip.ts`, `focus.ts`, `sheetDrag.ts`,
@@ -195,6 +201,20 @@ stay local until the parent passes a new value (Svelte's semantics).
 The right side is anything with `get()`/`set()`: a `signal`, a `bindable(...)` passed down, `field(obj, 'key')` for a
 property of a `deep` object or a props object. The shorthand `bind:open` (no value) is not JSX: write the value.
 
+Types: a caller may write `bind:x` instead of `x` for a *required* prop while the component has at most 6 required
+props (the "x or bind:x" type doubles with each one, so past that the props stay as declared). A component with more
+required props that a caller binds declares the bound prop optional (`value?: T`), which is what a `$bindable` read
+with `bindable(props, 'value')` is anyway.
+
+### Prop expressions are memoized as in Svelte
+
+The compiler gives a prop a lazy `computed` when Svelte would give it a `$.derived`: the expression calls something
+(`items={rows()}`), or reads state through anything but a plain identifier or member read (`src={err ? null : src}`,
+`active={i === index()}`; a template literal counts by its own expressions). The child then sees a new value, and its
+effects re-run, only when the value changed. Plain reads (`label={props.label}`) and JSX values are read through as
+they are. A memoized prop is evaluated outside any component (like `$derived`): do not create components or effects in
+a prop expression (pass a function for that, as for snippets).
+
 ### Types
 
 | Svelte | fw |
@@ -229,9 +249,17 @@ bubbling events (click, input, change, keydown/up, pointer*, mouse*, focusin/out
 beforeinput) are delegated exactly as Svelte delegates them: handler order, `stopPropagation`, disabled elements
 behave the same. `onclickcapture` / `onkeydowncapture` work. There are no event modifiers in Svelte 5 code.
 
-**Attribute semantics** follow Svelte 5: `null`/`undefined` removes an attribute; `false` on `aria-*` is the string
-`"false"`; DOM properties (`disabled`, `checked`, `value`, `open`, `readonly`...) are set as properties; `value` on
-`<select>` selects after the options render.
+**Attribute semantics** follow Svelte 5: `null`/`undefined` removes an attribute; a boolean on an attribute outside
+Svelte's boolean list stringifies (`spellcheck={false}` → `spellcheck="false"`, `aria-expanded={false}` →
+`"false"`, or the property when the element has one of that name, e.g. `hidden`), while Svelte's boolean attributes
+(`disabled`, `checked`, `open`, `readonly`, `required`...) are present when true and absent when false; DOM properties
+(`disabled`, `checked`, `value`, `open`, `readonly`...) are set as properties; `value` on `<select>` selects after the
+options render. A bare attribute (`<div data-notice>`) is present and empty, as in Svelte.
+
+**Text.** Adjacent static text and expressions are one text node, exactly where Svelte makes one
+(`Epoch {a}/{b}`): Chrome shapes each text node on its own, so this keeps glyphs identical. An expression with JSX in
+it (`{x ? <b/> : null}`, a list) is a block and splits the text around it, as an `{#if}` does in Svelte. An
+expression that turns out to render a node or a snippet (`{props.children}`, `{icon()}`) is still rendered as it is.
 
 **Dynamic or not?** The compiler makes an expression reactive when it contains a call or a property read. A plain
 identifier or literal is set once. So `title={label}` with `let label` reassigned later does **not** update: make
@@ -331,8 +359,9 @@ const option = (o: () => Option, on: () => boolean) => <button aria-checked={on(
 |---|---|
 | `class:on={x}` | `class:on={x}` |
 | `class:mono` (shorthand) | `class:mono={props.mono}` (JSX `class:mono` alone means `true`) |
-| `style:top={v}` | `style:top={v}` (`null`/`undefined` removes it) |
-| `style:--c={v}` | `style={{ '--c': v }}` (`--` is not valid in a JSX attribute name; object styles merge per property) |
+| `style:top={v}`, `style:top="1px"` | same (`null`/`undefined` removes it) |
+| `style="..."` or `style={...}` with `style:x` | same: the directives are applied over the attribute and win, as in Svelte |
+| `style:--c={v}` | `style={{ '--c': v }}` (`--` is not valid in a JSX attribute name; object styles merge per property); with other `style:` directives on the same element, both work together |
 | `style:color|important={v}` | `style:color|important` is not JSX: `style={{ color: v }}` + an `!important` rule in css`` |
 | `bind:this={el}` (plain `let el`) | `let el!: HTMLElement;` + `ref={(e) => (el = e)}` |
 | `bind:this={el}` (`let el = $state()`) | `const el = signal<HTMLElement>()` + `ref={el}` (cleared to `undefined` when the element goes) |
@@ -386,6 +415,10 @@ css`
 - Every element the file's JSX creates gets the file's scope class (`fw-` + a hash of its path); Svelte only adds its
   class to elements a selector matches, which never changes what matches.
 - Unused selectors are kept (Svelte drops them); they cannot match anything outside the file.
+- Cascade order is Svelte's: a file's CSS comes after the CSS of the components it imports, so a parent's rule wins a
+  tie of specificity over its child's (`:global(dialog.shortcuts.lg)` over Dialog's `dialog.lg`). Never add a class
+  twice to win a tie: `node framework/parity/css-order.mjs` (after `npm run build`) checks the built order against
+  the Svelte app's.
 
 #### Copying a style block
 
@@ -442,7 +475,7 @@ Callers keep `status.notice` / `status.notice = x`. A `$derived` field → a get
 
 | Svelte | fw |
 |---|---|
-| `new MediaQuery(media.phone, false)`, `.current` | same (`MediaQuery` from 'fw'; `.current`, also `.get()`) |
+| `new MediaQuery(media.phone, false)`, `.current` | same (`MediaQuery` from 'fw'; `.current`, also `.get()`); one `matchMedia` list per instance, as Svelte, so a test's `matchMedia` stub applies to instances created after it |
 | `SvelteMap` / `SvelteSet` | `ReactiveMap` / `ReactiveSet` |
 | `createSubscriber` | `createSubscriber` |
 | `Tween` (`.current`, `.target`, `.set`) | `Tween` (same API) |

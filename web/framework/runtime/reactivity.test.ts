@@ -94,3 +94,33 @@ describe('Tween', () => {
     expect(t.current).toBe(20);
   });
 });
+
+describe('MediaQuery per instance', () => {
+  it('asks matchMedia at construction, so a stub applies, and listens only while tracked', () => {
+    const real = window.matchMedia;
+    let matches = true;
+    const listeners = new Set<() => void>();
+    window.matchMedia = ((q: string) =>
+      ({
+        media: q,
+        get matches() {
+          return matches;
+        },
+        addEventListener: (_: string, f: () => void) => listeners.add(f),
+        removeEventListener: (_: string, f: () => void) => listeners.delete(f),
+      }) as unknown as MediaQueryList) as typeof window.matchMedia;
+    try {
+      const q = new MediaQuery('(max-width: 767px)');
+      expect(q.current).toBe(true);
+      expect(listeners.size).toBe(0);
+      const seen = track(() => q.current);
+      expect(listeners.size).toBe(1);
+      matches = false;
+      for (const f of listeners) f();
+      flush();
+      expect(seen).toEqual([true, false]);
+    } finally {
+      window.matchMedia = real;
+    }
+  });
+});

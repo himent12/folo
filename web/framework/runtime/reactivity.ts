@@ -256,37 +256,34 @@ export class ReactiveSet<T> extends Set<T> {
   }
 }
 
-const queries = new Map<string, { mql: MediaQueryList | null; version: Signal<number> }>();
 const KEYWORDS = new Set(['all', 'print', 'screen', 'and', 'or', 'not', 'only']);
 
 /**
- * A media query's live result (port of svelte/reactivity `MediaQuery`): `current` is whether it matches now (read
- * live, as Svelte does), and reading it in an effect or computed re-runs that on a change. One listener per
- * distinct query, shared.
+ * A media query's live result (port of svelte/reactivity `MediaQuery`): `current` is whether it matches now, and
+ * reading it in an effect or computed re-runs that on a change. As in Svelte, each instance has its own
+ * `matchMedia` list (so a test can stub `matchMedia`), listened to only while something tracks it.
  */
 export class MediaQuery {
-  #q: { mql: MediaQueryList | null; version: Signal<number> };
+  #mql: MediaQueryList | null;
+  #subscribe: () => void;
   /** `fallback` is accepted for parity with Svelte (it only matters for server rendering). */
   constructor(query: string, _fallback?: boolean) {
-    const text = /(.+)/.test(query) || query.split(/[s,]+/).some((k) => KEYWORDS.has(k.trim())) ? query : `(${query})`;
-    let q = queries.get(text);
-    if (q === undefined) {
-      const mql = typeof matchMedia === 'function' ? matchMedia(text) : null;
-      const version = counter();
-      mql?.addEventListener('change', () => bump(version));
-      queries.set(text, (q = { mql, version }));
-    }
-    this.#q = q;
+    const text = /\(.+\)/.test(query) || query.split(/[\s,]+/).some((k) => KEYWORDS.has(k.trim())) ? query : `(${query})`;
+    const mql = (this.#mql = typeof matchMedia === 'function' ? matchMedia(text) : null);
+    this.#subscribe = createSubscriber((update) => {
+      mql?.addEventListener('change', update);
+      return () => mql?.removeEventListener('change', update);
+    });
   }
   get current(): boolean {
-    this.#q.version.get();
-    return this.#q.mql?.matches ?? false;
+    this.#subscribe();
+    return this.#mql?.matches ?? false;
   }
   get(): boolean {
     return this.current;
   }
   peek(): boolean {
-    return this.#q.mql?.matches ?? false;
+    return this.#mql?.matches ?? false;
   }
 }
 

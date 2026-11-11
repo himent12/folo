@@ -50,7 +50,7 @@ if (app !== 'legacy' && app !== 'next') throw new Error(`--app ${app}: expected 
 /** The entry page of each app; the query and the hash route are the same for both. */
 const ENTRY = { legacy: '/', next: '/next.html' };
 /** CSS scope classes the reports leave out: Svelte's, and the new framework's (FOLO_SCOPE_PREFIX overrides it). */
-const SCOPE_PREFIXES = ['svelte-', process.env.FOLO_SCOPE_PREFIX ?? 'f-'];
+const SCOPE_PREFIXES = ['svelte-', process.env.FOLO_SCOPE_PREFIX ?? 'fw-'];
 const round =
   args.find((a, i) => !a.startsWith('--') && !VALUED.includes(args[i - 1])) ?? new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
 const outDir = opt('--out') ? resolve(/** @type {string} */ (opt('--out'))) : resolve(root, 'shots', round);

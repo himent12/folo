@@ -568,10 +568,35 @@ export function applyStyle(el: Element, value: StyleValue, prev: StyleValue | ty
   return { ...value };
 }
 
-/** Internal: a reactive `style` attribute (string or object). */
-export function bindStyle(el: Element, fn: () => StyleValue): void {
+/**
+ * Applies `style:` directives over the style attribute (Svelte's `set_style` with directives): after the attribute
+ * was rewritten (`all`), every directive again; otherwise only those that changed.
+ */
+export function applyStyleDirs(el: Element, d: Record<string, unknown>, prev: Record<string, unknown> | undefined, all: boolean): void {
+  const style = (el as HTMLElement).style;
+  for (const k in d) {
+    const v = d[k];
+    if (!all && prev !== undefined && prev[k] === v) continue;
+    if (v == null || v === '' || v === false) style.removeProperty(k);
+    else style.setProperty(k, String(v));
+  }
+}
+
+/**
+ * Internal: a reactive `style` attribute (string or object), with the element's `style:` directives when it has both
+ * (they win over the attribute, as in Svelte).
+ */
+export function bindStyle(el: Element, fn: () => StyleValue, dirs?: () => Record<string, unknown>): void {
   let prev: StyleValue | typeof UNSET = UNSET;
+  let prevValue: unknown = UNSET;
+  let prevDirs: Record<string, unknown> | undefined;
   renderEffect(() => {
-    prev = applyStyle(el, fn(), prev);
+    const v = fn();
+    const d = dirs?.();
+    const changed = v !== prevValue || typeof v === 'object';
+    if (changed) prev = applyStyle(el, v, prev);
+    if (d !== undefined) applyStyleDirs(el, d, prevDirs, changed);
+    prevValue = v;
+    prevDirs = d;
   });
 }

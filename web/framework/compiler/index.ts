@@ -3,8 +3,8 @@
 // `$icons/<name>` modules.
 
 import { createRequire } from 'node:module';
-import { existsSync, readFileSync as read } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { existsSync, readFileSync as read, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Plugin } from 'vite';
 import { scopeCss } from './css.ts';
 import { transformJsx } from './jsx.ts';
@@ -24,6 +24,21 @@ export function scopeClass(file: string, root: string): string {
     h = Math.imul(h, 0x01000193);
   }
   return SCOPE_PREFIX + (h >>> 0).toString(36);
+}
+
+const realCache = new Map<string, string | null>();
+/** The file's name as it is on disk (its real case), or null if it cannot be read. */
+function realCase(file: string): string | null {
+  let name = realCache.get(file);
+  if (name === undefined) {
+    try {
+      name = basename(realpathSync.native(file));
+    } catch {
+      name = null;
+    }
+    realCache.set(file, name);
+  }
+  return name;
 }
 
 /** A file's scoped CSS is the module `<file>.fw.css` (virtual; a query on a .tsx id would be taken for TSX). */
@@ -63,10 +78,25 @@ export function fw(options: FwOptions = {}): Plugin {
     configResolved(config) {
       root = config.root;
     },
-    resolveId(id) {
+    async resolveId(id, importer, options) {
       if (id.startsWith('$icons/')) return ICON + id.slice('$icons/'.length);
       if (id.endsWith(CSS_QUERY)) return cssFile(id) + CSS_QUERY;
-      return undefined;
+      // On a case-insensitive disk `$lib/ui/Field` can resolve to `field.ts` (`.ts` is tried before `.tsx`): an import
+      // must name the file it gets, case included, or it is an error (and on Linux it would be another module).
+      if (!importer || importer.includes('/node_modules/') || !(id.startsWith('./') || id.startsWith('../') || id.startsWith('$lib'))) return undefined;
+      const r = await this.resolve(id, importer, { ...options, skipSelf: true });
+      if (!r || r.external) return r;
+      const file = r.id.split('?')[0]!;
+      const real = realCase(file);
+      const want = basename(id);
+      if (real !== null && basename(file) !== real && real.toLowerCase() === basename(file).toLowerCase()) {
+        const ext = real.slice(real.lastIndexOf('.'));
+        this.error(
+          `fw: "${id}" in ${relative(root, importer)} resolves to ${real} (the disk ignores case).` +
+            ` Import the file you mean with its extension (e.g. "${id.slice(0, id.length - want.length)}${want}.tsx"), or "${id.slice(0, id.length - want.length)}${real.slice(0, -ext.length)}" for ${real}.`,
+        );
+      }
+      return r;
     },
     load(id) {
       if (id.startsWith(ICON)) {
@@ -98,12 +128,9 @@ export function fw(options: FwOptions = {}): Plugin {
       if (file !== id || !include(file)) return undefined;
       const out = compile(code, file);
       if (out.css === undefined) return { code: out.code, map: out.map };
-      return { code: `import ${JSON.stringify(file + CSS_QUERY)};\n${out.code}`, map: shiftMap(out.map) };
+      // After the module's own imports, as vite-plugin-svelte does: the CSS of the components a file imports comes
+      // first in the bundle, so the file's own rules win ties of specificity over theirs (the cascade Svelte gives).
+      return { code: `${out.code}\nimport ${JSON.stringify(file + CSS_QUERY)};\n`, map: out.map };
     },
   };
-}
-
-/** The map of code that got one line prepended. */
-function shiftMap<M extends { mappings: string }>(map: M): M {
-  return { ...map, mappings: ';' + map.mappings };
 }

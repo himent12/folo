@@ -18,10 +18,15 @@ describe('templates', () => {
     expect(templates(compile('const x = <div class="a"><i /></div>;'))).toEqual(['<div class="a"><i></i></div>']);
   });
 
-  it('separates text around a dynamic part with a comment marker', () => {
-    expect(templates(compile('const x = <p>a{b()}c</p>;'))).toEqual(['<p>a<!>c</p>']);
-    expect(templates(compile('const x = <p>{a()}{b()}</p>;'))).toEqual(['<p><!></p>']);
+  it('merges static text and expressions into one text node, as Svelte does', () => {
+    const code = compile('const x = <p>Epoch {a()}/{b}</p>;');
+    expect(templates(code)).toEqual(['<p> </p>']);
+    expect(code).toContain('_$run(_el$2, ["Epoch ", () => (a()), "/", () => (b)]);');
+    expect(templates(compile('const x = <p>{a()}{b()}</p>;'))).toEqual(['<p> </p>']);
     expect(templates(compile('const x = <p><b />{a()}</p>;'))).toEqual(['<p><b></b></p>']);
+    // An expression with JSX in it is a block, never part of a run; the text around it keeps its own nodes.
+    expect(templates(compile('const x = <p>a{c() ? <b /> : null}c</p>;'))).toEqual(['<p>a<!>c</p>', '<b></b>']);
+    expect(compile('const x = <>Save {n()}</>;')).toContain('_$runNode(["Save ", () => (n())])');
   });
 
   it('follows JSX whitespace rules and inlines literal children', () => {
@@ -72,7 +77,7 @@ describe('expressions', () => {
     const code = compile('const x = <C a="s" b={1} c={d()} e={<i />}>{(v) => v}</C>; const y = <C>text</C>; const z = <C><b /></C>;');
     expect(code).toContain('a: "s"');
     expect(code).toContain('b: (1)');
-    expect(code).toContain('get c() { return (d()); }');
+    expect(code).toContain('get c() { return _$propMemo(this, "c", () => (d())); }');
     expect(code).toContain('get e() { return (_tmpl$');
     expect(code).toContain('children: ((v) => v)');
     expect(code).toContain('children: "text"');
@@ -80,8 +85,30 @@ describe('expressions', () => {
   });
 
   it('bind: on components and spreads merge in order', () => {
-    const code = compile('const x = <C a={1} {...rest} bind:open={o} b={b()} />;');
-    expect(code).toContain('_$mergeProps({ a: (1) }, (rest), _$bound("open", (o)), { get b() { return (b()); } })');
+    const code = compile('const x = <C a={1} {...rest} bind:open={o} b={b()} {...more()} />;');
+    expect(code).toContain('_$mergeProps({ a: (1) }, (rest), _$bound("open", (o)), { get b() { return _$propMemo(this, "b", () => (b())); } }, _$derive(() => (more())))');
+  });
+
+  it('memoizes props as Svelte does: calls and non-trivial reads, not identifiers or member reads', () => {
+    const code = compile('const x = <C a={p.x} b={p.y ? null : p.z} c={`${p.w}px`} d={`${n}`} e={f(1)} f={<i />} />;');
+    expect(code).toContain('get a() { return (p.x); }');
+    expect(code).toContain('get b() { return _$propMemo(this, "b"');
+    expect(code).toContain('get c() { return (`${p.w}px`); }');
+    expect(code).toContain('d: (`${n}`)');
+    expect(code).toContain('get e() { return _$propMemo(this, "e"');
+    expect(code).toMatch(/get f\(\) \{ return \(_tmpl/);
+  });
+
+  it('booleans on non-boolean attributes stringify, as Svelte; boolean attributes drop on false', () => {
+    const code = compile('const x = <input spellcheck={false} aria-hidden={true} disabled={false} readonly={true} data-x />;');
+    expect(templates(code)).toEqual(['<input readonly data-x>']);
+    expect(code).toContain('_$setAttribute(_el$1, "spellcheck", false)');
+    expect(code).toContain('_$setAttribute(_el$1, "aria-hidden", true)');
+  });
+
+  it('style={...} with style: directives on one element', () => {
+    const code = compile('const x = <div style:top={t()} style={s()} />;');
+    expect(code).toMatch(/_\$bindStyle\(_el\$1, _v\$\d+, \(\) => \(\{ "top": _v\$\d+\(\) \}\)\)/);
   });
 
   it('directives', () => {

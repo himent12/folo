@@ -48,18 +48,30 @@ type Tag = keyof { [K in keyof SvelteHTMLElements as string extends K ? never : 
 
 /** Props that can be bound: all but children. */
 type BindKeys<P> = Exclude<keyof P, 'children'>;
-type RequiredKeys<P> = { [K in BindKeys<P>]-?: {} extends Pick<P, K> ? never : K }[BindKeys<P>];
 /** What `bind:x` takes for a prop of type T: anything readable as T and writable with a T. */
 interface BindTarget<T> {
   get(): T | undefined;
   set(v: Exclude<T, undefined>): void;
 }
-/** For each required prop `x`: `x` or `bind:x` (the union per key, intersected over keys). */
+type RequiredKeys<P> = { [K in BindKeys<P>]-?: {} extends Pick<P, K> ? never : K }[BindKeys<P>];
+type UnionToIntersection<U> = (U extends unknown ? (x: U) => void : never) extends (x: infer I) => void ? I : never;
+type LastOf<U> = UnionToIntersection<U extends unknown ? () => U : never> extends () => infer R ? R : never;
+/** How many members `U` has, counting no further than MAX_EITHER + 1 (so it costs nothing for big unions). */
+type Count<U, N extends unknown[] = []> = [U] extends [never] ? N['length'] : N['length'] extends 7 ? 7 : Count<Exclude<U, LastOf<U>>, [...N, 0]>;
+/** For each required prop `x`: `x` or `bind:x` (a union per key, intersected over keys: 2^n members). */
 type EitherRequired<P, R extends keyof P> = { [K in R]: (x: { [Q in K]: P[K] } | { [Q in K as Q extends string ? `bind:${Q}` : never]: BindTarget<P[K]> }) => void }[R] extends (x: infer I) => void ? I : never;
-/** A component's props, where each prop `x` can be given as `x={...}` or bound as `bind:x={signal}`. */
-type Bindified<P> = Omit<P, RequiredKeys<P>> & {
-  [K in BindKeys<P> as K extends string ? `bind:${K}` : never]?: BindTarget<P[K]>;
-} & ([RequiredKeys<P>] extends [never] ? unknown : EitherRequired<P, RequiredKeys<P>>);
+type BindProps<P> = { [K in BindKeys<P> as K extends string ? `bind:${K}` : never]?: BindTarget<P[K]> };
+/**
+ * A component's props, where any prop `x` may also be bound with `bind:x={signal}`. A required prop can be bound
+ * instead of passed while the component has at most 6 required props (the either/or type doubles with each one); past
+ * that the props stay as declared (linear), so a prop meant to be bound there is declared optional (`value?: T`, as a
+ * `$bindable` read with `bindable(props, 'value')`).
+ */
+type Bindified<P> = [RequiredKeys<P>] extends [never]
+  ? P & BindProps<P>
+  : Count<RequiredKeys<P>> extends 7
+    ? P & BindProps<P>
+    : Omit<P, RequiredKeys<P>> & BindProps<P> & EitherRequired<P, RequiredKeys<P>>;
 
 declare global {
   namespace JSX {

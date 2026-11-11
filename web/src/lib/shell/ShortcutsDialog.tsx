@@ -87,9 +87,7 @@ export default function ShortcutsDialog(props: { open?: boolean }) {
 
 css`
   /* A reference card, not a page: 640 px, two columns of 13 px rows, a group never split across them. */
-  /* \`.shortcuts\` twice: fw puts a file's CSS before that of the files it imports (Svelte after), so ui/Dialog's
-     \`dialog.lg\` (same specificity) would come later and win; the extra class keeps this rule on top in either order. */
-  :global(dialog.shortcuts.shortcuts.lg) {
+  :global(dialog.shortcuts.lg) {
     width: min(640px, calc(100vw - 32px));
   }
   .groups {
@@ -137,7 +135,7 @@ css`
     color: var(--text-tertiary);
   }
   @media (max-width: 767px) {
-    :global(dialog.shortcuts.shortcuts.lg) {
+    :global(dialog.shortcuts.lg) {
       width: 100%;
     }
   }

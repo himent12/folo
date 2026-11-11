@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
-import { Dynamic, flush, mergeProps, onCleanup, signal, splitProps, type Signal } from 'fw';
+import { Dynamic, effect, flush, mergeProps, onCleanup, signal, splitProps, type Signal } from 'fw';
 import { render } from '../testing';
 
 const html = (el: Element) => el.innerHTML.replace(/<!---->/g, '');
@@ -344,5 +344,157 @@ describe('components and props', () => {
     unmount();
     expect(cleanup).toHaveBeenCalledOnce();
     expect((s as unknown as { _targets: unknown })._targets).toBeUndefined();
+  });
+});
+
+describe('text runs', () => {
+  it('render adjacent text and expressions as one text node, updated in place', () => {
+    const a = signal(1);
+    const b = signal(60);
+    const { container, unmount } = render(() => (
+      <p>
+        Epoch {a.get()}/{b.get()}
+      </p>
+    ));
+    const p = container.querySelector('p')!;
+    expect(p.childNodes.length).toBe(1);
+    expect(p.textContent).toBe('Epoch 1/60');
+    const node = p.firstChild;
+    a.set(2);
+    flush();
+    expect(p.textContent).toBe('Epoch 2/60');
+    expect(p.firstChild).toBe(node);
+    expect(p.childNodes.length).toBe(1);
+    unmount();
+  });
+
+  it('keep neighbouring elements and blocks in place', () => {
+    const n = signal(3);
+    const show = signal(true);
+    const { container, unmount } = render(() => (
+      <p>
+        <b>x</b>
+        {n.get()} items{show.get() ? <i>!</i> : null} left
+      </p>
+    ));
+    const p = container.querySelector('p')!;
+    expect(p.textContent).toBe('x3 items! left');
+    n.set(4);
+    show.set(false);
+    flush();
+    expect(p.textContent).toBe('x4 items left');
+    unmount();
+  });
+
+  it('a part that yields a node splits the run, and then nothing is re-created when text changes', () => {
+    let made = 0;
+    const label = signal('L');
+    const withIcon = signal(false);
+    const Icon = () => {
+      made++;
+      return <svg />;
+    };
+    const icon = () => (withIcon.get() ? <Icon /> : null);
+    const { container, unmount } = render(() => (
+      <button>
+        {icon()}
+        {label.get()}
+      </button>
+    ));
+    const btn = container.querySelector('button')!;
+    expect(btn.textContent).toBe('L');
+    withIcon.set(true);
+    flush();
+    expect(btn.querySelector('svg')).not.toBeNull();
+    expect(btn.textContent).toBe('L');
+    const before = made;
+    label.set('M');
+    flush();
+    expect(btn.textContent).toBe('M');
+    expect(made).toBe(before);
+    expect(btn.firstChild).toBe(btn.querySelector('svg'));
+    unmount();
+  });
+
+  it('a snippet in a run renders as it is', () => {
+    const Box = (props: { children?: JSX.Element }) => <span>Save {props.children}</span>;
+    const { container, unmount } = render(() => (
+      <Box>
+        <b>now</b>
+      </Box>
+    ));
+    expect(container.querySelector('span')!.innerHTML.replace(/<!---->/g, '')).toBe('Save <b>now</b>');
+    unmount();
+  });
+
+  it('fragment runs: one node when text, the parts when not', () => {
+    const n = signal(1);
+    const C = () => <>Count {n.get()}</>;
+    const { container, unmount } = render(() => (
+      <div>
+        <C />
+      </div>
+    ));
+    const div = container.querySelector('div')!;
+    expect(div.textContent).toBe('Count 1');
+    expect([...div.childNodes].filter((x) => x.nodeType === 3 && (x as Text).data).length).toBe(1);
+    n.set(2);
+    flush();
+    expect(div.textContent).toBe('Count 2');
+    unmount();
+  });
+});
+
+describe('Svelte attribute and prop semantics', () => {
+  it('spellcheck={false} renders "false"; aria booleans stringify', () => {
+    const { container, unmount } = render(() => <input spellcheck={false} aria-hidden={true} disabled={false} />);
+    const i = container.querySelector('input')!;
+    expect(i.getAttribute('spellcheck')).toBe('false');
+    expect(i.getAttribute('aria-hidden')).toBe('true');
+    expect(i.hasAttribute('disabled')).toBe(false);
+    unmount();
+  });
+
+  it('a non-trivial prop is memoized: the child re-runs only when its value changes', () => {
+    const phase = signal<'idle' | 'busy' | 'error'>('idle');
+    const runs: (string | null)[] = [];
+    const Child = (props: { src: string | null }) => {
+      effect(() => void runs.push(props.src));
+      return null;
+    };
+    const src = 'a.png';
+    const { unmount } = render(() => <Child src={phase.get() === 'error' ? null : src} />);
+    flush();
+    phase.set('busy');
+    flush();
+    phase.set('error');
+    flush();
+    expect(runs).toEqual(['a.png', null]);
+    unmount();
+  });
+
+  it('style={...} and style: directives combine, the directives winning', () => {
+    const color = signal('red');
+    const top = signal<string | undefined>('2px');
+    const { container, unmount } = render(() => <i style={{ color: color.get(), top: '9px' }} style:top={top.get()} />);
+    const i = container.querySelector('i')!;
+    expect(i.style.color).toBe('red');
+    expect(i.style.top).toBe('2px');
+    color.set('blue');
+    flush();
+    expect(i.style.color).toBe('blue');
+    expect(i.style.top).toBe('2px');
+    top.set('5px');
+    flush();
+    expect(i.style.top).toBe('5px');
+    const s = signal('color: green');
+    const r = render(() => <b style={s.get()} style:left="1px" />);
+    const b = r.container.querySelector('b')!;
+    s.set('color: navy');
+    flush();
+    expect(b.style.color).toBe('navy');
+    expect(b.style.left).toBe('1px');
+    r.unmount();
+    unmount();
   });
 });

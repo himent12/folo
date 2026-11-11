@@ -47,6 +47,14 @@ const PROPS: Record<string, string> = {
   textcontent: 'textContent', innertext: 'innerText',
 };
 
+/** Svelte's DOM_BOOLEAN_ATTRIBUTES: present when true, absent when false. Other attributes stringify booleans. */
+const BOOLEAN_ATTRS = new Set([
+  'allowfullscreen', 'async', 'autofocus', 'autoplay', 'checked', 'controls', 'default', 'disabled', 'formnovalidate',
+  'indeterminate', 'inert', 'ismap', 'loop', 'multiple', 'muted', 'nomodule', 'novalidate', 'open', 'playsinline',
+  'readonly', 'required', 'reversed', 'seamless', 'selected', 'webkitdirectory', 'defer', 'disablepictureinpicture',
+  'disableremoteplayback',
+]);
+
 const SIZE_BINDS = new Set(['clientWidth', 'clientHeight', 'offsetWidth', 'offsetHeight']);
 /** Block elements a `<p>` cannot contain (the HTML parser would close the `<p>`, breaking the template walk). */
 const NOT_IN_P = new Set(['address', 'article', 'aside', 'blockquote', 'details', 'dialog', 'div', 'dl', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup', 'hr', 'main', 'menu', 'nav', 'ol', 'p', 'pre', 'section', 'table', 'ul']);
@@ -112,6 +120,34 @@ function isDynamic(n: Node): boolean {
   return found;
 }
 
+/** Whether `n` calls something (outside nested functions and JSX): Svelte's `has_call`. */
+function hasCall(n: Node): boolean {
+  if (!n || typeof n !== 'object') return false;
+  if (n.type === 'CallExpression' || n.type === 'NewExpression' || n.type === 'TaggedTemplateExpression' || n.type === 'ImportExpression' || n.type === 'AwaitExpression') return true;
+  if (FUNCTION_TYPES.has(n.type) || isJsx(n)) return false;
+  let found = false;
+  eachChild(n, (c) => {
+    if (!found && hasCall(c)) found = true;
+  });
+  return found;
+}
+
+function containsJsx(n: Node): boolean {
+  return isJsx(bare(n)) || jsxWithin(n).length > 0;
+}
+
+/**
+ * Svelte 5's rule for a component prop: memoized when it calls something, or reads state through anything but a
+ * plain identifier or member read (`active={i === index}`, `src={err ? null : src}`). For a template literal, its
+ * expressions decide (they are Svelte's attribute chunks).
+ */
+function needsDerived(x: Node): boolean {
+  if (hasCall(x)) return true;
+  const b = bare(x);
+  if (b.type === 'TemplateLiteral') return b.expressions.some((e: Node) => isDynamic(e) && needsDerived(e));
+  return b.type !== 'Identifier' && b.type !== 'MemberExpression';
+}
+
 function isFunctionExpr(n: Node): boolean {
   return n.type === 'ArrowFunctionExpression' || n.type === 'FunctionExpression';
 }
@@ -165,8 +201,14 @@ interface TNode {
   jsx?: Node;
 }
 
-/** A child of an element or fragment after JSX whitespace and fragments are resolved. */
-type Item = { kind: 'text'; text: string } | { kind: 'el'; node: Node } | { kind: 'dyn'; node: Node };
+/** A part of a text run: static text, or an expression. */
+type RunPart = { text: string } | { node: Node };
+
+/**
+ * A child of an element or fragment after JSX whitespace and fragments are resolved. A `run` is what Svelte makes one
+ * text node of: adjacent static text and expressions (`Epoch {a}/{b}`), keyed by its first expression.
+ */
+type Item = { kind: 'text'; text: string } | { kind: 'el'; node: Node } | { kind: 'dyn'; node: Node } | { kind: 'run'; node: Node; parts: RunPart[] };
 
 class Compiler {
   readonly s: MagicString;
@@ -175,6 +217,9 @@ class Compiler {
   readonly helpers = new Set<string>();
   readonly templates: string[] = [];
   readonly events = new Set<string>();
+  /** Text runs by their key (first expression), and every expression that belongs to a run. */
+  readonly runs = new Map<Node, RunPart[]>();
+  readonly runMembers = new Set<Node>();
   uid = 0;
   constructor(code: string, s: MagicString, scope: string | undefined) {
     this.code = code;
@@ -221,8 +266,49 @@ class Compiler {
     return this.element(n, svg);
   }
 
-  /** The children of an element or fragment, as items. */
+  /**
+   * The children of an element or fragment, as items, with text runs merged as Svelte merges its text sequences:
+   * adjacent static text and expressions become one text node (Chrome shapes each text node on its own, so this is
+   * what keeps glyphs identical). An expression with JSX in it is a block (an `{#if}`, a list), never part of a run.
+   */
   items(children: Node[]): Item[] {
+    const out: Item[] = [];
+    const flat = this.rawItems(children);
+    const textLike = (it: Item) => it.kind === 'text' || (it.kind === 'dyn' && it.node.type !== 'JSXElement' && !isJsx(bare(it.node)) && jsxWithin(it.node).length === 0);
+    for (let i = 0; i < flat.length; ) {
+      if (!textLike(flat[i]!)) {
+        out.push(flat[i++]!);
+        continue;
+      }
+      let j = i;
+      while (j < flat.length && textLike(flat[j]!)) j++;
+      const seg = flat.slice(i, j);
+      const exprs = seg.filter((it) => it.kind === 'dyn');
+      if (seg.length >= 2 && exprs.length > 0) {
+        const parts: RunPart[] = seg.map((it) => (it.kind === 'text' ? { text: it.text } : { node: (it as { node: Node }).node }));
+        const key = (exprs[0] as { node: Node }).node;
+        this.runs.set(key, parts);
+        for (const e of exprs) this.runMembers.add((e as { node: Node }).node);
+        out.push({ kind: 'run', node: key, parts });
+      } else out.push(...seg);
+      i = j;
+    }
+    return out;
+  }
+
+  /** A text run's parts as an array: static text as strings, every expression as a function. */
+  runParts(parts: RunPart[], svg: boolean): Chunk[] {
+    const out: Chunk[] = ['['];
+    parts.forEach((pt, i) => {
+      if (i) out.push(', ');
+      if ('text' in pt) out.push(JSON.stringify(pt.text));
+      else out.push('() => ', ...this.paren(pt.node, svg));
+    });
+    out.push(']');
+    return out;
+  }
+
+  rawItems(children: Node[]): Item[] {
     const out: Item[] = [];
     const pushText = (t: string) => {
       const last = out[out.length - 1];
@@ -240,7 +326,7 @@ class Compiler {
         else if (lit && (lit.value === null || lit.value === undefined || typeof lit.value === 'boolean')) continue;
         else out.push({ kind: 'dyn', node: c.expression });
       } else if (c.type === 'JSXFragment') {
-        for (const it of this.items(c.children)) {
+        for (const it of this.rawItems(c.children)) {
           if (it.kind === 'text') pushText(it.text);
           else out.push(it);
         }
@@ -294,6 +380,7 @@ class Compiler {
     const parts = items.map((it): Chunk[] => {
       if (it.kind === 'text') return [JSON.stringify(it.text)];
       if (it.kind === 'el') return this.element(it.node, svg);
+      if (it.kind === 'run') return [`${this.h('runNode')}(`, ...this.runParts(it.parts, svg), ')'];
       return this.childValue(it.node, svg);
     });
     if (parts.length === 1) return parts[0]!;
@@ -329,7 +416,9 @@ class Compiler {
     for (const a of opening.attributes) {
       if (a.type === 'JSXSpreadAttribute') {
         close();
-        segments.push(isDynamic(a.argument) ? ['() => ', ...this.paren(a.argument, svg)] : this.paren(a.argument, svg));
+        // A spread with a call is memoized (Svelte's `$.derived`), so its keys read one evaluation.
+        if (isDynamic(a.argument) && hasCall(a.argument) && !containsJsx(a.argument)) segments.push([`${this.h('derive')}(() => `, ...this.paren(a.argument, svg), ')']);
+        else segments.push(isDynamic(a.argument) ? ['() => ', ...this.paren(a.argument, svg)] : this.paren(a.argument, svg));
         continue;
       }
       const { ns, name: key } = attrName(a);
@@ -348,7 +437,8 @@ class Compiler {
       else if (a.value.type === 'JSXExpressionContainer') {
         const x = a.value.expression;
         if (x.type === 'JSXEmptyExpression') this.fail(a, 'empty attribute expression');
-        if (isDynamic(x) || isJsx(bare(x))) prop([`get ${k}() { return `, ...this.paren(x, svg), '; }']);
+        if (isDynamic(x) && !containsJsx(x) && needsDerived(x)) prop([`get ${k}() { return ${this.h('propMemo')}(this, ${JSON.stringify(key)}, () => `, ...this.paren(x, svg), '); }']);
+        else if (isDynamic(x) || isJsx(bare(x))) prop([`get ${k}() { return `, ...this.paren(x, svg), '; }']);
         else prop([`${k}: `, ...this.paren(x, svg)]);
       } else if (isJsx(a.value)) prop([`get ${k}() { return `, ...this.jsx(a.value, svg), '; }']);
     }
@@ -472,6 +562,7 @@ class Template {
       if (tag === 'textarea' && name === 'value') continue;
       const v = this.staticValue(a);
       if (v === undefined || v === null || v === false) continue;
+      if (v === true && a.value != null && !BOOLEAN_ATTRS.has(name.toLowerCase())) continue; // set at runtime (`"true"`)
       html += v === true ? ` ${name}` : ` ${name}="${escapeAttr(String(v))}"`;
     }
     if (!classDynamic && !hasSpread) {
@@ -489,7 +580,7 @@ class Template {
     const items = c.items(n.children);
     if (RAW_TEXT.has(tag) || tag === 'template') {
       for (const it of items) {
-        if (it.kind !== 'text' && (RAW_TEXT.has(tag) || it.kind === 'dyn')) c.fail(n, `<${tag}> takes static content only`);
+        if (it.kind !== 'text' && (RAW_TEXT.has(tag) || it.kind === 'dyn' || it.kind === 'run')) c.fail(n, `<${tag}> takes static content only`);
       }
     }
     let lastTemplate: TNode | null = null;
@@ -509,6 +600,12 @@ class Template {
         }
         this.html += tag === 'script' || tag === 'style' ? it.text : escapeText(it.text);
         place({ kind: 'text', parent: t, children: [] });
+      } else if (it.kind === 'run') {
+        // One text node, its content set by the run's binding (a space so the parser keeps it).
+        this.html += ' ';
+        const node: TNode = { kind: 'text', parent: t, children: [] };
+        place(node);
+        markers.set(it.node, node);
       } else if (it.kind === 'el') {
         const ctag = it.node.openingElement.name.name as string;
         if (tag === 'table' && ctag === 'tr') c.fail(it.node, '<tr> must be inside <thead>, <tbody> or <tfoot> (the HTML parser inserts one)');
@@ -570,8 +667,10 @@ class Template {
     let classAccessor: string | null = null;
     let groupValue: string | null = null;
     let groupSig: string | null = null;
+    const styleDirs: [string, string][] = [];
+    let styleAccessor: string | null = null;
     const accessor = (x: Node): string => {
-      const v = `_v${++c.uid}`;
+      const v = `_v$${++c.uid}`;
       op([`const ${v} = () => `, ...c.paren(x, svg), ';']);
       return v;
     };
@@ -604,12 +703,20 @@ class Template {
         continue;
       }
       if (ns === 'style') {
-        if (!expr) c.fail(a, 'style:prop takes an expression');
-        if (opening.attributes.some((b: Node) => b.type === 'JSXAttribute' && attrName(b).ns === null && attrName(b).name === 'style' && this.staticValue(b) === undefined))
-          c.fail(a, 'style:x together with a dynamic style={...} is not supported: put the property in the style object');
         const important = name.endsWith('|important');
         const prop = important ? name.slice(0, -10) : name;
-        op([`${c.h('styleProp')}(${el()}, ${JSON.stringify(prop)}, () => `, ...c.paren(expr, svg), `${important ? ', true' : ''});`]);
+        // `style:x={expr}`, or a string `style:x="1px"` (as Svelte allows).
+        const sv = expr ? null : this.staticValue(a);
+        if (!expr && typeof sv !== 'string') c.fail(a, 'style:prop takes a value: style:prop={expr} or style:prop="..."');
+        const value: Chunk[] = expr ? c.paren(expr, svg) : [JSON.stringify(sv)];
+        if (hasSpread || this.isStyleDynamic(opening)) {
+          // Applied with the style attribute, after it (Svelte's set_style with directives).
+          const v = `_v$${++c.uid}`;
+          op([`const ${v} = () => `, ...value, ';']);
+          styleDirs.push([prop, v]);
+          continue;
+        }
+        op([`${c.h('styleProp')}(${el()}, ${JSON.stringify(prop)}, () => `, ...value, `${important ? ', true' : ''});`]);
         continue;
       }
       if (ns === 'use') {
@@ -633,7 +740,7 @@ class Template {
         else if (name === 'open') op([`${c.h('bindOpen')}(${el()}, `, ...c.paren(expr, svg), ');']);
         else if (name === 'group') {
           if (!valueAttr) c.fail(a, 'bind:group needs a value on the same element');
-          groupSig = `_g${++c.uid}`;
+          groupSig = `_g$${++c.uid}`;
           op([`const ${groupSig} = `, ...c.paren(expr, svg), ';']);
         } else if (SIZE_BINDS.has(name)) op([`${c.h('bindSize')}(${el()}, ${JSON.stringify(name)}, `, ...c.paren(expr, svg), ');']);
         else c.fail(a, `bind:${name} is not supported on <${tag}>`);
@@ -685,8 +792,7 @@ class Template {
       }
       if (name === 'style') {
         if (this.staticValue(a) !== undefined) continue;
-        if (isDynamic(expr)) op([`${c.h('bindStyle')}(${el()}, () => `, ...c.paren(expr, svg), ');']);
-        else op([`${c.h('bindStyle')}(${el()}, () => `, ...c.paren(expr, svg), ');']);
+        styleAccessor = accessor(expr);
         continue;
       }
       if (tag === 'select' && name === 'value') {
@@ -697,6 +803,12 @@ class Template {
       }
       const sv = this.staticValue(a);
       const prop = !svg ? PROPS[name.toLowerCase()] : undefined;
+      if (typeof sv === 'boolean' && a.value != null && !BOOLEAN_ATTRS.has(name.toLowerCase())) {
+        // `spellcheck={false}`, `aria-hidden={true}`: as Svelte's set_attribute (a property if the element has a
+        // setter of that name, else the string "true"/"false"); only boolean attributes are dropped on false.
+        op([`${c.h('setAttribute')}(${el()}, ${JSON.stringify(name)}, ${sv});`]);
+        continue;
+      }
       if (sv !== undefined && !(tag === 'textarea' && name === 'value')) {
         if (needsGroupValue && name === 'value') groupValue ??= `() => ${JSON.stringify(sv)}`;
         continue;
@@ -717,9 +829,12 @@ class Template {
     }
     if (groupSig !== null) op([`${c.h('bindGroup')}(${el()}, ${groupSig}, ${groupValue ?? '() => undefined'});`]);
     const dirs = classDirs.length ? `() => ({ ${classDirs.map(([k, v]) => `${JSON.stringify(k)}: ${v}()`).join(', ')} })` : null;
+    const sdirs = styleDirs.length ? `() => ({ ${styleDirs.map(([k, v]) => `${JSON.stringify(k)}: ${v}()`).join(', ')} })` : null;
+    if (styleAccessor !== null) op([`${c.h('bindStyle')}(${el()}, ${styleAccessor}${sdirs ? `, ${sdirs}` : ''});`]);
     if (spreadParts.length) {
       const props = spreadParts.length === 1 ? spreadParts[0]! : `${c.h('mergeProps')}(${spreadParts.join(', ')})`;
-      op([`${c.h('spread')}(${el()}, ${props}, ${c.scope ? JSON.stringify(c.scope) : 'undefined'}${dirs ? `, ${dirs}` : ''});`]);
+      const extra = sdirs ? `, ${dirs ?? 'undefined'}, ${sdirs}` : dirs ? `, ${dirs}` : '';
+      op([`${c.h('spread')}(${el()}, ${props}, ${c.scope ? JSON.stringify(c.scope) : 'undefined'}${extra});`]);
     } else if (classAccessor !== null || (dirs && this.isClassDynamic(opening))) {
       op([`${c.h('className')}(${el()}, ${classAccessor ?? '() => undefined'}, ${c.scope ? JSON.stringify(c.scope) : 'undefined'}${dirs ? `, ${dirs}` : ''});`]);
     }
@@ -739,6 +854,12 @@ class Template {
       return;
     }
     const node = child.type === 'JSXExpressionContainer' ? child.expression : child;
+    const run = c.runs.get(node);
+    if (run !== undefined && markers.has(node)) {
+      this.ops.push([`${c.h('run')}(${this.ref(markers.get(node)!)}, `, ...c.runParts(run, svg), ');']);
+      return;
+    }
+    if (c.runMembers.has(node)) return; // the rest of a run
     if (!markers.has(node)) return; // static text, comment or nothing
     const marker = markers.get(node);
     const value = child.type === 'JSXElement' ? c.jsx(child, svg) : c.childValue(node, svg);
@@ -748,6 +869,10 @@ class Template {
 
   isClassDynamic(opening: Node): boolean {
     return opening.attributes.some((a: Node) => a.type === 'JSXAttribute' && attrName(a).ns === null && (attrName(a).name === 'class' || attrName(a).name === 'className') && this.staticValue(a) === undefined);
+  }
+
+  isStyleDynamic(opening: Node): boolean {
+    return opening.attributes.some((a: Node) => a.type === 'JSXAttribute' && attrName(a).ns === null && attrName(a).name === 'style' && this.staticValue(a) === undefined);
   }
 
   hasClassDirectives(opening: Node): boolean {
