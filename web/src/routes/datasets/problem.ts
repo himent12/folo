@@ -18,3 +18,8 @@ export function datasetProblem(e: unknown): DatasetProblem | undefined {
 }
 
 export const PROBLEM_LABEL: Record<DatasetProblem, string> = { missing: 'Folder missing', unreadable: "Can't read" };
+
+/** A registration refused because the folder holds images but no labels (the server says so in these words). */
+export function isUnlabeled(e: unknown): boolean {
+  return e instanceof ApiError && e.code === 'unknown_format' && /but no labels$/.test(e.message);
+}

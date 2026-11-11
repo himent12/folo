@@ -2,6 +2,7 @@
 import { flush as flushSync } from 'fw';
 import { render } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { router } from '$lib/router';
@@ -187,6 +188,14 @@ describe('AddDatasetDialog', () => {
     field.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
     await vi.waitFor(() => expect(create).toHaveBeenCalled());
     expect(create.mock.calls[0]![0].name).toBe('shapes-synth-2');
+  });
+
+  it('points a folder of images without labels to Label images', async () => {
+    vi.spyOn(hub.api, 'createDataset').mockRejectedValue(new ApiError(400, 'unknown_format', "'D:/data/images-only' has 2 images but no labels", 'label them first'));
+    await register('D:/data/images-only', []);
+    const err = document.querySelector('.err')!;
+    expect(err.textContent).toContain('Label them first: an agent can draw the boxes in Label images.');
+    expect(err.querySelector('a')?.getAttribute('href')).toBe('#/datasets/label');
   });
 
   it('announces a dataset that was not in the list as new', async () => {

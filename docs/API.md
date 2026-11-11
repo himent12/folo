@@ -129,7 +129,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   folder layout) or `images/{train,val,test}` + `labels/…`; COCO from `annotations/instances_*.json` (Roboflow
   layouts too). Corrupt or missing images and images with broken labels are left out (`stats.broken_labels` counts
   the latter; `folo dataset check` lists them all). Without `names` / `nc`, classes are named `class0..` up to the
-  largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset),
+  largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset; a folder with images
+  but no labels says "'<path>' has N images but no labels", with a hint to label them),
   `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes). The
   request returns once the dataset is indexed (every image header is read, in parallel). Registering a path that
   is already registered (the same folder by its canonical path, whatever the spelling, with `format` `auto` or

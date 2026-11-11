@@ -1,11 +1,12 @@
 /** "Add dataset": register a YOLO/COCO folder on the server's disk, or generate a synthetic shapes set. */
 import FolderOpen from '$icons/folder-open';
 import Sparkles from '$icons/sparkles';
+import Tags from '$icons/tags';
 import { bindable, computed, createUniqueId, css, effect, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { CreateDataset } from '$lib/api/types';
 import { duration, num } from '$lib/format';
-import { router } from '$lib/router';
+import { href, router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import ClassChips, { addClasses } from '$lib/ui/ClassChips';
 import Dialog from '$lib/ui/Dialog';
@@ -18,6 +19,7 @@ import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
 import { noTraining } from '../dataset/health';
 import { datasetsChanged } from './changes';
+import { isUnlabeled } from './problem';
 import { cleanPath, isFullPath, NAME_RE, nameFromPath, suggestName, uniqueName } from './names';
 
 type Mode = 'folder' | 'synthetic';
@@ -343,7 +345,20 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
               </>
             )}{' '}
             {error.get() ? (
-              <ErrorState error={error.get()} title={mode.get() === 'folder' ? 'Could not register this folder' : 'Could not generate the dataset'} compact />
+              <ErrorState
+                error={error.get()}
+                title={mode.get() === 'folder' ? 'Could not register this folder' : 'Could not generate the dataset'}
+                compact
+                // Images without labels: FOLO's own answer for exactly this is labeling them.
+                hint={isUnlabeled(error.get()) ? 'Label them first: an agent can draw the boxes in Label images.' : undefined}
+                actions={
+                  isUnlabeled(error.get()) ? (
+                    <Button size="sm" icon={Tags} href={href('/datasets/label')} onclick={() => open.set(false)}>
+                      Label images
+                    </Button>
+                  ) : undefined
+                }
+              />
             ) : null}
           </fieldset>
         </form>

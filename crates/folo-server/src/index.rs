@@ -191,15 +191,33 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
                 "pass the dataset root: the folder holding data.yaml, images/ + labels/, or annotations/",
             )
         }
-        DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => {
-            Error::new(StatusCode::BAD_REQUEST, "unknown_format", m).hint(
-                "expected data.yaml or images/ + labels/ (YOLO), or annotations/instances_*.json (COCO)",
-            )
-        }
+        // The message already says what a dataset folder holds; images there without labels are said as that.
+        DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => match images_under(Path::new(path)) {
+            0 => Error::new(StatusCode::BAD_REQUEST, "unknown_format", m),
+            n => {
+                let (path, s) = (folo_data::paths::shown(path), if n == 1 { "" } else { "s" });
+                let message = format!("'{path}' has {n} image{s} but no labels");
+                Error::new(StatusCode::BAD_REQUEST, "unknown_format", message).hint(
+                    "label them first (FOLO Studio: Datasets, Label images), or add YOLO labels/ or a COCO \
+                     annotations/ JSON",
+                )
+            }
+        },
         DataError::Format(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", m),
         DataError::Config(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_body", m),
         e => Error::internal(e.to_string()),
     }
+}
+
+/// Image files under `dir` (a few levels deep, counted up to 10,000), for a folder that is not a dataset.
+fn images_under(dir: &Path) -> usize {
+    walkdir::WalkDir::new(dir)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file() && folo_data::is_image_path(e.path()))
+        .take(10_000)
+        .count()
 }
 
 /// The path of a dataset to register, as sent: surrounding whitespace and one pair of matching quotes removed

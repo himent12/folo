@@ -241,7 +241,16 @@ async fn coco_folders_and_registration_errors() {
     err(&app, post_json("/api/datasets", missing), StatusCode::NOT_FOUND, "path_not_found").await;
     std::fs::create_dir_all(t.join("empty")).unwrap();
     let empty = json!({ "path": t.join("empty").to_str().unwrap() });
-    err(&app, post_json("/api/datasets", empty), StatusCode::BAD_REQUEST, "unknown_format").await;
+    let e = err(&app, post_json("/api/datasets", empty), StatusCode::BAD_REQUEST, "unknown_format").await;
+    assert!(e.message.starts_with("could not detect a dataset"), "{}", e.message);
+    assert_eq!(e.hint, None, "the message says it once");
+    // Images without labels are said as that, pointing to labeling.
+    image::RgbImage::new(8, 8).save(t.join("empty/a.jpg")).unwrap();
+    image::RgbImage::new(8, 8).save(t.join("empty/b.png")).unwrap();
+    let body = json!({ "path": t.join("empty") });
+    let e = err(&app, post_json("/api/datasets", body), StatusCode::BAD_REQUEST, "unknown_format").await;
+    assert!(e.message.ends_with("has 2 images but no labels"), "{}", e.message);
+    assert!(e.hint.unwrap().starts_with("label them first"));
     std::fs::write(yolo.join("data.yaml"), "train: images/train\nnc: 3\nnames: [a]\n").unwrap();
     let bad = json!({ "path": yolo.to_str().unwrap() });
     err(&app, post_json("/api/datasets", bad), StatusCode::BAD_REQUEST, "invalid_dataset").await;
