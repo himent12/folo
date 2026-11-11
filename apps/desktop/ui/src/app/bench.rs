@@ -200,7 +200,7 @@ fn print_line(kind: &str, samples: &[Sample], shaped: usize) {
         "-".to_string()
     };
     println!(
-        "  {kind}: render {} build {} layout {} prepaint {} paint {} finish {} raster {} present {} total {} wall {} us | allocs {} | drawn {}/{} | shaped {}",
+        "  {kind}: render {} build {} layout {} prepaint {} paint {} finish {} raster {} present {} total {} (min {}) wall {} us | allocs {} | drawn {}/{} | shaped {}",
         median(&|s| s.times.render_us.into()),
         median(&|s| s.times.build_us.into()),
         median(&|s| s.times.layout_us.into()),
@@ -210,6 +210,7 @@ fn print_line(kind: &str, samples: &[Sample], shaped: usize) {
         median(&|s| s.times.raster_us.into()),
         median(&|s| s.times.present_us.into()),
         median(&|s| s.times.total_us().into()),
+        samples.iter().map(|s| s.times.total_us()).filter(|&t| t > 0).min().unwrap_or_default(),
         median(&|s| s.wall_us.into()),
         allocations,
         drawn,

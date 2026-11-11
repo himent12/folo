@@ -111,7 +111,7 @@ impl Window {
         f: impl FnOnce(&GlobalElementId, &mut Self) -> R,
     ) -> R {
         self.element_id_stack.push(element_id);
-        let global_id = GlobalElementId(self.element_id_stack.as_slice().into());
+        let global_id = GlobalElementId::new(self.element_id_stack.as_slice());
         let result = f(&global_id, self);
         self.element_id_stack.pop();
         result

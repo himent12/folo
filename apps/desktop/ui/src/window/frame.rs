@@ -5,7 +5,7 @@
 //! Performance: the window keeps two frames (`rendered_frame`, `next_frame`) and swaps them after each draw;
 //! `Frame::clear` empties every list but keeps its capacity, so a steady-state frame allocates nothing a
 //! reused `Vec` avoids. Element states are moved, not cloned, from the previous frame when touched again.
-use std::{any::Any, collections::HashMap};
+use std::any::Any;
 
 use smallvec::SmallVec;
 
@@ -158,8 +158,10 @@ pub(crate) struct DeferredDraw {
     pub(crate) absolute_offset: crate::Point<Pixels>,
 }
 
-/// Element state kept across frames, by element id path and state type.
-pub(crate) type ElementStateMap = HashMap<(GlobalElementId, std::any::TypeId), Box<dyn Any>>;
+/// Element state kept across frames, by element id path and state type (the path's hash is precomputed;
+/// the Fx hasher mixes it with the type's).
+pub(crate) type ElementStateMap =
+    crate::text::fx_hash::FxHashMap<(GlobalElementId, std::any::TypeId), Box<dyn Any>>;
 
 /// Everything one paint produced.
 pub(crate) struct Frame {
@@ -194,7 +196,7 @@ impl Frame {
     pub(crate) fn new() -> Self {
         Frame {
             focus: None,
-            element_states: HashMap::new(),
+            element_states: Default::default(),
             hitboxes: Vec::new(),
             mouse_listeners: Vec::new(),
             dispatch_tree: DispatchTree::new(),
