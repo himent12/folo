@@ -9,6 +9,7 @@
 import X from '$icons/x';
 import { bindable, createUniqueId, css, defaults, effect, MediaQuery } from 'fw';
 import { media } from '$lib/design/tokens';
+import { backdropClose } from './backdrop';
 import Button from './Button';
 import DialogStatusRegion from './DialogStatus';
 import { DialogStatus, provideStatus } from './feedback';
@@ -51,6 +52,7 @@ export default function Dialog(props: DialogProps) {
     if (open.get() && !el.open) {
       restore = rememberFocus();
       el.showModal();
+      backdrop.opened();
       // The dialog itself takes focus (DESIGN_DIRECTION 9), not its first control: the close button would wear the
       // ring when opened from the keyboard. The first Tab reaches the controls; a component that wants a control
       // focused (a picker's checked option) focuses it after the dialog has opened.
@@ -71,16 +73,9 @@ export default function Dialog(props: DialogProps) {
     if (!p.onbeforeclose || p.onbeforeclose()) el.close();
   }
 
-  // A click whose target is the <dialog> itself landed on the backdrop. It must also have started there: a text
-  // selection or slider drag that begins inside and is released outside is not a request to close.
-  let downOnBackdrop = false;
-  function onpointerdown(e: PointerEvent) {
-    downOnBackdrop = e.target === el;
-  }
-  function onclick(e: MouseEvent) {
-    if (e.target === el && downOnBackdrop) dismiss();
-    downOnBackdrop = false;
-  }
+  // A click whose target is the <dialog> itself landed on the backdrop: it closes the dialog when it also started there,
+  // and not as the second click of the double-click that opened it (./backdrop).
+  const backdrop = backdropClose(() => el, dismiss);
 
   return (
     <dialog
@@ -93,8 +88,8 @@ export default function Dialog(props: DialogProps) {
       oncancel={(e) => {
         if (p.onbeforeclose && !p.onbeforeclose()) e.preventDefault();
       }}
-      onpointerdown={onpointerdown}
-      onclick={onclick}
+      onpointerdown={backdrop.onpointerdown}
+      onclick={backdrop.onclick}
     >
       <div class="frame">
         <header use:sheetDrag={{ sheet: () => el, close: dismiss, enabled: () => sheet.current }}>

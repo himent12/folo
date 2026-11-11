@@ -23,6 +23,7 @@ import { rememberFocus } from '$lib/ui/focus';
 import Ident from '$lib/ui/Ident';
 import Kbd from '$lib/ui/Kbd';
 import { keyPrefs } from '$lib/ui/keyPrefs';
+import { backdropClose } from '$lib/ui/backdrop';
 import Meta from '$lib/ui/Meta';
 import { statusWord } from '$lib/ui/StatusBadge';
 import type { IconType } from '$lib/ui/types';
@@ -79,12 +80,15 @@ export default function CommandPalette(props: CommandPaletteProps) {
   /** The items chosen last (ids), read on open: with no query they head the list, under Recent. */
   const recent = signal<string[]>([]);
 
+  // A press outside the box closes it, unless it is the second click of the double-click that opened it (ui/backdrop).
+  const backdrop = backdropClose(() => el, () => el.close());
   // Focus returns to the opener on close; a command that navigates then hands it to the new page (App).
   let restore: (() => void) | null = null;
   effect(() => {
     if (open.get() && !el.open) {
       restore = rememberFocus();
       el.showModal();
+      backdrop.opened();
       query.set('');
       index.set(0);
       recent.set(recentIds());
@@ -319,9 +323,8 @@ export default function CommandPalette(props: CommandPaletteProps) {
         restore?.();
         restore = null;
       }}
-      onclick={(e) => {
-        if (e.target === el) el.close();
-      }}
+      onpointerdown={backdrop.onpointerdown}
+      onclick={backdrop.onclick}
     >
       <div class="box">
         <div class="search">
