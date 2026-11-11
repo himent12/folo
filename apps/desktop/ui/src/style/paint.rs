@@ -85,7 +85,9 @@ pub fn paint_quad(
 }
 
 /// Pushes box shadows as GPUI's `Window::paint_shadows` does: each layer's box is `bounds` offset and
-/// dilated by its spread, scaled to device pixels with its blur radius, color faded by the opacity.
+/// dilated by its spread, scaled to device pixels with its blur radius, color faded by the opacity. A
+/// layer whose box (before the blur) misses the content mask is skipped, as GPUI's
+/// `Scene::insert_primitive` skips it, even where its blur would reach into the mask.
 pub fn paint_shadows(
     scene: &mut Scene,
     cx: &StylePaint,
