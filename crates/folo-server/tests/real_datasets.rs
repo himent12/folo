@@ -467,6 +467,12 @@ async fn registering_a_folder_again_returns_the_same_dataset() {
     assert_eq!(again.id, ids[0].id);
     let list: DatasetList = ok(&a, get("/api/datasets")).await;
     assert_eq!(list.datasets.len(), 1);
+    // Unregistered and registered again, the folder gets its id back (the runs that used it find it again).
+    let (status, _, _) = send(&a, delete(&format!("/api/datasets/{}", again.id))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let back: Dataset =
+        ok(&a, post_json("/api/datasets", json!({ "path": data.join("..").join("shapes") }))).await;
+    assert_eq!(back.id, ids[0].id);
 }
 
 /// A registered folder that is moved away stays in the list (also after a restart), says what is wrong, can be

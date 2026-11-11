@@ -16,11 +16,9 @@ import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
 import Button from '$lib/ui/Button';
-import Dialog from '$lib/ui/Dialog';
 import Gate from '$lib/ui/Gate';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
-import { DialogStatus } from '$lib/ui/feedback';
 import { gridView } from '$lib/ui/gridView';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Meta from '$lib/ui/Meta';
@@ -37,9 +35,9 @@ import DisplayMenu from './dataset/DisplayMenu';
 import { findingCount, findingLabel, healthChecks, imageCount, noTraining } from './dataset/health';
 import ImageGrid from './dataset/ImageGrid';
 import Inspector from './dataset/Inspector';
+import RemoveDialog from './dataset/RemoveDialog';
 import { ImagePager } from './dataset/pager';
 import StatsTab from './dataset/StatsTab';
-import { datasetsChanged } from './datasets/changes';
 
 type Tab = 'images' | 'stats';
 type SplitFilter = 'all' | Split;
@@ -170,25 +168,6 @@ export default function Dataset() {
   }
 
   const confirmDelete = signal(false);
-  const deleting = signal(false);
-  /** A failed delete says so in its dialog, which stays open for another try (the toaster sits behind the modal). */
-  const deleteStatus = new DialogStatus();
-  async function remove() {
-    const dd = target();
-    if (!dd) return;
-    deleting.set(true);
-    try {
-      await hub.api.deleteDataset(dd.id);
-      datasetsChanged();
-      confirmDelete.set(false);
-      toast.success('Dataset removed', `${dd.name} is no longer registered. Files on disk were not touched.`);
-      router.go('/datasets');
-    } catch (e) {
-      deleteStatus.error(e, 'Could not delete the dataset');
-    } finally {
-      deleting.set(false);
-    }
-  }
 
   // ---------- derived view data ----------
   const total = computed(() => {
@@ -514,24 +493,7 @@ export default function Dataset() {
         </>
       )}
       {target() ? (
-        <Dialog
-          bind:open={confirmDelete}
-          title={`Remove ${tg().name} from FOLO?`}
-          size="sm"
-          status={deleteStatus}
-          footer={() => (
-            <>
-              <Button onclick={() => confirmDelete.set(false)}>Cancel</Button>
-              <Button variant="destructive" icon={Trash} loading={deleting.get()} onclick={remove}>
-                Remove from FOLO
-              </Button>
-            </>
-          )}
-        >
-          <p class="confirm">
-            <b>{tg().name}</b> will be unregistered from FOLO. The files in <span class="mono">{tg().path}</span> stay on disk, and runs that used it keep their results.
-          </p>
-        </Dialog>
+        <RemoveDialog bind:open={confirmDelete} dataset={tg()} />
       ) : null}
     </>
   );
@@ -638,17 +600,6 @@ css`
     flex-shrink: 0;
     margin-top: 2px;
     color: var(--warning-text);
-  }
-  .confirm {
-    color: var(--text-secondary);
-  }
-  .confirm b {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-  }
-  .confirm .mono {
-    color: var(--text-primary);
-    overflow-wrap: anywhere;
   }
   .sk-page {
     max-width: calc(var(--size-content-max) + 2 * var(--space-6));

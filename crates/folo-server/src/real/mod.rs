@@ -24,6 +24,7 @@
 //! - `label/<id>/`: labeling jobs ([`crate::label`]); `bench/<id>/`: vision benchmarks ([`crate::bench`]).
 
 mod datasets;
+pub(crate) use datasets::dataset_seed;
 mod gpu_idle;
 mod models;
 mod store;

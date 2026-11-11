@@ -168,7 +168,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/datasets/{id}/images/{image_id}` → original image bytes (`Content-Type` from the file); `?thumb=256`
   returns a JPEG whose long side is 256 (clamped to 16..2048, never upscaled; EXIF orientation applied, so boxes
   line up). Mock images are immutable and sent with a long `Cache-Control`; real ones with `no-cache`.
-- `DELETE /api/datasets/{id}` → `204` (unregisters; never deletes files)
+- `DELETE /api/datasets/{id}` → `204` (unregisters; never deletes files). Runs that used the dataset keep their
+  metrics and models; their sample images (`/images` of this id) are gone with it. A dataset's id derives from its
+  folder (canonical path) and format, so registering the same folder again gives it the same id back (unless another
+  dataset has taken it meanwhile), and those runs find it again.
 
 ```jsonc
 // Dataset

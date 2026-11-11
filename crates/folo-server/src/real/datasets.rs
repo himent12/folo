@@ -131,10 +131,13 @@ impl RealStore {
             return self.get_dataset(&id);
         }
         let mut regs = read_registry(&self.data_dir)?;
-        // Unique against loaded datasets and registrations whose folder is currently missing.
-        let id = unique_id("ds", fnv1a(path.as_bytes()) ^ unix_now().to_bits(), |id| {
-            list.iter().any(|e| e.reg.lock().unwrap().id == id) || regs.iter().any(|r| r.id == id)
-        });
+        // Unique against loaded datasets and registrations whose folder is currently missing. Derived from the
+        // folder (canonical, so any spelling) and its format, not the time: a folder unregistered and registered
+        // again gets its id back, and the runs that trained on it find their dataset again.
+        let id =
+            unique_id("ds", dataset_seed(want.as_deref().unwrap_or(Path::new(&path)), idx.format), |id| {
+                list.iter().any(|e| e.reg.lock().unwrap().id == id) || regs.iter().any(|r| r.id == id)
+            });
         let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
             let lower = |n: &str| n.to_lowercase();
             default_name(Path::new(&path), |n| {
@@ -176,6 +179,11 @@ impl RealStore {
         claim_dir(&parent, base)
             .map_err(|e| Error::internal(format!("creating a folder in {}: {e}", parent.display())))
     }
+}
+
+/// The seed of a registered dataset's id: its canonical path and the format it is read in.
+pub(crate) fn dataset_seed(canonical: &Path, format: DatasetFormat) -> u64 {
+    fnv1a(canonical.to_string_lossy().as_bytes()) ^ fnv1a(format!("{format:?}").as_bytes())
 }
 
 /// A registered dataset whose folder no longer exists: said as that (still `404 path_not_found`), not with the

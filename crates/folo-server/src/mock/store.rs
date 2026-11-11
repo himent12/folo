@@ -217,7 +217,9 @@ impl Store for MockStore {
         if let Some(d) = same(&list) {
             return Ok(d);
         }
-        let id = unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
+        // As in real mode: the same folder registered again gets the same id.
+        let canonical = want.unwrap_or_else(|| Path::new(&req.path).to_path_buf());
+        let id = unique_id("ds", crate::real::dataset_seed(&canonical, index.format), |id| {
             list.iter().any(|d| d.meta().id == id)
         });
         let name = req.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
