@@ -43,5 +43,7 @@ when you adapt another file.
 | `text/portable/fonts.rs`, `text/portable/layout.rs` | `platform/linux/text_system.rs` |
 | `text/portable/raster.rs` | `platform/linux/text_system.rs`, `platform/blade/blade_renderer.rs` (`get_gamma_ratios`) |
 | `platform/windows/{chrome, clipboard, display, drop_target, events, keyboard, pacer, platform, platform_window, shell, util, window}.rs` | `platform/windows/` (`events.rs`, `window.rs`, `platform.rs`, `keyboard.rs`, `display.rs`, `clipboard.rs`, `util.rs`, `vsync.rs`, `system_settings.rs`): message handling, title bar, key names, display UUID, window placement formulas |
+| `raster/quad_eval.rs`, `raster/gradient.rs`, `raster/shadow.rs`, `raster/image.rs`, `raster/path.rs` (underlines) | `platform/windows/shaders.hlsl` (quad, gradient, Oklab, shadow, polychrome sprite and underline fragment maths) |
+| `raster/sprite.rs` | `platform/windows/alpha_correction.hlsl` (glyph contrast and gamma correction) |
 
 The Apache License 2.0 text is in the repository root, `LICENSE-APACHE`.
