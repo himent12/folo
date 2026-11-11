@@ -20,6 +20,30 @@ pub(crate) fn window_rect(hwnd: HWND) -> RECT {
     r
 }
 
+/// Captures the window once into a 1x1 bitmap. Off screen the window DC shows nothing, and the
+/// compositor builds the window's picture only when it is captured (`PrintWindow` with
+/// `PW_RENDERFULLCONTENT`, which repaints it); the first capture after the window appears or changes
+/// size sometimes comes out torn, later ones do not. Taking that one here keeps the tools' whole.
+pub(crate) fn warm_capture(hwnd: HWND) {
+    use ::windows::Win32::Graphics::Gdi::{
+        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
+    };
+    use ::windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+    // SAFETY: a 1x1 memory bitmap made, used and freed here; PrintWindow repaints our own window.
+    unsafe {
+        let screen = GetDC(None);
+        let dc = CreateCompatibleDC(Some(screen));
+        let bitmap = CreateCompatibleBitmap(screen, 1, 1);
+        let old = SelectObject(dc, bitmap.into());
+        // PW_CLIENTONLY | PW_RENDERFULLCONTENT, as the capture tools use.
+        let _ = PrintWindow(hwnd, dc, PRINT_WINDOW_FLAGS(3));
+        SelectObject(dc, old);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(dc);
+        ReleaseDC(None, screen);
+    }
+}
+
 /// Whether any part of `rect` is on a display.
 pub(crate) fn on_a_display(rect: &RECT) -> bool {
     // SAFETY: a plain query.
@@ -34,7 +58,8 @@ impl WindowInner {
         }
         let normal = window_rect(self.hwnd);
         let monitor = self.state.borrow().display.handle;
-        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mut info =
+            MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         // SAFETY: a sized MONITORINFO.
         let _ = unsafe { GetMonitorInfoW(monitor, &mut info) };
         let work = info.rcWork;
@@ -51,7 +76,15 @@ impl WindowInner {
         let (cx, cy) = (work.right - work.left + 2 * frame, work.bottom - work.top + 2 * frame);
         // SAFETY: repositioning our own window, without activating it.
         let _ = unsafe {
-            SetWindowPos(self.hwnd, None, OFFSCREEN_ORIGIN, OFFSCREEN_ORIGIN, cx, cy, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER)
+            SetWindowPos(
+                self.hwnd,
+                None,
+                OFFSCREEN_ORIGIN,
+                OFFSCREEN_ORIGIN,
+                cx,
+                cy,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER,
+            )
         };
     }
 
@@ -70,10 +103,23 @@ impl WindowInner {
             state.offscreen_maximized = false;
             state.offscreen_restore.take()
         };
-        let r = saved.unwrap_or(RECT { left: OFFSCREEN_ORIGIN, top: OFFSCREEN_ORIGIN, right: OFFSCREEN_ORIGIN + 960, bottom: OFFSCREEN_ORIGIN + 620 });
+        let r = saved.unwrap_or(RECT {
+            left: OFFSCREEN_ORIGIN,
+            top: OFFSCREEN_ORIGIN,
+            right: OFFSCREEN_ORIGIN + 960,
+            bottom: OFFSCREEN_ORIGIN + 620,
+        });
         // SAFETY: repositioning our own window, without activating it.
         let _ = unsafe {
-            SetWindowPos(self.hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER)
+            SetWindowPos(
+                self.hwnd,
+                None,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER,
+            )
         };
     }
 

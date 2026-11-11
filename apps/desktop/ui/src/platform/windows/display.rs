@@ -1,18 +1,19 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/display.rs
 //! `WindowsDisplay`: a monitor, its bounds in its own logical pixels, and GPUI's display UUID (a v5 UUID
 //! of the device name, every one of its 32 UTF-16 units as big-endian bytes) so `desktop.json` keeps
 //! matching across the port.
 
 use super::util::logical_point;
 use crate::{Bounds, DevicePixels, DisplayId, Pixels, PlatformDisplay, point, size};
-use anyhow::{Result, anyhow};
-use smallvec::SmallVec;
-use std::rc::Rc;
-use uuid::Uuid;
 use ::windows::Win32::Foundation::{LPARAM, POINT, RECT};
 use ::windows::Win32::Graphics::Gdi::*;
 use ::windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use ::windows::Win32::UI::WindowsAndMessaging::USER_DEFAULT_SCREEN_DPI;
 use ::windows::core::BOOL;
+use anyhow::{Result, anyhow};
+use smallvec::SmallVec;
+use std::rc::Rc;
+use uuid::Uuid;
 
 /// A connected monitor.
 #[derive(Debug, Clone, Copy)]
@@ -59,7 +60,10 @@ impl WindowsDisplay {
                 origin: logical_point(r.left as f32, r.top as f32, scale_factor),
                 size: physical_size.to_pixels(scale_factor),
             },
-            physical_bounds: Bounds { origin: point(DevicePixels(r.left), DevicePixels(r.top)), size: physical_size },
+            physical_bounds: Bounds {
+                origin: point(DevicePixels(r.left), DevicePixels(r.top)),
+                size: physical_size,
+            },
             uuid: generate_uuid(&info.szDevice),
         })
     }

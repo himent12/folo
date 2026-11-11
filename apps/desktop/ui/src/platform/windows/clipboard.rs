@@ -1,14 +1,15 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/clipboard.rs
 //! The clipboard: text as `CF_UNICODETEXT`, and a string's metadata in GPUI's private format next to a
 //! hash of the text (so metadata left over from an older copy is ignored).
 
 use crate::{ClipboardEntry, ClipboardItem};
-use anyhow::{Result, anyhow};
-use std::sync::OnceLock;
 use ::windows::Win32::Foundation::{HANDLE, HGLOBAL};
 use ::windows::Win32::System::DataExchange::*;
 use ::windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use ::windows::Win32::System::Ole::CF_UNICODETEXT;
 use ::windows::core::w;
+use anyhow::{Result, anyhow};
+use std::sync::OnceLock;
 
 fn hash_format() -> u32 {
     static F: OnceLock<u32> = OnceLock::new();
@@ -111,7 +112,7 @@ fn read_bytes(format: u32) -> Option<Vec<u8>> {
 
 fn read_wide(format: u32) -> Option<String> {
     let bytes = read_bytes(format)?;
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_ne_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_ne_bytes(*c)).collect();
     let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
     Some(String::from_utf16_lossy(&units[..end]))
 }

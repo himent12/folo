@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/events.rs (keys, IME), keyboard.rs
 //! Keys, text and IME with GPUI's semantics (`events.rs`, `keyboard.rs` there): `WM_KEYDOWN` becomes a
 //! `KeyDown` with GPUI's key names and `key_char`; only a key the app did not handle is translated
 //! into `WM_CHAR` (so a handled shortcut never also types), and `WM_CHAR` / dead keys / IME
@@ -32,7 +33,9 @@ impl WindowInner {
     pub(crate) fn handle_syskeyup(&self, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         let input = {
             let mut state = self.state.borrow_mut();
-            key_event(hwnd, wparam, lparam, &mut state, |keystroke| PlatformInput::KeyUp(KeyUpEvent { keystroke }))?
+            key_event(hwnd, wparam, lparam, &mut state, |keystroke| {
+                PlatformInput::KeyUp(KeyUpEvent { keystroke })
+            })?
         };
         self.dispatch_input(input)?;
         // Always handled, so ModifiersChanged keeps working after Alt.
@@ -65,7 +68,9 @@ impl WindowInner {
     pub(crate) fn handle_keyup(&self, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         let input = {
             let mut state = self.state.borrow_mut();
-            key_event(hwnd, wparam, lparam, &mut state, |keystroke| PlatformInput::KeyUp(KeyUpEvent { keystroke }))
+            key_event(hwnd, wparam, lparam, &mut state, |keystroke| {
+                PlatformInput::KeyUp(KeyUpEvent { keystroke })
+            })
         };
         let Some(input) = input else { return Some(1) };
         match self.dispatch_input(input) {
@@ -90,7 +95,8 @@ impl WindowInner {
         if let Some(handled) = self.offscreen_system_command(wparam.0 as u32) {
             return Some(handled);
         }
-        if wparam.0 == SC_KEYMENU as usize && std::mem::take(&mut self.state.borrow_mut().system_key_handled) {
+        if wparam.0 == SC_KEYMENU as usize && std::mem::take(&mut self.state.borrow_mut().system_key_handled)
+        {
             return Some(0);
         }
         None
@@ -124,9 +130,11 @@ impl WindowInner {
         unsafe {
             let ctx = ImmGetContext(hwnd);
             if let Some(caret) = caret {
-                let composition = COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: caret, ..Default::default() };
+                let composition =
+                    COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: caret, ..Default::default() };
                 let _ = ImmSetCompositionWindow(ctx, &composition);
-                let candidate = CANDIDATEFORM { dwStyle: CFS_CANDIDATEPOS, ptCurrentPos: caret, ..Default::default() };
+                let candidate =
+                    CANDIDATEFORM { dwStyle: CFS_CANDIDATEPOS, ptCurrentPos: caret, ..Default::default() };
                 let _ = ImmSetCandidateWindow(ctx, &candidate);
             }
             let _ = ImmReleaseContext(hwnd, ctx);
@@ -187,7 +195,8 @@ fn composition_string(ctx: HIMC, kind: IME_COMPOSITION_STRING) -> Option<String>
 
 /// Lets Windows turn a key the app did not handle into WM_CHAR / WM_DEADCHAR.
 fn translate_message(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
-    let msg = MSG { hwnd, message: WM_KEYDOWN, wParam: wparam, lParam: lparam, time: 0, pt: POINT::default() };
+    let msg =
+        MSG { hwnd, message: WM_KEYDOWN, wParam: wparam, lParam: lparam, time: 0, pt: POINT::default() };
     // SAFETY: a complete MSG for our window.
     let _ = unsafe { TranslateMessage(&msg) };
 }
@@ -226,7 +235,10 @@ fn key_event(
                 return None;
             }
             state.last_reported_modifiers = Some(modifiers);
-            Some(PlatformInput::ModifiersChanged(ModifiersChangedEvent { modifiers, capslock: current_capslock() }))
+            Some(PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+                modifiers,
+                capslock: current_capslock(),
+            }))
         }
         VK_PACKET => {
             translate_message(hwnd, wparam, lparam);
@@ -275,8 +287,8 @@ pub(crate) fn immutable_key_name(vkey: VIRTUAL_KEY) -> Option<&'static str> {
         VK_APPS => "menu",
         v if (VK_F1.0..=VK_F24.0).contains(&v.0) => {
             const F: [&str; 24] = [
-                "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "f13", "f14", "f15", "f16",
-                "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24",
+                "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "f13", "f14",
+                "f15", "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24",
             ];
             F[(v.0 - VK_F1.0) as usize]
         }
@@ -335,7 +347,13 @@ fn converts_to_shifted_key(vkey: VIRTUAL_KEY) -> bool {
 }
 
 /// What the key would type with these modifiers (`ToUnicode` without touching the dead-key state).
-pub(crate) fn generate_key_char(vkey: VIRTUAL_KEY, scan_code: u32, control: bool, shift: bool, alt: bool) -> Option<String> {
+pub(crate) fn generate_key_char(
+    vkey: VIRTUAL_KEY,
+    scan_code: u32,
+    control: bool,
+    shift: bool,
+    alt: bool,
+) -> Option<String> {
     let mut state = [0u8; 256];
     if control {
         state[VK_CONTROL.0 as usize] = 0x80;
@@ -374,8 +392,22 @@ fn keyboard_uses_altgr() -> bool {
     let lang = id.get(id.len().saturating_sub(4)..).unwrap_or("").to_ascii_uppercase();
     matches!(
         lang.as_str(),
-        "0407" | "040C" | "040A" | "0415" | "0413" | "0816" | "041D" | "0414" | "040B" | "041F" | "0419" | "0405"
-            | "040E" | "0424" | "041B" | "0418"
+        "0407"
+            | "040C"
+            | "040A"
+            | "0415"
+            | "0413"
+            | "0816"
+            | "041D"
+            | "0414"
+            | "040B"
+            | "041F"
+            | "0419"
+            | "0405"
+            | "040E"
+            | "0424"
+            | "041B"
+            | "0418"
     )
 }
 

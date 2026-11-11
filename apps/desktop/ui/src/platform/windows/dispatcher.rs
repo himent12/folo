@@ -4,6 +4,8 @@
 
 use super::WM_FOLO_MAIN_TASKS;
 use crate::PlatformDispatcher;
+use ::windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use ::windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use async_task::Runnable;
 use parking_lot::{Condvar, Mutex};
 use std::cmp::Reverse;
@@ -12,8 +14,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
-use ::windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use ::windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 /// Most background threads alive at once. The app blocks pool threads in HTTP calls, so the pool must
 /// be generous; idle threads exit after `IDLE_EXIT`.
@@ -31,7 +31,11 @@ pub(crate) struct MainQueue {
 
 impl MainQueue {
     fn new() -> Self {
-        Self { tasks: Mutex::new(VecDeque::new()), wake_pending: AtomicBool::new(false), hwnd: AtomicIsize::new(0) }
+        Self {
+            tasks: Mutex::new(VecDeque::new()),
+            wake_pending: AtomicBool::new(false),
+            hwnd: AtomicIsize::new(0),
+        }
     }
 
     fn push(&self, runnable: Runnable) {
@@ -91,7 +95,8 @@ impl Pool {
             state.threads += 1;
             drop(state);
             let pool = self.clone();
-            let spawned = std::thread::Builder::new().name("folo-ui-pool".into()).spawn(move || pool.worker());
+            let spawned =
+                std::thread::Builder::new().name("folo-ui-pool".into()).spawn(move || pool.worker());
             if spawned.is_err() {
                 self.state.lock().threads -= 1;
             }
@@ -174,7 +179,8 @@ impl Timers {
             state.running = true;
             let timers = self.clone();
             let pool = pool.clone();
-            let _ = std::thread::Builder::new().name("folo-ui-timers".into()).spawn(move || timers.run(&pool));
+            let _ =
+                std::thread::Builder::new().name("folo-ui-timers".into()).spawn(move || timers.run(&pool));
         }
         drop(state);
         self.changed.notify_one();
@@ -288,8 +294,9 @@ mod tests {
         for (i, ms) in [(0, 60u64), (1, 20), (2, 40), (3, 80)] {
             let tx = tx.clone();
             let dd = d.clone();
-            let (runnable, task) =
-                async_task::spawn(async move { tx.send(i).unwrap() }, move |r| dd.dispatch_after(Duration::from_millis(ms), r));
+            let (runnable, task) = async_task::spawn(async move { tx.send(i).unwrap() }, move |r| {
+                dd.dispatch_after(Duration::from_millis(ms), r)
+            });
             task.detach();
             runnable.schedule();
         }

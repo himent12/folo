@@ -11,10 +11,11 @@ mod dispatcher;
 mod display;
 mod drop_target;
 mod events;
-mod offscreen;
 mod keyboard;
+mod offscreen;
 mod pacer;
 mod platform;
+mod platform_window;
 mod present;
 mod shell;
 mod util;
@@ -48,7 +49,8 @@ pub(crate) const WM_FOLO_EXPOSE: u32 = WM_USER + 5;
 pub(crate) fn post_call(message_window: HWND, f: Box<dyn FnOnce()>) {
     let call = Box::into_raw(Box::new(f));
     // SAFETY: posting to our message window, which frees the box when it handles the message.
-    let posted = unsafe { PostMessageW(Some(message_window), WM_FOLO_CALL, WPARAM(0), LPARAM(call as isize)) };
+    let posted =
+        unsafe { PostMessageW(Some(message_window), WM_FOLO_CALL, WPARAM(0), LPARAM(call as isize)) };
     if posted.is_err() {
         // SAFETY: the message was not queued, so the box is still ours.
         drop(unsafe { Box::from_raw(call) });

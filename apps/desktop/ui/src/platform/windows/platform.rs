@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/platform.rs
 //! `WindowsPlatform`: the message loop on the thread that created it, a message-only window for
 //! main-thread wake-ups, and the `Platform` methods (displays, windows, clipboard, dialogs, shell).
 
@@ -8,18 +9,20 @@ use super::util::*;
 use super::window::{WindowsWindow, module_handle};
 use super::{WM_FOLO_CALL, WM_FOLO_MAIN_TASKS, WM_FOLO_QUIT, clipboard, shell};
 use crate::*;
+use ::windows::Win32::Foundation::*;
+use ::windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+use ::windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
+use ::windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
+use ::windows::Win32::UI::Shell::{CLSID_DragDropHelper, IDropTargetHelper};
+use ::windows::Win32::UI::WindowsAndMessaging::*;
+use ::windows::core::{PCWSTR, w};
 use anyhow::{Context as _, Result};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use ::windows::Win32::Foundation::*;
-use ::windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
-use ::windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
-use ::windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
-use ::windows::Win32::UI::Shell::{CLSID_DragDropHelper, IDropTargetHelper};
-use ::windows::Win32::UI::WindowsAndMessaging::*;
-use ::windows::core::{PCWSTR, w};
 
 /// What the platform's windows share (main thread only).
 pub(crate) struct Shared {
@@ -65,7 +68,7 @@ impl Shared {
     fn active_window(&self) -> Option<HWND> {
         // SAFETY: a plain query.
         let active = unsafe { ::windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow() };
-        self.windows.borrow().iter().any(|&h| h == active.0 as isize).then_some(active)
+        self.windows.borrow().contains(&(active.0 as isize)).then_some(active)
     }
 }
 
@@ -157,7 +160,8 @@ impl Platform for WindowsPlatform {
 
     fn quit(&self) {
         // SAFETY: posting to our own message window; it calls PostQuitMessage from the loop.
-        let _ = unsafe { PostMessageW(Some(self.shared.message_window()), WM_FOLO_QUIT, WPARAM(0), LPARAM(0)) };
+        let _ =
+            unsafe { PostMessageW(Some(self.shared.message_window()), WM_FOLO_QUIT, WPARAM(0), LPARAM(0)) };
     }
 
     fn activate(&self, _ignoring_other_apps: bool) {}
@@ -188,7 +192,10 @@ impl Platform for WindowsPlatform {
         });
     }
 
-    fn prompt_for_paths(&self, options: PathPromptOptions) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+    fn prompt_for_paths(
+        &self,
+        options: PathPromptOptions,
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
         let owner = self.shared.active_window();
         super::post_call(
@@ -200,7 +207,11 @@ impl Platform for WindowsPlatform {
         rx
     }
 
-    fn prompt_for_new_path(&self, directory: &Path, suggested_name: Option<&str>) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+    fn prompt_for_new_path(
+        &self,
+        directory: &Path,
+        suggested_name: Option<&str>,
+    ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
         let (tx, rx) = oneshot::channel();
         let owner = self.shared.active_window();
         let (directory, name) = (directory.to_path_buf(), suggested_name.map(str::to_string));
@@ -222,7 +233,11 @@ impl Platform for WindowsPlatform {
             // The shell's folder and selection calls need COM on this thread.
             // SAFETY: COM set-up and tear-down around the call, on this thread.
             unsafe {
-                let ok = ::windows::Win32::System::Com::CoInitializeEx(None, ::windows::Win32::System::Com::COINIT_APARTMENTTHREADED).is_ok();
+                let ok = ::windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    ::windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                )
+                .is_ok();
                 let _ = shell::reveal_in_explorer(&path);
                 if ok {
                     ::windows::Win32::System::Com::CoUninitialize();
@@ -253,14 +268,20 @@ impl Platform for WindowsPlatform {
 /// The executable's icon resource 1, as GPUI loads it (none if the executable has no icon).
 fn load_icon() -> HICON {
     // SAFETY: loading a shared resource from our own module.
-    let handle = unsafe { LoadImageW(Some(module_handle().into()), PCWSTR(1 as _), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED) };
+    let handle = unsafe {
+        LoadImageW(Some(module_handle().into()), PCWSTR(1 as _), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED)
+    };
     handle.map(|h| HICON(h.0)).unwrap_or_default()
 }
 
 const MESSAGE_CLASS_NAME: PCWSTR = w!("FOLO::PlatformWindow");
 
 fn create_message_window(queue: Arc<MainQueue>) -> Result<HWND> {
-    let class = WNDCLASSW { lpfnWndProc: Some(message_window_procedure), lpszClassName: MESSAGE_CLASS_NAME, ..Default::default() };
+    let class = WNDCLASSW {
+        lpfnWndProc: Some(message_window_procedure),
+        lpszClassName: MESSAGE_CLASS_NAME,
+        ..Default::default()
+    };
     // SAFETY: registering (again is harmless) and creating a message-only window; the queue is
     // boxed into the window's user data and freed at WM_NCDESTROY.
     unsafe {
@@ -284,7 +305,12 @@ fn create_message_window(queue: Arc<MainQueue>) -> Result<HWND> {
     }
 }
 
-unsafe extern "system" fn message_window_procedure(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn message_window_procedure(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_FOLO_MAIN_TASKS => {
             let queue = get_window_long(hwnd, GWLP_USERDATA) as *const Arc<MainQueue>;

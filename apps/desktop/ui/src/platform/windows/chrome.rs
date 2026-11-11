@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/events.rs, system_settings.rs
 //! The custom title bar, as GPUI does it: `WM_NCCALCSIZE` makes the client area cover the window
 //! (less the invisible resize border on the left, right and bottom, and the maximized insets), hit
 //! testing asks the app's caption areas first, a caption press goes to the app before Windows, and
@@ -11,14 +12,21 @@ use crate::*;
 use ::windows::Win32::Foundation::*;
 use ::windows::Win32::Graphics::Gdi::*;
 use ::windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
-use ::windows::Win32::UI::Shell::{ABM_GETSTATE, ABM_GETTASKBARPOS, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage};
+use ::windows::Win32::UI::Shell::{
+    ABM_GETSTATE, ABM_GETTASKBARPOS, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
+};
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 
 /// How far a maximized window leaves an auto-hide taskbar (so it can still slide out).
 const AUTO_HIDE_TASKBAR_THICKNESS_PX: i32 = 1;
 
 impl WindowInner {
-    pub(crate) fn handle_calc_client_size(&self, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    pub(crate) fn handle_calc_client_size(
+        &self,
+        hwnd: HWND,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<isize> {
         if !self.hide_title_bar || self.state.borrow().is_fullscreen() || wparam.0 == 0 {
             return None;
         }
@@ -55,14 +63,25 @@ impl WindowInner {
         // This sends WM_SIZE and WM_MOVE before it returns; WM_SIZE redraws at the new scale.
         // SAFETY: repositioning our own window.
         let _ = unsafe {
-            SetWindowPos(hwnd, None, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE)
+            SetWindowPos(
+                hwnd,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
         };
         // Maximized (or the same device size), no WM_SIZE came: tell the core about the new scale anyway.
         if was_maximized || self.state.borrow().size_events == size_events {
             let mut client = RECT::default();
             // SAFETY: a valid out pointer.
             let _ = unsafe { GetClientRect(hwnd, &mut client) };
-            self.handle_size_change(size(DevicePixels(client.right.max(1)), DevicePixels(client.bottom.max(1))), new_scale_factor);
+            self.handle_size_change(
+                size(DevicePixels(client.right.max(1)), DevicePixels(client.bottom.max(1))),
+                new_scale_factor,
+            );
         }
         Some(0)
     }
@@ -87,7 +106,13 @@ impl WindowInner {
         }
     }
 
-    pub(crate) fn handle_hit_test(&self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    pub(crate) fn handle_hit_test(
+        &self,
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<isize> {
         if !self.is_movable || self.state.borrow().is_fullscreen() {
             return None;
         }
@@ -107,7 +132,15 @@ impl WindowInner {
         let hit = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         if matches!(
             hit.0 as u32,
-            HTNOWHERE | HTRIGHT | HTLEFT | HTTOPLEFT | HTTOP | HTTOPRIGHT | HTBOTTOMRIGHT | HTBOTTOM | HTBOTTOMLEFT
+            HTNOWHERE
+                | HTRIGHT
+                | HTLEFT
+                | HTTOPLEFT
+                | HTTOP
+                | HTTOPRIGHT
+                | HTBOTTOMRIGHT
+                | HTBOTTOM
+                | HTBOTTOMLEFT
         ) {
             return Some(hit.0);
         }
@@ -126,7 +159,8 @@ impl WindowInner {
     pub(crate) fn handle_nc_mouse_move(&self, hwnd: HWND, lparam: LPARAM) -> Option<isize> {
         self.start_tracking_mouse(
             hwnd,
-            ::windows::Win32::UI::Input::KeyboardAndMouse::TME_LEAVE | ::windows::Win32::UI::Input::KeyboardAndMouse::TME_NONCLIENT,
+            ::windows::Win32::UI::Input::KeyboardAndMouse::TME_LEAVE
+                | ::windows::Win32::UI::Input::KeyboardAndMouse::TME_NONCLIENT,
         );
         let scale_factor = self.state.borrow().scale_factor;
         let input = PlatformInput::MouseMove(MouseMoveEvent {
@@ -142,14 +176,23 @@ impl WindowInner {
 
     /// A press on a caption area goes to the app first; only if nothing handled it (or prevented its
     /// default) does Windows get it. Caption buttons are remembered and act on release.
-    pub(crate) fn handle_nc_mouse_down(&self, hwnd: HWND, button: MouseButton, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    pub(crate) fn handle_nc_mouse_down(
+        &self,
+        hwnd: HWND,
+        button: MouseButton,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<isize> {
         let mut p = POINT { x: lparam.signed_loword() as i32, y: lparam.signed_hiword() as i32 };
         // SAFETY: a valid in/out pointer.
         let _ = unsafe { ScreenToClient(hwnd, &mut p) };
         if self.state.borrow().callbacks.input.is_some() {
             let (click_count, scale_factor) = {
                 let mut state = self.state.borrow_mut();
-                (state.click_state.update(button, point(DevicePixels(p.x), DevicePixels(p.y))), state.scale_factor)
+                (
+                    state.click_state.update(button, point(DevicePixels(p.x), DevicePixels(p.y))),
+                    state.scale_factor,
+                )
             };
             let input = PlatformInput::MouseDown(MouseDownEvent {
                 button,
@@ -176,7 +219,13 @@ impl WindowInner {
         }
     }
 
-    pub(crate) fn handle_nc_mouse_up(&self, hwnd: HWND, button: MouseButton, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    pub(crate) fn handle_nc_mouse_up(
+        &self,
+        hwnd: HWND,
+        button: MouseButton,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<isize> {
         if self.state.borrow().callbacks.input.is_some() {
             let scale_factor = self.state.borrow().scale_factor;
             let input = PlatformInput::MouseUp(MouseUpEvent {
@@ -198,7 +247,11 @@ impl WindowInner {
             return None;
         }
         if self.offscreen && code != HTCLOSE {
-            if code == HTMINBUTTON { self.offscreen_minimize() } else { self.offscreen_toggle_zoom() }
+            if code == HTMINBUTTON {
+                self.offscreen_minimize()
+            } else {
+                self.offscreen_toggle_zoom()
+            }
             return Some(0);
         }
         // SAFETY: showing, maximizing or closing our own window.

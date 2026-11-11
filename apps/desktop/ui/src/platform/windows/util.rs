@@ -1,13 +1,14 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/util.rs
 //! Small Win32 helpers: message parameter words, window longs, wide strings, the Windows version,
 //! the system appearance, DWM dark mode, cursors, and the `FOLO_UI_*` developer switches.
 
 use crate::{CursorStyle, Pixels, Point, WindowAppearance, px};
-use std::sync::OnceLock;
 use ::windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use ::windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use ::windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::{BOOL, w};
+use std::sync::OnceLock;
 
 /// The low and high 16-bit words of a message parameter.
 pub(crate) trait HiLoWord {
@@ -130,9 +131,10 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
         | CursorStyle::ResizeRight
         | CursorStyle::ResizeLeftRight
         | CursorStyle::ResizeColumn => (3, IDC_SIZEWE),
-        CursorStyle::ResizeUp | CursorStyle::ResizeDown | CursorStyle::ResizeUpDown | CursorStyle::ResizeRow => {
-            (4, IDC_SIZENS)
-        }
+        CursorStyle::ResizeUp
+        | CursorStyle::ResizeDown
+        | CursorStyle::ResizeUpDown
+        | CursorStyle::ResizeRow => (4, IDC_SIZENS),
         CursorStyle::OperationNotAllowed => (5, IDC_NO),
         CursorStyle::None => return None,
         _ => (6, IDC_ARROW),
@@ -165,7 +167,8 @@ pub fn ms_since_process_start() -> f64 {
     let (mut created, mut exited, mut kernel, mut user) =
         (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
     // SAFETY: the pseudo handle of the current process and four valid out pointers.
-    let ok = unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
+    let ok =
+        unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
     if ok.is_err() {
         return f64::NAN;
     }
@@ -182,7 +185,8 @@ pub fn process_cpu_time() -> std::time::Duration {
     let (mut created, mut exited, mut kernel, mut user) =
         (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
     // SAFETY: as in `ms_since_process_start`.
-    let _ = unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
+    let _ =
+        unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
     let ticks = |t: FILETIME| (t.dwHighDateTime as u64) << 32 | t.dwLowDateTime as u64;
     std::time::Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
 }
@@ -210,6 +214,9 @@ mod tests {
         assert!(load_cursor(CursorStyle::None).is_none());
         let arrow = load_cursor(CursorStyle::Arrow).unwrap();
         assert!(!arrow.is_invalid());
-        assert_eq!(load_cursor(CursorStyle::ResizeColumn).unwrap(), load_cursor(CursorStyle::ResizeLeft).unwrap());
+        assert_eq!(
+            load_cursor(CursorStyle::ResizeColumn).unwrap(),
+            load_cursor(CursorStyle::ResizeLeft).unwrap()
+        );
     }
 }

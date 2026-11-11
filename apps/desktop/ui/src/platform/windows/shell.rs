@@ -1,21 +1,24 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/platform.rs (open_target, file dialogs, reveal)
 //! The shell: `open_url` (`ShellExecuteW`), `reveal_path` (Explorer with the file selected) and the
 //! file dialogs (`IFileOpenDialog` / `IFileSaveDialog`), as GPUI does them.
 
 use crate::PathPromptOptions;
-use anyhow::{Context as _, Result, anyhow};
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
 use ::windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, HWND};
 use ::windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
 use ::windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use ::windows::Win32::UI::Shell::*;
 use ::windows::Win32::UI::WindowsAndMessaging::SW_SHOWDEFAULT;
 use ::windows::core::{HSTRING, w};
+use anyhow::{Context as _, Result, anyhow};
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 /// Opens a URL or file with its default handler.
 pub(crate) fn open_target(target: impl AsRef<OsStr>) -> Result<()> {
     // SAFETY: all strings outlive the call.
-    let ret = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(target.as_ref()), None, None, SW_SHOWDEFAULT) };
+    let ret = unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(target.as_ref()), None, None, SW_SHOWDEFAULT)
+    };
     if ret.0 as isize <= 32 {
         Err(anyhow!("unable to open target: {}", std::io::Error::last_os_error()))
     } else {
@@ -32,7 +35,14 @@ pub(crate) fn reveal_in_explorer(target: &Path) -> Result<()> {
         let desktop = SHGetDesktopFolder()?;
         let parse = |path: &Path| -> Result<*mut ITEMIDLIST> {
             let mut item = std::ptr::null_mut();
-            desktop.ParseDisplayName(HWND::default(), None, &HSTRING::from(path), None, &mut item, std::ptr::null_mut())?;
+            desktop.ParseDisplayName(
+                HWND::default(),
+                None,
+                &HSTRING::from(path),
+                None,
+                &mut item,
+                std::ptr::null_mut(),
+            )?;
             Ok(item)
         };
         let dir_item = parse(dir)?;
@@ -49,7 +59,10 @@ pub(crate) fn reveal_in_explorer(target: &Path) -> Result<()> {
         CoTaskMemFree(Some(file_item as _));
         match result {
             Ok(()) => Ok(()),
-            Err(e) if e.code().0 == ERROR_FILE_NOT_FOUND.to_hresult().0 || e.code().0 == ERROR_FILE_NOT_FOUND.0 as i32 => {
+            Err(e)
+                if e.code().0 == ERROR_FILE_NOT_FOUND.to_hresult().0
+                    || e.code().0 == ERROR_FILE_NOT_FOUND.0 as i32 =>
+            {
                 open_target(dir)
             }
             Err(e) => Err(anyhow!("cannot reveal {}: {e}", target.display())),
@@ -58,7 +71,10 @@ pub(crate) fn reveal_in_explorer(target: &Path) -> Result<()> {
 }
 
 /// The open dialog, modal over `owner`. `Ok(None)`: cancelled.
-pub(crate) fn file_open_dialog(options: &PathPromptOptions, owner: Option<HWND>) -> Result<Option<Vec<PathBuf>>> {
+pub(crate) fn file_open_dialog(
+    options: &PathPromptOptions,
+    owner: Option<HWND>,
+) -> Result<Option<Vec<PathBuf>>> {
     // SAFETY: COM calls on a dialog object this function owns; strings outlive the calls.
     unsafe {
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)?;

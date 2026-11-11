@@ -22,5 +22,6 @@ when you adapt another file.
 | `scene.rs` | `scene.rs` (`BorderStyle`, primitive field names) |
 | `image.rs` | `assets.rs` (`RenderImage`) |
 | `text/types.rs` | `text_system.rs`, `text_system/line_layout.rs`, `text_system/font_features.rs`, `text_system/font_fallbacks.rs`, `style.rs` (`UnderlineStyle`, `StrikethroughStyle`), `platform.rs` (`PlatformTextSystem`) |
+| `platform/windows/{chrome, clipboard, display, drop_target, events, keyboard, pacer, platform, platform_window, shell, util, window}.rs` | `platform/windows/` (`events.rs`, `window.rs`, `platform.rs`, `keyboard.rs`, `display.rs`, `clipboard.rs`, `util.rs`, `vsync.rs`, `system_settings.rs`): message handling, title bar, key names, display UUID, window placement formulas |
 
 The Apache License 2.0 text is in the repository root, `LICENSE-APACHE`.

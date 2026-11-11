@@ -1,12 +1,10 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/window.rs (WindowsDragDropHandler)
 //! File drops through OLE drag and drop: `FileDropEvent::{Entered, Pending, Submit, Exited}` with the
 //! paths (`CF_HDROP`) and the position in window logical pixels, and the shell's drag image helper.
 
 use super::util::logical_point;
 use super::window::WindowInner;
-use crate::{ExternalPaths, FileDropEvent, PlatformInput, Pixels, Point};
-use smallvec::SmallVec;
-use std::path::PathBuf;
-use std::rc::{Rc, Weak};
+use crate::{ExternalPaths, FileDropEvent, Pixels, PlatformInput, Point};
 use ::windows::Win32::Foundation::{POINT, POINTL, S_OK};
 use ::windows::Win32::Graphics::Gdi::ScreenToClient;
 use ::windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL};
@@ -14,6 +12,9 @@ use ::windows::Win32::System::Ole::*;
 use ::windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use ::windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use ::windows::core::{Ref, implement};
+use smallvec::SmallVec;
+use std::path::PathBuf;
+use std::rc::{Rc, Weak};
 
 /// Registers the window as a drop target (OLE is initialized by the platform).
 pub(crate) fn register(window: &Rc<WindowInner>) {
@@ -98,7 +99,10 @@ impl IDropTarget_Impl for DropTarget_Impl {
         // SAFETY: OLE passes a valid effect pointer.
         unsafe { *effect = accepted };
         if let Some(paths) = paths {
-            self.send(PlatformInput::FileDrop(FileDropEvent::Entered { position: self.position(pt), paths: ExternalPaths(paths) }));
+            self.send(PlatformInput::FileDrop(FileDropEvent::Entered {
+                position: self.position(pt),
+                paths: ExternalPaths(paths),
+            }));
         }
         if let (Some(helper), Some(window)) = (self.helper(), self.0.upgrade()) {
             // SAFETY: the helper draws the drag image over our window.
@@ -107,7 +111,12 @@ impl IDropTarget_Impl for DropTarget_Impl {
         Ok(())
     }
 
-    fn DragOver(&self, _keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> ::windows::core::Result<()> {
+    fn DragOver(
+        &self,
+        _keys: MODIFIERKEYS_FLAGS,
+        pt: &POINTL,
+        effect: *mut DROPEFFECT,
+    ) -> ::windows::core::Result<()> {
         // SAFETY: OLE passes a valid effect pointer.
         unsafe { *effect = DROPEFFECT_COPY };
         if let Some(helper) = self.helper() {

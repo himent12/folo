@@ -1,15 +1,16 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/vsync.rs
 //! Frame pacing: one helper thread that, while any window asked for a frame, waits for the compositor
 //! (`DwmFlush`, so it follows the display's real refresh rate) and posts each such window one
 //! `WM_FOLO_FRAME`. With no request pending it blocks on a condition variable: an idle app does nothing.
 
 use super::WM_FOLO_FRAME;
+use ::windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use ::windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmFlush, DwmGetCompositionTimingInfo};
+use ::windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use ::windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use ::windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmFlush, DwmGetCompositionTimingInfo};
-use ::windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 /// A wait shorter than this means `DwmFlush` returned without a composition (display asleep, nothing
 /// to compose): sleep one refresh period instead, as GPUI's vsync provider does.
@@ -28,7 +29,11 @@ pub(crate) struct FrameSlot {
 
 impl FrameSlot {
     pub(crate) fn new(hwnd: HWND) -> Arc<Self> {
-        Arc::new(Self { hwnd: hwnd.0 as isize, requested: AtomicBool::new(false), in_flight: AtomicBool::new(false) })
+        Arc::new(Self {
+            hwnd: hwnd.0 as isize,
+            requested: AtomicBool::new(false),
+            in_flight: AtomicBool::new(false),
+        })
     }
 }
 
@@ -83,7 +88,8 @@ impl Pacer {
                     return true; // the last frame message is still queued: try again next refresh
                 }
                 // SAFETY: posting to a window handle; a destroyed window only makes the call fail.
-                let posted = unsafe { PostMessageW(Some(HWND(slot.hwnd as _)), WM_FOLO_FRAME, WPARAM(0), LPARAM(0)) };
+                let posted =
+                    unsafe { PostMessageW(Some(HWND(slot.hwnd as _)), WM_FOLO_FRAME, WPARAM(0), LPARAM(0)) };
                 if posted.is_err() {
                     slot.in_flight.store(false, Ordering::Release);
                     slot.requested.store(false, Ordering::Release);
@@ -96,13 +102,14 @@ impl Pacer {
 
 /// The compositor's refresh period (from DWM's refresh rate), used only when `DwmFlush` returns early.
 pub(crate) fn refresh_period() -> Duration {
-    let mut info = DWM_TIMING_INFO { cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
+    let mut info =
+        DWM_TIMING_INFO { cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
     // SAFETY: a sized DWM_TIMING_INFO; a null window asks for the desktop's composition timing.
     if unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut info) }.is_err() {
         return DEFAULT_PERIOD;
     }
     let (num, den) = (info.rateRefresh.uiNumerator as u64, info.rateRefresh.uiDenominator as u64);
-    let period = if num == 0 { DEFAULT_PERIOD } else { Duration::from_micros(den * 1_000_000 / num) };
+    let period = (den * 1_000_000).checked_div(num).map_or(DEFAULT_PERIOD, Duration::from_micros);
     if period < EARLY_RETURN { DEFAULT_PERIOD } else { period }
 }
 

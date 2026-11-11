@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/window.rs
 //! `WindowsWindow`: our own window class, the window's state and callbacks, creation from
 //! `WindowParams` (placement, maximized / full screen, the off-screen developer mode) and the
 //! `PlatformWindow` methods. Message handling is in `events.rs`, `keyboard.rs` and `chrome.rs`.
@@ -7,20 +8,23 @@ use super::pacer::{FrameSlot, Pacer};
 use super::util::*;
 use super::{Shared, drop_target, present};
 use crate::*;
-use anyhow::{Context as _, Result};
-use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
-use std::sync::{Arc, Once};
-use std::time::{Duration, Instant};
 use ::windows::Win32::Foundation::*;
 use ::windows::Win32::Graphics::Gdi::*;
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::*;
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::{HSTRING, PCWSTR, w};
+use anyhow::{Context as _, Result};
+use std::cell::{Cell, RefCell};
+use std::rc::{Rc, Weak};
+use std::sync::{Arc, Once};
+use std::time::{Duration, Instant};
 
 /// Where an off-screen window's outer rectangle starts, in physical screen pixels.
 pub(crate) const OFFSCREEN_ORIGIN: i32 = -30000;
+
+/// What `on_resize` registers.
+pub(crate) type ResizeCallback = Box<dyn FnMut(Size<Pixels>, f32)>;
 
 /// The callbacks the core registers.
 #[derive(Default)]
@@ -29,7 +33,7 @@ pub(crate) struct Callbacks {
     pub(crate) input: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
     pub(crate) active_status_change: Option<Box<dyn FnMut(bool)>>,
     pub(crate) hovered_status_change: Option<Box<dyn FnMut(bool)>>,
-    pub(crate) resize: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
+    pub(crate) resize: Option<ResizeCallback>,
     pub(crate) moved: Option<Box<dyn FnMut()>>,
     pub(crate) should_close: Option<Box<dyn FnMut() -> bool>>,
     pub(crate) close: Option<Box<dyn FnOnce()>>,
@@ -86,8 +90,8 @@ pub(crate) struct WindowInner {
     /// The class DC (`CS_OWNDC`): presents need no GetDC / ReleaseDC.
     pub(crate) hdc: HDC,
     pub(crate) state: RefCell<WindowState>,
-    /// The retained copy of the last presented frame.
-    pub(crate) surface: RefCell<present::Surface>,
+    /// While a `WM_PAINT` or `WM_PRINTCLIENT` asks the core to present, the DC it must draw on.
+    pub(crate) paint_dc: Cell<Option<HDC>>,
     pub(crate) shared: Rc<Shared>,
     pub(crate) frame: Arc<FrameSlot>,
     pub(crate) pacer: Arc<Pacer>,
@@ -124,7 +128,10 @@ impl WindowInner {
     }
 
     /// Runs `f` with the input handler (taken out, so `f` may call into the core).
-    pub(crate) fn with_input_handler<R>(&self, f: impl FnOnce(&mut dyn PlatformInputHandler) -> R) -> Option<R> {
+    pub(crate) fn with_input_handler<R>(
+        &self,
+        f: impl FnOnce(&mut dyn PlatformInputHandler) -> R,
+    ) -> Option<R> {
         let mut handler = self.state.borrow_mut().input_handler.take()?;
         let result = f(handler.as_mut());
         let mut state = self.state.borrow_mut();
@@ -159,7 +166,8 @@ impl WindowInner {
     /// The restored bounds (client area, logical) and whether the window is maximized: GPUI's
     /// `calculate_window_bounds` from the window placement.
     pub(crate) fn calculate_window_bounds(&self) -> (Bounds<Pixels>, bool) {
-        let mut placement = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        let mut placement =
+            WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
         // SAFETY: a sized WINDOWPLACEMENT.
         let _ = unsafe { GetWindowPlacement(self.hwnd, &mut placement) };
         let state = self.state.borrow();
@@ -207,16 +215,23 @@ impl WindowInner {
                     cx: rc.right - rc.left,
                     cy: rc.bottom - rc.top,
                 });
-                let style = style & !(WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_CAPTION);
+                let style =
+                    style & !(WS_THICKFRAME | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_CAPTION);
                 let b = state.display.physical_bounds();
                 // Off screen, full screen is the display's size at the off-screen origin.
-                let (x, y) = if self.offscreen { (OFFSCREEN_ORIGIN, OFFSCREEN_ORIGIN) } else { (b.origin.x.0, b.origin.y.0) };
+                let (x, y) = if self.offscreen {
+                    (OFFSCREEN_ORIGIN, OFFSCREEN_ORIGIN)
+                } else {
+                    (b.origin.x.0, b.origin.y.0)
+                };
                 (style, x, y, b.size.width.0, b.size.height.0)
             }
         };
         set_window_long(self.hwnd, GWL_STYLE, style.0 as isize);
         // SAFETY: repositioning our own window.
-        let _ = unsafe { SetWindowPos(self.hwnd, None, x, y, cx, cy, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER) };
+        let _ = unsafe {
+            SetWindowPos(self.hwnd, None, x, y, cx, cy, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER)
+        };
     }
 
     /// Applies a placement deferred because the window opened hidden (GPUI's `set_window_placement`).
@@ -226,7 +241,15 @@ impl WindowInner {
             let r = status.placement.rcNormalPosition;
             // SAFETY: showing our own window off screen without activating it.
             let _ = unsafe {
-                SetWindowPos(self.hwnd, None, OFFSCREEN_ORIGIN, OFFSCREEN_ORIGIN, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+                SetWindowPos(
+                    self.hwnd,
+                    None,
+                    OFFSCREEN_ORIGIN,
+                    OFFSCREEN_ORIGIN,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
             };
             self.post_expose();
             match status.state {
@@ -258,8 +281,12 @@ impl WindowInner {
     /// Shows the frame: the damage rectangles, or everything after an expose.
     pub(crate) fn present(&self, frame: &Framebuffer, damage: &[Bounds<DevicePixels>]) {
         let full = std::mem::take(&mut self.state.borrow_mut().full_present);
-        let all = [Bounds::new(point(DevicePixels(0), DevicePixels(0)), size(DevicePixels(frame.width as i32), DevicePixels(frame.height as i32)))];
-        self.surface.borrow_mut().present(self.hdc, frame, if full { &all } else { damage });
+        let all = [Bounds::new(
+            point(DevicePixels(0), DevicePixels(0)),
+            size(DevicePixels(frame.width as i32), DevicePixels(frame.height as i32)),
+        )];
+        let dc = self.paint_dc.get().unwrap_or(self.hdc);
+        present::blit(dc, frame, if full { &all } else { damage });
         if !self.shared.traced.replace(true) && trace() {
             eprintln!("first-present {:.1}", ms_since_process_start());
         }
@@ -298,10 +325,10 @@ pub(crate) struct StyleAndBounds {
 /// A placement waiting for a hidden window's first `activate`.
 pub(crate) struct WindowOpenStatus {
     placement: WINDOWPLACEMENT,
-    state: WindowOpenState,
+    pub(crate) state: WindowOpenState,
 }
 
-enum WindowOpenState {
+pub(crate) enum WindowOpenState {
     Maximized,
     Fullscreen,
     Windowed,
@@ -320,7 +347,12 @@ impl WheelSettings {
             let mut value = 3u32;
             // SAFETY: the parameter is a u32.
             let _ = unsafe {
-                SystemParametersInfoW(action, 0, Some(&mut value as *mut u32 as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0))
+                SystemParametersInfoW(
+                    action,
+                    0,
+                    Some(&mut value as *mut u32 as *mut _),
+                    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                )
             };
             value
         };
@@ -352,7 +384,9 @@ pub(crate) struct ClickState {
 impl ClickState {
     pub(crate) fn new() -> Self {
         // SAFETY: plain system metric queries.
-        let (w, h, ms) = unsafe { (GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK), GetDoubleClickTime()) };
+        let (w, h, ms) = unsafe {
+            (GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK), GetDoubleClickTime())
+        };
         Self {
             button: MouseButton::Left,
             last_click: Instant::now(),
@@ -368,7 +402,9 @@ impl ClickState {
     pub(crate) fn update(&mut self, button: MouseButton, position: Point<DevicePixels>) -> usize {
         let dx = (self.last_position.x.0 - position.x.0).abs();
         let dy = (self.last_position.y.0 - position.y.0).abs();
-        let double = self.last_click.elapsed() < self.interval && dx <= self.tolerance_width && dy <= self.tolerance_height;
+        let double = self.last_click.elapsed() < self.interval
+            && dx <= self.tolerance_width
+            && dy <= self.tolerance_height;
         self.current_count = if self.button == button && double { self.current_count + 1 } else { 1 };
         self.last_click = Instant::now();
         self.last_position = position;
@@ -402,7 +438,9 @@ impl WindowsWindow {
     pub(crate) fn new(params: WindowParams, shared: Rc<Shared>) -> Result<Self> {
         register_window_class(shared.icon);
         let hide_title_bar = params.titlebar.as_ref().map(|t| t.appears_transparent).unwrap_or(true);
-        let title = HSTRING::from(params.titlebar.as_ref().and_then(|t| t.title.as_ref()).map(|t| t.as_ref()).unwrap_or(""));
+        let title = HSTRING::from(
+            params.titlebar.as_ref().and_then(|t| t.title.as_ref()).map(|t| t.as_ref()).unwrap_or(""),
+        );
         let offscreen = offscreen();
         let (mut ex_style, style) = if params.kind == WindowKind::PopUp {
             (WS_EX_TOOLWINDOW, WINDOW_STYLE(0))
@@ -420,7 +458,23 @@ impl WindowsWindow {
         let owner = if offscreen {
             ex_style &= !WS_EX_APPWINDOW;
             // SAFETY: a plain hidden STATIC window, destroyed with ours.
-            unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_OVERLAPPED, 0, 0, 0, 0, None, None, None, None) }.ok()
+            unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("STATIC"),
+                    w!(""),
+                    WS_OVERLAPPED,
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .ok()
         } else {
             None
         };
@@ -492,7 +546,8 @@ impl WindowsWindow {
             unsafe { SetWindowPlacement(hwnd, &placement)? };
             this.post_expose();
         } else {
-            this.state.borrow_mut().initial_placement = Some(WindowOpenStatus { placement, state: WindowOpenState::Windowed });
+            this.state.borrow_mut().initial_placement =
+                Some(WindowOpenStatus { placement, state: WindowOpenState::Windowed });
         }
         Ok(Self(this))
     }
@@ -511,7 +566,8 @@ struct CreateContext {
 
 fn new_inner(context: &CreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<Rc<WindowInner>> {
     // SAFETY: plain queries on the window being created.
-    let scale_factor = unsafe { ::windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) } as f32 / USER_DEFAULT_SCREEN_DPI as f32;
+    let scale_factor =
+        unsafe { ::windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) } as f32 / USER_DEFAULT_SCREEN_DPI as f32;
     let origin = logical_point(cs.x as f32, cs.y as f32, scale_factor);
     let logical_size = size(DevicePixels(cs.cx), DevicePixels(cs.cy)).to_pixels(scale_factor);
     // SAFETY: the class has CS_OWNDC, so this DC stays valid for the window's life.
@@ -549,7 +605,7 @@ fn new_inner(context: &CreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<
         hwnd,
         hdc,
         state: RefCell::new(state),
-        surface: RefCell::new(present::Surface::new()),
+        paint_dc: Cell::new(None),
         shared: context.shared.clone(),
         frame: FrameSlot::new(hwnd),
         pacer: context.shared.pacer.clone(),
@@ -642,7 +698,11 @@ pub(crate) fn calculate_window_rect(bounds: Bounds<DevicePixels>, offset: Window
 }
 
 /// GPUI's `calculate_client_rect`: the client bounds (logical) inside window rectangle `rect`.
-pub(crate) fn calculate_client_rect(rect: RECT, offset: WindowBorderOffset, scale_factor: f32) -> Bounds<Pixels> {
+pub(crate) fn calculate_client_rect(
+    rect: RECT,
+    offset: WindowBorderOffset,
+    scale_factor: f32,
+) -> Bounds<Pixels> {
     let left_offset = offset.width_offset / 2;
     let top_offset = offset.height_offset / 2;
     let left = rect.left + left_offset;
@@ -664,242 +724,13 @@ fn initial_placement(
     scale_factor: f32,
     offset: WindowBorderOffset,
 ) -> WINDOWPLACEMENT {
-    let mut placement = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+    let mut placement =
+        WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
     // SAFETY: a sized WINDOWPLACEMENT.
     let _ = unsafe { GetWindowPlacement(hwnd, &mut placement) };
     let bounds = if display.contains_center_of(bounds) { bounds } else { display.default_bounds() };
     placement.rcNormalPosition = calculate_window_rect(bounds.to_device_pixels(scale_factor), offset);
     placement
-}
-
-impl Drop for WindowsWindow {
-    fn drop(&mut self) {
-        // Destroying from inside a callback would re-enter the window procedure: do it from the queue.
-        let inner = self.0.clone();
-        super::post_call(
-            self.0.shared.message_window(),
-            Box::new(move || {
-                if !inner.destroyed.get() {
-                    drop_target::revoke(&inner);
-                    // SAFETY: destroying our own window on its thread.
-                    let _ = unsafe { DestroyWindow(inner.hwnd) };
-                }
-            }),
-        );
-    }
-}
-
-impl PlatformWindow for WindowsWindow {
-    fn bounds(&self) -> Bounds<Pixels> {
-        let state = self.0.state.borrow();
-        Bounds { origin: state.origin, size: state.logical_size }
-    }
-
-    fn is_maximized(&self) -> bool {
-        self.0.is_maximized()
-    }
-
-    fn window_bounds(&self) -> WindowBounds {
-        self.0.window_bounds()
-    }
-
-    fn content_size(&self) -> Size<Pixels> {
-        self.0.state.borrow().logical_size
-    }
-
-    fn resize(&mut self, size: Size<Pixels>) {
-        let (rect, origin) = {
-            let state = self.0.state.borrow();
-            let bounds = crate::bounds(state.origin, size).to_device_pixels(state.scale_factor);
-            (calculate_window_rect(bounds, state.border_offset), bounds.origin)
-        };
-        let hwnd = self.0.hwnd;
-        super::post_call(
-            self.0.shared.message_window(),
-            Box::new(move || {
-                // SAFETY: resizing our own window.
-                let _ = unsafe {
-                    SetWindowPos(hwnd, None, origin.x.0, origin.y.0, rect.right - rect.left, rect.bottom - rect.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
-                };
-            }),
-        );
-    }
-
-    fn scale_factor(&self) -> f32 {
-        self.0.state.borrow().scale_factor
-    }
-
-    fn appearance(&self) -> WindowAppearance {
-        self.0.state.borrow().appearance
-    }
-
-    fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
-        Some(Rc::new(self.0.state.borrow().display))
-    }
-
-    fn mouse_position(&self) -> Point<Pixels> {
-        let mut point = POINT::default();
-        // SAFETY: valid out pointers; reading the cursor position does not move it.
-        unsafe {
-            let _ = GetCursorPos(&mut point);
-            let _ = ScreenToClient(self.0.hwnd, &mut point);
-        }
-        logical_point(point.x as f32, point.y as f32, self.scale_factor())
-    }
-
-    fn modifiers(&self) -> Modifiers {
-        super::keyboard::current_modifiers()
-    }
-
-    fn capslock(&self) -> Capslock {
-        super::keyboard::current_capslock()
-    }
-
-    fn set_input_handler(&mut self, input_handler: Box<dyn PlatformInputHandler>) {
-        self.0.state.borrow_mut().input_handler = Some(input_handler);
-    }
-
-    fn take_input_handler(&mut self) -> Option<Box<dyn PlatformInputHandler>> {
-        self.0.state.borrow_mut().input_handler.take()
-    }
-
-    fn activate(&self) {
-        // Off screen, nothing may take the foreground (and no Alt key may be injected).
-        if self.0.offscreen {
-            self.0.apply_initial_placement();
-            return;
-        }
-        let inner = self.0.clone();
-        super::post_call(
-            self.0.shared.message_window(),
-            Box::new(move || {
-                inner.apply_initial_placement();
-                let hwnd = inner.hwnd;
-                // SAFETY: activating our own window; the Alt press and release is GPUI's way of being
-                // allowed to take the foreground.
-                unsafe {
-                    if IsIconic(hwnd).as_bool() {
-                        let _ = ShowWindowAsync(hwnd, SW_RESTORE);
-                    }
-                    let _ = SetActiveWindow(hwnd);
-                    let _ = SetFocus(Some(hwnd));
-                    let key = |flags| INPUT {
-                        r#type: INPUT_KEYBOARD,
-                        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, dwFlags: flags, ..Default::default() } },
-                    };
-                    let inputs = [key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)];
-                    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                    let _ = SetForegroundWindow(hwnd);
-                }
-            }),
-        );
-    }
-
-    fn is_active(&self) -> bool {
-        // SAFETY: a plain query.
-        self.0.hwnd == unsafe { GetActiveWindow() }
-    }
-
-    fn is_hovered(&self) -> bool {
-        self.0.state.borrow().hovered
-    }
-
-    fn set_title(&mut self, title: &str) {
-        // SAFETY: the string outlives the call.
-        let _ = unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) };
-    }
-
-    fn minimize(&self) {
-        if self.0.offscreen {
-            let inner = self.0.clone();
-            super::post_call(self.0.shared.message_window(), Box::new(move || inner.offscreen_minimize()));
-            return;
-        }
-        // SAFETY: showing our own window.
-        let _ = unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE) };
-    }
-
-    fn zoom(&self) {
-        // SAFETY: plain queries and showing our own window.
-        unsafe {
-            if self.0.offscreen && IsWindowVisible(self.0.hwnd).as_bool() {
-                let inner = self.0.clone();
-                super::post_call(self.0.shared.message_window(), Box::new(move || inner.offscreen_toggle_zoom()));
-            } else if IsWindowVisible(self.0.hwnd).as_bool() {
-                let cmd = if self.0.is_maximized() { SW_RESTORE } else { SW_MAXIMIZE };
-                let _ = ShowWindowAsync(self.0.hwnd, cmd);
-            } else if let Some(status) = self.0.state.borrow_mut().initial_placement.as_mut() {
-                status.state = WindowOpenState::Maximized;
-            }
-        }
-    }
-
-    fn toggle_fullscreen(&self) {
-        // SAFETY: a plain query.
-        if unsafe { IsWindowVisible(self.0.hwnd) }.as_bool() {
-            let inner = self.0.clone();
-            super::post_call(self.0.shared.message_window(), Box::new(move || inner.toggle_fullscreen_now()));
-        } else if let Some(status) = self.0.state.borrow_mut().initial_placement.as_mut() {
-            status.state = WindowOpenState::Fullscreen;
-        }
-    }
-
-    fn is_fullscreen(&self) -> bool {
-        self.0.state.borrow().is_fullscreen()
-    }
-
-    fn request_frame(&self) {
-        self.0.pacer.request(&self.0.frame);
-    }
-
-    fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
-        self.0.state.borrow_mut().callbacks.request_frame = Some(callback);
-    }
-
-    fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {
-        self.0.state.borrow_mut().callbacks.input = Some(callback);
-    }
-
-    fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
-        self.0.state.borrow_mut().callbacks.active_status_change = Some(callback);
-    }
-
-    fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
-        self.0.state.borrow_mut().callbacks.hovered_status_change = Some(callback);
-    }
-
-    fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>) {
-        self.0.state.borrow_mut().callbacks.resize = Some(callback);
-    }
-
-    fn on_moved(&self, callback: Box<dyn FnMut()>) {
-        self.0.state.borrow_mut().callbacks.moved = Some(callback);
-    }
-
-    fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
-        self.0.state.borrow_mut().callbacks.should_close = Some(callback);
-    }
-
-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
-        self.0.state.borrow_mut().callbacks.hit_test_window_control = Some(callback);
-    }
-
-    fn on_close(&self, callback: Box<dyn FnOnce()>) {
-        self.0.state.borrow_mut().callbacks.close = Some(callback);
-    }
-
-    fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
-        self.0.state.borrow_mut().callbacks.appearance_changed = Some(callback);
-    }
-
-    fn present(&mut self, frame: &Framebuffer, damage: &[Bounds<DevicePixels>]) {
-        self.0.present(frame, damage);
-    }
-
-    fn update_ime_position(&self, bounds: Bounds<Pixels>) {
-        self.0.state.borrow_mut().ime_position = Some(bounds);
-        super::keyboard::position_ime(&self.0);
-    }
 }
 
 #[cfg(test)]
@@ -910,7 +741,10 @@ mod tests {
     fn window_and_client_rects_round_trip() {
         // A Windows 11 window at 150%: 2 x 12 px of frame across, 2 + 12 down (GPUI's offsets).
         let offset = WindowBorderOffset { width_offset: 24, height_offset: 14 };
-        let client = Bounds::new(point(DevicePixels(300), DevicePixels(150)), size(DevicePixels(1440), DevicePixels(930)));
+        let client = Bounds::new(
+            point(DevicePixels(300), DevicePixels(150)),
+            size(DevicePixels(1440), DevicePixels(930)),
+        );
         let rect = calculate_window_rect(client, offset);
         assert_eq!((rect.left, rect.top, rect.right, rect.bottom), (288, 143, 1752, 1087));
         let back = calculate_client_rect(rect, offset, 1.5);

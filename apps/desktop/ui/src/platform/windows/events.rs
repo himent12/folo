@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/events.rs
 //! The window procedure's dispatch and the window, paint, frame and mouse messages, with GPUI's
 //! semantics (`vendor/gpui/src/platform/windows/events.rs`). Keys and IME are in `keyboard.rs`, the
 //! non-client area (title bar, hit testing, resize frame) in `chrome.rs`.
@@ -7,18 +8,26 @@ use super::display::WindowsDisplay;
 use super::util::*;
 use super::window::{WheelSettings, WindowInner};
 use crate::*;
-use std::rc::Rc;
-use std::sync::atomic::Ordering;
 use ::windows::Win32::Foundation::*;
 use ::windows::Win32::Graphics::Gdi::*;
-use ::windows::Win32::System::SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MK_XBUTTON1, MK_XBUTTON2, MODIFIERKEYS_FLAGS};
+use ::windows::Win32::System::SystemServices::{
+    MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MK_XBUTTON1, MK_XBUTTON2, MODIFIERKEYS_FLAGS,
+};
 use ::windows::Win32::UI::Controls::{HOVER_DEFAULT, WM_MOUSELEAVE};
 use ::windows::Win32::UI::Input::KeyboardAndMouse::*;
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use ::windows::core::PCWSTR;
+use std::rc::Rc;
+use std::sync::atomic::Ordering;
 
 impl WindowInner {
-    pub(crate) fn handle_msg(self: &Rc<Self>, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    pub(crate) fn handle_msg(
+        self: &Rc<Self>,
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
         let handled = match msg {
             WM_ACTIVATE => self.handle_activate(wparam),
             WM_CREATE => self.handle_create(hwnd),
@@ -32,7 +41,7 @@ impl WindowInner {
             WM_NCHITTEST => self.handle_hit_test(hwnd, msg, wparam, lparam),
             WM_ERASEBKGND => Some(1),
             WM_PAINT => self.handle_paint(hwnd),
-            WM_PRINTCLIENT => self.handle_print_client(hwnd, wparam),
+            WM_PRINTCLIENT => self.handle_print_client(wparam),
             WM_FOLO_FRAME => self.handle_frame(),
             super::WM_FOLO_EXPOSE => self.handle_expose(),
             WM_CLOSE => self.handle_close(),
@@ -42,7 +51,9 @@ impl WindowInner {
             WM_NCMOUSEMOVE => self.handle_nc_mouse_move(hwnd, lparam),
             // A double click is a second single click: we count clicks ourselves. Unhandled, it falls
             // through to Windows, which maximizes or restores on a caption double click.
-            WM_NCLBUTTONDBLCLK | WM_NCLBUTTONDOWN => self.handle_nc_mouse_down(hwnd, MouseButton::Left, wparam, lparam),
+            WM_NCLBUTTONDBLCLK | WM_NCLBUTTONDOWN => {
+                self.handle_nc_mouse_down(hwnd, MouseButton::Left, wparam, lparam)
+            }
             WM_NCRBUTTONDOWN => self.handle_nc_mouse_down(hwnd, MouseButton::Right, wparam, lparam),
             WM_NCMBUTTONDOWN => self.handle_nc_mouse_down(hwnd, MouseButton::Middle, wparam, lparam),
             WM_NCLBUTTONUP => self.handle_nc_mouse_up(hwnd, MouseButton::Left, wparam, lparam),
@@ -51,7 +62,9 @@ impl WindowInner {
             WM_LBUTTONDOWN => self.handle_mouse_down(hwnd, MouseButton::Left, lparam),
             WM_RBUTTONDOWN => self.handle_mouse_down(hwnd, MouseButton::Right, lparam),
             WM_MBUTTONDOWN => self.handle_mouse_down(hwnd, MouseButton::Middle, lparam),
-            WM_XBUTTONDOWN => xbutton(wparam).and_then(|b| self.handle_mouse_down(hwnd, b, lparam)).or(Some(1)),
+            WM_XBUTTONDOWN => {
+                xbutton(wparam).and_then(|b| self.handle_mouse_down(hwnd, b, lparam)).or(Some(1))
+            }
             WM_LBUTTONUP => self.handle_mouse_up(MouseButton::Left, lparam),
             WM_RBUTTONUP => self.handle_mouse_up(MouseButton::Right, lparam),
             WM_MBUTTONUP => self.handle_mouse_up(MouseButton::Middle, lparam),
@@ -103,12 +116,20 @@ impl WindowInner {
     fn handle_move(&self, hwnd: HWND, lparam: LPARAM) -> Option<isize> {
         {
             let mut state = self.state.borrow_mut();
-            let origin = logical_point(lparam.signed_loword() as f32, lparam.signed_hiword() as f32, state.scale_factor);
+            let origin = logical_point(
+                lparam.signed_loword() as f32,
+                lparam.signed_hiword() as f32,
+                state.scale_factor,
+            );
             state.origin = origin;
             let center_x = origin.x.0 + state.logical_size.width.0 / 2.;
             let center_y = origin.y.0 + state.logical_size.height.0 / 2.;
             let b = state.display.bounds();
-            if center_x < b.left().0 || center_x > b.right().0 || center_y < b.top().0 || center_y > b.bottom().0 {
+            if center_x < b.left().0
+                || center_x > b.right().0
+                || center_y < b.top().0
+                || center_y > b.bottom().0
+            {
                 // The centre may be on another monitor now (a minimized window gives none).
                 // SAFETY: a plain query.
                 let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) };
@@ -133,12 +154,20 @@ impl WindowInner {
             info.ptMaxTrackSize = POINT { x: 8192, y: 8192 };
         }
         let min = state.min_size?;
-        info.ptMinTrackSize.x = min.width.scale(state.scale_factor).0 as i32 + state.border_offset.width_offset;
-        info.ptMinTrackSize.y = min.height.scale(state.scale_factor).0 as i32 + state.border_offset.height_offset;
+        info.ptMinTrackSize.x =
+            min.width.scale(state.scale_factor).0 as i32 + state.border_offset.width_offset;
+        info.ptMinTrackSize.y =
+            min.height.scale(state.scale_factor).0 as i32 + state.border_offset.height_offset;
         Some(0)
     }
 
-    fn handle_window_pos_changing(&self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+    fn handle_window_pos_changing(
+        &self,
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<isize> {
         if !self.offscreen {
             return None;
         }
@@ -152,7 +181,8 @@ impl WindowInner {
         pos.flags |= SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER;
         if !pos.flags.contains(SWP_NOMOVE) || !pos.flags.contains(SWP_NOSIZE) {
             let current = super::offscreen::window_rect(hwnd);
-            let (x, y) = if pos.flags.contains(SWP_NOMOVE) { (current.left, current.top) } else { (pos.x, pos.y) };
+            let (x, y) =
+                if pos.flags.contains(SWP_NOMOVE) { (current.left, current.top) } else { (pos.x, pos.y) };
             let (cx, cy) = if pos.flags.contains(SWP_NOSIZE) {
                 (current.right - current.left, current.bottom - current.top)
             } else {
@@ -193,34 +223,52 @@ impl WindowInner {
         if self.draw(true, false) {
             // SAFETY: validating our own window: what WM_SIZE drew covers the whole client area.
             let _ = unsafe { ValidateRect(Some(self.hwnd), None) };
+            if self.offscreen {
+                super::offscreen::warm_capture(self.hwnd);
+            }
         }
     }
 
-    /// Repaints from the retained surface; only if it has nothing of the client's size does the core
-    /// draw (inside the paint, so `PrintWindow` of an off-screen window sees it too).
+    /// The core presents again, inside BeginPaint / EndPaint: for a window wholly off screen the
+    /// window DC shows nothing, and this paint (which `PrintWindow` sends) is the only way its pixels
+    /// are ever seen.
     fn handle_paint(&self, hwnd: HWND) -> Option<isize> {
-        let (width, height) = client_size(hwnd);
         let mut ps = PAINTSTRUCT::default();
         // SAFETY: the BeginPaint / EndPaint pair of our window.
         let dc = unsafe { BeginPaint(hwnd, &mut ps) };
-        if !self.surface.borrow().paint(dc, ps.rcPaint, width, height) {
-            self.draw(true, false);
-        }
+        self.paint_dc.set(Some(dc));
+        self.draw(true, false);
+        self.paint_dc.set(None);
         // SAFETY: as above.
         let _ = unsafe { EndPaint(hwnd, &ps) };
+        if self.offscreen {
+            // Off screen this paint is a capture's: let the compositor take the whole of it first.
+            // SAFETY: no arguments.
+            let _ = unsafe { ::windows::Win32::Graphics::Dwm::DwmFlush() };
+        }
         Some(0)
     }
 
-    fn handle_print_client(&self, hwnd: HWND, wparam: WPARAM) -> Option<isize> {
-        let (width, height) = client_size(hwnd);
-        let area = RECT { left: 0, top: 0, right: width, bottom: height };
-        self.surface.borrow().paint(HDC(wparam.0 as _), area, width, height);
+    /// The core presents into the DC in wparam (`WM_PRINTCLIENT`).
+    fn handle_print_client(&self, wparam: WPARAM) -> Option<isize> {
+        self.paint_dc.set(Some(HDC(wparam.0 as _)));
+        self.draw(true, false);
+        self.paint_dc.set(None);
+        // That present went to the print DC: the window's next one copies everything again.
+        self.state.borrow_mut().full_present = true;
         Some(0)
     }
 
     /// The window was just shown: draw it whole now, before any WM_PAINT.
     fn handle_expose(&self) -> Option<isize> {
-        self.draw(true, false);
+        if self.draw(true, false) {
+            // The whole client area is drawn: the WM_PAINT that would follow has nothing to do.
+            // SAFETY: validating our own window.
+            let _ = unsafe { ValidateRect(Some(self.hwnd), None) };
+            if self.offscreen {
+                super::offscreen::warm_capture(self.hwnd);
+            }
+        }
         Some(0)
     }
 
@@ -289,7 +337,11 @@ impl WindowInner {
             None
         };
         let input = PlatformInput::MouseMove(MouseMoveEvent {
-            position: logical_point(lparam.signed_loword() as f32, lparam.signed_hiword() as f32, scale_factor),
+            position: logical_point(
+                lparam.signed_loword() as f32,
+                lparam.signed_hiword() as f32,
+                scale_factor,
+            ),
             pressed_button,
             modifiers: super::keyboard::current_modifiers(),
         });
@@ -329,7 +381,11 @@ impl WindowInner {
         };
         let input = PlatformInput::MouseUp(MouseUpEvent {
             button,
-            position: logical_point(lparam.signed_loword() as f32, lparam.signed_hiword() as f32, scale_factor),
+            position: logical_point(
+                lparam.signed_loword() as f32,
+                lparam.signed_hiword() as f32,
+                scale_factor,
+            ),
             modifiers: super::keyboard::current_modifiers(),
             click_count,
         });
@@ -348,7 +404,11 @@ impl WindowInner {
         let position = screen_to_logical(hwnd, lparam, scale_factor);
         let input = PlatformInput::ScrollWheel(ScrollWheelEvent {
             position,
-            delta: ScrollDelta::Lines(if modifiers.shift { point(distance, 0.) } else { point(0., distance) }),
+            delta: ScrollDelta::Lines(if modifiers.shift {
+                point(distance, 0.)
+            } else {
+                point(0., distance)
+            }),
             modifiers,
             touch_phase: TouchPhase::Moved,
         });
@@ -396,7 +456,10 @@ impl WindowInner {
             };
             match wparam.0 as u32 {
                 // SPI_SETWORKAREA
-                47 => self.state.borrow_mut().auto_hide_taskbar = super::chrome::auto_hide_taskbar_edge(&display),
+                47 => {
+                    self.state.borrow_mut().auto_hide_taskbar =
+                        super::chrome::auto_hide_taskbar_edge(&display)
+                }
                 // SPI_SETWHEELSCROLLLINES, SPI_SETWHEELSCROLLCHARS
                 105 | 109 => self.state.borrow_mut().wheel = WheelSettings::read(),
                 _ => {}
@@ -412,7 +475,9 @@ impl WindowInner {
     fn handle_theme_changed(&self, hwnd: HWND, lparam: LPARAM) {
         let parameter = PCWSTR::from_raw(lparam.0 as *const u16);
         // SAFETY: for WM_SETTINGCHANGE with wparam 0, lparam is null or a NUL-terminated string.
-        if parameter.is_null() || unsafe { parameter.to_string() }.ok().as_deref() != Some("ImmersiveColorSet") {
+        if parameter.is_null()
+            || unsafe { parameter.to_string() }.ok().as_deref() != Some("ImmersiveColorSet")
+        {
             return;
         }
         let appearance = system_appearance();
@@ -421,13 +486,6 @@ impl WindowInner {
             configure_dwm_dark_mode(hwnd, appearance);
         }
     }
-}
-
-fn client_size(hwnd: HWND) -> (i32, i32) {
-    let mut r = RECT::default();
-    // SAFETY: a valid out pointer.
-    let _ = unsafe { GetClientRect(hwnd, &mut r) };
-    (r.right, r.bottom)
 }
 
 /// `Some(0)` if the core handled the event (stopped its propagation), `Some(1)` otherwise.
