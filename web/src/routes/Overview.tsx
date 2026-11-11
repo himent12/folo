@@ -5,7 +5,7 @@ import Images from '$icons/images';
 import Plus from '$icons/plus';
 import WifiOff from '$icons/wifi-off';
 import RefreshCwOff from '$icons/refresh-cw-off';
-import { computed, css, For, Key, signal } from 'fw';
+import { computed, css, effect, For, Key, signal, untrack } from 'fw';
 import { runProgress } from '$lib/api/progress';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
@@ -33,6 +33,7 @@ import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
 import LiveRunCard from './overview/LiveRunCard';
+import { modelsMayHaveChanged } from './overview/runChanges';
 import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
 
@@ -47,6 +48,17 @@ export default function Overview() {
   const datasets = new Resource(async (s) => {
     const list = await hub.api.datasets(s);
     return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
+  });
+
+  // A run that ended saved a model (and a deleted one took its models with it): Best models catches up then (./overview/runChanges).
+  let seenRuns: Run[] | undefined;
+  effect(() => {
+    const next = runs.data;
+    if (!next) return;
+    untrack(() => {
+      if (modelsMayHaveChanged(seenRuns, next)) void models.refresh();
+      seenRuns = next;
+    });
   });
 
   const live = computed(() => runs.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
