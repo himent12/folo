@@ -15,6 +15,7 @@ difference d = max(|A-B|) over the R, G, B channels (alpha ignored):
 
 Writes <out>/summary.json (every number) and <out>/summary.md (a table, worst first, and the missing
 files). --fail-pct P exits 1 when some pair has pct_tol > P or a file is missing (for scripted gates).
+Exits 2 (whatever --fail-pct says) when --a or --b is not a directory or the two have no PNG in common.
 """
 
 from __future__ import annotations
@@ -164,9 +165,16 @@ def main() -> int:
     ap.add_argument("--fail-pct", type=float, default=None)
     args = ap.parse_args()
 
+    for side in (args.a, args.b):
+        if not side.is_dir():
+            ap.error(f"{side} is not a directory")
     t0 = time.perf_counter()
     sa, sb = pngs(args.a), pngs(args.b)
     both = sorted(sa & sb)
+    if not both:
+        # Nothing to compare (empty trees, or no common paths) proves nothing: never a pass.
+        print(f"no PNG is in both {args.a} ({len(sa)}) and {args.b} ({len(sb)})", file=sys.stderr)
+        return 2
     args.out.mkdir(parents=True, exist_ok=True)
     with ThreadPoolExecutor(args.jobs) as pool:
         results = list(pool.map(lambda r: compare(r, args.a / r, args.b / r, args, args.out), both))

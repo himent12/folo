@@ -46,27 +46,36 @@ $work = {
 }
 # The runspaces share this process's environment, and Start-Dfw sets and restores variables around each
 # launch: set the off-screen switch for the whole process first, so a restore never clears it under
-# another runspace's launch.
+# another runspace's launch. It is put back once every worker has stopped, so a Desktop launched later
+# from the same shell opens on screen again.
+$offscreen0 = [Environment]::GetEnvironmentVariable("FOLO_UI_OFFSCREEN")
 [Environment]::SetEnvironmentVariable("FOLO_UI_OFFSCREEN", "1")
 $pool = [RunspaceFactory]::CreateRunspacePool(1, [Math]::Max(1, $Parallel))
-$pool.Open()
-$started = Get-Date
-$running = @()
-foreach ($j in $jobs) {
-    $out = Join-Path $Dir "$($j[1])x$($j[2])\$($j[0]).png"
-    $ps = [PowerShell]::Create()
-    $ps.RunspacePool = $pool
-    $ps.AddScript($work).AddArgument($capture).AddArgument($Exe).AddArgument($j[0]).AddArgument($j[1]).AddArgument($j[2]).AddArgument($out).AddArgument($DelayMs) | Out-Null
-    $running += [pscustomobject]@{ Ps = $ps; Handle = $ps.BeginInvoke() }
-}
 $log = @()
-foreach ($r in $running) {
-    $res = $r.Ps.EndInvoke($r.Handle)
-    foreach ($e in $r.Ps.Streams.Error) { $res += "FAIL $e" }
-    $r.Ps.Dispose()
-    $log += $res
+$running = @()
+try {
+    $pool.Open()
+    $started = Get-Date
+    foreach ($j in $jobs) {
+        $out = Join-Path $Dir "$($j[1])x$($j[2])\$($j[0]).png"
+        $ps = [PowerShell]::Create()
+        $ps.RunspacePool = $pool
+        $ps.AddScript($work).AddArgument($capture).AddArgument($Exe).AddArgument($j[0]).AddArgument($j[1]).AddArgument($j[2]).AddArgument($out).AddArgument($DelayMs) | Out-Null
+        $running += [pscustomobject]@{ Ps = $ps; Handle = $ps.BeginInvoke() }
+    }
+    foreach ($r in $running) {
+        $res = $r.Ps.EndInvoke($r.Handle)
+        foreach ($e in $r.Ps.Streams.Error) { $res += "FAIL $e" }
+        $r.Ps.Dispose()
+        $log += $res
+    }
 }
-$pool.Close()
+finally {
+    # Stops any worker still running (an interrupted run), then restores the variable.
+    foreach ($r in $running) { if (-not $r.Handle.IsCompleted) { $r.Ps.Stop() } }
+    $pool.Close()
+    [Environment]::SetEnvironmentVariable("FOLO_UI_OFFSCREEN", $offscreen0)
+}
 # Redirect files a parallel capture could not delete (another child still held them): empty ones go.
 Get-ChildItem -Recurse $Dir -Include *.stderr.txt, *.stderr.txt.out | Where-Object { $_.Length -eq 0 } | Remove-Item -ErrorAction SilentlyContinue
 $log += @(Get-ChildItem -Recurse $Dir -Filter *.stderr.txt | ForEach-Object { "STDERR $($_.FullName): $((Get-Content $_.FullName -TotalCount 3) -join ' | ')" })

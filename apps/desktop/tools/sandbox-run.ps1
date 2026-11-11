@@ -124,12 +124,13 @@ $cmdLine = "`"$ps`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedC
 
 $name = "folo-sandbox-$PID-$([Environment]::TickCount)"
 $fg0 = [FoloSandbox]::GetForegroundWindow()
-$old = @{}
-foreach ($k in $Env.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, [string]$Env[$k]) }
 $desk = [FoloSandbox]::NewDesktop($name)
 $job = [FoloSandbox]::NewJob()
 $code = 1
+$old = @{}
 try {
+    # The child inherits these at creation; they are put back right after (and in `finally`).
+    foreach ($k in $Env.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, [string]$Env[$k]) }
     $childPid = 0
     $hp = [FoloSandbox]::Start($cmdLine, $name, (Get-Location).Path, $job, [ref]$childPid)
     foreach ($k in $Env.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k]) }
@@ -147,7 +148,7 @@ try {
     [FoloSandbox]::CloseHandle($hp) | Out-Null
 }
 finally {
-    foreach ($k in $Env.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k]) }
+    foreach ($k in $old.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k]) }
     # Closing the job kills whatever the command left running; the desktop goes when nothing uses it.
     [FoloSandbox]::CloseHandle($job) | Out-Null
     [FoloSandbox]::CloseDesktop($desk) | Out-Null

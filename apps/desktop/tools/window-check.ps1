@@ -49,7 +49,8 @@ $msg = [bool]$InSandbox
 if (Test-Path $StateDir) { Remove-Item -Recurse -Force $StateDir }
 New-Item -ItemType Directory -Force $StateDir | Out-Null
 $stateFile = Join-Path $StateDir "desktop.json"
-$env:FOLO_DESKTOP_STATE = $stateFile
+# The app's launches inherit it; put back when the script ends (the `finally` below).
+$state0 = $env:FOLO_DESKTOP_STATE
 
 # The real profile's file must not change.
 $home_ = if ($env:FOLO_HOME) { $env:FOLO_HOME } else { Join-Path $env:USERPROFILE ".folo" }
@@ -279,6 +280,7 @@ function OverlayChecks([string]$what, [byte]$key) {
     Check "${what}: Close closes the app" (Exited) ""
 }
 
+$env:FOLO_DESKTOP_STATE = $stateFile
 try {
     "mode: $(if ($msg) { 'window messages on a private desktop' } else { 'real input on this screen' })"
     # ---- First launch: nothing remembered.
@@ -486,6 +488,7 @@ catch {
 }
 finally {
     Stop-Folo $script:p
+    $env:FOLO_DESKTOP_STATE = $state0
 }
 $realAfter = if (Test-Path $realFile) { (Get-Item $realFile).LastWriteTimeUtc.Ticks } else { 0 }
 Check "real profile's desktop.json untouched" ($realBefore -eq $realAfter) $realFile
