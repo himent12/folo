@@ -5,8 +5,9 @@
 //! `"window"`.
 //!
 //! The window keeps a clone of the shared handler so it can insert typed text itself, inside a window
-//! update, when no listener or binding took a key (`Window::insert_text_for_key`); the platform's calls
-//! come from outside any update and lease the window first.
+//! update, when no listener or binding took a key on a platform with no text input of its own (the
+//! headless one: `Window::insert_text_for_key`); the platform's calls come from outside any update and
+//! lease the window first.
 
 use std::{cell::RefCell, ops::Range, rc::Rc, rc::Weak};
 

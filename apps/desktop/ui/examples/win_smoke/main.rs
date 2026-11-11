@@ -201,7 +201,7 @@ fn run_checks(platform: &Rc<WindowsPlatform>, checks: &mut Checks, mode: Mode, s
     window.borrow_mut().set_input_handler(Box::new(Handler(log.clone())));
 
     // ---- First frame.
-    let presented = pump_until(Duration::from_secs(5), || !first_present_ms.get().is_nan());
+    let presented = pump_until(Duration::from_secs(30), || !first_present_ms.get().is_nan());
     let since_open = first_present_ms.get() - started_ms;
     checks.check(
         "first frame presented",
@@ -272,7 +272,7 @@ fn run_checks(platform: &Rc<WindowsPlatform>, checks: &mut Checks, mode: Mode, s
     }
     window.borrow().request_frame();
     let n = log.borrow().frames.len();
-    pump_until(Duration::from_secs(2), || log.borrow().frames.len() > n);
+    pump_until(Duration::from_secs(30), || log.borrow().frames.len() > n);
     let shot = print_client(hwnd, cw, ch);
     checks.check(
         "a 64x64 damage present shows up, the rest is kept",

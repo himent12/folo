@@ -57,6 +57,30 @@ fn resize_repaints_at_the_new_size() {
 }
 
 #[test]
+fn a_window_resized_to_nothing_draws_and_comes_back() {
+    let (mut app, window) =
+        open(size(px(200.), px(100.)), 1.0, |_, _| div().size_full().bg(color(1)).into_any_element());
+    let present = |app: &mut HeadlessApp, to: Size<Pixels>| {
+        with_window(app, window, |window, cx| {
+            window.on_resize(to, 1.0, cx);
+            let options = RequestFrameOptions { require_presentation: true, force_render: false };
+            window.on_request_frame(options, cx);
+        });
+    };
+    // Minimized (both sides zero), then collapsed to one side.
+    for to in [size(px(0.), px(0.)), size(px(200.), px(0.)), size(px(0.), px(100.))] {
+        present(&mut app, to);
+        let framebuffer = app.frame(window);
+        assert_eq!(framebuffer.width * framebuffer.height, 0);
+    }
+    present(&mut app, size(px(200.), px(100.)));
+    let framebuffer = app.frame(window);
+    assert_eq!((framebuffer.width, framebuffer.height), (200, 100));
+    let want = framebuffer.pixel(100, 50);
+    assert!(framebuffer.pixels.iter().all(|&p| p == want), "repainted whole");
+}
+
+#[test]
 fn a_required_presentation_presents_the_whole_frame_even_when_nothing_changed() {
     let (mut app, window) =
         open(size(px(200.), px(100.)), 1.0, |_, _| div().size_full().bg(color(1)).into_any_element());

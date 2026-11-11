@@ -1,6 +1,7 @@
 //! `WindowsDispatcher`: main-thread tasks (a queue plus one coalesced wake-up message to the platform's
 //! message window), a background pool that grows on demand and lets idle threads go, and one timer
 //! thread for `dispatch_after`. Nothing here polls: idle threads block on a condition variable.
+//! `shut_down` (once the message loop has ended) drops what is queued and lets the threads exit.
 
 use super::WM_FOLO_MAIN_TASKS;
 use crate::PlatformDispatcher;
@@ -27,19 +28,30 @@ pub(crate) struct MainQueue {
     wake_pending: AtomicBool,
     /// The platform's message-only window (0 until it exists).
     hwnd: AtomicIsize,
+    main_thread: ThreadId,
+    /// Set (under the tasks' lock) by `shut_down`: nothing runs main-thread tasks any more.
+    shut_down: AtomicBool,
 }
 
 impl MainQueue {
-    fn new() -> Self {
+    fn new(main_thread: ThreadId) -> Self {
         Self {
             tasks: Mutex::new(VecDeque::new()),
             wake_pending: AtomicBool::new(false),
             hwnd: AtomicIsize::new(0),
+            main_thread,
+            shut_down: AtomicBool::new(false),
         }
     }
 
     fn push(&self, runnable: Runnable) {
-        self.tasks.lock().push_back(runnable);
+        let mut tasks = self.tasks.lock();
+        if self.shut_down.load(Ordering::Acquire) {
+            drop(tasks);
+            return self.discard(VecDeque::from([runnable]));
+        }
+        tasks.push_back(runnable);
+        drop(tasks);
         if !self.wake_pending.swap(true, Ordering::AcqRel) {
             self.post_wake();
         }
@@ -70,7 +82,28 @@ impl MainQueue {
     /// Drops whatever is left (on the main thread, where the tasks' futures live).
     pub(crate) fn clear(&self) {
         let left = std::mem::take(&mut *self.tasks.lock());
-        drop(left);
+        self.discard(left);
+    }
+
+    /// Stops taking tasks and drops the queued ones.
+    fn shut_down(&self) {
+        let left = {
+            let mut tasks = self.tasks.lock();
+            self.shut_down.store(true, Ordering::Release);
+            std::mem::take(&mut *tasks)
+        };
+        self.discard(left);
+    }
+
+    /// Drops main-thread runnables, cancelling their tasks. Off the main thread (a pool thread waking a
+    /// task after the loop ended) it leaks them instead: dropping one there panics inside async-task,
+    /// which aborts the process.
+    fn discard(&self, runnables: VecDeque<Runnable>) {
+        if std::thread::current().id() == self.main_thread {
+            drop(runnables);
+        } else {
+            runnables.into_iter().for_each(std::mem::forget);
+        }
     }
 }
 
@@ -79,6 +112,8 @@ struct PoolState {
     queue: VecDeque<Runnable>,
     threads: usize,
     idle: usize,
+    /// Set by `shut_down`: runnables are dropped, threads exit.
+    shut_down: bool,
 }
 
 /// The background pool: a thread is added whenever queued work outnumbers idle threads.
@@ -90,6 +125,11 @@ struct Pool {
 impl Pool {
     fn dispatch(self: &Arc<Self>, runnable: Runnable) {
         let mut state = self.state.lock();
+        if state.shut_down {
+            // Dropping it cancels its task, which may schedule another: outside the lock.
+            drop(state);
+            return drop(runnable);
+        }
         state.queue.push_back(runnable);
         if state.queue.len() > state.idle && state.threads < MAX_POOL_THREADS {
             state.threads += 1;
@@ -114,6 +154,10 @@ impl Pool {
                     if let Some(runnable) = state.queue.pop_front() {
                         break runnable;
                     }
+                    if state.shut_down {
+                        state.threads -= 1;
+                        return;
+                    }
                     state.idle += 1;
                     let timed_out = self.work.wait_for(&mut state, IDLE_EXIT).timed_out();
                     state.idle -= 1;
@@ -129,6 +173,16 @@ impl Pool {
 
     fn threads(&self) -> usize {
         self.state.lock().threads
+    }
+
+    fn shut_down(&self) {
+        let queue = {
+            let mut state = self.state.lock();
+            state.shut_down = true;
+            std::mem::take(&mut state.queue)
+        };
+        self.work.notify_all();
+        drop(queue);
     }
 }
 
@@ -160,6 +214,27 @@ struct TimerState {
     heap: BinaryHeap<Reverse<Timer>>,
     seq: u64,
     running: bool,
+    /// Set by `shut_down`: the thread exits, later timers are dropped.
+    stopped: bool,
+}
+
+impl TimerState {
+    fn push(&mut self, due: Instant, runnable: Runnable) {
+        let seq = self.seq;
+        self.seq += 1;
+        self.heap.push(Reverse(Timer { due, seq, runnable }));
+    }
+
+    /// The timers due at `now`, in deadline order (equal deadlines in dispatch order).
+    fn pop_due(&mut self, now: Instant) -> Vec<Runnable> {
+        let mut due = Vec::new();
+        while self.heap.peek().is_some_and(|t| t.0.due <= now) {
+            if let Some(Reverse(timer)) = self.heap.pop() {
+                due.push(timer.runnable);
+            }
+        }
+        due
+    }
 }
 
 /// One thread sleeps until the earliest deadline (or forever while there is none), then hands the
@@ -172,9 +247,11 @@ struct Timers {
 impl Timers {
     fn add(self: &Arc<Self>, due: Instant, runnable: Runnable, pool: &Arc<Pool>) {
         let mut state = self.state.lock();
-        let seq = state.seq;
-        state.seq += 1;
-        state.heap.push(Reverse(Timer { due, seq, runnable }));
+        if state.stopped {
+            drop(state);
+            return drop(runnable);
+        }
+        state.push(due, runnable);
         if !state.running {
             state.running = true;
             let timers = self.clone();
@@ -189,10 +266,12 @@ impl Timers {
     fn run(&self, pool: &Arc<Pool>) {
         let mut state = self.state.lock();
         loop {
+            if state.stopped {
+                return;
+            }
             let now = Instant::now();
-            while state.heap.peek().is_some_and(|t| t.0.due <= now) {
-                let Reverse(timer) = state.heap.pop().unwrap();
-                pool.dispatch(timer.runnable);
+            for runnable in state.pop_due(now) {
+                pool.dispatch(runnable);
             }
             match state.heap.peek() {
                 Some(next) => {
@@ -202,6 +281,16 @@ impl Timers {
                 None => self.changed.wait(&mut state),
             }
         }
+    }
+
+    fn shut_down(&self) {
+        let heap = {
+            let mut state = self.state.lock();
+            state.stopped = true;
+            std::mem::take(&mut state.heap)
+        };
+        self.changed.notify_all();
+        drop(heap);
     }
 }
 
@@ -217,9 +306,10 @@ impl WindowsDispatcher {
     /// A dispatcher whose main thread is the calling thread. Main-thread tasks wait until
     /// `set_main_window` names the window their wake-up message goes to.
     pub(crate) fn new() -> Self {
+        let main_thread = std::thread::current().id();
         Self {
-            main_thread: std::thread::current().id(),
-            main: Arc::new(MainQueue::new()),
+            main_thread,
+            main: Arc::new(MainQueue::new(main_thread)),
             pool: Arc::new(Pool { state: Mutex::new(PoolState::default()), work: Condvar::new() }),
             timers: Arc::new(Timers { state: Mutex::new(TimerState::default()), changed: Condvar::new() }),
         }
@@ -236,6 +326,17 @@ impl WindowsDispatcher {
     /// How many background pool threads are alive (for tests and diagnostics).
     pub fn pool_threads(&self) -> usize {
         self.pool.threads()
+    }
+
+    /// Stops the dispatcher once the message loop has ended: queued runnables are dropped (cancelling
+    /// their tasks), later ones are dropped as they arrive, and the timer and pool threads exit (a pool
+    /// thread once its current job ends). A queued runnable's scheduler holds the dispatcher, so
+    /// without this the queues would keep it, the tasks' state and those threads alive. Main thread.
+    pub(crate) fn shut_down(&self) {
+        self.main.shut_down();
+        // The timer first: it hands due runnables to the pool.
+        self.timers.shut_down();
+        self.pool.shut_down();
     }
 }
 
@@ -268,6 +369,15 @@ mod tests {
         runnable.schedule();
     }
 
+    /// Waits (polling every millisecond) until `done`, up to a limit no loaded machine reaches.
+    fn wait_until(done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !done() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        done()
+    }
+
     #[test]
     fn the_pool_grows_past_blocked_threads() {
         let d = Arc::new(WindowsDispatcher::new());
@@ -282,27 +392,104 @@ mod tests {
             });
         }
         for _ in 0..40 {
-            rx.recv_timeout(Duration::from_secs(5)).expect("a job starved");
+            rx.recv_timeout(Duration::from_secs(30)).expect("a job starved");
         }
         assert!(d.pool_threads() >= 40);
+        d.shut_down();
+    }
+
+    /// The timer thread hands due runnables over in deadline order, equal deadlines in dispatch order.
+    /// Tested on the handover itself with the deadlines given, never waited for: once handed over they
+    /// run on pool threads, in whatever order those get the CPU.
+    #[test]
+    fn timers_are_handed_over_in_deadline_order() {
+        let base = Instant::now();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let mut state = TimerState::default();
+        for (i, ms) in [(0, 60u64), (1, 20), (2, 40), (3, 80), (4, 20)] {
+            let ran = ran.clone();
+            let (runnable, task) = async_task::spawn(async move { ran.lock().push(i) }, |_| {});
+            task.detach();
+            state.push(base + Duration::from_millis(ms), runnable);
+        }
+        let mut run_due = |at: u64| {
+            for runnable in state.pop_due(base + Duration::from_millis(at)) {
+                runnable.run();
+            }
+            std::mem::take(&mut *ran.lock())
+        };
+        assert_eq!(run_due(19), Vec::<i32>::new());
+        assert_eq!(run_due(40), [1, 4, 2]);
+        assert_eq!(run_due(79), [0]);
+        assert_eq!(run_due(1000), [3]);
+    }
+
+    /// A real timer runs on a pool thread, never before its deadline (a bound that holds however loaded
+    /// the machine is: the deadline is taken after `start`).
+    #[test]
+    fn a_timer_runs_on_the_pool_not_early() {
+        let d = Arc::new(WindowsDispatcher::new());
+        let (tx, rx) = mpsc::channel();
+        let start = Instant::now();
+        let dd = d.clone();
+        let (runnable, task) = async_task::spawn(
+            async move { tx.send((Instant::now(), std::thread::current().name().map(String::from))).unwrap() },
+            move |r| dd.dispatch_after(Duration::from_millis(30), r),
+        );
+        task.detach();
+        runnable.schedule();
+        let (at, thread) = rx.recv_timeout(Duration::from_secs(30)).expect("the timer fired");
+        assert!(at.duration_since(start) >= Duration::from_millis(30));
+        assert_eq!(thread.as_deref(), Some("folo-ui-pool"));
+        d.shut_down();
     }
 
     #[test]
-    fn timers_fire_in_deadline_order() {
+    fn shut_down_drops_queued_work_and_lets_its_threads_exit() {
         let d = Arc::new(WindowsDispatcher::new());
+        let weak = Arc::downgrade(&d);
+        // A pool thread, a main-thread runnable that never runs (no message window), and a timer an
+        // hour away: each queued runnable's scheduler holds the dispatcher.
         let (tx, rx) = mpsc::channel();
-        for (i, ms) in [(0, 60u64), (1, 20), (2, 40), (3, 80)] {
-            let tx = tx.clone();
-            let dd = d.clone();
-            let (runnable, task) = async_task::spawn(async move { tx.send(i).unwrap() }, move |r| {
-                dd.dispatch_after(Duration::from_millis(ms), r)
-            });
-            task.detach();
-            runnable.schedule();
-        }
-        let start = Instant::now();
-        let got: Vec<i32> = (0..4).map(|_| rx.recv_timeout(Duration::from_secs(2)).unwrap()).collect();
-        assert_eq!(got, [1, 2, 0, 3]);
-        assert!(start.elapsed() >= Duration::from_millis(55));
+        spawn_with(d.clone(), move || tx.send(()).unwrap());
+        rx.recv_timeout(Duration::from_secs(30)).expect("a background job ran");
+        let dd = d.clone();
+        let (runnable, task) = async_task::spawn_local(async {}, move |r| dd.dispatch_on_main_thread(r));
+        task.detach();
+        runnable.schedule();
+        let dd = d.clone();
+        let (runnable, task) =
+            async_task::spawn(async {}, move |r| dd.dispatch_after(Duration::from_secs(3600), r));
+        task.detach();
+        runnable.schedule();
+        let timers = Arc::downgrade(&d.timers);
+        assert!(d.timers.state.lock().running, "the timer thread started");
+
+        d.shut_down();
+        assert!(wait_until(|| d.pool_threads() == 0), "pool threads exit");
+        spawn_with(d.clone(), || {});
+        let dd = d.clone();
+        let (runnable, task) =
+            async_task::spawn(async {}, move |r| dd.dispatch_after(Duration::from_secs(1), r));
+        task.detach();
+        runnable.schedule();
+        assert_eq!(d.pool_threads(), 0, "work after shutdown is dropped, no thread starts");
+        assert!(d.main.tasks.lock().is_empty() && d.timers.state.lock().heap.is_empty());
+        drop(d);
+        assert!(wait_until(|| timers.upgrade().is_none()), "the timer thread exits");
+        assert!(weak.upgrade().is_none(), "nothing keeps the dispatcher alive");
+    }
+
+    /// A main-thread task woken on another thread after the shutdown is leaked, not dropped there
+    /// (async-task panics on that drop; on a pool thread the process would abort).
+    #[test]
+    fn a_main_thread_task_woken_elsewhere_after_shut_down_is_not_dropped_there() {
+        let d = Arc::new(WindowsDispatcher::new());
+        d.shut_down();
+        let dd = d.clone();
+        let (runnable, task) = async_task::spawn_local(async {}, move |r| dd.dispatch_on_main_thread(r));
+        task.detach();
+        // A `Runnable` is Send: scheduling it from another thread is what a waker there does.
+        std::thread::spawn(move || runnable.schedule()).join().expect("no panic off the main thread");
     }
 }

@@ -17,6 +17,15 @@
 //! and every final position is exactly what laying out a fresh tree gives (GPUI's behaviour), and
 //! `TaffyTree`'s cost is paid only for what changed. The request handling is `TaffyTree`'s
 //! (`compute_child_layout`: hidden layout, the per-frame cache, dispatch by display and children).
+//!
+//! What a record depends on, and how each is covered: the node's taffy style (compared; it is in device
+//! pixels, so the rem size and the scale applied to lengths are in it), its kind and measure key (compared;
+//! the text element's key holds its text, resolved font size and line height, fonts and wrapping style),
+//! its children (compared, through the nodes they were reused from), the requests (compared one by one),
+//! and the scale factor the measure function's logical results were converted with (a frame at another
+//! scale reuses nothing). Nodes measured without a key are never reused. Text shaping comes from the
+//! window's line layout cache, which a replay keeps warm, so a measure in a reused subtree sees what a
+//! fresh layout of this window would.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -115,6 +124,9 @@ pub(crate) struct LayoutTree {
     /// Last frame's nodes, and their children, while this frame's are added.
     previous: Vec<Node>,
     previous_children: Vec<NodeId>,
+    /// The scale factor of this frame's nodes, and of last frame's (`f32` bits; reuse needs them equal).
+    scale: u32,
+    previous_scale: u32,
     /// Last frame's nodes by signature.
     by_sig: HashMap<u64, SmallVec<[u32; 1]>, std::hash::BuildHasherDefault<FxHasher>>,
     /// Which of last frame's nodes were taken.
@@ -134,6 +146,7 @@ impl LayoutTree {
         std::mem::swap(&mut self.children, &mut self.previous_children);
         self.nodes.clear();
         self.caches.clear();
+        self.previous_scale = self.scale;
         self.children.clear();
         // Room for this frame's nodes, about as many as last frame's: without the trim, doubling leaves
         // up to twice that in each of the two node lists (1.3 KB a node).
@@ -151,8 +164,16 @@ impl LayoutTree {
         self.computed_last = std::mem::take(&mut self.computed);
     }
 
-    /// Adds a node with `children`; `measured` for a measured leaf.
-    pub(crate) fn add(&mut self, style: Style, children: &[NodeId], measured: Option<Measured>) -> NodeId {
+    /// Adds a node with `children`; `measured` for a measured leaf. `scale_factor` is the frame's (the
+    /// one `style` was converted with and `compute` will measure with).
+    pub(crate) fn add(
+        &mut self,
+        style: Style,
+        children: &[NodeId],
+        measured: Option<Measured>,
+        scale_factor: f32,
+    ) -> NodeId {
+        self.scale = scale_factor.to_bits();
         let id = NodeId::from(self.nodes.len());
         let mut hasher = FxHasher::default();
         hash_style(&style, &mut hasher);
@@ -210,6 +231,9 @@ impl LayoutTree {
         children: &[NodeId],
         measured: Option<&Measured>,
     ) -> Option<u32> {
+        if self.scale != self.previous_scale {
+            return None;
+        }
         let key = match measured {
             Some(Measured { key: None, .. }) => return None,
             Some(Measured { key: Some(key), .. }) => Some(key),

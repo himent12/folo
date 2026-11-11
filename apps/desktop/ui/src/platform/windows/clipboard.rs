@@ -3,7 +3,7 @@
 //! hash of the text (so metadata left over from an older copy is ignored).
 
 use crate::{ClipboardEntry, ClipboardItem};
-use ::windows::Win32::Foundation::{HANDLE, HGLOBAL};
+use ::windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use ::windows::Win32::System::DataExchange::*;
 use ::windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use ::windows::Win32::System::Ole::CF_UNICODETEXT;
@@ -28,11 +28,13 @@ fn text_hash(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
-/// Opens the clipboard, retrying briefly: another process may hold it for a moment.
-fn with_clipboard<T>(f: impl FnOnce() -> T) -> Option<T> {
+/// Opens the clipboard for `owner`, retrying briefly: another process may hold it for a moment. The
+/// owner must be a window of ours: `EmptyClipboard` makes the window that opened the clipboard its
+/// owner, and with none (`OpenClipboard(None)`) Windows documents that `SetClipboardData` fails.
+fn with_clipboard<T>(owner: HWND, f: impl FnOnce() -> T) -> Option<T> {
     for attempt in 0..5 {
-        // SAFETY: no owner window; the clipboard is closed again below.
-        if unsafe { OpenClipboard(None) }.is_ok() {
+        // SAFETY: our own window as the owner; the clipboard is closed again below.
+        if unsafe { OpenClipboard(Some(owner)) }.is_ok() {
             let result = f();
             // SAFETY: we opened it.
             let _ = unsafe { CloseClipboard() };
@@ -43,9 +45,10 @@ fn with_clipboard<T>(f: impl FnOnce() -> T) -> Option<T> {
     None
 }
 
-/// Puts the item's first string on the clipboard (an item with no entries clears it).
-pub(crate) fn write_to_clipboard(item: ClipboardItem) {
-    let _ = with_clipboard(|| -> Result<()> {
+/// Puts the item's first string on the clipboard (an item with no entries clears it), owned by
+/// `owner`.
+pub(crate) fn write_to_clipboard(owner: HWND, item: ClipboardItem) {
+    let _ = with_clipboard(owner, || -> Result<()> {
         // SAFETY: the clipboard is open.
         unsafe { EmptyClipboard() }?;
         let Some(ClipboardEntry::String(string)) = item.entries().first() else { return Ok(()) };
@@ -62,8 +65,8 @@ pub(crate) fn write_to_clipboard(item: ClipboardItem) {
 }
 
 /// The clipboard's text, with its metadata when it was written with some for this same text.
-pub(crate) fn read_from_clipboard() -> Option<ClipboardItem> {
-    with_clipboard(|| {
+pub(crate) fn read_from_clipboard(owner: HWND) -> Option<ClipboardItem> {
+    with_clipboard(owner, || {
         let text = read_wide(CF_UNICODETEXT.0 as u32)?;
         let metadata = read_bytes(hash_format())
             .filter(|h| h.len() >= 8 && h[..8] == text_hash(&text).to_ne_bytes())
@@ -76,19 +79,31 @@ pub(crate) fn read_from_clipboard() -> Option<ClipboardItem> {
     .flatten()
 }
 
+/// A global memory block, freed on drop unless the clipboard took it.
+struct Global(HGLOBAL);
+
+impl Drop for Global {
+    fn drop(&mut self) {
+        // SAFETY: a block we allocated and still own. (GlobalFree returns null on success, which
+        // the binding reports as an error: the result says nothing.)
+        let _ = unsafe { GlobalFree(Some(self.0)) };
+    }
+}
+
 fn set_data<T: Copy>(data: &[T], format: u32) -> Result<()> {
     let bytes = std::mem::size_of_val(data);
-    // SAFETY: a fresh moveable allocation of `bytes`, locked, filled, unlocked, then owned by the
-    // clipboard once SetClipboardData succeeds.
+    // SAFETY: a fresh moveable allocation of `bytes`, locked, filled and unlocked; freed by the guard
+    // unless SetClipboardData succeeds, after which the clipboard owns it.
     unsafe {
-        let global = GlobalAlloc(GMEM_MOVEABLE, bytes)?;
-        let ptr = GlobalLock(global);
+        let global = Global(GlobalAlloc(GMEM_MOVEABLE, bytes)?);
+        let ptr = GlobalLock(global.0);
         if ptr.is_null() {
             return Err(anyhow!("GlobalLock failed"));
         }
         std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr as *mut u8, bytes);
-        let _ = GlobalUnlock(global);
-        SetClipboardData(format, Some(HANDLE(global.0)))?;
+        let _ = GlobalUnlock(global.0);
+        SetClipboardData(format, Some(HANDLE(global.0.0)))?;
+        std::mem::forget(global);
     }
     Ok(())
 }

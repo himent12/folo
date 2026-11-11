@@ -62,7 +62,7 @@ impl TaffyLayoutEngine {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
         self.child_buffer.clear();
         self.child_buffer.extend(children.into_iter().map(|id| id.0));
-        LayoutId(self.tree.add(taffy_style, &self.child_buffer, None))
+        LayoutId(self.tree.add(taffy_style, &self.child_buffer, None, scale_factor))
     }
 
     /// Adds a leaf measured by `measured`.
@@ -74,7 +74,7 @@ impl TaffyLayoutEngine {
         measured: Measured,
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
-        LayoutId(self.tree.add(taffy_style, &[], Some(measured)))
+        LayoutId(self.tree.add(taffy_style, &[], Some(measured), scale_factor))
     }
 
     /// Computes the layout under `id` in `available_space` (measured leaves call back into the window).

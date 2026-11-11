@@ -1,12 +1,12 @@
 //! A window's winit events, turned into the core's callbacks with GPUI's semantics.
 
 use super::chrome::ChromeAction;
-use super::keys::{self, KeyInput};
+use super::keys::{self, KeyInput, TextRules};
 use super::mouse;
 use super::window::{WindowInner, call};
 use crate::{
-    KeyDownEvent, KeyUpEvent, Modifiers, ModifiersChangedEvent, MouseDownEvent, MouseExitEvent,
-    MouseMoveEvent, MouseUpEvent, PlatformInput, RequestFrameOptions, ScrollWheelEvent, point, px,
+    KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, PlatformInput, PlatformInputHandler, RequestFrameOptions, ScrollWheelEvent, point, px,
 };
 use std::ops::Range;
 use std::time::Instant;
@@ -250,12 +250,13 @@ impl WindowInner {
             keystroke: keystroke.clone(),
             is_held: event.repeat,
         }));
-        // GPUI's rule: a key the app did not handle types its text, with at most shift held.
+        // GPUI's rule: a key the app did not handle types its text, if the system's rules say the
+        // modifiers held type characters (Shift; Option on macOS; AltGr).
         let composing = self.state.borrow().composing;
         if result.propagate
             && !composing
             && !already_committed
-            && keystroke.modifiers.is_subset_of(&Modifiers::shift())
+            && TextRules::CURRENT.types_text(&keystroke.modifiers)
             && let Some(text) = &keystroke.key_char
         {
             self.with_input_handler(|handler| handler.replace_text_in_range(None, text));
@@ -269,12 +270,7 @@ impl WindowInner {
                 if text.is_empty() {
                     // The composition was cleared (before a commit, or cancelled).
                     if std::mem::take(&mut self.state.borrow_mut().composing) {
-                        self.with_input_handler(|handler| {
-                            if let Some(marked) = handler.marked_text_range() {
-                                handler.replace_text_in_range(Some(marked), "");
-                            }
-                            handler.unmark_text();
-                        });
+                        self.with_input_handler(cancel_composition);
                     }
                     return;
                 }
@@ -302,12 +298,21 @@ impl WindowInner {
                 }
             }
             Ime::Disabled => {
+                // winit's contract: pending preedit is cleared, not kept as typed text.
                 if std::mem::take(&mut self.state.borrow_mut().composing) {
-                    self.with_input_handler(|handler| handler.unmark_text());
+                    self.with_input_handler(cancel_composition);
                 }
             }
         }
     }
+}
+
+/// Removes the composition's text and ends it (a preedit that was cleared or abandoned types nothing).
+pub(crate) fn cancel_composition(handler: &mut dyn PlatformInputHandler) {
+    if let Some(marked) = handler.marked_text_range() {
+        handler.replace_text_in_range(Some(marked), "");
+    }
+    handler.unmark_text();
 }
 
 /// A byte range of `text` as a UTF-16 range (what the input handler takes).
@@ -327,5 +332,65 @@ mod tests {
         assert_eq!(utf16_range("日本😀x", 3..6), 1..2);
         assert_eq!(utf16_range("日本😀x", 6..10), 2..4);
         assert_eq!(utf16_range("ab", 5..9), 2..2);
+    }
+
+    /// A text field as the app's `TextInput` behaves: `unmark_text` only forgets the marked range.
+    #[derive(Default)]
+    struct Field {
+        text: String,
+        selection: Range<usize>,
+        marked: Option<Range<usize>>,
+    }
+
+    impl PlatformInputHandler for Field {
+        fn selected_text_range(&mut self, _: bool) -> Option<crate::UTF16Selection> {
+            Some(crate::UTF16Selection { range: self.selection.clone(), reversed: false })
+        }
+        fn marked_text_range(&mut self) -> Option<Range<usize>> {
+            self.marked.clone()
+        }
+        fn text_for_range(&mut self, range: Range<usize>, _: &mut Option<Range<usize>>) -> Option<String> {
+            self.text.get(range).map(str::to_owned)
+        }
+        fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str) {
+            let range = range.or(self.marked.take()).unwrap_or(self.selection.clone());
+            self.text.replace_range(range.clone(), text);
+            self.selection = range.start + text.len()..range.start + text.len();
+            self.marked = None;
+        }
+        fn replace_and_mark_text_in_range(
+            &mut self,
+            range: Option<Range<usize>>,
+            text: &str,
+            _: Option<Range<usize>>,
+        ) {
+            let range = range.or(self.marked.clone()).unwrap_or(self.selection.clone());
+            self.text.replace_range(range.clone(), text);
+            self.marked = Some(range.start..range.start + text.len());
+            self.selection = range.start + text.len()..range.start + text.len();
+        }
+        fn unmark_text(&mut self) {
+            self.marked = None;
+        }
+        fn bounds_for_range(&mut self, _: Range<usize>) -> Option<crate::Bounds<crate::Pixels>> {
+            None
+        }
+        fn character_index_for_point(&mut self, _: crate::Point<crate::Pixels>) -> Option<usize> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_cancelled_composition_types_nothing() {
+        // "ab", then a composition "ni" the IME abandons (`Ime::Disabled` after switching input
+        // sources, or an empty `Ime::Preedit`): the field is "ab" again, with nothing marked.
+        let mut field = Field { text: "ab".into(), selection: 2..2, marked: None };
+        field.replace_and_mark_text_in_range(None, "ni", Some(2..2));
+        assert_eq!((field.text.as_str(), field.marked.clone()), ("abni", Some(2..4)));
+        cancel_composition(&mut field);
+        assert_eq!((field.text.as_str(), field.marked.clone(), field.selection.clone()), ("ab", None, 2..2));
+        // With no composition it changes nothing.
+        cancel_composition(&mut field);
+        assert_eq!((field.text.as_str(), field.selection.clone()), ("ab", 2..2));
     }
 }

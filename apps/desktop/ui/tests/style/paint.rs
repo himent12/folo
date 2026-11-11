@@ -1,7 +1,7 @@
 use folo_ui::{
     BorderStyle, Bounds, BoxShadow, ContentMask, Corners, DevicePixels, Edges, Hsla, Overflow, Pixels,
     Primitive, Refineable, ScaledPixels, Scene, Style, StylePaint, StyleRefinement, Styled, black, blue,
-    hsla, point, px, red, size, svg_sprite_bounds, transparent_black,
+    hsla, paint_shadows, point, px, red, size, svg_sprite_bounds, transparent_black,
 };
 
 fn sp(v: f32) -> ScaledPixels {
@@ -146,4 +146,33 @@ fn svg_sprites_center_on_their_bounds() {
     let bounds = lbounds(2., 3., 16., 16.).scale(1.5);
     let sprite = svg_sprite_bounds(bounds, size(DevicePixels(48), DevicePixels(48)));
     assert_eq!(sprite, sbounds(3., 5., 24., 24.));
+}
+
+#[test]
+fn a_shadow_is_culled_by_its_unblurred_box_as_gpui_culls_it() {
+    // GPUI 0.2.2's `Scene::insert_primitive` drops a primitive whose `bounds` (for a shadow: the box
+    // offset and spread, before the blur) miss its content mask, so a blur that would reach into the
+    // mask from a box outside it is not drawn. Pinned so the pixels stay GPUI's.
+    let mut clipped = cx(1., 1.);
+    clipped.content_mask = ContentMask { bounds: lbounds(0., 0., 100., 100.) };
+    let blurred = |offset: f32, spread: f32| BoxShadow {
+        color: shadow_color(),
+        offset: point(px(offset), px(0.)),
+        blur_radius: px(8.),
+        spread_radius: px(spread),
+    };
+    let paint_one = |shadow: BoxShadow| {
+        let mut scene = Scene::new();
+        paint_shadows(&mut scene, &clipped, lbounds(101., 20., 20., 20.), Corners::default(), &[shadow]);
+        scene
+    };
+    assert!(paint_one(blurred(0., 0.)).is_empty(), "the box at x 101 misses the mask ending at 100");
+    // Offset or spread into the mask: kept, with the blur radius and the mask as its clip.
+    let scene = paint_one(blurred(-2., 0.));
+    let Primitive::Shadow(shadow) = &scene.primitives[0] else { panic!("one shadow") };
+    assert_eq!(
+        (shadow.bounds, shadow.clip, shadow.blur_radius),
+        (sbounds(99., 20., 20., 20.), sbounds(0., 0., 100., 100.), sp(8.))
+    );
+    assert_eq!(paint_one(blurred(0., 2.)).len(), 1);
 }

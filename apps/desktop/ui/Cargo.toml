@@ -85,7 +85,8 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "a
 cosmic-text = "0.14"
 winit = "0.30"
 softbuffer = "0.4"
-arboard = "3"
+# wayland-data-control: the clipboard in a Wayland session without XWayland (pure Rust, no system library).
+arboard = { version = "3", features = ["wayland-data-control"] }
 # The xdg-desktop-portal backend (no GTK).
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 

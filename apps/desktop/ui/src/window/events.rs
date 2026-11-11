@@ -24,17 +24,6 @@ impl Window {
     pub(crate) fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
         cx.propagate_event = true;
         self.default_prevented = false;
-        // A pointer event means the mouse is over the window (Windows sends no `MouseExited`, and the
-        // hover callback may lag the first move).
-        if matches!(
-            event,
-            PlatformInput::MouseMove(_)
-                | PlatformInput::MouseDown(_)
-                | PlatformInput::MouseUp(_)
-                | PlatformInput::ScrollWheel(_)
-        ) {
-            self.hovered.set(true);
-        }
 
         let event = match event {
             PlatformInput::MouseMove(event) => {
@@ -68,6 +57,18 @@ impl Window {
             PlatformInput::FileDrop(event) => self.translate_file_drop(event, cx),
             event @ (PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_)) => event,
         };
+        // A pointer event means the mouse is over the window (Windows sends no `MouseExited`, and the
+        // hover callback may lag the first move). Checked after translation: a file dragged in from
+        // outside reaches the window only as file-drop events, which became moves and an up above.
+        if matches!(
+            event,
+            PlatformInput::MouseMove(_)
+                | PlatformInput::MouseDown(_)
+                | PlatformInput::MouseUp(_)
+                | PlatformInput::ScrollWheel(_)
+        ) {
+            self.hovered.set(true);
+        }
 
         if let Some(mouse_event) = event.mouse_event() {
             self.dispatch_mouse_event(mouse_event, cx);
@@ -75,6 +76,7 @@ impl Window {
             self.dispatch_key_event(key_event, cx);
             if let PlatformInput::KeyDown(key_down) = &event
                 && cx.propagate_event
+                && self.platform_window.inserts_key_text()
             {
                 self.insert_text_for_key(key_down, cx);
             }
@@ -85,7 +87,9 @@ impl Window {
 
     /// GPUI's translation of a file drop: entering starts an active drag of `ExternalPaths` (a left-button
     /// mouse move), hovering moves, dropping is a left mouse up (the drop listeners take the drag), leaving
-    /// cancels the drag.
+    /// cancels the drag. Leaving (or cancelling) also ends the hover the drag's moves set, as the mouse
+    /// leaving the window does: the platforms report no hover change during a drag, and a real mouse move
+    /// over the window hovers it again.
     fn translate_file_drop(&mut self, event: FileDropEvent, cx: &mut App) -> PlatformInput {
         let mouse_move = |position| {
             PlatformInput::MouseMove(MouseMoveEvent {
@@ -118,6 +122,10 @@ impl Window {
             }
             FileDropEvent::Exited => {
                 self.active_drag = None;
+                if self.hovered.get() {
+                    self.on_hover_status_change(false, cx);
+                    cx.propagate_event = true;
+                }
                 PlatformInput::FileDrop(FileDropEvent::Exited)
             }
         }
@@ -222,9 +230,10 @@ impl Window {
 
     /// Sends the key's text to the focused input handler (`replace_text_in_range(None, text)`) when no
     /// listener or binding handled the key, the key types text (`key_char`) and no modifier other than
-    /// shift is held (GPUI's platforms do this; the window does it so every backend and the headless
-    /// harness behave the same). The key then counts as handled, so the platform does not translate it
-    /// again.
+    /// shift is held. Only on a platform without text input of its own
+    /// (`PlatformWindow::inserts_key_text`, the headless one): Win32 and winit type through the OS
+    /// (`WM_CHAR` and the IME, winit's text and IME events), as GPUI's platforms do. The key then
+    /// counts as handled.
     pub(crate) fn insert_text_for_key(&mut self, event: &KeyDownEvent, cx: &mut App) {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;

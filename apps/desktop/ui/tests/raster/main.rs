@@ -2,6 +2,7 @@
 //! exactness against GPUI's formulas, and cache bounds.
 
 mod cache;
+mod degenerate;
 mod exact;
 mod invariant;
 mod scenes;

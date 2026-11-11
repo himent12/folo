@@ -167,6 +167,8 @@ impl Platform for WinitPlatform {
         if let Err(error) = event_loop.run_app(&mut app) {
             log_error(&format!("winit event loop: {error}"));
         }
+        // Nothing runs main-thread work any more: drop what is queued and let the dispatcher's threads go.
+        self.shared.dispatcher.shut_down();
     }
 
     fn quit(&self) {
