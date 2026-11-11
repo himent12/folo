@@ -51,12 +51,14 @@ impl WindowInner {
 
     pub(crate) fn handle_dpi_changed(&self, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         let new_scale_factor = wparam.loword() as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-        let (was_maximized, size_events) = {
+        // Asked before the state is borrowed below: `is_maximized` borrows it too.
+        let was_maximized = self.is_maximized();
+        let size_events = {
             let mut state = self.state.borrow_mut();
             state.scale_factor = new_scale_factor;
             state.border_offset.update(hwnd);
             state.full_present = true;
-            (self.is_maximized(), state.size_events)
+            state.size_events
         };
         // SAFETY: for WM_DPICHANGED lparam points to the suggested window RECT.
         let rect = unsafe { *(lparam.0 as *const RECT) };
