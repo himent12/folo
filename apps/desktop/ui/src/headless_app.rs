@@ -135,7 +135,16 @@ impl HeadlessApp {
         }
     }
 
-    /// Draws `window` if it is dirty and returns its framebuffer.
+    /// Whether `window` asks for its next refresh: it is dirty, or a paint animation
+    /// (`with_opacity_animation`) is running.
+    pub fn wants_frame(&self, window: AnyWindowHandle) -> bool {
+        match self.app.borrow().windows.get(&window.id) {
+            Some(Some(window)) => window.dirty.get() || window.has_running_paint_animations(),
+            _ => false,
+        }
+    }
+
+    /// Draws `window` if it is dirty (or advances its paint animations) and returns its framebuffer.
     #[track_caller]
     pub fn frame(&mut self, window: AnyWindowHandle) -> &Framebuffer {
         let framebuffer = &mut self.framebuffer;
@@ -172,7 +181,7 @@ impl HeadlessApp {
             let frame = self.frame(window).clone();
             self.run_until_idle();
             let same = previous.as_ref() == Some(&frame);
-            if same || !self.is_dirty(window) {
+            if same || !self.wants_frame(window) {
                 return true;
             }
             previous = Some(frame);
@@ -191,7 +200,7 @@ impl HeadlessApp {
         loop {
             self.frame(window);
             self.run_until_idle();
-            if !self.is_dirty(window) {
+            if !self.wants_frame(window) {
                 return true;
             }
             if elapsed >= max_time {

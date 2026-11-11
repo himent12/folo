@@ -4,7 +4,7 @@
 //! Files: `handle.rs` (ids and handles), `focus.rs` (focus handles), `frame.rs` (what a paint produces),
 //! `dispatch.rs` (the key dispatch tree and tab stops), `layout.rs` (taffy), `draw.rs` (the frame pipeline
 //! and presenting), `trace.rs` (`FOLO_UI_TRACE=frames`), `paint.rs` (`PaintQuad` helpers), `primitives.rs`
-//! (the element-author paint API), `text_paint.rs` (`GlyphPainter`, line painting), `element_api.rs`
+//! (the element-author paint API), `paint_animation.rs` (opacity groups and paint animations), `text_paint.rs` (`GlyphPainter`, line painting), `element_api.rs`
 //! (stacks, ids, element state, hitboxes, listeners), `events.rs` (mouse and key dispatch), `ops.rs`
 //! (window operations and queries), `input_handler.rs` (the IME seam).
 //!
@@ -23,6 +23,7 @@ pub(crate) mod input_handler;
 mod layout;
 mod ops;
 mod paint;
+mod paint_animation;
 mod primitives;
 mod text_paint;
 mod trace;
@@ -36,6 +37,7 @@ pub use frame::*;
 pub use handle::*;
 pub(crate) use layout::*;
 pub use paint::*;
+pub(crate) use paint_animation::PaintAnimation;
 pub use trace::FrameTimes;
 
 use std::{
@@ -94,8 +96,11 @@ pub struct Window {
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     /// Content masks pushed by `with_content_mask` (each already intersected with its parent).
     pub(crate) content_mask_stack: Vec<crate::ContentMask<Pixels>>,
-    /// The opacity colours are painted at now (product of `with_element_opacity`; 1 at the root).
+    /// The opacity colours are painted at now (product of `with_element_opacity`; 1 at the root, and 1
+    /// inside an opacity group, which fades its primitives after paint).
     pub(crate) element_opacity: f32,
+    /// The opacity groups being painted, innermost last, each with where its current span starts.
+    pub(crate) opacity_group_stack: Vec<(u32, usize)>,
     /// The frame shown on screen (hit testing and key dispatch use it).
     pub(crate) rendered_frame: Frame,
     /// The frame being painted (swapped with `rendered_frame` after `draw`).
@@ -223,6 +228,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            opacity_group_stack: Vec::new(),
             rendered_frame,
             next_frame,
             next_frame_callbacks: Rc::default(),

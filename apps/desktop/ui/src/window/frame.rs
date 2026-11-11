@@ -185,6 +185,8 @@ pub(crate) struct Frame {
     pub(crate) window_control_hitboxes: Vec<WindowControlHitbox>,
     /// `deferred` elements, drawn after the tree.
     pub(crate) deferred_draws: Vec<DeferredDraw>,
+    /// Opacity animations that tick without a redraw (`paint_animation.rs`).
+    pub(crate) paint_animations: Vec<crate::window::PaintAnimation>,
 }
 
 impl Frame {
@@ -202,6 +204,7 @@ impl Frame {
             tooltip_requests: Vec::new(),
             window_control_hitboxes: Vec::new(),
             deferred_draws: Vec::new(),
+            paint_animations: Vec::new(),
         }
     }
 
@@ -219,6 +222,7 @@ impl Frame {
         self.tooltip_requests.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
+        self.paint_animations.clear();
     }
 
     /// Hit tests `position` against this frame's hitboxes (GPUI's `Frame::hit_test`): topmost first, each

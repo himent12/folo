@@ -64,9 +64,13 @@ impl Window {
         style
     }
 
-    /// Runs `f` with colours painted at `opacity` times the current element opacity.
+    /// Runs `f` with colours painted at `opacity` times the current element opacity. Inside an opacity group
+    /// it opens a nested group instead, so the group's colours are faded in the same order (`opacity.rs`).
     pub fn with_element_opacity<R>(&mut self, opacity: Option<f32>, f: impl FnOnce(&mut Self) -> R) -> R {
         let Some(opacity) = opacity else { return f(self) };
+        if !self.opacity_group_stack.is_empty() {
+            return self.with_opacity_group(opacity, f).0;
+        }
         let previous = self.element_opacity;
         self.element_opacity = previous * opacity;
         let result = f(self);

@@ -95,12 +95,12 @@ pub fn skeleton(t: &Theme, id: impl Into<SharedString>) -> folo_ui::AnyElement {
         return block.into_any_element();
     }
     block
-        .with_animation(
+        .with_opacity_animation(
             folo_ui::ElementId::Name(format!("skel-{id}").into()),
             Animation::new(Duration::from_millis(1400)).repeat(),
-            move |d, p| {
+            move |p| {
                 let w = (p * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-                d.opacity(0.55 + 0.45 * w)
+                0.55 + 0.45 * w
             },
         )
         .into_any_element()

@@ -2,6 +2,7 @@
 
 mod layout;
 mod lists;
+mod opacity;
 mod text;
 
 use std::borrow::Cow;

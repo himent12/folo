@@ -40,10 +40,10 @@ pub fn appear<E: IntoElement + Styled + 'static>(el: E, id: &str) -> folo_ui::An
     if reduce_motion() {
         return el.into_any_element();
     }
-    el.with_animation(
+    el.with_opacity_animation(
         SharedString::from(id.to_string()),
         Animation::new(Duration::from_millis(160)).with_easing(folo_ui::ease_out_quint()),
-        |d, p| d.opacity(p),
+        |p| p,
     )
     .into_any_element()
 }

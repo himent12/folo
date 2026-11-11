@@ -55,11 +55,12 @@ pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> f
         return dot.into_any_element();
     }
     let id: SharedString = id.into();
-    dot.with_animation(
+    // An opacity-only animation: the window re-fades the dot at each refresh without rebuilding the UI.
+    dot.with_opacity_animation(
         folo_ui::ElementId::Name(format!("breathe-{id}").into()),
         Animation::new(Duration::from_millis(2400)).repeat(),
         // One cosine period per loop, so the loop has no seam: full, down to 40 %, full.
-        |d, p| d.opacity(0.7 + 0.3 * (p * std::f32::consts::TAU).cos()),
+        |p| 0.7 + 0.3 * (p * std::f32::consts::TAU).cos(),
     )
     .into_any_element()
 }

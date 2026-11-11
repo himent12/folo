@@ -7,7 +7,8 @@
 //! Dirtiness: a dirty window calls `platform_window.request_frame()` once; the platform calls back
 //! `on_request_frame` at the next refresh, and the callback draws only if the window is still dirty. No
 //! frame, no timer and no wake-up while nothing is dirty. `request_animation_frame` makes the window dirty
-//! again right after the frame it was called in.
+//! again right after the frame it was called in. A paint animation (`paint_animation.rs`) asks for frames
+//! without making the window dirty: those frames only re-fade its opacity group and present the damage.
 //!
 //! Cost: each phase is timed (`FrameTimes`, printed with `FOLO_UI_TRACE=frames`). The pipeline reuses its
 //! buffers: both frames' lists, the taffy tree, the dispatch tree and the deferred-draw order keep their
@@ -19,6 +20,7 @@ use crate::{
     AnyElement, App, AvailableSpace, Bounds, IntoElement, Pixels, Point, RequestFrameOptions, Size, Window,
     point, px,
     window::{
+        FrameTimes,
         input_handler::{SharedInputHandler, WindowInputHandler},
         trace::{micros_since, print_frame, trace_frames},
     },
@@ -40,6 +42,14 @@ impl Window {
         let mut presented = false;
         if self.dirty.get() || options.force_render {
             self.draw(cx);
+            presented = self.present();
+            if trace_frames() {
+                print_frame(&self.frame_times);
+            }
+        } else if self.tick_paint_animations(cx) {
+            // Only paint animations moved: the scene's group table changed; no render, layout or paint.
+            let frame = self.frame_times.frame + 1;
+            self.frame_times = FrameTimes { frame, ..FrameTimes::default() };
             presented = self.present();
             if trace_frames() {
                 print_frame(&self.frame_times);
@@ -126,6 +136,7 @@ impl Window {
         self.text_system.finish_frame();
         self.glyph_masks.end_frame();
         self.icon_masks.end_frame();
+        self.next_frame.scene.seal_opacity_groups();
 
         std::mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
@@ -137,6 +148,8 @@ impl Window {
         self.drawing = false;
         if std::mem::take(&mut self.animation_frame_requested) {
             self.refresh();
+        } else if self.has_running_paint_animations() {
+            self.platform_window.request_frame();
         }
     }
 
