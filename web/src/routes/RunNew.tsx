@@ -22,6 +22,7 @@ import Field from '$lib/ui/Field.tsx';
 import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
+import { tooltip } from '$lib/ui/tooltip';
 import { CloudPick } from './runnew/cloudPick';
 import { arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
 import { ampBlockOf } from './runnew/amp';
@@ -33,6 +34,7 @@ import { oomChangesOf } from './runnew/retry';
 import { serverEstimate } from './runnew/serverEstimate';
 import { clearDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
 import WhyLine from './runnew/WhyLine';
+import { START_KEYS, startKeys } from './runnew/startKeys';
 import { isPublished, scoreContextOf, startHintOf } from './runnew/weights';
 import { sampleImagesOf, trainSizesOf } from './runnew/trainImages';
 import DatasetSection from './runnew/DatasetSection';
@@ -63,6 +65,8 @@ export default function RunNew() {
   const datasetId = signal<string>((own ? own.datasetId : q.get('dataset')) ?? draft?.datasetId ?? '');
   // The dock repeats the summary's Start button for narrow screens; it steps aside while that button is on screen.
   const startEl = signal<HTMLElement>();
+  const formEl = signal<HTMLFormElement>();
+  startKeys(() => formEl.get());
   const startVisible = signal(false);
   effect(() => {
     const el = startEl.get();
@@ -641,7 +645,7 @@ export default function RunNew() {
           />
         </Panel>
       ) : (
-        <form class="layout" onsubmit={submit} novalidate>
+        <form class="layout" ref={formEl} onsubmit={submit} novalidate>
           {oomRun.get() ? (
             <OomNote
               oomRun={oomRun.get()!}
@@ -744,18 +748,20 @@ export default function RunNew() {
                         {fix.get() ? `${useLabel(fix.get()!)}${fix.get()!.vram !== undefined ? ` · ${roughBytes(fix.get()!.vram!)}` : ''}` : 'Finding settings that fit'}
                       </Button>
                     ) : null}
-                    <Button
-                      type="submit"
-                      variant={noFit.get() ? 'secondary' : 'primary'}
-                      size="lg"
-                      icon={Play}
-                      block
-                      loading={submitting.get()}
-                      disabled={!valid.get()}
-                      aria-describedby={[showWhy.get() ? 'start-why' : '', noFit.get() ? 'rail-nofit' : ''].filter(Boolean).join(' ') || undefined}
-                    >
-                      Start training
-                    </Button>
+                    <span class="start-tip" use:tooltip={{ text: 'Start training', keys: START_KEYS }}>
+                      <Button
+                        type="submit"
+                        variant={noFit.get() ? 'secondary' : 'primary'}
+                        size="lg"
+                        icon={Play}
+                        block
+                        loading={submitting.get()}
+                        disabled={!valid.get()}
+                        aria-describedby={[showWhy.get() ? 'start-why' : '', noFit.get() ? 'rail-nofit' : ''].filter(Boolean).join(' ') || undefined}
+                      >
+                        Start training
+                      </Button>
+                    </span>
                     <Why id="start-why" />
                   </div>
                   <CliCommand cliParts={cliParts.get()} cli={cli.get()} cliPlaceholder={cliPlaceholder.get()} />
@@ -862,6 +868,9 @@ css`
     align-content: start;
     gap: var(--space-4);
     min-width: 0;
+  }
+  .start-tip {
+    display: block;
   }
   .layout :global([data-jumped]) {
     outline: 2px solid var(--focus);

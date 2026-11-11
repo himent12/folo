@@ -37,6 +37,7 @@ export const shortcutList: { keys: string; also?: string; label: string; group: 
   { keys: '?', label: 'Keyboard shortcuts', group: 'General', single: true },
   { keys: '[', label: 'Collapse or expand the sidebar', group: 'General', single: true },
   { keys: 'N', label: 'New training run', group: 'General', single: true },
+  { keys: 'Mod+Enter', label: 'Start the run (New run)', group: 'General' },
   ...[...mainNav, settingsNav].map((n) => ({ keys: n.keys, label: `Go to ${n.label}`, group: 'Navigation', single: true })),
   // A run, model, dataset or benchmark page (and Compare): back to its list, when nothing on the page is using Escape.
   { keys: 'Escape', label: 'Back to the list (detail pages)', group: 'Navigation', single: true },

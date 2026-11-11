@@ -530,3 +530,28 @@ describe('New run: the draft', () => {
     expect(dataset()).toBe(first);
   });
 });
+
+describe('New run: the keyboard', () => {
+  const press = (el: Element, init: KeyboardEventInit = {}) => {
+    const e = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init });
+    el.dispatchEvent(e);
+    return e;
+  };
+
+  it('never starts a run on Enter in a field; Ctrl+Enter starts it, as the Start button says', async () => {
+    await open();
+    const create = vi.spyOn(api, 'createRun');
+    // The browser's implicit submission is the default action of Enter in an input: turned off.
+    expect(press(target.querySelector('input#epochs')!).defaultPrevented).toBe(true);
+    expect(press(target.querySelector('input#name')!).defaultPrevented).toBe(true);
+    await tick();
+    expect(create).not.toHaveBeenCalled();
+    // The Start button's tooltip names the shortcut.
+    const tip = target.querySelector('.start .start-tip')!;
+    tip.dispatchEvent(new Event('pointerenter'));
+    await until(() => document.getElementById('folo-tooltip')?.textContent?.includes('Start training'), 'the tooltip');
+    expect([...document.querySelectorAll('#folo-tooltip kbd')].map((k) => k.textContent)).toEqual(['Ctrl', '↵']);
+    press(target.querySelector('input#epochs')!, { ctrlKey: true });
+    await until(() => create.mock.calls.length === 1, 'the start');
+  });
+});
