@@ -14,6 +14,7 @@ use smallvec::SmallVec;
 use crate::{
     App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
     LayoutId, Pixels, SharedString, Size, TextOverflow, TextRun, WhiteSpace, Window, WrappedLine,
+    text::fx_hash::FxHasher, window::MeasureKey,
 };
 
 /// Text with explicit runs (fonts, colours, underlines per byte range).
@@ -78,71 +79,79 @@ impl TextLayout {
         let line_height = text_style.line_height.to_pixels(font_size.into(), window.rem_size());
         let runs = runs.unwrap_or_else(|| vec![text_style.to_run(text.len())]);
         let element_state = self.clone();
+        let key = measure_key(&text, font_size, line_height, &runs, &text_style);
+        let reset_state = self.clone();
+        let reset = move || *reset_state.0.borrow_mut() = None;
 
-        window.request_measured_layout(Default::default(), move |known, available, window, cx| {
-            let definite_width = match available.width {
-                AvailableSpace::Definite(width) => Some(width),
-                AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
-            };
-            let wrap_width = if text_style.white_space == WhiteSpace::Normal {
-                known.width.or(definite_width)
-            } else {
-                None
-            };
-            let (truncate_width, suffix) = match &text_style.text_overflow {
-                Some(TextOverflow::Truncate(suffix)) => {
-                    let width = known.width.or(definite_width.map(|width| match text_style.line_clamp {
-                        Some(max_lines) => width * max_lines as f32,
-                        None => width,
-                    }));
-                    (width, suffix.clone())
+        window.request_keyed_measured_layout(
+            Default::default(),
+            key,
+            reset,
+            move |known, available, window, cx| {
+                let definite_width = match available.width {
+                    AvailableSpace::Definite(width) => Some(width),
+                    AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
+                };
+                let wrap_width = if text_style.white_space == WhiteSpace::Normal {
+                    known.width.or(definite_width)
+                } else {
+                    None
+                };
+                let (truncate_width, suffix) = match &text_style.text_overflow {
+                    Some(TextOverflow::Truncate(suffix)) => {
+                        let width = known.width.or(definite_width.map(|width| match text_style.line_clamp {
+                            Some(max_lines) => width * max_lines as f32,
+                            None => width,
+                        }));
+                        (width, suffix.clone())
+                    }
+                    None => (None, SharedString::default()),
+                };
+
+                if let Some(layout) = element_state.0.borrow().as_ref()
+                    && let Some(size) = layout.size
+                    && (wrap_width.is_none() || wrap_width == layout.wrap_width)
+                {
+                    return size;
                 }
-                None => (None, SharedString::default()),
-            };
 
-            if let Some(layout) = element_state.0.borrow().as_ref()
-                && let Some(size) = layout.size
-                && (wrap_width.is_none() || wrap_width == layout.wrap_width)
-            {
-                return size;
-            }
+                let (text, runs) = match truncate_width {
+                    Some(width) => {
+                        let mut wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                        wrapper.truncate_line(text.clone(), width, &suffix, &runs)
+                    }
+                    None => (text.clone(), runs.clone()),
+                };
+                let lines = match window.text_system().shape_text(
+                    text,
+                    font_size,
+                    &runs,
+                    wrap_width,
+                    text_style.line_clamp,
+                ) {
+                    Ok(lines) => lines,
+                    Err(error) => {
+                        eprintln!("folo-ui: shaping text failed: {error:#}");
+                        SmallVec::new()
+                    }
+                };
 
-            let (text, runs) = match truncate_width {
-                Some(width) => {
-                    let mut wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
-                    wrapper.truncate_line(text.clone(), width, &suffix, &runs)
+                let mut size: Size<Pixels> = Size::default();
+                for line in &lines {
+                    let line_size = line.size(line_height);
+                    size.height += line_size.height;
+                    size.width = size.width.max(line_size.width).ceil();
                 }
-                None => (text.clone(), runs.clone()),
-            };
-            let lines = match window.text_system().shape_text(
-                text,
-                font_size,
-                &runs,
-                wrap_width,
-                text_style.line_clamp,
-            ) {
-                Ok(lines) => lines,
-                Err(error) => {
-                    eprintln!("folo-ui: shaping text failed: {error:#}");
-                    SmallVec::new()
-                }
-            };
-
-            let mut size: Size<Pixels> = Size::default();
-            for line in &lines {
-                let line_size = line.size(line_height);
-                size.height += line_size.height;
-                size.width = size.width.max(line_size.width).ceil();
-            }
-            element_state.0.borrow_mut().replace(TextLayoutInner {
-                lines,
-                line_height,
-                wrap_width,
-                size: Some(size),
-                bounds: None,
-            });
-            size
-        })
+                element_state.0.borrow_mut().replace(TextLayoutInner {
+                    lines,
+                    line_height,
+                    wrap_width,
+                    size: Some(size),
+                    bounds: None,
+                });
+                size
+            },
+        )
     }
 
     fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
@@ -186,6 +195,34 @@ impl TextLayout {
             .as_ref()
             .map_or(0, |state| state.lines.iter().map(|line| line.wrap_boundaries().len() + 1).sum())
     }
+}
+
+/// What the measure function's results depend on besides the layout requests: the text, its size and
+/// line height, the fonts of its runs, and the wrapping and truncation style (colours do not change sizes).
+fn measure_key(
+    text: &SharedString,
+    font_size: Pixels,
+    line_height: Pixels,
+    runs: &[TextRun],
+    style: &crate::TextStyle,
+) -> MeasureKey {
+    use std::hash::{Hash, Hasher};
+    let mut h = FxHasher::default();
+    text.as_str().hash(&mut h);
+    h.write_u32(font_size.0.to_bits());
+    h.write_u32(line_height.0.to_bits());
+    for run in runs {
+        h.write_usize(run.len);
+        run.font.hash(&mut h);
+    }
+    style.font().hash(&mut h);
+    (style.white_space == WhiteSpace::Normal).hash(&mut h);
+    match &style.text_overflow {
+        Some(TextOverflow::Truncate(suffix)) => suffix.as_str().hash(&mut h),
+        None => h.write_u8(0),
+    }
+    style.line_clamp.hash(&mut h);
+    MeasureKey { hash: h.finish(), text: text.clone() }
 }
 
 /// Implements `Element` for a text type: `$text` turns `self` into the `SharedString` to lay out.
