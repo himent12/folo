@@ -5,6 +5,7 @@
 import { flush } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Run } from '$lib/api/types';
@@ -97,6 +98,21 @@ describe('Overview', () => {
       expect(recent().textContent).toContain('deleted dataset');
     });
     expect(recent().textContent).not.toMatch(/ds_/);
+  });
+
+  it('names what failed, and does not blame the split when the runs failed to load', async () => {
+    const api = new MockApi('normal', 0);
+    api.runs = () => Promise.reject(new ApiError(500, 'internal', 'the run index could not be read'));
+    open(api);
+    const text = () => target.textContent ?? '';
+    await vi.waitFor(() => {
+      flush();
+      expect(text()).toContain('Could not load recent runs');
+      expect(target.querySelector('#best-models .unranked')).not.toBeNull();
+    });
+    expect(text()).toContain('Could not check what is training');
+    expect(text()).not.toContain('Could not load this');
+    expect(target.querySelector('#best-models .unranked')!.textContent).toMatch(/not ranked: could not load runs\.$/);
   });
 
   it('refetches Best models when a run ends, and not on an unchanged list', async () => {
