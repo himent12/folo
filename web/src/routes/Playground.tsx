@@ -2,7 +2,7 @@ import Box from '$icons/box';
 import Check from '$icons/check';
 import Plus from '$icons/plus';
 import RotateCcw from '$icons/rotate-ccw';
-import { computed, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack } from 'fw';
+import { computed, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack, type Signal } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { MockApi } from '$lib/api/mock';
@@ -36,6 +36,9 @@ import ClassList from './playground/ClassList';
 import PhoneDetails from './playground/PhoneDetails';
 import SidePanels from './playground/SidePanels';
 import { BACKEND_NAME, DEFAULTS, FETCH, simulate } from './playground/predict';
+import { keepSession } from './playground/keepSession';
+import { sampleImages } from './playground/samples';
+import { playgroundPath } from './playground/session';
 import { imageBlob, type Source } from './playground/source';
 import { followVanished } from './playground/vanished';
 
@@ -126,7 +129,7 @@ export default function Playground() {
 
   function chooseModel(id: string) {
     pickedModel.set(id);
-    router.go(`/playground?model=${encodeURIComponent(id)}`, { replace: true });
+    router.go(playgroundPath({ model: id, source: source.peek(), conf: conf.peek(), iou: iou.peek(), maxDet: maxDet.peek() }), { replace: true });
   }
   followVanished(() => model.get(), () => ranked.get(), chooseModel);
 
@@ -242,26 +245,7 @@ export default function Playground() {
     if (!next || !(e.currentTarget as HTMLElement).contains(next)) dragging.set(false);
   }
 
-  // Sample images for the empty state: a few from each dataset, the selected model's own dataset first.
-  const samplePool = new Resource(async (s) => {
-    const list = await hub.api.datasets(s);
-    const per = await Promise.all(
-      list.slice(0, 4).map((d) =>
-        hub.api
-          .datasetImages(d.id, { split: d.splits.val ? 'val' : 'train', limit: 3 }, s)
-          .then((r) => r.images.map((img) => ({ ds: d, img })))
-          .catch(() => []),
-      ),
-    );
-    return per;
-  });
-  const samples = computed(() => {
-    const pool = samplePool.data;
-    if (!pool) return samplePool.error ? [] : undefined;
-    const key = model.get()?.classes.join('|');
-    const groups = [...pool].sort((a, b) => Number(b[0]?.ds.classes.join('|') === key) - Number(a[0]?.ds.classes.join('|') === key));
-    return groups.flat().slice(0, 6);
-  });
+  const samples = sampleImages(model);
 
   // ---------- where inference runs ----------
   // On the server (POST /api/predict), or in this browser through folo-wasm on WebGPU or the CPU (docs/WASM.md).
@@ -357,13 +341,30 @@ export default function Playground() {
   const tbody = signal<HTMLTableSectionElement>();
   const tab = signal<'detections' | 'json'>('detections');
 
+  // The image, its result and the thresholds outlive the page for the tab; a dataset image and the thresholds are in
+  // the URL (./playground/session).
+  const restored = keepSession({
+    source,
+    pred,
+    runOn: runOn as Signal<string>,
+    conf,
+    iou,
+    maxDet,
+    labels,
+    scores,
+    truth,
+    hidden,
+    setSource,
+    model: () => modelId.get() ?? queryModel.get() ?? null,
+  });
+
   effect(() => {
     const id = modelId.get();
     const s = source.get();
     const on = runOn.get();
     const file = localWeights.get().get(id ?? '');
     void retryTick.get();
-    if (!id || !s) return;
+    if (!id || !s || untrack(() => restored(id, s, on))) return;
     const input: PredictInput = s.kind === 'file' ? { kind: 'file', file: s.file } : { kind: 'dataset', dataset_id: s.ds.id, image_id: s.img.id };
     const ctrl = new AbortController();
     untrack(() => {
@@ -866,7 +867,7 @@ export default function Playground() {
       <DatasetPicker
         bind:open={pickerOpen}
         prefer={classes.get()}
-        onpick={(ds, img) => setSource({ kind: 'dataset', ds, img })}
+        onpick={(ds, img, at) => setSource({ kind: 'dataset', ds, img, at })}
         onclose={() => seg.set(source.peek()?.kind ?? 'file')}
       />
     </>

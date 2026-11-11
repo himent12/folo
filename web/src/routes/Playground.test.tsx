@@ -8,6 +8,7 @@ import { resetWasmProbe } from '$lib/inference/browser';
 import { prefs } from '$lib/prefs';
 import { parse, router } from '$lib/router';
 import Playground from './Playground';
+import { session } from './playground/session';
 
 /** Port of `mount(Playground, { target })`: renders into `target`; `unmount(c)` is `c.unmount()`. */
 const mount = (_: typeof Playground, o: { target: HTMLElement }) => render(() => <Playground />, o.target);
@@ -46,6 +47,8 @@ afterEach(() => {
   if (c) unmount(c);
   c = undefined;
   target?.remove();
+  // Each test starts a fresh tab: no image or thresholds kept from the one before.
+  session.set(null);
 });
 
 describe('Playground: a failed prediction', () => {
@@ -228,5 +231,45 @@ describe('Playground: an end-to-end (o2o) model', () => {
 
   it('still suppresses them for an NMS (o2m) model', async () => {
     expect(await detections('m_shapes_n')).toEqual({ head: 'o2m', rows: 1 });
+  });
+});
+
+describe('Playground: the session', () => {
+  it('keeps the image, its result and the thresholds when the page is left and opened again', async () => {
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const conf = target.querySelector<HTMLInputElement>('.slider input[type="range"]')!;
+    conf.value = '0.5';
+    conf.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const rows = target.querySelectorAll('#pg-panel tbody tr').length;
+    unmount(c!);
+    target.remove();
+    const predict = vi.spyOn(hub.api, 'predict');
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground');
+    c = mount(Playground, { target });
+    await until(() => target.querySelectorAll('#pg-panel tbody tr').length === rows, 'the same detections');
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.5');
+    expect(target.querySelector('button.sample')).toBeNull();
+    // The kept result is shown as it was: the same answer is not asked for twice.
+    expect(predict).not.toHaveBeenCalled();
+  });
+
+  it('opens a linked dataset image with its thresholds', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    const ds = (await api.datasets())[0]!;
+    const img = (await api.datasetImages(ds.id, { split: 'val', limit: 3 })).images[2]!;
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse(`#/playground?model=m_hard_s&dataset=${ds.id}&image=${encodeURIComponent(img.id)}&split=val&conf=0.4`);
+    c = mount(Playground, { target });
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    expect(session.get()?.source).toMatchObject({ kind: 'dataset', img: { id: img.id }, at: 2 });
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.4');
   });
 });

@@ -22,7 +22,8 @@ import Skeleton from '$lib/ui/Skeleton';
 
 export interface DatasetPickerProps {
   open?: boolean;
-  onpick: (d: Dataset, img: Img) => void;
+  /** `at`: the image's place in its split (a link finds it again with one request). */
+  onpick: (d: Dataset, img: Img, at: number) => void;
   onclose?: () => void;
   /** Classes of the selected model: a dataset with the same classes is shown first. */
   prefer?: readonly string[];
@@ -75,7 +76,7 @@ export default function DatasetPicker(props: DatasetPickerProps) {
   function pick(img: Img) {
     const d = ds.peek();
     if (!d) return;
-    p.onpick(d, img);
+    p.onpick(d, img, offset.peek() + Math.max(0, images.data?.images.indexOf(img) ?? 0));
     open.set(false);
   }
 
