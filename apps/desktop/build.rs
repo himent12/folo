@@ -48,24 +48,31 @@ fn main() {
     std::fs::write(out_dir.join("icons.rs"), table).unwrap();
 
     // The Windows app icon (taskbar, Alt-Tab, Explorer): folo-ui loads icon resource 1 from the
-    // executable. link.exe takes a compiled resource file as an input, so the .ico becomes a .res
-    // here, in plain Rust: no resource compiler or extra crate needed.
+    // executable. And the application manifest (RT_MANIFEST 1: DPI awareness, Common Controls 6).
+    // link.exe takes a compiled resource file as an input, so both become a .res here, in plain Rust:
+    // no resource compiler or extra crate needed.
     let ico = manifest.join("assets/folo.ico");
+    let app_manifest = manifest.join("assets/folo-desktop.manifest");
     println!("cargo:rerun-if-changed={}", ico.display());
+    println!("cargo:rerun-if-changed={}", app_manifest.display());
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if target_os == "windows" && target_env == "msvc" {
         let bytes = std::fs::read(&ico).unwrap_or_else(|e| panic!("reading {}: {e}", ico.display()));
+        let xml = std::fs::read(&app_manifest)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", app_manifest.display()));
         let res = out_dir.join("folo-icon.res");
-        std::fs::write(&res, icon_res(&bytes)).unwrap();
+        std::fs::write(&res, windows_res(&bytes, &xml)).unwrap();
         println!("cargo:rustc-link-arg-bins={}", res.display());
     }
 }
 
-/// A compiled resource file (`.res`) holding an `.ico` as icon group 1 (its images as icons 1..n).
-fn icon_res(ico: &[u8]) -> Vec<u8> {
+/// A compiled resource file (`.res`) holding an `.ico` as icon group 1 (its images as icons 1..n) and
+/// an application manifest as `RT_MANIFEST` 1.
+fn windows_res(ico: &[u8], app_manifest: &[u8]) -> Vec<u8> {
     const RT_ICON: u16 = 3;
     const RT_GROUP_ICON: u16 = 14;
+    const RT_MANIFEST: u16 = 24;
     let u16_at = |i: usize| u16::from_le_bytes([ico[i], ico[i + 1]]);
     let u32_at = |i: usize| u32::from_le_bytes(ico[i..i + 4].try_into().unwrap());
     assert!(ico.len() >= 6 && u16_at(0) == 0 && u16_at(2) == 1, "assets/folo.ico is not an icon file");
@@ -104,6 +111,7 @@ fn icon_res(ico: &[u8]) -> Vec<u8> {
         group.extend(id.to_le_bytes());
     }
     entry(&mut out, RT_GROUP_ICON, 1, 0x1030, &group);
+    entry(&mut out, RT_MANIFEST, 1, 0x0030, app_manifest);
     out
 }
 

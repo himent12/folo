@@ -284,7 +284,7 @@ fn run_checks(platform: &Rc<WindowsPlatform>, checks: &mut Checks, mode: Mode, s
     mouse(checks, hwnd, scale, &log);
     keys(checks, hwnd, &log);
     resize(checks, hwnd, scale, &log, &window);
-    modes(checks, hwnd, &window, fg0);
+    modes(checks, hwnd, &window, &log, fg0);
     pacing(checks, &window, &log, &frame);
     dispatcher(checks, platform);
     if !quick {

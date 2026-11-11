@@ -164,8 +164,14 @@ impl Application {
     }
 }
 
-/// The text backend the real platforms use: DirectWrite on Windows, cosmic-text elsewhere.
+/// The text backend the real platforms use: DirectWrite on Windows, cosmic-text elsewhere. On Windows,
+/// `FOLO_UI_PLATFORM=winit` with the `portable-text` feature takes cosmic-text too, so the winit check there
+/// runs what Linux and macOS run.
 fn native_text_system() -> anyhow::Result<Arc<dyn crate::PlatformTextSystem>> {
+    #[cfg(all(windows, feature = "winit", feature = "portable-text"))]
+    if std::env::var("FOLO_UI_PLATFORM").is_ok_and(|platform| platform == "winit") {
+        return crate::platform::headless::text_backend(crate::TextBackend::Portable);
+    }
     crate::platform::headless::text_backend(crate::TextBackend::Native)
 }
 

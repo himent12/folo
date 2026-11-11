@@ -144,6 +144,12 @@ impl WindowInner {
     /// Asks the core to draw now. `expose`: the window lost what it showed, so the next present
     /// copies all of the frame and the core must present. Returns whether the core was asked.
     pub(crate) fn draw(&self, expose: bool, force_render: bool) -> bool {
+        // Nothing is drawn while minimized (GPUI takes the frame callback away there): a minimized
+        // window still gets WM_PAINT where no shell hides it, and a frame drawn then would see the
+        // window as neither maximized nor full screen. The restore's WM_SIZE draws.
+        if self.state.borrow().minimized {
+            return false;
+        }
         if expose {
             self.state.borrow_mut().full_present = true;
         }

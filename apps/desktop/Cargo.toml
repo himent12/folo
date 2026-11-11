@@ -21,6 +21,10 @@ path = "src/main.rs"
 [features]
 # Counts allocations for `--bench-frames` (folo-ui's frame bench); off in every shipped build.
 bench-alloc = []
+# On Windows, the Linux / macOS backend for a check on the dev machine: build with `--features winit,portable-text`
+# and run with FOLO_UI_PLATFORM=winit (folo-ui's features; always on elsewhere).
+winit = ["folo-ui/winit"]
+portable-text = ["folo-ui/portable-text"]
 
 [dependencies]
 folo-ui = { path = "ui" }
