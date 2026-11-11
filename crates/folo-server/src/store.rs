@@ -235,8 +235,8 @@ pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate:
 
 /// The file name a model's weights are offered under: its name reduced to `A-Z a-z 0-9 . _ -` (anything else
 /// becomes `_`, outer dots are dropped, at most 200 characters, so it is a file name on every OS), then `.folo`,
-/// `-f16.folo` for the f16 export, or, as `POST /api/models/{id}/export` names its files, `.onnx` (`-f16.onnx` with
-/// `half`).
+/// `-f16.folo` for the f16 export, or, as `POST /api/models/{id}/export` names its files, `.onnx` with the
+/// switches' suffix (`-decoded`, `-f16`, `-decoded-f16`: [`folo_api::OnnxSwitches::file_suffix`]).
 pub fn weights_file_name(model_name: &str, format: WeightsFormat) -> String {
     let stem: String = model_name
         .chars()
@@ -251,8 +251,7 @@ pub fn weights_file_name(model_name: &str, format: WeightsFormat) -> String {
     match format {
         WeightsFormat::Stored => format!("{stem}.folo"),
         WeightsFormat::F16 => format!("{stem}-f16.folo"),
-        WeightsFormat::Onnx(s) if s.half => format!("{stem}-f16.onnx"),
-        WeightsFormat::Onnx(_) => format!("{stem}.onnx"),
+        WeightsFormat::Onnx(s) => format!("{stem}{}.onnx", s.file_suffix()),
     }
 }
 

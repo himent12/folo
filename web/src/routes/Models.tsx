@@ -4,6 +4,7 @@ import Search from '$icons/search';
 import { computed, css, For, MediaQuery, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { bestMark, bestWord } from '$lib/bestMark';
+import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run } from '$lib/api/types';
 import { ago, bytes, compact, date, metric, num, sizeIn, sizeUnit } from '$lib/format';
@@ -18,6 +19,7 @@ import ErrorState from '$lib/ui/ErrorState';
 import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import Versus from './models/Versus';
+import { isLast } from './model/weightsEpoch';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
@@ -76,17 +78,27 @@ const range = (n: number) => Array.from({ length: n }, (_, i) => i);
 export default function Models() {
   setCrumbs({ label: 'Models' });
 
-  const models = new Resource((s) => hub.api.models(s));
+  // Kept current: a run that ends or is deleted, or the tab shown again, fetches the list again (lib/api/models).
+  const models = modelsResource();
   // No models yet: the empty state's New run is the page's create action, so the top bar's steps aside.
   ownCreateAction(() => models.data?.length === 0);
   // Only for source-run names and evaluation datasets; the list still renders if these fail.
   const runs = new Resource((s) => hub.api.runs(s));
+  refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
+  // Where imported .folo files go, for the empty state (the server's data dir, when it says; the mock has none).
+  const system = new Resource((s) => hub.api.system(s));
+  const modelsDir = computed(() => (system.data?.data_dir ? `\`${system.data.data_dir}/models\`` : "the models folder of the server's data directory"));
   // This server's measured speed, for the engine benchmarks' "Measured on this server" lines (null on older servers).
   const throughput = new Resource((s) => loadThroughput(hub.api, s));
   const benchHere = computed(() => [measuredLatency(throughput.data, 'folo-n'), measuredTraining(throughput.data, 'folo-n')].filter(Boolean).length);
 
   const runById = computed(() => new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r])));
+  /** A run's `-last` model when the run's best epoch was its last: the same weights as its `-best` (model/weightsEpoch). */
+  const sameAsBest = (m: Model) => {
+    const r = isLast(m) && m.run_id ? runById.get().get(m.run_id) : undefined;
+    return !!r && r.status === 'completed' && r.best?.epoch === r.epochs;
+  };
   const sourceName = (m: Model) => (m.run_id ? (runById.get().get(m.run_id)?.name ?? m.run_id) : '');
   const modelById = computed(() => new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
   /** The model a trained model was fine-tuned from (its run's starting weights); null for imported weights. */
@@ -189,8 +201,10 @@ export default function Models() {
     const decimals = new Map<string, number>();
     for (const g of groups.get()) {
       if (!g.ranked || g.rows.length < 2) continue;
-      const m = bestMark(g.rows.map((r) => r.metrics?.map50_95));
+      // A run's last checkpoint that is its best epoch is the same weights: it is not a second contender.
+      const m = bestMark(g.rows.map((r) => (sameAsBest(r) ? null : r.metrics?.map50_95)));
       for (const i of m.best) marks.set(g.rows[i]!.id, bestWord(m));
+      for (const r of g.rows) if (sameAsBest(r)) marks.set(r.id, 'same as best');
       if (m.decimals > 3) for (const r of g.rows) decimals.set(r.id, m.decimals);
     }
     return { marks, decimals };
@@ -238,13 +252,23 @@ export default function Models() {
     </>
   );
 
-  const bestText = (m: () => Model) => (best.get().marks.has(m().id) ? <span class="best">{best.get().marks.get(m().id)}</span> : null);
+  const bestText = (m: () => Model) =>
+    best.get().marks.has(m().id) ? (
+      <span class="best" title={sameAsBest(m()) ? 'Best and last are the same epoch: the same weights' : undefined}>
+        {best.get().marks.get(m().id)}
+      </span>
+    ) : null;
 
   return (
     <Page
       title="Models"
       // One fixed line: the counts live at the list's end, so nothing here changes as the list loads.
-      sub={() => <span>Trained, published and imported weights, ranked within each evaluation dataset and split.</span>}
+      sub={() => (
+        <span>
+          Trained, published and imported weights, ranked within each evaluation dataset and split. To import a .folo file, put it in the models
+          folder of the server's data directory.
+        </span>
+      )}
       // Phones: one line, so the list starts 16 px under it.
       subPhone={() => <span>Ranked per dataset and split.</span>}
     >
@@ -335,7 +359,7 @@ export default function Models() {
                   <EmptyState
                     icon={Box}
                     title="No models yet"
-                    description="A training run saves its best weights here when it finishes."
+                    description={`A training run saves its best weights here when it finishes. To import a .folo file, copy it into ${modelsDir.get()} on the server's machine.`}
                     // The page's only action (its header has none), so primary.
                     actions={() => (
                       <Button variant="primary" icon={Plus} href={href('/runs/new')}>
@@ -407,7 +431,7 @@ export default function Models() {
                         return (
                           <tr class="link" data-row aria-label={m().name} onclick={() => router.go(`/models/${m().id}`)}>
                             <td>
-                              <a class="name" href={href(`/models/${m().id}`)} title={m().about ?? m().id} onclick={(e) => e.stopPropagation()}>
+                              <a class="name" href={href(`/models/${m().id}`)} title={m().about ?? m().name} onclick={(e) => e.stopPropagation()}>
                                 {m().name}
                               </a>
                             </td>
@@ -834,6 +858,16 @@ css`
       display: grid;
       justify-items: end;
       flex-shrink: 0;
+    }
+    /* "best" over the score, not beside it: the side stays narrow, so the name's meta line never wraps (and rows with
+       and without the word are the same height). */
+    .m-side .map {
+      display: grid;
+      justify-items: end;
+    }
+    .m-side .best {
+      margin-right: 0;
+      line-height: var(--type-sm-line);
     }
     .m-col {
       margin-left: auto;

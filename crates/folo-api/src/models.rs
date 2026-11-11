@@ -306,6 +306,18 @@ impl OnnxSwitches {
     pub fn any(&self) -> bool {
         self.decode || self.dynamic || self.half
     }
+
+    /// What an ONNX file's name gets for these switches, before `.onnx`: `-decoded` with `decode`, `-f16` with
+    /// `half`, both `-decoded-f16` (as `folo export` names its files). The export path and the download name share it,
+    /// so two different graphs are never offered under one name.
+    pub fn file_suffix(&self) -> &'static str {
+        match (self.decode, self.half) {
+            (true, true) => "-decoded-f16",
+            (false, true) => "-f16",
+            (true, false) => "-decoded",
+            (false, false) => "",
+        }
+    }
 }
 
 /// The full body of `POST /api/models/{id}/export`: [`ExportRequest`]'s `format` plus the [`OnnxSwitches`]

@@ -6,7 +6,7 @@ import ChevronDown from '$icons/chevron-down';
 import { bindable, css, defaults, For } from 'fw';
 import type { Model } from '$lib/api/types';
 import type { Evaluation } from '$lib/api/evaluation';
-import { evaluatedOn, metricsLabel, type EvalSource } from '$lib/evaluated';
+import { evaluatedOn, metricsLabel, sourceShort, type EvalSource } from '$lib/evaluated';
 import { atBestF1, conf, metric } from '$lib/format';
 import InfoButton from '$lib/ui/InfoButton';
 
@@ -37,6 +37,11 @@ export default function KpiSummary(props: KpiSummaryProps) {
 
   // What the four numbers mean: one place in every layout, after the strip's first label (the strip and the phone's
   // 2 × 2 grid alike), so it never lands on whichever cell happens to be last or top-right.
+  // An imported or published file's stored metrics: what they were measured on is not recorded. The page's /eval
+  // provenance (the curves) is not theirs, so it is never given as theirs (models F15: the list said "split unknown"
+  // while this strip said "validation split of shapes").
+  const fromFile = () => !p.m.run_id;
+  const label = () => (fromFile() ? 'Metrics stored with the file' : metricsLabel(p.source));
   const kHelp = () => <InfoButton label="What these metrics mean" controls="metric-help" bind:open={helpOpen} class="k-help" />;
   const metricHelp = () => (
     <dl class="k-body" id="metric-help">
@@ -62,7 +67,17 @@ export default function KpiSummary(props: KpiSummaryProps) {
       <div>
         <dt>Evaluated on</dt>
         <dd>
-          {evaluatedOn(p.source, p.ev ? p.ev.images : null)}, at {p.m.imgsz} px, {p.head === 'o2o' ? 'end to end (the one-to-one head, no NMS)' : 'with NMS IoU 0.7'}.
+          {fromFile() ? (
+            <>
+              Not recorded: these numbers came with the file, and it does not say which dataset or split they are on (so the
+              Models list does not rank them).
+              {sourceShort(p.source) ? ` The curves and the matrix are this server's own evaluation, on ${sourceShort(p.source)}.` : ''}
+            </>
+          ) : (
+            <>
+              {evaluatedOn(p.source, p.ev ? p.ev.images : null)}, at {p.m.imgsz} px, {p.head === 'o2o' ? 'end to end (the one-to-one head, no NMS)' : 'with NMS IoU 0.7'}.
+            </>
+          )}
         </dd>
       </div>
     </dl>
@@ -72,7 +87,7 @@ export default function KpiSummary(props: KpiSummaryProps) {
     <>
       {p.grid ? (
         // Phones: the summary heads its section, one line that unfolds the grid.
-        <section class="kpi-grid num" class:folded={p.kpiFolded} aria-label={metricsLabel(p.source)}>
+        <section class="kpi-grid num" class:folded={p.kpiFolded} aria-label={label()}>
           {p.kpiFolded ? (
             <button type="button" class="kpi-line" aria-expanded={kpiOpen.get()} aria-controls="kpi-cells" onclick={() => kpiOpen.set(!kpiOpen.get())}>
               <span class="kl-name">mAP50-95</span>
@@ -100,7 +115,7 @@ export default function KpiSummary(props: KpiSummaryProps) {
           ) : null}
         </section>
       ) : (
-        <section class="kpis" aria-label={metricsLabel(p.source)}>
+        <section class="kpis" aria-label={label()}>
           <For each={kpis(p.m)} key={(k) => k.label}>
             {(k, i) => (
               <div class="kpi" class:hero={i() === 0}>

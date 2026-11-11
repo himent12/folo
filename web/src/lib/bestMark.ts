@@ -13,11 +13,16 @@ export interface BestMark {
   decimals: number;
 }
 
-/** The best of `values` (higher is better); missing values never win and never count towards the two needed. */
+/**
+ * The best of `values` (higher is better); missing values never win and never count towards the two needed, and a top
+ * of 0 is no best.
+ */
 export function bestMark(values: readonly (number | null | undefined)[], decimals = 3, max = 6): BestMark {
   const finite = values.flatMap((v, i) => (v != null && Number.isFinite(v) ? [{ v, i }] : []));
   if (finite.length < 2) return { best: new Set(), joint: false, decimals };
   const top = Math.max(...finite.map((f) => f.v));
+  // Nothing scored: a 0 is not a best.
+  if (!(top > 0)) return { best: new Set(), joint: false, decimals };
   const best = new Set(finite.filter((f) => f.v === top).map((f) => f.i));
   const rest = finite.filter((f) => f.v !== top).map((f) => f.v);
   let d = decimals;

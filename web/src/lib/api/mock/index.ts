@@ -376,6 +376,9 @@ export class MockApi extends MockTrainingApi implements Api {
     return this.#predict(input, opts, false);
   }
 
+  /** Models the demo's server has predicted with: its first call of each is `cold` (the warm-up is in its timing). */
+  #warm = new Set<string>();
+
   #predict(input: PredictInput, opts: PredictOptions, server: boolean): Promise<Prediction> {
     return (async () => {
       const models = await this.models();
@@ -416,7 +419,10 @@ export class MockApi extends MockTrainingApi implements Api {
       if ((opts.iou ?? 0.7) > 0.8) boxes = withDuplicates(boxes, width, height, hash(m.id) ^ (width * 31 + height));
       const r = rng(hash(m.id) + width + height);
       const scale = (m.imgsz / 640) ** 2;
-      const inference = archInfo[m.arch].ms * scale * (1 + (r() - 0.5) * 0.08);
+      const cold = server && !this.#warm.has(m.id);
+      if (server) this.#warm.add(m.id);
+      // A model's first prediction on the server includes its warm-up (GPU kernels compiled, buffers allocated).
+      const inference = archInfo[m.arch].ms * scale * (1 + (r() - 0.5) * 0.08) + (cold ? 180 * scale : 0);
       const pre = 0.55 + r() * 0.35;
       const post = 0.12 + boxes.length * 0.004 + r() * 0.05;
       const out: PredictBox[] = boxes
@@ -429,6 +435,7 @@ export class MockApi extends MockTrainingApi implements Api {
         boxes: out,
         timing: { preprocess_ms: round(pre, 2), inference_ms: round(inference, 2), postprocess_ms: round(post, 2), total_ms: round(pre + inference + post, 2) },
         device: 'gpu:0',
+        ...(cold ? { cold: true } : {}),
       };
     })();
   }

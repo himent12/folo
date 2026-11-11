@@ -294,11 +294,12 @@ export function attachmentName(header: string | null): string | null {
 }
 
 /**
- * The name a model's ONNX download gets on the server (docs/API.md): `<name>.onnx`, `<name>-f16.onnx` with `half`,
- * characters outside `A-Z a-z 0-9 . _ -` as `_`. Studio names the file before it asks for it.
+ * The name a model's ONNX download gets on the server (docs/API.md): `<name>.onnx`, `-decoded.onnx` with `decode`,
+ * `-f16.onnx` with `half`, `-decoded-f16.onnx` with both, characters outside `A-Z a-z 0-9 . _ -` as `_`. Studio names
+ * the file before it asks for it.
  */
-export function onnxFileName(modelName: string, half: boolean): string {
-  return `${modelName.replace(/[^A-Za-z0-9._-]/g, '_')}${half ? '-f16' : ''}.onnx`;
+export function onnxFileName(modelName: string, half: boolean, decode = false): string {
+  return `${modelName.replace(/[^A-Za-z0-9._-]/g, '_')}${decode ? '-decoded' : ''}${half ? '-f16' : ''}.onnx`;
 }
 
 /** Builds a query string from defined values only. */
@@ -643,7 +644,7 @@ export class HttpApi implements Api {
       const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
       throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the ONNX file (HTTP ${res.status}).`, err?.hint);
     }
-    const name = attachmentName(res.headers.get('content-disposition')) ?? `model${switches.half ? '-f16' : ''}.onnx`;
+    const name = attachmentName(res.headers.get('content-disposition')) ?? onnxFileName('model', !!switches.half, !!switches.decode);
     return new File([await res.blob()], name, { type: 'application/octet-stream' });
   }
 

@@ -71,6 +71,8 @@ describe('HttpApi: queue and ONNX (docs/API.md, #129)', () => {
   it('names files by the server rule', () => {
     expect(onnxFileName('fasteners n/best', false)).toBe('fasteners_n_best.onnx');
     expect(onnxFileName('shapes-s-best', true)).toBe('shapes-s-best-f16.onnx');
+    expect(onnxFileName('shapes-s-best', false, true)).toBe('shapes-s-best-decoded.onnx');
+    expect(onnxFileName('shapes-s-best', true, true)).toBe('shapes-s-best-decoded-f16.onnx');
     expect(attachmentName('attachment; filename="a.onnx"')).toBe('a.onnx');
     expect(attachmentName(null)).toBeNull();
   });

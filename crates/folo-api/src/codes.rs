@@ -70,6 +70,12 @@ pub const CODES: &[Code] = &[
     c("image_not_found", 404, 3, "no such image"),
     c("model_not_found", 404, 3, "no such model or weights file"),
     c("run_not_found", 404, 3, "no such run"),
+    c(
+        "no_matching_dataset",
+        404,
+        3,
+        "no registered dataset has a models-folder model's classes, so it cannot be evaluated",
+    ),
     c("label_job_not_found", 404, 3, "no such labeling job"),
     c("path_not_found", 404, 3, "no such file or folder"),
     c(

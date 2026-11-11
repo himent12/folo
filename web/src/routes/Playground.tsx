@@ -2,10 +2,11 @@ import Box from '$icons/box';
 import Check from '$icons/check';
 import Plus from '$icons/plus';
 import RotateCcw from '$icons/rotate-ccw';
-import { computed, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack } from 'fw';
+import { computed, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack, type Signal } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { MockApi } from '$lib/api/mock';
+import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model, PredictInput, Prediction, Run } from '$lib/api/types';
 import { modelChoices, scoreContext } from '$lib/scoreSummary';
@@ -35,7 +36,12 @@ import ClassList from './playground/ClassList';
 import PhoneDetails from './playground/PhoneDetails';
 import SidePanels from './playground/SidePanels';
 import { BACKEND_NAME, DEFAULTS, FETCH, simulate } from './playground/predict';
+import { ACCEPT, droppedImages, takeImage } from './playground/intake';
+import { keepSession } from './playground/keepSession';
+import { sampleImages } from './playground/samples';
+import { playgroundPath } from './playground/session';
 import { imageBlob, type Source } from './playground/source';
+import { followVanished } from './playground/vanished';
 
 type RunOn = 'server' | Backend;
 type Seg = 'file' | 'dataset' | 'webcam';
@@ -96,10 +102,12 @@ export default function Playground() {
   // Dragging the sheet's header down closes it; a shorter pull springs back (ui/sheetDrag, as every sheet).
 
   // ---------- model ----------
-  const models = new Resource((s) => hub.api.models(s));
+  // Kept current (lib/api/models): a deleted model leaves the picker, a finished run's joins it.
+  const models = modelsResource();
   // What each model's score is on (lib/scoreSummary): the picker groups models by dataset and split, best first within
   // a group (on a tie the earlier checkpoint), and never ranks one group against another.
   const runs = new Resource((s) => hub.api.runs(s));
+  refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
   const choices = computed(() => {
     // Until the runs and datasets answer (or fail) the splits are unknown: wait, so the default never switches.
@@ -122,8 +130,9 @@ export default function Playground() {
 
   function chooseModel(id: string) {
     pickedModel.set(id);
-    router.go(`/playground?model=${encodeURIComponent(id)}`, { replace: true });
+    router.go(playgroundPath({ model: id, source: source.peek(), conf: conf.peek(), iou: iou.peek(), maxDet: maxDet.peek() }), { replace: true });
   }
+  followVanished(() => model.get(), () => ranked.get(), chooseModel);
 
   effect(() => {
     const s = source.get();
@@ -167,23 +176,14 @@ export default function Playground() {
 
   async function setFile(file: File | Blob, name = file instanceof File ? file.name : 'pasted image') {
     const seq = ++decodeSeq;
-    if (file.type && !file.type.startsWith('image/')) {
-      toast.error(new Error(`${name} is not an image.`), 'Unsupported file');
-      return;
-    }
-    let width = 0;
-    let height = 0;
-    try {
-      const bmp = await createImageBitmap(file);
-      width = bmp.width;
-      height = bmp.height;
-      bmp.close();
-    } catch {
-      if (seq === decodeSeq && !destroyed) toast.error(new Error('That file could not be decoded. Use a JPEG, PNG or WebP.'), 'Unsupported image');
-      return;
-    }
+    // An image the server cannot read (GIF, AVIF...) comes back as a PNG (./playground/intake).
+    const t = await takeImage(file, name);
     if (seq !== decodeSeq || destroyed) return;
-    setSource({ kind: 'file', file, name, url: URL.createObjectURL(file), width, height });
+    if ('error' in t) {
+      toast.error(new Error(t.error), 'Unsupported image');
+      return;
+    }
+    setSource({ kind: 'file', file: t.file, name, url: URL.createObjectURL(t.file), width: t.width, height: t.height });
   }
 
   function clear() {
@@ -221,8 +221,11 @@ export default function Playground() {
   function ondrop(e: DragEvent) {
     e.preventDefault();
     dragging.set(false);
-    const file = e.dataTransfer?.files[0];
-    if (file) void setFile(file);
+    const [file, ...rest] = droppedImages(e.dataTransfer?.files);
+    if (!file) return;
+    void setFile(file);
+    // One image runs at a time: the others are not dropped without a word.
+    if (rest.length) toast.info(`Using ${file.name}`, `The Playground runs one image at a time, so the other ${rest.length === 1 ? 'image was' : `${rest.length} images were`} left out.`);
   }
 
   function ondragover(e: DragEvent) {
@@ -237,26 +240,7 @@ export default function Playground() {
     if (!next || !(e.currentTarget as HTMLElement).contains(next)) dragging.set(false);
   }
 
-  // Sample images for the empty state: a few from each dataset, the selected model's own dataset first.
-  const samplePool = new Resource(async (s) => {
-    const list = await hub.api.datasets(s);
-    const per = await Promise.all(
-      list.slice(0, 4).map((d) =>
-        hub.api
-          .datasetImages(d.id, { split: d.splits.val ? 'val' : 'train', limit: 3 }, s)
-          .then((r) => r.images.map((img) => ({ ds: d, img })))
-          .catch(() => []),
-      ),
-    );
-    return per;
-  });
-  const samples = computed(() => {
-    const pool = samplePool.data;
-    if (!pool) return samplePool.error ? [] : undefined;
-    const key = model.get()?.classes.join('|');
-    const groups = [...pool].sort((a, b) => Number(b[0]?.ds.classes.join('|') === key) - Number(a[0]?.ds.classes.join('|') === key));
-    return groups.flat().slice(0, 6);
-  });
+  const samples = sampleImages(model);
 
   // ---------- where inference runs ----------
   // On the server (POST /api/predict), or in this browser through folo-wasm on WebGPU or the CPU (docs/WASM.md).
@@ -291,7 +275,8 @@ export default function Playground() {
   effect(() => {
     if (browserOff.get() && untrack(() => runOn.get()) !== 'server') runOn.set('server');
   });
-  const runOnNote = computed(() => (browserOff.get() ? 'No in-browser runtime' : !webgpu ? 'No WebGPU in this browser' : null));
+  // A build without the runtime offers the server alone, so there is no choice to explain (ModelPickers hides it).
+  const runOnNote = computed(() => (!browserOff.get() && !webgpu ? 'No WebGPU in this browser' : null));
   /** .folo files the user picked, by model id. */
   const localWeights = signal(new Map<string, File>());
   /** The server cannot send this model's file: ask for it. */
@@ -352,13 +337,30 @@ export default function Playground() {
   const tbody = signal<HTMLTableSectionElement>();
   const tab = signal<'detections' | 'json'>('detections');
 
+  // The image, its result and the thresholds outlive the page for the tab; a dataset image and the thresholds are in
+  // the URL (./playground/session).
+  const restored = keepSession({
+    source,
+    pred,
+    runOn: runOn as Signal<string>,
+    conf,
+    iou,
+    maxDet,
+    labels,
+    scores,
+    truth,
+    hidden,
+    setSource,
+    model: () => modelId.get() ?? queryModel.get() ?? null,
+  });
+
   effect(() => {
     const id = modelId.get();
     const s = source.get();
     const on = runOn.get();
     const file = localWeights.get().get(id ?? '');
     void retryTick.get();
-    if (!id || !s) return;
+    if (!id || !s || untrack(() => restored(id, s, on))) return;
     const input: PredictInput = s.kind === 'file' ? { kind: 'file', file: s.file } : { kind: 'dataset', dataset_id: s.ds.id, image_id: s.img.id };
     const ctrl = new AbortController();
     untrack(() => {
@@ -412,9 +414,10 @@ export default function Playground() {
           weightsMissing.set(true);
           return;
         }
+        // Said once, in place above the image (with its ways out): no toast repeats it, and no earlier result stays on
+        // screen as if it were this run's.
+        pred.set(null);
         error.set(e);
-        // Out of GPU memory is answered in place, with its ways out; a toast would only repeat it.
-        if (!(on === 'server' && isOom(e))) toast.error(e, 'Prediction failed');
       },
     );
     return () => ctrl.abort();
@@ -644,7 +647,7 @@ export default function Playground() {
   const timingBody = () => (
     <>
       {pred.get() ? (
-        <TimingBar timing={pred.get()!.timing} device={deviceText.get()} />
+        <TimingBar timing={pred.get()!.timing} device={deviceText.get()} cold={pred.get()!.cold} />
       ) : predicting.get() ? (
         <div class="t-sk">
           <Skeleton h="28px" w="50%" />
@@ -691,7 +694,7 @@ export default function Playground() {
       <input
         ref={(e) => (fileInput = e)}
         type="file"
-        accept="image/*"
+        accept={ACCEPT}
         class="sr-only"
         tabindex={-1}
         aria-hidden="true"
@@ -861,7 +864,7 @@ export default function Playground() {
       <DatasetPicker
         bind:open={pickerOpen}
         prefer={classes.get()}
-        onpick={(ds, img) => setSource({ kind: 'dataset', ds, img })}
+        onpick={(ds, img, at) => setSource({ kind: 'dataset', ds, img, at })}
         onclose={() => seg.set(source.peek()?.kind ?? 'file')}
       />
     </>

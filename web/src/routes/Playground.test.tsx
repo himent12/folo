@@ -3,11 +3,13 @@ import { flush as flushSync } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../framework/testing';
 import { hub } from '$lib/api/index';
+import { ApiError } from '$lib/api/client';
 import { MockApi, type Scenario } from '$lib/api/mock';
 import { resetWasmProbe } from '$lib/inference/browser';
 import { prefs } from '$lib/prefs';
 import { parse, router } from '$lib/router';
 import Playground from './Playground';
+import { session } from './playground/session';
 
 /** Port of `mount(Playground, { target })`: renders into `target`; `unmount(c)` is `c.unmount()`. */
 const mount = (_: typeof Playground, o: { target: HTMLElement }) => render(() => <Playground />, o.target);
@@ -46,6 +48,8 @@ afterEach(() => {
   if (c) unmount(c);
   c = undefined;
   target?.remove();
+  // Each test starts a fresh tab: no image or thresholds kept from the one before.
+  session.set(null);
 });
 
 describe('Playground: a failed prediction', () => {
@@ -142,20 +146,21 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
     document.body.appendChild(target);
     router.route = parse('#/playground?model=m_shapes_s');
     c = mount(Playground, { target });
-    return until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+    await until(() => target.querySelector('.model-pick'), 'the model picker');
+    return target.querySelector('[role="radiogroup"][aria-label="Run the model on"]');
   }
   const option = (g: Element, name: string) => [...g.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === name)!;
 
-  it('offers WebGPU and CPU off, with the reason, where the build has none', async () => {
-    const g = await open('no-wasm');
-    await until(() => option(g, 'CPU').disabled, 'the CPU choice to turn off');
-    expect(option(g, 'Server').disabled).toBe(false);
-    expect(option(g, 'WebGPU').disabled).toBe(true);
-    expect(target.querySelector('.runon')?.getAttribute('aria-describedby')).toBe('runon-note');
+  // models F14: options this build can never use are not shown (it runs on the server, and nothing needs saying).
+  it('offers no browser choice where the build has none, and says nothing about it', async () => {
+    await open('no-wasm');
+    await until(() => !target.querySelector('.runon'), 'the Run on choice to go');
+    expect(target.textContent).not.toContain('in-browser runtime');
   });
 
   it('offers the CPU where the build has it', async () => {
-    const g = await open('normal');
+    await open('normal');
+    const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
     await until(() => target.querySelector('select, .model-pick'), 'the pickers');
     await new Promise((r) => setTimeout(r, 50));
     flushSync();
@@ -181,12 +186,10 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
       document.body.appendChild(target);
       router.route = parse('#/playground?model=m_shapes_s');
       c = mount(Playground, { target });
-      const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+      await until(() => target.querySelector('.model-pick'), 'the model picker');
       expect((await api.system()).features).toContain('web_wasm');
-      await until(() => option(g, 'CPU').disabled, 'the CPU choice to turn off');
+      await until(() => !target.querySelector('.runon'), 'the Run on choice to go');
       expect(fetch).toHaveBeenCalledWith(expect.stringContaining('folo-wasm/folo_wasm_bg.wasm'), { method: 'HEAD' });
-      expect(option(g, 'WebGPU').disabled).toBe(true);
-      expect(target.querySelector('#runon-note')?.textContent).toBe('No in-browser runtime');
     } finally {
       vi.unstubAllGlobals();
       resetWasmProbe();
@@ -228,5 +231,100 @@ describe('Playground: an end-to-end (o2o) model', () => {
 
   it('still suppresses them for an NMS (o2m) model', async () => {
     expect(await detections('m_shapes_n')).toEqual({ head: 'o2m', rows: 1 });
+  });
+});
+
+describe('Playground: the session', () => {
+  it('keeps the image, its result and the thresholds when the page is left and opened again', async () => {
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const conf = target.querySelector<HTMLInputElement>('.slider input[type="range"]')!;
+    conf.value = '0.5';
+    conf.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const rows = target.querySelectorAll('#pg-panel tbody tr').length;
+    unmount(c!);
+    target.remove();
+    const predict = vi.spyOn(hub.api, 'predict');
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground');
+    c = mount(Playground, { target });
+    await until(() => target.querySelectorAll('#pg-panel tbody tr').length === rows, 'the same detections');
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.5');
+    expect(target.querySelector('button.sample')).toBeNull();
+    // The kept result is shown as it was: the same answer is not asked for twice.
+    expect(predict).not.toHaveBeenCalled();
+  });
+
+  it('opens a linked dataset image with its thresholds', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    const ds = (await api.datasets())[0]!;
+    const img = (await api.datasetImages(ds.id, { split: 'val', limit: 3 })).images[2]!;
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse(`#/playground?model=m_hard_s&dataset=${ds.id}&image=${encodeURIComponent(img.id)}&split=val&conf=0.4`);
+    c = mount(Playground, { target });
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    expect(session.get()?.source).toMatchObject({ kind: 'dataset', img: { id: img.id }, at: 2 });
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.4');
+  });
+});
+
+describe('Playground: a failure is said once', () => {
+  it('shows a failed prediction in place, with no toast', async () => {
+    const { toast } = await import('$lib/ui/toast');
+    toast.items = [];
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    api.predict = async () => {
+      throw new ApiError(422, 'image_decode_failed', 'not an image', 'send a JPEG, PNG, BMP or WebP file');
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('.notice'), 'the notice');
+    expect(target.querySelector('.notice .title')?.textContent).toBe('Prediction failed');
+    expect(toast.items).toEqual([]);
+  });
+});
+
+describe('Playground: a cold first prediction', () => {
+  it("says the first call's time includes loading the model, and the next one does not", async () => {
+    await run('normal', 'm_hard_s');
+    const note = await until(() => target.querySelector('p.cold'), 'the cold note');
+    expect(note.textContent).toBe('Includes loading the model: the next image runs faster.');
+    // A first call's rate would be the warm-up's: none is given.
+    expect(note.parentElement!.querySelector('.rate')).toBeNull();
+    // The model is warm now: the next call is not cold.
+    const api = hub.api as MockApi;
+    const ds = (await api.datasets())[0]!;
+    const img = (await api.datasetImages(ds.id, { split: 'val', limit: 2 })).images[1]!;
+    const p = await api.predict({ kind: 'dataset', dataset_id: ds.id, image_id: img.id }, { model_id: 'm_hard_s' });
+    expect(p.cold).toBeUndefined();
+  });
+});
+
+describe('Playground: the model caption', () => {
+  // models F17: a model without a score kept no caption line, and the workspace moved up 20 px on switching to it.
+  it('keeps the line under the model select for a model without a score', async () => {
+    const api = new MockApi('normal', 0);
+    const models = api.models.bind(api);
+    api.models = async () => (await models()).map((m) => (m.id === 'm_hard_s' ? { ...m, metrics: null } : m));
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    c = mount(Playground, { target });
+    const meta = await until(() => target.querySelector('#model-meta'), 'the caption');
+    expect(meta.textContent).toBe('Not evaluated');
   });
 });

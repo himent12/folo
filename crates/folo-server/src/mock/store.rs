@@ -609,6 +609,7 @@ impl Store for MockStore {
                 total_ms: round(preprocess_ms + inference_ms + postprocess_ms),
             },
             device: "gpu:0".into(),
+            cold: false,
         })
     }
 

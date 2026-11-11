@@ -18,6 +18,7 @@ import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
 // The head and precision in the words Run's Config and Compare use.
 import { HEAD_LABEL, PRECISION_LABEL } from '../run/resolved';
+import { weightsEpoch } from './weightsEpoch';
 
 export interface DetailsListProps {
   m: Model;
@@ -30,6 +31,8 @@ export interface DetailsListProps {
   source: EvalSource;
   ev: Evaluation | null;
   lineage: Origin | null;
+  /** No registered dataset has the model's classes: there is no evaluation to describe. */
+  unevaluated?: boolean;
   stored: string | null;
   head: 'o2m' | 'o2o';
   aboutOpen?: boolean;
@@ -40,6 +43,8 @@ export interface DetailsListProps {
  * measured. It is a benchmark of the architecture, never this model's own timing, and is labelled as such.
  */
 const latency = (m: Model): number | undefined => e2eMs[m.arch];
+/** Bytes per parameter of the FOLO f16 export (as the Export dialog estimates it). */
+const F16_BYTES_PER_PARAM = 2.03;
 
 export default function DetailsList(props: DetailsListProps) {
   const aboutOpen = bindable(props, 'aboutOpen');
@@ -92,6 +97,12 @@ export default function DetailsList(props: DetailsListProps) {
           </div>
         </>
       ) : null}
+      {weightsEpoch(m(), props.run) ? (
+        <div class="kv">
+          <dt>Weights from</dt>
+          <dd class="num">{weightsEpoch(m(), props.run)}</dd>
+        </div>
+      ) : null}
       {props.stored ? (
         <div class="kv">
           <dt>Stored as</dt>
@@ -100,7 +111,14 @@ export default function DetailsList(props: DetailsListProps) {
       ) : null}
       <div class="kv">
         <dt>File size</dt>
-        <dd class="num">{bytes(m().bytes, prefs.units)}</dd>
+        {/* A training checkpoint (it has a training record) also holds the optimizer state and the averaged weights:
+            say why it is bigger than what Export writes. */}
+        <dd class="evald">
+          <span class="num">{bytes(m().bytes, prefs.units)}</span>
+          {m().trained_with && !m().fused ? (
+            <span class="faint">training checkpoint with optimizer state; exported as FOLO f16, about {bytes(m().params * F16_BYTES_PER_PARAM, prefs.units)}</span>
+          ) : null}
+        </dd>
       </div>
       <div class="kv wide">
         <dt>Classes</dt>
@@ -158,17 +176,21 @@ export default function DetailsList(props: DetailsListProps) {
         <dt>Evaluated on</dt>
         {/* The dataset as the value, the split and its images under it, so the row keeps the rail's alignment. */}
         <dd class="evald">
-          {src().datasetName && src().datasetId ? (
+          {props.unevaluated ? (
+            <span class="muted">Not evaluated: no registered dataset has its classes</span>
+          ) : src().datasetName && src().datasetId ? (
             <a class="link" href={href(`/datasets/${encodeURIComponent(src().datasetId!)}`)}>
               {src().datasetName}
             </a>
           ) : src().datasetName ? (
             <span>{src().datasetName}</span>
           ) : null}{' '}
-          <span class="num" class:faint={!!src().datasetName}>
-            {src().split ? `${splitWord(src().split!)} split` : 'split not reported'}
-            {props.ev ? `, ${num(props.ev.images)} ${props.ev.images === 1 ? 'image' : 'images'}` : ''}
-          </span>
+          {props.unevaluated ? null : (
+            <span class="num" class:faint={!!src().datasetName}>
+              {src().split ? `${splitWord(src().split!)} split` : 'split not reported'}
+              {props.ev ? `, ${num(props.ev.images)} ${props.ev.images === 1 ? 'image' : 'images'}` : ''}
+            </span>
+          )}
         </dd>
       </div>
       {props.lineage ? (

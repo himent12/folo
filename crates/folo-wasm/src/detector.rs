@@ -290,6 +290,7 @@ impl Detector {
                 boxes: pred.scored_boxes(p.classes()),
                 timing: pred.timing.to_api(),
                 device: p.device().to_string(),
+                cold: false,
             },
             backend: self.backend,
         })

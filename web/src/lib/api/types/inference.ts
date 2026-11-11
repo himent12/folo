@@ -23,6 +23,8 @@ export interface Prediction {
   device: string;
   /** Set when the prediction ran in this browser (folo-wasm, docs/WASM.md) instead of on the server. */
   backend?: 'webgpu' | 'cpu';
+  /** The model's first prediction since the server loaded it: `timing` includes its warm-up (absent: false). */
+  cold?: boolean;
 }
 
 export interface PredictOptions {

@@ -53,7 +53,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 401 | `unauthorized` | a request without the server's token (see Conventions) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
 | 403 | `forbidden_host` | any request to a server on loopback whose `Host` is not a loopback name nor an `--allow-host` one (see Conventions); the hint names `--allow-host` and `--token` |
-| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
+| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `no_matching_dataset` (`/eval` of a model no registered dataset has the classes of), `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
 | 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job, new benchmark entries and parts of an open one, 2 MiB elsewhere) |
@@ -244,7 +244,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   counts false positives predicted as `c`, and `confusion[n][n]` is always 0.
   In real mode the model's dataset is its run's (the registered copy while it is registered, else the path the run
   trained on); a model from the models folder is evaluated on the first registered dataset with exactly its classes
-  (`404 dataset_not_found` when there is none); `400 invalid_dataset` when the dataset's classes (names, in order)
+  (`404 no_matching_dataset` when there is none: the message gives the class count and the first four names); `400 invalid_dataset` when the dataset's classes (names, in order)
   are no longer the model's. Computed with folo-vision's validator (docs/METRICS.md; MODEL.md
   §8.7 settings: `conf 0.001`, `iou 0.7`, the model's `imgsz`) on the server's `--device`, then cached (in memory and
   in `cache/eval/<model id>.json`) until the weights file or the dataset's files change (results cached by servers
@@ -311,7 +311,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   remote browser gets the file instead of a server path.
   - `Content-Type: application/octet-stream` (also for ONNX, which has no registered media type), `Content-Length`,
     `Content-Disposition: attachment; filename="<model name>.folo"` (`<model name>-f16.folo`; ONNX as the export
-    names it: `<model name>.onnx`, `<model name>-f16.onnx` with `half`; characters outside `A-Z a-z 0-9 . _ -`
+    names it: `<model name>.onnx`, `-decoded.onnx` with `decode`, `-f16.onnx` with `half`, `-decoded-f16.onnx` with
+    both; characters outside `A-Z a-z 0-9 . _ -`
     become `_`, and the name is cut to 200 characters).
     Real files are streamed from disk (never read into memory whole), and never gzip-compressed.
   - Validators: a strong `ETag` (real mode: the file's size and modification time in nanoseconds, cheap and exact
@@ -546,8 +547,12 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   { "model_id": "m_31aa", "image": { "width": 1280, "height": 720 },
     "boxes": [ScoredBox],                       // highest score first
     "timing": { "preprocess_ms": 0.8, "inference_ms": 3.1, "postprocess_ms": 0.2, "total_ms": 4.1 },
-    "device": "gpu:0" }
+    "device": "gpu:0",
+    "cold": true }                              // only on a model's first prediction since it was loaded
   ```
+  `cold` (absent when false) marks the model's first prediction since the server loaded it: its `timing` includes the
+  warm-up (GPU kernels compiled, buffers allocated), so it is not what the next call takes. Such a call is never a
+  throughput sample (`GET /api/system/throughput` measures warm calls only).
   `conf` and `iou` must be in `0..=1`, `max_det >= 1`. Uploads up to 64 MiB; JPEG, PNG, BMP and WebP are accepted.
   `timing` values (here, in `folo predict --json` and in MCP) are milliseconds rounded to 0.1 µs (4 decimals).
   Boxes only use the model's classes: on a dataset image, ground-truth classes the model does not know (by name) are

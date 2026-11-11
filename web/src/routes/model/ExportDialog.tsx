@@ -95,7 +95,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   /** The ONNX switches go with the request when the server takes them (`weights_onnx` takes them as query parameters). */
   const onnxSwitches = computed(() => switchesOk.get() || onnxDirect.get());
   /** Direct ONNX download: the file it will be, by the server's naming rule, and the file once it arrived. */
-  const onnxName = computed(() => onnxFileName(model().name, onnxSwitches.get() && switches.get().half));
+  const onnxName = computed(() => onnxFileName(model().name, onnxSwitches.get() && switches.get().half, onnxSwitches.get() && switches.get().decode));
   const direct = computed(() => format.get() === 'onnx' && onnxDirect.get() && !demo.get());
   /** The format as listed, for the demo preview's size. */
   const picked = computed(() => formats.find((f) => f.value === format.get())!);
@@ -366,13 +366,14 @@ export default function ExportDialog(props: ExportDialogProps) {
                       </span>
                     </span>
                   </label>
-                  {f().value === 'onnx' && format.get() === 'onnx' && onnxSwitches.get() ? (
-                    // folo export's switches, under the format they belong to.
-                    <div class="switches" role="group" aria-label="ONNX options">
+                  {f().value === 'onnx' && onnxSwitches.get() ? (
+                    // folo export's switches, under the format they belong to: always there, off until ONNX is
+                    // picked, so choosing it does not grow the centred dialog under the pointer.
+                    <div class="switches" class:off={format.get() !== 'onnx'} role="group" aria-label="ONNX options">
                       <For each={switchOptions} key={(o) => o.key}>
                         {(o) => (
                           <label class="sw-opt">
-                            <input type="checkbox" bind:checked={switchOf(o().key)} />
+                            <input type="checkbox" bind:checked={switchOf(o().key)} disabled={format.get() !== 'onnx'} />
                             <span class="box" aria-hidden="true">
                               <Check size={12} strokeWidth={2.5} />
                             </span>
@@ -640,6 +641,16 @@ css`
   }
   .sw-opt:hover .box {
     border-color: var(--line-control-hover);
+  }
+  .off .sw-opt {
+    cursor: default;
+  }
+  .off .sw-name,
+  .off .opt-desc {
+    color: var(--text-disabled);
+  }
+  .off .sw-opt:hover .box {
+    border-color: var(--line-control);
   }
   input:checked + .box {
     border-color: var(--text-primary);
