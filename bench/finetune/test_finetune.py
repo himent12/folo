@@ -503,6 +503,9 @@ class Runners(unittest.TestCase):
 
         pre = run_folo.train_config(common.RunKey("folo", "folo-n", "bccd", "pretrained", 1), "ds_1", A, None, "ft-x")
         self.assertEqual(pre["weights"], "folo-n-coco-v2")
+        # A weights file on the server is named by its model id, not by the name --weights found it under.
+        key = common.RunKey("folo", "folo-n", "bccd", "pretrained", 1)
+        self.assertEqual(run_folo.train_config(key, "ds_1", A, None, "ft-x", "m_ef99259f")["weights"], "m_ef99259f")
         self.assertEqual((pre["seed"], pre["epochs"], pre["batch"], pre["imgsz"]), (1, 100, 16, 640))
         self.assertEqual((pre["arch"], pre["device"]), ("folo-n", "cpu"))
         self.assertEqual(pre["name"], "ft-x")

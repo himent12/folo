@@ -70,9 +70,12 @@ def parse_compute(text: str | None, max_hours: float, disk_gb: int | None) -> di
     return c
 
 
-def train_config(key: common.RunKey, dataset_id: str, args, compute: dict | None, name: str) -> dict:
+def train_config(
+    key: common.RunKey, dataset_id: str, args, compute: dict | None, name: str, weights_id: str | None = None
+) -> dict:
     """The POST /api/runs body of one run (`name`: run_state.run_name): FOLO's defaults but for the protocol's fixed
-    settings."""
+    settings. `weights_id`: the model id --weights resolved to on the server. `TrainConfig.weights` takes an id; a
+    published name is its own id, a `.folo` file in the server's models folder has another (`m_...`) than its name."""
     cfg = {
         "name": name,
         "dataset_id": dataset_id,
@@ -84,7 +87,7 @@ def train_config(key: common.RunKey, dataset_id: str, args, compute: dict | None
         "device": "auto" if compute else args.device,
     }
     if key.variant == "pretrained":
-        cfg["weights"] = args.weights
+        cfg["weights"] = weights_id or args.weights
     if compute:
         cfg["compute"] = compute
     return cfg
@@ -344,7 +347,8 @@ class Matrix(Ownership):
             self.log(f"{key.stem}: not started: the budget would not cover it")
             return None
         try:
-            cfg = train_config(key, self.dataset_id(key.dataset), self.args, self.compute, name)
+            weights_id = self.base_model()["id"] if key.variant == "pretrained" else None
+            cfg = train_config(key, self.dataset_id(key.dataset), self.args, self.compute, name, weights_id)
             self.state.set_intent(key.stem, name, fp, spec)
             run = self.submit(key, name, cfg)
             self.register(run["id"], key.stem, name)
