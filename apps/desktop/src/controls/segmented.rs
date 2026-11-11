@@ -26,6 +26,22 @@ impl FoloApp {
         self.segmented_ext(key, options, selected, false, &[], window, cx, on_select)
     }
 
+    /// [`Self::segmented`] with unavailable options: `disabled[i]` is why option `i` can't be chosen
+    /// (shown as its tooltip); arrow keys skip it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn segmented_with(
+        &self,
+        key: &str,
+        options: &[&str],
+        selected: usize,
+        disabled: &[Option<SharedString>],
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> Stateful<Div> {
+        self.segmented_ext(key, options, selected, false, disabled, window, cx, on_select)
+    }
+
     /// A segmented control that fills its container with equal-width segments (forms).
     pub fn segmented_fill(
         &self,
