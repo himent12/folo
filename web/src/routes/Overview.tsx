@@ -36,6 +36,7 @@ import NoValue from '$lib/ui/NoValue';
 import LiveRunCard from './overview/LiveRunCard';
 import { modelsMayHaveChanged } from './overview/runChanges';
 import { slotRun } from './overview/slot';
+import { datasetLabel } from './overview/datasetLabel';
 import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
 
@@ -94,6 +95,8 @@ export default function Overview() {
     void datasets.refresh();
   }
   const dsById = computed(() => new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
+  // A run's dataset by name, a placeholder while the datasets load, "deleted dataset" once they did without it.
+  const dsLabel = (r: Run) => datasetLabel(r.config.dataset_id, datasets.data ? dsById.get() : undefined, !!datasets.error);
   const runById = computed(() => new Map<string, Run>((runList.get() ?? []).map((r) => [r.id, r])));
   // A score ranks only against scores on the same dataset and split (lib/scoreSummary): the best of each comparable
   // group, its dataset named above it and any split but validation tagged beside the score. Imported and published
@@ -184,13 +187,31 @@ export default function Overview() {
                 <ErrorState error={runs.error} retry={() => runs.refresh()} compact />
               </Panel>
             ) : !runList.get() ? (
-              // The live card itself with placeholder values, so nothing jumps when it arrives.
-              <LiveRunCard run={null} />
+              // The common state's shape (Nothing is training: the mark, a title, two lines and a button), so nothing
+              // below moves when it arrives; a run training is the exception, and grows the card once.
+              <Panel title="Training">
+                <div class="idle-sk" aria-busy="true" aria-label="Loading training">
+                  <Skeleton w="24px" h="24px" />
+                  <span class="l-20">
+                    <Skeleton w="120px" h="12px" />
+                  </span>
+                  <span class="l-20">
+                    <Skeleton w="min(320px, 100%)" h="10px" />
+                  </span>
+                  <span class="l-20">
+                    <Skeleton w="64px" h="10px" />
+                  </span>
+                  <span class="idle-cta">
+                    <Skeleton w="96px" h="var(--control-md)" />
+                  </span>
+                </div>
+              </Panel>
             ) : live.get() ? (
               <Key when={live.get()!.id}>
                 <LiveRunCard
                   run={live.get()!}
                   dataset={datasets.data ? (dsById.get().get(live.get()!.config.dataset_id) ?? null) : datasets.error ? null : undefined}
+                  datasetName={dsLabel(live.get()!)}
                   bind:lost={streamLost}
                 />
               </Key>
@@ -305,9 +326,15 @@ export default function Overview() {
                                 </a>{' '}
                                 <span class="sub">
                                   <Meta line>
-                                    <span class="ds" use:tooltip={dsById.get().get(r().config.dataset_id)?.name}>
-                                      {dsById.get().get(r().config.dataset_id)?.name ?? r().config.dataset_id}
-                                    </span>
+                                    {dsLabel(r()) === undefined ? (
+                                      <span class="ds">
+                                        &#8203;<Skeleton inline w="72px" h="10px" />
+                                      </span>
+                                    ) : dsLabel(r()) ? (
+                                      <span class="ds" use:tooltip={dsLabel(r())}>
+                                        {dsLabel(r())}
+                                      </span>
+                                    ) : null}
                                     <Ident value={r().config.arch} />
                                   </Meta>
                                 </span>
@@ -642,6 +669,19 @@ css`
   .sub {
     width: 0;
     min-width: 100%;
+  }
+  .idle-sk {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    column-gap: var(--space-3);
+    align-items: center;
+    padding: var(--space-1) 0;
+  }
+  .idle-sk > :not(:first-child) {
+    grid-column: 2;
+  }
+  .idle-cta {
+    margin-top: var(--space-3);
   }
   .run-name {
     display: block;

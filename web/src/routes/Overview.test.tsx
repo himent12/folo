@@ -69,6 +69,36 @@ describe('Overview', () => {
     expect(text).not.toContain('Queued');
   });
 
+  it('loads in the shape of the common state, not of a training run', () => {
+    open(new MockApi('loading'));
+    const slot = target.querySelector('.live')!;
+    expect(slot.querySelector('.idle-sk')).not.toBeNull();
+    expect(slot.textContent).not.toContain('Epoch');
+  });
+
+  it('names a run by its dataset, a placeholder while datasets load, never by a raw id', async () => {
+    const runs = await idleRuns();
+    watched.runs = runs;
+    const api = new MockApi('normal', 0);
+    const recent = () => target.querySelector('#recent-runs tbody')!;
+    let answer: (v: Awaited<ReturnType<MockApi['datasets']>>) => void = () => {};
+    api.datasets = () => new Promise((res) => (answer = res));
+    open(api);
+    await vi.waitFor(() => expect(recent().querySelectorAll('tr.link').length).toBeGreaterThan(0));
+    expect(recent().textContent).not.toMatch(/ds_/);
+    expect(recent().querySelector('.ds .sk')).not.toBeNull();
+
+    // The datasets arrive without the first run's: it was deleted.
+    const all = await new MockApi('normal', 0).datasets();
+    const gone = runs.find((r) => r.status === 'completed')!.config.dataset_id;
+    answer(all.filter((d) => d.id !== gone));
+    await vi.waitFor(() => {
+      flush();
+      expect(recent().textContent).toContain('deleted dataset');
+    });
+    expect(recent().textContent).not.toMatch(/ds_/);
+  });
+
   it('refetches Best models when a run ends, and not on an unchanged list', async () => {
     const runs = await idleRuns();
     const run = runs.find((r) => r.status === 'completed')!;
