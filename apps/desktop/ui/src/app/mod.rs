@@ -62,10 +62,26 @@ impl Application {
             Ok(None) => {}
             Err(error) => panic!("--shot: {error:#}"),
         }
-        let platform = native_text_system()
-            .and_then(default_platform)
-            .unwrap_or_else(|error| panic!("cannot start the platform: {error:#}"));
-        Application(App::new_app(platform, Arc::new(())), None)
+        native_text_system()
+            .and_then(native_application)
+            .unwrap_or_else(|error| panic!("cannot start the platform: {error:#}"))
+    }
+
+    /// The Win32 app: when its loop ends by itself (the last window closed, or a quit from outside), the
+    /// `on_app_quit` callbacks still run, as GPUI's platform quit callback does.
+    #[cfg(windows)]
+    fn windows(text_system: Arc<dyn crate::PlatformTextSystem>) -> anyhow::Result<Self> {
+        let platform = Rc::new(crate::platform::windows::WindowsPlatform::new(text_system)?);
+        let app = App::new_app(platform.clone(), Arc::new(()));
+        let weak = Rc::downgrade(&app);
+        platform.on_quit(Box::new(move || {
+            if let Some(app) = weak.upgrade()
+                && let Some(mut app) = app.try_borrow_mut()
+            {
+                app.update(|cx| cx.quit());
+            }
+        }));
+        Ok(Application(app, None))
     }
 
     /// An app on the headless platform (tests, `--shot`). Prefer `HeadlessApp`, which also drives it.
@@ -106,20 +122,21 @@ fn native_text_system() -> anyhow::Result<Arc<dyn crate::PlatformTextSystem>> {
     crate::platform::headless::text_backend(crate::TextBackend::Native)
 }
 
-/// The window backend for this OS: Win32 on Windows (winit when `FOLO_UI_PLATFORM=winit` and the `winit`
-/// feature is on), winit elsewhere.
-fn default_platform(text_system: Arc<dyn crate::PlatformTextSystem>) -> anyhow::Result<Rc<dyn Platform>> {
+/// The app on this OS's window backend: Win32 on Windows (winit when `FOLO_UI_PLATFORM=winit` and the
+/// `winit` feature is on), winit elsewhere.
+fn native_application(text_system: Arc<dyn crate::PlatformTextSystem>) -> anyhow::Result<Application> {
+    #[cfg(any(not(windows), feature = "winit"))]
+    if cfg!(not(windows)) || std::env::var("FOLO_UI_PLATFORM").is_ok_and(|platform| platform == "winit") {
+        let platform = Rc::new(crate::platform::winit::WinitPlatform::new(text_system)?);
+        return Ok(Application(App::new_app(platform, Arc::new(())), None));
+    }
     #[cfg(windows)]
     {
-        #[cfg(feature = "winit")]
-        if std::env::var("FOLO_UI_PLATFORM").is_ok_and(|platform| platform == "winit") {
-            return Ok(Rc::new(crate::platform::winit::WinitPlatform::new(text_system)?));
-        }
-        crate::pending::platform_pending::windows_platform(text_system)
+        Application::windows(text_system)
     }
     #[cfg(not(windows))]
     {
-        Ok(Rc::new(crate::platform::winit::WinitPlatform::new(text_system)?))
+        unreachable!("winit is the only backend off Windows")
     }
 }
 
