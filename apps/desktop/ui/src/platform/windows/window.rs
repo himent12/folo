@@ -278,6 +278,24 @@ impl WindowInner {
         }
     }
 
+    /// Takes the client area's size and position from the window. At creation the state holds what
+    /// `CreateWindowExW` was given (`CW_USEDEFAULT`, which is `i32::MIN`), and a window opened hidden
+    /// gets no `WM_SIZE` until it is shown, while the core sizes its first frame from this.
+    pub(crate) fn read_client_area(&self) {
+        let mut client = RECT::default();
+        let mut origin = POINT::default();
+        // SAFETY: valid out pointers for our own window.
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut client);
+            let _ = ClientToScreen(self.hwnd, &mut origin);
+        }
+        let mut state = self.state.borrow_mut();
+        let scale_factor = state.scale_factor;
+        state.logical_size = size(DevicePixels(client.right.max(1)), DevicePixels(client.bottom.max(1)))
+            .to_pixels(scale_factor);
+        state.origin = logical_point(origin.x as f32, origin.y as f32, scale_factor);
+    }
+
     /// Asks for a full draw from the message loop (the window was just shown).
     pub(crate) fn post_expose(&self) {
         // SAFETY: posting to our own window.
@@ -527,6 +545,7 @@ impl WindowsWindow {
         drop_target::register(&this);
         configure_dwm_dark_mode(hwnd, appearance);
         this.state.borrow_mut().border_offset.update(hwnd);
+        this.read_client_area();
         let placement = {
             let state = this.state.borrow();
             initial_placement(hwnd, &state.display, params.bounds, state.scale_factor, state.border_offset)
