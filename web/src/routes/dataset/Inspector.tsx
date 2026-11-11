@@ -12,7 +12,7 @@ import Plus from '$icons/plus';
 import X from '$icons/x';
 import { computed, css, cubicOut, effect, fly, Key, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
-import type { Box } from '$lib/api/types';
+import type { Box, DatasetImage as ImageInfo } from '$lib/api/types';
 import DatasetImage from '$lib/detect/DatasetImage';
 import { num } from '$lib/format';
 import Button from '$lib/ui/Button';
@@ -310,7 +310,9 @@ export default function Inspector(props: InspectorProps) {
     </div>
   );
 
-  const im = () => img.get()!;
+  // As in the grid: bindings that re-run once more as the image goes read the last one, never undefined.
+  let last: ImageInfo | undefined;
+  const im = () => (last = img.get() ?? last)!;
 
   return (
     <dialog
