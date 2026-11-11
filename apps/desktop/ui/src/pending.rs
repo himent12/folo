@@ -4,17 +4,6 @@
 //! (and the `pub use pending::*` line in `lib.rs` goes with the last block).
 #![allow(dead_code)] // skeleton
 
-// ---- text package (text/) ----
-
-/// Stand-in: the text package's app-wide `TextSystem`.
-pub struct TextSystem {}
-
-/// Stand-in: the text package's per-window `WindowTextSystem`.
-pub struct WindowTextSystem {}
-
-/// Stand-in: the text package's `WrappedLine`.
-pub struct WrappedLine {}
-
 // ---- raster package (raster/) ----
 
 /// Stand-ins for the raster package's types (`raster::Renderer`, `raster::MaskCache`) live in

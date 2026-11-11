@@ -66,6 +66,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# `#[implement]` (the DirectWrite text renderer, text/dwrite) expands to `::windows_core` paths; the same
+# 0.62 copy `windows` uses.
+windows-core = "0.62"
 cosmic-text = { version = "0.14", optional = true }
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
