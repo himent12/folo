@@ -10,6 +10,7 @@ use super::gradient::GradientSpan;
 use super::quad_eval::QuadShader;
 use super::target::Target;
 use crate::{BackgroundTag, BorderStyle, Quad};
+use std::sync::OnceLock;
 
 const AA: f32 = 0.5;
 
@@ -42,7 +43,24 @@ pub(crate) struct QuadPrep {
     /// pixel is certainly the background, and beyond which it is certainly untouched.
     inside2: [f32; 4],
     outside2: [f32; 4],
+    /// The rasterized span (`x0, y0, x1, y1`), before clipping.
+    span: [i32; 4],
+    /// The straight bands' colours, computed by the first tile that needs them.
+    edges: OnceLock<Option<Edges>>,
 }
+
+/// The colours of a quad's straight bands: the columns left and right of the free columns (on free
+/// rows, per vertical half), and the rows above and below the free rows (across the free columns,
+/// per horizontal half). Computed once per frame and shared by every tile of the quad.
+struct Edges {
+    /// Per vertical half: columns `x0..fx0`, then `fx1..x1`.
+    cols: [Vec<Src>; 2],
+    /// Rows `y0..fy0`, then `fy1..y1`: the left and right halves' colours.
+    rows: Vec<[Src; 2]>,
+}
+
+/// Bands wider than this (huge radii) are not tabulated; their tiles evaluate each pixel.
+const MAX_BAND: i32 = 1024;
 
 /// Slack for the corner shortcuts, far above the rounding of the shader's own maths.
 const EPS: f32 = 1e-2;
@@ -130,7 +148,60 @@ impl QuadPrep {
                 inside2[k] = inner * inner;
             }
         }
-        QuadPrep { sh, mode, fx0, fx1, split_x, fy0, fy1, split_y, bg, inside2, outside2 }
+        let (x0, x1) = raster_span(sh.origin[0], sh.origin[0] + sh.size[0]);
+        let (y0, y1) = raster_span(sh.origin[1], sh.origin[1] + sh.size[1]);
+        QuadPrep {
+            sh,
+            mode,
+            fx0,
+            fx1,
+            split_x,
+            fy0,
+            fy1,
+            split_y,
+            bg,
+            inside2,
+            outside2,
+            span: [x0, y0, x1, y1],
+            edges: OnceLock::new(),
+        }
+    }
+
+    /// The representative free row of vertical half `half` (column colours are the same on every
+    /// free row of a half).
+    fn rep_row(&self, half: usize) -> i32 {
+        if half == 0 { self.fy0 } else { self.fy1 - 1 }
+    }
+
+    fn edges(&self) -> Option<&Edges> {
+        self.edges
+            .get_or_init(|| {
+                let [x0, y0, x1, y1] = self.span;
+                let bands = [self.fx0 - x0, x1 - self.fx1, self.fy0 - y0, y1 - self.fy1];
+                if bands.iter().any(|&b| b > MAX_BAND) {
+                    return None;
+                }
+                let has_rows = [self.fy0 < self.fy1.min(self.split_y), self.fy0.max(self.split_y) < self.fy1];
+                let cols = [0, 1].map(|half| {
+                    if !has_rows[half] {
+                        return Vec::new();
+                    }
+                    let rep = self.rep_row(half);
+                    (x0..self.fx0).chain(self.fx1..x1).map(|x| self.eval(x, rep)).collect()
+                });
+                let (left, right) = (self.fx0 < self.split_x, self.split_x < self.fx1);
+                let rows = (y0..self.fy0)
+                    .chain(self.fy1..y1)
+                    .map(|y| {
+                        [
+                            if left { self.eval(self.fx0, y) } else { Src::NOOP },
+                            if right { self.eval(self.fx1 - 1, y) } else { Src::NOOP },
+                        ]
+                    })
+                    .collect();
+                Some(Edges { cols, rows })
+            })
+            .as_ref()
     }
 
     /// The shader's output at a pixel as a blendable source. Inside a rounded corner, pixels well
@@ -193,48 +264,42 @@ impl QuadPrep {
 
     fn draw_bands(&self, t: &mut Target, r: IRect) {
         let (a, b) = self.free_cols(&r);
-        // Column colours of free rows, one set per vertical half (computed on first use).
-        let w = (r.x1 - r.x0) as usize;
-        let mut cols: [Option<Box<[Src]>>; 2] = [None, None];
+        let edges = self.edges();
+        let [x0, y0, ..] = self.span;
+        // Index of a band column / row in `Edges`.
+        let col = |x: i32| (if x < self.fx0 { x - x0 } else { self.fx0 - x0 + x - self.fx1 }) as usize;
+        let row_of = |y: i32| (if y < self.fy0 { y - y0 } else { self.fy0 - y0 + y - self.fy1 }) as usize;
         for y in r.y0..r.y1 {
-            let free_row = y >= self.fy0 && y < self.fy1;
-            if free_row {
+            let row = t.row(y, r.x0, r.x1);
+            if y >= self.fy0 && y < self.fy1 {
+                // A free row: band columns from the table, the background between.
                 let half = (y >= self.split_y) as usize;
-                let rep = if half == 0 { self.fy0 } else { self.fy1 - 1 };
-                let cs = cols[half].get_or_insert_with(|| {
-                    let mut v = vec![Src::default(); w].into_boxed_slice();
-                    for x in (r.x0..a).chain(b..r.x1) {
-                        v[(x - r.x0) as usize] = self.eval(x, rep);
-                    }
-                    v
-                });
-                let row = t.row(y, r.x0, r.x1);
-                let (left, rest) = row.split_at_mut((a - r.x0) as usize);
-                let (mid, right) = rest.split_at_mut((b - a) as usize);
-                for (p, s) in left.iter_mut().zip(cs.iter()) {
+                for x in (r.x0..a).chain(b..r.x1) {
+                    let s = match edges {
+                        Some(e) => e.cols[half][col(x)],
+                        None => self.eval(x, self.rep_row(half)),
+                    };
+                    let p = &mut row[(x - r.x0) as usize];
                     *p = s.over(*p);
                 }
-                fill_span(mid, &self.bg);
-                for (p, s) in right.iter_mut().zip(cs[(b - r.x0) as usize..].iter()) {
-                    *p = s.over(*p);
-                }
+                fill_span(&mut row[(a - r.x0) as usize..(b - r.x0) as usize], &self.bg);
             } else {
-                let row = t.row(y, r.x0, r.x1);
+                // A band row: the corner boxes per pixel, one colour per half across the free
+                // columns (from the half's outermost free column).
                 for x in (r.x0..a).chain(b..r.x1) {
                     let p = &mut row[(x - r.x0) as usize];
                     *p = self.eval(x, y).over(*p);
                 }
-                // One colour per horizontal half across the free columns, from the half's
-                // outermost free column.
                 let m = self.split_x.clamp(a, b);
-                if a < m {
-                    let s = self.eval(self.fx0, y);
-                    fill_span(&mut row[(a - r.x0) as usize..(m - r.x0) as usize], &s);
-                }
-                if m < b {
-                    let s = self.eval(self.fx1 - 1, y);
-                    fill_span(&mut row[(m - r.x0) as usize..(b - r.x0) as usize], &s);
-                }
+                let colours = match edges {
+                    Some(e) => e.rows[row_of(y)],
+                    None => [
+                        if a < m { self.eval(self.fx0, y) } else { Src::NOOP },
+                        if m < b { self.eval(self.fx1 - 1, y) } else { Src::NOOP },
+                    ],
+                };
+                fill_span(&mut row[(a - r.x0) as usize..(m - r.x0) as usize], &colours[0]);
+                fill_span(&mut row[(m - r.x0) as usize..(b - r.x0) as usize], &colours[1]);
             }
         }
     }

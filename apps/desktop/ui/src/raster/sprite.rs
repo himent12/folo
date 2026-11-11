@@ -118,7 +118,8 @@ fn mask_rect(origin: (i32, i32), w: i32, h: i32) -> IRect {
 }
 
 /// Linear sampling of a mask stretched over a destination, in fixed point: the texel coordinate of
-/// destination pixel `i` is `(k0 + i * k) / 65536` (centres, minus half a texel), as a GPU sampler.
+/// destination pixel `i` is `(k0 + i * k) / 2^32` (centres, minus half a texel), as a GPU sampler;
+/// the weight keeps 8 bits, as GPU filtering does.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Axis {
     k0: i64,
@@ -133,8 +134,9 @@ impl Axis {
         let scale = n as f64 / dst_len as f64;
         let scale = if scale.is_finite() { scale } else { 0. };
         // u(i) = ((i + 0.5) - dst0) * scale - 0.5
-        let k = (scale * 65536.).round() as i64;
-        let k0 = (((0.5 - dst0 as f64) * scale - 0.5) * 65536.).round() as i64;
+        let one = (1u64 << 32) as f64;
+        let k = (scale * one).round() as i64;
+        let k0 = (((0.5 - dst0 as f64) * scale - 0.5) * one).round() as i64;
         Axis { k0, k, n }
     }
 
@@ -142,8 +144,8 @@ impl Axis {
     #[inline(always)]
     pub fn at(&self, i: i32) -> (usize, usize, u32) {
         let u = self.k0 + self.k * i as i64;
-        let i0 = u >> 16;
-        let f = ((u >> 8) & 0xff) as u32;
+        let i0 = u >> 32;
+        let f = ((u >> 24) & 0xff) as u32;
         let last = (self.n - 1).max(0) as i64;
         (i0.clamp(0, last) as usize, (i0 + 1).clamp(0, last) as usize, f)
     }

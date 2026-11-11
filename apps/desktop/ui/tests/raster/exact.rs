@@ -328,3 +328,26 @@ fn rounded_image_corners_and_opacity_follow_the_sdf() {
         }
     }
 }
+
+#[test]
+fn a_zoomed_image_resamples_only_what_the_frame_shows() {
+    let mut rng = Rng(3);
+    let img = image(&mut rng, 16, 16, false);
+    let mut s = Scene::new();
+    // 160 000 x 160 000 device px: a full-size copy would be 100 GB.
+    s.push_image(Image {
+        bounds: rect(-80_000., -80_000., 160_000., 160_000.),
+        clip: full(),
+        corner_radii: Corners::default(),
+        image: img,
+        frame: 0,
+        grayscale: false,
+        opacity: 1.,
+    });
+    let mut r = Renderer::with_threads(1);
+    let mut fb = Framebuffer::new(W, H);
+    r.render(&s, GlyphBlend::IDENTITY, &mut fb);
+    assert!(r.cache_bytes() < (W * H * 4 + 4096) as usize, "{} bytes", r.cache_bytes());
+    // The frame shows the middle of the image: texels 7 and 8 blend around the centre.
+    assert!(fb.pixels.iter().any(|&p| p != 0));
+}

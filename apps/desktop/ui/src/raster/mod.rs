@@ -35,7 +35,9 @@ use crate::{Bounds, DevicePixels, Framebuffer, GlyphBlend, Primitive, Scene};
 use geom::IRect;
 use items::Item;
 use pool::{Pool, for_each};
-use prep::{Caches, GlyphTables, Prep, Prepared};
+use prep::{Caches, GlyphTables, Prep, Prepared, Use};
+use quad::QuadPrep;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use target::FrameMut;
@@ -49,6 +51,8 @@ const PARALLEL_FRONT: usize = 6000;
 const LAZY: u32 = u32::MAX;
 /// The high bit of a `slot` marks a glyph table index.
 const GLYPH: u32 = 1 << 31;
+/// The next bit marks an index into the shared quad preparations.
+const QUAD: u32 = 1 << 30;
 
 /// What the last `render` did, for benches and diagnostics.
 #[derive(Clone, Debug, Default)]
@@ -78,11 +82,14 @@ pub struct Renderer {
     tiles: Tiles,
     /// One per primitive of the scene.
     items: Vec<Item>,
-    /// Per item, when `mark[i] == stamp`: an index into `preps`, `GLYPH | table`, or `LAZY`.
+    /// Per item, when `mark[i] == stamp`: an index into `preps`, `GLYPH | table`, `QUAD | cell`, or
+    /// `LAZY`.
     slot: Vec<u32>,
     mark: Vec<u32>,
     stamp: u32,
     preps: Vec<Prep>,
+    /// Rounded or bordered quads of this frame, each prepared by the first tile that draws it.
+    quads: Vec<OnceLock<QuadPrep>>,
     glyphs: GlyphTables,
     dirty: Vec<u32>,
     caches: Caches,
@@ -113,6 +120,7 @@ impl Renderer {
             mark: Vec::new(),
             stamp: 0,
             preps: Vec::new(),
+            quads: Vec::new(),
             glyphs: GlyphTables::default(),
             dirty: Vec::new(),
             caches: Caches::new(),
@@ -199,6 +207,7 @@ impl Renderer {
             self.slot.resize(n, 0);
         }
         self.preps.clear();
+        self.quads.clear();
         self.glyphs.clear();
         let mut jobs: Vec<(usize, prep::Job)> = Vec::new();
         let all = self.dirty.len() == self.tiles.len();
@@ -218,6 +227,10 @@ impl Renderer {
                     match prep::prepare(&prims[i], &mut self.caches, &mut self.glyphs, &glyph, frame_rect) {
                         Prepared::Lazy => LAZY,
                         Prepared::Glyph(g) => GLYPH | g,
+                        Prepared::Quad => {
+                            self.quads.push(OnceLock::new());
+                            QUAD | (self.quads.len() as u32 - 1)
+                        }
                         Prepared::Item(p) => {
                             self.preps.push(p);
                             self.preps.len() as u32 - 1
@@ -261,6 +274,7 @@ impl Renderer {
             items: &self.items,
             slot: &self.slot,
             preps: &self.preps,
+            quads: &self.quads,
             glyphs: &self.glyphs.tables,
             prims,
         };
@@ -306,6 +320,7 @@ struct TileCtx<'a> {
     items: &'a [Item],
     slot: &'a [u32],
     preps: &'a [Prep],
+    quads: &'a [OnceLock<QuadPrep>],
     glyphs: &'a [(std::sync::Arc<sprite::AlphaLut>, blend::Tint)],
     prims: &'a [Primitive],
 }
@@ -345,12 +360,13 @@ impl TileCtx<'_> {
                 continue;
             }
             let slot = self.slot[i];
-            let (prep, glyph) = match slot {
-                LAZY => (None, 0),
-                s if s & GLYPH != 0 => (None, s & !GLYPH),
-                s => (Some(&self.preps[s as usize]), 0),
+            let used = match slot {
+                LAZY => Use::Lazy,
+                s if s & GLYPH != 0 => Use::Glyph(&self.glyphs[(s & !GLYPH) as usize]),
+                s if s & QUAD != 0 => Use::Quad(&self.quads[(s & !QUAD) as usize]),
+                s => Use::Prep(&self.preps[s as usize]),
             };
-            prep::draw(&mut target, &self.prims[i], prep, glyph, self.glyphs, r);
+            prep::draw(&mut target, &self.prims[i], used, r);
         }
     }
 }

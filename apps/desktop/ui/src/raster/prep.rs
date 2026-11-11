@@ -15,10 +15,10 @@ use super::shadow::{self, ShadowKey, ShadowMask, ShadowShape};
 use super::sprite::{AlphaLut, Axis, draw_color, draw_glyph, draw_svg};
 use super::target::Target;
 use crate::{
-    Background, BackgroundTag, GlyphBlend, Hsla, Image, Path, PathData, Primitive, RenderImage, Shadow,
+    Background, BackgroundTag, GlyphBlend, Hsla, Image, Path, PathData, Primitive, Quad, RenderImage, Shadow,
     SpriteKind,
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// An item whose preparation needed the caches.
 pub(crate) enum Prep {
@@ -170,8 +170,28 @@ fn origin_of(b: &crate::Bounds<crate::ScaledPixels>) -> (i32, i32) {
 pub(crate) enum Prepared {
     Lazy,
     Glyph(u32),
+    /// A rounded or bordered quad: its `QuadPrep` is made by the first tile that draws it.
+    Quad,
     Item(Prep),
     Pending(Job),
+}
+
+/// How a tile draws an item: from the tile alone, with a glyph table, with what `prepare` made, or
+/// with the quad's shared preparation.
+#[derive(Clone, Copy)]
+pub(crate) enum Use<'a> {
+    Lazy,
+    Glyph(&'a (Arc<AlphaLut>, Tint)),
+    Prep(&'a Prep),
+    Quad(&'a OnceLock<QuadPrep>),
+}
+
+/// An unrounded, unbordered quad.
+fn is_plain(q: &Quad) -> bool {
+    let (r, w) = (&q.corner_radii, &q.border_widths);
+    [r.top_left, r.top_right, r.bottom_right, r.bottom_left, w.top, w.right, w.bottom, w.left]
+        .iter()
+        .all(|v| v.0 == 0.)
 }
 
 /// A cache miss to fill: the expensive part of preparing a shadow, an image or a path.
@@ -209,7 +229,7 @@ impl Job {
             }
             (Job::Image(key, ..), Made::Image(copy), Primitive::Image(m)) => {
                 caches.images.insert(key, copy.clone(), copy.bytes());
-                image_prep(m, copy)
+                image_prep(m, copy, frame)
             }
             (Job::Path(key, _), Made::Path(mask), Primitive::Path(p)) => {
                 caches.paths.insert(key, mask.clone(), mask.bytes());
@@ -246,25 +266,34 @@ fn shadow_prep(s: &Shadow, mask: Arc<ShadowMask>, frame: IRect) -> Prep {
     Prep::Shadow { mask, origin: (m.x0, m.y0), tint: Tint::new(c), alpha: alpha16(c[3]) }
 }
 
-/// The image's pixel rectangle origin and its cache key.
-fn image_key(m: &Image) -> ((i32, i32), ImageKey, [f32; 4]) {
+/// Destinations up to this many pixels (16 MB of copy) are resampled whole.
+const MAX_FULL_COPY: u64 = 4 << 20;
+
+/// Where the image's copy lands (see `MAX_FULL_COPY`), its cache key, and the bounds
+/// relative to the copy (`x`, `y`, `width`, `height`).
+fn image_key(m: &Image, frame: IRect) -> ((i32, i32), ImageKey, [f32; 4]) {
     let b = &m.bounds;
     let (x0, x1) = raster_span(b.origin.x.0, b.origin.x.0 + b.size.width.0);
     let (y0, y1) = raster_span(b.origin.y.0, b.origin.y.0 + b.size.height.0);
-    let dst = [b.origin.x.0 - x0 as f32, b.origin.y.0 - y0 as f32, b.size.width.0, b.size.height.0];
+    // The whole destination is resampled, so the copy survives scrolling; a destination larger
+    // than `MAX_FULL_COPY` pixels (a zoomed image) is resampled only where the frame shows it.
+    let full = IRect::new(x0, y0, x1, y1);
+    let area = full.width().max(0) as u64 * full.height().max(0) as u64;
+    let c = if area <= MAX_FULL_COPY { full } else { full.intersect(&frame) };
+    let dst = [b.origin.x.0 - c.x0 as f32, b.origin.y.0 - c.y0 as f32, b.size.width.0, b.size.height.0];
     let key = ImageKey {
         id: m.image.id.0,
         frame: m.frame,
         grayscale: m.grayscale,
-        w: x1 - x0,
-        h: y1 - y0,
+        w: c.width().max(0),
+        h: c.height().max(0),
         bits: dst.map(f32::to_bits),
     };
-    ((x0, y0), key, dst)
+    ((c.x0, c.y0), key, dst)
 }
 
-fn image_prep(m: &Image, copy: Arc<ImageCopy>) -> Prep {
-    let (origin, ..) = image_key(m);
+fn image_prep(m: &Image, copy: Arc<ImageCopy>, frame: IRect) -> Prep {
+    let (origin, ..) = image_key(m, frame);
     Prep::Image(Box::new(ImageDraw::new(copy, origin, m.opacity, m)))
 }
 
@@ -301,7 +330,12 @@ pub(crate) fn prepare(
     match prim {
         Primitive::Quad(q) => {
             if q.background.tag != BackgroundTag::LinearGradient {
-                return Prepared::Lazy;
+                // Plain solid quads are a fill; others share one `QuadPrep` across their tiles.
+                return if is_plain(q) && q.background.tag == BackgroundTag::Solid {
+                    Prepared::Lazy
+                } else {
+                    Prepared::Quad
+                };
             }
             let sh = QuadShader::new(q);
             let grad = caches.gradient(&q.background, &sh.paint);
@@ -321,9 +355,9 @@ pub(crate) fn prepare(
         },
         Primitive::ColorSprite(_) | Primitive::Underline(_) => Prepared::Lazy,
         Primitive::Image(m) => {
-            let (_, key, dst) = image_key(m);
+            let (_, key, dst) = image_key(m, frame);
             match caches.images.get(&key) {
-                Some(copy) => Prepared::Item(image_prep(m, copy)),
+                Some(copy) => Prepared::Item(image_prep(m, copy, frame)),
                 None => Prepared::Pending(Job::Image(key, m.image.clone(), m.frame, m.grayscale, dst)),
             }
         }
@@ -339,45 +373,33 @@ pub(crate) fn prepare(
 
 /// Draws `prim`'s pixels inside `r` (its rectangle cut to the tile). `prep` is what `prepare` made
 /// for it (`None` for lazy items), `glyphs` the frame's glyph tables.
-pub(crate) fn draw(
-    t: &mut Target,
-    prim: &Primitive,
-    prep: Option<&Prep>,
-    glyph: u32,
-    glyphs: &[(Arc<AlphaLut>, Tint)],
-    r: IRect,
-) {
-    if let Some(p) = prep {
-        match p {
-            Prep::Quad(q) => q.draw(t, r),
-            Prep::Shadow { mask, origin, tint, alpha } => shadow::draw(t, mask, *origin, tint, *alpha, r),
-            Prep::Image(d) => d.draw(t, r),
-            Prep::Path { mask, paint } => {
-                let r = r.intersect(&mask.rect);
-                if !r.is_empty() {
-                    draw_path(t, mask, paint, r);
+pub(crate) fn draw(t: &mut Target, prim: &Primitive, used: Use, r: IRect) {
+    match used {
+        Use::Prep(p) => {
+            match p {
+                Prep::Quad(q) => q.draw(t, r),
+                Prep::Shadow { mask, origin, tint, alpha } => shadow::draw(t, mask, *origin, tint, *alpha, r),
+                Prep::Image(d) => d.draw(t, r),
+                Prep::Path { mask, paint } => {
+                    let r = r.intersect(&mask.rect);
+                    if !r.is_empty() {
+                        draw_path(t, mask, paint, r);
+                    }
                 }
             }
+            return;
         }
-        return;
+        Use::Quad(cell) => {
+            if let Primitive::Quad(q) = prim {
+                cell.get_or_init(|| QuadPrep::new(QuadShader::new(q), None)).draw(t, r);
+            }
+            return;
+        }
+        Use::Glyph(..) | Use::Lazy => {}
     }
     match prim {
         Primitive::Quad(q) => {
-            let rr = &q.corner_radii;
-            let w = &q.border_widths;
-            let simple = [
-                rr.top_left,
-                rr.top_right,
-                rr.bottom_right,
-                rr.bottom_left,
-                w.top,
-                w.right,
-                w.bottom,
-                w.left,
-            ]
-            .iter()
-            .all(|v| v.0 == 0.);
-            if simple && q.background.tag == BackgroundTag::Solid {
+            if is_plain(q) && q.background.tag == BackgroundTag::Solid {
                 fill(t, &Src::new(rgba(q.background.solid)), r);
             } else {
                 QuadPrep::new(QuadShader::new(q), None).draw(t, r);
@@ -385,8 +407,9 @@ pub(crate) fn draw(
         }
         Primitive::MonoSprite(s) => match s.kind {
             SpriteKind::Glyph => {
-                let (lut, tint) = &glyphs[glyph as usize];
-                draw_glyph(t, &s.mask, origin_of(&s.bounds), lut, tint, r);
+                if let Use::Glyph((lut, tint)) = used {
+                    draw_glyph(t, &s.mask, origin_of(&s.bounds), lut, tint, r);
+                }
             }
             SpriteKind::Svg => {
                 let c = rgba(s.color);
