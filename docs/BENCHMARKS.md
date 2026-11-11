@@ -378,7 +378,7 @@ rented RTX PRO 4000 Blackwell (9.5 h of epochs, about $5.60 for the pod), publis
 |---|---:|---|---:|---:|---:|---:|---:|---:|
 | **folo-s, f32** | 9.5 M | **56 epochs from scratch**, FOLO trainer, `auto` → MuSGD (rule 3), AMP | **0.416** | 0.580 | 0.452 | 0.229 | 0.459 | 0.584 |
 | folo-s, f16 (`--half`) | 9.5 M | the same weights, fused f16 file | 0.416 | 0.580 | 0.452 | 0.229 | 0.460 | 0.584 |
-| YOLO11s (Ultralytics, published) | | Ultralytics recipe (not given on its model page) | 0.470 | | | | | |
+| YOLO11s (Ultralytics, published) | 9.4 M | Ultralytics recipe (not given on its model page) | 0.470 | | | | | |
 | YOLO26s (Ultralytics, published) | 9.5 M | Objects365 pretraining, a long COCO schedule, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.480 | | | | | |
 
 **This is not like for like:** YOLO26's numbers come from more data (Objects365 pretraining), a longer schedule and a

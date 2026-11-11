@@ -418,7 +418,7 @@ folo export --model /data/runs/coco-folo-s/weights/best.folo --format weights \
 folo export --model /data/out/folo-s-coco.folo --format folo-f16 --output /data/out/folo-s-coco-f16.folo
 cd /data/out && sha256sum folo-s-coco.folo folo-s-coco-f16.folo > SHA256SUMS
 # here, with the three files copied back
-gh release create weights-v3 --latest=false --repo himent12/folo --title "FOLO pretrained weights v3 (folo-s)" \
+gh release create weights-v3 --latest=false --target main --repo himent12/folo --title "FOLO pretrained weights v3 (folo-s)" \
   --notes-file notes.md folo-s-coco.folo folo-s-coco-f16.folo SHA256SUMS
 ```
 
