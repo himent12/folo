@@ -761,7 +761,8 @@ exported more than once.
   image file), whose images are read in place, not copied. A file that is not a readable image, an upload with
   the bytes of an image the job already has, or a folder image it already has (the same file) is listed in
   `skipped` with the reason instead of failing the request; so is everything past the job's limit of 10000
-  images. File names are unique within a job: a second `a.jpg` becomes `a-2.jpg`. The path is taken without the
+  images, and a folder without a single image (one entry for the folder, naming a few of the other files'
+  extensions) or a `path` to a file that is not an image. File names are unique within a job: a second `a.jpg` becomes `a-2.jpg`. The path is taken without the
   whitespace and one pair of matching quotes around it (Windows' "Copy as path"); a relative path is
   `400 invalid_body` (it is never read from the server's working directory), a blank one too. `404 path_not_found`
   for a missing folder. Images may be added while a run is active (they wait for the next run).

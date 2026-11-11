@@ -5,8 +5,23 @@
 import { signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { LiveLabelJob } from '$lib/api/liveLabel';
-import type { LabelImagesAdded } from '$lib/api/types';
+import type { LabelImagesAdded, SkippedImage } from '$lib/api/types';
 import { UploadIncomplete, type UploadProgress } from '$lib/api/upload';
+import { num } from '$lib/format';
+
+/**
+ * Why a folder added nothing, in one line from what the server skipped: its one reason (no images there, not an image
+ * file, already in the job), or each reason with how many files it took.
+ */
+export function whyNothingAdded(skipped: readonly SkippedImage[]): string {
+  const [first] = skipped;
+  if (!first) return 'The folder has no images to add.';
+  const cap = (r: string) => r.charAt(0).toUpperCase() + r.slice(1);
+  if (skipped.length === 1) return `${cap(first.reason)}.`;
+  const reasons = new Map<string, number>();
+  for (const s of skipped) reasons.set(s.reason, (reasons.get(s.reason) ?? 0) + 1);
+  return `${[...reasons].map(([r, n]) => `${num(n)} ${n === 1 ? 'file' : 'files'}: ${r}`).join('; ')}.`;
+}
 
 export class Uploads {
   #progress = signal<UploadProgress | null>(null);
@@ -54,11 +69,17 @@ export class Uploads {
     }
   }
 
-  /** Adds a folder on the server's machine; throws for the dialog that asked to say. */
-  async folder(path: string) {
+  /**
+   * Adds a folder on the server's machine; throws for the dialog that asked to say. An answer that added nothing is
+   * the dialog's to explain too (it stays open), so it is returned rather than shown over the images.
+   */
+  async folder(path: string): Promise<LabelImagesAdded | null> {
     this.error = undefined;
     this.result = null;
     await this.#apply(() => hub.api.importLabelImages(this.jobId(), path));
+    const answer = this.result;
+    if (answer && !answer.added.length) this.result = null;
+    return answer;
   }
 
   dismiss() {

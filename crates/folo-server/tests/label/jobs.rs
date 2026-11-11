@@ -299,6 +299,24 @@ async fn folder_images_are_read_in_place() {
     let again: LabelImagesAdded = ok(app, post(&uri, json!({ "path": quoted }))).await;
     assert!(again.added.is_empty());
     assert_eq!(again.skipped.iter().filter(|s| s.reason == "the job already has this file").count(), 4);
+    // A folder without images, or a file that is not one, says why nothing was added.
+    std::fs::create_dir_all(t.join("notes/sub")).unwrap();
+    std::fs::write(t.join("notes/a.md"), "x").unwrap();
+    std::fs::write(t.join("notes/sub/b.TIF"), "x").unwrap();
+    let none: LabelImagesAdded =
+        ok(app, post(&uri, json!({ "path": t.join("notes").to_string_lossy() }))).await;
+    assert!(none.added.is_empty());
+    let reasons: Vec<&str> = none.skipped.iter().map(|s| s.reason.as_str()).collect();
+    assert_eq!(
+        reasons,
+        ["no JPEG, PNG, BMP or WebP images in this folder or its subfolders (it has .md, .tif files)"]
+    );
+    let file: LabelImagesAdded =
+        ok(app, post(&uri, json!({ "path": t.join("notes/a.md").to_string_lossy() }))).await;
+    assert_eq!(
+        (file.skipped[0].file.as_str(), file.skipped[0].reason.as_str()),
+        ("a.md", "not a JPEG, PNG, BMP or WebP file")
+    );
     // A relative path is refused as such, never read from (and named after) the server's working directory.
     let relative = post(&uri, json!({ "path": "\"photos\"" }));
     let e = err(app, relative, StatusCode::BAD_REQUEST, "invalid_body").await;

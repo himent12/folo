@@ -4,7 +4,7 @@ import { createComponent } from 'fw/internal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi, type Scenario } from '$lib/api/mock';
-import type { LabelJob } from '$lib/api/types';
+import type { LabelImagesAdded, LabelJob } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { toast } from '$lib/ui/toast';
@@ -14,7 +14,7 @@ import LabelJobs from '../LabelJobs';
 import AddImagesDialog from './AddImagesDialog';
 import DatasetDialog, { type DatasetDialogProps } from './DatasetDialog';
 import JobDialog, { type JobDialogProps } from './JobDialog';
-import type { Uploads } from './uploads';
+import { whyNothingAdded, type Uploads } from './uploads';
 
 let target: HTMLElement;
 /** Port of `mount(comp, { target, props })`: the props object is read live (a `deep` one changes them). */
@@ -106,8 +106,8 @@ describe('New labeling job', () => {
 });
 
 describe('Add images › Server folder', () => {
-  function folderTab() {
-    const folder = vi.fn(async (_path: string) => {});
+  function folderTab(answer: LabelImagesAdded | null = null) {
+    const folder = vi.fn(async (_path: string) => answer);
     open(AddImagesDialog, { open: true, tab: 'folder' as const, uploads: { folder } as unknown as Uploads, onbrowse: () => {} });
     const input = document.querySelector<HTMLInputElement>('dialog[open] input')!;
     const submit = () => {
@@ -122,6 +122,20 @@ describe('Add images › Server folder', () => {
     type(input, '  "D:\\photos\\unlabeled cells"  ');
     submit();
     await vi.waitFor(() => expect(folder).toHaveBeenCalledWith('D:\\photos\\unlabeled cells'));
+  });
+
+  it('stays open and says why when the folder added nothing', async () => {
+    const reason = 'no JPEG, PNG, BMP or WebP images in this folder or its subfolders (it has .tif files)';
+    const { input, submit } = folderTab({ added: [], skipped: [{ file: 'D:/scans', reason }], job: {} as LabelJob });
+    type(input, 'D:/scans');
+    submit();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('dialog[open] .nothing')?.textContent).toBe(`Nothing was added${reason.replace('no', 'No')}.`);
+    });
+    expect(whyNothingAdded([1, 2, 3].map((i) => ({ file: `${i}.png`, reason: i < 3 ? 'the job already has this file' : 'not a readable image' })))).toBe(
+      '2 files: the job already has this file; 1 file: not a readable image.',
+    );
   });
 
   it('says a relative path is not a full one, and sends nothing', () => {

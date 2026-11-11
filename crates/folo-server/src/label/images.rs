@@ -74,14 +74,27 @@ impl Labeler {
                 state.file.images.iter().filter_map(|r| r.external.clone()).collect();
             (known, MAX_IMAGES.saturating_sub(state.file.images.len()))
         };
+        // The other files' extensions, a few, say why a folder without images added nothing.
+        let mut others = std::collections::BTreeSet::new();
         let files = walkdir::WalkDir::new(folder)
             .sort_by_file_name()
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file() && folo_data::is_image_path(e.path()))
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| {
+                let image = folo_data::is_image_path(e.path());
+                if !image && others.len() < 4 {
+                    others.insert(
+                        e.path().extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default(),
+                    );
+                }
+                image
+            })
             .map(|e| e.into_path());
         let (mut staged, mut skipped, mut over) = (Vec::new(), Vec::new(), 0usize);
+        let mut found = 0usize;
         for path in files {
+            found += 1;
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             if known.contains(&path) {
                 skipped.push(SkippedImage { file: name, reason: "the job already has this file".into() });
@@ -101,6 +114,9 @@ impl Labeler {
                 file: folder.display().to_string(),
                 reason: format!("{over} more images were left out: a job holds at most {MAX_IMAGES}"),
             });
+        }
+        if found == 0 {
+            skipped.push(nothing_found(folder, &others));
         }
         self.insert(job, staged, skipped)
     }
@@ -306,4 +322,18 @@ impl Source {
             let _ = std::fs::remove_file(tmp);
         }
     }
+}
+
+/// Why a folder (or a file) added nothing: a file is not an image, a folder has none (and which other files it has).
+fn nothing_found(path: &Path, others: &std::collections::BTreeSet<String>) -> SkippedImage {
+    if path.is_file() {
+        let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        return SkippedImage { file, reason: "not a JPEG, PNG, BMP or WebP file".into() };
+    }
+    let mut reason = "no JPEG, PNG, BMP or WebP images in this folder or its subfolders".to_string();
+    let kinds: Vec<String> = others.iter().filter(|x| !x.is_empty()).map(|x| format!(".{x}")).collect();
+    if !kinds.is_empty() {
+        reason.push_str(&format!(" (it has {} files)", kinds.join(", ")));
+    }
+    SkippedImage { file: path.display().to_string(), reason }
 }

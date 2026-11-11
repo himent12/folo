@@ -16,7 +16,7 @@ import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import Tabs from '$lib/ui/Tabs';
 import Viewfinder from '$lib/ui/Viewfinder';
-import type { Uploads } from './uploads';
+import { whyNothingAdded, type Uploads } from './uploads';
 
 export interface AddImagesDialogProps {
   open?: boolean;
@@ -40,11 +40,14 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
   const pathError = computed(() => (tried.get() ? folderPathError(folder.get()) : null));
   const busy = signal(false);
   const error = signal<unknown>(undefined);
+  /** Why the last folder added nothing (no images there, a file that is not one, all in the job already). */
+  const nothing = signal<string | null>(null);
   const dragging = signal(false);
 
   effect(() => {
     if (!open.get()) {
       error.set(undefined);
+      nothing.set(null);
       tried.set(false);
       busy.set(false);
       dragging.set(false);
@@ -66,8 +69,13 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
     if (!folder.peek() || pathError.peek() || busy.peek()) return;
     busy.set(true);
     error.set(undefined);
+    nothing.set(null);
     try {
-      await props.uploads.folder(folder.peek());
+      const answer = await props.uploads.folder(folder.peek());
+      if (answer && !answer.added.length) {
+        nothing.set(whyNothingAdded(answer.skipped));
+        return;
+      }
       open.set(false);
       path.set('');
     } catch (err) {
@@ -172,6 +180,12 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
               />
             </Field>
             {error.get() ? <ErrorState error={error.get()} title="Could not add this folder" compact /> : null}
+            {nothing.get() ? (
+              <div class="nothing" role="status">
+                <p class="title">Nothing was added</p>
+                <p>{nothing.get()}</p>
+              </div>
+            ) : null}
           </form>
         )}
       </div>
@@ -212,6 +226,19 @@ css`
     font-family: var(--font-sans);
     font-size: var(--type-base-size);
     color: var(--text-tertiary);
+  }
+  .nothing {
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--bg-inset);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .nothing .title {
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
   }
   .why {
     margin-right: auto;
