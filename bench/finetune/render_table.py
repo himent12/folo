@@ -162,8 +162,8 @@ def results_table(groups: dict, names: list[str], fm: str, um: str, seeds: int, 
     if shared:
         lines.append("")
         lines.append(
-            f"Minutes per run of {', '.join(shared)}: only the runs that had the GPU to themselves; the others "
-            "trained two at a time on one GPU (their accuracy counts, their time does not)."
+            f"Minutes per run of {', '.join(shared)}: only the runs that had the GPU to themselves (none: blank); "
+            "the others trained side by side with other runs on one GPU (their accuracy counts, their time does not)."
         )
     lines.append("")
     return lines
