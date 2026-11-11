@@ -9,7 +9,7 @@ import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Sample } from '$lib/api/types';
 import DatasetImage from '$lib/detect/DatasetImage';
-import Dialog from '$lib/ui/Dialog';
+import SampleInspector from './SampleInspector';
 import ErrorState from '$lib/ui/ErrorState';
 import Panel from '$lib/ui/Panel';
 import Segmented from '$lib/ui/Segmented';
@@ -36,8 +36,8 @@ export default function Samples(props: SamplesProps) {
   const pick = signal<string>('latest');
   const show = signal<'both' | 'pred' | 'truth'>('both');
   const conf = signal(0.25);
-  const open = signal<Sample | null>(null);
-  const dialogOpen = signal(false);
+  /** The sample open in the inspector (an index into the epoch's samples), null: none. */
+  const open = signal<number | null>(null);
   // About eight samples show by default, always as full rows (5 columns: 10, 3 columns: 9); the rest are one click
   // away.
   const cols = signal(4);
@@ -157,8 +157,7 @@ export default function Samples(props: SamplesProps) {
                     class="cell"
                     style:aspect-ratio={`${s().width} / ${s().height}`}
                     onclick={() => {
-                      open.set(s());
-                      dialogOpen.set(true);
+                      open.set(samples.data?.samples.indexOf(s()) ?? null);
                     }}
                     aria-label={`Open sample ${s().image_id}: ${hits(s())} predictions, ${s().truth.length} ground-truth boxes`}
                   >
@@ -197,28 +196,17 @@ export default function Samples(props: SamplesProps) {
         )}
       </Panel>
 
-      <Dialog
-        bind:open={dialogOpen}
-        title={open.get() ? `Sample ${open.get()!.image_id}` : 'Sample'}
-        description={open.get() ? `${hits(open.get()!)} predictions ≥ ${conf.get().toFixed(2)} · ${open.get()!.truth.length} ground-truth boxes` : undefined}
-        size="lg"
-      >
-        {open.get() && props.datasetGone ? (
-          <p class="none">The dataset was removed, so this image is gone; the counts above are from the run.</p>
-        ) : open.get() ? (
-          <div class="big" style:aspect-ratio={`${open.get()!.width} / ${open.get()!.height}`}>
-            <DatasetImage
-              datasetId={open.get()!.dataset_id}
-              imageId={open.get()!.image_id}
-              width={open.get()!.width}
-              height={open.get()!.height}
-              boxes={preds(open.get()!)}
-              truth={truth(open.get()!)}
-              classes={props.classes}
-            />
-          </div>
-        ) : null}
-      </Dialog>
+      <SampleInspector
+        samples={samples.data?.samples ?? []}
+        index={open.get()}
+        onindex={(i) => open.set(i)}
+        epoch={samples.data?.epoch}
+        classes={props.classes}
+        preds={preds}
+        truth={truth}
+        describe={(x) => `${hits(x)} predictions ≥ ${conf.get().toFixed(2)} · ${x.truth.length} ground-truth boxes`}
+        datasetGone={props.datasetGone}
+      />
     </>
   );
 }
@@ -364,11 +352,6 @@ css`
     color: var(--text-tertiary);
     text-align: center;
     background: var(--bg-inset);
-  }
-  .big {
-    width: 100%;
-    border-radius: var(--radius-md);
-    overflow: hidden;
   }
   @media (max-width: 767px) {
     .grid {
