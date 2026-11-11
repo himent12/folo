@@ -341,7 +341,7 @@ pub enum PathKind {
 /// Which points are inside a filled path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum FillRule {
-    /// Non-zero winding (lyon's and GPUI's default).
+    /// Non-zero winding. (lyon's and so GPUI's `PathBuilder::fill` default is `EvenOdd`, which `PathBuilder` sets.)
     #[default]
     NonZero,
     /// Even-odd.

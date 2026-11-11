@@ -12,8 +12,8 @@ use std::{any::Any, fmt, panic, sync::Arc};
 use smallvec::SmallVec;
 
 use crate::{
-    App, AvailableSpace, Bounds, Context, Entity, EntityId, FocusHandle, FocusId, Pixels, Point,
-    SharedString, Size, Window,
+    App, AvailableSpace, Bounds, Context, Entity, EntityId, FluentBuilder, FocusHandle, FocusId, Pixels,
+    Point, SharedString, Size, Window,
 };
 
 /// An element: GPUI 0.2.2's trait, unchanged (the app implements it by hand in `src/input.rs`).
@@ -601,31 +601,5 @@ impl<V: Render> IntoElement for Entity<V> {
     }
 }
 
-/// Conditional builder steps (`.when(cond, |d| ..)`, `.when_some(opt, |d, v| ..)`), for every element.
-pub trait FluentBuilder {
-    /// Applies `f` to self.
-    fn map<U>(self, f: impl FnOnce(Self) -> U) -> U
-    where
-        Self: Sized,
-    {
-        f(self)
-    }
-
-    /// Applies `then` when `condition` holds.
-    fn when(self, condition: bool, then: impl FnOnce(Self) -> Self) -> Self
-    where
-        Self: Sized,
-    {
-        self.map(|this| if condition { then(this) } else { this })
-    }
-
-    /// Applies `then` to the value when there is one.
-    fn when_some<T>(self, option: Option<T>, then: impl FnOnce(Self, T) -> Self) -> Self
-    where
-        Self: Sized,
-    {
-        self.map(|this| if let Some(value) = option { then(this, value) } else { this })
-    }
-}
-
+/// Conditional builder steps (`.when(..)`, `.when_some(..)`) for every element.
 impl<T: IntoElement> FluentBuilder for T {}

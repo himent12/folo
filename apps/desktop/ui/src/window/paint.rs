@@ -16,14 +16,6 @@ use crate::{
     RenderImage, SharedString, StrikethroughStyle, UnderlineStyle, Window, transparent_black,
 };
 
-/// A rectangular clip: what may be painted (window logical px).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[repr(C)]
-pub struct ContentMask<P: Clone + Default + std::fmt::Debug + PartialEq> {
-    /// The visible region.
-    pub bounds: Bounds<P>,
-}
-
 /// A quad to paint: bounds, corner radii, background, borders.
 #[derive(Clone, Debug)]
 pub struct PaintQuad {

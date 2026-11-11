@@ -24,5 +24,15 @@ when you adapt another file.
 | `text/types.rs` | `text_system.rs`, `text_system/line_layout.rs`, `text_system/font_features.rs`, `text_system/font_fallbacks.rs`, `style.rs` (`UnderlineStyle`, `StrikethroughStyle`), `platform.rs` (`PlatformTextSystem`) |
 | `element.rs` | `element.rs` (the `Element` trait), `util.rs` (`FluentBuilder`) |
 | `window/paint.rs` | `window.rs` (`PaintQuad`, `quad`, `fill`, `outline`) |
+| `style/mod.rs`, `style/layout.rs`, `style/text.rs` | `style.rs` |
+| `style/to_taffy.rs` | `taffy.rs` (`ToTaffy`) |
+| `style/paint.rs` | `style.rs` (`Style::paint`, `overflow_mask`), `window.rs` (`paint_quad`, `paint_shadows`, `ContentMask`) |
+| `style/refine.rs` | `refineable` (`Refineable`) and `refineable/derive_refineable` (the generated refinements) |
+| `styled/mod.rs`, `styled/macros.rs` | `styled.rs`, and `gpui_macros/src/styles.rs` (the generated method families) |
+| `styled/fluent.rs` | `util.rs` (`FluentBuilder`) |
+| `path_builder.rs` | `path_builder.rs` |
+| `svg.rs` | `svg_renderer.rs` |
+| `assets.rs` | `assets.rs` (`AssetSource`) |
+| `easing.rs` | `elements/animation.rs` (`easing`) |
 
 The Apache License 2.0 text is in the repository root, `LICENSE-APACHE`.

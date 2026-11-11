@@ -39,8 +39,8 @@ use std::{
 use smallvec::SmallVec;
 
 use crate::{
-    AnyDrag, AnyView, App, DisplayId, Framebuffer, Modifiers, Pixels, PlatformWindow, Point, Size,
-    TextStyleRefinement, WindowOptions, WindowTextSystem, element::ElementIdStack,
+    AnyDrag, AnyView, App, ContentMask, DisplayId, Framebuffer, Modifiers, Pixels, PlatformWindow, Point,
+    Size, TextStyleRefinement, WindowOptions, WindowTextSystem, element::ElementIdStack,
 };
 // skeleton: `crate::raster` once the raster package lands.
 use crate::pending::raster_pending as raster;
