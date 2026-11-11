@@ -1,7 +1,8 @@
 # folo-ui: design
 
-`folo-ui` is FOLO Desktop's own UI framework. It replaces GPUI. This file is the contract every part is
-built against; when code and this file disagree, fix one of them in the same change.
+`folo-ui` is FOLO Desktop's own UI framework; it replaced GPUI 0.2.2 under the app. This file is the design
+record and the contract every part is built against; when code and this file disagree, fix one of them in the
+same change. `README.md` is how to build, test and run it.
 
 ## Goals, in order
 
@@ -35,8 +36,8 @@ built against; when code and this file disagree, fix one of them in the same cha
   loop needs it (SSE2 is the x86-64 baseline, NEON the aarch64 one; always keep a scalar path).
 - **The public API is GPUI's, for exactly the subset the app uses.** Same names, signatures and semantics,
   re-exported flat from the crate root (and `folo_ui::prelude`). The app is the specification of the surface:
-  if `apps/desktop/src` does not use it, it does not exist. GPUI 0.2.2 (`apps/desktop/vendor/gpui`, in the tree
-  until the port lands) is the specification of behaviour.
+  if `apps/desktop/src` does not use it, it does not exist. GPUI 0.2.2 (the `gpui` crate on crates.io) is the
+  specification of behaviour.
 - **Rendering is on the CPU, in tiles, and only where the picture changed.** The window keeps one framebuffer.
   Each frame's display list (`Scene`) is binned into 64 px tiles; a tile whose content hash equals last frame's
   is not touched; changed tiles are rasterized (in parallel when there are many) and only their rectangles are
@@ -66,35 +67,56 @@ line (`// Adapted from GPUI (Apache-2.0): <path>`) and is listed in `ui/NOTICE.m
 window pipeline, element and interactivity code, renderer, platforms, text backends) is written for this
 design; match GPUI's observable behaviour, do not transplant its modules.
 
-## Crate layout and owners
+## Crate layout
 
-`apps/desktop/ui/`, crate `folo-ui`, a member of the `apps/desktop` workspace. One crate; each work package
-owns the files listed and touches others only to fix a real integration problem (say so in your report).
+`apps/desktop/ui/`, crate `folo-ui`, a member of the `apps/desktop` workspace. One crate, in these parts (a
+module's doc comment may name its part with an `Owner tag`):
 
-| Files (under `ui/src/`) | Package | Contents |
-| --- | --- | --- |
-| `geometry.rs` `color.rs` `shared_string.rs` `util.rs` | foundation | `Pixels` `ScaledPixels` `DevicePixels` `Rems` `Length`… `Point` `Size` `Bounds` `Edges` `Corners`, `Hsla` `Rgba` `Background` gradients |
-| `input_events.rs` `keystroke.rs` | foundation | `PlatformInput` and every event struct, `Modifiers`, `Keystroke` (parse / unparse), `MouseButton`, `ScrollDelta`, `ExternalPaths`, `CursorStyle`, `WindowControlArea` |
-| `platform.rs` | foundation | `Platform`, `PlatformWindow`, `PlatformDisplay`, `PlatformDispatcher`, `PlatformInputHandler`, `WindowOptions` and friends, `ClipboardItem`, `PathPromptOptions`, `Framebuffer` |
-| `scene.rs` | foundation (raster may extend) | `Scene`, primitives, `AlphaMask`, `ColorMask` |
-| `text/types.rs` | foundation | `Font` `FontId` `FontWeight` `FontStyle` `FontFeatures` `FontMetrics` `GlyphId` `TextRun` `FontRun` `LineLayout` `ShapedRun` `ShapedGlyph` `RenderGlyphParams`, `PlatformTextSystem` |
-| `raster/` | raster | the tile renderer, mask / shadow / path / scaled-image caches, benches |
-| `text/` (rest) | text | `TextSystem`, `WindowTextSystem`, line layout cache, `LineWrapper`, truncation, `ShapedLine` / `WrappedLine` and their painting through `GlyphPainter` |
-| `text/dwrite/` | text | DirectWrite `PlatformTextSystem` |
-| `text/portable/` | unix | cosmic-text `PlatformTextSystem` |
-| `platform/windows/` | windows | Win32 backend |
-| `platform/winit/` | unix | winit + softbuffer backend |
-| `style.rs` `styled.rs` `layout.rs` `path_builder.rs` `assets.rs` `svg.rs` `image.rs` `easing.rs` | style | `Style`, `StyleRefinement`, `Styled`, `TextStyle`, taffy mapping, `PathBuilder` / `Path`, `AssetSource`, SVG to mask, `RenderImage` |
-| everything else: `executor.rs` `action.rs` `keymap/` `app/` `window/` `element.rs` `elements/` `interactive.rs` `platform/headless.rs` … | core | the runtime, the window, the elements |
+| Files (under `ui/src/`) | Contents |
+| --- | --- |
+| `geometry/` `color.rs` `shared_string.rs` `util.rs` | `Pixels` `ScaledPixels` `DevicePixels` `Rems` `Length`… `Point` `Size` `Bounds` `Edges` `Corners`, `Hsla` `Rgba` `Background` gradients |
+| `input_events.rs` `keystroke.rs` | `PlatformInput` and every event struct, `Modifiers`, `Keystroke` (parse / unparse), `MouseButton`, `ScrollDelta`, `ExternalPaths`, `CursorStyle`, `WindowControlArea` |
+| `platform.rs` `platform/` (shared parts) | `Platform`, `PlatformWindow`, `PlatformDisplay`, `PlatformDispatcher`, `PlatformInputHandler`, `WindowOptions` and friends, `ClipboardItem`, `PathPromptOptions`, `Framebuffer` |
+| `scene.rs` | `Scene`, primitives, `AlphaMask`, `ColorMask` |
+| `text/types.rs` | `Font` `FontId` `FontWeight` `FontStyle` `FontFeatures` `FontMetrics` `GlyphId` `TextRun` `FontRun` `LineLayout` `ShapedRun` `ShapedGlyph` `RenderGlyphParams`, `PlatformTextSystem` |
+| `raster/` | the tile renderer, mask / shadow / path / scaled-image caches, its thread pool (bench: `benches/raster.rs`) |
+| `text/` (rest) | `TextSystem`, `WindowTextSystem`, line layout cache, `LineWrapper`, truncation, `ShapedLine` / `WrappedLine` and their painting through `GlyphPainter` |
+| `text/dwrite/` | DirectWrite `PlatformTextSystem` |
+| `text/portable/` | cosmic-text `PlatformTextSystem` |
+| `platform/windows/` | Win32 backend |
+| `platform/winit/` | winit + softbuffer backend |
+| `platform/headless/` `headless_app.rs` | the headless platform and `HeadlessApp` (below) |
+| `style/` `styled/` `layout.rs` `path_builder.rs` `assets.rs` `svg.rs` `image.rs` `easing.rs` | `Style`, `StyleRefinement`, `Styled`, `TextStyle`, taffy mapping, `PathBuilder` / `Path`, `AssetSource`, SVG to mask, `RenderImage` |
+| `executor.rs` `action.rs` `keymap/` `app/` `view.rs` | the runtime: `Application`, `App`, entities, contexts, effects, tasks, actions, key bindings, `--shot` |
+| `window/` `interactive/` `element.rs` `elements/` | the window, its frame pipeline and dispatch, the elements |
 
-Rules for every package:
+Rules:
 
 - Rust 2024, `cargo fmt`, `cargo clippy --all-targets -- -D warnings` clean, **no source file of 1000 lines
   or more** (`tools/file-size.sh` fails CI), `unsafe` only in blocks with a `// SAFETY:` line.
 - Public items get a doc comment. Tests are deterministic and quick (about a second each at most).
-- Build output goes to `D:/folo-build/<your dir>` (`CARGO_TARGET_DIR`), never under `C:`.
 - Never open a window on the user's screen from a test or a script without being told to. Use the headless
   platform. A real-window check runs off screen and without taking focus (`FOLO_UI_OFFSCREEN=1`, below).
+
+## Differences from GPUI (on purpose)
+
+The API is GPUI's where the app uses it. Below it, these differ by design:
+
+- **Frames.** `PlatformWindow::request_frame(&self)` means "I am dirty, call `on_request_frame` once at the next
+  refresh"; calls coalesce, and a backend runs no timer while none is pending.
+  `PlatformWindow::present(&mut self, frame, damage)` replaces `draw(scene)`; there is no atlas.
+- `Platform::dispatcher()` replaces the executor getters; the runtime builds its executors from it.
+  `Platform::open_window(WindowParams)` takes no window handle; `WindowParams` has `app_id`. `Platform` has no
+  `on_quit`, menus, credentials, keyboard layouts or screen capture.
+- File prompts return `platform::oneshot::Receiver<T>` (awaiting gives `Result<T, Canceled>`; also `try_recv`).
+- Scene primitives carry `clip: Bounds<ScaledPixels>` (no `ContentMask`, no draw order). `GlyphBlend` has
+  `apply: bool`; `GlyphBlend::IDENTITY` / `none()` mean no correction.
+- `ClipboardItem` holds strings only. `PathBuilder::build` returns a `BuiltPath` (logical px; `Path` is the
+  scene primitive).
+- Dropped: serde, schemars, derive_more, refineable (operators written by hand), string parsing of lengths and
+  colours, grid placement.
+- The text element truncates a copy of its runs on every measure (GPUI 0.2.2 shortened them in place, which
+  sliced multi-byte characters on a later measure and panicked; the app carried a patched GPUI for it).
 
 ## Units and colour
 
@@ -136,6 +158,12 @@ impl Renderer {
 }
 ```
 
+Beyond the contract, for tests, benches and the window's frame timings: `Renderer::with_threads(n)` (1 draws
+on the calling thread; `new` uses up to `min(8, cores)`), `threads()`, `stats() -> &RenderStats` (what the last
+frame did), `cache_bytes()` and `set_cache_budget(bytes)` (default about 108 MB in all, of which a frame
+usually needs a small part); `raster::MaskCache` (the window's glyph and icon masks), `raster::TILE_SIZE`, and
+`raster::debug::{write_png, read_png}` (a `Framebuffer` to and from a PNG; `--shot` writes through it).
+
 - **The invariant, tested with random scenes:** rendering frame A then frame B into the same buffer gives
   the same bytes as rendering B into a fresh buffer, and the same bytes for every thread count.
 - Tiles are 64x64 device px. Bin primitives by `bounds ∩ clip`; hash each tile's ordered primitive
@@ -143,7 +171,7 @@ impl Renderer {
 - Few dirty tiles are drawn on the calling thread; many go to a small dedicated pool (not rayon's global
   pool: it belongs to the engine). The pool is created the first time it is needed.
 - Quads, borders (solid and dashed), rounded corners and shadows use GPUI's coverage formulas
-  (`vendor/gpui/src/platform/windows/shaders.hlsl`) on edge pixels and solid spans inside. Shadows are cached
+  (GPUI 0.2.2's `src/platform/windows/shaders.hlsl`) on edge pixels and solid spans inside. Shadows are cached
   as masks. Images are sampled as a linear GPU sampler would (texel centres), with a cache of resampled
   copies for images drawn at the same size frame after frame. Path coverage is cached by geometry.
 - Caches are bounded in bytes and drop what recent frames did not use. Memory is a goal, not an afterthought.
@@ -180,17 +208,36 @@ impl Renderer {
 - **Frames.** The window draws when it is dirty, at most once per display refresh; while a frame asks for
   another (`request_animation_frame`) the backend keeps a refresh-rate tick, otherwise there is no timer and
   the process sleeps in the message loop. Resizing repaints synchronously (no black edges).
-- **Headless** (`platform/headless.rs`): no OS window; a fixed size and scale; synthetic input; renders to a
-  `Framebuffer`. It is what tests, `folo-desktop --shot`, and CI use.
+- **Headless** (`platform/headless/`): no OS window; a fixed size and scale; synthetic input; renders to a
+  `Framebuffer`. `HeadlessApp` (`headless_app.rs`) drives it: `update` changes state, `run_until_idle` pumps
+  the main queue and waits for background jobs, `advance_clock` moves the fake clock (timers and animations see
+  only that clock), `simulate_input` delivers events, `frame` draws a dirty window and returns its pixels,
+  `settle` / `settle_advancing` draw until the window stops asking for frames. A frame is a function of the
+  state and the time the harness advanced to. It is what tests, `folo-desktop --shot`, and CI use.
+- **`--shot <png>`** (`app/shot.rs`): `Application::new` sees it in the process arguments and runs the app on
+  the headless platform instead (`--width`, `--height`, `--scale`, `--text portable`, `--shot-time`), settles
+  its first window (queues pumped, then 50 ms steps of the fake clock until it stops asking for frames or
+  `--shot-time` has passed, default 2200 ms) and writes the PNG. The app needs no code for it.
 - `FOLO_UI_OFFSCREEN=1`: a real window opens off every display, is never activated and takes no focus
   (developer checks on a machine someone is using).
 
-## Acceptance (the whole port)
+## How it is verified
 
-- `apps/desktop` builds against `folo-ui` with no `gpui` anywhere, and `vendor/gpui` is gone.
-- Every `--scenario` rendered headless at the baseline's size and scale matches the GPUI capture: boxes,
-  colours and text at the same pixels; any residual difference is listed and explained.
-- `tools/chrome-check.ps1` and the window checks pass on the real window.
-- Measured against the GPUI build on the same machine: time to first frame, working set and private bytes,
-  GPU memory, idle CPU, CPU time over a scripted live run, binary size, clean build time.
-- `cargo fmt`, clippy and tests are green on Windows and Linux; the crate checks for macOS.
+- **The app builds on folo-ui alone.** `apps/desktop` has no `gpui` dependency and no vendored copy; the
+  only GPUI left is the attribution in `NOTICE.md` and the files' first lines.
+- **Pixels.** Every `--scenario` rendered headless at the GPUI captures' sizes and scale (1280 x 800 for all,
+  960 x 620 and 1680 x 1050 for the densest, at 1.5) is compared with GPUI 0.2.2's captures, region by
+  region: boxes, colours and text at the same pixels. The GPUI captures and the comparison were made outside
+  the repo, on the dev PC. (Placeholder: the parity branch adds its tool and the residual differences here.)
+- **Behaviour.** The crate's tests drive the headless platform with synthetic input: layout, text wrapping and
+  truncation, hover, focus and keyboard, scrolling, drag and drop, IME ranges, animations on the fake clock,
+  the renderer's invariant on random scenes and its exactness against GPUI's formulas. The app's own tests run
+  on it too.
+- **The real window** (Windows): `win_smoke` and the app's `tools/chrome-check.ps1` drive an off-screen window
+  with posted messages; `tools/window-check.ps1` drives it with real input when someone can leave the machine
+  alone.
+- **Cost.** `tools/perf.ps1` measures time to first frame, working set and private bytes, GPU memory, idle CPU
+  and CPU over a live run, off screen; compare two builds back to back on the same machine.
+- **Platforms.** CI runs fmt, clippy and the tests on Windows and Linux, a headless `--shot` on Linux, and
+  `tools/cross-check.sh` (check and clippy of the crate for Linux and both macOS targets). Nothing runs on
+  macOS.
