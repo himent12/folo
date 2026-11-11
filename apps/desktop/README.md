@@ -127,7 +127,7 @@ default plan). A benchmark's page has three tabs:
 
 An entry's page shows the score and its axes, accuracy, self-labeling, robustness per condition and severity, per
 class, calibration and localization, then its images worst first with the truth (dashed) and its detections.
-Without the feature the section says so. The built-in demo has three benchmarks (`src/api/mock_bench.rs`, scored by
+Without the feature the section says so. The built-in demo has three benchmarks (`src/api/mock_bench/`, scored by
 `folo-bench` itself); `FOLO_SERVER=… cargo test real_server_bench -- --ignored` checks every benchmark call against
 a real server.
 
