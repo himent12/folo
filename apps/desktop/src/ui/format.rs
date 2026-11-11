@@ -215,6 +215,19 @@ pub fn fmt_lr(v: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+/// A learning rate in normalised scientific notation, as Studio writes it (`lib/format` `lr`):
+/// "1.43×10⁻⁵", a mantissa that would round to 10 moving to the next power ("1.00×10⁻²").
+pub fn lr_sci(x: f64) -> String {
+    if x == 0. || !x.is_finite() {
+        return if x == 0. { "0".into() } else { "–".into() };
+    }
+    let mut e = x.abs().log10().floor() as i32;
+    if (x / 10f64.powi(e) * 100.).round().abs() >= 1000. {
+        e += 1;
+    }
+    crate::charts::in_pow(x, e)
+}
+
 /// Text that may hold a power of ten ("lr0 1.11×10⁻³"): the exponent drawn as an 11 px raised
 /// run ("−3") rather than the font's superscript glyphs, which render at 7–8 px. Text without
 /// one is plain `text`.
@@ -272,6 +285,17 @@ mod tests {
         assert_eq!(fmt_conf(0.314), "0.314");
         assert_eq!(fmt_conf(0.024), "0.024");
         assert_eq!(fmt_conf(0.35), "0.35");
+    }
+
+    #[test]
+    fn learning_rates_read_as_studio_writes_them() {
+        use super::lr_sci;
+        // The dogfood case: Desktop said "0.014×10⁻³", Studio "1.43×10⁻⁵".
+        assert_eq!(lr_sci(1.43e-5), "1.43×10⁻⁵");
+        assert_eq!(lr_sci(0.0067), "6.70×10⁻³");
+        assert_eq!(lr_sci(0.009996), "1.00×10⁻²");
+        assert_eq!(lr_sci(0.01), "1.00×10⁻²");
+        assert_eq!(lr_sci(0.), "0");
     }
 
     #[test]
