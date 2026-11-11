@@ -18,11 +18,11 @@ import Copy from '$icons/copy';
 import Play from '$icons/play';
 import RotateCcw from '$icons/rotate-ccw';
 import CloudUpload from '$icons/cloud-upload';
-import { computed, css, effect, For, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, effect, MediaQuery, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { LiveRun } from '$lib/api/live';
 import { Resource } from '$lib/api/resource';
-import { hasFeature, ordinal, queuePlace, withQueueMove } from '$lib/api/queue';
+import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
 import type { QueueRequest } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
 import { ago, deviceName, eta } from '$lib/format';
@@ -41,7 +41,6 @@ import Tabs from '$lib/ui/Tabs';
 import ErrorState from '$lib/ui/ErrorState';
 import StatusBadge from '$lib/ui/StatusBadge';
 import Ident from '$lib/ui/Ident';
-import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
 import { tooltip } from '$lib/ui/tooltip';
 import ConfigPanel from './run/ConfigPanel';
@@ -63,6 +62,7 @@ import CloudPanel from './run/CloudPanel';
 import { isOom } from '$lib/oom';
 import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import RunSkeleton from './run/RunSkeleton';
+import WaitingPanels from './run/WaitingPanels';
 import DeleteRun from './run/DeleteRun';
 
 type Section = 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
@@ -543,61 +543,13 @@ export default function Run() {
                 </div>
                 <div class="w-side">
                   {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} /> : null}
-                  {place.get() !== null && queue.get().length ? (
-                    <Panel title="Queue" meta={`${waitingCount.get()} waiting`} pad="none" id="queue">
-                      <ol class="queue">
-                        {ahead.get() ? (
-                          <li class="q-row">
-                            <span class="q-n">
-                              <span class="live-dot" aria-hidden="true"></span>
-                              <span class="sr-only">Training</span>
-                            </span>
-                            <a class="q-name" href={href(`/runs/${ahead.get()!.id}`)}>
-                              {ahead.get()!.name}
-                            </a>
-                            <span class="q-meta num">{ahead.get()!.eta_s !== null ? `${eta(ahead.get()!.eta_s)} left` : 'training'}</span>
-                          </li>
-                        ) : null}
-                        <For each={queue.get()} key={(q) => q.id}>
-                          {(q) => {
-                            const self = () => q().id === R().id;
-                            return (
-                              <li class="q-row" class:self={self()} aria-current={self() ? 'true' : undefined}>
-                                <span class="q-n num" aria-label={ordinal(q().queue_position ?? 0)}>
-                                  {q().queue_position}
-                                </span>
-                                {self() ? (
-                                  <>
-                                    <span class="q-name">{q().name}</span>
-                                    <span class="q-meta">this run</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <a class="q-name" href={href(`/runs/${q().id}`)}>
-                                      {q().name}
-                                    </a>
-                                    <span class="q-meta"></span>
-                                  </>
-                                )}
-                              </li>
-                            );
-                          }}
-                        </For>
-                      </ol>
-                    </Panel>
-                  ) : null}
-                  <Panel title="When training starts" pad="none" id="later">
-                    <ul class="later">
-                      <For each={later.get()} key={(l) => l.name}>
-                        {(l) => (
-                          <li>
-                            <span class="l-name">{l().name}</span>
-                            <span class="l-what">{l().what}</span>
-                          </li>
-                        )}
-                      </For>
-                    </ul>
-                  </Panel>
+                  <WaitingPanels
+                    queue={place.get() !== null ? queue.get() : []}
+                    ahead={ahead.get()}
+                    self={R().id}
+                    waiting={waitingCount.get()}
+                    later={later.get()}
+                  />
                 </div>
               </div>
             ) : (
@@ -791,80 +743,6 @@ css`
     .w-side :global(#later) {
       display: none;
     }
-  }
-  .queue,
-  .later {
-    list-style: none;
-    margin: 0;
-    padding: 0 0 var(--space-2);
-  }
-  .q-row {
-    display: grid;
-    grid-template-columns: 24px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-2);
-    height: 36px;
-    padding: 0 var(--space-4);
-    border-top: 1px solid var(--line-subtle);
-  }
-  .q-row:first-child {
-    border-top: 0;
-  }
-  /* Each name is a link: a 44 px row on touch screens. */
-  @media (pointer: coarse) {
-    .q-row {
-      height: 44px;
-    }
-  }
-  .q-n {
-    color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-  }
-  .live-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--accent-line);
-  }
-  .q-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-primary);
-  }
-  a.q-name:hover {
-    text-decoration: underline;
-    text-decoration-color: var(--line-strong);
-    text-underline-offset: 3px;
-  }
-  .q-row.self {
-    background: var(--bg-active);
-  }
-  .q-row.self .q-name {
-    font-weight: var(--weight-medium);
-  }
-  .q-meta {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    white-space: nowrap;
-  }
-  .later li {
-    display: grid;
-    gap: 2px;
-    padding: var(--space-2) var(--space-4);
-    border-top: 1px solid var(--line-subtle);
-  }
-  .later li:first-child {
-    border-top: 0;
-  }
-  .l-name {
-    font-weight: var(--weight-medium);
-  }
-  .l-what {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
   }
   /* The two columns end together: each column's last panel takes what the other column adds. Usually the rail is the
      taller, and the log (at least 200 px) grows to its bottom; under a short rail (few classes) Config's frame runs
