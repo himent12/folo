@@ -387,6 +387,8 @@ try {
         Key 0x4B "ctrl"; Settle 400
         Key 0x41 "ctrl"; Key 0x2E; Keys "runs"; Settle 300
         $runsPanel = Snap
+        # Something else first, so "runs" on the clipboard can only come from this Ctrl+C.
+        [System.Windows.Forms.Clipboard]::SetText("folo-interact-check")
         Key 0x41 "ctrl"; Key 0x43 "ctrl"
         $copied = ClipText
         for ($i = 0; $i -lt 50 -and $copied -ne "runs"; $i++) { Start-Sleep -Milliseconds 20; $copied = ClipText }
