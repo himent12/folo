@@ -4,7 +4,8 @@
  */
 import FolderOpen from '$icons/folder-open';
 import Upload from '$icons/upload';
-import { bindable, createUniqueId, css, effect, MediaQuery, signal } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, MediaQuery, signal } from 'fw';
+import { folderPath, folderPathError } from '$lib/label';
 import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import { media } from '$lib/design/tokens';
 import Button from '$lib/ui/Button';
@@ -32,6 +33,11 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
   const touch = new MediaQuery(TOUCH_ONLY, false);
   const phone = new MediaQuery(media.phone, false);
   const path = signal('');
+  /** The path without the quotes and spaces around it (Explorer's "Copy as path"). */
+  const folder = computed(() => folderPath(path.get()));
+  /** Set by the first submit: from then on a relative path says so as it is typed. */
+  const tried = signal(false);
+  const pathError = computed(() => (tried.get() ? folderPathError(folder.get()) : null));
   const busy = signal(false);
   const error = signal<unknown>(undefined);
   const dragging = signal(false);
@@ -39,6 +45,7 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
   effect(() => {
     if (!open.get()) {
       error.set(undefined);
+      tried.set(false);
       busy.set(false);
       dragging.set(false);
     }
@@ -55,11 +62,12 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
-    if (!path.peek().trim() || busy.peek()) return;
+    tried.set(true);
+    if (!folder.peek() || pathError.peek() || busy.peek()) return;
     busy.set(true);
     error.set(undefined);
     try {
-      await props.uploads.folder(path.peek().trim());
+      await props.uploads.folder(folder.peek());
       open.set(false);
       path.set('');
     } catch (err) {
@@ -78,7 +86,7 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
         <>
           {tab.get() === 'folder' ? (
             <>
-              {!path.get().trim() ? (
+              {!folder.get() ? (
                 <p class="why" data-gate-why>
                   Enter a folder path
                 </p>
@@ -86,7 +94,7 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
               <Button variant="ghost" onclick={() => open.set(false)}>
                 Cancel
               </Button>
-              <Gate reason={path.get().trim() ? null : 'Enter a folder path'}>
+              <Gate reason={folder.get() ? null : 'Enter a folder path'}>
                 {(why) => (
                   <Button
                     variant="primary"
@@ -151,6 +159,7 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
               label="Folder"
               for={`${uid}-path`}
               hint="On the machine running `folo serve`. Its images, in subfolders too, are read in place, never copied or changed."
+              error={pathError.get()}
             >
               <Input
                 id={`${uid}-path`}

@@ -10,13 +10,13 @@ use folo_api::{
 };
 
 use crate::error::Result;
-use crate::index::{absolute, read_image_with, write_atomic};
+use crate::index::{read_image_with, write_atomic};
 use crate::store::ImageData;
 use crate::util::fnv1a;
 
 use super::job::{Job, Record, stem_key, unique_file_name};
 use super::validate::check_boxes;
-use super::{BULK_IMAGES, Labeler, MAX_IMAGES, Upload, io_error, path_not_found};
+use super::{BULK_IMAGES, Labeler, MAX_IMAGES, Upload, folder_path, invalid, io_error, path_not_found};
 
 impl Labeler {
     /// `POST /api/label/jobs/{id}/images` (multipart): stores the uploads in the job's folder.
@@ -56,8 +56,10 @@ impl Labeler {
     /// `POST /api/label/jobs/{id}/images` (JSON): adds the images of a folder on this machine, in place.
     pub fn add_folder(&self, id: &str, path: &str) -> Result<LabelImagesAdded> {
         let job = self.job(id)?;
-        let folder = absolute(Path::new(path.trim()));
-        if path.trim().is_empty() || !folder.exists() {
+        let Some(folder) = folder_path(path)? else {
+            return Err(invalid("path must not be blank"));
+        };
+        if !folder.exists() {
             return Err(path_not_found(&folder));
         }
         self.add_folder_to(&job, &folder)

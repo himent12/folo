@@ -11,8 +11,10 @@ import { toast } from '$lib/ui/toast';
 import { render } from '../../../framework/testing';
 import LabelJobPage from '../LabelJob';
 import LabelJobs from '../LabelJobs';
+import AddImagesDialog from './AddImagesDialog';
 import DatasetDialog, { type DatasetDialogProps } from './DatasetDialog';
 import JobDialog, { type JobDialogProps } from './JobDialog';
+import type { Uploads } from './uploads';
 
 let target: HTMLElement;
 /** Port of `mount(comp, { target, props })`: the props object is read live (a `deep` one changes them). */
@@ -100,6 +102,36 @@ describe('New labeling job', () => {
     expect(text()).toMatch(/rename a class or add one, not remove one/);
     expect(document.querySelectorAll('dialog[open] button[aria-label^="Remove"]')).toHaveLength(0);
     expect(document.querySelectorAll('dialog[open] input[aria-label^="Class"]')).toHaveLength(4);
+  });
+});
+
+describe('Add images › Server folder', () => {
+  function folderTab() {
+    const folder = vi.fn(async (_path: string) => {});
+    open(AddImagesDialog, { open: true, tab: 'folder' as const, uploads: { folder } as unknown as Uploads, onbrowse: () => {} });
+    const input = document.querySelector<HTMLInputElement>('dialog[open] input')!;
+    const submit = () => {
+      submitButton().click();
+      flushSync();
+    };
+    return { folder, input, submit };
+  }
+
+  it('sends a path pasted with quotes and spaces around (Explorer’s "Copy as path") without them', async () => {
+    const { folder, input, submit } = folderTab();
+    type(input, '  "D:\\photos\\unlabeled cells"  ');
+    submit();
+    await vi.waitFor(() => expect(folder).toHaveBeenCalledWith('D:\\photos\\unlabeled cells'));
+  });
+
+  it('says a relative path is not a full one, and sends nothing', () => {
+    const { folder, input, submit } = folderTab();
+    type(input, "'photos'");
+    submit();
+    expect(folder).not.toHaveBeenCalled();
+    expect(document.querySelector('dialog[open] .field.invalid')?.textContent).toMatch(/Give the full path, such as D:\/photos/);
+    type(input, '/srv/photos');
+    expect(document.querySelector('dialog[open] .field.invalid')).toBeNull();
   });
 });
 

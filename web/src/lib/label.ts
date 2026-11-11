@@ -15,6 +15,25 @@ export const CLASS_NAME_MAX = 64;
 export const INSTRUCTIONS_MAX = 4000;
 export const NOTE_MAX = 2000;
 
+/**
+ * A folder path as people paste it, without what is not part of it: surrounding whitespace and one pair of matching
+ * quotes (Windows' "Copy as path" adds them), as the server reads it.
+ */
+export function folderPath(raw: string): string {
+  const p = raw.trim();
+  const q = p[0];
+  return p.length >= 2 && (q === '"' || q === "'") && p.at(-1) === q ? p.slice(1, -1).trim() : p;
+}
+
+/**
+ * Why a cleaned folder path cannot be a folder on the server's machine, or null: a relative one would be read from
+ * wherever the server was started (a drive path, a `/` path and a `\\server` share are full paths).
+ */
+export function folderPathError(path: string): string | null {
+  if (!path || /^([A-Za-z]:[\\/]|[\\/])/.test(path)) return null;
+  return 'Give the full path, such as D:/photos: a relative one would be read from wherever folo serve was started.';
+}
+
 /** What is wrong with one class name, or null: not blank, at most 64 characters, no `,`, `:` or line break. */
 export function classNameError(name: string): string | null {
   const n = name.trim();

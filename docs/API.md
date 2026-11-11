@@ -745,7 +745,7 @@ exported more than once.
   non-blank names of at most 64 characters (no `,`, `:`, line breaks or other control characters; they are
   compared without case); `instructions`:
   at most 4000 characters. With `path`, the images of that folder are added as by `POST …/images`
-  (`path_not_found` creates nothing). Anything else wrong is `400 invalid_body`, naming the field.
+  (`path_not_found` and a relative path create nothing). Anything else wrong is `400 invalid_body`, naming the field.
 - `GET /api/label/jobs/{id}` → `LabelJob`
 - `PUT /api/label/jobs/{id}` body `{ "name"?, "classes"?, "instructions"? }` → `LabelJob`. Absent fields stay.
   Boxes refer to classes by position, so once the job has boxes `classes` may only rename or append (a shorter
@@ -761,8 +761,10 @@ exported more than once.
   image file), whose images are read in place, not copied. A file that is not a readable image, an upload with
   the bytes of an image the job already has, or a folder image it already has (the same file) is listed in
   `skipped` with the reason instead of failing the request; so is everything past the job's limit of 10000
-  images. File names are unique within a job: a second `a.jpg` becomes `a-2.jpg`. `404 path_not_found` for a
-  missing folder. Images may be added while a run is active (they wait for the next run).
+  images. File names are unique within a job: a second `a.jpg` becomes `a-2.jpg`. The path is taken without the
+  whitespace and one pair of matching quotes around it (Windows' "Copy as path"); a relative path is
+  `400 invalid_body` (it is never read from the server's working directory), a blank one too. `404 path_not_found`
+  for a missing folder. Images may be added while a run is active (they wait for the next run).
 - `GET /api/label/jobs/{id}/images?status=pending|labeling|labeled|failed&offset=0&limit=100` →
   `{ "total", "images": [LabelImage] }`, in the order the images were added. `limit` defaults to 100 and is capped
   at 1000; `total` counts all matches before `offset` / `limit`; any other `status` is `400 invalid_query`.

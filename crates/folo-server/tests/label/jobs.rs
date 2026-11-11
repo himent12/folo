@@ -294,6 +294,15 @@ async fn folder_images_are_read_in_place() {
         "path_not_found",
     )
     .await;
+    // A path as Explorer's "Copy as path" gives it, in quotes with spaces around, is the same folder.
+    let quoted = format!(" \"{}\" ", photos.to_string_lossy());
+    let again: LabelImagesAdded = ok(app, post(&uri, json!({ "path": quoted }))).await;
+    assert!(again.added.is_empty());
+    assert_eq!(again.skipped.iter().filter(|s| s.reason == "the job already has this file").count(), 4);
+    // A relative path is refused as such, never read from (and named after) the server's working directory.
+    let relative = post(&uri, json!({ "path": "\"photos\"" }));
+    let e = err(app, relative, StatusCode::BAD_REQUEST, "invalid_body").await;
+    assert_eq!(e.message, "path must be a full path: photos is relative");
 
     // Labeled and exported: the dataset has copies; deleting an image or the job leaves the folder alone.
     ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), json!({ "agent": "claude" })))

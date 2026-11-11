@@ -25,7 +25,7 @@ import type {
   StartLabeling,
   UpdateLabelJob,
 } from '../types';
-import { AGENT_NAME, classChangeError, classesError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
+import { AGENT_NAME, classChangeError, classesError, folderPath, folderPathError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
 import { imageSize, inventBoxes, predictBoxes, round } from './boxes';
 import { image, specs, type MockDatasetSpec } from './datasets';
 import { renderImage } from './render';
@@ -392,7 +392,7 @@ export class MockLabeling {
   create(body: CreateLabelJob, now: number): LabelJob {
     this.#checkJobFields(body);
     // As on the server, a folder that cannot be found creates nothing.
-    const folder = body.path ? this.#folder(body.path) : null;
+    const folder = body.path && folderPath(body.path) ? this.#folder(body.path) : null;
     const id = `lb_${(hash(body.name + now + this.#next++) & 0xffff).toString(16).padStart(4, '0')}`;
     const job = this.#make(id, body.name.trim(), body.classes.map((c) => c.trim()), body.instructions ?? '', now);
     if (folder) this.#import(job, folder);
@@ -430,8 +430,11 @@ export class MockLabeling {
   // ---------- images ----------
 
   /** A mock dataset's folder (its path, whatever the spelling): what the demo server can "read". */
-  #folder(path: string): MockDatasetSpec {
-    const key = (p: string) => p.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  #folder(raw: string): MockDatasetSpec {
+    // As the server: the quotes and spaces around a pasted path are not part of it, and a relative path is refused.
+    const path = folderPath(raw);
+    if (folderPathError(path)) throw new ApiError(400, 'invalid_body', `path must be a full path: ${path} is relative`);
+    const key = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
     const s = specs.find((d) => key(d.path) === key(path));
     if (!s) throw new ApiError(404, 'path_not_found', `No folder at ${path}.`, 'The demo server cannot read your disk: try one of its own folders, such as D:/data/shapes.');
     return s;
