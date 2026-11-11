@@ -169,6 +169,12 @@ try {
         Launch @("--scenario", "overview", "--width", "1280", "--height", "800")
         Learn
         $before = Snap
+        if ($InSandbox) {
+            # Off screen the backend lets only a posted WM_MOUSELEAVE end a hover; on a desktop the
+            # real cursor is not on (this one), TrackMouseEvent answers a posted move with an
+            # immediate WM_MOUSELEAVE, so hover cannot be held there. The off-screen run covers it.
+            "SKIP  hover, button hover and tooltip steps: no cursor on a private desktop (see the off-screen run)"
+        } else {
         Point 66 94.7; Settle
         Pass "hover a sidebar item: the hover style appears" (-not (Same $before (Snap))) ""
         Away
@@ -187,6 +193,7 @@ try {
         Pass "tooltip: not before its delay, shown after it" (-not (Same $early $late)) ""
         Away
         Pass "tooltip: hidden when the mouse leaves its element" (Same $before (Snap)) ""
+        }
 
         # Every sidebar section, by click: the page is that scenario's shot.
         foreach ($k in @("datasets", "runs", "models", "benchmarks")) {
@@ -360,7 +367,15 @@ try {
     }
 
     # ---------- 7. clipboard (private desktop only): copy from and paste into a text field
+    # The clipboard belongs to the window station, which the private desktop shares with you: the steps
+    # run only when it holds nothing but text (or nothing), which is put back exactly afterwards.
+    $formats = @()
     if ((Wants "clipboard") -and $InSandbox) {
+        $formats = @(try { [System.Windows.Forms.Clipboard]::GetDataObject().GetFormats() } catch { @() })
+        $textOnly = @($formats | Where-Object { $_ -notmatch '^(Text|UnicodeText|System.String|OEMText|Locale)$' }).Count -eq 0
+        if (-not $textOnly) { "SKIP  clipboard steps: your clipboard holds $($formats -join ', '), which could not be put back exactly" }
+    }
+    if ((Wants "clipboard") -and $InSandbox -and $textOnly) {
         $saved = try { [System.Windows.Forms.Clipboard]::GetText() } catch { "" }
         try {
             Launch @("--scenario", "overview", "--width", "1280", "--height", "800")
