@@ -23,8 +23,10 @@ annotations/instances_<split>.json, and scores the detections with pycocotools (
 Restartable: a run whose result file exists is skipped; a run started before is followed again instead of started
 twice. Each work dir has an owner id and each run a name that carries it and the fingerprint of its configuration
 (run_state.py), so a run is only ever adopted by the matrix and configuration that started it; the request that
-creates a run is never repeated blindly (after a lost answer the run is looked up by its name first). On Ctrl+C,
-an error or a spent budget every run of this matrix that is still active is stopped through the API, the server's
+creates a run is never repeated blindly (after a lost answer the run is looked up by its name first), and repeats
+that commit late are found and stopped by reconciliation (run_cleanup.py). One runner per work dir (an OS lock on
+work-dir/run_folo.lock). At the end, normal or not (Ctrl+C, an error, a spent budget), no new creation starts,
+the workers settle, and every run of this matrix that is still active is stopped through the API, the server's
 cloud instances of those runs are checked (and terminated), and whatever could not be confirmed stopped is listed
 with the commands that finish the job (the exit code is then 1). Work dirs of the run_folo.py before owner ids
 (state.json without `"version": 2`) are not resumed: their runs are left to the version that started them.
@@ -51,15 +53,8 @@ import datasets  # noqa: E402
 import folo_api  # noqa: E402
 import run_state  # noqa: E402
 import scorer  # noqa: E402
-from folo_api import Api, ApiError  # noqa: E402
-
-TERMINAL = {"completed", "failed", "stopped"}
-
-
-def ended(run: dict) -> bool:
-    """The run is over and holds nothing: terminal, and a cloud run's instance released."""
-    cloud = run.get("cloud")
-    return run["status"] in TERMINAL and (not cloud or cloud.get("phase") == "released")
+from folo_api import Api, ApiError  # noqa: E402,F401  (ApiError: what callers of Matrix catch)
+from run_cleanup import TERMINAL, Ownership, ended  # noqa: E402,F401  (TERMINAL, ended: run_folo's API)
 
 
 def parse_compute(text: str | None, max_hours: float, disk_gb: int | None) -> dict | None:
@@ -106,26 +101,38 @@ def wall_seconds(run: dict) -> float | None:
     return (b - a).total_seconds() if a and b else None
 
 
-class Matrix:
+class Matrix(Ownership):
+    """One matrix of runs on one server; run_cleanup.Ownership is its reconciliation and clean-up half."""
+
     def __init__(self, args, api=None):
         self.args = args
         self.api = api or Api(args.server, args.token)
         self.results = Path(args.results)
         self.work = Path(args.work_dir)
         self.work.mkdir(parents=True, exist_ok=True)
+        self.work_lock = run_state.lock_work_dir(self.work)  # before the state is read; held until release()
         self.state = run_state.State(self.work / "state.json")
         self.compute = parse_compute(args.compute, args.max_hours, args.disk_gb)
         self.stop = threading.Event()
-        self.sleep = time.sleep
+        self.pause = self.stop.wait  # backoff that a shutdown cuts short
+        self.closing = False  # no creation starts once set (under self.lock)
         self.active: dict[str, str] = {}  # run id -> stem, the runs this process started or follows
+        self.tracked: dict[str, str] = {}  # run name -> the run id this process keeps for it
+        self.inflight: dict[str, str] = {}  # run name -> stem: a creation on its way (POST sent, not registered)
         self.reserved: dict[str, float] = {}  # stem -> projected cost of a launch being submitted (the budget's)
         self.discarded: dict[str, str] = {}  # run id -> stem: repeats of a creation, stopped (and reaped at the end)
+        self.restop: set[str] = set()  # repeats whose stop request failed: asked again at each reconciliation
+        self.last_reconcile = time.monotonic()
         self.lock = threading.Lock()
         self.dataset_ids: dict[str, str] = {}
         self.layouts: dict[str, str] = {}  # dataset -> layout digest, hashed from its files once per invocation
         self.spent: dict[str, float] = {}  # run id -> cloud cost so far
         self.finished: set[str] = set()  # run ids that completed (their cost is a full run's)
         self.base: dict | None = None  # the --weights model as the server lists it (pretrained variant)
+
+    def release(self) -> None:
+        """Let go of the work dir (after clean-up)."""
+        run_state.unlock_work_dir(self.work_lock)
 
     def base_model(self) -> dict:
         """The --weights model on the server (a published name or a model id), checked to be an --arch model, so a
@@ -199,6 +206,8 @@ class Matrix:
         if self.args.budget_usd is None:
             return True
         with self.lock:
+            if self.closing:
+                return False
             done = [c for rid, c in self.spent.items() if rid in self.finished]
             per_run = sum(done) / len(done) if done else self.args.run_cost_usd
             active = [rid for rid in self.active if rid not in self.finished]
@@ -220,13 +229,16 @@ class Matrix:
             )
         return ok
 
-    def register(self, run_id: str, stem: str) -> None:
-        """`run_id` is a run of this process from now on (its reservation, if any, becomes the run)."""
+    def register(self, run_id: str, stem: str, name: str) -> None:
+        """`run_id` is the run of `name` this process keeps from now on: its reservation (if any) becomes the run,
+        and a creation of that name in flight is over (one step under the lock, so reconciliation sees either)."""
         with self.lock:
             self.active[run_id] = stem
+            self.tracked[name] = run_id
             self.reserved.pop(stem, None)
+            self.inflight.pop(name, None)
 
-    def release(self, stem: str) -> None:
+    def release_reservation(self, stem: str) -> None:
         with self.lock:
             self.reserved.pop(stem, None)
 
@@ -262,19 +274,8 @@ class Matrix:
         )
         for r in runs:
             if r["id"] != keep["id"]:
-                self.discard(r, key)
+                self.discard(r, key.stem)
         return keep
-
-    def discard(self, run: dict, key: common.RunKey) -> None:
-        """Stop a repeat of one of this matrix's runs; clean-up checks it ended and reaps its instance."""
-        self.log(f"{key.stem}: {run['id']} repeats {run['name']} ({run['status']}): stopping it")
-        with self.lock:
-            self.discarded[run["id"]] = key.stem
-        if run["status"] not in TERMINAL:
-            try:
-                self.api.post(f"/api/runs/{run['id']}/stop")
-            except Exception as e:
-                self.log(f"{key.stem}: stopping {run['id']} failed (clean-up tries again): {e}")
 
     def resume(self, key: common.RunKey, name: str, fp: str, spec: dict) -> dict | None:
         """The run this work dir started before for `key` with this configuration, or None to start one. A run of
@@ -303,16 +304,22 @@ class Matrix:
 
     def submit(self, key: common.RunKey, name: str, cfg: dict) -> dict:
         """`POST /api/runs`, never repeated blindly: after a failure that may have created the run (no answer, a
-        5xx) it is looked up by its name, adopted when it is there, and only then sent again."""
+        5xx) it is looked up by its name, adopted when it is there, and only then sent again. Each POST is sent
+        only while the matrix is not closing (checked under the lock), and marks the name in flight until `launch`
+        registers the run or gives up."""
         attempts = max(1, self.args.create_attempts)
         for attempt in range(1, attempts + 1):
+            with self.lock:
+                if self.closing:
+                    raise KeyboardInterrupt
+                self.inflight[name] = key.stem
             try:
                 return self.api.call("POST", "/api/runs", cfg, retries=1)
             except Exception as e:
                 if not folo_api.ambiguous(e):
                     raise
                 self.log(f"{key.stem}: creating {name} got no clear answer ({e}); looking it up by name")
-            self.sleep(min(30, 2**attempt))
+            self.pause(min(30, 2**attempt))
             run = self.adoptable(key, name)
             if run is not None:
                 self.log(f"{key.stem}: the server had created it: {run['id']}")
@@ -322,7 +329,11 @@ class Matrix:
         raise RuntimeError(f"{key.stem}: {name} was not created in {attempts} attempts (each looked up by name)")
 
     def launch(self, key: common.RunKey, name: str, fp: str, spec: dict) -> dict | None:
-        """Start `key`'s run (None: the budget would not cover it). The intent is in state.json before the POST."""
+        """Start `key`'s run (None: the budget would not cover it). The intent is in state.json before the POST, and
+        the name is looked up once more after it: a repeat that committed meanwhile is stopped at once."""
+        with self.lock:
+            if self.closing:
+                raise KeyboardInterrupt
         if not self.reserve(key.stem):
             self.log(f"{key.stem}: not started: the budget would not cover it")
             return None
@@ -330,21 +341,24 @@ class Matrix:
             cfg = train_config(key, self.dataset_id(key.dataset), self.args, self.compute, name)
             self.state.set_intent(key.stem, name, fp, spec)
             run = self.submit(key, name, cfg)
-            self.register(run["id"], key.stem)
+            self.register(run["id"], key.stem, name)
         finally:
-            self.release(key.stem)
+            self.release_reservation(key.stem)
+            with self.lock:
+                self.inflight.pop(name, None)
         self.state.set_run(key.stem, run["id"])
         self.log(f"{key.stem}: started {run['id']} ({name})")
-        if self.stop.is_set():  # a stop that came while the run was being created: stop_active may have missed it
-            try:
-                self.api.post(f"/api/runs/{run['id']}/stop")
-            except Exception as e:
-                self.log(f"{key.stem}: stop failed (clean-up tries again): {e}")
+        try:
+            self.adoptable(key, name, preferred=run["id"])  # the reconciliation after every creation
+        except Exception as e:
+            self.log(f"{key.stem}: looking {name} up again failed (the next reconciliation does it): {e}")
+        if self.stop.is_set():  # the matrix is closing: clean-up waits for this worker, then checks the run ended
+            self.request_stop(run["id"], key.stem)
         return run
 
-    def follow(self, run: dict, key: common.RunKey) -> dict:
+    def follow(self, run: dict, key: common.RunKey, name: str) -> dict:
         rid = run["id"]
-        self.register(rid, key.stem)
+        self.register(rid, key.stem, name)
         last_line = None
         try:
             while True:
@@ -371,7 +385,7 @@ class Matrix:
                     self.log(f"hard budget of ${self.args.budget_hard_usd:.2f} spent (${self.spent_usd():.2f}): stopping")
                     self.stop.set()
                     raise KeyboardInterrupt
-                self.sleep(self.args.poll_s)
+                self.stop.wait(self.args.poll_s)
         finally:
             with self.lock:
                 if "status" in run and ended(run):
@@ -468,10 +482,10 @@ class Matrix:
                 if run is None:
                     return "skipped: the budget would not cover it"
             else:
-                self.register(run["id"], key.stem)
+                self.register(run["id"], key.stem, name)
                 self.state.set_run(key.stem, run["id"])
                 self.log(f"{key.stem}: following {run['id']} ({run['status']})")
-            run = self.follow(run, key)
+            run = self.follow(run, key, name)
             # No capacity for the offer right now: nothing was rented, so wait and ask again.
             if run["status"] == "failed" and run.get("error_code") == "cloud_refused" and attempt < self.args.refused_retries:
                 self.log(f"{key.stem}: refused ({run.get('error')}); trying again in {self.args.refused_wait_s:.0f} s")
@@ -488,123 +502,6 @@ class Matrix:
         m = rec["metrics"]
         self.log(f"{key.stem}: AP {m['ap']:.4f} AP50 {m['ap50']:.4f} (folo val {rec['tool_reported']['map50_95']:.4f})")
         return "completed"
-
-    # ---------------------------------------------------------------------------------------------------------
-    def owned_live_runs(self) -> dict[str, str]:
-        """Runs on the server whose name carries this matrix's owner id and that have not ended: run id -> name."""
-        owner = self.state.owner
-        return {
-            r["id"]: r["name"]
-            for r in self.api.get("/api/runs")["runs"]
-            if run_state.owned(r.get("name"), owner) and not ended(r)
-        }
-
-    def stop_active(self, wait_s: float = 600, settle_s: float = 2, poll_s: float = 3) -> list[str]:
-        """Stop every run of this matrix still active (those this process follows, repeats it discarded, and any
-        live run on the server whose name carries its owner id), wait for each to end (a cloud run: to release its
-        instance), then terminate any live instance of those runs that is left. A failure on one run (no answer
-        too) does not keep the others from being stopped, and the instances are reaped whatever happened before.
-        Returns what could not be confirmed stopped ([] when everything was)."""
-        time.sleep(settle_s)  # let a worker that is creating a run register it
-        with self.lock:
-            runs = dict(self.active)
-            runs.update(self.discarded)
-        problems: list[str] = []
-        try:
-            try:
-                for rid, name in self.owned_live_runs().items():
-                    runs.setdefault(rid, name)
-            except Exception as e:
-                self.log(f"could not list the server's runs to find this matrix's: {e}")
-            unsent = set()
-            for rid, stem in runs.items():
-                if self.request_stop(rid, stem) is False:
-                    unsent.add(rid)
-            deadline = time.time() + wait_s
-            pending = set(runs)
-            while pending and time.time() < deadline:
-                for rid in sorted(pending):
-                    try:
-                        run = self.api.get(f"/api/runs/{rid}")
-                    except Exception:
-                        continue
-                    if ended(run):
-                        pending.discard(rid)
-                    elif rid in unsent and self.request_stop(rid, runs[rid]) is not False:
-                        unsent.discard(rid)
-                if pending:
-                    time.sleep(poll_s)
-            for rid in sorted(pending):
-                why = "its stop request got no answer" if rid in unsent else f"not seen ended within {wait_s:.0f} s"
-                problems.append(f"run {rid} ({runs[rid]}): {why}")
-        finally:
-            problems += self.reap(set(runs))
-        return problems
-
-    def request_stop(self, rid: str, stem: str) -> bool | None:
-        """`POST /api/runs/{rid}/stop`: True when asked, None when the run had ended or is gone, False on failure."""
-        try:
-            self.api.post(f"/api/runs/{rid}/stop")
-            self.log(f"{stem}: stop requested ({rid})")
-            return True
-        except ApiError as e:
-            if e.status == 409:  # run_not_active: it ended meanwhile
-                return None
-            self.log(f"{stem}: stop failed ({rid}): {e}")
-            return None if e.status == 404 else False
-        except Exception as e:  # no answer: carry on with the other runs, and ask again while waiting
-            self.log(f"{stem}: stop failed ({rid}): {e}")
-            return False
-
-    def reap(self, run_ids: set[str]) -> list[str]:
-        """Terminate the live instances of `run_ids` (runs of this matrix), never anyone else's: another runner,
-        Studio or a person may have cloud runs on the same server. Returns what could not be confirmed terminated."""
-        if not run_ids:
-            return []
-        try:
-            instances = self.api.get("/api/cloud/instances")["instances"]
-        except ApiError as e:
-            if e.status < 500:
-                return []  # a server without the cloud feature
-            return [f"could not list the cloud instances: {e}"]
-        except Exception as e:
-            return [f"could not list the cloud instances: {e}"]
-        problems = []
-        for inst in instances:
-            if inst["status"] in ("terminated", "lost") or inst.get("run_id") not in run_ids:
-                continue
-            self.log(f"instance {inst['id']} ({inst['name']}) is {inst['status']}: terminating")
-            what = f"instance {inst['id']} ({inst['name']}) of run {inst['run_id']}"
-            try:
-                got = self.api.call("DELETE", f"/api/cloud/instances/{inst['id']}")
-            except Exception as e:
-                problems.append(f"{what}: terminate failed: {e}")
-                continue
-            if (got or {}).get("status") != "terminated":
-                problems.append(f"{what}: {(got or {}).get('status')}, not confirmed terminated")
-        return problems
-
-    def live_instances(self) -> list[dict]:
-        try:
-            return [i for i in self.api.get("/api/cloud/instances")["instances"] if i["status"] not in ("terminated", "lost")]
-        except Exception:
-            return []
-
-    def unconfirmed(self, problems: list[str]) -> None:
-        """The loud end of a clean-up that could not confirm everything stopped."""
-        try:
-            data_dir = self.api.get("/api/system").get("data_dir") or "<its data dir>"
-        except Exception:
-            data_dir = "<the server's data dir>"
-        bar = "!" * 100
-        self.log(bar)
-        self.log(f"NOT CONFIRMED STOPPED ({len(problems)}): these may still be running and costing money")
-        for p in problems:
-            self.log(f"  {p}")
-        self.log(f"finish by hand: folo cloud instances --data-dir {data_dir}")
-        self.log(f"  then for each live instance of those runs: folo cloud terminate <instance id> --data-dir {data_dir}")
-        self.log(f"  and for each run still active: curl -X POST {self.args.server}/api/runs/<run id>/stop")
-        self.log(bar)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -656,6 +553,19 @@ def main(argv: list[str] | None = None) -> int:
         default=5,
         help="POST /api/runs attempts for a run whose creation got no clear answer (each looked up by name first)",
     )
+    ap.add_argument(
+        "--reconcile-s",
+        type=float,
+        default=30,
+        help="how often the server's runs of this matrix are checked for repeats of a creation (a late-committing POST)",
+    )
+    ap.add_argument(
+        "--settle-s",
+        type=float,
+        default=180,
+        help="at the end, how long to wait for workers to return (a POST in flight ends within its 60 s timeout)",
+    )
+    ap.add_argument("--stop-wait-s", type=float, default=600, help="at the end, how long to wait for stopped runs to end")
     ap.add_argument("--folo", default="folo", help="the folo binary for val")
     ap.add_argument("--val-device", default="auto")
     ap.add_argument("--poll-s", type=float, default=10)
@@ -676,7 +586,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.compute and args.device is None:
         raise SystemExit("local runs need --device (cpu, gpu:<n> or auto); cloud runs need --compute")
     scorer.require()  # before anything is launched or rented: a run that cannot be scored is money lost
-    m = Matrix(args)
+    m = Matrix(args)  # takes the work dir's lock (another runner on it: refused)
+    try:
+        return run_matrix(m, keys, variants)
+    finally:
+        m.release()
+
+
+def run_matrix(m: Matrix, keys: list[common.RunKey], variants: list[str]) -> int:
+    args = m.args
     if "pretrained" in variants:
         m.base_model()  # fail before anything starts on a wrong --weights / --arch
     todo = [k for k in keys if not k.result_path(m.results).is_file()]
@@ -698,6 +616,7 @@ def main(argv: list[str] | None = None) -> int:
 
     outcome: dict[str, str] = {}
     problems: list[str] = []
+    futures: dict = {}
     pool = ThreadPoolExecutor(max_workers=max(1, args.parallel))
     try:
         futures = {pool.submit(m.one, k): k for k in todo}
@@ -715,12 +634,16 @@ def main(argv: list[str] | None = None) -> int:
                     m.log(f"{k.stem}: error: {e}")
             if m.stop.is_set():
                 break
+            m.maybe_reconcile()
     except KeyboardInterrupt:
         m.log("interrupted: stopping the active runs")
     finally:
-        m.stop.set()
+        # No new creation; the workers return (a POST in flight ends within its timeout); then the last discovery,
+        # stops and reaping, which also is the last reconciliation of a matrix that ended normally.
+        m.close()
         pool.shutdown(wait=False, cancel_futures=True)
-        problems = m.stop_active()
+        m.settle(futures, args.settle_s)
+        problems = m.clean_up()
         live = m.live_instances()
         if live:
             m.log(f"live cloud instances on the server: {[(i['id'], i['name'], i['status']) for i in live]}")

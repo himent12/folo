@@ -14,13 +14,15 @@ an `s` row, and the renderer pairs models by size letter (folo-n with yolo26n, f
 | `run_ultralytics.py` | Ultralytics runs (one subprocess each), scored by `scorer.py`; self-contained for a pod |
 | `run_ultralytics_pod.sh` | the Ultralytics matrix on a plain PyTorch GPU pod: installs, fetches, runs, packs `results.tgz` |
 | `run_folo.py` | FOLO runs through a running `folo serve` (local GPU or cloud pods), evaluated with `folo val --save-json` |
-| `run_state.py` | which server run is which run of a matrix: owner id, fingerprints, unique run names, `state.json` |
+| `run_state.py` | which server run is which run of a matrix: owner id, fingerprints, unique run names, `state.json`, the work-dir lock |
+| `run_cleanup.py` | `run_folo.py`'s reconciliation (one run per name) and clean-up (every run stopped, or reported) |
 | `folo_api.py` | the few calls of docs/API.md `run_folo.py` makes, and which failures may be retried |
 | `render_table.py` | `results/*.json` → `results/summary.json` and the tables (`--update docs/BENCHMARKS.md`) |
 | `crosscheck_coco.py` | checks the scorer against both tools' own COCO val2017 numbers |
 | `common.py` | run keys, result files, the summary |
 | `test_finetune.py` | bookkeeping tests: `python -m unittest discover -s bench/finetune -p "test_*.py"` |
-| `test_run_folo.py` | `run_folo.py` against a fake server: run ownership, creation, the budget, clean-up |
+| `test_run_folo.py` | `run_folo.py` against a fake server (`fake_folo.py`): run ownership, creation, the budget, clean-up |
+| `test_run_folo_failures.py` | the same under partial failure: late commits, launches in flight at shutdown, a server that cannot list, a shared work dir |
 
 ## Datasets
 
@@ -115,18 +117,30 @@ all three. Both runners skip a run whose result file exists, so a matrix can be 
 check the dataset's files against the recorded layout digest (hashed again, not taken from `meta.json`) before
 a run and before scoring it.
 
-`run_folo.py` gives its `--work-dir` an owner id (in `state.json`, written before anything is submitted) and each
-run a name that carries it and a fingerprint of the run's configuration (dataset layout, architecture, weights
-and their sha256, epochs, size, batch, seed, variant, device, compute), e.g.
-`ft-folo-n-bccd-pretrained-s0-3f9a1c2d4e-0c4e2b7a91d5`. A restart follows the run of that exact name instead of
-starting it twice; another matrix on the same server never adopts it, and a run of the same key but another
-configuration is an error, not adopted. The request that creates a run is never repeated blindly: when its
-answer is lost (or a 5xx) the run is looked up by its name first, and repeats are stopped. On Ctrl+C, an error or
-`--budget-usd` it stops every run of the matrix that is still active (also runs of its owner id it lost track
-of) and terminates any cloud instance of those runs that is still live; whatever it could not confirm stopped is
-listed with the `folo cloud instances` / `folo cloud terminate` commands that finish the job, and it exits 1.
-`--budget-usd` reserves each launch's projected cost before submitting it, so launches side by side cannot
-overrun it. Work dirs of the runner before owner ids (the 2026-11-11 matrix's) are not resumed. Smoke runs belong in a scratch results folder:
+`run_folo.py` takes an OS lock on its `--work-dir` (`run_folo.lock`; a second runner there is refused), gives it
+an owner id (in `state.json`, written before anything is submitted) and each run a name that carries it and a
+fingerprint of the run's configuration (dataset layout, architecture, weights and their sha256, epochs, size,
+batch, seed, variant, device, compute), e.g. `ft-folo-n-bccd-pretrained-s0-3f9a1c2d4e-0c4e2b7a91d5`. A restart
+follows the run of that exact name instead of starting it twice; another matrix on the same server never adopts
+it, and a run of the same key but another configuration is an error, not adopted. The request that creates a run
+is never repeated blindly: when its answer is lost (or a 5xx) the run is looked up by its name first. After every
+creation, and every `--reconcile-s` (30 s) while the matrix runs, it looks for repeats of its runs (a POST that
+committed after it was looked up) and stops them, charging their cost to the budget. At the end (a normal end,
+Ctrl+C, an error or `--budget-usd`) it lets no new creation start, waits for its workers (`--settle-s`), lists
+its owner id's runs once more, stops every one still active and terminates any cloud instance of those runs that
+is still live; whatever it could not confirm (a creation still in flight, a listing that failed, a run not seen
+ended, an instance not seen terminated) is listed with the `folo cloud instances` / `folo cloud terminate`
+commands that finish the job, and it exits 1. `--budget-usd` reserves each launch's projected cost before
+submitting it, so launches side by side cannot overrun it. Work dirs of the runner before owner ids (the
+2026-11-11 matrix's) are not resumed.
+
+**Limits.** `POST /api/runs` has no idempotency key, so a creation that times out can commit after every lookup
+made for it: such a repeat is found and stopped within one reconciliation interval while the matrix runs; one
+that commits after the runner has ended is bounded only by its own `max_hours`, which is why `--max-hours` should
+stay close to a run's real length (0.5 h here). The real fix is server-side: an idempotency key on `POST
+/api/runs` (a repeat of the same key answers the run it created).
+
+Smoke runs belong in a scratch results folder:
 the renderer leaves out runs of another epoch count anyway. Result files are named
 `<model>-<dataset>-<variant>-s<seed>.json` (`folo-n-bccd-pretrained-s0.json`, `yolo26n-bccd-pretrained-s0.json`).
 
@@ -134,8 +148,24 @@ the renderer leaves out runs of another epoch count anyway. Result files are nam
 
 `results/` holds one file per run of the first matrix (all 28 runs; the last one, the brain-tumor from-scratch
 control, did not fit the first budget and ran afterwards for $0.10, AP 0.3725) and `summary.json`; the tables
-and their reading are in docs/BENCHMARKS.md. It ran on RunPod A40s (Secure Cloud, $0.59/h), about $1.45 for the
-first 27 runs:
+and their reading are in docs/BENCHMARKS.md. It ran on RunPod A40s (Secure Cloud, $0.59/h), **about $1.55 in
+all**:
+
+| what | cost | source |
+|---|---:|---|
+| FOLO: 12 fine-tunes | $0.659 | FOLO's estimate per pod (price × uptime), `folo cloud instances` of the control plane |
+| FOLO: 4 from-scratch controls | $0.197 | the same ($0.101 for three, $0.096 for brain-tumor's, run later) |
+| FOLO: 3 runs repeated after a runner bug | $0.074 | the same; these runs have no result file |
+| **FOLO, all 19 pods** | **$0.930** | |
+| Ultralytics: the pod that did the work | $0.494 | pod uptime × $0.59/h (RunPod console) |
+| Ultralytics: the pod that never started its container | $0.124 | the same |
+| **total** | **$1.548** | |
+
+The result files record $0.856 of FOLO pod cost (`compute.cost_usd`, the same estimates): the 16 scored runs,
+without the 3 repeated ones, whose pods left no result. Ultralytics' result files record no cost (one pod ran
+them all). As a cross-check, the RunPod balance went from $9.0085 to $6.9316 ($2.077) over the matrix, while a
+training pod of another job ($0.57/h) ran alongside: the $0.53 left over would be about 56 minutes of that pod
+(its uptime is not recorded here).
 - FOLO: `run_folo.py --compute cc_…:"NVIDIA A40@secure" --max-hours 0.5 --parallel 4` against a local control
   plane serving the Linux build of `ee846c88`. RunPod often refused a launch for capacity right after offering
   "high" stock; `run_folo.py` retries those (nothing is rented). A fine-tune cost $0.025–0.11 (pills to

@@ -12,12 +12,17 @@ configuration, and any live run whose name carries the owner id is this matrix's
 "run_id"}}}`. An entry is written before its run is submitted (`run_id` null until the server answered), so a
 creation whose answer was lost can be looked up by name afterwards. A state.json of an older run_folo.py (stem ->
 run id, no owner) is kept under `legacy`; its runs are not adopted.
+
+One runner per work dir: `lock_work_dir` takes an OS lock on `<work dir>/run_folo.lock` before the state is read and
+holds it until the runner has stopped its runs (the OS drops it when the process dies), so two runners can neither
+overwrite each other's entries nor stop each other's runs as their own.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import threading
@@ -26,6 +31,46 @@ from pathlib import Path
 import common
 
 VERSION = 2
+LOCK_NAME = "run_folo.lock"
+
+
+def lock_work_dir(work: Path):
+    """Take the work dir's lock (an open file the caller keeps, and closes to let go), or exit naming the lock file
+    when another runner holds it. msvcrt on Windows, flock elsewhere: held by the OS, released when the process
+    ends however it ends."""
+    path = Path(work) / LOCK_NAME
+    f = open(path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise SystemExit(
+            f"{work} is in use by another run_folo.py (it holds {path}): one runner per work dir; wait for that one "
+            "to end, or use another --work-dir"
+        ) from None
+    return f
+
+
+def unlock_work_dir(f) -> None:
+    if f.closed:
+        return
+    if os.name == "nt":
+        import msvcrt
+
+        f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    f.close()
 
 
 def fingerprint(spec: dict) -> str:
@@ -73,6 +118,15 @@ class State:
 
     def run_id(self, stem: str) -> str | None:
         return (self.entry(stem) or {}).get("run_id")
+
+    def entries(self) -> dict[str, dict]:
+        """stem -> a copy of its entry."""
+        with self.lock:
+            return {k: dict(v) for k, v in self.data["runs"].items()}
+
+    def stem_of(self, name: str) -> str:
+        """The stem whose entry has run name `name` (else the name itself)."""
+        return next((k for k, v in self.entries().items() if v["name"] == name), name)
 
     def legacy_run(self, stem: str) -> str | None:
         """The run id an older run_folo.py recorded for `stem`."""

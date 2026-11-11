@@ -11,6 +11,8 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -181,6 +183,100 @@ class Layout(unittest.TestCase):
                 datasets.verify_layout(spec, dest)
             datasets.fetch(spec, root)
             self.assertTrue((dest / "images" / "val" / "0000.jpg").is_file())
+
+
+FAKE_ULTRALYTICS = '''
+import os
+from pathlib import Path
+from types import SimpleNamespace
+
+__version__ = "0-fake"
+
+
+class YOLO:
+    def __init__(self, path):
+        self.path = path
+
+    def train(self, data, project, name, **kw):
+        if os.environ.get("FAKE_TAMPER") == "1":  # the dataset changes while the run trains
+            (Path(data).parent / "labels" / "train" / "0000.txt").write_text("0 0.2 0.2 0.1 0.1\\n")
+        save = Path(project) / name
+        (save / "weights").mkdir(parents=True, exist_ok=True)
+        (save / "weights" / "best.pt").write_bytes(b"fake")
+        self.trainer = SimpleNamespace(save_dir=str(save), amp=False)
+
+    def add_callback(self, *a):
+        pass
+
+    def val(self, **kw):
+        raise SystemExit("fake ultralytics: validation reached")
+'''
+
+FAKE_TORCH = '''
+__version__ = "0-fake"
+
+
+class cuda:
+    is_available = staticmethod(lambda: False)
+
+
+class version:
+    cuda = None
+'''
+
+ULTRALYTICS_DRIVER = '''
+import sys
+from argparse import Namespace
+here, fake, root, work, results, weights, digest = sys.argv[1:]
+sys.path[:0] = [fake, here]
+import datasets
+datasets.SPECS["toy"] = datasets.Spec(
+    name="toy", title="Toy", domain="test", url="https://example.invalid/toy.zip", sha256="0" * 64, licence="MIT",
+    licence_url="", source="", kind="yolo_zip", classes=("thing",), eval_split="val", layout_sha256=digest,
+)
+import run_ultralytics
+run_ultralytics.run_one(Namespace(
+    weights=weights, dataset="toy", seed=0, data_root=root, work_dir=work, results=results, epochs=1, imgsz=64,
+    batch=1, device="cpu", workers=None, compute_label=None, jobs=1,
+))
+'''
+
+
+@unittest.skipUnless(HAS_PIL, "needs Pillow")
+class UltralyticsRunner(unittest.TestCase):
+    """run_ultralytics.run_one against a fake torch and ultralytics (in a subprocess: it must import them fresh)."""
+
+    def run_one(self, tamper: bool):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            fake = t / "fake"
+            (fake / "ultralytics" / "utils").mkdir(parents=True)
+            (fake / "ultralytics" / "__init__.py").write_text(FAKE_ULTRALYTICS)
+            (fake / "ultralytics" / "utils" / "__init__.py").write_text("SETTINGS = {}\n")
+            (fake / "torch.py").write_text(FAKE_TORCH)
+            spec = datasets.Spec(
+                name="toy", title="Toy", domain="test", url="https://example.invalid/toy.zip", sha256="0" * 64,
+                licence="MIT", licence_url="", source="", kind="yolo_zip", classes=("thing",), eval_split="val",
+            )
+            Layout.make_src(None, t / "src")
+            digest = datasets.lay_out(spec, t / "src", t / "data" / "toy")["layout_sha256"]
+            (t / "yolo26s.pt").write_bytes(b"weights")
+            driver = t / "driver.py"
+            driver.write_text(ULTRALYTICS_DRIVER)
+            argv = [str(HERE), str(fake), str(t / "data"), str(t / "work"), str(t / "results"), str(t / "yolo26s.pt"), digest]
+            env = dict(os.environ, FAKE_TAMPER="1" if tamper else "0")
+            env.pop("PYTHONPATH", None)
+            p = subprocess.run([sys.executable, str(driver), *argv], capture_output=True, text=True, env=env, timeout=60)
+            return p, sorted((t / "results").glob("*.json")) if (t / "results").is_dir() else []
+
+    def test_a_dataset_changed_during_training_is_refused_before_validation(self):
+        p, results = self.run_one(tamper=True)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("changed since they were laid out", p.stderr)
+        self.assertNotIn("validation reached", p.stderr)
+        self.assertEqual(results, [])
+        p, _ = self.run_one(tamper=False)  # the control: unchanged files go on to validation
+        self.assertIn("validation reached", p.stderr)
 
 
 class Scorer(unittest.TestCase):

@@ -150,6 +150,10 @@ def run_one(args) -> None:
     best = run_dir / "weights" / "best.pt"
     if not best.is_file():
         raise SystemExit(f"{best} was not written")
+    # Hashed again before validation reads them: the result must be of the files the run trained on.
+    now = datasets.verify_layout(spec, data_dir)
+    if now != layout_sha:
+        raise SystemExit(f"{key.stem}: {data_dir} has layout {now} now, the run trained on {layout_sha}: no result written")
 
     captured = []
     ev = YOLO(str(best))

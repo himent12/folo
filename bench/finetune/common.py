@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import statistics
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,11 +73,19 @@ def parse_seeds(text: str) -> list[int]:
 
 
 def write_json_atomic(path: Path, obj) -> None:
+    """`obj` as indented JSON at `path`, through a temporary file of its own in the same folder and `os.replace`, so
+    a reader sees the old file or the new one, and two writers never share a temporary file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2) + "\n", newline="\n")
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(obj, indent=2) + "\n")
+        os.chmod(tmp, 0o644)  # mkstemp's 0600 would make result files private on a pod
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def now_iso() -> str:
