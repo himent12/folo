@@ -38,6 +38,7 @@ uuid = { version = "1", features = ["v5"] }
 [target.'cfg(windows)'.dependencies]
 # The version wgpu-hal uses, so the app links one copy (apps/desktop/Cargo.toml, gpu-allocator note).
 windows = { version = "0.62", features = [
+    "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Direct2D",
@@ -47,11 +48,13 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Xps",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    "Win32_System_Registry",
     "Win32_System_Ole",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
@@ -66,6 +69,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# `#[implement]` (the OLE drop target) names `::windows_core`; the copy `windows` 0.62 already uses.
+windows-core = "0.62"
 cosmic-text = { version = "0.14", optional = true }
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
