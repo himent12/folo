@@ -3,7 +3,8 @@ import type { LabelAgent, LabelImage, LabelJob, LabelRun } from '$lib/api/types'
 import { classChangeError, classesError } from '$lib/label';
 import { askOutcome, imageState, jobStatus, modelLabel, runAgent, tokens, usageFacts } from './words';
 
-const job = (status: LabelJob['status'], outcome: LabelRun['outcome'] = null) => ({ status, run: outcome ? { outcome } : null }) as LabelJob;
+const job = (status: LabelJob['status'], outcome: LabelRun['outcome'] = null) =>
+  ({ status, run: outcome ? { outcome } : null, counts: { images: 3, pending: 2, labeled: 1, failed: 0, boxes: 4 } }) as LabelJob;
 const claude = { id: 'claude', models: [{ id: 'sonnet', label: 'Sonnet' }] } as LabelAgent;
 
 describe('usage', () => {
@@ -27,7 +28,9 @@ describe('jobStatus', () => {
   it('says what the agent is doing, and when its last run failed', () => {
     expect(jobStatus(job('running'))).toEqual({ status: 'running', label: 'Labeling' });
     expect(jobStatus(job('stopping'))).toEqual({ status: 'stopping', label: 'Stopping' });
-    expect(jobStatus(job('idle', 'failed'))).toEqual({ status: 'failed', label: 'Agent failed' });
+    expect(jobStatus(job('idle', 'failed'))).toEqual({ status: 'failed', label: 'Last run failed' });
+    // Once every image is labeled (by hand, or by a later run), the failure is history.
+    expect(jobStatus({ ...job('idle', 'failed'), counts: { images: 3, pending: 0, labeled: 3, failed: 0, boxes: 9 } }).label).toBe('Idle');
     expect(jobStatus(job('idle', 'completed')).label).toBe('Idle');
     expect(jobStatus(job('idle')).label).toBe('Idle');
   });

@@ -30,12 +30,13 @@ import { cannotLabel } from './label/support';
 import Unsupported from './label/Unsupported';
 import { jobStatus, runAgent } from './label/words';
 
-type Filter = 'all' | 'active' | 'idle';
+type Filter = 'all' | 'active' | 'failed' | 'idle';
 
 /** Columns of the desktop table (for state rows that span it), the empty last one included. */
 const COLS = 7;
 
-const active = (j: LabelJob) => j.status !== 'idle';
+/** The filter a job is listed under besides All: an agent at work, a last run that failed, else idle. */
+const filterOf = (j: LabelJob): Exclude<Filter, 'all'> => (j.status !== 'idle' ? 'active' : jobStatus(j).status === 'failed' ? 'failed' : 'idle');
 
 export default function LabelJobs() {
   setCrumbs({ label: 'Datasets', path: '/datasets' }, { label: 'Label images' });
@@ -62,11 +63,11 @@ export default function LabelJobs() {
 
   const query = signal('');
   const filter = signal<Filter>('all');
-  const count = (f: Filter) => (jobs.data ?? []).filter((j) => f === 'all' || (f === 'active') === active(j)).length;
+  const count = (f: Filter) => (jobs.data ?? []).filter((j) => f === 'all' || filterOf(j) === f).length;
   const shown = computed(() => {
     const q = query.get().trim().toLowerCase();
     const f = filter.get();
-    return (jobs.data ?? []).filter((j) => (f === 'all' || (f === 'active') === active(j)) && (!q || `${j.name} ${j.classes.join(' ')}`.toLowerCase().includes(q)));
+    return (jobs.data ?? []).filter((j) => (f === 'all' || filterOf(j) === f) && (!q || `${j.name} ${j.classes.join(' ')}`.toLowerCase().includes(q)));
   });
   const totals = computed(() => ({
     images: shown.get().reduce((a, j) => a + j.counts.images, 0),
@@ -112,6 +113,7 @@ export default function LabelJobs() {
                   options={[
                     { value: 'all', label: 'All', meta: jobs.data?.length ? String(count('all')) : undefined },
                     { value: 'active', label: 'Labeling', meta: jobs.data?.length ? String(count('active')) : undefined },
+                    { value: 'failed', label: 'Failed', meta: jobs.data?.length ? String(count('failed')) : undefined },
                     { value: 'idle', label: 'Idle', meta: jobs.data?.length ? String(count('idle')) : undefined },
                   ]}
                 />
@@ -235,7 +237,7 @@ export default function LabelJobs() {
                                   <span class="num">{num(j().counts.labeled)}</span>
                                   <Progress
                                     value={j().counts.images ? j().counts.labeled / j().counts.images : 0}
-                                    tone={active(j()) ? 'accent' : 'neutral'}
+                                    tone={filterOf(j()) === 'active' ? 'accent' : 'neutral'}
                                     label={`${j().counts.labeled} of ${j().counts.images} images labeled`}
                                   />
                                 </span>

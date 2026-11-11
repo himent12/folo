@@ -270,7 +270,13 @@ describe('the job list', () => {
       flushSync();
       expect(document.querySelectorAll('tr[data-row]')).toHaveLength(4);
     });
-    expect([...document.querySelectorAll('tr[data-row]')].map((r) => r.querySelector('.badge')?.textContent?.trim())).toEqual(['Idle', 'Labeling', 'Idle', 'Agent failed']);
+    expect([...document.querySelectorAll('tr[data-row]')].map((r) => r.querySelector('.badge')?.textContent?.trim())).toEqual(['Idle', 'Labeling', 'Idle', 'Last run failed']);
+    // A job whose last run failed is listed under Failed, not Idle.
+    const failed = [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"] button, [role="radio"]')].find((b) => b.textContent?.startsWith('Failed'));
+    expect(failed?.textContent).toBe('Failed1');
+    failed!.click();
+    flushSync();
+    expect([...document.querySelectorAll('tr[data-row]')].map((r) => r.querySelector('.badge')?.textContent?.trim())).toEqual(['Last run failed']);
     unmount(c!);
     hub.api = new MockApi('empty', 0);
     c = mount(LabelJobs, { target });

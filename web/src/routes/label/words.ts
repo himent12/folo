@@ -13,12 +13,13 @@ interface OwnStatus {
 
 /**
  * A job's status as a status mark (the run status whose mark it shares) and its word: "Labeling" while an agent
- * works, "Stopping", "Agent failed" when its last run ended early, else "Idle".
+ * works, "Stopping", "Last run failed" when its last run ended early and images are still to label (once they are all
+ * labeled, by hand or by a later run, the failure is history), else "Idle".
  */
 export function jobStatus(job: LabelJob): OwnStatus {
   if (job.status === 'running') return { status: 'running', label: 'Labeling' };
   if (job.status === 'stopping') return { status: 'stopping', label: 'Stopping' };
-  if (job.run?.outcome === 'failed') return { status: 'failed', label: 'Agent failed' };
+  if (job.run?.outcome === 'failed' && toLabel(job) > 0) return { status: 'failed', label: 'Last run failed' };
   return { status: 'queued', label: 'Idle' };
 }
 

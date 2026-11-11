@@ -84,6 +84,8 @@ impl Agent for ClaudeCode {
                 "the account's usage limit was reached; start again once it resets, or use another agent"
                     .into(),
             )
+        } else if m.contains("printed no result") {
+            Some("run `claude -p hi` in a terminal on the server's machine to see why (a sign-in, a limit or an update it asks for)".into())
         } else {
             None
         }
@@ -209,7 +211,9 @@ mod tests {
         assert_eq!(err, AgentError::Failed("error: unknown option '--safe-mode'".into()));
         assert!(ClaudeCode::new().hint("error: unknown option '--safe-mode'").unwrap().contains("update"));
         let err = parse(&output("not json\n", "", true)).unwrap_err();
-        assert!(matches!(err, AgentError::Unavailable(_)), "{err:?}");
+        let AgentError::Unavailable(message) = &err else { panic!("{err:?}") };
+        // Nothing to go on: the hint is how to see what the CLI says.
+        assert!(ClaudeCode::new().hint(message).unwrap().contains("`claude -p hi`"));
     }
 
     #[test]
