@@ -6,8 +6,8 @@
 use std::{panic, rc::Rc, time::Duration};
 
 use crate::{
-    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels,
-    Window,
+    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
+    Pixels, Window,
 };
 
 /// An animation: duration, repeat, easing.

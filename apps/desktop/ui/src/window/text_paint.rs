@@ -5,8 +5,8 @@
 use anyhow::Result;
 
 use crate::{
-    App, Bounds, FontId, GlyphId, GlyphPainter, Hsla, Pixels, Point, ShapedLine, StrikethroughStyle, TextAlign,
-    UnderlineStyle, Window, WrappedLine, fill,
+    App, Bounds, FontId, GlyphId, GlyphPainter, Hsla, Pixels, Point, ShapedLine, StrikethroughStyle,
+    TextAlign, UnderlineStyle, Window, WrappedLine, fill,
 };
 
 impl GlyphPainter for Window {
@@ -21,7 +21,13 @@ impl GlyphPainter for Window {
         Window::paint_glyph(self, origin, font_id, glyph_id, font_size, color)
     }
 
-    fn paint_emoji(&mut self, origin: Point<Pixels>, font_id: FontId, glyph_id: GlyphId, font_size: Pixels) -> Result<()> {
+    fn paint_emoji(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+    ) -> Result<()> {
         Window::paint_emoji(self, origin, font_id, glyph_id, font_size)
     }
 
@@ -40,7 +46,13 @@ impl GlyphPainter for Window {
 
 impl ShapedLine {
     /// Paints the line with its top-left at `origin` (GPUI's `ShapedLine::paint`).
-    pub fn paint(&self, origin: Point<Pixels>, line_height: Pixels, window: &mut Window, cx: &mut App) -> Result<()> {
+    pub fn paint(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
         let content_mask = window.content_mask().bounds;
         self.paint_with(origin, line_height, cx.text_system(), content_mask, window)
     }

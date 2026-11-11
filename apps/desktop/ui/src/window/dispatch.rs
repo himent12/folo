@@ -260,7 +260,11 @@ impl DispatchTree {
     }
 
     /// The bindings for `keystroke` under the contexts of `dispatch_path`, best first.
-    pub(crate) fn bindings_for_input(&self, keystroke: &Keystroke, dispatch_path: &[DispatchNodeId]) -> KeyMatch {
+    pub(crate) fn bindings_for_input(
+        &self,
+        keystroke: &Keystroke,
+        dispatch_path: &[DispatchNodeId],
+    ) -> KeyMatch {
         let mut bindings = SmallVec::new();
         if let Some(keymap) = &self.keymap {
             let contexts = self.context_path(dispatch_path);
@@ -281,12 +285,20 @@ impl DispatchTree {
         let anchor = focused.and_then(|id| self.tab_stops.iter().rposition(|stop| stop.focus_id == id));
         let candidates = || (0..self.tab_stops.len()).filter(|ix| self.tab_stops[*ix].tab_stop);
         let found = match (anchor, reverse) {
-            (Some(anchor), false) => candidates().filter(|ix| key(*ix) > key(anchor)).min_by_key(|ix| key(*ix)),
-            (Some(anchor), true) => candidates().filter(|ix| key(*ix) < key(anchor)).max_by_key(|ix| key(*ix)),
+            (Some(anchor), false) => {
+                candidates().filter(|ix| key(*ix) > key(anchor)).min_by_key(|ix| key(*ix))
+            }
+            (Some(anchor), true) => {
+                candidates().filter(|ix| key(*ix) < key(anchor)).max_by_key(|ix| key(*ix))
+            }
             (None, _) => None,
         };
         let found = found.or_else(|| {
-            if reverse { candidates().max_by_key(|ix| key(*ix)) } else { candidates().min_by_key(|ix| key(*ix)) }
+            if reverse {
+                candidates().max_by_key(|ix| key(*ix))
+            } else {
+                candidates().min_by_key(|ix| key(*ix))
+            }
         });
         found.map(|ix| self.tab_stops[ix].focus_id)
     }
@@ -307,7 +319,15 @@ mod tests {
     #[test]
     fn tab_order_follows_tab_index_then_paint_order_and_wraps() {
         // GPUI's `test_tab_handles` order: index 0 handles in paint order, then index 1, then 2.
-        let tree = tree_with(&[(1, 0, true), (2, 1, true), (3, 1, true), (4, 0, false), (5, 2, false), (6, 0, true), (7, 2, true)]);
+        let tree = tree_with(&[
+            (1, 0, true),
+            (2, 1, true),
+            (3, 1, true),
+            (4, 0, false),
+            (5, 2, false),
+            (6, 0, true),
+            (7, 2, true),
+        ]);
         let mut order = Vec::new();
         let mut focused = None;
         for _ in 0..6 {

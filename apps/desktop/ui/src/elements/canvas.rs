@@ -4,8 +4,8 @@
 use std::panic;
 
 use crate::{
-    App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Refineable,
-    Style, StyleRefinement, Styled, Window, elements::paint_style,
+    App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels,
+    Refineable, Style, StyleRefinement, Styled, Window, elements::paint_style,
 };
 
 /// A canvas: `prepaint` runs with the laid-out bounds and returns a value `paint` gets.

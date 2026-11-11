@@ -12,6 +12,8 @@ mod deferred;
 mod div;
 mod input_handler;
 mod svg;
+#[cfg(test)]
+mod tests;
 mod text;
 mod uniform_list;
 
@@ -25,7 +27,7 @@ pub use svg::*;
 pub use text::*;
 pub use uniform_list::*;
 
-use crate::{App, Bounds, Pixels, Style, StylePaint, Window};
+use crate::{App, Bounds, Pixels, Style, Window};
 
 /// GPUI's `Style::paint`: the shadows and background, then `children`, then the border on top. The colours
 /// take the current element opacity and the current content mask, as GPUI's `Window::paint_quad` does.
@@ -36,78 +38,8 @@ pub(crate) fn paint_style(
     cx: &mut App,
     children: impl FnOnce(&mut Window, &mut App),
 ) {
-    let paint = StylePaint {
-        rem_size: window.rem_size(),
-        scale_factor: window.scale_factor(),
-        opacity: window.element_opacity.unwrap_or(1.0),
-        content_mask: window.content_mask(),
-    };
+    let paint = window.style_paint();
     style.paint_before_children(bounds, &paint, &mut window.next_frame.scene);
     children(window, cx);
     style.paint_after_children(bounds, &paint, &mut window.next_frame.scene);
 }
-
-/// Skeleton only: implements `Element` for `$ty` with the given phase states and `todo!($owner)` bodies, and
-/// `IntoElement` as itself. The owner replaces each use with the real impl (the trait fixes the signatures;
-/// the associated types written here are the design).
-macro_rules! skeleton_element {
-    ([$($generics:tt)*] $ty:ty, $request_layout:ty, $prepaint:ty, $owner:literal) => {
-        impl<$($generics)*> $crate::Element for $ty {
-            type RequestLayoutState = $request_layout;
-            type PrepaintState = $prepaint;
-
-            fn id(&self) -> Option<$crate::ElementId> {
-                todo!($owner)
-            }
-
-            fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-                None
-            }
-
-            fn request_layout(
-                &mut self,
-                _id: Option<&$crate::GlobalElementId>,
-                _inspector_id: Option<&$crate::InspectorElementId>,
-                _window: &mut $crate::Window,
-                _cx: &mut $crate::App,
-            ) -> ($crate::LayoutId, Self::RequestLayoutState) {
-                todo!($owner)
-            }
-
-            fn prepaint(
-                &mut self,
-                _id: Option<&$crate::GlobalElementId>,
-                _inspector_id: Option<&$crate::InspectorElementId>,
-                _bounds: $crate::Bounds<$crate::Pixels>,
-                _request_layout: &mut Self::RequestLayoutState,
-                _window: &mut $crate::Window,
-                _cx: &mut $crate::App,
-            ) -> Self::PrepaintState {
-                todo!($owner)
-            }
-
-            fn paint(
-                &mut self,
-                _id: Option<&$crate::GlobalElementId>,
-                _inspector_id: Option<&$crate::InspectorElementId>,
-                _bounds: $crate::Bounds<$crate::Pixels>,
-                _request_layout: &mut Self::RequestLayoutState,
-                _prepaint: &mut Self::PrepaintState,
-                _window: &mut $crate::Window,
-                _cx: &mut $crate::App,
-            ) {
-                todo!($owner)
-            }
-        }
-
-        impl<$($generics)*> $crate::IntoElement for $ty {
-            type Element = Self;
-
-            fn into_element(self) -> Self::Element {
-                self
-            }
-        }
-    };
-}
-
-pub(crate) use skeleton_element;

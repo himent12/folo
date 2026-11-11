@@ -31,7 +31,13 @@ pub struct FrameTimes {
 impl FrameTimes {
     /// The whole frame, in microseconds.
     pub fn total_us(&self) -> u32 {
-        self.build_us + self.layout_us + self.prepaint_us + self.paint_us + self.finish_us + self.raster_us + self.present_us
+        self.build_us
+            + self.layout_us
+            + self.prepaint_us
+            + self.paint_us
+            + self.finish_us
+            + self.raster_us
+            + self.present_us
     }
 }
 

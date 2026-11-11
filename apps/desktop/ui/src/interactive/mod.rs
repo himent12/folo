@@ -31,16 +31,19 @@ use std::{
 
 use crate::{
     AnyView, App, Bounds, ClickEvent, DispatchPhase, ElementId, FocusHandle, HitboxBehavior, KeyContext,
-    KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, SharedString,
-    Size, StyleRefinement, TooltipId, Window, WindowControlArea, window::DispatchNodeId,
+    KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent,
+    SharedString, Size, StyleRefinement, TooltipId, Window, WindowControlArea, window::DispatchNodeId,
 };
 
 /// A mouse-down listener.
-pub(crate) type MouseDownListener = Box<dyn Fn(&MouseDownEvent, DispatchPhase, &crate::Hitbox, &mut Window, &mut App)>;
+pub(crate) type MouseDownListener =
+    Box<dyn Fn(&MouseDownEvent, DispatchPhase, &crate::Hitbox, &mut Window, &mut App)>;
 /// A mouse-up listener.
-pub(crate) type MouseUpListener = Box<dyn Fn(&MouseUpEvent, DispatchPhase, &crate::Hitbox, &mut Window, &mut App)>;
+pub(crate) type MouseUpListener =
+    Box<dyn Fn(&MouseUpEvent, DispatchPhase, &crate::Hitbox, &mut Window, &mut App)>;
 /// A mouse-move listener.
-pub(crate) type MouseMoveListener = Box<dyn Fn(&MouseMoveEvent, DispatchPhase, &crate::Hitbox, &mut Window, &mut App)>;
+pub(crate) type MouseMoveListener =
+    Box<dyn Fn(&MouseMoveEvent, DispatchPhase, &crate::Hitbox, &mut Window, &mut App)>;
 /// A scroll-wheel listener.
 pub(crate) type ScrollWheelListener =
     Box<dyn Fn(&ScrollWheelEvent, DispatchPhase, &crate::Hitbox, &mut Window, &mut App)>;

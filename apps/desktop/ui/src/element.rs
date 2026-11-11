@@ -11,8 +11,8 @@ use std::{any::Any, fmt, mem, panic, sync::Arc};
 use smallvec::SmallVec;
 
 use crate::{
-    App, AvailableSpace, Bounds, Context, Style, Entity, EntityId, FluentBuilder, FocusHandle, FocusId, Pixels,
-    Point, SharedString, Size, Window,
+    App, AvailableSpace, Bounds, Context, Entity, EntityId, FluentBuilder, FocusHandle, FocusId, Pixels,
+    Point, SharedString, Size, Style, Window,
 };
 
 /// An element: GPUI 0.2.2's trait, unchanged (the app implements it by hand in `src/input.rs`).
@@ -123,7 +123,8 @@ impl<C: RenderOnce> Element for Component<C> {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut element = self.component.take().expect("a component renders once").render(window, cx).into_any_element();
+        let mut element =
+            self.component.take().expect("a component renders once").render(window, cx).into_any_element();
         let layout_id = element.request_layout(window, cx);
         (layout_id, element)
     }
@@ -264,7 +265,8 @@ impl<E: Element> ElementObject for Drawable<E> {
                     window.element_id_stack.push(id);
                     GlobalElementId(Arc::from(window.element_id_stack.as_slice()))
                 });
-                let (layout_id, request_layout) = self.element.request_layout(global_id.as_ref(), None, window, cx);
+                let (layout_id, request_layout) =
+                    self.element.request_layout(global_id.as_ref(), None, window, cx);
                 if global_id.is_some() {
                     window.element_id_stack.pop();
                 }
@@ -329,8 +331,12 @@ impl<E: Element> ElementObject for Drawable<E> {
         let layout_id = match mem::replace(&mut self.phase, ElementDrawPhase::Painted) {
             ElementDrawPhase::RequestLayout { layout_id, global_id, request_layout } => {
                 window.compute_layout(layout_id, available_space, cx);
-                self.phase =
-                    ElementDrawPhase::LayoutComputed { layout_id, global_id, available_space, request_layout };
+                self.phase = ElementDrawPhase::LayoutComputed {
+                    layout_id,
+                    global_id,
+                    available_space,
+                    request_layout,
+                };
                 layout_id
             }
             ElementDrawPhase::LayoutComputed {
@@ -342,8 +348,12 @@ impl<E: Element> ElementObject for Drawable<E> {
                 if available_space != previous_space {
                     window.compute_layout(layout_id, available_space, cx);
                 }
-                self.phase =
-                    ElementDrawPhase::LayoutComputed { layout_id, global_id, available_space, request_layout };
+                self.phase = ElementDrawPhase::LayoutComputed {
+                    layout_id,
+                    global_id,
+                    available_space,
+                    request_layout,
+                };
                 layout_id
             }
             _ => panic!("cannot measure after painting"),
@@ -583,7 +593,9 @@ impl<E: Element> Element for Option<E> {
         cx: &mut App,
     ) -> Self::PrepaintState {
         match (self, request_layout) {
-            (Some(element), Some(state)) => Some(element.prepaint(id, inspector_id, bounds, state, window, cx)),
+            (Some(element), Some(state)) => {
+                Some(element.prepaint(id, inspector_id, bounds, state, window, cx))
+            }
             _ => None,
         }
     }

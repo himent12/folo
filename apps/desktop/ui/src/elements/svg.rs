@@ -5,8 +5,8 @@
 use std::panic;
 
 use crate::{
-    App, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId, InteractiveElement, Interactivity,
-    IntoElement, LayoutId, Pixels, SharedString, StyleRefinement, Styled, Window,
+    App, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId, InteractiveElement,
+    Interactivity, IntoElement, LayoutId, Pixels, SharedString, StyleRefinement, Styled, Window,
 };
 
 /// A new SVG element (give it `.path(..)` and a size).
@@ -61,9 +61,10 @@ impl Element for Svg {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        let layout_id = self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, cx| {
-            window.request_layout(style, None, cx)
-        });
+        let layout_id =
+            self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, cx| {
+                window.request_layout(style, None, cx)
+            });
         (layout_id, ())
     }
 
@@ -76,9 +77,15 @@ impl Element for Svg {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
-        self.interactivity.prepaint(global_id, inspector_id, bounds, bounds.size, window, cx, |_, _, hitbox, _, _| {
-            hitbox
-        })
+        self.interactivity.prepaint(
+            global_id,
+            inspector_id,
+            bounds,
+            bounds.size,
+            window,
+            cx,
+            |_, _, hitbox, _, _| hitbox,
+        )
     }
 
     /// The icon is a mask tinted with the text colour; with no text colour set, nothing is drawn (GPUI).
@@ -93,13 +100,21 @@ impl Element for Svg {
         cx: &mut App,
     ) {
         let path = self.path.clone();
-        self.interactivity.paint(global_id, inspector_id, bounds, hitbox.as_ref(), window, cx, |style, window, cx| {
-            if let Some((path, color)) = path.zip(style.text.color)
-                && let Err(error) = window.paint_svg(bounds, path.clone(), color, cx)
-            {
-                eprintln!("folo-ui: svg {path}: {error:#}");
-            }
-        })
+        self.interactivity.paint(
+            global_id,
+            inspector_id,
+            bounds,
+            hitbox.as_ref(),
+            window,
+            cx,
+            |style, window, cx| {
+                if let Some((path, color)) = path.zip(style.text.color)
+                    && let Err(error) = window.paint_svg(bounds, path.clone(), color, cx)
+                {
+                    eprintln!("folo-ui: svg {path}: {error:#}");
+                }
+            },
+        )
     }
 }
 

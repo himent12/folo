@@ -12,9 +12,9 @@
 use std::any::Any;
 
 use crate::{
-    Action, AnyDrag, App, DispatchEventResult, DispatchPhase, ExternalPaths, FileDropEvent, KeyDownEvent, Keystroke,
-    Modifiers, MouseButton, MouseMoveEvent, MouseUpEvent, PlatformInput, Window, WindowControlArea,
-    window::DispatchNodeId,
+    Action, AnyDrag, App, DispatchEventResult, DispatchPhase, ExternalPaths, FileDropEvent, KeyDownEvent,
+    Keystroke, Modifiers, MouseButton, MouseMoveEvent, MouseUpEvent, PlatformInput, Window,
+    WindowControlArea, window::DispatchNodeId,
 };
 
 impl Window {
@@ -252,7 +252,12 @@ impl Window {
 
     /// GPUI's `dispatch_action_on_node`: global capture, window capture (root to leaf), window bubble (leaf
     /// to root; a handler stops propagation unless it calls `cx.propagate()`), then global bubble.
-    pub(crate) fn dispatch_action_on_node(&mut self, node: DispatchNodeId, action: &dyn Action, cx: &mut App) {
+    pub(crate) fn dispatch_action_on_node(
+        &mut self,
+        node: DispatchNodeId,
+        action: &dyn Action,
+        cx: &mut App,
+    ) {
         let path = self.rendered_frame.dispatch_tree.dispatch_path(node);
         let action_type = action.as_any().type_id();
 

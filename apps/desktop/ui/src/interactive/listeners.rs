@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use crate::{
     ClickEvent, DispatchPhase, Hitbox, HitboxId, InteractiveElementState, Interactivity, KeyUpEvent,
-    KeyboardButton, KeyboardClickEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Overflow, Pixels, ScrollWheelEvent, Style, Window,
+    KeyboardButton, KeyboardClickEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Overflow, Pixels, ScrollWheelEvent, Style, Window,
     interactive::{ElementClickedState, tooltip},
 };
 
@@ -27,7 +27,8 @@ impl Interactivity {
         if let Some(focus_handle) = self.tracked_focus_handle.clone() {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
-                if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) && !window.default_prevented() {
+                if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) && !window.default_prevented()
+                {
                     window.focus(&focus_handle);
                     window.prevent_default();
                 }
@@ -99,13 +100,15 @@ impl Interactivity {
         if let Some(hover_listener) = self.hover_listener.take() {
             let hitbox = hitbox.clone();
             let was_hovered = element_state.hover_state.get_or_insert_with(Default::default).clone();
-            let has_mouse_down = element_state.pending_mouse_down.get_or_insert_with(Default::default).clone();
+            let has_mouse_down =
+                element_state.pending_mouse_down.get_or_insert_with(Default::default).clone();
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
-                let is_hovered =
-                    has_mouse_down.borrow().is_none() && window.active_drag.is_none() && hitbox.is_hovered(window);
+                let is_hovered = has_mouse_down.borrow().is_none()
+                    && window.active_drag.is_none()
+                    && hitbox.is_hovered(window);
                 let changed = {
                     let mut was_hovered = was_hovered.borrow_mut();
                     let changed = is_hovered != *was_hovered;
@@ -120,7 +123,8 @@ impl Interactivity {
 
         if let Some(build_tooltip) = self.tooltip_builder.take() {
             let active_tooltip = element_state.active_tooltip.get_or_insert_with(Default::default).clone();
-            let pending_mouse_down = element_state.pending_mouse_down.get_or_insert_with(Default::default).clone();
+            let pending_mouse_down =
+                element_state.pending_mouse_down.get_or_insert_with(Default::default).clone();
             let check_is_hovered_during_prepaint = Rc::new({
                 let pending_mouse_down = pending_mouse_down.clone();
                 let source_bounds = hitbox.bounds;
@@ -151,7 +155,8 @@ impl Interactivity {
                 }
             });
         } else {
-            let group_hitbox = self.group_active_style.as_ref().and_then(|group| window.group_hitboxes.get(&group.group));
+            let group_hitbox =
+                self.group_active_style.as_ref().and_then(|group| window.group_hitboxes.get(&group.group));
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
                 if phase == DispatchPhase::Bubble && !window.default_prevented() {
@@ -177,7 +182,8 @@ impl Interactivity {
         is_focused: bool,
         window: &mut Window,
     ) {
-        let pending_mouse_down = element_state.pending_mouse_down.get_or_insert_with(Default::default).clone();
+        let pending_mouse_down =
+            element_state.pending_mouse_down.get_or_insert_with(Default::default).clone();
         element_state.clicked_state.get_or_insert_with(Default::default);
         let click_listeners: Rc<[crate::interactive::ClickListener]> = click_listeners.into();
 
@@ -185,7 +191,10 @@ impl Interactivity {
             let pending_mouse_down = pending_mouse_down.clone();
             let hitbox = hitbox.clone();
             move |event: &MouseDownEvent, phase, window, _| {
-                if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && hitbox.is_hovered(window) {
+                if phase == DispatchPhase::Bubble
+                    && event.button == MouseButton::Left
+                    && hitbox.is_hovered(window)
+                {
                     *pending_mouse_down.borrow_mut() = Some(event.clone());
                     window.refresh();
                 }
@@ -245,7 +254,9 @@ impl Interactivity {
             window.set_key_context(context);
         }
         for listener in self.key_down_listeners.drain(..) {
-            window.on_key_event(move |event: &crate::KeyDownEvent, phase, window, cx| listener(event, phase, window, cx));
+            window.on_key_event(move |event: &crate::KeyDownEvent, phase, window, cx| {
+                listener(event, phase, window, cx)
+            });
         }
         for (action_type, listener) in self.action_listeners.drain(..) {
             window.on_action(action_type, listener);
@@ -254,8 +265,10 @@ impl Interactivity {
 
     /// A `group_hover` style redraws when its group's hover state changes.
     pub(crate) fn paint_hover_group_handler(&self, window: &mut Window) {
-        let group_hitbox =
-            self.group_hover_style.as_ref().and_then(|group_hover| window.group_hitboxes.get(&group_hover.group));
+        let group_hitbox = self
+            .group_hover_style
+            .as_ref()
+            .and_then(|group_hover| window.group_hitboxes.get(&group_hover.group));
         if let Some(group_hitbox) = group_hitbox {
             let was_hovered = group_hitbox.is_hovered(window);
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {

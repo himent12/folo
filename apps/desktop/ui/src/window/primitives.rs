@@ -12,10 +12,11 @@
 use std::sync::Arc;
 
 use crate::{
-    AlphaMask, App, Background, Bounds, BoxShadow, BuiltPath, ColorMask, ColorSprite, Corners, FontId, GlyphId,
-    Hsla, Image, MonoSprite, PaintQuad, Pixels, Point, RenderGlyphParams, RenderImage, RenderSvgParams,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, SharedString, Size, SpriteKind, StrikethroughStyle,
-    StylePaint, Underline, UnderlineStyle, Window, size, svg_sprite_bounds, window::raster::Mask,
+    AlphaMask, App, Background, Bounds, BoxShadow, BuiltPath, ColorMask, ColorSprite, Corners, FontId,
+    GlyphId, Hsla, Image, MonoSprite, PaintQuad, Pixels, Point, RenderGlyphParams, RenderImage,
+    RenderSvgParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, SharedString, Size, SpriteKind,
+    StrikethroughStyle, StylePaint, Underline, UnderlineStyle, Window, size, svg_sprite_bounds,
+    window::raster::Mask,
 };
 
 impl Window {
@@ -66,7 +67,8 @@ impl Window {
     ) -> anyhow::Result<()> {
         anyhow::ensure!(frame_index < data.frame_count(), "image frame {frame_index} out of range");
         let scale_factor = self.scale_factor;
-        let bounds = bounds.scale(scale_factor).map_origin(|origin| origin.floor()).map_size(|size| size.ceil());
+        let bounds =
+            bounds.scale(scale_factor).map_origin(|origin| origin.floor()).map_size(|size| size.ceil());
         let clip = self.scaled_clip();
         if bounds.intersect(&clip).is_empty() {
             return Ok(());
@@ -85,13 +87,19 @@ impl Window {
 
     /// Paints an SVG asset as a single-colour icon (mask from the icon cache, rendered at GPUI's
     /// `SMOOTH_SVG_SCALE_FACTOR` and placed by `svg_sprite_bounds`).
-    pub fn paint_svg(&mut self, bounds: Bounds<Pixels>, path: SharedString, color: Hsla, _cx: &App) -> anyhow::Result<()> {
+    pub fn paint_svg(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        path: SharedString,
+        color: Hsla,
+        _cx: &App,
+    ) -> anyhow::Result<()> {
         let bounds = bounds.scale(self.scale_factor);
         let params = RenderSvgParams::for_bounds(path, &bounds);
         let renderer = &self.svg_renderer;
-        let mask = self
-            .icon_masks
-            .get_or_insert_with(&params, || Ok(renderer.render(&params)?.map(|mask| Mask::from(Arc::new(mask)))))?;
+        let mask = self.icon_masks.get_or_insert_with(&params, || {
+            Ok(renderer.render(&params)?.map(|mask| Mask::from(Arc::new(mask))))
+        })?;
         let Some(mask) = mask.and_then(|mask| mask.alpha().cloned()) else { return Ok(()) };
         let bounds = svg_sprite_bounds(bounds, mask.size);
         let clip = self.scaled_clip();
@@ -99,7 +107,13 @@ impl Window {
             return Ok(());
         }
         let color = color.opacity(self.element_opacity);
-        self.next_frame.scene.push_mono_sprite(MonoSprite { bounds, clip, color, mask, kind: SpriteKind::Svg });
+        self.next_frame.scene.push_mono_sprite(MonoSprite {
+            bounds,
+            clip,
+            color,
+            mask,
+            kind: SpriteKind::Svg,
+        });
         Ok(())
     }
 
@@ -120,8 +134,16 @@ impl Window {
             x: (glyph_origin.x.0.fract() * SUBPIXEL_VARIANTS_X as f32).floor() as u8,
             y: (glyph_origin.y.0.fract() * SUBPIXEL_VARIANTS_Y as f32).floor() as u8,
         };
-        let params = RenderGlyphParams { font_id, glyph_id, font_size, subpixel_variant, scale_factor, is_emoji: false };
-        let Some((raster_bounds, mask)) = self.glyph_mask(&params, |size, bytes| Arc::new(AlphaMask::new(size, bytes)).into())?
+        let params = RenderGlyphParams {
+            font_id,
+            glyph_id,
+            font_size,
+            subpixel_variant,
+            scale_factor,
+            is_emoji: false,
+        };
+        let Some((raster_bounds, mask)) =
+            self.glyph_mask(&params, |size, bytes| Arc::new(AlphaMask::new(size, bytes)).into())?
         else {
             return Ok(());
         };
@@ -135,7 +157,13 @@ impl Window {
             return Ok(());
         }
         let color = color.opacity(self.element_opacity);
-        self.next_frame.scene.push_mono_sprite(MonoSprite { bounds, clip, color, mask, kind: SpriteKind::Glyph });
+        self.next_frame.scene.push_mono_sprite(MonoSprite {
+            bounds,
+            clip,
+            color,
+            mask,
+            kind: SpriteKind::Glyph,
+        });
         Ok(())
     }
 
@@ -157,7 +185,8 @@ impl Window {
             scale_factor,
             is_emoji: true,
         };
-        let Some((raster_bounds, mask)) = self.glyph_mask(&params, |size, bytes| Arc::new(ColorMask::new(size, bytes)).into())?
+        let Some((raster_bounds, mask)) =
+            self.glyph_mask(&params, |size, bytes| Arc::new(ColorMask::new(size, bytes)).into())?
         else {
             return Ok(());
         };
@@ -194,7 +223,12 @@ impl Window {
     }
 
     /// Paints box shadows under a rounded rectangle.
-    pub fn paint_shadows(&mut self, bounds: Bounds<Pixels>, corner_radii: Corners<Pixels>, shadows: &[BoxShadow]) {
+    pub fn paint_shadows(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+    ) {
         let cx = self.style_paint();
         crate::paint_shadows(&mut self.next_frame.scene, &cx, bounds, corner_radii, shadows);
     }
@@ -202,15 +236,34 @@ impl Window {
     /// Paints an underline (straight, or wavy and three times as tall), as GPUI.
     pub fn paint_underline(&mut self, origin: Point<Pixels>, width: Pixels, style: &UnderlineStyle) {
         let height = if style.wavy { style.thickness * 3. } else { style.thickness };
-        self.push_underline(origin, size(width, height), style.color.unwrap_or_default(), style.thickness, style.wavy);
+        self.push_underline(
+            origin,
+            size(width, height),
+            style.color.unwrap_or_default(),
+            style.thickness,
+            style.wavy,
+        );
     }
 
     /// Paints a strikethrough.
     pub fn paint_strikethrough(&mut self, origin: Point<Pixels>, width: Pixels, style: &StrikethroughStyle) {
-        self.push_underline(origin, size(width, style.thickness), style.color.unwrap_or_default(), style.thickness, false);
+        self.push_underline(
+            origin,
+            size(width, style.thickness),
+            style.color.unwrap_or_default(),
+            style.thickness,
+            false,
+        );
     }
 
-    fn push_underline(&mut self, origin: Point<Pixels>, line: Size<Pixels>, color: Hsla, thickness: Pixels, wavy: bool) {
+    fn push_underline(
+        &mut self,
+        origin: Point<Pixels>,
+        line: Size<Pixels>,
+        color: Hsla,
+        thickness: Pixels,
+        wavy: bool,
+    ) {
         let scale_factor = self.scale_factor;
         let bounds = Bounds { origin, size: line }.scale(scale_factor);
         let clip = self.scaled_clip();

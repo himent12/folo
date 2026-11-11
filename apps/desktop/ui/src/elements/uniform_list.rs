@@ -158,22 +158,23 @@ impl Element for UniformList {
         let max_items = self.item_count;
         let item_size = self.measure_item(None, window, cx);
         // GPUI's `ListSizingBehavior::Infer`: as tall as all rows, capped by the space available.
-        let layout_id = self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, _| {
-            window.with_text_style(style.text_style().cloned(), |window| {
-                window.request_measured_layout(style, move |known, available, _, _| {
-                    let desired_height = item_size.height * max_items as f32;
-                    let width = known.width.unwrap_or(match available.width {
-                        AvailableSpace::Definite(width) => width,
-                        AvailableSpace::MinContent | AvailableSpace::MaxContent => item_size.width,
-                    });
-                    let height = match available.height {
-                        AvailableSpace::Definite(height) => desired_height.min(height),
-                        AvailableSpace::MinContent | AvailableSpace::MaxContent => desired_height,
-                    };
-                    size(width, height)
+        let layout_id =
+            self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, _| {
+                window.with_text_style(style.text_style().cloned(), |window| {
+                    window.request_measured_layout(style, move |known, available, _, _| {
+                        let desired_height = item_size.height * max_items as f32;
+                        let width = known.width.unwrap_or(match available.width {
+                            AvailableSpace::Definite(width) => width,
+                            AvailableSpace::MinContent | AvailableSpace::MaxContent => item_size.width,
+                        });
+                        let height = match available.height {
+                            AvailableSpace::Definite(height) => desired_height.min(height),
+                            AvailableSpace::MinContent | AvailableSpace::MaxContent => desired_height,
+                        };
+                        size(width, height)
+                    })
                 })
-            })
-        });
+            });
         (layout_id, UniformListFrameState { item_height: item_size.height, items: SmallVec::new() })
     }
 
@@ -268,11 +269,19 @@ impl Element for UniformList {
         cx: &mut App,
     ) {
         let items = &mut frame_state.items;
-        self.interactivity.paint(global_id, inspector_id, bounds, hitbox.as_ref(), window, cx, |_, window, cx| {
-            for item in items.iter_mut() {
-                item.paint(window, cx);
-            }
-        })
+        self.interactivity.paint(
+            global_id,
+            inspector_id,
+            bounds,
+            hitbox.as_ref(),
+            window,
+            cx,
+            |_, window, cx| {
+                for item in items.iter_mut() {
+                    item.paint(window, cx);
+                }
+            },
+        )
     }
 }
 

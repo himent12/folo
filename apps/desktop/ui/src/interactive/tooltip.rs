@@ -126,8 +126,11 @@ fn handle_tooltip_mouse_move(
                 let view = build_tooltip(window, cx);
                 let state = active_tooltip.clone();
                 let check_visible_and_update: crate::interactive::TooltipVisibility =
-                    Rc::new(move |bounds, window, _cx| check_visible_and_update(&state, &check_is_hovered, bounds, window));
-                let tooltip = AnyTooltip { view, mouse_position: window.mouse_position(), check_visible_and_update };
+                    Rc::new(move |bounds, window, _cx| {
+                        check_visible_and_update(&state, &check_is_hovered, bounds, window)
+                    });
+                let tooltip =
+                    AnyTooltip { view, mouse_position: window.mouse_position(), check_visible_and_update };
                 *active_tooltip.borrow_mut() = Some(ActiveTooltip::Visible { tooltip });
                 window.refresh();
             });

@@ -47,9 +47,10 @@ use std::{
 use smallvec::SmallVec;
 
 use crate::{
-    AnyDrag, AnyView, App, AppCell, Bounds, DisplayId, Framebuffer, GlyphBlend, GroupHitboxes, Modifiers, Pixels,
-    PlatformWindow, Point, RenderGlyphParams, RenderSvgParams, Size, SvgRenderer, TextStyleRefinement,
-    WindowBounds, WindowOptions, WindowParams, WindowTextSystem, element::ElementIdStack, px,
+    AnyDrag, AnyView, App, AppCell, Bounds, DisplayId, Framebuffer, GlyphBlend, GroupHitboxes, Modifiers,
+    Pixels, PlatformWindow, Point, RenderGlyphParams, RenderSvgParams, Size, SvgRenderer,
+    TextStyleRefinement, WindowBounds, WindowOptions, WindowParams, WindowTextSystem,
+    element::ElementIdStack, px,
 };
 // `crate::raster` once the raster package lands (same names and signatures).
 pub(crate) use crate::pending::raster_pending as raster;
@@ -289,7 +290,11 @@ impl Window {
     }
 
     /// Registers the handler asked when the user closes the window; `false` keeps it open.
-    pub fn on_window_should_close(&mut self, _cx: &App, f: impl FnMut(&mut Window, &mut App) -> bool + 'static) {
+    pub fn on_window_should_close(
+        &mut self,
+        _cx: &App,
+        f: impl FnMut(&mut Window, &mut App) -> bool + 'static,
+    ) {
         self.should_close_handler = Some(Box::new(f));
     }
 
@@ -341,7 +346,9 @@ fn wire_callbacks(platform_window: &dyn PlatformWindow, app: Weak<AppCell>, hand
     }));
     platform_window.on_input(Box::new({
         let app = app.clone();
-        move |event| update_window(&app, handle, |window, cx| window.dispatch_event(event, cx)).unwrap_or_default()
+        move |event| {
+            update_window(&app, handle, |window, cx| window.dispatch_event(event, cx)).unwrap_or_default()
+        }
     }));
     platform_window.on_resize(Box::new({
         let app = app.clone();

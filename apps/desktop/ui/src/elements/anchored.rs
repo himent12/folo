@@ -6,8 +6,9 @@ use std::panic;
 use smallvec::SmallVec;
 
 use crate::{
-    AnyElement, App, Axis, Bounds, Corner, Display, Edges, Element, ElementId, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, ParentElement, Pixels, Point, Position, Size, Style, Window, point,
+    AnyElement, App, Axis, Bounds, Corner, Display, Edges, Element, ElementId, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Point, Position, Size, Style, Window,
+    point,
 };
 
 /// A new anchored element.
@@ -186,16 +187,22 @@ pub(crate) fn fit(
     if fit_mode == AnchoredFitMode::SwitchAnchor {
         let mut anchor_corner = anchor_corner;
         if desired.left() < limits.left() || desired.right() > limits.right() {
-            let switched =
-                Bounds::from_corner_and_size(anchor_corner.other_side_corner_along(Axis::Horizontal), origin, size);
+            let switched = Bounds::from_corner_and_size(
+                anchor_corner.other_side_corner_along(Axis::Horizontal),
+                origin,
+                size,
+            );
             if !(switched.left() < limits.left() || switched.right() > limits.right()) {
                 anchor_corner = anchor_corner.other_side_corner_along(Axis::Horizontal);
                 desired = switched;
             }
         }
         if desired.top() < limits.top() || desired.bottom() > limits.bottom() {
-            let switched =
-                Bounds::from_corner_and_size(anchor_corner.other_side_corner_along(Axis::Vertical), origin, size);
+            let switched = Bounds::from_corner_and_size(
+                anchor_corner.other_side_corner_along(Axis::Vertical),
+                origin,
+                size,
+            );
             if !(switched.top() < limits.top() || switched.bottom() > limits.bottom()) {
                 desired = switched;
             }

@@ -9,8 +9,8 @@ use smallvec::SmallVec;
 
 use crate::{
     App, Bounds, Display, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId,
-    InteractiveElementState, Interactivity, LayoutId, Overflow, Pixels, Point, Refineable, SharedString, Size,
-    Style, Visibility, Window, interactive::tooltip, px, size,
+    InteractiveElementState, Interactivity, LayoutId, Overflow, Pixels, Point, Refineable, SharedString,
+    Size, Style, Visibility, Window, interactive::tooltip, px, size,
 };
 
 impl Interactivity {
@@ -23,46 +23,53 @@ impl Interactivity {
         cx: &mut App,
         f: impl FnOnce(Style, &mut Window, &mut App) -> LayoutId,
     ) -> LayoutId {
-        window.with_optional_element_state::<InteractiveElementState, _>(global_id, |element_state, window| {
-            let mut element_state = element_state.map(|state| state.unwrap_or_default());
+        window.with_optional_element_state::<InteractiveElementState, _>(
+            global_id,
+            |element_state, window| {
+                let mut element_state = element_state.map(|state| state.unwrap_or_default());
 
-            // A drag in progress cancels a pending click and the pressed state (GPUI).
-            if let Some(state) = element_state.as_ref()
-                && window.active_drag.is_some()
-            {
-                if let Some(pending) = state.pending_mouse_down.as_ref() {
-                    *pending.borrow_mut() = None;
+                // A drag in progress cancels a pending click and the pressed state (GPUI).
+                if let Some(state) = element_state.as_ref()
+                    && window.active_drag.is_some()
+                {
+                    if let Some(pending) = state.pending_mouse_down.as_ref() {
+                        *pending.borrow_mut() = None;
+                    }
+                    if let Some(clicked) = state.clicked_state.as_ref() {
+                        *clicked.borrow_mut() = Default::default();
+                    }
                 }
-                if let Some(clicked) = state.clicked_state.as_ref() {
-                    *clicked.borrow_mut() = Default::default();
+
+                // A focusable element without a tracked handle keeps one in its state.
+                if self.focusable
+                    && self.tracked_focus_handle.is_none()
+                    && let Some(state) = element_state.as_mut()
+                {
+                    let mut handle = state
+                        .focus_handle
+                        .get_or_insert_with(|| cx.focus_handle())
+                        .clone()
+                        .tab_stop(self.tab_stop);
+                    if let Some(index) = self.tab_index {
+                        handle = handle.tab_index(index);
+                    }
+                    self.tracked_focus_handle = Some(handle);
                 }
-            }
 
-            // A focusable element without a tracked handle keeps one in its state.
-            if self.focusable
-                && self.tracked_focus_handle.is_none()
-                && let Some(state) = element_state.as_mut()
-            {
-                let mut handle = state.focus_handle.get_or_insert_with(|| cx.focus_handle()).clone().tab_stop(self.tab_stop);
-                if let Some(index) = self.tab_index {
-                    handle = handle.tab_index(index);
+                if let Some(scroll_handle) = self.tracked_scroll_handle.as_ref() {
+                    self.scroll_offset = Some(scroll_handle.0.borrow().offset.clone());
+                } else if (self.base_style.overflow.x == Some(Overflow::Scroll)
+                    || self.base_style.overflow.y == Some(Overflow::Scroll))
+                    && let Some(state) = element_state.as_mut()
+                {
+                    self.scroll_offset = Some(state.scroll_offset.get_or_insert_with(Rc::default).clone());
                 }
-                self.tracked_focus_handle = Some(handle);
-            }
 
-            if let Some(scroll_handle) = self.tracked_scroll_handle.as_ref() {
-                self.scroll_offset = Some(scroll_handle.0.borrow().offset.clone());
-            } else if (self.base_style.overflow.x == Some(Overflow::Scroll)
-                || self.base_style.overflow.y == Some(Overflow::Scroll))
-                && let Some(state) = element_state.as_mut()
-            {
-                self.scroll_offset = Some(state.scroll_offset.get_or_insert_with(Rc::default).clone());
-            }
-
-            let style = self.compute_style_internal(None, element_state.as_mut(), window);
-            let layout_id = f(style, window, cx);
-            (layout_id, element_state)
-        })
+                let style = self.compute_style_internal(None, element_state.as_mut(), window);
+                let layout_id = f(style, window, cx);
+                (layout_id, element_state)
+            },
+        )
     }
 
     /// Pushes the element's dispatch node and focus id, inserts the hitbox, clamps the scroll offset, and
@@ -83,8 +90,9 @@ impl Interactivity {
         if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
             window.set_focus_handle(focus_handle, cx);
         }
-        let result =
-            window.with_optional_element_state::<InteractiveElementState, _>(global_id, |element_state, window| {
+        let result = window.with_optional_element_state::<InteractiveElementState, _>(
+            global_id,
+            |element_state, window| {
                 let mut element_state = element_state.map(|state| state.unwrap_or_default());
                 let style = self.compute_style_internal(None, element_state.as_mut(), window);
 
@@ -111,7 +119,8 @@ impl Interactivity {
                     })
                 });
                 (result, element_state)
-            });
+            },
+        );
         window.pop_dispatch_node();
         result
     }
@@ -138,7 +147,12 @@ impl Interactivity {
 
     /// Clamps the scroll offset to `-max..=0` (max = content plus padding minus bounds, two decimals) and
     /// reports bounds and max to the scroll handle (GPUI's `clamp_scroll_position`).
-    fn clamp_scroll_position(&self, bounds: Bounds<Pixels>, style: &Style, window: &mut Window) -> Point<Pixels> {
+    fn clamp_scroll_position(
+        &self,
+        bounds: Bounds<Pixels>,
+        style: &Style,
+        window: &mut Window,
+    ) -> Point<Pixels> {
         fn round_to_two_decimals(pixels: Pixels) -> Pixels {
             (pixels * 100.).round() / 100.
         }
@@ -158,7 +172,8 @@ impl Interactivity {
         );
         let mut offset = scroll_offset.borrow_mut();
         offset.x = offset.x.clamp(-scroll_max.width, px(0.));
-        offset.y = if scroll_to_bottom { -scroll_max.height } else { offset.y.clamp(-scroll_max.height, px(0.)) };
+        offset.y =
+            if scroll_to_bottom { -scroll_max.height } else { offset.y.clamp(-scroll_max.height, px(0.)) };
         if let Some(mut state) = handle_state {
             state.max_offset = scroll_max;
             state.bounds = bounds;
@@ -183,50 +198,53 @@ impl Interactivity {
             window.set_active_dispatch_node(node);
         }
         self.hovered = hitbox.map(|hitbox| hitbox.is_hovered(window));
-        window.with_optional_element_state::<InteractiveElementState, _>(global_id, |element_state, window| {
-            let mut element_state = element_state.map(|state| state.unwrap_or_default());
-            let style = self.compute_style_internal(hitbox, element_state.as_mut(), window);
-            self.paint_hover_group_handler(window);
-            if style.visibility == Visibility::Hidden {
-                return ((), element_state);
-            }
-            if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
-                window.insert_tab_stop(focus_handle);
-            }
-            window.with_element_opacity(style.opacity, |window| {
-                let paint = window.style_paint();
-                style.paint_before_children(bounds, &paint, &mut window.next_frame.scene);
-                window.with_text_style(style.text_style().cloned(), |window| {
-                    window.with_content_mask(style.overflow_mask(bounds, window.rem_size()), |window| {
-                        if let Some(hitbox) = hitbox {
-                            if let Some(cursor) = style.mouse_cursor
-                                && window.active_drag.is_none()
+        window.with_optional_element_state::<InteractiveElementState, _>(
+            global_id,
+            |element_state, window| {
+                let mut element_state = element_state.map(|state| state.unwrap_or_default());
+                let style = self.compute_style_internal(hitbox, element_state.as_mut(), window);
+                self.paint_hover_group_handler(window);
+                if style.visibility == Visibility::Hidden {
+                    return ((), element_state);
+                }
+                if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
+                    window.insert_tab_stop(focus_handle);
+                }
+                window.with_element_opacity(style.opacity, |window| {
+                    let paint = window.style_paint();
+                    style.paint_before_children(bounds, &paint, &mut window.next_frame.scene);
+                    window.with_text_style(style.text_style().cloned(), |window| {
+                        window.with_content_mask(style.overflow_mask(bounds, window.rem_size()), |window| {
+                            if let Some(hitbox) = hitbox {
+                                if let Some(cursor) = style.mouse_cursor
+                                    && window.active_drag.is_none()
+                                {
+                                    window.set_cursor_style(cursor, hitbox);
+                                }
+                                if let Some(group) = self.group.clone() {
+                                    window.group_hitboxes.push(group, hitbox.id);
+                                }
+                                if let Some(area) = self.window_control {
+                                    window.insert_window_control_hitbox(area, hitbox.clone());
+                                }
+                                self.paint_mouse_listeners(hitbox, element_state.as_mut(), window);
+                                self.paint_scroll_listener(hitbox, &style, window);
+                            }
+                            self.paint_keyboard_listeners(window);
+                            f(&style, window, cx);
+                            if hitbox.is_some()
+                                && let Some(group) = self.group.as_ref()
                             {
-                                window.set_cursor_style(cursor, hitbox);
+                                window.group_hitboxes.pop(group);
                             }
-                            if let Some(group) = self.group.clone() {
-                                window.group_hitboxes.push(group, hitbox.id);
-                            }
-                            if let Some(area) = self.window_control {
-                                window.insert_window_control_hitbox(area, hitbox.clone());
-                            }
-                            self.paint_mouse_listeners(hitbox, element_state.as_mut(), window);
-                            self.paint_scroll_listener(hitbox, &style, window);
-                        }
-                        self.paint_keyboard_listeners(window);
-                        f(&style, window, cx);
-                        if hitbox.is_some()
-                            && let Some(group) = self.group.as_ref()
-                        {
-                            window.group_hitboxes.pop(group);
-                        }
+                        });
                     });
+                    let paint = window.style_paint();
+                    style.paint_after_children(bounds, &paint, &mut window.next_frame.scene);
                 });
-                let paint = window.style_paint();
-                style.paint_after_children(bounds, &paint, &mut window.next_frame.scene);
-            });
-            ((), element_state)
-        });
+                ((), element_state)
+            },
+        );
     }
 
     /// The style for this frame: the base refined by focus, hover, group hover, active and group active.
