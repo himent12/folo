@@ -14,7 +14,10 @@
     "smoke": "node scripts/smoke.mjs",
     "live-smoke": "node scripts/live-smoke.mjs",
     "label-smoke": "node scripts/label-smoke.mjs",
-    "qa": "node scripts/shoot.mjs --qa"
+    "qa": "node scripts/shoot.mjs --qa",
+    "parity": "node scripts/parity.mjs --run",
+    "perf": "node scripts/perf.mjs",
+    "shoot:next": "node scripts/shoot.mjs --app next"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",

@@ -1,6 +1,189 @@
-// The fw app's shell. Until the screens are ported it renders the proof page of the ported components.
-import Demo from '../framework/parity/Demo';
+// fw port of App.svelte: the shell (sidebar, top bar, tab bar, palette, shortcuts, toasts, run watch) and the screen of
+// the current route. Each screen is a chunk of its own (./routes.ts): the shell renders at once, a screen when its
+// chunk is there. Moving to a screen whose chunk has not loaded yet keeps the screen on display until it has, then
+// swaps in one step, as `{#key}` does; chunks are fetched ahead (a link hovered, focused or touched, the G of a
+// shortcut, the palette opening, idle time after startup), so that wait is rarely there at all.
+import { computed, css, Dynamic, effect, Key, onMount, signal, tick, untrack, type Component } from 'fw';
+import { hub } from '$lib/api/index';
+import { prefs } from '$lib/prefs';
+import { router } from '$lib/router';
+import CommandPalette from '$lib/shell/CommandPalette';
+import ConnectionStatus from '$lib/shell/ConnectionStatus';
+// The extension: runWatch.ts (its logic) differs from this file's name only in case.
+import RunWatch from '$lib/shell/RunWatch.tsx';
+import { holdRouteFocus, isNewPage } from '$lib/shell/routeFocus';
+import { installShortcuts } from '$lib/shell/shortcuts.fw';
+import ShortcutsDialog from '$lib/shell/ShortcutsDialog';
+import Sidebar from '$lib/shell/Sidebar';
+import SidebarLive from '$lib/shell/SidebarLive';
+import TabBar from '$lib/shell/TabBar';
+import Topbar from '$lib/shell/Topbar';
+import Toaster from '$lib/ui/Toaster';
+import { preload, preloadAll, preloadHref, screenOf } from './routes';
+import NotFound from './routes/NotFound';
+
+type Screen = { path: string | null; comp: Component<Record<string, never>> | null };
+
+const NONE: Screen = { path: null, comp: null };
+/** After the first screen has shown, the other chunks load in idle time (once). */
+const IDLE_PRELOAD_MS = 1000;
+
+// The first screen's chunk: fetched with the shell, not after it.
+{
+  const first = router.route.name;
+  if (first !== 'not-found') void preload(first).catch(() => {});
+}
 
 export default function App() {
-  return <Demo />;
+  const paletteOpen = signal(false);
+  const shortcutsOpen = signal(false);
+  /** Bumps when a screen's chunk arrives. */
+  const arrived = signal(0);
+
+  effect(() => {
+    document.documentElement.dataset.theme = prefs.resolvedTheme;
+  });
+
+  onMount(() => {
+    void hub.connect();
+    const uninstall = installShortcuts({
+      palette: () => paletteOpen.set(!paletteOpen.peek()),
+      shortcuts: () => shortcutsOpen.set(true),
+    });
+    // Fetch a screen's chunk ahead: a link to it hovered, focused or touched; every screen on a "go to" G.
+    const intent = (e: Event) => preloadHref((e.target as Element | null)?.closest?.('a[href^="#/"]')?.getAttribute('href'));
+    const onkey = (e: KeyboardEvent) => {
+      if (e.key === 'g' || e.key === 'G') preloadAll();
+    };
+    document.addEventListener('pointerover', intent, { passive: true });
+    document.addEventListener('focusin', intent);
+    document.addEventListener('touchstart', intent, { passive: true });
+    document.addEventListener('keydown', onkey);
+    return () => {
+      uninstall();
+      document.removeEventListener('pointerover', intent);
+      document.removeEventListener('focusin', intent);
+      document.removeEventListener('touchstart', intent);
+      document.removeEventListener('keydown', onkey);
+    };
+  });
+
+  // The palette may lead anywhere.
+  effect(() => {
+    if (paletteOpen.get()) preloadAll();
+  });
+
+  /** What `main` shows: the current route's screen once its chunk is there, else the one shown until then. */
+  let last: Screen = NONE;
+  const screen = computed(
+    () => {
+      const r = router.route;
+      arrived.get();
+      const comp = r.name === 'not-found' ? NotFound : screenOf(r.name);
+      if (comp === undefined) {
+        const name = r.name as Exclude<typeof r.name, 'not-found'>;
+        void preload(name).then(
+          () => arrived.set((n) => n + 1),
+          () => {},
+        );
+        return last;
+      }
+      return (last = { path: r.path, comp });
+    },
+    { equals: (a, b) => a.path === b.path && a.comp === b.comp },
+  );
+
+  // Once the first screen is up, the others load in idle time.
+  effect(() => {
+    if (screen.get().path === null) return;
+    const t = setTimeout(() => {
+      const idle = (globalThis as { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
+      if (idle) idle(preloadAll, { timeout: 5000 });
+      else preloadAll();
+    }, IDLE_PRELOAD_MS);
+    return () => clearTimeout(t);
+  });
+
+  // A new page takes focus (its heading) once it has rendered; a query change on the same page leaves focus alone.
+  let mainEl!: HTMLElement;
+  let shownPath = router.route.path;
+  let releaseFocus: (() => void) | null = null;
+  effect(() => {
+    const path = screen.get().path;
+    if (path === null || !isNewPage(shownPath, path)) return;
+    shownPath = path;
+    releaseFocus?.();
+    releaseFocus = null;
+    void tick().then(() =>
+      requestAnimationFrame(() => {
+        // `mainEl` is gone if the app was torn down before the frame.
+        if (mainEl?.isConnected && router.route.path === path) releaseFocus = holdRouteFocus(mainEl);
+      }),
+    );
+  });
+
+  return (
+    <>
+      <a class="skip" href="#content">
+        Skip to content
+      </a>
+      <div class="app">
+        <Sidebar live={(collapsed) => <SidebarLive collapsed={collapsed()} />} footer={(collapsed) => <ConnectionStatus collapsed={collapsed()} />} />
+        <div class="main">
+          <Topbar onsearch={() => paletteOpen.set(true)} />
+          <main id="content" tabindex={-1} ref={(e) => (mainEl = e)}>
+            <Key when={screen.get()}>{() => <Dynamic component={untrack(() => screen.get().comp)} />}</Key>
+          </main>
+        </div>
+        <TabBar />
+      </div>
+      <CommandPalette bind:open={paletteOpen} onshortcuts={() => shortcutsOpen.set(true)} />
+      <ShortcutsDialog bind:open={shortcutsOpen} />
+      <Toaster />
+      <RunWatch />
+    </>
+  );
 }
+
+css`
+  .app {
+    display: flex;
+    min-height: 100dvh;
+  }
+  .main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  main {
+    flex: 1;
+    min-width: 0;
+    outline: none;
+  }
+  .skip {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: var(--z-toast);
+    padding: 6px 12px;
+    border-radius: var(--radius-md);
+    background: var(--accent-solid);
+    color: var(--accent-on);
+    font-weight: var(--weight-medium);
+    transform: translateY(-200%);
+  }
+  .skip:focus-visible {
+    transform: none;
+  }
+  @media (max-width: 767px) {
+    /* The sidebar's own column only (pages have rails of their own, which phones show as sections). */
+    .app :global(.shell-rail) {
+      display: none;
+    }
+    /* Clear of the tab bar (56 px + 8), or of nothing but 8 px while a page's dock replaces it (shell/dock.ts). */
+    main {
+      padding-bottom: calc(var(--tabbar-h) + var(--space-2) + env(safe-area-inset-bottom));
+    }
+  }
+`;

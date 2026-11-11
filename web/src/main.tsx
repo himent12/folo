@@ -1,4 +1,4 @@
-// The fw app (next.html): FOLO Studio as it is ported from Svelte. For now it shows the ported proof components.
+// The fw app (next.html): FOLO Studio as it is ported from Svelte (port of main.ts).
 import { render } from 'fw';
 import './lib/design/tokens.css';
 import './lib/design/base.css';

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>UI gallery: fw</title>
+    <script>
+      // Apply the saved theme before first paint so there is no flash.
+      try {
+        const t = localStorage.getItem('folo.theme') ?? 'dark';
+        const dark = t === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : t !== 'light';
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./gallery/main-fw.tsx"></script>
+  </body>
+</html>

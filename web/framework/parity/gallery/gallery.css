@@ -1,0 +1,54 @@
+/* Layout of the ui gallery (global, shared by both sides so only the components differ). Every class is `g-` prefixed
+   so it never matches a component's own class. */
+.g-gallery {
+  display: grid;
+  gap: 32px;
+  padding: 24px;
+  max-width: 1100px;
+}
+.g-section {
+  display: grid;
+  gap: 16px;
+}
+.g-title {
+  font-size: var(--type-lg-size);
+  font-weight: var(--weight-semibold);
+}
+.g-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.g-col {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
+.g-stack {
+  display: grid;
+  gap: 12px;
+}
+.g-narrow {
+  width: 320px;
+}
+.g-medium {
+  width: 560px;
+}
+.g-wide {
+  width: 900px;
+}
+.g-end {
+  justify-content: flex-end;
+}
+.g-note {
+  color: var(--text-tertiary);
+  font-size: var(--type-xs-size);
+}
+.g-tile {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--text-secondary);
+  font-size: var(--type-sm-size);
+}
