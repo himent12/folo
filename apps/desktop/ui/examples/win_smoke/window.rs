@@ -2,6 +2,7 @@
 
 use crate::common::*;
 use ::windows::Win32::Foundation::*;
+use ::windows::Win32::Graphics::Gdi::InvalidateRect;
 use ::windows::Win32::UI::WindowsAndMessaging::*;
 use folo_ui::windows::WindowsWindow;
 use folo_ui::*;
@@ -70,7 +71,13 @@ pub fn resize(
     pump();
 }
 
-pub fn modes(checks: &mut Checks, hwnd: HWND, window: &Rc<RefCell<WindowsWindow>>, fg0: HWND) {
+pub fn modes(
+    checks: &mut Checks,
+    hwnd: HWND,
+    window: &Rc<RefCell<WindowsWindow>>,
+    log: &Rc<RefCell<Log>>,
+    fg0: HWND,
+) {
     let restored = window.borrow().window_bounds();
     let b = restored.get_bounds();
     window.borrow().zoom();
@@ -135,6 +142,28 @@ pub fn modes(checks: &mut Checks, hwnd: HWND, window: &Rc<RefCell<WindowsWindow>
         left && wb == restored && window.borrow().content_size() == b.size,
         format!("{wb:?}"),
     );
+
+    // Minimized, nothing draws: not a paint, a capture or a frame request (GPUI's rule; the app reads
+    // the window's mode in the frame it draws). The restore draws again.
+    window.borrow().minimize();
+    let minimized = pump_until(Duration::from_secs(3), || iconic(hwnd));
+    let n = log.borrow().frames.len();
+    // SAFETY: invalidating our own window; a capture into nothing.
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    let _ = print_client(hwnd, 8, 8);
+    window.borrow().request_frame();
+    pump_until(Duration::from_millis(200), || false);
+    let drawn = log.borrow().frames.len() - n;
+    checks.check("minimized: no frame drawn", minimized && drawn == 0, format!("{drawn} frame(s)"));
+    // SAFETY: the taskbar's restore, without activation off screen (the backend routes it).
+    unsafe { SendMessageW(hwnd, WM_SYSCOMMAND, Some(WPARAM(SC_RESTORE as usize)), None) };
+    let back = pump_until(Duration::from_secs(3), || log.borrow().frames.len() > n);
+    checks.check("restored: drawn again", back && !iconic(hwnd), "");
+}
+
+fn iconic(hwnd: HWND) -> bool {
+    // SAFETY: a plain query.
+    unsafe { IsIconic(hwnd) }.as_bool()
 }
 
 pub fn pacing(
