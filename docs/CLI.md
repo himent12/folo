@@ -248,7 +248,9 @@ while the server runs lists at once; the server reads the same cache (`$FOLO_WEI
 first, which is all a public release needs: no `gh`, no account, nothing but the `folo` binary. The repository is
 private for now, so that download answers `404` and the pull falls back to `gh release download`: until the
 repository is public, pulling needs an account with access to it and a logged-in [`gh`](https://cli.github.com)
-(`gh auth login`). A progress line shows on a terminal; a stalled connection fails after 60 s without data.
+(`gh auth login`). A progress line shows on a terminal. Each step has its own time limit, none the whole download: 15 s
+to resolve the host name and 15 s to connect, 60 s to send the request and to get the answer's head, and 60 s for
+each read of the file, so a stalled connection fails and a slow one does not.
 
 - `FOLO_WEIGHTS_BASE_URL=<base>` downloads `<base>/<tag>/<file>` (and `<base>/<tag>/SHA256SUMS`) instead of the
   GitHub release: a mirror is a folder per release tag with the release's files, served over HTTP(S). A file the

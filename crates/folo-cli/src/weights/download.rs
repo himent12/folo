@@ -15,9 +15,10 @@ pub const BASE_URL_ENV: &str = "FOLO_WEIGHTS_BASE_URL";
 /// The GitHub CLI program the fallback runs (default `gh`).
 pub const GH_ENV: &str = "FOLO_GH";
 
+/// The longest wait for the host name to resolve, and then for the connection (TLS included) to be set up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// The longest wait for an answer's head, and for each read of its body: a stalled download fails, a slow one
-/// does not.
+/// The longest wait for the request's head to be sent, for an answer's head, and for each read of its body: a
+/// stalled download fails, a slow one does not (no whole-request deadline).
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// Files smaller than this get no progress line (`SHA256SUMS`).
 const PROGRESS_MIN_BYTES: u64 = 1 << 20;
@@ -70,7 +71,10 @@ pub fn release_files(
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .user_agent(format!("folo/{}", env!("CARGO_PKG_VERSION")))
+        .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_send_request(Some(READ_TIMEOUT))
+        .timeout_per_write(Some(READ_TIMEOUT))
         .timeout_recv_response(Some(READ_TIMEOUT))
         .timeout_per_read(Some(READ_TIMEOUT))
         .build()

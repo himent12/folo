@@ -1,5 +1,5 @@
 //! `folo weights pull` against a release server on loopback (`FOLO_WEIGHTS_BASE_URL`): the plain HTTPS download
-//! with its redirect, what is installed and what is not (a bad checksum, a cut body, a server error, no server),
+//! with its redirect, what is installed and what is not (a bad checksum, a cut body, a server error, no answer),
 //! and the fallback to the GitHub CLI when the download is refused (`FOLO_GH` names a missing or failing `gh`).
 
 use std::io::{Read, Write};
@@ -84,6 +84,20 @@ impl Server {
         let requests = self.requests.lock().unwrap();
         requests.iter().map(|h| h.split_whitespace().nth(1).unwrap_or_default().to_string()).collect()
     }
+}
+
+/// A server on loopback that closes every connection at once without answering, so the client gets a transport
+/// error, never an HTTP status. It stays bound until the test process ends: no other server can take its port
+/// (which a port let go of before the client connects could not promise).
+fn hang_up() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+    base
 }
 
 fn read_head(s: &mut TcpStream) -> String {
@@ -235,7 +249,7 @@ fn a_refused_download_falls_back_to_gh_and_says_both_when_it_fails() {
 }
 
 #[test]
-fn a_cut_body_a_server_error_or_no_server_is_a_download_error() {
+fn a_cut_body_a_server_error_or_no_answer_is_a_download_error() {
     let (bytes, sha) = model();
     let cut =
         Server::start(|_| vec![(SUMS.into(), sums_of(sha)), (ASSET.into(), Answer::Cut(Arc::clone(bytes)))]);
@@ -251,9 +265,8 @@ fn a_cut_body_a_server_error_or_no_server_is_a_download_error() {
     assert_eq!(e["code"], "download_failed", "{e}");
     assert!(e["message"].as_str().unwrap().ends_with("answered 503"), "{e}");
 
-    // Nothing listens on a port just let go.
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let e = failed(&cache, pull(&cache, &format!("http://127.0.0.1:{port}"), NO_GH, &[]));
+    // A connection closed without an answer (as when nothing answers): no HTTP status at all.
+    let e = failed(&cache, pull(&cache, &hang_up(), NO_GH, &[]));
     assert_eq!(e["code"], "download_failed", "{e}");
     assert!(e["hint"].as_str().unwrap().contains("network"), "{e}");
 }
