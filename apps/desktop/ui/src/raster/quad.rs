@@ -92,7 +92,7 @@ fn free_range(origin: f32, size: f32, t_low: f32, t_high: f32) -> (i32, i32, i32
         split += 1;
     }
     // Low half: free is monotone, rising toward the centre.
-    let mut f0 = ((origin + t_low - 0.5).floor() as i32 + 1).clamp(lo, split);
+    let mut f0 = ((origin + t_low - 0.5).floor() as i32).saturating_add(1).clamp(lo, split);
     while f0 > lo && free(f0 - 1) {
         f0 -= 1;
     }
@@ -326,9 +326,10 @@ impl QuadPrep {
 
 /// Pixels where a quad certainly writes its opaque background and nothing else (a conservative
 /// inset of the free rows by free columns), for occlusion. `rect` is the quad's pixel rectangle.
+/// A NaN alpha is not opaque (blending saturates it to zero).
 pub(crate) fn opaque_core(q: &Quad, rect: IRect) -> IRect {
     let bg = &q.background;
-    if bg.tag != BackgroundTag::Solid || bg.solid.a < 1. {
+    if bg.tag != BackgroundTag::Solid || bg.solid.a.is_nan() || bg.solid.a < 1. {
         return IRect::EMPTY;
     }
     let (r, w) = (&q.corner_radii, &q.border_widths);

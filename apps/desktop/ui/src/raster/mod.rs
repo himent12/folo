@@ -175,6 +175,13 @@ impl Renderer {
         let t0 = Instant::now();
         assert_eq!(frame.pixels.len(), frame.width as usize * frame.height as usize, "framebuffer size");
         self.tiles.resize(frame.width, frame.height);
+        if self.tiles.len() == 0 {
+            // An empty frame (a minimized or collapsed window): nothing to draw. The grid is empty, so
+            // the next frame of any other size repaints everything.
+            self.dirty.clear();
+            self.stats = RenderStats::default();
+            return Vec::new();
+        }
         let frame_rect = IRect::new(0, 0, frame.width as i32, frame.height as i32);
         let prims = &scene.primitives;
         let n = prims.len();
