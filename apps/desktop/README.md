@@ -1,11 +1,12 @@
 # FOLO Desktop
 
-The native FOLO app, built in Rust with [GPUI](https://gpui.rs) (Zed's GPU-accelerated UI framework). Same screens and
-design language as FOLO Studio (`web/`): Overview, Datasets, Runs (with a live training dashboard), Models,
-Benchmarks, Playground and Settings, plus a command palette, keyboard navigation, toasts, and dark and light themes.
+The native FOLO app, built in Rust on [folo-ui](ui/README.md), its own UI framework (GPUI's API, rendered on the
+CPU; the UI uses no GPU). Same screens and design language as FOLO Studio (`web/`): Overview, Datasets, Runs (with a
+live training dashboard), Models, Benchmarks, Playground and Settings, plus a command palette, keyboard navigation,
+toasts, and dark and light themes.
 
-It is a separate cargo workspace, so the root workspace and its CI stay GPUI-free. See `docs/ARCHITECTURE.md`
-(Front ends) and `docs/API.md` (its data contract).
+It is a separate cargo workspace with two members, the app and `ui/` (folo-ui), so the root workspace does not
+build them. See `docs/ARCHITECTURE.md` (Front ends, folo-ui) and `docs/API.md` (its data contract).
 
 ## Run
 
@@ -31,13 +32,16 @@ FOLO row (drag to move, double-click to maximize or restore, hover Maximize for 
 and the search field in the title bar take their own clicks. The top few pixels (`layout.desktop_resize_edge`)
 resize the window, as the other edges do, except when it is maximized or full screen.
 
-Two GPUI details keep this working; `tools/window-check.ps1` catches a regression in either:
+Two folo-ui details (both GPUI's behaviour, kept) shape this; `tools/window-check.ps1` catches a regression in
+either:
 
-- **Caption areas are `.occlude()`d.** GPUI sends a caption press to the app first and passes it to Windows only
-  if nothing prevented its default. A focus-tracked element under the pointer does (it focuses itself), and the
-  root view is one, so without the occlusion no button, drag or double-click ever reached Windows.
-- **The top edge is a strip over the title bar** (`resize-top`, on top and occluding). Windows resizes only where
-  GPUI's hit test finds no caption area, and the title bar's drag area reaches the top of the window.
+- **Caption areas are `.occlude()`d.** folo-ui sends a caption press to the app first and passes it to Windows
+  only if nothing handled it or prevented its default (`ui/src/platform/windows/chrome.rs`). A focus-tracked
+  element under the pointer prevents it (it focuses itself), and the root view is one, so without the occlusion no
+  button, drag or double-click would reach Windows.
+- **The top edge is a strip over the title bar** (`resize-top`, on top and occluding). The hit test answers with
+  the app's caption areas first and resizes only where it finds none, and the title bar's drag area reaches the
+  top of the window.
 
 Hidden from the root, the chrome also leaves keyboard mode itself on a press (`leave_kb`), as the root does for
 any other press.
@@ -55,16 +59,17 @@ three buttons are plain buttons: Minimize, Restore (leaves full screen) and Clos
 
 The window opens as it was closed: its restored size and place, maximized or full screen, and the theme
 (`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file).
-It reopens on the display it was on (GPUI's display UUID, kept with the place: each display's bounds are in its
-own logical pixels, so with mixed scale factors their rectangles overlap and the place alone can't say which), if
+It reopens on the display it was on (the display's UUID, derived from its device name as GPUI did, so a file
+written by an older build still matches; kept with the place: each display's bounds are in its own logical pixels,
+so with mixed scale factors their rectangles overlap and the place alone can't say which), if
 that display still shows enough of the title bar to grab; else on the display that shows the most of it (a tie
 goes to the primary display). A place no connected display shows enough of opens centred on the primary display. Launches for screenshots
 (`--scenario`, `--width`, `--height`) neither read nor write it, and `--theme` beats the remembered theme.
 Closed while minimized, it keeps the mode it had before (`window_state::closing_mode`).
 
 The app icon (taskbar, Alt-Tab, Explorer) is `assets/folo.ico`, drawn from `design/logo.svg` and the tokens by
-`tools/make-icon.ps1` (run it again when either changes, and commit the .ico). GPUI loads icon resource 1 from the
-executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to link.exe, so the
+`tools/make-icon.ps1` (run it again when either changes, and commit the .ico). folo-ui loads icon resource 1 from
+the executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to link.exe, so the
 build needs no resource compiler or extra crate (MSVC targets only).
 
 ## Layout
@@ -87,9 +92,25 @@ src/viz.rs        images with detection boxes and label chips (design/README.md 
 src/screens/      one module per screen
 src/overlays/     palette, dialogs, image inspector, toasts
 src/scenario.rs   `--scenario` states for screenshots
-tools/            shoot.ps1 / shoot-all.ps1 (screenshots), window-check.ps1 (the window chrome, real input),
-                  chrome-check.ps1 (its hit tests and buttons, by window message), make-icon.ps1 (assets/folo.ico)
+ui/               folo-ui, the UI framework (ui/README.md)
+tools/            developer scripts (below)
 ```
+
+Tools (`tools/`, PowerShell 5.1 unless noted; each has a usage header):
+
+- `shoot.ps1`, `shoot-all.ps1`: headless screenshots (Screenshots, below).
+- `capture.ps1`, `capture-all.ps1`: the same scenarios captured from the real window, opened off screen
+  (`FOLO_UI_OFFSCREEN=1`) and never focused; what the Win32 backend presents, at the display's scale.
+- `perf.ps1`: start-up, memory, CPU and GPU numbers of a build, off screen, as JSON.
+- `win.ps1`: the Win32 helpers the off-screen tools dot-source (find a process's window, rectangles, capture).
+- `window-check.ps1`, `chrome-check.ps1`: the window chrome (Window check, below).
+  *(Placeholder: the real-window branch updates these and adds `chrome-check-offscreen.ps1` and
+  `interact-check.ps1`; describe them here from their headers when it lands.)*
+- *(Placeholder: `parity.py`, the headless-against-GPUI pixel comparison, comes with the parity branch; describe
+  it here from its header when it lands.)*
+- `cross-check.sh` (bash): type-checks and lints folo-ui for Linux and both macOS targets.
+- `make-icon.ps1`: draws `assets/folo.ico` from `design/logo.svg` and the tokens.
+- `review-brief.md`: the brief a design reviewer gets with a round's shots.
 
 ## Data
 
@@ -149,7 +170,8 @@ Settings › Connection switches at runtime. `--open run:<id>` (or `dataset:`, `
 
 `build.rs` reads `../../design/tokens.json`, the source of truth shared with Studio, and generates `Colors` (both
 themes), the type scale, spacing, radii, sizes, motion and shadow tables. Never hard-code a colour or size in the app;
-add a token instead. GPUI has no letter-spacing, so `tracking` values are not applied.
+add a token instead. folo-ui has no letter-spacing (GPUI had none either, and the design was tuned without it), so
+`tracking` values are not applied.
 
 ## Screenshots and the design hill-climb
 
@@ -157,12 +179,24 @@ add a token instead. GPUI has no letter-spacing, so `tracking` values are not ap
 with `+` (`dataset+light`, `overview+empty`). `folo-desktop --list-scenarios` prints the review set.
 
 ```powershell
-tools\shoot-all.ps1 -Dir shots\round1      # every scenario + minimum and wide window sizes, at the display's scale
+tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (98 PNGs; about 25 s on a release build)
 tools\shoot.ps1 -Scenario palette -Out shots\palette.png -Width 960 -Height 620
 tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://127.0.0.1:7878 --open run:run_9d9d"   # real data
 ```
 
-The scripts run `$CARGO_TARGET_DIR/debug/folo-desktop.exe` unless `-Exe` names another build (a release one, say).
+Shots are headless: the scripts run `folo-desktop --scenario … --shot <png>`, which renders on folo-ui's headless
+platform (no window, no cursor, no focus), settles animations on a fake clock and writes the frame; one takes
+well under a second. `-Width` / `-Height` are the window's logical size and `-Scale` its scale factor, 1.5 by
+default: the dev PC's display, at which every design review has been shot (the PNG is 1920 x 1200 at the default
+1280 x 800). The scripts run `$CARGO_TARGET_DIR/debug/folo-desktop.exe` unless `-Exe` names another build (a
+release one, say).
+
+A real-data shot (`-Scenario none` and `--server URL`, with `--open`) waits for what the screen fetches: the
+harness pumps the app's queues and waits for its background requests before it draws, and a live run's event
+stream is read up to that point. Checked against `folo serve --mock`: a live run's page, Runs and Overview show
+their data; an unreachable server shows the unreachable state. Always give `--server` or `--mock` with
+`-Scenario none`; without them the app looks for, or starts, a local `folo serve`, as a normal launch does.
+`tools\capture.ps1` takes the same arguments for a real window off screen.
 
 ### Window check
 
@@ -188,31 +222,10 @@ it cannot drag, and it never proves that a real click arrives.
 
 `shots/` is gitignored. Design reviews score the shots against `REVIEW_RUBRIC.md`; `HILLCLIMB.md` logs each round.
 
-## Vendored GPUI
+## folo-ui
 
-`vendor/gpui` is GPUI 0.2.2 from crates.io, used via `[patch.crates-io]` in `Cargo.toml`, with one fix and two
-trims:
-
-- **The fix, `src/elements/text.rs`.**
-  - **The bug:** the text element built its `runs` once per layout and let `truncate_line` shorten them in place.
-    A later measure in the same layout (another width, or none) shaped the whole text with run lengths cut for the
-    truncated one. DirectWrite then sliced the text at that byte, and inside a multi-byte character ("·", "é", CJK)
-    that panicked (`direct_write.rs`: "byte index … is not a char boundary"). It crashed the finished-run page
-    on "best F1 · conf 0.4xx · val".
-  - **The change:** `truncate_for_measure` now truncates a copy of the element's runs on every measure. Truncation
-    still cuts on character boundaries, so the runs always cover the text exactly.
-  - **The test:** `folo_truncation_tests` measures truncated, then untruncated, text containing "·", "×", "é", "–",
-    "…" and CJK at several widths, and checks the runs cover each text on character boundaries.
-- **The trims:** `examples/` (4.8 MB of demo assets) and their 30 `[[example]]` entries in `Cargo.toml`, and
-  `Cargo.toml.orig`. Nothing else differs from the published crate.
-
-To check it on a GPUI upgrade:
-
-1. **See whether upstream still needs the fix.** In the new crate's `src/elements/text.rs`, look at the closure in
-   `TextLayout::layout`. If it still passes the element's own `runs` mutably to `truncate_line`, the fix is needed.
-2. **Re-vendor.** Copy the new crate into `vendor/gpui` without `examples/`, drop its `[[example]]` entries, and
-   re-apply `truncate_for_measure` and its test. `diff -ru` against the registry copy should show only those.
-3. **Run the test and a panic sweep:**
-   - `cargo test --manifest-path vendor/gpui/Cargo.toml --lib folo_truncation` (use its own target dir);
-   - every scenario at 960, 1280 and 1680 widths with stderr captured, checking for no "panicked".
-4. **Drop the vendor if upstream fixed it:** remove `vendor/gpui` and the `[patch]` entry.
+`ui/` is the app's UI framework: GPUI's API for the subset the app uses, its own runtime, a CPU tile renderer,
+DirectWrite text on Windows and cosmic-text elsewhere, and Win32, winit and headless platforms. How to build and
+test it, what is verified on each platform and its developer switches (`FOLO_UI_OFFSCREEN`, `FOLO_UI_TRACE`,
+`FOLO_UI_PLATFORM`) are in `ui/README.md`; the design and its contracts in `ui/DESIGN.md`; the files adapted from
+GPUI in `ui/NOTICE.md`.
