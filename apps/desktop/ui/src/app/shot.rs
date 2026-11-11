@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, anyhow};
 
 use crate::{
     AppCell, Framebuffer, HeadlessApp, HeadlessOptions, TextBackend, platform::headless::HeadlessPlatform,
-    px, size, unpack_rgb,
+    px, size,
 };
 
 /// The most frames a screenshot draws while settling.
@@ -76,18 +76,13 @@ impl Shot {
     }
 }
 
-/// Writes a framebuffer as an RGB PNG.
-pub(crate) fn write_png(path: &std::path::Path, frame: &Framebuffer) -> Result<()> {
+/// Writes a framebuffer as a PNG (the raster package's writer), creating the folder.
+fn write_png(path: &std::path::Path, frame: &Framebuffer) -> Result<()> {
     anyhow::ensure!(!frame.is_empty(), "the window has no pixels ({}x{})", frame.width, frame.height);
-    let image = ::image::RgbImage::from_fn(frame.width, frame.height, |x, y| {
-        ::image::Rgb(unpack_rgb(frame.pixel(x, y)))
-    });
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    image
-        .save_with_format(path, ::image::ImageFormat::Png)
-        .with_context(|| format!("writing {}", path.display()))
+    crate::raster::debug::write_png(frame, path)
 }
 
 #[cfg(test)]
