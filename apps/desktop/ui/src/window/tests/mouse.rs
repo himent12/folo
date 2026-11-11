@@ -270,3 +270,63 @@ fn a_file_drop_reaches_on_drop_and_drag_moves_see_the_paths() {
         "the drop ends the drag"
     );
 }
+
+/// A target that logs its drops, filling a 200 x 100 window's top-left 100 x 50 (hover colour 2).
+fn drop_target(
+    events: &Log,
+) -> impl Fn(&mut Window, &mut crate::Context<TestView>) -> crate::AnyElement + 'static {
+    let events = events.clone();
+    move |_, _| {
+        let events = events.clone();
+        div()
+            .size_full()
+            .child(div().id("target").w(px(100.)).h(px(50.)).bg(color(1)).hover(|s| s.bg(color(2))).on_drop(
+                move |paths: &crate::ExternalPaths, _, _| {
+                    events.borrow_mut().push(format!("drop {}", paths.paths()[0].display()))
+                },
+            ))
+            .into_any_element()
+    }
+}
+
+#[test]
+fn a_file_drop_from_outside_the_window_reaches_on_drop() {
+    let events = log();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, drop_target(&events));
+    // The pointer left the window, then drags a file in from outside (no mouse move reaches the window: the
+    // platforms report the drag only as file-drop events).
+    with_window(&mut app, window, |window, cx| window.on_hover_status_change(false, cx));
+    app.frame(window);
+    let paths = crate::ExternalPaths(smallvec::smallvec![std::path::PathBuf::from("a.png")]);
+    let drop = |app: &mut HeadlessApp, event| app.simulate_input(window, PlatformInput::FileDrop(event));
+    drop(&mut app, crate::FileDropEvent::Entered { position: point(px(20.), px(20.)), paths });
+    app.frame(window);
+    drop(&mut app, crate::FileDropEvent::Pending { position: point(px(25.), px(20.)) });
+    drop(&mut app, crate::FileDropEvent::Submit { position: point(px(25.), px(20.)) });
+    assert_eq!(*events.borrow(), ["drop a.png"]);
+}
+
+#[test]
+fn a_file_drag_that_leaves_the_window_ends_its_hover() {
+    let events = log();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, drop_target(&events));
+    with_window(&mut app, window, |window, cx| window.on_hover_status_change(false, cx));
+    app.frame(window);
+    let paths = crate::ExternalPaths(smallvec::smallvec![std::path::PathBuf::from("a.png")]);
+    let drop = |app: &mut HeadlessApp, event| app.simulate_input(window, PlatformInput::FileDrop(event));
+    drop(&mut app, crate::FileDropEvent::Entered { position: point(px(20.), px(20.)), paths });
+    app.frame(window);
+    assert!(with_window(&mut app, window, |window, _| window.hovered.get()), "the drag hovers the window");
+    // Hover styles are off during a drag; once it left, the target must not look hovered at the drag's
+    // last position.
+    drop(&mut app, crate::FileDropEvent::Exited);
+    assert!(app.is_dirty(window), "leaving redraws");
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1, "no hover once the drag left the window");
+    assert!(with_window(&mut app, window, |window, _| !window.hovered.get()));
+    // The next real mouse move over the window hovers again.
+    mouse_move(&mut app, window, 10., 10.);
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(2)).len(), 1);
+    assert!(events.borrow().is_empty());
+}
