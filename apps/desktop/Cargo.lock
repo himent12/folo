@@ -1069,6 +1069,7 @@ dependencies = [
  "usvg",
  "uuid",
  "windows",
+ "windows-core",
  "winit",
 ]
 

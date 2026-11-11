@@ -25,17 +25,7 @@ pub enum TextOverflow {
     Truncate(SharedString),
 }
 
-/// How to align text within the element.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum TextAlign {
-    /// Align the text to the left of the element.
-    #[default]
-    Left,
-    /// Center the text within the element.
-    Center,
-    /// Align the text to the right of the element.
-    Right,
-}
+pub use crate::text::TextAlign;
 
 refineable! {
     /// The properties that style text (they cascade from an element to its children).

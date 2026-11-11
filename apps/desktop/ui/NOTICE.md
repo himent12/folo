@@ -34,5 +34,11 @@ when you adapt another file.
 | `svg.rs` | `svg_renderer.rs` |
 | `assets.rs` | `assets.rs` (`AssetSource`) |
 | `easing.rs` | `elements/animation.rs` (`easing`) |
+| `text/system.rs`, `text/window_text_system.rs` | `text_system.rs` |
+| `text/line_layout.rs`, `text/layout_cache.rs` | `text_system/line_layout.rs` |
+| `text/line_wrapper.rs`, `text/tests/wrapper.rs` | `text_system/line_wrapper.rs`, `elements/text.rs` (FOLO's truncation tests) |
+| `text/line.rs`, `text/paint.rs` | `text_system/line.rs`, `style.rs` (`TextAlign`) |
+| `text/dwrite/mod.rs`, `text/dwrite/fonts.rs`, `text/dwrite/layout.rs`, `text/dwrite/raster.rs` | `platform/windows/direct_write.rs`, `platform/windows/color_text_raster.hlsl` |
+| `text/dwrite/blend.rs` | `platform/windows/directx_renderer.rs` (`get_font_info`, `get_gamma_ratios`), `platform/windows/alpha_correction.hlsl` |
 
 The Apache License 2.0 text is in the repository root, `LICENSE-APACHE`.
