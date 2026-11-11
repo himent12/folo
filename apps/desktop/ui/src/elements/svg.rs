@@ -23,7 +23,7 @@ pub struct Svg {
 }
 
 impl Svg {
-    /// Sets the asset path (`"icons/logo-frame.svg"`).
+    /// Sets the asset path (`"icons/logo-mark.svg"`).
     pub fn path(mut self, path: impl Into<SharedString>) -> Self {
         self.path = Some(path.into());
         self

@@ -67,9 +67,9 @@ goes to the primary display). A place no connected display shows enough of opens
 (`--scenario`, `--width`, `--height`) neither read nor write it, and `--theme` beats the remembered theme.
 Closed while minimized, it keeps the mode it had before (`window_state::closing_mode`).
 
-The app icon (taskbar, Alt-Tab, Explorer) is `assets/folo.ico`, drawn from `design/logo.svg` and the tokens by
-`tools/make-icon.ps1` (run it again when either changes, and commit the .ico). folo-ui loads icon resource 1 from
-the executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to link.exe, so the
+The app icon (taskbar, Alt-Tab, Explorer) is `assets/folo.ico`, the logo of `design/logo-icon.svg` drawn with the
+tokens by `tools/make-icon.ps1` (run it again when either changes, and commit the .ico). folo-ui loads icon resource
+1 from the executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to link.exe, so the
 build needs no resource compiler or extra crate (MSVC targets only).
 
 ## Layout
@@ -140,7 +140,7 @@ or takes focus.
 - `bench-frames.sh` (bash): the frame bench (`--bench-frames`: the time and allocations of each frame phase)
   over the main screens at two window sizes; build with `--features bench-alloc` for allocation counts.
 - `cross-check.sh` (bash): type-checks and lints folo-ui for Linux and both macOS targets.
-- `make-icon.ps1`: draws `assets/folo.ico` from `design/logo.svg` and the tokens.
+- `make-icon.ps1`: draws `assets/folo.ico`, the logo of `design/logo-icon.svg`, with the tokens.
 - `review-brief.md`: the brief a design reviewer gets with a round's shots.
 
 ## Data

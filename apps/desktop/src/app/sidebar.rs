@@ -87,18 +87,16 @@ impl FoloApp {
                     // See `titlebar-drag`.
                     .occlude()
                     .capture_any_mouse_down(brand_press)
-                    .child(logo(&t, 20.))
+                    .when(compact, |d| d.child(logo(&t, 20.)))
                     .when(!compact, |d| {
                         d.child(
+                            // The wordmark has no text baseline to align on: bottoms together, and it is
+                            // lifted by what the `md` line keeps under its baseline.
                             div()
                                 .flex()
-                                .items_baseline()
+                                .items_end()
                                 .gap(px(6.))
-                                .child(
-                                    text(ty::MD, t.text_primary)
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child("FOLO"),
-                                )
+                                .child(div().pb(px(MD_UNDER_BASELINE)).child(wordmark(&t, 16.)))
                                 .child(text(ty::MD, t.text_tertiary).child("Desktop")),
                         )
                     }),
@@ -351,19 +349,49 @@ fn shortcut_label(key: &str) -> &'static str {
     }
 }
 
-/// The FOLO mark: a viewfinder (four corner brackets) around the signal dot.
+/// What a line of `ty::MD` text keeps under its baseline, in px (the descent and half the leading).
+const MD_UNDER_BASELINE: f32 = 5.;
+
+/// The FOLO mark (design/logo.svg): the f and the signal dot, the last o of "folo".
 pub fn logo(t: &Theme, size: f32) -> impl IntoElement {
     div()
         .relative()
         .size(px(size))
         .flex_none()
-        .child(folo_ui::svg().path("icons/logo-frame.svg").size(px(size)).text_color(t.text_primary))
+        .child(folo_ui::svg().path("icons/logo-mark.svg").size(px(size)).text_color(t.text_primary))
         .child(
             div()
                 .absolute()
-                .top(px(size * (12.0 - 3.25) / 24.0))
-                .left(px(size * (12.0 - 3.25) / 24.0))
-                .size(px(size * 6.5 / 24.0))
+                .top(px(size * (14.75 - 6.375) / 24.0))
+                .left(px(size * (17.25 - 6.375) / 24.0))
+                .size(px(size * 12.75 / 24.0))
+                .rounded_full()
+                .bg(t.accent_solid),
+        )
+}
+
+/// The FOLO wordmark (design/logo-wordmark.svg), `height` px tall: "folo" with its last o as the signal dot.
+/// Its bottom edge is the letters' baseline.
+fn wordmark(t: &Theme, height: f32) -> impl IntoElement {
+    let width = height * 207.0 / 93.0;
+    div()
+        .relative()
+        .w(px(width))
+        .h(px(height))
+        .flex_none()
+        .child(
+            folo_ui::svg()
+                .path("icons/logo-wordmark.svg")
+                .w(px(width))
+                .h(px(height))
+                .text_color(t.text_primary),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(height * (61.0 - 31.0) / 93.0))
+                .left(px(height * (176.0 - 31.0) / 93.0))
+                .size(px(height * 62.0 / 93.0))
                 .rounded_full()
                 .bg(t.accent_solid),
         )

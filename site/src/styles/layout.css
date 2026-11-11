@@ -34,9 +34,12 @@
   color: var(--text-primary);
 }
 
-.brand-name {
-  font-weight: var(--weight-semibold);
-  letter-spacing: -0.02em;
+/* The product name sits on the wordmark's baseline (the SVG's bottom edge). */
+.brand-lockup {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1-5);
+  line-height: 1;
 }
 
 .brand-product {

@@ -1,5 +1,5 @@
-# Draws FOLO's logo (design/logo.svg: four corner brackets and the accent dot) on a dark rounded tile
-# and writes assets/folo.ico, the Windows app icon that build.rs links into folo-desktop.exe (the
+# Draws FOLO's logo (design/logo.svg: the f and the accent dot; design/logo-icon.svg) on a dark rounded
+# tile and writes assets/folo.ico, the Windows app icon that build.rs links into folo-desktop.exe (the
 # taskbar, Alt-Tab, Explorer and the window's own icon). Colours come from design/tokens.json (dark
 # theme: bg.panel, line.strong, text.primary, accent.solid). Run it again after the logo or those
 # tokens change, and commit the .ico:
@@ -41,23 +41,23 @@ function Draw([int]$n) {
     $g.FillPath((New-Object System.Drawing.SolidBrush $tile), $box)
     if ($n -ge 32) { $g.DrawPath((New-Object System.Drawing.Pen $edge, 1.0), $box) }
 
-    # The logo's 24-unit box, inset so the brackets clear the tile's corners.
-    $s = $n * 0.78 / 24.0
+    # The logo's 24-unit box on three quarters of the tile, as in design/logo-icon.svg.
+    $s = $n * 0.75 / 24.0
     $o = ($n - 24 * $s) / 2.0
     $g.TranslateTransform([float]$o, [float]$o)
     $g.ScaleTransform([float]$s, [float]$s)
-    $pen = New-Object System.Drawing.Pen $ink, ([float][Math]::Max(2.0, 1.4 / $s))
-    $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+    # The f. Stem and hook: M4.75 21V9.25A4.75 4.75 0 0 1 9.5 4.5h2, 4 wide, flat ends.
+    # (PointF and RectangleF, or PowerShell picks the integer overloads and rounds the coordinates.)
     $p = New-Object System.Drawing.Drawing2D.GraphicsPath
-    # M3 8.5V5a2 2 0 0 1 2-2h3.5, and the same at the other three corners.
-    $p.StartFigure(); $p.AddLine(3, 8.5, 3, 5); $p.AddArc(3, 3, 4, 4, 180, 90); $p.AddLine(5, 3, 8.5, 3)
-    $p.StartFigure(); $p.AddLine(15.5, 3, 19, 3); $p.AddArc(17, 3, 4, 4, 270, 90); $p.AddLine(21, 5, 21, 8.5)
-    $p.StartFigure(); $p.AddLine(21, 15.5, 21, 19); $p.AddArc(17, 17, 4, 4, 0, 90); $p.AddLine(19, 21, 15.5, 21)
-    $p.StartFigure(); $p.AddLine(8.5, 21, 5, 21); $p.AddArc(3, 17, 4, 4, 90, 90); $p.AddLine(3, 19, 3, 15.5)
-    $g.DrawPath($pen, $p)
-    $g.FillEllipse((New-Object System.Drawing.SolidBrush $dot), 8.75, 8.75, 6.5, 6.5)
+    $p.AddLine((New-Object System.Drawing.PointF 4.75, 21), (New-Object System.Drawing.PointF 4.75, 9.25))
+    $p.AddArc((New-Object System.Drawing.RectangleF 4.75, 4.5, 9.5, 9.5), 180, 90)
+    $p.AddLine((New-Object System.Drawing.PointF 9.5, 4.5), (New-Object System.Drawing.PointF 11.5, 4.5))
+    $g.DrawPath((New-Object System.Drawing.Pen $ink, 4.0), $p)
+    # Its crossbar: M.5 10.625h8, 3.5 wide.
+    $g.DrawLine((New-Object System.Drawing.Pen $ink, 3.5), (New-Object System.Drawing.PointF 0.5, 10.625),
+        (New-Object System.Drawing.PointF 8.5, 10.625))
+    # The dot, the last o of "folo".
+    $g.FillEllipse((New-Object System.Drawing.SolidBrush $dot), (New-Object System.Drawing.RectangleF 10.875, 8.375, 12.75, 12.75))
     $g.Dispose()
     $ms = New-Object System.IO.MemoryStream
     $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)

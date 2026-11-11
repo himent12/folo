@@ -22,7 +22,7 @@ that line that you would ask to fix before shipping.
 | 9 | **Interaction & motion feel** | (From code and states.) Hover/pressed feedback on everything interactive; live data updates without jank; drag, zoom, pan and sliders feel direct; motion is fast and quiet (no bounce). |
 | 10 | **Accessibility** | Full keyboard path: Tab order follows layout, a visible focus ring on every focusable element, Enter/Space/arrows/Esc work, shortcuts are discoverable. Contrast passes; meaning never relies on colour alone. |
 | 11 | **Window resizing & responsiveness** | The minimum size (960 × 620) and a wide window (1680 × 1050) both look designed: content reflows, nothing overflows or clips, density adapts (collapsed sidebar, wrapped KPI grid). |
-| 12 | **Overall polish & delight** | It feels like a precise instrument: fast, calm, confident. Small touches (live pulse, linked chart cursors, viewfinder logo, smart defaults) make it memorable. You would show it off. |
+| 12 | **Overall polish & delight** | It feels like a precise instrument: fast, calm, confident. Small touches (live pulse, linked chart cursors, the logo's signal dot, smart defaults) make it memorable. You would show it off. |
 
 ## Output format for reviewers
 

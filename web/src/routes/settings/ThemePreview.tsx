@@ -17,7 +17,13 @@ export default function ThemePreview(props: { theme: 'dark' | 'light'; half?: bo
       style={{ '--app': c().bg.app, '--panel': c().bg.panel, '--line': c().line.default, '--t1': c().text.primary, '--t3': c().text.tertiary }}
     >
       <span class="side">
-        <span class="logo"></span>
+        <span class="logo">
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M4.75 21V9.25A4.75 4.75 0 0 1 9.5 4.5h2" stroke="var(--t1)" stroke-width="4" />
+            <path d="M.5 10.625h8" stroke="var(--t1)" stroke-width="3.5" />
+            <circle cx="17.25" cy="14.75" r="6.375" fill="var(--t1)" />
+          </svg>
+        </span>
         <span class="nav on"></span>
         <span class="nav"></span>
         <span class="nav"></span>
@@ -56,8 +62,6 @@ css`
     width: 10px;
     height: 10px;
     margin-bottom: 4px;
-    border-radius: 2px;
-    border: 1.5px solid var(--t1);
   }
   .nav {
     height: 4px;

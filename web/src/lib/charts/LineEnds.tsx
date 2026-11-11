@@ -38,7 +38,7 @@ export interface LineEndsProps {
   margin: { top: number; right: number; bottom: number; left: number };
 }
 
-/** The run just completed: lime viewfinder corners (the product's mark) close in on the best ring and fade. */
+/** The run just completed: lime viewfinder corners close in on the best ring and fade. */
 const brackets = (h: number) => {
   const k = 3.5;
   return <path class="focus" d={`M${-h} ${-h + k}V${-h}H${-h + k}M${h - k} ${-h}H${h}V${-h + k}M${h} ${h - k}V${h}H${h - k}M${-h + k} ${h}H${-h}V${h - k}`} />;

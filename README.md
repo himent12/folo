@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="design/logo-wordmark.svg">
+    <img src="design/logo-wordmark-light.svg" alt="folo" width="207" height="93">
+  </picture>
+</p>
+
 # FOLO
 
 **FOLO Only Looks Once.** A from-scratch, very fast vision framework in Rust: a YOLO-style real-time object detector

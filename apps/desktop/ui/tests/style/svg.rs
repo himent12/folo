@@ -16,15 +16,15 @@ impl AssetSource for Icons {
         self.loads.fetch_add(1, Ordering::Relaxed);
         Ok(match path {
             "icons/check.svg" => Some(Cow::Borrowed(include_bytes!("../../../assets/icons/check.svg"))),
-            "icons/logo-frame.svg" => {
-                Some(Cow::Borrowed(include_bytes!("../../../assets/icons/logo-frame.svg")))
+            "icons/logo-mark.svg" => {
+                Some(Cow::Borrowed(include_bytes!("../../../assets/icons/logo-mark.svg")))
             }
             _ => None,
         })
     }
 
     fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(vec!["icons/check.svg".into(), "icons/logo-frame.svg".into()])
+        Ok(vec!["icons/check.svg".into(), "icons/logo-mark.svg".into()])
     }
 }
 
@@ -67,7 +67,7 @@ fn missing_assets_and_zero_sizes() {
 
     // Another icon: the requested width decides the scale.
     let logo = RenderSvgParams {
-        path: "icons/logo-frame.svg".into(),
+        path: "icons/logo-mark.svg".into(),
         size: size(DevicePixels(40), DevicePixels(40)),
     };
     let mask = renderer.render(&logo).unwrap().unwrap();

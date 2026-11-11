@@ -20,7 +20,8 @@ export const ICONS = {
   external: icon('<path d="M6.5 3.5h-3v9h9v-3M9.5 2.5h4v4M13.5 2.5 7.5 8.5"/>', 12),
 };
 
-export const LOGO = `<svg class="logo" viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="M3 8.5V5a2 2 0 0 1 2-2h3.5M15.5 3H19a2 2 0 0 1 2 2v3.5M21 15.5V19a2 2 0 0 1-2 2h-3.5M8.5 21H5a2 2 0 0 1-2-2v-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="3.25" fill="var(--accent-solid)"/></svg>`;
+// The wordmark (design/logo-wordmark.svg): "folo" with its last o as the accent dot.
+export const LOGO = `<svg class="logo" viewBox="0 0 207 93" width="35.6" height="16" fill="none" aria-hidden="true"><path d="M16 91V29A20 20 0 0 1 36 9h8" stroke="currentColor" stroke-width="16"/><path d="M0 38h38" stroke="currentColor" stroke-width="14"/><circle cx="74" cy="61" r="23" stroke="currentColor" stroke-width="16"/><path d="M125 1v90" stroke="currentColor" stroke-width="16"/><circle cx="176" cy="61" r="31" fill="var(--accent-solid)"/></svg>`;
 
 // Before first paint: the saved theme, else the system's (the CSS already follows the system without a script).
 const THEME_INIT = `<script>try{const t=localStorage.getItem('folo.docs.theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch{}</script>`;
@@ -79,7 +80,7 @@ ${THEME_INIT}
 <a class="skip" href="#main">Skip to content</a>
 <header class="topbar">
   <button class="icon-btn nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open navigation"><span class="i-menu">${ICONS.menu}</span><span class="i-close">${ICONS.close}</span></button>
-  <a class="brand" href="${root}" aria-label="FOLO docs home">${LOGO}<span class="brand-name">FOLO</span><span class="brand-product">Docs</span></a>
+  <a class="brand" href="${root}" aria-label="FOLO docs home"><span class="brand-lockup">${LOGO}<span class="brand-product">Docs</span></span></a>
   <button class="search-trigger" type="button" aria-haspopup="dialog" aria-controls="search" aria-label="Search docs" aria-keyshortcuts="/ Control+K Meta+K">${ICONS.search}<span class="search-trigger-label">Search docs</span><kbd class="kbd">/</kbd></button>
   <div class="topbar-end">
     <a class="icon-btn" href="${REPO_URL}" aria-label="FOLO on GitHub">${ICONS.github}</a>

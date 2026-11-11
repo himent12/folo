@@ -134,6 +134,27 @@ and panels, `chart` 240 ms for data transitions. Enter with `easing.out`, move w
 bounce, no overshoot, no spring. With reduced motion, durations are 0.
 
 ## Logo
-`logo.svg`: a viewfinder (four corner brackets) around a single dot, the one look. The brackets use `text.primary`;
-the dot is `accent.solid`. Wordmark: "FOLO" in Geist SemiBold, tracking −0.02 em, followed by the product name
-("Studio" / "Desktop") in `text.tertiary` regular.
+"folo" in lowercase, drawn from circles and straight stems, with its last o a solid dot: the one look, and the one
+thing it found. The letters use `text.primary`; the dot is `accent.solid` in both themes (it is a fill, not a line).
+
+| file | what | where |
+|---|---|---|
+| `logo-wordmark.svg` | the wordmark, "fol" and the dot (207 × 93) | sidebars and top bars with room, the README |
+| `logo-wordmark-light.svg` | the same in the light theme's colours | light backgrounds outside the apps |
+| `logo.svg` | the mark: the f and the dot, in a 24-unit box | collapsed sidebars, phones, next to a title |
+| `logo-icon.svg` | the mark on a `bg.panel` tile with a `line.strong` edge (64 × 64) | favicons, the Desktop app icon |
+
+- **Construction.** Strokes with flat ends, no outlines to keep in step. Wordmark: stems 16 wide, the f's crossbar 14
+  (horizontals look heavier), x-height 60 and ascender 90 above the baseline at y = 91; the o is a ring of outer
+  radius 31 and the dot a disc of the same radius, both overshooting the x-height and the baseline by 1. The mark is
+  the same f at a quarter of the size beside a dot of the o's proportions.
+- **Lockup.** The wordmark, then the product name ("Studio" / "Desktop" / "Docs") in `text.tertiary` regular at
+  `md`, 6 px apart, sitting on the wordmark's baseline (the SVG's bottom edge). The wordmark is 16 px tall there.
+- **Clear space and size.** Keep half the dot's diameter clear on every side. The wordmark is at least 12 px tall
+  and the mark at least 16 px; below that use `logo-icon.svg`.
+- **Colour.** Letters in `text.primary` on the theme's surfaces, or everything in `accent.on` on an `accent.solid`
+  field. Never recolour the dot, outline the letters, or set "folo" in a font in the logo's place.
+- Studio draws it in `web/src/lib/shell/Logo.tsx`, the docs site in `site/scripts/layout.ts`, and Desktop from the
+  masks `apps/desktop/assets/icons/logo-mark.svg` and `logo-wordmark.svg` (the letters only; the app draws the dot in
+  the theme's accent). `apps/desktop/tools/make-icon.ps1` draws `folo.ico`. Change the geometry in all of them
+  together.
