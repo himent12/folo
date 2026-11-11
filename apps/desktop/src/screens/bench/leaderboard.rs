@@ -43,7 +43,7 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = *t;
-        // Run a contestant: the picked one (the newest model by default), or a coding agent.
+        // Run a contestant: the picked one (the best model by default), or a coding agent.
         let contenders = self.bench_contenders(b);
         let has_models = contenders.iter().any(|c| matches!(c, Contender::Model(_)));
         let picked = self.bench_run_model(b);

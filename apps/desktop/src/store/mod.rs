@@ -1,5 +1,6 @@
 //! Client-side state: what has been fetched from the backend, live run data, and decoded images.
 
+mod best;
 mod images;
 mod live;
 
@@ -8,6 +9,7 @@ use std::sync::Arc;
 
 use crate::api::*;
 
+pub use best::better_model;
 pub use images::{ImageCache, ImgKey, ImgKind, ImgSlot, to_render_image};
 pub use live::{Derived, RunData};
 

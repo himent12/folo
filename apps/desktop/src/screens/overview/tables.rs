@@ -251,16 +251,13 @@ impl FoloApp {
                 .into_any_element(),
             Load::Ready(models) => 'card: {
                 // Each evaluated model's dataset (from the run that trained it; an imported model
-                // without one is left out: there's nothing to compare it with).
-                let ds_of = |m: &crate::api::Model| {
-                    m.run_id.as_ref().and_then(|r| self.store.run(r)).map(|r| r.config.dataset_id.clone())
-                };
+                // without one is left out: there's nothing to compare it with). The best by the
+                // rule every pick uses (`better_model`: a tie takes the "-best" checkpoint).
                 let mut best: Vec<(String, crate::api::Model)> = Vec::new();
                 for m in models.iter().filter(|m| m.metrics.is_some()) {
-                    let Some(ds) = ds_of(m) else { continue };
-                    let map = |m: &crate::api::Model| m.metrics.as_ref().map_or(0., |x| x.map50_95);
+                    let Some(ds) = self.store.model_dataset(m).map(str::to_string) else { continue };
                     match best.iter_mut().find(|(d, _)| *d == ds) {
-                        Some((_, b)) if map(m) > map(b) => *b = m.clone(),
+                        Some((_, b)) if crate::store::better_model(m, b).is_lt() => *b = m.clone(),
                         Some(_) => {}
                         None => best.push((ds, m.clone())),
                     }

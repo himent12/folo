@@ -22,8 +22,13 @@ impl FoloApp {
     pub(super) fn play_side(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let models = self.store.models.ready().cloned().unwrap_or_default();
-        let sel =
-            self.play_model.as_ref().and_then(|id| models.iter().position(|m| &m.id == id)).unwrap_or(0);
+        // The picked model while it exists, else the best one.
+        let best = self.store.best_model(None).map(|m| m.id.clone());
+        let sel = [self.play_model.as_ref(), best.as_ref()]
+            .into_iter()
+            .flatten()
+            .find_map(|id| models.iter().position(|m| &m.id == id))
+            .unwrap_or(0);
         let model = models.get(sel).cloned();
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.

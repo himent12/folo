@@ -79,9 +79,10 @@ impl FoloApp {
                             m
                         })
                         .into();
+                    // Playground starts on the best model (not the newest checkpoint, which may
+                    // have learned nothing yet).
                     if this.play_model.is_none() {
-                        this.play_model =
-                            this.store.models.ready().and_then(|m| m.first()).map(|m| m.id.clone());
+                        this.play_model = this.store.best_model(None).map(|m| m.id.clone());
                     }
                 },
             );
