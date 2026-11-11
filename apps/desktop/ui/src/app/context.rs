@@ -9,7 +9,10 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{AnyWindowHandle, App, AppContext, AsyncApp, Entity, EntityId, Global, Subscription, Task, WeakEntity, Window};
+use crate::{
+    AnyWindowHandle, App, AppContext, AsyncApp, Entity, EntityId, Global, Subscription, Task, WeakEntity,
+    Window,
+};
 
 /// Declares that an entity of this type emits events of type `E` (`cx.emit`, `cx.subscribe`).
 pub trait EventEmitter<E: 'static>: 'static {}
@@ -95,12 +98,18 @@ impl<'a, T: 'static> Context<'a, T> {
     }
 
     /// Calls `f` whenever global `G` changes, while the subscription lives.
-    pub fn observe_global<G: Global>(&mut self, _f: impl FnMut(&mut T, &mut Context<T>) + 'static) -> Subscription {
+    pub fn observe_global<G: Global>(
+        &mut self,
+        _f: impl FnMut(&mut T, &mut Context<T>) + 'static,
+    ) -> Subscription {
         todo!("runtime")
     }
 
     /// Calls `on_quit` when the app quits; the quit waits briefly for the returned future.
-    pub fn on_app_quit<Fut>(&self, _on_quit: impl FnMut(&mut T, &mut Context<T>) -> Fut + 'static) -> Subscription
+    pub fn on_app_quit<Fut>(
+        &self,
+        _on_quit: impl FnMut(&mut T, &mut Context<T>) -> Fut + 'static,
+    ) -> Subscription
     where
         Fut: 'static + Future<Output = ()>,
     {
@@ -147,7 +156,11 @@ impl<T> AppContext for Context<'_, T> {
         self.app.new(build_entity)
     }
 
-    fn update_entity<U, R>(&mut self, handle: &Entity<U>, update: impl FnOnce(&mut U, &mut Context<U>) -> R) -> R
+    fn update_entity<U, R>(
+        &mut self,
+        handle: &Entity<U>,
+        update: impl FnOnce(&mut U, &mut Context<U>) -> R,
+    ) -> R
     where
         U: 'static,
     {

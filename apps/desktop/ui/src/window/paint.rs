@@ -94,7 +94,11 @@ pub fn fill(bounds: impl Into<Bounds<Pixels>>, background: impl Into<Background>
 }
 
 /// A 1 px outline.
-pub fn outline(bounds: impl Into<Bounds<Pixels>>, border_color: impl Into<Hsla>, border_style: BorderStyle) -> PaintQuad {
+pub fn outline(
+    bounds: impl Into<Bounds<Pixels>>,
+    border_color: impl Into<Hsla>,
+    border_style: BorderStyle,
+) -> PaintQuad {
     PaintQuad {
         bounds: bounds.into(),
         corner_radii: (0.).into(),
@@ -129,7 +133,13 @@ impl Window {
     }
 
     /// Paints an SVG asset as a single-colour icon (mask from the icon cache).
-    pub fn paint_svg(&mut self, _bounds: Bounds<Pixels>, _path: SharedString, _color: Hsla, _cx: &App) -> anyhow::Result<()> {
+    pub fn paint_svg(
+        &mut self,
+        _bounds: Bounds<Pixels>,
+        _path: SharedString,
+        _color: Hsla,
+        _cx: &App,
+    ) -> anyhow::Result<()> {
         todo!("window")
     }
 
@@ -157,7 +167,12 @@ impl Window {
     }
 
     /// Paints box shadows under a rounded rectangle.
-    pub fn paint_shadows(&mut self, _bounds: Bounds<Pixels>, _corner_radii: Corners<Pixels>, _shadows: &[BoxShadow]) {
+    pub fn paint_shadows(
+        &mut self,
+        _bounds: Bounds<Pixels>,
+        _corner_radii: Corners<Pixels>,
+        _shadows: &[BoxShadow],
+    ) {
         todo!("window")
     }
 
@@ -167,7 +182,12 @@ impl Window {
     }
 
     /// Paints a strikethrough.
-    pub fn paint_strikethrough(&mut self, _origin: Point<Pixels>, _width: Pixels, _style: &StrikethroughStyle) {
+    pub fn paint_strikethrough(
+        &mut self,
+        _origin: Point<Pixels>,
+        _width: Pixels,
+        _style: &StrikethroughStyle,
+    ) {
         todo!("window")
     }
 

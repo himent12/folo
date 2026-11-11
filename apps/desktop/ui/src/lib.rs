@@ -31,10 +31,15 @@ mod app;
 mod element;
 mod elements;
 mod executor;
+mod headless_app;
 mod interactive;
 mod keymap;
 pub mod prelude;
+mod view;
 mod window;
+
+// Skeleton stand-ins for other packages' names (see the file); removed as those packages land.
+mod pending;
 
 pub use color::*;
 pub use geometry::*;
@@ -45,3 +50,15 @@ pub use platform::*;
 pub use scene::*;
 pub use shared_string::*;
 pub use text::*;
+
+pub use action::*;
+pub use app::*;
+pub use element::*;
+pub use elements::*;
+pub use executor::*;
+pub use headless_app::*;
+pub use interactive::*;
+pub use keymap::*;
+pub use pending::*;
+pub use view::*;
+pub use window::*;

@@ -5,8 +5,8 @@
 use std::{future::Future, rc::Weak};
 
 use crate::{
-    AnyView, AnyWindowHandle, App, AppCell, AppContext, BackgroundExecutor, Context, Entity, ForegroundExecutor,
-    Global, Task, Window,
+    AnyView, AnyWindowHandle, App, AppCell, AppContext, BackgroundExecutor, Context, Entity,
+    ForegroundExecutor, Global, Task, Window,
 };
 
 /// The app from inside a spawned future.
@@ -49,7 +49,10 @@ impl AsyncApp {
 impl AppContext for AsyncApp {
     type Result<T> = anyhow::Result<T>;
 
-    fn new<T: 'static>(&mut self, _build_entity: impl FnOnce(&mut Context<T>) -> T) -> anyhow::Result<Entity<T>> {
+    fn new<T: 'static>(
+        &mut self,
+        _build_entity: impl FnOnce(&mut Context<T>) -> T,
+    ) -> anyhow::Result<Entity<T>> {
         todo!("runtime")
     }
 

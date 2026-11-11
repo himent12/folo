@@ -11,8 +11,12 @@ use crate::{App, Bounds, Context, Entity, Pixels, Point, UTF16Selection, Window}
 /// the app passed in.
 pub trait InputHandler: 'static {
     /// The selection (`None`: no editable text).
-    fn selected_text_range(&mut self, ignore_disabled_input: bool, window: &mut Window, cx: &mut App)
-    -> Option<UTF16Selection>;
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled_input: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<UTF16Selection>;
     /// The IME composition range.
     fn marked_text_range(&mut self, window: &mut Window, cx: &mut App) -> Option<Range<usize>>;
     /// The text in `range_utf16`.
@@ -24,7 +28,13 @@ pub trait InputHandler: 'static {
         cx: &mut App,
     ) -> Option<String>;
     /// Replaces a range (or the marked text, or the selection) with `text`.
-    fn replace_text_in_range(&mut self, replacement_range: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut App);
+    fn replace_text_in_range(
+        &mut self,
+        replacement_range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut App,
+    );
     /// Replaces a range and marks it as the IME composition.
     fn replace_and_mark_text_in_range(
         &mut self,
@@ -37,9 +47,19 @@ pub trait InputHandler: 'static {
     /// Ends the composition.
     fn unmark_text(&mut self, window: &mut Window, cx: &mut App);
     /// Window bounds of the text in `range_utf16`.
-    fn bounds_for_range(&mut self, range_utf16: Range<usize>, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>>;
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>>;
     /// The character index at `point`.
-    fn character_index_for_point(&mut self, point: Point<Pixels>, window: &mut Window, cx: &mut App) -> Option<usize>;
+    fn character_index_for_point(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<usize>;
 }
 
 /// A view that edits text (GPUI 0.2.2's trait, as `src/input.rs` implements it).
@@ -68,7 +88,13 @@ pub trait EntityInputHandler: 'static + Sized {
     fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>);
 
     /// Replaces a range with `text`.
-    fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>);
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    );
 
     /// Replaces a range and marks it.
     fn replace_and_mark_text_in_range(
@@ -90,8 +116,12 @@ pub trait EntityInputHandler: 'static + Sized {
     ) -> Option<Bounds<Pixels>>;
 
     /// The character index at `point`.
-    fn character_index_for_point(&mut self, point: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>)
-    -> Option<usize>;
+    fn character_index_for_point(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize>;
 }
 
 /// The `InputHandler` an element paints for its view (`window.handle_input(&fh, ElementInputHandler::new(..))`).
@@ -110,7 +140,12 @@ impl<V: 'static> ElementInputHandler<V> {
 }
 
 impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
-    fn selected_text_range(&mut self, _ignore_disabled_input: bool, _window: &mut Window, _cx: &mut App) -> Option<UTF16Selection> {
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<UTF16Selection> {
         todo!("elements")
     }
 
@@ -128,7 +163,13 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
         todo!("elements")
     }
 
-    fn replace_text_in_range(&mut self, _replacement_range: Option<Range<usize>>, _text: &str, _window: &mut Window, _cx: &mut App) {
+    fn replace_text_in_range(
+        &mut self,
+        _replacement_range: Option<Range<usize>>,
+        _text: &str,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
         todo!("elements")
     }
 
@@ -147,11 +188,21 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
         todo!("elements")
     }
 
-    fn bounds_for_range(&mut self, _range_utf16: Range<usize>, _window: &mut Window, _cx: &mut App) -> Option<Bounds<Pixels>> {
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
         todo!("elements")
     }
 
-    fn character_index_for_point(&mut self, _point: Point<Pixels>, _window: &mut Window, _cx: &mut App) -> Option<usize> {
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<usize> {
         todo!("elements")
     }
 }

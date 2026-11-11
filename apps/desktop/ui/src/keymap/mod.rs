@@ -68,7 +68,11 @@ impl Keymap {
     }
 
     /// The actions bound to `input` under `context_stack` (root first), best match first.
-    pub fn bindings_for_input(&self, _input: &[Keystroke], _context_stack: &[KeyContext]) -> SmallVec<[&KeyBinding; 1]> {
+    pub fn bindings_for_input(
+        &self,
+        _input: &[Keystroke],
+        _context_stack: &[KeyContext],
+    ) -> SmallVec<[&KeyBinding; 1]> {
         todo!("runtime")
     }
 }

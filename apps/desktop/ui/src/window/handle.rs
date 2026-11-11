@@ -32,7 +32,11 @@ impl AnyWindowHandle {
     }
 
     /// Updates the window (`Err` when it has closed).
-    pub fn update<C, R>(self, cx: &mut C, update: impl FnOnce(crate::AnyView, &mut Window, &mut App) -> R) -> anyhow::Result<R>
+    pub fn update<C, R>(
+        self,
+        cx: &mut C,
+        update: impl FnOnce(crate::AnyView, &mut Window, &mut App) -> R,
+    ) -> anyhow::Result<R>
     where
         C: AppContext,
     {
@@ -50,7 +54,10 @@ pub struct WindowHandle<V> {
 impl<V: 'static> WindowHandle<V> {
     /// A handle to window `id`.
     pub(crate) fn new(id: WindowId) -> Self {
-        WindowHandle { any_handle: AnyWindowHandle { id, state_type: TypeId::of::<V>() }, state_type: PhantomData }
+        WindowHandle {
+            any_handle: AnyWindowHandle { id, state_type: TypeId::of::<V>() },
+            state_type: PhantomData,
+        }
     }
 
     /// The window's id.

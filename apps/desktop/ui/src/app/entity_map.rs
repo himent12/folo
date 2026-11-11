@@ -16,7 +16,7 @@ use std::{
     marker::PhantomData,
     sync::{
         Arc, Weak,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize},
     },
 };
 
@@ -142,7 +142,11 @@ impl AnyEntity {
 
     /// A weak handle to the same entity.
     pub fn downgrade(&self) -> AnyWeakEntity {
-        AnyWeakEntity { entity_id: self.entity_id, entity_type: self.entity_type, entity_ref_counts: self.entity_map.clone() }
+        AnyWeakEntity {
+            entity_id: self.entity_id,
+            entity_type: self.entity_type,
+            entity_ref_counts: self.entity_map.clone(),
+        }
     }
 
     /// The typed handle, if the state is a `T`.

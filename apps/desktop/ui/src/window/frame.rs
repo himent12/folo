@@ -12,8 +12,8 @@ use std::{any::Any, collections::HashMap};
 use smallvec::SmallVec;
 
 use crate::{
-    AnyTooltip, App, Bounds, CursorStyle, DispatchTree, FocusId, GlobalElementId, Pixels, Scene, WindowControlArea,
-    window::input_handler::InputHandlerSlot,
+    AnyTooltip, App, Bounds, CursorStyle, DispatchTree, FocusId, GlobalElementId, Pixels, Scene,
+    WindowControlArea, window::input_handler::InputHandlerSlot,
 };
 
 /// A hitbox's id in its frame (its index in insertion order, so a later id is on top).
@@ -92,7 +92,8 @@ impl DispatchPhase {
 }
 
 /// A mouse listener registered during paint (`Window::on_mouse_event`).
-pub(crate) type AnyMouseListener = Box<dyn FnMut(&dyn Any, DispatchPhase, &mut crate::Window, &mut App) + 'static>;
+pub(crate) type AnyMouseListener =
+    Box<dyn FnMut(&dyn Any, DispatchPhase, &mut crate::Window, &mut App) + 'static>;
 
 /// A cursor style request for a hitbox (or for the whole window when `hitbox_id` is `None`).
 #[derive(Clone, Debug)]

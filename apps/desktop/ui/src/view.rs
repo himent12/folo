@@ -8,8 +8,8 @@
 use std::panic;
 
 use crate::{
-    AnyElement, AnyEntity, App, Bounds, Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, Pixels, Render, Window,
+    AnyElement, AnyEntity, App, Bounds, Element, ElementId, Entity, EntityId, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Render, Window,
 };
 
 /// A type-erased view: the entity and the function that renders it.
@@ -43,6 +43,7 @@ impl<V: Render> From<Entity<V>> for AnyView {
 }
 
 /// `AnyView::render` for views of type `V`.
+#[allow(clippy::extra_unused_type_parameters)] // skeleton: the body downcasts to `Entity<V>`
 fn render_view<V: Render>(_view: &AnyView, _window: &mut Window, _cx: &mut App) -> AnyElement {
     todo!("elements")
 }

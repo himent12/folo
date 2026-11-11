@@ -59,7 +59,12 @@ impl App {
     }
 
     /// Runs the subscribers of `emitter` for `event_type`.
-    pub(crate) fn apply_emit_effect(&mut self, _emitter: EntityId, _event_type: TypeId, _event: Box<dyn Any>) {
+    pub(crate) fn apply_emit_effect(
+        &mut self,
+        _emitter: EntityId,
+        _event_type: TypeId,
+        _event: Box<dyn Any>,
+    ) {
         todo!("runtime")
     }
 

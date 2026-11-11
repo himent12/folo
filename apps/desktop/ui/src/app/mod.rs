@@ -32,8 +32,8 @@ use std::{
 };
 
 use crate::{
-    AnyWindowHandle, AssetSource, BackgroundExecutor, DispatchPhase, FocusMap, ForegroundExecutor, Keymap, Platform,
-    TextSystem, Window, WindowId,
+    AnyWindowHandle, AssetSource, BackgroundExecutor, DispatchPhase, FocusMap, ForegroundExecutor, Keymap,
+    Platform, TextSystem, Window, WindowId,
 };
 
 /// The app before it runs: `Application::new().with_assets(..).run(|cx| ..)`.
@@ -261,7 +261,8 @@ pub trait AppContext {
 
     /// Builds a new entity.
     #[allow(clippy::wrong_self_convention)]
-    fn new<T: 'static>(&mut self, build_entity: impl FnOnce(&mut Context<T>) -> T) -> Self::Result<Entity<T>>;
+    fn new<T: 'static>(&mut self, build_entity: impl FnOnce(&mut Context<T>) -> T)
+    -> Self::Result<Entity<T>>;
 
     /// Updates an entity.
     fn update_entity<T, R>(
@@ -300,7 +301,11 @@ impl AppContext for App {
         todo!("runtime")
     }
 
-    fn update_entity<T, R>(&mut self, _handle: &Entity<T>, _update: impl FnOnce(&mut T, &mut Context<T>) -> R) -> R
+    fn update_entity<T, R>(
+        &mut self,
+        _handle: &Entity<T>,
+        _update: impl FnOnce(&mut T, &mut Context<T>) -> R,
+    ) -> R
     where
         T: 'static,
     {

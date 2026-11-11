@@ -11,8 +11,8 @@ use std::{any::Any, fmt, panic, sync::Arc};
 use smallvec::SmallVec;
 
 use crate::{
-    App, AvailableSpace, Bounds, Context, Entity, EntityId, FocusHandle, FocusId, Pixels, Point, SharedString,
-    Size, Window,
+    App, AvailableSpace, Bounds, Context, Entity, EntityId, FocusHandle, FocusId, Pixels, Point,
+    SharedString, Size, Window,
 };
 
 /// An element: GPUI 0.2.2's trait, unchanged (the app implements it by hand in `src/input.rs`).
@@ -195,8 +195,12 @@ pub(crate) trait ElementObject {
     /// Phase 3.
     fn paint(&mut self, window: &mut Window, cx: &mut App);
     /// Lays the element out as a root of its own taffy tree in `available_space`.
-    fn layout_as_root(&mut self, available_space: Size<AvailableSpace>, window: &mut Window, cx: &mut App)
-    -> Size<Pixels>;
+    fn layout_as_root(
+        &mut self,
+        available_space: Size<AvailableSpace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Size<Pixels>;
 }
 
 /// Where an element is in its three phases; the states it carries between them.
@@ -313,7 +317,12 @@ impl AnyElement {
     }
 
     /// Prepaints at `origin` (after a layout), offset from the current element offset.
-    pub fn prepaint_at(&mut self, _origin: Point<Pixels>, _window: &mut Window, _cx: &mut App) -> Option<FocusHandle> {
+    pub fn prepaint_at(
+        &mut self,
+        _origin: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<FocusHandle> {
         todo!("elements")
     }
 
@@ -590,3 +599,32 @@ impl<V: Render> IntoElement for Entity<V> {
         self.into()
     }
 }
+
+/// Conditional builder steps (`.when(cond, |d| ..)`, `.when_some(opt, |d, v| ..)`), for every element.
+pub trait FluentBuilder {
+    /// Applies `f` to self.
+    fn map<U>(self, f: impl FnOnce(Self) -> U) -> U
+    where
+        Self: Sized,
+    {
+        f(self)
+    }
+
+    /// Applies `then` when `condition` holds.
+    fn when(self, condition: bool, then: impl FnOnce(Self) -> Self) -> Self
+    where
+        Self: Sized,
+    {
+        self.map(|this| if condition { then(this) } else { this })
+    }
+
+    /// Applies `then` to the value when there is one.
+    fn when_some<T>(self, option: Option<T>, then: impl FnOnce(Self, T) -> Self) -> Self
+    where
+        Self: Sized,
+    {
+        self.map(|this| if let Some(value) = option { then(this, value) } else { this })
+    }
+}
+
+impl<T: IntoElement> FluentBuilder for T {}

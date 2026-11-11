@@ -24,7 +24,6 @@ mod ops;
 mod paint;
 
 pub(crate) use dispatch::*;
-pub use draw::*;
 pub use focus::*;
 pub use frame::*;
 pub use handle::*;
@@ -40,9 +39,14 @@ use std::{
 use smallvec::SmallVec;
 
 use crate::{
-    AnyDrag, AnyView, App, ContentMask, DisplayId, FocusId, Framebuffer, Modifiers, Pixels, PlatformWindow, Point,
-    Size, TextStyleRefinement, WindowOptions, WindowTextSystem, element::ElementIdStack, raster,
+    AnyDrag, AnyView, App, DisplayId, Framebuffer, Modifiers, Pixels, PlatformWindow, Point, Size,
+    TextStyleRefinement, WindowOptions, WindowTextSystem, element::ElementIdStack,
 };
+// skeleton: `crate::raster` once the raster package lands.
+use crate::pending::raster_pending as raster;
+
+/// The `on_window_should_close` handler.
+pub(crate) type ShouldCloseHandler = Box<dyn FnMut(&mut Window, &mut App) -> bool>;
 
 /// A callback for `on_next_frame`.
 pub(crate) type FrameCallback = Box<dyn FnOnce(&mut Window, &mut App)>;
@@ -106,7 +110,7 @@ pub struct Window {
     /// The tooltip shown now, if any.
     pub(crate) active_tooltip: Option<ActiveTooltip>,
     /// `on_window_should_close` handler.
-    pub(crate) should_close_handler: Option<Box<dyn FnMut(&mut Window, &mut App) -> bool>>,
+    pub(crate) should_close_handler: Option<ShouldCloseHandler>,
     /// The pixels on screen (device px).
     pub(crate) framebuffer: Framebuffer,
     /// The tile renderer (keeps last frame's tile hashes).
@@ -134,7 +138,11 @@ pub(crate) struct ActiveTooltip {
 impl Window {
     /// Opens the platform window, wires its callbacks to the app, and builds the window (no frame is drawn
     /// until the first `on_request_frame`).
-    pub(crate) fn new(_handle: AnyWindowHandle, _options: WindowOptions, _cx: &mut App) -> anyhow::Result<Self> {
+    pub(crate) fn new(
+        _handle: AnyWindowHandle,
+        _options: WindowOptions,
+        _cx: &mut App,
+    ) -> anyhow::Result<Self> {
         todo!("window")
     }
 
@@ -162,7 +170,11 @@ impl Window {
     }
 
     /// Registers the handler asked when the user closes the window; `false` keeps it open.
-    pub fn on_window_should_close(&mut self, _cx: &App, f: impl FnMut(&mut Window, &mut App) -> bool + 'static) {
+    pub fn on_window_should_close(
+        &mut self,
+        _cx: &App,
+        f: impl FnMut(&mut Window, &mut App) -> bool + 'static,
+    ) {
         self.should_close_handler = Some(Box::new(f));
     }
 }

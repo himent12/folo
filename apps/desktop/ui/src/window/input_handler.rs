@@ -6,7 +6,9 @@
 
 use std::{ops::Range, rc::Weak};
 
-use crate::{AppCell, Bounds, FocusId, InputHandler, Pixels, PlatformInputHandler, Point, UTF16Selection, WindowId};
+use crate::{
+    AppCell, Bounds, FocusId, InputHandler, Pixels, PlatformInputHandler, Point, UTF16Selection, WindowId,
+};
 
 /// An input handler painted this frame, for the element with `focus_id`.
 pub(crate) struct InputHandlerSlot {
@@ -36,7 +38,11 @@ impl PlatformInputHandler for WindowInputHandler {
         todo!("window")
     }
 
-    fn text_for_range(&mut self, _range_utf16: Range<usize>, _adjusted_range: &mut Option<Range<usize>>) -> Option<String> {
+    fn text_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _adjusted_range: &mut Option<Range<usize>>,
+    ) -> Option<String> {
         todo!("window")
     }
 

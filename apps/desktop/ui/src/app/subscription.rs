@@ -50,7 +50,11 @@ where
     }
 
     /// Registers `callback` for `emitter_key`. The returned closure activates it; the subscription removes it.
-    pub(crate) fn insert(&self, _emitter_key: EmitterKey, _callback: Callback) -> (Subscription, Box<dyn FnOnce()>) {
+    pub(crate) fn insert(
+        &self,
+        _emitter_key: EmitterKey,
+        _callback: Callback,
+    ) -> (Subscription, Box<dyn FnOnce()>) {
         todo!("runtime")
     }
 

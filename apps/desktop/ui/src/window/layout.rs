@@ -47,12 +47,22 @@ impl TaffyLayoutEngine {
     }
 
     /// Adds a node with `style` and `children`.
-    pub(crate) fn request_layout(&mut self, _style: Style, _rem_size: Pixels, _children: &[LayoutId]) -> LayoutId {
+    pub(crate) fn request_layout(
+        &mut self,
+        _style: Style,
+        _rem_size: Pixels,
+        _children: &[LayoutId],
+    ) -> LayoutId {
         todo!("window")
     }
 
     /// Adds a leaf measured by `measure`.
-    pub(crate) fn request_measured_layout(&mut self, _style: Style, _rem_size: Pixels, _measure: NodeMeasureFn) -> LayoutId {
+    pub(crate) fn request_measured_layout(
+        &mut self,
+        _style: Style,
+        _rem_size: Pixels,
+        _measure: NodeMeasureFn,
+    ) -> LayoutId {
         todo!("window")
     }
 
@@ -93,7 +103,12 @@ impl Window {
     }
 
     /// Computes the layout under `layout_id` in `available_space`.
-    pub fn compute_layout(&mut self, _layout_id: LayoutId, _available_space: Size<AvailableSpace>, _cx: &mut App) {
+    pub fn compute_layout(
+        &mut self,
+        _layout_id: LayoutId,
+        _available_space: Size<AvailableSpace>,
+        _cx: &mut App,
+    ) {
         todo!("window")
     }
 

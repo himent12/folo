@@ -17,7 +17,11 @@ use crate::{
 
 impl Window {
     /// Runs `f` with `mask` intersected into the content mask (`None` leaves it as is).
-    pub fn with_content_mask<R>(&mut self, _mask: Option<ContentMask<Pixels>>, _f: impl FnOnce(&mut Self) -> R) -> R {
+    pub fn with_content_mask<R>(
+        &mut self,
+        _mask: Option<ContentMask<Pixels>>,
+        _f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         todo!("window")
     }
 
@@ -50,12 +54,20 @@ impl Window {
     }
 
     /// Runs `f` with the element offset set to `offset`.
-    pub fn with_absolute_element_offset<R>(&mut self, _offset: Point<Pixels>, _f: impl FnOnce(&mut Self) -> R) -> R {
+    pub fn with_absolute_element_offset<R>(
+        &mut self,
+        _offset: Point<Pixels>,
+        _f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         todo!("window")
     }
 
     /// Runs `f` with `element_id` pushed on the id path, giving it the element's global id.
-    pub fn with_global_id<R>(&mut self, _element_id: ElementId, _f: impl FnOnce(&GlobalElementId, &mut Self) -> R) -> R {
+    pub fn with_global_id<R>(
+        &mut self,
+        _element_id: ElementId,
+        _f: impl FnOnce(&GlobalElementId, &mut Self) -> R,
+    ) -> R {
         todo!("window")
     }
 
@@ -66,7 +78,11 @@ impl Window {
 
     /// Runs `f` with the element's state of type `S` from the previous frame (`None` the first time) and
     /// keeps the state it returns for the next frame.
-    pub fn with_element_state<S, R>(&mut self, _global_id: &GlobalElementId, _f: impl FnOnce(Option<S>, &mut Self) -> (R, S)) -> R
+    pub fn with_element_state<S, R>(
+        &mut self,
+        _global_id: &GlobalElementId,
+        _f: impl FnOnce(Option<S>, &mut Self) -> (R, S),
+    ) -> R
     where
         S: 'static,
     {
@@ -119,18 +135,30 @@ impl Window {
     }
 
     /// Adds a key listener of event type `Event` to the current dispatch node.
-    pub fn on_key_event<Event: KeyEvent>(&mut self, _listener: impl Fn(&Event, DispatchPhase, &mut Window, &mut App) + 'static) {
+    pub fn on_key_event<Event: KeyEvent>(
+        &mut self,
+        _listener: impl Fn(&Event, DispatchPhase, &mut Window, &mut App) + 'static,
+    ) {
         todo!("window")
     }
 
     /// Adds an action listener to the current dispatch node.
-    pub fn on_action(&mut self, _action_type: TypeId, _listener: impl Fn(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static) {
+    pub fn on_action(
+        &mut self,
+        _action_type: TypeId,
+        _listener: impl Fn(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static,
+    ) {
         todo!("window")
     }
 
     /// Records `input_handler` as the text input handler of the element with `focus_handle`; the focused
     /// element's handler is given to the platform after the frame.
-    pub fn handle_input(&mut self, _focus_handle: &FocusHandle, _input_handler: impl InputHandler, _cx: &App) {
+    pub fn handle_input(
+        &mut self,
+        _focus_handle: &FocusHandle,
+        _input_handler: impl InputHandler,
+        _cx: &App,
+    ) {
         todo!("window")
     }
 
