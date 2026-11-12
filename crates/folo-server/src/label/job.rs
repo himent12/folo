@@ -163,7 +163,9 @@ impl State {
             boxes: r.boxes.clone(),
             source: r.source,
             error: r.error.clone(),
-            reviewed: r.reviewed && r.status == LabelImageStatus::Labeled,
+            // By the shown status: an image back in an agent call is not reviewed while the call may replace its labels
+            // (the stored flag stays, for a call that leaves them untouched).
+            reviewed: r.reviewed && self.status(r) == LabelImageStatus::Labeled,
         }
     }
 
@@ -490,6 +492,7 @@ mod tests {
             record("3", LabelImageStatus::Failed, 5),
             record("4", LabelImageStatus::Labeled, 1),
         ];
+        file.images[1].reviewed = true;
         let mut state = State { file, active: None, logs: VecDeque::new(), exporting: false, deleted: false };
         let job = state.job();
         assert_eq!(job.status, LabelJobStatus::Idle);
@@ -507,6 +510,8 @@ mod tests {
         // An image in a call shows as `labeling` and keeps its boxes; counts go by the stored status.
         let shown = state.image(&state.file.images[1]);
         assert_eq!((shown.status, shown.boxes.len()), (LabelImageStatus::Labeling, 2));
+        // Nor is it reviewed while the call is open; its stored flag comes back if the call leaves it as it was.
+        assert!(!shown.reviewed && state.file.images[1].reviewed);
         assert_eq!(state.job().counts.labeled, 2);
         assert_eq!(state.check_idle("x").unwrap_err().body.code, "label_job_active");
         let exporting = State {
