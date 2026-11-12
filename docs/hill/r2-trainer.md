@@ -218,8 +218,9 @@ epoch compiled for 30 s, one kernel after the other.
 - folo-gpu `kernel_list.rs` + `context/precompile.rs`: `GpuContext::precompile(kind, shape)` records the kernels a
   context uses while the recording is open (name + spec, in order of first use; also kernels the context compiled
   before, through a per-context recording generation checked on the dispatch path) beside the pipeline cache and,
-  at the next call with the same kind and shape, compiles that list on one worker thread per core. A thread that needs a kernel takes it ready, waits for
-  the worker compiling it, or compiles it itself if no worker started it. No list for the shape: the newest list
+  at the next call with the same kind and shape, compiles that list on worker threads (half the cores, at most 12;
+  `FOLO_GPU_PRECOMPILE_THREADS`). A thread that needs a kernel takes it ready, waits for the worker compiling it, or
+  compiles it itself if no worker started it. No list for the shape: the newest list
   of the same kind (most kernels are shared). Same header and checksum as the pipeline cache, but the identity
   leaves out the driver (a list names kernels, not compiled code). Bounds: 4096 kernels, 1 MB, 64 lists per folder,
   16 recordings per context (`folo serve`); every integer constant at most 65536 in magnitude, and per kernel the
@@ -237,9 +238,13 @@ epoch compiled for 30 s, one kernel after the other.
   list per model kind for all image sizes, batches and heads).
 - `FOLO_GPU_TRACE_COMPILE=1` prints a second line: the time the threads that needed kernels spent getting them.
 - The bench scripts (`warm_start.sh`, `cold_start.sh`) keep every run's output in `$OUT` and print a run that failed,
-  timed out or lacks its epoch record or compile line as FAILED rather than as a sample.
+  timed out or lacks its epoch record as FAILED rather than as a sample.
 
 ### Results
+The first measurements below are of the first version (head a9c0c8f0 on ed265317: one worker per core, no Muon
+kernels on main yet). The final head was measured again on a much busier machine, after the review fixes and the
+worker count change (next subsection).
+
 Warm start, one row-10 epoch (`OUT=D:/folo-data/runs-hill2/trainer2/ws-f32 bench/trainer/warm_start.sh train
 base=<647b981f> main=<ed265317> new=<PR>`, and `AMP=--amp OUT=.../ws-amp`; 3 rounds, every binary with its own warm
 cache folder; 647b981f has no compile timer):
@@ -277,7 +282,37 @@ folo-n --epochs 2 --batch 16 --imgsz 640 --workers 8 --close-mosaic 0 --device g
 sustained main **344.1 img/s** (340.2-349.5), PR **339.1** (324.2-358.1): a tie (others 6.7-7.2 vs 7.9-12.0 cores).
 Epoch-1 training img/s: 197.5 → 297.1.
 
+### How many workers, and the final head
+With the Muon kernels on main and the machine busier, one worker per core (28) sometimes made the training thread
+wait: AMP warm starts left 0.58-0.61 s on it in three rounds, and a trace showed each tensor-core pipeline taking
+0.2-0.6 s on a worker against ~8 ms alone (pipeline creation contends in the driver: the workers' summed compile time
+was 18-31 s against 1.7 s serial). A sweep (AMP warm start, `FOLO_GPU_PRECOMPILE_THREADS`, 3 rounds alternated, same
+cache folder) gave on the training thread: 28 workers 0.011 / 0.011 / 0.767 s (summed compile 31 s in the bad round),
+**12 workers 0.013 / 0.015 / 0.015 s** (summed ~2.0 s), 6 workers 0.115-0.133 s, 3 workers 0.318-0.363 s. With the
+driver cache cold (list kept, 2 rounds): 28 workers 4.09 / 3.36 s, 16 workers 4.57 / 4.16 s, 12 workers 4.83 / 4.44 s.
+Default: half the cores, at most 12.
+
+Final head (f2bd1a7e on 663c914d), against main 56a2ba38 (the main with the Muon kernels) and 647b981f, in one GPU
+lock hold (`warm_start.sh train` f32 and `AMP=--amp`, `ROUNDS=5 warm_start.sh predict`, `cold_start.sh --amp`;
+outputs in `D:/folo-data/runs-hill2/trainer2/final-ab.txt`), with the machine 55-100% busy before most runs:
+
+| | 647b981f | main 56a2ba38 | PR |
+|---|---|---|---|
+| f32 warm: compile on the training thread, per round | not timed | 1.25 / 1.34 / 1.09 s | **0.368 / 0.001 / 0.265 s** |
+| f32 warm: epoch 1 | 2.93 / 2.93 / 8.17 s | 3.02 / 3.37 / 4.07 s | 2.15 / 5.13 / 4.81 s |
+| AMP warm: compile on the training thread | not timed | 1.25 / 1.37 / 1.43 s | **0.502 / 0.583 / 0.651 s** |
+| AMP warm: epoch 1 | 10.74 / 2.56 / 2.47 s | 2.49 / 2.83 / 2.78 s | **2.20 / 2.08 / 2.17 s** |
+| `folo predict` 1 image, wall, median (range) | 0.76 s (0.74-0.83) | 0.62 s (0.51-0.88) | **0.47 s** (0.44-0.68) |
+| AMP cold (empty driver cache): compile on the training thread | – | first-ever 26.9 / 30.9 / 35.8 s | list kept **3.73 / 5.20 / 4.89 s** (no list: 26.0 / 34.1 / 39.5 s) |
+| AMP cold: process wall | – | 29.0 / 33.3 / 38.3 s | list kept **5.75 / 7.73 / 7.51 s** |
+
+Under this load the warm-start target (<= 0.3 s on the training thread) holds on a quieter machine (0.001-0.02 s,
+first measurements and the sweep) but not here (0.27-0.65 s in 5 of 6 rounds: the training thread waits for 14-27
+kernels still on a worker); it is still 2-4x below main's serial compile, and AMP's first epoch is the fastest of
+the three in every round. The cold target (<= 8 s) holds with a list.
+
 ### Negative results
+- One worker per core: see above (contention in the driver under load).
 - Parsing each WGSL module once (shared naga IR) was not needed: on the workers the ~1.1-1.4 s of parsing is spread
   over the cores, and the training thread's remaining time is 0.001-0.02 s on a warm start. It would also need the
   specialisation constants as pipeline-overridable constants, which cannot size workgroup arrays on every backend
