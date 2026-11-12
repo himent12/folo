@@ -126,7 +126,11 @@ fn unescape(field: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+        if b[i] == b'\\'
+            && i + 3 < b.len()
+            && (b'0'..=b'3').contains(&b[i + 1])
+            && b[i + 2..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
             out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
             i += 4;
         } else {
@@ -362,6 +366,14 @@ mod tests {
         assert_eq!(cgroup_free("0::/tenant/job\n", &sub), Some(200));
         assert_eq!(cgroup_free("0::/elsewhere/job\n", &sub), None, "outside the mounted subtree");
         assert_eq!(cgroup_free("", &sub), None);
+    }
+
+    /// Escapes up to `\377` decode, anything else (`\400`, a short or non-octal one) stays as written.
+    #[test]
+    fn unescapes_mountinfo_fields() {
+        assert_eq!(unescape(r"/sys/fs/cgroup/a\040b"), "/sys/fs/cgroup/a b");
+        assert_eq!(unescape(r"x\134y\011"), "x\u{5c}y\t");
+        assert_eq!(unescape(r"\400\777\08\12"), r"\400\777\08\12");
     }
 
     #[test]
