@@ -349,8 +349,10 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     }
     let w1 = ctx.work_stats();
     ctx.reset_peak_memory();
+    let misses = ctx.pool_stats().misses;
     let s = stats((0..10).map(|_| step(false, false).0).collect());
     let w2 = ctx.work_stats();
+    let misses = ctx.pool_stats().misses - misses;
     let peak = ctx.pool_stats().peak_live_bytes;
     row(&format!("train step b16 ({label}, {optim})"), &s, 16);
     let mut split = |host: bool| {
@@ -364,11 +366,13 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     let ((f, l, b, o), enc) = split(false);
     println!(
         "    split (medians, each phase synchronised): forward {f:.1} ms, loss {l:.1} ms, backward {b:.1} ms, \
-         {} {o:.1} ms; {} dispatches, {} submissions and {:.0} new bind groups per step; peak {:.0} MiB",
+         {} {o:.1} ms; {} dispatches, {} submissions, {:.0} new bind groups and {:.0} new buffers per step; \
+         peak {:.0} MiB",
         if amp { format!("unscale + check + {optim}") } else { optim.to_string() },
         (w1.dispatches - w0.dispatches) / 3,
         (w1.submissions - w0.submissions) / 3,
         (w2.bind_groups - w1.bind_groups) as f64 / 10.0,
+        misses as f64 / 10.0,
         mib(peak)
     );
     println!(

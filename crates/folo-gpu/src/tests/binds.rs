@@ -173,4 +173,40 @@ fn bind_cache_is_bounded() {
     }
     drop(get);
     assert_eq!(created, 3 * GENERATION + 1, "every combination once, the hot one once");
+    // Retiring a buffer drops exactly the entries that bind it, in both generations.
+    let mut probe = |cache: &mut BindCache, i: usize| {
+        let (x, y, z) = (&bufs[i % 24], &bufs[i / 24 % 24], &bufs[i / 576 % 24]);
+        let mut made = false;
+        cache.get(dev, &k.layout, &uniform, &[x, y, z], &mut made);
+        made
+    };
+    let before = cache.len();
+    cache.retire(&HashSet::from([crate::context::buffer_id(&bufs[1])]));
+    assert!(cache.len() < before);
+    assert!(probe(&mut cache, 1), "an entry with the retired buffer is gone");
+    assert!(!probe(&mut cache, 3 * GENERATION), "an entry without it stays");
+}
+
+/// `set_bind_cache(false)` empties the cache and makes every dispatch create its bind group; on again, it caches.
+#[test]
+fn the_bind_cache_can_be_switched_off() {
+    let _shared = gpu!();
+    let Some(ctx) = private() else { return };
+    let k = ctx.kernel(&ADD_PARAM, Spec::new()).unwrap();
+    let a = GpuTensor::zeros(&ctx, &[64], DType::F32).unwrap();
+    let run = |n: usize| {
+        let before = ctx.work_stats().bind_groups;
+        for _ in 0..n {
+            ctx.dispatch(&k, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
+        }
+        ctx.work_stats().bind_groups - before
+    };
+    assert_eq!(run(5), 1);
+    ctx.set_bind_cache(false);
+    assert_eq!(ctx.bind_cache_len(), 0);
+    assert_eq!(run(5), 5);
+    assert_eq!(ctx.bind_cache_len(), 0);
+    ctx.set_bind_cache(true);
+    assert_eq!(run(5), 1);
+    assert_eq!(a.to_vec().unwrap(), vec![15.0; 64]);
 }

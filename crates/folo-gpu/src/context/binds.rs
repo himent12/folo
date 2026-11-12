@@ -55,6 +55,13 @@ impl Entry {
 pub(crate) struct BindCache {
     cur: HashMap<u64, Entry>,
     old: HashMap<u64, Entry>,
+    /// The keys of the entries that bind each buffer (by [`id_of`]), so retiring a buffer touches only its own
+    /// entries: a training step retires buffers all the time, and sweeping the whole cache each time cost more than
+    /// the cache saved. It may list keys whose entry is gone (checked on use); it is rebuilt at every generation
+    /// change, so it grows only with inserts.
+    users: HashMap<u64, Vec<u64>>,
+    /// Set by [`crate::GpuContext::set_bind_cache`]`(false)`: every dispatch creates its bind group (A/B runs).
+    pub(crate) off: bool,
 }
 
 impl BindCache {
@@ -74,6 +81,10 @@ impl BindCache {
         uniform.hash(&mut s);
         buffers.hash(&mut s);
         let key = s.finish();
+        if self.off {
+            *created = true;
+            return create(device, layout, uniform, buffers);
+        }
         if let Some(e) = self.cur.get(&key)
             && e.matches(layout, uniform, buffers)
         {
@@ -87,20 +98,7 @@ impl BindCache {
             return bind;
         }
         *created = true;
-        let mut entries = Vec::with_capacity(buffers.len() + 1);
-        entries.push(wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: uniform,
-                offset: 0,
-                size: wgpu::BufferSize::new(crate::pipeline::UNIFORM_SLOT),
-            }),
-        });
-        for (i, buf) in buffers.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry { binding: i as u32 + 1, resource: buf.as_entire_binding() });
-        }
-        let bind =
-            device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout, entries: &entries });
+        let bind = create(device, layout, uniform, buffers);
         self.insert(
             key,
             Entry {
@@ -117,17 +115,30 @@ impl BindCache {
     fn insert(&mut self, key: u64, e: Entry) {
         if self.cur.len() >= GENERATION {
             self.old = std::mem::take(&mut self.cur);
+            self.users.clear();
+            for (&k, e) in &self.old {
+                for &id in &e.ids {
+                    self.users.entry(id).or_default().push(k);
+                }
+            }
+        }
+        for &id in &e.ids {
+            self.users.entry(id).or_default().push(key);
         }
         self.cur.insert(key, e);
     }
 
     /// Drops every entry that binds one of the buffers with these [`id_of`] ids.
     pub(crate) fn retire(&mut self, ids: &HashSet<u64>) {
-        if ids.is_empty() {
-            return;
-        }
-        for map in [&mut self.cur, &mut self.old] {
-            map.retain(|_, e| !e.ids.iter().any(|i| ids.contains(i)));
+        for id in ids {
+            let Some(keys) = self.users.remove(id) else { continue };
+            for k in keys {
+                for map in [&mut self.cur, &mut self.old] {
+                    if map.get(&k).is_some_and(|e| e.ids.contains(id)) {
+                        map.remove(&k);
+                    }
+                }
+            }
         }
     }
 
@@ -135,10 +146,33 @@ impl BindCache {
     pub(crate) fn clear(&mut self) {
         self.cur.clear();
         self.old.clear();
+        self.users.clear();
     }
 
     /// Bind groups held.
     pub(crate) fn len(&self) -> usize {
         self.cur.len() + self.old.len()
     }
+}
+
+/// A new bind group of `layout` (see [`BindCache::get`]).
+fn create(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    buffers: &[&wgpu::Buffer],
+) -> wgpu::BindGroup {
+    let mut entries = Vec::with_capacity(buffers.len() + 1);
+    entries.push(wgpu::BindGroupEntry {
+        binding: 0,
+        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: uniform,
+            offset: 0,
+            size: wgpu::BufferSize::new(crate::pipeline::UNIFORM_SLOT),
+        }),
+    });
+    for (i, buf) in buffers.iter().enumerate() {
+        entries.push(wgpu::BindGroupEntry { binding: i as u32 + 1, resource: buf.as_entire_binding() });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout, entries: &entries })
 }

@@ -60,6 +60,9 @@ pub fn request_tensor_cores() -> bool {
     }
 }
 
+/// Environment variable that turns the bind-group cache off in contexts created afterwards
+/// (`FOLO_GPU_NO_BIND_CACHE=1`, for A/B runs; see [`GpuContext::set_bind_cache`]).
+pub const ENV_NO_BIND_CACHE: &str = "FOLO_GPU_NO_BIND_CACHE";
 /// Environment variable that overrides the flush interval ([`GpuContext::set_flush_interval`]) of contexts created
 /// afterwards, for experiments (`FOLO_GPU_FLUSH_EVERY=1024`).
 pub const ENV_FLUSH_EVERY: &str = "FOLO_GPU_FLUSH_EVERY";

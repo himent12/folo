@@ -220,6 +220,16 @@ impl GpuContext {
         }
     }
 
+    /// Turns the bind-group cache off (every dispatch creates its bind group, as before the cache) or back on, for
+    /// A/B comparisons in one process. Turning it off empties it.
+    pub fn set_bind_cache(&self, on: bool) {
+        let mut b = self.inner.batch.lock().expect("batch lock");
+        b.binds.off = !on;
+        if !on {
+            b.binds.clear();
+        }
+    }
+
     /// Bind groups in the cache (for tests and benchmarks).
     pub fn bind_cache_len(&self) -> usize {
         self.inner.batch.lock().expect("batch lock").binds.len()

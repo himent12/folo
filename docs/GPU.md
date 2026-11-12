@@ -90,9 +90,13 @@ group depends only on the kernel's layout, the arena chunk and the storage buffe
 buffers in the same order on every forward pass and training step, so the context keeps the bind groups it made,
 keyed by those (`context/binds.rs`), and a repeated pass creates none (creating one cost 3–4 µs of host time).
 A cached bind group keeps its buffers alive, so the pool records every buffer it lets go of (evicted, or dropped by
-`trim_pool()`), and the next dispatch drops the bind groups that hold one; `release_memory()` empties the cache.
-The cache holds at most two generations of 4096 bind groups: when the current one is full it becomes the old one
-and the previous old one is dropped, and an old entry used again moves back. `ctx.bind_cache_len()` is its size.
+`trim_pool()`), and the next dispatch drops the bind groups that hold one, found through an index from buffer to
+entries (a training step retires buffers all the time; sweeping the whole cache each time made the optimizer phase
+4× slower); `release_memory()` empties the cache. The cache holds at most two generations of 4096 bind groups:
+when the current one is full it becomes the old one and the previous old one is dropped, and an old entry used
+again moves back. `ctx.bind_cache_len()` is its size; `ctx.set_bind_cache(false)` (or `FOLO_GPU_NO_BIND_CACHE=1`
+for contexts created afterwards) turns it off for A/B runs, and the `dispatch_ab` bench of folo-vision compares
+both in one process.
 
 The interval was 1024 until the training-step profile showed the GPU idle for most of the host's encoding and
 submission time: a step's 1300 dispatches went out in 3 submissions, so the GPU waited for each one to be built

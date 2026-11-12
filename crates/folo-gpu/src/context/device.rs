@@ -381,6 +381,9 @@ impl GpuContext {
                 profiler,
             }),
         };
+        if std::env::var(super::ENV_NO_BIND_CACHE).is_ok_and(|v| v != "0" && !v.is_empty()) {
+            ctx.set_bind_cache(false);
+        }
         if !coop {
             return Ok(ctx);
         }
