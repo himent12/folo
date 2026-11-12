@@ -3,9 +3,9 @@
 //!
 //! The parameter block is bound with a dynamic offset (its slot in the uniform chunk), so a bind group depends only
 //! on `(kernel, uniform chunk, storage buffers)`. An inference forward meets the same combinations on every call and
-//! creates no bind group after its first calls. A training step does not: the pool's buffers do not come back in the
-//! same order every step, and only about a quarter (f32) to a half (AMP) of a folo-n step's dispatches repeat an
-//! earlier combination. So a miss is kept cheap (one hash and a set insert besides the bind group itself), and a
+//! creates no bind group after its first calls, and so does a training step at a fixed shape, since the pool hands
+//! out the same buffer for the same request every step (`pool.rs`). Shapes that change (a last partial batch,
+//! validation) still miss, so a miss is kept cheap (one hash and a set insert besides the bind group itself), and a
 //! combination is cached only on its second sighting ([`BindCache::get`]); one seen once is just remembered.
 //!
 //! A cached bind group holds its buffers alive, so only buffers the pool owns are cached (and the context's dummy

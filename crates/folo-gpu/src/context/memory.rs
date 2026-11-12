@@ -11,6 +11,16 @@ impl GpuContext {
         self.inner.pool.lock().expect("pool lock").stats()
     }
 
+    /// Device memory wgpu's allocator holds for this context, `(allocated, reserved)` bytes: the sum of the live
+    /// allocations and of the memory blocks they are carved from, which is what the driver has given the process.
+    /// `None` where wgpu cannot report it (the browser, Metal, GL).
+    pub fn device_memory(&self) -> Option<(u64, u64)> {
+        self.inner
+            .device
+            .generate_allocator_report()
+            .map(|r| (r.total_allocated_bytes, r.total_reserved_bytes))
+    }
+
     /// Restart the pool's peak-memory counter ([`PoolStats::peak_live_bytes`]) from the current live bytes.
     pub fn reset_peak_memory(&self) {
         self.inner.pool.lock().expect("pool lock").reset_peak();

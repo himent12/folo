@@ -27,7 +27,9 @@
 //!   under `folo_core::autocast` (f16 on tensor cores), the loss in f32, backward of the loss times the loss scale,
 //!   the gradients unscaled and checked for overflow on the GPU (one flag readback), SGD, the scaler update.
 //! - **peak memory**: the buffer pool's peak live bytes over the measured calls (PyTorch's
-//!   `max_memory_allocated` counterpart, in pool size classes, which round up by at most 25%).
+//!   `max_memory_allocated` counterpart, in pool size classes, which round up by at most 25%). The training rows
+//!   also print the most the pool held (live + cached), its need (`PoolStats::need_bytes`) and the device memory
+//!   wgpu's allocator reserved, sampled at the end of every phase of the split steps.
 //!
 //! Before every section the bench idles for a second and prints the GPU utilisation `nvidia-smi` reports,
 //! because the GPU is shared with other jobs on the dev machine.
@@ -278,6 +280,9 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     // and the four phase times.
     // `FOLO_GPU_PROFILE=1`: GPU time per kernel label, per phase (the context's timestamp queries).
     let profile: std::cell::RefCell<[Profile; 4]> = Default::default();
+    // The device memory wgpu's allocator reserved, sampled at the end of every phase of the split steps (the
+    // samples are taken after each phase's timing).
+    let reserved = std::cell::Cell::new(0u64);
     let mut step = |split: bool, host: bool| {
         let mut phase = 0;
         // Host time spent encoding each phase (until its synchronisation starts).
@@ -287,6 +292,9 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
             enc[phase] = mark.elapsed();
             if on {
                 synchronize(dev).expect("sync");
+            }
+            if split && let Some((_, r)) = ctx.device_memory() {
+                reserved.set(reserved.get().max(r));
             }
             for r in ctx.profile_take() {
                 let mut p = profile.borrow_mut();
@@ -356,7 +364,8 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     let s = stats((0..10).map(|_| step(false, false).0).collect());
     let w2 = ctx.work_stats();
     let misses = ctx.pool_stats().misses - misses;
-    let peak = ctx.pool_stats().peak_live_bytes;
+    let pool = ctx.pool_stats();
+    let peak = pool.peak_live_bytes;
     row(&format!("train step b16 ({label}, {optim})"), &s, 16);
     let mut split = |host: bool| {
         step(true, host);
@@ -370,13 +379,16 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     println!(
         "    split (medians, each phase synchronised): forward {f:.1} ms, loss {l:.1} ms, backward {b:.1} ms, \
          {} {o:.1} ms; {} dispatches, {} submissions, {:.0} new bind groups and {:.0} new buffers per step; \
-         peak {:.0} MiB",
+         peak {:.0} MiB live, {:.0} MiB held by the pool (need {:.0} MiB), {:.0} MiB of device memory",
         if amp { format!("unscale + check + {optim}") } else { optim.to_string() },
         (w1.dispatches - w0.dispatches) / 3,
         (w1.submissions - w0.submissions) / 3,
         (w2.bind_groups - w1.bind_groups) as f64 / 10.0,
         misses as f64 / 10.0,
-        mib(peak)
+        mib(peak),
+        mib(pool.peak_held_bytes),
+        mib(pool.need_bytes),
+        mib(reserved.get())
     );
     println!(
         "    host encode time of each phase (medians): forward {:.1} ms, loss {:.1} ms, backward {:.1} ms, step {:.1} ms",

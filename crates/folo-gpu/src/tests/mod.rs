@@ -16,6 +16,7 @@ mod gemm;
 mod layout;
 mod muon;
 mod pipeline_cache;
+mod pool;
 mod reduce;
 mod runtime;
 

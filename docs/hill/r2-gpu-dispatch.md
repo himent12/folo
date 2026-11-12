@@ -199,3 +199,74 @@ a build with this PR and the residual change below): f32 mAP50 0.44944638 / mAP5
 3. **Residual add fusion** (negative result above): worth retrying only if a GEMM epilogue change makes the extra
    load free in the tensor-core kernel (the f16 TC rows were the ones that lost).
 4. **Concatenations with more than four parts or 3×3 consumers** read in place: none in the current detector.
+
+## Second wave (lane `gpu-pool`, 2026-11-12)
+
+The two leftovers above: training bind-group reuse and the bimodal batch-1 latency. Same machine, same method
+(binaries copied aside, alternated run by run with the order reversed every other round, GPU lock, `nvidia-smi`
+under 10% before each run); baselines `main` 647b981f (`m647`, the shared build) and the `main` this lane branched
+from, ed265317 (`base`: a private worktree with only the bench's new counters added, so its rows print the same
+numbers). Scripts and raw runs: `D:/folo-data/runs-hill2/gpu-pool/` (`bin/ab.sh`, `bin/parse_train.py`).
+
+### Pool PR 1: the pool hands out the same buffers every step (`gpu/pool-order`)
+
+**Why the bind groups missed.** The pool popped the most recently freed buffer of a size class. A training step
+frees its tensors in another order than it allocates them (autograd's traversal, gradients in a hash map whose
+order changes per step), so the free list of a class was a different permutation at the start of every step and
+request *k* got a different buffer each time: only 22% (f32) / 24% (AMP) of a folo-n b16 step's dispatches found
+their bind group. A second cause made it worse in f32: the free lists held at most the live high-water mark
+(3467 MiB), but a step needs 4191 MiB of buffers, because its size classes peak at different times (forward
+activations, then backward gradients). So every step the pool evicted and recreated 57 buffers, each new one a
+new bind-group key, and each new buffer zero-filled by wgpu on first use (GPU time). AMP in a process of its own
+churned 46 buffers per step the same way (its cap was the 2 GiB floor, its need 2472 MiB); after an f32 section in
+the same process it did not, which is why lane gpu-dispatch saw 0 there.
+
+**What.**
+- Each free list is ordered by the buffer's creation number and hands out the oldest free buffer. The choice then
+  depends only on which buffers are free, not on the order they came back: the free set at the start of a step is
+  the same every step, so by induction every request gets the buffer it got the step before. Where a step
+  allocates differently (other shapes), the assignment differs for that stretch and falls back in step when the
+  free sets agree again.
+- The cache bound adds the *need*: per size class, the most buffers lent out at once in the current or the
+  previous window of 4096 requests (about three folo-n steps), times the class size, summed. The free lists may
+  hold the need less the live bytes (besides the old 2 GiB floor and live high-water mark), counted at most up to
+  twice the live high-water mark, which is what the old rule already allowed the pool to hold (live bytes plus a
+  cache as big as the high-water mark). Classes no longer requested (validation, a last partial batch) leave the
+  need after two windows and are then evicted least recently freed first, as before.
+- `PoolStats` gains `peak_held_bytes` (live + cached at most: the pool's device memory) and `need_bytes`;
+  `GpuContext::device_memory()` returns wgpu's allocator report (allocated, reserved). The `gpu` bench prints them
+  per training precision, the reserved bytes sampled at the end of every phase of the split steps.
+
+**Numbers** (`pr1-train/`: 3 rounds, f32 and AMP in separate processes, GPU 0–1% before each run, CPU 11–94%
+busy; median and range of each binary's per-run median):
+
+| folo-n b16 | `main` 647b981f | `main` ed265317 | PR | vs ed265317 |
+|---|---|---|---|---|
+| f32 train step | 49.89 ms (49.42–50.84) | 48.26 (46.34–48.72) | **43.21** (42.94–43.23) | −10.5% |
+| f32 host encode, sum of the four phases | 15.5 ms (13.9–17.6) | 12.5 (9.8–17.7) | **8.1** (7.9–13.6) | −35% |
+| f32 new bind groups / buffers per step | n/a | 872 / 57 (22% reuse) | **0 / 0** (100%) | |
+| AMP train step | 30.61 ms (28.64–31.03) | 28.55 (26.88–28.66) | **27.14** (26.37–27.88) | −4.9% |
+| AMP host encode, sum | 13.7 ms (8.8–18.0) | 14.4 (8.7–21.4) | **8.8** (7.1–14.0) | −39% |
+| AMP new bind groups / buffers per step | n/a | 979 / 46 (24% reuse) | **0 / 0** (100%) | |
+| f32 peak live / held by the pool / device memory | 3467 MiB / – / – | 3467 / 4191 / 4608 | 3467 / 4196 / 4608 | same |
+| AMP peak live / held / device memory | 2022 MiB / – / – | 2022 / 2472 / 2816 | 2022 / 2472 / 2816 | same |
+
+The pool already reached the step's need at its peak before (it held 4191 MiB while the step ran, then evicted
+at the end of the backward), so keeping those buffers does not raise the peak; wgpu's allocator reserves the same
+4608 / 2816 MiB on both. The split rows show the f32 backward phase 32.4–35.1 → 29.1–30.3 ms with each phase
+synchronised: the recreated buffers cost GPU time too (wgpu zero-fills a new buffer before its first use).
+
+**Inference** (`pr1-infer/`, `gpu` bench forward + predict, folo-n and folo-s, f32 and f16 TC, 3 rounds, CPU 76–97%):
+nothing to change there (an inference forward already hit the cache on every call) and nothing lost. The GPU-bound
+batch-16 rows tie: folo-n f32 forward b16 8.23 → 8.23 ms (pipelined 7.76 → 7.77), folo-s f32 20.11 → 20.13
+(19.66 → 19.61), folo-n f16 TC pipelined 4.48 → 4.45, folo-s f16 TC pipelined 11.66 → 11.42. Batch-1 rows of both
+binaries swing between a fast and a slow mode by run (the next item); one row read worse in that run, folo-n f32
+predict b1 2.41 → 2.70 ms, and a 5-round rerun of it (`pr1-predict/`) read 4.11 (2.07–5.01) → 3.27 (1.80–5.36),
+both binaries bimodal (fast runs 1.8–2.1 ms, slow ones 3–5 ms).
+
+Tests (`src/tests/pool.rs`): twelve requests of four classes per step, the held ones freed in a shuffled order
+mid-step and at the end, give the same buffer for every request in all twelve steps and create nothing after the
+first (it fails with the newest-first rule, checked); a step whose two classes peak apart (4 MiB, then 5 MiB) keeps
+all 9 MiB and creates nothing after its first run; a class not requested for two windows is evicted, and forty
+classes requested one at a time keep at most twice the live high-water mark. Three older tests that evicted
+inside a window now pass two windows first.
