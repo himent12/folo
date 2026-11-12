@@ -243,7 +243,7 @@ the same process it did not, which is why lane gpu-dispatch saw 0 there.
 
 **Numbers** (`pr1-train/`: 3 rounds, f32 and AMP in separate processes, GPU 0–1% before each run, CPU 0–94%
 busy (one sample read 0%); median and range of each binary's per-run median). These train numbers were measured
-before the bound was enforced on allocation misses too (above) and are to be re-measured:
+before the bound was enforced on allocation misses too (above); the re-measurement follows the table:
 
 | folo-n b16 | `main` 647b981f | `main` ed265317 | PR | vs ed265317 |
 |---|---|---|---|---|
@@ -262,6 +262,23 @@ f32 (+5 MiB, +0.1%) and 2472 → 2472 in AMP, the peak live bytes are unchanged,
 4608 / 2816 MiB on both. The split rows show the f32 backward phase 32.6–35.0 → 29.2–30.2 ms (the per-run medians;
 `main` 35.0, 32.6, 34.1, the PR 30.2, 29.2, 29.9) with each phase
 synchronised: the recreated buffers cost GPU time too (wgpu zero-fills a new buffer before its first use).
+
+**Re-measured after the review fixes** (the bound enforced on allocation misses and at window rollovers; binaries
+`pr1b` = 312c080d, `pr1c` = 5484bca0, which differ only on misses and rollovers, neither of which a steady step
+has), in busier windows (CPU 59–100%; the encode of both binaries doubled against the first run):
+
+| folo-n b16 | `main` ed265317 | PR | |
+|---|---|---|---|
+| f32 step (`pr1b-train/`, 3 rounds) | 48.24 ms (48.16–51.02) | **43.47** (42.75–43.93) | −9.9% |
+| f32 host encode | 21.2 ms (18.0–23.9) | **14.9** (14.2–15.5) | −30% |
+| AMP step (`pr1c-amp/`, 4 rounds, `pr1` = 36ed569c too) | 29.58 (29.35–107.12) | `pr1` 27.94 (27.58–30.62), `pr1c` 29.97 (28.53–32.57) | tie to −5.5% |
+| AMP host encode | 19.85 ms (15.5–49.4) | `pr1` 13.65, `pr1c` 15.6 | −21 to −31% |
+| new bind groups / buffers per step, memory | as above | 0 / 0, held and device memory as above | |
+
+f32 holds its −10% in every window. **AMP does not clearly meet the −4% target**: −4.9% in the first window,
+−5.5% (`pr1`) and +1.3% (`pr1c`) in the second, with base and PR rounds of 50–107 ms from other load. The AMP step
+is GPU-bound (about 28 ms of GPU work against 13–20 ms of encode), so its 25–35% less host encode hardly shows; the
+f32 step also gained GPU time (no zero-filled new buffers, about 700 MB per step).
 
 **Inference** (`pr1-infer/`, `gpu` bench forward + predict, folo-n and folo-s, f32 and f16 TC, 3 rounds, CPU 76–97%):
 nothing to change there (an inference forward already hit the cache on every call) and nothing lost. The GPU-bound
