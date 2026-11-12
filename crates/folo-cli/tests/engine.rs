@@ -389,11 +389,42 @@ fn assert_no_f32_noise(v: &Value) {
     }
 }
 
+/// Epochs of the runs the stop tests stop: far more than a run can finish before its stop lands, however fast
+/// training gets (the tests stop every run after its first epoch).
+const UNSTOPPED_EPOCHS: &str = "1000";
+
+/// Runs `folo train` with `args` (and `--json`), sends `folo stop` to `run` when the first `epoch` record arrives,
+/// and returns every record once the process has exited successfully.
+fn train_until_stopped(args: &[&str], run: &Path) -> Vec<Value> {
+    use std::io::BufRead;
+    let mut child: ChildGuard = folo_cmd()
+        .args(["train", "--json"])
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut records = Vec::new();
+    let mut asked = false;
+    for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
+        let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if v["event"] == "epoch" && !asked {
+            let (code, lines, stderr) = folo(&["stop", "--json", s(run)]);
+            assert_eq!(code, 0, "{stderr}");
+            assert_eq!(lines[0]["event"], "stop_requested");
+            asked = true;
+        }
+        records.push(v);
+    }
+    assert!(child.wait().unwrap().success());
+    records
+}
+
 /// `folo stop` ends a running `folo train` after its current batch (status `stopped`); `--resume` then refuses a
 /// changed setting, and `--json-events epoch` leaves the step records out.
 #[test]
 fn stop_resume_and_epoch_only_records() {
-    use std::io::BufRead;
     let root = TestDir::new("cli-stop");
     let data = root.join("shapes");
     let cfg = SyntheticConfig {
@@ -407,33 +438,29 @@ fn stop_resume_and_epoch_only_records() {
     write_yolo(&cfg, &data, ImageFormat::Png).unwrap();
     let project = root.join("runs");
     let run = project.join("long");
-    let mut child: ChildGuard = folo_cmd()
-        .args(["train", "--json", "--device", "cpu", "--data", s(&data), "--imgsz", "64", "--batch", "4"])
-        .args(["--epochs", "6", "--workers", "1", "--project", s(&project), "--name", "long"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap()
-        .into();
-    let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
-    let mut records = Vec::new();
-    let mut asked = false;
-    for line in stdout.lines() {
-        let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
-        if v["event"] == "epoch" && !asked {
-            let (code, lines, stderr) = folo(&["stop", "--json", s(&run)]);
-            assert_eq!(code, 0, "{stderr}");
-            assert_eq!(lines[0]["event"], "stop_requested");
-            asked = true;
-        }
-        records.push(v);
-    }
-    assert!(child.wait().unwrap().success());
+    let records = train_until_stopped(
+        &[
+            "--device",
+            "cpu",
+            "--data",
+            s(&data),
+            "--imgsz",
+            "64",
+            "--batch",
+            "4",
+            "--epochs",
+            UNSTOPPED_EPOCHS,
+        ]
+        .into_iter()
+        .chain(["--workers", "1", "--project", s(&project), "--name", "long"])
+        .collect::<Vec<_>>(),
+        &run,
+    );
     let done = records.last().unwrap();
     assert_eq!(done["event"], "done");
     assert_eq!(done["status"], "stopped", "{done}");
     let finished = done["epochs_completed"].as_u64().unwrap();
-    assert!((1..6).contains(&finished), "{done}");
+    assert!(finished >= 1, "{done}");
     assert!(!run.join("stop").exists(), "the stop file is consumed");
     // folo stop on something that is not a run.
     let (code, lines, _) = folo(&["stop", "--json", s(&data)]);
@@ -445,23 +472,17 @@ fn stop_resume_and_epoch_only_records() {
     assert_eq!(code, 2);
     let e = &lines.last().unwrap()["error"];
     assert_eq!(e["code"], "invalid_config");
-    assert!(e["message"].as_str().unwrap().contains("--epochs 9 differs from the run's 6"), "{e}");
-    let (code, lines, stderr) = folo(&[
-        "train",
-        "--json",
-        "--resume",
-        s(&last),
-        "--epochs",
-        "6",
-        "--batch",
-        "4",
-        "--json-events",
-        "epoch",
-    ]);
-    assert_eq!(code, 0, "{stderr}");
+    let want = format!("--epochs 9 differs from the run's {UNSTOPPED_EPOCHS}");
+    assert!(e["message"].as_str().unwrap().contains(&want), "{e}");
+    let lines = train_until_stopped(
+        &["--resume", s(&last), "--epochs", UNSTOPPED_EPOCHS, "--batch", "4", "--json-events", "epoch"],
+        &run,
+    );
     assert!(lines.iter().all(|l| l["event"] != "step"), "no step records");
-    assert_eq!(lines.iter().filter(|l| l["event"] == "epoch").count() as u64, 6 - finished);
-    assert_eq!(lines.last().unwrap()["status"], "completed");
+    let done = lines.last().unwrap();
+    assert_eq!(done["status"], "stopped", "{done}");
+    // The resume went on from the checkpoint: at least one more epoch.
+    assert!(done["epochs_completed"].as_u64().unwrap() > finished, "{done}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -469,7 +490,6 @@ fn stop_resume_and_epoch_only_records() {
 /// resume reads the folder the same way without repeating it (the checkpoint keeps it).
 #[test]
 fn format_picks_the_labels_and_resume_keeps_it() {
-    use std::io::BufRead;
     let root = TestDir::new("cli-format");
     let data = root.join("both");
     let cfg = SyntheticConfig {
@@ -494,26 +514,9 @@ fn format_picks_the_labels_and_resume_keeps_it() {
     let run = project.join("coco");
     // Runs `folo train` with `args` and stops it after its first epoch; returns the final record.
     let train_one_epoch = |args: &[&str]| {
-        let mut child: ChildGuard = folo_cmd()
-            .args(["train", "--json", "--device", "cpu", "--workers", "1"])
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap()
-            .into();
-        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
-        let mut last = Value::Null;
-        for line in stdout.lines() {
-            let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
-            if v["event"] == "epoch" && last["event"] != "epoch" {
-                let (code, _, stderr) = folo(&["stop", "--json", s(&run)]);
-                assert_eq!(code, 0, "{stderr}");
-            }
-            last = v;
-        }
-        assert!(child.wait().unwrap().success());
-        last
+        let all: Vec<&str> =
+            ["--device", "cpu", "--workers", "1"].into_iter().chain(args.iter().copied()).collect();
+        train_until_stopped(&all, &run).pop().unwrap()
     };
     let last = train_one_epoch(&[
         "--data",
@@ -525,7 +528,7 @@ fn format_picks_the_labels_and_resume_keeps_it() {
         "--batch",
         "4",
         "--epochs",
-        "6",
+        UNSTOPPED_EPOCHS,
         "--project",
         s(&project),
         "--name",
@@ -559,24 +562,14 @@ fn resume_keeps_the_runs_device() {
     let project = root.join("runs");
     let run = project.join("dev");
     // Stopped after its first epoch (a changed `epochs` would not match the checkpoint's schedule).
-    let mut child: ChildGuard = folo_cmd()
-        .args(["train", "--json", "--device", "cpu", "--workers", "1", "--data", s(&data), "--imgsz", "64"])
-        .args(["--batch", "4", "--epochs", "3", "--project", s(&project), "--name", "dev"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap()
-        .into();
-    let mut asked = false;
-    for line in std::io::BufRead::lines(std::io::BufReader::new(child.stdout.take().unwrap())) {
-        let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
-        if v["event"] == "epoch" && !asked {
-            let (code, _, stderr) = folo(&["stop", "--json", s(&run)]);
-            assert_eq!(code, 0, "{stderr}");
-            asked = true;
-        }
-    }
-    assert!(child.wait().unwrap().success());
+    let first = train_until_stopped(
+        &["--device", "cpu", "--workers", "1", "--data", s(&data), "--imgsz", "64", "--batch", "4"]
+            .into_iter()
+            .chain(["--epochs", UNSTOPPED_EPOCHS, "--project", s(&project), "--name", "dev"])
+            .collect::<Vec<_>>(),
+        &run,
+    );
+    assert_eq!(first.last().unwrap()["status"], "stopped");
     let ckpt = run.join("weights/last.folo");
     set_train_key(&ckpt, "device", serde_json::json!("gpu:7"));
     // Not through `folo()`, which adds --device cpu.
@@ -592,8 +585,12 @@ fn resume_keeps_the_runs_device() {
     };
     let (code, last) = resume(&[]);
     assert_eq!((code, &last["error"]["code"]), (3, &serde_json::json!("device_not_found")), "{last}");
-    let (code, last) = resume(&["--device", "cpu"]);
-    assert_eq!((code, &last["status"]), (0, &serde_json::json!("completed")), "{last}");
+    // `--device cpu` overrides it: the run goes on (stopped again after an epoch).
+    let lines =
+        train_until_stopped(&["--resume", s(&ckpt), "--device", "cpu", "--json-events", "epoch"], &run);
+    let last = lines.last().unwrap();
+    assert_eq!(last["status"], "stopped", "{last}");
+    assert!(lines.iter().any(|l| l["event"] == "epoch"), "it trained");
     let _ = std::fs::remove_dir_all(&root);
 }
 
