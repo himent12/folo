@@ -279,6 +279,7 @@ impl Backend for MockBackend {
                 resolved: None,
                 queue_position: None,
                 cloud: None,
+                dataset: None,
                 config,
             },
             curve,

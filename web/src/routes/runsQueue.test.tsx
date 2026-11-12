@@ -113,7 +113,9 @@ describe('Runs: the training queue', () => {
     );
     await new Promise((r) => setTimeout(r, 20));
     flushSync();
-    expect(target.querySelectorAll('td.act button')).toHaveLength(0);
+    // No queue actions on any row (finished rows keep their own ⋯: the model and Delete).
+    expect(target.querySelectorAll('td.act button[aria-label^="Queue actions"]')).toHaveLength(0);
+    expect(target.querySelector('tr[data-id="run_q7c5"] td.act button')).toBeNull();
     expect(place('run_q7c5')).toBeUndefined();
   });
 });

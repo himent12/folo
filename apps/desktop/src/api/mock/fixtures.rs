@@ -468,6 +468,7 @@ impl MockBackend {
                         }),
                         queue_position: (s.status == RunStatus::Queued).then_some(1),
                         cloud: None,
+                        dataset: None,
                         config: s.config,
                     },
                     curve,

@@ -370,6 +370,7 @@ impl SimRun {
             resolved: snap.started.and(self.resolved.clone()),
             queue_position: snap.queue.map(|q| q.0),
             cloud: self.cloud_at(&snap),
+            dataset: None,
         }
     }
 

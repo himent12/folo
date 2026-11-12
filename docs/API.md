@@ -407,8 +407,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     the event), and the moved run gets a `log` line (also in `/logs`). Mock
     mode: runs created through the API share one training slot the same way (the seeded looping run `run_3c02` is
     outside the queue).
-- `DELETE /api/runs/{id}` → `204` (`409 run_active` while `queued`, `running` or `stopping`). Real mode removes the run
-  folder, its weights included, so its models disappear too.
+- `DELETE /api/runs/{id}` → `204` (`409 run_active` while `running` or `stopping`, or `queued` after it had started: a
+  resumed run waiting to continue). A run waiting in the queue that never started leaves the queue and is deleted (the
+  runs behind it move up; Studio's Remove from queue). Real mode removes the run folder, its weights included, so its
+  models disappear too.
 - `GET /api/runs/{id}/metrics?every=1` → `{ "steps": [Step], "epochs": [Epoch] }` (full history, for charts on page
   load; `every=N` keeps every N-th step plus the latest one, to thin long runs). `after_step=<n>` keeps the steps
   with `step > n` and `after_epoch=<m>` the epochs with `epoch > m` (feature `run_cursors`; either or both, applied
@@ -425,7 +427,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   future epoch)
 - `GET /api/runs/{id}/logs?limit=500` → `{ "lines": [{ "t", "level": "debug|info|warn|error", "message" }],
   "total": 812 }`:
-  the run's log history, most recent `limit` lines (default 500, clamped to 1..5000), oldest first. `total` counts
+  the run's log history (the trainer's lines, the server's, and one per finished epoch: `epoch 3/5: loss 3.214,
+  mAP50-95 0.073, 15.2 s`), most recent `limit` lines (default 500, clamped to 1..5000), oldest first. `total` counts
   every line of the log (feature `run_cursors`; left out when it is 0, so a missing `total` reads as 0, as
   from older servers), and `after=<n>` answers the lines after
   the first `n` instead (the oldest `limit` of them), so `after=<total of the last answer>` polls for new lines
@@ -489,15 +492,20 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // Run
 { "id": "run_7d1e", "name": "shapes-n", "status": "running", "config": TrainConfig, "created": "...",
   // + "error_code": "not_supported" | "training_failed" | ... when failed (folo_api::codes; absent otherwise and from
-  //   older servers), next to "error" (the message); the final `status` event carries it too
+  //   older servers), next to "error" (the message); the final `status` event carries it too. A `stopped` run has
+  //   "interrupted" when the server stopped or restarted while it trained or waited (not a client's stop)
   "started": "..." | null, "finished": null | "...",
-  "epoch": 12,             // epoch in progress, 1-based (0 before the first step; the last epoch once finished)
+  "epoch": 12,             // epoch in progress, 1-based (0 before the first step); once ended, the last epoch it
+                           // finished (completed, stopped) or the one it failed in (failed)
   "epochs": 100,
   "step": 575,             // optimizer steps completed over all epochs
   "steps_per_epoch": 50,  // 0 until the trainer is built (before the first `running` status; events carry it)
   "eta_s": 1840 | null,    // null unless queued / running / stopping
   "best": { "epoch": 11, "map50_95": 0.61 } | null, "device": "NVIDIA GeForce RTX 4080 SUPER (vulkan)",
   "model_id": null | "m_31aa",  // set once the run completed, or stopped after at least one validated epoch
+  "dataset": { "name": "shapes-1k", "classes": ["circle", "square"] },  // the dataset as it was when the run was
+                           // created, so the run still names it once the dataset is removed (`classes` empty for runs
+                           // from before they were recorded; absent in mock mode and from older servers)
   "error": null | "...",
   "queue_position": null | 2,   // 1-based place in the training queue while the run waits there (1 starts next)
   "resolved": null | ResolvedTrain,   // what the trainer resolved `config` to (below); null until it is built
@@ -1299,8 +1307,9 @@ mostly shown) for the others.
   `config.json` (the trainer's resolved config), `metrics.jsonl` (every trainer event, every step; `/metrics` reads
   it, and a resumed run's repeated steps replace the earlier ones), `weights/last.folo` and `weights/best.folo`
   (full checkpoints, docs/FORMAT.md) and `samples/epoch_NNN.json`. On start every run is listed again; runs a
-  previous process left `queued`, `running` or `stopping` become `stopped` (with a `warn` log line) and can be
-  resumed with `resume_run_id`. On a graceful shutdown the active run stops after its current batch.
+  previous process left `queued`, `running` or `stopping` become `stopped` (with a `warn` log line; the ones that
+  were not stopping get `error_code: "interrupted"`) and can be resumed with `resume_run_id`. On a graceful shutdown
+  the active run stops after its current batch, and it and the queued runs end `stopped` with `interrupted` too.
 - `models/`: `.folo` files listed as models (scanned on every listing; metadata read once per file version).
 - `exports/`: exported models. `cache/eval/`: cached `/eval` results. `cache/weights/<model id>.<hash>.<variant>`:
   the exports of `/weights?format=…`: `f16.folo`, and `onnx` / `decode.onnx` / `decode-dynamic-half.onnx` / … (the

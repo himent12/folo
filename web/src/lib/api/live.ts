@@ -281,6 +281,8 @@ export class LiveRun {
         }
         this.logs = mergeLogs(logs.lines, this.logs);
         this.loading = false;
+        // A history that failed before (the panels said so) is in now.
+        this.error = undefined;
         // The history just applied is current: no longer "last known" (DESIGN_DIRECTION §2.8).
         this.#heard = Date.now();
         // Still down (a retry of the load got through): the view is last known as of now.

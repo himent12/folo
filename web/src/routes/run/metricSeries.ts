@@ -9,6 +9,7 @@
 import type { AppendLog, LogCursor } from '$lib/api/appendLog';
 import type { Epoch, Step } from '$lib/api/types';
 import type { Pt } from '$lib/charts/downsample';
+import { runHorizon } from '$lib/charts/horizon';
 
 /** Running bounds of a point list's finite values, and of its positive ones (what a log axis draws). */
 export interface Extent {
@@ -259,4 +260,23 @@ export class EpochSeries {
   points(field: EpochField): Pt[] {
     return this.#pts[field];
   }
+}
+
+/** The "So far" range's ends while a run trains: 5, 10, 20, 50, 100, 200, 500, … epochs. */
+const STEPS = [1, 2, 5];
+
+/**
+ * The x range of a live run's charts (lib/charts/horizon `runHorizon` for the rest): "So far" grows in steps (5, 10, 20,
+ * 50, … epochs, never past the plan) rather than to the next whole epoch, so the axis holds still for several epochs
+ * (it snapped from the plan to 0–1 at the first point, then 0–2, 0–3…) and a short run's "mosaic off" mark stays in
+ * view from the start.
+ */
+export function liveHorizon(observed: number, planned: number, mode: 'observed' | 'full'): [number, number] {
+  if (mode === 'full' || planned <= 0) return runHorizon(observed, planned, mode);
+  const need = Math.max(1, Math.ceil(observed));
+  for (let p = 1; ; p *= 10)
+    for (const s of STEPS) {
+      const end = s * p;
+      if (end >= 5 && end >= need) return [0, Math.min(planned, end)];
+    }
 }

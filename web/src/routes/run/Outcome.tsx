@@ -8,12 +8,14 @@
  * words behind "Why?"; never a toast. Once the run has an outcome, that line joins the outcome's callout as its second
  * line ("Completed in 30s · best …", then "Too short to learn: …"), so one run never stacks two banners.
  */
+import Box from '$icons/box';
 import CircleCheck from '$icons/circle-check';
 import Clock from '$icons/clock';
+import Database from '$icons/database';
 import Play from '$icons/play';
 import RotateCcw from '$icons/rotate-ccw';
 import ScanSearch from '$icons/scan-search';
-import Square from '$icons/square';
+import CircleStop from '$icons/circle-stop';
 import TriangleAlert from '$icons/triangle-alert';
 import { computed, css, effect, For, signal } from 'fw';
 import { hub } from '$lib/api/index';
@@ -26,6 +28,7 @@ import Button from '$lib/ui/Button';
 import Ident from '$lib/ui/Ident';
 import type { IconType } from '$lib/ui/types';
 import Callout from './Callout';
+import { failedTitle, failureSummary } from './failure';
 import { plain, scheduleTitle, shortCause, suggestedEpochs } from './warnings';
 
 export interface OutcomeProps {
@@ -43,6 +46,8 @@ export interface OutcomeProps {
   waitingActions?: () => JSX.Element;
   /** The trainer's schedule warnings, as it wrote them (./warnings). */
   warnings?: string[];
+  /** The run's dataset's name, for a failure that names it. */
+  datasetName?: string;
   /**
    * `/api/system`: the GPU's memory and whether the server estimates runs, to forecast the fixes. Undefined while it
    * loads; null when it could not be read (the fixes are then offered unforecast).
@@ -51,6 +56,18 @@ export interface OutcomeProps {
 }
 
 const NONE: string[] = [];
+
+/**
+ * A run has a checkpoint to continue from: a stopped run with weights has a model, a failed one a best epoch (an
+ * epoch finished, so its checkpoint was written).
+ */
+export const canContinue = (run: Pick<Run, 'best' | 'model_id'>) => !!run.model_id || !!run.best;
+
+/** A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. */
+function stoppedTitle(run: Run) {
+  if (run.error_code === 'interrupted') return run.started ? 'Interrupted: the server stopped during training' : 'Interrupted: the server stopped before it started';
+  return canContinue(run) ? `Stopped at epoch ${run.epoch}` : run.started ? 'Stopped during its first epoch' : 'Stopped before it started';
+}
 
 export default function Outcome(props: OutcomeProps) {
   const warnings = () => props.warnings ?? NONE;
@@ -115,6 +132,46 @@ export default function Outcome(props: OutcomeProps) {
   );
 
   const status = () => props.run.status;
+  /** "best mAP50-95 0.604 at epoch 150"; a model that detected nothing says so instead of "best 0.000 at epoch 1". */
+  const bestFact = () => (
+    <span>
+      {props.run.best && props.run.best.map50_95 > 0 ? (
+        <>
+          best mAP50-95 <span class="num">{metric(props.run.best.map50_95)}</span> at epoch {props.run.best.epoch}
+        </>
+      ) : (
+        'no detections'
+      )}
+    </span>
+  );
+  /** A failure's cause in plain words (./failure), by its error code; null: the server's message is the cause. */
+  const summary = computed(() => (props.run.status === 'failed' ? failureSummary(props.run.error_code, props.datasetName ?? 'this run') : null));
+  /**
+   * The hand-off of a run with a model, beside its result whatever else the callout says (a too-short warning keeps
+   * it): Open model, and Try in Playground unless the model scored exactly 0 (nothing to see there).
+   */
+  const handOff = () => (
+    <>
+      {props.run.model_id ? (
+        <>
+          <Button size="sm" icon={Box} href={href(`/models/${props.run.model_id}`)}>
+            Open model
+          </Button>
+          {props.run.best?.map50_95 !== 0 ? (
+            <Button size="sm" icon={ScanSearch} href={href(`/playground?model=${props.run.model_id}`)}>
+              Try in Playground
+            </Button>
+          ) : null}
+        </>
+      ) : null}
+    </>
+  );
+  /** Resume continues from the last finished epoch's checkpoint; with none (no epoch finished) it starts the run over. */
+  const resumeAction = () => (
+    <Button size="sm" icon={canContinue(props.run) ? Play : RotateCcw} loading={props.resuming ?? false} onclick={props.onresume}>
+      {canContinue(props.run) ? 'Resume' : 'Start again'}
+    </Button>
+  );
 
   return (
     <>
@@ -174,53 +231,57 @@ export default function Outcome(props: OutcomeProps) {
           Batch {props.run.config.batch} at {props.run.config.imgsz} px with <Ident value={props.run.config.arch} /> did not fit, at epoch {props.run.epoch}.
         </Callout>
       ) : status() === 'failed' ? (
+        // What went wrong in plain words by its error code, the server's own message under Details. A failure is not
+        // about the run's length: a schedule warning stays a line of its own, its fix behind Details with its reasons.
         <Callout
           tone="danger"
           icon={TriangleAlert}
-          title={`Failed at epoch ${props.run.epoch}`}
+          title={failedTitle(props.run)}
           role="alert"
-          moreLabel={short.get() ? 'Why?' : 'More fixes'}
+          moreLabel="Details"
           also={short.get()}
           actions={() => (
             <>
-              {short.get() ? scheduleFix() : null}
+              {props.run.error_code === 'data_error' ? (
+                <Button size="sm" icon={Database} href={href(`/datasets/${props.run.config.dataset_id}`)}>
+                  Check dataset
+                </Button>
+              ) : null}
               {/* Anything but out of memory can continue from the last checkpoint. */}
-              <Button size="sm" icon={Play} loading={props.resuming ?? false} onclick={props.onresume}>
-                Resume
-              </Button>
+              {resumeAction()}
             </>
           )}
           more={() => (
             <>
-              {short.get() ? (
-                why()
-              ) : (
-                <div class="alts cta-row">
-                  <Button size="sm" icon={RotateCcw} href={href(retryPath(props.run.id))}>
-                    New run like this
-                  </Button>
-                </div>
-              )}
+              {summary.get() && props.run.error ? <code class="mono">{props.run.error}</code> : null}
+              <div class="alts cta-row">
+                <Button size="sm" icon={RotateCcw} href={href(retryPath(props.run.id))}>
+                  New run like this
+                </Button>
+                {short.get() ? scheduleFix() : null}
+              </div>
+              {short.get() ? why() : null}
             </>
           )}
         >
-          {props.run.error}
+          {summary.get() ?? props.run.error}
         </Callout>
       ) : status() === 'completed' && short.get() ? (
-        // A run that completed but was too short to learn: the outcome and the warning in one callout, the fix its action
-        // (trying a model that learned nothing in the Playground is not the next step).
+        // A run that completed but was too short to learn: the outcome and the warning in one callout, the fix its first
+        // action, the model's hand-off after it.
         <Callout
           tone="success"
           icon={CircleCheck}
           title={`Completed in ${duration(props.elapsed)}`}
           moreLabel="Why?"
           also={short.get()}
-          facts={() => (
-            <span>
-              best mAP50-95 <span class="num">{metric(props.run.best?.map50_95)}</span> at epoch {props.run.best?.epoch ?? 0}
-            </span>
+          facts={() => bestFact()}
+          actions={() => (
+            <>
+              {scheduleFix()}
+              {handOff()}
+            </>
           )}
-          actions={scheduleFix}
           more={why}
         />
       ) : status() === 'completed' ? (
@@ -231,40 +292,34 @@ export default function Outcome(props: OutcomeProps) {
           brief
           facts={() => (
             <>
-              <span>
-                best mAP50-95 <span class="num">{metric(props.run.best?.map50_95)}</span> at epoch {props.run.best?.epoch ?? 0}
-              </span>
+              {bestFact()}
               <span>saved as a model</span>
             </>
           )}
-          actions={() => (
-            <>
-              {props.run.model_id ? (
-                <Button size="sm" icon={ScanSearch} href={href(`/playground?model=${props.run.model_id}`)}>
-                  Try in Playground
-                </Button>
-              ) : null}
-            </>
-          )}
+          actions={handOff}
         />
       ) : status() === 'stopped' ? (
+        // A run stopped before its first epoch ended has no checkpoint: it says so, and starts again rather than resumes.
         <Callout
           tone="neutral"
-          icon={Square}
-          title={`Stopped at epoch ${props.run.epoch}`}
+          icon={CircleStop}
+          title={stoppedTitle(props.run)}
           moreLabel="Why?"
           also={short.get()}
           more={short.get() ? why : undefined}
           actions={() => (
             <>
               {short.get() ? scheduleFix() : null}
-              <Button size="sm" icon={Play} loading={props.resuming ?? false} onclick={props.onresume}>
-                Resume
-              </Button>
+              {resumeAction()}
+              {handOff()}
             </>
           )}
         >
-          The last checkpoint was kept{props.run.model_id ? ' and saved as a model' : ''}.
+          {canContinue(props.run)
+            ? `The last checkpoint was kept${props.run.model_id ? ' and saved as a model' : ''}.`
+            : props.run.started
+              ? 'No epoch had finished, so nothing was saved.'
+              : 'It never trained, so nothing was saved.'}
         </Callout>
       ) : status() === 'queued' && props.waiting ? (
         // The dependency and the start estimate lead; the frames below stay compact until there is data.

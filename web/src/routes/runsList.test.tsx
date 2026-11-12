@@ -40,6 +40,8 @@ async function open(page: Component<Record<string, never>>, path: string, api: M
   target?.remove();
   hub.api = api;
   hub.mode = 'mock';
+  // The list writes its state to the URL: each test starts from its own.
+  history.replaceState(history.state, '', `#${path}`);
   router.route = parse(`#${path}`);
   target = document.createElement('div');
   document.body.appendChild(target);
@@ -169,7 +171,9 @@ describe('Runs: row checkboxes', () => {
     const label = runs.querySelector<HTMLLabelElement>('tbody tr[data-row] .check label')!;
     label.click();
     flushSync();
-    expect(go).not.toHaveBeenCalled();
+    // The run does not open; the selection joins the list's URL (it survives opening a run and coming back).
+    const id = label.closest('tr')!.dataset.id!;
+    expect(go.mock.calls).toEqual([[`/runs?sel=${id}`, { replace: true }]]);
     expect(label.closest('tr')!.classList.contains('on')).toBe(true);
     expect(runs.classList.contains('picking')).toBe(true);
     // Selecting never adds a column, so nothing is pushed off the edge.
@@ -205,5 +209,69 @@ describe('Runs: the status filter of a deep link', () => {
       flushSync();
       expect(target.querySelectorAll('table.runs tbody tr[data-id]').length).toBe(failed);
     });
+  });
+});
+
+describe('Runs: sort, search and selection kept in the URL; row menus on every ended run', () => {
+  const ids = () => [...target.querySelectorAll<HTMLElement>('table.runs tbody tr[data-id]')].map((r) => r.dataset.id!);
+  const loaded = () =>
+    vi.waitFor(() => {
+      flushSync();
+      if (!ids().length) throw new Error('rows not loaded');
+    });
+
+  it('opens as a link left it: search typed, sorted by best mAP high first (none last), the runs ticked', async () => {
+    const all = await new MockApi('normal', 0).runs();
+    const scored = all.filter((r) => r.best).sort((a, b) => b.best!.map50_95 - a.best!.map50_95);
+    await open(Runs, `/runs?sort=map&dir=desc&sel=${scored[0]!.id}`, new MockApi('normal', 0));
+    await loaded();
+    expect(ids().slice(0, scored.length)).toEqual(scored.map((r) => r.id));
+    expect(target.querySelector('th[aria-sort]')?.textContent).toContain('Best mAP50-95');
+    expect(target.querySelector('th[aria-sort]')?.getAttribute('aria-sort')).toBe('descending');
+    expect(target.querySelector<HTMLInputElement>(`tr[data-id="${scored[0]!.id}"] input[type="checkbox"]`)?.checked).toBe(true);
+  });
+
+  it('sorts on a header click, the second click turns it around, and the URL says so', async () => {
+    await open(Runs, '/runs?q=shapes', new MockApi('normal', 0));
+    await loaded();
+    expect(target.querySelector<HTMLInputElement>('input[aria-label="Filter runs"]')?.value).toBe('shapes');
+    const go = vi.spyOn(router, 'go');
+    const head = () => [...target.querySelectorAll<HTMLButtonElement>('th button.sort')].find((b) => b.textContent?.includes('Created'))!;
+    head().click();
+    flushSync();
+    expect(go).toHaveBeenLastCalledWith('/runs?q=shapes&sort=created&dir=asc', { replace: true });
+    head().click();
+    flushSync();
+    expect(go).toHaveBeenLastCalledWith('/runs?q=shapes', { replace: true });
+    go.mockRestore();
+  });
+
+  it('keeps two ticked runs in the URL once, with their commas (the URL spells them %2C)', async () => {
+    await open(Runs, '/runs', new MockApi('normal', 0));
+    await loaded();
+    const go = vi.spyOn(router, 'go').mockImplementation((path, o) => {
+      // As the router does: the URL's own spelling of the query comes back as the route.
+      history.replaceState(history.state, '', `#${path}`);
+      router.route = parse(location.hash);
+      void o;
+    });
+    const boxes = [...target.querySelectorAll<HTMLInputElement>('table.runs tbody tr[data-row] .check input')];
+    boxes[0]!.click();
+    flushSync();
+    boxes[1]!.click();
+    flushSync();
+    expect(go).toHaveBeenCalledTimes(2);
+    expect(go).toHaveBeenLastCalledWith(`/runs?sel=${ids()[0]},${ids()[1]}`, { replace: true });
+    go.mockRestore();
+  });
+
+  it('gives a finished run its model, the Playground and Delete run in its ⋯', async () => {
+    await open(Runs, '/runs', new MockApi('normal', 0));
+    await loaded();
+    const done = (await new MockApi('normal', 0).runs()).find((r) => r.status === 'completed' && r.model_id)!;
+    target.querySelector<HTMLButtonElement>(`tr[data-id="${done.id}"] td.act button`)!.click();
+    flushSync();
+    const items = [...document.querySelectorAll('[role="menuitem"]')].map((e) => e.textContent?.trim());
+    expect(items).toEqual(['Open model', 'Try in Playground', 'Delete run']);
   });
 });

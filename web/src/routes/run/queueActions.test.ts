@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { queueItems, queueWait, REMOVE_LABEL } from './queueActions';
+import { queueItems, queueWait, REMOVE_LABEL, removeDescription } from './queueActions';
 
 const labels = (...a: Parameters<typeof queueItems>) => queueItems(...a).map((i) => i.label);
 const noop = () => {};
@@ -34,5 +34,12 @@ describe('queueWait: how long a waiting run waits', () => {
   it('is null when nothing is known', () => {
     expect(queueWait(null, [null])).toBeNull();
     expect(queueWait(undefined, [])).toBeNull();
+  });
+});
+
+describe('removeDescription: what Remove from queue does', () => {
+  it('deletes a run that never started, and keeps what a resumed run trained', () => {
+    expect(removeDescription({ started: null })).toMatch(/nothing is lost: it leaves the queue and the runs list/);
+    expect(removeDescription({ started: '2026-11-07T06:00:03Z' })).toMatch(/keeps what it trained so far/);
   });
 });

@@ -7,6 +7,7 @@ import type { Epoch } from '$lib/api/types';
 import { classInk } from '$lib/design/classInk';
 import { unitTop } from '$lib/charts/domain';
 import Panel from '$lib/ui/Panel';
+import ErrorState from '$lib/ui/ErrorState';
 import Skeleton from '$lib/ui/Skeleton';
 import { tooltip } from '$lib/ui/tooltip';
 
@@ -17,6 +18,9 @@ export interface PerClassProps {
   loading: boolean;
   /** Rail width: class, AP50-95, change, bar. */
   compact?: boolean;
+  /** The run's history failed to load: an error with Retry in place of "appear after the first validation pass". */
+  error?: unknown;
+  retry?: () => void;
 }
 
 /** The last two epochs, compared by identity: a step (which bumps `version` too) leaves them as they were. */
@@ -63,7 +67,11 @@ export default function PerClass(props: PerClassProps) {
       pad="none"
       id="per-class"
     >
-      {props.loading ? (
+      {props.error !== undefined ? (
+        <div class="failed">
+          <ErrorState error={props.error} title="Could not load per-class results" retry={props.retry} compact />
+        </div>
+      ) : props.loading ? (
         <div class="sk">
           <Index each={[0, 1, 2, 3]}>{() => <Skeleton h="18px" />}</Index>
         </div>
@@ -150,6 +158,9 @@ css`
   .none {
     padding: 0 var(--space-4) var(--space-4);
     color: var(--text-tertiary);
+  }
+  .failed {
+    padding: 0 var(--space-4) var(--space-4);
   }
   .cls {
     display: inline-flex;

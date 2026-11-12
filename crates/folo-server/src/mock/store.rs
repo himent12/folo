@@ -493,13 +493,19 @@ impl Store for MockStore {
 
     fn delete_run(&self, id: &str) -> Result<()> {
         let (run, _) = self.run(id)?;
-        if run.is_active() {
+        // A run waiting in the queue that never started leaves it (as in real mode); any other active run stays.
+        let api = run.to_api();
+        let never_started = api.status == folo_api::RunStatus::Queued && api.started.is_none();
+        if run.is_active() && !never_started {
             return Err(Error::conflict("run_active", format!("run '{id}' is still active"))
                 .hint(format!("stop it first: POST /api/runs/{id}/stop")));
         }
         run.delete();
         self.runs.write().unwrap().retain(|r| r.0.id != id);
-        self.queue.lock().unwrap().retain(|r| r.id != id);
+        let mut queue = self.queue.lock().unwrap();
+        queue.retain(|r| r.id != id);
+        // The runs behind it start earlier now.
+        runs::reschedule(&queue, std::time::Instant::now());
         Ok(())
     }
 

@@ -60,6 +60,9 @@ pub struct DatasetRef {
     pub path: String,
     /// Format.
     pub format: DatasetFormat,
+    /// Class names (empty in runs created before they were recorded).
+    #[serde(default)]
+    pub classes: Vec<String>,
 }
 
 /// `run.json`.
@@ -93,6 +96,8 @@ struct RunState {
     outcome: Option<(RunStatus, Option<String>, Option<String>)>,
     /// Removed from the registry: every later request treats the run as unknown.
     deleted: bool,
+    /// The server's shutdown stopped the run (not a client): it ends `stopped` with error code `interrupted`.
+    interrupted: bool,
 }
 
 /// One run.

@@ -18,6 +18,7 @@ import InfoButton from '$lib/ui/InfoButton';
 import InfoRegion from '$lib/ui/InfoRegion';
 import { provideInfoSlot } from '$lib/ui/infoSlot';
 import Button from '$lib/ui/Button';
+import ErrorState from '$lib/ui/ErrorState';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';
 import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
 import { scoresTitle, type EvalSource } from '$lib/evaluated';
@@ -35,7 +36,7 @@ import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select.tsx';
 import { media } from '$lib/design/tokens';
 import MetricStrip, { type Tab, type TabDef } from './MetricStrip';
-import { EpochSeries, joinExtents, StepSeries, type Extent } from './metricSeries';
+import { EpochSeries, joinExtents, liveHorizon, StepSeries, type Extent } from './metricSeries';
 
 const CHART_KEY = 'folo.run.chartOpen';
 /**
@@ -128,6 +129,9 @@ export interface RunMetricsProps {
   queued?: boolean;
   /** What the epochs' scores are on (lib/evaluated `runEvalSource`): the titles name the split when it is not validation. */
   evalOn?: EvalSource | null;
+  /** The run's history failed to load: the panel says so with Retry, never "Waiting for the first validation…". */
+  error?: unknown;
+  retry?: () => void;
 }
 
 export default function RunMetrics(props: RunMetricsProps) {
@@ -209,7 +213,13 @@ export default function RunMetrics(props: RunMetricsProps) {
     const le = lastEpoch.get();
     return Math.max(ls ? ls.step / spe : 0, le ? le.epoch : 0);
   });
-  const xDomain = computed(() => runHorizon(observed.get(), props.run.epochs, horizon.get()), { equals: (a, b) => a[0] === b[0] && a[1] === b[1] });
+  // While the run trains, "So far" grows in steps (./metricSeries liveHorizon), so the axis holds still.
+  // The first epoch carries the start (loading, compiling the GPU pipelines): its time left swings by minutes. The ETA
+  // shows once an epoch has finished, or halfway through a one-epoch run.
+  const etaReady = computed(() => !!lastEpoch.get() || (props.run.epochs === 1 && observed.get() >= 0.5));
+  const xDomain = computed(() => (live.get() ? liveHorizon : runHorizon)(observed.get(), props.run.epochs, horizon.get()), {
+    equals: (a, b) => a[0] === b[0] && a[1] === b[1],
+  });
   const epochTitle = (x: number) => `Epoch ${x.toFixed(x % 1 === 0 ? 0 : 1)}`;
 
   /**
@@ -394,21 +404,26 @@ export default function RunMetrics(props: RunMetricsProps) {
     const r = props.run.resolved;
     return r ? `${warmupWords(r)} · ${r.cos_lr ? 'cosine' : 'linear'}` : 'warmup 3 epochs · linear';
   });
+  // Nothing detected yet (a best mAP of exactly 0, precision and recall both 0): said in words, never "best 0.000 at
+  // epoch 1" or "conf 1.00", which read as a finding.
+  const noneYet = computed(() => (live.get() ? 'no detections yet' : 'no detections'));
   const tabs = computed((): TabDef[] => {
     const run = props.run;
+    const nothing = run.best?.map50_95 === 0;
     const le = lastEpoch.get();
     const ls = lastStep.get();
     const pc = prConf.get();
     const sl = smoothedLast.get();
+    const prNone = !!le && le.val.precision === 0 && le.val.recall === 0;
     return [
       {
         id: 'map',
         label: 'mAP50-95',
         value: metric(le?.val.map50_95),
-        caption: run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
-        capShort: run.best ? `best · ep ${run.best.epoch}` : 'not yet',
+        caption: nothing ? noneYet.get() : run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
+        capShort: nothing ? noneYet.get() : run.best ? `best · ep ${run.best.epoch}` : 'not yet',
         title: `${scoresTitle(evalOn())} mAP50-95`,
-        qualifier: run.best ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
+        qualifier: run.best && !nothing ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
       },
       { id: 'map50', label: 'mAP50', value: metric(le?.val.map50), caption: latestEp.get(), capShort: latestShort.get(), title: `${scoresTitle(evalOn())} mAP50`, qualifier: 'by epoch' },
       {
@@ -417,8 +432,8 @@ export default function RunMetrics(props: RunMetricsProps) {
         short: 'P · R',
         value: le ? `${metric(le.val.precision)} · ${metric(le.val.recall)}` : '—',
         // The latest epoch's threshold: "conf 0.31 · ep 37" (each epoch has its own, so the chart says "each at").
-        caption: le ? (pc != null ? `conf ${conf(pc)} · ep ${le.epoch}` : `best-F1 conf · ep ${le.epoch}`) : 'after the first epoch',
-        capShort: le && pc != null ? `conf ${conf(pc)}` : latestShort.get(),
+        caption: prNone ? noneYet.get() : le ? (pc != null ? `conf ${conf(pc)} · ep ${le.epoch}` : `best-F1 conf · ep ${le.epoch}`) : 'after the first epoch',
+        capShort: prNone ? noneYet.get() : le && pc != null ? `conf ${conf(pc)}` : latestShort.get(),
         title: 'Precision and recall',
         qualifier: pc != null ? `by epoch · at each epoch's best-F1 conf (latest ${conf(pc)})` : "by epoch · at each epoch's best-F1 confidence",
       },
@@ -472,7 +487,7 @@ export default function RunMetrics(props: RunMetricsProps) {
    */
   const phoneQualifier = computed(() => {
     const b = props.run.best;
-    return tab.get() === 'map' && b ? `by epoch · ○ best${b.epoch === lastEpoch.get()?.epoch ? '' : ` ${metric(b.map50_95)}`} · ep ${b.epoch}` : current.get().qualifier;
+    return tab.get() === 'map' && b && b.map50_95 !== 0 ? `by epoch · ○ best${b.epoch === lastEpoch.get()?.epoch ? '' : ` ${metric(b.map50_95)}`} · ep ${b.epoch}` : current.get().qualifier;
   });
 
   // Phones: folding hands focus to the control that reopens it, and opening to the one that folds it again, so a
@@ -524,7 +539,11 @@ export default function RunMetrics(props: RunMetricsProps) {
 
   return (
     <section class="metrics" aria-label="Run metrics" data-tip-bounds>
-      {queued() && narrow() ? (
+      {props.error !== undefined ? (
+        <div class="failed">
+          <ErrorState error={props.error} title="Could not load this run's metrics" retry={props.retry} compact />
+        </div>
+      ) : queued() && narrow() ? (
         // Phones, queued: one line until there is something to chart; the banner above says when it starts.
         <button type="button" class="pending" aria-expanded={queuedOpen.get()} aria-controls="run-metrics-body" onclick={() => queuedOpen.set(!queuedOpen.peek())}>
           <span class="p-t">Metrics appear when training starts</span>
@@ -534,7 +553,7 @@ export default function RunMetrics(props: RunMetricsProps) {
           </span>
         </button>
       ) : null}
-      {!queuedFold.get() ? (
+      {props.error === undefined && !queuedFold.get() ? (
         <div class="metrics-body" id="run-metrics-body">
           <MetricStrip
             run={props.run}
@@ -545,6 +564,7 @@ export default function RunMetrics(props: RunMetricsProps) {
             closeId={closeId}
             closeText={closeText.get()}
             elapsed={elapsed.get()}
+            etaReady={etaReady.get()}
             tabs={tabs.get()}
             bind:tab={tab}
             unitOf={unitOf}
@@ -629,6 +649,10 @@ export default function RunMetrics(props: RunMetricsProps) {
                   // A tab swap fades the new chart in over 160 ms (0 under reduced motion, ui/motion).
                   <Key when={tab.get()}>
                     <div class="swap" in:fade={{ duration: motion(160) }}>
+                      {/* No point yet: the legend's row is held empty, so the plot does not drop when it appears. */}
+                      {!queued() && !series.get().some((x) => x.points.length > 0 && !x.ghost && !x.context && !x.lower) ? (
+                        <div class="legend-slot" aria-hidden="true"></div>
+                      ) : null}
                       <LineChart
                         series={series.get()}
                         height={height.get()}
@@ -671,6 +695,9 @@ css`
     border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     min-width: 0;
+  }
+  .failed {
+    padding: var(--space-4);
   }
   .unit {
     line-height: 1;
@@ -876,5 +903,9 @@ css`
   /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */
   .swap {
     min-width: 0;
+  }
+  /* The legend's line and the chart's gap under it (lib/charts LineChart, ChartLegend). */
+  .legend-slot {
+    height: calc(var(--type-sm-line) + var(--space-2));
   }
 `;

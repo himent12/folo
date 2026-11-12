@@ -14,6 +14,8 @@ export interface RunProfile {
   classes: number;
   /** Class names, snapshotted at creation so models keep them if the dataset is unregistered. */
   classNames: string[];
+  /** The dataset's name, recorded the first time the run is read (`Run.dataset`). */
+  datasetName?: string;
   /** Per-class difficulty multipliers (1 = average). */
   classEase: number[];
   stepsPerEpoch: number;

@@ -65,7 +65,21 @@ export async function moveQueued(
 /** Taking a waiting run out of the queue: one name, and one confirm, on the Runs list and the run's page. */
 export const REMOVE_LABEL = 'Remove from queue';
 export const removeTitle = (name: string) => `Remove ${name} from the queue?`;
-export const REMOVE_DESCRIPTION = 'It has not started yet, so nothing is lost. You can start it again from New run.';
+/**
+ * What removing does: a run that never started is deleted (DELETE /api/runs/{id}), so it leaves the list too; a resumed
+ * run that waits to continue is stopped and keeps what it trained.
+ */
+export const removeDescription = (run: Pick<Run, 'started'>) =>
+  run.started
+    ? 'It stops waiting and keeps what it trained so far. You can resume it later.'
+    : 'It has not started yet, so nothing is lost: it leaves the queue and the runs list. You can start it again from New run.';
+
+/** Removes a waiting run from the queue: deleted when it never started (null), stopped otherwise (the stopped run). */
+export async function removeQueued(run: Pick<Run, 'id' | 'started'>): Promise<Run | null> {
+  if (run.started) return hub.api.stopRun(run.id);
+  await hub.api.deleteRun(run.id);
+  return null;
+}
 
 /**
  * A waiting run's queue actions, one set in one order wherever they appear (the Runs row's ⋯ and the run page's):

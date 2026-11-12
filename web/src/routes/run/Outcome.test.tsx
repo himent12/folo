@@ -138,13 +138,31 @@ describe('Outcome', () => {
   it('keeps any other failure in full with Resume', () => {
     const onresume = vi.fn();
     const r = render(failed('dataset folder D:/data/shapes-hard is gone'), onresume);
-    expect(r.target.querySelector('.c-title')?.textContent).toBe('Failed at epoch 23');
+    expect(r.target.querySelector('.c-title')?.textContent).toBe('Failed in epoch 23');
     expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe('dataset folder D:/data/shapes-hard is gone');
-    expect(r.labels).toEqual(['Resume', 'More fixes']);
+    expect(r.labels).toEqual(['Resume', 'Details']);
     expect(r.more()).toEqual(['New run like this']);
     r.buttons[0]?.click();
     expect(onresume).toHaveBeenCalledOnce();
     r.done();
+  });
+
+  it('says a failure in plain words by its code, links the dataset, and keeps the raw error under Details', () => {
+    const error = 'io error at D:/data/bccd copy/images/train/BloodImage_00307.jpg: The system cannot find the path specified. (os error 3)';
+    // An older server's failed run: its epoch is the last one finished, its steps say it was in the next.
+    const run = { ...failed(error), error_code: 'data_error', epoch: 1, step: 25, steps_per_epoch: 13, best: null };
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(Outcome, { target, props: { run, elapsed: 30, onresume: vi.fn(), warnings: [], datasetName: 'bccd-copy' } });
+    flushSync();
+    expect(target.querySelector('.c-title')?.textContent).toBe('Failed in epoch 2');
+    expect(target.querySelector('.c-msg')?.textContent?.trim()).toBe('Files of dataset bccd-copy went missing or changed during training.');
+    const acts = [...target.querySelectorAll<HTMLElement>('.c-acts a, .c-acts button')];
+    expect(acts.map((b) => b.textContent?.trim())).toEqual(['Check dataset', 'Start again', 'Details']);
+    expect(acts[0]!.getAttribute('href')).toBe('#/datasets/ds_shapes_hard');
+    expect(target.querySelector('.c-detail code')?.textContent).toBe(error);
+    unmount(c);
+    target.remove();
   });
 
   const SHORT =
@@ -160,21 +178,72 @@ describe('Outcome', () => {
     const titles = [...c.querySelectorAll('.c-title')].map((t) => t.textContent);
     expect(titles).toEqual(['Completed in 16m 00s', 'Too short to learn:']);
     expect(c.querySelector('.c-also .c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
-    // The fix is the one action (no Playground for a model that learned nothing); the reasons behind Why?.
-    expect(r.labels).toEqual(['Train 8 epochs', 'Why?']);
+    // The fix leads; the model's hand-off stays beside it; the reasons behind Why?.
+    expect(r.labels).toEqual(['Train 8 epochs', 'Open model', 'Try in Playground', 'Why?']);
     expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&epochs=8');
+    expect(r.buttons[1]?.getAttribute('href')).toBe('#/models/m_1');
+    expect(r.buttons[2]?.getAttribute('href')).toBe('#/playground?model=m_1');
     expect(c.querySelector('.c-detail')?.textContent ?? '').not.toMatch(/lr0|warmup_epochs/);
     r.done();
   });
 
-  it('keeps the same one-callout pattern for a stopped or failed short run, with Resume beside the fix', () => {
-    for (const status of ['stopped', 'failed'] as const) {
+  it('keeps the same one-callout pattern for a stopped or failed short run; a failure keeps the fix under Details', () => {
+    for (const [status, labels] of [
+      ['stopped', ['Train 8 epochs', 'Resume', 'Open model', 'Try in Playground', 'Why?']],
+      ['failed', ['Resume', 'Details']],
+    ] as const) {
       const r = render(short(status), vi.fn(), [SHORT]);
       expect(r.target.querySelectorAll('.callout')).toHaveLength(1);
       expect(r.target.querySelector('.c-also .c-title')?.textContent).toBe('Too short to learn:');
-      expect(r.labels).toEqual(['Train 8 epochs', 'Resume', 'Why?']);
+      expect(r.labels).toEqual(labels);
       r.done();
     }
+  });
+
+  it('hands a completed run on to its model and the Playground, the Playground left out only at mAP exactly 0', () => {
+    const done = (map50_95: number): Run => ({ ...short('completed'), best: { epoch: 5, map50_95 } });
+    let r = render(done(0.073));
+    expect(r.labels).toEqual(['Open model', 'Try in Playground']);
+    expect(r.target.querySelector('.c-text')?.textContent).toContain('best mAP50-95 0.073 at epoch 5');
+    r.done();
+    r = render(done(0));
+    expect(r.labels).toEqual(['Open model']);
+    // Nothing detected is said in words, never "best mAP50-95 0.000 at epoch 1".
+    expect(r.target.querySelector('.c-text')?.textContent).toContain('no detections');
+    expect(r.target.querySelector('.c-text')?.textContent).not.toContain('0.000');
+    r.done();
+  });
+
+  it('never claims a checkpoint for a run stopped before an epoch finished: Start again, not Resume', () => {
+    const stopped = (started: string | null): Run => ({ ...failed(''), status: 'stopped', error: null, started, epoch: 0, best: null, model_id: null });
+    for (const [started, title, msg] of [
+      ['2026-11-07T06:00:03Z', 'Stopped during its first epoch', 'No epoch had finished, so nothing was saved.'],
+      [null, 'Stopped before it started', 'It never trained, so nothing was saved.'],
+    ] as const) {
+      const r = render(stopped(started));
+      expect(r.target.querySelector('.c-title')?.textContent).toBe(title);
+      expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe(msg);
+      expect(r.labels).toEqual(['Start again']);
+      r.done();
+    }
+    const r = render({ ...stopped('2026-11-07T06:00:03Z'), epoch: 3, model_id: 'm_1' });
+    expect(r.target.querySelector('.c-title')?.textContent).toBe('Stopped at epoch 3');
+    expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe('The last checkpoint was kept and saved as a model.');
+    expect(r.labels).toEqual(['Resume', 'Open model', 'Try in Playground']);
+    r.done();
+  });
+
+  it('says a run the server stopped was interrupted, not stopped by the user', () => {
+    const run: Run = { ...failed(''), status: 'stopped', error: null, error_code: 'interrupted', epoch: 2, model_id: 'm_1' };
+    let r = render(run);
+    expect(r.target.querySelector('.c-title')?.textContent).toBe('Interrupted: the server stopped during training');
+    expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe('The last checkpoint was kept and saved as a model.');
+    expect(r.labels[0]).toBe('Resume');
+    r.done();
+    r = render({ ...run, started: null, epoch: 0, model_id: null, best: null });
+    expect(r.target.querySelector('.c-title')?.textContent).toBe('Interrupted: the server stopped before it started');
+    expect(r.labels).toEqual(['Start again']);
+    r.done();
   });
 
   it('says the warning alone while the run has no outcome yet', () => {

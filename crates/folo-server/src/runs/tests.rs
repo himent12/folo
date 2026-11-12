@@ -39,6 +39,7 @@ fn a_step_cursor_never_skips_a_step() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
     let step = |s: u64| -> Step {
@@ -86,12 +87,14 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         resolved: None,
         queue_position: None,
         cloud: None,
+        dataset: None,
     };
     let dataset = DatasetRef {
         id: "ds_1".into(),
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let file = RunFile { run, dataset, weights: None, val_offset: 0, epochs_done: 0, last_metrics: None };
     std::fs::create_dir_all(dir.join("run_late")).unwrap();
@@ -143,6 +146,7 @@ fn a_run_stopped_before_it_is_queued_stays_out_of_the_queue() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
     runs.stop(e.id()).unwrap();
@@ -169,6 +173,7 @@ fn listed_queue_positions_are_one_snapshot() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let ids: Vec<String> = (0..4).map(|i| format!("run_q{i}")).collect();
     for id in &ids {
@@ -193,6 +198,7 @@ fn listed_queue_positions_are_one_snapshot() {
             resolved: None,
             queue_position: None,
             cloud: None,
+            dataset: None,
         };
         let file = RunFile {
             run,
@@ -283,4 +289,42 @@ fn only_complete_epochs_after_the_first_are_samples() {
 fn run_model_ids() {
     assert_eq!(run_model_id("run_7d1e", false), "m_7d1e");
     assert_eq!(run_model_id("run_7d1e", true), "m_7d1e-last");
+}
+
+/// A failed run names the epoch it failed in (its steps were in epoch 2, one epoch had finished); a stopped one the
+/// last epoch it finished (its checkpoint's).
+#[test]
+fn a_failed_run_names_the_epoch_it_failed_in() {
+    let dir = TestDir::new("runs-failed-epoch");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"f"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let loss = r#""loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1"#;
+    let step: Step = serde_json::from_str(&format!(r#"{{"epoch":2,"step":25,{loss}}}"#)).unwrap();
+    e.on_event(&RunEvent::Step(step));
+    for (status, epoch) in [(RunStatus::Failed, 2), (RunStatus::Stopped, 1)] {
+        let mut st = e.state.lock().unwrap();
+        st.file.epochs_done = 1;
+        st.file.run.epoch = 2;
+        e.finish(&mut st, status, None);
+        assert_eq!(st.file.run.epoch, epoch, "{status:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_epoch_is_one_log_line() {
+    let loss = r#"{"box":1,"cls":1,"dfl":1,"total":3.21449}"#;
+    let val = r#"{"map50":0.1,"map50_95":0.0734,"precision":0.1,"recall":0.1,"per_class":[]}"#;
+    let e: Epoch =
+        serde_json::from_str(&format!(r#"{{"epoch":3,"train_loss":{loss},"val":{val},"duration_s":15.24}}"#))
+            .unwrap();
+    assert_eq!(super::entry::epoch_line(&e, 5), "epoch 3/5: loss 3.214, mAP50-95 0.073, 15.2 s");
 }

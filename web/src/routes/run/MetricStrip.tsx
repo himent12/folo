@@ -8,6 +8,7 @@ import type { Run } from '$lib/api/types';
 import { progressText } from '$lib/api/progress';
 import { duration, eta } from '$lib/format';
 import Meta from '$lib/ui/Meta';
+import { failedEpoch } from './failure';
 
 export type Tab = 'map' | 'map50' | 'pr' | 'loss' | 'lr' | 'ips';
 export interface TabDef {
@@ -37,6 +38,8 @@ export interface MetricStripProps {
   closeId: string;
   closeText: { cap: string; full: string };
   elapsed: number | null;
+  /** The time left has settled (an epoch finished): until then "estimating…". */
+  etaReady?: boolean;
   tabs: TabDef[];
   tab?: Tab;
   /** A tab's unit, as the chart's readout draws it. */
@@ -67,10 +70,12 @@ export default function MetricStrip(props: MetricStripProps) {
   return (
     <div class="strip" class:finished={completed()}>
       <div class="epoch">
-        <span class="sr-only">Epoch</span>
+        {/* "Epoch 1 of 5": the epoch in progress, never read as epochs done next to "6%". */}
         <span class="big num">
-          {props.run.epoch}
-          <span class="of">/ {props.run.epochs}</span>
+          <span class="ep">Epoch</span>
+          {/* A failed run's: the one it failed in, as its callout says (./failure). */}
+          {props.run.status === 'failed' ? (failedEpoch(props.run) ?? 0) : props.run.epoch}
+          <span class="of">of {props.run.epochs}</span>
         </span>
         <div class="bar" class:has-close={props.mosaicOff}>
           <div
@@ -110,10 +115,14 @@ export default function MetricStrip(props: MetricStripProps) {
         <span class="cap num">
           {props.run.status === 'queued' ? (
             'Not started'
+          ) : props.live && props.run.step === 0 && props.run.status === 'running' ? (
+            // Running with no step yet: the trainer is built and its first batches are on the way (the GPU's pipelines
+            // compile during them).
+            'Starting the first epoch…'
           ) : props.live ? (
             <Meta line>
               <span>{progressText(props.run)}</span>
-              <span>{props.run.eta_s !== null ? `${eta(props.run.eta_s)} left` : 'estimating…'}</span>
+              <span>{props.run.eta_s !== null && props.etaReady ? `${eta(props.run.eta_s)} left` : 'estimating time left…'}</span>
             </Meta>
           ) : props.elapsed !== null ? (
             `${duration(props.elapsed)} total`
@@ -237,6 +246,13 @@ css`
     line-height: 32px;
     letter-spacing: var(--type-2xl-tracking);
     font-weight: var(--weight-semibold);
+  }
+  .ep {
+    margin-right: 6px;
+    font-size: var(--type-lg-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+    letter-spacing: 0;
   }
   .of {
     margin-left: 6px;

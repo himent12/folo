@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use folo_api::{BestEpoch, LogLevel, LogLine, ModelMetrics, Run, RunCloud, RunEvent, RunStatus, StatusEvent};
+use folo_api::{
+    BestEpoch, LogLevel, LogLine, ModelMetrics, Run, RunCloud, RunDataset, RunEvent, RunStatus, StatusEvent,
+};
 use tokio::sync::broadcast;
 
 use crate::index::write_atomic;
@@ -12,8 +14,14 @@ use crate::index::write_atomic;
 use super::{DatasetRef, EVENT_BUFFER, RunEntry, RunFile, RunState, TAIL_STEPS, append_line, now};
 
 impl RunEntry {
-    pub(super) fn new(id: String, dir: PathBuf, file: RunFile) -> RunEntry {
+    pub(super) fn new(id: String, dir: PathBuf, mut file: RunFile) -> RunEntry {
         let (tx, _) = broadcast::channel(EVENT_BUFFER);
+        // The dataset it was created on names it in the API, also once that dataset is removed (older run.json files
+        // have its name but no classes).
+        let d = &file.dataset;
+        file.run
+            .dataset
+            .get_or_insert_with(|| RunDataset { name: d.name.clone(), classes: d.classes.clone() });
         RunEntry {
             id,
             dir,
@@ -23,6 +31,7 @@ impl RunEntry {
                 claimed: false,
                 outcome: None,
                 deleted: false,
+                interrupted: false,
             }),
             tx,
             stop: Arc::new(AtomicBool::new(false)),
@@ -89,8 +98,9 @@ impl RunEntry {
         self.finish_with_code(st, status, error, None);
     }
 
-    /// [`RunEntry::finish`] with the failure's stable error code (`Run.error_code`).
-    fn finish_with_code(
+    /// [`RunEntry::finish`] with the failure's stable error code (`Run.error_code`; [`INTERRUPTED`] for a run the
+    /// server's stop ended).
+    pub(super) fn finish_with_code(
         &self,
         st: &mut RunState,
         status: RunStatus,
@@ -103,7 +113,9 @@ impl RunEntry {
         r.error_code = code;
         r.eta_s = None;
         r.finished = Some(now());
-        r.epoch = st.file.epochs_done;
+        // A failed run names the epoch it failed in (the one its steps were in); any other the last one it finished.
+        r.epoch =
+            if status == RunStatus::Failed { r.epoch.max(st.file.epochs_done) } else { st.file.epochs_done };
         r.model_id = model_id_of(&self.id, &self.dir, status).or(r.model_id.take());
         self.persist(st);
         self.send(RunEvent::Status(status_event(&st.file.run)));
@@ -120,6 +132,7 @@ impl RunEntry {
             }
         }
         let mut st = self.state.lock().unwrap();
+        let mut line = None;
         match ev {
             RunEvent::Status(s) => {
                 let r = &mut st.file.run;
@@ -160,6 +173,10 @@ impl RunEntry {
                 if r.best.is_none_or(|b| e.val.map50_95 > b.map50_95) {
                     r.best = Some(BestEpoch { epoch: e.epoch, map50_95: e.val.map50_95 });
                 }
+                // One log line per epoch, so the log shows progress (a cloud run's worker writes its own, mirrored).
+                if r.cloud.is_none() {
+                    line = Some(epoch_line(e, r.epochs));
+                }
                 self.persist(&st);
             }
             RunEvent::Log(l) => self.write_log(l),
@@ -169,6 +186,10 @@ impl RunEntry {
         }
         // Sent under the state lock, so subscribers see transitions in the order they happen.
         self.send(ev.clone());
+        drop(st);
+        if let Some(line) = line {
+            self.log(LogLevel::Info, line);
+        }
     }
 
     /// Takes a queued run for execution: false when it was stopped or deleted while it waited.
@@ -215,6 +236,8 @@ impl RunEntry {
             }
         };
         st.claimed = false;
+        let code =
+            if status == RunStatus::Stopped && st.interrupted { Some(INTERRUPTED.to_string()) } else { code };
         self.finish_with_code(&mut st, status, error, code);
     }
 
@@ -258,6 +281,10 @@ impl RunEntry {
     }
 }
 
+/// `Run.error_code` of a run that ended `stopped` because the server stopped (or restarted) while it trained or
+/// waited, not because a client stopped it.
+pub(crate) const INTERRUPTED: &str = "interrupted";
+
 /// How an execution of a claimed run ended ([`RunEntry::execute`]).
 pub(crate) enum Ended {
     /// It recorded its final status: publish it.
@@ -265,6 +292,14 @@ pub(crate) enum Ended {
     /// This process let go of the run without ending it (a cloud run left to its worker when the server shuts
     /// down): it stays as persisted, for the next process to follow.
     LetGo,
+}
+
+/// A run's log line for a finished epoch: "epoch 3/5: loss 3.214, mAP50-95 0.073, 15.2 s".
+pub(super) fn epoch_line(e: &folo_api::Epoch, epochs: u32) -> String {
+    format!(
+        "epoch {}/{epochs}: loss {:.3}, mAP50-95 {:.3}, {:.1} s",
+        e.epoch, e.train_loss.total, e.val.map50_95, e.duration_s
+    )
 }
 
 /// The model metrics of an epoch's validation.

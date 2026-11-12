@@ -300,6 +300,14 @@ describe('mock queue (docs/API.md, POST /api/runs/{id}/queue)', () => {
     const r = await api.createRun({ ...cfg, name: 'shapes-n-2' });
     expect(r).toMatchObject({ status: 'queued', queue_position: 2 });
   });
+
+  it('deletes a run that waits and never started (the one behind moves up), never the live one', async () => {
+    const api = new MockApi('normal', 0);
+    await api.deleteRun('run_q4n2');
+    expect(await places(api)).toEqual({ run_q7c5: 1 });
+    await expect(api.run('run_q4n2')).rejects.toMatchObject({ status: 404 });
+    await expect(api.deleteRun('run_7d1e')).rejects.toMatchObject({ status: 409, code: 'run_active' });
+  });
 });
 
 describe('mock operating point', () => {

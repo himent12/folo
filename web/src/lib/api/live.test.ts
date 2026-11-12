@@ -279,6 +279,27 @@ describe('LiveRun ordering', () => {
     stop();
   });
 
+  it("keeps a failed first history as an error beside the run (a finished run's snapshot still comes), until a sync gets it", async () => {
+    (hub.api as { runMetrics: Api['runMetrics'] }).runMetrics = () => Promise.reject(new Error('500'));
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    // A finished run: the stream's terminal status fetches the snapshot even though the history failed.
+    handlers.status?.({ status: 'stopped', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run).toBeDefined();
+    expect(live.error).toBeInstanceOf(Error);
+    // The page's panels say so; a later sync that gets through clears it.
+    (hub.api as { runMetrics: Api['runMetrics'] }).runMetrics = () => Promise.resolve({ steps: [step(1)], epochs: [] });
+    handlers.reconnect?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.error).toBeUndefined();
+    expect(live.steps).toHaveLength(1);
+    stop();
+  });
+
   it('refreshes the snapshot on a terminal status even while history is loading', async () => {
     let calls = 0;
     (hub.api as { run: Api['run'] }).run = () => {
