@@ -101,6 +101,41 @@ fn files_are_not_deleted_while_something_reads_them() {
     assert!(!folder.exists());
 }
 
+/// The reviewer's second case: a dataset whose description pointed elsewhere when it was indexed, then was changed
+/// to point into the folder, reads it now (its cached index still says otherwise); and any active run, on whatever
+/// dataset, keeps every folder.
+#[test]
+fn files_are_judged_by_descriptions_as_they_read_now() {
+    let t = TestDir::new("real-delete-changed");
+    let store = RealStore::open(t.join("home"));
+    let a = synthetic(&store, "a");
+    let yaml = std::fs::read_to_string(Path::new(&a.path).join("data.yaml")).unwrap();
+    let c = t.join("c");
+    let cfg = folo_data::synthetic::SyntheticConfig { images: 4, imgsz: 64, seed: 3, ..Default::default() };
+    folo_data::synthetic::write_yolo(&cfg, &c, folo_data::ImageFormat::Png).unwrap();
+    let b = t.join("b");
+    std::fs::create_dir_all(&b).unwrap();
+    let points_to = |p: &Path| {
+        std::fs::write(b.join("data.yaml"), format!("path: '{}'\n{yaml}", p.display())).unwrap();
+    };
+    points_to(&c);
+    let on_c = register(&store, &b.join("data.yaml"));
+    points_to(Path::new(&a.path));
+    let e = store.delete_dataset_files(&a.id).unwrap_err();
+    assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "dataset_in_use"), "{}", e.body.message);
+    assert!(e.body.message.contains(&on_c.name), "{}", e.body.message);
+    points_to(&c);
+
+    // A queued run on another dataset altogether.
+    let run = run_on(&store, &on_c.id, "elsewhere");
+    let e = store.delete_dataset_files(&a.id).unwrap_err();
+    assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "run_active"), "{}", e.body.message);
+    assert!(Path::new(&a.path).join("images").is_dir() && store.entry(&a.id).is_ok());
+    store.runs.stop(&run).unwrap();
+    store.delete_dataset_files(&a.id).unwrap();
+    assert!(!Path::new(&a.path).exists());
+}
+
 /// Registration and run admission wait while a deletion of dataset files holds the lease.
 #[test]
 fn registering_and_creating_runs_wait_for_a_deletion() {

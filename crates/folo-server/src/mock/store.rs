@@ -314,6 +314,16 @@ impl Store for MockStore {
             let m = "a folder registered from disk is not one this server wrote; its files are never deleted";
             return Err(Error::new(StatusCode::BAD_REQUEST, "invalid_query", m.to_string()));
         }
+        // As in real mode, never while a run is active (the scripted live run does not count).
+        let runs = self.runs.read().unwrap();
+        if let Some(r) = runs.iter().find(|r| r.0.id != LIVE_RUN && r.0.snap().status.is_active()) {
+            let m = format!(
+                "run {} is queued or training; files are deleted only while no run is",
+                r.0.config.name
+            );
+            return Err(Error::conflict("run_active", m).hint("wait for it to end, or stop it first"));
+        }
+        drop(runs);
         self.delete_dataset(id)
     }
 

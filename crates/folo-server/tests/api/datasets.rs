@@ -238,6 +238,12 @@ async fn mock_mode_deletes_a_generated_set_with_files_but_never_a_folder() {
     assert!(dir.join("images").is_dir());
     let (status, _, _) = send(&app, del(&made.id)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    // Never while a run is active, whatever dataset it trains on.
+    let set =
+        |name: &str| post_json("/api/datasets/synthetic", json!({ "name": name, "images": 10, "imgsz": 64 }));
+    let (other, trained): (Dataset, Dataset) = (ok(&app, set("b")).await, ok(&app, set("c")).await);
+    let _: Run = ok(&app, post_json("/api/runs", json!({ "dataset_id": trained.id, "epochs": 2 }))).await;
+    err(&app, del(&other.id), StatusCode::CONFLICT, "run_active").await;
 }
 
 /// Mock mode keeps an unregistered folder's id for it, as real mode's tombstones do: the folder registered again
