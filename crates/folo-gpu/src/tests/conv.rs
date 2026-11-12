@@ -134,6 +134,69 @@ fn conv_implicit_gemm() {
     run(&desc(1, 3, 17, 17, 8, 1, Window2d::square(7, 2, 3)), true, None, 6);
 }
 
+/// The tap mask's edge windows (`CONV_MODE` 1, one bit per tap) on the regular generator, f32 with the picked tiles
+/// and f16 with explicit ones (the regular kernels also with tensor cores on): exactly 32 taps (4×8: bit 31 is the
+/// last tap, inside the image for most pixels) and 5×5 (25 taps), not depthwise.
+#[test]
+fn conv_tap_mask_windows() {
+    let k4x8 = Window2d { kernel: (4, 8), stride: (1, 1), padding: (1, 3), dilation: (1, 1) };
+    let k4x8_s2 = Window2d { kernel: (4, 8), stride: (2, 2), padding: (2, 4), dilation: (1, 1) };
+    for (d, seed) in [
+        (desc(2, 3, 9, 13, 6, 1, k4x8), 80),
+        (desc(1, 4, 11, 12, 8, 1, k4x8_s2), 81),
+        (desc(2, 4, 11, 11, 6, 1, Window2d::square(5, 1, 2)), 82),
+        (desc(1, 5, 12, 10, 8, 1, Window2d::square(5, 2, 2)), 83),
+    ] {
+        run(&d, true, None, seed);
+        run(&Conv2dDesc { dtype: DType::F16, ..d }, true, Some(TileConfig::MEDIUM), seed + 10);
+    }
+}
+
+/// A forward conv whose `K` (45) is no multiple of any `BK` on a channel slice read in place, NaN in the channels
+/// right after the slice, finite weights, no activation, on the regular generator: the gather must stop at `K`
+/// (reading on would take the next channel, and 0 × NaN is NaN).
+#[test]
+fn conv_ragged_k_slice_before_nan() {
+    let ctx = gpu!();
+    // Channels 3..8 of 12: 3 finite noise channels before the slice, 4 NaN after it.
+    let (n, c, c_all, c0, h, w) = (2, 5, 12, 3, 7, 9);
+    let hw = h * w;
+    for (dtype, cfg, seed) in [(DType::F32, None, 84), (DType::F16, Some(TileConfig::MEDIUM), 85)] {
+        if dtype == DType::F16 && !ctx.caps().shader_f16 {
+            continue;
+        }
+        let d = Conv2dDesc { dtype, ..desc(n, c, h, w, 24, 1, Window2d::square(3, 1, 1)) };
+        let mut rng = Rng::new(seed);
+        let round = |v: Vec<f32>| if dtype == DType::F16 { f16_round(&v) } else { v };
+        let mut full = round(rng.vec(n * c_all * hw, -1.0, 1.0));
+        let (wt, b) = (round(rng.vec(24 * c * 9, -1.0, 1.0)), round(rng.vec(24, -1.0, 1.0)));
+        let slice: Vec<f32> =
+            (0..n).flat_map(|i| full[(i * c_all + c0) * hw..(i * c_all + c0 + c) * hw].to_vec()).collect();
+        for i in 0..n {
+            full[(i * c_all + c0 + c) * hw..(i + 1) * c_all * hw].fill(f32::NAN);
+        }
+        let want = cpu_conv(&d, &slice, &wt, Some(&b));
+        let up = |v: &[f32]| match dtype {
+            DType::F32 => GpuTensor::from_slice(&ctx, v, &[v.len()]).unwrap(),
+            DType::F16 => GpuTensor::from_f16(&ctx, &to_f16(v), &[v.len()]).unwrap(),
+        };
+        let (gx, gw, gb) = (up(&full), up(&wt), up(&b));
+        let gy = GpuTensor::empty(&ctx, &[want.len()], dtype).unwrap();
+        let at = conv::ConvInput { offset: c0 * hw, n_stride: c_all * hw };
+        conv::conv2d_input(&ctx, &d, (gx.raw(), at), gw.raw(), Some(gb.raw()), gy.raw(), cfg).unwrap();
+        let got = gy.to_vec().unwrap();
+        assert!(got.iter().all(|v| v.is_finite()), "{dtype:?}: NaN from past the slice in a ragged-K conv");
+        let (atol, rtol) = if dtype == DType::F16 { (3e-3, 2e-3) } else { (2e-5 * 45f32.sqrt(), 1e-5) };
+        assert_close(
+            &got,
+            &want,
+            atol,
+            rtol,
+            &format!("ragged-K {dtype:?} conv on a slice before NaN channels"),
+        );
+    }
+}
+
 #[test]
 fn conv_both_tile_configs() {
     for cfg in

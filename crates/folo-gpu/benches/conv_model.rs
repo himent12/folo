@@ -2,19 +2,41 @@
 //! layers at 40 and 20 px (few output tiles, large `K`) and the stride-2 downsamples.
 //!
 //! `cargo bench -p folo-gpu --bench conv_model` (`FOLO_BENCH_PRECISION=f32,f16tc`, default `f32`; `f16tc` needs
-//! `FOLO_GPU_TENSOR_CORES=1`). `FOLO_CONV_TUNE=1` also times every regular tile config (on tensor cores: the
-//! picked one) with 1–8 split-K chunks per case, and `FOLO_CONV_GEMM=1` the plain GEMM of the same size. Each
-//! row is the best of three timed runs of back-to-back dispatches, and `x` is how often the layer occurs in the
-//! forward, so the last line is roughly what these layers cost per forward.
+//! `FOLO_GPU_TENSOR_CORES=1`). The `FOLO_CONV_*` switches are tested for presence, so any value (even `0`) turns
+//! them on. `FOLO_CONV_TUNE` also times every regular tile config with 1–8 split-K chunks per case; on tensor
+//! cores it times every tensor-core tile config instead (these explicit-config rows keep the automatic split-K
+//! choice), then the picked config with 1–8 chunks. `FOLO_CONV_GEMM` times the plain GEMM of the same size
+//! (skipped on tensor cores), and `FOLO_CONV_BIG` adds folo-s's layers at 80 px and above. Each row is the best of
+//! three timed runs of back-to-back dispatches, and `x` is how often the layer occurs in the forward, so the last
+//! line is roughly what these layers cost per forward.
 
 use std::time::Instant;
 
 use folo_gpu::kernels::conv::{self, Conv2dDesc, ConvPlan};
+use folo_gpu::kernels::coop::{self, CoopConfig};
 use folo_gpu::kernels::gemm::{self, TileConfig};
 use folo_gpu::kernels::pooling::Window2d;
 use folo_gpu::{DType, GpuContext, UnaryOp};
 
 fn bench(ctx: &GpuContext, d: &Conv2dDesc, plan: ConvPlan) -> f64 {
+    bench_with(ctx, d, |x, w, b, y| {
+        conv::conv2d_with_plan(ctx, d, x, w, Some(b), y, plan).unwrap();
+    })
+}
+
+/// `d` on tensor cores with an explicit tile config.
+fn bench_coop(ctx: &GpuContext, d: &Conv2dDesc, cfg: CoopConfig) -> f64 {
+    bench_with(ctx, d, |x, w, b, y| {
+        coop::conv2d(ctx, d, d.dtype, x, w, Some(b), y, Some(cfg)).unwrap();
+    })
+}
+
+/// Seconds per call of `f(x, weight, bias, y)` on buffers sized for `d`: best of three timed runs.
+fn bench_with(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    f: impl Fn(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer),
+) -> f64 {
     let (oh, ow) = d.output().unwrap();
     let (kh, kw) = d.win.kernel;
     let es = d.dtype.size() as u64;
@@ -30,7 +52,7 @@ fn bench(ctx: &GpuContext, d: &Conv2dDesc, plan: ConvPlan) -> f64 {
             if i % 8 == 7 {
                 ctx.flush();
             }
-            conv::conv2d_with_plan(ctx, d, x.raw(), w.raw(), Some(b.raw()), y.raw(), plan).unwrap();
+            f(x.raw(), w.raw(), b.raw(), y.raw());
         }
         ctx.sync().unwrap();
     };
@@ -95,7 +117,7 @@ fn main() {
     let tune = std::env::var("FOLO_CONV_TUNE").is_ok();
     let precisions = std::env::var("FOLO_BENCH_PRECISION").unwrap_or_else(|_| "f32".into());
     // (name, c_in, size, c_out, stride, occurrences per forward)
-    let cases: [(&str, usize, usize, usize, usize, usize); 17] = [
+    let mut cases: Vec<(&str, usize, usize, usize, usize, usize)> = vec![
         ("n c3k 3x3 64->64 @20", 64, 20, 64, 1, 9),
         ("n head 3x3 256->64 @20", 256, 20, 64, 1, 1),
         ("n down5 3x3 s2 128->256 @40", 128, 40, 256, 2, 1),
@@ -114,6 +136,18 @@ fn main() {
         ("s down4 3x3 s2 128->256 @80", 128, 80, 256, 2, 1),
         ("s 1x1 512->512 @20", 512, 20, 512, 1, 4),
     ];
+    if std::env::var("FOLO_CONV_BIG").is_ok() {
+        // folo-s's layers at 80 px and above, where most of a batch-16 forward's GEMM time goes.
+        cases.extend([
+            ("s down2 3x3 s2 32->64 @320", 32, 320, 64, 2, 1),
+            ("s down3 3x3 s2 128->128 @160", 128, 160, 128, 2, 1),
+            ("s head 3x3 128->64 @80", 128, 80, 64, 1, 1),
+            ("s head 3x3 64->64 @80", 64, 80, 64, 1, 1),
+            ("s c3k 3x3 64->64 @80", 64, 80, 64, 1, 4),
+            ("s 1x1 256->256 @80", 256, 80, 256, 1, 2),
+            ("s 1x1 128->128 @160", 128, 160, 128, 1, 2),
+        ]);
+    }
     for prec in precisions.split(',') {
         let (dtype, tc) = match prec.trim() {
             "f32" => (DType::F32, false),
@@ -167,6 +201,18 @@ fn main() {
                 }
             }
             if tune && tc {
+                for c in [
+                    CoopConfig::C128X128,
+                    CoopConfig::C64X128,
+                    CoopConfig::C64X64,
+                    CoopConfig::C32X128,
+                    CoopConfig::C16X256,
+                ] {
+                    let secs = bench_coop(&ctx, &d, c);
+                    let tf = d.flops().unwrap() / secs / 1e12;
+                    let row = format!("    tc {}x{}x{}", c.bm, c.bn, c.bk);
+                    println!("{row:<40} {:>9.1} {tf:>8.1}", secs * 1e6);
+                }
                 // The picked tensor-core tile config with 1–8 chunks.
                 for splits in [1, 2, 3, 4, 6, 8] {
                     let secs = bench(&ctx, &d, ConvPlan { tiles: None, splits: Some(splits) });

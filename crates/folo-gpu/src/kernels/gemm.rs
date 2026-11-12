@@ -276,6 +276,10 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     // Input gradient of one stride phase (`super::conv`'s stride-phase decomposition).
     let phase = mode == 2 && spec.get_bool("PHASE");
     let split = spec.get_bool("SPLIT");
+    // Forward conv windows of at most 32 taps keep a per-column tap mask (`vm`) instead of four bounds checks.
+    let (kh_n, kw_n) = (spec.get_u32("KH", 1), spec.get_u32("KW", 1));
+    let (dh_n, dw_n) = (spec.get_u32("DH", 1), spec.get_u32("DW", 1));
+    let tap_mask = mode == 1 && kh_n * kw_n <= 32;
     let bias = spec.get_u32("BIAS_KIND", 0);
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`super::gemm_cat`; plain GEMM, `B` not transposed).
     let cat = spec.get_u32("CAT", 1);
@@ -380,11 +384,33 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let _ = writeln!(s, "  let bi = tid % {}u; let bo = tid / {}u;", pb.inner, pb.inner);
     // One B column per thread for the whole K loop, so its index math is done once.
     match mode {
-        1 => s.push_str(
-            "  let cj = n0 + bi;\n  let coh = cj / OW; let cow = cj % OW;\n\
-             let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;\n\
-             let cjok = cj < N;\n",
-        ),
+        1 => {
+            s.push_str(
+                "  let cj = n0 + bi;\n  let coh = cj / OW; let cow = cj % OW;\n\
+                 let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;\n\
+                 let cjok = cj < N;\n",
+            );
+            if tap_mask {
+                // Which taps of this column's window lie inside the image (bit `kh·KW + kw`), and the window's
+                // top-left element (wrapping u32 arithmetic: only in-image taps are ever read).
+                s.push_str("  var vm = 0u;\n  if (cjok) {\n");
+                for kh in 0..kh_n {
+                    for kw in 0..kw_n {
+                        let _ = writeln!(
+                            s,
+                            "    if (u32(cih0 + {}) < IH && u32(ciw0 + {}) < IW) {{ vm |= {}u; }}",
+                            kh * dh_n,
+                            kw * dw_n,
+                            1u32 << (kh * kw_n + kw)
+                        );
+                    }
+                }
+                s.push_str(
+                    "  }\n  let cbase = offB + bitcast<u32>(cih0 * i32(IW) + ciw0);\n\
+                     \x20 let IHW = IH * IW; let DHIW = DH * IW;\n",
+                );
+            }
+        }
         2 if phase => s.push_str(
             "  let cj = n0 + bi; let cjok = cj < N;\n\
              let ca = pi(30u) + i32(cj / WR); let cb = pi(31u) + i32(cj % WR);\n",
@@ -463,6 +489,18 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
             (format!("rb[{}]", u / 4), format!("[{}]", u % 4))
         };
         match mode {
+            1 if tap_mask => {
+                // Unit (k = k0 + o, j = cj): one constant division, the tap's bit and an add per element.
+                let kcheck = if check { "k < K && " } else { "" };
+                let _ = writeln!(
+                    load,
+                    "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k - ci * (KH * KW);\n\
+                     \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
+                     \x20       {reg}{comp} = f32(B[cbase + ci * IHW + (r / KW) * DHIW + (r % KW) * DW]);\n\
+                     \x20     }} else {{ {reg}{comp} = 0.0; }} }}"
+                );
+                continue;
+            }
             1 => {
                 // Unit (k = k0 + o, j = cj): gather from the image.
                 let _ = writeln!(

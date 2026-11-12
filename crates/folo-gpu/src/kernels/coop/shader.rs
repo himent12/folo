@@ -58,6 +58,10 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     // Input gradient of one stride phase (`crate::kernels::conv`'s stride-phase decomposition).
     let phase = mode == 2 && spec.get_bool("PHASE");
     let split = spec.get_bool("SPLIT");
+    // Forward conv windows of at most 32 taps keep a per-column tap mask (`vm`), as the regular generator does.
+    let (kh_n, kw_n) = (spec.get_u32("KH", 1), spec.get_u32("KW", 1));
+    let (dh_n, dw_n) = (spec.get_u32("DH", 1), spec.get_u32("DW", 1));
+    let tap_mask = mode == 1 && kh_n * kw_n <= 32;
     let bias = spec.get_u32("BIAS_KIND", 0);
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`crate::kernels::gemm_cat`).
     let cat = spec.get_u32("CAT", 1);
@@ -153,6 +157,26 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20 let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;",
                 pb.inner_expr()
             );
+            if tap_mask {
+                // As in `crate::kernels::gemm`: which taps of this column's window lie inside the image (bit
+                // `kh·KW + kw`), and the window's top-left element (wrapping u32: only in-image taps are read).
+                s.push_str("  var vm = 0u;\n  if (cjok) {\n");
+                for kh in 0..kh_n {
+                    for kw in 0..kw_n {
+                        let _ = writeln!(
+                            s,
+                            "    if (u32(cih0 + {}) < IH && u32(ciw0 + {}) < IW) {{ vm |= {}u; }}",
+                            kh * dh_n,
+                            kw * dw_n,
+                            1u32 << (kh * kw_n + kw)
+                        );
+                    }
+                }
+                s.push_str(
+                    "  }\n  let wbase = offB + bitcast<u32>(cih0 * i32(IW) + ciw0);\n\
+                     \x20 let IHW = IH * IW; let DHIW = DH * IW;\n",
+                );
+            }
         }
         // Input gradient: column = input pixel; B[k = (co, kh, kw)][j] =
         // G[co][(ih + PH − kh·DH) / SH][(iw + PW − kw·DW) / SW] where both divisions are exact and in range, else 0.
@@ -250,7 +274,16 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     }
     for u in (0..pb.count).filter(|_| mode != 3) {
         let (o, i) = (pb.outer(u), pb.inner_expr());
-        let body = if mode == 1 {
+        let body = if mode == 1 && tap_mask {
+            let _ = i;
+            let kcheck = if check { "k < K && " } else { "" };
+            format!(
+                "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k - ci * (KH * KW);\n\
+                 \x20     if ({kcheck}((vm >> r) & 1u) != 0u) {{\n\
+                 \x20       rb{u} = MB[wbase + ci * IHW + (r / KW) * DHIW + (r % KW) * DW];\n\
+                 \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
+            )
+        } else if mode == 1 {
             let _ = i;
             format!(
                 "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k % (KH * KW);\n\

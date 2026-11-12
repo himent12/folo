@@ -170,6 +170,56 @@ bottleneck 64 → 32 @ 40 62 → 44) and is flat or a little worse for `K` ≤ 1
 71 with 4 chunks, folo-n down4 64 → 128 s2 @ 80 104 → 125 with 3); the 17 cases sum to 3.62 ms with the plan.
 Kept one rule for both paths: batch-16 tensor-core GEMM time is a tie either way (above).
 
+## Fix: `tiny_amp_run_learns` (#193)
+
+Main's Windows CI went red after #186: folo-vision `gpu_amp` `tiny_amp_run_learns` (40 AdamW steps, AMP tail
+loss ≤ 1.15 × f32's) failed with seed 0 at ratio 1.19. Not a numerics error: split-K forced off on main reproduces
+c0464b29 bit for bit, and there seeds 0–5 give 0.97–1.16 (seed 5 already failed); with split-K 0.91–1.19. One AMP
+step of folo-n (128 px, batch 4, same weights): AMP gradients 6.29% (split off) and 6.21% (split on) from f32;
+split on vs off moves the f32 gradient by 4.7e-5. #193 set that test's bound to 1.3 (the dual-head test keeps
+1.15) and added a tensor-core split-K test on a channel slice read in place.
+
+## PR 2: the forward gather through a per-column tap mask (regular and tensor-core generators)
+
+The implicit-GEMM gather rebuilt, per loaded element, `ci = k / 9`, `r = k % 9`, the row and column, four
+bounds checks and the address (about 15 integer operations). Now each thread builds, once before the K loop, its
+output pixel's tap mask (bit `kh·KW + kw` set when the tap lies inside the image) and the address of its
+window's top-left element; an element is then one division by the constant `KH·KW`, a bit test and an add.
+Windows of more than 32 taps (a 7×7 stem) keep the old gather. Both generators. As before, the gather's
+`k < K` test is compiled out only when M, N and K are all tile multiples (`CHECK` false), not whenever `K` is.
+
+Tests: the existing CPU-reference conv cases that take this gather (3×3 stride 1 and 2, padding, dilation,
+groups, 1×3, 1×1 stride 2, ragged M and N, split-K, channel slices; their 5×5 cases are depthwise, a separate
+kernel) plus new ones on both generators: a 4×8 window (exactly 32 taps, so bit 31 is a live tap), 5×5 with
+groups 1, and a conv with a ragged `K` on a channel slice read in place whose next channels are NaN (a missing
+`k < K` test pulls 0 × NaN in; both this and a dropped bit 31 were checked to fail the tests). On tensor cores
+also 32 → 128 channels at 16×16, where M, N and K are all tile multiples (`CHECK` false), whole and in 2 chunks.
+The tensor-core conv tests moved to `tests/coop_conv.rs`.
+
+A/B, `main` 5246c0c0 (A) against it (B), `gpu` (forward f32 and f16tc, train f32 and AMP) and `gpu_profile`
+(f16tc, batch 16), 3 rounds each, GPU 0–1% before every run, 2026-11-12 (`ab/tc_mask`, `ab/proftc_mask`):
+
+| row | main | tap mask | |
+|---|---|---|---|
+| folo-n f32 forward b16 pipelined | 2061 img/s (2060–2069) | 2116 img/s (2102–2117) | +2.7% |
+| folo-s f32 forward b16 pipelined | 815 img/s (814–815) | 830 img/s (794–832) | +1.8% |
+| folo-n f16 TC forward b16 pipelined | 3606 img/s (3592–3629) | 3560 img/s (2718–3688) | tie |
+| folo-s f16 TC forward b16 pipelined | 1406 img/s (1405–1408) | 1459 img/s (1450–1459) | +3.8% |
+| folo-n f16 TC b16, `coop_gemm` replay | 2.78 ms (2.73–2.79) | 2.67 ms (2.63–2.68) | −4.0% |
+| folo-s f16 TC b16, `coop_gemm` replay | 6.93 ms (6.91–6.95) | 6.55 ms (6.54–6.57) | −5.5% |
+| folo-n / folo-s f32 forward b1 median | 1.34 / 2.45 ms | 1.29 / 2.28 ms | −4% / −7% (noisy) |
+| folo-n / folo-s f16 TC forward b1 median | 1.18 / 1.79 ms | 1.09 / 1.51 ms | −8% / −16% (noisy) |
+| folo-n / folo-s train step f32 | 44.30 / 104.33 ms | 44.49 / 103.81 ms | tie |
+| folo-n / folo-s train step AMP | 27.79 / 56.21 ms | 27.21 / 55.78 ms | tie |
+
+How far to trust it: the min–max ranges are apart on folo-n f32 b16, folo-s f16 TC b16 and both `coop_gemm`
+replays. folo-s f32 b16 overlaps (main 814–815, tap mask 794–832: one slow round), so its +1.8% is a median gain
+only. The batch-1 rows are medians of noisy rows whose ranges overlap between A and B: lower observed medians, not
+a measured gain, and no proof that batch 1 is not slower. The train steps are ties.
+
+An earlier f32-only A/B of the regular generator alone (`ab/fwd_mask`, 3 rounds, GPU 0–3% before every run)
+gave folo-n f32 b16 1993 (1843–2061) → 2107 (2094–2110) img/s and folo-s 808 (796–811) → 827 (821–827).
+
 ## Leftovers (by expected gain)
 
 1. **Tensor-core split threshold by `K`**: on tensor cores, a chunk of ≤ 4 `BK = 32` tiles does not pay. A
