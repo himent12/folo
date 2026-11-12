@@ -8,11 +8,13 @@ import { tooltip } from '$lib/ui/tooltip';
 
 export default function ConnectionStatus(props: { collapsed: boolean }) {
   const label = computed(() =>
-    hub.offline ? 'Server offline' : hub.mode === 'live' ? 'Connected' : hub.mode === 'mock' ? 'Demo data' : 'Connecting…',
+    hub.offline ? (hub.refused ? 'Not connected' : 'Server offline') : hub.mode === 'live' ? 'Connected' : hub.mode === 'mock' ? 'Demo data' : 'Connecting…',
   );
   const detail = computed(() =>
     hub.offline
-      ? `No answer from ${hub.serverUrl}. Retrying…`
+      ? hub.refused
+        ? `${hub.serverUrl}: ${hub.refused} Retrying…`
+        : `No answer from ${hub.serverUrl}. Retrying…`
       : hub.mode === 'live'
         ? `folo serve ${hub.version ?? ''} at ${hub.serverUrl}`
         : hub.mode === 'mock'

@@ -1,5 +1,6 @@
 /**
- * The app-wide word that the server stopped answering (`hub.offline`), while Studio probes it: a pill in the top bar,
+ * The app-wide word that the server stopped answering (`hub.offline`), or answered a connect as something that is not
+ * a usable FOLO server (`hub.refused`, said instead), while Studio probes it: a pill in the top bar,
  * between the page's trail and the bar's actions. The bar's height is fixed, so nothing on the page moves when it comes
  * or goes, and nothing of the page is ever under it (v-shell N5). Phones say "Offline" (the sidebar's Settings page has
  * the rest). It goes when the server answers again; the sidebar footer then says Connected.
@@ -14,8 +15,8 @@ export default function OfflineNotice() {
       {hub.offline ? (
         <p class="notice">
           <WifiOff size={14} strokeWidth={2} aria-hidden="true" />
-          <span class="long">Can't reach folo serve. Retrying…</span>
-          <span class="short">Offline</span>
+          <span class="long">{hub.refused ? `${hub.refused} Retrying…` : "Can't reach folo serve. Retrying…"}</span>
+          <span class="short">{hub.refused ? 'Not connected' : 'Offline'}</span>
         </p>
       ) : null}
     </div>

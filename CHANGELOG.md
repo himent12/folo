@@ -28,7 +28,8 @@ fixes.
 - **Not found and errors**: one not-found state for every deleted run, model, dataset, benchmark and labeling job;
   error states name what could not be loaded; a real offline state that recovers by itself, its notice in the top bar;
   Studio no longer falls back to demo data by itself: a server that is slow to answer or not there shows "Server
-  offline" and is asked again until it answers (demo data only with `?mock=1` or Settings › Use demo data); server
+  offline" and is asked again until it answers (demo data only with `?mock=1` or Settings › Use demo data), and an
+  address that answers but not as FOLO (another program, a 404 page, a sign-in wall) says so instead; server
   hints written for agents stay out of people's way; messages that start with an identifier keep its case.
 - **Dialogs and small things**: a double-click that opens a dialog no longer closes it; closing a dialog after its
   notice changed tone no longer throws; toasts expire and never stack; Back and Forward restore the scroll position;
