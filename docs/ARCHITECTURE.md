@@ -57,7 +57,9 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   split by input channels, then the GEMMs and output transforms by output channels). Not bit for bit the direct
   conv: an output is within `(C + 8) · 2^-23 · 9 · Σ_c D_c · G_c` of the exact sum (`D_c`, `G_c`: the sums of
   |inputs| over its tile's 4x4 input patch and of |weights| over its 3x3 kernel in channel c; derived in the
-  module doc, tested), an error that grows with C like the direct conv's `K · 2^-23 · Σ|terms|`; COCO val AP of
+  module doc, tested; it assumes no step overflows or underflows, and inputs within a factor ~4 of `f32::MAX` can
+  overflow in the input transform where the direct sum would not), an error that grows with C like the direct
+  conv's `K · 2^-23 · Σ|terms|`; COCO val AP of
   folo-n-coco changed by less than 1e-6. The same
   bits for any thread count or batch. The autograd conv (`conv2d_with`) keeps the direct conv.
   `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part

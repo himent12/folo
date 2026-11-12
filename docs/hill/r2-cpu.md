@@ -343,8 +343,8 @@ log; that binary had the rule behind environment knobs): under load less of the 
 forward.
 
 After the review fixes (per-row writes into `V`, the cache checked against the view's storage, at most 4096
-channels), the fixed head (`pr1b`) against the first one (`pr1`), 3 rounds, 14–16 cores busy elsewhere (logs
-`pr1b_n28.txt`, `pr1b_m28.txt`): folo-n forward 15.10 (`base`) / 14.06 / **14.09** ms, folo-m 86.57 / 81.34 /
+channels), the fixed head (`pr1b`) against the first one (`pr1`), 3 rounds (logs `pr1b_n28.txt`, 13.4–16.5
+cores busy elsewhere, and `pr1b_m28.txt`, 10.1–11.0): folo-n forward 15.10 (`base`) / 14.06 / **14.09** ms, folo-m 86.57 / 81.34 /
 **79.90** ms: the fixes cost nothing.
 
 ### Negative results (PR 3)

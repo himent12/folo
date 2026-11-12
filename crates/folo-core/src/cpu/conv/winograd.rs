@@ -14,6 +14,11 @@
 //! unit covers the second-order terms and the rounding of the bias add (`u · |bias|` besides). It grows with `C`:
 //! with every product of one sign nothing cancels (all-ones inputs, 512 channels: 20 · 2^-23 · Σ|terms| of the
 //! direct sum, far inside the direct conv's own `K · 2^-23 · Σ|terms|`, `K = 9C`). Tested in `kernel_tests.rs`.
+//! Like every rounding bound it assumes no step overflows or underflows: the transforms add up to 4 inputs (and
+//! scale weights by up to 9/4 before the products), so inputs within a factor ~4 of `f32::MAX` can overflow to
+//! inf (and inf - inf to NaN) where the direct sum stays finite, and products below the normal range
+//! (|value| < 2^-126) lose their relative accuracy. Activations of a trained model are many orders of magnitude
+//! inside both.
 //!
 //! The tiles of an image are cut into blocks of `tb` tiles (a multiple of `NR`). A block transforms its input
 //! patches into `V` (`16 x C x tb`), runs the 16 GEMMs into `M` (`16 x O x tb`) and transforms `M` into its
