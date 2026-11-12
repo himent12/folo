@@ -142,6 +142,28 @@ pub fn with_auto_rule(mut cmd: CliCommand, config: &TrainConfig, rule: Option<u3
     cmd
 }
 
+/// The warmup floor (`TrainConfig.warmup_floor`, docs/MODEL.md §8.4) a run trained with, from its folder's
+/// `config.json`: its `train.warmup_floor`, or 100 when the key is absent (written before it existed). `None`
+/// when the run has no `config.json` (it starts with the current default).
+pub fn recorded_warmup_floor(run_dir: &std::path::Path) -> Option<u64> {
+    let bytes = std::fs::read(run_dir.join("config.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let train = v.get("train")?;
+    Some(train.get("warmup_floor").and_then(serde_json::Value::as_u64).unwrap_or(folo_nn::WARMUP_FLOOR))
+}
+
+/// `cmd` with `--set warmup_floor=N` when the run trained with another floor than a new run takes, so the command
+/// warms up as the run did (runs made before the key: 100 iterations).
+pub fn with_warmup_floor(mut cmd: CliCommand, floor: Option<u64>) -> CliCommand {
+    if let Some(f) = floor
+        && f != folo_vision::TrainConfig::default().warmup_floor
+    {
+        cmd.argv.extend(["--set".to_string(), format!("warmup_floor={f}")]);
+        cmd.cli = shell_join(&cmd.argv);
+    }
+    cmd
+}
+
 /// `argv` as one command line, quoted for PowerShell (as Studio shows commands): an argument with characters a shell
 /// treats specially is single-quoted, with each quote inside doubled (`'O''Brien'`; PowerShell also reads the
 /// typographic quotes U+2018 to U+201B as single quotes, so they are doubled too). POSIX shells read the same words
@@ -221,6 +243,25 @@ mod tests {
         c.optimizer = Optimizer::Sgd;
         let sgd = train_command(&c, "D:/coco", DatasetFormat::Coco, None);
         assert_eq!(with_auto_rule(sgd.clone(), &c, Some(1)).cli, sgd.cli, "an explicit optimizer");
+    }
+
+    /// A run made before `warmup_floor` (100 iterations then) repeats with `--set warmup_floor=100`; a run with
+    /// the current default, or that never started, gets no `--set`.
+    #[test]
+    fn runs_repeat_with_their_warmup_floor() {
+        use folo_test_support::TestDir;
+        let dir = TestDir::new("cli-warmup-floor");
+        let write = |v: serde_json::Value| std::fs::write(dir.join("config.json"), v.to_string()).unwrap();
+        assert_eq!(recorded_warmup_floor(&dir), None, "no config.json");
+        write(serde_json::json!({ "train": { "epochs": 100 } }));
+        assert_eq!(recorded_warmup_floor(&dir), Some(100), "written before the key");
+        let c: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
+        let base = || train_command(&c, "D:/bccd", DatasetFormat::Yolo, None);
+        let cmd = with_warmup_floor(base(), Some(100));
+        assert_eq!(cmd.argv[cmd.argv.len() - 2..], ["--set", "warmup_floor=100"]);
+        let current = folo_vision::TrainConfig::default().warmup_floor;
+        assert_eq!(with_warmup_floor(base(), Some(current)).cli, base().cli);
+        assert_eq!(with_warmup_floor(base(), None).cli, base().cli);
     }
 
     /// A run whose optimizer this build does not know gets no command (one without `--optimizer` would train

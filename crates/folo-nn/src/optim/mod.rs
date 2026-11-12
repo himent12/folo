@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 pub use adamw::AdamW;
 pub use grads::{GradAccumulator, global_grad_norm};
 pub use musgd::{
-    MUON_SCALE, MuSgd, NS_COEFFS, NS_EPS, NS_STEPS, is_muon_group, muon_scale, orthogonalize,
+    MUON_SCALE, MuSgd, MuSgdWeights, NS_COEFFS, NS_EPS, NS_STEPS, is_muon_group, muon_scale, orthogonalize,
     orthogonalize_many,
 };
 pub use sgd::Sgd;
@@ -509,19 +509,27 @@ pub fn effective_weight_decay(weight_decay: f64, batch: usize, accumulate: usize
 /// What `optimizer: auto` chooses (docs/MODEL.md §8.2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoChoice {
-    /// MuSGD (rule 3; SGD before it) for long runs (> 10000 iterations), AdamW otherwise.
+    /// MuSGD for every run (rule 4); rules 1 to 3: SGD (1, 2) or MuSGD (3) for long runs (> 10000 iterations),
+    /// AdamW otherwise.
     pub kind: OptimKind,
     /// The base LR.
     pub lr0: f64,
-    /// SGD momentum / AdamW β1 (0.9 in both cases).
+    /// SGD momentum / AdamW β1 (0.937 under rule 4, 0.9 before).
     pub momentum: f64,
-    /// Always 0.0 under `auto`.
+    /// 0.0 under `auto` rules 1 to 3, [`AUTO_MUSGD_WARMUP_BIAS_LR`] under rule 4.
     pub warmup_bias_lr: f64,
 }
 
 /// The current version of the `auto` rule (docs/MODEL.md §8.2). A run's settings record the rule it started with
 /// (`TrainConfig.auto_rule`), so a resume keeps it; settings written before the key existed mean rule 1.
-pub const AUTO_RULE: u32 = 3;
+pub const AUTO_RULE: u32 = 4;
+
+/// Rule 4's momentum, the configured default (docs/MODEL.md §8.1; rules 1 to 3 use 0.9).
+pub const AUTO_MUSGD_MOMENTUM: f64 = 0.937;
+
+/// Rule 4's bias-group warmup start: the configured default (docs/MODEL.md §8.1), no longer zeroed. On the COCO
+/// proxy MuSGD reaches 0.113 AP with it and 0.103 with 0 (docs/hill/r2-learn.md).
+pub const AUTO_MUSGD_WARMUP_BIAS_LR: f64 = 0.1;
 
 /// Rule 2's floor on the AdamW `lr0`: the reference's fit `0.002 · 5 / (4 + nc)` falls below it from 7 classes on
 /// (0.000119 for 80 classes), where it trains from scratch about 5x slower than SGD (docs/hill/learn.md).
@@ -538,10 +546,12 @@ pub fn auto_optimizer(
     auto_optimizer_rule(AUTO_RULE, n_train, batch, nbs, epochs, num_classes)
 }
 
-/// docs/MODEL.md §8.2 `auto` by rule version: `iterations = ceil(n_train / max(batch, nbs)) · epochs`; above
-/// 10000, SGD at `lr0 = 0.01` (rules 1 and 2) or MuSGD at `lr0 = 0.01` (rule 3, the reference trainer's choice since
-/// Ultralytics 8.4), else AdamW at `round(0.002 · 5 / (4 + nc), 6)` (rule 1, the reference trainer's), raised to at
-/// least [`AUTO_ADAMW_MIN_LR0`] from rule 2 on; momentum 0.9 and `warmup_bias_lr = 0`.
+/// docs/MODEL.md §8.2 `auto` by rule version. Rule 4: MuSGD at `lr0 = 0.01`, momentum 0.937
+/// ([`AUTO_MUSGD_MOMENTUM`]) and `warmup_bias_lr = 0.1` ([`AUTO_MUSGD_WARMUP_BIAS_LR`]) for every run. Rules 1 to 3:
+/// `iterations = ceil(n_train / max(batch, nbs)) · epochs`; above 10000, SGD at `lr0 = 0.01` (rules 1 and 2) or
+/// MuSGD at `lr0 = 0.01` (rule 3, the reference trainer's choice since Ultralytics 8.4), else AdamW at
+/// `round(0.002 · 5 / (4 + nc), 6)` (rule 1, the reference trainer's), raised to at least [`AUTO_ADAMW_MIN_LR0`]
+/// from rule 2 on; momentum 0.9 and `warmup_bias_lr = 0`.
 pub fn auto_optimizer_rule(
     rule: u32,
     n_train: usize,
@@ -550,6 +560,14 @@ pub fn auto_optimizer_rule(
     epochs: usize,
     num_classes: usize,
 ) -> AutoChoice {
+    if rule >= 4 {
+        return AutoChoice {
+            kind: OptimKind::MuSgd,
+            lr0: 0.01,
+            momentum: AUTO_MUSGD_MOMENTUM,
+            warmup_bias_lr: AUTO_MUSGD_WARMUP_BIAS_LR,
+        };
+    }
     let iterations = n_train.div_ceil(batch.max(nbs).max(1)) * epochs;
     if iterations > 10_000 {
         let kind = if rule >= 3 { OptimKind::MuSgd } else { OptimKind::Sgd };
@@ -635,17 +653,26 @@ mod tests {
         assert_eq!(accumulate_steps(64, 16), 4);
         assert_eq!(accumulate_steps(64, 128), 1);
         assert_eq!(effective_weight_decay(0.0005, 16, 4, 64), 0.0005);
-        let a = auto_optimizer(2000, 16, 64, 30, 4);
+        // Rule 4: MuSGD at lr0 0.01, momentum 0.937, warmup_bias_lr 0.1, for short and long runs alike.
+        let m = AutoChoice { kind: OptimKind::MuSgd, lr0: 0.01, momentum: 0.937, warmup_bias_lr: 0.1 };
+        for (n, epochs, nc) in [(2000, 30, 4), (205, 100, 3), (20_000, 20, 80), (118_287, 100, 80)] {
+            assert_eq!(auto_optimizer(n, 16, 64, epochs, nc), m, "{n} images, {epochs} epochs, {nc} classes");
+        }
+        let a = auto_optimizer_rule(3, 2000, 16, 64, 30, 4);
         assert_eq!((a.kind, a.lr0, a.momentum, a.warmup_bias_lr), (OptimKind::AdamW, 0.00125, 0.9, 0.0));
         // Rule 2 floors the AdamW lr0 at 0.001 (from 7 classes on); rule 1 is the reference fit.
-        assert_eq!(auto_optimizer(2000, 16, 64, 30, 80).lr0, 0.001);
-        assert_eq!(auto_optimizer(2000, 16, 64, 30, 6).lr0, 0.001);
-        assert_eq!(auto_optimizer(2000, 16, 64, 30, 2).lr0, 0.001667);
+        assert_eq!(auto_optimizer_rule(3, 2000, 16, 64, 30, 80).lr0, 0.001);
+        assert_eq!(auto_optimizer_rule(3, 2000, 16, 64, 30, 6).lr0, 0.001);
+        assert_eq!(auto_optimizer_rule(3, 2000, 16, 64, 30, 2).lr0, 0.001667);
         assert_eq!(auto_optimizer_rule(1, 2000, 16, 64, 30, 80).lr0, 0.000119);
         assert_eq!(auto_optimizer_rule(1, 2000, 16, 64, 30, 4), a);
-        // Long runs: MuSGD from rule 3 on, SGD before.
-        assert_eq!(auto_optimizer(118_287, 16, 64, 100, 80).kind, OptimKind::MuSgd);
+        // Long runs: MuSGD from rule 3 on (bias warmup 0), SGD before.
+        let l = auto_optimizer_rule(3, 118_287, 16, 64, 100, 80);
+        assert_eq!((l.kind, l.warmup_bias_lr), (OptimKind::MuSgd, 0.0));
         assert_eq!(auto_optimizer_rule(2, 118_287, 16, 64, 100, 80).kind, OptimKind::Sgd);
-        assert_eq!(auto_optimizer_rule(2, 2000, 16, 64, 30, 80), auto_optimizer(2000, 16, 64, 30, 80));
+        assert_eq!(
+            auto_optimizer_rule(2, 2000, 16, 64, 30, 80),
+            auto_optimizer_rule(3, 2000, 16, 64, 30, 80)
+        );
     }
 }

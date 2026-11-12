@@ -160,7 +160,7 @@ async fn train_evaluate_predict_and_reload() {
     assert!(best_epoch.val.best_f1_conf.is_some());
     assert_eq!(model.metrics.unwrap().best_f1_conf, best_epoch.val.best_f1_conf);
     let resolved = done.resolved.clone().expect("a finished run says what it trained with");
-    assert_eq!((resolved.optimizer, resolved.accumulate), (ResolvedOptimizer::Adamw, 16));
+    assert_eq!((resolved.optimizer, resolved.accumulate), (ResolvedOptimizer::Musgd, 16));
     // The head comes from `folo.config`, `trained_with` from the checkpoint's `folo.train`.
     let trained = TrainedWith { amp: false, imgsz: 64, epochs: 2 };
     assert_eq!((model.head, model.trained_with), (Head::O2m, Some(trained)));

@@ -635,7 +635,9 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   and `--head` is always given, since the CLI's default is the weights file's head); settings equal to the
   defaults are left out, and a value starting with `-` is attached (`--name=--amp`). An `auto` run that trained under
   an older `auto` rule than a new run takes (its `config.json` `train.auto_rule`, rule 1 when absent) ends with
-  `--set auto_rule=N`, so a long run made before rule 3 repeats with SGD, not MuSGD. A run whose optimizer this
+  `--set auto_rule=N`, so a long run made before rule 3 repeats with SGD, not MuSGD, and a short one made before
+  rule 4 with AdamW; a run made before `warmup_floor` existed (its `config.json` has no `train.warmup_floor`) ends
+  with `--set warmup_floor=100`, the warmup floor it trained with. A run whose optimizer this
   server does not know (made by a newer FOLO) gets `400 invalid_config` instead of a command that would train `auto`. `cli` is quoted for PowerShell,
   as Studio shows commands: arguments with spaces or shell characters are single-quoted, a quote inside doubled
   (`'O''Brien'`, also for the typographic quotes PowerShell reads as quotes); POSIX shells read the same words

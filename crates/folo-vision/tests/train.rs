@@ -244,8 +244,8 @@ fn micro_run_learns_checkpoints_and_resumes_bit_exactly() {
     let _ = std::fs::remove_dir_all(&dir_b);
 }
 
-/// docs/MODEL.md §10.4: N = 800, batch 16, 30 epochs → nb 50, accumulate 4, spe 13, T 390, W 100; and `auto`
-/// picks AdamW at `round(0.002 · 5 / (4 + nc), 6)`. The same data for 10 epochs is a short run: W 39, a warning.
+/// docs/MODEL.md §10.4: N = 800, batch 16, 30 epochs → nb 50, accumulate 4, spe 13, T 390, W 39 (100 with the
+/// pre-rule-4 floor); and `auto` picks MuSGD (rule 4). The same data for 10 epochs is a short run: W 39, a warning.
 #[test]
 fn schedule_numbers_match_the_spec() {
     let img = folo_data::Image::new(64, 64, [0; 3]);
@@ -257,7 +257,10 @@ fn schedule_numbers_match_the_spec() {
     let t = Trainer::new(cfg.clone(), data.clone(), TrainOptions::default()).unwrap();
     assert_eq!((t.batches_per_epoch(), t.accumulate()), (50, 4));
     let c = t.schedule().contract();
-    assert_eq!((c.steps_per_epoch, t.schedule().total_iters(), c.warmup_iters), (13, 390, 100));
+    assert_eq!((c.steps_per_epoch, t.schedule().total_iters(), c.warmup_iters), (13, 390, 39));
+    let floored =
+        Trainer::new(TrainConfig { warmup_floor: 100, ..cfg.clone() }, data.clone(), TrainOptions::default());
+    assert_eq!(floored.unwrap().schedule().contract().warmup_iters, 100);
     assert!(t.warnings().is_empty(), "{:?}", t.warnings());
     assert_eq!(t.config().augment.close_mosaic_epochs(30), 10);
 
@@ -271,14 +274,14 @@ fn schedule_numbers_match_the_spec() {
     let o = t.optimizer();
     assert_eq!(
         (o.kind, o.lr0, o.momentum, o.warmup_bias_lr),
-        (folo_nn::optim::OptimKind::AdamW, 0.00125, 0.9, 0.0)
+        (folo_nn::optim::OptimKind::MuSgd, 0.01, 0.937, 0.1)
     );
 
-    let smoke = TrainConfig { epochs: 30, batch: 16, ..TrainConfig::default() };
+    let smoke = TrainConfig { epochs: 30, batch: 16, auto_rule: 3, ..TrainConfig::default() };
     let r = smoke.resolve_optimizer(2000, 4);
-    assert_eq!((r.kind, r.lr0), (folo_nn::optim::OptimKind::AdamW, 0.00125));
+    assert_eq!((r.kind, r.lr0), (folo_nn::optim::OptimKind::AdamW, 0.00125), "rule 3: AdamW for a short run");
     let long = TrainConfig { epochs: 300, ..TrainConfig::default() };
-    // Long runs: MuSGD under `auto` rule 3, SGD under the rules before it.
+    // Long runs: MuSGD under `auto` rules 3 and 4, SGD under the rules before.
     assert_eq!(long.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::MuSgd);
     let rule2 = TrainConfig { auto_rule: 2, ..long };
     assert_eq!(rule2.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::Sgd);

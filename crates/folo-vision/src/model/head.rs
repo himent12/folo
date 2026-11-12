@@ -170,6 +170,9 @@ pub struct Detect {
     pub reg_max: usize,
     /// Number of classes.
     pub num_classes: usize,
+    /// Whether [`Detect::forward_o2o`] detaches its inputs while gradients are recorded (§6.6; the default).
+    /// `false` lets the one-to-one loss train the backbone and neck too (`o2o_attached_epochs`, MODEL.md §6.6).
+    pub o2o_detach: bool,
 }
 
 impl Detect {
@@ -195,7 +198,7 @@ impl Detect {
         };
         let levels = branch(init);
         let o2o = o2o.then(|| branch(init));
-        let head = Detect { levels, o2o, c_box, c_cls, reg_max, num_classes };
+        let head = Detect { levels, o2o, c_box, c_cls, reg_max, num_classes, o2o_detach: true };
         head.reset_priors()?;
         Ok(head)
     }
@@ -225,11 +228,11 @@ impl Detect {
     }
 
     /// The raw outputs of the one-to-one branch (§6.6), laid out like [`Detect::forward`]'s, or `None` without
-    /// it. While gradients are recorded its inputs are detached, so it trains only itself, never the backbone
-    /// and neck.
+    /// it. While gradients are recorded its inputs are detached (unless [`Detect::o2o_detach`] is off), so it
+    /// trains only itself, never the backbone and neck.
     pub fn forward_o2o(&self, feats: [&Tensor; 3]) -> Result<Option<(Tensor, Tensor)>> {
         let Some(levels) = &self.o2o else { return Ok(None) };
-        if is_grad_enabled() {
+        if self.o2o_detach && is_grad_enabled() {
             let d = feats.map(Tensor::detach);
             return Ok(Some(self.forward_levels(levels, [&d[0], &d[1], &d[2]])?));
         }

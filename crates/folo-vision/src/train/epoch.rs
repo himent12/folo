@@ -26,6 +26,7 @@ impl Trainer {
         let (epoch_start, mut epoch_images) = (Instant::now(), 0usize);
         let skipped_before = self.scaler.as_ref().map_or(0, GradScaler::skipped_steps);
         let ctx = folo_gpu::context_for(self.device);
+        self.model.head.o2o_detach = e >= self.cfg.o2o_attached_epochs;
         let mut source = match self.prefetched.take() {
             Some((pe, source)) if pe == e => source,
             _ => self.start_epoch(e)?,

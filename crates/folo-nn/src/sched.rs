@@ -70,7 +70,7 @@ pub struct LrSchedule {
 
 /// The warmup floor of docs/MODEL.md §8.4 in iterations, before it is capped to
 /// [`WARMUP_FLOOR_TENTHS`] of the run.
-const WARMUP_FLOOR: u64 = 100;
+pub const WARMUP_FLOOR: u64 = 100;
 
 /// The largest share of the run, in tenths, that [`WARMUP_FLOOR`] may stretch the warmup to (3: 30%).
 const WARMUP_FLOOR_TENTHS: u64 = 3;
@@ -79,11 +79,17 @@ const WARMUP_FLOOR_TENTHS: u64 = 3;
 /// `min(max(round(warmup_epochs · spe), min(100, floor(0.3 · T))), max(epochs − 1, 0) · spe)` with
 /// `T = epochs · spe`. The floor applies in full from `T = 334` on, so a short run is not all warmup.
 pub fn warmup_iters(warmup_epochs: f64, epochs: u64, steps_per_epoch: u64) -> u64 {
+    warmup_iters_floor(warmup_epochs, epochs, steps_per_epoch, WARMUP_FLOOR)
+}
+
+/// [`warmup_iters`] with `floor` iterations in place of [`WARMUP_FLOOR`] (still capped to 30% of the run);
+/// `floor = 0` is plain `round(warmup_epochs · spe)`, capped at `(epochs − 1) · spe`, as Ultralytics 8.4 counts it.
+pub fn warmup_iters_floor(warmup_epochs: f64, epochs: u64, steps_per_epoch: u64, floor: u64) -> u64 {
     if warmup_epochs.is_nan() || warmup_epochs <= 0.0 {
         return 0;
     }
     let total = epochs.saturating_mul(steps_per_epoch);
-    let floor = WARMUP_FLOOR.min(total.saturating_mul(WARMUP_FLOOR_TENTHS) / 10);
+    let floor = floor.min(total.saturating_mul(WARMUP_FLOOR_TENTHS) / 10);
     let w = ((warmup_epochs * steps_per_epoch as f64).round() as u64).max(floor);
     w.min(epochs.saturating_sub(1).saturating_mul(steps_per_epoch))
 }
@@ -105,13 +111,27 @@ impl LrSchedule {
         warmup_bias_lr: f64,
         warmup_momentum: f64,
     ) -> Result<Self> {
+        let w = warmup_iters(warmup_epochs, epochs, steps_per_epoch);
+        Self::with_warmup_iters(kind, epochs, steps_per_epoch, lrf, w, warmup_bias_lr, warmup_momentum)
+    }
+
+    /// [`LrSchedule::new`] with a warmup of exactly `warmup_iters` iterations (e.g. from [`warmup_iters_floor`]).
+    pub fn with_warmup_iters(
+        kind: DecayKind,
+        epochs: u64,
+        steps_per_epoch: u64,
+        lrf: f64,
+        warmup_iters: u64,
+        warmup_bias_lr: f64,
+        warmup_momentum: f64,
+    ) -> Result<Self> {
         Self::from_contract(SchedContract {
             kind,
             unit: SchedUnit::Iteration,
             epochs,
             steps_per_epoch,
             lrf,
-            warmup_iters: warmup_iters(warmup_epochs, epochs, steps_per_epoch),
+            warmup_iters,
             warmup_bias_lr,
             warmup_momentum,
             step: 0,
@@ -253,6 +273,9 @@ mod tests {
         assert_eq!(warmup_iters(0.5, 37, 9), 99); // T = 333: floor 99
         assert_eq!(warmup_iters(0.5, 334, 1), 100); // T = 334: the full floor
         assert_eq!(warmup_iters(3.0, 4, 3), 9); // 3 epochs of 4, capped at epochs − 1
+        assert_eq!(warmup_iters_floor(3.0, 100, 4, 0), 12); // a 205-image fine-tune: 3 epochs, no floor
+        assert_eq!(warmup_iters_floor(3.0, 100, 4, 100), warmup_iters(3.0, 100, 4)); // 100 = the §8.4 floor
+        assert_eq!(warmup_iters_floor(0.0, 100, 4, 0), 0);
         let lr0 = 0.01;
         let mk = |name: &str| {
             ParamGroup::new(name, vec![("w".into(), Tensor::zeros([1]))]).lr(lr0).momentum(0.937)
