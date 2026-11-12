@@ -149,16 +149,19 @@ impl FoloApp {
     fn install_models(&mut self, mut models: Vec<Model>, cx: &mut Context<Self>) {
         models.sort_by(|a, b| b.created.cmp(&a.created));
         if self.store.models.ready() != Some(&models) {
+            // A model gone from the list (its run deleted elsewhere) is remembered by its name.
+            let gone: Vec<(String, String)> = (self.store.models.ready().into_iter().flatten())
+                .filter(|m| !models.iter().any(|n| n.id == m.id))
+                .map(|m| (m.id.clone(), m.name.clone()))
+                .collect();
+            for (id, name) in gone {
+                self.deleted.insert(id, name);
+            }
             self.store.models = Load::Ready(models);
             self.menu_open = None;
         }
-        // Playground starts on the best model (not the newest checkpoint, which may have learned
-        // nothing yet), and so does it again after its model was deleted: an image already on stage
-        // is predicted with it.
-        if self.play_model.is_none() {
-            self.play_model = self.store.best_model(None).map(|m| m.id.clone());
-            self.run_predict(cx);
-        }
+        // The Playground's model is one of these, or replaced now.
+        self.reconcile_play_model(cx);
     }
 
     fn install_runs(&mut self, runs: Vec<Run>, cx: &mut Context<Self>) {

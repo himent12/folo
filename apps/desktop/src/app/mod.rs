@@ -360,7 +360,13 @@ pub struct FoloApp {
     pub cm_cell: Option<(usize, usize)>,
 
     // Playground
+    /// The model Playground runs; always one of the loaded list once it is in
+    /// ([`FoloApp::reconcile_play_model`]).
     pub play_model: Option<String>,
+    /// The run that made `play_model`: its delete drops the model even while the list is loading.
+    play_model_run: Option<String>,
+    /// The name of the model Playground lost (deleted), said once the next one is picked.
+    play_model_gone: Option<String>,
     pub play_conf: f32,
     /// The confidence the current predictions were fetched down to: a threshold below it refetches.
     pub play_fetched_floor: f32,
@@ -577,6 +583,8 @@ impl FoloApp {
             confusion_norm: true,
             cm_cell: None,
             play_model: None,
+            play_model_run: None,
+            play_model_gone: None,
             play_conf: 0.25,
             play_fetched_floor: PLAY_CONF_FLOOR,
             play_picker_open: false,

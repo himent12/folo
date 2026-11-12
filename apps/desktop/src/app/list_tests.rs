@@ -141,3 +141,105 @@ fn deleting_the_playground_models_run_drops_its_late_answer_and_predicts_with_th
         assert!(!this.play_pred_pending && !this.play_pred_dim);
     });
 }
+
+/// Playground on the best model with an image on stage and its boxes in: (that model, its run, the
+/// model that comes next once it is gone).
+fn playground_on_best(app: &mut HeadlessApp, window: WindowHandle<FoloApp>) -> (String, String, String) {
+    let (first, run) = drive(app, window, |this, w, cx| {
+        this.navigate(Route::Playground, w, cx);
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+        let first = this.play_model.clone().expect("the best model is picked");
+        let run = this.store.model(&first).unwrap().run_id.clone().expect("made by a run");
+        (first, run)
+    });
+    let next = drive(app, window, |this, _, _| {
+        assert_eq!(this.play_pred.ready().map(|p| p.model_id.clone()), Some(first.clone()));
+        let mut rest = this.store.models.ready().unwrap().clone();
+        rest.retain(|m| m.run_id.as_deref() != Some(&*run));
+        let mut store = crate::store::Store::new(this.store.api.clone());
+        store.runs = this.store.runs.clone();
+        store.models = crate::store::Load::Ready(rest);
+        store.best_model(None).map(|m| m.id.clone()).expect("another model is left")
+    });
+    (first, run, next)
+}
+
+/// What Playground shows: the model it runs, the side panel's model, the boxes' model, and whether
+/// anything is still out or dimmed; then how often `title` was toasted.
+fn playground_state(
+    this: &FoloApp,
+    title: &str,
+) -> (Option<String>, Option<String>, Option<String>, bool, usize) {
+    let shown = this.play_shown_model().map(|m| m.id.clone());
+    let boxes = this.play_pred.ready().map(|p| p.model_id.clone());
+    let busy = this.play_pred_pending || this.play_pred_dim;
+    let told = this.toasts.iter().filter(|t| t.title == title).count();
+    (this.play_model.clone(), shown, boxes, busy, told)
+}
+
+#[test]
+fn a_playground_model_deleted_elsewhere_is_replaced_at_the_next_refresh() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let (first, run, next) = playground_on_best(&mut app, window);
+    let name = drive(&mut app, window, |this, _, _| this.store.model(&first).unwrap().name.clone());
+    // An IoU change asks again; its answer (the old model's boxes) is made, and held.
+    let held = api.hold("predict");
+    start(&mut app, window, 1, |this, _, cx| this.run_predict(cx));
+    held.wait_held();
+    // The model's run is deleted through the API (Studio, the CLI); the 5 s refresh finds it gone.
+    api.delete_run(&run).unwrap();
+    start(&mut app, window, 1, |this, _, cx| this.refresh_lists(cx));
+    assert!(held.is_held(), "the old answer was still out when the refresh landed");
+    let title = format!("{name} was deleted");
+    let now = start(&mut app, window, 1, |this, _, _| playground_state(this, &title));
+    assert_eq!(now, (Some(next.clone()), Some(next.clone()), Some(next.clone()), false, 1));
+    // The old model's answer lands last: dropped. Another refresh says nothing more.
+    held.release();
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    let after = drive(&mut app, window, |this, _, _| playground_state(this, &title));
+    assert_eq!(after, (Some(next.clone()), Some(next.clone()), Some(next), false, 1));
+    let body = drive(&mut app, window, |this, _, _| {
+        this.toasts.iter().find(|t| t.title == title.as_str()).and_then(|t| t.body.clone())
+    });
+    assert!(body.is_some_and(|b| b.starts_with("Playground now uses ")), "it names the model used now");
+}
+
+#[test]
+fn a_playground_model_deleted_here_with_a_model_reload_out_is_replaced_at_once() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let (first, run, next) = playground_on_best(&mut app, window);
+    let name = drive(&mut app, window, |this, _, _| this.store.model(&first).unwrap().name.clone());
+    // A prediction of the old model is out, and so is a model reload (another run just finished).
+    let predict = api.hold("predict");
+    start(&mut app, window, 1, |this, _, cx| this.run_predict(cx));
+    predict.wait_held();
+    let reload = api.hold("models");
+    let other = start(&mut app, window, 1, |this, _, _| {
+        let runs = this.store.runs.ready().unwrap();
+        runs.iter().find(|r| r.id != run && r.status == crate::api::RunStatus::Completed).unwrap().id.clone()
+    });
+    start(&mut app, window, 2, |this, _, cx| this.run_ended(&other, crate::api::RunStatus::Completed, cx));
+    reload.wait_held();
+    // The model's run is deleted here while both are out: the next model at once.
+    start(&mut app, window, 2, |this, w, cx| {
+        this.ask_delete(DeleteTarget::Run(run.clone()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    assert!(predict.is_held() && reload.is_held(), "both answers were still out when the delete landed");
+    let title = format!("{name} was deleted");
+    let now = start(&mut app, window, 2, |this, _, _| playground_state(this, &title));
+    assert_eq!(now, (Some(next.clone()), Some(next.clone()), Some(next.clone()), false, 1));
+    // The reload from before the delete lands (it lists the old model): dropped. Then the old answer.
+    reload.release();
+    app.run_until_held(1);
+    predict.release();
+    app.run_until_idle();
+    let after = drive(&mut app, window, |this, _, _| {
+        assert!(this.store.model(&first).is_none(), "the old model is not listed again");
+        playground_state(this, &title)
+    });
+    assert_eq!(after, (Some(next.clone()), Some(next.clone()), Some(next), false, 1));
+}

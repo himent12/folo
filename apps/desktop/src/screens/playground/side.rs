@@ -22,14 +22,10 @@ impl FoloApp {
     pub(super) fn play_side(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let models = self.store.models.ready().cloned().unwrap_or_default();
-        // The picked model while it exists, else the best one.
-        let best = self.store.best_model(None).map(|m| m.id.clone());
-        let sel = [self.play_model.as_ref(), best.as_ref()]
-            .into_iter()
-            .flatten()
-            .find_map(|id| models.iter().position(|m| &m.id == id))
-            .unwrap_or(0);
-        let model = models.get(sel).cloned();
+        // The model Playground runs, and no other in its place (a deleted one is replaced, and that
+        // said, as soon as the list shows it gone).
+        let model = self.play_shown_model().cloned();
+        let sel = model.as_ref().and_then(|m| models.iter().position(|x| x.id == m.id)).unwrap_or(0);
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.
         let e2e = model.as_ref().is_some_and(|m| self.model_e2e(m));
@@ -70,8 +66,7 @@ impl FoloApp {
             cx,
             Rc::new(move |this, i, _, cx| {
                 if let Some(id) = ids.get(i) {
-                    this.play_model = Some(id.clone());
-                    this.run_predict(cx);
+                    this.pick_play_model(id.clone(), cx);
                 }
             }),
         );

@@ -376,8 +376,13 @@ impl FoloApp {
                     Some("Best weights saved to Models.".into()),
                     cx,
                 );
-                self.store.models = Load::Idle;
-                self.ensure_core(cx);
+                // Read again in place: the list (and which run made the Playground's model) stays
+                // while it is out.
+                if self.store.models.ready().is_some() {
+                    self.fetch_list(List::Models, cx);
+                } else {
+                    self.ensure_core(cx);
+                }
             }
             RunStatus::Failed => self.toast(Tone::Danger, format!("{name} failed"), None, cx),
             _ => {}

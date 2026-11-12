@@ -159,10 +159,66 @@ impl FoloApp {
         .detach();
     }
 
-    /// The Playground's model is gone (its run was deleted): nothing it predicted is shown, and an
-    /// answer still out for it is dropped when it comes. The next model list picks another.
-    pub(super) fn drop_play_model(&mut self) {
+    /// Playground uses model `id` (picked from its list, or a model's Try in Playground) and runs it on
+    /// the image on stage.
+    pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
+        self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
+        self.play_model = Some(id);
+        self.run_predict(cx);
+    }
+
+    /// The model Playground shows and runs: only `play_model`, never another in its place.
+    pub fn play_shown_model(&self) -> Option<&Model> {
+        let id = self.play_model.as_ref()?;
+        self.store.models.ready()?.iter().find(|m| m.id == *id)
+    }
+
+    /// Whether the Playground's model is one that run `run` made (`made`, deleted with it), also while
+    /// the model list is loading.
+    pub(super) fn play_model_made_by(&self, run: &str, made: &[String]) -> bool {
+        self.play_model.as_ref().is_some_and(|m| made.contains(m))
+            || self.play_model_run.as_deref() == Some(run)
+    }
+
+    /// The Playground's model against the model list as it now stands (after each list installed, and
+    /// a delete here): gone (deleted here or by another client), everything it predicted, shown or still
+    /// out, is dropped, the best model left is picked and run on the image on stage, and the person is
+    /// told once, when Playground is in use. Without a model yet (the first list), the best is picked.
+    pub(super) fn reconcile_play_model(&mut self, cx: &mut Context<Self>) {
+        let Some(models) = self.store.models.ready() else { return };
+        if let Some(id) = self.play_model.clone()
+            && !models.iter().any(|m| m.id == id)
+        {
+            let name = self.deleted.get(&id).cloned().unwrap_or(id);
+            self.drop_play_model(Some(name));
+        }
+        if self.play_model.is_some() {
+            return;
+        }
+        // The best model (not the newest checkpoint, which may have learned nothing yet).
+        let best = self.store.best_model(None).map(|m| (m.id.clone(), m.name.clone(), m.run_id.clone()));
+        let in_use = self.play_image.is_some() || self.route == Route::Playground;
+        if let Some(gone) = self.play_model_gone.take().filter(|_| in_use) {
+            let body = match &best {
+                Some((_, next, _)) => format!("Playground now uses {next}."),
+                None => "No other model is left: train one first.".to_string(),
+            };
+            self.toast(Tone::Neutral, format!("{gone} was deleted"), Some(body.into()), cx);
+        }
+        if let Some((id, _, run)) = best {
+            self.play_model = Some(id);
+            self.play_model_run = run;
+            self.run_predict(cx);
+        }
+    }
+
+    /// The Playground's model is gone (its run was deleted, here or elsewhere; `name` says which):
+    /// nothing it predicted is shown, and an answer still out for it is dropped when it comes.
+    /// [`Self::reconcile_play_model`] picks another.
+    pub(super) fn drop_play_model(&mut self, name: Option<String>) {
         self.play_model = None;
+        self.play_model_run = None;
+        self.play_model_gone = name;
         self.play_pred_seq += 1;
         self.play_pred = Load::Idle;
         self.play_pred_for = None;

@@ -146,10 +146,9 @@ impl FoloApp {
                             window,
                             cx,
                             act(move |this, w, cx| {
-                                this.play_model = Some(m2.clone());
                                 this.play_pred = Load::Idle;
                                 this.navigate(Route::Playground, w, cx);
-                                this.run_predict(cx);
+                                this.pick_play_model(m2.clone(), cx);
                             }),
                         )
                         .into_any_element(),

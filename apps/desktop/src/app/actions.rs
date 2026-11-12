@@ -340,14 +340,16 @@ impl FoloApp {
                 m.id.clone()
             })
             .collect();
-        if self.play_model.as_ref().is_some_and(|m| made.contains(m)) {
-            self.drop_play_model();
+        if self.play_model_made_by(id, &made) {
+            let name = self.play_model.as_ref().and_then(|m| self.deleted.get(m)).cloned();
+            self.drop_play_model(name);
         }
         // Gone from the list now, which is fetched again (an answer asked for before the delete still
-        // lists them, and is dropped): Playground picks its next model from it.
+        // lists them, and is dropped). Playground takes the best model left at once.
         if let Some(models) = self.store.models.ready_mut() {
             models.retain(|m| !made.contains(&m.id));
         }
+        self.reconcile_play_model(cx);
         self.changed_here(List::Models, cx);
         // An open select may list it, or its models: its highlight is an index into that list.
         self.menu_open = None;

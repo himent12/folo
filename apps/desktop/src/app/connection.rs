@@ -54,6 +54,8 @@ impl FoloApp {
         self.play_pred = Load::Idle;
         self.play_pred_pending = false;
         self.play_model = None;
+        self.play_model_run = None;
+        self.play_model_gone = None;
         self.retry_all(cx);
     }
 
