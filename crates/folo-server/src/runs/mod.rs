@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::throughput::{Throughput, TrainKey};
-use crate::util::{rfc3339, unix_now};
+use crate::util::{parse_rfc3339, rfc3339, unix_now};
 
 pub(crate) use entry::Ended;
 pub use entry::run_model_id;
@@ -83,14 +83,28 @@ struct RunFile {
     /// Validation metrics of the last validated epoch (those of `weights/last.folo`).
     #[serde(default)]
     last_metrics: Option<ModelMetrics>,
-    /// When the run was last resumed (Unix seconds), while it has not trained since: the wait until it does is added
-    /// to `Run.paused_s` then ([`add_paused`]).
+    /// When the run was last resumed (Unix seconds), while it has not trained since: the wait until it trains, or
+    /// until it ends without training (stopped in the queue, the server's stop), is added to `Run.paused_s` then
+    /// ([`add_paused`]); until then the API record counts the wait so far ([`RunFile::shown`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resumed_at: Option<f64>,
     /// When the run last trained (Unix seconds; at most [`ALIVE_EVERY_S`] behind while it trains): a run a previous
     /// process left training ended then, not when the server started again ([`history::reconcile`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     alive_at: Option<f64>,
+}
+
+impl RunFile {
+    /// The API record. While the run waits after a resume, `paused_s` includes the wait so far, so the training
+    /// time it gives (`Run.paused_s`) stays where it was until the run trains again.
+    fn shown(&self) -> Run {
+        let mut r = self.run.clone();
+        if let Some(at) = self.resumed_at {
+            let end = r.finished.as_deref().and_then(parse_rfc3339).unwrap_or_else(|| unix_now().floor());
+            add_paused(&mut r, end - at);
+        }
+        r
+    }
 }
 
 /// How often a training run's `alive_at` is written to `run.json`, at most.

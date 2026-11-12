@@ -399,8 +399,39 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
     runs.restart(&e, config.clone(), None).unwrap();
     e.state.lock().unwrap().file.resumed_at = Some(t - 500.0);
     ended(Some(t - 40_000.0), t - 100.0);
-    runs.restart(&e, config, None).unwrap();
+    runs.restart(&e, config.clone(), None).unwrap();
     near(paused(), 36_060.0 + 50.0 + 500.0, 4.0);
+
+    // The reviewer's case: trained 60 s, stopped, resumed an hour later behind a long run (moved back by hand), and
+    // stopped while it still waited. Training time, as the API defines it, is 60 s while it waits, once it is
+    // stopped there (the wait is settled into `paused_s`), and after the next resume until it trains.
+    let training = || {
+        let r = e.run();
+        let secs = |s: &Option<String>| s.as_deref().and_then(crate::util::parse_rfc3339);
+        secs(&r.finished).unwrap_or_else(|| unix_now().floor())
+            - secs(&r.started).unwrap()
+            - r.paused_s.unwrap()
+    };
+    let sixty = |got: f64| {
+        let late = 2.0 * (unix_now().floor() - t) + 1.0;
+        assert!((60.0 - late..=60.0 + late).contains(&got), "trained {got} s, want 60");
+    };
+    ended(Some(t - 7200.0), t - 7140.0);
+    e.state.lock().unwrap().file.run.paused_s = None;
+    runs.restart(&e, config.clone(), None).unwrap();
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.run.paused_s = Some(3540.0);
+        st.file.resumed_at = Some(t - 3600.0);
+    }
+    sixty(training());
+    runs.stop(e.id()).unwrap();
+    assert_eq!(e.run().status, RunStatus::Stopped);
+    assert_eq!(e.state.lock().unwrap().file.resumed_at, None, "the wait is settled");
+    sixty(training());
+    near(paused(), 7140.0, 2.0);
+    runs.restart(&e, config, None).unwrap();
+    sixty(training());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

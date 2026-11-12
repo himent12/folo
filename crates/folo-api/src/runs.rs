@@ -207,8 +207,10 @@ pub struct Run {
     /// `interrupted`), when it last trained (about 10 s at most before that).
     pub finished: Option<String>,
     /// Seconds a resumed run spent not training since `started`: from each end (stop, failure) until it trained
-    /// again, summed over its resumes. Its training time is `finished` (or now, while it trains) minus `started`
-    /// minus this. Absent for a run never resumed, and from servers that predate the field.
+    /// again, summed over its resumes; while it waits in the queue after a resume, the wait so far is included (and
+    /// a resumed run that ends there keeps it). Its training time is `finished` (or now, while it is active) minus
+    /// `started` minus this, so it does not grow while the run waits. Absent for a run never resumed, and from servers
+    /// that predate the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_s: Option<f64>,
     /// Current epoch, 1-based; 0 before the first step. Once ended: the last epoch it finished (`completed`,

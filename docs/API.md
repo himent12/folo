@@ -523,8 +523,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   // "finished" of a run "interrupted" by a server that was killed (not stopped) is when it last trained, at most
   //   about 10 s off, not when the server started again: the time it was down is not training time
   // + "paused_s": 52800.0 for a resumed run: the seconds it spent not training since "started", from each end (stop,
-  //   failure) until it trained again; its training time is "finished" (or now, while it trains) minus "started"
-  //   minus "paused_s". Absent for a run never resumed and from older servers
+  //   failure) until it trained again; while it waits in the queue after a resume, the wait so far is included (and
+  //   a resumed run stopped there keeps it). Its training time is "finished" (or now, while it is active) minus
+  //   "started" minus "paused_s", which does not grow while it waits. Absent for a run never resumed and from older
+  //   servers
   "epoch": 12,             // epoch in progress, 1-based (0 before the first step); once ended, the last epoch it
                            // finished (completed, stopped) or the one it failed in (failed)
   "epochs": 100,

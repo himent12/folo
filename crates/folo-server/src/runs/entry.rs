@@ -10,7 +10,7 @@ use folo_api::{
 use tokio::sync::broadcast;
 
 use crate::index::write_atomic;
-use crate::util::unix_now;
+use crate::util::{parse_rfc3339, unix_now};
 
 use super::{
     ALIVE_EVERY_S, DatasetRef, EVENT_BUFFER, RunEntry, RunFile, RunState, TAIL_STEPS, add_paused,
@@ -45,7 +45,7 @@ impl RunEntry {
 
     /// The API record.
     pub fn run(&self) -> Run {
-        self.state.lock().unwrap().file.run.clone()
+        self.state.lock().unwrap().file.shown()
     }
 
     /// The dataset it trains on.
@@ -118,7 +118,13 @@ impl RunEntry {
         r.eta_s = None;
         // An active run has no end yet, except one a previous process left training: it ended when it last trained
         // (`history::reconcile`).
-        r.finished = Some(r.finished.take().unwrap_or_else(now));
+        let finished = r.finished.take().unwrap_or_else(now);
+        // A resumed run that ends before it trained again: its wait is not training either, and a next resume counts
+        // from this end.
+        if let Some(at) = st.file.resumed_at.take() {
+            add_paused(r, parse_rfc3339(&finished).unwrap_or(at) - at);
+        }
+        r.finished = Some(finished);
         // A failed run names the epoch it failed in (the one its steps were in); any other the last one it finished.
         r.epoch =
             if status == RunStatus::Failed { r.epoch.max(st.file.epochs_done) } else { st.file.epochs_done };
