@@ -36,8 +36,9 @@ pub struct View<'a> {
     pub storage: &'a Storage,
     /// How to read it.
     pub layout: &'a Layout,
-    /// The storage's derived values, for a view of a tensor.
-    derived: Option<&'a Derived>,
+    /// For a view of a tensor: the storage's derived values, and the storage they belong to (`storage` is a
+    /// public field, so it may since have been pointed elsewhere).
+    derived: Option<(&'a Derived, &'a Storage)>,
 }
 
 impl<'a> View<'a> {
@@ -48,21 +49,21 @@ impl<'a> View<'a> {
 
     /// A view of a tensor's storage, with the storage's derived values (see [`View::derived`]).
     pub(crate) fn of_cell(storage: &'a Storage, layout: &'a Layout, derived: &'a Derived) -> Self {
-        View { storage, layout, derived: Some(derived) }
+        View { storage, layout, derived: Some((derived, storage)) }
     }
 
     /// A value derived from this view's data, kept with the storage until its data is next written, under its
     /// type and `key` (which must name what the value is and everything it depends on besides the data, such
-    /// as the layout); made by `make` on a miss. A view without a storage of its own ([`View::new`]) makes it
-    /// every time.
+    /// as the layout); made by `make` on a miss. A view without derived values of its storage ([`View::new`],
+    /// or one whose `storage` was replaced after [`View::of_cell`]) makes it every time and keeps nothing.
     pub(crate) fn derived<T: std::any::Any + Send + Sync>(
         &self,
         key: u64,
         make: impl FnOnce() -> T,
     ) -> Arc<T> {
         match self.derived {
-            Some(d) => d.get_or_make(key, make),
-            None => Arc::new(make()),
+            Some((d, owner)) if std::ptr::eq(self.storage, owner) => d.get_or_make(key, make),
+            _ => Arc::new(make()),
         }
     }
 

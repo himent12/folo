@@ -4,8 +4,16 @@
 //! the 4x4 transform domain) of `O x C` weights by `C x tiles` inputs.
 //!
 //! Not bit for bit the direct conv: the transforms add and subtract inputs (and halve weights) before the
-//! products, so a result differs from the direct sum in the last bits (the tests hold it to the direct conv's
-//! own f32 summation bound).
+//! products, so a result differs from the direct sum in the last bits. The error of an output (before bias and
+//! activation) is at most `(C + 8) · 2^-23 · 9 · Σ_c D_c · G_c`, with `D_c` the sum of `|d|` over its tile's 4x4
+//! input patch in channel `c` (padding counts 0) and `G_c` the sum of `|g|` over its 3x3 kernel from channel `c`:
+//! with `u = 2^-24`, an element of `V` is a ±1 sum of 4 patch values in two roundings (error `≤ 2u · D_c`, and
+//! `|V| ≤ D_c`); an element of `U` is `G g Gᵀ` (every `|G_ik · G_jl| ≤ 1`, so `|U| ≤ G_c`), rounded once from
+//! f64; the GEMM sums `C` products (error `≤ C u Σ_c |U| |V|`); and the output transform adds 9 elements of `M`
+//! with signs ±1 in four roundings. First order that is `(C + 7) u · 9 Σ_c D_c G_c`, and the bound's twice-as-large
+//! unit covers the second-order terms and the rounding of the bias add (`u · |bias|` besides). It grows with `C`:
+//! with every product of one sign nothing cancels (all-ones inputs, 512 channels: 20 · 2^-23 · Σ|terms| of the
+//! direct sum, far inside the direct conv's own `K · 2^-23 · Σ|terms|`, `K = 9C`). Tested in `kernel_tests.rs`.
 //!
 //! The tiles of an image are cut into blocks of `tb` tiles (a multiple of `NR`). A block transforms its input
 //! patches into `V` (`16 x C x tb`), runs the 16 GEMMs into `M` (`16 x O x tb`) and transforms `M` into its
@@ -40,15 +48,49 @@ pub(crate) fn winograd_shape(g: &ConvGeom) -> bool {
 /// where it measured faster, with at least 16 input and 8 output channels, and either 256 tiles (a 32x32 output)
 /// or `c * o >= 4096`. At 28 threads it ran 5-41% faster than the direct conv on folo-n's convs from 40x40 up and
 /// 11-29% on 12x12 to 24x24 outputs with 64 to 512 channels; folo-n's 20x20 64->64 convs tied, and 8 input
-/// channels at 160x160 tied or lost (docs/hill/r2-cpu.md, second wave).
+/// channels at 160x160 tied or lost (docs/hill/r2-cpu.md, second wave). At most [`MAX_CHANNELS`] input plus
+/// output channels, which bounds the per-thread scratch a block keeps.
 pub(crate) fn uses_winograd(g: &ConvGeom) -> bool {
     let tiles = g.oh.div_ceil(2) * g.ow.div_ceil(2);
-    winograd_shape(g) && g.c >= 16 && g.o >= 8 && (tiles >= 256 || g.c * g.o >= 4096)
+    winograd_shape(g)
+        && g.c >= 16
+        && g.o >= 8
+        && g.c + g.o <= MAX_CHANNELS
+        && (tiles >= 256 || g.c * g.o >= 4096)
+}
+
+/// Input plus output channels a Winograd conv may have: a block's `V` and `M` (`16 · (C + O) · tb` floats, in each
+/// worker thread's scratch, kept between calls) stay within 4 MiB at the smallest block (`tb = NR = 16`). Wider
+/// convs (none in the FOLO models, whose layers have at most 768 channels) run direct.
+const MAX_CHANNELS: usize = 4096;
+
+#[cfg(test)]
+thread_local! {
+    /// Calls of [`transform_weights`] and of [`winograd_forward`] on this thread: tests observe dispatch and the
+    /// weight cache with it.
+    static CALLS: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
+}
+
+/// `[transform_weights calls, winograd_forward calls]` made on this thread so far.
+#[cfg(test)]
+pub(crate) fn calls() -> [usize; 2] {
+    CALLS.get()
+}
+
+#[cfg(test)]
+fn count(i: usize) {
+    CALLS.with(|c| {
+        let mut v = c.get();
+        v[i] += 1;
+        c.set(v);
+    });
 }
 
 /// `U = G g Gᵀ` of every `(o, c)` 3x3 kernel of the OIHW weights `wt`, laid out `[16][o][c]` (element `xi` of
 /// the transform domain is the row-major `O x C` matrix `xi`), computed in f64 and rounded once.
 pub(crate) fn transform_weights(wt: &[f32], o: usize, c: usize) -> Vec<f32> {
+    #[cfg(test)]
+    count(0);
     let oc = o * c;
     assert_eq!(wt.len(), oc * 9, "winograd: weights are not O x C x 3 x 3");
     let mut u = vec![0f32; 16 * oc];
@@ -97,6 +139,8 @@ pub(crate) fn winograd_forward(
     epi: Option<ChannelEpilogue<'_>>,
 ) {
     debug_assert!(winograd_shape(g));
+    #[cfg(test)]
+    count(1);
     let (c, o) = (g.c, g.o);
     assert_eq!(u.len(), 16 * o * c, "winograd: transformed weights are not 16 x O x C");
     let tiles = g.oh.div_ceil(2) * g.ow.div_ceil(2);
@@ -124,10 +168,9 @@ pub(crate) fn winograd_forward(
                 let (b, part) = (q / cparts, q % cparts);
                 let (t0, t1) = span(b);
                 let (ci0, ci1) = (part * cstep, ((part + 1) * cstep).min(c));
-                // SAFETY: block b's V is the vlen floats from b * vlen, inside `vall`; this task writes only the
-                // rows (xi, ci0..ci1) of it, and nothing reads `vall` until every task is done.
-                let v = unsafe { std::slice::from_raw_parts_mut(vptr.0.add(b * vlen), vlen) };
-                input_transform(&planes[ci0..ci1], ci0, g, t0, t1, tb, v);
+                // SAFETY: block b's V is the vlen floats from b * vlen, inside `vall`; this task is the only one
+                // with its rows (xi, ci0..ci1), and nothing reads `vall` until every task is done.
+                unsafe { input_transform(&planes[ci0..ci1], ci0, g, t0, t1, tb, vptr.0.add(b * vlen)) };
             });
             let vall_ref = &vall;
             (0..blocks * oparts).into_par_iter().for_each(|q| {
@@ -147,7 +190,8 @@ pub(crate) fn winograd_forward(
             let (t0, t1) = span(b);
             with_scratch(16 * (c + o) * tb, |buf| {
                 let (v, m) = buf[..16 * (c + o) * tb].split_at_mut(16 * c * tb);
-                input_transform(&planes, 0, g, t0, t1, tb, v);
+                // SAFETY: `v` is this block's V, all of it.
+                unsafe { input_transform(&planes, 0, g, t0, t1, tb, v.as_mut_ptr()) };
                 // SAFETY: blocks own disjoint output tiles, so the elements each one writes are its own.
                 unsafe { gemm_output(u, v, 0..o, g, epi, t0, t1, tb, m, optr.0) };
             });
@@ -197,30 +241,38 @@ macro_rules! avx2_or_plain {
 
 /// Input transform of tiles `t0..t1` for the channels `ci0..` of `planes`: `V[i*4 + j][ci][pos] = (Bt d B)[i][j]`
 /// of the 4x4 input patch `d` of tile `t0 + pos` in channel `ci`, into the block's `v` (`16 x C x tb`). Columns
-/// past the last tile are zeros.
-fn input_transform(
+/// past the last tile are zeros. Writes through slices of single rows `(xi, ci)` of `v`, so tasks that own other
+/// channels of the same `V` can run at once.
+///
+/// # Safety
+/// `v` points to a block's `V` (`16 · C · tb` floats), and no one else accesses its rows `(xi, ci0..ci0 + n)`
+/// (every `xi`, `n = planes.len()`) while this runs.
+unsafe fn input_transform(
     planes: &[&[f32]],
     ci0: usize,
     g: &ConvGeom,
     t0: usize,
     t1: usize,
     tb: usize,
-    v: &mut [f32],
+    v: *mut f32,
 ) {
-    avx2_or_plain!(run(planes: &[&[f32]], ci0: usize, g: &ConvGeom, t0: usize, t1: usize, tb: usize, v: &mut [f32]) {
-        input_transform_body(planes, ci0, g, t0, t1, tb, v)
+    avx2_or_plain!(run(planes: &[&[f32]], ci0: usize, g: &ConvGeom, t0: usize, t1: usize, tb: usize, v: *mut f32) {
+        // SAFETY: forwarded.
+        unsafe { input_transform_body(planes, ci0, g, t0, t1, tb, v) }
     })
 }
 
+/// # Safety
+/// As [`input_transform`].
 #[inline(always)]
-fn input_transform_body(
+unsafe fn input_transform_body(
     planes: &[&[f32]],
     ci0: usize,
     g: &ConvGeom,
     t0: usize,
     t1: usize,
     tb: usize,
-    v: &mut [f32],
+    v: *mut f32,
 ) {
     let (c, h, w) = (g.c, g.h as isize, g.w as isize);
     let [ph, pw] = g.p.padding.map(|p| p as isize);
@@ -231,6 +283,8 @@ fn input_transform_body(
     let mut seg = [0f32; 2 * SEG + 2];
     for (cl, plane) in planes.iter().enumerate() {
         let ci = ci0 + cl;
+        // SAFETY: row (xi, ci) of V is tb floats inside `v`, and the caller's alone; one is live at a time.
+        let row = |xi: usize| unsafe { std::slice::from_raw_parts_mut(v.add((xi * c + ci) * tb), tb) };
         for (ty, tx0, len, pos) in segments(t0, t1, tw) {
             let x0 = 2 * tx0 as isize - pw;
             let (lo, hi) = (x0.max(0), (x0 + 2 * len as isize + 2).min(w));
@@ -264,18 +318,18 @@ fn input_transform_body(
             }
             let [tr0, tr1, tr2, tr3] = &tr;
             for (j, (((a0, a1), a2), a3)) in tr0.iter().zip(tr1).zip(tr2).zip(tr3).enumerate() {
-                let at = |i: usize| ((i * 4 + j) * c + ci) * tb + pos;
+                let at = |i: usize| &mut row(i * 4 + j)[pos..pos + len];
                 let (a0, a1, a2, a3) = (&a0[..len], &a1[..len], &a2[..len], &a3[..len]);
-                for ((d, x), y) in v[at(0)..at(0) + len].iter_mut().zip(a0).zip(a2) {
+                for ((d, x), y) in at(0).iter_mut().zip(a0).zip(a2) {
                     *d = x - y;
                 }
-                for ((d, x), y) in v[at(1)..at(1) + len].iter_mut().zip(a1).zip(a2) {
+                for ((d, x), y) in at(1).iter_mut().zip(a1).zip(a2) {
                     *d = x + y;
                 }
-                for ((d, x), y) in v[at(2)..at(2) + len].iter_mut().zip(a2).zip(a1) {
+                for ((d, x), y) in at(2).iter_mut().zip(a2).zip(a1) {
                     *d = x - y;
                 }
-                for ((d, x), y) in v[at(3)..at(3) + len].iter_mut().zip(a1).zip(a3) {
+                for ((d, x), y) in at(3).iter_mut().zip(a1).zip(a3) {
                     *d = x - y;
                 }
             }
@@ -283,7 +337,7 @@ fn input_transform_body(
         // The columns past the block's last tile are computed and dropped: keep them finite.
         if n < tb {
             for xi in 0..16 {
-                v[(xi * c + ci) * tb + n..(xi * c + ci + 1) * tb].fill(0.0);
+                row(xi)[n..].fill(0.0);
             }
         }
     }

@@ -18,6 +18,8 @@ use depthwise::depthwise_forward;
 use im2col::{Im2Col, PlaneRows};
 use shifted::{ShiftedRows, shifted_scratch};
 use small_c::{small_c_forward, uses_small_c};
+#[cfg(test)]
+pub(crate) use winograd::calls as winograd_calls;
 pub(crate) use winograd::{transform_weights, uses_winograd, winograd_forward};
 
 pub(crate) use backward_input::{backward_input_overwrites, conv2d_backward_input};

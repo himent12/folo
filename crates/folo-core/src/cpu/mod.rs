@@ -19,6 +19,8 @@ mod index;
 mod pool;
 mod pool_alloc;
 pub(crate) mod reduce;
+#[cfg(test)]
+mod winograd_tests;
 
 pub use elementwise::{SILU_MAX_REL_ERR, fast_exp, silu, silu_backward};
 pub(crate) use pool_alloc::{alloc_filled, alloc_uninit, alloc_zeroed, recycle};

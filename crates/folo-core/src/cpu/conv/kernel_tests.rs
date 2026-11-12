@@ -59,18 +59,43 @@ fn reference(x: &[f32], wt: &[f32], g: &ConvGeom) -> Vec<(f64, f64)> {
     out
 }
 
-/// Runs `conv2d_forward` on every case with every epilogue (and accumulating into a prior output), against
-/// the f64 reference. Tolerance: the f32 summation bound `K · 2^-23 · Σ|terms|` for a K-term dot product in
-/// any order, carried through the activation (slope at most 1.1), plus SiLU's own relative error.
-fn check(cases: &[Case]) {
-    check_with(cases, None, |x, wt, out, g, epi| conv2d_forward(x, wt, out, g, false, epi), true);
+/// `2^-23`, the unit of the tolerances (twice f32's unit roundoff).
+const EPS: f64 = 1.0 / (1u64 << 23) as f64;
+
+/// The case's pseudo-random inputs and weights.
+fn case_data(i: usize, g: &ConvGeom) -> (Vec<f32>, Vec<f32>) {
+    (data(g.n * g.c * g.h * g.w, 7 + i as u32), data(g.o * g.kdim(), 300 + i as u32))
 }
 
-/// [`check`] of `forward` (overwriting): the summation term of the tolerance is `terms · 2^-23 · Σ|terms|`
-/// (`terms` is K when `None`); the accumulating case runs only if `accumulate`.
+/// The summation part of a forward's tolerance, from the inputs, the weights and the f64 reference
+/// `(sum, Σ|terms|)`: per output element, the allowance before bias, and the factor of `|bias|` to add.
+type Bound = fn(&[f32], &[f32], &ConvGeom, &[(f64, f64)]) -> (Vec<f64>, f64);
+
+/// The direct conv: the f32 summation bound `K · 2^-23 · (Σ|terms| + |bias|)` of a K-term dot product in any order.
+fn direct_bound(_: &[f32], _: &[f32], g: &ConvGeom, want: &[(f64, f64)]) -> (Vec<f64>, f64) {
+    let k = g.kdim() as f64 * EPS;
+    (want.iter().map(|&(_, a)| k * a).collect(), k)
+}
+
+/// Runs `conv2d_forward` on every case with every epilogue (and accumulating into a prior output), against
+/// the f64 reference. Tolerance: [`direct_bound`], carried through the activation (slope at most 1.1), plus,
+/// when an activation is applied, its own error (SiLU's relative error and an absolute floor).
+fn check(cases: &[Case]) {
+    check_with(
+        cases,
+        case_data,
+        direct_bound,
+        |x, wt, out, g, epi| conv2d_forward(x, wt, out, g, false, epi),
+        true,
+    );
+}
+
+/// [`check`] of `forward` (overwriting) on the inputs and weights `inputs` makes for each case, with the
+/// summation tolerance `bound`; the accumulating case runs only if `accumulate`.
 fn check_with(
     cases: &[Case],
-    terms: Option<f64>,
+    inputs: impl Fn(usize, &ConvGeom) -> (Vec<f32>, Vec<f32>),
+    bound: Bound,
     forward: impl Fn(&[f32], &[f32], &mut [f32], &ConvGeom, Option<ChannelEpilogue<'_>>),
     accumulate: bool,
 ) {
@@ -78,19 +103,18 @@ fn check_with(
     let silu = |v: f64| v / (1.0 + (-v).exp());
     for (i, &(n, c, hw, o, k, prm)) in cases.iter().enumerate() {
         let g = geom(n, c, hw, o, k, prm);
-        let x = data(n * c * hw[0] * hw[1], 7 + i as u32);
-        let wt = data(o * g.kdim(), 300 + i as u32);
+        let (x, wt) = inputs(i, &g);
         let want = reference(&x, &wt, &g);
+        let (allow, bias_factor) = bound(&x, &wt, &g, &want);
         let bias = bias_of(o);
         let ohw = g.ohw();
-        let kterms = terms.unwrap_or(g.kdim() as f64);
         for (e, act) in [None, Some(UnaryOp::Silu), Some(UnaryOp::Relu)].into_iter().enumerate() {
             for with_bias in [false, true] {
                 let epi = BiasAct { bias: with_bias.then_some(&bias[..]), act };
                 let epi = (with_bias || act.is_some()).then_some(epi);
                 let mut got = vec![f32::NAN; n * o * ohw];
                 forward(&x, &wt, &mut got, &g, epi);
-                for (q, (&y, &(s, a))) in got.iter().zip(&want).enumerate() {
+                for (q, ((&y, &(s, _)), &allow)) in got.iter().zip(&want).zip(&allow).enumerate() {
                     let b = if with_bias { bias[(q / ohw) % o] as f64 } else { 0.0 };
                     let t = s + b;
                     let (want, slope) = match act {
@@ -98,7 +122,8 @@ fn check_with(
                         Some(UnaryOp::Silu) => (silu(t), 1.1),
                         _ => (t.max(0.0), 1.0),
                     };
-                    let tol = slope * kterms * 1.2e-7 * (a + b.abs()) + 5e-7 * want.abs() + 1e-7;
+                    let act_err = if act.is_some() { 5e-7 * want.abs() + 1e-7 } else { 0.0 };
+                    let tol = slope * (allow + bias_factor * b.abs()) + act_err;
                     assert!(
                         (y as f64 - want).abs() <= tol,
                         "case {i} ({g:?}) epi {e}/{with_bias} at {q}: {y} vs {want} (tol {tol})"
@@ -308,12 +333,52 @@ fn winograd(x: &[f32], wt: &[f32], out: &mut [f32], g: &ConvGeom, epi: Option<Ch
     winograd_forward(ConvInput { parts: &part }, &u, out, g, epi);
 }
 
-/// Winograd F(2x2, 3x3) against the f64 reference on [`winograd_cases`], within `2 · 2^-23 · Σ|terms|` (no
-/// factor K: its sums are over the input channels only, and on these cases and on random folo-n shapes its
-/// largest error was 0.4-0.6 · 2^-23 · Σ|terms|, against 0.2-1.05 for the direct conv), plus the activation's.
+/// The Winograd F(2x2, 3x3) error bound per output element (module doc of `winograd.rs`):
+/// `(C + 8) · 2^-23 · 9 · Σ_c D_c · G_c` before bias, with `D_c` the sum of `|x|` over the output's tile's 4x4
+/// input patch in channel `c` (padding counts 0) and `G_c` the sum of `|w|` over its 3x3 kernel from channel `c`,
+/// and `2^-23 · |bias|` for the bias add.
+fn winograd_bound(x: &[f32], wt: &[f32], g: &ConvGeom, _: &[(f64, f64)]) -> (Vec<f64>, f64) {
+    let (c, (th, tw)) = (g.c, (g.oh.div_ceil(2), g.ow.div_ceil(2)));
+    let [ph, pw] = g.p.padding.map(|p| p as isize);
+    let gsum: Vec<f64> = wt.chunks(9).map(|k| k.iter().map(|v| v.abs() as f64).sum()).collect();
+    let mut out = Vec::with_capacity(g.n * g.o * g.ohw());
+    for img in 0..g.n {
+        // dsum[ci][tile]: Σ|x| over the tile's input patch.
+        let mut dsum = vec![0f64; c * th * tw];
+        for (q, d) in dsum.iter_mut().enumerate() {
+            let (ci, ty, tx) = (q / (th * tw), q / tw % th, q % tw);
+            for r in 0..4 {
+                for s in 0..4 {
+                    let (iy, ix) = ((2 * ty + r) as isize - ph, (2 * tx + s) as isize - pw);
+                    if (0..g.h as isize).contains(&iy) && (0..g.w as isize).contains(&ix) {
+                        *d += x[((img * c + ci) * g.h + iy as usize) * g.w + ix as usize].abs() as f64;
+                    }
+                }
+            }
+        }
+        for oc in 0..g.o {
+            for oy in 0..g.oh {
+                for ox in 0..g.ow {
+                    let t = oy / 2 * tw + ox / 2;
+                    let s: f64 = (0..c).map(|ci| dsum[ci * th * tw + t] * gsum[oc * c + ci]).sum();
+                    out.push((c as f64 + 8.0) * EPS * 9.0 * s);
+                }
+            }
+        }
+    }
+    (out, EPS)
+}
+
+/// Winograd F(2x2, 3x3) against the f64 reference within [`winograd_bound`] (plus the activation's error when
+/// one is applied), with every epilogue: on [`winograd_cases`], and with all-constant inputs (1.0) and weights
+/// (0.1) over 512 channels, where every product has one sign and the error grows with the channel count (about
+/// 20 · 2^-23 · Σ|terms|: a bound without a factor of C does not hold).
 #[test]
 fn winograd_matches_reference() {
-    check_with(&winograd_cases(), Some(2.0), winograd, false);
+    check_with(&winograd_cases(), case_data, winograd_bound, winograd, false);
+    let constant = [(1, 512, [4, 4], 8, [3, 3], params([1, 1], [0, 0], [1, 1], 1))];
+    let ones = |_: usize, g: &ConvGeom| (vec![1.0; g.n * g.c * g.h * g.w], vec![0.1; g.o * g.kdim()]);
+    check_with(&constant, ones, winograd_bound, winograd, false);
 }
 
 /// Winograd results do not depend on the thread count (the blocks a pool size makes) or on the batch: one
