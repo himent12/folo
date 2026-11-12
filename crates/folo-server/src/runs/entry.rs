@@ -132,6 +132,7 @@ impl RunEntry {
             }
         }
         let mut st = self.state.lock().unwrap();
+        let mut line = None;
         match ev {
             RunEvent::Status(s) => {
                 let r = &mut st.file.run;
@@ -172,6 +173,10 @@ impl RunEntry {
                 if r.best.is_none_or(|b| e.val.map50_95 > b.map50_95) {
                     r.best = Some(BestEpoch { epoch: e.epoch, map50_95: e.val.map50_95 });
                 }
+                // One log line per epoch, so the log shows progress (a cloud run's worker writes its own, mirrored).
+                if r.cloud.is_none() {
+                    line = Some(epoch_line(e, r.epochs));
+                }
                 self.persist(&st);
             }
             RunEvent::Log(l) => self.write_log(l),
@@ -181,6 +186,10 @@ impl RunEntry {
         }
         // Sent under the state lock, so subscribers see transitions in the order they happen.
         self.send(ev.clone());
+        drop(st);
+        if let Some(line) = line {
+            self.log(LogLevel::Info, line);
+        }
     }
 
     /// Takes a queued run for execution: false when it was stopped or deleted while it waited.
@@ -283,6 +292,14 @@ pub(crate) enum Ended {
     /// This process let go of the run without ending it (a cloud run left to its worker when the server shuts
     /// down): it stays as persisted, for the next process to follow.
     LetGo,
+}
+
+/// A run's log line for a finished epoch: "epoch 3/5: loss 3.214, mAP50-95 0.073, 15.2 s".
+pub(super) fn epoch_line(e: &folo_api::Epoch, epochs: u32) -> String {
+    format!(
+        "epoch {}/{epochs}: loss {:.3}, mAP50-95 {:.3}, {:.1} s",
+        e.epoch, e.train_loss.total, e.val.map50_95, e.duration_s
+    )
 }
 
 /// The model metrics of an epoch's validation.

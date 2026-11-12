@@ -425,7 +425,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   future epoch)
 - `GET /api/runs/{id}/logs?limit=500` → `{ "lines": [{ "t", "level": "debug|info|warn|error", "message" }],
   "total": 812 }`:
-  the run's log history, most recent `limit` lines (default 500, clamped to 1..5000), oldest first. `total` counts
+  the run's log history (the trainer's lines, the server's, and one per finished epoch: `epoch 3/5: loss 3.214,
+  mAP50-95 0.073, 15.2 s`), most recent `limit` lines (default 500, clamped to 1..5000), oldest first. `total` counts
   every line of the log (feature `run_cursors`; left out when it is 0, so a missing `total` reads as 0, as
   from older servers), and `after=<n>` answers the lines after
   the first `n` instead (the oldest `limit` of them), so `after=<total of the last answer>` polls for new lines
@@ -1293,8 +1294,9 @@ mostly shown) for the others.
   `config.json` (the trainer's resolved config), `metrics.jsonl` (every trainer event, every step; `/metrics` reads
   it, and a resumed run's repeated steps replace the earlier ones), `weights/last.folo` and `weights/best.folo`
   (full checkpoints, docs/FORMAT.md) and `samples/epoch_NNN.json`. On start every run is listed again; runs a
-  previous process left `queued`, `running` or `stopping` become `stopped` (with a `warn` log line) and can be
-  resumed with `resume_run_id`. On a graceful shutdown the active run stops after its current batch.
+  previous process left `queued`, `running` or `stopping` become `stopped` (with a `warn` log line; the ones that
+  were not stopping get `error_code: "interrupted"`) and can be resumed with `resume_run_id`. On a graceful shutdown
+  the active run stops after its current batch, and it and the queued runs end `stopped` with `interrupted` too.
 - `models/`: `.folo` files listed as models (scanned on every listing; metadata read once per file version).
 - `exports/`: exported models. `cache/eval/`: cached `/eval` results. `cache/weights/<model id>.<hash>.<variant>`:
   the exports of `/weights?format=…`: `f16.folo`, and `onnx` / `decode.onnx` / `decode-dynamic-half.onnx` / … (the

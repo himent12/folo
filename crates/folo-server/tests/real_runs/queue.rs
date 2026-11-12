@@ -61,6 +61,9 @@ async fn queue_stop_resume_and_restart() {
     assert_eq!(a1.status, RunStatus::Stopped);
     assert_eq!(a1.epoch, 1);
     assert!(a1.model_id.is_some(), "stopped after a validated epoch");
+    // One log line per finished epoch, in plain terms.
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", a.id))).await;
+    assert!(logs.lines.iter().any(|l| l.message.starts_with("epoch 1/2: loss ")), "{:?}", logs.lines);
     err(&app, post(&format!("/api/runs/{}/stop", a.id)), StatusCode::CONFLICT, "run_not_active").await;
     s.hold_runs_after_epochs(false);
 

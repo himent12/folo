@@ -318,3 +318,13 @@ fn a_failed_run_names_the_epoch_it_failed_in() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_epoch_is_one_log_line() {
+    let loss = r#"{"box":1,"cls":1,"dfl":1,"total":3.21449}"#;
+    let val = r#"{"map50":0.1,"map50_95":0.0734,"precision":0.1,"recall":0.1,"per_class":[]}"#;
+    let e: Epoch =
+        serde_json::from_str(&format!(r#"{{"epoch":3,"train_loss":{loss},"val":{val},"duration_s":15.24}}"#))
+            .unwrap();
+    assert_eq!(super::entry::epoch_line(&e, 5), "epoch 3/5: loss 3.214, mAP50-95 0.073, 15.2 s");
+}
