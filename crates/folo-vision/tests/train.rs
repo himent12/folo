@@ -734,3 +734,36 @@ fn musgd_runs_train_checkpoint_and_resume_with_either_head() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `o2o_attached_epochs` in the trainer (docs/MODEL.md §6.6): with 1 of 2 epochs attached, the one-to-one branch
+/// reads attached features in epoch 1 and detached ones in epoch 2, in an uninterrupted run and in one stopped after
+/// epoch 1 and resumed from its checkpoint (a resumed model starts detached, the default, before its first epoch).
+#[test]
+fn o2o_attached_epochs_switch_at_the_boundary() {
+    use folo_vision::model::HeadMode;
+    let ds = shapes(4, 2, 64);
+    let cfg =
+        TrainConfig { head: HeadMode::O2o, o2o_attached_epochs: 1, batch: 2, nbs: 4, ..micro_config(2) };
+    let detached = |t: &Trainer| t.model().head.o2o_detach;
+    // Uninterrupted: the switch happens inside the run.
+    let mut a = Trainer::new(cfg.clone(), data(&ds), options(None).0).unwrap();
+    assert_eq!(a.run().unwrap().epochs_completed, 2);
+    assert!(detached(&a), "epoch 2 of 2 is past the 1 attached epoch");
+    // Stopped after epoch 1 (attached), then resumed for epoch 2 (detached).
+    let (opts, _) = options(None);
+    let stop = opts.stop.clone();
+    let events: folo_vision::train::EventSink = Box::new(move |e| {
+        if matches!(e, RunEvent::Epoch(_)) {
+            stop.store(true, Ordering::Relaxed);
+        }
+    });
+    let mut b = Trainer::new(cfg, data(&ds), TrainOptions { events: Some(events), ..opts }).unwrap();
+    assert_eq!(b.run().unwrap().epochs_completed, 1);
+    assert!(!detached(&b), "epoch 1 is attached");
+    let ckpt = TestFile::new("train-o2o-attached", "last.folo");
+    b.save_checkpoint(&ckpt).unwrap();
+    let mut r = Trainer::resume(&ckpt, data(&ds), options(None).0, ResumeOverrides::default()).unwrap();
+    assert!(detached(&r), "a resumed model starts with the default");
+    assert_eq!(r.run().unwrap().epochs_completed, 2);
+    assert!(detached(&r), "the resumed epoch 2 is detached");
+}

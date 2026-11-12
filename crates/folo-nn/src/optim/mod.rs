@@ -233,44 +233,63 @@ pub trait Optimizer: Send {
 
     /// The `folo.optim` contract.
     fn contract(&self) -> OptimContract {
-        let kind = self.kind();
-        OptimContract {
-            kind,
-            groups: self.groups().iter().map(|g| GroupContract::from_group(g, kind)).collect(),
-            step: self.step_count(),
-        }
+        group_contract(self)
     }
 
     /// Check that `c` describes this optimizer (type, group names, parameter sets) and adopt its group
-    /// hyperparameters. Used on resume before [`Optimizer::load_state`].
+    /// hyperparameters (and [`MuSgd`]'s step weights). Used on resume before [`Optimizer::load_state`].
     fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
-        let kind = self.kind();
-        if c.kind != kind {
-            return Err(Error::Load(format!(
-                "checkpoint optimizer is {}, but the run uses {}",
-                c.kind.as_str(),
-                kind.as_str()
-            )));
-        }
-        check_param_sets(self.groups(), &c.groups)?;
-        for (g, gc) in self.groups_mut().iter_mut().zip(&c.groups) {
-            gc.apply_to(g, kind)?;
-        }
-        Ok(())
+        apply_group_contract(self, c)
     }
+}
+
+/// The part of `folo.optim` every optimizer has: type, groups and step (no `musgd`).
+fn group_contract<O: Optimizer + ?Sized>(o: &O) -> OptimContract {
+    let kind = o.kind();
+    OptimContract {
+        kind,
+        groups: o.groups().iter().map(|g| GroupContract::from_group(g, kind)).collect(),
+        step: o.step_count(),
+        musgd: None,
+    }
+}
+
+/// Check the type and parameter sets of `c` against `o` and adopt the group hyperparameters. A `musgd` object
+/// is an error here: only [`MuSgd`] reads it.
+fn apply_group_contract<O: Optimizer + ?Sized>(o: &mut O, c: &OptimContract) -> Result<()> {
+    let kind = o.kind();
+    if c.kind != kind {
+        return Err(Error::Load(format!(
+            "checkpoint optimizer is {}, but the run uses {}",
+            c.kind.as_str(),
+            kind.as_str()
+        )));
+    }
+    if c.musgd.is_some() && kind != OptimKind::MuSgd {
+        return Err(Error::Load(format!("folo.optim: a `{}` contract cannot have `musgd`", kind.as_str())));
+    }
+    check_param_sets(o.groups(), &c.groups)?;
+    for (g, gc) in o.groups_mut().iter_mut().zip(&c.groups) {
+        gc.apply_to(g, kind)?;
+    }
+    Ok(())
 }
 
 /// `folo.optim` (docs/FORMAT.md).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptimContract {
-    /// `"sgd"` or `"adamw"`.
+    /// `"sgd"`, `"adamw"` or `"musgd"`.
     #[serde(rename = "type")]
     pub kind: OptimKind,
     /// The groups, in order.
     pub groups: Vec<GroupContract>,
     /// Completed optimizer steps; equals `optim.__step`.
     pub step: u64,
+    /// MuSGD's step weights. Written only when they differ from [`MuSgdWeights::default`], so a file with the
+    /// default weights reads as before; absent means the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musgd: Option<MuSgdWeights>,
 }
 
 /// One group of `folo.optim`. Only the fields that apply to the optimizer type are present.

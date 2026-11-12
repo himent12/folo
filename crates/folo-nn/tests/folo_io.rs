@@ -328,6 +328,11 @@ struct Run {
 }
 
 fn new_run(kind: OptimKind, seed: u64) -> Run {
+    new_run_with(kind, seed, MuSgdWeights::default())
+}
+
+/// [`new_run`] with MuSGD step weights (ignored by the other optimizers).
+fn new_run_with(kind: OptimKind, seed: u64, weights: MuSgdWeights) -> Run {
     let mut rng = Rng::seed(seed);
     let model = net(3, &mut rng);
     let ema = ModelEma::new(net(3, &mut Rng::seed(seed + 100)), &model).unwrap();
@@ -338,9 +343,8 @@ fn new_run(kind: OptimKind, seed: u64) -> Run {
         // The last layer stands in for the head's class branch (`.cls` groups at 3x the LR).
         OptimKind::MuSgd => {
             let last = sg.decay.last().unwrap().0.rsplit_once('.').unwrap().0.to_string() + ".";
-            Box::new(
-                MuSgd::new(sg.into_boosted_groups(0.01, 0.9, 5e-4, |n| n.starts_with(&last), 3.0)).unwrap(),
-            )
+            let groups = sg.into_boosted_groups(0.01, 0.9, 5e-4, |n| n.starts_with(&last), 3.0);
+            Box::new(MuSgd::with_weights(groups, weights).unwrap())
         }
     };
     let sched = LrSchedule::new(DecayKind::Cosine, 2, 5, 0.01, 0.0, 0.1, 0.8).unwrap();
@@ -370,9 +374,9 @@ fn train_steps(r: &mut Run, n: usize) {
     }
 }
 
-fn save(r: &Run, path: &std::path::Path) {
+fn with_parts<T>(r: &Run, f: impl FnOnce(&CheckpointParts<'_>) -> T) -> T {
     let train = serde_json::json!({ "epochs": 2, "batch": 2 });
-    let parts = CheckpointParts {
+    f(&CheckpointParts {
         model: &r.model,
         ema: Some(&r.ema),
         optimizer: r.opt.as_ref(),
@@ -381,8 +385,11 @@ fn save(r: &Run, path: &std::path::Path) {
         epoch: 1,
         best: BestState { epoch: 0, fitness: Some(0.25) },
         train_config: &train,
-    };
-    save_checkpoint(path, &meta(FileKind::Checkpoint, 3), &parts).unwrap();
+    })
+}
+
+fn save(r: &Run, path: &std::path::Path) {
+    with_parts(r, |p| save_checkpoint(path, &meta(FileKind::Checkpoint, 3), p).unwrap());
 }
 
 fn snapshot(r: &Run) -> Vec<(String, Vec<u32>)> {
@@ -423,6 +430,65 @@ fn checkpoint_resume_is_bit_identical() {
             assert!(b1 == b2, "{kind:?}: `{n1}` differs after resume");
         }
     }
+}
+
+#[test]
+fn musgd_weights_resume_through_the_checkpoint() {
+    let w = MuSgdWeights { muon: 0.5, sgd: 0.5 };
+    let mut a = new_run_with(OptimKind::MuSgd, 10, w);
+    train_steps(&mut a, 3);
+    let path = tmp("resume-musgd-weights.folo");
+    save(&a, &path);
+    let (mut map, tensors) =
+        with_parts(&a, |p| checkpoint_contents(&meta(FileKind::Checkpoint, 3), p).unwrap());
+    train_steps(&mut a, 3);
+    let want = snapshot(&a);
+    let optim_json = |path: &std::path::Path| -> Value {
+        let p = parse_independently(&std::fs::read(path).unwrap());
+        serde_json::from_str(p.header["__metadata__"]["folo.optim"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(optim_json(&path)["musgd"], serde_json::json!({ "muon": 0.5, "sgd": 0.5 }));
+
+    // A fresh run with the default weights takes the file's and continues bit-exactly.
+    let mut b = new_run(OptimKind::MuSgd, 77);
+    let f = ModelFile::open(&path).unwrap();
+    let res = f.resume(&b.model, b.opt.as_mut(), Some(&mut b.ema), Some(classes(3))).unwrap();
+    assert_eq!(b.opt.contract().musgd, Some(w));
+    b.sched = res.schedule;
+    b.rng = res.rng;
+    drop(f);
+    train_steps(&mut b, 3);
+    let got = snapshot(&b);
+    assert_eq!(got.len(), want.len());
+    for ((n1, b1), (n2, b2)) in got.iter().zip(&want) {
+        assert_eq!(n1, n2);
+        assert!(b1 == b2, "`{n1}` differs after resuming with MuSGD weights {w:?}");
+    }
+
+    // The default weights are not written: such a file reads as before the key.
+    let d = new_run(OptimKind::MuSgd, 11);
+    let dpath = tmp("resume-musgd-default.folo");
+    save(&d, &dpath);
+    assert!(optim_json(&dpath).get("musgd").is_none());
+
+    // A contract without the key (written before it) means the defaults, also into a run made with others.
+    let mut optim = optim_json(&path);
+    optim.as_object_mut().unwrap().remove("musgd");
+    map.insert("folo.optim".into(), optim.to_string());
+    let legacy = rewrite(&map, &tensors).unwrap();
+    let mut c = new_run_with(OptimKind::MuSgd, 78, w);
+    legacy.resume(&c.model, c.opt.as_mut(), Some(&mut c.ema), Some(classes(3))).unwrap();
+    assert_eq!(c.opt.contract().musgd, None);
+
+    // `musgd` belongs to MuSGD contracts only, and its weights are checked.
+    optim["type"] = "sgd".into();
+    optim["musgd"] = serde_json::json!({ "muon": 0.5, "sgd": 0.5 });
+    map.insert("folo.optim".into(), optim.to_string());
+    assert!(rewrite(&map, &tensors).err().unwrap().to_string().contains("musgd"));
+    optim["type"] = "musgd".into();
+    optim["musgd"] = serde_json::json!({ "muon": -1.0, "sgd": 0.5 });
+    map.insert("folo.optim".into(), optim.to_string());
+    assert!(rewrite(&map, &tensors).err().unwrap().to_string().contains("weights"));
 }
 
 #[test]

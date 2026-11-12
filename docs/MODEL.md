@@ -625,7 +625,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `batch` | 16 | images per forward/backward |
 | `imgsz` | 640 | square, multiple of 32, at least 64 for training (so P5 is at least 2×2 and every BN channel sees several values) |
 | `nbs` | 64 | nominal batch: gradients accumulate over `accumulate = max(round(nbs / batch), 1)` batches |
-| `optimizer` | `auto` | `sgd`, `adamw` or `auto` (§8.2) |
+| `optimizer` | `auto` | `sgd`, `adamw`, `musgd` or `auto` (§8.2) |
 | `lr0` | 0.01 | base LR (ignored by `auto`) |
 | `lrf` | 0.01 | final LR = `lr0 · lrf` |
 | `momentum` | 0.937 | SGD momentum / AdamW β1 |
@@ -653,13 +653,14 @@ Effective weight decay: `wd = weight_decay · batch · accumulate / nbs`.
 short or long, from scratch or from pretrained weights. An explicit `sgd`/`adamw`/`musgd` uses `lr0`, `momentum` and
 `warmup_bias_lr` as given.
 
-Why (docs/hill/r2-learn.md, three seeds per side unless noted): the reference trainer (Ultralytics 8.4.198, and
-FOLO's rule 3) zeroes the bias warmup LR whenever `auto` chooses, which suits AdamW at `lr0 ≈ 0.001` but costs MuSGD
-about 10% on the COCO proxy (MuSGD at momentum 0.9: AP 0.1021 with `warmup_bias_lr = 0`, 0.1118 with 0.1, three
-seeds each); and below 10,000 iterations it picks AdamW, which MuSGD beats in every short case measured: the COCO
-proxy (6,260 iterations from scratch, AP 0.0747 for AdamW against 0.112), the shapes gate (§10.6, mAP50-95 0.892
-against 0.926, one seed) and fine-tuning `folo-n-coco-v2` on BCCD (test AP 0.607 against 0.625, three seeds), with
-the other three fine-tuning sets of docs/BENCHMARKS.md level or better.
+Why (docs/hill/r2-learn.md; three seeds per side unless marked "one seed"): the reference trainer (Ultralytics
+8.4.198, and FOLO's rule 3) zeroes the bias warmup LR whenever `auto` chooses, which suits AdamW at `lr0 ≈ 0.001` but
+costs MuSGD about 10% on the COCO proxy (MuSGD at momentum 0.9: AP 0.1021 with `warmup_bias_lr = 0`, 0.1118 with
+0.1); and below 10,000 iterations it picks AdamW, which MuSGD beats in every short case measured: the COCO proxy
+(6,260 iterations from scratch, AP 0.0747 for AdamW, one seed, from docs/hill/learn.md, against 0.112), the shapes
+gate (§10.6, mAP50-95 0.892 against 0.926, one seed) and fine-tuning `folo-n-coco-v2` on BCCD (test AP 0.607
+against 0.625). On the other fine-tuning sets of docs/BENCHMARKS.md it is level: medical-pills 0.807 against
+0.804, signature 0.9885 against 0.9892 (a saturated set); brain-tumor: see docs/hill/r2-learn.md.
 
 Rule 3: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: MuSGD with `lr0 = 0.01`,
 `momentum = 0.9`, as the reference trainer picks since Ultralytics 8.4. Otherwise: AdamW with
@@ -707,7 +708,8 @@ p = p − 0.2 · lr · sqrt(max(1, d₋₂ / d₋₁)) · X        (the factor i
 ```
 then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. The two
 weights and the class-branch factor are `TrainConfig.musgd` (`muon = 0.2`, `sgd = 1.0`: the SGD half of a Muon
-parameter runs at `sgd · lr`; `cls_lr = 3.0`), the reference trainer's; YOLO26's published COCO run used 0.528 /
+parameter runs at `sgd · lr`; `cls_lr = 3.0`), the reference trainer's; other step weights are saved in the
+checkpoint's `folo.optim` (FORMAT.md), so a resume continues with them; YOLO26's published COCO run used 0.528 /
 0.674 / 2.737 (the `muon_w`, `sgd_w`, `cls_w` of `yolo26n.pt`'s `train_args`), which fine-tuned BCCD worse here
 (docs/hill/r2-learn.md). Same
 `lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the Newton–Schulz iteration in `f32` (the
@@ -998,12 +1000,14 @@ batch 2, in train mode so BN uses batch statistics).
 
 ### 10.4 Training-loop tests
 - Batching and schedule: for `N_train = 800`, `batch = 16`, `E = 30`: `nb = 50`, `accumulate = 4`,
-  `spe = 13` (the last window of each epoch has 2 batches), `T = 390`, `W = 100` (the 100 floor applies, since
-  `round(3 · 13) = 39`). Check the LR and momentum of every group at `t ∈ {0, 50, 99, 100, 389}`, that
-  `lf(0) = 1` and `lf(389) = lrf`, and that `warmup_epochs = 0` gives `W = 0`.
-- Short runs: the same data for `E = 10` (`T = 130`) gives `W = 39` (the floor is `floor(0.3 · 130) = 39`) and a
-  short-run warning; `E = 12` of `spe = 3` (`T = 36`) gives `W = 10`; `T = 333` has floor 99 and `T = 334` the full
-  100. `close_mosaic = 10` closes mosaic for 10 epochs of 20 or 30, 6 of 12, 4 of 8 and none of 1.
+  `spe = 13` (the last window of each epoch has 2 batches), `T = 390`, `W = 39` (`round(3 · 13)`; no floor by
+  default). With `warmup_floor = 100` (configs written before the key) the floor applies and `W = 100`; on that
+  schedule check the LR and momentum of every group at `t ∈ {0, 50, 99, 100, 389}`, that `lf(0) = 1` and
+  `lf(389) = lrf`, and that `warmup_epochs = 0` gives `W = 0`.
+- Short runs: the same data for `E = 10` (`T = 130`) gives `W = 39` and a short-run warning (with the 100 floor
+  too: it is cut to `floor(0.3 · 130) = 39`). With the 100 floor, `E = 12` of `spe = 3` (`T = 36`) gives `W = 10`
+  (no floor: 9), `T = 333` has floor 99 and `T = 334` the full 100. `close_mosaic = 10` closes mosaic for 10 epochs
+  of 20 or 30, 6 of 12, 4 of 8 and none of 1.
 - Accumulation never crosses an epoch boundary: after each epoch the gradient buffers are zero.
 - A forward that produces NaN in a BN layer (inject it), followed by a valid batch: the BN running statistics,
   the EMA and eval-mode outputs stay finite, and no `step` event carries a non-finite value.
@@ -1012,7 +1016,8 @@ batch 2, in train mode so BN uses batch statistics).
   uninterrupted run.
 - Early stopping: with `patience = 2` and fitness `[0.1, 0.3, 0.2, 0.2]`, training stops after epoch 3
   (`best_epoch = 1`). A resume from the epoch-2 checkpoint stops at the same epoch.
-- `auto` picks AdamW at `lr0 = 0.00125` for `nc = 4`, 2000 images and 30 epochs.
+- `auto` (rule 4) picks MuSGD at `lr0 = 0.01`, momentum 0.937 and `warmup_bias_lr = 0.1` for the run above;
+  `auto_rule = 3` picks AdamW at `lr0 = 0.00125` for `nc = 4`, 2000 images and 30 epochs.
 - EMA: after one update `d = 0.9999 · (1 − e^{−1/2000}) ≈ 4.99825e-4`.
 - **Overfit** (`#[ignore]`, about 1–2 min on CPU): folo-n at 320 px, 8 synthetic images, augmentation off, AdamW
   `lr0 = 0.002`, 300 steps, batch 8, no accumulation. The total loss must fall below 25% of its first value, and
@@ -1031,12 +1036,16 @@ AGPL-3.0: never commit them, any derived file, or the conversion script; gate th
 - Dataset: folo-data's synthetic shapes, 4 classes (circle, square, triangle, star), 2000 train and 200 val images
   at 320×320, 1 to 8 objects per image, object size 6 to 35% of the image side, textured backgrounds, seed 0.
 - Run: `folo train --arch folo-n --imgsz 320 --epochs 30 --batch 16 --close-mosaic 5 --seed 0`, other settings at
-  default (so `auto` chooses AdamW at `lr0 = 0.00125`; `nb = 125`, accumulate 4, `spe = 32`, warmup `W = 100`
-  iterations).
+  default (so `auto` rule 4 chooses MuSGD at `lr0 = 0.01`, momentum 0.937, `warmup_bias_lr = 0.1`; `nb = 125`,
+  accumulate 4, `spe = 32`, warmup `W = 96` iterations: 3 epochs, no floor).
 - **Pass:** EMA-model validation mAP@0.5 ≥ 0.90 and mAP@0.5:0.95 ≥ 0.75 by epoch 30, with no non-finite loss.
-- Calibration: the reference implementation (Ultralytics 8.4 YOLO11n: the same topology, AdamW auto at 0.00125,
-  trained from scratch with this run configuration on a generator matching this description; its warmup is
-  375 batches ≈ 94 optimizer steps instead of 100, with an accumulation ramp) reached
+- Measured (seed 0, RTX 4080 SUPER, docs/hill/r2-learn.md): final mAP@0.5 0.985 and mAP@0.5:0.95 0.926, the bar
+  first met at epoch 8. The `auto` of rule 3 (AdamW at `lr0 = 0.00125`, `warmup_bias_lr = 0`, `W = 100` with the
+  old floor) measured 0.980 / 0.892, first met at epoch 9.
+- Calibration (historical: made when `auto` chose AdamW here): the reference implementation (Ultralytics 8.4
+  YOLO11n: the same topology, trained with AdamW, its `auto` at 0.00125, from scratch with this run configuration on
+  a generator matching this description; its warmup is 375 batches ≈ 94 optimizer steps instead of the 100 FOLO had
+  then, with an accumulation ramp) reached
   mAP@0.5 0.854 / 0.904 / 0.933 / 0.948 at epochs 6 / 11 / 16 / 30, and mAP@0.5:0.95 0.752 at epoch 9 and 0.873 at
   epoch 30. Its losses dropped visibly when mosaic closed at epoch 26. The pass bar leaves margin for generator and
   implementation differences. A FOLO run far below it points to a bug, not to tuning.
