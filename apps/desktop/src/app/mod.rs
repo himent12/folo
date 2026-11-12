@@ -4,6 +4,7 @@
 mod actions;
 mod connection;
 mod data;
+mod deleted;
 mod descriptions;
 mod drag;
 mod focus;
@@ -434,9 +435,9 @@ pub struct FoloApp {
     pub bench: crate::bench::BenchState,
     /// A page to open on the next render (set where no window is at hand, e.g. after a request).
     pub route_pending: Option<Route>,
-    /// Runs, models and datasets this app deleted, by id, with their names: a link to one left
-    /// behind (an earlier toast's Open, the palette) opens its list instead, saying so.
-    pub deleted: HashMap<String, String>,
+    /// Runs, models and datasets deleted lately, by id, with their names: a link to one left behind
+    /// (an earlier toast's Open, the palette) opens its list instead, saying so.
+    pub deleted: deleted::Deleted,
     /// Which half of it shows: training (0) or inference (1); reference rows too or measured only.
     pub tp_view: usize,
     pub tp_all: bool,
@@ -615,7 +616,7 @@ impl FoloApp {
             cloud: Default::default(),
             bench: Default::default(),
             route_pending: None,
-            deleted: HashMap::new(),
+            deleted: Default::default(),
             tp_view: 0,
             tp_all: false,
             bench_busy: false,

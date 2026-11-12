@@ -1,8 +1,6 @@
 //! Moving between pages: navigate, back, the parent route, and the Ctrl+number shortcuts (inert
 //! while a dialog is up).
 
-use std::collections::HashMap;
-
 use folo_ui::{Context, Window, px};
 
 use crate::store::*;
@@ -12,7 +10,7 @@ use super::{FoloApp, Route};
 
 /// The list to open instead of `route` when it is the page of something in `deleted`, with that
 /// thing's name.
-pub(super) fn deleted_route(deleted: &HashMap<String, String>, route: &Route) -> Option<(String, Route)> {
+pub(super) fn deleted_route(deleted: &super::deleted::Deleted, route: &Route) -> Option<(String, Route)> {
     let (id, list) = match route {
         Route::Run(id) => (id, Route::Runs),
         Route::Model(id) => (id, Route::Models),
