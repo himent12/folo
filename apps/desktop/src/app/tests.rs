@@ -588,3 +588,24 @@ fn a_generated_dataset_can_be_removed_with_its_files_as_in_studio() {
         assert!(this.store.dataset_summary(&id).is_none());
     });
 }
+
+#[test]
+fn a_run_that_ends_shows_its_model_and_end_at_once() {
+    use crate::api::RunStatus;
+    let (mut app, window) = open();
+    // As the live stream leaves it: the status says completed, the list doesn't know the rest yet.
+    let id = drive(&mut app, window, |this, _, _| {
+        let runs = this.store.runs.ready_mut().unwrap();
+        let r = runs.iter_mut().find(|r| r.status == RunStatus::Completed && r.model_id.is_some()).unwrap();
+        r.model_id = None;
+        r.finished = None;
+        r.id.clone()
+    });
+    drive(&mut app, window, |this, _, cx| this.run_ended(&id, RunStatus::Completed, cx));
+    drive(&mut app, window, |this, _, _| {
+        let r = this.store.run(&id).unwrap();
+        assert!(r.model_id.is_some(), "Open model and Try in Playground show now");
+        assert!(r.finished.is_some(), "its duration stops counting now");
+        assert!(this.toasts.iter().any(|t| t.title.ends_with("finished")));
+    });
+}
