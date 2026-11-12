@@ -281,6 +281,8 @@ impl BufferPool {
         self.window_takes += 1;
         if self.window_takes == NEED_WINDOW {
             self.roll_window(false);
+            // The need may have dropped: the bound holds after the rollover too, also when this request hits.
+            self.evict_to(self.cache_cap());
         }
         if let Some((_, buf)) = self.free.get_mut(&(class, usage)).and_then(BTreeMap::pop_first) {
             self.stats.hits += 1;

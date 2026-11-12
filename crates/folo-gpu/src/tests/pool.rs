@@ -228,3 +228,30 @@ fn classes_no_longer_requested_leave_the_cache() {
     assert_eq!(s.need_bytes, (1..=40u64).sum::<u64>() * 64 * 1024, "{s:?}");
     assert!(s.cached_bytes <= 2 * 40 * 64 * 1024, "{s:?}");
 }
+
+/// A need window that rolls over on a request served from the cache applies the lower need at once: classes that
+/// left the need are evicted on that request, not only at the next miss or free.
+#[test]
+fn a_window_rollover_on_a_hit_applies_the_lower_need() {
+    let ctx = gpu!();
+    let dev = ctx.wgpu_device();
+    let mut pool = BufferPool::new(1024);
+    for class in [4 * MIB, 5 * MIB] {
+        let b = pool.take(dev, class, USAGE);
+        pool.give(b, class);
+    }
+    assert_eq!(pool.stats().cached_bytes, 9 * MIB);
+    // Small requests only, all hits after the first, up to the last request of the second window: the final take
+    // below is request 2 * NEED_WINDOW, a hit that rolls the window over.
+    let small = 256;
+    for _ in 2..2 * NEED_WINDOW - 1 {
+        let b = pool.take(dev, small, USAGE);
+        pool.give(b, small);
+    }
+    let b = pool.take(dev, small, USAGE);
+    let s = pool.stats();
+    assert_eq!(s.need_bytes, small, "{s:?}");
+    // The cap is now the high-water mark (5 MiB): the 4 MiB buffer, freed first, is gone.
+    assert!(s.live_bytes + s.cached_bytes <= 5 * MIB + small, "{s:?}");
+    pool.give(b, small);
+}
