@@ -184,15 +184,28 @@ pub fn recorded_transfer(run_dir: &std::path::Path) -> Option<bool> {
     Some(train.get("transfer").and_then(serde_json::Value::as_bool).unwrap_or(false))
 }
 
+/// The MuSGD step weights a run's config records (`musgd.muon`, `musgd.sgd`; [`recorded_train`]), the defaults
+/// 0.2 / 1.0 when absent. `None` when nothing records the run's config.
+pub fn recorded_musgd_weights(run_dir: &std::path::Path) -> Option<folo_nn::optim::MuSgdWeights> {
+    let train = recorded_train(run_dir)?;
+    let d = folo_nn::optim::MuSgdWeights::default();
+    let w = |k: &str, d: f64| {
+        train.get("musgd").and_then(|m| m.get(k)).and_then(serde_json::Value::as_f64).unwrap_or(d)
+    };
+    Some(folo_nn::optim::MuSgdWeights { muon: w("muon", d.muon), sgd: w("sgd", d.sgd) })
+}
+
 /// `cmd` with `--set auto_rule=4` for an `auto` run under the current rule that trained as a transfer run
 /// (`transfer`) while the command has no `--weights` (e.g. a run continued from an imported checkpoint): the command
 /// would train from scratch, which rule 5 resolves to other MuSGD step weights; rule 4 resolves the same optimizer
-/// with `musgd.*`, the weights the run trained with. Runs under older rules already carry their rule.
+/// with `musgd.*`, so the run's own `musgd` weights (`weights`) follow when they are not the defaults. Runs under
+/// older rules already carry their rule.
 pub fn with_transfer(
     mut cmd: CliCommand,
     config: &TrainConfig,
     rule: Option<u32>,
     transfer: Option<bool>,
+    weights: Option<folo_nn::optim::MuSgdWeights>,
 ) -> CliCommand {
     let current = folo_vision::TrainConfig::default().auto_rule;
     if config.optimizer == Optimizer::Auto
@@ -202,6 +215,11 @@ pub fn with_transfer(
         && !cmd.argv.iter().any(|a| a == "--weights" || a.starts_with("--weights="))
     {
         cmd.argv.extend(["--set".to_string(), "auto_rule=4".to_string()]);
+        if let Some(w) = weights.filter(|w| *w != folo_nn::optim::MuSgdWeights::default()) {
+            for (k, v) in [("muon", w.muon), ("sgd", w.sgd)] {
+                cmd.argv.extend(["--set".to_string(), format!("musgd.{k}={v}")]);
+            }
+        }
         cmd.cli = shell_join(&cmd.argv);
     }
     cmd

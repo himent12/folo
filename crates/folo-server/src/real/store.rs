@@ -152,7 +152,9 @@ impl Store for RealStore {
         let rule = crate::cli::recorded_auto_rule(e.dir());
         let cmd = crate::cli::with_auto_rule(cmd, &config, rule);
         // A transfer run whose command has no `--weights` keeps its MuSGD step weights (rule 5 vs 4, §8.2).
-        let cmd = crate::cli::with_transfer(cmd, &config, rule, crate::cli::recorded_transfer(e.dir()));
+        let (transfer, weights) =
+            (crate::cli::recorded_transfer(e.dir()), crate::cli::recorded_musgd_weights(e.dir()));
+        let cmd = crate::cli::with_transfer(cmd, &config, rule, transfer, weights);
         Ok(crate::cli::with_warmup_floor(cmd, crate::cli::recorded_warmup_floor(e.dir())))
     }
 

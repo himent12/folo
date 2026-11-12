@@ -641,7 +641,8 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   rule 4 with AdamW; a run made before `warmup_floor` existed (no `warmup_floor`) ends with
   `--set warmup_floor=100`, the warmup floor it trained with; an `auto` rule-5 run that trained from pretrained
   weights (`transfer`) but whose command has no `--weights` (a run continued from an imported checkpoint) ends with
-  `--set auto_rule=4`, which resolves the same optimizer with the MuSGD step weights it used (docs/MODEL.md §8.2).
+  `--set auto_rule=4` (and `--set musgd.muon=.. --set musgd.sgd=..` when its weights were not the defaults), which
+  resolves the same optimizer with the MuSGD step weights it used (docs/MODEL.md §8.2).
   A run whose optimizer this
   server does not know (made by a newer FOLO) gets `400 invalid_config` instead of a command that would train `auto`. `cli` is quoted for PowerShell,
   as Studio shows commands: arguments with spaces or shell characters are single-quoted, a quote inside doubled
