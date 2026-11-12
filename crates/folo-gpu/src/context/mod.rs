@@ -239,6 +239,8 @@ struct Inner {
     dispatches: AtomicU64,
     submissions: AtomicU64,
     bind_groups: AtomicU64,
+    spin_waits: AtomicU64,
+    blocked_waits: AtomicU64,
     /// Tensor-core kernels in use (only ever true when `caps.coop_f16`); cleared by
     /// [`GpuContext::set_tensor_cores`] or when a tensor-core kernel fails to build.
     tensor_cores: AtomicBool,
@@ -321,6 +323,11 @@ pub struct WorkStats {
     pub submissions: u64,
     /// Bind groups created; the other dispatches reused a cached one (see [`GpuContext::bind_cache_len`]).
     pub bind_groups: u64,
+    /// Waits for the GPU ([`GpuContext::sync`], readbacks) that ended while polling, within the wait spin
+    /// ([`GpuContext::set_wait_spin`]).
+    pub spin_waits: u64,
+    /// Waits that blocked in the driver: the wait spin is zero, or the GPU was still busy when it ran out.
+    pub blocked_waits: u64,
 }
 
 /// A wgpu device and queue plus FOLO's buffer pool, pipeline cache and command batch.
@@ -471,12 +478,14 @@ impl GpuContext {
         std::time::Duration::from_nanos(self.inner.wait_spin_ns.load(Ordering::Relaxed))
     }
 
-    /// Dispatch and submission counters (benchmarks use the difference across a pass).
+    /// Dispatch, submission and wait counters (benchmarks use the difference across a pass).
     pub fn work_stats(&self) -> WorkStats {
         WorkStats {
             dispatches: self.inner.dispatches.load(Ordering::Relaxed),
             submissions: self.inner.submissions.load(Ordering::Relaxed),
             bind_groups: self.inner.bind_groups.load(Ordering::Relaxed),
+            spin_waits: self.inner.spin_waits.load(Ordering::Relaxed),
+            blocked_waits: self.inner.blocked_waits.load(Ordering::Relaxed),
         }
     }
 

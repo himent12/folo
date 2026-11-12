@@ -111,21 +111,29 @@ bind groups created (the backend benchmark prints them per pass).
 
 **Waiting.** A wait for the GPU (`sync()`, a readback) first polls the device without blocking, for up to 2 ms
 (`ctx.set_wait_spin(d)`, or `FOLO_GPU_WAIT_SPIN_US=n` for contexts created afterwards; 0 blocks at once), and
-only then blocks in the driver. A blocked thread is woken some time after the GPU finishes, and in about half the
-synchronised batch-1 forwards on the dev machine it woke on another core (often an E-core), with cold caches for
-the next call's encoding. Polling instead kept folo-n b1 synchronised calls 5–14% faster at the median (more when
-the CPU is busy) and their p90 lower; a wait longer than the spin costs at most 2 ms of one core before it blocks
-as before. `cargo bench -p folo-vision --bench gpu_latency` splits synchronised b1 calls into encode, submit and
-wait per call, compares spins in one process (`FOLO_BENCH_SPINS=0,1000,2000`), logs the GPU clocks while it runs
-and, with `FOLO_BENCH_RAMP=1`, how latency recovers after the GPU idled.
+only then blocks in the driver. `ctx.work_stats()` counts the waits that ended while polling (`spin_waits`) and
+those that blocked (`blocked_waits`: no spin, or the GPU was still busy when it ran out). A blocked thread is woken
+some time after the GPU finishes, and in about half the synchronised batch-1 forwards on the dev machine the thread
+ended the wait on another logical processor than the one it started the call on (often an E-core), with cold caches
+for the next call's encoding (counted between the start of the call and the end of the wait; the `gpu_latency`
+bench now also counts the wait alone). In seven interleaved in-process runs, polling made folo-n b1 synchronised
+calls 4–14% (f32) and 7–17% (f16 on tensor cores) faster at the median, and their p99 lower in every run; a wait
+longer than the spin costs at most 2 ms of one core before it blocks as before. `cargo bench -p folo-vision
+--bench gpu_latency` splits synchronised b1 calls into encode, submit and wait per call, compares spins in one
+process (`FOLO_BENCH_SPINS=0,1000,2000`), logs the GPU clocks while it runs and, with `FOLO_BENCH_RAMP=1`, how
+latency and the graphics clock recover after the GPU idled.
 
-**GPU clocks after idling** (the driver's power management, not something FOLO controls): after a second or more
-without work, the RTX 4080 SUPER drops to P8 (210 MHz graphics, 405 MHz memory) and needs 150–300 ms of steady
-work to come back; meanwhile a folo-n b1 forward takes 2.5–4 ms instead of 1–1.3. Calls spaced out in time pay
-this on every call: 200 ms apart, a folo-n f32 b1 forward took 16 ms at the median, 30 ms apart (a 33 fps
-camera) 6 ms. On a machine that serves such streams, NVIDIA's "Prefer maximum performance" power setting (per
-application, in the NVIDIA Control Panel) keeps the clocks up. The latency rows of the folo-vision `gpu` bench
-warm up for at least half a second for this reason.
+**GPU clocks after idling** (the driver's power management, not something FOLO controls): with calls spaced out,
+the RTX 4080 SUPER sits in P8 (210 MHz graphics, 405 MHz memory): with a 200 ms sleep after each folo-n f32 b1
+forward, 912 of 1038 `nvidia-smi` samples read P8 and a forward took 16 ms at the median. With a 30 ms sleep after
+each call (not a fixed 33 fps schedule) it took 5.8 ms p50 / 15.7 ms p90 without the wait spin and 10.4 / 15.7 with
+the 2 ms spin: the spin did not help there (a worse median, in one run of 150 calls per setting). Right after two
+idle seconds, the first 150–300 ms of back-to-back calls were slower in three of four traces (f32 2.75 → ~2.0 ms
+and 3.65 → ~1.8 ms, f16 on tensor cores 3.8–3.9 → ~1.0 ms) and not in the fourth; clock ramp-up is the likely
+cause, but the clocks were not sampled during those traces. On a machine that serves spaced-out streams, NVIDIA's
+"Prefer maximum performance" power setting (per application, in the NVIDIA Control Panel) keeps the clocks up. The
+latency rows of the folo-vision `gpu` bench warm up for at least half a second of back-to-back calls for this
+reason.
 
 **Bind-group cache.** The parameter block is bound with a dynamic offset (its slot in the arena chunk), so a bind
 group depends only on the kernel's layout, the arena chunk and the storage buffers, and the context keeps the bind

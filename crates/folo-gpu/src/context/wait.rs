@@ -1,6 +1,8 @@
 //! Waiting for the device: [`GpuContext::sync`], loss-aware polls ([`GpuError::DeviceLost`]) and the validation /
 //! out-of-memory errors wgpu reported.
 
+use std::sync::atomic::Ordering;
+
 use super::{FIRST_DISPATCHES_PER_BATCH, GpuContext};
 use crate::error::{GpuError, Result};
 
@@ -16,13 +18,17 @@ impl GpuContext {
         self.take_error()
     }
 
-    /// Blocks until the device is idle (returns at once in the browser, where WebGPU's `poll` cannot wait).
+    /// Blocks until the device is idle (returns at once in the browser, where WebGPU's `poll` cannot wait): polls for
+    /// up to the wait spin first, then blocks in the driver; each wait counts in [`crate::WorkStats`] as a spin wait
+    /// or a blocked one.
     ///
     /// A lost device is [`GpuError::DeviceLost`], not a panic: wgpu treats a failed poll on a lost device as fatal
     /// and panics inside `Device::poll` (its message still reaches stderr through the panic hook), so the poll
     /// runs under `catch_unwind` and the loss is remembered, failing every later wait at once.
     pub(super) fn wait_idle(&self) -> Result<()> {
         let polled = self.spin().and_then(|done| {
+            let counter = if done { &self.inner.spin_waits } else { &self.inner.blocked_waits };
+            counter.fetch_add(1, Ordering::Relaxed);
             if done { Ok(()) } else { self.poll_checked(wgpu::PollType::wait_indefinitely()) }
         });
         // The GPU has nothing queued now: submit the head of the next pass early.

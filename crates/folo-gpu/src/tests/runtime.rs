@@ -359,32 +359,58 @@ fn profiling_context_survives_device_loss() {
     let _ = ctx.profile_take();
 }
 
-/// Waits with every spin budget give the right results: none (block at once), shorter than the work (spin, then
-/// block), and far longer than the work, where the wait must end as soon as the queue is empty, not when the budget
-/// runs out.
+/// Waits with every spin budget give the right results and take the path the budget calls for, counted in
+/// [`crate::WorkStats`]: none blocks at once (also on an idle queue, which a poll would find empty), one far shorter
+/// than milliseconds of GPU work runs out and falls back to blocking, and one far longer than the work ends by polling
+/// as soon as the queue is empty, not when the budget runs out.
 #[test]
 fn waits_spin_then_block() {
+    use std::time::Duration;
     let _shared = gpu!();
     let ctx = crate::GpuContext::new().unwrap();
-    assert_eq!(ctx.wait_spin(), crate::context::DEFAULT_WAIT_SPIN);
+    let expected = std::env::var(crate::context::ENV_WAIT_SPIN_US)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|us| Duration::from_nanos(us.saturating_mul(1000)))
+        .unwrap_or(crate::context::DEFAULT_WAIT_SPIN);
+    assert_eq!(ctx.wait_spin(), expected);
     let one = GpuTensor::from_slice(&ctx, &[1.0], &[1]).unwrap();
-    for (spin, adds) in [(0, 300), (20, 3000), (5_000_000, 50)] {
-        ctx.set_wait_spin(std::time::Duration::from_micros(spin));
-        let mut t = GpuTensor::from_slice(&ctx, &vec![0.5f32; 4096], &[4096]).unwrap();
+    // `adds` additions over `len` floats, then one `sync`: how it waited (spin waits, blocked waits), how long, and
+    // whether the result is exact.
+    let job = |spin_us: u64, len: usize, adds: usize| {
+        ctx.set_wait_spin(Duration::from_micros(spin_us));
+        let mut t = GpuTensor::from_slice(&ctx, &vec![0.5f32; len], &[len]).unwrap();
         for _ in 0..adds {
             t = t.add(&one).unwrap();
         }
+        let before = ctx.work_stats();
         let start = std::time::Instant::now();
         ctx.sync().unwrap();
         let waited = start.elapsed();
-        assert!(t.to_vec().unwrap().iter().all(|&v| v == 0.5 + adds as f32), "spin {spin} us");
-        if spin == 5_000_000 {
-            assert!(
-                waited < std::time::Duration::from_secs(2),
-                "a 5 s spin ended when the queue emptied: {waited:?}"
-            );
-        }
-    }
+        let after = ctx.work_stats();
+        assert!(t.to_vec().unwrap().iter().all(|&v| v == 0.5 + adds as f32), "spin {spin_us} us");
+        (after.spin_waits - before.spin_waits, after.blocked_waits - before.blocked_waits, waited)
+    };
+
+    let (spun, blocked, _) = job(0, 4096, 300);
+    assert_eq!((spun, blocked), (0, 1), "no spin blocks at once");
+    let before = ctx.work_stats();
+    ctx.sync().unwrap();
+    let after = ctx.work_stats();
+    assert_eq!(
+        (after.spin_waits - before.spin_waits, after.blocked_waits - before.blocked_waits),
+        (0, 1),
+        "no spin blocks at once on an idle queue too"
+    );
+
+    // 200 passes over 16 MiB read and write 6.4 GB: milliseconds of GPU work, far longer than the spin.
+    let (spun, blocked, _) = job(1, 4 << 20, 200);
+    assert_eq!((spun, blocked), (0, 1), "a 1 us spin runs out while the GPU works, then the wait blocks");
+
+    let (spun, blocked, waited) = job(5_000_000, 4096, 50);
+    assert_eq!((spun, blocked), (1, 0), "a 5 s spin ends by polling");
+    assert!(waited < Duration::from_secs(2), "a 5 s spin ended when the queue emptied: {waited:?}");
+
     ctx.destroy_device();
     assert!(matches!(ctx.sync(), Err(crate::GpuError::DeviceLost(_))), "a lost device ends the spin");
 }

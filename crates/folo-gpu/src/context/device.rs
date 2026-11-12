@@ -406,6 +406,8 @@ impl GpuContext {
                 dispatches: AtomicU64::new(0),
                 submissions: AtomicU64::new(0),
                 bind_groups: AtomicU64::new(0),
+                spin_waits: AtomicU64::new(0),
+                blocked_waits: AtomicU64::new(0),
                 tensor_cores: AtomicBool::new(false),
                 tensor_cores_status: Mutex::new(status),
                 experimental: coop,
