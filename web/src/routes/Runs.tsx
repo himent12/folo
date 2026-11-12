@@ -614,8 +614,10 @@ css`
       white-space: nowrap;
     }
   }
+  /* The table's frame is the container the wide columns ask for room (below). */
   .scroll {
     overflow-x: auto;
+    container-type: inline-size;
   }
   /* The checkbox has a real 32 px column, there whether the boxes show or not, so revealing them never moves a thing:
      the box 12 px from the panel's edge, the name 14 px after it (its cell's leading padding 8). The whole cell is the
@@ -730,9 +732,10 @@ css`
   .ctx {
     display: none;
   }
-  /* Below 1600 the Dataset, Model and Started from columns hide (the name's second line has them), below 1280 the
-     trend and Duration too (.hide-lg, base.css), so the name keeps 160 px or more at every width. */
-  @media (max-width: 1599px) {
+  /* In a frame under 1320 px the Dataset, Model and Started from columns hide (the name's second line has them): with
+     Duration in, the page's widest frame (--size-content-max) would leave the name under 80 px. Below 1280 the trend
+     and Duration hide too (.hide-lg, base.css), so the name keeps 160 px or more at every width. */
+  @container (max-width: 1319px) {
     .runs :is(th, td).hide-xl {
       display: none;
     }
