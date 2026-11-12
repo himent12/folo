@@ -172,7 +172,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/datasets/{id}/images/{image_id}` → original image bytes (`Content-Type` from the file); `?thumb=256`
   returns a JPEG whose long side is 256 (clamped to 16..2048, never upscaled; EXIF orientation applied, so boxes
   line up). Mock images are immutable and sent with a long `Cache-Control`; real ones with `no-cache`.
-- `DELETE /api/datasets/{id}` → `204` (unregisters; never deletes files). Runs that used the dataset keep their
+- `DELETE /api/datasets/{id}` → `204` (unregisters; its files stay, unless `?files=true`, below). Runs that used the dataset keep their
   metrics and models; their sample images (`/images` of this id) are gone with it. A dataset's id derives from its
   folder (canonical path) and format, so registering the same folder again gives it the same id back (unless another
   dataset has taken it meanwhile), and those runs find it again. `?files=true` also deletes the dataset's folder, for
@@ -394,8 +394,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   holds the run's `cloud.lock`) is shown as that process last persisted it, and stopping it here is `409
   run_active`.
 - `GET /api/runs/{id}` → `Run`
-- `POST /api/runs/{id}/stop` → `Run` (status `stopping` → `stopped`; the last checkpoint is kept). `409 run_not_active`
-  when the run already finished. A queued run stops at once; a running one after its current batch (the epoch in
+- `POST /api/runs/{id}/stop` → `Run` (status `stopping` → `stopped`; the last finished epoch's checkpoint is kept,
+  none before the first epoch ends). `409 run_not_active` when the run already finished. A queued run stops at once
+  (one that never started is better deleted: `DELETE /api/runs/{id}` below); a running one after its current batch (the epoch in
   progress is discarded; `weights/last.folo` is the last finished epoch's). `model_id` is set when at least one epoch
   was validated. The final `status` event is sent once the run can be resumed or deleted.
 - `POST /api/runs/{id}/queue` body `{ "action": "top|up|down|bottom|start" }` or `{ "position": 1 }` → `Run` (with
@@ -421,7 +422,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     outside the queue).
 - `DELETE /api/runs/{id}` → `204` (`409 run_active` while `running` or `stopping`, or `queued` after it had started: a
   resumed run waiting to continue). A run waiting in the queue that never started leaves the queue and is deleted (the
-  runs behind it move up; Studio's Remove from queue). Real mode removes the run folder, its weights included, so its
+  runs behind it move up; Remove from queue in Studio and FOLO Desktop). Real mode removes the run folder, its weights included, so its
   models disappear too.
 - `GET /api/runs/{id}/metrics?every=1` → `{ "steps": [Step], "epochs": [Epoch] }` (full history, for charts on page
   load; `every=N` keeps every N-th step plus the latest one, to thin long runs). `after_step=<n>` keeps the steps
