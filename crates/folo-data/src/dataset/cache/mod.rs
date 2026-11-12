@@ -12,11 +12,13 @@
 //!   boxes, the issues found), stored with every file's path, length and modification time and reused only
 //!   while all of them are unchanged.
 //!
-//! A cache file is checked as a whole (a magic, a format version, its key and a checksum of its contents) and
-//! ignored when anything is off, so a torn, corrupt or stale file costs one normal open, never a wrong result.
-//! Results come out exactly as without the cache: same entries in the same order, same issues and messages. Only
-//! folders with at least [`MIN_FILES`] files of a dataset are listed and cached (small ones gain nothing). With a
-//! read guard installed ([`crate::guard`]) nothing is cached or listed: every file is read and checked again.
+//! A cache file is checked as a whole (its length, a magic, a format version, its key and a checksum of its
+//! contents) and ignored when anything is off, so a torn, corrupt or stale file costs one normal open, never a
+//! wrong result. Results come out exactly as without the cache (same entries in the same order, same issues and
+//! messages) as long as every change to a file changes its length or modification time; the folder listings are a
+//! snapshot taken when the open starts. Only folders with at least [`MIN_FILES`] files of a dataset are listed and
+//! cached (small ones gain nothing). With a read guard installed ([`crate::guard`]) nothing is cached or listed:
+//! every file is read and checked again.
 //! Bump [`FORMAT`] when the scan's rules change (what a probe or a label parse returns, the JSON rules).
 
 pub(crate) mod coco;
@@ -24,8 +26,10 @@ pub(crate) mod listing;
 pub(crate) mod probe;
 
 use std::cell::RefCell;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The folder of [`set_scan_cache_dir`].
@@ -37,6 +41,12 @@ pub const MIN_FILES: usize = 256;
 /// Version of the cached data; part of every file's header.
 pub(crate) const FORMAT: u32 = 1;
 const MAGIC: &[u8; 8] = b"FOLOSCAN";
+/// A cache file larger than this is ignored (COCO train2017's entry is 24 MB).
+const MAX_CACHE_FILE: u64 = 1 << 30;
+/// The kinds of cache file, the first part of their names.
+const KINDS: [&str; 2] = [coco::KIND, probe::KIND];
+/// Numbers this process's temporary files, so two writers in one process never share one.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Cache files not written for this long are deleted when the next one is written.
 const MAX_AGE: Duration = Duration::from_secs(60 * 86_400);
 /// A file modified less than this long before it is scanned is not cached: a write within the same timestamp
@@ -76,8 +86,13 @@ impl Settings {
         if let Some(s) = OVERRIDE.with(|o| o.borrow().clone()) {
             return s;
         }
-        let guarded = crate::guard::installed();
-        Settings { dir: if guarded { None } else { scan_cache_dir() }, min_files: MIN_FILES, list: !guarded }
+        Self::new(scan_cache_dir(), crate::guard::installed())
+    }
+
+    /// The settings with the cache folder `dir`, and with a read guard installed when `guarded` (then nothing is
+    /// cached or listed).
+    fn new(dir: Option<PathBuf>, guarded: bool) -> Self {
+        Settings { dir: if guarded { None } else { dir }, min_files: MIN_FILES, list: !guarded }
     }
 }
 
@@ -226,17 +241,31 @@ fn file_for(dir: &Path, kind: &str, key: &str) -> PathBuf {
     dir.join(format!("{kind}-{:016x}.bin", fnv(key.as_bytes())))
 }
 
-/// The contents of the cache file of `kind` for `key`, when it exists and its header, key and checksum match.
+/// The contents of the cache file of `kind` for `key`, when it exists and its header, key and checksum match. The
+/// file's length is checked (at most [`MAX_CACHE_FILE`], exactly its header plus the payload length the header
+/// gives) before the payload is read.
 pub(crate) fn read(dir: &Path, kind: &str, key: &str) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(file_for(dir, kind, key)).ok()?;
-    let mut d = Dec(&bytes);
+    let mut f = std::fs::File::open(file_for(dir, kind, key)).ok()?;
+    let file_len = f.metadata().ok()?.len();
+    if file_len > MAX_CACHE_FILE {
+        return None;
+    }
+    // Magic, format, kind and key (each with its length), checksum, payload length.
+    let head_len = 8 + 4 + 8 + kind.len() + 8 + key.len() + 8 + 8;
+    let mut head = vec![0; head_len];
+    f.read_exact(&mut head).ok()?;
+    let mut d = Dec(&head);
     if d.take(8)? != MAGIC || d.u32()? != FORMAT || d.str()? != kind || d.str()? != key {
         return None;
     }
     let sum = d.u64()?;
-    let len = usize::try_from(d.u64()?).ok()?;
-    let payload = d.take(len)?;
-    (d.is_empty() && fnv(payload) == sum).then(|| payload.to_vec())
+    let len = d.u64()?;
+    if (head_len as u64).checked_add(len)? != file_len {
+        return None;
+    }
+    let mut payload = Vec::with_capacity(usize::try_from(len).ok()?);
+    f.take(len + 1).read_to_end(&mut payload).ok()?;
+    (payload.len() as u64 == len && fnv(&payload) == sum).then_some(payload)
 }
 
 /// Writes `payload` as the cache file of `kind` for `key` (atomically: a temporary file renamed over the old one)
@@ -256,9 +285,10 @@ pub(crate) fn write(dir: &Path, kind: &str, key: &str, payload: &[u8]) {
         return;
     }
     let tmp = dir.join(format!(
-        ".{}.{}.tmp",
+        ".{}.{}-{}.tmp",
         path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-        std::process::id()
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     if std::fs::write(&tmp, &e.0).is_err() || std::fs::rename(&tmp, &path).is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -267,22 +297,47 @@ pub(crate) fn write(dir: &Path, kind: &str, key: &str, payload: &[u8]) {
     prune(dir);
 }
 
-/// Deletes cache files (and temporary files left by a killed writer) older than [`MAX_AGE`].
+/// Deletes cache files (and temporary files left by a killed writer) older than [`MAX_AGE`]. Only files named as
+/// this module names them ([`is_cache_name`]) are ever deleted, so a folder shared with other files keeps them.
 fn prune(dir: &Path) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let now = SystemTime::now();
     for e in rd.flatten() {
+        if !e.file_name().to_str().is_some_and(is_cache_name) {
+            continue;
+        }
         let old = e
             .metadata()
             .ok()
+            .filter(|m| m.is_file())
             .and_then(|m| m.modified().ok())
             .and_then(|t| now.duration_since(t).ok())
             .is_some_and(|age| age > MAX_AGE);
-        let ours = e.file_name().to_str().is_some_and(|n| n.ends_with(".bin") || n.ends_with(".tmp"));
-        if old && ours {
+        if old {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// Whether `name` is a cache file (`<kind>-<16 hex digits>.bin`) or one of [`write`]'s temporary files
+/// (`.<cache file name>.<pid>-<n>.tmp`).
+fn is_cache_name(name: &str) -> bool {
+    let cache_file = |n: &str| {
+        KINDS.iter().any(|k| {
+            n.strip_prefix(k)
+                .and_then(|r| r.strip_prefix('-'))
+                .and_then(|r| r.strip_suffix(".bin"))
+                .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        })
+    };
+    let digits = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    if let Some(t) = name.strip_prefix('.').and_then(|n| n.strip_suffix(".tmp"))
+        && let Some((file, ids)) = t.rsplit_once('.')
+        && let Some((pid, n)) = ids.split_once('-')
+    {
+        return cache_file(file) && digits(pid) && digits(n);
+    }
+    cache_file(name)
 }
 
 #[cfg(test)]

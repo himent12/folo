@@ -64,22 +64,28 @@ were not opened since boot) and, for COCO, a parse of the JSON (5-8 s for train2
 `folo_data::set_scan_cache_dir(Some(dir))` (`folo` sets `<FOLO_HOME>/cache/scan`, docs/CLI.md Caches; off by default)
 an open keeps what it learnt in `dir` and the next one reuses it (`dataset/cache/`):
 
-- **Per folder** (`dir-<hash>.bin`, keyed by the folder's absolute path): every image's probe result (its size, or
+- **Per folder** (`dir-<hash>.bin`, keyed by the folder's canonical path, links resolved; a folder that cannot be
+  canonicalised or whose path is not UTF-8 is not cached): every image's probe result (its size, or
   the codec's message when it cannot be decoded) and every YOLO label's parse (boxes and warnings, or why it is
   broken, with the class count it was checked against), each with the file's length and modification time. One
   directory read gives those for every file of the folder (free on Windows, where a `stat` opens the file), and a
   file is reused only while both match. IO errors are never cached, and files modified in the last 2 s are not
   cached (a same-tick rewrite could keep both).
-- **Per COCO annotation set** (`coco-<hash>.bin`, keyed by the JSON paths as given and absolute, and the wanted
+- **Per COCO annotation set** (`coco-<hash>.bin`, keyed by the JSON paths as given and canonical, and the wanted
   splits): everything derived from the JSON files alone (classes, issues, each image's boxes), reused only while
   every JSON file keeps its length and modification time. The image folder is still chosen and the images still
   checked against the disk (through the per-folder entries) at every open.
 
-An open comes out exactly as without the cache: the same entries in the same order and the same issues and messages
-(tested with corrupt, truncated and stale cache files and with files rewritten under an unchanged stamp). Every
-cache file is checked as a whole (magic, format version, its key, an FNV-1a checksum of its contents) and ignored
-when anything is off; writes are atomic (temporary file + rename), and cache files not written for 60 days are
-deleted when the next one is written. Only folders holding at least `SCAN_CACHE_MIN_FILES` (256) files of a dataset
+An open comes out exactly as without the cache (the same entries in the same order and the same issues and
+messages) as long as every change to a file changes its length or modification time: a file rewritten under an
+unchanged stamp is answered from the cache (tested, as are corrupt, truncated and stale cache files). The folder
+listing is a snapshot taken when the open starts, so a file changed or deleted while the open runs may be seen as
+it was then (without the cache an open is racy the same way; the dataset is the one at the open). A file listed but
+gone when its header is probed is reported as missing, as without the cache. Every cache file is checked as a
+whole (its length, at most 1 GiB and matching its header, then magic, format version, its key and an FNV-1a
+checksum of its contents) and ignored when anything is off; writes are atomic (a temporary file
+`.<name>.<pid>-<n>.tmp` + rename), and cache files (`dir-<16 hex>.bin`, `coco-<16 hex>.bin` and those temporary
+files, never any other file of the folder) not written for 60 days are deleted when the next one is written. Only folders holding at least `SCAN_CACHE_MIN_FILES` (256) files of a dataset
 are listed and cached, and COCO sets with at least that many images. With a read guard installed nothing is listed
 or cached. COCO train + val on the dev machine: 51 s cold, 0.3 s warm (docs/hill/r2-trainer.md).
 

@@ -14,7 +14,7 @@ const TOKEN: &str = "cli-remote-token-0123456789";
 
 /// Runs `folo cloud <args> --json --data-dir <home>` with `env` and `stdin`: exit code, stdout records, stderr.
 fn cloud(home: &Path, args: &[&str], env: &[(&str, &str)], stdin: &str) -> (i32, Vec<Value>, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut child = folo_cmd()
         .arg("cloud")
         .args(args)
         .args(["--json", "--data-dir"])
@@ -61,7 +61,7 @@ fn connections_offers_and_instances_from_the_command_line() {
     assert!(!home.join("cloud").join("connections.json").exists(), "nothing stored");
 
     // A `folo serve --token` to connect to (no GPU needed: it is only checked and asked for its offer).
-    let mut serve: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut serve: ChildGuard = folo_cmd()
         .args(["serve", "--port", "0", "--json", "--token", TOKEN, "--data-dir"])
         .arg(root.join("server"))
         .env("RUST_LOG", "warn")
@@ -141,11 +141,14 @@ fn connections_offers_and_instances_from_the_command_line() {
     // The token is in connections.json and nowhere else.
     let text = std::fs::read_to_string(home.join("cloud").join("connections.json")).unwrap();
     assert!(text.contains(TOKEN));
-    let human = Command::new(env!("CARGO_BIN_EXE_folo"))
-        .args(["cloud", "connections", "--data-dir"])
-        .arg(&home)
-        .output()
-        .unwrap();
+    let human = folo_cmd().args(["cloud", "connections", "--data-dir"]).arg(&home).output().unwrap();
     let shown = String::from_utf8(human.stdout).unwrap();
     assert!(shown.starts_with("ID ") && shown.contains("box") && !shown.contains(TOKEN), "{shown}");
+}
+
+/// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
+fn folo_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
+    c.env("FOLO_NO_CACHE", "1");
+    c
 }

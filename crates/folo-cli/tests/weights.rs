@@ -129,7 +129,7 @@ fn respond(s: &mut TcpStream, answer: &Answer) -> std::io::Result<()> {
 
 /// `folo weights pull <NAME> --json` (and `extra`) into the cache `cache`, from `base`, with `gh` as `FOLO_GH`.
 fn pull(cache: &Path, base: &str, gh: &str, extra: &[&str]) -> (i32, Vec<Value>, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let out = folo_cmd()
         .args(["weights", "pull", NAME, "--json"])
         .args(extra)
         .env("FOLO_WEIGHTS_DIR", cache)
@@ -269,4 +269,11 @@ fn a_cut_body_a_server_error_or_no_answer_is_a_download_error() {
     let e = failed(&cache, pull(&cache, &hang_up(), NO_GH, &[]));
     assert_eq!(e["code"], "download_failed", "{e}");
     assert!(e["hint"].as_str().unwrap().contains("network"), "{e}");
+}
+
+/// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
+fn folo_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
+    c.env("FOLO_NO_CACHE", "1");
+    c
 }

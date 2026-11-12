@@ -12,26 +12,32 @@
 //! Writes are atomic (a temporary file renamed over the old one) and happen off the compiling thread: a saver
 //! thread writes the cache about a second after the last new pipeline was compiled, dropping the context writes
 //! whatever is still unsaved, and so does [`save_pipeline_caches`] (for the process-wide context, which is never
-//! dropped). Every failure (no folder, a read-only disk) is silent: the cache only ever
-//! makes compilation faster, never makes a run fail.
+//! dropped). A cache that has grown past [`MAX_FILE`] is not written (the previous file stays). Temporary files
+//! that a killed writer left behind are deleted when a cache opens, once they are an hour old. Every failure (no
+//! folder, a read-only disk) is silent: the cache only ever makes compilation faster, never makes a run fail.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// The folder of [`set_pipeline_cache_dir`]; `None` (the default) keeps the cache off.
 static DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Every open cache, for [`save_pipeline_caches`].
 static OPEN: Mutex<Vec<Weak<DiskCache>>> = Mutex::new(Vec::new());
 
-/// A cache file larger than this is discarded instead of loaded (pipelines of old shaders are never evicted
-/// otherwise).
+/// A cache file larger than this is discarded instead of loaded, and a cache that would be written larger is not
+/// written (pipelines of old shaders are never evicted otherwise).
 pub const MAX_FILE: u64 = 256 << 20;
+/// Temporary files of [`write_atomic`] older than this are a killed writer's and deleted when a cache opens.
+const STALE_TMP: Duration = Duration::from_secs(3600);
+/// Numbers this process's temporary files, so two writers in one process never share one.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const MAGIC: &[u8; 8] = b"FOLOPIPE";
 const FORMAT: u32 = 1;
 /// How long the saver waits after the last new pipeline before it writes the cache.
+#[cfg(not(target_arch = "wasm32"))]
 const QUIET: Duration = Duration::from_millis(1000);
 
 /// Keeps compiled pipelines in `dir` for contexts created afterwards (`None` turns the cache off, the default).
@@ -46,8 +52,11 @@ pub fn pipeline_cache_dir() -> Option<PathBuf> {
 }
 
 /// Writes every context's pipeline cache that has pipelines not on disk yet, now (a process about to exit calls
-/// this: the saver thread waits for a quiet second first). `folo` calls it when a command ends.
+/// this: the saver thread waits for a quiet second first). `folo` calls it when a command ends. With
+/// `FOLO_GPU_TRACE_COMPILE=1` it also prints the compile timer's totals (docs/GPU.md, Pipeline cache).
 pub fn save_pipeline_caches() {
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::pipeline::trace::report();
     let open: Vec<Arc<DiskCache>> = {
         let mut v = OPEN.lock().unwrap_or_else(|p| p.into_inner());
         v.retain(|w| w.strong_count() > 0);
@@ -144,16 +153,50 @@ pub(crate) fn encode(payload: &[u8], identity: &str) -> Vec<u8> {
     out
 }
 
-/// Writes `bytes` to `path` through a temporary file in the same folder, so a reader never sees half a file.
+/// Writes `bytes` to `path` through a temporary file in the same folder (`.<name>.<pid>-<n>.tmp`), so a reader
+/// never sees half a file. The temporary file is removed when the write or the rename fails.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.{}-{n}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// Whether `name` is one of [`write_atomic`]'s temporary files for the cache file `file`.
+fn is_tmp_of(name: &str, file: &str) -> bool {
+    let digits = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    name.strip_prefix('.')
+        .and_then(|n| n.strip_prefix(file))
+        .and_then(|n| n.strip_prefix('.'))
+        .and_then(|n| n.strip_suffix(".tmp"))
+        .and_then(|n| n.split_once('-'))
+        .is_some_and(|(pid, n)| digits(pid) && digits(n))
+}
+
+/// Deletes the temporary files of `path` older than [`STALE_TMP`] (a killed writer's).
+fn remove_stale_tmp(path: &Path) {
+    let (Some(dir), Some(file)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let now = SystemTime::now();
+    for e in rd.flatten() {
+        if !e.file_name().to_str().is_some_and(|n| is_tmp_of(n, file)) {
+            continue;
+        }
+        let stale = e
+            .metadata()
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > STALE_TMP);
+        if stale {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// A context's on-disk pipeline cache.
@@ -161,6 +204,8 @@ pub(crate) struct DiskCache {
     pub cache: wgpu::PipelineCache,
     path: PathBuf,
     identity: String,
+    /// Whether a valid file was loaded when the cache opened (else it started empty).
+    pub loaded: bool,
     /// Pipelines compiled through the cache, and how many of them the last write covered.
     compiled: AtomicU64,
     saved: AtomicU64,
@@ -172,6 +217,7 @@ impl DiskCache {
     /// Opens the cache at `path` on `device` (created with [`wgpu::Features::PIPELINE_CACHE`]), loading the file
     /// when it is valid for this adapter and starting empty otherwise, and starts its saver thread.
     pub fn open(device: &wgpu::Device, info: &wgpu::AdapterInfo, path: PathBuf) -> Arc<Self> {
+        remove_stale_tmp(&path);
         let identity = identity(info);
         let file = std::fs::metadata(&path)
             .ok()
@@ -192,11 +238,16 @@ impl DiskCache {
             cache,
             path,
             identity,
+            loaded: data.is_some(),
             compiled: AtomicU64::new(0),
             saved: AtomicU64::new(0),
             writing: Mutex::new(()),
         });
-        OPEN.lock().unwrap_or_else(|p| p.into_inner()).push(Arc::downgrade(&disk));
+        {
+            let mut open = OPEN.lock().unwrap_or_else(|p| p.into_inner());
+            open.retain(|w| w.strong_count() > 0);
+            open.push(Arc::downgrade(&disk));
+        }
         #[cfg(not(target_arch = "wasm32"))]
         spawn_saver(Arc::downgrade(&disk));
         disk
@@ -207,16 +258,18 @@ impl DiskCache {
         self.compiled.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Writes the cache when pipelines were compiled since the last write. Errors are ignored.
+    /// Writes the cache when pipelines were compiled since the last write, unless the file would be larger than
+    /// [`MAX_FILE`] (the previous file is then kept). Errors are ignored.
     pub fn save(&self) {
         let _w = self.writing.lock().unwrap_or_else(|p| p.into_inner());
         let n = self.compiled.load(Ordering::Relaxed);
         if n == self.saved.load(Ordering::Relaxed) {
             return;
         }
-        if let Some(data) = self.cache.get_data()
-            && write_atomic(&self.path, &encode(&data, &self.identity)).is_ok()
-        {
+        let Some(data) = self.cache.get_data() else { return };
+        let file = encode(&data, &self.identity);
+        // Too large: not written, and not tried again until more pipelines are compiled.
+        if file.len() as u64 > MAX_FILE || write_atomic(&self.path, &file).is_ok() {
             self.saved.store(n, Ordering::Relaxed);
         }
     }
@@ -274,5 +327,22 @@ mod tests {
         let mut longer = file.clone();
         longer.push(0);
         assert_eq!(decode(&longer, "id a"), None);
+    }
+
+    #[test]
+    fn temporary_file_names() {
+        let file = "wgpu_pipeline_cache_vulkan_10de_2702.bin";
+        assert!(is_tmp_of(&format!(".{file}.1234-0.tmp"), file));
+        assert!(is_tmp_of(&format!(".{file}.1-56.tmp"), file));
+        for other in [
+            format!("{file}.1234-0.tmp"),
+            format!(".{file}.1234.tmp"),
+            format!(".{file}.x-0.tmp"),
+            format!(".{file}.1-0.tmp.keep"),
+            ".other.bin.1-0.tmp".to_string(),
+            "notes.tmp".to_string(),
+        ] {
+            assert!(!is_tmp_of(&other, file), "{other}");
+        }
     }
 }

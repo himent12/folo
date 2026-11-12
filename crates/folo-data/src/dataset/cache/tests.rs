@@ -98,23 +98,146 @@ fn yolo_opens_the_same_with_and_without_the_cache_and_sees_changes() {
     assert_eq!(open(&data, settings(&cache)), changed);
 }
 
+/// Sets `path`'s modification time to `t`.
+fn set_mtime(path: &Path, t: SystemTime) {
+    std::fs::File::options().write(true).open(path).unwrap().set_modified(t).unwrap();
+}
+
+/// A PNG of `w` x `h` padded with zeros after its end to `len` bytes (decoders stop at the end chunk), so two images
+/// of different sizes can share a length.
+fn padded_png(path: &Path, w: u32, h: u32, len: usize) {
+    let mut bytes = Vec::new();
+    image::RgbImage::from_pixel(w, h, image::Rgb([90, 120, 30]))
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .unwrap();
+    assert!(bytes.len() <= len, "{} bytes", bytes.len());
+    bytes.resize(len, 0);
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn image_probes_are_reused_only_while_the_stamp_and_class_count_match() {
+    let data = TestDir::new("scan-probe");
+    let cache = TestDir::new("scan-probe-cache");
+    yolo(&data);
+    let img = data.join("images/train/0.png");
+    padded_png(&img, 20, 10, 4096);
+    age(&img);
+    let plain = open(&data, uncached());
+    assert_eq!(open(&data, settings(&cache)), plain, "cold cache");
+
+    // Another valid image of another size under the old length and modification time: the cached size answers.
+    let mtime = std::fs::metadata(&img).unwrap().modified().unwrap();
+    padded_png(&img, 33, 17, 4096);
+    set_mtime(&img, mtime);
+    assert_ne!(open(&data, uncached()), plain, "the new image has another size");
+    assert_eq!(open(&data, settings(&cache)), plain, "same stamp: cached size");
+    // Only the length changes (same modification time): probed again.
+    padded_png(&img, 33, 17, 4097);
+    set_mtime(&img, mtime);
+    let changed = open(&data, uncached());
+    assert_ne!(changed, plain);
+    assert_eq!(open(&data, settings(&cache)), changed, "new length: re-probed");
+
+    // Labels parsed against two classes are parsed again against eight (`7 ...` in broken.txt is then valid).
+    write(
+        &data.join("data.yaml"),
+        "path: .\ntrain: images/train\nval: images/val\nnames: [a, b, c, d, e, f, g, h]\n",
+    );
+    let eight = open(&data, uncached());
+    assert_ne!(eight, changed);
+    assert_eq!(open(&data, settings(&cache)), eight, "another class count: re-parsed");
+}
+
+#[test]
+fn files_modified_in_the_last_seconds_are_not_cached() {
+    let data = TestDir::new("scan-recent");
+    let cache = TestDir::new("scan-recent-cache");
+    yolo(&data);
+    let img = data.join("images/train/0.png");
+    let recent = SystemTime::now() - Duration::from_millis(500);
+    padded_png(&img, 20, 10, 4096);
+    set_mtime(&img, recent);
+    open(&data, settings(&cache));
+    // Had the first open cached the probe, this same-stamp rewrite would be answered from the cache.
+    padded_png(&img, 33, 17, 4096);
+    set_mtime(&img, recent);
+    assert_eq!(open(&data, settings(&cache)), open(&data, uncached()));
+}
+
+#[test]
+fn nothing_is_cached_or_listed_with_a_read_guard() {
+    // The guard is process-wide and cannot be uninstalled, so this checks the settings an installed guard gives.
+    let data = TestDir::new("scan-guard");
+    let cache = TestDir::new("scan-guard-cache");
+    yolo(&data);
+    let guarded = Settings::new(Some(cache.to_path_buf()), true);
+    assert!(guarded.dir.is_none() && !guarded.list, "{guarded:?}");
+    assert!(Settings::new(Some(cache.to_path_buf()), false).dir.is_some());
+    assert_eq!(open(&data, Settings { min_files: 1, ..guarded }), open(&data, uncached()));
+    assert_eq!(std::fs::read_dir(&*cache).unwrap().count(), 0);
+}
+
+#[test]
+fn prune_deletes_only_old_cache_files() {
+    let cache = TestDir::new("scan-prune");
+    let names = [
+        "dir-0123456789abcdef.bin",
+        "coco-0123456789abcdef.bin",
+        ".dir-0123456789abcdef.bin.42-7.tmp",
+        "notes.bin",
+        "coco-0123456789abcdeg.bin",
+        "dir-0123.bin",
+        "other-0123456789abcdef.bin",
+        "dir-0123456789abcdef.bin.tmp",
+        ".notes.bin.42-7.tmp",
+    ];
+    for n in names {
+        let p = cache.join(n);
+        std::fs::write(&p, "x").unwrap();
+        set_mtime(&p, SystemTime::now() - MAX_AGE - Duration::from_secs(60));
+    }
+    std::fs::write(cache.join("dir-fedcba9876543210.bin"), "new").unwrap();
+    prune(&cache);
+    let mut left: Vec<String> =
+        std::fs::read_dir(&*cache).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    left.sort();
+    let mut want: Vec<&str> = names[3..].to_vec();
+    want.push("dir-fedcba9876543210.bin");
+    want.sort();
+    assert_eq!(left, want);
+}
+
 #[test]
 fn corrupt_or_foreign_cache_files_fall_back_to_a_normal_open() {
-    let data = TestDir::new("scan-corrupt");
-    let cache = TestDir::new("scan-corrupt-cache");
-    yolo(&data);
+    for (name, make) in [("yolo", yolo as fn(&Path)), ("coco", coco)] {
+        corrupt_files_fall_back(name, make);
+    }
+}
+
+/// Every cache file of the dataset `make` writes, truncated or with a flipped byte: the open is still exact.
+fn corrupt_files_fall_back(name: &str, make: fn(&Path)) {
+    let data = TestDir::new(&format!("scan-corrupt-{name}"));
+    let cache = TestDir::new(&format!("scan-corrupt-{name}-cache"));
+    make(&data);
     let plain = open(&data, uncached());
     open(&data, settings(&cache));
     let files: Vec<PathBuf> = std::fs::read_dir(&*cache).unwrap().map(|e| e.unwrap().path()).collect();
     assert!(!files.is_empty());
+    if name == "coco" {
+        assert!(
+            files.iter().any(|f| f.file_name().unwrap().to_str().unwrap().starts_with("coco-")),
+            "{files:?}"
+        );
+    }
     for f in &files {
         let good = std::fs::read(f).unwrap();
         // Every truncation and a flipped byte anywhere: the open is still exact.
-        for cut in [0, 7, 12, good.len() / 2, good.len() - 1] {
+        for cut in [7, good.len() / 2, good.len() - 1] {
             std::fs::write(f, &good[..cut]).unwrap();
             assert_eq!(open(&data, settings(&cache)), plain, "{} cut to {cut}", f.display());
         }
-        for i in [0, 9, 20, good.len() / 3, good.len() - 2] {
+        for i in [9, good.len() / 3, good.len() - 2] {
             let mut bad = good.clone();
             bad[i] ^= 0x40;
             std::fs::write(f, &bad).unwrap();

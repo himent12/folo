@@ -128,9 +128,17 @@ folo-gpu version, the adapter's name and driver, the payload length and an FNV-1
 front of wgpu's data: a file from another driver, adapter or folo-gpu version, a torn or corrupt one, or one over
 256 MB is ignored and the cache starts empty, and wgpu and the driver validate their own headers again
 (`fallback: true`). A changed shader simply misses (pipelines are found by their code). A saver thread writes the
-file atomically (temporary file + rename) about a second after the last new pipeline, and dropping the context or
-calling `save_pipeline_caches()` (`folo` does when a command ends) writes what is left; no error of the cache ever
-fails a run. Effect on the dev machine: docs/hill/r2-trainer.md.
+file atomically (a temporary file `.<name>.<pid>-<n>.tmp` + rename) about a second after the last new pipeline,
+and dropping the context or calling `save_pipeline_caches()` (`folo` does when a command ends) writes what is left;
+a cache that would be written larger than 256 MB is not written (the previous file stays), temporary files of
+that cache file older than an hour (a killed writer's) are deleted when a context opens the cache, and no error of
+the cache ever fails a run. `GpuContext::pipeline_cache_loaded()` says whether a context started from a valid
+file. Effect on the dev machine: docs/hill/r2-trainer.md.
+
+To see what compilation costs, set `FOLO_GPU_TRACE_COMPILE=1` (read once per process; native only): every
+`Kernel::compile` adds its `create_shader_module` time (WGSL parsing and validation in naga) and its total time to
+process-wide totals, printed to stderr as `folo-gpu: compiled N pipelines, module X s, total Y s` every 25
+pipelines and once more from `save_pipeline_caches()` (so `folo` prints the run's totals when a command ends).
 
 ### In the browser
 

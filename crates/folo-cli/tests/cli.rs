@@ -7,7 +7,7 @@ use folo_test_support::{ChildGuard, TestDir};
 use serde_json::Value;
 
 fn folo(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_folo")).args(args).output().unwrap();
+    let out = folo_cmd().args(args).output().unwrap();
     (
         out.status.code().unwrap(),
         String::from_utf8(out.stdout).unwrap(),
@@ -77,7 +77,7 @@ fn doctor_reports_folo_wasm_in_the_web_dir() {
     std::fs::create_dir_all(dir.join("folo-wasm")).unwrap();
     let report = || {
         // No GPU probe (`webgpu` is the browser's backend): only the web folder matters here.
-        let out = Command::new(env!("CARGO_BIN_EXE_folo"))
+        let out = folo_cmd()
             .args(["doctor", "--json", "--web-dir", dir.to_str().unwrap()])
             .env("FOLO_GPU_BACKEND", "webgpu")
             .output()
@@ -181,11 +181,7 @@ fn data_dir_that_is_a_file_is_a_usage_error() {
     std::fs::write(&file, b"x").unwrap();
     let file = file.to_str().unwrap();
     // `folo mcp` keeps stdout for the protocol: its error is on stderr.
-    let mcp = Command::new(env!("CARGO_BIN_EXE_folo"))
-        .args(["mcp", "--data-dir", file])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let mcp = folo_cmd().args(["mcp", "--data-dir", file]).stdin(Stdio::null()).output().unwrap();
     let stderr = String::from_utf8_lossy(&mcp.stderr);
     assert_eq!(mcp.status.code(), Some(2), "mcp: {stderr}");
     assert!(mcp.stdout.is_empty() && stderr.contains("--data-dir"), "mcp: {stderr}");
@@ -193,7 +189,7 @@ fn data_dir_that_is_a_file_is_a_usage_error() {
         &["cloud", "instances", "--json", "--data-dir", file][..],
         &["serve", "--json", "--port", "0", "--data-dir", file],
     ] {
-        let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+        let mut child: ChildGuard = folo_cmd()
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -228,7 +224,7 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     use std::io::Write;
     let (a, b) = (TestDir::new("cli-owner-a"), TestDir::new("cli-owner-b"));
     let data = a.join("data");
-    let mut server: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut server: ChildGuard = folo_cmd()
         .args(["--json", "serve", "--port", "0", "--data-dir", "data"])
         .current_dir(&*a)
         .env("FOLO_GPU_BACKEND", "webgpu")
@@ -246,7 +242,7 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     assert!(reported.is_absolute(), "{line}");
     assert_eq!(std::fs::canonicalize(&reported).unwrap(), std::fs::canonicalize(&data).unwrap());
 
-    let second = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let second = folo_cmd()
         .args(["--json", "serve", "--port", "0", "--data-dir", data.to_str().unwrap()])
         .current_dir(&*b)
         .env("FOLO_GPU_BACKEND", "webgpu")
@@ -258,7 +254,7 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     let in_use: Value = serde_json::from_str(&first_line).unwrap();
     assert_eq!((&in_use["event"], &in_use["url"]), (&Value::from("data_dir_in_use"), &listening["url"]));
 
-    let mut mcp: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut mcp: ChildGuard = folo_cmd()
         .args(["mcp", "--data-dir", data.to_str().unwrap()])
         .current_dir(&*b)
         .env("FOLO_GPU_BACKEND", "webgpu")
@@ -289,7 +285,7 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
 /// stderr, not an error envelope on stdout.
 #[test]
 fn mcp_errors_stay_off_stdout_with_json() {
-    let out = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let out = folo_cmd()
         .args(["mcp", "--json", "--server", "ftp://example.com"])
         .stdin(Stdio::null())
         .output()
@@ -302,7 +298,7 @@ fn mcp_errors_stay_off_stdout_with_json() {
 
 #[test]
 fn serve_mock_prints_the_url_as_json() {
-    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut child: ChildGuard = folo_cmd()
         .args(["serve", "--mock", "--port", "0", "--json", "--web-dir", "does/not/exist"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -325,7 +321,7 @@ fn serve_mock_prints_the_url_as_json() {
 #[test]
 fn serve_refuses_foreign_hosts_on_loopback() {
     use std::io::{Read, Write};
-    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut child: ChildGuard = folo_cmd()
         .args(["serve", "--mock", "--port", "0", "--json", "--allow-host", "folo.tunnel.example"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -352,4 +348,11 @@ fn serve_refuses_foreign_hosts_on_loopback() {
     let (code, stdout, _) = folo(&["describe", "serve", "--json"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("\"allow-host\"") || stdout.contains("--allow-host"), "{stdout}");
+}
+
+/// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
+fn folo_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
+    c.env("FOLO_NO_CACHE", "1");
+    c
 }

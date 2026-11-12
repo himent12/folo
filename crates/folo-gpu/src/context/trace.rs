@@ -68,6 +68,18 @@ impl GpuContext {
         self.inner.pipeline_cache.as_deref().map(|d| d.path())
     }
 
+    /// Whether this context's pipeline cache started from a valid file (false without a cache, or when the file
+    /// was missing, corrupt or another adapter's and the cache started empty).
+    pub fn pipeline_cache_loaded(&self) -> bool {
+        self.inner.pipeline_cache.as_deref().is_some_and(|d| d.loaded)
+    }
+
+    /// The size of the data the pipeline cache holds now (tests: what wgpu was given, right after the open).
+    #[cfg(test)]
+    pub(crate) fn pipeline_cache_data_len(&self) -> Option<usize> {
+        self.inner.pipeline_cache.as_deref().and_then(|d| d.cache.get_data()).map(|d| d.len())
+    }
+
     /// Submits the open batch, waits for it, and returns the GPU time per label since the last call (largest
     /// first), resetting the totals. Empty unless [`GpuContext::profiling`].
     pub fn profile_take(&self) -> Vec<ProfileRow> {

@@ -8,7 +8,7 @@ use crate::error::Result;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const KIND: &str = "coco";
+pub(super) const KIND: &str = "coco";
 
 /// [`Annotations`] of `jsons` (and `wanted`), from the cache while every file is unchanged, else from `read` (and
 /// then cached, for a dataset with at least [`Settings::min_files`] images).
@@ -39,7 +39,8 @@ pub(crate) fn load_or_read(
     Ok(a)
 }
 
-/// The files as given and as absolute paths, and the wanted splits. `None` for a path that is not UTF-8.
+/// The files as given (issue paths are built from them) and as canonical paths (links resolved: the identity of
+/// each file), and the wanted splits. `None` (not cached) for a path that cannot be canonicalised or is not UTF-8.
 fn key(jsons: &[(Split, PathBuf)], wanted: &[Split]) -> Option<String> {
     let mut k = String::from("wanted");
     for s in Split::ALL {
@@ -51,7 +52,7 @@ fn key(jsons: &[(Split, PathBuf)], wanted: &[Split]) -> Option<String> {
         k.push('\n');
         k.push_str(p.to_str()?);
         k.push('\n');
-        k.push_str(crate::paths::normalize(p).to_str()?);
+        k.push_str(std::fs::canonicalize(p).ok()?.to_str()?);
     }
     Some(k)
 }

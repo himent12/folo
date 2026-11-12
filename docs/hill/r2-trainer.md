@@ -10,16 +10,22 @@ pipeline compilation, `folo val`'s readback and the decode of large images. Base
   `lock.sh acquire gpu trainer`, numbers are A/B pairs alternated inside one hold. "others" = cores used by other
   processes during a run (`bench/trainer/ab.py`'s accounting).
 - **Start-up.** `bench/trainer/startup.py` (new): a fresh `folo train --json` per run, read from a pipe, stopped by
-  PID at the first `step` record (emitted after the first optimizer step), so the number is process start to the
-  first optimizer step. `--warm 1` runs every binary once first (a second start); `--clear PATH` deletes a cache
-  before every run (a cold start).
-- **Compilation.** A temporary build with a timer in `Kernel::compile` (not committed) sums the time spent compiling
-  pipelines in one row-10 epoch (`folo train --data D:/folo-bench/data --model folo-n --epochs 1 --batch 16 --imgsz
-  640 --workers 8 --close-mosaic 0 --device gpu:0 [--amp]`).
-  The timer: in `Kernel::compile`, an `Instant` before `render`, its elapsed time before the bind group layout
-  (`create_shader_module`) and at the end added to three static `AtomicU64`s (count, module µs, total µs), printed
-  as `TRACE compile n=.. module=..s total=..s` every 25 pipelines when `FOLO_TRACE_COMPILE` is set.
-- **Dataset open.** A temporary example timing `folo_data::open_with` on `D:/folo-data/coco` (train + val).
+  PID at the first `step` record with `step >= --until-step N` (a timer kills a run that passes `--timeout`).
+  `step` counts batches and the optimizer updates once per `accumulate = nbs / batch` batches, so at batch 16
+  `--until-step 4` is process start to the first optimizer step; the default, 1, is the end of the first batch.
+  `--warm 1` runs every binary once first (a second start) and then keeps each run alive 3 s after the step, so the
+  pipeline cache is on disk for the next one; `--clear PATH` deletes a cache before every run (a cold start). The
+  start-up numbers below were taken before `--until-step` existed: at the first `step` record, i.e. the end of the
+  first batch (step 1), not the first optimizer step; they are to be rerun with `--until-step 4`.
+- **Compilation.** `FOLO_GPU_TRACE_COMPILE=1` (docs/GPU.md, Pipeline cache): folo-gpu sums each `Kernel::compile`'s
+  `create_shader_module` time and total time and prints `folo-gpu: compiled N pipelines, module X s, total Y s` to
+  stderr every 25 pipelines and when `folo` ends. `bench/trainer/first_epoch.sh` reads that line from one row-10
+  epoch (`folo train --data D:/folo-bench/data --model folo-n --epochs 1 --batch 16 --imgsz 640 --workers 8
+  --close-mosaic 0 --device gpu:0 [--amp]`). The numbers below came from a temporary timer that did the same but
+  printed only every 25 pipelines (`TRACE compile ...`), so they miss up to 24 pipelines.
+- **Dataset open.** `crates/folo-data/examples/open_time.rs`: `cargo run -p folo-data --release --example
+  open_time -- PATH [noverify]` times `folo_data::open_with` (here on `D:/folo-data/coco`, train + val), with the
+  scan cache in `SCAN_CACHE=DIR` when set.
 
 ## PR 1: persistent pipeline cache + dataset scan cache
 
@@ -59,9 +65,9 @@ only 1 s faster, so the driver's own shader cache does not remove it.
 COCO open (`open_with`, train + val, 123 287 images), same binary: **51.1 s cold → 0.38 / 0.29 s** with a warm scan
 cache (24 MB COCO entry + 6 MB of folder entries).
 
-**`folo train` on COCO, process start to the first optimizer step** (`bench/trainer/startup.py --warm 1 --rounds 3
--- --data D:/folo-data/coco --model folo-n --epochs 1 --batch 16 --imgsz 640 --device gpu:0`, alternated in one GPU
-lock hold, `FOLO_CACHE_DIR` set to a fresh folder for the new binary, my workspace test build running beside it):
+**`folo train` on COCO, process start to the first `step` record** (the end of the first batch, see Method;
+`bench/trainer/startup.py --warm 1 --rounds 3 -- --data D:/folo-data/coco --model folo-n --epochs 1 --batch 16
+--imgsz 640 --device gpu:0`, alternated in one GPU lock hold, `FOLO_CACHE_DIR` set to a fresh folder for the new binary, my workspace test build running beside it):
 
 | | main 647b981f | this PR |
 |---|---|---|
@@ -70,7 +76,7 @@ lock hold, `FOLO_CACHE_DIR` set to a fresh folder for the new binary, my workspa
 
 **First epoch, row-10 set** (`bench/trainer/first_epoch.sh`: main, this PR with the pipeline cache deleted
 before the run, this PR with the cache the previous run left; 3 rounds alternated; the compile total is the
-temporary timer's last report, every 25 pipelines, so it misses up to 24 of them):
+temporary timer's last report, every 25 pipelines, so it misses up to 24 of them; see Method):
 
 | | main | PR, cold cache | PR, warm cache |
 |---|---|---|---|

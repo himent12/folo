@@ -472,20 +472,21 @@ pub(crate) fn build_entries(
 /// A checked candidate: its entry (unless skipped), its issues and what the scan cache should learn from it.
 type Checked = (Option<ImageEntry>, Vec<Issue>, Vec<cache::probe::Fresh>);
 
-/// The header probe of `image` (`(width, height)` or the issue message), from the scan cache when it has it.
+/// The header probe of `image` (`(width, height)` or the issue), from the scan cache when it has it. A file gone
+/// since it was listed is a [`IssueKind::MissingImage`], any other failure a [`IssueKind::CorruptImage`].
 fn probe_image(
     image: &Path,
     stamp: Option<cache::Stamp>,
     probes: &cache::probe::Probes,
     fresh: &mut Vec<cache::probe::Fresh>,
-) -> std::result::Result<(u32, u32), String> {
+) -> std::result::Result<(u32, u32), (IssueKind, String)> {
     use cache::probe::{Fresh, ImageProbe};
     if let Some(s) = stamp
         && let Some(p) = probes.image(image, s)
     {
         return match p {
             ImageProbe::Size(w, h) => Ok((*w, *h)),
-            ImageProbe::Corrupt(m) => Err(DataError::image(image, m).to_string()),
+            ImageProbe::Corrupt(m) => Err((IssueKind::CorruptImage, DataError::image(image, m).to_string())),
         };
     }
     let probed = probe_size(image);
@@ -499,7 +500,12 @@ fn probe_image(
             Err(_) => {}
         }
     }
-    probed.map_err(|e| e.to_string())
+    probed.map_err(|e| match e {
+        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            (IssueKind::MissingImage, "image file not found".to_string())
+        }
+        e => (IssueKind::CorruptImage, e.to_string()),
+    })
 }
 
 /// The YOLO label file `label` read and parsed, from the scan cache when it has it. `Err` is the message of a
@@ -558,8 +564,8 @@ fn check_candidate(
     let size = if need_size {
         match probe_image(&c.image, image.stamp, probes, &mut fresh) {
             Ok(s) => Some(s),
-            Err(m) => {
-                issues.push(issue(IssueKind::CorruptImage, &c.image, m));
+            Err((kind, m)) => {
+                issues.push(issue(kind, &c.image, m));
                 return (None, issues, fresh);
             }
         }

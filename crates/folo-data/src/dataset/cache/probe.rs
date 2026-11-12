@@ -39,14 +39,16 @@ struct DirCache {
     labels: HashMap<String, (Stamp, Option<u64>, LabelParse)>,
 }
 
-const KIND: &str = "dir";
+pub(super) const KIND: &str = "dir";
 
 /// The listings and cached results of one [`super::super::build_entries`] call.
 pub(crate) struct Probes {
     settings: Settings,
     listing: Listing,
-    /// Cached results of the listed folders (when caching is on), by folder.
+    /// Cached results of the listed folders (when caching is on and the folder has a [`key`]), by folder.
     dirs: HashMap<PathBuf, DirCache>,
+    /// The [`key`] of every folder in `dirs`.
+    keys: HashMap<PathBuf, String>,
     now: SystemTime,
 }
 
@@ -54,14 +56,16 @@ impl Probes {
     /// Lists the folders of `files` (images and label files) and loads their caches.
     pub fn new<'a>(files: impl Iterator<Item = &'a Path>, settings: Settings) -> Self {
         let listing = Listing::new(files, &settings);
-        let mut dirs = HashMap::new();
+        let (mut dirs, mut keys) = (HashMap::new(), HashMap::new());
         if let Some(cache) = &settings.dir {
             for dir in listing.dirs() {
-                let loaded = super::read(cache, KIND, &key(dir)).and_then(|b| decode(&b)).unwrap_or_default();
+                let Some(k) = key(dir) else { continue };
+                let loaded = super::read(cache, KIND, &k).and_then(|b| decode(&b)).unwrap_or_default();
                 dirs.insert(dir.to_path_buf(), loaded);
+                keys.insert(dir.to_path_buf(), k);
             }
         }
-        Probes { settings, listing, dirs, now: SystemTime::now() }
+        Probes { settings, listing, dirs, keys, now: SystemTime::now() }
     }
 
     /// What is at `path` (see [`Listing::stat`]).
@@ -120,7 +124,9 @@ impl Probes {
             }
         }
         for (dir, d) in touched {
-            super::write(&cache, KIND, &key(&dir), &encode(&d));
+            if let Some(k) = self.keys.get(&dir) {
+                super::write(&cache, KIND, k, &encode(&d));
+            }
         }
     }
 
@@ -133,9 +139,10 @@ impl Probes {
     }
 }
 
-/// The cache key of a folder: its absolute path.
-fn key(dir: &Path) -> String {
-    crate::paths::normalize(dir).to_string_lossy().into_owned()
+/// The cache key of a folder: its canonical path (links resolved, so two spellings of one folder share a key and
+/// two folders never do). `None` (the folder is not cached) when it cannot be canonicalised or is not UTF-8.
+fn key(dir: &Path) -> Option<String> {
+    std::fs::canonicalize(dir).ok()?.into_os_string().into_string().ok()
 }
 
 fn encode(d: &DirCache) -> Vec<u8> {
