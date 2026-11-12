@@ -74,12 +74,12 @@ impl FoloApp {
     }
 
     /// Whether a dataset's folder can go with it: the server wrote it into its data dir (a generated
-    /// set) and no run trains or waits on it now (the server checks both too), as in Studio.
+    /// set) and no run on the server, on any dataset, trains or waits now (the server checks both
+    /// too: it deletes files only while no run is active, docs/API.md), as in Studio.
     pub(crate) fn dataset_files_deletable(&self, id: &str) -> bool {
         let Some(d) = self.store.dataset_summary(id) else { return false };
         let Some(runs) = self.store.runs.ready() else { return false };
-        self.store.written_by_server(d)
-            && !runs.iter().any(|r| r.config.dataset_id == id && r.status.is_active())
+        self.store.written_by_server(d) && !runs.iter().any(|r| r.status.is_active())
     }
 
     /// What removing a dataset means, in Studio's words: it is unregistered and its files stay (or,

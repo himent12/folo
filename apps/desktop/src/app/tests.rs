@@ -511,6 +511,7 @@ fn lists_changed_elsewhere_show_at_the_next_refresh() {
 #[test]
 fn a_generated_dataset_can_be_removed_with_its_files_as_in_studio() {
     use super::DeleteTarget;
+    use crate::api::RunStatus;
     let (mut app, window) = open();
     let id = drive(&mut app, window, |this, _, _| {
         let runs = this.store.runs.ready().unwrap();
@@ -518,12 +519,18 @@ fn a_generated_dataset_can_be_removed_with_its_files_as_in_studio() {
         let idle =
             ds.iter().find(|d| !runs.iter().any(|r| r.config.dataset_id == d.id && r.status.is_active()));
         let id = idle.expect("a dataset no run is using").id.clone();
+        assert!(runs.iter().any(|r| r.status.is_active()), "the demo trains on another dataset");
         // The demo has no data dir: its datasets are folders of the person's own, never offered.
         assert!(!this.dataset_files_deletable(&id));
         // A server's own: under <data dir>/datasets.
         this.store.data_dir = Some("D:/srv/folo".into());
         let d = this.store.datasets.ready_mut().unwrap().iter_mut().find(|d| d.id == id).unwrap();
         d.path = r"D:\srv\folo\datasets\shapes".into();
+        // The server deletes files only while no run is active, on any dataset: not offered yet.
+        assert!(!this.dataset_files_deletable(&id));
+        for r in this.store.runs.ready_mut().unwrap().iter_mut().filter(|r| r.status.is_active()) {
+            r.status = RunStatus::Stopped;
+        }
         assert!(this.dataset_files_deletable(&id));
         id
     });
