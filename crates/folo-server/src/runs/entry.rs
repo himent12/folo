@@ -13,7 +13,8 @@ use crate::index::write_atomic;
 use crate::util::unix_now;
 
 use super::{
-    DatasetRef, EVENT_BUFFER, RunEntry, RunFile, RunState, TAIL_STEPS, add_paused, append_line, now,
+    ALIVE_EVERY_S, DatasetRef, EVENT_BUFFER, RunEntry, RunFile, RunState, TAIL_STEPS, add_paused,
+    append_line, now,
 };
 
 impl RunEntry {
@@ -115,7 +116,9 @@ impl RunEntry {
         r.error = error;
         r.error_code = code;
         r.eta_s = None;
-        r.finished = Some(now());
+        // An active run has no end yet, except one a previous process left training: it ended when it last trained
+        // (`history::reconcile`).
+        r.finished = Some(r.finished.take().unwrap_or_else(now));
         // A failed run names the epoch it failed in (the one its steps were in); any other the last one it finished.
         r.epoch =
             if status == RunStatus::Failed { r.epoch.max(st.file.epochs_done) } else { st.file.epochs_done };
@@ -152,6 +155,7 @@ impl RunEntry {
                         return;
                     }
                     r.status = RunStatus::Running;
+                    file.alive_at = Some(unix_now().floor());
                     self.persist(&st);
                 } else {
                     st.outcome = Some((s.status, s.error.clone(), s.error_code.clone()));
@@ -169,10 +173,17 @@ impl RunEntry {
                 if st.tail.len() < TAIL_STEPS {
                     st.tail.push(*s);
                 }
+                // Where it ended if the process dies before the epoch does (`history::reconcile`).
+                let at = unix_now().floor();
+                if st.file.alive_at.is_none_or(|a| at - a >= ALIVE_EVERY_S) {
+                    st.file.alive_at = Some(at);
+                    self.persist(&st);
+                }
             }
             RunEvent::Epoch(e) => {
                 st.tail.clear();
                 st.file.epochs_done = e.epoch;
+                st.file.alive_at = Some(unix_now().floor());
                 let v = &e.val;
                 st.file.last_metrics = Some(model_metrics(v));
                 let r = &mut st.file.run;

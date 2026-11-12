@@ -170,6 +170,7 @@ impl Runs {
             epochs_done: 0,
             last_metrics: None,
             resumed_at: None,
+            alive_at: None,
         };
         let entry = Arc::new(RunEntry::new(id, dir, file));
         {

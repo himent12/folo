@@ -508,6 +508,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   //   older servers), next to "error" (the message); the final `status` event carries it too. A `stopped` run has
   //   "interrupted" when the server stopped or restarted while it trained or waited (not a client's stop)
   "started": "..." | null, "finished": null | "...",
+  // "finished" of a run "interrupted" by a server that was killed (not stopped) is when it last trained, at most
+  //   about 10 s off, not when the server started again: the time it was down is not training time
   // + "paused_s": 52800.0 for a resumed run: the seconds it spent not training since "started", from each end (stop,
   //   failure) until it trained again; its training time is "finished" (or now, while it trains) minus "started"
   //   minus "paused_s". Absent for a run never resumed and from older servers

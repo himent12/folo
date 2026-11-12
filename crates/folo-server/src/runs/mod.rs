@@ -87,7 +87,14 @@ struct RunFile {
     /// to `Run.paused_s` then ([`add_paused`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resumed_at: Option<f64>,
+    /// When the run last trained (Unix seconds; at most [`ALIVE_EVERY_S`] behind while it trains): a run a previous
+    /// process left training ended then, not when the server started again ([`history::reconcile`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    alive_at: Option<f64>,
 }
+
+/// How often a training run's `alive_at` is written to `run.json`, at most.
+const ALIVE_EVERY_S: f64 = 10.0;
 
 /// Adds `secs` (whole seconds, as `started` and `finished` are) to the time run `r` spent not training.
 fn add_paused(r: &mut Run, secs: f64) {
