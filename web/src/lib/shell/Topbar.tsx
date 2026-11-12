@@ -15,6 +15,7 @@ import Gate from '$lib/ui/Gate';
 import Kbd from '$lib/ui/Kbd';
 import { OFFLINE_REASON } from '$lib/ui/offline';
 import Logo from './Logo';
+import OfflineNotice from './OfflineNotice';
 import { page } from './crumbs';
 
 export default function Topbar(props: { onsearch: () => void }) {
@@ -55,6 +56,8 @@ export default function Topbar(props: { onsearch: () => void }) {
           }}
         </Index>
       </ol>
+
+      <OfflineNotice />
 
       <div class="actions">
         <button class="search" onclick={() => props.onsearch()} aria-label="Search and commands" aria-keyshortcuts="Control+K Meta+K">

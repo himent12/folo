@@ -4,7 +4,7 @@
 import { createRoot, flush } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ConnectionStatus from '$lib/shell/ConnectionStatus';
-import OfflineNotice from '$lib/shell/OfflineNotice';
+import Topbar from '$lib/shell/Topbar';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { render } from '../../../framework/testing';
 import { CONNECT_TIMEOUT, hub, SLOW_CONNECT } from './index';
@@ -136,14 +136,15 @@ describe('hub.offline with the server', () => {
       () => (
         <>
           <ConnectionStatus collapsed={false} />
-          <OfflineNotice />
+          <Topbar onsearch={() => {}} />
           <StatusBadge run={{ status: 'running' }} plain />
           <StatusBadge run={{ status: 'completed' }} plain />
         </>
       ),
       shell,
     );
-    const said = () => [shell.querySelector('.conn .label')!.textContent!.trim(), shell.querySelector('[role=status]')!.textContent!.trim()];
+    // The word is in the top bar, whose height is fixed: it never covers the page (v-shell N5). Phones say "Offline".
+    const said = () => [shell.querySelector('.conn .label')!.textContent!.trim(), shell.querySelector('.topbar [role=status] .long')?.textContent?.trim() ?? ''];
     const held = () => [...shell.querySelectorAll('.badge')].map((b) => b.classList.contains('held'));
     expect(said()).toEqual(['Connected', '']);
     expect(held()).toEqual([false, false]);
