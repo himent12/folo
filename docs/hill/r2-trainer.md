@@ -14,9 +14,7 @@ pipeline compilation, `folo val`'s readback and the decode of large images. Base
   `step` counts batches and the optimizer updates once per `accumulate = nbs / batch` batches, so at batch 16
   `--until-step 4` is process start to the first optimizer step; the default, 1, is the end of the first batch.
   `--warm 1` runs every binary once first (a second start) and then keeps each run alive 3 s after the step, so the
-  pipeline cache is on disk for the next one; `--clear PATH` deletes a cache before every run (a cold start). The
-  start-up numbers below were taken before `--until-step` existed: at the first `step` record, i.e. the end of the
-  first batch (step 1), not the first optimizer step; they are to be rerun with `--until-step 4`.
+  pipeline cache is on disk for the next one; `--clear PATH` deletes a cache before every run (a cold start).
 - **Compilation.** `FOLO_GPU_TRACE_COMPILE=1` (docs/GPU.md, Pipeline cache): folo-gpu sums each `Kernel::compile`'s
   `create_shader_module` time and total time and prints `folo-gpu: compiled N pipelines, module X s, total Y s` to
   stderr every 25 pipelines and when `folo` ends. `bench/trainer/first_epoch.sh` reads that line from one row-10
@@ -65,7 +63,20 @@ only 1 s faster, so the driver's own shader cache does not remove it.
 COCO open (`open_with`, train + val, 123 287 images), same binary: **51.1 s cold → 0.38 / 0.29 s** with a warm scan
 cache (24 MB COCO entry + 6 MB of folder entries).
 
-**`folo train` on COCO, process start to the first `step` record** (the end of the first batch, see Method;
+**`folo train` on COCO, process start to the first optimizer step** (head 8c249e96, `bench/trainer/startup.py --bin
+base=D:/folo-build/hill2-base/release/folo.exe --bin new=<this PR's folo.exe> --warm 1 --rounds 3 --until-step 4
+--out D:/folo-data/runs-hill2/trainer/startup2 -- --data D:/folo-data/coco --model folo-n --epochs 1 --batch 16
+--imgsz 640 --device gpu:0` with `FOLO_CACHE_DIR` a fresh folder, alternated in one GPU lock hold; the machine was
+heavily loaded (main's runs swing 78-128 s; the script records no core counts):
+
+| | main 647b981f | this PR |
+|---|---|---|
+| second start (warm caches): step 4 (first optimizer step), median (range) | **107.2 s** (78.1-127.5) | **3.5 s** (3.5-4.1) |
+| per run, alternated | 107.2 / 127.5 / 78.1 | 4.1 / 3.5 / 3.5 |
+| first start (the untimed warm-up run, no cache yet) | 310.4 s | 117.3 s |
+
+An earlier measurement (head 89d3ce2d, lighter load), taken before `--until-step` existed, timed the first `step`
+record, i.e. the end of the first batch, not the first optimizer step (`--until-step 1`;
 `bench/trainer/startup.py --warm 1 --rounds 3 -- --data D:/folo-data/coco --model folo-n --epochs 1 --batch 16
 --imgsz 640 --device gpu:0`, alternated in one GPU lock hold, `FOLO_CACHE_DIR` set to a fresh folder for the new binary, my workspace test build running beside it):
 
