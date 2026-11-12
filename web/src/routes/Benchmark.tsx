@@ -255,7 +255,7 @@ export default function Benchmark() {
       await hub.api.deleteBench(b.id);
       deleteOpen.set(false);
       toast.success(`Deleted ${b.name}`, 'Its images, entries and loops are gone. Models, runs and datasets were not touched.');
-      router.go('/benchmarks');
+      router.go('/benchmarks', { replace: true });
     } catch (e) {
       deleteStatus.error(e, 'Could not delete the benchmark');
     } finally {

@@ -173,7 +173,7 @@ export default function BenchEntryPage() {
       removing.set(false);
       // page-level: its confirm dialog has closed on the line above.
       toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
-      router.go(`/benchmarks/${id.peek()}`);
+      router.go(`/benchmarks/${id.peek()}`, { replace: true });
     } catch (err) {
       removeStatus.error(err, 'Could not delete the entry');
     } finally {

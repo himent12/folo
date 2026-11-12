@@ -75,7 +75,7 @@ describe('a dataset whose folder is missing', () => {
       'the confirmation',
     );
     confirm.click();
-    await vi.waitFor(() => expect(go).toHaveBeenCalledWith('/datasets'));
+    await vi.waitFor(() => expect(go).toHaveBeenCalledWith('/datasets', { replace: true }));
     expect(del).toHaveBeenCalledWith('ds_shapes', { files: false });
   });
 });

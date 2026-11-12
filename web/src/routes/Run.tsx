@@ -312,7 +312,7 @@ export default function Run() {
         stopOpen.set(false);
         removedToast(cur);
         if (r) live.run = r;
-        else router.go('/runs');
+        else router.go('/runs', { replace: true });
         return;
       }
       const r = await hub.api.stopRun(cur.id);
@@ -714,7 +714,7 @@ export default function Run() {
               </>
             )}
           />
-          <DeleteRun run={deleteOpen.get() ? R() : null} onclose={() => deleteOpen.set(false)} ondeleted={() => router.go('/runs')} />
+          <DeleteRun run={deleteOpen.get() ? R() : null} onclose={() => deleteOpen.set(false)} ondeleted={() => router.go('/runs', { replace: true })} />
         </>
       )}
     </>
