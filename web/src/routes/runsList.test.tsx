@@ -246,6 +246,25 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     go.mockRestore();
   });
 
+  it('keeps two ticked runs in the URL once, with their commas (the URL spells them %2C)', async () => {
+    await open(Runs, '/runs', new MockApi('normal', 0));
+    await loaded();
+    const go = vi.spyOn(router, 'go').mockImplementation((path, o) => {
+      // As the router does: the URL's own spelling of the query comes back as the route.
+      history.replaceState(history.state, '', `#${path}`);
+      router.route = parse(location.hash);
+      void o;
+    });
+    const boxes = [...target.querySelectorAll<HTMLInputElement>('table.runs tbody tr[data-row] .check input')];
+    boxes[0]!.click();
+    flushSync();
+    boxes[1]!.click();
+    flushSync();
+    expect(go).toHaveBeenCalledTimes(2);
+    expect(go).toHaveBeenLastCalledWith(`/runs?sel=${ids()[0]},${ids()[1]}`, { replace: true });
+    go.mockRestore();
+  });
+
   it('gives a finished run its model, the Playground and Delete run in its ⋯', async () => {
     await open(Runs, '/runs', new MockApi('normal', 0));
     await loaded();

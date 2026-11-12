@@ -140,7 +140,9 @@ export default function Runs() {
   const sortKey = signal<SortKey>(start.sort);
   const sortDir = signal(start.dir);
   const selected = signal<string[]>(start.sel);
-  let written = untrack(() => router.route.query.toString());
+  // Queries compare in the one form writeState gives (a URL's own spelling may differ: `%2C` for the ids' commas).
+  const norm = (q: URLSearchParams) => writeState(readState(q));
+  let written = untrack(() => norm(router.route.query));
   effect(() => {
     const next = writeState({ filter: filter.get(), q: query.get(), sort: sortKey.get(), dir: sortDir.get(), sel: selected.get() });
     if (next === written || untrack(() => router.route.name) !== 'runs') return;
@@ -150,9 +152,9 @@ export default function Runs() {
   // A link to the list (the sidebar's Runs while here) brings its own state.
   effect(() => {
     const r = router.route;
-    if (r.name !== 'runs' || r.query.toString() === written) return;
+    if (r.name !== 'runs' || norm(r.query) === written) return;
     const st = readState(r.query);
-    written = r.query.toString();
+    written = norm(r.query);
     filter.set(st.filter);
     query.set(st.q);
     sortKey.set(st.sort);
@@ -445,8 +447,9 @@ export default function Runs() {
                             <a class="name" href={href(`/runs/${r().id}`)} title={r().name} onclick={(e) => e.stopPropagation()}>
                               {r().name}
                             </a>{' '}
+                            {/* Whole items wrap: the name's column is what the fixed ones leave, and a fact is never cut. */}
                             <span class="sub ctx">
-                              <Meta line>
+                              <Meta>
                                 <span>{dsName.get().get(r().config.dataset_id) ?? r().dataset?.name ?? r().config.dataset_id}</span>
                                 <Ident value={r().config.arch} />
                                 <span>
