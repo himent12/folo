@@ -21,6 +21,7 @@ import { href } from '$lib/router';
 import InfoButton from '$lib/ui/InfoButton';
 import Panel from '$lib/ui/Panel';
 import IssueList from './IssueList';
+import { count } from './count';
 import { swatchStyle } from './swatch';
 import { countBinLabel, findingLabel, healthChecks, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
@@ -166,7 +167,14 @@ export default function StatsTab(props: StatsTabProps) {
                            under its finding's row (the grid packs the next finding into the cell beside it), never a card
                            that spans both columns among half-width ones. */
                         <li class="evidence" id={`ds-ev-${h().id}`}>
-                          <IssueList datasetId={props.dataset.id} path={props.dataset.path} severity={h().issues} severityFilter={false} counts={props.counts} />
+                          <IssueList
+                            datasetId={props.dataset.id}
+                            path={props.dataset.path}
+                            severity={h().issues}
+                            kinds={h().kinds}
+                            severityFilter={false}
+                            counts={props.counts}
+                          />
                         </li>
                       ) : null}
                     </>
@@ -201,7 +209,7 @@ export default function StatsTab(props: StatsTabProps) {
           <span class="k-label">Boxes</span>
           <span class="k-value num">{num(props.stats.boxes)}</span>
           {listsEmpty.get() ? (
-            <span class="k-sub num">{num(images.get() - props.stats.empty_images)} images with boxes</span>
+            <span class="k-sub num">{count(images.get() - props.stats.empty_images, 'image')} with boxes</span>
           ) : (
             <span class="k-sub num">
               {perImage.get()} per image{!listsBroken.get() ? <span class="wide">{` · ${classCount.get()}`}</span> : null}
@@ -225,7 +233,7 @@ export default function StatsTab(props: StatsTabProps) {
           <div class="kpi">
             <span class="k-label">Classes</span>
             <span class="k-value num">{num(props.dataset.classes.length)}</span>
-            <span class="k-sub num">~{num(perClass.get())} boxes per class</span>
+            <span class="k-sub num">~{count(perClass.get(), 'box')} per class</span>
           </div>
         ) : (
           <div class="kpi">
@@ -246,7 +254,7 @@ export default function StatsTab(props: StatsTabProps) {
                   type="button"
                   class:absent={b().count === 0}
                   onclick={() => props.onclass(b().cls)}
-                  aria-label={`${b().name}: ${num(b().count)} boxes, ${share(b().count).toFixed(1)}%. Show images`}
+                  aria-label={`${b().name}: ${count(b().count, 'box')}, ${share(b().count).toFixed(1)}%. Show images`}
                 >
                   <span class="sw" style={swatchStyle(b().cls, b().count === 0)}></span>
                   <span class="cname truncate">{b().name}</span>

@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::http::StatusCode;
 use folo_api::{Dataset, DatasetFormat};
 
 use crate::error::{Error, Result};
-use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, write_atomic};
+use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, default_name, write_atomic};
 use crate::runs::DatasetRef;
 use crate::store::Store;
 use crate::util::{claim_dir, fnv1a, rfc3339, unique_id, unix_now};
@@ -47,7 +48,9 @@ impl RealStore {
         }
         let reg = e.reg();
         tracing::info!(id = %reg.id, "dataset files changed; re-indexing");
-        match Index::build(&reg.path, reg.format, &own_state(&self.data_dir)) {
+        match Index::build(&reg.path, reg.format, &own_state(&self.data_dir))
+            .map_err(|err| folder_gone(err, &reg))
+        {
             Ok(idx) => {
                 let idx = Arc::new(idx);
                 save_index(&self.data_dir, e, &idx);
@@ -128,12 +131,19 @@ impl RealStore {
             return self.get_dataset(&id);
         }
         let mut regs = read_registry(&self.data_dir)?;
-        // Unique against loaded datasets and registrations whose folder is currently missing.
-        let id = unique_id("ds", fnv1a(path.as_bytes()) ^ unix_now().to_bits(), |id| {
-            list.iter().any(|e| e.reg.lock().unwrap().id == id) || regs.iter().any(|r| r.id == id)
-        });
+        // Unique against loaded datasets and registrations whose folder is currently missing. Derived from the
+        // folder (canonical, so any spelling) and its format, not the time: a folder unregistered and registered
+        // again gets its id back, and the runs that trained on it find their dataset again.
+        let id =
+            unique_id("ds", dataset_seed(want.as_deref().unwrap_or(Path::new(&path)), idx.format), |id| {
+                list.iter().any(|e| e.reg.lock().unwrap().id == id) || regs.iter().any(|r| r.id == id)
+            });
         let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
-            idx.base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dataset".into())
+            let lower = |n: &str| n.to_lowercase();
+            default_name(Path::new(&path), |n| {
+                list.iter().any(|e| lower(&e.reg.lock().unwrap().name) == lower(n))
+                    || regs.iter().any(|r| lower(&r.name) == lower(n))
+            })
         });
         let reg = Registration {
             id,
@@ -153,6 +163,58 @@ impl RealStore {
         Ok(out)
     }
 
+    /// `DELETE /api/datasets/{id}?files=true`: unregisters the dataset and deletes the folder it was written
+    /// to, the one right under `<data dir>/datasets` (whatever inside it was registered). Refused for a dataset
+    /// anywhere else, while another registered dataset reads files there, and while a run trains on it.
+    pub(super) fn delete_own_dataset(&self, id: &str) -> Result<()> {
+        let reg = self.entry(id)?.reg();
+        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_query", m);
+        let own = std::fs::canonicalize(self.data_dir.join("datasets")).ok();
+        let at = std::fs::canonicalize(&reg.path).ok();
+        let folder = match (&own, &at) {
+            (Some(own), Some(at)) => {
+                at.strip_prefix(own).ok().and_then(|r| r.components().next()).map(|c| own.join(c))
+            }
+            _ => None,
+        };
+        let Some(folder) = folder else {
+            let path = folo_data::paths::shown(&reg.path);
+            return Err(bad(format!(
+                "'{path}' is not a folder FOLO wrote into its data dir; its files are never deleted"
+            ))
+            .hint("unregister it without files=true"));
+        };
+        let others: Vec<String> = self
+            .entries
+            .read()
+            .unwrap()
+            .iter()
+            .map(|e| e.reg())
+            .filter(|r| r.id != id && std::fs::canonicalize(&r.path).is_ok_and(|p| p.starts_with(&folder)))
+            .map(|r| r.name)
+            .collect();
+        if !others.is_empty() {
+            return Err(bad(format!("{} also read the files in that folder", others.join(", ")))
+                .hint("remove those datasets first, or unregister this one without files=true"));
+        }
+        // A run training or queued on it reads those files: it would fail.
+        if let Some(r) =
+            self.list_runs()?.into_iter().find(|r| r.config.dataset_id == id && r.status.is_active())
+        {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "run_active",
+                format!("run {} is training or queued on it", r.name),
+            )
+            .hint("wait for it, or stop it first"));
+        }
+        self.delete_dataset(id)?;
+        std::fs::remove_dir_all(&folder).map_err(|e| {
+            let folder = folo_data::paths::shown(&folder);
+            Error::internal(format!("{} was unregistered, but deleting '{folder}' failed: {e}", reg.name))
+        })
+    }
+
     pub(super) fn thumbs_dir(&self, id: &str) -> PathBuf {
         self.data_dir.join("cache").join("thumbs").join(id)
     }
@@ -169,6 +231,26 @@ impl RealStore {
         claim_dir(&parent, base)
             .map_err(|e| Error::internal(format!("creating a folder in {}: {e}", parent.display())))
     }
+}
+
+/// The seed of a registered dataset's id: its canonical path and the format it is read in.
+pub(crate) fn dataset_seed(canonical: &Path, format: DatasetFormat) -> u64 {
+    fnv1a(canonical.to_string_lossy().as_bytes()) ^ fnv1a(format!("{format:?}").as_bytes())
+}
+
+/// A registered dataset whose folder no longer exists: said as that (still `404 path_not_found`), not with the
+/// registration error's advice on which folder to pass.
+fn folder_gone(err: Error, reg: &Registration) -> Error {
+    if err.body.code != "path_not_found" || Path::new(&reg.path).exists() {
+        return err;
+    }
+    let (name, path) = (&reg.name, folo_data::paths::shown(&reg.path));
+    let message = format!("the folder of dataset '{name}' is gone: '{path}' does not exist");
+    Error::new(StatusCode::NOT_FOUND, "path_not_found", message).hint(format!(
+        "move the folder back (FOLO picks it up again within seconds), or unregister the dataset with \
+         DELETE /api/datasets/{} (its files are never deleted)",
+        reg.id
+    ))
 }
 
 /// The server's own files in the data dir, left out of dataset fingerprints (the data dir may sit inside a
@@ -239,7 +321,7 @@ pub(super) fn load_or_build(dir: &Path, e: &Entry) {
         return;
     }
     let t0 = Instant::now();
-    match Index::build(&reg.path, reg.format, &own_state(dir)) {
+    match Index::build(&reg.path, reg.format, &own_state(dir)).map_err(|err| folder_gone(err, &reg)) {
         Ok(idx) => {
             tracing::info!(id = %reg.id, images = idx.images.len(), secs = t0.elapsed().as_secs_f32(), "indexed");
             save_index(dir, e, &idx);

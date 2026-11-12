@@ -3,7 +3,7 @@ import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Sparkles from '$icons/sparkles';
 import Tags from '$icons/tags';
-import { computed, css, For, signal, untrack } from 'fw';
+import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import ClassStrip from '$lib/detect/ClassStrip';
@@ -11,6 +11,7 @@ import { ago, num } from '$lib/format';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -25,6 +26,9 @@ import Meta from '$lib/ui/Meta';
 import { rowNav } from '$lib/ui/rowNav';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import { imageCount } from './dataset/health';
+import { count } from './dataset/count';
+import { datasetChanges } from './datasets/changes';
+import { datasetProblem, PROBLEM_LABEL, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
 /** Columns of the desktop table (for state rows that span it), the empty last one included. */
@@ -35,10 +39,22 @@ export default function Datasets() {
   // The header's create action is the one in the top-right corner (the top bar's New run steps aside).
   ownCreateAction();
 
-  // The list endpoint has no stats; fetch each dataset for its class balance and box count.
+  // The list endpoint has no stats; fetch each dataset for its class balance and box count (and to learn which ones
+  // cannot be read: a folder that was moved is marked, not shown as if nothing were wrong).
   const datasets = new Resource(async (s) => {
     const list = await hub.api.datasets(s);
-    return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
+    return Promise.all(list.map((d): Promise<ListedDataset> => hub.api.dataset(d.id, s).catch((e) => ({ ...d, problem: datasetProblem(e) }))));
+  });
+  // The list goes stale otherwise: read it again after a dataset action in this tab, and when the tab comes back (one
+  // added in another tab, by an agent, or a folder moved meanwhile).
+  const seen = datasetChanges.peek();
+  effect(() => {
+    if (datasetChanges.get() !== seen) untrack(() => void datasets.refresh());
+  });
+  effect(() => {
+    const back = () => document.visibilityState === 'visible' && !datasets.loading && void datasets.refresh();
+    document.addEventListener('visibilitychange', back);
+    return () => document.removeEventListener('visibilitychange', back);
   });
 
   // `#/datasets?add=folder|synthetic` opens the dialog (used by the onboarding on an empty Overview).
@@ -254,7 +270,15 @@ export default function Datasets() {
                         <td class="r num muted">{num(d().splits.train)}</td>
                         <td class="r num muted">{num(d().splits.val)}</td>
                         <td class="r num muted">{num(d().splits.test)}</td>
-                        <td>{d().stats ? <ClassStrip counts={d().stats!.class_counts} classes={d().classes} /> : <span class="faint">—</span>}</td>
+                        <td>
+                          {d().problem ? (
+                            <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge>
+                          ) : d().stats ? (
+                            <ClassStrip counts={d().stats!.class_counts} classes={d().classes} />
+                          ) : (
+                            <span class="faint">—</span>
+                          )}
+                        </td>
                         {/* Full numbers, like the split columns beside it: one format per column. */}
                         <td class="r num hide-md">{num(d().stats?.boxes)}</td>
                         <td class="r faint hide-md">{ago(d().created)}</td>
@@ -279,8 +303,8 @@ export default function Datasets() {
                         <span class="name truncate">{d().name}</span>{' '}
                         <span class="m-meta m-total num">
                           <Meta>
-                            <span>{num(imageCount(d()))} images</span>
-                            <span>{d().classes.length} classes</span>
+                            <span>{count(imageCount(d()), 'image')}</span>
+                            <span>{count(d().classes.length, 'class')}</span>
                           </Meta>
                         </span>{' '}
                         <span class="m-meta num">
@@ -292,7 +316,11 @@ export default function Datasets() {
                         </span>
                       </span>
                     </a>{' '}
-                    {d().stats ? (
+                    {d().problem ? (
+                      <span class="m-side">
+                        <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge>
+                      </span>
+                    ) : d().stats ? (
                       <span class="m-side">
                         <span class="m-strip">
                           <ClassStrip counts={d().stats!.class_counts} classes={d().classes} height={4} named />
@@ -332,8 +360,8 @@ export default function Datasets() {
                 {shown.get().length < datasets.data.length ? `${shown.get().length} of ${datasets.data.length}` : shown.get().length}{' '}
                 {datasets.data.length === 1 ? 'dataset' : 'datasets'}
               </span>{' '}
-              <span>{num(totals.get().images)} images</span>{' '}
-              <span>{num(totals.get().boxes)} boxes</span>
+              <span>{count(totals.get().images, 'image')}</span>{' '}
+              <span>{count(totals.get().boxes, 'box')}</span>
             </Meta>
           </p>
         ) : null}

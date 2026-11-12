@@ -99,6 +99,28 @@ describe('Inspector labels', () => {
     pager.dispose();
   });
 
+  it('fades its key hint off the image once the viewer is used, and keeps the split on one line', async () => {
+    const dataset = await hub.api.dataset('ds_fasteners');
+    const pager = new ImagePager(dataset.id, undefined, undefined);
+    const first = await pager.at(0);
+    c = mount(Inspector, {
+      target,
+      props: { pager, classes: dataset.classes, imageId: first!.id, only: null, onnavigate: () => {}, onclose: () => {}, onmissing: () => {} },
+    });
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('.split')) throw new Error('not rendered yet');
+    });
+    const hint = target.querySelector('.hint')!;
+    expect(hint.classList.contains('touched')).toBe(false);
+    target.querySelector<HTMLElement>('.viewport')!.dispatchEvent(new KeyboardEvent('keydown', { key: '+', bubbles: true }));
+    flushSync();
+    expect(hint.classList.contains('touched')).toBe(true);
+    // "train" and, beside it (hidden on phones), " split".
+    expect(target.querySelector('.split .split-word')?.textContent).toBe(' split');
+    pager.dispose();
+  });
+
   it('draws the selected label as the selected box (the others recede) and the hovered one apart from it', async () => {
     // The boxes are placed in screen pixels: give every element a size, since this DOM does no layout.
     const cw = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');

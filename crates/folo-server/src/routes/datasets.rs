@@ -42,11 +42,19 @@ pub(super) async fn get_dataset(
     Ok(Json(blocking(&st, move |s| s.get_dataset(&id)).await?).into_response())
 }
 
+#[derive(Deserialize)]
+pub(super) struct DeleteParams {
+    /// Also delete the dataset's folder (only one the server wrote under `<data dir>/datasets`).
+    #[serde(default)]
+    files: bool,
+}
+
 pub(super) async fn delete_dataset(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
+    ApiQuery(p): ApiQuery<DeleteParams>,
 ) -> Result<StatusCode> {
-    blocking(&st, move |s| s.delete_dataset(&id)).await?;
+    blocking(&st, move |s| if p.files { s.delete_dataset_files(&id) } else { s.delete_dataset(&id) }).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

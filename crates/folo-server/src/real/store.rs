@@ -19,7 +19,7 @@ use crate::bench::Benches;
 use crate::cloud::{self};
 use crate::engine::{self, engine_error};
 use crate::error::{Error, Result};
-use crate::index::{data_error, read_image_with, write_atomic};
+use crate::index::{data_error, read_image_with, requested_path, write_atomic};
 use crate::label::Labeler;
 use crate::runs::run_model_id;
 use crate::store::{
@@ -175,7 +175,7 @@ impl Store for RealStore {
     }
 
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
-        self.register(req.name, req.path, req.format)
+        self.register(req.name, requested_path(&req.path)?, req.format)
     }
 
     fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset> {
@@ -199,6 +199,9 @@ impl Store for RealStore {
             seed: req.seed,
             vary_aspect: false,
             val_fraction: 0.2,
+            // A sample set passes FOLO's own health checks: Studio warns past 10% tiny boxes, and the generator's
+            // default (a fifth of the objects 8 to 28 px across) makes about 27%. A few small ones stay (about 6%).
+            small_fraction: 0.05,
             ..Default::default()
         };
         let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
@@ -262,6 +265,10 @@ impl Store for RealStore {
         let _ = std::fs::remove_file(index_path(&self.data_dir, id));
         let _ = std::fs::remove_dir_all(self.thumbs_dir(id));
         Ok(())
+    }
+
+    fn delete_dataset_files(&self, id: &str) -> Result<()> {
+        self.delete_own_dataset(id)
     }
 
     fn list_models(&self) -> Result<Vec<Model>> {

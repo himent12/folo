@@ -427,6 +427,16 @@ pub trait Store: Send + Sync + 'static {
     fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData>;
     /// Unregisters a dataset (never deletes files).
     fn delete_dataset(&self, id: &str) -> Result<()>;
+    /// Unregisters a dataset and deletes its folder, which must be one this server wrote under `<data dir>/datasets`
+    /// (a generated sample set, a labeling job's export, an upload); any other is `400 invalid_query`.
+    fn delete_dataset_files(&self, id: &str) -> Result<()> {
+        let _ = id;
+        Err(crate::error::Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_query",
+            "this server does not delete dataset files".to_string(),
+        ))
+    }
 
     /// All models, newest first.
     fn list_models(&self) -> Result<Vec<Model>>;

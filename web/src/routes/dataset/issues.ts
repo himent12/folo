@@ -88,9 +88,24 @@ export async function loadIssues(
       out = { total, list, byKind };
     }
   }
-  list.sort((a, b) => (a.file === b.file ? (a.line ?? 0) - (b.line ?? 0) : a.file < b.file ? -1 : 1));
+  list.sort(byPlace);
   return out;
 }
+
+/** The issues of a few kinds of one severity (a finding's own: its broken label files, not the unreadable images beside
+ *  them), read kind by kind and merged in dataset order. */
+export async function loadKinds(api: Read, id: string, severity: IssueSeverity, kinds: readonly IssueKind[], cap = 2000, signal?: AbortSignal): Promise<LoadedIssues> {
+  const parts = await Promise.all(kinds.map((k) => loadIssues(api, id, severity, cap, signal, k)));
+  const list = parts.flatMap((p) => p.list).sort(byPlace).slice(0, cap);
+  const byKind: Partial<Record<IssueKind, number>> = {};
+  kinds.forEach((k, i) => {
+    if (parts[i]!.total) byKind[k] = parts[i]!.total;
+  });
+  return { total: parts.reduce((a, p) => a + p.total, 0), list, byKind, counts: parts[0]?.counts };
+}
+
+/** Dataset order: by file, then line. */
+const byPlace = (a: DatasetIssue, b: DatasetIssue) => (a.file === b.file ? (a.line ?? 0) - (b.line ?? 0) : a.file < b.file ? -1 : 1);
 
 const NOUN: Record<IssueSeverity, [string, string]> = { error: ['error', 'errors'], warning: ['warning', 'warnings'], info: ['note', 'notes'] };
 const MEANS: Record<IssueSeverity, string> = {

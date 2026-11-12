@@ -94,14 +94,25 @@ async fn datasets_and_images() {
     )
     .await;
 
-    // Register from disk: a missing path is a clean 404.
+    // Register from disk: a missing path is a clean 404, a relative one a 400 that does not name the server's
+    // working directory.
+    let gone = TestDir::new("gone");
+    let missing = gone.join("definitely/not/here");
     err(
         &app,
-        post_json("/api/datasets", json!({ "path": "Z:/definitely/not/here" })),
+        post_json("/api/datasets", json!({ "path": missing })),
         StatusCode::NOT_FOUND,
         "path_not_found",
     )
     .await;
+    let e = err(
+        &app,
+        post_json("/api/datasets", json!({ "path": "bccd" })),
+        StatusCode::BAD_REQUEST,
+        "invalid_body",
+    )
+    .await;
+    assert_eq!(e.message, "'bccd' is not a full path");
 
     // Delete.
     let (status, _, _) =
@@ -136,11 +147,13 @@ async fn real_store_disk_dataset_and_engine_checks() {
     let app = server.router();
     let h: Health = ok(&app, get("/api/health")).await;
     assert!(!h.mock);
-    let (status, _, b) =
-        send(&app, post_json("/api/datasets", json!({ "path": ds_dir.to_str().unwrap() }))).await;
+    // Pasted as Windows' "Copy as path" gives it: in quotes, with a stray space.
+    let quoted = format!(" \"{}\"", ds_dir.to_str().unwrap());
+    let (status, _, b) = send(&app, post_json("/api/datasets", json!({ "path": quoted }))).await;
     assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
     let ds: Dataset = serde_json::from_slice(&b).unwrap();
     assert_eq!((ds.name.as_str(), ds.format), ("ds", DatasetFormat::Yolo));
+    assert_eq!(ds.path, folo_api::json::path(&ds_dir));
     assert_eq!(ds.classes, ["bolt", "nut"]);
     assert_eq!(ds.stats.unwrap().class_counts, [1, 1]);
     let page: ImagePage = ok(&app, get(&format!("/api/datasets/{}/images", ds.id))).await;
@@ -207,4 +220,22 @@ async fn malformed_registry_is_never_overwritten() {
     err(&app, post_json("/api/datasets", body), StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
     assert_eq!(std::fs::read_to_string(root.join("datasets.json")).unwrap(), "{ not json");
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[tokio::test]
+async fn mock_mode_deletes_a_generated_set_with_files_but_never_a_folder() {
+    let dir = TestDir::new("mock-delete-files");
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    std::fs::create_dir_all(dir.join("labels")).unwrap();
+    let (server, _) = mock();
+    let app = server.router();
+    let body = json!({ "name": "tiny", "images": 10, "imgsz": 64 });
+    let made: Dataset = ok(&app, post_json("/api/datasets/synthetic", body)).await;
+    let disk: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": dir.to_str().unwrap() }))).await;
+    let del =
+        |id: &str| Request::delete(format!("/api/datasets/{id}?files=true")).body(Body::empty()).unwrap();
+    err(&app, del(&disk.id), StatusCode::BAD_REQUEST, "invalid_query").await;
+    assert!(dir.join("images").is_dir());
+    let (status, _, _) = send(&app, del(&made.id)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }

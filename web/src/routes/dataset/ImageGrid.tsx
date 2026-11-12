@@ -5,6 +5,7 @@
 import { computed, css } from 'fw';
 import DatasetImage from '$lib/detect/DatasetImage';
 import TileGrid, { dominantAspect, type Density } from '$lib/ui/TileGrid';
+import type { DatasetImage as ImageInfo } from '$lib/api/types';
 import type { ImagePager } from './pager';
 
 export interface ImageGridProps {
@@ -14,6 +15,8 @@ export interface ImageGridProps {
   boxes: boolean;
   only: ReadonlySet<number> | null;
   onopen: (index: number, id: string) => void;
+  /** An image to scroll to and focus, each time a new one is given (the one the inspector closed on). */
+  reveal?: { i: number } | null;
 }
 
 const NO_BOXES: never[] = [];
@@ -40,7 +43,10 @@ export default function ImageGrid(props: ImageGridProps) {
   // once, and its bindings re-run only when this cell's image itself changed (Svelte re-ran each `{@const}` reader).
   const tile = (i: () => number) => {
     const img = computed(() => props.pager.get(i()));
-    const im = () => img.get()!;
+    // The image's bindings may re-run once more as it goes (before the branch that shows it is taken down: a link to an
+    // image opened from the Stats tab did): they read the last image there was, never undefined.
+    let last: ImageInfo | undefined;
+    const im = () => (last = img.get() ?? last)!;
     return (
       <>
         {img.get() ? (
@@ -81,6 +87,7 @@ export default function ImageGrid(props: ImageGridProps) {
       onopen={open}
       onrange={(lo, hi) => props.pager.ensure(lo, hi)}
       toolbar=".ds-toolbar"
+      reveal={props.reveal}
       tile={tile}
     />
   );

@@ -121,21 +121,26 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 ## Datasets
 - `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
 - `POST /api/datasets` body `{ "name"?, "path", "format": "auto|yolo|coco" }` → `201 Dataset` with `stats`.
-  Registers a dataset on disk: a folder, a `data.yaml` or a COCO instances `.json` (relative paths are resolved
-  against the server's working directory and stored absolute in `path`); `name` defaults to the folder name,
-  `format` to `auto`. Datasets are read with folo-data, exactly as for training (formats and detection rules:
+  Registers a dataset on disk: a folder, a `data.yaml` or a COCO instances `.json`. `path` must be absolute
+  (surrounding whitespace and one pair of quotes, as Windows' "Copy as path" adds, are ignored; a relative path is
+  `400 invalid_body`, never resolved against the server's working directory); `name` defaults to the folder's name
+  (for a COCO file in `annotations/`, the folder above it; for a `data.yaml`, its folder), numbered `-2`, `-3`, ...
+  when a dataset already has that name; `format` defaults to `auto`. Datasets are read with folo-data, exactly as for training (formats and detection rules:
   `docs/DATA.md`): YOLO from `data.yaml` (`path`, `train`, `val`, `test`, `names`; a YAML with only `names` uses the
   folder layout) or `images/{train,val,test}` + `labels/…`; COCO from `annotations/instances_*.json` (Roboflow
   layouts too). Corrupt or missing images and images with broken labels are left out (`stats.broken_labels` counts
   the latter; `folo dataset check` lists them all). Without `names` / `nc`, classes are named `class0..` up to the
-  largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset),
+  largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset; a folder with images
+  but no labels says "'<path>' has N images but no labels", with a hint to label them),
   `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes). The
   request returns once the dataset is indexed (every image header is read, in parallel). Registering a path that
   is already registered (the same folder by its canonical path, whatever the spelling, with `format` `auto` or
   the same format) returns the existing dataset (still `201`) instead of a duplicate; its `name` is kept.
 - `POST /api/datasets/synthetic` body `{ "name", "images": 1000, "classes": ["circle","square","triangle"], "imgsz": 640, "seed": 0 }`
   → `201 Dataset` with `stats`. Only `name` is required. Generates square JPEG images (folo-data's shapes
-  generator, deterministic in `images`, `classes`, `imgsz` and `seed`) into `<data dir>/datasets/<name>` (the name
+  generator, deterministic in `images`, `classes`, `imgsz` and `seed`; a twentieth of the objects extra-small, so
+  under 10% of the boxes are under 5% of the image side and a sample set passes Studio's health checks) into
+  `<data dir>/datasets/<name>` (the name
   lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registers them. Images are split 80 / 20 into
   train / val. `classes`: 1 to 8 distinct names; `circle`, `square`, `triangle`, `star`, `ring`, `cross`,
   `hexagon` and `heart` get that shape, every other name the next shape no name has claimed. `400 invalid_body`
@@ -167,7 +172,14 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/datasets/{id}/images/{image_id}` → original image bytes (`Content-Type` from the file); `?thumb=256`
   returns a JPEG whose long side is 256 (clamped to 16..2048, never upscaled; EXIF orientation applied, so boxes
   line up). Mock images are immutable and sent with a long `Cache-Control`; real ones with `no-cache`.
-- `DELETE /api/datasets/{id}` → `204` (unregisters; never deletes files)
+- `DELETE /api/datasets/{id}` → `204` (unregisters; never deletes files). Runs that used the dataset keep their
+  metrics and models; their sample images (`/images` of this id) are gone with it. A dataset's id derives from its
+  folder (canonical path) and format, so registering the same folder again gives it the same id back (unless another
+  dataset has taken it meanwhile), and those runs find it again. `?files=true` also deletes the dataset's folder, for
+  a dataset this server wrote into its data dir (the folder right under `<data dir>/datasets`: a generated sample
+  set, a labeling job's export, an upload); a dataset anywhere else is `400 invalid_query` (nothing is unregistered
+  or deleted), so is one whose folder another registered dataset reads, and a run queued or training on it is `409
+  run_active`. In mock mode a generated set goes with `files=true` and a folder registered from disk is refused.
 
 ```jsonc
 // Dataset
@@ -1279,11 +1291,13 @@ mostly shown) for the others.
   registry is listed immediately and every dataset is checked on a background thread: a fresh cache is loaded, a
   stale or missing one rebuilt; requests for a dataset that is still being indexed wait for it. While running,
   `GET /api/datasets/{id}` and image listings re-check the fingerprint at most every 5 s and re-index when files
-  were added, removed or edited. Datasets whose folder no longer exists are left out of the list (but stay in the
-  registry).
+  were added, removed or edited. A dataset whose folder no longer exists (moved, renamed, deleted) stays in the list
+  with its last classes and splits; `GET /api/datasets/{id}` and its images answer `404 path_not_found` ("the folder
+  of dataset '<name>' is gone: ...") until the folder is back (it is re-checked like any change), and `DELETE`
+  unregisters it.
 - `cache/thumbs/<id>/`: thumbnails, keyed by the image's path, size, modification time and the requested side.
 - `datasets/<name>/`: synthetic datasets and the datasets made from labeling jobs. `DELETE /api/datasets/{id}`
-  removes the dataset's caches, never its files.
+  removes the dataset's caches, and its files only with `?files=true`.
 - `label/<job id>/`: one folder per labeling job: `job.json` (the job, its images and their boxes, rewritten
   atomically after every change; during an agent run at most every 5 seconds and when it ends, so a crash can
   lose the labels of the run's last few seconds), `images/` (uploaded files; folder imports stay where they are)

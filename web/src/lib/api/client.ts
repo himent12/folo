@@ -108,7 +108,8 @@ export interface Api {
   datasetIssues(id: string, q: DatasetIssuesQuery, signal?: AbortSignal): Promise<DatasetIssues>;
   /** URL of an image (thumbnail when `thumb` is set). The mock renders images on demand, hence async. */
   imageUrl(datasetId: string, imageId: string, thumb?: number): Promise<string>;
-  deleteDataset(id: string): Promise<void>;
+  /** Unregisters a dataset; `files` also deletes the folder of one the server wrote into its data dir (docs/API.md). */
+  deleteDataset(id: string, opts?: { files?: boolean }): Promise<void>;
 
   models(signal?: AbortSignal): Promise<Model[]>;
   model(id: string, signal?: AbortSignal): Promise<Model>;
@@ -413,8 +414,8 @@ export class HttpApi implements Api {
   async imageUrl(datasetId: string, imageId: string, thumb?: number) {
     return `${this.base}/api/datasets/${encodeURIComponent(datasetId)}/images/${encodeURIComponent(imageId)}${qs({ thumb })}`;
   }
-  deleteDataset(id: string) {
-    return this.#req<void>('DELETE', `/datasets/${encodeURIComponent(id)}`);
+  deleteDataset(id: string, opts: { files?: boolean } = {}) {
+    return this.#req<void>('DELETE', `/datasets/${encodeURIComponent(id)}${opts.files ? '?files=true' : ''}`);
   }
 
   async models(signal?: AbortSignal) {
