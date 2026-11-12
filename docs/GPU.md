@@ -245,8 +245,17 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   work do not grow with the stride; when the kernel is smaller than the stride, the input gradient is cleared
   first and the other phases' pixels stay zero. Both the regular and the tensor-core generator have it.
 - `CONV_MODE = 3` is the weight gradient: `K = N·OH·OW` folds the batch into the reduction, `A` rows are output-
-  gradient planes read across images, and `B` is the image gathered as a transposed im2col (each thread owns one
-  `(c_in, kh, kw)` column). `SPLIT = true` splits `K` into chunks, one per extra workgroup layer, each writing a
+  gradient planes read across images, and `B` is the image gathered as a transposed im2col. The `B` tile is loaded
+  in runs of pixels: neighbouring invocations take 16 (8 on tensor cores) neighbouring `k = (n, oh, ow)` of one
+  `(c_in, kh, kw)` column, then the next columns (`conv::wgrad_b_units`), so a warp's gather reads a few
+  contiguous pieces of image rows instead of one element per image plane (neighbouring columns are a whole plane
+  apart: each invocation owned one column before, and a 1×1 layer's weight gradient ran at about 3 TFLOPS). The
+  k-major workgroup tile is padded (one vec4 per row in the regular generator; the tensor-core one's rows are
+  already `bn + 8` halves apart) so these stores hit distinct banks; a run of a whole warp along `k` made the
+  f16 stores conflict 4-way and the tensor-core weight gradients 3x slower. The stem (`C_out ≤ 16`, `N ≤ 32`
+  columns, e.g. 3→16 with `N = 27`) takes a 16×32 regular tile with 32 invocations (`STEM`, f32 or f16 inputs,
+  also when tensor cores are on: their narrowest tile is 16×256), split-K into up to 1024 chunks.
+  `SPLIT = true` splits `K` into chunks, one per extra workgroup layer, each writing a
   partial weight slab that a column reduction sums: early layers have only a few output tiles but hundreds of
   thousands of `K` steps. The spatial sizes (`IH`, `IW`, `OH`, `OW`) are specialisation constants here (in both
   generators), because the gather divides every `k = (n, oh, ow)` by `OH·OW` and `OW`: a constant divisor is a
@@ -303,7 +312,8 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   invocation owns an input pixel; the `B` tile gathers the output-gradient pixels that read it, `A` is the weight
   permuted once to `[groups, C_in/g, C_out/g, KH·KW]`; 1×1 convs are the plain tensor-core GEMM over that permuted
   weight). `CONV_MODE` 3 is the weight gradient with `K = N·OH·OW` (the `A` rows are output-gradient planes read
-  across images, the `B` tile the image gathered as a transposed im2col), tiles picked by `M = C_out/groups` alone
+  across images, the `B` tile the image gathered as a transposed im2col in runs of 8 pixels, see above; the stem
+  shape goes to the regular kernels' `STEM` tile), tiles picked by `M = C_out/groups` alone
   and `SPLIT` cutting `K` into chunks (one z-layer each; each chunk writes an f32 partial slab, a column reduction
   sums them) until about 512 workgroups run. The loop bounds derive from `workgroup_id` and uniforms, so they stay
   uniform. The weight gradient is written as f32 (straight to the f32 master weight, no f16 rounding or

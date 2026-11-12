@@ -175,15 +175,17 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             let _ = writeln!(
                 s,
                 "{}  let SAN = pu(32u); let SBN = pu(33u);\n\
-                 \x20 let cj = n0 + {}; let cjok = cj < N;\n\
-                 \x20 let cci = cj / (KH * KW); let cr = cj % (KH * KW);\n\
-                 \x20 let cdh = i32((cr / KW) * DH) - PH; let cdw = i32((cr % KW) * DW) - PW;",
+                 \x20 let wl = tid % {WR}u; let wq = tid / {WR}u;",
                 crate::kernels::conv::weight_grad_dims(spec),
-                pb.inner_expr()
+                WR = spec.get_u32("WG_RUN", 8),
             );
         }
         _ => {}
     }
+    // The weight gradient's B tile: runs of pixels down each column (`crate::kernels::conv::wgrad_b_units`).
+    // Runs of 8 pixels: with the tile rows `bn + PAD` halves apart, a warp's f16 stores then hit distinct banks.
+    let wb =
+        (mode == 3).then(|| crate::kernels::conv::wgrad_b_units(THREADS, bk, bn, spec.get_u32("WG_RUN", 8)));
     let a_reg = if va { "vec4<f16>" } else { "f16" };
     let b_reg = if vb && !conv { "vec4<f16>" } else { "f16" };
     for u in 0..pa.count {
@@ -238,7 +240,10 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         };
         load.push_str(&pa.guarded(body));
     }
-    for u in 0..pb.count {
+    if let Some(wb) = &wb {
+        load.push_str(&crate::kernels::conv::wgrad_b_load(wb, "MB", |u| format!("rb{u}"), "", "f16(0.0)"));
+    }
+    for u in (0..pb.count).filter(|_| mode != 3) {
         let (o, i) = (pb.outer(u), pb.inner_expr());
         let body = if mode == 1 {
             let _ = i;
@@ -272,14 +277,6 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20       }}\n\
                  \x20     }}\n\
                  \x20     rb{u} = v; }}\n"
-            )
-        } else if mode == 3 {
-            format!(
-                "    {{ let k = k0 + {o}; let nn = k / OHOW; let r = k % OHOW;\n\
-                 \x20     let ih = i32((r / OW) * SH) + cdh; let iw = i32((r % OW) * SW) + cdw;\n\
-                 \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
-                 \x20       rb{u} = MB[offB + nn * SBN + (cci * IH + u32(ih)) * IW + u32(iw)];\n\
-                 \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
             )
         } else {
             let (idx, cond) = match (vb, tb) {
@@ -333,7 +330,12 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             }
             st.push_str(&pa.guarded(body));
         }
-        for u in 0..pb.count {
+        for (u, w) in wb.iter().flat_map(|wb| wb.units.iter().map(move |w| (wb.run, w))).enumerate() {
+            let (run, w) = w;
+            let row = format!("({} * {run}u + wl)", w.kq);
+            let _ = writeln!(st, "    Bs{buf}[{row} * {sb}u + {}] = rb{u};", w.jj);
+        }
+        for u in (0..pb.count).filter(|_| mode != 3) {
             let (o, i) = (pb.outer(u), pb.inner_expr());
             let mut body = String::new();
             match (vb && !conv, tb && !conv) {
