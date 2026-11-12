@@ -253,6 +253,13 @@ export default function Run() {
     void live.version;
     return live.epochs.length;
   });
+  /**
+   * It ended without a training step (interrupted before it started, failed before its first one, its dataset's folder
+   * gone): the metrics say so in one line, and there are no samples or per-class results to wait for.
+   */
+  const neverTrained = computed(
+    () => !active.get() && !live.loading && historyError.get() === undefined && stepCount.get() === 0 && epochsDone.get() === 0 && (run.get()?.step ?? 0) === 0,
+  );
   // How long it took, as the Runs list says: from start to end, less the time it sat stopped before a resume.
   const elapsed = computed(() => {
     const r = run.get();
@@ -269,7 +276,7 @@ export default function Run() {
   // Below 960 px one section shows at a time. A queued run has nothing to sample yet, so it opens on its Config (the
   // dependency and start estimate are in the banner above); once picked, the choice holds.
   const picked = signal<Section | null>(null);
-  const section = computed<Section>(() => picked.get() ?? (queuedOnly.get() ? 'config' : 'samples'));
+  const section = computed<Section>(() => picked.get() ?? (queuedOnly.get() ? 'config' : neverTrained.get() ? 'logs' : 'samples'));
   const models = modelsResource();
   /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
   const stacked = new MediaQuery(media.upToLaptop, false);
@@ -603,6 +610,7 @@ export default function Run() {
                   evalOn={evalOn.get()}
                   error={historyError.get()}
                   retry={retryHistory}
+                  never={neverTrained.get()}
                 />
 
                 {/* Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right,
@@ -616,8 +624,12 @@ export default function Run() {
                     value={section.get()}
                     onchange={(v) => picked.set(v)}
                     tabs={[
-                      { value: 'samples', label: 'Samples' },
-                      { value: 'classes', label: 'Classes' },
+                      ...(neverTrained.get()
+                        ? []
+                        : [
+                            { value: 'samples' as const, label: 'Samples' },
+                            { value: 'classes' as const, label: 'Classes' },
+                          ]),
                       { value: 'logs', label: 'Logs' },
                       ...(isCloud.get() ? [{ value: 'cloud' as const, label: 'Cloud' }] : []),
                       { value: 'config', label: 'Config' },
@@ -627,30 +639,36 @@ export default function Run() {
                 <div
                   class="detail"
                   class:cloud={isCloud.get()}
+                  class:never={neverTrained.get()}
                   data-show={section.get()}
                   id="run-sec-panel"
                   role={stacked.current ? 'tabpanel' : undefined}
                   aria-labelledby={stacked.current ? `run-sec-${section.get()}` : undefined}
                 >
                   <div class="main-col">
-                    <div class="part" data-part="samples">
-                      <Samples
-                        runId={R().id}
-                        classes={classes.get()}
-                        datasetGone={datasetGone.get()}
-                        epochsDone={epochsDone.get()}
-                        title={`${scoresTitle(evalOn.get())} samples`}
-                        unavailable={historyError.get() !== undefined}
-                      />
-                    </div>
+                    {/* A run that never trained has no samples or per-class results: the log and Config are its row. */}
+                    {!neverTrained.get() ? (
+                      <div class="part" data-part="samples">
+                        <Samples
+                          runId={R().id}
+                          classes={classes.get()}
+                          datasetGone={datasetGone.get()}
+                          epochsDone={epochsDone.get()}
+                          title={`${scoresTitle(evalOn.get())} samples`}
+                          unavailable={historyError.get() !== undefined}
+                        />
+                      </div>
+                    ) : null}
                     <div class="part" data-part="logs">
                       <Logs log={live.logsLog} version={live.version} live={active.get()} />
                     </div>
                   </div>
                   <aside class="rail" aria-label="Per-class results and config">
-                    <div class="part" data-part="classes">
-                      <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} />
-                    </div>
+                    {!neverTrained.get() ? (
+                      <div class="part" data-part="classes">
+                        <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} />
+                      </div>
+                    ) : null}
                     {cloud.get() ? (
                       <div class="part" data-part="cloud">
                         <CloudPanel cloud={cloud.get()!} provider={provider.get()} />
@@ -839,6 +857,22 @@ css`
     }
     .detail.cloud [data-part='logs'] {
       grid-row: span 2;
+    }
+    /* A run that never trained: no samples / per-class row, so the log and Config (a cloud run's Cloud panel above
+       Config) are the rows. */
+    .detail.never {
+      grid-template-rows: minmax(0, 1fr);
+    }
+    .detail.never .main-col,
+    .detail.never .rail {
+      grid-row: 1 / 2;
+    }
+    .detail.cloud.never {
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+    .detail.cloud.never .main-col,
+    .detail.cloud.never .rail {
+      grid-row: 1 / 3;
     }
   }
   .phone-pick {

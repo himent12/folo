@@ -12,6 +12,9 @@ describe('a failed run in plain words', () => {
     expect(failureSummary('data_error', 'bccd-copy')).toBe('Files of dataset bccd-copy went missing or changed during training.');
     expect(failureSummary('training_failed', 'x')).toBe('Training diverged or produced no usable batch.');
     expect(failureSummary(undefined, 'x')).toBeNull();
+    // Before its first step: "Failed before training started" is the title, so the cause says nothing of training.
+    expect(failureSummary('data_error', 'gone-soon', false)).toBe('The files of dataset gone-soon are missing or could not be read.');
+    expect(failureSummary('io_error', 'x', false)).toBe('Reading or writing a file failed.');
     expect(failureSummary('some_new_code', 'x')).toBeNull();
   });
 });

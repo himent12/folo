@@ -132,6 +132,11 @@ export interface RunMetricsProps {
   /** The run's history failed to load: the panel says so with Retry, never "Waiting for the first validation…". */
   error?: unknown;
   retry?: () => void;
+  /**
+   * The run ended without a training step (interrupted before it started, failed before its first step): one line in
+   * place of the strip and the chart, never "Waiting for the first validation…" or tiles "after the first epoch".
+   */
+  never?: boolean;
 }
 
 export default function RunMetrics(props: RunMetricsProps) {
@@ -541,6 +546,8 @@ export default function RunMetrics(props: RunMetricsProps) {
         <div class="failed">
           <ErrorState error={props.error} title="Could not load this run's metrics" retry={props.retry} compact />
         </div>
+      ) : props.never ? (
+        <p class="never">No metrics: it ended before its first training step.</p>
       ) : queued() && narrow() ? (
         // Phones, queued: one line until there is something to chart; the banner above says when it starts.
         <button type="button" class="pending" aria-expanded={queuedOpen.get()} aria-controls="run-metrics-body" onclick={() => queuedOpen.set(!queuedOpen.peek())}>
@@ -551,7 +558,7 @@ export default function RunMetrics(props: RunMetricsProps) {
           </span>
         </button>
       ) : null}
-      {props.error === undefined && !queuedFold.get() ? (
+      {props.error === undefined && !props.never && !queuedFold.get() ? (
         <div class="metrics-body" id="run-metrics-body">
           <MetricStrip
             run={props.run}
@@ -696,6 +703,10 @@ css`
   }
   .failed {
     padding: var(--space-4);
+  }
+  .never {
+    padding: var(--space-4);
+    color: var(--text-tertiary);
   }
   .unit {
     line-height: 1;

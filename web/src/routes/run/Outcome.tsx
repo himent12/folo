@@ -28,7 +28,7 @@ import Button from '$lib/ui/Button';
 import Ident from '$lib/ui/Ident';
 import type { IconType } from '$lib/ui/types';
 import Callout from './Callout';
-import { failedTitle, failureSummary } from './failure';
+import { failedEpoch, failedTitle, failureSummary } from './failure';
 import { plain, scheduleTitle, shortCause, suggestedEpochs } from './warnings';
 
 export interface OutcomeProps {
@@ -145,7 +145,7 @@ export default function Outcome(props: OutcomeProps) {
     </span>
   );
   /** A failure's cause in plain words (./failure), by its error code; null: the server's message is the cause. */
-  const summary = computed(() => (props.run.status === 'failed' ? failureSummary(props.run.error_code, props.datasetName ?? 'this run') : null));
+  const summary = computed(() => (props.run.status === 'failed' ? failureSummary(props.run.error_code, props.datasetName ?? 'this run', failedEpoch(props.run) !== null) : null));
   /**
    * The hand-off of a run with a model, beside its result whatever else the callout says (a too-short warning keeps
    * it): Open model, and Try in Playground unless the model scored exactly 0 (nothing to see there).
