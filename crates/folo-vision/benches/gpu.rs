@@ -11,7 +11,9 @@
 //! Per scale, 80 classes, 640×640, untrained (seed-0) weights, inference in f32 and f16 (half precision: f16
 //! weights and activations, f32 accumulation; the input is f16 too, and the predictor letterboxes into f16):
 //! - **forward**: the fused model (`fuse()`: Conv+BN folded, Conv + bias + SiLU in one kernel), eval mode,
-//!   `no_grad`, input already on the GPU. Latency: every call synchronised, 25 warm-up calls, median / p90 of
+//!   `no_grad`, input already on the GPU. Latency: every call synchronised, at least 25 warm-up calls and a second
+//!   of them (the first calls after the idle second before each section are slower, likely while the GPU's
+//!   clocks ramp back up), median / p90 of
 //!   100 (batch 1) or 30 (batch 16). Throughput: the same calls back to back with one synchronise at the end.
 //! - **predict (end to end)**: `folo_vision::predict::Predictor` (`predict` for batch 1, `predict_batch` for
 //!   16) on decoded `u8` RGB 640×640 images: upload of the raw `u8` pixels, letterbox + `÷255` on the GPU,
@@ -61,11 +63,20 @@ fn stats(mut t: Vec<Duration>) -> Stats {
     Stats { median: ms(t[t.len() / 2]), p90: ms(t[(t.len() * 9 / 10).min(t.len() - 1)]), min: ms(t[0]) }
 }
 
-/// Every call synchronised.
+/// Back-to-back calls before a latency measurement, at least: after the second of idling that precedes every
+/// section, the GPU may have dropped its clocks, and in clock-sampled traces they took up to about 450 ms of work to
+/// come back, with batch-1 calls 3-9x slower meanwhile (docs/hill/r2-gpu-dispatch.md, Pool PR 2); measured inside
+/// that stretch, a batch-1 row read anything from 1.7 to 6 ms by run.
+const LATENCY_WARM: Duration = Duration::from_secs(1);
+
+/// Every call synchronised, after `warm` calls and at least [`LATENCY_WARM`] of them.
 fn latency(dev: Device, warm: usize, iters: usize, mut f: impl FnMut()) -> Stats {
-    for _ in 0..warm {
+    let t = Instant::now();
+    let mut n = 0;
+    while n < warm || t.elapsed() < LATENCY_WARM {
         f();
         synchronize(dev).expect("sync");
+        n += 1;
     }
     stats(
         (0..iters)

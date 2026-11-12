@@ -406,6 +406,8 @@ impl GpuContext {
                 dispatches: AtomicU64::new(0),
                 submissions: AtomicU64::new(0),
                 bind_groups: AtomicU64::new(0),
+                spin_waits: AtomicU64::new(0),
+                blocked_waits: AtomicU64::new(0),
                 tensor_cores: AtomicBool::new(false),
                 tensor_cores_status: Mutex::new(status),
                 experimental: coop,
@@ -418,6 +420,13 @@ impl GpuContext {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(DEFAULT_FLUSH_INTERVAL)
                         .clamp(1, MAX_DISPATCHES_PER_BATCH),
+                ),
+                wait_spin_ns: AtomicU64::new(
+                    std::env::var(super::ENV_WAIT_SPIN_US)
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(|us| us.saturating_mul(1000))
+                        .unwrap_or(super::DEFAULT_WAIT_SPIN.as_nanos() as u64),
                 ),
                 profiler,
                 pipeline_cache,

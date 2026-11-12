@@ -74,6 +74,11 @@ pub const ENV_FLUSH_EVERY: &str = "FOLO_GPU_FLUSH_EVERY";
 pub const DEFAULT_FLUSH_INTERVAL: u32 = 64;
 /// Largest flush interval.
 pub const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
+/// Environment variable that overrides the wait spin ([`GpuContext::set_wait_spin`]) of contexts created
+/// afterwards, in microseconds (`FOLO_GPU_WAIT_SPIN_US=0` blocks at once).
+pub const ENV_WAIT_SPIN_US: &str = "FOLO_GPU_WAIT_SPIN_US";
+/// How long a wait polls the device before it blocks, by default.
+pub const DEFAULT_WAIT_SPIN: std::time::Duration = std::time::Duration::from_millis(2);
 /// Dispatches before the first submission after the device was idle (or the flush interval, when that is smaller).
 /// The limit then doubles with every submission up to the flush interval, so the GPU starts on the head of a pass
 /// while the host still encodes the rest (a synchronised batch-1 forward otherwise spends a third of its latency
@@ -234,6 +239,8 @@ struct Inner {
     dispatches: AtomicU64,
     submissions: AtomicU64,
     bind_groups: AtomicU64,
+    spin_waits: AtomicU64,
+    blocked_waits: AtomicU64,
     /// Tensor-core kernels in use (only ever true when `caps.coop_f16`); cleared by
     /// [`GpuContext::set_tensor_cores`] or when a tensor-core kernel fails to build.
     tensor_cores: AtomicBool,
@@ -248,6 +255,8 @@ struct Inner {
     staging: Arc<Mutex<StagingFree>>,
     /// Dispatches after which the open batch is submitted on its own ([`GpuContext::set_flush_interval`]).
     flush_every: AtomicU32,
+    /// How long a wait polls the device before it blocks, in nanoseconds ([`GpuContext::set_wait_spin`]).
+    wait_spin_ns: AtomicU64,
     /// Per-kernel timestamp queries (`FOLO_GPU_PROFILE=1`, see [`crate::profile`]).
     profiler: Option<Mutex<Profiler>>,
     /// Compiled pipelines kept on disk between processes ([`crate::pipeline_cache`]).
@@ -314,6 +323,11 @@ pub struct WorkStats {
     pub submissions: u64,
     /// Bind groups created; the other dispatches reused a cached one (see [`GpuContext::bind_cache_len`]).
     pub bind_groups: u64,
+    /// Waits for the GPU ([`GpuContext::sync`], readbacks) that ended while polling, within the wait spin
+    /// ([`GpuContext::set_wait_spin`]).
+    pub spin_waits: u64,
+    /// Waits that blocked in the driver: the wait spin is zero, or the GPU was still busy when it ran out.
+    pub blocked_waits: u64,
 }
 
 /// A wgpu device and queue plus FOLO's buffer pool, pipeline cache and command batch.
@@ -453,12 +467,25 @@ impl GpuContext {
         self.inner.flush_every.load(Ordering::Relaxed)
     }
 
-    /// Dispatch and submission counters (benchmarks use the difference across a pass).
+    /// How long a wait for the GPU ([`GpuContext::sync`], a readback) polls the device before it blocks in the
+    /// driver (the default is [`DEFAULT_WAIT_SPIN`], or [`ENV_WAIT_SPIN_US`]); zero blocks at once.
+    pub fn set_wait_spin(&self, spin: std::time::Duration) {
+        self.inner.wait_spin_ns.store(spin.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+    }
+
+    /// The current wait spin ([`GpuContext::set_wait_spin`]).
+    pub fn wait_spin(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.inner.wait_spin_ns.load(Ordering::Relaxed))
+    }
+
+    /// Dispatch, submission and wait counters (benchmarks use the difference across a pass).
     pub fn work_stats(&self) -> WorkStats {
         WorkStats {
             dispatches: self.inner.dispatches.load(Ordering::Relaxed),
             submissions: self.inner.submissions.load(Ordering::Relaxed),
             bind_groups: self.inner.bind_groups.load(Ordering::Relaxed),
+            spin_waits: self.inner.spin_waits.load(Ordering::Relaxed),
+            blocked_waits: self.inner.blocked_waits.load(Ordering::Relaxed),
         }
     }
 

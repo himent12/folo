@@ -58,6 +58,10 @@ name = "gpu_profile"
 harness = false
 
 [[bench]]
+name = "gpu_latency"
+harness = false
+
+[[bench]]
 name = "head"
 harness = false
 

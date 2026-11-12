@@ -109,6 +109,33 @@ A forward pass is therefore a handful of submissions. Each dispatch's parameters
 64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches, submissions and
 bind groups created (the backend benchmark prints them per pass).
 
+**Waiting.** A wait for the GPU (`sync()`, a readback) first polls the device without blocking, for up to 2 ms
+(`ctx.set_wait_spin(d)`, or `FOLO_GPU_WAIT_SPIN_US=n` for contexts created afterwards; 0 blocks at once), and
+only then blocks in the driver. `ctx.work_stats()` counts the waits that ended while polling (`spin_waits`) and
+those that blocked (`blocked_waits`: no spin, or the GPU was still busy when it ran out). A blocked thread is woken
+some time after the GPU finishes, and in 46–76% of the synchronised batch-1 forwards on the dev machine the thread
+woke on another logical processor than the one it waited on (often an E-core), with cold caches for the next call's
+encoding; polling cut that to 3–27%. In nine interleaved in-process runs, polling made folo-n b1 synchronised calls
+4–14% (f32) and 4–17% (f16 on tensor cores) faster at the median, and their p99 lower in all but one; a wait
+longer than the spin costs at most 2 ms of one core before it blocks as before. `cargo bench -p folo-vision
+--bench gpu_latency` splits synchronised b1 calls into encode, submit and wait per call, compares spins in one
+process (`FOLO_BENCH_SPINS=0,1000,2000`), logs the GPU clocks while it runs and, with `FOLO_BENCH_RAMP=1`, how
+latency and the graphics clock recover after the GPU idled.
+
+**GPU clocks after idling** (the driver's power management, not something FOLO controls): with calls spaced out,
+the RTX 4080 SUPER sits in P8 (210 MHz graphics, 405 MHz memory): with a 200 ms sleep after each folo-n f32 b1
+forward, 912 of 1038 `nvidia-smi` samples read P8 and a forward took 16 ms at the median. With a 30 ms sleep after
+each call (not a fixed 33 fps schedule) it took 5.8 ms p50 / 15.7 ms p90 without the wait spin and 10.4 / 15.7 with
+the 2 ms spin: the spin did not help there (a worse median, in one run of 150 calls per setting). Right after two
+idle seconds the clocks need a few hundred milliseconds of work to come back: in the two clock-sampled traces where
+the first calls ran on low clocks (210–255 MHz and 795–855 MHz reported in their first buckets), folo-n b1
+forwards took 7.6–9.0 ms and 3.9–4.2 ms for the first 250–300 ms, then 0.9–1.6 ms over the next half second;
+`nvidia-smi` reported the higher clock 150–200 ms after the latency had recovered (presumably its readings lag). When the GPU had kept its clocks through the idle seconds there was no slow
+start. On a machine that serves spaced-out streams, NVIDIA's
+"Prefer maximum performance" power setting (per application, in the NVIDIA Control Panel) keeps the clocks up. The
+latency rows of the folo-vision `gpu` bench warm up for at least a second of back-to-back calls for this
+reason.
+
 **Bind-group cache.** The parameter block is bound with a dynamic offset (its slot in the arena chunk), so a bind
 group depends only on the kernel's layout, the arena chunk and the storage buffers, and the context keeps the bind
 groups it made, keyed by those (`context/binds.rs`; creating one costs 3–4 µs of host time). An inference forward

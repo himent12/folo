@@ -1,6 +1,8 @@
 //! Waiting for the device: [`GpuContext::sync`], loss-aware polls ([`GpuError::DeviceLost`]) and the validation /
 //! out-of-memory errors wgpu reported.
 
+use std::sync::atomic::Ordering;
+
 use super::{FIRST_DISPATCHES_PER_BATCH, GpuContext};
 use crate::error::{GpuError, Result};
 
@@ -16,28 +18,65 @@ impl GpuContext {
         self.take_error()
     }
 
-    /// Blocks until the device is idle (returns at once in the browser, where WebGPU's `poll` cannot wait).
+    /// Blocks until the device is idle (returns at once in the browser, where WebGPU's `poll` cannot wait): polls for
+    /// up to the wait spin first, then blocks in the driver; each wait counts in [`crate::WorkStats`] as a spin wait
+    /// or a blocked one.
     ///
     /// A lost device is [`GpuError::DeviceLost`], not a panic: wgpu treats a failed poll on a lost device as fatal
     /// and panics inside `Device::poll` (its message still reaches stderr through the panic hook), so the poll
     /// runs under `catch_unwind` and the loss is remembered, failing every later wait at once.
     pub(super) fn wait_idle(&self) -> Result<()> {
-        let polled = self.poll_checked(wgpu::PollType::wait_indefinitely());
+        let polled = self.spin().and_then(|done| {
+            let counter = if done { &self.inner.spin_waits } else { &self.inner.blocked_waits };
+            counter.fetch_add(1, Ordering::Relaxed);
+            if done { Ok(()) } else { self.poll_checked(wgpu::PollType::wait_indefinitely()) }
+        });
         // The GPU has nothing queued now: submit the head of the next pass early.
         self.inner.batch.lock().expect("batch lock").limit = FIRST_DISPATCHES_PER_BATCH;
         polled
+    }
+
+    /// Polls the device without blocking until the queue is empty or the wait spin ([`GpuContext::set_wait_spin`])
+    /// has passed; `true` when the queue emptied. A blocking wait sleeps in the driver and the thread wakes up
+    /// later, often on another core; a batch-1 forward waits well under a millisecond, which polling catches as
+    /// soon as it ends.
+    fn spin(&self) -> Result<bool> {
+        #[cfg(target_arch = "wasm32")]
+        return Ok(false);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let budget = self.wait_spin();
+            if budget.is_zero() {
+                return Ok(false);
+            }
+            let start = std::time::Instant::now();
+            loop {
+                if self.poll_status(wgpu::PollType::Poll)?.is_queue_empty() {
+                    return Ok(true);
+                }
+                if start.elapsed() >= budget {
+                    return Ok(false);
+                }
+                std::hint::spin_loop();
+            }
+        }
     }
 
     /// One `Device::poll` that turns a lost device into [`GpuError::DeviceLost`]: before the poll if the loss is
     /// already known, if wgpu panics inside the poll (it treats a poll on a lost device as fatal), and after a
     /// successful poll if the device-lost callback fired during it. A loss found here is remembered.
     pub(super) fn poll_checked(&self, how: wgpu::PollType) -> Result<()> {
+        self.poll_status(how).map(|_| ())
+    }
+
+    /// [`GpuContext::poll_checked`] that returns what the poll reported.
+    fn poll_status(&self, how: wgpu::PollType) -> Result<wgpu::PollStatus> {
         if let Some(why) = self.lost_reason() {
             return Err(GpuError::DeviceLost(why));
         }
         let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.inner.device.poll(how)));
         let res = match polled {
-            Ok(r) => r.map(|_| ()).map_err(|e| GpuError::Poll(e.to_string())),
+            Ok(r) => r.map_err(|e| GpuError::Poll(e.to_string())),
             Err(panic) => {
                 let msg = panic
                     .downcast_ref::<String>()
