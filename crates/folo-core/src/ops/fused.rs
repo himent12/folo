@@ -97,8 +97,9 @@ impl Tensor {
     }
 
     /// [`Tensor::conv2d_act`] of `Tensor::cat(xs, 1)`. When nothing is being recorded and the backend has the
-    /// kernel ([`crate::backend::Backend::conv2d_act_cat`], the CPU does), the conv reads each part in place and
-    /// the concatenation is never written; otherwise this is `cat` then [`Tensor::conv2d_act`], with autograd.
+    /// kernel ([`crate::backend::Backend::conv2d_act_cat`]: the CPU, and the GPU for 1×1 convs), the conv reads
+    /// each part in place and the concatenation is never written; otherwise this is `cat` then
+    /// [`Tensor::conv2d_act`], with autograd.
     pub fn conv2d_act_cat(
         xs: &[&Tensor],
         weight: &Tensor,

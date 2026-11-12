@@ -7,7 +7,7 @@ use folo_core::{DType as CoreDType, Error, Result, Shape, Storage};
 use super::convert::{Core, bn_act, kdt, nchw, strided_of};
 use super::{BACKEND_NAME, GpuBackend};
 use crate::error::GpuError;
-use crate::kernels::conv::Conv2dDesc;
+use crate::kernels::conv::{Conv2dDesc, ConvInput};
 use crate::kernels::elementwise::UnaryOp as GpuUnary;
 use crate::kernels::ew::{self, EwInput, EwOp};
 use crate::kernels::gemm::{self, BatchStrides, GemmDesc};
@@ -28,6 +28,21 @@ fn mat_operand(rows: usize, cols: usize, rs: usize, cs: usize) -> Option<(bool, 
         return Some((true, cs2));
     }
     None
+}
+
+/// Where a conv can read `v` in place: an NCHW view whose images each hold their `C·H·W` elements contiguously
+/// (a dense tensor, or a channel slice of one, as `narrow` along dim 1 gives), images apart by at least that.
+pub(crate) fn conv_input(v: &View<'_>) -> Option<ConvInput> {
+    let l = v.layout;
+    let (d, s) = (l.dims(), l.strides());
+    if d.len() != 4 || !l.fits(v.storage.len()) {
+        return None;
+    }
+    let (n, c, h, w) = (d[0], d[1], d[2], d[3]);
+    let image = c * h * w;
+    let inner = (w <= 1 || s[3] == 1) && (h <= 1 || s[2] == w) && (c <= 1 || s[1] == h * w);
+    let n_stride = if n <= 1 { image } else { s[0] };
+    (inner && n_stride >= image).then_some(ConvInput { offset: l.offset(), n_stride })
 }
 
 impl GpuBackend {

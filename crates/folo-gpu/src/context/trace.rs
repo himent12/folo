@@ -7,6 +7,17 @@ use super::{GpuContext, TracedKind, TracedOp};
 use crate::error::Result;
 use crate::profile::{ProfileRow, Profiler};
 
+#[cfg(test)]
+impl TracedOp {
+    /// Whether the operation binds or copies `buf`.
+    pub(crate) fn touches(&self, buf: &wgpu::Buffer) -> bool {
+        match &self.kind {
+            TracedKind::Dispatch { buffers, .. } => buffers.contains(buf),
+            TracedKind::Copy { src, dst, .. } => src == buf || dst == buf,
+        }
+    }
+}
+
 impl GpuContext {
     /// Starts recording every dispatch and buffer copy encoded from now on (for profiling; see [`TracedOp`]).
     /// The recorded operations keep their buffers alive until the trace is dropped.

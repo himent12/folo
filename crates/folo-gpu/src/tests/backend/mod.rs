@@ -6,6 +6,7 @@
 //! reduction length (different summation order, FMA); copies, casts and index ops exactly.
 
 mod conv;
+mod conv_cat;
 mod elementwise;
 mod fixtures;
 mod index;

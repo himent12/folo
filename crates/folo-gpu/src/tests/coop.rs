@@ -689,3 +689,94 @@ fn coop_weight_gradient_f32_output_does_not_overflow() {
         conv::conv2d_backward_weight_as(&ctx, &f32_conv, x32.raw(), g32.raw(), dw.raw(), DType::F16).is_err()
     );
 }
+
+/// `x` (`[n, c, hw]`) placed at channel `at` of a larger `[n, big, hw]` buffer of noise: a channel slice.
+fn embed(x: &[f32], n: usize, c: usize, hw: usize, big: usize, at: usize, rng: &mut Rng) -> Vec<f32> {
+    let mut out = rng.vec(n * big * hw, -1.0, 1.0);
+    for i in 0..n {
+        let (src, dst) = (i * c * hw, (i * big + at) * hw);
+        out[dst..dst + c * hw].copy_from_slice(&x[src..src + c * hw]);
+    }
+    out
+}
+
+/// The 1×1 conv over a concatenation read in place (`conv::conv2d_cat`) and convs on a channel slice
+/// (`conv::conv2d_input`) on tensor cores: 2 to 4 parts, slices and whole tensors, batches, odd sizes.
+#[test]
+fn coop_conv_reads_parts_and_slices_in_place() {
+    let (ctx, _g) = coop!();
+    let mut rng = Rng::new(77);
+    for (n, h, w) in [(1, 20, 20), (2, 5, 7), (2, 4, 4)] {
+        let hw = h * w;
+        for chans in [&[16usize, 16][..], &[8, 5, 12], &[16, 32, 16, 16]] {
+            let c: usize = chans.iter().sum();
+            let d = cdesc(n, c, h, w, 24, 1, Window2d::square(1, 1, 0));
+            // Each part on its own; even parts are channel slices of a larger buffer (3 noise channels first).
+            let xs: Vec<Vec<f32>> =
+                chans.iter().map(|&ci| f16_round(&rng.vec(n * ci * hw, -1.0, 1.0))).collect();
+            let mut cat = vec![0f32; n * c * hw];
+            for i in 0..n {
+                let mut ch = 0;
+                for (x, &ci) in xs.iter().zip(chans.iter()) {
+                    cat[(i * c + ch) * hw..(i * c + ch + ci) * hw]
+                        .copy_from_slice(&x[i * ci * hw..(i + 1) * ci * hw]);
+                    ch += ci;
+                }
+            }
+            let wt = f16_round(&rng.vec(24 * c, -1.0, 1.0));
+            let b = f16_round(&rng.vec(24, -1.0, 1.0));
+            let want = cpu_conv(&d, &cat, &wt, Some(&b), false);
+            let sums = cpu_conv(&d, &cat, &wt, None, true);
+            let bmax = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let tol: Vec<f64> =
+                want.iter().zip(&sums).map(|(&y, &s)| bound(y, s as f64, c, bmax, DType::F16)).collect();
+            let mut bufs = Vec::new();
+            let mut ats = Vec::new();
+            for (j, (x, &ci)) in xs.iter().zip(chans.iter()).enumerate() {
+                if j % 2 == 0 {
+                    let big = ci + 5;
+                    bufs.push(upload(&ctx, &embed(x, n, ci, hw, big, 3, &mut rng), DType::F16));
+                    ats.push(conv::ConvInput { offset: 3 * hw, n_stride: big * hw });
+                } else {
+                    bufs.push(upload(&ctx, x, DType::F16));
+                    ats.push(conv::ConvInput { offset: 0, n_stride: ci * hw });
+                }
+            }
+            let parts: Vec<conv::ConvPart<'_>> = bufs
+                .iter()
+                .zip(&ats)
+                .zip(chans.iter())
+                .map(|((g, &at), &channels)| conv::ConvPart { buf: g.raw(), channels, at })
+                .collect();
+            let (gw, gb) = (upload(&ctx, &wt, DType::F16), upload(&ctx, &b, DType::F16));
+            let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F16).unwrap();
+            conv::conv2d_cat(&ctx, &d, &parts, gw.raw(), Some(gb.raw()), gy.raw()).unwrap();
+            assert!(ctx.tensor_cores(), "{}", ctx.tensor_cores_status());
+            assert_within(
+                &gy.to_vec().unwrap(),
+                &want,
+                &tol,
+                &format!("coop conv_cat n{n} {h}x{w} {chans:?}"),
+            );
+        }
+    }
+    // A channel slice as the input of a 3×3 and a 1×1 conv.
+    for (k, pad) in [(3, 1), (1, 0)] {
+        let d = cdesc(2, 16, 9, 10, 32, 1, Window2d::square(k, 1, pad));
+        let hw = 90;
+        let x = f16_round(&rng.vec(2 * 16 * hw, -1.0, 1.0));
+        let wt = f16_round(&rng.vec(32 * 16 * k * k, -1.0, 1.0));
+        let b = f16_round(&rng.vec(32, -1.0, 1.0));
+        let want = cpu_conv(&d, &x, &wt, Some(&b), false);
+        let sums = cpu_conv(&d, &x, &wt, None, true);
+        let bmax = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let tol: Vec<f64> =
+            want.iter().zip(&sums).map(|(&y, &s)| bound(y, s as f64, 16 * k * k, bmax, DType::F16)).collect();
+        let gx = upload(&ctx, &embed(&x, 2, 16, hw, 24, 4, &mut rng), DType::F16);
+        let (gw, gb) = (upload(&ctx, &wt, DType::F16), upload(&ctx, &b, DType::F16));
+        let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F16).unwrap();
+        let at = conv::ConvInput { offset: 4 * hw, n_stride: 24 * hw };
+        conv::conv2d_input(&ctx, &d, (gx.raw(), at), gw.raw(), Some(gb.raw()), gy.raw(), None).unwrap();
+        assert_within(&gy.to_vec().unwrap(), &want, &tol, &format!("coop conv on a slice k{k}"));
+    }
+}

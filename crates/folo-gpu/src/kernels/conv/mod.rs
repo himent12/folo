@@ -31,7 +31,7 @@ mod forward;
 mod input_grad;
 mod weight_grad;
 
-pub use forward::{conv2d, conv2d_with_config};
+pub use forward::{ConvInput, ConvPart, conv2d, conv2d_cat, conv2d_input, conv2d_with_config};
 pub use input_grad::conv2d_backward_input;
 pub(crate) use input_grad::{PHASE_PIXEL, Phase};
 pub use weight_grad::{conv2d_backward_weight, conv2d_backward_weight_as};
@@ -94,6 +94,46 @@ impl Conv2dDesc {
             )));
         }
         self.win.check_limits()
+    }
+
+    /// [`Conv2dDesc::check_buffers`] for an input at `x`'s element `offset` with images `n_stride` elements apart
+    /// (each image's `C_in·H·W` contiguous).
+    pub(crate) fn check_input_buffers(
+        &self,
+        (x, offset, n_stride): (&wgpu::Buffer, usize, usize),
+        weight: &wgpu::Buffer,
+        bias: Option<&wgpu::Buffer>,
+        y: &wgpu::Buffer,
+    ) -> Result<(usize, usize)> {
+        self.validate()?;
+        let (oh, ow) = self.output()?;
+        let (kh, kw) = self.win.kernel;
+        let image = prod(&[self.c_in, self.h, self.w])?;
+        if self.n > 1 && n_stride < image {
+            return Err(shape_err(format!(
+                "conv2d: images {n_stride} elements apart overlap ({image} each)"
+            )));
+        }
+        // An empty batch (or empty images) reads nothing.
+        let last = match self.n.checked_sub(1) {
+            Some(last_image) if image > 0 => last_image
+                .checked_mul(n_stride)
+                .and_then(|v| v.checked_add(offset)?.checked_add(image))
+                .ok_or_else(|| shape_err("conv2d: input extent overflows"))?,
+            _ => 0,
+        };
+        check_buf(x, last, self.dtype, "conv2d input")?;
+        check_buf(
+            weight,
+            prod(&[self.c_out, self.c_in / self.groups, kh, kw])?,
+            self.dtype,
+            "conv2d weight",
+        )?;
+        check_buf(y, prod(&[self.n, self.c_out, oh, ow])?, self.dtype, "conv2d output")?;
+        if let Some(b) = bias {
+            check_buf(b, self.c_out, self.dtype, "conv2d bias")?;
+        }
+        Ok((oh, ow))
     }
 
     /// Checks the operand buffers (input, weight and the `dtype` input storage; output and bias as `out`) and

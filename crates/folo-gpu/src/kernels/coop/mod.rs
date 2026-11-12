@@ -32,8 +32,8 @@ pub use self::convolution::conv2d;
 pub(crate) use self::convolution::{
     encode_conv, encode_conv_backward_input, encode_conv_backward_input_phase, encode_conv_backward_weight,
 };
-pub(crate) use self::matmul::encode_gemm;
 pub use self::matmul::gemm;
+pub(crate) use self::matmul::{encode_gemm, encode_gemm_cat};
 pub use self::support::adapter_unavailable_reason;
 pub(crate) use self::support::{
     FEATURES, adapter_supports, experimental_opt_in, self_test, unavailable_reason,
