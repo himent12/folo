@@ -1302,15 +1302,19 @@ mostly shown) for the others.
 
 ## Real mode
 `folo serve` without `--mock` keeps its state in the data dir (`--data-dir`, default `$FOLO_HOME` or `~/.folo`):
-- `datasets.json`: the registry (`id`, `name`, `path`, `format`, `created`, and a snapshot of `classes` and
-  `splits`), rewritten atomically (temporary file + rename) on every change, so registrations survive restarts.
-  A malformed registry is never overwritten: registering and unregistering fail with `500 internal` until it is
-  fixed.
+- `datasets.json`: the registry, a plain list of registrations (`id`, `name`, `path`, `format`, `created`, and a
+  snapshot of `classes` and `splits`), as every version writes it, so an older build opening the data dir lists
+  the same datasets. `datasets.removed.json`: the tombstones of unregistered datasets (`DELETE
+  /api/datasets/{id}`, above); a missing file has none. Both are rewritten atomically (temporary file + rename) on
+  every change, the one that gains an id first (a crash between the two leaves the id in both, and the
+  registration counts). A `datasets.json` holding an object with `datasets` and `tombstones` (written by pre-release
+  builds of this version for a few hours) is read, and written as a list at the next change. A malformed file is
+  never overwritten: registering and unregistering fail with `500 internal` until it is fixed.
 - `cache/datasets/<id>.json`: each dataset's index (images, sizes, boxes, stats, issues) plus a fingerprint of the files it
   was built from (relative path, size and modification time of every file under the dataset folder and under
   everything outside it that folo-data read: split folders and image lists a `data.yaml` points to, folders of
   every candidate image and label, also skipped ones, and split paths or a `path:` that do not exist yet; the data dir's own `cache/`, `label/`, `bench/` and
-  `datasets.json` are left out, so a data dir inside a dataset folder does not invalidate it). On start the
+  `datasets.json` / `datasets.removed.json` are left out, so a data dir inside a dataset folder does not invalidate it). On start the
   registry is listed immediately and every dataset is checked on a background thread: a fresh cache is loaded, a
   stale or missing one rebuilt; requests for a dataset that is still being indexed wait for it. While running,
   `GET /api/datasets/{id}` and image listings re-check the fingerprint at most every 5 s and re-index when files

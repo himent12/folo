@@ -186,3 +186,49 @@ fn unregistering_waits_for_a_run_being_admitted() {
     assert!(store.entry(&a.id).is_err());
     assert_eq!(register(&store, Path::new(&a.path)).id, a.id);
 }
+
+/// `datasets.json` stays the plain list every version reads (an older build sees the datasets this one wrote), the
+/// tombstones live in `datasets.removed.json` (none when it is missing), and the object form this version's
+/// pre-release builds wrote is read, then written as a list at the next write.
+#[test]
+fn the_registry_stays_the_list_older_builds_read() {
+    let t = TestDir::new("real-registry-format");
+    let home = t.join("home");
+    let data = t.join("shapes");
+    let cfg = folo_data::synthetic::SyntheticConfig { images: 4, imgsz: 64, seed: 9, ..Default::default() };
+    folo_data::synthetic::write_yolo(&cfg, &data, folo_data::ImageFormat::Png).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let old = serde_json::json!([{
+        "id": "ds_main", "name": "shapes", "path": data, "format": "yolo", "created": "2026-11-01T00:00:00Z"
+    }]);
+    let (list_path, removed_path) = (home.join("datasets.json"), home.join("datasets.removed.json"));
+    std::fs::write(&list_path, old.to_string()).unwrap();
+    let ids =
+        |store: &RealStore| store.list_datasets().unwrap().into_iter().map(|d| d.id).collect::<Vec<_>>();
+    // An older build's data dir (no tombstone file) opens with its dataset.
+    let store = RealStore::open(home.clone());
+    assert_eq!(ids(&store), ["ds_main"]);
+    // This build's writes: still a list, read as an older build reads it; the tombstone in its own file.
+    let b = synthetic(&store, "b");
+    run_on(&store, &b.id, "on-b");
+    store.delete_dataset(&b.id).unwrap();
+    let as_older: Vec<super::Registration> =
+        serde_json::from_str(&std::fs::read_to_string(&list_path).unwrap()).unwrap();
+    assert_eq!(as_older.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["ds_main"]);
+    let removed: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(&removed_path).unwrap()).unwrap();
+    assert_eq!(removed.iter().map(|t| t["id"].as_str().unwrap()).collect::<Vec<_>>(), [b.id.as_str()]);
+    drop(store);
+
+    // The object form, its tombstone inside: read, the id kept for its dataset, and rewritten as a list.
+    std::fs::remove_file(&removed_path).unwrap();
+    let object = serde_json::json!({ "datasets": old, "tombstones": removed });
+    std::fs::write(&list_path, object.to_string()).unwrap();
+    let store = RealStore::open(home.clone());
+    assert_eq!(ids(&store), ["ds_main"]);
+    assert_eq!(register(&store, Path::new(&b.path)).id, b.id);
+    let as_older: Vec<super::Registration> =
+        serde_json::from_str(&std::fs::read_to_string(&list_path).unwrap()).unwrap();
+    assert_eq!(as_older.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["ds_main", b.id.as_str()]);
+    assert_eq!(std::fs::read_to_string(&removed_path).unwrap().trim(), "[]");
+}
