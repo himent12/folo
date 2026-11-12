@@ -180,7 +180,8 @@ fn a_step_keeps_the_buffers_of_classes_that_peak_apart() {
     step(&mut pool);
     let created = pool.stats().misses;
     assert_eq!(created, 8);
-    for _ in 0..20 {
+    // Eight requests per step: past two need-window rollovers, which must not evict what the step needs.
+    for _ in 0..(2 * NEED_WINDOW / 8 + 20) {
         step(&mut pool);
     }
     let s = pool.stats();

@@ -63,8 +63,8 @@ high-water mark when classes peak at different times (a folo-n b16 f32 step: 4.1
 the cap at the high-water mark the pool evicted and created again 57 buffers per f32 step (46 with AMP in a process
 of its own); wgpu zero-fills a new buffer, so that cost GPU time as well as bind groups. Classes no longer requested
 (after validation, a last partial batch) leave the need after two windows, and the need counts for at most twice the
-live high-water mark. The cap is enforced on every free and on every allocation miss, before the new buffer is
-created; what does not fit is evicted, least recently freed first. With `M` the configured cap (2 GiB) and `H` the
+live high-water mark. The cap is enforced on every free, on every allocation miss (before the new buffer is
+created) and when a need window rolls over; what does not fit is evicted, least recently freed first. With `M` the configured cap (2 GiB) and `H` the
 high-water mark, the pool therefore holds (live plus cached) at most `max(live + max(M, H), min(need, 2H)) ≤
 2·max(M, H)` at any time, never more than a cache capped at `max(M, H)` on top of the live bytes could hold.
 `trim_pool()` empties the lists and `pool_stats()` reports hits, misses and bytes. With a fixed 2 GiB cap that

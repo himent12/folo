@@ -22,8 +22,8 @@
 //! without creating a buffer. It exceeds the live high-water mark when classes peak at different times (a folo-n
 //! f32 training step needs 4.1 GiB of buffers for 3.4 GiB live at most), and without it the pool evicted and
 //! recreated about 55 buffers every step. Classes no longer requested drop out of the need after two windows
-//! (validation between epochs, the last partial batch). The cap is enforced on every free and on every allocation
-//! miss, before the new buffer is created: the least recently freed buffers are evicted until the cache fits (the
+//! (validation between epochs, the last partial batch). The cap is enforced on every free, on every allocation
+//! miss (before the new buffer is created) and when a need window rolls over (after a hit has left the cache): the least recently freed buffers are evicted until the cache fits (the
 //! driver frees them once in-flight work is done). With `M` the configured cap and `H` the high-water mark, the
 //! memory the pool holds (live plus cached) is therefore at most `max(live + max(M, H), min(need, 2H))
 //! <= 2 max(M, H)` at all times: never more than a cache bounded by `max(M, H)` alone could hold on top of the live
@@ -278,16 +278,22 @@ impl BufferPool {
             }
             lent.cur = lent.now;
         }
+        // A hit leaves the cache before any eviction below: `live_bytes` already counts this request, so a buffer
+        // still counted in `cached_bytes` too would make the pool look a buffer fuller than it is and evict one the
+        // step needs.
+        let hit = self.free.get_mut(&(class, usage)).and_then(BTreeMap::pop_first);
+        if hit.is_some() {
+            self.stats.hits += 1;
+            self.stats.cached_bytes -= class;
+            self.cached_buffers -= 1;
+        }
         self.window_takes += 1;
         if self.window_takes == NEED_WINDOW {
             self.roll_window(false);
             // The need may have dropped: the bound holds after the rollover too, also when this request hits.
             self.evict_to(self.cache_cap());
         }
-        if let Some((_, buf)) = self.free.get_mut(&(class, usage)).and_then(BTreeMap::pop_first) {
-            self.stats.hits += 1;
-            self.stats.cached_bytes -= class;
-            self.cached_buffers -= 1;
+        if let Some((_, buf)) = hit {
             return buf;
         }
         // The bound holds on every allocation as well as every free, so a new buffer never lands on top of a cache

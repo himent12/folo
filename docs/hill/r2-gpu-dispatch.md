@@ -232,7 +232,10 @@ the same process it did not, which is why lane gpu-dispatch saw 0 there.
   hold the need less the live bytes (besides the old 2 GiB floor and live high-water mark), counted at most up to
   twice the live high-water mark. Classes no longer requested (validation, a last partial batch) leave the need
   after two windows and are then evicted least recently freed first, as before.
-- The bound is enforced on every allocation miss (before the new buffer is created) as well as on every free
+- The bound is enforced on every allocation miss (before the new buffer is created), on every free, and at every
+  need-window rollover after a hit has left the cache (second review round: without it a lower need waited for the
+  next miss or free; third round: with the hit still counted as cached, the rollover evicted a buffer the step
+  needed, churn every 4096 requests, caught by running the steady-step test past two rollovers)
   (review finding: checked on frees only, a miss could stack a new buffer on a cache filled for the need, about
   3× the high-water mark held across successive workloads). With `M` the 2 GiB floor and `H` the high-water mark
   the pool now holds at most `max(live + max(M, H), min(need, 2H)) ≤ 2·max(M, H)`, never more than the old rule
