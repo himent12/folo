@@ -102,41 +102,98 @@ fn available_memory() -> u64 {
     sys.refresh_memory();
     let host = sys.available_memory();
     #[cfg(target_os = "linux")]
-    let host = std::fs::read_to_string("/proc/self/cgroup")
-        .ok()
-        .and_then(|text| cgroup_free(&text, std::path::Path::new("/sys/fs/cgroup")))
-        .map_or(host, |cg| host.min(cg));
+    let host =
+        match (std::fs::read_to_string("/proc/self/cgroup"), std::fs::read_to_string("/proc/self/mountinfo"))
+        {
+            (Ok(cgroup), Ok(mountinfo)) => cgroup_free(&cgroup, &mountinfo).map_or(host, |cg| host.min(cg)),
+            _ => host,
+        };
     host
 }
 
-/// What the memory limits of the process's cgroups still allow, the tightest of them, given `/proc/self/cgroup`'s
-/// text and the cgroup mount `root`: for the process's own cgroup and every ancestor up to the root, of both
-/// hierarchies, the limit less the usage, the reclaimable inactive file cache not counted as used (as
-/// `docker stats` counts it). cgroup v2: `memory.max` / `memory.current` / `inactive_file`; v1 (the `memory`
-/// controller under `root/memory`): `memory.limit_in_bytes` / `memory.usage_in_bytes` / `total_inactive_file`.
-/// `None` when no cgroup on the way has a limit.
+/// A mounted cgroup hierarchy that limits memory: cgroup v2, or v1 with the `memory` controller (alone or
+/// co-mounted with others).
+struct CgroupMount {
+    /// The cgroup path the mount shows at its mount point (`/` unless a subtree is mounted).
+    root: String,
+    point: std::path::PathBuf,
+    v2: bool,
+}
+
+/// `/proc/self/mountinfo`'s octal escapes (`\040` for a space) undone.
+fn unescape(field: &str) -> String {
+    let b = field.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+            out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
+            i += 4;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The memory-limiting cgroup hierarchies in `/proc/self/mountinfo`'s text.
+fn cgroup_mounts(mountinfo: &str) -> Vec<CgroupMount> {
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let (pre, post) = line.split_once(" - ")?;
+            let pre: Vec<&str> = pre.split(' ').collect();
+            let mut post = post.split(' ');
+            let (fstype, _source, options) = (post.next()?, post.next()?, post.next().unwrap_or(""));
+            let v2 = match fstype {
+                "cgroup2" => true,
+                "cgroup" if options.split(',').any(|o| o == "memory") => false,
+                _ => return None,
+            };
+            Some(CgroupMount { root: unescape(pre.get(3)?), point: unescape(pre.get(4)?).into(), v2 })
+        })
+        .collect()
+}
+
+/// What the memory limits of the process's cgroups still allow, the tightest of them, given the text of
+/// `/proc/self/cgroup` and `/proc/self/mountinfo`: for the process's cgroup in every memory-limiting hierarchy
+/// (cgroup v2 `0::path`, v1 lines naming the `memory` controller), translated through each mount of that hierarchy
+/// (its root and mount point, so a co-mounted controller or a mounted subtree resolves), the cgroup's directory
+/// and each ancestor up to the mount point: the limit less the usage, the reclaimable inactive file cache not
+/// counted as used (as `docker stats` counts it). v2: `memory.max` / `memory.current` / `inactive_file`; v1:
+/// `memory.limit_in_bytes` / `memory.usage_in_bytes` / `total_inactive_file`. `None` when no level has a limit.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn cgroup_free(proc_cgroup: &str, root: &std::path::Path) -> Option<u64> {
+fn cgroup_free(proc_cgroup: &str, mountinfo: &str) -> Option<u64> {
+    let mounts = cgroup_mounts(mountinfo);
     let mut tightest: Option<u64> = None;
     for line in proc_cgroup.lines() {
         let mut parts = line.splitn(3, ':');
         let (Some(_), Some(controllers), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
             continue;
         };
-        let (base, v2) = if controllers.is_empty() {
-            (root.to_path_buf(), true)
-        } else if controllers.split(',').any(|c| c == "memory") {
-            (root.join("memory"), false)
-        } else {
+        let v2 = controllers.is_empty();
+        if !v2 && !controllers.split(',').any(|c| c == "memory") {
             continue;
-        };
-        let mut dir = base.join(path.trim_start_matches('/'));
-        loop {
-            if let Some(free) = cgroup_free_at(&dir, v2) {
-                tightest = Some(tightest.map_or(free, |t| t.min(free)));
-            }
-            if dir == base || !dir.pop() || !dir.starts_with(&base) {
-                break;
+        }
+        for m in mounts.iter().filter(|m| m.v2 == v2) {
+            // The cgroup's path below the mount's root; a cgroup outside the mounted subtree is not visible there.
+            let rel = if m.root == "/" {
+                path
+            } else {
+                match path.strip_prefix(m.root.as_str()) {
+                    Some(r) if r.is_empty() || r.starts_with('/') => r,
+                    _ => continue,
+                }
+            };
+            let mut dir = m.point.join(rel.trim_start_matches('/'));
+            loop {
+                if let Some(free) = cgroup_free_at(&dir, v2) {
+                    tightest = Some(tightest.map_or(free, |t| t.min(free)));
+                }
+                if dir == m.point || !dir.pop() || !dir.starts_with(&m.point) {
+                    break;
+                }
             }
         }
     }
@@ -151,11 +208,8 @@ fn cgroup_free_at(dir: &std::path::Path, v2: bool) -> Option<u64> {
         (number("memory.max")?, number("memory.current")?, "inactive_file")
     } else {
         // v1 reports "no limit" as a huge number (the largest page-aligned i64).
-        (
-            number("memory.limit_in_bytes").filter(|&l| l < 1 << 62)?,
-            number("memory.usage_in_bytes")?,
-            "total_inactive_file",
-        )
+        let limit = number("memory.limit_in_bytes").filter(|&l| l < 1 << 62)?;
+        (limit, number("memory.usage_in_bytes")?, "total_inactive_file")
     };
     let reclaimable = read("memory.stat").and_then(|s| stat_value(&s, inactive)).unwrap_or(0);
     Some(limit.saturating_sub(usage.saturating_sub(reclaimable)))
@@ -259,7 +313,8 @@ mod tests {
         assert_eq!(POOL.load(Ordering::SeqCst), 0);
     }
 
-    /// The tightest limit of the process's cgroup and its ancestors, v2 and v1, unlimited levels skipped.
+    /// The tightest limit of the process's cgroup and its ancestors, found through the mounts: v2, v1 with memory
+    /// alone or co-mounted with cpu, a mounted subtree (mount root not `/`); unlimited levels skipped.
     #[test]
     fn cgroup_limits_of_the_cgroup_and_its_ancestors() {
         let root = folo_test_support::TestDir::new("data-cgroup");
@@ -268,25 +323,45 @@ mod tests {
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join(name), text).unwrap();
         };
-        // v2: the scope is unlimited, its slice allows 1000 - (900 - 300 inactive) = 400, the root has no files.
-        write("user.slice/run.scope", "memory.max", "max\n");
-        write("user.slice/run.scope", "memory.current", "10\n");
-        write("user.slice", "memory.max", "1000\n");
-        write("user.slice", "memory.current", "900\n");
-        write("user.slice", "memory.stat", "active_file 5\ninactive_file 300\n");
-        assert_eq!(cgroup_free("0::/user.slice/run.scope\n", &root), Some(400));
+        let at = |rel: &str| root.join(rel).to_string_lossy().replace('\\', "/").replace(' ', "\\040");
+        let mount = |root_in: &str, point: &str, fs: &str, opts: &str| {
+            format!("30 23 0:26 {root_in} {} rw,nosuid shared:4 - {fs} cgroup {opts}\n", at(point))
+        };
+        // v2 at "v2": the scope is unlimited, its slice allows 1000 - (900 - 300 inactive) = 400.
+        let v2 = mount("/", "v2", "cgroup2", "rw,nsdelegate");
+        write("v2/user.slice/run.scope", "memory.max", "max\n");
+        write("v2/user.slice/run.scope", "memory.current", "10\n");
+        write("v2/user.slice", "memory.max", "1000\n");
+        write("v2/user.slice", "memory.current", "900\n");
+        write("v2/user.slice", "memory.stat", "active_file 5\ninactive_file 300\n");
+        assert_eq!(cgroup_free("0::/user.slice/run.scope\n", &v2), Some(400));
         // A tighter scope wins.
-        write("user.slice/run.scope", "memory.max", "50\n");
-        assert_eq!(cgroup_free("0::/user.slice/run.scope\n", &root), Some(40));
-        // v1 memory controller; "no limit" is a huge number.
-        write("memory/docker/abc", "memory.limit_in_bytes", "2000\n");
-        write("memory/docker/abc", "memory.usage_in_bytes", "500\n");
-        write("memory/docker", "memory.limit_in_bytes", "9223372036854771712\n");
-        write("memory/docker", "memory.usage_in_bytes", "1\n");
-        assert_eq!(cgroup_free("12:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n", &root), Some(1500));
-        // No limit anywhere.
-        assert_eq!(cgroup_free("0::/\n", &root), None);
-        assert_eq!(cgroup_free("", &root), None);
+        write("v2/user.slice/run.scope", "memory.max", "50\n");
+        assert_eq!(cgroup_free("0::/user.slice/run.scope\n", &v2), Some(40));
+        // No mount, no limit; a cgroup line without a mount of its kind is skipped.
+        assert_eq!(cgroup_free("0::/user.slice/run.scope\n", ""), None);
+        assert_eq!(cgroup_free("4:memory:/user.slice\n", &v2), None);
+        // v1 memory co-mounted with cpu at "cpu,memory", no `memory` link; "no limit" is a huge number.
+        let v1 = mount("/", "cpu,memory", "cgroup", "rw,cpu,memory");
+        write("cpu,memory/docker/abc", "memory.limit_in_bytes", "2000\n");
+        write("cpu,memory/docker/abc", "memory.usage_in_bytes", "500\n");
+        write("cpu,memory/docker", "memory.limit_in_bytes", "9223372036854771712\n");
+        write("cpu,memory/docker", "memory.usage_in_bytes", "1\n");
+        assert_eq!(cgroup_free("12:cpu,memory:/docker/abc\n", &v1), Some(1500));
+        // Hybrid: both hierarchies count, the tightest wins.
+        assert_eq!(
+            cgroup_free("12:cpu,memory:/docker/abc\n0::/user.slice/run.scope\n", &(v1.clone() + &v2)),
+            Some(40)
+        );
+        // A subtree mounted with root /tenant at "sub": /tenant/job is "sub/job", and the mount point bounds the walk.
+        let sub = mount("/tenant", "sub dir", "cgroup2", "rw");
+        write("sub dir/job", "memory.max", "300\n");
+        write("sub dir/job", "memory.current", "100\n");
+        write("sub dir", "memory.max", "5000\n");
+        write("sub dir", "memory.current", "0\n");
+        assert_eq!(cgroup_free("0::/tenant/job\n", &sub), Some(200));
+        assert_eq!(cgroup_free("0::/elsewhere/job\n", &sub), None, "outside the mounted subtree");
+        assert_eq!(cgroup_free("", &sub), None);
     }
 
     #[test]
