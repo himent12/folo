@@ -1,7 +1,7 @@
 import Images from '$icons/images';
 import Play from '$icons/play';
 import Plus from '$icons/plus';
-import { computed, css, deep, effect, signal, tick, untrack } from 'fw';
+import { computed, css, deep, effect, Key, signal, tick, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/api/types';
@@ -51,7 +51,19 @@ import CliCommand from './runnew/CliCommand';
 import OomNote from './runnew/OomNote';
 import StartDock from './runnew/StartDock';
 
+/**
+ * New run follows its own URL while open (v-data-runs N1): a link that changes it (the palette's "New run on X", a
+ * pasted link, Back / Forward) opens the form again under the rules of a first open, the draft included (that same
+ * link's draft whole, else the link's fields over the draft's). The form never writes its own URL, so this cannot loop.
+ */
 export default function RunNew() {
+  let shown = '';
+  // Leaving (a start goes to the run), the route is another screen's: the form stays as it is until it is gone.
+  const link = computed(() => (router.route.name === 'run-new' ? (shown = String(router.route.query)) : shown));
+  return <Key when={link.get()}>{() => <RunNewForm />}</Key>;
+}
+
+function RunNewForm() {
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'New run' });
   // This page is the create action: the top bar's New run steps aside instead of showing a pressed, disabled copy.
   ownCreateAction();

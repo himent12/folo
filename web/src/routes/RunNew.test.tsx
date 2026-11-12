@@ -530,6 +530,23 @@ describe('New run: the draft', () => {
     expect(dataset()).toBe(first);
   });
 
+  // v-data-runs N1: the palette's "New run on X" (or a pasted link, Back / Forward) changes the URL of the open form.
+  it('follows its own URL while open, by the same rules as a first open', async () => {
+    await open('?dataset=ds_shapes');
+    type('epochs', '7');
+    const other = [...target.querySelectorAll<HTMLInputElement>('input[name="dataset"]')].find((i) => i.value !== 'ds_shapes')!.value;
+    router.route = parse(`#/runs/new?dataset=${other}`);
+    await until(() => dataset() === other, 'the linked dataset');
+    // The link's dataset (and the name for it), the draft's edits.
+    expect(field('epochs')).toBe('7');
+    expect(field('name')).not.toMatch(/^shapes-/);
+    // Back: the first link again, its dataset again, the edits kept; nothing more is written back to the URL.
+    router.route = parse('#/runs/new?dataset=ds_shapes');
+    await until(() => dataset() === 'ds_shapes', 'the first link');
+    expect(field('epochs')).toBe('7');
+    expect(router.route.path + router.route.query).toBe('/runs/new' + 'dataset=ds_shapes');
+  });
+
   // review R4: a draft that is JSON but not a draft of this form (`augment.hsv` null) was trusted, and the form threw.
   it('opens with its defaults over a draft of another shape, and keeps a sound one after', async () => {
     await open();
