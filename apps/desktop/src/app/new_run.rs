@@ -13,8 +13,8 @@ use crate::store::*;
 use crate::ui::*;
 
 use super::forms::{
-    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, auto_close_mosaic, batch_index, carry_over,
-    free_run_name, parse_epochs, parse_lr,
+    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, again_run_name, auto_close_mosaic, batch_index,
+    carry_over, free_run_name, parse_epochs, parse_lr, run_name_error,
 };
 use super::{FoloApp, Route, RunFilter};
 
@@ -71,7 +71,8 @@ impl FoloApp {
     ) {
         self.open_new_run(Some(&config.dataset_id), window, cx);
         let idx = |list: &[u32], v: u32| list.iter().position(|x| *x == v);
-        let name = format!("{}-2", config.name);
+        let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
+        let name = again_run_name(&config.name, runs);
         let cloud_on = self.cloud_on();
         if let Some(f) = self.new_run.as_mut() {
             f.arch = ARCHS.iter().position(|a| *a == config.arch).unwrap_or(f.arch);
@@ -466,8 +467,8 @@ impl FoloApp {
             return;
         }
         let Some(config) = config else { return };
-        if config.name.is_empty() {
-            form.error = Some(ApiError::new("invalid_name", "Give the run a name."));
+        if let Some(why) = run_name_error(&config.name) {
+            form.error = Some(ApiError::new("invalid_name", why));
             // The error shows at the top of the form, by the Name field: go there.
             let name_fh = form.name.read(cx).focus_handle(cx);
             window.focus(&name_fh);

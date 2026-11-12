@@ -604,3 +604,31 @@ fn closing_the_inspector_lands_on_the_image_it_showed_last() {
         assert!(this.fh(format!("tile-{shown}"), cx).is_focused(w), "focus is on the image shown last");
     });
 }
+
+#[test]
+fn new_run_refuses_a_name_longer_than_the_server_takes_and_fits_its_own() {
+    let (mut app, window) = open();
+    // New run from a run whose name is at the limit: the suggestion still fits.
+    let long = "r".repeat(super::forms::MAX_RUN_NAME);
+    drive(&mut app, window, |this, w, cx| {
+        let mut config = this.store.runs.ready().unwrap()[0].config.clone();
+        config.name = long.clone();
+        this.open_new_run_from(&config, None, w, cx);
+    });
+    let name = run_name(&mut app, window);
+    assert!(name.chars().count() <= 64 && name.ends_with("-2"), "{name}");
+    // Typed one character over: refused in Studio's words, and nothing is sent.
+    type_into(&mut app, window, |f| f.name.clone(), &format!("{long}x"));
+    let api = drive(&mut app, window, |this, w, cx| {
+        this.submit_new_run(w, cx);
+        this.store.api.clone()
+    });
+    let runs = api.runs().unwrap().len();
+    drive(&mut app, window, |this, _, _| {
+        let f = this.new_run.as_ref().expect("still open");
+        assert!(!f.submitting);
+        let said = f.error.as_ref().map(|e| e.message.clone());
+        assert_eq!(said.as_deref(), Some("At most 64 characters (this one has 65)."));
+    });
+    assert_eq!(api.runs().unwrap().len(), runs);
+}
