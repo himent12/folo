@@ -362,11 +362,69 @@ saved.)
 - **The weight transform per call** (before the cache): 0.08 ms for 64→64 and 0.18 ms for 128→64 on one thread,
   serial: a quarter of a 28-thread layer.
 
+## 4. Tried after PR 3, not shipped (no clear win in the forward)
+
+Both on `main` 709155e6 (PR 3 merged), patches and logs in `D:/folo-build/hill2-cpu2-bin`.
+
+**Stride-2 convs in bands of output rows** (`banded-s2.patch`). The idea from the leftovers above: the
+whole-image shifted-rows copy of a stride-2 conv (16→32 at 320²: 6.6 MB) leaves L2, and the GEMM then streams
+144 B rows from L3. Instead each task built the shifted rows of its own band of output rows (`ShiftedRows::band`,
+~256 KB, on its own thread) and ran the GEMM of that band (a raw-output `gemm_rows_to` with the planes' channel
+stride; more output-channel parts when there are fewer bands than threads). Bit for bit the direct conv (same K
+order per element; the existing bitwise conv tests passed). `conv_infer -- k3s2`, GF/s, 2 rounds alternated,
+11–12 cores busy elsewhere (log `b1_k3s2_28.txt`):
+
+| stride-2 conv | whole-image copy | bands |
+|---|---|---|
+| 16→32 at 320² | 459–462 | 516–524 |
+| 64→64 at 160² | 659–667 | 578–584 |
+| 128→128 at 80² | 696–721 | 545–552 |
+| 64→64 at 80² | 492–498 | 426–435 |
+| 128→256 at 40² | 651–661 | 401–406 |
+| 128→128 at 40² | 524–530 | 341–345 |
+| group, ms | 2.70–2.72 | 3.32–3.34 |
+
+Bands make each task's GEMM narrow (one or two output rows: few column panels, a ragged last panel, the
+weights re-read per band), which costs more than the copy saves, and the whole-image copy already runs in
+parallel. On one pinned P-core (2 rounds, 21–24 cores busy elsewhere, log `b1_k3s2_1.txt`, noisy) bands (`band`) gained
+on 16→32 at 320² (41–57 → 55–63 GF/s) and 128→256 at 40² (81–84 → 90–96); with a 4x band budget (`band4`)
+62–68 and 76–91; the others tied or swung both ways. A 4x
+larger band budget with one band per thread, once at 28 threads, gave the same picture (16→32 479 GF/s, the rest
+402–579 against 466–731 whole; that run's output was not saved). The one conv bands win at 28 threads saves
+~0.06 ms: not worth the code.
+
+**Winograd F(4x4, 3x3)** (`f43.patch`: the driver of PR 3 generic over the tile size, `M + 2 = 6` transform
+rows, 36 GEMMs, the weights cached under their own key; F(2x2, 3x3), where it is still chosen, gives its previous bits).
+Correct against the f64 reference within a common bound for both variants, `(C + 32) · 2^-23 · S` before bias
+and activation, where `S` is the exact computation with the absolute values of every transform coefficient, input
+and weight (`|Bᵀ| |d| |B|`, `|G| |g| |Gᵀ|`, summed over channels, `|Aᵀ| · |A|`), assuming no overflow or
+underflow (PR 3 states F(2x2, 3x3)'s special case, `S ≤ 9 Σ_c D_c G_c`); all the PR 3 cases, deterministic across
+thread counts. Its error is larger: 6–12 · 2^-23 · Σ|terms| of the direct sum and (2.7–12) · 10⁻⁶ of the largest
+output on folo-n shapes, against 0.3–1.0 and 2.5–7.3 · 10⁻⁷ for F(2x2, 3x3) (log
+`f43_errors.txt`; the direct conv's own bound is K = 9C times Σ|terms|).
+
+- One pinned P-core (`f43_prof.txt`, a temporary phase timer): 1.1–1.9x faster than F(2x2, 3x3) (64→64 at 80²
+  1.93–1.98 against 2.93–3.09 ms; GEMMs 1.03–1.06 against 1.93–1.99), its input transform now 32–51% of its time
+  (as long as 0.6x the GEMMs on 64→64 at 80², 1.4x on 16→8 at 160²).
+- Per layer at 28 threads (`f43_k3s1_28.txt`, 12 cores busy elsewhere): F(4x4) 3–33% faster on 64→64 at 80²
+  (1294 against 1004–1015 GF/s), 16→8 at 160², the 20x20 convs and 128→64 at 40²; 2–11% slower on 32→32,
+  32→64 and 64→32 at 40² (100 tiles for 28 threads).
+- Whole forward, F(4x4) where it won per layer, against `main` (3 rounds alternated, 10–17 cores busy elsewhere;
+  `f43_n28.txt`, `f43_s28.txt`, `f43_m28.txt`): folo-n 14.85 (14.59–15.56) → 14.63 (14.08–14.66) ms, folo-s
+  31.72 (31.65–32.68) → 31.81 (31.39–32.08), folo-m 78.71 (78.67–82.58) → 78.32 (77.76–78.49): ties. Larger tile blocks (so the 2.25x larger transformed weights are re-read by fewer blocks: a 4x and
+  a 16x L2 budget) did not change folo-m (`f43k_m28.txt`: 77.71 `main`, 76.34–76.87). Under this load the
+  per-layer gain does not reach the forward; on a quiet machine (PR 3's 2–6 busy cores) it might.
+
 ## Leftovers (second wave, by expected gain)
 
 - **Pointwise convs** are the largest conv group of the folo-n forward at 28 threads (4.9 ms of 12.4 ms of convs
   timed alone, `conv_infer`, log `w6_groups.txt`): those at 40² and 20² run at 50–300 GF/s, waiting on the pool
   more than computing.
-- **Winograd F(4x4, 3x3)**: 2.25 multiplies per output against F(2x2, 3x3)'s 4 (1.8x fewer GEMM flops, less
-  transform data per output); larger rounding error (transform constants up to 8), to be checked against AP.
-- Stride-2 convs (2.8 ms of convs timed alone) and the depthwise convs and shifted-rows copy, as above.
+- **Winograd F(4x4, 3x3)** on a quiet machine (above, `f43.patch`): 1.1–1.9x per core over F(2x2, 3x3), a tie
+  in the forward under 10–17 busy cores; its input transform (32–51% of its time on one core) is the next cost.
+- Stride-2 convs (2.8 ms of convs timed alone): bands did not help (above); the remaining idea is fewer multiplies
+  (a stride-2 3x3 conv is four stride-1 convs over the input's phases with 2x2, 2x1, 1x2 and 1x1 kernels; with
+  Winograd F(2, 2) along each two-tap dimension they need 25 channel-pair multiplies per four outputs instead of
+  36: ~1.4x fewer for complete tiles, before the transforms and the sum of the four phases' results).
+- The depthwise convs of the head (0.47 ms of convs timed alone) and the shifted-rows copy of the convs that
+  stay direct.
