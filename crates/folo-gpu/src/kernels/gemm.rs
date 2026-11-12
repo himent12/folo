@@ -277,6 +277,8 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let phase = mode == 2 && spec.get_bool("PHASE");
     let split = spec.get_bool("SPLIT");
     let bias = spec.get_u32("BIAS_KIND", 0);
+    // `CAT` > 1: `B` is that many row blocks in separate buffers (`super::gemm_cat`; plain GEMM, `B` not transposed).
+    let cat = spec.get_u32("CAT", 1);
     let f16 = spec.is_f16();
     // `OUT_F32`: f16 operands but an f32 `C` (the weight gradient's f32 partial slabs / f32 result).
     let c_f16 = f16 && !spec.get_bool("OUT_F32");
@@ -308,6 +310,9 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let _ = writeln!(s, "@group(0) @binding(2) var<storage, read> B: array<{}>;", wgsl_ty(f16, vb && !conv));
     s.push_str("@group(0) @binding(3) var<storage, read> BIAS: array<T>;\n");
     let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> C: array<{}>;", wgsl_ty(c_f16, vc));
+    if cat > 1 {
+        s.push_str(&super::gemm_cat::cat_source(cat, "B", wgsl_ty(f16, vb), vb));
+    }
     let _ = writeln!(s, "var<workgroup> As: array<array<vec4<f32>, {bm4}>, {}>;", 2 * bk);
     let _ = writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {bn4}>, {}>;", 2 * bk);
     let _ = writeln!(s, "@compute @workgroup_size({wgx}, {wgy}, 1)");
@@ -521,7 +526,12 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                 (format!("offB + (n0 + {o}) * ldb + k0 + bi"), format!("n0 + {o} < N && k0 + bi < K"))
             }
         };
-        let val = if pb.vec { format!("vec4<f32>(B[{idx}])") } else { format!("f32(B[{idx}])") };
+        let fetch = match (cat > 1, pb.vec) {
+            (true, true) => format!("cat_b(k0 + {o}, (n0 >> 2u) + bi, b1)"),
+            (true, false) => format!("cat_b(k0 + {o}, n0 + bi, b1)"),
+            (false, _) => format!("B[{idx}]"),
+        };
+        let val = if pb.vec { format!("vec4<f32>({fetch})") } else { format!("f32({fetch})") };
         let zero = if pb.vec { "vec4<f32>(0.0)" } else { "0.0" };
         if check {
             let _ =
@@ -686,6 +696,21 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
 pub(crate) static GEMM: KernelDef = KernelDef {
     name: "gemm",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_gemm),
+};
+
+/// [`GEMM`] with `B` in up to [`super::gemm_cat::MAX_CAT_PARTS`] buffers (`CAT`; unused parts bind the dummy).
+pub(crate) static GEMM_CAT: KernelDef = KernelDef {
+    name: "gemm_cat",
+    storage: &[
+        Access::Read,
+        Access::Read,
+        Access::Read,
+        Access::ReadWrite,
+        Access::Read,
+        Access::Read,
+        Access::Read,
+    ],
     source: Source::Generated(gen_gemm),
 };
 

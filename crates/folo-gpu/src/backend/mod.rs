@@ -38,6 +38,8 @@ use folo_core::{
 };
 
 use self::convert::{Core, elem, strided_of};
+#[cfg(test)]
+pub(crate) use self::encode::conv_input;
 use crate::context::GpuContext;
 use crate::error::GpuError;
 use crate::kernels::strided;

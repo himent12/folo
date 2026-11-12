@@ -6,9 +6,35 @@ use super::depthwise::{DEPTHWISE, DW_VX};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::Result;
+use crate::error::shape_err;
 use crate::kernels::coop;
 use crate::kernels::gemm::{self, GEMM, TileConfig, base_spec, check_dtype, gemm_params};
+use crate::kernels::gemm_cat::{CatPart, MAX_CAT_PARTS, gemm_cat};
 use crate::pipeline::Params;
+
+/// Where a forward conv reads its input in its buffer: from element `offset`, images `n_stride` elements apart,
+/// each image's `C_in·H·W` elements contiguous. A dense `[N, C, H, W]` tensor is `offset` 0, `n_stride` `C·H·W`;
+/// a channel slice of a larger one (`narrow` along dim 1) is read in place with its own offset and the larger
+/// tensor's image size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConvInput {
+    /// Element offset of image 0.
+    pub offset: usize,
+    /// Elements between images.
+    pub n_stride: usize,
+}
+
+/// One part of the channel concatenation a 1×1 conv reads in place ([`conv2d_cat`]): `channels` channels of
+/// `buf` read like a [`ConvInput`].
+#[derive(Clone, Copy, Debug)]
+pub struct ConvPart<'a> {
+    /// The part's buffer.
+    pub buf: &'a wgpu::Buffer,
+    /// Its channels.
+    pub channels: usize,
+    /// Where its images are.
+    pub at: ConvInput,
+}
 
 /// `y = act(conv2d(x, weight) + bias)`. Returns `(OH, OW)`.
 ///
@@ -34,13 +60,32 @@ pub fn conv2d_with_config(
     y: &wgpu::Buffer,
     cfg: Option<TileConfig>,
 ) -> Result<(usize, usize)> {
+    let dense = ConvInput { offset: 0, n_stride: d.c_in * d.h * d.w };
+    conv2d_input(ctx, d, (x, dense), weight, bias, y, cfg)
+}
+
+/// [`conv2d_with_config`] on an input read from `x` as `at` says (a channel slice read in place). Depthwise convs
+/// take only dense inputs.
+pub fn conv2d_input(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    (x, at): (&wgpu::Buffer, ConvInput),
+    weight: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    y: &wgpu::Buffer,
+    cfg: Option<TileConfig>,
+) -> Result<(usize, usize)> {
     check_dtype(ctx, d.dtype, "conv2d")?;
-    let (oh, ow) = d.check_buffers(x, weight, bias, y, d.dtype)?;
+    let (oh, ow) = d.check_input_buffers((x, at.offset, at.n_stride), weight, bias, y)?;
     if d.n * d.c_out * oh * ow == 0 {
         return Ok((oh, ow));
     }
+    let dense = at.offset == 0 && (d.n <= 1 || at.n_stride == d.c_in * d.h * d.w);
 
     if d.is_depthwise() {
+        if !dense {
+            return Err(shape_err("conv2d: a depthwise conv reads only dense inputs"));
+        }
         let spec = d
             .win
             .spec()
@@ -67,7 +112,9 @@ pub fn conv2d_with_config(
     let (kh, kw) = d.win.kernel;
     let (k_dim, hw_out) = (d.c_in / d.groups * kh * kw, oh * ow);
     let cout_g = d.c_out / d.groups;
-    let g = d.gemm_view(oh, ow, bias.is_some());
+    let mut g = d.gemm_view(oh, ow, bias.is_some());
+    g.b.offset = at.offset;
+    g.b.outer = at.n_stride;
 
     // Tensor cores for f16 when the context has them on (an explicit tile config means the regular kernels).
     if cfg.is_none() && d.dtype == DType::F16 && ctx.tensor_cores() {
@@ -124,5 +171,41 @@ pub fn conv2d_with_config(
         u32::try_from(d.n * d.groups).unwrap_or(u32::MAX),
     ];
     ctx.dispatch(&kernel, &[weight, x, bias.unwrap_or(ctx.dummy()), y], &p, groups)?;
+    Ok((oh, ow))
+}
+
+/// `y = act(conv2d(cat(parts, 1), weight) + bias)` for a 1×1, stride-1, unpadded, ungrouped conv, reading the
+/// parts of the channel concatenation in place (no concatenation is written): one GEMM whose `B` rows come from
+/// the parts' buffers ([`crate::kernels::gemm_cat`]). `d.c_in` is the parts' total; 2 to
+/// [`MAX_CAT_PARTS`] parts.
+pub fn conv2d_cat(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    parts: &[ConvPart<'_>],
+    weight: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    y: &wgpu::Buffer,
+) -> Result<(usize, usize)> {
+    check_dtype(ctx, d.dtype, "conv2d_cat")?;
+    if !d.is_pointwise() || d.groups != 1 {
+        return Err(shape_err("conv2d_cat: only 1x1, stride-1, unpadded, ungrouped convs"));
+    }
+    if parts.len() < 2 || parts.len() > MAX_CAT_PARTS {
+        return Err(shape_err(format!("conv2d_cat: {} parts (2 to {MAX_CAT_PARTS})", parts.len())));
+    }
+    if parts.iter().map(|p| p.channels).sum::<usize>() != d.c_in {
+        return Err(shape_err(format!("conv2d_cat: the parts do not add up to {} channels", d.c_in)));
+    }
+    let hw = d.h * d.w;
+    // `gemm_cat` checks the weight, bias, output and every part against its extent.
+    d.validate()?;
+    let (oh, ow) = d.output()?;
+    let cat: Vec<CatPart<'_>> = parts
+        .iter()
+        .map(|p| CatPart { buf: p.buf, rows: p.channels, offset: p.at.offset, outer: p.at.n_stride })
+        .collect();
+    let g = d.gemm_view(oh, ow, bias.is_some());
+    debug_assert_eq!(g.ldb, hw);
+    gemm_cat(ctx, &g, weight, &cat, bias, y, None)?;
     Ok((oh, ow))
 }

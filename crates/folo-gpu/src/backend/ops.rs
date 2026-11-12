@@ -10,11 +10,13 @@ use folo_core::{CpuStorage, DType as CoreDType, Device, Error, Layout, Result, S
 use super::convert::{
     Core, conv_act, conv_label, elem, f32_only, kdt, nchw, optim_update, pool2d, split3, strided_of,
 };
+use super::encode::conv_input;
 use super::storage::Dense;
 use super::{BACKEND_NAME, GpuBackend, core_err};
 use crate::error::GpuError;
 use crate::kernels::conv;
 use crate::kernels::ew::EwOp;
+use crate::kernels::gemm_cat::MAX_CAT_PARTS;
 use crate::kernels::layout;
 use crate::kernels::norm::{self, BnRunning};
 use crate::kernels::optim;
@@ -533,12 +535,62 @@ impl Backend for GpuBackend {
         let (oh, ow) = d.output().core()?;
         let len = d.n * d.c_out * oh * ow;
         let out = self.alloc(dtype, len)?;
-        let (xd, wd) = (self.dense(&x)?, self.dense(&w)?);
+        let wd = self.dense(&w)?;
         let bd = bias.as_ref().map(|b| self.dense(b)).transpose()?;
+        // A channel slice (or any view with contiguous images) is read in place, not gathered first.
+        if !d.is_depthwise()
+            && d.n * d.groups <= 65535
+            && let Some(at) = conv_input(&x)
+        {
+            let bias = bd.as_ref().map(|b| b.raw());
+            conv::conv2d_input(&self.ctx, &d, (self.buf(&x)?, at), wd.raw(), bias, out.raw(), None).core()?;
+            return Ok(self.wrap(dtype, len, out));
+        }
+        let xd = self.dense(&x)?;
         let per = (d.c_in * d.h * d.w, d.c_out * oh * ow);
         self.conv_by_batch(&d, (xd.raw(), per.0), (out.raw(), per.1), |d, x, y| {
             conv::conv2d(&self.ctx, d, x, wd.raw(), bd.as_ref().map(|b| b.raw()), y).map(drop)
         })?;
+        Ok(self.wrap(dtype, len, out))
+    }
+
+    fn conv2d_act_cat(
+        &self,
+        xs: &[View<'_>],
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+    ) -> Result<Storage> {
+        // 1×1 convs over 2 to `MAX_CAT_PARTS` parts whose images are contiguous: one GEMM reads them in place.
+        // Anything else is `NotSupported`, and the caller concatenates first.
+        let unsupported = Error::NotSupported { op: "conv2d_act_cat", backend: BACKEND_NAME };
+        if xs.len() < 2 || xs.len() > MAX_CAT_PARTS || xs.iter().any(|x| x.shape().rank() != 4) {
+            return Err(unsupported);
+        }
+        let dtype = xs[0].storage.dtype();
+        let (n, _, h, wi) = nchw(xs[0].shape());
+        let c: usize = xs.iter().map(|x| nchw(x.shape()).1).sum();
+        let mut d = self.conv_desc(&Shape::new(&[n, c, h, wi]), w.shape(), p, dtype);
+        d.act = conv_act(act).ok_or(unsupported.clone())?;
+        if !d.is_pointwise() || d.groups != 1 || n > 65535 {
+            return Err(unsupported);
+        }
+        let mut parts = Vec::with_capacity(xs.len());
+        for x in xs {
+            let (pn, pc, ph, pw) = nchw(x.shape());
+            let Some(at) = conv_input(x).filter(|_| (pn, ph, pw) == (n, h, wi)) else {
+                return Err(unsupported);
+            };
+            parts.push(conv::ConvPart { buf: self.buf(x)?, channels: pc, at });
+        }
+        let _p = profile::scope(|| format!("conv_cat {} {}", xs.len(), conv_label(&d)));
+        let (oh, ow) = d.output().core()?;
+        let len = d.n * d.c_out * oh * ow;
+        let out = self.alloc(dtype, len)?;
+        let wd = self.dense(&w)?;
+        let bd = bias.as_ref().map(|b| self.dense(b)).transpose()?;
+        conv::conv2d_cat(&self.ctx, &d, &parts, wd.raw(), bd.as_ref().map(|b| b.raw()), out.raw()).core()?;
         Ok(self.wrap(dtype, len, out))
     }
 

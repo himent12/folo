@@ -449,13 +449,24 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   GEMM's leading dimension / transpose / two-level batch strides (transposed views cost nothing; a shared right
   operand folds the batch into `M`) and copies an operand only when no such mapping exists. Every other kernel
   takes dense data, so a strided input is copied once first.
+- **Concatenations read in place.** Every `forward_cat` of the detector (C3k2, C3k, SPPF, C2PSA and the neck's
+  Concat + C3k2) is a 1×1 conv over a channel concatenation. `conv2d_act_cat` runs it as one GEMM whose `B` is
+  the parts' rows read from their own buffers (`kernels::gemm_cat`, `CAT` in the GEMM and tensor-core
+  generators): part 0 binds where `B` does, parts 1–3 at `@binding(5..7)`, and uniform words 40–51 hold each
+  part's row end, offset and image stride; the generated `cat_b(k, i, b1)` picks the part by row. Up to four parts
+  (`MAX_CAT_PARTS`), each a dense tensor or a channel slice with contiguous images; anything else (3×3 or grouped
+  convs, more parts, strided images) is `NotSupported`, and folo-core concatenates first. Inference only: a
+  recorded (training) forward keeps `cat` then the conv.
 - **Op mapping.** Reductions: sum / max / min through the reduce kernels (split into two passes when long rows
   meet few outputs), arg-reductions to `i64`. Softmax over any dim. conv2d forward is the existing kernel; its
   gradients are the `CONV_MODE` 2 / 3 GEMMs or the depthwise kernels. Pooling, upsampling, index ops and top-k use
   the kernels in the table above.
 - **Fused ops** (folo-core's optional `Backend` hooks, each with a composite fallback on other backends):
   `conv2d_act` is the conv kernel with bias and activation in its epilogue (`Tensor::conv2d_act`, used by folo-nn's
-  `ConvBnAct` in eval / fused mode, so a fused folo-n forward is one dispatch per conv);
+  `ConvBnAct` in eval / fused mode, so a fused folo-n forward is one dispatch per conv), and reads a channel
+  slice (`narrow` along dim 1, any view whose images are contiguous) in place through the GEMM's `B` offset and
+  batch stride instead of gathering it first (depthwise convs still take dense inputs); `conv2d_act_cat` (see
+  Concatenations read in place, below) is the 1×1 conv over a concatenation without writing it;
   `batch_norm_act` / `batch_norm_act_backward` are the BatchNorm kernels above (`Tensor::batch_norm_act_train`,
   recorded by folo-nn's `BatchNorm2d` as one custom op); `optimizer_step` is the update kernel
   (`Tensor::optimizer_step_`) and `optimizer_step_many` / `unscale_check_many` its multi-tensor form
