@@ -370,9 +370,12 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
         st.file.run.finished = Some(rfc3339(finished));
     };
     let paused = || e.run().paused_s;
-    let near = |got: Option<f64>, want: f64| {
+    // Each of the `adds` additions so far was measured against a "now" at or after `t`, so each may be late by the
+    // time this test has taken (whole seconds, as the server counts), and never early.
+    let near = |got: Option<f64>, want: f64, adds: f64| {
         let got = got.expect("paused_s set");
-        assert!((got - want).abs() <= 2.0, "paused_s {got}, want about {want}");
+        let late = adds * (unix_now().floor() - t);
+        assert!((want..=want + late).contains(&got), "paused_s {got}, want {want} to {}", want + late);
     };
 
     // Stopped before it ever trained: resuming it starts it over, with nothing to leave out.
@@ -384,10 +387,10 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
     // Trained, stopped overnight (10 h ago), resumed now: the night counts, and the wait in the queue once it trains.
     ended(Some(t - 40_000.0), t - 36_000.0);
     runs.restart(&e, config.clone(), None).unwrap();
-    near(paused(), 36_000.0);
+    near(paused(), 36_000.0, 1.0);
     e.state.lock().unwrap().file.resumed_at = Some(t - 60.0);
     e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
-    near(paused(), 36_060.0);
+    near(paused(), 36_060.0, 2.0);
     assert_eq!(e.state.lock().unwrap().file.resumed_at, None);
 
     // Resumed, stopped while it waited (it never trained in between), resumed again: from the first resume on (each
@@ -397,7 +400,7 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
     e.state.lock().unwrap().file.resumed_at = Some(t - 500.0);
     ended(Some(t - 40_000.0), t - 100.0);
     runs.restart(&e, config, None).unwrap();
-    near(paused(), 36_060.0 + 50.0 + 500.0);
+    near(paused(), 36_060.0 + 50.0 + 500.0, 4.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
