@@ -16,7 +16,9 @@
 //!
 //! The free lists hold at most the largest of [`BufferPool::max_cached_bytes`], the high-water mark of live bytes
 //! and the *need* of the recent requests less the live bytes, so a training loop whose working set exceeds the
-//! configured cap still reuses every buffer from one step to the next (like PyTorch's caching allocator). The need
+//! configured cap still reuses its buffers from one step to the next (like PyTorch's caching allocator), as long as
+//! a step requests every class at least once per two need windows (a folo-n step makes about 1300 requests) and its
+//! need fits within twice the live high-water mark; beyond that the pool evicts and creates buffers again. The need
 //! is the sum over size classes of the class size times the most buffers of that class lent out at once in the
 //! current or the previous window of [`NEED_WINDOW`] requests: what the pool must hold to serve those requests
 //! without creating a buffer. It exceeds the live high-water mark when classes peak at different times (a folo-n

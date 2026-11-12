@@ -55,8 +55,10 @@ step's bind groups missed the cache (below). Now the free set at the start of ev
 request gets the same buffer as in the step before, as long as the program allocates and frees the same way.
 
 The free lists hold at most the largest of 2 GiB, the high-water mark of live bytes, and the *need* of the recent
-requests less the live bytes, so a training step whose working set is bigger than 2 GiB still reuses every buffer
-on the next step (as PyTorch's caching allocator does). The need is the sum over size classes of the class size
+requests less the live bytes, so a training step whose working set is bigger than 2 GiB still reuses its buffers
+on the next step (as PyTorch's caching allocator does), as long as the step requests every size class at least once
+per two windows (below) and its need fits within twice the live high-water mark (a folo-n step: about 1300 requests,
+need 1.2× the high-water mark); otherwise some buffers are evicted and created again. The need is the sum over size classes of the class size
 times the most buffers of that class lent out at once, over the last two windows of 4096 requests (about three
 folo-n training steps): what the pool must hold to serve them without creating a buffer. It is more than the live
 high-water mark when classes peak at different times (a folo-n b16 f32 step: 4.1 GiB for 3.4 GiB live), and with
