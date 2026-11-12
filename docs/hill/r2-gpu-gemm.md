@@ -332,4 +332,4 @@ and `--half --tensor-cores` 0.44943 / 0.30995 (mAP50 / mAP50-95; 647b981f 0.4494
   is at most 11% faster on any weak case (64×64: n 3×3 s2 128 → 128 @ 40 131.8 → 117.2 µs, s 3×3 128 → 128 @ 20
   131.6 → 116.8 µs, n head 64 → 64 @ 40 107.7 → 96.4 µs) and no better on most; the others are often much
   slower (128×128 and the narrow configs up to 2.2×). Not worth an f32 picker change on its own (the tensor-core
-picker of PR 3 is a different case: there 64×64 beat the picked 128×128 by 14–63%).
+picker of PR 3 is a different case: there 64×64 took 14–63% less time than 128×128).
