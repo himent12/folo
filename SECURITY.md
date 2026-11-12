@@ -24,9 +24,10 @@ FOLO is a local tool first, and its defaults assume that:
   `--confine` keeps file reads inside the data dir ([docs/MCP.md](docs/MCP.md)).
 - **Agent labeling and agent benchmark entries start `claude` or `codex` on the server's machine**, with tools,
   configuration files and sessions switched off, and send them your images ([docs/LABELING.md](docs/LABELING.md)).
-- **Cloud runs spend money** on the provider account whose key you connect. The key is stored in the data dir
-  (mode 0600 on Unix; on Windows under the folder's own permissions, which for the default `~/.folo` are the user's
-  profile's) and is never returned by the API ([docs/CLOUD.md](docs/CLOUD.md)).
+- **Cloud runs spend money** on the provider account whose key you connect. The key is stored in the data dir and
+  is never returned by the API ([docs/CLOUD.md](docs/CLOUD.md)). Credential files use owner-only permissions on
+  Unix. On Windows they inherit the data dir's permissions: the default `~/.folo` is inside your profile; for any
+  other data dir, use a folder restricted to your account.
 - **`.folo` files are data**: a JSON header and raw tensors in a safetensors-compatible layout, with no code in them
   ([docs/FORMAT.md](docs/FORMAT.md)). Images and label files from an untrusted source go through the image decoders
   and the parsers; a crash or a hang on a crafted file is a bug worth reporting.

@@ -1,6 +1,8 @@
 {
   "$comment": "The numbers behind the charts in docs/img/charts, each copied from the document named in its `source`. Change a number there first, then here, then run `node tools/charts/render.mjs`. Values are [FOLO, the Ultralytics model of the same size] unless a key says otherwise.",
   "machine": "RTX 4080 SUPER, Core i7-14700KF, 640×640 input",
+  "method": "FOLO: medians of runs alternated with its previous build, 2026-11-12. YOLO26: its best configuration per row, measured 2026-11-07 (whole trainer: the best of 3 runs). Method and noise: docs/BENCHMARKS.md.",
+  "warmup": "Batch-1 latency is timed after a second of back-to-back warm-up calls for FOLO and after 25 calls for YOLO26.",
   "inference": {
     "source": "docs/BENCHMARKS.md, FOLO targets, rows 1, 3, 4, 5, 6, 7 and 8 (folo-n, measured 2026-11-12)",
     "latency": [
@@ -62,13 +64,12 @@
     }
   },
   "coco_curves": {
-    "source": "metrics.jsonl of the three runs in examples/coco/README.md: validation mAP50-95 after each epoch (the trainer's own validation, the numbers of the Curve tables there)",
+    "source": "This file is the extract: `val.map50_95` of every `epoch` event in the three runs' metrics.jsonl (examples/coco/README.md), rounded to four decimals. The Curve tables there print selected epochs of the same series to three decimals",
     "series": [
       { "label": "folo-n, 50 epochs", "short": "folo-n", "labelAt": "below", "values": [0.0023, 0.0285, 0.0642, 0.1032, 0.1343, 0.1577, 0.1758, 0.1877, 0.1965, 0.2029, 0.2079, 0.2119, 0.2159, 0.2196, 0.2231, 0.2272, 0.231, 0.2346, 0.238, 0.242, 0.246, 0.2499, 0.2543, 0.2575, 0.2606, 0.2638, 0.2668, 0.2698, 0.2728, 0.2755, 0.2781, 0.2807, 0.2828, 0.2847, 0.2867, 0.289, 0.2912, 0.2934, 0.2953, 0.2976, 0.2986, 0.3004, 0.3025, 0.3042, 0.3055, 0.3067, 0.3083, 0.309, 0.3095, 0.31] },
       { "label": "folo-s, 56 epochs", "short": "folo-s", "labelAt": "right", "values": [0.0226, 0.0957, 0.1517, 0.2104, 0.2439, 0.2704, 0.2885, 0.3004, 0.3097, 0.3156, 0.3204, 0.3247, 0.3288, 0.3322, 0.3357, 0.339, 0.342, 0.3456, 0.349, 0.3524, 0.3558, 0.3589, 0.3621, 0.3651, 0.368, 0.3711, 0.3737, 0.3763, 0.3789, 0.381, 0.3832, 0.3847, 0.3865, 0.3882, 0.3895, 0.3911, 0.3929, 0.3946, 0.3957, 0.3975, 0.399, 0.4001, 0.4015, 0.4027, 0.4045, 0.4057, 0.4066, 0.4076, 0.4085, 0.4091, 0.4098, 0.4105, 0.4109, 0.4114, 0.4115, 0.4117] },
       { "label": "folo-n v2, paused at 62 of 300", "short": "folo-n v2", "labelAt": "right", "values": [0.0023, 0.0289, 0.0633, 0.1012, 0.1337, 0.1568, 0.1753, 0.1874, 0.1946, 0.2, 0.2048, 0.2092, 0.2129, 0.2166, 0.22, 0.2241, 0.2276, 0.2312, 0.2351, 0.2388, 0.2425, 0.2459, 0.2499, 0.2535, 0.2565, 0.2599, 0.2629, 0.266, 0.2692, 0.272, 0.2742, 0.2762, 0.2783, 0.2803, 0.2818, 0.2839, 0.2857, 0.2877, 0.2893, 0.2916, 0.2932, 0.2948, 0.2963, 0.2978, 0.2988, 0.2997, 0.3011, 0.3025, 0.3032, 0.3042, 0.3052, 0.3059, 0.3068, 0.3075, 0.3083, 0.3092, 0.3095, 0.3107, 0.3111, 0.3121, 0.3128, 0.3134] }
     ],
     "final_ap": "The final weights score AP 0.314 (folo-n), 0.317 (folo-n v2) and 0.416 (folo-s) with pycocotools."
-  },
-  "method": ["FOLO: medians of runs alternated with its previous build, 2026-11-12. YOLO26: its best configuration per", "row, measured 2026-11-07 (whole trainer: the best of 3 runs). Method and noise: docs/BENCHMARKS.md."]
+  }
 }

@@ -1,6 +1,6 @@
 // A line chart of a few series over a shared x axis (epochs), each line ending in a marker and a direct label.
 
-import { frame, line, n, runs, text, textWidth } from './lib.mjs';
+import { frame, line, n, runs, text, textWidth, wrap } from './lib.mjs';
 
 const W = 720;
 const PAD = 28;
@@ -10,7 +10,7 @@ const RIGHT = 112;
 
 /**
  * `spec`: { title, subtitle, desc, xTitle, xTicks, xMax, yTicks, yMax, yFormat, series: [{ label, short, values,
- * labelAt }], footer }. `xMax` / `yMax` end the axes past the last tick. `values[i]` is the value at x = i + 1. `labelAt` puts the end label `right` of the line's end or
+ * labelAt }], footer }. `footer` is a list of paragraphs, wrapped here. `xMax` / `yMax` end the axes past the last tick. `values[i]` is the value at x = i + 1. `labelAt` puts the end label `right` of the line's end or
  * `below` it (for a line that ends under another one).
  */
 export function linesFigure(spec, t) {
@@ -25,8 +25,8 @@ export function linesFigure(spec, t) {
   let lx = PAD;
   spec.series.forEach((s, i) => {
     out.push(line(lx, y + 5, lx + 14, y + 5, t.series[i], 2));
-    out.push(text(lx + 20, y + 9.5, s.label, { size: 12.5, fill: t.ink2 }));
-    lx += 20 + textWidth(s.label, 12.5) + 22;
+    out.push(text(lx + 20, y + 9.5, s.label, { size: 13, fill: t.ink2 }));
+    lx += 20 + textWidth(s.label, 13) + 22;
   });
   if (lx - 22 > W - PAD) throw new Error(`${spec.title}: the legend does not fit`);
   y += 10 + 22;
@@ -46,7 +46,7 @@ export function linesFigure(spec, t) {
   for (const tick of spec.xTicks) {
     out.push(text(px(tick), y + PLOT_H + 18, String(tick), { size: 11, fill: t.tick, anchor: 'middle' }));
   }
-  out.push(text((x0 + x1) / 2, y + PLOT_H + 38, spec.xTitle, { size: 12, fill: t.ink3, anchor: 'middle' }));
+  out.push(text((x0 + x1) / 2, y + PLOT_H + 38, spec.xTitle, { size: 12.5, fill: t.ink3, anchor: 'middle' }));
 
   // Lines first, then the end markers with their surface ring, so a marker is never under another line.
   spec.series.forEach((s, i) => {
@@ -61,19 +61,19 @@ export function linesFigure(spec, t) {
       [spec.yFormat(s.values.at(-1), true), { weight: 600, fill: t.ink }],
       [`  ${s.short}`, { fill: t.ink2 }],
     ];
-    const width = textWidth(parts.map((part) => part[0]).join(''), 12.5, 600);
+    const width = textWidth(parts.map((part) => part[0]).join(''), 13, 600);
     const at = s.labelAt === 'below' ? ex - 6 : ex + 12;
     if (at + width > W - PAD) throw new Error(`${spec.title}: the end label of "${s.label}" does not fit`);
-    out.push(runs(at, s.labelAt === 'below' ? ey + 24 : ey + 4.4, parts, { size: 12.5 }));
+    out.push(runs(at, s.labelAt === 'below' ? ey + 24 : ey + 4.4, parts, { size: 13 }));
   });
   y += PLOT_H + 52;
 
   if (spec.footer?.length) {
     out.push(line(PAD, y + 0.5, W - PAD, y + 0.5, t.grid));
     y += 12;
-    for (const l of spec.footer) {
-      out.push(text(PAD, y + 12, l, { size: 12, fill: t.ink3 }));
-      y += 17;
+    for (const l of spec.footer.flatMap((paragraph) => wrap(paragraph, 12.5, W - 2 * PAD))) {
+      out.push(text(PAD, y + 12, l, { size: 12.5, fill: t.ink3 }));
+      y += 18;
     }
     y += 2;
   }

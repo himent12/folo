@@ -24,6 +24,8 @@ plus training, evaluation and export. You drive it from one `folo` binary, an HT
 > (`folo weights pull folo-s-coco`). It is faster than the incumbent on every row below and not yet as accurate on
 > COCO; interfaces may still change. See [Project status](#project-status).
 
+**[Install it and train a first model](#quickstart)**, or read on for the numbers.
+
 ## Why FOLO: the numbers
 
 folo-n against Ultralytics **yolo26n** (8.4.198, torch 2.11 + CUDA 12.8) on the same machine: an RTX 4080 SUPER and an
@@ -65,7 +67,8 @@ much noise to expect.
 </details>
 
 FOLO's numbers were measured on `main` on 2026-11-12, alternated run by run with the build before it on a mostly
-quiet machine; yolo26n's on 2026-11-07, its best configuration for each row. folo-s beats yolo26s on every row
+quiet machine; yolo26n's on 2026-11-07, its best configuration for each row. The two batch-1 latency protocols
+differ in their warm-up (a second of calls for FOLO, 25 calls for yolo26n). folo-s beats yolo26s on every row
 measured for it as well ([the chart by model size](docs/BENCHMARKS.md#summary)); its whole-trainer row was not
 measured.
 
@@ -79,7 +82,7 @@ been measured at an equal budget:
 
 - **Per epoch, the two trainers learn equally well.** On a 20,000-image COCO subset at 320 px, 20 epochs from scratch,
   FOLO's trainer with folo-n and Ultralytics' with YOLO11n reach the same AP with the same optimizer (SGD 0.086
-  against 0.085, MuSGD 0.113–0.116 against 0.113): no sign that FOLO's trainer is what causes the COCO gap.
+  against 0.085, MuSGD 0.113–0.116 against 0.113). What causes the gap on full COCO has not been measured.
 - **Fine-tuned on small datasets, folo-n and yolo26n are level on three of four.** Each starts from its own COCO
   weights and trains 100 epochs at its defaults; one scorer (pycocotools) grades both.
 

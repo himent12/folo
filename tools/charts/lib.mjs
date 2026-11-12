@@ -72,6 +72,23 @@ export function textWidth(str, size, weight = 400) {
   return em * size * (weight >= 600 ? 1.05 : 1);
 }
 
+/** `str` broken into lines of at most `width` px at `size` px, by the same estimate. */
+export function wrap(str, size, width) {
+  const lines = [];
+  let cur = '';
+  for (const word of String(str).split(' ')) {
+    const next = cur ? `${cur} ${word}` : word;
+    if (cur && textWidth(next, size) > width) {
+      lines.push(cur);
+      cur = word;
+    } else {
+      cur = next;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
 /** A <text> element. `anchor` is start | middle | end. */
 export function text(x, y, str, { size = 13, weight = 400, fill, anchor = 'start', tracking } = {}) {
   const attrs = [
