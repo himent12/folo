@@ -205,6 +205,11 @@ pub struct Run {
     pub started: Option<String>,
     /// When it reached `stopped`, `completed` or `failed`.
     pub finished: Option<String>,
+    /// Seconds a resumed run spent not training since `started`: from each end (stop, failure) until it trained
+    /// again, summed over its resumes. Its training time is `finished` (or now, while it trains) minus `started`
+    /// minus this. Absent for a run never resumed, and from servers that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_s: Option<f64>,
     /// Current epoch, 1-based; 0 before the first step. Once ended: the last epoch it finished (`completed`,
     /// `stopped`), or the epoch it failed in (`failed`).
     pub epoch: u32,

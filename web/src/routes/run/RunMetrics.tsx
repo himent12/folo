@@ -29,7 +29,7 @@ import LineChart, { type Marker, type Series } from '$lib/charts/LineChart';
 import { runHorizon } from '$lib/charts/horizon';
 import type { AppendLog } from '$lib/api/appendLog';
 import type { Epoch, Run, Step } from '$lib/api/types';
-import { etaSettled, runProgress } from '$lib/api/progress';
+import { etaSettled, runProgress, trainingSeconds } from '$lib/api/progress';
 import { effectiveCloseMosaic, warmupEpochs } from './resolved';
 import { conf, metric, num } from '$lib/format';
 import Segmented from '$lib/ui/Segmented';
@@ -170,10 +170,7 @@ export default function RunMetrics(props: RunMetricsProps) {
   });
   const uid = createUniqueId();
   const closeId = `${uid}-close`;
-  const elapsed = computed(() => {
-    const run = props.run;
-    return run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null;
-  });
+  const elapsed = computed(() => trainingSeconds(props.run));
 
   // ---- the series, from the append logs ----
   const stepData = new StepSeries(untrack(() => props.steps));

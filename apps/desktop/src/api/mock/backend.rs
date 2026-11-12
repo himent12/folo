@@ -266,6 +266,7 @@ impl Backend for MockBackend {
                 created: time::format(now),
                 started: Some(time::format(now)),
                 finished: None,
+                paused_s: None,
                 epoch: 0,
                 epochs: config.epochs,
                 step: 0,

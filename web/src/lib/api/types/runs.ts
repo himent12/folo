@@ -52,6 +52,11 @@ export interface Run {
   created: Time;
   started: Time | null;
   finished: Time | null;
+  /**
+   * A resumed run's seconds not training since `started` (from each end until it trained again): its training time is
+   * `finished` (or now) − `started` − this. Missing for a run never resumed and from older servers.
+   */
+  paused_s?: number;
   epoch: number;
   epochs: number;
   step: number;

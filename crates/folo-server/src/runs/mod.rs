@@ -83,6 +83,15 @@ struct RunFile {
     /// Validation metrics of the last validated epoch (those of `weights/last.folo`).
     #[serde(default)]
     last_metrics: Option<ModelMetrics>,
+    /// When the run was last resumed (Unix seconds), while it has not trained since: the wait until it does is added
+    /// to `Run.paused_s` then ([`add_paused`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resumed_at: Option<f64>,
+}
+
+/// Adds `secs` (whole seconds, as `started` and `finished` are) to the time run `r` spent not training.
+fn add_paused(r: &mut Run, secs: f64) {
+    r.paused_s = Some(r.paused_s.unwrap_or(0.0) + secs.max(0.0).round());
 }
 
 struct RunState {

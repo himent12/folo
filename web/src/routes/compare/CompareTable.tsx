@@ -7,6 +7,7 @@ import ChevronLeft from '$icons/chevron-left';
 import ArrowLeftRight from '$icons/arrow-left-right';
 import { bindable, computed, css, effect, For, MediaQuery, signal } from 'fw';
 import { bestMark, bestWord } from '$lib/bestMark';
+import { trainingSeconds } from '$lib/api/progress';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset, Run, RunMetrics } from '$lib/api/types';
 import { conf, deviceName, duration, metric } from '$lib/format';
@@ -103,7 +104,7 @@ export default function CompareTable(props: CompareTableProps) {
       ['Precision', (r) => precisionSetting(r.config)],
       ['Head', (r) => headSetting(r.config)],
       ['Device', (r) => plain(deviceName(r.device))],
-      ['Duration', (r) => plain(r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
+      ['Duration', (r) => plain(r.started ? duration(trainingSeconds(r)) : '—')],
     ];
   });
   const differs = (f: (r: Run) => Setting) => new Set(props.chosen.map((r) => settingText(f(r)))).size > 1;

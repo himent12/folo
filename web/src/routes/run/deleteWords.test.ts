@@ -24,7 +24,10 @@ describe('deleteWords: the Delete run confirm tells what goes', () => {
     expect(deleteWords({ id: 'run_f6f1' }, [model('m_f6f1', 'n-best', 'run_f6f1', 1000, 'run')], 'metric').button).toBe('Delete run and 1 model');
   });
 
-  it('still says the weights go while the models list loads', () => {
-    expect(deleteWords({ id: 'run_f6f1' }, undefined).description).toMatch(/weights on disk, with the models saved from them/);
+  it('still says the weights and models go while the models list loads, never that there are none', () => {
+    expect(deleteWords({ id: 'run_f6f1' }, undefined)).toEqual({
+      description: "Deletes the run and its metric history. Its weights and models are deleted too. This can't be undone.",
+      button: 'Delete run',
+    });
   });
 });

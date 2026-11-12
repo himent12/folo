@@ -1,6 +1,6 @@
 use super::*;
 use axum::http::StatusCode;
-use folo_api::{Epoch, TrainConfig};
+use folo_api::{Epoch, StatusEvent, TrainConfig};
 use folo_test_support::TestDir;
 
 use super::history::read_metrics;
@@ -75,6 +75,7 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         created: now(),
         started: None,
         finished: None,
+        paused_s: None,
         epoch: 0,
         step: 0,
         steps_per_epoch: 0,
@@ -96,7 +97,15 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         format: DatasetFormat::Yolo,
         classes: vec![],
     };
-    let file = RunFile { run, dataset, weights: None, val_offset: 0, epochs_done: 0, last_metrics: None };
+    let file = RunFile {
+        run,
+        dataset,
+        weights: None,
+        val_offset: 0,
+        epochs_done: 0,
+        last_metrics: None,
+        resumed_at: None,
+    };
     std::fs::create_dir_all(dir.join("run_late")).unwrap();
     let entry = Arc::new(RunEntry::new("run_late".into(), dir.join("run_late"), file));
     runs.list.write().unwrap().push(entry.clone());
@@ -186,6 +195,7 @@ fn listed_queue_positions_are_one_snapshot() {
             created: now(),
             started: None,
             finished: None,
+            paused_s: None,
             epoch: 0,
             step: 0,
             steps_per_epoch: 0,
@@ -207,6 +217,7 @@ fn listed_queue_positions_are_one_snapshot() {
             val_offset: 0,
             epochs_done: 0,
             last_metrics: None,
+            resumed_at: None,
         };
         std::fs::create_dir_all(dir.join(id)).unwrap();
         let entry = Arc::new(RunEntry::new(id.clone(), dir.join(id), file));
@@ -327,4 +338,58 @@ fn an_epoch_is_one_log_line() {
         serde_json::from_str(&format!(r#"{{"epoch":3,"train_loss":{loss},"val":{val},"duration_s":15.24}}"#))
             .unwrap();
     assert_eq!(super::entry::epoch_line(&e, 5), "epoch 3/5: loss 3.214, mAP50-95 0.073, 15.2 s");
+}
+
+/// A resumed run's `paused_s`: the time from its end to the resume, then the wait in the queue once it trains again;
+/// a stop while it waited counts from that resume. A run resumed before it ever started has none.
+#[test]
+fn a_resumed_run_records_the_time_it_was_not_training() {
+    let dir = TestDir::new("runs-paused");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"p"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let t = unix_now().floor();
+    let ended = |started: Option<f64>, finished: f64| {
+        let mut st = e.state.lock().unwrap();
+        st.file.run.status = RunStatus::Stopped;
+        st.file.run.started = started.map(rfc3339);
+        st.file.run.finished = Some(rfc3339(finished));
+    };
+    let paused = || e.run().paused_s;
+    let near = |got: Option<f64>, want: f64| {
+        let got = got.expect("paused_s set");
+        assert!((got - want).abs() <= 2.0, "paused_s {got}, want about {want}");
+    };
+
+    // Stopped before it ever trained: resuming it starts it over, with nothing to leave out.
+    ended(None, t - 100.0);
+    runs.restart(&e, config.clone(), None).unwrap();
+    assert_eq!(paused(), None);
+    assert_eq!(serde_json::to_value(e.run()).unwrap().get("paused_s"), None, "absent, not null");
+
+    // Trained, stopped overnight (10 h ago), resumed now: the night counts, and the wait in the queue once it trains.
+    ended(Some(t - 40_000.0), t - 36_000.0);
+    runs.restart(&e, config.clone(), None).unwrap();
+    near(paused(), 36_000.0);
+    e.state.lock().unwrap().file.resumed_at = Some(t - 60.0);
+    e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
+    near(paused(), 36_060.0);
+    assert_eq!(e.state.lock().unwrap().file.resumed_at, None);
+
+    // Resumed, stopped while it waited (it never trained in between), resumed again: from the first resume on (each
+    // resume is "now"; the first is moved 500 s back by hand).
+    ended(Some(t - 40_000.0), t - 50.0);
+    runs.restart(&e, config.clone(), None).unwrap();
+    e.state.lock().unwrap().file.resumed_at = Some(t - 500.0);
+    ended(Some(t - 40_000.0), t - 100.0);
+    runs.restart(&e, config, None).unwrap();
+    near(paused(), 36_060.0 + 50.0 + 500.0);
+    let _ = std::fs::remove_dir_all(&dir);
 }

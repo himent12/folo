@@ -81,6 +81,33 @@ describe('Dataset page history', () => {
     await until(() => hash() === '#/datasets/ds_shapes', 'the grid again');
   });
 
+  it('still knows where an image was opened from after Back and Forward, so Close goes back instead of doubling the grid', async () => {
+    open('/datasets/ds_shapes');
+    const cell = await until(() => target.querySelector<HTMLElement>('[data-i="2"]'), 'the grid');
+    cell.click();
+    await until(() => hash().includes('image='), 'the image in the URL');
+    history.back();
+    await until(() => hash() === '#/datasets/ds_shapes', 'the grid after Back');
+    history.forward();
+    await until(() => hash().includes('image='), 'the image after Forward');
+    const back = vi.spyOn(history, 'back');
+    const replace = vi.spyOn(history, 'replaceState');
+    await until(() => document.querySelector('dialog.insp'), 'the inspector');
+    document.querySelector('dialog.insp')!.dispatchEvent(new Event('close'));
+    expect(back).toHaveBeenCalledOnce();
+    expect(replace).not.toHaveBeenCalled();
+    await until(() => hash() === '#/datasets/ds_shapes', 'the grid again');
+  });
+
+  it('replaces an image entry reached by a link when it closes (there is no grid entry behind it)', async () => {
+    open('/datasets/ds_shapes?image=1');
+    await until(() => document.querySelector('dialog.insp'), 'the inspector');
+    const back = vi.spyOn(history, 'back');
+    document.querySelector('dialog.insp')!.dispatchEvent(new Event('close'));
+    expect(back).not.toHaveBeenCalled();
+    await until(() => hash() === '#/datasets/ds_shapes', 'the grid in place of the image');
+  });
+
   it('adds an entry for the first filter only, and Clear goes back to the unfiltered view', async () => {
     open('/datasets/ds_shapes');
     await until(() => target.querySelector('[data-i="0"]'), 'the grid');

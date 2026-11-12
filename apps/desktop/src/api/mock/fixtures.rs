@@ -453,6 +453,7 @@ impl MockBackend {
                         created: time::format(created),
                         started,
                         finished,
+                        paused_s: None,
                         epoch: 0,
                         epochs: s.config.epochs,
                         step: s.step,

@@ -8,6 +8,7 @@ import Trash from '$icons/trash-2';
 import X from '$icons/x';
 import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
+import { modelsResource } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Model, QueueRequest, Run } from '$lib/api/types';
 import { runDatasetLabel } from '$lib/runDataset';
@@ -25,7 +26,7 @@ import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
 import Segmented from '$lib/ui/Segmented';
-import { runProgress } from '$lib/api/progress';
+import { runProgress, trainingSeconds } from '$lib/api/progress';
 import { rowNav } from '$lib/ui/rowNav';
 import Skeleton from '$lib/ui/Skeleton';
 import StatusBadge from '$lib/ui/StatusBadge';
@@ -47,7 +48,7 @@ import { DialogStatus } from '$lib/ui/feedback';
 import { toast } from '$lib/ui/toast';
 import DeleteRun from './run/DeleteRun';
 import RunRows from './runs/RunRows';
-import { groups, readState, sortRuns, trainingSeconds, writeState, type Filter, type SortKey } from './runs/listState';
+import { groups, readState, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
 import { exactTime, tickingNow } from './runs/when';
 
 /** Columns of the desktop table (for state rows that span it). */
@@ -65,7 +66,7 @@ export default function Runs() {
   /** A run's dataset by name (lib/runDataset), the one it recorded while the datasets load; marked once it was removed. */
   const datasetName = (r: Run) => runDatasetLabel(r, datasets.data ? dsName.get() : undefined, !!datasets.error) ?? r.dataset?.name ?? '';
   // Only to name the model a run was fine-tuned from; the list renders without it.
-  const models = new Resource((s) => hub.api.models(s));
+  const models = modelsResource();
   const modelById = computed(() => new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
 
   // Queue control (servers that list `queue_control`): a waiting run's row says its place and has a ⋯ menu with
@@ -576,7 +577,6 @@ export default function Runs() {
       />{' '}
       <DeleteRun
         run={deleting.get()}
-        models={models.data}
         onclose={() => deleting.set(null)}
         ondeleted={(r) => {
           selected.set(selected.peek().filter((id) => id !== r.id));

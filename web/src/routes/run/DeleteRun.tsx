@@ -1,11 +1,13 @@
 /**
  * The Delete run confirm, one on the Run page and the Runs list: it names what goes (the run, its history, its weights
- * and the models saved from them, ./deleteWords), and its button says so. A failure shows in the dialog, which stays
- * open for Retry; a success closes it and toasts.
+ * and the models saved from them, ./deleteWords), and its button says so. It counts them from the models list fetched
+ * when it opens, never from the page's: that one can predate the run's end, when its weights became models. A failure
+ * shows in the dialog, which stays open for Retry; a success closes it and toasts.
  */
 import Trash from '$icons/trash-2';
-import { computed, signal } from 'fw';
+import { computed, effect, signal } from 'fw';
 import { hub } from '$lib/api/index';
+import { modelsChanged } from '$lib/api/models';
 import type { Model, Run } from '$lib/api/types';
 import { prefs } from '$lib/prefs';
 import Button from '$lib/ui/Button';
@@ -17,8 +19,6 @@ import { deleteWords, runModels } from './deleteWords';
 export interface DeleteRunProps {
   /** The run to delete; null: closed. */
   run: Pick<Run, 'id' | 'name'> | null;
-  /** The models list (undefined while it loads). */
-  models: readonly Model[] | undefined;
   onclose: () => void;
   ondeleted?: (run: Pick<Run, 'id' | 'name'>) => void;
 }
@@ -26,18 +26,36 @@ export interface DeleteRunProps {
 export default function DeleteRun(props: DeleteRunProps) {
   const busy = signal(false);
   const status = new DialogStatus();
-  const words = computed(() => (props.run ? deleteWords(props.run, props.models, prefs.units) : null));
+  /** The models list fetched for this opening; undefined until it arrives (or when it fails). */
+  const models = signal<readonly Model[] | undefined>(undefined);
+  const runId = computed(() => props.run?.id ?? null);
+  effect(() => {
+    const id = runId.get();
+    models.set(undefined);
+    if (!id) return;
+    const ctrl = new AbortController();
+    hub.api.models(ctrl.signal).then(
+      (m) => {
+        if (!ctrl.signal.aborted) models.set(m);
+      },
+      () => {},
+    );
+    return () => ctrl.abort();
+  });
+  const words = computed(() => (props.run ? deleteWords(props.run, models.get(), prefs.units) : null));
 
   async function remove() {
     const r = props.run;
     if (!r) return;
-    const gone = props.models ? runModels(r, props.models).length : 0;
+    const known = models.peek();
+    const gone = known ? runModels(r, known).length : undefined;
     busy.set(true);
     try {
       await hub.api.deleteRun(r.id);
       props.onclose();
       // page-level: the confirm closed on the line above.
       toast.success(`Deleted ${r.name}`, gone ? `Its weights and ${gone === 1 ? 'model are' : `${gone} models are`} gone too.` : undefined);
+      modelsChanged();
       props.ondeleted?.(r);
     } catch (e) {
       status.error(e, 'Could not delete the run');

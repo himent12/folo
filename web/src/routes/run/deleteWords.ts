@@ -8,13 +8,14 @@ import { bytes } from '$lib/format';
 export const runModels = (run: Pick<Run, 'id'>, models: readonly Model[]) => models.filter((m) => m.run_id === run.id && (m.source ?? 'run') === 'run');
 
 /**
- * The confirm's description and button. `models` undefined: the list is not loaded yet, so the words say what goes
- * without counting it.
+ * The confirm's description and button. `models` is a list fetched since the confirm opened (./DeleteRun), never an
+ * older one: a run gets its models when it ends, so a list from before can miss them. Undefined until it arrives (or
+ * when it fails): the words then say the weights and models go without counting them, and never that there are none.
  */
 export function deleteWords(run: Pick<Run, 'id'>, models: readonly Model[] | undefined, units: 'binary' | 'metric' = 'binary') {
   if (!models)
     return {
-      description: "Deletes the run, its metric history and its weights on disk, with the models saved from them. This can't be undone.",
+      description: "Deletes the run and its metric history. Its weights and models are deleted too. This can't be undone.",
       button: 'Delete run',
     };
   const mine = runModels(run, models);

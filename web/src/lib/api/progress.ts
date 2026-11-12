@@ -53,3 +53,13 @@ export const ETA_PENDING = 'estimating time left…';
 export function closeMosaicEpochs(closeMosaic: number, epochs: number): number {
   return Math.max(0, Math.min(closeMosaic, Math.floor(Math.max(0, epochs) / 2)));
 }
+
+/**
+ * Seconds a run has trained: from its start to its end, or to `now` while it is active, less the time it sat ended
+ * before a resume (`paused_s`, which the server records). Every screen that says how long a run took or has taken
+ * says this one value (the Runs list, the run page's outcome line and metric strip). Null before it started.
+ */
+export function trainingSeconds(r: Pick<Run, 'started' | 'finished' | 'paused_s'>, now = Date.now()): number | null {
+  if (!r.started) return null;
+  return Math.max(0, ((r.finished ? Date.parse(r.finished) : now) - Date.parse(r.started)) / 1000 - (r.paused_s ?? 0));
+}
