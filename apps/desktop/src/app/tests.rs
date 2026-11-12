@@ -248,3 +248,19 @@ fn new_run_opens_on_the_last_started_choices() {
     });
     assert!(name.contains("-n-"), "{name}");
 }
+
+#[test]
+fn remove_from_queue_deletes_a_run_that_never_started() {
+    use crate::api::RunExt;
+    let (mut app, window) = open();
+    let id = drive(&mut app, window, |this, _, _| {
+        this.store.runs.ready().unwrap().iter().find(|r| r.never_started()).map(|r| r.id.clone())
+    })
+    .expect("the demo data has a run waiting in the queue");
+    drive(&mut app, window, |this, _, cx| this.remove_queued(id.clone(), cx));
+    // Gone from the list and from the server, never left behind as a stopped run.
+    let held = drive(&mut app, window, |this, _, _| this.store.run(&id).is_some());
+    assert!(!held);
+    let api = drive(&mut app, window, |this, _, _| this.store.api.clone());
+    assert!(api.runs().unwrap().iter().all(|r| r.id != id));
+}

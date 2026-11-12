@@ -29,18 +29,25 @@ impl FoloApp {
 
     fn resume_button(&self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rid = r.id.clone();
+        // No checkpoint (no epoch finished): it starts again, as Studio says, never "Resume".
+        let again = !r.can_continue() || self.last_finished_epoch(r) == Some(0);
         let from = self.last_finished_epoch(r).map(|e| e + 1);
+        let label = match from {
+            _ if again => "Start again".to_string(),
+            Some(f) => format!("Resume from epoch {f}"),
+            None => "Resume".to_string(),
+        };
         self.button(
             "run-resume",
-            from.map_or("Resume".to_string(), |f| format!("Resume from epoch {f}")),
+            label,
             Btn::Secondary,
-            Some("icons/play.svg"),
+            Some(if again { "icons/refresh-cw.svg" } else { "icons/play.svg" }),
             window,
             cx,
             act(move |this, _, cx| this.resume_run(rid.clone(), cx)),
         )
         .tooltip(crate::controls::tip(
-            if from == Some(1) {
+            if again {
                 "No epoch finished: starts over with the same config"
             } else {
                 "Continues from the last saved checkpoint"
@@ -243,6 +250,8 @@ impl FoloApp {
             body = body.child(self.cloud_run_panel(&r, &c, now, window, cx));
         } else if r.status == RunStatus::Queued {
             body = body.child(self.queue_panel(&r, cx));
+        } else if r.status == RunStatus::Stopped {
+            body = body.child(self.stopped_panel(&r, cx));
         }
         let data = self.store.run_data.get(id).map(|l| match l {
             Load::Ready(d) => Ok((
@@ -301,6 +310,34 @@ impl FoloApp {
                             .child(queue_text(r.queue_position)),
                     )
                     .child(text(ty::SM, t.text_secondary).child(queue_wait_text(r.queue_position, ahead))),
+            )
+            .into_any_element()
+    }
+
+    /// A stopped run's outcome, as Studio says it: who stopped it (the server's shutdown is never
+    /// the user's own stop) and what it kept; no checkpoint is claimed before an epoch finished.
+    fn stopped_panel(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        panel(&t)
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(16.))
+            .py(px(14.))
+            .child(icon("icons/stop.svg", 18., t.text_secondary))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        text(ty::BASE, t.text_primary)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(r.stopped_title()),
+                    )
+                    .child(text(ty::SM, t.text_secondary).child(r.stopped_detail())),
             )
             .into_any_element()
     }

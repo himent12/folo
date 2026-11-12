@@ -212,6 +212,18 @@ pub trait RunExt {
     /// A cloud run that hasn't reached training yet (provisioning, booting, uploading): it waits on
     /// its instance, not in the training queue.
     fn cloud_pending(&self) -> Option<&RunCloud>;
+    /// A checkpoint to continue from: a model, or a validated best epoch. A run stopped or failed
+    /// before its first epoch ended has none, so it starts again rather than resumes (as in Studio).
+    fn can_continue(&self) -> bool;
+    /// A run waiting in this machine's queue that never started: Remove from queue deletes it
+    /// (docs/API.md, `DELETE /api/runs/{id}`). A resumed run waiting to continue is stopped instead,
+    /// and keeps what it trained.
+    fn never_started(&self) -> bool;
+    /// A stopped run's title, in Studio's words: a stop the server's shutdown or restart made
+    /// (`error_code: "interrupted"`) is never said as the user's own.
+    fn stopped_title(&self) -> String;
+    /// What a stopped run kept, in Studio's words.
+    fn stopped_detail(&self) -> &'static str;
 }
 
 /// `close_mosaic` as the engine applies it to `epochs` (capped at half the run).
@@ -240,6 +252,33 @@ impl RunExt for Run {
         let handing_over =
             |p: CloudPhase| matches!(p, CloudPhase::Provisioning | CloudPhase::Booting | CloudPhase::Syncing);
         self.cloud.as_ref().filter(|c| self.status == RunStatus::Queued && handing_over(c.phase))
+    }
+
+    fn can_continue(&self) -> bool {
+        self.model_id.is_some() || self.best.is_some()
+    }
+
+    fn never_started(&self) -> bool {
+        self.status == RunStatus::Queued && self.started.is_none() && self.cloud.is_none()
+    }
+
+    fn stopped_title(&self) -> String {
+        match (self.error_code.as_deref() == Some("interrupted"), self.started.is_some()) {
+            (true, true) => "Interrupted: the server stopped during training".into(),
+            (true, false) => "Interrupted: the server stopped before it started".into(),
+            _ if self.can_continue() => format!("Stopped at epoch {}", self.epoch),
+            (_, true) => "Stopped during its first epoch".into(),
+            (_, false) => "Stopped before it started".into(),
+        }
+    }
+
+    fn stopped_detail(&self) -> &'static str {
+        match (self.can_continue(), self.model_id.is_some(), self.started.is_some()) {
+            (true, true, _) => "The last checkpoint was kept and saved as a model.",
+            (true, false, _) => "The last checkpoint was kept.",
+            (false, _, true) => "No epoch had finished, so nothing was saved.",
+            (false, _, false) => "It never trained, so nothing was saved.",
+        }
     }
 }
 
@@ -280,6 +319,41 @@ impl SplitsExt for Splits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stopped_run_says_what_it_kept_and_who_stopped_it() {
+        use crate::api::Backend;
+        let api = crate::api::mock::MockBackend::new(4200, true);
+        let base = api.run("run_a19f").unwrap();
+        let stopped = |started: bool, best: bool, code: Option<&str>| Run {
+            status: RunStatus::Stopped,
+            started: started.then(|| "2026-11-08T06:00:02Z".into()),
+            best: if best { base.best } else { None },
+            model_id: None,
+            error_code: code.map(Into::into),
+            ..base.clone()
+        };
+        let before = stopped(false, false, None);
+        assert!(!before.can_continue());
+        assert_eq!(before.stopped_title(), "Stopped before it started");
+        assert_eq!(before.stopped_detail(), "It never trained, so nothing was saved.");
+        assert_eq!(stopped(true, false, None).stopped_title(), "Stopped during its first epoch");
+        let kept = stopped(true, true, None);
+        assert!(kept.can_continue());
+        assert_eq!(kept.stopped_title(), format!("Stopped at epoch {}", kept.epoch));
+        assert_eq!(
+            stopped(true, true, Some("interrupted")).stopped_title(),
+            "Interrupted: the server stopped during training"
+        );
+        assert_eq!(
+            stopped(false, false, Some("interrupted")).stopped_title(),
+            "Interrupted: the server stopped before it started"
+        );
+        // Only a run that never started leaves the queue by being deleted.
+        let queued = Run { status: RunStatus::Queued, ..before.clone() };
+        assert!(queued.never_started());
+        assert!(!Run { started: kept.started.clone(), ..queued }.never_started());
+    }
 
     #[test]
     fn run_parses_contract_example() {

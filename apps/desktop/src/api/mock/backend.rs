@@ -279,7 +279,7 @@ impl Backend for MockBackend {
                 resolved: None,
                 queue_position: None,
                 cloud: None,
-                dataset: None,
+                dataset: Some(RunDataset { name: ds.ds.name.clone(), classes: ds.ds.classes.clone() }),
                 config,
             },
             curve,
@@ -348,7 +348,9 @@ impl Backend for MockBackend {
             .iter()
             .position(|f| f.run.id == id)
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
-        if Self::snapshot(&runs[i]).status.is_active() {
+        // A queued run that never started leaves the queue and is deleted, as on the server.
+        let snap = Self::snapshot(&runs[i]);
+        if snap.status.is_active() && !snap.never_started() {
             return Err(ApiError::new("run_active", format!("run '{id}' is still active"))
                 .with_hint(format!("stop it first: POST /api/runs/{id}/stop")));
         }

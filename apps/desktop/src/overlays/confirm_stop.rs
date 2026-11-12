@@ -2,6 +2,7 @@
 
 use folo_ui::{AnyElement, Context, ParentElement, Styled, Window, div, px};
 
+use crate::api::RunExt;
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
 use crate::theme::{theme, ty};
@@ -40,9 +41,11 @@ impl FoloApp {
             .and_then(|d| d.ready())
             .map(|d| kept_epoch(d.metrics.epochs.last().map(|e| e.epoch), run.as_ref()));
         let rid = id.to_string();
-        // A run still waiting in the queue leaves it: nothing is stopped or lost.
+        // A run still waiting in the queue leaves it: one that never started is deleted (nothing is
+        // lost); a resumed one waiting to continue is stopped and keeps what it trained.
         let waiting =
             run.as_ref().is_some_and(|r| r.status == crate::api::RunStatus::Queued && r.cloud.is_none());
+        let never_started = run.as_ref().is_some_and(|r| r.never_started());
         let cancel = self.button(
             "stop-cancel",
             if waiting { "Keep in queue" } else { "Keep training" },
@@ -65,7 +68,11 @@ impl FoloApp {
             cx,
             act(move |this, w, cx| {
                 this.restore_focus(w);
-                this.stop_run(rid.clone(), cx)
+                if never_started {
+                    this.remove_queued(rid.clone(), cx)
+                } else {
+                    this.stop_run(rid.clone(), cx)
+                }
             }),
         );
         let body = div()
@@ -78,7 +85,8 @@ impl FoloApp {
                     .whitespace_normal()
                     // The epoch in progress is discarded; last.folo is the last finished epoch's.
                     .child(match finished {
-                        _ if waiting => "It hasn't started training, so nothing is lost: it leaves the queue and the runs behind it move up.".to_string(),
+                        _ if never_started => "It hasn't started, so nothing is lost: it leaves the queue and the runs list, and the runs behind it move up.".to_string(),
+                        _ if waiting => "It stops waiting and keeps what it trained so far. You can resume it later.".to_string(),
                         Some(Some(e)) => format!("Stops after the current batch and keeps the epoch {e} checkpoint for export or resume. Progress after epoch {e} is lost."),
                         Some(None) => "Stops after the current batch. No epoch has finished yet, so there is no checkpoint to keep.".to_string(),
                         None => "Stops after the current batch and keeps the last finished epoch's checkpoint for export or resume. Progress after it is lost.".to_string(),

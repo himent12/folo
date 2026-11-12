@@ -468,7 +468,11 @@ impl MockBackend {
                         }),
                         queue_position: (s.status == RunStatus::Queued).then_some(1),
                         cloud: None,
-                        dataset: None,
+                        // As the server records it when the run is created.
+                        dataset: datasets
+                            .iter()
+                            .find(|d| d.ds.id == s.config.dataset_id)
+                            .map(|d| RunDataset { name: d.ds.name.clone(), classes: d.ds.classes.clone() }),
                         config: s.config,
                     },
                     curve,

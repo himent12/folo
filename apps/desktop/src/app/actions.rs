@@ -192,10 +192,12 @@ impl FoloApp {
 
     /// Resume a stopped or failed run from its last checkpoint.
     pub fn resume_run(&mut self, id: String, cx: &mut Context<Self>) {
+        // A run with no finished epoch starts over (the server keeps its config): said as that.
+        let again = self.store.run(&id).is_some_and(|r| !r.can_continue());
         self.fetch(
             cx,
             move |api| api.resume_run(&id),
-            |this, r, cx| match r {
+            move |this, r, cx| match r {
                 Ok(run) => {
                     let (rid, name) = (run.id.clone(), run.name.clone());
                     if let Some(runs) = this.store.runs.ready_mut()
@@ -214,12 +216,15 @@ impl FoloApp {
                     this.history_ticket(&rid, "logs");
                     this.history_ticket(&rid, "samples");
                     this.resubscribe(rid.clone(), cx);
-                    this.toast(
-                        Tone::Accent,
-                        format!("Resuming {name}"),
-                        Some("From its last finished epoch, with the optimizer state.".into()),
-                        cx,
-                    );
+                    let (title, body) = if again {
+                        (format!("Starting {name} again"), "No epoch had finished, so it starts over.")
+                    } else {
+                        (
+                            format!("Resuming {name}"),
+                            "From its last finished epoch, with the optimizer state.",
+                        )
+                    };
+                    this.toast(Tone::Accent, title, Some(body.into()), cx);
                 }
                 Err(e) => this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx),
             },
@@ -335,6 +340,33 @@ impl FoloApp {
         }
     }
 
+    /// Takes a run that never started out of the queue: the server deletes it (docs/API.md), so it
+    /// leaves the list too, as in Studio, instead of staying behind as a stopped run.
+    pub fn remove_queued(&mut self, id: String, cx: &mut Context<Self>) {
+        self.confirm_stop = None;
+        let name = self.store.run(&id).map_or(id.clone(), |r| r.name.clone());
+        let rid = id.clone();
+        self.fetch(
+            cx,
+            move |api| api.delete_run(&rid),
+            move |this, r, cx| match r {
+                Ok(()) => {
+                    this.forget_run(&id);
+                    this.toast(
+                        Tone::Neutral,
+                        format!("Removed {name} from the queue"),
+                        Some("It hadn't started, so nothing was lost.".into()),
+                        cx,
+                    );
+                }
+                Err(e) => {
+                    this.toast(Tone::Danger, format!("Couldn't remove {name}"), Some(e.message.into()), cx)
+                }
+            },
+        );
+        cx.notify();
+    }
+
     pub fn stop_run(&mut self, id: String, cx: &mut Context<Self>) {
         self.confirm_stop = None;
         let rid = id.clone();
@@ -354,6 +386,8 @@ impl FoloApp {
                     // the last steps, a final validation and the terminal status.
                     let name = run.name.clone();
                     let epoch = run.epoch;
+                    // No checkpoint before the first epoch is validated: nothing is claimed then.
+                    let kept = run.can_continue();
                     let stopping = run.status == RunStatus::Stopping;
                     let dequeued = prev == Some(RunStatus::Queued) && run.cloud.is_none();
                     if let Some(runs) = this.store.runs.ready_mut()
@@ -361,22 +395,27 @@ impl FoloApp {
                     {
                         *slot = run;
                     }
+                    let nothing = "No epoch had finished, so nothing is saved.".to_string();
                     let (title, body) = if dequeued {
+                        // A resumed run that waited to continue: it keeps what it trained.
                         (
                             format!("Removed {name} from the queue"),
-                            if epoch > 0 {
-                                format!("Its epoch {epoch} checkpoint is kept.")
-                            } else {
-                                "It hadn't started training.".to_string()
-                            },
+                            if kept { "It keeps what it trained so far.".to_string() } else { nothing },
                         )
                     } else if stopping {
                         (
                             format!("Stopping {name}"),
-                            "Finishing the current step; the last checkpoint is kept.".to_string(),
+                            if kept {
+                                "Finishing the current batch; the last finished epoch's checkpoint is kept."
+                                    .to_string()
+                            } else {
+                                format!("Finishing the current batch. {nothing}")
+                            },
                         )
-                    } else {
+                    } else if kept {
                         (format!("Stopped {name}"), format!("Last checkpoint kept (epoch {epoch})."))
+                    } else {
+                        (format!("Stopped {name}"), nothing)
                     };
                     this.toast(Tone::Neutral, title, Some(body.into()), cx);
                 }

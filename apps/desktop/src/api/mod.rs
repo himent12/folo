@@ -102,8 +102,9 @@ pub trait Backend: Send + Sync + 'static {
     fn run(&self, id: &str) -> ApiResult<Run>;
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run>;
     fn stop_run(&self, id: &str) -> ApiResult<Run>;
-    /// Deletes a run that is not active (`DELETE /api/runs/{id}`; `409 run_active` while queued,
-    /// running or stopping): its folder and weights, so its models go too.
+    /// Deletes a run that is not active (`DELETE /api/runs/{id}`; `409 run_active` while running,
+    /// stopping, or queued after it had started): its folder and weights, so its models go too. A
+    /// queued run that never started leaves the queue and is deleted (Remove from queue).
     fn delete_run(&self, id: &str) -> ApiResult<()>;
     /// Unregisters a dataset (`DELETE /api/datasets/{id}`); its files are never deleted.
     fn delete_dataset(&self, id: &str) -> ApiResult<()>;
