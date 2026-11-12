@@ -157,9 +157,13 @@ export default function Playground() {
     };
   });
 
-  // Decodes finish asynchronously: only the latest request may commit, and nothing commits after destroy.
+  // Decodes and linked images arrive later: only the latest choice may show, and nothing shows after destroy.
   let decodeSeq = 0;
   let destroyed = false;
+  function choose() {
+    const seq = ++decodeSeq;
+    return () => seq === decodeSeq && !destroyed;
+  }
 
   function setSource(s: Source) {
     decodeSeq++;
@@ -175,10 +179,10 @@ export default function Playground() {
   }
 
   async function setFile(file: File | Blob, name = file instanceof File ? file.name : 'pasted image') {
-    const seq = ++decodeSeq;
+    const live = choose();
     // An image the server cannot read (GIF, AVIF...) comes back as a PNG (./playground/intake).
     const t = await takeImage(file, name);
-    if (seq !== decodeSeq || destroyed) return;
+    if (!live()) return;
     if ('error' in t) {
       toast.error(new Error(t.error), 'Unsupported image');
       return;
@@ -351,7 +355,9 @@ export default function Playground() {
     truth,
     hidden,
     setSource,
+    choose,
     model: () => modelId.get() ?? queryModel.get() ?? null,
+    pickModel: (id) => pickedModel.set(id),
   });
 
   effect(() => {
