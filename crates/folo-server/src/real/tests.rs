@@ -224,6 +224,32 @@ fn files_are_kept_while_another_dataset_cannot_be_checked() {
     assert!(!Path::new(&a.path).exists());
 }
 
+/// A dataset that is not there at all reads nothing: one deleted with its files whose run keeps its id, and a
+/// registered one whose folder was moved away, do not keep the next generated set's files for good.
+#[test]
+fn a_dataset_that_is_gone_does_not_keep_other_files() {
+    let t = TestDir::new("real-delete-gone");
+    let store = RealStore::open(t.join("home"));
+    let a = synthetic(&store, "a");
+    let run = run_on(&store, &a.id, "on-a");
+    store.runs.stop(&run).unwrap();
+    store.delete_dataset_files(&a.id).unwrap();
+    assert!(!Path::new(&a.path).exists());
+    let registry = super::registry::read_registry(&store.data_dir).unwrap();
+    assert_eq!(registry.tombstones.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), [a.id.as_str()]);
+
+    let c = t.join("c");
+    let cfg = folo_data::synthetic::SyntheticConfig { images: 4, imgsz: 64, seed: 4, ..Default::default() };
+    folo_data::synthetic::write_yolo(&cfg, &c, folo_data::ImageFormat::Png).unwrap();
+    let moved = register(&store, &c);
+    std::fs::rename(&c, t.join("c-moved")).unwrap();
+
+    let b = synthetic(&store, "b");
+    store.delete_dataset_files(&b.id).unwrap();
+    assert!(!Path::new(&b.path).exists());
+    assert!(store.entry(&moved.id).is_ok(), "the moved dataset stays registered");
+}
+
 /// Registration and run admission wait while a deletion of dataset files holds the lease.
 #[test]
 fn registering_and_creating_runs_wait_for_a_deletion() {

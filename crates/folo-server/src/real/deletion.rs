@@ -19,7 +19,8 @@ impl RealStore {
     /// files then); and while another registered dataset, or a run of an unregistered dataset that keeps its id,
     /// reads images or labels in that folder (`409 dataset_in_use`), judged by its description as it reads now (the
     /// folders its root and sources name, resolved through links, not a cached index), or when what one of them
-    /// reads cannot be checked (also `409 dataset_in_use`: nothing is deleted on a guess). The checks and the
+    /// reads cannot be checked (also `409 dataset_in_use`: nothing is deleted on a guess; one whose path is not
+    /// there at all reads nothing). The checks and the
     /// deletion hold [`RealStore::files`] exclusively, so no dataset is registered and no run created or resumed in
     /// between.
     pub(super) fn delete_own_dataset(&self, id: &str) -> Result<()> {
@@ -50,13 +51,20 @@ impl RealStore {
             .hint("wait for it to end, or stop it first"));
         }
         let in_use = |m: String| Error::conflict("dataset_in_use", m);
-        // Whether the dataset `name` at `path` reads files in the folder; refused when that cannot be told.
-        let reads_folder = |name: &str, path: &str, format| match reads(path, format) {
-            Ok(paths) => Ok(paths.iter().any(|p| overlaps(p, &folder))),
-            Err(e) => Err(in_use(format!(
-                "the files of {name} could not be checked ({e}), so they may be in that folder"
-            ))
-            .hint(format!("fix {name} first, or unregister this dataset without files=true"))),
+        // Whether the dataset `name` at `path` reads files in the folder; refused when that cannot be told. A
+        // dataset whose folder or description is not there at all reads nothing (one moved away, or one deleted
+        // with its files earlier whose runs keep its id): it must not stand in the way for good.
+        let reads_folder = |name: &str, path: &str, format| {
+            if matches!(Path::new(path).try_exists(), Ok(false)) {
+                return Ok(false);
+            }
+            match reads(path, format) {
+                Ok(paths) => Ok(paths.iter().any(|p| overlaps(p, &folder))),
+                Err(e) => Err(in_use(format!(
+                    "the files of {name} could not be checked ({e}), so they may be in that folder"
+                ))
+                .hint(format!("fix {name} first, or unregister this dataset without files=true"))),
+            }
         };
         let others: Vec<_> =
             self.entries.read().unwrap().iter().filter(|e| e.reg().id != id).cloned().collect();

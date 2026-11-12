@@ -188,7 +188,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   images or labels in that folder by its description as it reads at that moment (its root, split sources and the
   folders of its images and labels), and also while what one of them reads cannot be checked (its description
   cannot be read or parsed, or one of those folders cannot be listed or resolved): the message names that dataset,
-  nothing is unregistered or deleted, and unregistering without `files=true` still works. The check covers the
+  nothing is unregistered or deleted, and unregistering without `files=true` still works. A dataset whose path is not
+  there at all (its folder was moved away, or it was deleted with its files and a run keeps its id) reads nothing and
+  refuses nothing. The check covers the
   folders of other registrations and retained runs, resolved through directory links (a folder of another dataset
   that is a junction or symlink into this one counts), but not a link to a single image file from elsewhere.
   Registering a dataset or creating or resuming a run waits until the checks and the deletion are done. Mock mode keeps
