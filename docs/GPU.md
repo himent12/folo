@@ -436,7 +436,8 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   apply `alpha`, bias and activation to 8 elements each and store them with bounds checks. Configs: 128×128 (4×2
   fragments per subgroup), 64×128, 64×64, 32×128 for `M ≤ 32` and 16×256 for `M ≤ 16` (folo-n's 16- and 32-channel
   early layers); `coop::pick_config` picks by `M` and occupancy for plain GEMMs and the conv gradients. The forward
-  convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM) pick through `coop::pick_config_conv` instead:
+  convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM, routed or through `coop::conv2d` without a
+  config) pick through `coop::pick_config_conv` instead:
   the flat tiles for `M ≤ 32` as above, 64×128 for outputs of at least 128 channels and 6400 pixels (80 px and
   up), 64×64 otherwise. On folo-n / folo-s's convs at batch 16, 128×128 was never the fastest and 64×64 beat it by
   11–50% at 40 and 20 px and on the stride-2 convs; the switch made the f16 tensor-core forward of folo-s 25%

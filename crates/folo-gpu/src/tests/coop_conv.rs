@@ -688,3 +688,79 @@ fn coop_conv_reads_parts_and_slices_in_place() {
     assert!(chunks > 1, "the slice case must split K, ran {chunks} chunk(s)");
     assert_within(&gy.to_vec().unwrap(), &want, &tol, "coop split-K conv on a slice");
 }
+
+/// `(BM, BN)` of the one tensor-core GEMM that `f` encodes on `ctx`, read from a trace.
+#[track_caller]
+fn traced_tile(ctx: &GpuContext, f: impl FnOnce()) -> (u32, u32) {
+    ctx.trace_begin();
+    f();
+    let ops = ctx.trace_end();
+    let gemms: Vec<_> = ops.iter().filter(|op| op.name.starts_with("coop_gemm")).collect();
+    let names: Vec<_> = ops.iter().map(|op| op.name).collect();
+    assert_eq!(gemms.len(), 1, "one tensor-core GEMM, ran {names:?}");
+    let get = |key: &str| -> u32 {
+        let v = gemms[0].spec.split(' ').find_map(|p| p.strip_prefix(key));
+        v.and_then(|v| v.parse().ok()).unwrap_or_else(|| panic!("no {key} in {:?}", gemms[0].spec))
+    };
+    (get("BM="), get("BN="))
+}
+
+/// The forward 1×1 conv (routed and explicit without a config) and the 1×1 conv over a concatenation read in place
+/// run the forward pick's tiles, against the reference: 64×64 for 64 channels at 64×64 px (batch 4, where the GEMM
+/// pick takes 64×128) and 64×128 for 128 channels at 80×80 px (6400 pixels; the GEMM pick takes 64×64).
+#[test]
+fn coop_pointwise_convs_take_the_forward_tiles() {
+    let (ctx, _g) = coop!();
+    let mut rng = Rng::new(97);
+    let (c0, c1) = (4, 8);
+    for (n, size, c_out, cfg) in [(4, 64, 64, CoopConfig::C64X64), (1, 80, 128, CoopConfig::C64X128)] {
+        let hw = size * size;
+        assert_eq!(coop::pick_config_conv(c_out, hw), cfg);
+        assert_ne!(coop::pick_config(c_out, hw, n), cfg, "a shape where the GEMM pick differs");
+        let d = cdesc(n, c0 + c1, size, size, c_out, 1, Window2d::square(1, 1, 0));
+        let x = f16_round(&rng.vec(n * (c0 + c1) * hw, -1.0, 1.0));
+        let wt = f16_round(&rng.vec(c_out * (c0 + c1), -1.0, 1.0));
+        let b = f16_round(&rng.vec(c_out, -1.0, 1.0));
+        let want = cpu_conv(&d, &x, &wt, Some(&b), false);
+        let sums = cpu_conv(&d, &x, &wt, None, true);
+        let bmax = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let tol: Vec<f64> =
+            want.iter().zip(&sums).map(|(&y, &s)| bound(y, s as f64, c0 + c1, bmax, DType::F16)).collect();
+        let (gx, gw, gb) =
+            (upload(&ctx, &x, DType::F16), upload(&ctx, &wt, DType::F16), upload(&ctx, &b, DType::F16));
+        let check = |what: &str, encode: &dyn Fn(&wgpu::Buffer)| {
+            let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F16).unwrap();
+            assert_eq!(traced_tile(&ctx, || encode(gy.raw())), (cfg.bm, cfg.bn), "tile of the {what} {d:?}");
+            assert_within(&gy.to_vec().unwrap(), &want, &tol, &format!("{what} {d:?}"));
+        };
+        check("routed 1x1 conv", &|y| {
+            conv::conv2d(&ctx, &d, gx.raw(), gw.raw(), Some(gb.raw()), y).unwrap();
+        });
+        check("tensor-core 1x1 conv", &|y| {
+            coop::conv2d(&ctx, &d, DType::F16, gx.raw(), gw.raw(), Some(gb.raw()), y, None).unwrap();
+        });
+        // The same input as two parts: its first channels as a slice of a larger buffer, the rest whole.
+        let part = |from: usize, c: usize| -> Vec<f32> {
+            (0..n)
+                .flat_map(|i| x[(i * (c0 + c1) + from) * hw..(i * (c0 + c1) + from + c) * hw].to_vec())
+                .collect()
+        };
+        let g0 = upload(&ctx, &embed(&part(0, c0), n, c0, hw, c0 + 5, 3, &mut rng), DType::F16);
+        let g1 = upload(&ctx, &part(c0, c1), DType::F16);
+        let parts = [
+            conv::ConvPart {
+                buf: g0.raw(),
+                channels: c0,
+                at: conv::ConvInput { offset: 3 * hw, n_stride: (c0 + 5) * hw },
+            },
+            conv::ConvPart {
+                buf: g1.raw(),
+                channels: c1,
+                at: conv::ConvInput { offset: 0, n_stride: c1 * hw },
+            },
+        ];
+        check("1x1 conv over a concatenation", &|y| {
+            conv::conv2d_cat(&ctx, &d, &parts, gw.raw(), Some(gb.raw()), y).unwrap();
+        });
+    }
+}

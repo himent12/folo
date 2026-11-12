@@ -246,7 +246,10 @@ FOLO_BENCH_PRECISION=f16tc FOLO_CONV_TUNE=1 FOLO_CONV_BIG=1`, on #199's build; `
 GEMM, the 1×1 GEMM, the concatenation GEMM): the flat tiles for `M ≤ 32` as before, 64×128 for `M ≥ 128` and
 `OH·OW ≥ 6400`, else 64×64. The conv gradients and plain GEMMs keep `pick_config`. With smaller tiles fewer
 convs reach split-K (more workgroups), which also removes the cases where split-K on tensor cores did not pay
-(s c3k 64 → 64 @ 40: 81 µs picked with 3 chunks, 41 µs now).
+(s c3k 64 → 64 @ 40: 81 µs picked with 3 chunks, 41 µs now). `coop::conv2d` without a config picks the same way
+for its 1×1 path. Tests: the routed and the explicit 1×1 conv and the concatenation GEMM run the new 64×64 and
+64×128 tiles (shapes where `pick_config` picks the other one; the tile is read from a trace) against the CPU
+reference.
 
 A/B, #199 (A) against #199 + this (B), `gpu_profile` f16tc, 5 rounds, GPU 0–3% before every run
 (`ab/prof_tiles5`):

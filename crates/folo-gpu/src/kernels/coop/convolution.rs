@@ -4,7 +4,7 @@
 #[cfg(doc)]
 use super::matmul::gemm;
 use super::matmul::{base_spec, build, check_io, encode_gemm};
-use super::{CoopConfig, pick_config, pick_config_conv, resolve};
+use super::{CoopConfig, conv_config, pick_config, pick_config_conv, resolve};
 use crate::DType;
 use crate::UnaryOp;
 use crate::context::GpuContext;
@@ -17,7 +17,8 @@ use crate::pipeline::Spec;
 /// [`DType::F16`]), f32 accumulation, and `y` and the bias stored as `out` (f16 or f32). 1×1 stride-1 convs run as
 /// the tensor-core GEMM, other non-depthwise convs as the implicit-GEMM conv; depthwise convs have no tensor-core
 /// path (one output row per group) and fail with [`GpuError::Unsupported`], as does a context without tensor cores.
-/// Ignores the run-time switch like [`gemm`]. Returns `(OH, OW)`.
+/// Without `cfg`, both paths take the forward convs' tile pick ([`pick_config_conv`]). Ignores the run-time switch
+/// like [`gemm`]. Returns `(OH, OW)`.
 #[allow(clippy::too_many_arguments)]
 pub fn conv2d(
     ctx: &GpuContext,
@@ -40,7 +41,7 @@ pub fn conv2d(
     let g = d.gemm_view(oh, ow, bias.is_some());
     let bias = bias.unwrap_or(ctx.dummy());
     let built = if d.is_pointwise() {
-        encode_gemm(ctx, &g, out, weight, x, bias, y, cfg)?
+        encode_gemm(ctx, &g, out, weight, x, bias, y, cfg.or_else(|| conv_config(ctx, g.m, g.n)))?
     } else {
         encode_conv(ctx, d, &g, out, x, weight, bias, y, cfg, None)?
     };
