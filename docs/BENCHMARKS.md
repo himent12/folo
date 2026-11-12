@@ -21,9 +21,10 @@ each row, folo-n is faster than yolo26n on every row measured: 4.0× to 5.2× at
 3.5× at batch-16 throughput, 1.8× to 1.9× on the CPU and 1.9× to 2.7× in training, with about a quarter less GPU
 memory allocated. folo-s against yolo26s: 1.3× to 3.6×. The table of record is [FOLO targets](#folo-targets); FOLO's
 numbers are medians of runs alternated with its previous build (2026-11-12), the incumbent's were measured on
-2026-11-07. One difference in protocol is open: FOLO's batch-1 latency is timed after a second of back-to-back
-warm-up calls (since [Hill-climb 2](#hill-climb-2-2026-11-12)), the incumbent's after 25 calls ([Method](#method)),
-and the incumbent has not been measured again with the longer warm-up.
+2026-11-07. One difference in protocol is open, in the GPU batch-1 latency rows: both sides warm up with 25 calls
+(forward) or 10 (end to end), and FOLO's bench then keeps warming until a second has passed (since
+[Hill-climb 2](#hill-climb-2-2026-11-12)), which the incumbent's does not ([Method](#method)). The incumbent has not
+been measured again with that longer warm-up. The CPU rows warm up with 5 calls on both sides.
 
 <p align="center">
   <picture>

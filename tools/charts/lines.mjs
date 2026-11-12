@@ -16,6 +16,9 @@ const RIGHT = 112;
 export function linesFigure(spec, t) {
   const out = [];
   let y = PAD;
+  for (const [what, str, size] of [['title', spec.title, 17], ['subtitle', spec.subtitle, 13]]) {
+    if (textWidth(str, size, size === 17 ? 600 : 400) > W - 2 * PAD) throw new Error(`${spec.title}: the ${what} does not fit`);
+  }
   out.push(text(PAD, y + 15, spec.title, { size: 17, weight: 600, fill: t.ink, tracking: '-0.01em' }));
   y += 26;
   out.push(text(PAD, y + 12, spec.subtitle, { size: 13, fill: t.ink2 }));
@@ -41,10 +44,10 @@ export function linesFigure(spec, t) {
   for (const tick of spec.yTicks) {
     const gy = Math.round(py(tick)) + 0.5;
     out.push(line(x0, gy, x1, gy, tick === 0 ? t.axis : t.grid));
-    out.push(text(x0 - 10, gy + 4, spec.yFormat(tick), { size: 11, fill: t.tick, anchor: 'end' }));
+    out.push(text(x0 - 10, gy + 4, spec.yFormat(tick), { size: 12.5, fill: t.tick, anchor: 'end' }));
   }
   for (const tick of spec.xTicks) {
-    out.push(text(px(tick), y + PLOT_H + 18, String(tick), { size: 11, fill: t.tick, anchor: 'middle' }));
+    out.push(text(px(tick), y + PLOT_H + 18, String(tick), { size: 12.5, fill: t.tick, anchor: 'middle' }));
   }
   out.push(text((x0 + x1) / 2, y + PLOT_H + 38, spec.xTitle, { size: 12.5, fill: t.ink3, anchor: 'middle' }));
 

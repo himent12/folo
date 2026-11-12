@@ -67,8 +67,9 @@ much noise to expect.
 </details>
 
 FOLO's numbers were measured on `main` on 2026-11-12, alternated run by run with the build before it on a mostly
-quiet machine; yolo26n's on 2026-11-07, its best configuration for each row. The two batch-1 latency protocols
-differ in their warm-up (a second of calls for FOLO, 25 calls for yolo26n). folo-s beats yolo26s on every row
+quiet machine; yolo26n's on 2026-11-07, its best configuration for each row. The GPU batch-1 latency warm-ups
+differ: both make the same calls first (25, or 10 end to end), and FOLO's bench then keeps warming until a second has
+passed. folo-s beats yolo26s on every row
 measured for it as well ([the chart by model size](docs/BENCHMARKS.md#summary)); its whole-trainer row was not
 measured.
 

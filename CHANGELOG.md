@@ -143,8 +143,9 @@ fixes.
   yolo26s at batch 16 too (819 and 1799 img/s; both were ties).
 - **`auto` picks MuSGD for every run** (rules 4 and 5, docs/MODEL.md §8.2): lr0 0.01, momentum 0.937, a bias warmup
   from 0.1, and for runs from scratch step weights 0.5 / 0.5. On the COCO subset used to compare trainers it reaches
-  AP 0.123 where the rule before reached 0.076. MuSGD's Muon step runs in fused kernels, so its cost over SGD fell
-  from 23% of a step to under 1% with `--amp`. A resumed run keeps the rule it started with.
+  AP 0.123 where the rule before reached 0.076. MuSGD's Muon step runs in fused kernels, so with `--amp` its
+  step-time overhead over SGD fell from about 23% to under 1% for folo-n, and from 21% to 8% for folo-s. A resumed
+  run keeps the rule it started with.
 - **Start-up**: `folo train` on COCO reaches its first optimizer step in 1.3 s with warm caches (was 36.5 s): the
   dataset scan and the compiled pipelines are cached, and pipelines compile on worker threads from a recorded kernel
   list. `folo val` on COCO val2017 takes 4.5 s (was 8.0 s).
