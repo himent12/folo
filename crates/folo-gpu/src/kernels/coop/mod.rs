@@ -126,11 +126,12 @@ pub fn pick_config(m: usize, n: usize, batch: usize) -> CoopConfig {
 }
 
 /// [`pick_config`] for the forward convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM): short `M` gets
-/// the flat tiles as there, then 64×128 for outputs of at least 128 channels and 6400 pixels (80 px and up), else
-/// 64×64. Measured on an RTX 4080 SUPER at folo-n / folo-s's shapes, batch 16 (`cargo bench -p folo-gpu --bench
-/// conv_model`, `FOLO_CONV_TUNE=1 FOLO_CONV_BIG=1`): 128×128 was never the fastest, and 64×64 beat it by 11–50% at
-/// 40 and 20 px and on stride-2 convs; 64×128 led 64×64 by 2–5% on the large outputs. The gradients keep
-/// [`pick_config`].
+/// the flat tiles as there, then 64×128 for outputs of at least 128 channels (per group: `m` is `C_out / groups`)
+/// and 6400 pixels (80 px and up), else 64×64. Measured on an RTX 4080 SUPER at folo-n / folo-s's shapes, batch 16
+/// (`cargo bench -p folo-gpu --bench conv_model`, `FOLO_CONV_TUNE=1 FOLO_CONV_BIG=1`): 128×128 was never the
+/// fastest; 64×64 took 14–63% less time than it at 40 and 20 px and on the stride-2 convs, and 64×128 2.8–5.3%
+/// less than 64×64 on the three large outputs the sweep has. Not measured: folo-m / l's wider layers on their own,
+/// grouped convs, non-640 inputs. The gradients keep [`pick_config`].
 pub fn pick_config_conv(m: usize, n: usize) -> CoopConfig {
     if m <= 32 {
         return pick_config(m, n, 1);

@@ -438,10 +438,11 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   early layers); `coop::pick_config` picks by `M` and occupancy for plain GEMMs and the conv gradients. The forward
   convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM, routed or through `coop::conv2d` without a
   config) pick through `coop::pick_config_conv` instead:
-  the flat tiles for `M ≤ 32` as above, 64×128 for outputs of at least 128 channels and 6400 pixels (80 px and
-  up), 64×64 otherwise. On folo-n / folo-s's convs at batch 16, 128×128 was never the fastest and 64×64 beat it by
-  11–50% at 40 and 20 px and on the stride-2 convs; the switch made the f16 tensor-core forward of folo-s 25%
-  faster (docs/hill/r2-gpu-gemm.md, PR 3). 45 KiB of workgroup memory at 128×128.
+  the flat tiles for `M ≤ 32` as above, 64×128 for outputs of at least 128 channels per group and 6400 pixels
+  (80 px and up), 64×64 otherwise. On folo-n / folo-s's convs at batch 16, 128×128 was never the fastest and 64×64
+  took 14–63% less time than it at 40 and 20 px and on the stride-2 convs; the switch raised folo-s's batch-16
+  f16 tensor-core forward throughput by 25% (pipelined; batch-1 GPU time unchanged; docs/hill/r2-gpu-gemm.md,
+  PR 3). 45 KiB of workgroup memory at 128×128.
 - **Accuracy.** Products of f16 values are exact in f32, so the only difference from the regular f16 kernels is
   the f32 summation order. `src/tests/coop.rs` checks the kernels against the f64 CPU on the same f16 inputs with a
   per-element bound of `K · 2^-23 · Σ|a·b|` (one ulp per addition, which also covers tensor cores that truncate
