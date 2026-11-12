@@ -36,9 +36,12 @@ fn close_objects(s: &mut JsonObject) {
 }
 
 /// `train`'s input: TrainConfig plus `resume_run_id`, where `dataset_id` is required unless `resume_run_id` is
-/// given (a resume may leave every other field out).
+/// given (a resume may leave every other field out). `name` says the server's limit (`maxLength`).
 pub(super) fn train_input() -> Arc<JsonObject> {
     let mut s = (*input::<TrainArgs>()).clone();
+    if let Some(Value::Object(name)) = s.get_mut("properties").and_then(|p| p.get_mut("name")) {
+        name.insert("maxLength".into(), json!(folo_server::store::MAX_RUN_NAME_CHARS));
+    }
     if let Some(Value::Array(required)) = s.get_mut("required") {
         required.retain(|r| r != "dataset_id");
         if required.is_empty() {

@@ -119,8 +119,13 @@ pub(super) fn unknown_argument(tool: &str, schema: &JsonObject, args: &JsonObjec
 }
 
 pub(super) fn check_name(what: &str, s: &str) -> Result<(), Error> {
-    if s.chars().count() > MAX_NAME_CHARS {
-        return Err(invalid_arguments(format!("{what} must be at most {MAX_NAME_CHARS} characters")));
+    check_name_at(what, s, MAX_NAME_CHARS)
+}
+
+/// [`check_name`] with the limit the server sets for this kind of name (a run's: `MAX_RUN_NAME_CHARS`).
+pub(super) fn check_name_at(what: &str, s: &str, max: usize) -> Result<(), Error> {
+    if s.chars().count() > max {
+        return Err(invalid_arguments(format!("{what} must be at most {max} characters")));
     }
     Ok(())
 }

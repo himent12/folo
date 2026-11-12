@@ -143,3 +143,31 @@ fn diff_lists_differing_fields() {
     assert_eq!(d.keys().collect::<Vec<_>>(), ["augment.fliplr", "epochs", "name"]);
     assert_eq!(d["epochs"], vec![json!(10), json!(20)]);
 }
+
+/// `train` takes a run name as long as the server does (`POST /api/runs`: 64 characters), and its inputSchema says so.
+#[tokio::test]
+async fn train_names_are_capped_as_the_server_caps_them() {
+    use folo_server::store::{MAX_RUN_NAME_CHARS, Store};
+    let schema = (find("train").unwrap().input)();
+    assert_eq!(schema["properties"]["name"]["maxLength"], json!(MAX_RUN_NAME_CHARS));
+    let store = std::sync::Arc::new(folo_server::MockStore::new());
+    let ds = store.list_datasets().unwrap().remove(0).id;
+    let home = folo_test_support::TestDir::new("mcp-train-name");
+    let opts = crate::Options {
+        data_dir: home.to_path_buf(),
+        read_only: false,
+        confine: false,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let server = crate::server::FoloMcp::new(store, None, opts);
+    let args = |n: usize| {
+        json!({ "dataset_id": ds, "name": "é".repeat(n), "epochs": 1 }).as_object().unwrap().clone()
+    };
+    let e = server.inner.train(args(MAX_RUN_NAME_CHARS + 1)).await.err().unwrap();
+    assert_eq!(
+        (e.body.code.as_str(), e.body.message.as_str()),
+        ("invalid_arguments", "name must be at most 64 characters")
+    );
+    assert!(server.inner.train(args(MAX_RUN_NAME_CHARS)).await.is_ok());
+}

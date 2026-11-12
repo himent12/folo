@@ -97,7 +97,8 @@ nested objects included, has `additionalProperties: false`: **an argument the to
   CLI and docs/API.md (`folo_api::codes`; the same failure has the same code on every front end): store errors
   pass through unchanged, except the HTTP layer's names for bad input (`invalid_body`, `invalid_query`,
   `invalid_path`, `bad_request`), which are `invalid_arguments`. Added by MCP: `invalid_arguments` (arguments
-  that fail the `inputSchema`, unknown ones included, or a documented range, e.g. names over 128 characters),
+  that fail the `inputSchema`, unknown ones included, or a documented range, e.g. a run name over 64 characters,
+  as `POST /api/runs` refuses it, or other names over 128),
   `read_only`, `path_outside_data_dir`, `path_not_found`, `too_many_inputs`, `payload_too_large` (images over 64
   MiB), `result_too_large` (see below) and `server_unreachable` (proxy mode, `folo serve` not answering). A
   `TrainConfig` value the trainer cannot use (`arch: "folo-q"`, out of range) is `invalid_config` as in the CLI;
