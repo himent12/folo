@@ -48,7 +48,14 @@ impl FoloApp {
             rest.push("mixed precision".into());
         }
         if let Some(s) = r.started.as_deref().and_then(crate::api::time::parse) {
-            rest.push(format!("started {}", crate::api::time::ago(s, self.store.api.now())));
+            // Training, it sits by an elapsed clock: the same seconds, not "just now".
+            let now = self.store.api.now();
+            let when = if r.status.is_active() {
+                crate::api::time::ago_live(s, now)
+            } else {
+                crate::api::time::ago(s, now)
+            };
+            rest.push(format!("started {when}"));
         }
         // The architecture leads, its e2e tag right after it, as in every list.
         let tag = (r.config.head == Head::O2o).then(|| crate::ui::e2e_tag(t, format!("e2e-{id}-{}", r.id)));

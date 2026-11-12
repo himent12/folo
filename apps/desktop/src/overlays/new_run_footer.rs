@@ -14,14 +14,14 @@ use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
 
 /// A reference estimate's duration, as precise as it is: whole minutes ("≈ 10 min", "≈ 1 h 25 min"),
-/// seconds only under a minute.
+/// seconds only under a minute (and all of it: 30 to 59 s rounded to "1 min" put a point outside its
+/// range in seconds).
 fn rough_duration(secs: f64) -> String {
-    let m = (secs / 60.).round() as u64;
-    match m {
-        0 => format!("{:.0} s", secs.max(1.)),
-        1..60 => format!("{m} min"),
-        _ => format!("{} h {} min", m / 60, m % 60),
+    if secs.round() < 60. {
+        return format!("{:.0} s", secs.max(1.));
     }
+    let m = (secs / 60.).round() as u64;
+    if m < 60 { format!("{m} min") } else { format!("{} h {} min", m / 60, m % 60) }
 }
 
 /// An estimate's range, as rough as its ends: whole minutes under an hour ("7–15 min"), else
@@ -477,6 +477,10 @@ mod tests {
         assert_eq!(estimate_text(900., 420., 600.), ("10 min".to_string(), "7–10 min".to_string()));
         assert_eq!(estimate_text(576., 420., 900.), ("10 min".to_string(), "7–15 min".to_string()));
         assert_eq!(estimate_text(20., 10., 40.), ("20 s".to_string(), "10–40 s".to_string()));
+        // Half a minute and more, under a minute: seconds, like its range ("≈ 1 min (32–39 s)" was shown).
+        assert_eq!(estimate_text(36., 32., 39.), ("36 s".to_string(), "32–39 s".to_string()));
+        assert_eq!(rough_duration(45.), "45 s");
+        assert_eq!(rough_duration(59.6), "1 min");
     }
 
     #[test]

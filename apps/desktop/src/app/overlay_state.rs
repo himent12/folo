@@ -201,10 +201,23 @@ impl FoloApp {
     }
 
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.inspector = None;
-        match self.inspector_return.take() {
-            Some(fh) => window.focus(&fh),
-            None => window.focus(&self.root_focus),
+        let closed = self.inspector.take();
+        let opener = self.inspector_return.take();
+        // Opened from the dataset's grid: back on the image it showed last (scrolled into view and
+        // focused), not on the tile it was opened from (←/→ may have walked far from it).
+        let last =
+            closed.filter(|i| i.sample.is_none() && self.route == super::Route::Dataset(i.dataset.clone()));
+        if let Some(i) = last
+            && let Some(id) = self.filtered_image(&i.dataset, i.index).map(|m| m.id.clone())
+        {
+            self.grid_scroll.scroll_to_item(i.index / self.grid_cols(), folo_ui::ScrollStrategy::Center);
+            let fh = self.fh(format!("tile-{id}"), cx);
+            window.focus(&fh);
+        } else {
+            match opener {
+                Some(fh) => window.focus(&fh),
+                None => window.focus(&self.root_focus),
+            }
         }
         cx.notify();
     }

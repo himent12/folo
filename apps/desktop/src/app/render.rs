@@ -131,6 +131,7 @@ impl Render for FoloApp {
             // Keyboard mode turns on in the capture phase, before a focused control (a slider, a
             // segmented group) consumes the key, so its first keyboard step already shows the ring.
             .capture_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, _, cx| {
+                this.pointer_moved = false;
                 let nav = matches!(
                     ev.keystroke.key.as_str(),
                     "up" | "down" | "left" | "right" | "home" | "end" | "pageup" | "pagedown"

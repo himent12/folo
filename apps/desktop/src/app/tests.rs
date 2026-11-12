@@ -609,3 +609,31 @@ fn a_run_that_ends_shows_its_model_and_end_at_once() {
         assert!(this.toasts.iter().any(|t| t.title.ends_with("finished")));
     });
 }
+
+#[test]
+fn closing_the_inspector_lands_on_the_image_it_showed_last() {
+    use super::Route;
+    let (mut app, window) = open();
+    let ds = drive(&mut app, window, |this, w, cx| {
+        let ds = this.store.datasets.ready().unwrap()[0].id.clone();
+        this.navigate(Route::Dataset(ds.clone()), w, cx);
+        ds
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, cx| this.ensure_dataset(&ds, cx));
+    // Opened on the first tile (focused by its click), then walked on to the 24th image.
+    drive(&mut app, window, |this, w, cx| {
+        let first = this.filtered_image(&ds, 0).unwrap().id.clone();
+        let fh = this.fh(format!("tile-{first}"), cx);
+        w.focus(&fh);
+        this.open_inspector(ds.clone(), 0, w, cx);
+        for _ in 0..23 {
+            this.step_inspector(1, cx);
+        }
+    });
+    drive(&mut app, window, |this, w, cx| {
+        let shown = this.filtered_image(&ds, 23).unwrap().id.clone();
+        this.close_inspector(w, cx);
+        assert!(this.fh(format!("tile-{shown}"), cx).is_focused(w), "focus is on the image shown last");
+    });
+}

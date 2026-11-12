@@ -281,6 +281,9 @@ pub struct FoloApp {
     pub switch_seen: RefCell<HashMap<String, (bool, Option<std::time::Instant>)>>,
     /// The last input came from the keyboard, so focus rings are shown.
     pub kb: bool,
+    /// The pointer moved since the last key: a keyboard focus tip (an image tile's) gives way to the
+    /// pointer's own tooltips instead of standing beside them.
+    pub pointer_moved: bool,
     pub page_scroll: ScrollHandle,
     /// A scroll thumb being dragged: its container, the pointer's start y and the start offset.
     pub scroll_drag: Option<(ScrollHandle, Pixels, Pixels)>,
@@ -522,6 +525,7 @@ impl FoloApp {
             focus: RefCell::new(HashMap::new()),
             switch_seen: RefCell::new(HashMap::new()),
             kb: false,
+            pointer_moved: false,
             page_scroll: ScrollHandle::new(),
             scroll_drag: None,
             play_side_scroll: ScrollHandle::new(),
