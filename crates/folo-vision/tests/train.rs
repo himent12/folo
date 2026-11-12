@@ -776,3 +776,29 @@ fn o2o_attached_epochs_switch_at_the_boundary() {
     assert_eq!(t.run().unwrap().epochs_completed, 3);
     assert!(detached(&t), "epoch 3 is past the 2 attached epochs");
 }
+
+/// `auto` rule 5 (docs/MODEL.md §8.2): MuSGD with the scratch step weights 0.5 / 0.5 for a run from scratch, the
+/// configured 0.2 / 1.0 for one that starts from weights (`transfer`, which the trainer sets from
+/// `TrainOptions::weights` whatever the config says, and which a resume keeps); no training needed.
+#[test]
+fn auto_musgd_weights_follow_transfer_and_survive_resume() {
+    use folo_nn::optim::{AUTO_MUSGD_SCRATCH_WEIGHTS, MuSgdWeights, OptimKind};
+    let ds = shapes(2, 1, 64);
+    let cfg = TrainConfig { optimizer: OptimizerChoice::Auto, transfer: true, ..micro_config(2) };
+    let scratch = Trainer::new(cfg.clone(), data(&ds), options(None).0).unwrap();
+    assert!(!scratch.config().transfer, "no weights: from scratch, whatever the config said");
+    let o = scratch.optimizer();
+    assert_eq!((o.kind, o.musgd), (OptimKind::MuSgd, AUTO_MUSGD_SCRATCH_WEIGHTS));
+    let weights = TestFile::new("train-auto-transfer", "start.folo");
+    scratch.save_checkpoint(&weights).unwrap();
+
+    let opts = TrainOptions { weights: Some(weights.path().to_path_buf()), ..options(None).0 };
+    let tuned = Trainer::new(TrainConfig { transfer: false, ..cfg }, data(&ds), opts).unwrap();
+    assert!(tuned.config().transfer);
+    assert_eq!(tuned.optimizer().musgd, MuSgdWeights::default());
+    let ckpt = TestFile::new("train-auto-transfer", "last.folo");
+    tuned.save_checkpoint(&ckpt).unwrap();
+    let resumed = Trainer::resume(&ckpt, data(&ds), options(None).0, ResumeOverrides::default()).unwrap();
+    assert!(resumed.config().transfer, "a resumed fine-tune stays one");
+    assert_eq!(resumed.optimizer().musgd, MuSgdWeights::default());
+}

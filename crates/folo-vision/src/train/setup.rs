@@ -10,8 +10,7 @@ use folo_core::rng::Rng;
 use folo_data::{DataLoader, LoaderConfig};
 use folo_nn::io::{BestState, ModelConfig, ModelFile};
 use folo_nn::optim::{
-    AdamW, GradAccumulator, MuSgd, MuSgdWeights, OptimKind, Optimizer, Sgd, StandardGroups,
-    effective_weight_decay,
+    AdamW, GradAccumulator, MuSgd, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
 };
 use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module};
 
@@ -76,6 +75,8 @@ impl Trainer {
     /// A new run of `cfg` on `data`.
     pub fn new(cfg: TrainConfig, data: TrainData, opts: TrainOptions) -> Result<Self> {
         let weights = opts.weights.clone();
+        // Stored with the run (`folo.train`), so a resume resolves `auto` as this run started (§8.2, rule 5).
+        let cfg = TrainConfig { transfer: weights.is_some(), ..cfg };
         let mut t = Self::build(cfg, data, opts)?;
         t.warnings = schedule_warnings(&t.cfg, &t.sched, t.data.train.len(), weights.is_none());
         if let Some(w) = weights {
@@ -285,7 +286,7 @@ impl Trainer {
                     |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
                     cfg.musgd.cls_lr,
                 ),
-                MuSgdWeights { muon: cfg.musgd.muon, sgd: cfg.musgd.sgd },
+                resolved.musgd,
             )?),
         };
         let nb = n_train.div_ceil(cfg.batch);

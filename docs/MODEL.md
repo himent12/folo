@@ -649,9 +649,18 @@ Three groups, assigned by tensor name:
 
 Effective weight decay: `wd = weight_decay · batch · accumulate / nbs`.
 
-`auto` (rule 4): MuSGD (below) with `lr0 = 0.01`, `momentum = 0.937` and `warmup_bias_lr = 0.1` for every run,
-short or long, from scratch or from pretrained weights. An explicit `sgd`/`adamw`/`musgd` uses `lr0`, `momentum` and
-`warmup_bias_lr` as given.
+`auto` (rule 5): MuSGD (below) with `lr0 = 0.01`, `momentum = 0.937` and `warmup_bias_lr = 0.1` for every run,
+short or long, from scratch or from pretrained weights; from scratch with the step weights `muon = sgd = 0.5`
+(`folo_nn::optim::AUTO_MUSGD_SCRATCH_WEIGHTS`, the defaults of Ultralytics' `MuSGD` class), from pretrained weights
+with `musgd.muon` / `musgd.sgd` (default 0.2 / 1.0, the reference trainer's). Whether a run starts from weights is
+`TrainConfig.transfer`, which the trainer sets from `--weights` and stores with the run, so a resume resolves the
+same. An explicit `sgd`/`adamw`/`musgd` uses `lr0`, `momentum`, `warmup_bias_lr` and `musgd.*` as given. Rule 4
+is rule 5 with `musgd.*` for every run.
+
+Why the step weights (docs/hill/r2-learn.md): from scratch 0.5 / 0.5 trains folo-n on the COCO proxy to AP 0.1234
+against 0.1135 with 0.2 / 1.0 (three seeds each, every seed above every other; Ultralytics 8.4.198's own MuSGD on
+the same images: 0.1133), and the shapes gate to mAP50-95 0.934 against 0.926 (one seed); fine-tuning
+`folo-n-coco-v2` on BCCD it does worse (test AP 0.616 against 0.625, three seeds), so fine-tunes keep 0.2 / 1.0.
 
 Why (docs/hill/r2-learn.md; three seeds per side unless marked "one seed"): the reference trainer (Ultralytics
 8.4.198, and FOLO's rule 3) zeroes the bias warmup LR whenever `auto` chooses, which suits AdamW at `lr0 ≈ 0.001` but
@@ -667,7 +676,7 @@ Rule 3: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations
 `lr0 = max(round(0.002 · 5 / (4 + nc), 6), 0.001)` and `β1 = 0.9` (e.g. 0.00125 for `nc = 4`, 0.001 from `nc = 6`
 on, so 0.001 for `nc = 80`). In both cases `warmup_bias_lr = 0.0`.
 
-`TrainConfig.auto_rule` (current: 4) versions this rule: rule 4 and rule 3 are the above; rule 2 picks SGD (`lr0 = 0.01`,
+`TrainConfig.auto_rule` (current: 5) versions this rule: rules 5, 4 and 3 are the above; rule 2 picks SGD (`lr0 = 0.01`,
 `momentum = 0.9`) instead of MuSGD for long runs; rule 1 is rule 2 without the AdamW floor. On the COCO proxy of
 docs/hill/learn.md (20 epochs, SGD regime forced) MuSGD reaches 1.38x the AP of SGD (0.1143 vs 0.0830), as the
 reference's own MuSGD does. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1;
@@ -679,7 +688,7 @@ it does not measure MuSGD's gain over SGD on full COCO. The 0.001 floor is FOLO'
 gives 80 classes 0.000119, and a from-scratch run on a 20k-image COCO subset (20 epochs, 6,260 iterations) then
 reaches about a fifth of the AP of SGD on the same budget, in Ultralytics as in FOLO (docs/hill/learn.md). Rule 2
 changes nothing below 6 classes. Settings saved before the key existed (a checkpoint's `folo.train`, a run's
-`config.json`) mean rule 1, so a run resumes with the rule it started with; `--set auto_rule=1` (or `2`, `3`;
+`config.json`) mean rule 1, so a run resumes with the rule it started with; `--set auto_rule=1` (or `2` to `4`;
 CLI) selects an older rule for a new run.
 
 **SGD** (PyTorch semantics, Nesterov, no dampening), per parameter `p` with gradient `g`:
@@ -708,7 +717,8 @@ p = p − 0.2 · lr · sqrt(max(1, d₋₂ / d₋₁)) · X        (the factor i
 ```
 then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. The two
 weights and the class-branch factor are `TrainConfig.musgd` (`muon = 0.2`, `sgd = 1.0`: the SGD half of a Muon
-parameter runs at `sgd · lr`; `cls_lr = 3.0`), the reference trainer's; other step weights are saved in the
+parameter runs at `sgd · lr`; `cls_lr = 3.0`), the reference trainer's (`auto` rule 5 uses 0.5 / 0.5 for a run from
+scratch, above); other step weights are saved in the
 checkpoint's `folo.optim` (FORMAT.md), so a resume continues with them; YOLO26's published COCO run used 0.528 /
 0.674 / 2.737 (the `muon_w`, `sgd_w`, `cls_w` of `yolo26n.pt`'s `train_args`), which fine-tuned BCCD worse here
 (docs/hill/r2-learn.md). Same

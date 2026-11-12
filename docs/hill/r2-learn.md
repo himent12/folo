@@ -51,6 +51,42 @@ not speed measurements.
 every seed of one side above every seed of the other. Momentum 0.937 against 0.9: one seed per side at each bias
 warmup (0.1048 vs 0.1027 at 0, 0.1133 vs 0.1139 at 0.1), not distinguishable.
 
+### Proxy P1: the defaults, and screens on top of rule 4 (binary `folo-r4f` = PR #188, `auto` rule 4)
+
+| run | seed | settings (beyond P1) | AP | AP50 | AP_S | AP_M | AP_L |
+|---|---:|---|---:|---:|---:|---:|---:|
+| auto-main-s0 | 0 | main 647b981f defaults: `auto` → AdamW lr0 0.001 | 0.0761 | 0.129 | 0.033 | 0.119 | 0.170 |
+| auto-main-s1 | 1 | the same | 0.0751 | 0.129 | 0.036 | 0.119 | 0.165 |
+| auto-main-s2 | 2 | the same | 0.0758 | 0.127 | 0.035 | 0.125 | 0.171 |
+| mus-937-s0 | 0 | MuSGD momentum 0.937, warmup_bias_lr 0.1 (= rule 4's `auto` here) | 0.1133 | 0.187 | 0.057 | 0.174 | 0.239 |
+| auto-r4-s1 | 1 | rule 4 defaults | 0.1129 | 0.186 | 0.055 | 0.171 | 0.252 |
+| auto-r4-s2 | 2 | rule 4 defaults | 0.1143 | 0.187 | 0.064 | 0.171 | 0.250 |
+| r4-w55-s0 | 0 | rule 4, `--set musgd.muon=0.5 --set musgd.sgd=0.5` (= rule 5 from scratch) | 0.1248 | 0.203 | 0.057 | 0.191 | 0.294 |
+| r4-w55-s1 | 1 | the same | 0.1229 | 0.201 | 0.056 | 0.186 | 0.276 |
+| r4-w55-s2 | 2 | the same | 0.1225 | 0.201 | 0.068 | 0.182 | 0.255 |
+| r4-cls1-s0 | 0 | rule 4, `--set loss.cls_gain=1.0` | 0.1203 | 0.204 | 0.059 | 0.178 | 0.246 |
+| r4-cls1-s1 | 1 | the same | 0.1149 | 0.194 | 0.055 | 0.174 | 0.256 |
+| r4-cls1-s2 | 2 | the same | 0.1206 | 0.201 | 0.059 | 0.180 | 0.272 |
+| r4-topk13-s0 | 0 | rule 4, `--set loss.tal.topk=13` | 0.1126 | 0.185 | 0.056 | 0.176 | 0.250 |
+| r4-cos-s0 | 0 | rule 4, `--cos-lr` | 0.1129 | 0.188 | 0.064 | 0.162 | 0.239 |
+
+Means over seeds 0–2: main's `auto` **0.0757**; rule 4 **0.1135**; rule 4 with MuSGD weights 0.5 / 0.5 (rule 5
+from scratch) **0.1234**; rule 4 with `cls_gain` 1.0 0.1186. Both 0.5 / 0.5 and `cls_gain` 1.0 are above rule 4 on
+every seed (0.5 / 0.5: +0.012, +0.010, +0.008; `cls_gain`: +0.007, +0.002, +0.006).
+
+**o2o (`--head o2o`, `p1o.sh`, binary r2b; MuSGD momentum 0.937, warmup_bias_lr 0.1), seed 0**, AP of the one-to-one
+head (NMS-free, what an o2o model predicts with) and of the same model's one-to-many branch (`--head o2m`, with NMS):
+
+| run | settings | o2o AP | o2o AP50 | o2m AP | o2m AP50 |
+|---|---|---:|---:|---:|---:|
+| o2o-det-s0 | default: the o2o branch's inputs detached | 0.0952 | 0.158 | 0.1144 | 0.188 |
+| o2o-att10-s0 | `o2o_attached_epochs=10` (attached for the first half) | 0.0966 | 0.161 | 0.1132 | 0.189 |
+| o2o-att20-s0 | `o2o_attached_epochs=20` (attached throughout) | 0.1009 | 0.170 | 0.1093 | 0.185 |
+
+Attaching the one-to-one branch throughout helps the NMS-free head (+0.006) and costs the one-to-many branch
+(−0.005); for the first 10 epochs only, both are within a seed's noise of detached (+0.001, −0.001). One seed each,
+not shipped as a default (it stays opt-in).
+
 ### Fine-tune on BCCD (test AP of best.folo, benchmark scorer)
 
 | run | seeds | settings | test AP per seed | mean | AP50 mean |
@@ -68,6 +104,10 @@ warmup (0.1048 vs 0.1027 at 0, 0.1133 vs 0.1139 at 0.1), not distinguishable.
 | ft-musy26w | 0 | the same with YOLO26's published MuSGD weights (muon 0.528, sgd 0.674, cls_lr 2.737) | 0.6085 | | 0.893 |
 | ft-musm09 / ft-r4 | 0 1 2 | MuSGD lr0 0.01, momentum 0.9, warmup_bias_lr 0.1, floor 0 (`auto` rule 4 draft) | 0.6231 0.6158 0.6269 | 0.622 | 0.906 |
 | yolo26n (published) | 0 1 2 | Ultralytics defaults from yolo26n.pt | 0.6212 0.6339 0.6235 | 0.626 | 0.911 |
+
+**On top of rule 4 on BCCD** (three seeds each): MuSGD weights 0.5 / 0.5 0.6036 / 0.6254 / 0.6185 (mean 0.616,
+−0.009 against rule 4's 0.6251); `cls_gain` 1.0 0.6167 / 0.6177 / 0.6233 (mean 0.619, −0.006). Both help from
+scratch on the proxy and cost the fine-tune, so rule 5 uses 0.5 / 0.5 only from scratch and `cls_gain` stays 0.5.
 
 ### Fine-tune on the other three sets (rule 4's settings: MuSGD lr0 0.01, momentum 0.937, warmup_bias_lr 0.1, floor 0)
 
@@ -87,7 +127,9 @@ brain-tumor 0.619 (main 0.613). Pills a little better, signature and brain-tumor
 |---|---|---:|---:|---:|
 | shapes-main | main: `auto` → AdamW lr0 0.00125, warmup 100 steps | 0.980 | 0.892 | epoch 9 |
 | shapes-mus | MuSGD lr0 0.01, momentum 0.9, warmup_bias_lr 0.1, floor 0 | 0.982 | 0.917 | epoch 10 |
-| shapes-r5 | MuSGD lr0 0.01, momentum 0.937, warmup_bias_lr 0.1, floor 0 (= rule 4) | 0.985 | **0.926** | epoch 8 |
+| shapes-r5 | MuSGD lr0 0.01, momentum 0.937, warmup_bias_lr 0.1, floor 0 (= rule 4) | 0.985 | 0.926 | epoch 8 |
+| shapes-w55 | rule 4 with `musgd.muon=0.5`, `musgd.sgd=0.5` (= rule 5 from scratch) | 0.988 | **0.934** | epoch 8 |
+| shapes-cls1 | rule 4 with `loss.cls_gain=1.0` | 0.987 | 0.924 | epoch 9 |
 
 No run had a non-finite batch.
 
@@ -115,6 +157,10 @@ the order). Flags per row:
 | ft-musm09 | `--set warmup_floor=0 --optimizer musgd --lr0 0.01 --set momentum=0.9` |
 | ft-r4 | none, binary r4 (its rule-4 draft: MuSGD momentum 0.9, floor 0), the same settings as ft-musm09 (seed 0 bit-identical) |
 | ft-r5 | `--optimizer musgd --lr0 0.01 --set momentum=0.937`, binary r4 (floor 0): the shipped rule's settings |
+| auto-main / auto-r4 | none (`p1.sh` with `folo-main.exe` / `folo-r4f.exe`, the PR #188 build: `auto` rule 4) |
+| r4-w55 / r4-cls1 / r4-topk13 / r4-cos | `--set musgd.muon=0.5 --set musgd.sgd=0.5` / `--set loss.cls_gain=1.0` / `--set loss.tal.topk=13` / `--cos-lr` (r4f) |
+| ft-w55 / ft-cls1, shapes-w55 / shapes-cls1 | the same flags with `ft.sh` / `shapes.sh` (r4f) |
+| o2o-det / o2o-att20 | `p1o.sh` (adds `--head o2o`): `--optimizer musgd` / and `--set o2o_attached_epochs=20` (r2b) |
 | shapes-main / shapes-mus / shapes-r5 | none / `--optimizer musgd --set momentum=0.9 --set warmup_floor=0` / `--optimizer musgd --lr0 0.01 --set momentum=0.937` (r4) |
 
 (`bin/chain1.sh` and `chain2.sh` were the first queues and were stopped after `mus-937-s0`; none of their later lines
@@ -132,11 +178,18 @@ ran as written there.)
 - Opt-in, defaults unchanged: `musgd.{muon,sgd,cls_lr}` (YOLO26's published weights lost on BCCD, one seed) and
   `o2o_attached_epochs`.
 
+## Shipped (PR 2: `auto` rule 5)
+
+- **MuSGD step weights 0.5 / 0.5 for a run from scratch** (`AUTO_MUSGD_SCRATCH_WEIGHTS`), the reference trainer's
+  0.2 / 1.0 for one from pretrained weights (`TrainConfig.transfer`, set by the trainer from `--weights` and stored
+  with the run). Proxy 0.1234 vs 0.1135 (three seeds each), shapes gate 0.934 vs 0.926 (one seed); fine-tunes resolve
+  exactly as under rule 4, so their numbers above stand.
+
 ## Targets
 
-- **Proxy P1, +5% over main's recipe and over Ultralytics' rows**: over main's recipe (`auto` → AdamW, 0.0747) rule
-  4 is about +50%; over Ultralytics' best row (MuSGD 0.1133) it is level, not +5% (0.1118 at momentum 0.9, three seeds;
-  rule 4's own seeds below). Not met against Ultralytics' MuSGD row.
+- **Proxy P1, +5% over main's recipe and over Ultralytics' rows** (three seeds per side): rule 5's `auto` 0.1234
+  against main's `auto` 0.0757 (**+63%**), Ultralytics' `auto` 0.0166, SGD 0.0853 and MuSGD 0.1133 (**+8.9%** over its
+  best row). **Met.** (Rule 4 alone: 0.1135, level with Ultralytics' MuSGD.)
 - **BCCD ≥ yolo26n (0.626)**: 0.625 (0.6251 vs 0.6262): level, not above. Not met by its letter.
 
 ## Negative results
@@ -145,13 +198,17 @@ ran as written there.)
   `auto`'s 0.00143 (two seeds, floor 0). Not shipped.
 - MuSGD lr0 0.005 or 0.02 on BCCD (0.608, 0.607), YOLO26's published MuSGD weights (0.609), a 1-epoch warmup (0.611),
   `nbs=16` (0.607): all below MuSGD lr0 0.01 / floor 0 (0.622–0.629), one seed each.
+- On rule 4, one seed each on the proxy: `loss.tal.topk=13` 0.1126 and `--cos-lr` 0.1129 (rule 4: 0.1129–0.1143):
+  nothing. `loss.cls_gain=1.0`: +4.5% on the proxy (three seeds) but level on the shapes gate and −0.006 on BCCD:
+  not a default; a class-count effect (80 classes) is the likely reading and needs full COCO to tell.
 - ProgLoss and STAL (YOLO26): FOLO already has both (the o2m/o2o loss-weight decay of MODEL.md §6.6 and the 16 px
   candidate enlargement of §7.3); nothing to add.
 
 ## Leftovers
 
-- The proxy screens queued on rule 4 (`loss.tal.topk=13`, `loss.cls_gain=1.0`, `--cos-lr`, MuSGD weights 0.5 / 0.5)
-  and the o2o runs (`--head o2o`, detached vs `o2o_attached_epochs=20`): results below as they finish.
+- `o2o_attached_epochs`: one seed each at 10 and 20 (above); for NMS-free models, three seeds of 20 and an o2o
+  fine-tune would tell whether to make it the `--head o2o` default (+0.006 on the o2o head, one seed).
+- `loss.cls_gain` by class count (80-class proxy +4.5%, 3- and 4-class sets not): full COCO under rule 5.
 - The Studio and Desktop offline estimates (`web/src/routes/runnew/estimate.ts`, `web/src/lib/api/mock/runs.ts`,
   `web/src/routes/run/resolved.ts`, `apps/desktop/src/api/mock/training.rs`) still mirror rule 3 and the 100-step
   floor; other lanes own them.
