@@ -10,7 +10,7 @@ import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
 import Dataset from './Dataset';
 import Datasets from './Datasets';
-import { datasetsChanged } from './datasets/changes';
+import { datasetsChanged, generationEnded, generationStarted, pendingGeneration } from './datasets/changes';
 
 let target: HTMLElement;
 let c: { unmount(): void } | undefined;
@@ -138,5 +138,36 @@ describe('Add dataset from the URL', () => {
     expect(go).toHaveBeenLastCalledWith('/datasets', { replace: true });
     flushSync();
     expect(document.querySelector('dialog[open]')).toBeNull();
+  });
+});
+
+describe('a sample set generating across a reload', () => {
+  it('has the list read itself again until the new dataset is there, then stops (datasets F10)', async () => {
+    const before = await hub.api.datasets();
+    generationStarted({ name: 'shapes-synth', since: Date.now(), ids: before.map((d) => d.id) });
+    const list = vi.spyOn(hub.api, 'datasets');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    try {
+      open(Datasets, '/datasets');
+      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      const calls = list.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 1));
+      // It lands (numbered, as the server names a taken name).
+      await hub.api.createSyntheticDataset({ name: 'shapes-synth', images: 10, classes: ['circle'], imgsz: 64, seed: 0 });
+      const shown = () => [...target.querySelectorAll('tr[aria-label]')].some((r) => !before.some((d) => d.name === r.getAttribute('aria-label')));
+      for (let i = 0; i < 40 && !shown(); i++) {
+        await vi.advanceTimersByTimeAsync(100);
+        flushSync();
+      }
+      expect(shown()).toBe(true);
+      expect(pendingGeneration()).toBeNull();
+      const after = list.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(list.mock.calls.length).toBe(after);
+    } finally {
+      vi.useRealTimers();
+      generationEnded();
+    }
   });
 });

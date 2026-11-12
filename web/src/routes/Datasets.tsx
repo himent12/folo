@@ -26,12 +26,14 @@ import Meta from '$lib/ui/Meta';
 import { rowNav } from '$lib/ui/rowNav';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import { imageCount } from './dataset/health';
-import { datasetChanges } from './datasets/changes';
+import { datasetChanges, generationEnded, landed, pendingGeneration } from './datasets/changes';
 import { datasetProblem, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
 /** Columns of the desktop table (for state rows that span it), the empty last one included. */
 const COLS = 10;
+/** How often the list reads itself again while a sample set this tab asked for still generates. */
+const GENERATION_POLL_MS = 3000;
 
 export default function Datasets() {
   setCrumbs({ label: 'Datasets' });
@@ -61,6 +63,20 @@ export default function Datasets() {
   const seen = datasetChanges.peek();
   effect(() => {
     if (datasetChanges.get() !== seen) untrack(reread);
+  });
+  // A sample set this tab asked for before a reload is still generating: read the list every few seconds until it is
+  // there (./datasets/changes).
+  effect(() => {
+    const list = datasets.data;
+    const g = untrack(() => pendingGeneration());
+    if (!g || !list) return;
+    if (landed(g, list)) return void generationEnded();
+    // A read that finds nothing new keeps the same list (Resource), so this runs on its own clock until one does.
+    const t = setInterval(() => {
+      if (pendingGeneration()) void datasets.refresh();
+      else clearInterval(t);
+    }, GENERATION_POLL_MS);
+    return () => clearInterval(t);
   });
   effect(() => {
     const back = () => document.visibilityState === 'visible' && !datasets.loading && reread();
