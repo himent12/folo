@@ -148,27 +148,40 @@ streams 6 floats per element at ~60 GB/s: memory-bound.
 
 Changes, in folo-nn's `train_cpu` (`crates/folo-nn/src/layers/batchnorm.rs`):
 
-- **One pass for the statistics.** Each plane's count, mean and sum of squared deviations come from one read
-  (sums of `v − K` and `(v − K)²` around the plane's first value, exact differences and squares in `f64`).
-  They are combined per channel in image order with Chan's formula, so the forward reads x twice instead of three
-  times. Not bit for bit the old two-pass sums. The f64 results differ in the last bits, and the f32 mean and
-  variance round to the same values except at rare ties. Test `one_pass_statistics_match_two_pass_reference`
-  checks mean and variance within 2 f32 ulp of a two-pass f64 reference: a mean 10⁴ times the spread, a
-  constant channel, 1×1 planes, one outlier per plane.
+- **One read of x for the statistics** (`plane_stats`), so the forward reads x twice instead of three times.
+  Each plane is taken in blocks of 256 floats. A block first feeds the plane's sum: the old code's 8 `f64`
+  accumulators across the whole plane, then the tail, so the per-channel sum (planes added in image order) and
+  the mean `Σ / n` are bit for bit the old ones. Then, while the block is in L1, its own mean and
+  `M2 = Σ(v − mean_b)²` in `f64`. The blocks are merged per plane, and the planes per channel in image order,
+  with Chan's formula (`M2a + M2b + d² · na · nb / n`, `d` the difference of the means); the variance is
+  `M2 / n`. Every term is non-negative, so nothing cancels and nothing needs a clamp, and an infinity or a NaN
+  makes the variance NaN as before. The variance is not bit for bit the old two-pass sum (it differs in the
+  last f64 bits). A first draft shifted each plane by its first value and took `Σd² − (Σd)² / n`, which
+  cancels when that value is extreme (a 1000×1000 plane of 0.1 with 10⁶ first: variance 1000007 against
+  999999) and lost small terms of the mean (`[1e16, −1e16, 1, 1]`: 0 against 0.5); review caught it. Test
+  `one_pass_statistics_match_two_pass_reference` checks the mean bit for bit against the old formula and the
+  variance within 2 f32 ulp of a two-pass f64 reference: means 10⁴ and 10⁷ times the spread (the second fails
+  `Σv² − n·mean²`, asserted), a constant channel, 1×1 planes, one outlier per plane, both review cases,
+  infinities and NaNs.
 - **AVX2 for the per-plane loops** (`with_avx2`): the same loop bodies compiled under
   `#[target_feature(enable = "avx2")]`, chosen at run time. The same IEEE operations lane by lane, and Rust
-  never fuses a multiply and an add without being asked, so the result is bit for bit the SSE2 one.
-  `fused_activation_is_bitwise_bn_then_act` (now with a 33×17 plane) still holds bit for bit.
+  never fuses a multiply and an add without being asked, so the result is bit for bit the SSE2 one. Test
+  `avx2_and_fallback_are_bitwise_equal` runs the SiLU kernel forward and backward both ways (a test-only
+  switch forces the plain build) and compares output, statistics and gradients bit for bit.
+  `fused_activation_is_bitwise_bn_then_act` (now with a 33×17 plane, three statistics blocks and a ragged
+  tail) still holds bit for bit.
 
 | folo-n train step, 320 px b16, 28 threads, 5 rounds alternated (9–15 busy) | `main` (62f80c4a) | PR 2 |
 |---|---|---|
 | forward + loss | 80.0–85.6 ms (median 84.4) | **76.3–77.8 ms (76.8), −9%** |
 | backward | 170.2–178.7 ms | 173.3–183.6 ms (tie) |
-| total | 251.5–265.4 ms (median 263.9) | **251.0–262.8 ms (256.0), −3.0%** |
+| total | 251.5–265.4 ms (median 263.9) | 251.0–262.8 ms (256.0), −3.0% (tie: inside the ±3% band) |
 
 On one core with 27 cores busy elsewhere, forward + loss went from 689 to 612 ms and backward from 1296 to 1285
 ms. Log: `pr2_train.txt` (`ab.sh 5 0 "" "" 'main=...pr1-train_step.exe;pr2=...pr2-train_step.exe'`); the `main`
-binary is PR 1's head, whose train-step code is `main`'s.
+binary is PR 1's head, whose train-step code is `main`'s. These numbers are of the first draft of the
+statistics (shifted sums, one loop per plane); the block design above, which loops twice over each block in
+L1, was not re-measured.
 
 ### Negative results (PR 2)
 
@@ -187,8 +200,9 @@ binary is PR 1's head, whose train-step code is `main`'s.
   | 3→16 3×3 s2 at 320² (stem) | 1.31–1.35 | 1.03–1.06 | 1.15–1.17 |
 
   On one core it was faster everywhere but the inference stem (64→128: 26.3 → 20.5 ms). At 28 threads it wins
-  only where the input has few channels; folo-n's strided convs mostly have 64 or more. Train step 258–268 ms
-  against 258–262 without it. Dropped.
+  only where the input has few channels; folo-n's strided convs mostly have 64 or more. Train step with the
+  phases 260.8–268.2 ms (median 262.9) against 258.3–261.9 (median 261.2) without it (log `ph_train.txt`); the
+  log of the conv-bench table above was not saved. Dropped.
 
 ## Leftovers (by expected gain)
 
