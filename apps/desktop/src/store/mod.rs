@@ -1,5 +1,6 @@
 //! Client-side state: what has been fetched from the backend, live run data, and decoded images.
 
+mod best;
 mod images;
 mod live;
 
@@ -8,6 +9,7 @@ use std::sync::Arc;
 
 use crate::api::*;
 
+pub use best::better_model;
 pub use images::{ImageCache, ImgKey, ImgKind, ImgSlot, to_render_image};
 pub use live::{Derived, RunData};
 
@@ -69,6 +71,8 @@ pub struct Store {
     pub capabilities: Option<crate::api::Capabilities>,
     /// Optional API features the server reports (`/system` `features`, e.g. `queue_control`).
     pub features: Vec<String>,
+    /// The server's data dir (`/system` `data_dir`; absent in mock mode and from older servers).
+    pub data_dir: Option<String>,
     pub datasets: Load<Vec<Dataset>>,
     pub dataset: HashMap<String, Load<Dataset>>,
     /// All image metadata of a dataset (cheap: boxes only), for filtering and the grid.
@@ -103,6 +107,7 @@ impl Store {
             health: Load::Idle,
             system: Load::Idle,
             capabilities: None,
+            data_dir: None,
             features: Vec::new(),
             datasets: Load::Idle,
             dataset: HashMap::new(),
@@ -139,6 +144,47 @@ impl Store {
         self.datasets.ready()?.iter().find(|d| d.id == id)
     }
 
+    /// How a run names its dataset: the registered name; once the datasets are in without it (it was
+    /// removed), the name recorded with the run (`Run.dataset`) marked "(removed)", as Studio does. The
+    /// raw id only for a run from a server that recorded no name.
+    pub fn run_dataset_name(&self, r: &Run) -> String {
+        if let Some(d) = self.dataset_summary(&r.config.dataset_id) {
+            return d.name.clone();
+        }
+        match (&r.dataset, self.datasets.ready().is_some()) {
+            (Some(d), true) => format!("{} (removed)", d.name),
+            (Some(d), false) => d.name.clone(),
+            (None, true) => "removed dataset".into(),
+            (None, false) => r.config.dataset_id.clone(),
+        }
+    }
+
+    /// How a dataset is named by its id where no run is at hand (a model's row, a crumb): the
+    /// registered name, else as a run trained on it names it ([`Self::run_dataset_name`]: the
+    /// recorded name marked "(removed)"); the raw id only when no run knows it either.
+    pub fn dataset_name(&self, id: &str) -> String {
+        if let Some(d) = self.dataset_summary(id) {
+            return d.name.clone();
+        }
+        let run = self.runs.ready().and_then(|runs| {
+            // A run that recorded the name, if any did.
+            let on = || runs.iter().filter(|r| r.config.dataset_id == id);
+            on().find(|r| r.dataset.is_some()).or_else(|| on().next())
+        });
+        run.map_or(id.to_string(), |r| self.run_dataset_name(r))
+    }
+
+    /// Whether the server wrote this dataset into its own data dir (a generated set, a labeling job's
+    /// export, an upload), so its folder can go with it (`?files=true`), as Studio decides.
+    pub fn written_by_server(&self, d: &Dataset) -> bool {
+        written_by_server(&d.path, self.data_dir.as_deref())
+    }
+
+    /// The server stopped answering (the last `/system` refresh couldn't connect).
+    pub fn unreachable(&self) -> bool {
+        matches!(&self.health, Load::Failed(e) if e.code == "server_unreachable")
+    }
+
     /// What the periodic `/system` refresh says about the connection (`err`: its error, if any).
     /// `health`, which the status line shows, is fetched once per connection; without this a server
     /// that went away mid-session still read "Connected". Unreachable marks it down; the first answer
@@ -150,6 +196,17 @@ impl Store {
             _ => {}
         }
     }
+}
+
+/// True when `path` is inside `<data_dir>/datasets/`, where the server writes the datasets it makes:
+/// `/` and `\` alike, a trailing separator ignored, and a Windows path compared ignoring case.
+pub fn written_by_server(path: &str, data_dir: Option<&str>) -> bool {
+    let norm = |p: &str| {
+        let s = p.replace('\\', "/").trim_end_matches('/').to_string();
+        let drive = s.as_bytes().get(1) == Some(&b':') && s.as_bytes()[0].is_ascii_alphabetic();
+        if drive { s.to_lowercase() } else { s }
+    };
+    data_dir.is_some_and(|dir| norm(path).starts_with(&format!("{}/datasets/", norm(dir))))
 }
 
 #[cfg(test)]
@@ -165,14 +222,67 @@ mod tests {
         let down = ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7911");
         // The 2 s refresh fails to connect: the status line must stop saying "Connected".
         store.note_reachability(Some(&down));
-        assert!(matches!(store.health, Load::Failed(ref e) if e.code == "server_unreachable"));
+        assert!(store.unreachable());
         // It answers again: health is checked again (Idle is fetched by the next ensure_core).
         store.note_reachability(None);
-        assert!(store.health.needs_fetch());
+        assert!(store.health.needs_fetch() && !store.unreachable());
         // A connected server's answers and its other errors (a 500) leave a good status alone.
         store.health = api.health().into();
         store.note_reachability(None);
         store.note_reachability(Some(&ApiError::new("http_error", "folo serve answered HTTP 500")));
         assert!(store.health.ready().is_some());
+    }
+
+    #[test]
+    fn a_run_names_its_removed_dataset_by_the_name_it_recorded_never_by_id() {
+        let api = Arc::new(MockBackend::new(4200, true));
+        let mut store = Store::new(api.clone());
+        let mut run = api.runs().unwrap().into_iter().next().unwrap();
+        let datasets = api.datasets().unwrap();
+        let name = datasets.iter().find(|d| d.id == run.config.dataset_id).unwrap().name.clone();
+        run.dataset = Some(RunDataset { name: name.clone(), classes: Vec::new() });
+        // Before the datasets load: the recorded name.
+        assert_eq!(store.run_dataset_name(&run), name);
+        store.datasets = Load::Ready(datasets.clone());
+        assert_eq!(store.run_dataset_name(&run), name);
+        // Removed: the recorded name, marked; an older server's run without one is not shown as an id.
+        store.datasets =
+            Load::Ready(datasets.into_iter().filter(|d| d.id != run.config.dataset_id).collect());
+        assert_eq!(store.run_dataset_name(&run), format!("{name} (removed)"));
+        run.dataset = None;
+        assert_eq!(store.run_dataset_name(&run), "removed dataset");
+    }
+
+    #[test]
+    fn a_dataset_under_the_data_dirs_datasets_folder_was_written_by_the_server() {
+        let dir = Some("D:/folo-ux/data2-v-desktop-e2e");
+        assert!(written_by_server("D:\\folo-ux\\data2-v-desktop-e2e\\datasets\\Été 🎉 shapes", dir));
+        assert!(written_by_server("d:/FOLO-UX/data2-v-desktop-e2e/datasets/shapes/", dir));
+        assert!(!written_by_server("D:/folo-data/finetune/BCCD", dir));
+        assert!(!written_by_server("D:/folo-ux/data2-v-desktop-e2e/datasets", dir), "the folder itself");
+        assert!(!written_by_server("D:/folo-ux/data2-v-desktop-e2e-old/datasets/x", dir));
+        assert!(!written_by_server("D:/folo-ux/data2-v-desktop-e2e/datasets/x", None), "no data dir: never");
+        // Not a Windows path: case counts.
+        assert!(!written_by_server("/Srv/data/datasets/x", Some("/srv/data")));
+    }
+
+    #[test]
+    fn a_removed_dataset_is_named_by_what_its_runs_recorded() {
+        let api = Arc::new(MockBackend::new(4200, true));
+        let mut store = Store::new(api.clone());
+        let datasets = api.datasets().unwrap();
+        let mut runs = api.runs().unwrap();
+        let id = runs[0].config.dataset_id.clone();
+        let name = datasets.iter().find(|d| d.id == id).unwrap().name.clone();
+        for r in runs.iter_mut().filter(|r| r.config.dataset_id == id) {
+            r.dataset = Some(RunDataset { name: name.clone(), classes: Vec::new() });
+        }
+        store.runs = Load::Ready(runs);
+        store.datasets = Load::Ready(datasets.clone());
+        assert_eq!(store.dataset_name(&id), name);
+        store.datasets = Load::Ready(datasets.into_iter().filter(|d| d.id != id).collect());
+        assert_eq!(store.dataset_name(&id), format!("{name} (removed)"), "never the raw id {id}");
+        // Nothing knows it: only then the id.
+        assert_eq!(store.dataset_name("ds_none"), "ds_none");
     }
 }

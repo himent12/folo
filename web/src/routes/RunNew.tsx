@@ -1,11 +1,11 @@
-import ArrowRight from '$icons/arrow-right';
 import Images from '$icons/images';
 import Play from '$icons/play';
-import CircleAlert from '$icons/circle-alert';
-import { computed, css, deep, effect, signal, tick, untrack } from 'fw';
+import Plus from '$icons/plus';
+import { computed, css, deep, effect, Key, signal, tick, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
+import { readDatasets } from '$lib/api/datasetReads';
 import { Resource } from '$lib/api/resource';
-import type { Arch, Augment, DatasetImage, Optimizer, RunEstimate, TrainConfig } from '$lib/api/types';
+import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/api/types';
 import { modelChoices, scoreMeta } from '$lib/scoreSummary';
 import { sentence } from '$lib/format';
 import { hasCloud } from '$lib/cloud';
@@ -15,6 +15,7 @@ import { hasFeature } from '$lib/throughput';
 import { href, router } from '$lib/router';
 import { serverCommand, trainCommand } from '$lib/trainCli';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import { watched } from '$lib/shell/runList';
 import Page from '$lib/shell/Page';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -24,6 +25,7 @@ import Field from '$lib/ui/Field.tsx';
 import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
+import { tooltip } from '$lib/ui/tooltip';
 import { CloudPick } from './runnew/cloudPick';
 import { arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
 import { ampBlockOf } from './runnew/amp';
@@ -32,7 +34,14 @@ import { cloudCostOf, closeMosaicShown, reviewRows, roughBytes, shownEstimate } 
 import { trainConfig } from './runnew/config';
 import { deviceLabelOf, deviceMessage } from './runnew/device';
 import { oomChangesOf } from './runnew/retry';
-import { isPublished, scoreContextOf, startHintOf } from './runnew/weights';
+import { serverEstimate } from './runnew/serverEstimate';
+import { clearDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
+import { MAX_RUN_NAME, nameHint, runName, uniqueName } from './runnew/name';
+import WhyLine from './runnew/WhyLine';
+import { START_KEYS, startKeys } from './runnew/startKeys';
+import { aheadLine, aheadOf, startedToast } from './runnew/queue';
+import { queueToastKey } from './run/queueActions';
+import { isPublished, otherSizeChoices, scoreContextOf, startHintOf } from './runnew/weights';
 import { sampleImagesOf, trainSizesOf } from './runnew/trainImages';
 import DatasetSection from './runnew/DatasetSection';
 import ModelSection from './runnew/ModelSection';
@@ -44,17 +53,38 @@ import CliCommand from './runnew/CliCommand';
 import OomNote from './runnew/OomNote';
 import StartDock from './runnew/StartDock';
 
+/**
+ * New run follows its own URL while open (v-data-runs N1): a link that changes it (the palette's "New run on X", a
+ * pasted link, Back / Forward) opens the form again under the rules of a first open, the draft included (that same
+ * link's draft whole, else the link's fields over the draft's). The form never writes its own URL, so this cannot loop.
+ */
 export default function RunNew() {
+  let shown = '';
+  // Leaving (a start goes to the run), the route is another screen's: the form stays as it is until it is gone.
+  const link = computed(() => (router.route.name === 'run-new' ? (shown = String(router.route.query)) : shown));
+  return <Key when={link.get()}>{() => <RunNewForm />}</Key>;
+}
+
+function RunNewForm() {
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'New run' });
   // This page is the create action: the top bar's New run steps aside instead of showing a pressed, disabled copy.
   ownCreateAction();
 
   const q = untrack(() => router.route.query);
   const defaults: Augment = { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 };
+  const fromId = q.get('from');
+  // The tab's draft (runnew/draft): whole when it was made under this link (Back, a reload), else under the fields this
+  // link sets. A copy of a run (?from=) sets them all, so it starts from the run, not the draft.
+  const query = q.toString();
+  const stored = readDraft(hub.server);
+  const own = stored?.query === query ? stored : null;
+  const draft = own ?? (fromId ? null : stored);
 
-  const datasetId = signal<string>(q.get('dataset') ?? '');
+  const datasetId = signal<string>((own ? own.datasetId : q.get('dataset')) ?? draft?.datasetId ?? '');
   // The dock repeats the summary's Start button for narrow screens; it steps aside while that button is on screen.
   const startEl = signal<HTMLElement>();
+  const formEl = signal<HTMLFormElement>();
+  startKeys(() => formEl.get());
   const startVisible = signal(false);
   effect(() => {
     const el = startEl.get();
@@ -63,32 +93,32 @@ export default function RunNew() {
     io.observe(el);
     return () => io.disconnect();
   });
-  const arch = signal<Arch>('folo-s');
+  const arch = signal<Arch>(draft?.arch ?? 'folo-s');
   /** Number inputs bind `null` when cleared (the form's errors say so). */
-  const epochs = signal<number>(100);
-  const batch = signal('16');
+  const epochs = signal<number>(draft ? (draft.epochs as number) : 100);
+  const batch = signal(draft?.batch ?? '16');
   const IMGSZ = IMGSZ_STEPS.map(String);
   // ?imgsz= (e.g. from a dataset's "Train at 960 px" health finding) preselects a supported size. Until one is chosen
   // (there, by hand or by a retry) the size follows the dataset (see `defaultImgsz`).
-  const queryImgsz = IMGSZ.includes(q.get('imgsz') ?? '');
-  const imgsz = signal(queryImgsz ? q.get('imgsz')! : '640');
-  const imgszChosen = signal(queryImgsz);
-  const device = signal<string>('auto');
-  const optimizer = signal<Optimizer>('auto');
+  const queryImgsz = !own && IMGSZ.includes(q.get('imgsz') ?? '');
+  const imgsz = signal(queryImgsz ? q.get('imgsz')! : (draft?.imgsz ?? '640'));
+  const imgszChosen = signal(queryImgsz || !!draft?.imgszChosen);
+  const device = signal<string>(draft?.device ?? 'auto');
+  const optimizer = signal<Optimizer>(draft?.optimizer ?? 'auto');
   /** Mixed precision as asked for; what the run gets is `ampOn` (off where the server cannot train that way). */
-  const amp = signal(false);
+  const amp = signal(draft?.amp ?? false);
   /** The end-to-end head (TrainConfig.head `o2o`, docs/MODEL.md §6.6): predicts without NMS. */
-  const e2e = signal(false);
-  const lr0 = signal(0.01);
-  const seed = signal(0);
-  const weights = signal<string>('none');
-  const name = signal('');
-  const nameEdited = signal(false);
+  const e2e = signal(draft?.e2e ?? false);
+  const lr0 = signal(draft ? (draft.lr0 as number) : 0.01);
+  const seed = signal(draft ? (draft.seed as number) : 0);
+  const weights = signal<string>(draft?.weights ?? 'none');
+  const name = signal(draft?.name ?? '');
+  const nameEdited = signal(draft?.nameEdited ?? false);
   // Edited in place by the controls (a `deep` object, as Svelte's `$state`), replaced whole by a prefill or Defaults.
-  const augment = signal<Augment>(deep(structuredClone(defaults)));
+  const augment = signal<Augment>(deep(structuredClone({ ...defaults, ...draft?.augment })));
   // Close mosaic follows the epoch count (default 10, never more than half the run, the trainer's own cap) until it is
   // set by hand; the trainer caps a hand-set value the same way, so a short run always trains with mosaic.
-  const closeEdited = signal(false);
+  const closeEdited = signal(draft?.closeEdited ?? false);
   effect(() => {
     const e = epochs.get();
     if (closeEdited.get() || !Number.isFinite(e) || e < 1) return;
@@ -98,35 +128,41 @@ export default function RunNew() {
   const submitting = signal(false);
   /** The short-run warning's reasons, folded behind its "Why?". */
   const shortWhy = signal(false);
-  const advancedOpen = signal(false);
+  const advancedOpen = signal(draft?.advancedOpen ?? false);
   /** The augmentation settings fold behind a one-line summary at every width until opened. */
-  const augOpen = signal(false);
+  const augOpen = signal(draft?.augOpen ?? false);
   /** Below 960 px the dock opens the summary as a sheet, so the run can be reviewed without scrolling down. */
   const sumOpen = signal(false);
 
-  const datasets = new Resource(async (s) => {
-    const list = await hub.api.datasets(s);
-    return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
-  });
+  // Each read for its stats; one whose folder is missing is marked, and Start waits (lib/api/datasetReads).
+  const datasets = new Resource(readDatasets);
   const system = new Resource((s) => hub.api.system(s));
   // Run on (servers with the `cloud` feature): this machine or a cloud connection, its GPU and the time limit.
   const cloudPick = new CloudPick(() => system.data);
+  if (draft) cloudPick.restore(draft.cloud);
   const cloudOn = computed(() => hasCloud(system.data));
   /** A connection is chosen: the run trains on its GPU, not this machine's. */
   const onCloud = computed(() => cloudOn.get() && cloudPick.cloud);
   const models = new Resource((s) => hub.api.models(s));
   const runs = new Resource((s) => hub.api.runs(s));
+  // While another run holds this machine, a new one waits in the queue: the Summary says so and Start reads "Queue run".
+  // The shell's list (polled every 2 s) is the current one; this page's own stands in until it arrives.
+  const ahead = computed(() => aheadOf(watched.runs ?? runs.data, onCloud.get()));
+  const startLabel = computed(() => (ahead.get() ? 'Queue run' : 'Start training'));
+  /** Every run's name, so a new one is told apart (runnew/name). */
+  const taken = computed(() => new Set((runs.data ?? []).map((r) => r.name)));
   // This server's measured speed (GET /api/system/throughput), where it has one: measured latency in the size table.
   const tp = new Resource((s) => (hasFeature(system.data, 'throughput') ? hub.api.throughput(s).catch(() => null) : Promise.resolve(null)));
 
   // Prefill from an earlier run (?from=run_x, e.g. "Retry with batch 32"). Loaded through the hub, so it waits for
   // the real server instead of asking the mock that answers before the connection settles.
-  const fromId = q.get('from');
   const source = new Resource((s) => (fromId ? hub.api.run(fromId, s) : Promise.resolve(null)));
-  const prefilled = signal(!fromId);
+  // A draft of this same link already holds the copy, and the edits since.
+  const prefilled = signal(!fromId || !!own);
   effect(() => {
     const r = source.data;
-    if (!r || untrack(() => prefilled.get())) return;
+    // The runs too (or their error), so the copy's name is a new one.
+    if (!r || (!runs.data && !runs.error) || untrack(() => prefilled.get())) return;
     const c = r.config;
     // A retry's fix comes in the query (?batch=, ?imgsz=, ?arch=, ?device=; see $lib/oom) and wins over the run's.
     // A value the trainer would reject is ignored (the run's own stays), never offered with Start enabled.
@@ -151,7 +187,7 @@ export default function RunNew() {
     cloudPick.prefill(c.compute, r.cloud?.offer.gpu ?? 'GPU');
     augment.set(deep(structuredClone(c.augment)));
     closeEdited.set(true);
-    name.set(`${c.name}-retry`);
+    name.set(uniqueName(`${runName(c.name)}-retry`, taken.get()));
     nameEdited.set(true);
     prefilled.set(true);
   });
@@ -163,26 +199,66 @@ export default function RunNew() {
     }
   });
 
+  // The first dataset until one is picked. One a draft or a link asked for that is gone is not swapped for another in
+  // silence: none is picked, and the picker says which one went (by the name its runs recorded, where one has).
   effect(() => {
     const list = datasets.data;
     if (list?.length && !untrack(() => datasetId.get())) datasetId.set(list[0]!.id);
   });
+  const gone = computed(() => {
+    const id = datasetId.get();
+    if (!id || !datasets.data || datasets.data.some((d) => d.id === id)) return null;
+    const was = runs.data?.find((r) => r.config.dataset_id === id)?.dataset?.name;
+    return `${was ?? 'The dataset asked for'} was removed: pick a dataset.`;
+  });
+
+  // The draft follows every edit, once the form holds what the link asked for; a start clears it (below).
+  let started = false;
+  effect(() => {
+    const d: Draft = {
+      server: hub.server,
+      query,
+      datasetId: datasetId.get(),
+      arch: arch.get(),
+      epochs: epochs.get(),
+      batch: batch.get(),
+      imgsz: imgsz.get(),
+      imgszChosen: imgszChosen.get(),
+      device: device.get(),
+      optimizer: optimizer.get(),
+      amp: amp.get(),
+      e2e: e2e.get(),
+      lr0: lr0.get(),
+      seed: seed.get(),
+      weights: weights.get(),
+      name: name.get(),
+      nameEdited: nameEdited.get(),
+      augment: { ...augment.get(), hsv: [...augment.get().hsv] as Augment['hsv'] },
+      closeEdited: closeEdited.get(),
+      advancedOpen: advancedOpen.get(),
+      augOpen: augOpen.get(),
+      cloud: cloudPick.draft,
+    };
+    if (prefilled.get() && !started) saveDraft(d);
+  });
 
   const dataset = computed(() => datasets.data?.find((d) => d.id === datasetId.get()));
 
-  // A fine-tune trains the weights' own architecture (docs/API.md, TrainConfig.weights), so the weights listed are the
-  // chosen size's and switching size drops another size's choice. Published weights (`folo weights pull`, `source:
-  // published`) are listed whatever the size, in a group of their own: picking them sets the size to theirs. Fused
-  // weights (an export) load for inference only, so they are never a starting point.
+  // A fine-tune trains the weights' own architecture (docs/API.md, TrainConfig.weights), so the weights listed first are
+  // the chosen size's and switching size drops another size's choice. Trained models of the other sizes follow, a
+  // group per size, and published weights (`folo weights pull`, `source: published`) in a group of their own: picking
+  // either sets the size to theirs. Fused weights (an export) load for inference only, so they are never a starting point.
   const startable = computed(() => (models.data ?? []).filter((m) => m.fused !== true));
   const weightOptions = computed(() => startable.get().filter((m) => !isPublished(m) && m.arch === arch.get()));
   const publishedOptions = computed(() => startable.get().filter(isPublished));
   // Each starting point's score with what it is on (lib/scoreSummary): grouped by dataset and split, best first.
   const scoreCtx = computed(() => scoreContextOf(runs, datasets));
   const weightChoices = computed(() => modelChoices(weightOptions.get(), scoreCtx.get()));
+  const otherOptions = computed(() => startable.get().filter((m) => !isPublished(m) && m.arch !== arch.get()));
+  const otherChoices = computed(() => otherSizeChoices(otherOptions.get(), arch.get(), scoreCtx.get()));
   const picked = computed(() => (weights.get() === 'none' ? undefined : startable.get().find((m) => m.id === weights.get())));
   /** Start from's hint: the picked weights' score with all of its context, and what published weights are. */
-  const startHint = computed(() => startHintOf(picked.get(), scoreCtx.get()));
+  const startHint = computed(() => startHintOf(picked.get(), scoreCtx.get(), arch.get(), weightOptions.get().length, otherOptions.get()));
   /** Published weights' provenance: the server's description, then the score with what it is on. */
   const pickedAbout = computed(() => {
     const p = picked.get();
@@ -202,28 +278,33 @@ export default function RunNew() {
     const m = list.find((x) => x.id === w);
     if (!m || m.arch !== a) weights.set('none');
   });
-  /** Start from picked: published weights of another size bring their size (the size picker follows). */
+  /** Start from picked: weights of another size (trained or published) bring their size (the size picker follows). */
   function pickWeights(id: string) {
     const m = startable.get().find((x) => x.id === id);
-    if (m && isPublished(m) && m.arch !== arch.get()) arch.set(m.arch);
+    if (m && m.arch !== arch.get()) arch.set(m.arch);
   }
   const gpu = computed(() => system.data?.gpus[0]);
 
-  // The suggested name is unique among existing runs (dataset-size, then -2, -3, …), so runs stay tellable apart.
+  // The suggested name is unique among existing runs (dataset-size, then -2, -3, …), so runs stay tellable apart; a
+  // name typed over it that is taken gets a warning under the field (runnew/name).
   effect(() => {
-    const base = `${dataset.get()?.name ?? 'run'}-${arch.get().replace('folo-', '')}`;
-    const taken = new Set((runs.data ?? []).map((r) => r.name));
-    let auto = base;
-    for (let k = 2; taken.has(auto); k++) auto = `${base}-${k}`;
+    // The dataset's part gives way first, so a long dataset name keeps the size (and a few numbers) in the limit.
+    const ds = runName(dataset.get()?.name ?? '').slice(0, MAX_RUN_NAME - 4) || 'run';
+    const auto = uniqueName(`${ds}-${arch.get().replace('folo-', '')}`, taken.get());
     if (!untrack(() => nameEdited.get())) name.set(auto);
   });
 
+  /** The picked dataset, where its images can be read (listed, folder there): nothing is asked of one that is not. */
+  const readableId = computed(() => {
+    const d = dataset.get();
+    return d && !d.problem ? d.id : '';
+  });
   // A few training images for the augmentation preview.
-  const sampleImages = new Resource<DatasetImage[]>((s) => sampleImagesOf(datasetId.get(), s));
+  const sampleImages = new Resource<DatasetImage[]>((s) => sampleImagesOf(readableId.get(), s));
 
   // The training images' sizes, to train a dataset of small images at its own size. Read only for a dataset small
   // enough to list in a few pages (the stats do not carry image sizes); otherwise null, and the size stays 640.
-  const trainSizes = new Resource((s) => trainSizesOf(datasetId.get(), s));
+  const trainSizes = new Resource((s) => trainSizesOf(readableId.get(), s));
   const datasetImgsz = computed(() => {
     const t = trainSizes.data;
     return t && t.id === datasetId.get() ? defaultImgsz(t.sizes) : null;
@@ -267,8 +348,8 @@ export default function RunNew() {
   // The figures wait for the server's devices and the dataset: until then "Estimating…", never a CPU guess or 0 steps.
   // A cloud run's figures wait for its GPU too.
   const estReady = computed(() => !!dataset.get() && (system.data !== undefined || system.error !== undefined) && (!onCloud.get() || !!cloudPick.compute));
-  // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess. A cloud
-  // run's memory is its offer's.
+  // The server reads an adapter's memory through Vulkan; through DX12 or Metal (and from servers before that) it sends 0:
+  // then there is no meter and no out-of-memory guess. A cloud run's memory is its offer's.
   const gpuMem = computed(() => {
     const g = gpu.get();
     return onCloud.get() ? cloudPick.offer?.vram_bytes || null : g && g.memory_bytes > 0 ? g.memory_bytes : null;
@@ -322,6 +403,7 @@ export default function RunNew() {
       seed.get(),
       augment.get(),
       dataset.get(),
+      gone.get(),
       weights.get(),
       picked.get(),
       arch.get(),
@@ -335,6 +417,12 @@ export default function RunNew() {
     ),
   );
   const valid = computed(() => prefilled.get() && Object.values(errors.get()).every((e) => e === null));
+  /**
+   * Settings no estimate can stand for: no dataset, or one with nothing to train on, or an epoch count (or Close mosaic)
+   * out of range. The Summary shows dashes (never "0 optimizer steps", "under 1 min" or "24–55 h" for 99,999 epochs),
+   * no memory verdict, and the server is not asked.
+   */
+  const noFigures = computed(() => !!errors.get().dataset || !isInt(epochs.get(), 1, 10000) || !!errors.get().close);
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
   const why = computed(() => firstError(errors.get()));
   const showWhy = computed(() => !valid.get() && !!why.get() && prefilled.get());
@@ -364,61 +452,9 @@ export default function RunNew() {
     ),
   );
 
-  // The server's estimate (POST /api/runs/estimate, feature `run_estimate`): the first asked at once, every later one
-  // 300 ms after the settings stop changing, whether or not the last one was answered (a slow or failing server is not
-  // asked once per keystroke); the last answer stays up meanwhile. Its errors are the form's own (a missing device,
-  // weights of another size), already said at their fields: the reference figures stand in.
   const canEstimate = computed(() => hasFeature(system.data, 'run_estimate'));
-  const served = signal<{ key: string; est: RunEstimate } | null>(null);
-  /** Whether the latest request is still out: set by the run of the effect that owns it, cleared by every other. */
-  const estimating = signal(false);
-  /** Whether an estimate has been asked for yet (not state: it only sets the next one's delay). */
-  let asked = false;
-  /** The latest request's number: an answer to an older (cancelled) one never touches the state. */
-  let estSeq = 0;
-  // The name is part of the request: the server's command (`cli`) names the run.
   const estKey = computed(() => JSON.stringify(config.get()));
-  effect(() => {
-    const key = estKey.get();
-    const c = config.get();
-    const body = { ...c, name: c.name || 'estimate' };
-    const seq = ++estSeq;
-    // No request for these settings (none possible, or the answer is already in): none is pending either, even where
-    // the one this replaced (since cancelled) was.
-    if (!canEstimate.get() || !dataset.get() || !isInt(epochs.get(), 1, 10000) || errors.get().close || (onCloud.get() && !cloudPick.compute)) {
-      served.set(null);
-      estimating.set(false);
-      return;
-    }
-    if (untrack(() => served.get()?.key) === key) {
-      estimating.set(false);
-      return;
-    }
-    const ctrl = new AbortController();
-    estimating.set(true);
-    const t = setTimeout(
-      () => {
-        asked = true;
-        hub.api.estimateRun(body, ctrl.signal).then(
-          (e) => {
-            if (ctrl.signal.aborted || seq !== estSeq) return;
-            served.set({ key, est: e });
-            estimating.set(false);
-          },
-          () => {
-            if (ctrl.signal.aborted || seq !== estSeq) return;
-            served.set(null);
-            estimating.set(false);
-          },
-        );
-      },
-      asked ? 300 : 0,
-    );
-    return () => {
-      clearTimeout(t);
-      ctrl.abort();
-    };
-  });
+  const { served, estimating } = serverEstimate(config, estKey, () => canEstimate.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute));
   const closeEff = computed(() => closeMosaicShown(errors.get(), served.get(), estKey.get(), augment.get(), epochs.get()));
   /**
    * Whether the figures shown answer earlier settings: the last answer stays up while the request for these is out, so
@@ -442,7 +478,7 @@ export default function RunNew() {
    * `danger` (likely won't fit), within 10% of it `warning` (tight; lib/oom's headroom), else neutral.
    */
   const vramLevel = computed(() =>
-    !memShown.get() || !gpuMem.get() ? null : vramPct.get() > 1 ? ('danger' as const) : vramPct.get() > 0.9 ? ('warning' as const) : null,
+    !memShown.get() || !gpuMem.get() || noFigures.get() ? null : vramPct.get() > 1 ? ('danger' as const) : vramPct.get() > 0.9 ? ('warning' as const) : null,
   );
   const noFit = computed(() => vramLevel.get() === 'danger');
   /**
@@ -522,11 +558,16 @@ export default function RunNew() {
     // The Summary sheet closes first: the start's result is the page's (a toast, or the Device field's message).
     sumOpen.set(false);
     submitting.set(true);
+    const before = ahead.get();
     try {
       const run = await hub.api.createRun(config.get());
+      started = true;
+      clearDraft();
       const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
       // page-level: the sheet is closed (above).
-      toast.success(`Started ${run.name}`, `${run.epochs} epochs of ${run.config.arch} on ${dataset.get()?.name}${where}.`);
+      const t = startedToast(run, before);
+      // Keyed by the run's place in the queue: a later "Removed … from the queue" takes its place (run/queueActions).
+      toast.success(t.title, `${t.place ? `${t.place} · ` : ''}${run.epochs} epochs of ${run.config.arch} on ${dataset.get()?.name}${where}.`, undefined, { key: queueToastKey(run.id) });
       router.go(`/runs/${run.id}`);
     } catch (err) {
       if (err instanceof ApiError && (err.code === 'device_not_found' || (err.code === 'not_implemented' && device.get().startsWith('gpu:')))) {
@@ -593,12 +634,13 @@ export default function RunNew() {
 
   // The Svelte original's snippets, as local components.
   const Review = (p: { withName: boolean }) => (
-    <ReviewList withName={p.withName} name={name.get()} errors={errors.get()} review={review.get()} jump={jump} />
+    <ReviewList withName={p.withName} name={runName(name.get())} errors={errors.get()} review={review.get()} jump={jump} />
   );
 
   const Figures = (p: { where: string }) => (
     <EstimateFigures
       where={p.where}
+      blocked={noFigures.get()}
       estReady={estReady.get()}
       sched={sched.get()}
       batchN={batchN.get()}
@@ -626,28 +668,8 @@ export default function RunNew() {
     />
   );
 
-  // Why Start is off, as a way to the field that needs changing (the field may be far away). The mark in front carries
-  // the danger hue; the link itself is ink, since danger never means navigation.
-  const WhyLine = (p: { id: string; cls?: string }) => (
-    <>
-      {showWhy.get() && why.get() ? (
-        <p class={`why ${p.cls ?? ''}`} id={p.id} role={p.id === 'start-why' ? 'status' : undefined}>
-          <CircleAlert size={14} strokeWidth={2} aria-hidden="true" />
-          <button
-            type="button"
-            class="why-go"
-            onclick={() => {
-              const w = why.get();
-              if (w) void jump(w.key);
-            }}
-          >
-            {why.get()?.text}
-            <ArrowRight size={12} strokeWidth={2} aria-hidden="true" />
-          </button>
-        </p>
-      ) : null}
-    </>
-  );
+  /** Why Start is off, as a way to that field (runnew/WhyLine). */
+  const Why = (p: { id: string; cls?: string }) => <WhyLine id={p.id} cls={p.cls} why={showWhy.get() ? why.get() : null} jump={jump} />;
 
   return (
     <Page title="New training run" sub={() => <span>Pick data and a model size; the defaults are tuned to work well. Everything else is optional.</span>}>
@@ -660,14 +682,18 @@ export default function RunNew() {
             title="Add a dataset first"
             description="Runs train on a registered dataset: add a folder or generate a synthetic one."
             actions={() => (
-              <Button variant="primary" href={href('/datasets')}>
-                Go to Datasets
-              </Button>
+              // Straight to the Add dataset dialog, as Overview's first step (Datasets reads `?add=`).
+              <>
+                <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>
+                  Add dataset
+                </Button>
+                <Button href={href('/datasets?add=synthetic')}>Generate sample set</Button>
+              </>
             )}
           />
         </Panel>
       ) : (
-        <form class="layout" onsubmit={submit} novalidate>
+        <form class="layout" ref={formEl} onsubmit={submit} novalidate>
           {oomRun.get() ? (
             <OomNote
               oomRun={oomRun.get()!}
@@ -693,6 +719,7 @@ export default function RunNew() {
               pickedAbout={pickedAbout.get()}
               errors={errors.get()}
               weightChoices={weightChoices.get()}
+              otherChoices={otherChoices.get()}
               publishedOptions={publishedOptions.get()}
               scoreCtx={scoreCtx.get()}
               pickWeights={pickWeights}
@@ -750,11 +777,15 @@ export default function RunNew() {
                   full-width summary (below 960 px) sets them side by side. */}
               <div class="sum">
                 <div class="sum-col">
-                  <Field label="Run name" for="name" error={errors.get().name}>
+                  <Field label="Run name" for="name" error={errors.get().name} hint={nameHint(name.get(), taken.get(), nameEdited.get()) ?? undefined}>
                     <Input
                       id="name"
                       bind:value={name}
                       oninput={() => nameEdited.set(true)}
+                      onblur={() => {
+                        const n = runName(name.get());
+                        if (n && n !== name.get()) name.set(n);
+                      }}
                       invalid={!!errors.get().name}
                       spellcheck="false"
                       autocomplete="off"
@@ -764,25 +795,28 @@ export default function RunNew() {
                 </div>
                 <div class="sum-col">
                   <Figures where="rail" />
+                  {ahead.get() ? <p class="ahead">{aheadLine(ahead.get()!)}</p> : null}
                   <div class="start" ref={startEl}>
                     {noFit.get() && (fix.get() || fixLoading.get()) ? (
                       <Button variant="primary" size="lg" block loading={fixLoading.get()} onclick={() => fix.get() && applyFix(fix.get()!)}>
                         {fix.get() ? `${useLabel(fix.get()!)}${fix.get()!.vram !== undefined ? ` · ${roughBytes(fix.get()!.vram!)}` : ''}` : 'Finding settings that fit'}
                       </Button>
                     ) : null}
-                    <Button
-                      type="submit"
-                      variant={noFit.get() ? 'secondary' : 'primary'}
-                      size="lg"
-                      icon={Play}
-                      block
-                      loading={submitting.get()}
-                      disabled={!valid.get()}
-                      aria-describedby={[showWhy.get() ? 'start-why' : '', noFit.get() ? 'rail-nofit' : ''].filter(Boolean).join(' ') || undefined}
-                    >
-                      Start training
-                    </Button>
-                    <WhyLine id="start-why" />
+                    <span class="start-tip" use:tooltip={{ text: startLabel.get(), keys: START_KEYS }}>
+                      <Button
+                        type="submit"
+                        variant={noFit.get() ? 'secondary' : 'primary'}
+                        size="lg"
+                        icon={Play}
+                        block
+                        loading={submitting.get()}
+                        disabled={!valid.get()}
+                        aria-describedby={[showWhy.get() ? 'start-why' : '', noFit.get() ? 'rail-nofit' : ''].filter(Boolean).join(' ') || undefined}
+                      >
+                        {startLabel.get()}
+                      </Button>
+                    </span>
+                    <Why id="start-why" />
                   </div>
                   <CliCommand cliParts={cliParts.get()} cli={cli.get()} cliPlaceholder={cliPlaceholder.get()} />
                 </div>
@@ -794,7 +828,7 @@ export default function RunNew() {
             startVisible={startVisible.get()}
             showWhy={showWhy.get()}
             why={why.get()}
-            whyLine={(id, cls) => <WhyLine id={id} cls={cls} />}
+            whyLine={(id, cls) => <Why id={id} cls={cls} />}
             bind:sumOpen={sumOpen}
             shown={shown.get()}
             estReady={estReady.get()}
@@ -812,6 +846,7 @@ export default function RunNew() {
             applyFix={applyFix}
             submitting={submitting.get()}
             valid={valid.get()}
+            startLabel={startLabel.get()}
           />
 
           {/* Inside the form, so its Start button submits it. */}
@@ -833,7 +868,7 @@ export default function RunNew() {
                       disabled={!valid.get()}
                       aria-describedby={[showWhy.get() ? 'sheet-why' : '', 'sheet-nofit'].filter(Boolean).join(' ')}
                     >
-                      Start training
+                      {startLabel.get()}
                     </Button>
                     <Button variant="primary" loading={fixLoading.get()} onclick={() => fix.get() && applyFix(fix.get()!)}>
                       {fix.get() ? useLabel(fix.get()!) : 'Finding a fit'}
@@ -848,7 +883,7 @@ export default function RunNew() {
                     disabled={!valid.get()}
                     aria-describedby={showWhy.get() ? 'sheet-why' : undefined}
                   >
-                    Start training
+                    {startLabel.get()}
                   </Button>
                 )}
               </>
@@ -857,7 +892,8 @@ export default function RunNew() {
             <div class="sum">
               <Review withName />
               <Figures where="sheet" />
-              <WhyLine id="sheet-why" />
+              {ahead.get() ? <p class="ahead">{aheadLine(ahead.get()!)}</p> : null}
+              <Why id="sheet-why" />
             </div>
           </Dialog>
         </form>
@@ -889,52 +925,15 @@ css`
     gap: var(--space-4);
     min-width: 0;
   }
-  .why {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-2);
-    margin-top: var(--space-2);
+  .start-tip {
+    display: block;
+  }
+  /* What the run waits for: a plain line in the Summary's secondary ink, not a warning (waiting is normal). */
+  .ahead {
+    max-inline-size: var(--measure);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--text-primary);
-  }
-  .why > :global(svg) {
-    flex-shrink: 0;
-    margin-top: 2px;
-    color: var(--danger-solid);
-  }
-  /* The reason Start is off leads to the field: an ink link, underlined, the arrow in tertiary. */
-  .why-go {
-    display: inline;
-    min-width: 0;
-    color: inherit;
-    text-align: left;
-    text-decoration: underline;
-    text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
-    text-underline-offset: 3px;
-    border-radius: var(--radius-xs);
-  }
-  .why-go:hover {
-    text-decoration-color: currentColor;
-  }
-  .why-go :global(svg) {
-    display: inline;
-    margin-left: var(--space-1);
-    vertical-align: -1px;
-    color: var(--text-tertiary);
-  }
-  @media (pointer: coarse) {
-    .why {
-      align-items: center;
-    }
-    .why > :global(svg) {
-      margin-top: 0;
-    }
-    .why-go {
-      display: inline-block;
-      min-height: 44px;
-      padding-block: var(--space-3);
-    }
+    color: var(--text-secondary);
   }
   .layout :global([data-jumped]) {
     outline: 2px solid var(--focus);
@@ -950,12 +949,6 @@ css`
   @media (max-width: 1023px) {
     .layout {
       padding-bottom: 64px;
-    }
-    /* The reason sits on the dock's left, where the estimate would be. */
-    .dock-why {
-      flex: 1;
-      min-width: 0;
-      margin-top: 0;
     }
     .layout {
       grid-template-columns: minmax(0, 1fr);

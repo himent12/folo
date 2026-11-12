@@ -65,17 +65,16 @@ export const playgroundScenes = [
     },
   },
   {
-    // DOGFOOD-3 S5: a Studio build without the in-browser runtime: WebGPU and CPU are off, the line under them says
-    // why, and the hovered CPU choice shows the reason as its tip.
+    // A Studio build without the in-browser runtime (DOGFOOD-3 S5, models F14): it runs on the server, with no Run on
+    // choice it could never use and no line about it; the model picker stands alone.
     name: 'playground-no-wasm',
     path: '/playground?model=m_hard_s',
     search: 'scenario=no-wasm',
     fullPage: false,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
-    setup: async (page, { vp }) => {
-      await until(page, '.vbar-note');
-      if (vp === 'desktop' || vp === 'laptop') await page.locator('.runon .tip').last().hover();
-      else await page.mouse.move(0, 0);
+    setup: async (page) => {
+      await until(page, '.model-pick');
+      await page.mouse.move(0, 0);
       await page.clock.runFor(800);
     },
   },

@@ -13,8 +13,9 @@ pub use folo_api::{
     Arch, Augment, BBox, BestEpoch, ClassMetrics, CpuInfo, Dataset, DatasetFormat, DatasetStats, Epoch,
     ExportResult, GpuBackend, GpuInfo, Health, Histogram, ImageInfo, ImagePage, ImageSize, IssueCounts,
     IssuePage, LogLevel, LogLine, Loss, MemoryInfo, Model, ModelEval, ModelMetrics, Optimizer, PrCurve,
-    PredictResponse, RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, RunStatus, Sample, ScoredBox,
-    Split, Splits, StatusEvent, Step, SyntheticDataset, SystemInfo, Timing, TrainConfig, ValMetrics,
+    PredictResponse, RegisterDataset, Run, RunDataset, RunEvent, RunMetrics, RunSamples, RunStatus, Sample,
+    ScoredBox, Split, Splits, StatusEvent, Step, SyntheticDataset, SystemInfo, Timing, TrainConfig,
+    ValMetrics,
 };
 pub use folo_api::{
     BENCH_SEVERITIES, Bench, BenchAccuracy, BenchAxis, BenchBest, BenchCalibration, BenchCalibrationBin,
@@ -211,6 +212,18 @@ pub trait RunExt {
     /// A cloud run that hasn't reached training yet (provisioning, booting, uploading): it waits on
     /// its instance, not in the training queue.
     fn cloud_pending(&self) -> Option<&RunCloud>;
+    /// A checkpoint to continue from: a model, or a validated best epoch. A run stopped or failed
+    /// before its first epoch ended has none, so it starts again rather than resumes (as in Studio).
+    fn can_continue(&self) -> bool;
+    /// A run waiting in this machine's queue that never started: Remove from queue deletes it
+    /// (docs/API.md, `DELETE /api/runs/{id}`). A resumed run waiting to continue is stopped instead,
+    /// and keeps what it trained.
+    fn never_started(&self) -> bool;
+    /// A stopped run's title, in Studio's words: a stop the server's shutdown or restart made
+    /// (`error_code: "interrupted"`) is never said as the user's own.
+    fn stopped_title(&self) -> String;
+    /// What a stopped run kept, in Studio's words.
+    fn stopped_detail(&self) -> &'static str;
 }
 
 /// `close_mosaic` as the engine applies it to `epochs` (capped at half the run).
@@ -240,6 +253,57 @@ impl RunExt for Run {
             |p: CloudPhase| matches!(p, CloudPhase::Provisioning | CloudPhase::Booting | CloudPhase::Syncing);
         self.cloud.as_ref().filter(|c| self.status == RunStatus::Queued && handing_over(c.phase))
     }
+
+    fn can_continue(&self) -> bool {
+        self.model_id.is_some() || self.best.is_some()
+    }
+
+    fn never_started(&self) -> bool {
+        self.status == RunStatus::Queued && self.started.is_none() && self.cloud.is_none()
+    }
+
+    fn stopped_title(&self) -> String {
+        match (self.error_code.as_deref() == Some("interrupted"), self.started.is_some()) {
+            (true, true) => "Interrupted: the server stopped during training".into(),
+            (true, false) => "Interrupted: the server stopped before it started".into(),
+            _ if self.can_continue() => format!("Stopped at epoch {}", self.epoch),
+            (_, true) => "Stopped during its first epoch".into(),
+            (_, false) => "Stopped before it started".into(),
+        }
+    }
+
+    fn stopped_detail(&self) -> &'static str {
+        match (self.can_continue(), self.model_id.is_some(), self.started.is_some()) {
+            (true, true, _) => "The last checkpoint was kept and saved as a model.",
+            (true, false, _) => "The last checkpoint was kept.",
+            (false, _, true) => "No epoch had finished, so nothing was saved.",
+            (false, _, false) => "It never trained, so nothing was saved.",
+        }
+    }
+}
+
+/// The run on this machine that holds the training device (running or stopping), other than
+/// `except`. Cloud runs train elsewhere and never hold it.
+pub fn training_now<'a>(runs: &'a [Run], except: &str) -> Option<&'a Run> {
+    runs.iter().find(|r| {
+        r.id != except && r.cloud.is_none() && matches!(r.status, RunStatus::Running | RunStatus::Stopping)
+    })
+}
+
+/// Whether a run the server just accepted waits for others rather than training at once.
+/// `POST /api/runs` answers `queued` either way (docs/API.md), so its status alone can't say: it
+/// waits behind a place past the first, a run holding the device, or (a server without queue
+/// places, or a run whose trainer is being built) another queued run on this machine.
+pub fn waits_to_start(run: &Run, runs: &[Run]) -> bool {
+    run.status == RunStatus::Queued
+        && (run.queue_position.is_some_and(|p| p > 1)
+            || training_now(runs, &run.id).is_some()
+            || runs.iter().any(|r| {
+                r.id != run.id
+                    && r.cloud.is_none()
+                    && r.status == RunStatus::Queued
+                    && r.queue_position.is_none()
+            }))
 }
 
 pub trait SplitsExt {
@@ -257,6 +321,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_stopped_run_says_what_it_kept_and_who_stopped_it() {
+        use crate::api::Backend;
+        let api = crate::api::mock::MockBackend::new(4200, true);
+        let base = api.run("run_a19f").unwrap();
+        let stopped = |started: bool, best: bool, code: Option<&str>| Run {
+            status: RunStatus::Stopped,
+            started: started.then(|| "2026-11-08T06:00:02Z".into()),
+            best: if best { base.best } else { None },
+            model_id: None,
+            error_code: code.map(Into::into),
+            ..base.clone()
+        };
+        let before = stopped(false, false, None);
+        assert!(!before.can_continue());
+        assert_eq!(before.stopped_title(), "Stopped before it started");
+        assert_eq!(before.stopped_detail(), "It never trained, so nothing was saved.");
+        assert_eq!(stopped(true, false, None).stopped_title(), "Stopped during its first epoch");
+        let kept = stopped(true, true, None);
+        assert!(kept.can_continue());
+        assert_eq!(kept.stopped_title(), format!("Stopped at epoch {}", kept.epoch));
+        assert_eq!(
+            stopped(true, true, Some("interrupted")).stopped_title(),
+            "Interrupted: the server stopped during training"
+        );
+        assert_eq!(
+            stopped(false, false, Some("interrupted")).stopped_title(),
+            "Interrupted: the server stopped before it started"
+        );
+        // Only a run that never started leaves the queue by being deleted.
+        let queued = Run { status: RunStatus::Queued, ..before.clone() };
+        assert!(queued.never_started());
+        assert!(!Run { started: kept.started.clone(), ..queued }.never_started());
+    }
+
+    #[test]
     fn run_parses_contract_example() {
         let json = r#"{ "id": "run_7d1e", "name": "shapes-n", "status": "running",
           "config": { "name": "shapes-n", "dataset_id": "ds_8f2c", "arch": "folo-n", "epochs": 100,
@@ -271,5 +370,38 @@ mod tests {
         assert_eq!(run.status, RunStatus::Running);
         assert_eq!(run.best.as_ref().unwrap().epoch, 11);
         assert!((run.progress() - 340.0 / 5000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_new_run_waits_only_behind_another() {
+        let json = r#"{ "id": "run_a", "name": "a", "status": "queued", "queue_position": 1,
+          "config": { "name": "a", "dataset_id": "ds", "arch": "folo-n", "epochs": 10, "batch": 16,
+            "imgsz": 320, "device": "auto", "optimizer": "auto", "lr0": 0.01, "weights": null,
+            "augment": { "mosaic": 1.0, "mixup": 0.0, "hsv": [0.015, 0.7, 0.4], "fliplr": 0.5,
+              "scale": 0.5, "translate": 0.1, "close_mosaic": 10 }, "seed": 0 },
+          "created": "2026-11-08T06:00:00Z", "started": null, "finished": null, "epoch": 0,
+          "epochs": 10, "step": 0, "steps_per_epoch": 0, "eta_s": null, "best": null,
+          "device": "", "model_id": null, "error": null }"#;
+        let new: Run = serde_json::from_str(json).unwrap();
+        let other = |id: &str, status: RunStatus, place: Option<u32>| Run {
+            id: id.into(),
+            status,
+            queue_position: place,
+            ..new.clone()
+        };
+        let done = other("run_d", RunStatus::Completed, None);
+        // The server's first answer is always `queued`, at the front: with nothing else on the
+        // device it trains at once.
+        assert!(!waits_to_start(&new, &[new.clone(), done.clone()]));
+        // Behind a run that trains, or one whose trainer is being built.
+        let busy = other("run_b", RunStatus::Running, None);
+        assert!(waits_to_start(&new, &[new.clone(), busy.clone()]));
+        assert_eq!(training_now(&[new.clone(), busy], "run_a").map(|r| r.id.as_str()), Some("run_b"));
+        assert!(waits_to_start(&new, &[new.clone(), other("run_c", RunStatus::Queued, None)]));
+        // Past the first place.
+        let second = Run { queue_position: Some(2), ..new.clone() };
+        assert!(waits_to_start(&second, std::slice::from_ref(&second)));
+        // A run that already trains (a later status) never "waits".
+        assert!(!waits_to_start(&Run { status: RunStatus::Running, ..new.clone() }, &[new, done]));
     }
 }

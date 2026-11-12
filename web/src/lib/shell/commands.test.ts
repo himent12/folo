@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rank, type Rankable } from './commands';
+import { highlight, rank, type Rankable } from './commands';
 
 const items: (Rankable & { id: string })[] = [
   { id: 'nav-runs', group: 'Go to', label: 'Runs' },
@@ -31,5 +31,33 @@ describe('rank', () => {
 
   it('drops what does not match', () => {
     expect(ids('zzz')).toEqual([]);
+  });
+
+  it('matches words, not characters scattered in order (shell F14)', () => {
+    const more: (Rankable & { id: string })[] = [
+      ...items,
+      { id: 'act-try-five', group: 'Actions', label: 'Open shapes-five-n-best in Playground', match: ['shapes-five-n-best'], scoped: true },
+      { id: 'act-train-five', group: 'Actions', label: 'New run on shapes-five', match: ['shapes-five'], scoped: true },
+      { id: 'ds-five', group: 'Datasets', label: 'shapes-five', scoped: true },
+      { id: 'ds-small', group: 'Datasets', label: 'shapes-small', scoped: true },
+      { id: 'set-cloud', group: 'Settings', label: 'Cloud', match: ['Cloud compute'], scoped: true },
+      { id: 'nav-new', group: 'Actions', label: 'New training run' },
+    ];
+    const r = (q: string) => rank(more, q).map((i) => i.id);
+    // "cloud" is no subsequence soup of "Open … in Playground": the Cloud settings alone.
+    expect(r('cloud')).toEqual(['set-cloud']);
+    // A word and the start of the next: the dataset, above actions that only hold its letters.
+    expect(r('shapes s')[0]).toBe('ds-small');
+    // The dataset named by the query ranks above the actions about it.
+    expect(r('five').indexOf('ds-five')).toBeLessThan(r('five').indexOf('act-train-five'));
+    // Initials still find an action, as a last resort.
+    expect(r('ntr')).toEqual(['nav-new']);
+  });
+
+  it('highlights what matched', () => {
+    const marked = (q: string, t: string) => highlight(q, t).filter((x) => x.m).map((x) => x.s);
+    expect(marked('shapes s', 'shapes-small')).toEqual(['shapes', 's']);
+    expect(marked('small', 'shapes-small')).toEqual(['small']);
+    expect(marked('cloud', 'Open shapes in Playground')).toEqual([]);
   });
 });

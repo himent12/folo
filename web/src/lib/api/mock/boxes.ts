@@ -20,7 +20,7 @@ export async function imageSize(file: Blob): Promise<{ width: number; height: nu
     bmp.close();
     return out;
   } catch {
-    throw new ApiError(400, 'bad_image', 'That file is not an image FOLO can decode.', 'Use a JPEG, PNG or WebP.');
+    throw new ApiError(400, 'bad_image', 'That file is not an image FOLO can decode.', 'Use a JPEG, PNG, BMP or WebP.');
   }
 }
 

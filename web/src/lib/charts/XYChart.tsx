@@ -493,6 +493,8 @@ css`
     display: block;
     overflow: visible;
     touch-action: pan-y;
+    /* A press and drag over the plot reads values; it never selects the tick labels (runs F18). */
+    user-select: none;
   }
   /* Focus: the global :focus-visible ring (base.css), never a halo of its own (DESIGN_DIRECTION §2.9). */
   .grid line {

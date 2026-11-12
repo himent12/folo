@@ -5,16 +5,19 @@ import GitCompare from '$icons/git-compare-arrows';
 import Images from '$icons/images';
 import Keyboard from '$icons/keyboard';
 import PanelLeft from '$icons/panel-left';
+import Repeat from '$icons/repeat';
 import Plus from '$icons/plus';
 import ScanSearch from '$icons/scan-search';
 import Search from '$icons/search';
+import SettingsIcon from '$icons/settings';
 import SunMoon from '$icons/sun-moon';
 import Tags from '$icons/tags';
 import Target from '$icons/target';
 import X from '$icons/x';
 import { bindable, computed, css, Dynamic, effect, For, Index, signal } from 'fw';
 import { hub } from '$lib/api/index';
-import type { Bench, Dataset, Model, Run, RunStatus } from '$lib/api/types';
+import { hasCloud } from '$lib/cloud';
+import type { Bench, BenchLoop, Dataset, LabelJob, Model, Run, RunStatus } from '$lib/api/types';
 import { failureCause } from '$lib/oom';
 import { prefs } from '$lib/prefs';
 import { router } from '$lib/router';
@@ -23,9 +26,11 @@ import { rememberFocus } from '$lib/ui/focus';
 import Ident from '$lib/ui/Ident';
 import Kbd from '$lib/ui/Kbd';
 import { keyPrefs } from '$lib/ui/keyPrefs';
+import { backdropClose } from '$lib/ui/backdrop';
 import Meta from '$lib/ui/Meta';
 import { statusWord } from '$lib/ui/StatusBadge';
 import type { IconType } from '$lib/ui/types';
+import { count } from '$lib/format';
 import { highlight, rank } from './commands';
 import { mainNav, settingsNav } from './nav';
 import { pageCommandList, recentIds, rememberRecent } from './pageCommands';
@@ -56,6 +61,17 @@ interface Item {
   run: () => void;
 }
 
+/** Settings' sections (routes/Settings: `?section=`), with what each holds, as people may look for it. */
+const SETTINGS_SECTIONS: { id: string; label: string; match: string[] }[] = [
+  { id: 'connection', label: 'Connection', match: ['Server URL', 'Server address', 'folo serve'] },
+  { id: 'cloud', label: 'Cloud', match: ['Cloud compute', 'Connect a cloud', 'RunPod', 'Rented GPU'] },
+  { id: 'appearance', label: 'Appearance', match: ['Theme', 'Dark theme', 'Light theme'] },
+  { id: 'units', label: 'Units', match: ['Memory units', 'GiB', 'GB'] },
+  { id: 'shortcuts', label: 'Keyboard shortcuts', match: ['Single-key shortcuts'] },
+  { id: 'system', label: 'System', match: ['GPU', 'Device', 'Driver', 'Throughput'] },
+  { id: 'about', label: 'About', match: ['Version'] },
+];
+
 export interface CommandPaletteProps {
   open?: boolean;
   onshortcuts: () => void;
@@ -76,27 +92,63 @@ export default function CommandPalette(props: CommandPaletteProps) {
   /** Benchmarks, on servers that have them (a server without answers 501 or 404: none listed). */
   const benches = signal<Bench[]>([]);
   const benchesOk = signal(false);
+  /** Labeling jobs, and the benchmarks' self-improvement loops, on servers that have them (none listed otherwise). */
+  const labelJobs = signal<LabelJob[]>([]);
+  const loops = signal<BenchLoop[]>([]);
+  /** The server has cloud compute (`features`: `cloud`): only then is Settings' Cloud section there to open. */
+  const cloud = signal(false);
   /** The items chosen last (ids), read on open: with no query they head the list, under Recent. */
   const recent = signal<string[]>([]);
 
+  /** The hub epoch the lists above were fetched under. */
+  let listed: number | null = null;
+  // A press outside the box closes it, unless it is the second click of the double-click that opened it (ui/backdrop).
+  const backdrop = backdropClose(() => el, () => el.close());
   // Focus returns to the opener on close; a command that navigates then hands it to the new page (App).
   let restore: (() => void) | null = null;
   effect(() => {
     if (open.get() && !el.open) {
       restore = rememberFocus();
       el.showModal();
+      backdrop.opened();
       query.set('');
       index.set(0);
       recent.set(recentIds());
       queueMicrotask(() => input.peek()?.focus());
       const api = hub.api;
-      api.runs().then((r) => runs.set(r), () => {});
-      api.datasets().then((d) => datasets.set(d), () => {});
-      api.models().then((m) => models.set(m), () => {});
+      // What the lists hold came from the server in use at the last opening: another one's (a reconnect since) goes,
+      // and so does an answer that arrives after the next reconnect.
+      const epoch = hub.epoch;
+      if (epoch !== listed) {
+        listed = epoch;
+        runs.set([]);
+        datasets.set([]);
+        models.set([]);
+        benches.set([]);
+        benchesOk.set(false);
+        labelJobs.set([]);
+        loops.set([]);
+        cloud.set(false);
+      }
+      const mine =
+        <A extends unknown[]>(f: (...a: A) => void) =>
+        (...a: A) => {
+          if (hub.epoch === epoch) f(...a);
+        };
+      api.runs().then(mine((r) => runs.set(r)), () => {});
+      api.datasets().then(mine((d) => datasets.set(d)), () => {});
+      api.models().then(mine((m) => models.set(m)), () => {});
       api.benches().then(
-        (b) => (benches.set(b), benchesOk.set(true)),
-        () => (benches.set([]), benchesOk.set(false)),
+        mine((b) => {
+          benches.set(b);
+          benchesOk.set(true);
+          // Loops live under their benchmark: one request each (a server has a few benchmarks).
+          Promise.all(b.map((x) => api.benchLoops(x.id).catch(() => [] as BenchLoop[]))).then(mine((l) => loops.set(l.flat())));
+        }),
+        mine(() => (benches.set([]), benchesOk.set(false), loops.set([]))),
       );
+      api.labelJobs().then(mine((j) => labelJobs.set(j)), mine(() => labelJobs.set([])));
+      api.system().then(mine((s) => cloud.set(hasCloud(s))), mine(() => cloud.set(false)));
     } else if (!open.get() && el.open) el.close();
   });
 
@@ -142,17 +194,32 @@ export default function CommandPalette(props: CommandPaletteProps) {
         icon: SunMoon,
         run: () => prefs.cycleTheme(),
       },
-      {
-        id: 'sidebar',
-        group: 'Actions',
-        label: sidebar.collapsed ? 'Expand sidebar' : 'Collapse sidebar',
-        keys: '[',
-        icon: PanelLeft,
-        run: () => sidebar.toggle(),
-      },
-      // Touch-only devices have no keys to look up.
-      ...(touchOnly ? [] : [{ id: 'shortcuts', group: 'Actions', label: 'Keyboard shortcuts', keys: '?', icon: Keyboard, run: () => props.onshortcuts() }]),
+      // Touch-only devices have no keys to look up, and a phone or tablet held in the hand no sidebar to fold.
+      ...(touchOnly
+        ? []
+        : [
+            {
+              id: 'sidebar',
+              group: 'Actions',
+              label: sidebar.collapsed ? 'Expand sidebar' : 'Collapse sidebar',
+              keys: '[',
+              icon: PanelLeft,
+              run: () => sidebar.toggle(),
+            },
+            { id: 'shortcuts', group: 'Actions', label: 'Keyboard shortcuts', keys: '?', icon: Keyboard, run: () => props.onshortcuts() },
+          ]),
     ];
+    // Settings' sections, by name and by what they hold ("cloud", "theme", "server URL"): for a query only.
+    // Cloud only where Settings has it (a server with the cloud feature).
+    const settings: Item[] = SETTINGS_SECTIONS.filter((x) => !(touchOnly && x.id === 'shortcuts') && (x.id !== 'cloud' || cloud.get())).map((x) => ({
+      id: `settings-${x.id}`,
+      group: 'Settings',
+      label: x.label,
+      match: x.match,
+      scoped: true,
+      icon: SettingsIcon,
+      run: go(`/settings?section=${x.id}`),
+    }));
     const r: Item[] = runs.get().map((x) => ({
       id: `run-${x.id}`,
       group: 'Runs',
@@ -180,6 +247,24 @@ export default function CommandPalette(props: CommandPaletteProps) {
       hint: [`${x.images.toLocaleString('en-US')} images`, `${x.entries} ${x.entries === 1 ? 'entry' : 'entries'}`, ...(x.best ? [`best ${x.best.score.toFixed(1)}`] : [])],
       icon: Target,
       run: go(`/benchmarks/${x.id}`),
+    }));
+    const benchName = new Map(benches.get().map((x) => [x.id, x.name]));
+    const jobs: Item[] = labelJobs.get().map((x) => ({
+      id: `label-${x.id}`,
+      group: 'Labeling jobs',
+      label: x.name,
+      match: x.classes,
+      hint: [x.status === 'idle' ? `${x.counts.labeled.toLocaleString('en-US')} of ${x.counts.images.toLocaleString('en-US')} images labeled` : 'Labeling', count(x.classes.length, 'class')],
+      icon: Tags,
+      run: go(`/datasets/label/${x.id}`),
+    }));
+    const l: Item[] = loops.get().map((x) => ({
+      id: `loop-${x.id}`,
+      group: 'Loops',
+      label: x.name,
+      hint: [`${x.status.charAt(0).toUpperCase()}${x.status.slice(1)}`, `on ${benchName.get(x.bench_id) ?? 'a benchmark'}`],
+      icon: Repeat,
+      run: go(`/benchmarks/${x.bench_id}/loops/${x.id}`),
     }));
     const m: Item[] = models.get().map((x) => ({
       id: `model-${x.id}`,
@@ -221,11 +306,14 @@ export default function CommandPalette(props: CommandPaletteProps) {
       ...page,
       ...nav,
       ...actions,
+      ...settings,
       ...onEntity,
       ...r.map((i) => ({ ...i, scoped: !idle(i) })),
       ...d.map((i) => ({ ...i, scoped: true })),
       ...m.map((i) => ({ ...i, scoped: true })),
       ...b.map((i) => ({ ...i, scoped: true })),
+      ...jobs.map((i) => ({ ...i, scoped: true })),
+      ...l.map((i) => ({ ...i, scoped: true })),
     ];
   });
 
@@ -246,11 +334,12 @@ export default function CommandPalette(props: CommandPaletteProps) {
 
   const grouped = computed(() => {
     const out: { group: string; items: { item: Item; n: number }[] }[] = [];
-    results.get().forEach((item, n) => {
-      const g = out.find((x) => x.group === item.group);
-      if (g) g.items.push({ item, n });
-      else out.push({ group: item.group, items: [{ item, n }] });
-    });
+    // Groups in the order of their best result, except that an action about an entity ("New run on shapes-five") never
+    // puts its group above the entities' own: those groups take their place from their other results, or come last.
+    const all = results.get();
+    for (const item of [...all.filter((i) => !i.describes), ...all.filter((i) => i.describes)])
+      if (!out.some((x) => x.group === item.group)) out.push({ group: item.group, items: [] });
+    all.forEach((item, n) => out.find((x) => x.group === item.group)!.items.push({ item, n }));
     // Keep numbering in visual order.
     let n = 0;
     for (const g of out) for (const it of g.items) it.n = n++;
@@ -319,9 +408,9 @@ export default function CommandPalette(props: CommandPaletteProps) {
         restore?.();
         restore = null;
       }}
-      onclick={(e) => {
-        if (e.target === el) el.close();
-      }}
+      onpointerdown={backdrop.onpointerdown}
+      onmousedown={backdrop.onmousedown}
+      onclick={backdrop.onclick}
     >
       <div class="box">
         <div class="search">
@@ -340,9 +429,11 @@ export default function CommandPalette(props: CommandPaletteProps) {
             spellcheck="false"
             autocomplete="off"
           />
-          <span class="esc">
-            <Kbd keys="Escape" subtle />
-          </span>
+          {!touchOnly ? (
+            <span class="esc">
+              <Kbd keys="Escape" subtle />
+            </span>
+          ) : null}
           <button class="close" type="button" aria-label="Close" onclick={() => el.close()}>
             <X size={18} />
           </button>
@@ -389,7 +480,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
                           {hint(x)}
                         </span>
                         {/* Every hint here is a single key: none while those are off (Settings). */}
-                        {x().item.keys && keyPrefs.singleKeys ? <Kbd keys={x().item.keys ?? ''} subtle /> : null}
+                        {x().item.keys && keyPrefs.singleKeys && !touchOnly ? <Kbd keys={x().item.keys ?? ''} subtle /> : null}
                       </li>
                     );
                   }}
@@ -401,18 +492,21 @@ export default function CommandPalette(props: CommandPaletteProps) {
         <p class="sr-only" role="status" aria-live="polite" data-testid="palette-count">
           {said.get()}
         </p>
-        <footer>
-          <span>
-            <Kbd keys="ArrowUp" subtle />
-            <Kbd keys="ArrowDown" subtle /> move
-          </span>
-          <span>
-            <Kbd keys="Enter" subtle /> open
-          </span>
-          <span>
-            <Kbd keys="Escape" subtle /> close
-          </span>
-        </footer>
+        {/* The keys that drive the list, for a keyboard: a touch-only device has none. */}
+        {!touchOnly ? (
+          <footer>
+            <span>
+              <Kbd keys="ArrowUp" subtle />
+              <Kbd keys="ArrowDown" subtle /> move
+            </span>
+            <span>
+              <Kbd keys="Enter" subtle /> open
+            </span>
+            <span>
+              <Kbd keys="Escape" subtle /> close
+            </span>
+          </footer>
+        ) : null}
       </div>
     </dialog>
   );
@@ -463,7 +557,9 @@ css`
     flex-direction: column;
     max-height: min(560px, 70vh);
   }
+  /* The search row and the footer keep their height whatever the list holds: only the list gives (shell F9). */
   .search {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -561,6 +657,7 @@ css`
     color: var(--text-tertiary);
   }
   footer {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: var(--space-4);

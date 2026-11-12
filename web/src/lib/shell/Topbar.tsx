@@ -15,6 +15,7 @@ import Gate from '$lib/ui/Gate';
 import Kbd from '$lib/ui/Kbd';
 import { OFFLINE_REASON } from '$lib/ui/offline';
 import Logo from './Logo';
+import OfflineNotice from './OfflineNotice';
 import { page } from './crumbs';
 
 export default function Topbar(props: { onsearch: () => void }) {
@@ -55,6 +56,8 @@ export default function Topbar(props: { onsearch: () => void }) {
           }}
         </Index>
       </ol>
+
+      <OfflineNotice />
 
       <div class="actions">
         <button class="search" onclick={() => props.onsearch()} aria-label="Search and commands" aria-keyshortcuts="Control+K Meta+K">
@@ -100,7 +103,6 @@ css`
     padding: 0 var(--space-4) 0 var(--space-6);
     background: color-mix(in srgb, var(--bg-app) 86%, transparent);
     backdrop-filter: blur(12px) saturate(1.4);
-    -webkit-backdrop-filter: blur(12px) saturate(1.4);
     border-bottom: 1px solid var(--line-subtle);
   }
   .mobile-logo,
@@ -189,6 +191,13 @@ css`
     .search-label,
     .search-keys {
       display: none;
+    }
+  }
+  /* Touch, where it is an icon: a 44 px target like the theme and settings buttons beside it (shell F17). */
+  @media (max-width: 1023px) and (pointer: coarse) {
+    .search {
+      width: 44px;
+      height: 44px;
     }
   }
   @media (max-width: 767px) {

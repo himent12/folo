@@ -3,7 +3,8 @@
 //! DPI, frames paced by the compositor and presented with GDI. No GPU anywhere.
 //!
 //! Developer switches: `FOLO_UI_OFFSCREEN=1` opens windows outside every display, never activated,
-//! with no taskbar button; `FOLO_UI_TRACE=1` prints `first-present <ms>` at the first present.
+//! with no taskbar button, and keeps everything else of the process off the displays too (`offscreen`);
+//! `FOLO_UI_TRACE=1` prints `first-present <ms>` at the first present.
 
 mod chrome;
 mod clipboard;

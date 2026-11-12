@@ -6,6 +6,7 @@ use folo_api::{BestEpoch, Epoch, RunLogs, RunMetrics, Step};
 
 use crate::error::Result;
 use crate::store::{LogsQuery, MetricsQuery, Subscription};
+use crate::util::{parse_rfc3339, rfc3339, unix_now};
 
 use super::entry::{model_metrics, status_event};
 use super::{RunFile, Runs};
@@ -54,8 +55,12 @@ impl Runs {
 /// Brings the progress in `run.json` of a run a previous process left active up to its files: the trainer writes
 /// `weights/last.folo`, then the epoch's line in `metrics.jsonl`, then (through its event) `run.json`, so a crash in
 /// between leaves `run.json` behind. Epochs done and the best epoch come from the newest of the three; the last
-/// epoch's metrics only from `metrics.jsonl` (unknown when only the checkpoint has that epoch).
+/// epoch's metrics only from `metrics.jsonl` (unknown when only the checkpoint has that epoch). A run that had
+/// started ended when it last trained ([`last_trained`]), so the time the server was down is not training time.
 pub(super) fn reconcile(file: &mut RunFile, dir: &Path) {
+    if file.run.started.is_some() {
+        file.run.finished = last_trained(file, dir).map(rfc3339);
+    }
     let m = read_metrics(&dir.join("metrics.jsonl"));
     let ckpt = crate::engine::read_model_file(&dir.join("weights").join("last.folo"))
         .ok()
@@ -81,6 +86,23 @@ pub(super) fn reconcile(file: &mut RunFile, dir: &Path) {
     file.run.best = best;
     file.last_metrics = m.epochs.last().filter(|e| e.epoch == done).map(|e| model_metrics(&e.val));
     file.epochs_done = done;
+}
+
+/// When a started run a previous process left active last trained (Unix seconds): `alive_at`, or for a run.json
+/// from before it the newest of its files; a resume it has not trained since is later (it waited from then on).
+/// Never before `started` nor after now; none when nothing tells.
+fn last_trained(file: &RunFile, dir: &Path) -> Option<f64> {
+    let started = file.run.started.as_deref().and_then(parse_rfc3339)?;
+    let written = || {
+        ["run.json", "metrics.jsonl", "log.jsonl", "weights/last.folo"]
+            .iter()
+            .filter_map(|f| std::fs::metadata(dir.join(f)).and_then(|m| m.modified()).ok())
+            .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as f64)
+            .reduce(f64::max)
+    };
+    let at = file.alive_at.or_else(written).into_iter().chain(file.resumed_at).reduce(f64::max)?;
+    Some(at.clamp(started, unix_now().floor().max(started)))
 }
 
 /// Parses `metrics.jsonl`. A resumed run appends the steps of the epoch it repeats again: a step or epoch number

@@ -259,12 +259,18 @@ export class LiveRun {
         const cloudSeq = this.#cloudSeq;
         const gen = this.#gen;
         const my = ++loadIssued;
-        const [snap, metrics, logs] = await Promise.all([
-          snapshot(),
-          api.runMetrics(runId),
-          // Older servers have no /logs; the live stream still fills the view.
-          api.runLogs(runId, 500).catch(() => ({ lines: [] })),
-        ]);
+        // Older servers have no /logs; the live stream still fills the view.
+        const logsLoad = api.runLogs(runId, 500).catch(() => ({ lines: [] }));
+        const metricsLoad = api.runMetrics(runId);
+        // The log is a request of its own: it shows while the metrics failed (their panel says so, with Retry).
+        metricsLoad.catch(() =>
+          logsLoad.then((l) => {
+            if (closed || my < loadApplied || gen !== this.#gen) return;
+            this.logs = mergeLogs(l.lines, this.logs);
+            this.#bump();
+          }),
+        );
+        const [snap, metrics, logs] = await Promise.all([snapshot(), metricsLoad, logsLoad]);
         if (closed) return;
         if (my < loadApplied) return;
         // Requested before a resume rewound the view (or before its replay ended): it may hold the interrupted
@@ -281,6 +287,8 @@ export class LiveRun {
         }
         this.logs = mergeLogs(logs.lines, this.logs);
         this.loading = false;
+        // A history that failed before (the panels said so) is in now.
+        this.error = undefined;
         // The history just applied is current: no longer "last known" (DESIGN_DIRECTION §2.8).
         this.#heard = Date.now();
         // Still down (a retry of the load got through): the view is last known as of now.

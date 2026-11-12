@@ -60,6 +60,9 @@ impl Render for FoloApp {
         // A dialog or the inspector owns the keys: the page's hint stands down.
         let key_hint = self.key_hint.borrow_mut().take().filter(|_| self.kb && !self.modal_open());
         let overlays = self.overlays(window, cx);
+        // Lost the server (it was there, and the 2 s refresh can't reach it): said over the page,
+        // so the page keeps its place, until it answers again.
+        let lost = (self.store.unreachable() && self.connecting.is_none()).then(|| lost_banner(&t));
         div()
             .id("root")
             .key_context("FoloApp")
@@ -128,6 +131,7 @@ impl Render for FoloApp {
             // Keyboard mode turns on in the capture phase, before a focused control (a slider, a
             // segmented group) consumes the key, so its first keyboard step already shows the ring.
             .capture_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, _, cx| {
+                this.pointer_moved = false;
                 let nav = matches!(
                     ev.keystroke.key.as_str(),
                     "up" | "down" | "left" | "right" | "home" | "end" | "pageup" | "pagedown"
@@ -230,6 +234,7 @@ impl Render for FoloApp {
                             .min_h_0()
                             .relative()
                             .child(page)
+                            .children(lost)
                             .when_some(key_hint, |d, h| {
                                 d.child(key_hint_strip(&t, h).absolute().left_0().right_0().bottom_0())
                             }),
@@ -254,6 +259,32 @@ impl Render for FoloApp {
                 )
             })
     }
+}
+
+/// "Lost connection to folo serve, retrying…": a slim pill over the top of the page area, which
+/// moves nothing under it.
+fn lost_banner(t: &Theme) -> folo_ui::Div {
+    div().absolute().top(px(8.)).left_0().right_0().flex().justify_center().child(
+        div()
+            .id("lost-connection")
+            .occlude()
+            .h(px(28.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .rounded_full()
+            .bg(t.bg_overlay)
+            .border_1()
+            .border_color(t.line_strong)
+            .shadow(t.shadow_lg())
+            .child(crate::ui::icon("icons/refresh-cw.svg", 14., t.warning_solid))
+            .child(
+                crate::ui::text(ty::SM, t.text_secondary)
+                    .whitespace_nowrap()
+                    .child("Lost connection to folo serve, retrying…"),
+            ),
+    )
 }
 
 /// The strip over the page's bottom edge that names the focused control's keys: 32 px, a

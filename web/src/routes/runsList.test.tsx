@@ -10,6 +10,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { render } from '../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { duration } from '$lib/format';
 import { parse, router } from '$lib/router';
 import { page as pageMeta } from '$lib/shell/crumbs';
 import Runs from './Runs';
@@ -40,6 +41,8 @@ async function open(page: Component<Record<string, never>>, path: string, api: M
   target?.remove();
   hub.api = api;
   hub.mode = 'mock';
+  // The list writes its state to the URL: each test starts from its own.
+  history.replaceState(history.state, '', `#${path}`);
   router.route = parse(`#${path}`);
   target = document.createElement('div');
   document.body.appendChild(target);
@@ -169,7 +172,9 @@ describe('Runs: row checkboxes', () => {
     const label = runs.querySelector<HTMLLabelElement>('tbody tr[data-row] .check label')!;
     label.click();
     flushSync();
-    expect(go).not.toHaveBeenCalled();
+    // The run does not open; the selection joins the list's URL (it survives opening a run and coming back).
+    const id = label.closest('tr')!.dataset.id!;
+    expect(go.mock.calls).toEqual([[`/runs?sel=${id}`, { replace: true }]]);
     expect(label.closest('tr')!.classList.contains('on')).toBe(true);
     expect(runs.classList.contains('picking')).toBe(true);
     // Selecting never adds a column, so nothing is pushed off the edge.
@@ -205,5 +210,141 @@ describe('Runs: the status filter of a deep link', () => {
       flushSync();
       expect(target.querySelectorAll('table.runs tbody tr[data-id]').length).toBe(failed);
     });
+  });
+});
+
+describe('Runs: sort, search and selection kept in the URL; row menus on every ended run', () => {
+  const ids = () => [...target.querySelectorAll<HTMLElement>('table.runs tbody tr[data-id]')].map((r) => r.dataset.id!);
+  const loaded = () =>
+    vi.waitFor(() => {
+      flushSync();
+      if (!ids().length) throw new Error('rows not loaded');
+    });
+
+  it('opens as a link left it: search typed, sorted by best mAP high first (none last), the runs ticked', async () => {
+    const all = await new MockApi('normal', 0).runs();
+    const scored = all.filter((r) => r.best).sort((a, b) => b.best!.map50_95 - a.best!.map50_95);
+    await open(Runs, `/runs?sort=map&dir=desc&sel=${scored[0]!.id}`, new MockApi('normal', 0));
+    await loaded();
+    expect(ids().slice(0, scored.length)).toEqual(scored.map((r) => r.id));
+    expect(target.querySelector('th[aria-sort]')?.textContent).toContain('Best mAP50-95');
+    expect(target.querySelector('th[aria-sort]')?.getAttribute('aria-sort')).toBe('descending');
+    expect(target.querySelector<HTMLInputElement>(`tr[data-id="${scored[0]!.id}"] input[type="checkbox"]`)?.checked).toBe(true);
+  });
+
+  it('sorts on a header click, the second click turns it around, and the URL says so', async () => {
+    await open(Runs, '/runs?q=shapes', new MockApi('normal', 0));
+    await loaded();
+    expect(target.querySelector<HTMLInputElement>('input[aria-label="Filter runs"]')?.value).toBe('shapes');
+    const go = vi.spyOn(router, 'go');
+    const head = () => [...target.querySelectorAll<HTMLButtonElement>('th button.sort')].find((b) => b.textContent?.includes('Created'))!;
+    head().click();
+    flushSync();
+    expect(go).toHaveBeenLastCalledWith('/runs?q=shapes&sort=created&dir=asc', { replace: true });
+    head().click();
+    flushSync();
+    expect(go).toHaveBeenLastCalledWith('/runs?q=shapes', { replace: true });
+    go.mockRestore();
+  });
+
+  it('keeps two ticked runs in the URL once, with their commas (the URL spells them %2C)', async () => {
+    await open(Runs, '/runs', new MockApi('normal', 0));
+    await loaded();
+    const go = vi.spyOn(router, 'go').mockImplementation((path, o) => {
+      // As the router does: the URL's own spelling of the query comes back as the route.
+      history.replaceState(history.state, '', `#${path}`);
+      router.route = parse(location.hash);
+      void o;
+    });
+    const boxes = [...target.querySelectorAll<HTMLInputElement>('table.runs tbody tr[data-row] .check input')];
+    boxes[0]!.click();
+    flushSync();
+    boxes[1]!.click();
+    flushSync();
+    expect(go).toHaveBeenCalledTimes(2);
+    expect(go).toHaveBeenLastCalledWith(`/runs?sel=${ids()[0]},${ids()[1]}`, { replace: true });
+    go.mockRestore();
+  });
+
+  it('keeps the runs ticked for Compare across a run opened and left with Escape (a bare /runs right after it)', async () => {
+    const api = new MockApi('normal', 0);
+    const ids = (await api.runs()).slice(0, 2).map((r) => r.id);
+    await open(Runs, `/runs?sel=${ids.join(',')}`, api);
+    await loaded();
+    // Enter on a row opens the run (a new entry); the App swaps the list for the run page.
+    router.go(`/runs/${ids[0]}`);
+    unmount(c!);
+    // Escape there opens /runs (shell/shortcuts backPath), the next entry.
+    router.go('/runs');
+    const P = Runs;
+    c = render(() => <P />, target);
+    await loaded();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(location.hash).toBe(`#/runs?sel=${ids.join(',')}`);
+      expect(target.querySelectorAll('td.check input:checked')).toHaveLength(2);
+    });
+  });
+
+  it('gives a finished run its model, the Playground and Delete run in its ⋯', async () => {
+    await open(Runs, '/runs', new MockApi('normal', 0));
+    await loaded();
+    const done = (await new MockApi('normal', 0).runs()).find((r) => r.status === 'completed' && r.model_id)!;
+    target.querySelector<HTMLButtonElement>(`tr[data-id="${done.id}"] td.act button`)!.click();
+    flushSync();
+    const items = [...document.querySelectorAll('[role="menuitem"]')].map((e) => e.textContent?.trim());
+    expect(items).toEqual(['Open model', 'Try in Playground', 'Delete run']);
+  });
+
+  it('gives the training run a ⋯ too: Open run, and Stop behind its confirm (v-data-runs N10a)', async () => {
+    const api = new MockApi('normal', 0);
+    await open(Runs, '/runs', api);
+    await loaded();
+    const running = (await api.runs()).find((r) => r.status === 'running')!;
+    target.querySelector<HTMLButtonElement>(`tr[data-id="${running.id}"] td.act button`)!.click();
+    flushSync();
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    expect(items.map((e) => e.textContent?.trim())).toEqual(['Open run', 'Stop']);
+    expect(items[0]!.getAttribute('href')).toBe(`#/runs/${running.id}`);
+    items[1]!.click();
+    flushSync();
+    expect(document.querySelector('dialog[open]')?.textContent).toContain(`Stop ${running.name}?`);
+  });
+
+  it("gives a resumed run's training time, without the night it sat stopped", async () => {
+    const api = new MockApi('normal', 0);
+    const runs = await api.runs();
+    const done = runs.find((r) => r.status === 'completed')!;
+    const resumed = { ...done, started: '2026-11-10T18:00:00Z', finished: '2026-11-11T08:30:00Z', paused_s: 14 * 3600 };
+    vi.spyOn(api, 'runs').mockResolvedValue(runs.map((r) => (r.id === done.id ? resumed : r)));
+    await open(Runs, '/runs', api);
+    await vi.waitFor(() => {
+      flushSync();
+      const cells = [...target.querySelectorAll(`tr[data-id="${done.id}"] td`)].map((td) => td.textContent?.trim());
+      expect(cells).toContain(duration(30 * 60));
+    });
+  });
+
+  it('names a removed dataset as the run recorded it, marked, never by its id', async () => {
+    const api = new MockApi('normal', 0);
+    const done = (await api.runs()).find((r) => r.status === 'completed' && r.dataset)!;
+    await api.deleteDataset(done.config.dataset_id);
+    await open(Runs, '/runs', api);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelector(`tr[data-id="${done.id}"]`)?.textContent).toContain(`${done.dataset!.name} (removed)`);
+    });
+    expect(target.querySelector('table.runs tbody')!.textContent).not.toMatch(/ds_/);
+  });
+
+  it('shows the compare checkboxes without a hover once two runs are listed', async () => {
+    await open(Runs, '/runs', new MockApi('normal', 0));
+    await loaded();
+    expect(target.querySelector('table.runs')!.classList.contains('pickable')).toBe(true);
+    const [one] = await new MockApi('normal', 0).runs();
+    await open(Runs, `/runs?q=${encodeURIComponent(one!.id)}`, new MockApi('normal', 0));
+    await loaded();
+    expect(ids()).toHaveLength(1);
+    expect(target.querySelector('table.runs')!.classList.contains('pickable')).toBe(false);
   });
 });

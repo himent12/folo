@@ -58,3 +58,38 @@ describe('the run chart on phones', () => {
     unmount(c);
   });
 });
+
+describe('the run chart when the history failed to load', () => {
+  it('says so with Retry, never "Waiting for the first validation…"', () => {
+    let retried = 0;
+    const c = render(
+      () => (
+        <RunMetrics run={run} steps={new AppendLog<Step>()} epochs={new AppendLog<Epoch>()} version={0} loading={false} error={new Error('HTTP 500')} retry={() => retried++} />
+      ),
+      target,
+    );
+    flushSync();
+    expect(target.textContent).toContain("Could not load this run's metrics");
+    expect(target.textContent).not.toMatch(/Waiting for the first|after the first epoch/);
+    [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Retry')!.click();
+    expect(retried).toBe(1);
+    unmount(c);
+  });
+});
+
+describe('the run chart before anything is detected', () => {
+  it('says "no detections yet" instead of "best 0.000 · ep 1" and "conf 1.00"', () => {
+    window.matchMedia = ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
+    const val = { map50: 0, map50_95: 0, precision: 0, recall: 0, best_f1_conf: 1, per_class: [] };
+    const epochs = new AppendLog<Epoch>();
+    epochs.push({ epoch: 1, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val, duration_s: 10 });
+    const live = { ...run, status: 'running' as const, best: { epoch: 1, map50_95: 0 } };
+    const c = render(() => <RunMetrics run={live} steps={new AppendLog<Step>()} epochs={epochs} version={1} loading={false} />, target);
+    flushSync();
+    const caps = [...target.querySelectorAll('.tab .cap .full')].map((e) => e.textContent?.trim());
+    expect(caps[0]).toBe('no detections yet');
+    expect(caps[2]).toBe('no detections yet');
+    expect(target.textContent).not.toMatch(/best 0\.000|conf 1\.00/);
+    unmount(c);
+  });
+});

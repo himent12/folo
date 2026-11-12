@@ -27,14 +27,16 @@ export interface ScoreContext {
  */
 export function scoreContext(
   m: Pick<Model, 'run_id' | 'source'>,
-  runs: ReadonlyMap<string, Pick<Run, 'config'>>,
+  runs: ReadonlyMap<string, Pick<Run, 'config' | 'dataset'>>,
   datasets: ReadonlyMap<string, Pick<Dataset, 'id' | 'name' | 'splits'>>,
 ): ScoreContext {
   if (m.source === 'published') return { kind: 'published', datasetId: null, datasetName: null, split: null };
   if (!m.run_id) return { kind: 'imported', datasetId: null, datasetName: null, split: null };
-  const dsId = runs.get(m.run_id)?.config.dataset_id ?? null;
+  const run = runs.get(m.run_id);
+  const dsId = run?.config.dataset_id ?? null;
   const ds = dsId ? datasets.get(dsId) : undefined;
-  if (!ds) return { kind: 'run', datasetId: dsId, datasetName: dsId, split: null };
+  // A removed dataset goes by the name its run recorded (Run.dataset), never by its id.
+  if (!ds) return { kind: 'run', datasetId: dsId, datasetName: run?.dataset?.name ?? null, split: null };
   return { kind: 'run', datasetId: ds.id, datasetName: ds.name, split: ds.splits.val === 0 ? 'train' : 'val' };
 }
 
@@ -112,16 +114,29 @@ export interface ScoreGroup<T> {
   items: T[];
 }
 
+/** A run's two checkpoints on a tie: its `-best` before anything else, its `-last` after. */
+export const checkpointOrder = (name: string) => (name.endsWith('-best') ? 0 : name.endsWith('-last') ? 2 : 1);
+
 /**
- * Rank items only against comparable ones: one group per dataset and split, best first; groups ordered by dataset name,
- * validation before other splits. Whatever has no comparable group (imported, published, an unknown split) is returned
- * apart, unranked, in the order given.
+ * The one rule for "the better model" (FOLO Desktop's `better_model` too): the higher mAP50-95 (unevaluated last), on
+ * a tie a `-best` checkpoint before a `-last` one, then the earlier made. A comparator: `models.sort(betterModel)[0]`
+ * is the best, what the Playground opens on.
+ */
+export function betterModel(a: Pick<Model, 'name' | 'created' | 'metrics'>, b: Pick<Model, 'name' | 'created' | 'metrics'>): number {
+  return (b.metrics?.map50_95 ?? -1) - (a.metrics?.map50_95 ?? -1) || checkpointOrder(a.name) - checkpointOrder(b.name) || a.created.localeCompare(b.created);
+}
+
+/**
+ * Rank items only against comparable ones: one group per dataset and split, best first (as `betterModel`); groups
+ * ordered by dataset name, validation before other splits. Whatever has no comparable group (imported, published, an
+ * unknown split) is returned apart, unranked, in the order given.
  */
 export function rankByContext<T>(
   items: readonly T[],
   ctxOf: (t: T) => ScoreContext,
   scoreOf: (t: T) => number | null | undefined,
   createdOf: (t: T) => string = () => '',
+  nameOf: (t: T) => string = () => '',
 ): { groups: ScoreGroup<T>[]; unranked: T[] } {
   const by = new Map<string, ScoreGroup<T>>();
   const unranked: T[] = [];
@@ -136,7 +151,11 @@ export function rankByContext<T>(
     by.get(key)!.items.push(t);
   }
   const groups = [...by.values()];
-  for (const g of groups) g.items.sort((a, b) => (scoreOf(b) ?? -1) - (scoreOf(a) ?? -1) || createdOf(a).localeCompare(createdOf(b)));
+  for (const g of groups)
+    g.items.sort(
+      (a, b) =>
+        (scoreOf(b) ?? -1) - (scoreOf(a) ?? -1) || checkpointOrder(nameOf(a)) - checkpointOrder(nameOf(b)) || createdOf(a).localeCompare(createdOf(b)),
+    );
   groups.sort((a, b) => (a.ctx.datasetName ?? '').localeCompare(b.ctx.datasetName ?? '') || splitOrder(a.ctx.split) - splitOrder(b.ctx.split));
   return { groups, unranked };
 }
@@ -165,7 +184,13 @@ export function modelChoices<M extends Pick<Model, 'id' | 'name' | 'created' | '
   models: readonly M[],
   ctxOf: (m: M) => ScoreContext,
 ): ModelChoice<M>[] {
-  const { groups, unranked } = rankByContext(models, ctxOf, (m) => m.metrics?.map50_95, (m) => m.created);
+  const { groups, unranked } = rankByContext(
+    models,
+    ctxOf,
+    (m) => m.metrics?.map50_95,
+    (m) => m.created,
+    (m) => m.name,
+  );
   const choice = (model: M, ctx: ScoreContext): ModelChoice<M> => ({
     model,
     ctx,

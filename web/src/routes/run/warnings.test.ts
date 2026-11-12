@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LogLine } from '$lib/api/types';
-import { plain, scheduleTitle, scheduleWarnings, sentences, shortCause, suggestedEpochs } from './warnings';
+import { minimumEpochs, plain, scheduleTitle, scheduleWarnings, sentences, shortCause, suggestedEpochs } from './warnings';
 
 const SHORT =
   'this run takes only 125 optimizer steps (5 epochs × 25: 800 training images, batch 32); a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP near 0. Train for at least 8 epochs, add images, or start from pretrained weights';
@@ -28,16 +28,28 @@ describe('sentences', () => {
   });
 });
 
-describe('suggestedEpochs', () => {
+describe('minimumEpochs', () => {
   it('is the engine rule, ⌈200 / steps per epoch⌉, from the warning numbers', () => {
-    expect(suggestedEpochs([SHORT])).toBe(8);
+    expect(minimumEpochs([SHORT])).toBe(8);
     // 30 steps an epoch: 200 / 30 = 6.67, so 7 epochs (the engine's div_ceil), whatever the sentence says.
-    expect(suggestedEpochs(['this run takes only 90 optimizer steps (3 epochs × 30: 480 training images, batch 16); …'])).toBe(7);
+    expect(minimumEpochs(['this run takes only 90 optimizer steps (3 epochs × 30: 480 training images, batch 16); …'])).toBe(7);
   });
 
   it('reads the epochs the trainer suggests, or null', () => {
-    expect(suggestedEpochs(['this run takes only 125 optimizer steps (5 epochs × 25: …); … Train for at least 8 epochs, add images, or start from pretrained weights'])).toBe(8);
-    expect(suggestedEpochs(["warmup takes 70 of the run's 125 optimizer steps, …; lower warmup_epochs (now 3) or train for more epochs"])).toBeNull();
+    expect(minimumEpochs(['this run takes only 125 optimizer steps (5 epochs × 25: …); … Train for at least 8 epochs, add images, or start from pretrained weights'])).toBe(8);
+    expect(minimumEpochs(["warmup takes 70 of the run's 125 optimizer steps, …; lower warmup_epochs (now 3) or train for more epochs"])).toBeNull();
+  });
+});
+
+describe('suggestedEpochs', () => {
+  it('suggests a clearly larger, round count, never one epoch more (v-data-runs N4)', () => {
+    // 15 epochs of 13 steps: the minimum is 16; the suggestion is 30, twice the run.
+    expect(suggestedEpochs(['this run takes only 195 optimizer steps (15 epochs × 13: 200 training images, batch 16); …'], 15)).toBe(30);
+    // 60 epochs of 3 steps (the minimum 67): 150, not 67 or 120.
+    expect(suggestedEpochs(['this run takes only 180 optimizer steps (60 epochs × 3: 40 training images, batch 16); …'], 60)).toBe(150);
+    // The minimum above twice the run wins, rounded up: 5 epochs with a minimum of 8 → 10.
+    expect(suggestedEpochs([SHORT], 5)).toBe(10);
+    expect(suggestedEpochs([WARMUP], 5)).toBeNull();
   });
 });
 
@@ -55,5 +67,12 @@ describe('shortCause and scheduleTitle', () => {
     expect(shortCause([])).toBe('');
     expect(scheduleTitle([SHORT, WARMUP])).toBe('Too short to learn:');
     expect(scheduleTitle([WARMUP])).toBe('Mostly warmup:');
+  });
+
+  it('do not say a run that scored well was too short to learn, nor that its mAP is near 0', () => {
+    expect(scheduleTitle([SHORT], true)).toBe('More epochs would likely improve this:');
+    expect(scheduleTitle([WARMUP], true)).toBe('Mostly warmup:');
+    expect(plain(SHORT, true)).not.toMatch(/mAP near 0|learn anything/);
+    expect(plain(SHORT, true)).toContain('usually needs a few hundred steps before it stops improving');
   });
 });

@@ -5,6 +5,44 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 
 ## Unreleased
 
+### Usability pass
+Testers used Studio, FOLO Desktop and the server as people would and wrote down what got in the way; these are the
+fixes.
+- **Lists that stay current**: the models list catches up on every screen (Models, the Playground, a model page,
+  Overview's Best models) when a run ends or is deleted, and when the tab is shown again; the Datasets list reads
+  again after a change; Overview reads the sidebar's run list, so the two never disagree.
+- **Runs**: Remove from queue deletes a run that never started (`DELETE /api/runs/{id}`, Studio and Desktop) instead
+  of leaving a "Stopped" run with Resume; a run stopped before its first epoch says so and offers Start again; a run
+  the server's shutdown stopped says "Interrupted" (`error_code: "interrupted"`); a failed run says what went wrong in
+  plain words; "Epoch 1 of 5" everywhere, with no time left shown until the first epoch is done; run names are tidied
+  as typed and capped at 64 characters (server, Studio and MCP); the Runs list sorts, keeps its state on Back, shows
+  durations, row menus and its compare checkboxes; the log has one line per epoch.
+- **A removed dataset is still named**: runs record their dataset's name and classes (`Run.dataset`), so their pages
+  and every list say "shapes (removed)" instead of an id or "deleted dataset".
+- **Datasets**: a folder that was moved is marked "Folder missing" with Remove from FOLO, never as deleted; pasted
+  paths in quotes are taken and relative ones refused (datasets and labeling); default names are tidy and unique;
+  removing a generated sample set can delete its images too (`?files=true`, refused while any run is active, another
+  dataset reads them (also through a folder link) or what another dataset reads cannot be checked); a dataset registered again while runs use it gets its id back, and an id never moves to another
+  dataset (tombstones in `datasets.removed.json`, so `datasets.json` stays the list older versions read); a folder of
+  unlabeled images points to Label images; health guidance and counts that are true ("1 class").
+- **Not found and errors**: one not-found state for every deleted run, model, dataset, benchmark and labeling job;
+  error states name what could not be loaded; a real offline state that recovers by itself, its notice in the top bar;
+  Studio no longer falls back to demo data by itself: a server that is slow to answer or not there shows "Server
+  offline" and is asked again until it answers (demo data only with `?mock=1` or Settings › Use demo data), and an
+  address that answers but not as FOLO (another program, a 404 page, a sign-in wall) says so instead; server
+  hints written for agents stay out of people's way; messages that start with an identifier keep its case.
+- **Dialogs and small things**: a double-click that opens a dialog no longer closes it; closing a dialog after its
+  notice changed tone no longer throws; toasts expire and never stack; Back and Forward restore the scroll position;
+  New run keeps its draft (for the server it was made on), follows a changed link and never starts on Enter alone; a
+  dataset whose folder is missing cannot be picked to train; the Playground keeps its image, follows an edited URL,
+  opens on the best model, marks a model's first (cold) prediction and lists one set of image formats; labeling has a
+  reviewed state (Looks right, Enter; with changes, Enter or Ctrl+S saves).
+- **FOLO Desktop**: delete runs and datasets with a confirmation; says when `folo serve` is lost; empty Runs and
+  Models say what to do first; picks the best model by default; Studio's wording for learning rate, loss, plurals and
+  stopped runs; a removed dataset by name.
+- **GPU memory**: the server reports a Vulkan GPU's memory size (`/api/system` `memory_bytes`), and `folo doctor`
+  prints it.
+
 ### Studio on fw
 - FOLO Studio no longer runs on Svelte: it runs on **fw**, our own UI framework (`web/framework/`): JSX compiled at
   build time into cloned DOM templates with one fine-grained binding per dynamic part, on a push-pull signal graph,

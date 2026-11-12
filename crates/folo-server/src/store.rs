@@ -224,6 +224,32 @@ pub fn check_export(spec: &ExportSpec) -> Result<()> {
     Ok(())
 }
 
+/// The longest run name `POST /api/runs` takes, in characters (as long as a dataset's name may be).
+pub const MAX_RUN_NAME_CHARS: usize = 64;
+
+/// `400 invalid_config` for a run name over [`MAX_RUN_NAME_CHARS`] (every store's `create_run` checks this): one long
+/// name would otherwise widen every list that shows runs and their models.
+pub fn check_run_name(name: &str) -> Result<()> {
+    if name.chars().count() > MAX_RUN_NAME_CHARS {
+        return Err(crate::error::Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_config",
+            format!("name: must be at most {MAX_RUN_NAME_CHARS} characters"),
+        )
+        .hint("pick a shorter run name, or leave it empty for <dataset name>-<size>"));
+    }
+    Ok(())
+}
+
+/// The name of a run created without one: `<dataset name>-<size>` (`shapes-n`), the dataset's name shortened so the
+/// whole stays within [`MAX_RUN_NAME_CHARS`] (a run's config read back can be sent as a new run again).
+pub fn default_run_name(dataset: &str, arch: folo_api::Arch) -> String {
+    let size = arch.as_str().trim_start_matches("folo-");
+    let room = MAX_RUN_NAME_CHARS.saturating_sub(size.chars().count() + 1);
+    let base: String = dataset.chars().take(room).collect();
+    format!("{}-{size}", base.trim_end())
+}
+
 /// An IO error on the weights file of model `id`: `model_not_found` when the file is gone, else `internal`.
 pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate::error::Error {
     if e.kind() == std::io::ErrorKind::NotFound {
@@ -235,8 +261,8 @@ pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate:
 
 /// The file name a model's weights are offered under: its name reduced to `A-Z a-z 0-9 . _ -` (anything else
 /// becomes `_`, outer dots are dropped, at most 200 characters, so it is a file name on every OS), then `.folo`,
-/// `-f16.folo` for the f16 export, or, as `POST /api/models/{id}/export` names its files, `.onnx` (`-f16.onnx` with
-/// `half`).
+/// `-f16.folo` for the f16 export, or, as `POST /api/models/{id}/export` names its files, `.onnx` with the
+/// switches' suffix (`-decoded`, `-f16`, `-decoded-f16`: [`folo_api::OnnxSwitches::file_suffix`]).
 pub fn weights_file_name(model_name: &str, format: WeightsFormat) -> String {
     let stem: String = model_name
         .chars()
@@ -251,8 +277,7 @@ pub fn weights_file_name(model_name: &str, format: WeightsFormat) -> String {
     match format {
         WeightsFormat::Stored => format!("{stem}.folo"),
         WeightsFormat::F16 => format!("{stem}-f16.folo"),
-        WeightsFormat::Onnx(s) if s.half => format!("{stem}-f16.onnx"),
-        WeightsFormat::Onnx(_) => format!("{stem}.onnx"),
+        WeightsFormat::Onnx(s) => format!("{stem}{}.onnx", s.file_suffix()),
     }
 }
 
@@ -411,6 +436,16 @@ pub trait Store: Send + Sync + 'static {
     fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData>;
     /// Unregisters a dataset (never deletes files).
     fn delete_dataset(&self, id: &str) -> Result<()>;
+    /// Unregisters a dataset and deletes its folder, which must be one this server wrote under `<data dir>/datasets`
+    /// (a generated sample set, a labeling job's export, an upload); any other is `400 invalid_query`.
+    fn delete_dataset_files(&self, id: &str) -> Result<()> {
+        let _ = id;
+        Err(crate::error::Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_query",
+            "this server does not delete dataset files".to_string(),
+        ))
+    }
 
     /// All models, newest first.
     fn list_models(&self) -> Result<Vec<Model>>;

@@ -110,6 +110,12 @@ impl HeadlessDispatcher {
     /// Returns whether anything ran on this thread. Panics if background jobs are still running after the
     /// idle timeout, or if one panicked. Call it while the app is not borrowed.
     pub fn run_until_idle(&self) -> bool {
+        self.run_until_held(0)
+    }
+
+    /// `run_until_idle`, except that it returns once at most `held` background jobs are outstanding: a test
+    /// that holds a job back on purpose (an answer it releases later, out of order) pumps everything else.
+    pub fn run_until_held(&self, held: usize) -> bool {
         let timeout = *self.idle_timeout.lock();
         let deadline = Instant::now() + timeout;
         let mut ran = false;
@@ -128,12 +134,12 @@ impl HeadlessDispatcher {
                 state = self.shared.state.lock();
                 continue;
             }
-            if state.outstanding == 0 {
+            if state.outstanding <= held {
                 return ran;
             }
             if self.shared.progress.wait_until(&mut state, deadline).timed_out()
                 && state.foreground.is_empty()
-                && state.outstanding > 0
+                && state.outstanding > held
             {
                 let outstanding = state.outstanding;
                 drop(state);

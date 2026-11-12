@@ -130,6 +130,22 @@ fn io_error(what: &str, path: &Path, e: std::io::Error) -> Error {
     Error::internal(format!("{what} {}: {e}", path.display()))
 }
 
+/// A folder (or image) path as people paste it: surrounding whitespace and one pair of matching quotes (Windows'
+/// "Copy as path") are not part of it; None when nothing is left. A relative path is refused rather than read from
+/// wherever the server was started, which would name a folder the user never typed.
+fn folder_path(raw: &str) -> Result<Option<PathBuf>> {
+    let p = raw.trim();
+    let p = ['"', '\''].iter().find_map(|q| p.strip_prefix(*q)?.strip_suffix(*q)).unwrap_or(p).trim();
+    if p.is_empty() {
+        return Ok(None);
+    }
+    if !Path::new(p).is_absolute() {
+        return Err(invalid(format!("path must be a full path: {p} is relative"))
+            .hint("give the full path of a folder (or an image file) on the machine the server runs on, such as D:/photos"));
+    }
+    Ok(Some(absolute(Path::new(p))))
+}
+
 fn path_not_found(path: &Path) -> Error {
     Error::new(StatusCode::NOT_FOUND, "path_not_found", format!("{} does not exist", path.display()))
         .hint("give a folder (or an image file) on the machine the server runs on")
@@ -198,8 +214,7 @@ impl Labeler {
         let classes = check_classes(&req.classes)?;
         let instructions = check_text("instructions", &req.instructions, MAX_INSTRUCTION_CHARS)?;
         // Checked before anything is created: a job is not left behind for a folder that is not there.
-        let folder =
-            req.path.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(|p| absolute(Path::new(p)));
+        let folder = req.path.as_deref().map(folder_path).transpose()?.flatten();
         if let Some(folder) = folder.as_ref().filter(|f| !f.exists()) {
             return Err(path_not_found(folder));
         }

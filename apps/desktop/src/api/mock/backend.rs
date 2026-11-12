@@ -99,7 +99,14 @@ impl Backend for MockBackend {
         if self.empty {
             return Ok(Vec::new());
         }
-        Ok(self.datasets.iter().map(|d| Dataset { stats: None, ..d.ds.clone() }).collect())
+        let list = self
+            .datasets
+            .iter()
+            .filter(|d| !self.is_removed(&d.ds.id))
+            .map(|d| Dataset { stats: None, ..d.ds.clone() })
+            .collect();
+        self.hold_point("datasets");
+        Ok(list)
     }
 
     fn dataset(&self, id: &str) -> ApiResult<Dataset> {
@@ -175,7 +182,14 @@ impl Backend for MockBackend {
         if self.empty {
             return Ok(Vec::new());
         }
-        Ok(self.models.clone())
+        let list = self
+            .models
+            .iter()
+            .filter(|m| !m.run_id.as_ref().is_some_and(|r| self.is_removed(r)))
+            .cloned()
+            .collect();
+        self.hold_point("models");
+        Ok(list)
     }
 
     fn model_eval(&self, id: &str) -> ApiResult<ModelEval> {
@@ -201,7 +215,9 @@ impl Backend for MockBackend {
         if self.empty {
             return Ok(Vec::new());
         }
-        Ok(self.runs.lock().unwrap().iter().map(Self::snapshot).collect())
+        let list = self.runs.lock().unwrap().iter().map(Self::snapshot).collect();
+        self.hold_point("runs");
+        Ok(list)
     }
 
     fn run(&self, id: &str) -> ApiResult<Run> {
@@ -256,6 +272,7 @@ impl Backend for MockBackend {
                 created: time::format(now),
                 started: Some(time::format(now)),
                 finished: None,
+                paused_s: None,
                 epoch: 0,
                 epochs: config.epochs,
                 step: 0,
@@ -269,6 +286,7 @@ impl Backend for MockBackend {
                 resolved: None,
                 queue_position: None,
                 cloud: None,
+                dataset: Some(RunDataset { name: ds.ds.name.clone(), classes: ds.ds.classes.clone() }),
                 config,
             },
             curve,
@@ -328,6 +346,38 @@ impl Backend for MockBackend {
         // The demo queues one run at a time: every move leaves it first.
         f.run.queue_position = Some(1);
         Ok(f.run.clone())
+    }
+
+    fn delete_run(&self, id: &str) -> ApiResult<()> {
+        self.check()?;
+        let mut runs = self.runs.lock().unwrap();
+        let i = runs
+            .iter()
+            .position(|f| f.run.id == id)
+            .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
+        // A queued run that never started leaves the queue and is deleted, as on the server.
+        let snap = Self::snapshot(&runs[i]);
+        if snap.status.is_active() && !snap.never_started() {
+            return Err(ApiError::new("run_active", format!("run '{id}' is still active"))
+                .with_hint(format!("stop it first: POST /api/runs/{id}/stop")));
+        }
+        runs.remove(i);
+        self.removed.lock().unwrap().insert(id.to_string());
+        Ok(())
+    }
+
+    fn delete_dataset(&self, id: &str, files: bool) -> ApiResult<()> {
+        self.check()?;
+        self.fixture(id)?;
+        // The demo's datasets are folders of its own, none generated into a data dir (it has none).
+        if files {
+            return Err(ApiError::new(
+                "invalid_query",
+                "Only a dataset FOLO generated can go with its files",
+            ));
+        }
+        self.removed.lock().unwrap().insert(id.to_string());
+        Ok(())
     }
 
     fn stop_run(&self, id: &str) -> ApiResult<Run> {
@@ -604,7 +654,9 @@ impl Backend for MockBackend {
     }
 
     fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse> {
-        self.predict_for(req)
+        let r = self.predict_for(req);
+        self.hold_point("predict");
+        r
     }
 
     // ---------- vision benchmarks (deterministic fixtures, `mock_bench`) ----------

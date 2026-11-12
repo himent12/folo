@@ -1,10 +1,12 @@
 /** New run, section 1: the dataset, as cards from 768 px up and as a compact select with a one-line summary on phones. */
 import Check from '$icons/check';
+import CircleAlert from '$icons/circle-alert';
 import { bindable, css, For, Index } from 'fw';
 import type { Resource } from '$lib/api/resource';
-import type { Dataset } from '$lib/api/types';
+import Badge from '$lib/ui/Badge';
+import { PROBLEM_LABEL, type ListedDataset } from '../datasets/problem';
 import ClassStrip from '$lib/detect/ClassStrip';
-import { compact, num } from '$lib/format';
+import { compact, count, num } from '$lib/format';
 import Panel from '$lib/ui/Panel';
 import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
@@ -12,10 +14,11 @@ import Meta from '$lib/ui/Meta';
 import { balanced } from '$lib/ui/balancedGrid';
 import type { FormErrors } from './jump';
 
+
 export interface DatasetSectionProps {
-  datasets: Resource<Dataset[]>;
+  datasets: Resource<ListedDataset[]>;
   datasetId: string;
-  dataset: Dataset | undefined;
+  dataset: ListedDataset | undefined;
   errors: FormErrors;
 }
 
@@ -37,14 +40,14 @@ export default function DatasetSection(props: DatasetSectionProps) {
               label="Dataset"
               bind:value={datasetId}
               invalid={!!props.errors.dataset}
-              options={props.datasets.data!.map((d) => ({ value: d.id, label: d.name }))}
+              options={props.datasets.data!.map((d) => ({ value: d.id, label: d.problem ? `${d.name} (${PROBLEM_LABEL[d.problem]})` : d.name }))}
             />
-            {props.dataset ? (
+            {props.dataset && !props.dataset.problem ? (
               <p class="ds-line num">
                 <Meta>
                   <span>{num(props.dataset.splits.train)} train</span>
                   <span>{num(props.dataset.splits.val)} val</span>
-                  <span>{props.dataset.classes.length} classes</span>
+                  <span>{count(props.dataset.classes.length, 'class')}</span>
                   <span>{props.dataset.format}</span>
                 </Meta>
               </p>
@@ -55,6 +58,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
             role="radiogroup"
             aria-label="Dataset"
             aria-invalid={props.errors.dataset ? 'true' : undefined}
+            aria-describedby={props.errors.dataset ? 'dataset-error' : undefined}
             use:balanced={{ n: props.datasets.data!.length, min: 184, gap: 8 }}
           >
             <For each={props.datasets.data!} key={(d) => d.id}>
@@ -75,14 +79,15 @@ export default function DatasetSection(props: DatasetSectionProps) {
                           ) : null}
                           {d().name}
                         </span>
-                        <span class="c-fmt">{d().format}</span>
+                        {/* A folder gone since it was registered: the Datasets list's word, and Start says why it waits. */}
+                        {d().problem ? <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge> : <span class="c-fmt">{d().format}</span>}
                       </span>
                       {/* Breaks only between the parts, and a wrapped line never ends on "·" (ui/Meta). */}
                       <span class="c-meta num">
                         <Meta>
                           <span>{compact(d().splits.train)} train</span>
                           <span>{compact(d().splits.val)} val</span>
-                          <span>{d().classes.length} classes</span>
+                          <span>{count(d().classes.length, 'class')}</span>
                         </Meta>
                       </span>
                     </label>
@@ -96,6 +101,16 @@ export default function DatasetSection(props: DatasetSectionProps) {
               }}
             </For>
           </div>
+          {/* Said at the picker, not only beside Start: a dataset with no train split cannot be trained on. */}
+          {props.errors.dataset ? (
+            <p class="ds-error" id="dataset-error" role="alert">
+              <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>
+                {props.errors.dataset}
+                {props.dataset && !props.dataset.problem ? ' Training needs images in a train split: pick another dataset, or add training images to this one.' : ''}
+              </span>
+            </p>
+          ) : null}
         </>
       )}
     </Panel>
@@ -103,6 +118,21 @@ export default function DatasetSection(props: DatasetSectionProps) {
 }
 
 css`
+  /* As Field's error line: the danger icon and text, one readable measure. */
+  .ds-error {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-1);
+    margin-top: var(--space-2);
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--danger-text);
+  }
+  .ds-error > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
   /* As many cards across as fit at 184 px, never one alone on a row (ui/balancedGrid sets --cols): four datasets are
      one row on a desktop and 2 × 2 on a laptop or tablet, never 3 + 1. */
   .cards {

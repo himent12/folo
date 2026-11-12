@@ -53,6 +53,10 @@ pub struct PredictResponse {
     pub timing: Timing,
     /// Device it ran on, e.g. `gpu:0`.
     pub device: String,
+    /// The model's first prediction since it was loaded: `timing` includes its warm-up (GPU kernels compiled,
+    /// buffers allocated), so it is not what the next call takes. Left out when false (older servers never send it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cold: bool,
 }
 
 /// Image dimensions.

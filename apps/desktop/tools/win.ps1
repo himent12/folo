@@ -26,12 +26,14 @@ public static class DfwWin {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
 
-    // The visible top-level window of a process with the largest client area (IntPtr.Zero if none).
+    // The app's window: the process's visible top-level FOLO::Window with the largest client area
+    // (IntPtr.Zero if none); by class, so a dialog is never taken for it.
     public static IntPtr FindWindow(uint pid) {
         IntPtr best = IntPtr.Zero; long bestArea = -1;
         EnumWindows((h, l) => {
             uint p; GetWindowThreadProcessId(h, out p);
-            if (p == pid && IsWindowVisible(h)) {
+            var c = new StringBuilder(64); GetClassName(h, c, 64);
+            if (p == pid && IsWindowVisible(h) && c.ToString() == "FOLO::Window") {
                 RECT r; GetClientRect(h, out r);
                 long a = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
                 if (a > bestArea) { bestArea = a; best = h; }
@@ -65,6 +67,21 @@ public static class DfwWin {
             if (w.Left < m.Right && w.Right > m.Left && w.Top < m.Bottom && w.Bottom > m.Top) return false;
         }
         return true;
+    }
+    // Every visible top-level window of a process that a display shows a part of ("class rect"):
+    // the app's or any other (a dialog is a window of its own).
+    public static List<string> OnDisplay(uint pid) {
+        var l = new List<string>();
+        EnumWindows((h, x) => {
+            uint p; GetWindowThreadProcessId(h, out p);
+            RECT r; GetWindowRect(h, out r);
+            if (p == pid && IsWindowVisible(h) && r.Right > r.Left && r.Bottom > r.Top && !OffEveryMonitor(r)) {
+                var c = new StringBuilder(64); GetClassName(h, c, 64);
+                l.Add(c + " " + Str(r));
+            }
+            return true;
+        }, IntPtr.Zero);
+        return l;
     }
     public static string Str(RECT r) { return "(" + r.Left + "," + r.Top + ")-(" + r.Right + "," + r.Bottom + ")"; }
 }

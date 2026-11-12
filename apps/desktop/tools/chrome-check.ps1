@@ -59,8 +59,8 @@ try {
             # Watch the rectangle while the state changes: it must never touch a display.
             $on = @()
             for ($i = 0; $i -lt 45; $i++) {
-                $wr = Rect
-                if (-not [FoloDrive]::OffEveryMonitor($wr)) { $on += [FoloDrive]::Str($wr) }
+                # Every window of the process, not only the app's.
+                $on += [FoloDrive]::OnDisplay([uint32]$p.Id)
                 Start-Sleep -Milliseconds 20
             }
             Check "  off every display throughout (code $code)" ($on.Count -eq 0) ($on -join " ")
@@ -98,7 +98,8 @@ try {
     Start-Sleep -Milliseconds 900
     Check "back from minimized" ((-not [FoloDrive]::IsIconic($h)) -and ((Rect).Left -eq $r.Left)) ([FoloDrive]::Str((Rect)))
     if ($Offscreen) {
-        Check "still off every display" ([FoloDrive]::OffEveryMonitor((Rect))) ([FoloDrive]::Str((Rect)))
+        $on = [FoloDrive]::OnDisplay([uint32]$p.Id)
+        Check "nothing of the process on any display" ($on.Count -eq 0) ($on -join " | ")
         Check "foreground window unchanged" ([FoloDrive]::GetForegroundWindow() -eq $fg0) ""
     }
     Press $closeX $y 20

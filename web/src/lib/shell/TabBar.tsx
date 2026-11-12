@@ -40,7 +40,6 @@ css`
       padding: var(--space-1) var(--space-1) calc(var(--space-1) + env(safe-area-inset-bottom));
       background: color-mix(in srgb, var(--bg-app) 88%, transparent);
       backdrop-filter: blur(16px) saturate(1.4);
-      -webkit-backdrop-filter: blur(16px) saturate(1.4);
       border-top: 1px solid var(--line-subtle);
     }
     /* A page showing a bottom dock (shell/dock.ts) takes the bottom edge: one fixed bar, not two. */

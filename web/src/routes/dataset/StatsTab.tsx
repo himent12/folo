@@ -16,7 +16,7 @@ import { computed, css, Dynamic, For, signal } from 'fw';
 import type { Dataset, DatasetStats, IssueCounts, IssueSeverity } from '$lib/api/types';
 import Histogram from '$lib/charts/Histogram.tsx';
 import { classInk } from '$lib/design/classInk';
-import { num } from '$lib/format';
+import { count, num } from '$lib/format';
 import { href } from '$lib/router';
 import InfoButton from '$lib/ui/InfoButton';
 import Panel from '$lib/ui/Panel';
@@ -70,7 +70,7 @@ export default function StatsTab(props: StatsTabProps) {
   });
   const share = (x: number) => (props.stats.boxes ? (x / props.stats.boxes) * 100 : 0);
   const perLast = computed(() => props.stats.boxes_per_image_hist.counts.length - 1);
-  const classCount = computed(() => `${props.dataset.classes.length} ${props.dataset.classes.length === 1 ? 'class' : 'classes'}`);
+  const classCount = computed(() => count(props.dataset.classes.length, 'class'));
   const pct = (x: number) => (images.get() ? `${((x / images.get()) * 100).toFixed(1)}% of images` : '');
 
   // A count is said once on a page (DESIGN_DIRECTION §2.23): once Health lists the empty images or the broken labels, the
@@ -166,7 +166,14 @@ export default function StatsTab(props: StatsTabProps) {
                            under its finding's row (the grid packs the next finding into the cell beside it), never a card
                            that spans both columns among half-width ones. */
                         <li class="evidence" id={`ds-ev-${h().id}`}>
-                          <IssueList datasetId={props.dataset.id} path={props.dataset.path} severity={h().issues} severityFilter={false} counts={props.counts} />
+                          <IssueList
+                            datasetId={props.dataset.id}
+                            path={props.dataset.path}
+                            severity={h().issues}
+                            kinds={h().kinds}
+                            severityFilter={false}
+                            counts={props.counts}
+                          />
                         </li>
                       ) : null}
                     </>
@@ -201,7 +208,7 @@ export default function StatsTab(props: StatsTabProps) {
           <span class="k-label">Boxes</span>
           <span class="k-value num">{num(props.stats.boxes)}</span>
           {listsEmpty.get() ? (
-            <span class="k-sub num">{num(images.get() - props.stats.empty_images)} images with boxes</span>
+            <span class="k-sub num">{count(images.get() - props.stats.empty_images, 'image')} with boxes</span>
           ) : (
             <span class="k-sub num">
               {perImage.get()} per image{!listsBroken.get() ? <span class="wide">{` · ${classCount.get()}`}</span> : null}
@@ -225,7 +232,7 @@ export default function StatsTab(props: StatsTabProps) {
           <div class="kpi">
             <span class="k-label">Classes</span>
             <span class="k-value num">{num(props.dataset.classes.length)}</span>
-            <span class="k-sub num">~{num(perClass.get())} boxes per class</span>
+            <span class="k-sub num">~{count(perClass.get(), 'box')} per class</span>
           </div>
         ) : (
           <div class="kpi">
@@ -246,7 +253,7 @@ export default function StatsTab(props: StatsTabProps) {
                   type="button"
                   class:absent={b().count === 0}
                   onclick={() => props.onclass(b().cls)}
-                  aria-label={`${b().name}: ${num(b().count)} boxes, ${share(b().count).toFixed(1)}%. Show images`}
+                  aria-label={`${b().name}: ${count(b().count, 'box')}, ${share(b().count).toFixed(1)}%. Show images`}
                 >
                   <span class="sw" style={swatchStyle(b().cls, b().count === 0)}></span>
                   <span class="cname truncate">{b().name}</span>

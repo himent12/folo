@@ -5,6 +5,9 @@
 //!
 //!   cargo run -p folo-ui --release --example win_smoke            # all checks and the timings
 //!   cargo run -p folo-ui --release --example win_smoke -- --quick # skip the 5 s idle-CPU check
+//!
+//! `--dialog`, `--offscreen-dialog` and `--onscreen-timings` show windows (or would, if off screen
+//! failed): they run only on a private desktop (`tools/sandbox-run.ps1`, `FOLO_SMOKE_SANDBOX=1`).
 
 #[cfg(not(windows))]
 fn main() {
@@ -54,15 +57,21 @@ fn main() {
     // only way the window DC is not clipped away. Refused unless the caller says it runs this on a
     // private desktop nobody looks at (FOLO_SMOKE_SANDBOX=1).
     let onscreen = std::env::args().any(|a| a == "--onscreen-timings");
-    // `--dialog`: the modal file dialog check, which shows a dialog: same rule.
+    // `--dialog`: the modal file dialog check, which shows a dialog (off screen dialogs are refused,
+    // so its window is a normal one): same rule.
     let dialog = std::env::args().any(|a| a == "--dialog");
-    if (onscreen || dialog) && std::env::var_os("FOLO_SMOKE_SANDBOX").is_none_or(|v| v != "1") {
+    // `--offscreen-dialog`: off screen, the dialogs are refused and a stray window is moved off the
+    // displays; were either broken, a window would show: same rule.
+    let offscreen_dialog = std::env::args().any(|a| a == "--offscreen-dialog");
+    if (onscreen || dialog || offscreen_dialog)
+        && std::env::var_os("FOLO_SMOKE_SANDBOX").is_none_or(|v| v != "1")
+    {
         eprintln!(
-            "--onscreen-timings and --dialog show windows: run them on a private desktop with FOLO_SMOKE_SANDBOX=1"
+            "--onscreen-timings, --dialog and --offscreen-dialog show windows: run them on a private desktop with FOLO_SMOKE_SANDBOX=1"
         );
         std::process::exit(2);
     }
-    if !onscreen {
+    if !onscreen && !dialog {
         // SAFETY: set before any other thread exists; the backend reads it once.
         unsafe { std::env::set_var("FOLO_UI_OFFSCREEN", "1") };
     }
@@ -77,7 +86,7 @@ fn main() {
     let p = platform.clone();
     let c = checks.clone();
     platform.run(Box::new(move || {
-        run_checks(&p, &mut c.borrow_mut(), Mode { quick, onscreen, dialog }, started_ms)
+        run_checks(&p, &mut c.borrow_mut(), Mode { quick, onscreen, dialog, offscreen_dialog }, started_ms)
     }));
     let mut checks = checks.borrow_mut();
     checks.check("run returned after the last window closed; on_quit ran", quit_ran.get(), "");
@@ -98,11 +107,12 @@ struct Mode {
     quick: bool,
     onscreen: bool,
     dialog: bool,
+    offscreen_dialog: bool,
 }
 
 #[cfg(windows)]
 fn run_checks(platform: &Rc<WindowsPlatform>, checks: &mut Checks, mode: Mode, started_ms: f64) {
-    let Mode { quick, onscreen, dialog: dialog_only } = mode;
+    let Mode { quick, onscreen, dialog: dialog_only, offscreen_dialog } = mode;
     let fg0 = foreground();
     let log = Rc::new(RefCell::new(Log::default()));
     let primary = platform.primary_display().expect("display");
@@ -210,6 +220,11 @@ fn run_checks(platform: &Rc<WindowsPlatform>, checks: &mut Checks, mode: Mode, s
     );
     if dialog_only {
         dialog(checks, platform, &window, &log, &frame);
+        post(hwnd, WM_CLOSE, 0, 0);
+        return;
+    }
+    if offscreen_dialog {
+        refused_dialogs(checks, platform);
         post(hwnd, WM_CLOSE, 0, 0);
         return;
     }

@@ -9,7 +9,8 @@ use crate::input::TextInput;
 use crate::ui::*;
 
 use super::forms::{SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, parse_images};
-use super::{FoloApp, Route, ServerMode, act};
+use super::lists::List;
+use super::{DeleteTarget, FoloApp, Route, ServerMode, act};
 
 impl FoloApp {
     // ---------- actions ----------
@@ -71,16 +72,10 @@ impl FoloApp {
             return;
         }
         let name = f.name.read(cx).text().trim().to_string();
+        // Each field says what's wrong under itself, and Generate is off until both are right
+        // (Enter included).
         let images = parse_images(&f.images.read(cx).text());
-        let (Some(images), false) = (images, name.is_empty()) else {
-            f.error = Some(if name.is_empty() {
-                "Give the dataset a name.".into()
-            } else {
-                "Images: a whole number from 1 to 100,000.".into()
-            });
-            cx.notify();
-            return;
-        };
+        let (Some(images), false) = (images, name.is_empty()) else { return };
         f.submitting = true;
         f.error = None;
         let form = f.id;
@@ -109,7 +104,7 @@ impl FoloApp {
                     Err(e) if mine => {
                         if let Some(f) = this.synth.as_mut() {
                             f.submitting = false;
-                            f.error = Some(e.message);
+                            f.error = Some(e);
                         }
                     }
                     // Its dialog is gone (dismissed, or another one open): say so instead.
@@ -137,9 +132,7 @@ impl FoloApp {
             prompt: Some("Add dataset".into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(p) = paths.into_iter().next()
-            {
+            if let Some(p) = picked(&this, rx.await, cx) {
                 this.update(cx, |this, cx| {
                     let path = p.to_string_lossy().to_string();
                     let folder = p.file_name().map_or(path.clone(), |n| n.to_string_lossy().to_string());
@@ -165,21 +158,21 @@ impl FoloApp {
         .detach();
     }
 
-    /// A new dataset from the server: list it first and say so, with a way to open it.
-    fn dataset_added(&mut self, ds: crate::api::Dataset, verb: &str, cx: &mut Context<Self>) {
+    /// A new dataset from the server: list it where the server lists it and say so, with a way to
+    /// open it.
+    pub(super) fn dataset_added(&mut self, ds: crate::api::Dataset, verb: &str, cx: &mut Context<Self>) {
         let (id, name) = (ds.id.clone(), ds.name.clone());
-        let body = format!("{} images · {}", int(ds.splits.total()), ds.classes.join(", "));
+        // A folder registered again after its dataset was deleted can come back under its id.
+        self.deleted.remove(&id);
+        let body = format!("{} · {}", counted(ds.splits.total(), "image", "images"), ds.classes.join(", "));
         // Registering a folder twice answers with the dataset it already is: say so, and leave
         // the list's order alone.
         // Unknown while the list isn't loaded: neither "added" nor "already added" is claimed then.
         let existed = self.store.datasets.ready().map(|l| l.iter().any(|d| d.id == ds.id));
         if let Some(list) = self.store.datasets.ready_mut() {
-            if let Some(slot) = list.iter_mut().find(|d| d.id == ds.id) {
-                *slot = ds;
-            } else {
-                list.insert(0, ds);
-            }
+            upsert_dataset(list, ds);
         }
+        self.changed_here(List::Datasets, cx);
         self.toast_with(
             if existed == Some(true) { Tone::Info } else { Tone::Accent },
             match existed {
@@ -200,10 +193,12 @@ impl FoloApp {
 
     /// Resume a stopped or failed run from its last checkpoint.
     pub fn resume_run(&mut self, id: String, cx: &mut Context<Self>) {
+        // A run with no finished epoch starts over (the server keeps its config): said as that.
+        let again = self.store.run(&id).is_some_and(|r| !r.can_continue());
         self.fetch(
             cx,
             move |api| api.resume_run(&id),
-            |this, r, cx| match r {
+            move |this, r, cx| match r {
                 Ok(run) => {
                     let (rid, name) = (run.id.clone(), run.name.clone());
                     if let Some(runs) = this.store.runs.ready_mut()
@@ -211,6 +206,7 @@ impl FoloApp {
                     {
                         *slot = run;
                     }
+                    this.changed_here(List::Runs, cx);
                     // Resumed steps replace the earlier ones. Retire everything tied to the old
                     // attempt (stream, in-flight history, buffered events), then open a fresh
                     // stream; the dashboard reloads history once it is open.
@@ -222,12 +218,15 @@ impl FoloApp {
                     this.history_ticket(&rid, "logs");
                     this.history_ticket(&rid, "samples");
                     this.resubscribe(rid.clone(), cx);
-                    this.toast(
-                        Tone::Accent,
-                        format!("Resuming {name}"),
-                        Some("From its last finished epoch, with the optimizer state.".into()),
-                        cx,
-                    );
+                    let (title, body) = if again {
+                        (format!("Starting {name} again"), "No epoch had finished, so it starts over.")
+                    } else {
+                        (
+                            format!("Resuming {name}"),
+                            "From its last finished epoch, with the optimizer state.",
+                        )
+                    };
+                    this.toast(Tone::Accent, title, Some(body.into()), cx);
                 }
                 Err(e) => this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx),
             },
@@ -249,6 +248,7 @@ impl FoloApp {
                     {
                         *slot = run;
                     }
+                    this.changed_here(List::Runs, cx);
                     let title =
                         if started { format!("Started {name}") } else { format!("{name} starts next") };
                     this.toast(Tone::Neutral, title, None, cx);
@@ -265,6 +265,152 @@ impl FoloApp {
         );
     }
 
+    /// Deletes what the confirmation named; on success its page (if open) gives way to the list.
+    pub fn delete_confirmed(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.confirm_delete.take() else { return };
+        let name = match &target {
+            DeleteTarget::Run(id) => self.store.run(id).map_or(id.clone(), |r| r.name.clone()),
+            DeleteTarget::Dataset(id) => {
+                self.store.dataset_summary(id).map_or(id.clone(), |d| d.name.clone())
+            }
+        };
+        // A generated set's folder goes too when asked (and still allowed: no run started on it since).
+        let files = matches!(&target, DeleteTarget::Dataset(id) if self.delete_files && self.dataset_files_deletable(id));
+        let images = match &target {
+            DeleteTarget::Dataset(id) => self.store.dataset_summary(id).map(|d| {
+                counted(d.splits.train + d.splits.val + d.splits.test, "generated image", "generated images")
+            }),
+            DeleteTarget::Run(_) => None,
+        };
+        let call = target.clone();
+        self.fetch(
+            cx,
+            move |api| match &call {
+                DeleteTarget::Run(id) => api.delete_run(id),
+                DeleteTarget::Dataset(id) => api.delete_dataset(id, files),
+            },
+            move |this, r, cx| match r {
+                Ok(()) => match &target {
+                    DeleteTarget::Run(id) => {
+                        this.forget_run(id, cx);
+                        this.toast(Tone::Info, format!("Deleted {name}"), None, cx);
+                    }
+                    DeleteTarget::Dataset(id) => {
+                        this.forget_dataset(id, cx);
+                        // Studio's words.
+                        let body = if files {
+                            format!("{name} and its {} were deleted.", images.as_deref().unwrap_or("files"))
+                        } else {
+                            format!("{name} is no longer registered. Files on disk were not touched.")
+                        };
+                        this.toast(Tone::Info, "Dataset removed", Some(body.into()), cx);
+                    }
+                },
+                Err(e) => {
+                    let verb = if matches!(target, DeleteTarget::Run(_)) { "delete" } else { "remove" };
+                    this.toast(Tone::Danger, format!("Couldn't {verb} {name}"), Some(e.message.into()), cx)
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// Drops a deleted run (and the models it made, fetched again) from what the app holds, and
+    /// leaves its page (or one of its models') for the list.
+    fn forget_run(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(r) = self.store.run(id) {
+            self.deleted.insert(id.to_string(), r.name.clone());
+        }
+        if let Some(runs) = self.store.runs.ready_mut() {
+            runs.retain(|r| r.id != id);
+        }
+        self.changed_here(List::Runs, cx);
+        self.store.run_data.remove(id);
+        self.store.samples.remove(id);
+        self.store.logs.remove(id);
+        let made: Vec<String> = self
+            .store
+            .models
+            .ready()
+            .into_iter()
+            .flatten()
+            .filter(|m| m.run_id.as_deref() == Some(id))
+            .map(|m| {
+                self.deleted.insert(m.id.clone(), m.name.clone());
+                m.id.clone()
+            })
+            .collect();
+        if self.play_model_made_by(id, &made) {
+            let name = self.play_model.as_ref().and_then(|m| self.deleted.get(m)).cloned();
+            self.drop_play_model(name);
+        }
+        // Gone from the list now, which is fetched again (an answer asked for before the delete still
+        // lists them, and is dropped). Playground takes the best model left at once.
+        if let Some(models) = self.store.models.ready_mut() {
+            models.retain(|m| !made.contains(&m.id));
+        }
+        self.reconcile_play_model(cx);
+        self.changed_here(List::Models, cx);
+        // An open select may list it, or its models: its highlight is an index into that list.
+        self.menu_open = None;
+        self.leave_deleted();
+    }
+
+    /// The open page of something just deleted gives way to its list (Back skips it too).
+    fn leave_deleted(&mut self) {
+        if let Some((_, list)) = super::navigation::deleted_route(&self.deleted, &self.route) {
+            self.route_pending = Some(list);
+        }
+    }
+
+    /// Drops an unregistered dataset from what the app holds, and leaves its page for the list.
+    fn forget_dataset(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(d) = self.store.dataset_summary(id) {
+            self.deleted.insert(id.to_string(), d.name.clone());
+        }
+        if self.inspector.as_ref().is_some_and(|i| i.dataset == id) {
+            self.inspector = None;
+            self.inspector_return = None;
+        }
+        if let Some(list) = self.store.datasets.ready_mut() {
+            list.retain(|d| d.id != id);
+        }
+        self.changed_here(List::Datasets, cx);
+        self.store.dataset.remove(id);
+        self.store.images.remove(id);
+        // An open select may list it (New run's datasets): its highlight is an index into the list.
+        // The forms hold their dataset by id, so the choice in them stays what it was.
+        self.menu_open = None;
+        self.leave_deleted();
+    }
+
+    /// Takes a run that never started out of the queue: the server deletes it (docs/API.md), so it
+    /// leaves the list too, as in Studio, instead of staying behind as a stopped run.
+    pub fn remove_queued(&mut self, id: String, cx: &mut Context<Self>) {
+        self.confirm_stop = None;
+        let name = self.store.run(&id).map_or(id.clone(), |r| r.name.clone());
+        let rid = id.clone();
+        self.fetch(
+            cx,
+            move |api| api.delete_run(&rid),
+            move |this, r, cx| match r {
+                Ok(()) => {
+                    this.forget_run(&id, cx);
+                    this.toast(
+                        Tone::Neutral,
+                        format!("Removed {name} from the queue"),
+                        Some("It hadn't started, so nothing was lost.".into()),
+                        cx,
+                    );
+                }
+                Err(e) => {
+                    this.toast(Tone::Danger, format!("Couldn't remove {name}"), Some(e.message.into()), cx)
+                }
+            },
+        );
+        cx.notify();
+    }
+
     pub fn stop_run(&mut self, id: String, cx: &mut Context<Self>) {
         self.confirm_stop = None;
         let rid = id.clone();
@@ -275,6 +421,8 @@ impl FoloApp {
         {
             prev = Some(std::mem::replace(&mut r.status, RunStatus::Stopping));
         }
+        // An answer asked for before would show it running again (and offer Stop).
+        self.list_tickets.changed(List::Runs);
         self.fetch(
             cx,
             move |api| api.stop_run(&rid),
@@ -284,19 +432,37 @@ impl FoloApp {
                     // the last steps, a final validation and the terminal status.
                     let name = run.name.clone();
                     let epoch = run.epoch;
+                    // No checkpoint before the first epoch is validated: nothing is claimed then.
+                    let kept = run.can_continue();
                     let stopping = run.status == RunStatus::Stopping;
+                    let dequeued = prev == Some(RunStatus::Queued) && run.cloud.is_none();
                     if let Some(runs) = this.store.runs.ready_mut()
                         && let Some(slot) = runs.iter_mut().find(|r| r.id == run.id)
                     {
                         *slot = run;
                     }
-                    let (title, body) = if stopping {
+                    this.changed_here(List::Runs, cx);
+                    let nothing = "No epoch had finished, so nothing is saved.".to_string();
+                    let (title, body) = if dequeued {
+                        // A resumed run that waited to continue: it keeps what it trained.
+                        (
+                            format!("Removed {name} from the queue"),
+                            if kept { "It keeps what it trained so far.".to_string() } else { nothing },
+                        )
+                    } else if stopping {
                         (
                             format!("Stopping {name}"),
-                            "Finishing the current step; the last checkpoint is kept.".to_string(),
+                            if kept {
+                                "Finishing the current batch; the last finished epoch's checkpoint is kept."
+                                    .to_string()
+                            } else {
+                                format!("Finishing the current batch. {nothing}")
+                            },
                         )
-                    } else {
+                    } else if kept {
                         (format!("Stopped {name}"), format!("Last checkpoint kept (epoch {epoch})."))
+                    } else {
+                        (format!("Stopped {name}"), nothing)
                     };
                     this.toast(Tone::Neutral, title, Some(body.into()), cx);
                 }
@@ -339,5 +505,53 @@ impl FoloApp {
                 Err(e) => this.toast(Tone::Danger, "Export failed", Some(e.message.into()), cx),
             },
         );
+    }
+}
+
+/// The first path a file dialog answered with; `None` when it was cancelled. A dialog that could
+/// not open (off screen they are refused: `FOLO_UI_OFFSCREEN=1`) says why in a toast.
+pub(super) fn picked(
+    this: &folo_ui::WeakEntity<FoloApp>,
+    answer: Result<anyhow::Result<Option<Vec<std::path::PathBuf>>>, folo_ui::oneshot::Canceled>,
+    cx: &mut folo_ui::AsyncApp,
+) -> Option<std::path::PathBuf> {
+    match answer {
+        Ok(Ok(paths)) => paths?.into_iter().next(),
+        Ok(Err(e)) => {
+            this.update(cx, |this, cx| {
+                this.toast(Tone::Danger, "The file dialog didn't open", Some(e.to_string().into()), cx)
+            })
+            .ok();
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// Puts a dataset the server answered with into the list in the server's order (oldest first,
+/// docs/API.md: a new one last), or replaces it in place when it is already there, so the list
+/// reads the same now and after a restart.
+fn upsert_dataset(list: &mut Vec<crate::api::Dataset>, ds: crate::api::Dataset) {
+    match list.iter_mut().find(|d| d.id == ds.id) {
+        Some(slot) => *slot = ds,
+        None => list.push(ds),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::Backend;
+
+    #[test]
+    fn a_new_dataset_goes_where_the_server_lists_it() {
+        let api = crate::api::mock::MockBackend::new(4200, true);
+        let all = api.datasets().unwrap();
+        let mut list = all[..2].to_vec();
+        super::upsert_dataset(&mut list, all[2].clone());
+        let ids: Vec<&str> = list.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, [&all[0].id, &all[1].id, &all[2].id].map(String::as_str));
+        // Added again (a folder registered twice): replaced where it is.
+        super::upsert_dataset(&mut list, crate::api::Dataset { name: "again".into(), ..all[0].clone() });
+        assert_eq!((list.len(), list[0].name.as_str()), (3, "again"));
     }
 }

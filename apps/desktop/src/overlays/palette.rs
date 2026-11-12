@@ -106,6 +106,31 @@ impl FoloApp {
                 }),
             });
         }
+        // The open page's run or dataset can be deleted from here too (a run once it isn't active).
+        let page_delete =
+            match &self.route {
+                Route::Run(id) => self.store.run(id).filter(|r| !r.status.is_active()).map(|r| {
+                    (r.name.clone(), crate::app::DeleteTarget::Run(id.clone()), "run and its models")
+                }),
+                Route::Dataset(id) => self.store.dataset_summary(id).map(|d| {
+                    (d.name.clone(), crate::app::DeleteTarget::Dataset(id.clone()), "dataset; its files stay")
+                }),
+                _ => None,
+            };
+        if let Some((name, target, detail)) = page_delete {
+            let title = match target {
+                crate::app::DeleteTarget::Run(_) => format!("Delete {name}"),
+                crate::app::DeleteTarget::Dataset(_) => format!("Remove {name} from FOLO"),
+            };
+            items.push(PaletteItem {
+                group: "Actions",
+                icon: "icons/trash-2.svg",
+                title,
+                detail: detail.into(),
+                keys: &[],
+                action: act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
+            });
+        }
         for (name, icon_path, route, keys) in nav {
             items.push(PaletteItem {
                 group: "Go to",
@@ -156,7 +181,11 @@ impl FoloApp {
                     group: "Datasets",
                     icon: "icons/images.svg",
                     title: d.name.clone(),
-                    detail: format!("{} images · {}", int(d.splits.total()), d.format.label()),
+                    detail: format!(
+                        "{} · {}",
+                        counted(d.splits.total(), "image", "images"),
+                        d.format.label()
+                    ),
                     keys: &[],
                     action: act(move |this, w, cx| this.navigate(Route::Dataset(id.clone()), w, cx)),
                 });
@@ -183,6 +212,17 @@ impl FoloApp {
         let t = theme(cx);
         let items = self.filtered_palette();
         let n = items.len();
+        let rows: Vec<(&'static str, String)> = items.iter().map(|it| (it.group, it.title.clone())).collect();
+        if let Some(p) = self.palette.as_mut()
+            && p.shown != rows
+        {
+            if let Some(was) = p.shown.get(p.selected)
+                && let Some(now) = rows.iter().position(|r| r == was)
+            {
+                p.selected = now;
+            }
+            p.shown = rows;
+        }
         let p = self.palette.as_ref().unwrap();
         // With no query the list is every item (commands, datasets, runs, models); with one, matches.
         let searching = !p.query.trim().is_empty();
@@ -387,9 +427,9 @@ impl FoloApp {
                             )
                             .child(div().flex_1())
                             .child(text(ty::SM, t.text_tertiary).tnum().child(if searching {
-                                format!("{n} results")
+                                counted(n as u64, "result", "results")
                             } else {
-                                format!("{n} items")
+                                counted(n as u64, "item", "items")
                             })),
                     ),
             );

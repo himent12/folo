@@ -184,6 +184,30 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
     expect(mark('fasteners-n-f16')).toBe('joint best');
   });
 
+  it("says where to put a .folo file to import it, with the server's own folder when it gives its data dir", async () => {
+    const api = new MockApi('empty', 0);
+    const system = api.system.bind(api);
+    api.system = async () => ({ ...(await system()), data_dir: 'D:/folo-data' });
+    await open(Models, '/models', api);
+    const state = await table('table.models', (t) => !!t.querySelector('tr.state')?.textContent?.includes('D:/folo-data'), 'the empty state');
+    expect(state.querySelector('tr.state')!.textContent).toContain('To import a .folo file, copy it into D:/folo-data/models on the server');
+    expect(target.querySelector('header')?.textContent).toContain('To import a .folo file');
+  });
+
+  it("marks a run's last checkpoint that is its best epoch as the same weights, not a joint best", async () => {
+    const api = new MockApi('normal', 0);
+    const [models, runs] = [api.models.bind(api), api.runs.bind(api)];
+    const best = (await models()).find((m) => m.id === 'm_fast_n')!;
+    api.models = async () => [...(await models()), { ...best, id: 'm_fast_n-last', name: 'fasteners-n-last' }];
+    api.runs = async () => (await runs()).map((r) => (r.id === best.run_id ? { ...r, status: 'completed', best: { epoch: r.epochs, map50_95: best.metrics!.map50_95 } } : r));
+    await open(Models, '/models', api);
+    await table('table.models', (t) => !!t.textContent?.includes('fasteners-n-last'), 'the last checkpoint');
+    await vi.waitFor(() => expect(target.querySelector('table.models')?.textContent).toContain('same as best'));
+    const mark = (name: string) => [...target.querySelectorAll('table.models tbody tr')].find((tr) => tr.querySelector('a.name')?.textContent === name)!.querySelector('.best')?.textContent ?? null;
+    expect(mark('fasteners-n-last')).toBe('same as best');
+    expect(mark('fasteners-n-best')).toBe('joint best'); // still tied with fasteners-n-f16, a different file
+  });
+
   it('ranks a training-split model apart from the validation ones, under its own heading', async () => {
     await loaded('train-split');
     expect(groups().map((th) => th.firstElementChild?.textContent)).toContain('Training split of fasteners-mini');

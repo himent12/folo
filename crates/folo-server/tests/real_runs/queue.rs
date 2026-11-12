@@ -23,6 +23,8 @@ async fn queue_stop_resume_and_restart() {
 
     // One run at a time: the second waits in the queue, and stopping it there is immediate.
     let a: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
+    // The run records its dataset's name and classes, so it still names them once the dataset is removed.
+    assert_eq!(a.dataset, Some(RunDataset { name: ds.name.clone(), classes: ds.classes.clone() }));
     let b: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
     let mut sse = Events::open(&app, &a.id).await;
     sse.until_epoch().await;
@@ -32,6 +34,16 @@ async fn queue_stop_resume_and_restart() {
     assert!(stopped_b.model_id.is_none() && stopped_b.started.is_none());
     let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", b.id))).await;
     assert!(logs.lines[0].message.starts_with("queued behind 1"), "{:?}", logs.lines);
+
+    // Deleting a run that waits and never started takes it out of the queue (the one behind moves up) and away.
+    let c: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
+    let d: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
+    assert_eq!((c.queue_position, d.queue_position), (Some(1), Some(2)));
+    assert_eq!(send(&app, delete(&format!("/api/runs/{}", c.id))).await.0, StatusCode::NO_CONTENT);
+    err(&app, get(&format!("/api/runs/{}", c.id)), StatusCode::NOT_FOUND, "run_not_found").await;
+    assert!(!home.join("runs").join(&c.id).exists());
+    assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", d.id))).await.queue_position, Some(1));
+    assert_eq!(send(&app, delete(&format!("/api/runs/{}", d.id))).await.0, StatusCode::NO_CONTENT);
 
     // A running run cannot be deleted; a stop takes effect after the current batch and keeps the checkpoint.
     err(&app, delete(&format!("/api/runs/{}", a.id)), StatusCode::CONFLICT, "run_active").await;
@@ -49,6 +61,9 @@ async fn queue_stop_resume_and_restart() {
     assert_eq!(a1.status, RunStatus::Stopped);
     assert_eq!(a1.epoch, 1);
     assert!(a1.model_id.is_some(), "stopped after a validated epoch");
+    // One log line per finished epoch, in plain terms.
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", a.id))).await;
+    assert!(logs.lines.iter().any(|l| l.message.starts_with("epoch 1/2: loss ")), "{:?}", logs.lines);
     err(&app, post(&format!("/api/runs/{}/stop", a.id)), StatusCode::CONFLICT, "run_not_active").await;
     s.hold_runs_after_epochs(false);
 
@@ -94,6 +109,8 @@ async fn queue_stop_resume_and_restart() {
     s.shutdown();
     let b1 = s.get_run(&b.id).unwrap();
     assert_eq!(b1.status, RunStatus::Stopped);
+    // Interrupted by the server, not stopped by a client: the run says so.
+    assert_eq!(b1.error_code.as_deref(), Some("interrupted"));
     drop(s);
 
     // A run a crashed server left `running` comes back `stopped` (and resumable).
@@ -125,7 +142,9 @@ async fn queue_stop_resume_and_restart() {
     let last: Model = ok(&app, get(&format!("/api/models/{b_last}"))).await;
     assert_eq!(last.metrics, None, "the last epoch's metrics are unknown, not the best epoch's");
     let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", b.id))).await;
-    assert!(logs.lines.last().unwrap().message.contains("server stopped while the run was running"));
+    assert_eq!(b2.error_code.as_deref(), Some("interrupted"));
+    let line = &logs.lines.last().unwrap().message;
+    assert!(line.contains("server stopped during training") && !line.contains("POST /api"), "{line}");
     let runs: RunList = ok(&app, get("/api/runs")).await;
     assert_eq!(runs.runs.len(), 2);
     let r: Run = ok(&app, resume(json!({ "resume_run_id": b.id }))).await;

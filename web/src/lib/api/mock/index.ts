@@ -1,4 +1,4 @@
-// In-browser mock of the whole API (docs/API.md), used with `?mock=1` or when the server is unreachable.
+// In-browser mock of the whole API (docs/API.md), used only when asked for with `?mock=1`.
 // Deterministic: everything derives from ids and the clock, so screenshots are comparable between rounds.
 //
 // Scenarios (`?scenario=`): `normal` (default), `empty` (nothing registered yet), `error` (every call fails),
@@ -137,6 +137,10 @@ export class MockApi extends MockTrainingApi implements Api {
 
   updateLabelImage(jobId: string, imageId: string, boxes: Box[]): Promise<LabelImage> {
     return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.updateImage(jobId, imageId, boxes, Date.now()));
+  }
+
+  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean): Promise<LabelImage> {
+    return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.reviewImage(jobId, imageId, reviewed, Date.now()));
   }
 
   deleteLabelImage(jobId: string, imageId: string): Promise<void> {
@@ -376,6 +380,9 @@ export class MockApi extends MockTrainingApi implements Api {
     return this.#predict(input, opts, false);
   }
 
+  /** Models the demo's server has predicted with: its first call of each is `cold` (the warm-up is in its timing). */
+  #warm = new Set<string>();
+
   #predict(input: PredictInput, opts: PredictOptions, server: boolean): Promise<Prediction> {
     return (async () => {
       const models = await this.models();
@@ -416,7 +423,10 @@ export class MockApi extends MockTrainingApi implements Api {
       if ((opts.iou ?? 0.7) > 0.8) boxes = withDuplicates(boxes, width, height, hash(m.id) ^ (width * 31 + height));
       const r = rng(hash(m.id) + width + height);
       const scale = (m.imgsz / 640) ** 2;
-      const inference = archInfo[m.arch].ms * scale * (1 + (r() - 0.5) * 0.08);
+      const cold = server && !this.#warm.has(m.id);
+      if (server) this.#warm.add(m.id);
+      // A model's first prediction on the server includes its warm-up (GPU kernels compiled, buffers allocated).
+      const inference = archInfo[m.arch].ms * scale * (1 + (r() - 0.5) * 0.08) + (cold ? 180 * scale : 0);
       const pre = 0.55 + r() * 0.35;
       const post = 0.12 + boxes.length * 0.004 + r() * 0.05;
       const out: PredictBox[] = boxes
@@ -429,6 +439,7 @@ export class MockApi extends MockTrainingApi implements Api {
         boxes: out,
         timing: { preprocess_ms: round(pre, 2), inference_ms: round(inference, 2), postprocess_ms: round(post, 2), total_ms: round(pre + inference + post, 2) },
         device: 'gpu:0',
+        ...(cold ? { cold: true } : {}),
       };
     })();
   }

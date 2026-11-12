@@ -306,7 +306,7 @@ fn from_load_issue(i: &crate::Issue) -> CheckIssue {
         IssueKind::MissingImage => (CheckKind::MissingImage, "remove the entry that names the image"),
         IssueKind::BrokenLabel => (CheckKind::BrokenLabel, "fix or remove the broken annotation"),
         IssueKind::LabelWarning => (CheckKind::ZeroSizeBox, "remove the degenerate annotation"),
-        IssueKind::Other => (CheckKind::Other, "fix the dataset description"),
+        IssueKind::Other => (CheckKind::Other, "correct data.yaml or the COCO JSON to match the files"),
     };
     CheckIssue::new(kind, &i.path, None, i.message.clone(), Some(fix.into()))
 }
@@ -507,6 +507,13 @@ fn hash128(bytes: &[u8]) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_description_problem_says_what_to_edit() {
+        let i = crate::Issue { kind: IssueKind::Other, path: "data.yaml".into(), message: "x".into() };
+        let c = from_load_issue(&i);
+        assert_eq!(c.fix.as_deref(), Some("correct data.yaml or the COCO JSON to match the files"));
+    }
 
     #[test]
     fn line_lint() {

@@ -6,7 +6,7 @@
  */
 import ExternalLink from '$icons/external-link';
 import PlugZap from '$icons/plug-zap';
-import { bindable, computed, createUniqueId, css, effect, For, signal, untrack, type Signal } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, For, signal, tick, untrack, type Signal } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { CloudConnection, CloudField, CloudProvider } from '$lib/api/types';
@@ -31,6 +31,11 @@ export interface ConnectDialogProps {
 const inSentence = (f: CloudField) => (/^[A-Z]{2}/.test(f.label) ? f.label : f.label.charAt(0).toLowerCase() + f.label.slice(1));
 /** What a credential is called after "this": "API key" → "key", "Token" → "token". */
 const noun = (f: CloudField) => f.label.toLowerCase().replace(/^api /, '');
+/**
+ * The server's message about one field, worded for the form: it names the field by its JSON key, for API clients
+ * ("`url` must start with https:// or http://"); under the field it says the field's name ("The server URL must …").
+ */
+export const fieldMessage = (f: CloudField, message: string) => sentence(message.replace(`\`${f.key}\``, `the ${inSentence(f)}`), true);
 
 export default function ConnectDialog(props: ConnectDialogProps) {
   const open = bindable(props, 'open', false);
@@ -74,6 +79,19 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     if (!open.get()) untrack(reset);
   });
 
+  /** Focus on a field's input (the dialog has opened, or a submit found it wrong). */
+  const focusField = (key: string) => void tick().then(() => document.getElementById(`${uid}-${key}`)?.focus());
+  // On open, the first thing to type (the API key, a server's URL), not the dialog: four Tabs less (shell F18).
+  effect(() => {
+    if (open.get()) untrack(() => provider.get()?.fields[0] && focusField(provider.get()!.fields[0]!.key));
+  });
+  /** Errors at their fields, and focus on the first of them in the form's order. */
+  function showErrors(errs: Record<string, string>) {
+    fieldErrors.set(errs);
+    const first = provider.peek()?.fields.find((f) => f.key in errs);
+    if (first) focusField(first.key);
+  }
+
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     const p = provider.peek();
@@ -81,7 +99,7 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     failure.set(undefined);
     const typed = values.peek();
     const missing = Object.fromEntries(p.fields.filter((f) => f.required && !typed[f.key]?.trim()).map((f) => [f.key, `Enter the ${inSentence(f)}.`]));
-    fieldErrors.set(missing);
+    showErrors(missing);
     if (Object.keys(missing).length) return;
     busy.set(true);
     try {
@@ -97,8 +115,8 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     } catch (err) {
       const field = err instanceof ApiError && err.code === 'invalid_body' ? p.fields.find((f) => err.message.includes(`\`${f.key}\``)) : undefined;
       const secret = firstSecret.peek();
-      if (err instanceof ApiError && err.code === 'cloud_auth_failed' && secret) fieldErrors.set({ [secret.key]: `${p.name} rejected this ${noun(secret)}.` });
-      else if (field && err instanceof ApiError) fieldErrors.set({ [field.key]: sentence(err.message, true) });
+      if (err instanceof ApiError && err.code === 'cloud_auth_failed' && secret) showErrors({ [secret.key]: `${p.name} rejected this ${noun(secret)}.` });
+      else if (field && err instanceof ApiError) showErrors({ [field.key]: fieldMessage(field, err.message) });
       else failure.set(err);
     } finally {
       busy.set(false);
@@ -139,6 +157,7 @@ export default function ConnectDialog(props: ConnectDialogProps) {
                 label={f().label}
                 for={`${uid}-${f().key}`}
                 hint={f().help ?? undefined}
+                optional={!f().required}
                 error={fieldErrors.get()[f().key] ?? null}
                 aside={() => (
                   <>
@@ -173,7 +192,7 @@ export default function ConnectDialog(props: ConnectDialogProps) {
               </Field>
             )}
           </For>
-          <Field label="Name" for={`${uid}-name`} hint="How Settings and New run list this connection.">
+          <Field label="Name" for={`${uid}-name`} optional hint="How Settings and New run list this connection.">
             <Input id={`${uid}-name`} bind:value={name} placeholder={provider.get()?.name} autocomplete="off" spellcheck={false} />
           </Field>
           {failure.get() ? <ErrorState error={failure.get()} title="Could not connect" compact /> : null}

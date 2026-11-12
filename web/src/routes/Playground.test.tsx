@@ -3,11 +3,16 @@ import { flush as flushSync } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../framework/testing';
 import { hub } from '$lib/api/index';
+import { ApiError } from '$lib/api/client';
 import { MockApi, type Scenario } from '$lib/api/mock';
 import { resetWasmProbe } from '$lib/inference/browser';
 import { prefs } from '$lib/prefs';
+import { betterModel } from '$lib/scoreSummary';
+import { toast } from '$lib/ui/toast';
 import { parse, router } from '$lib/router';
 import Playground from './Playground';
+import { URL_DELAY_MS } from './playground/keepSession';
+import { session } from './playground/session';
 
 /** Port of `mount(Playground, { target })`: renders into `target`; `unmount(c)` is `c.unmount()`. */
 const mount = (_: typeof Playground, o: { target: HTMLElement }) => render(() => <Playground />, o.target);
@@ -46,6 +51,8 @@ afterEach(() => {
   if (c) unmount(c);
   c = undefined;
   target?.remove();
+  // Each test starts a fresh tab: no image or thresholds kept from the one before.
+  session.set(null);
 });
 
 describe('Playground: a failed prediction', () => {
@@ -142,20 +149,21 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
     document.body.appendChild(target);
     router.route = parse('#/playground?model=m_shapes_s');
     c = mount(Playground, { target });
-    return until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+    await until(() => target.querySelector('.model-pick'), 'the model picker');
+    return target.querySelector('[role="radiogroup"][aria-label="Run the model on"]');
   }
   const option = (g: Element, name: string) => [...g.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === name)!;
 
-  it('offers WebGPU and CPU off, with the reason, where the build has none', async () => {
-    const g = await open('no-wasm');
-    await until(() => option(g, 'CPU').disabled, 'the CPU choice to turn off');
-    expect(option(g, 'Server').disabled).toBe(false);
-    expect(option(g, 'WebGPU').disabled).toBe(true);
-    expect(target.querySelector('.runon')?.getAttribute('aria-describedby')).toBe('runon-note');
+  // models F14: options this build can never use are not shown (it runs on the server, and nothing needs saying).
+  it('offers no browser choice where the build has none, and says nothing about it', async () => {
+    await open('no-wasm');
+    await until(() => !target.querySelector('.runon'), 'the Run on choice to go');
+    expect(target.textContent).not.toContain('in-browser runtime');
   });
 
   it('offers the CPU where the build has it', async () => {
-    const g = await open('normal');
+    await open('normal');
+    const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
     await until(() => target.querySelector('select, .model-pick'), 'the pickers');
     await new Promise((r) => setTimeout(r, 50));
     flushSync();
@@ -181,12 +189,10 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
       document.body.appendChild(target);
       router.route = parse('#/playground?model=m_shapes_s');
       c = mount(Playground, { target });
-      const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+      await until(() => target.querySelector('.model-pick'), 'the model picker');
       expect((await api.system()).features).toContain('web_wasm');
-      await until(() => option(g, 'CPU').disabled, 'the CPU choice to turn off');
+      await until(() => !target.querySelector('.runon'), 'the Run on choice to go');
       expect(fetch).toHaveBeenCalledWith(expect.stringContaining('folo-wasm/folo_wasm_bg.wasm'), { method: 'HEAD' });
-      expect(option(g, 'WebGPU').disabled).toBe(true);
-      expect(target.querySelector('#runon-note')?.textContent).toBe('No in-browser runtime');
     } finally {
       vi.unstubAllGlobals();
       resetWasmProbe();
@@ -228,5 +234,262 @@ describe('Playground: an end-to-end (o2o) model', () => {
 
   it('still suppresses them for an NMS (o2m) model', async () => {
     expect(await detections('m_shapes_n')).toEqual({ head: 'o2m', rows: 1 });
+  });
+});
+
+describe('Playground: the session', () => {
+  it('keeps the image, its result and the thresholds when the page is left and opened again', async () => {
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const conf = target.querySelector<HTMLInputElement>('.slider input[type="range"]')!;
+    conf.value = '0.5';
+    conf.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const rows = target.querySelectorAll('#pg-panel tbody tr').length;
+    unmount(c!);
+    target.remove();
+    const predict = vi.spyOn(hub.api, 'predict');
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground');
+    c = mount(Playground, { target });
+    await until(() => target.querySelectorAll('#pg-panel tbody tr').length === rows, 'the same detections');
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.5');
+    expect(target.querySelector('button.sample')).toBeNull();
+    // The kept result is shown as it was: the same answer is not asked for twice.
+    expect(predict).not.toHaveBeenCalled();
+  });
+
+  it('opens a linked dataset image with its thresholds', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    const ds = (await api.datasets())[0]!;
+    const img = (await api.datasetImages(ds.id, { split: 'val', limit: 3 })).images[2]!;
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse(`#/playground?model=m_hard_s&dataset=${ds.id}&image=${encodeURIComponent(img.id)}&split=val&conf=0.4`);
+    c = mount(Playground, { target });
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    expect(session.get()?.source).toMatchObject({ kind: 'dataset', img: { id: img.id }, at: 2 });
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.4');
+  });
+
+  const link = (ds: string, img: string, at: number, rest: string) => parse(`#/playground?${rest}&dataset=${ds}&image=${encodeURIComponent(img)}&split=val&at=${at}`);
+
+  // review R1: only the query changing keeps the page mounted (an edited URL, Back, a link to itself); it follows the
+  // URL, the model too after a pick in the list, and its own later write never puts the old state back.
+  it('follows a URL changed while it is open', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    const ds = (await api.datasets())[0]!;
+    const [, a, b] = (await api.datasetImages(ds.id, { split: 'val', limit: 3 })).images;
+    const predict = vi.spyOn(api, 'predict');
+    const last = () => predict.mock.calls.at(-1);
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = link(ds.id, a!.id, 1, 'model=m_hard_s&conf=0.4');
+    c = mount(Playground, { target });
+    await until(() => target.querySelector('#pg-panel tbody tr') && last()?.[1].model_id === 'm_hard_s', "A's detections");
+    const select = target.querySelector<HTMLSelectElement>('.model-pick select')!;
+    select.value = 'm_shapes_n';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => last()?.[1].model_id === 'm_shapes_n', 'the picked model');
+
+    // As an edited URL does: the browser moves, and the router follows (`hashchange`).
+    const to = link(ds.id, b!.id, 2, 'model=m_hard_s&conf=0.8');
+    location.hash = `#${to.path}?${to.query}`;
+    await until(() => router.route.query.get('image') === b!.id, 'the route');
+    const onB = () => (last()?.[0] as { image_id?: string } | undefined)?.image_id === b!.id && last()?.[1].model_id === 'm_hard_s';
+    await until(() => onB() && session.get()?.pred?.model_id === 'm_hard_s', "B's detections by the linked model");
+    expect(session.get()?.source).toMatchObject({ img: { id: b!.id } });
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.8');
+    await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+    flushSync();
+    expect(Object.fromEntries(router.route.query)).toMatchObject({ model: 'm_hard_s', image: b!.id, conf: '0.8' });
+    expect(session.get()?.source).toMatchObject({ img: { id: b!.id } });
+  });
+
+  // review studio-2 R2: a URL leaves out the thresholds that are the defaults, so one followed while the page is open
+  // that names none means the defaults, not the values on screen; its own later write keeps them so.
+  it('takes the defaults from a followed URL that names no thresholds, on Back and Forward', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    const ds = (await api.datasets())[0]!;
+    const [, a] = (await api.datasetImages(ds.id, { split: 'val', limit: 2 })).images;
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    const plain = link(ds.id, a!.id, 1, 'model=m_hard_s');
+    const tuned = link(ds.id, a!.id, 1, 'model=m_hard_s&conf=0.8&iou=0.9&max=20');
+    location.hash = `#${plain.path}?${plain.query}`;
+    router.route = plain;
+    c = mount(Playground, { target });
+    await until(() => target.querySelector('#pg-panel tbody tr'), "A's detections");
+    const thresholds = () => {
+      const s = session.get()!;
+      return [s.conf, s.iou, s.maxDet];
+    };
+    const written = () => ['conf', 'iou', 'max'].map((p) => router.route.query.get(p));
+    const settled = async () => {
+      await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+      flushSync();
+    };
+    expect(thresholds()).toEqual([0.25, 0.7, 300]);
+
+    // A link to the tuned URL, then Back to the plain one and Forward again: the browser moves, the router follows.
+    location.hash = `#${tuned.path}?${tuned.query}`;
+    await until(() => router.route.query.get('conf') === '0.8', 'the tuned route');
+    await until(() => thresholds()[0] === 0.8, 'the tuned thresholds');
+    expect(thresholds()).toEqual([0.8, 0.9, 20]);
+    await settled();
+    expect(written()).toEqual(['0.8', '0.9', '20']);
+
+    history.back();
+    await until(() => router.route.query.get('conf') === null, 'the plain route');
+    await until(() => thresholds()[0] === 0.25, 'the default thresholds');
+    expect(thresholds()).toEqual([0.25, 0.7, 300]);
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.25');
+    // The page's own write a moment later names no threshold either (it would put 0.8 back otherwise).
+    await settled();
+    expect(written()).toEqual([null, null, null]);
+
+    history.forward();
+    await until(() => router.route.query.get('conf') === '0.8', 'the tuned route again');
+    await until(() => thresholds()[0] === 0.8, 'the tuned thresholds again');
+    expect(thresholds()).toEqual([0.8, 0.9, 20]);
+    await settled();
+    expect(written()).toEqual(['0.8', '0.9', '20']);
+  });
+
+  // review R2: a linked image still being looked up is a choice like any other; one made after it wins.
+  it('keeps an image chosen while a linked one loads', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    let release!: () => void;
+    const slow = new Promise<void>((r) => (release = r));
+    const dataset = api.dataset.bind(api);
+    api.dataset = async (id) => (await slow, dataset(id));
+    hub.api = api;
+    hub.mode = 'mock';
+    const ds = (await api.datasets())[0]!;
+    const linked = (await api.datasetImages(ds.id, { split: 'val', limit: 6 })).images[5]!;
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = link(ds.id, linked.id, 5, 'model=m_hard_s');
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('#pg-panel tbody tr'), "the sample's detections");
+    const chosen = (session.get()?.source as { img: { id: string } }).img.id;
+    expect(chosen).not.toBe(linked.id);
+    release();
+    await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+    flushSync();
+    expect(session.get()?.source).toMatchObject({ img: { id: chosen } });
+    expect(router.route.query.get('image')).toBe(chosen);
+  });
+});
+
+describe('Playground: a failure is said once', () => {
+  it('shows a failed prediction in place, with no toast', async () => {
+    const { toast } = await import('$lib/ui/toast');
+    toast.items = [];
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    api.predict = async () => {
+      throw new ApiError(422, 'image_decode_failed', 'not an image', 'send a JPEG, PNG, BMP or WebP file');
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('.notice'), 'the notice');
+    expect(target.querySelector('.notice .title')?.textContent).toBe('Prediction failed');
+    expect(toast.items).toEqual([]);
+  });
+});
+
+describe('Playground: a cold first prediction', () => {
+  it("says the first call's time includes loading the model, and the next one does not", async () => {
+    await run('normal', 'm_hard_s');
+    const note = await until(() => target.querySelector('p.cold'), 'the cold note');
+    expect(note.textContent).toBe('Includes loading the model: the next image runs faster.');
+    // A first call's rate would be the warm-up's: none is given.
+    expect(note.parentElement!.querySelector('.rate')).toBeNull();
+    // The model is warm now: the next call is not cold.
+    const api = hub.api as MockApi;
+    const ds = (await api.datasets())[0]!;
+    const img = (await api.datasetImages(ds.id, { split: 'val', limit: 2 })).images[1]!;
+    const p = await api.predict({ kind: 'dataset', dataset_id: ds.id, image_id: img.id }, { model_id: 'm_hard_s' });
+    expect(p.cold).toBeUndefined();
+  });
+});
+
+describe('Playground: the model caption', () => {
+  // models F17: a model without a score kept no caption line, and the workspace moved up 20 px on switching to it.
+  it('keeps the line under the model select for a model without a score', async () => {
+    const api = new MockApi('normal', 0);
+    const models = api.models.bind(api);
+    api.models = async () => (await models()).map((m) => (m.id === 'm_hard_s' ? { ...m, metrics: null } : m));
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    c = mount(Playground, { target });
+    const meta = await until(() => target.querySelector('#model-meta'), 'the caption');
+    expect(meta.textContent).toBe('Not evaluated');
+  });
+});
+
+describe('Playground: which model it opens on', () => {
+  const open = async (api: MockApi, link: string) => {
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse(link);
+    c = mount(Playground, { target });
+    return until(() => target.querySelector<HTMLSelectElement>('select')?.value, 'a model');
+  };
+
+  // v-desktop N8: Studio opened on the first group's model (a newest checkpoint at 0.000) where Desktop opens on the best.
+  it('opens on the best model by the rule Desktop and Overview use, not the first listed', async () => {
+    const api = new MockApi('normal', 0);
+    const models = api.models.bind(api);
+    // The models of the dataset listed first (by name) learned nothing: the picker's first group is at 0.000.
+    api.models = async () => (await models()).map((m) => (m.name.startsWith('fasteners') && m.metrics ? { ...m, metrics: { ...m.metrics, map50_95: 0 } } : m));
+    const best = [...(await api.models())].sort(betterModel)[0]!;
+    expect(best.name).not.toMatch(/^fasteners/);
+    expect(await open(api, '#/playground')).toBe(best.id);
+  });
+
+  // v-models-label N6: a link to a deleted model showed another one without a word.
+  it('says which model it shows when the link names one that is gone', async () => {
+    toast.items = [];
+    const api = new MockApi('normal', 0);
+    const shown = await open(api, '#/playground?model=m_gone&conf=0.4');
+    const name = (await api.models()).find((m) => m.id === shown)!.name;
+    await until(() => toast.items.length, 'the note');
+    expect(toast.items.map((t) => [t.title, t.detail])).toEqual([['The linked model was not found', `It was deleted or the link is wrong. Showing ${name} instead.`]]);
+    toast.items = [];
+  });
+
+  // v-models-label N2: "Unsupported image" stayed 20 s over the results of the images that followed.
+  it('takes back an image error once the next image is accepted', async () => {
+    toast.items = [];
+    // What the Playground says of a file it cannot open (setFile), then a sample image taken.
+    toast.error(new Error('fake.jpg could not be opened'), 'Unsupported image', { key: 'image' });
+    toast.info('Something else');
+    await run('normal', 'm_shapes_s');
+    expect(toast.items.map((t) => t.title)).toEqual(['Something else']);
+    toast.items = [];
   });
 });

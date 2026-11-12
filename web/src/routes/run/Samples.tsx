@@ -3,12 +3,13 @@
  * neutral in the thumbnails). Follows the
  * latest epoch while the run is live; pick any earlier epoch to see how detections improved.
  */
+import ImageOff from '$icons/image-off';
 import { computed, css, effect, For, Index, MediaQuery, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Sample } from '$lib/api/types';
 import DatasetImage from '$lib/detect/DatasetImage';
-import Dialog from '$lib/ui/Dialog';
+import SampleInspector from './SampleInspector';
 import ErrorState from '$lib/ui/ErrorState';
 import Panel from '$lib/ui/Panel';
 import Segmented from '$lib/ui/Segmented';
@@ -24,14 +25,19 @@ export interface SamplesProps {
   epochsDone: number;
   /** "Validation samples", or the split they are really from ("Training-split samples", lib/evaluated `scoresTitle`). */
   title?: string;
+  /** The run's history failed to load (so `epochsDone` is unknown): one quiet line, not "appear after…"; the metrics
+   * panel has the error and its Retry. */
+  unavailable?: boolean;
+  /** The run's dataset was removed: its images are gone, and the tiles say so (nothing to retry). */
+  datasetGone?: boolean;
 }
 
 export default function Samples(props: SamplesProps) {
   const pick = signal<string>('latest');
   const show = signal<'both' | 'pred' | 'truth'>('both');
   const conf = signal(0.25);
-  const open = signal<Sample | null>(null);
-  const dialogOpen = signal(false);
+  /** The sample open in the inspector (an index into the epoch's samples), null: none. */
+  const open = signal<number | null>(null);
   // About eight samples show by default, always as full rows (5 columns: 10, 3 columns: 9); the rest are one click
   // away.
   const cols = signal(4);
@@ -119,9 +125,10 @@ export default function Samples(props: SamplesProps) {
                   <span class="long">ground truth</span>
                   <span class="short">truth</span>
                 </span>
-                <span class="count-key num">
-                  <span class="long">7/8 = predictions / true boxes</span>
-                  <span class="short">7/8 = predicted / true</span>
+                {/* What a tile's corner count means, as a key: letters, never a count that reads like data. */}
+                <span class="count-key">
+                  <span class="long">n/m = predictions / true boxes</span>
+                  <span class="short">n/m = predicted / true</span>
                 </span>
               </div>
               <div class="conf">
@@ -130,8 +137,12 @@ export default function Samples(props: SamplesProps) {
             </div>
           </div>
         ) : null}
-        {props.epochsDone === 0 ? (
+        {props.unavailable ? (
+          <p class="none">Samples show once the run's metrics load.</p>
+        ) : props.epochsDone === 0 ? (
           <p class="none">Samples appear after the first validation pass.</p>
+        ) : samples.error && !samples.data && props.datasetGone ? (
+          <p class="none">The dataset was removed, so its sample images are gone.</p>
         ) : samples.error && !samples.data ? (
           <ErrorState error={samples.error} retry={() => samples.refresh()} compact />
         ) : !samples.data ? (
@@ -147,22 +158,28 @@ export default function Samples(props: SamplesProps) {
                     class="cell"
                     style:aspect-ratio={`${s().width} / ${s().height}`}
                     onclick={() => {
-                      open.set(s());
-                      dialogOpen.set(true);
+                      open.set(samples.data?.samples.indexOf(s()) ?? null);
                     }}
                     aria-label={`Open sample ${s().image_id}: ${hits(s())} predictions, ${s().truth.length} ground-truth boxes`}
                   >
-                    <DatasetImage
-                      datasetId={s().dataset_id}
-                      imageId={s().image_id}
-                      width={s().width}
-                      height={s().height}
-                      thumb={384}
-                      boxes={preds(s())}
-                      truth={truth(s())}
-                      classes={props.classes}
-                      compact
-                    />
+                    {props.datasetGone ? (
+                      <span class="gone">
+                        <ImageOff size={16} strokeWidth={1.75} aria-hidden="true" />
+                        The dataset was removed
+                      </span>
+                    ) : (
+                      <DatasetImage
+                        datasetId={s().dataset_id}
+                        imageId={s().image_id}
+                        width={s().width}
+                        height={s().height}
+                        thumb={384}
+                        boxes={preds(s())}
+                        truth={truth(s())}
+                        classes={props.classes}
+                        compact
+                      />
+                    )}
                     <span class="count num">
                       {hits(s())}
                       <span class="faint">/{s().truth.length}</span>
@@ -180,26 +197,17 @@ export default function Samples(props: SamplesProps) {
         )}
       </Panel>
 
-      <Dialog
-        bind:open={dialogOpen}
-        title={open.get() ? `Sample ${open.get()!.image_id}` : 'Sample'}
-        description={open.get() ? `${hits(open.get()!)} predictions ≥ ${conf.get().toFixed(2)} · ${open.get()!.truth.length} ground-truth boxes` : undefined}
-        size="lg"
-      >
-        {open.get() ? (
-          <div class="big" style:aspect-ratio={`${open.get()!.width} / ${open.get()!.height}`}>
-            <DatasetImage
-              datasetId={open.get()!.dataset_id}
-              imageId={open.get()!.image_id}
-              width={open.get()!.width}
-              height={open.get()!.height}
-              boxes={preds(open.get()!)}
-              truth={truth(open.get()!)}
-              classes={props.classes}
-            />
-          </div>
-        ) : null}
-      </Dialog>
+      <SampleInspector
+        samples={samples.data?.samples ?? []}
+        index={open.get()}
+        onindex={(i) => open.set(i)}
+        epoch={samples.data?.epoch}
+        classes={props.classes}
+        preds={preds}
+        truth={truth}
+        describe={(x) => `${hits(x)} predictions ≥ ${conf.get().toFixed(2)} · ${x.truth.length} ground-truth boxes`}
+        datasetGone={props.datasetGone}
+      />
     </>
   );
 }
@@ -332,10 +340,19 @@ css`
   .none {
     color: var(--text-tertiary);
   }
-  .big {
+  .gone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-1);
     width: 100%;
-    border-radius: var(--radius-md);
-    overflow: hidden;
+    height: 100%;
+    padding: var(--space-2);
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    text-align: center;
+    background: var(--bg-inset);
   }
   @media (max-width: 767px) {
     .grid {

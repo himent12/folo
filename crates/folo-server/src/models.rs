@@ -497,12 +497,7 @@ impl Models {
         let base = export_stem(&m.model.name);
         let (suffix, ext) = match format {
             ExportFormat::FoloF16 => ("-f16", "folo"),
-            ExportFormat::Onnx => match (spec.onnx.decode, spec.onnx.half) {
-                (true, true) => ("-decoded-f16", "onnx"),
-                (false, true) => ("-f16", "onnx"),
-                (true, false) => ("-decoded", "onnx"),
-                (false, false) => ("", "onnx"),
-            },
+            ExportFormat::Onnx => (spec.onnx.file_suffix(), "onnx"),
         };
         // create_new claims the name, so two exports never share a file; the export then replaces it atomically.
         let mut n = 1;

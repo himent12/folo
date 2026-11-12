@@ -122,6 +122,17 @@ if (typeof location !== 'undefined' && typeof history !== 'undefined') {
  */
 export type NavigationGuard = (to: Route, proceed: () => void) => boolean;
 
+/**
+ * The app moved to another history entry: a new one (`traverse` false: a link, `go`) or one it has been on before
+ * (`traverse` true: Back, Forward). `pos` is the entry's place in the tab's history (see `Router`); replacing the
+ * entry (`go` with `replace`) is not a move.
+ */
+export interface EntryChange {
+  from: number;
+  to: number;
+  traverse: boolean;
+}
+
 /** How long a history traversal of the router's own may take before the router stops waiting for it. */
 const TRAVERSAL_MS = 1000;
 
@@ -182,8 +193,24 @@ class Router {
     };
   }
   #guards = new Set<NavigationGuard>();
+  #entryListeners = new Set<(e: EntryChange) => void>();
   /** The place of the entry the app is on. */
   #pos = 0;
+
+  /** The place in the tab's history of the entry the app is on (what state kept per entry is keyed by). */
+  get entry(): number {
+    return this.#pos;
+  }
+
+  /** Calls `fn` after every move to another history entry (lib/shell/entryMemory); returns its removal. */
+  onEntry(fn: (e: EntryChange) => void): () => void {
+    this.#entryListeners.add(fn);
+    return () => this.#entryListeners.delete(fn);
+  }
+
+  #entered(from: number, to: number, traverse: boolean) {
+    for (const fn of this.#entryListeners) fn({ from, to, traverse });
+  }
   /** A traversal of the router's own is under way, to the entry at `pos`: back to the page that holds a navigation, or `on` to the held one. */
   #travelling: { pos: number; on: boolean; timer: ReturnType<typeof setTimeout>; then: (() => void)[] } | null = null;
 
@@ -236,7 +263,9 @@ class Router {
       this.route = parse(hash);
     } else if (location.hash !== hash) {
       // Guards have been asked. `pushState` fires no `hashchange`, so the route is set here.
+      const from = this.#pos;
       history.pushState({ pos: ++this.#pos }, '', hash);
+      this.#entered(from, this.#pos, false);
       this.route = parse(hash);
     }
   }
@@ -255,8 +284,12 @@ class Router {
       // Only the entry the router is travelling to counts; anything else is an event of the move before.
       if (known !== travel.pos) return;
       this.#arrived();
+      const was = this.#pos;
       this.#pos = travel.pos;
-      if (travel.on) this.route = parse(hash);
+      if (travel.on) {
+        this.#entered(was, travel.pos, true);
+        this.route = parse(hash);
+      }
       travel.then.forEach((step) => this.#settled(step));
       return;
     }
@@ -270,6 +303,7 @@ class Router {
     if (this.#allowed(parse(hash), proceed)) {
       if (known === null) this.#stamp(pos);
       this.#pos = pos;
+      if (pos !== from) this.#entered(from, pos, known !== null);
       this.route = parse(hash);
     } else {
       // The URL has already moved: back to the page that holds the navigation, its history as it was.

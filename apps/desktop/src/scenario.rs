@@ -29,9 +29,12 @@ pub const ALL: &[&str] = &[
     "overview+loading",
     "overview+empty",
     "overview+error",
+    "overview+lost",
     "palette",
     "palette+light",
     "datasets",
+    "synth",
+    "synth+invalid",
     "dataset",
     "dataset+light",
     "dataset+filter",
@@ -52,6 +55,8 @@ pub const ALL: &[&str] = &[
     "new-run+light",
     "stop-confirm",
     "stop-confirm+light",
+    "delete-confirm",
+    "delete-confirm+dataset",
     "models",
     "model",
     "model+light",
@@ -158,6 +163,19 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     match screen {
         "overview" | "toast" | "kb-focus" | "palette" => app.route = Route::Overview,
         "datasets" => app.route = Route::Datasets,
+        // Generate synthetic; `+invalid` with an image count out of range (its message in place).
+        "synth" => {
+            app.route = Route::Datasets;
+            // The demo can't generate (it says so instead): open the dialog as against folo serve.
+            let mode = std::mem::replace(&mut app.server_mode, crate::app::ServerMode::Local);
+            app.open_synth(window, cx);
+            app.server_mode = mode;
+            if s.has("invalid")
+                && let Some(f) = app.synth.as_ref()
+            {
+                f.images.clone().update(cx, |i, cx| i.set_text("200000", cx));
+            }
+        }
         "dataset" => {
             app.route = Route::Dataset("ds_3b91".into());
             if s.has("filter") {
@@ -203,6 +221,18 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             }
         }
         "run-failed" => app.route = Route::Run("run_e4f0".into()),
+        // The delete confirmation, over a finished run's page (`+dataset`: over a dataset's).
+        "delete-confirm" => {
+            let target = if s.has("dataset") {
+                app.route = Route::Dataset("ds_3b91".into());
+                crate::app::DeleteTarget::Dataset("ds_3b91".into())
+            } else {
+                app.route = Route::Run("run_52e8".into());
+                crate::app::DeleteTarget::Run("run_52e8".into())
+            };
+            app.store.models = app.store.api.models().into();
+            app.ask_delete(target, window, cx);
+        }
         "new-run" => {
             app.route = Route::Runs;
             app.run_filter = RunFilter::All;
@@ -340,6 +370,12 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         // The form needs the dataset list; load it synchronously from the frozen mock.
         app.store.datasets = app.store.api.datasets().into();
         app.open_new_run(Some("ds_3b91"), window, cx);
+        if s.has("deleted")
+            && let Some(list) = app.store.datasets.ready_mut()
+        {
+            // Its dataset deleted while the form is open: it asks for another.
+            list.retain(|d| d.id != "ds_3b91");
+        }
         if s.has("cloud") {
             // RunPod's RTX 4090 (Secure Cloud) chosen with its offers in; Stop after follows the
             // estimate.
@@ -402,6 +438,13 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.focus_key(key, window, cx);
         // Enough frames for the async lists (samples, the eval) to land and lay out.
         app.reveal_pending = 90;
+    }
+    // `+lost`: the server stopped answering mid-session (the banner over the page, Overview's strip).
+    if s.has("lost") {
+        let down =
+            crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878");
+        app.store.health = Load::Failed(down.clone());
+        app.store.system = Load::Failed(down);
     }
     let _ = Load::<()>::Idle;
 }

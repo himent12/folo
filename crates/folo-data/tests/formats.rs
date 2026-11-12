@@ -103,6 +103,22 @@ fn yolo_names_map_roboflow_paths_and_no_verify() {
 /// A YAML found by its `train` key is found whatever the case of its extension (`.YAML`, `.Yml`): on a
 /// case-sensitive file system `DATA.YAML` was not looked at.
 #[test]
+fn a_file_read_in_the_wrong_format_says_so_in_plain_words() {
+    let t = TempDir::new("wrong-format");
+    let r = t.path();
+    write(&r.join("instances_train.json"), "{}");
+    write(&r.join("data.yaml"), "names: [a]\n");
+    let msg = |p: &str, format| match open_with(r.join(p), &OpenOptions { format, ..Default::default() }) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("{p} opened as {format:?}"),
+    };
+    let json = msg("instances_train.json", Format::Yolo);
+    assert!(json.contains("is a COCO .json file, not YOLO"), "{json}");
+    assert!(msg("data.yaml", Format::Coco).contains("is a YOLO data.yaml, not COCO"));
+    assert!(!json.contains("Yolo"), "no enum names: {json}");
+}
+
+#[test]
 fn yaml_extension_case_does_not_matter() {
     for name in ["Shapes.YAML", "shapes.Yml"] {
         let t = TempDir::new("yolo-yaml-case");

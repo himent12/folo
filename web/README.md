@@ -9,15 +9,21 @@ npm ci
 npm run dev       # http://localhost:5173, proxies /api to FOLO_API (default http://127.0.0.1:7878)
 npm run check     # generated tokens are fresh, contrast, icons vendored, tsc (app, framework, scripts), spacing lint
 npm test          # vitest (logic, components, the framework)
-npm run build     # -> dist/, served by `folo serve`
+npm run build     # -> dist/, served by `folo serve`; fails if a built stylesheet lost an unprefixed declaration
 npm run shoot r1  # screenshots of every screen/state -> shots/r1/ (uses the installed Chrome)
 npm run qa        # the shoot's layout checks on the production build at tablet/phone sizes, no shots; fails on any (CI)
 FOLO_API=http://127.0.0.1:7979 npm run smoke   # every route against a running `folo serve`, reports errors
 ```
 
-Data source: in dev, `/api` is proxied to `FOLO_API` (default `folo serve` on `127.0.0.1:7878`; try
-`folo serve --mock`). If no server answers, Studio falls back to its built-in mock (`src/lib/api/mock`), which is also
-what `?mock=1` forces and what screenshots use, so they are deterministic.
+Data source: the server Studio was served from, or in dev `/api` proxied to `FOLO_API` (default `folo serve` on
+`127.0.0.1:7878`; try `folo serve --mock`). Studio's built-in mock (`src/lib/api/mock`) is used only when it is asked
+for: `?mock=1` in the address (what the screenshot, QA, parity and perf scripts open, so they are deterministic), or
+Settings › Connection › Use demo data, which reloads with it. A server that is slow to answer or not there is never
+replaced by demo data: Studio says "Connecting…", then "Server offline" with "Can't reach folo serve. Retrying…", and
+keeps checking (`src/lib/api/index.ts`) until it answers with FOLO's health payload. An address that answers with
+something else says what came back ("This address answered, but not as a FOLO server", "This server asks for sign-in
+(401)", `src/lib/api/handshake.ts`) and is checked again the same way. So `npm run dev` without a server shows that offline state:
+start `folo serve`, or open `http://localhost:5173/?mock=1`.
 
 - Design tokens come from `../design/tokens.json` (see `../design/README.md`). After editing it, run `npm run tokens`.
 - `src/lib/design/` generated tokens + base CSS · `src/lib/ui/` components · `src/lib/shell/` app chrome ·

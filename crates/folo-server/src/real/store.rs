@@ -19,7 +19,7 @@ use crate::bench::Benches;
 use crate::cloud::{self};
 use crate::engine::{self, engine_error};
 use crate::error::{Error, Result};
-use crate::index::{data_error, read_image_with, write_atomic};
+use crate::index::{data_error, read_image_with, requested_path, write_atomic};
 use crate::label::Labeler;
 use crate::runs::run_model_id;
 use crate::store::{
@@ -30,7 +30,6 @@ use crate::throughput::{EstimateInput, InferKey, InferSample};
 use crate::uploads::Uploads;
 use crate::util::slug;
 
-use super::datasets::{index_path, read_registry, write_registry};
 use super::models::cli_weights;
 use super::training::{run_cloud, upload_fingerprint};
 use super::{MAX_SYNTHETIC_IMAGES, RealStore, SHUTDOWN_WAIT, State};
@@ -182,7 +181,7 @@ impl Store for RealStore {
     }
 
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
-        self.register(req.name, req.path, req.format)
+        self.register(req.name, requested_path(&req.path)?, req.format)
     }
 
     fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset> {
@@ -206,6 +205,9 @@ impl Store for RealStore {
             seed: req.seed,
             vary_aspect: false,
             val_fraction: 0.2,
+            // A sample set passes FOLO's own health checks: Studio warns past 10% tiny boxes, and the generator's
+            // default (a fifth of the objects 8 to 28 px across) makes about 27%. A few small ones stay (about 6%).
+            small_fraction: 0.05,
             ..Default::default()
         };
         let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
@@ -249,26 +251,13 @@ impl Store for RealStore {
     }
 
     fn delete_dataset(&self, id: &str) -> Result<()> {
-        let mut list = self.entries.write().unwrap();
-        let mut regs = read_registry(&self.data_dir)?;
-        let found = list.iter().any(|e| e.reg.lock().unwrap().id == id) || regs.iter().any(|r| r.id == id);
-        if !found {
-            return Err(Error::not_found("dataset", id));
-        }
-        regs.retain(|r| r.id != id);
-        write_registry(&self.data_dir, &regs)?;
-        let entry = list.iter().find(|e| e.reg.lock().unwrap().id == id).cloned();
-        list.retain(|e| e.reg.lock().unwrap().id != id);
-        // Caches are ours to delete; the dataset's own files never are. Marking the entry deleted first (under the
-        // lock cache writers hold) keeps in-flight indexers and thumbnails from writing them back.
-        let _deleted = entry.as_ref().map(|e| {
-            let mut d = e.deleted.lock().unwrap();
-            *d = true;
-            d
-        });
-        let _ = std::fs::remove_file(index_path(&self.data_dir, id));
-        let _ = std::fs::remove_dir_all(self.thumbs_dir(id));
-        Ok(())
+        // Exclusive (briefly), so no run is admitted for the dataset while its identity changes (`RealStore::files`).
+        let _files = self.files.write().unwrap_or_else(|p| p.into_inner());
+        self.unregister(id)
+    }
+
+    fn delete_dataset_files(&self, id: &str) -> Result<()> {
+        self.delete_own_dataset(id)
     }
 
     fn list_models(&self) -> Result<Vec<Model>> {
@@ -335,6 +324,8 @@ impl Store for RealStore {
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
+        // Shared with registration; a deletion of dataset files waits for it (see `RealStore::files`).
+        let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
         let (entry, wanted) = self.runs.resume_config(id, fields)?;
         let Some(compute) = wanted.compute.clone() else { return self.runs.resume(&entry, wanted) };
         cloud::check_device(&wanted)?;
@@ -467,6 +458,7 @@ impl Store for RealStore {
             boxes: pred.scored_boxes(p.classes()),
             timing,
             device: p.device().to_string(),
+            cold: !warm,
         })
     }
 

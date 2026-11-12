@@ -14,14 +14,14 @@ use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
 
 /// A reference estimate's duration, as precise as it is: whole minutes ("≈ 10 min", "≈ 1 h 25 min"),
-/// seconds only under a minute.
+/// seconds only under a minute (and all of it: 30 to 59 s rounded to "1 min" put a point outside its
+/// range in seconds).
 fn rough_duration(secs: f64) -> String {
-    let m = (secs / 60.).round() as u64;
-    match m {
-        0 => format!("{:.0} s", secs.max(1.)),
-        1..60 => format!("{m} min"),
-        _ => format!("{} h {} min", m / 60, m % 60),
+    if secs.round() < 60. {
+        return format!("{:.0} s", secs.max(1.));
     }
+    let m = (secs / 60.).round() as u64;
+    if m < 60 { format!("{m} min") } else { format!("{} h {} min", m / 60, m % 60) }
 }
 
 /// An estimate's range, as rough as its ends: whole minutes under an hour ("7–15 min"), else
@@ -35,6 +35,16 @@ fn rough_range(lo: f64, hi: f64) -> String {
     } else {
         format!("{:.1}–{:.1} h", lo / 3600., hi / 3600.)
     }
+}
+
+/// A server estimate as the footer writes it, its point and range ("10 min", "7–15 min"): the point
+/// never outside the range, nor in a finer unit than the range's ends (a server's point below its
+/// low end read "≈ 5 s (1–3 min)").
+fn estimate_text(point: f64, lo: f64, hi: f64) -> (String, String) {
+    let (lo, hi) = (lo.min(hi).max(0.), lo.max(hi));
+    let p = point.clamp(lo, hi);
+    let point = if hi >= 60. && p < 60. { "1 min".to_string() } else { rough_duration(p) };
+    (point, rough_range(lo, hi))
 }
 
 /// Rough training cost of a configuration on this machine: (seconds, VRAM GiB).
@@ -102,12 +112,13 @@ impl FoloApp {
         let compute_blocked = self.compute_blocked();
         // What the footer can honestly say. With the server's estimator: its answer for this
         // config; while a changed config is out, the last answer marked as updating (if it was for
-        // the same kind of device); nothing for an unparsed value or a rejected config. Servers
-        // without one: the app's own reference figures.
+        // the same kind of device); nothing for an unparsed value, a rejected config or a deleted
+        // dataset. Servers without one: the app's own reference figures.
         enum Est {
             Server(Box<crate::api::RunEstimate>, bool),
             Pending,
             Invalid,
+            NoDataset,
             Rejected(String),
             Local,
         }
@@ -115,7 +126,9 @@ impl FoloApp {
         let same_kind = |e: &crate::api::RunEstimate| {
             (e.device == "cpu") == cpu && (e.device == "cloud") == cloud.is_some()
         };
-        let est = if !self.store.features.iter().any(|f| f == "run_estimate") {
+        let est = if ds.is_none() {
+            Est::NoDataset
+        } else if !self.store.features.iter().any(|f| f == "run_estimate") {
             Est::Local
         } else if epochs_bad
             || lr_bad
@@ -173,6 +186,7 @@ impl FoloApp {
         let (headline, basis, note): (String, String, Option<String>) = match &est {
             Est::Invalid => ("No estimate while a value is invalid".into(), String::new(), None),
             Est::Pending => ("Estimating…".into(), String::new(), None),
+            Est::NoDataset => ("No estimate without a dataset".into(), String::new(), None),
             Est::Rejected(msg) => (
                 "No estimate for this config".into(),
                 "The server couldn't estimate it".into(),
@@ -193,12 +207,10 @@ impl FoloApp {
                 None,
             ),
             Est::Server(e, updating) => {
-                let range = rough_range(e.est_total_s_low, e.est_total_s_high);
+                let (point, range) = estimate_text(e.est_total_s, e.est_total_s_low, e.est_total_s_high);
                 let headline = match vram {
-                    Some(v) => {
-                        format!("≈ {} ({range}) · ≈ {v:.1} GiB GPU memory", rough_duration(e.est_total_s))
-                    }
-                    None => format!("≈ {} ({range}) on the CPU", rough_duration(e.est_total_s)),
+                    Some(v) => format!("≈ {point} ({range}) · ≈ {v:.1} GiB GPU memory"),
+                    None => format!("≈ {point} ({range}) on the CPU"),
                 };
                 // What the figures are, said plainly: measured here or reference rates, and how far
                 // to trust them (the server's own confidence).
@@ -293,6 +305,17 @@ impl FoloApp {
                 Btn::Primary,
                 Some(go_icon),
                 "Creating the run…",
+                window,
+                cx,
+            )
+        } else if ds.is_none() {
+            // Its dataset was deleted while the form was open.
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Pick a dataset first",
                 window,
                 cx,
             )
@@ -446,6 +469,18 @@ mod tests {
         assert_eq!(super::rough_duration(576.), "10 min");
         assert_eq!(super::rough_duration(25.), "25 s");
         assert_eq!(super::rough_duration(5100.), "1 h 25 min");
+    }
+
+    #[test]
+    fn a_point_estimate_stays_inside_its_range() {
+        assert_eq!(estimate_text(5., 50., 170.), ("1 min".to_string(), "1–3 min".to_string()));
+        assert_eq!(estimate_text(900., 420., 600.), ("10 min".to_string(), "7–10 min".to_string()));
+        assert_eq!(estimate_text(576., 420., 900.), ("10 min".to_string(), "7–15 min".to_string()));
+        assert_eq!(estimate_text(20., 10., 40.), ("20 s".to_string(), "10–40 s".to_string()));
+        // Half a minute and more, under a minute: seconds, like its range ("≈ 1 min (32–39 s)" was shown).
+        assert_eq!(estimate_text(36., 32., 39.), ("36 s".to_string(), "32–39 s".to_string()));
+        assert_eq!(rough_duration(45.), "45 s");
+        assert_eq!(rough_duration(59.6), "1 min");
     }
 
     #[test]

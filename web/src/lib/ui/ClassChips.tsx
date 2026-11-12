@@ -8,13 +8,21 @@ import { bindable, css, For } from 'fw';
 import { classColor } from '$lib/design/tokens';
 import { describedBy, getField } from './field';
 
-/** `classes` with the names in `raw` (split at commas and line breaks) added, each once, at most `max` in all. */
-export function addClasses(classes: readonly string[], raw: string, max: number): string[] {
-  const next = raw
+/** The names in `raw` (split at commas and line breaks) that `classes` does not have yet, each once. */
+const newClasses = (classes: readonly string[], raw: string) =>
+  raw
     .split(/[,\n]/)
     .map((c) => c.trim())
     .filter((c, i, all) => c && !classes.includes(c) && all.indexOf(c) === i);
-  return [...classes, ...next].slice(0, max);
+
+/** `classes` with the names in `raw` (split at commas and line breaks) added, each once, at most `max` in all. */
+export function addClasses(classes: readonly string[], raw: string, max: number): string[] {
+  return [...classes, ...newClasses(classes, raw)].slice(0, max);
+}
+
+/** The new names in `raw` that `addClasses` leaves out: those past `max`. */
+export function classesLeftOut(classes: readonly string[], raw: string, max: number): string[] {
+  return newClasses(classes, raw).slice(Math.max(0, max - classes.length));
 }
 
 export interface ClassChipsProps {
@@ -24,6 +32,8 @@ export interface ClassChipsProps {
   max: number;
   placeholder: string;
   invalid?: boolean;
+  /** After each addition: the names that did not fit under `max` (none: an empty list), for the form to say. */
+  onleftout?: (names: string[]) => void;
 }
 
 export default function ClassChips(props: ClassChipsProps) {
@@ -32,6 +42,7 @@ export default function ClassChips(props: ClassChipsProps) {
   const field = getField();
 
   function add() {
+    props.onleftout?.(classesLeftOut(classes.get(), draft.get(), props.max));
     classes.set(addClasses(classes.get(), draft.get(), props.max));
     draft.set('');
   }

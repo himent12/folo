@@ -12,7 +12,7 @@ use super::duration_of;
 use crate::api::{Run, RunExt, RunStatus, time};
 use crate::app::{FoloApp, Route, RunFilter, act};
 use crate::controls::Btn;
-use crate::screens::{loading_rows, page_header, th};
+use crate::screens::{FirstStep, loading_rows, page_header, th};
 use crate::theme::{theme, ty};
 use crate::ui::*;
 
@@ -20,6 +20,7 @@ impl FoloApp {
     pub fn runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let runs = self.store.runs.ready().cloned().unwrap_or_default();
+        let total = runs.len();
         let count = |f: RunFilter| runs.iter().filter(|r| matches_filter(r, f)).count();
         let active = count(RunFilter::Active);
         let subtitle = if self.store.runs.is_loading() {
@@ -160,10 +161,7 @@ impl FoloApp {
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let ds = self
-                    .store
-                    .dataset_summary(&r.config.dataset_id)
-                    .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+                let ds = self.store.run_dataset_name(r);
                 let dur = duration_of(r, now).map_or("–".into(), time::duration);
                 let created_at = time::parse(&r.created);
                 let created = created_at.map_or(String::new(), |c| time::ago(c, now));
@@ -317,17 +315,49 @@ impl FoloApp {
                 .into_any_element()
             })
             .collect();
+        let step = self.next_first_step();
+        let mut first = self.first_step_button("runs-first", step, window, cx);
+        // A filter that hides every run says how to see them again.
+        let show_all = (rows.is_empty() && total > 0).then(|| {
+            self.button(
+                "runs-show-all",
+                if total == 1 { "Show the 1 run".to_string() } else { format!("Show all {total} runs") },
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.run_filter = RunFilter::All;
+                    cx.notify();
+                }),
+            )
+        });
         let table = panel(&t).overflow_hidden().child(head).map(|d| {
             if self.store.runs.is_loading() {
                 d.child(loading_rows(&t, "runs", 6))
+            } else if total == 0 {
+                // An empty server: what to do first, and the button that does it.
+                let body = match step {
+                    FirstStep::AddDataset => {
+                        "Training needs a dataset first: add a YOLO or COCO folder, or generate a synthetic one."
+                    }
+                    _ => "Start one with New run: pick a dataset, an architecture and how long to train.",
+                };
+                d.child(
+                    empty_state(&t, "icons/activity.svg", "No runs yet", body, Tone::Neutral)
+                        .children(first.take()),
+                )
             } else if rows.is_empty() {
-                d.child(empty_state(
-                    &t,
-                    "icons/activity.svg",
-                    "No runs here",
-                    "Runs matching this filter will show up here.",
-                    Tone::Neutral,
-                ))
+                d.child(
+                    empty_state(
+                        &t,
+                        "icons/activity.svg",
+                        "No runs here",
+                        "Runs matching this filter will show up here.",
+                        Tone::Neutral,
+                    )
+                    .children(show_all),
+                )
             } else {
                 d.children(rows)
             }

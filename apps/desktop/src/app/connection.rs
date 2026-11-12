@@ -22,9 +22,9 @@ impl FoloApp {
         self.nr_estimate = None;
         self.nr_estimate_last = None;
         self.nr_estimate_gen += 1;
-        // A draft's dataset belongs to the old server.
+        // A draft's dataset belongs to the old server, and so do the ids deleted there.
         self.new_run_draft = None;
-        self.new_run_draft_ds = None;
+        self.deleted.clear();
         // Model ids are per server: loaded local models belong to the old one.
         crate::local::forget_all();
         if !api.local_inference() {
@@ -54,7 +54,44 @@ impl FoloApp {
         self.play_pred = Load::Idle;
         self.play_pred_pending = false;
         self.play_model = None;
+        self.play_model_run = None;
+        self.play_model_gone = None;
         self.retry_all(cx);
+    }
+
+    /// The server answers again after it was unreachable: an open dialog's "could not reach"
+    /// error is out of date (its next try may well work), and the estimate is asked for again.
+    pub fn reconnected(&mut self, cx: &mut Context<Self>) {
+        let stale = |e: &Option<ApiError>| e.as_ref().is_some_and(|e| e.code == "server_unreachable");
+        if let Some(f) = self.new_run.as_mut()
+            && stale(&f.error)
+        {
+            f.error = None;
+        }
+        if matches!(&self.nr_estimate, Some((_, Load::Failed(e))) if e.code == "server_unreachable") {
+            // The dialog asks again on its next frame.
+            self.nr_estimate = None;
+        }
+        if let Some(f) = self.synth.as_mut()
+            && stale(&f.error)
+        {
+            f.error = None;
+        }
+        for e in [
+            self.bench.new_bench.as_mut().map(|f| &mut f.error),
+            self.bench.new_loop.as_mut().map(|f| &mut f.error),
+            self.bench.design.as_mut().map(|f| &mut f.error),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if stale(e) {
+                *e = None;
+            }
+        }
+        // Back: read the lists now (the server may have restarted on another data dir).
+        self.refresh_lists(cx);
+        cx.notify();
     }
 
     /// Connect to a running `folo serve`, or start a local `folo serve` (the real engine, bare

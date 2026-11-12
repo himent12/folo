@@ -16,6 +16,18 @@ fn backend_parsing() {
 }
 
 #[test]
+fn vulkan_adapters_report_their_memory() {
+    // `/api/system` sizes runs against it (New run's GPU memory meter and its "won't fit" check).
+    let Some(c) = super::ctx() else { return };
+    let s = c.summary();
+    if s.backend != "Vulkan" {
+        eprintln!("note: {} is not driven through Vulkan, whose memory size wgpu cannot read", s.name);
+        return;
+    }
+    assert!(s.memory_bytes >= 256 << 20, "{s}: {} bytes", s.memory_bytes);
+}
+
+#[test]
 fn pool_reuses_freed_buffers() {
     let ctx = gpu!();
     // A size no other test uses, so concurrent tests do not steal the freed buffer.

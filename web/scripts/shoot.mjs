@@ -61,6 +61,8 @@ const started = Date.now();
 
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
+  // The narrowest two-column Overview (Recent runs beside Best models): only the scenes that list it, for --qa's checks.
+  wide: { width: 1280, height: 800 },
   laptop: { width: 1024, height: 768 },
   // Below the 960 px laptop tier: one column, the section picker, the New run dock.
   tablet: { width: 820, height: 1180 },
@@ -664,7 +666,7 @@ const overflows = [];
  * Opens one scene in one theme and viewport, sets it up, runs both checks and (without --qa) takes the shot.
  * @param {import('./scenes.mjs').Scene} scene
  * @param {'dark' | 'light'} theme
- * @param {'desktop' | 'laptop' | 'tablet' | 'mobile' | 'small'} vp
+ * @param {'desktop' | 'wide' | 'laptop' | 'tablet' | 'mobile' | 'small'} vp
  * @param {boolean} [touch] a touch screen (`pointer: coarse`, `hover: none`): --qa's phone states
  * @returns {Promise<boolean>} whether the page showed a phone section picker
  */
@@ -788,8 +790,8 @@ async function shot(page, scene, vp, name) {
   }
 }
 
-/** --qa's sizes: tablet, mobile and small (the scenes listing it); FOLO_QA_SIZES=laptop,tablet (comma-separated) checks others on demand. */
-const qaSizes = (process.env.FOLO_QA_SIZES ?? 'tablet,mobile,small').split(',').map((v) => v.trim());
+/** --qa's sizes: wide, tablet, mobile and small (the scenes listing them); FOLO_QA_SIZES=laptop,tablet (comma-separated) checks others on demand. */
+const qaSizes = (process.env.FOLO_QA_SIZES ?? 'wide,tablet,mobile,small').split(',').map((v) => v.trim());
 /** --qa's states, run by a small pool below. @type {(() => Promise<void>)[]} */
 const qaJobs = [];
 /** The shots, in order: one at a time, or with --exact by the same pool. @type {(() => Promise<void>)[]} */

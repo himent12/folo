@@ -40,6 +40,9 @@ pub struct AdapterSummary {
     /// Whether the adapter offers the 16×16×16 f16 → f32 cooperative matrices the tensor-core kernels need
     /// (wgpu's experimental `EXPERIMENTAL_COOPERATIVE_MATRIX`; native Vulkan / Metal only).
     pub tensor_cores: bool,
+    /// Dedicated memory in bytes: the largest device-local heap on Vulkan (on an integrated GPU, the share of system
+    /// memory it may use); 0 where wgpu offers no way to ask (DX12, Metal, the browser).
+    pub memory_bytes: u64,
     /// Largest buffer in bytes.
     pub max_buffer_size: u64,
     /// Largest storage buffer binding in bytes.
@@ -67,6 +70,7 @@ impl AdapterSummary {
             driver_info: i.driver_info,
             shader_f16: adapter.features().contains(wgpu::Features::SHADER_F16),
             tensor_cores: crate::kernels::coop::adapter_supports(adapter),
+            memory_bytes: device_memory(adapter),
             max_buffer_size: l.max_buffer_size,
             max_storage_buffer_binding_size: l.max_storage_buffer_binding_size,
             max_compute_workgroup_storage_size: l.max_compute_workgroup_storage_size,
@@ -76,12 +80,42 @@ impl AdapterSummary {
     }
 }
 
+/// [`AdapterSummary::memory_bytes`]: wgpu's own adapter info has no memory size, so it is read from the Vulkan
+/// physical device behind the adapter (`vkGetPhysicalDeviceMemoryProperties`).
+fn device_memory(adapter: &wgpu::Adapter) -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    // SAFETY: the guard is dropped at the end of this block and only the physical device's memory properties are read
+    // through it: nothing is created, destroyed or used by the GPU.
+    if let Some(a) = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() } {
+        // SAFETY: `raw_physical_device` belongs to `raw_instance`, which outlives the call (the adapter holds it).
+        let props = unsafe {
+            a.shared_instance().raw_instance().get_physical_device_memory_properties(a.raw_physical_device())
+        };
+        /// `VK_MEMORY_HEAP_DEVICE_LOCAL_BIT`.
+        const DEVICE_LOCAL: u32 = 0x1;
+        return props
+            .memory_heaps_as_slice()
+            .iter()
+            .filter(|h| h.flags.as_raw() & DEVICE_LOCAL != 0)
+            .map(|h| h.size)
+            .max()
+            .unwrap_or(0);
+    }
+    let _ = adapter;
+    0
+}
+
 impl std::fmt::Display for AdapterSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The memory size where the backend tells it (Vulkan); nothing said where it cannot (0).
+        let memory = match self.memory_bytes {
+            0 => String::new(),
+            b => format!("memory {:.1} GiB; ", b as f64 / (1u64 << 30) as f64),
+        };
         write!(
             f,
-            "[{}] {} ({}, {}) driver {} {}; shader-f16 {}; tensor cores {}; max buffer {} MiB, storage binding {} MiB, \
-             workgroup storage {} KiB, {} invocations/workgroup, subgroup {}..{}",
+            "[{}] {} ({}, {}) driver {} {}; {memory}shader-f16 {}; tensor cores {}; max buffer {} MiB, storage binding \
+             {} MiB, workgroup storage {} KiB, {} invocations/workgroup, subgroup {}..{}",
             self.index,
             self.name,
             self.backend,
@@ -417,5 +451,36 @@ impl GpuContext {
                 Ok(ctx)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdapterSummary;
+
+    /// `folo doctor` prints each adapter's memory size when the backend reports one, and nothing about it otherwise.
+    #[test]
+    fn an_adapter_line_names_its_memory_when_known() {
+        let mut a = AdapterSummary {
+            index: 0,
+            name: "NVIDIA GeForce RTX 4080 SUPER".into(),
+            vendor: 0x10de,
+            device: 0x2702,
+            device_type: "DiscreteGpu".into(),
+            backend: "Vulkan".into(),
+            driver: "NVIDIA".into(),
+            driver_info: "591.44".into(),
+            shader_f16: true,
+            tensor_cores: true,
+            memory_bytes: 16_869_490_688,
+            max_buffer_size: 1 << 32,
+            max_storage_buffer_binding_size: 1 << 31,
+            max_compute_workgroup_storage_size: 49_152,
+            max_compute_invocations_per_workgroup: 1024,
+            subgroup_size: (32, 32),
+        };
+        assert!(a.to_string().contains("driver NVIDIA 591.44; memory 15.7 GiB; shader-f16 yes"), "{a}");
+        a.memory_bytes = 0;
+        assert!(!a.to_string().contains("memory"), "{a}");
     }
 }

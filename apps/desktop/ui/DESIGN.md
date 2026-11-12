@@ -280,7 +280,10 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
   its first window (queues pumped, then 50 ms steps of the fake clock until it stops asking for frames or
   `--shot-time` has passed, default 2200 ms) and writes the PNG. The app needs no code for it.
 - `FOLO_UI_OFFSCREEN=1`: a real window opens off every display, is never activated and takes no focus
-  (developer checks on a machine someone is using).
+  (developer checks on a machine someone is using). Nothing else of the process shows either: on Windows
+  the file dialogs answer with an error, `open_url` and `reveal_path` do nothing (both say so on stderr),
+  and any other window of the process that shows or moves onto a display is moved off at once (a
+  WinEvent hook, `platform/windows/offscreen.rs`).
 
 ## How it is verified
 

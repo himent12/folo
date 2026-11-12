@@ -209,6 +209,13 @@ describe('mock API: PR #69 behaviour', () => {
     expect((await api.system()).gpus.map((g) => g.ordinal)).toEqual([0]);
   });
 
+  it('refuses a run name over 64 characters, as the server does', async () => {
+    const api = new MockApi('normal', 0);
+    const c = (await api.run('run_c19a')).config;
+    await expect(api.createRun({ ...c, name: 'x'.repeat(65) })).rejects.toMatchObject({ status: 400, code: 'invalid_config' });
+    await expect(api.createRun({ ...c, name: 'x'.repeat(64) })).resolves.toMatchObject({ name: 'x'.repeat(64) });
+  });
+
   it('returns the registered dataset for a folder that is already registered', async () => {
     const api = new MockApi('normal', 0);
     const before = (await api.datasets()).length;
@@ -292,6 +299,14 @@ describe('mock queue (docs/API.md, POST /api/runs/{id}/queue)', () => {
     const cfg = (await api.run('run_31aa')).config;
     const r = await api.createRun({ ...cfg, name: 'shapes-n-2' });
     expect(r).toMatchObject({ status: 'queued', queue_position: 2 });
+  });
+
+  it('deletes a run that waits and never started (the one behind moves up), never the live one', async () => {
+    const api = new MockApi('normal', 0);
+    await api.deleteRun('run_q4n2');
+    expect(await places(api)).toEqual({ run_q7c5: 1 });
+    await expect(api.run('run_q4n2')).rejects.toMatchObject({ status: 404 });
+    await expect(api.deleteRun('run_7d1e')).rejects.toMatchObject({ status: 409, code: 'run_active' });
   });
 });
 

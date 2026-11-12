@@ -8,7 +8,28 @@ pub fn parse_close(s: &str, epochs: f32) -> Option<u32> {
     s.trim().parse::<u32>().ok().filter(|v| (*v as f32) <= epochs)
 }
 
+/// Close mosaic's default for a run of `epochs`: the trainer's 10 under its own cap (half the run),
+/// as Studio's New run has it.
+pub fn auto_close_mosaic(epochs: u32) -> u32 {
+    capped_close_mosaic(10, epochs)
+}
+
 impl NewRunForm {
+    /// While close mosaic is still the form's default, it follows the epoch count: the text its
+    /// field should show now, when the value moved.
+    pub fn follow_epochs(&mut self) -> Option<String> {
+        if !self.close_auto || self.epochs_invalid {
+            return None;
+        }
+        let v = auto_close_mosaic(self.epochs.round() as u32);
+        self.close_invalid = false;
+        if self.close_mosaic.round() as u32 == v {
+            return None;
+        }
+        self.close_mosaic = v as f32;
+        Some(v.to_string())
+    }
+
     /// Validate the close-mosaic text against the current epoch count.
     pub fn check_close(&mut self, s: &str) {
         match parse_close(s, self.epochs) {
@@ -63,6 +84,15 @@ pub fn parse_images(s: &str) -> Option<u64> {
     s.trim().replace([',', '_', ' '], "").parse::<u64>().ok().filter(|v| (1..=100_000).contains(v))
 }
 
+/// What is wrong with the Generate synthetic form's name and image count as typed, each shown
+/// under its field at once (and Generate waits until both are right).
+pub fn synth_errors(name: &str, images: &str) -> (Option<&'static str>, Option<&'static str>) {
+    (
+        name.trim().is_empty().then_some("Give the dataset a name"),
+        parse_images(images).is_none().then_some("A whole number from 1 to 100,000"),
+    )
+}
+
 pub struct SynthForm {
     /// Which opening of the dialog this is: a late answer only touches its own dialog.
     pub id: u64,
@@ -71,12 +101,67 @@ pub struct SynthForm {
     pub imgsz: usize,
     pub classes: usize,
     pub submitting: bool,
-    pub error: Option<String>,
+    pub error: Option<ApiError>,
+}
+
+/// The longest run name the server takes (docs/API.md, `POST /api/runs`), as for a dataset's.
+pub const MAX_RUN_NAME: usize = 64;
+
+/// `base` and then `suffix`, `base` shortened (and dashes left at its cut dropped) so the whole fits
+/// in [`MAX_RUN_NAME`] characters, as Studio's New run fits its names (`web/src/routes/runnew/name.ts`).
+pub fn fit_run_name(base: &str, suffix: &str) -> String {
+    let room = MAX_RUN_NAME.saturating_sub(suffix.chars().count());
+    let cut: String = base.chars().take(room).collect();
+    format!("{}{suffix}", cut.trim_end_matches('-'))
+}
+
+/// What is wrong with a typed run name, in Studio's words: empty, or longer than the server takes.
+pub fn run_name_error(name: &str) -> Option<String> {
+    let n = name.trim().chars().count();
+    if n == 0 {
+        Some("Give the run a name.".into())
+    } else if n > MAX_RUN_NAME {
+        Some(format!("At most {MAX_RUN_NAME} characters (this one has {n})."))
+    } else {
+        None
+    }
+}
+
+/// The name New run suggests: the dataset, the architecture's letter and the run's number
+/// ("shapes-n-4"), the dataset's part shortened to fit the length limit.
+pub fn suggested_name(dataset: &str, arch: Arch, n: usize) -> String {
+    fit_run_name(dataset, &format!("-{}-{n}", arch.as_str().trim_start_matches("folo-")))
+}
+
+/// The name of a new run made from run `name` (New run from this run, Retry): `name-2`, or the next
+/// number no run of `runs` is called, `name` shortened to fit the length limit.
+pub fn again_run_name(name: &str, runs: &[Run]) -> String {
+    (2..)
+        .map(|n| fit_run_name(name, &format!("-{n}")))
+        .find(|candidate| !runs.iter().any(|r| r.name == *candidate))
+        .expect("a free number")
+}
+
+/// [`suggested_name`] numbered one past the run count, or the next number no run of `runs` is
+/// called: after a delete the count alone names a run that exists, and with no rename a second run
+/// (and its models) would keep that name.
+pub fn free_run_name(dataset: &str, arch: Arch, runs: &[Run]) -> String {
+    (runs.len() + 1..)
+        .map(|n| suggested_name(dataset, arch, n))
+        .find(|name| !runs.iter().any(|r| r.name == *name))
+        .expect("one of len + 1 names is free")
 }
 
 pub struct NewRunForm {
     pub name: Entity<TextInput>,
-    pub dataset: usize,
+    /// The name the form suggested while the field still holds it: it follows the dataset and the
+    /// architecture until the name is typed (then `None`).
+    pub name_suggested: Option<String>,
+    /// The dataset's id: a deletion that shrinks the list doesn't move the choice to another one
+    /// (gone itself, the form asks for another, [`FoloApp::nr_dataset_gone`]).
+    ///
+    /// [`FoloApp::nr_dataset_gone`]: crate::app::FoloApp::nr_dataset_gone
+    pub dataset: String,
     pub arch: usize,
     pub epochs: f32,
     pub batch: usize,
@@ -106,6 +191,9 @@ pub struct NewRunForm {
     pub lr_invalid: bool,
     pub close_input: Entity<TextInput>,
     pub close_invalid: bool,
+    /// Close mosaic is the form's default and follows the epoch count (`follow_epochs`) until it
+    /// is set by hand.
+    pub close_auto: bool,
     /// Mixed-precision training (f16 on tensor cores). Sent only for a GPU device.
     pub amp: bool,
     /// The NMS-free end-to-end head (`head: o2o`); off is the default one-to-many head.
@@ -241,7 +329,60 @@ mod retry_tests {
 
 #[cfg(test)]
 mod form_tests {
-    use super::{format_lr, parse_epochs, parse_lr};
+    use super::{format_lr, parse_epochs, parse_lr, suggested_name};
+
+    #[test]
+    fn suggested_names_follow_the_choices() {
+        assert_eq!(suggested_name("shapes-ux", crate::api::Arch::S, 4), "shapes-ux-s-4");
+        assert_eq!(suggested_name("shapes-ux", crate::api::Arch::N, 4), "shapes-ux-n-4");
+        assert_eq!(suggested_name("bccd", crate::api::Arch::X, 12), "bccd-x-12");
+    }
+
+    #[test]
+    fn the_suggested_run_name_is_never_one_a_run_has() {
+        use crate::api::{Arch, Backend, Run};
+        let base = crate::api::mock::MockBackend::new(4200, true).runs().unwrap().remove(0);
+        let runs = |names: &[&str]| -> Vec<Run> {
+            names.iter().map(|n| Run { name: n.to_string(), ..base.clone() }).collect()
+        };
+        // Five runs left after -4 was deleted: the count says -6, which a run has.
+        let left = runs(&["a", "b", "shapes-v-n-5", "shapes-v-n-6", "c"]);
+        assert_eq!(super::free_run_name("shapes-v", Arch::N, &left), "shapes-v-n-7");
+        // Free at the count: the count.
+        assert_eq!(super::free_run_name("shapes-v", Arch::N, &runs(&["shapes-v-n-5"])), "shapes-v-n-2");
+        assert_eq!(super::free_run_name("shapes-v", Arch::S, &left), "shapes-v-s-6");
+        assert_eq!(super::free_run_name("shapes-v", Arch::S, &[]), "shapes-v-s-1");
+    }
+
+    #[test]
+    fn every_suggested_name_fits_the_servers_limit() {
+        use super::{MAX_RUN_NAME, again_run_name, fit_run_name, run_name_error};
+        use crate::api::{Arch, Backend, Run};
+        let long = "a-very-long-dataset-name-registered-from-a-deeply-nested-folder-of-images";
+        let s = suggested_name(long, Arch::S, 12);
+        assert_eq!(s.chars().count(), MAX_RUN_NAME);
+        assert!(s.starts_with("a-very-long") && s.ends_with("-s-12"), "{s}");
+        // A cut right after a dash leaves no double dash.
+        assert_eq!(fit_run_name(&format!("{}-tail", "x".repeat(61)), "-2"), format!("{}-2", "x".repeat(61)));
+        // Characters, not bytes.
+        assert_eq!(fit_run_name(&"é".repeat(70), "").chars().count(), MAX_RUN_NAME);
+        // New run from a run named at the limit: shortened, numbered past the names taken.
+        let base = crate::api::mock::MockBackend::new(4200, true).runs().unwrap().remove(0);
+        let at_limit = "r".repeat(MAX_RUN_NAME);
+        let two = again_run_name(&at_limit, &[]);
+        assert_eq!((two.chars().count(), two.ends_with("-2")), (MAX_RUN_NAME, true));
+        let taken = vec![Run { name: two.clone(), ..base }];
+        let three = again_run_name(&at_limit, &taken);
+        assert!(three.ends_with("-3") && three.chars().count() == MAX_RUN_NAME, "{three}");
+        assert_eq!(again_run_name("shapes-s-1", &[]), "shapes-s-1-2");
+        // A typed name: Studio's words.
+        assert_eq!(run_name_error("  ").as_deref(), Some("Give the run a name."));
+        assert_eq!(run_name_error(&at_limit), None);
+        assert_eq!(
+            run_name_error(&format!("{at_limit}x")).as_deref(),
+            Some("At most 64 characters (this one has 65).")
+        );
+    }
 
     #[test]
     fn typed_numbers_validate() {
@@ -287,6 +428,13 @@ mod tests {
     }
 
     #[test]
+    fn close_mosaic_default_is_studios() {
+        // 10, never more than half the run (Studio's autoCloseMosaic: 0, 1, 2, 10, 10).
+        let auto: Vec<u32> = [1, 2, 5, 20, 100].into_iter().map(super::auto_close_mosaic).collect();
+        assert_eq!(auto, [0, 1, 2, 10, 10]);
+    }
+
+    #[test]
     fn close_mosaic_bounded_by_epochs() {
         // 200 is invalid at 100 epochs and valid once epochs rise to 300 ...
         assert_eq!(parse_close("200", 100.), None);
@@ -306,5 +454,12 @@ mod tests {
         assert_eq!(parse_images("0"), None);
         assert_eq!(parse_images("100001"), None);
         assert_eq!(parse_images("ten"), None);
+        use super::synth_errors;
+        assert_eq!(synth_errors("shapes", "1,000"), (None, None));
+        assert_eq!(
+            synth_errors("  ", "0"),
+            (Some("Give the dataset a name"), Some("A whole number from 1 to 100,000"))
+        );
+        assert_eq!(synth_errors("s", "200000").1, Some("A whole number from 1 to 100,000"));
     }
 }

@@ -179,14 +179,13 @@ impl Trainer {
                 );
             }
             let t0 = Instant::now();
+            let batches_before = clock.wall[0] + clock.wall[1];
             self.at_boundary = false;
             let Some(train_loss) = self.train_epoch(e, &mut clock)? else {
                 stopped = true;
                 break;
             };
             let val = self.validate_epoch()?;
-            clock.val_time += val.seconds;
-            clock.val_count += 1;
             let metrics = val_metrics(&val.report);
             let fitness = val.report.map50_95 as f64;
             let (improved, stop) = update_best(&mut self.best, e, fitness, self.cfg.patience);
@@ -196,12 +195,10 @@ impl Trainer {
             self.epoch = e + 1;
             self.at_boundary = true;
             self.write_epoch_files(e, improved, &val.samples, &mut summary)?;
-            let ep = folo_api::Epoch {
-                epoch: e + 1,
-                train_loss,
-                val: metrics,
-                duration_s: t0.elapsed().as_secs_f64(),
-            };
+            let duration_s = t0.elapsed().as_secs_f64();
+            let batches = clock.wall[0] + clock.wall[1] - batches_before;
+            clock.ended_epoch(val.seconds, (duration_s - batches - val.seconds).max(0.0));
+            let ep = folo_api::Epoch { epoch: e + 1, train_loss, val: metrics, duration_s };
             summary.epochs.push(ep.clone());
             self.emitter.emit(RunEvent::Epoch(ep));
             if stop {

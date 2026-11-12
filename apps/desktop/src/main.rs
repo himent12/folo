@@ -86,6 +86,11 @@ Options:
   --height H            Window height in px [default: the last size, else 800]
   --scenario NAME       A fixed, deterministic state for screenshots (implies demo data)
   --list-scenarios      Print the scenario names and exit
+  --shot PNG            Render headless (no window), settle, write the frame to PNG and exit
+  --scale F             With --shot: device pixels per logical pixel [default: 1]
+  --shot-time MS        With --shot: how long animations may run first [default: 2200]
+  --text native|portable  With --shot: the text backend [default: native]
+  --bench-frames N      Time N full redraws per frame phase, headless (tools/bench-frames.sh)
   -h, --help            Print this help and exit
   -V, --version         Print the version and exit
 ";
@@ -308,6 +313,13 @@ mod tests {
             );
         }
         assert!(info_text(&["--help", "--version"]).unwrap().contains("Usage:"), "help wins");
+        // Everything README's Screenshots section and the tools pass is listed.
+        let help = info_text(&["--help"]).unwrap();
+        for flag in
+            ["--scenario", "--shot", "--scale", "--width", "--height", "--shot-time", "--bench-frames"]
+        {
+            assert!(help.contains(flag), "{flag} missing from --help");
+        }
         assert_eq!(info_text(&["--mock", "--open", "runs"]), None);
         assert_eq!(info_text::<&str>(&[]), None);
     }

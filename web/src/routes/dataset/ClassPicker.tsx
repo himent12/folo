@@ -99,6 +99,12 @@ export default function ClassPicker(props: ClassPickerProps) {
           <button type="button" role="option" tabindex={-1} aria-selected={p.value === undefined} onclick={() => pick(undefined)}>
             <span class="check">{p.value === undefined ? <Check size={14} strokeWidth={2} /> : null}</span>
             <span class="name">All classes</span>
+            {/* The numbers below are boxes (the filter's result counts images): the column says so once, here. */}
+            {p.counts ? (
+              <span class="n" aria-hidden="true">
+                boxes
+              </span>
+            ) : null}
           </button>
           <Index each={p.classes}>
             {(c, i) => (
@@ -115,7 +121,12 @@ export default function ClassPicker(props: ClassPickerProps) {
                 <span class="name truncate" title={c()}>
                   {c()}
                 </span>
-                {p.counts ? <span class="n num">{compact(p.counts[i])}</span> : null}
+                {p.counts ? (
+                  <span class="n num">
+                    {compact(p.counts[i])}
+                    <span class="sr-only"> {p.counts[i] === 1 ? 'box' : 'boxes'}</span>
+                  </span>
+                ) : null}
               </button>
             )}
           </Index>

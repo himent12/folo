@@ -1,47 +1,64 @@
-// Fuzzy matching and ranking for the command palette.
+// Matching and ranking for the command palette.
 
-/**
- * Scores how well `query` matches `text` (higher is better), or -1 for no match. Characters must appear in order;
- * consecutive runs, word starts and an early first match score higher.
- */
-export function fuzzy(query: string, text: string): number {
-  const q = query.trim().toLowerCase();
-  if (!q) return 0;
-  const t = text.toLowerCase();
-  const direct = t.indexOf(q);
-  if (direct >= 0) return 1000 - direct * 2 - (t.length - q.length) * 0.1 + (direct === 0 || /[\s\-_/]/.test(t[direct - 1] ?? '') ? 50 : 0);
-  let score = 0;
-  let ti = 0;
-  let run = 0;
-  for (const ch of q) {
-    if (ch === ' ') continue;
-    const found = t.indexOf(ch, ti);
-    if (found < 0) return -1;
-    run = found === ti ? run + 1 : 0;
-    score += 10 + run * 5 + (found === 0 || /[\s\-_/]/.test(t[found - 1] ?? '') ? 15 : 0) - Math.min(9, found - ti);
-    ti = found + 1;
-  }
-  return score;
+/** The words of a text: runs between spaces and the separators of names (`shapes-small`, `a/b`, `x_1`, `(now dark)`). */
+function words(t: string): { at: number; w: string }[] {
+  return [...t.matchAll(/[^\s\-_/.()]+/g)].map((m) => ({ at: m.index, w: m[0] }));
 }
 
-/** Splits `text` into [plain, matched] segments for highlighting the characters `query` matched. */
-export function highlight(query: string, text: string): { s: string; m: boolean }[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return [{ s: text, m: false }];
+/**
+ * Where `query` matches `text`, best way first, as the spans to mark, and how good that way is: the whole text,
+ * its start, a word's start, every query word starting a word in order ("shapes s" in "shapes-small"), the middle of a
+ * word, the words' initials ("nr" in "New run"). Characters scattered anywhere in order do not match: "cloud" must
+ * not find every "Open … in Playground" (shell F14). Null for no match.
+ */
+function match(query: string, text: string): { score: number; spans: [number, number][] } | null {
+  const q = query.trim().toLowerCase().replace(/\s+/g, ' ');
   const t = text.toLowerCase();
-  const marks = new Array<boolean>(text.length).fill(false);
-  const direct = t.indexOf(q);
-  if (direct >= 0) for (let i = 0; i < q.length; i++) marks[direct + i] = true;
-  else {
-    let ti = 0;
-    for (const ch of q) {
-      if (ch === ' ') continue;
-      const f = t.indexOf(ch, ti);
-      if (f < 0) break;
-      marks[f] = true;
-      ti = f + 1;
+  if (!q) return { score: 0, spans: [] };
+  const extra = (t.length - q.length) * 0.1;
+  if (t === q) return { score: 2000, spans: [[0, q.length]] };
+  const tw = words(t);
+  const atWord = tw.find((x) => t.startsWith(q, x.at))?.at;
+  if (atWord === 0) return { score: 1600 - extra, spans: [[0, q.length]] };
+  if (atWord !== undefined) return { score: 1400 - atWord * 2 - extra, spans: [[atWord, atWord + q.length]] };
+  const qw = q.split(' ').filter(Boolean);
+  if (qw.length > 1) {
+    const spans: [number, number][] = [];
+    let j = 0;
+    for (const w of qw) {
+      while (j < tw.length && !tw[j]!.w.startsWith(w)) j++;
+      if (j === tw.length) break;
+      spans.push([tw[j]!.at, tw[j]!.at + w.length]);
+      j++;
     }
+    if (spans.length === qw.length) return { score: 1100 - extra, spans };
   }
+  const mid = t.indexOf(q);
+  if (mid >= 0) return { score: 800 - mid * 2 - extra, spans: [[mid, mid + q.length]] };
+  if (!q.includes(' ') && q.length >= 2 && q.length <= tw.length) {
+    const spans: [number, number][] = [];
+    let j = 0;
+    for (const ch of q) {
+      while (j < tw.length && tw[j]!.w[0] !== ch) j++;
+      if (j === tw.length) return null;
+      spans.push([tw[j]!.at, tw[j]!.at + 1]);
+      j++;
+    }
+    return { score: 500 - extra, spans };
+  }
+  return null;
+}
+
+/** Scores how well `query` matches `text` (higher is better; see `match`), or -1 for no match. */
+export function fuzzy(query: string, text: string): number {
+  return match(query, text)?.score ?? -1;
+}
+
+/** Splits `text` into [plain, matched] segments for highlighting what `query` matched. */
+export function highlight(query: string, text: string): { s: string; m: boolean }[] {
+  const spans = query.trim() ? (match(query, text)?.spans ?? []) : [];
+  const marks = new Array<boolean>(text.length).fill(false);
+  for (const [a, b] of spans) for (let i = a; i < b; i++) marks[i] = true;
   const out: { s: string; m: boolean }[] = [];
   for (let i = 0; i < text.length; i++) {
     const last = out[out.length - 1];

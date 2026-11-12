@@ -274,12 +274,15 @@ export class MockServer {
 
   createDataset(body: CreateDataset): Promise<Dataset> {
     return this.call(() => {
-      // As on the server: a folder that is already registered (by its path, whatever the spelling) answers with the
-      // existing dataset, its name kept.
+      // As on the server: surrounding quotes and whitespace are dropped, a relative path is refused, and a folder that
+      // is already registered (by its path, whatever the spelling) answers with the existing dataset, its name kept.
+      const path = body.path.trim().replace(/^(["'])(.*)\1$/s, '$2').trim();
+      if (!/^([A-Za-z]:[\\/]|[\\/])/.test(path))
+        throw new ApiError(400, 'invalid_body', `'${path}' is not a full path`, "use the folder's full path on the machine running folo serve, such as D:/data/my-dataset");
       const key = (p: string) => p.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-      const known = this.state.datasets.find((d) => key(d.path) === key(body.path));
+      const known = this.state.datasets.find((d) => key(d.path) === key(path));
       if (known) return toDataset(known, this.state.t0, true);
-      throw new ApiError(400, 'dataset_not_found_on_disk', `No YOLO or COCO dataset found at ${body.path}.`, 'The mock server cannot read your disk; connect to folo serve to register folders.');
+      throw new ApiError(400, 'dataset_not_found_on_disk', `No YOLO or COCO dataset found at ${path}.`, 'The mock server cannot read your disk; connect to folo serve to register folders.');
     }, 400);
   }
 
@@ -359,8 +362,10 @@ export class MockServer {
     return p;
   }
 
-  deleteDataset(id: string): Promise<void> {
+  deleteDataset(id: string, opts: { files?: boolean } = {}): Promise<void> {
     return this.call(() => {
+      // As folo serve --mock: no data dir, so no folder is ever this server's to delete.
+      if (opts.files) throw new ApiError(400, 'invalid_query', "this dataset's folder is not one this server wrote; its files are never deleted");
       this.spec(id);
       this.state.datasets = this.state.datasets.filter((d) => d.id !== id);
     });
@@ -570,7 +575,7 @@ export class MockServer {
     return this.call(() => {
       const m = this.allModels().find((x) => x.id === id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
-      return new File([], onnxFileName(m.name, !!switches.half), { type: 'application/octet-stream' });
+      return new File([], onnxFileName(m.name, !!switches.half, !!switches.decode), { type: 'application/octet-stream' });
     }, 1200);
   }
 
@@ -581,8 +586,8 @@ export class MockServer {
       const on = { decode: !!switches?.decode, dynamic: !!switches?.dynamic, half: !!switches?.half };
       if (format !== 'onnx' && (on.decode || on.dynamic || on.half))
         throw new ApiError(400, 'invalid_body', 'decode, dynamic and half apply to ONNX exports only.');
-      // The real server's names (docs/API.md): `<name>-f16.folo`, `<name>.onnx`, `<name>-f16.onnx` with `half`.
-      const file = format === 'onnx' ? `${m.name}${on.half ? '-f16' : ''}.onnx` : `${m.name}-f16.folo`;
+      // The real server's names (docs/API.md): `<name>-f16.folo`, `<name>.onnx`, `-decoded` with `decode`, `-f16` with `half`.
+      const file = format === 'onnx' ? `${m.name}${on.decode ? '-decoded' : ''}${on.half ? '-f16' : ''}.onnx` : `${m.name}-f16.folo`;
       const perParam = format === 'onnx' ? (on.half ? 2.05 : 4.1) : 2.03;
       return { path: `D:/folo/exports/${file}`, bytes: Math.round(m.params * perParam) };
     }, 1200);

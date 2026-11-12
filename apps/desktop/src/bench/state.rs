@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use folo_ui::Entity;
 
+use super::create::SourceId;
 use crate::api::*;
 use crate::input::TextInput;
 use crate::store::Load;
@@ -26,10 +27,11 @@ pub struct NewBenchForm {
     pub name: Entity<TextInput>,
     /// Bumped on every opening: a late answer only touches its own form.
     pub seq: u64,
-    /// Index into [`FoloApp::bench_sources`]: the datasets, then the labeling jobs with labeled images.
+    /// One of [`FoloApp::bench_sources`] (the datasets, then the labeling jobs with labeled
+    /// images); none while there was none to pick.
     ///
     /// [`FoloApp::bench_sources`]: crate::app::FoloApp::bench_sources
-    pub dataset: usize,
+    pub source: Option<SourceId>,
     /// Index into [`BENCH_SPLITS`] (a dataset's split; a labeling job has none).
     pub split: usize,
     pub submitting: bool,
@@ -50,10 +52,10 @@ pub struct NewLoopForm {
     pub seq: u64,
     /// The teacher, a model id.
     pub teacher: Option<String>,
-    /// Index into [`FoloApp::bench_sources`].
+    /// One of [`FoloApp::bench_sources`]; none while there was none to pick.
     ///
     /// [`FoloApp::bench_sources`]: crate::app::FoloApp::bench_sources
-    pub pool: usize,
+    pub pool: Option<SourceId>,
     /// Index into [`LOOP_GENERATIONS`].
     pub generations: usize,
     /// Index into [`LOOP_EPOCHS`].
@@ -167,7 +169,7 @@ pub struct BenchState {
     pub image_sort: ImageSort,
     /// Per benchmark: its first image, shown under each condition on the Plan tab.
     pub previews: HashMap<String, Load<BenchImagePage>>,
-    /// Who runs on the open benchmark (the newest model until one is picked).
+    /// Who runs on the open benchmark (the best model until one is picked).
     pub run_model: Option<Contender>,
     /// A Run model request is out.
     pub starting: bool,

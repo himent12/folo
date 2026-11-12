@@ -11,6 +11,7 @@ use crate::api::*;
 use crate::store::*;
 use crate::ui::*;
 
+use super::lists::List;
 use super::{FoloApp, Route};
 
 impl FoloApp {
@@ -53,38 +54,15 @@ impl FoloApp {
     pub fn ensure_core(&mut self, cx: &mut Context<Self>) {
         if self.store.runs.needs_fetch() {
             self.store.runs = Load::Loading;
-            self.fetch(
-                cx,
-                |api| api.runs(),
-                |this, r, cx| {
-                    this.store.runs = r.map(newest_first_runs).into();
-                    this.store.sync_run_list();
-                    this.subscribe_active(cx);
-                },
-            );
+            self.fetch_list(List::Runs, cx);
         }
         if self.store.datasets.needs_fetch() {
             self.store.datasets = Load::Loading;
-            self.fetch(cx, |api| api.datasets(), |this, r, _| this.store.datasets = r.into());
+            self.fetch_list(List::Datasets, cx);
         }
         if self.store.models.needs_fetch() {
             self.store.models = Load::Loading;
-            self.fetch(
-                cx,
-                |api| api.models(),
-                |this, r, _| {
-                    this.store.models = r
-                        .map(|mut m| {
-                            m.sort_by(|a, b| b.created.cmp(&a.created));
-                            m
-                        })
-                        .into();
-                    if this.play_model.is_none() {
-                        this.play_model =
-                            this.store.models.ready().and_then(|m| m.first()).map(|m| m.id.clone());
-                    }
-                },
-            );
+            self.fetch_list(List::Models, cx);
         }
         if self.store.system.needs_fetch() {
             self.store.system = Load::Loading;
@@ -97,13 +75,18 @@ impl FoloApp {
                     {
                         this.store.gpu_util.push_back(g);
                     }
+                    let was_down = this.store.unreachable();
                     this.store.note_reachability(r.as_ref().err());
+                    if was_down && !this.store.unreachable() {
+                        this.reconnected(cx);
+                    }
                     // Back after being unreachable: check its health now, not in 2 s.
                     if this.store.health.needs_fetch() {
                         this.ensure_core(cx);
                     }
                     let r = r.map(|s| {
                         this.store.capabilities = s.capabilities;
+                        this.store.data_dir = s.data_dir;
                         this.store.features = s.features;
                         s.system
                     });
@@ -358,19 +341,60 @@ impl FoloApp {
         .detach();
     }
 
+    /// Reload the dataset, model and run lists in place (no loading state): added or removed
+    /// elsewhere (Studio, the CLI, another data dir behind the same server), they show here too, and a
+    /// run's "(removed)" goes once its dataset is listed again. A list that failed is fetched again from
+    /// scratch.
+    pub fn refresh_lists(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.store.datasets, Load::Failed(_)) {
+            self.store.datasets = Load::Idle;
+        } else if matches!(self.store.datasets, Load::Ready(_)) {
+            self.fetch_list(List::Datasets, cx);
+        }
+        if matches!(self.store.models, Load::Failed(_)) {
+            self.store.models = Load::Idle;
+        } else if matches!(self.store.models, Load::Ready(_)) {
+            self.fetch_list(List::Models, cx);
+        }
+        if matches!(self.store.runs, Load::Ready(_)) {
+            self.refresh_runs(cx);
+        }
+        self.ensure_core(cx);
+    }
+
+    /// A run's stream said it ended (completed, failed or stopped). The event carries only the
+    /// status: its model, end time and final numbers are in the run list, read again now (not at
+    /// the next 5 s refresh, which left a finished run with only Delete and a duration still
+    /// counting), and a completed run's models too.
+    pub(super) fn run_ended(&mut self, id: &str, status: RunStatus, cx: &mut Context<Self>) {
+        let name = self.store.run(id).map_or(id.to_string(), |r| r.name.clone());
+        match status {
+            RunStatus::Completed => {
+                self.toast(
+                    Tone::Success,
+                    format!("{name} finished"),
+                    Some("Best weights saved to Models.".into()),
+                    cx,
+                );
+                // Read again in place: the list (and which run made the Playground's model) stays
+                // while it is out.
+                if self.store.models.ready().is_some() {
+                    self.fetch_list(List::Models, cx);
+                } else {
+                    self.ensure_core(cx);
+                }
+            }
+            RunStatus::Failed => self.toast(Tone::Danger, format!("{name} failed"), None, cx),
+            _ => {}
+        }
+        if matches!(self.store.runs, Load::Ready(_)) {
+            self.refresh_runs(cx);
+        }
+    }
+
     /// Reload the run list in place (no loading state) and subscribe to whatever is active.
     pub fn refresh_runs(&mut self, cx: &mut Context<Self>) {
-        self.fetch(
-            cx,
-            |api| api.runs(),
-            |this, r, cx| {
-                if let Ok(runs) = r {
-                    this.store.runs = Load::Ready(newest_first_runs(runs));
-                    this.store.sync_run_list();
-                    this.subscribe_active(cx);
-                }
-            },
-        );
+        self.fetch_list(List::Runs, cx);
     }
 
     /// Drain live events ~10× a second and refresh slow-moving data every few seconds.
@@ -397,7 +421,7 @@ impl FoloApp {
                                     }
                                 };
                                 if let RunEvent::Status(s) = &ev
-                                    && matches!(s.status, RunStatus::Completed | RunStatus::Failed)
+                                    && !s.status.is_active()
                                 {
                                     finished.push((id.clone(), s.status));
                                 }
@@ -421,18 +445,7 @@ impl FoloApp {
                             this.resubscribe(id, cx);
                         }
                         for (id, status) in finished {
-                            let name = this.store.run(&id).map(|r| r.name.clone()).unwrap_or(id.clone());
-                            if status == RunStatus::Completed {
-                                this.toast(
-                                    Tone::Success,
-                                    format!("{name} finished"),
-                                    Some("Best weights saved to Models.".into()),
-                                    cx,
-                                );
-                                this.store.models = Load::Idle;
-                            } else {
-                                this.toast(Tone::Danger, format!("{name} failed"), None, cx);
-                            }
+                            this.run_ended(&id, status, cx);
                         }
                         if this.bench_pump(tick, cx) {
                             changed = true;
@@ -441,8 +454,8 @@ impl FoloApp {
                             this.store.system = Load::Idle;
                             this.ensure_core(cx);
                         }
-                        if tick.is_multiple_of(50) && matches!(this.store.runs, Load::Ready(_)) {
-                            this.refresh_runs(cx);
+                        if tick.is_multiple_of(50) {
+                            this.refresh_lists(cx);
                         }
                         // A rented instance costs money: its row stays current while it lives.
                         if tick.is_multiple_of(50) && this.instance_alive() {
@@ -460,10 +473,4 @@ impl FoloApp {
         });
         self._tasks.push(task);
     }
-}
-
-/// Runs newest first (the server already sends them so; the mock and refreshes may not).
-fn newest_first_runs(mut runs: Vec<Run>) -> Vec<Run> {
-    runs.sort_by(|a, b| b.created.cmp(&a.created));
-    runs
 }

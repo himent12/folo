@@ -97,6 +97,8 @@ export default function NewBenchDialog(props: { open?: boolean }) {
     };
   });
   const show = (e: string | null) => (touched.get() ? e : null);
+  /** A number field says a value out of range as soon as it is typed: the hint that reads fine for it would mislead. */
+  const maxError = computed(() => (touched.get() || maxText.get().trim() ? errs.get().max : null));
   const sourceWhy = computed(() =>
     kind.get() === 'dataset'
       ? !datasets.data
@@ -117,7 +119,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
               : null,
   );
   const missing = computed(() => (!name.get().trim() ? 'Enter a name' : sourceWhy.get()));
-  const shownError = computed(() => (touched.get() ? Object.entries(errs.get()).find(([, e]) => e)?.[0] : undefined));
+  const shownError = computed(() => (touched.get() ? Object.entries(errs.get()).find(([, e]) => e)?.[0] : maxError.get() ? 'max' : undefined));
   const reason = computed(() => {
     const se = shownError.get();
     return missing.get() ?? (se ? FIX[se] : null);
@@ -262,8 +264,8 @@ export default function NewBenchDialog(props: { open?: boolean }) {
             <Select id={`${uid}-job`} bind:value={jobId} disabled={!jobs.data?.length} options={jobOptions.get()} />
           </Field>
         )}
-        <Field label="At most" for={`${uid}-max`} error={show(errs.get().max)} hint={sampleHint.get()}>
-          <Input id={`${uid}-max`} bind:value={maxText} inputmode="numeric" suffix="images" class="max" invalid={!!show(errs.get().max)} />
+        <Field label="At most" for={`${uid}-max`} error={maxError.get()} hint={sampleHint.get()}>
+          <Input id={`${uid}-max`} bind:value={maxText} inputmode="numeric" suffix="images" class="max" invalid={!!maxError.get()} />
         </Field>
         {kind.get() === 'dataset' && split.get() === 'train' ? (
           <p class="note warn">
@@ -290,12 +292,17 @@ css`
   .form :global(.seg) {
     justify-self: start;
   }
-  /* Dataset and split side by side: the split's three choices keep their width, the dataset takes the rest. */
+  /* Dataset and split side by side: the split's three choices keep their width, the dataset takes the rest (the
+     split's hint wraps under its choices rather than widening their column). */
   .pair {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: var(--space-4);
     align-items: start;
+  }
+  .pair :global(.field:last-child .msg) {
+    width: 0;
+    min-width: 100%;
   }
   .form :global(.max) {
     max-width: 160px;

@@ -135,6 +135,15 @@ pub fn ago(then: i64, now: i64) -> String {
     }
 }
 
+/// [`ago`] for a moment shown beside a running clock (a live run's "started …" next to its elapsed
+/// time): seconds under a minute ("35 s ago", where "just now" sat beside "35s elapsed").
+pub fn ago_live(then: i64, now: i64) -> String {
+    match (now - then).max(0) {
+        d @ 0..60 => format!("{d} s ago"),
+        _ => ago(then, now),
+    }
+}
+
 /// Compact duration: "42 s", "12 m 05 s", "3 h 20 m".
 pub fn duration(secs: f64) -> String {
     let s = secs.max(0.0).round() as i64;
@@ -151,6 +160,13 @@ pub fn duration(secs: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_runs_start_reads_like_its_elapsed_clock() {
+        assert_eq!(ago_live(100, 135), "35 s ago");
+        assert_eq!(ago(100, 135), "just now");
+        assert_eq!(ago_live(100, 190), "2 min ago");
+    }
 
     #[test]
     fn round_trip() {

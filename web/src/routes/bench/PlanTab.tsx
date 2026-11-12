@@ -209,6 +209,7 @@ export default function PlanTab(props: PlanTabProps) {
           <Panel
             title="Plan"
             meta={`${plan.get().conditions.length} of ${props.catalog.conditions.length} conditions · ${planPasses(plan.get())} severities`}
+            class={props.editable && props.dirty ? 'unsaved-plan' : ''}
             pad="none"
             actions={() => (
               <>
@@ -303,6 +304,15 @@ css`
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: var(--space-4);
     align-items: start;
+  }
+  /* With unsaved edits, the header holding Save plan stays in view under the top bar while lower rows are edited. */
+  .plan :global(.panel.unsaved-plan > header) {
+    position: sticky;
+    top: var(--size-topbar);
+    z-index: var(--z-sticky);
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--line-subtle);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   }
   .rail {
     position: sticky;

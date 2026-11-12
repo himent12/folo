@@ -7,6 +7,7 @@ import ChevronLeft from '$icons/chevron-left';
 import ArrowLeftRight from '$icons/arrow-left-right';
 import { bindable, computed, css, effect, For, MediaQuery, signal } from 'fw';
 import { bestMark, bestWord } from '$lib/bestMark';
+import { trainingSeconds } from '$lib/api/progress';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset, Run, RunMetrics } from '$lib/api/types';
 import { conf, deviceName, duration, metric } from '$lib/format';
@@ -58,7 +59,7 @@ export default function CompareTable(props: CompareTableProps) {
   const otherAt = bindable(props, 'otherAt', 0);
   const baselineId = bindable(props, 'baselineId', null);
 
-  const dsName = (id: string) => props.datasets.data?.find((d) => d.id === id)?.name ?? id;
+  const dsName = (id: string) => props.datasets.data?.find((d) => d.id === id)?.name ?? props.chosen.find((r) => r.config.dataset_id === id)?.dataset?.name ?? id;
   /**
    * The best mAP50-95 of each dataset the runs share (lib/bestMark, as the Models list ranks within a group): "best", or
    * "joint best" on every run of an exact tie, and "on <dataset>" when the comparison spans datasets, since scores
@@ -88,7 +89,7 @@ export default function CompareTable(props: CompareTableProps) {
     const datasets = props.datasets.data;
     const startOf = props.startOf;
     return [
-      ['Dataset', (r) => plain(datasets?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id)],
+      ['Dataset', (r) => plain(datasets?.find((d) => d.id === r.config.dataset_id)?.name ?? r.dataset?.name ?? r.config.dataset_id)],
       ['Model', (r) => ident(r.config.arch)],
       ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain(FROM_SCRATCH))],
       ['Epochs', (r) => plain(`${r.epoch}/${r.epochs}`)],
@@ -103,7 +104,7 @@ export default function CompareTable(props: CompareTableProps) {
       ['Precision', (r) => precisionSetting(r.config)],
       ['Head', (r) => headSetting(r.config)],
       ['Device', (r) => plain(deviceName(r.device))],
-      ['Duration', (r) => plain(r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
+      ['Duration', (r) => plain(r.started ? duration(trainingSeconds(r)) : '—')],
     ];
   });
   const differs = (f: (r: Run) => Setting) => new Set(props.chosen.map((r) => settingText(f(r)))).size > 1;

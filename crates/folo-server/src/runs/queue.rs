@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::store::QueueMove;
 use crate::util::{fnv1a, unique_id, unix_now};
 
-use super::entry::{Ended, status_event};
+use super::entry::{Ended, INTERRUPTED, status_event};
 use super::train::execute;
 use super::{DatasetRef, Queue, RunEntry, RunFile, Runs, now};
 
@@ -20,7 +20,7 @@ impl Runs {
     /// Sends every waiting run its place in the queue (the SSE `queue` event). Called with the queue locked, after
     /// every change to it, so a run's events arrive in the order of the changes, and before the `running` status
     /// of the worker taking it.
-    fn notify_queue(q: &Queue) {
+    pub(super) fn notify_queue(q: &Queue) {
         let waiting = q.runs.len() as u32;
         for (i, e) in q.runs.iter().enumerate() {
             e.send(RunEvent::Queue(QueueEvent { position: i as u32 + 1, waiting }));
@@ -51,7 +51,7 @@ impl Runs {
         }
         let training = self.active.lock().unwrap().is_some();
         drop(q);
-        let mut run = st.file.run.clone();
+        let mut run = st.file.shown();
         run.queue_position = Some(to as u32 + 1);
         drop(st);
         if mv == QueueMove::Start {
@@ -111,7 +111,7 @@ impl Runs {
     /// Creates a run's folder and record and adds it to the registry; a cloud run (`cloud`) is claimed before
     /// anything can see it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn register(
+    pub(crate) fn register(
         &self,
         config: TrainConfig,
         dataset: DatasetRef,
@@ -146,6 +146,7 @@ impl Runs {
             created: now(),
             started: None,
             finished: None,
+            paused_s: None,
             epoch: 0,
             step: 0,
             steps_per_epoch: 0,
@@ -158,8 +159,19 @@ impl Runs {
             resolved: None,
             queue_position: None,
             cloud,
+            // Filled in from `dataset` by `RunEntry::new`.
+            dataset: None,
         };
-        let file = RunFile { run, dataset, weights, val_offset, epochs_done: 0, last_metrics: None };
+        let file = RunFile {
+            run,
+            dataset,
+            weights,
+            val_offset,
+            epochs_done: 0,
+            last_metrics: None,
+            resumed_at: None,
+            alive_at: None,
+        };
         let entry = Arc::new(RunEntry::new(id, dir, file));
         {
             let mut st = entry.state.lock().unwrap();
@@ -272,11 +284,17 @@ impl Runs {
     /// Requests a stop: a queued run stops at once, a running one after its current batch (keeping the last
     /// epoch's checkpoint).
     pub fn stop(&self, id: &str) -> Result<Run> {
+        self.stop_as(id, false)
+    }
+
+    /// [`Runs::stop`]; `interrupted`: the server's shutdown asks, and the run ends with error code `interrupted`.
+    fn stop_as(&self, id: &str, interrupted: bool) -> Result<Run> {
         let e = self.get(id)?;
         let mut st = e.state.lock().unwrap();
         if st.deleted {
             return Err(Error::not_found("run", id));
         }
+        st.interrupted |= interrupted;
         let cloud = st.file.run.config.compute.is_some();
         if cloud && st.file.run.status.is_active() && !st.claimed {
             return Err(followed_elsewhere(id));
@@ -289,7 +307,7 @@ impl Runs {
                     Self::notify_queue(&q);
                 }
                 e.finish(&mut st, RunStatus::Stopped, None);
-                let run = st.file.run.clone();
+                let run = st.file.shown();
                 drop(st);
                 e.log(LogLevel::Info, "stopped before it started");
                 Ok(run)
@@ -299,17 +317,21 @@ impl Runs {
                 st.file.run.status = RunStatus::Stopping;
                 e.persist(&st);
                 e.send(RunEvent::Status(status_event(&st.file.run)));
-                let run = st.file.run.clone();
+                let run = st.file.shown();
                 drop(st);
                 let message = match run.cloud.as_ref().map(|c| c.phase) {
                     Some(p) if cloud && p < CloudPhase::Training => "stop requested; releasing the instance",
                     _ if cloud => "stop requested; the worker stops after its current batch",
+                    _ if interrupted => {
+                        "the server is shutting down: the run stops after the current batch and keeps its last \
+                         checkpoint; resume it from its page in Studio"
+                    }
                     _ => "stop requested; stopping after the current batch",
                 };
                 e.log(LogLevel::Info, message);
                 Ok(run)
             }
-            RunStatus::Stopping => Ok(st.file.run.clone()),
+            RunStatus::Stopping => Ok(st.file.shown()),
             s => Err(Error::run_not_active(id, serde_json::to_value(s).unwrap().as_str().unwrap_or(""))),
         }
     }
@@ -326,12 +348,17 @@ impl Runs {
         for e in queued {
             let mut st = e.state.lock().unwrap();
             if st.file.run.status == RunStatus::Queued && !st.deleted {
-                e.finish(&mut st, RunStatus::Stopped, None);
+                e.finish_with_code(&mut st, RunStatus::Stopped, None, Some(INTERRUPTED.to_string()));
+                drop(st);
+                e.log(
+                    LogLevel::Warn,
+                    "the server stopped while the run waited in the queue; start it from its page in Studio",
+                );
             }
         }
         let active = self.active.lock().unwrap().clone();
         if let Some(e) = active {
-            let _ = self.stop(&e.id);
+            let _ = self.stop_as(&e.id, true);
         }
         if let Some(wait) = wait {
             let t0 = Instant::now();

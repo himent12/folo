@@ -7,7 +7,7 @@ import Toaster from './Toaster';
 
 // happy-dom's Web Animations reject when an outro is cancelled; the fly is beside the point here.
 vi.mock('fw', async (orig) => ({ ...(await orig<typeof import('fw')>()), fly: () => ({}) }));
-import { toast } from './toast';
+import { toast, TOAST_MS } from './toast';
 
 let c: Rendered | undefined;
 
@@ -104,14 +104,32 @@ describe('Toaster and focus', () => {
 });
 
 describe('Toast timing and announcement', () => {
-  it('errors and toasts with an action stay until closed; plain ones time out', () => {
+  it('every toast expires: a note soon, one with an action later, an error later still (models F6)', () => {
+    vi.useFakeTimers();
     const plain = toast.info('Saved');
-    const err = toast.error(new Error('nope'));
     const act = toast.success('Run finished', undefined, { label: 'Open run', run: () => {} });
+    const err = toast.error(new Error('nope'), 'Prediction failed');
     const by = (id: number) => toast.items.find((t) => t.id === id)?.timeout;
-    expect(by(plain)).toBeGreaterThan(0);
-    expect(by(err)).toBe(0);
-    expect(by(act)).toBe(0);
+    expect(by(plain)! < by(act)! && by(act)! < by(err)!).toBe(true);
+    const shown = () => toast.items.map((t) => t.id);
+    vi.advanceTimersByTime(TOAST_MS.note);
+    expect(shown()).toEqual([act, err]);
+    vi.advanceTimersByTime(TOAST_MS.action - TOAST_MS.note);
+    expect(shown()).toEqual([err]);
+    vi.advanceTimersByTime(TOAST_MS.error - TOAST_MS.action);
+    expect(shown()).toEqual([]);
+  });
+
+  it("the same action's next report takes an error's place, and the same toast twice is shown once", () => {
+    toast.error(new Error('Unsupported image'), 'Prediction failed', { key: 'predict' });
+    toast.error(new Error('Unsupported image'), 'Prediction failed', { key: 'predict' });
+    expect(toast.items.map((t) => t.title)).toEqual(['Prediction failed']);
+    toast.success('Detected 3 objects', undefined, undefined, { key: 'predict' });
+    expect(toast.items.map((t) => t.title)).toEqual(['Detected 3 objects']);
+    toast.info('Copied');
+    toast.info('Copied');
+    toast.info('Copied');
+    expect(toast.items.map((t) => t.title)).toEqual(['Detected 3 objects', 'Copied']);
   });
 
   it('each toast is its own live region; the list is not one', () => {

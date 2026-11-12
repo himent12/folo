@@ -4,13 +4,43 @@
 use folo_ui::{Context, Window, px};
 
 use crate::store::*;
+use crate::ui::Tone;
 
 use super::{FoloApp, Route};
+
+/// The list to open instead of `route` when it is the page of something in `deleted`, with that
+/// thing's name.
+pub(super) fn deleted_route(deleted: &super::deleted::Deleted, route: &Route) -> Option<(String, Route)> {
+    let (id, list) = match route {
+        Route::Run(id) => (id, Route::Runs),
+        Route::Model(id) => (id, Route::Models),
+        Route::Dataset(id) => (id, Route::Datasets),
+        _ => return None,
+    };
+    deleted.get(id).map(|name| (name.clone(), list))
+}
+
+/// What a link to `name`, gone, says: a dataset "was removed" (unregistered; its files may well be
+/// there), a run or a model "was deleted".
+pub(super) fn gone_title(name: &str, route: &Route) -> String {
+    match route {
+        Route::Dataset(_) => format!("{name} was removed"),
+        _ => format!("{name} was deleted"),
+    }
+}
 
 impl FoloApp {
     // ---------- navigation ----------
 
     pub fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        // A link to something deleted since it was made opens the list, and says why.
+        let route = match deleted_route(&self.deleted, &route) {
+            Some((name, list)) => {
+                self.toast(Tone::Neutral, gone_title(&name, &route), None, cx);
+                list
+            }
+            None => route,
+        };
         // The confusion-matrix cursor belongs to the model page it was set on.
         if matches!(route, Route::Model(_)) {
             self.cm_cell = None;
@@ -19,6 +49,11 @@ impl FoloApp {
             return;
         }
         let prev = std::mem::replace(&mut self.route, route);
+        // Runs opens on all runs, unless coming up from one of them: a filter (one the queue
+        // toast set, say) doesn't wait there to make the list look empty later.
+        if self.route == Route::Runs && !matches!(prev, Route::Run(_)) {
+            self.run_filter = super::RunFilter::All;
+        }
         self.history.push(prev);
         if self.history.len() > 50 {
             self.history.remove(0);
@@ -27,10 +62,15 @@ impl FoloApp {
     }
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(r) = self.history.pop() {
-            self.route = r;
-            self.after_navigate(window, cx);
-        } else if let Some(parent) = self.parent_route() {
+        // Past the pages of what was deleted since, and the page already open.
+        while let Some(r) = self.history.pop() {
+            if r != self.route && deleted_route(&self.deleted, &r).is_none() {
+                self.route = r;
+                self.after_navigate(window, cx);
+                return;
+            }
+        }
+        if let Some(parent) = self.parent_route() {
             self.route = parent;
             self.after_navigate(window, cx);
         }
@@ -79,6 +119,7 @@ impl FoloApp {
         self.new_run.is_some()
             || self.synth.is_some()
             || self.confirm_stop.is_some()
+            || self.confirm_delete.is_some()
             || self.inspector.is_some()
             || self.cloud.connect.is_some()
             || self.cloud.disconnect.is_some()

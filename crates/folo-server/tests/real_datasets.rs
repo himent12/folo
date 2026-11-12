@@ -63,6 +63,19 @@ async fn err(app: &Router, req: Request<Body>, status: StatusCode, code: &str) -
     e.error
 }
 
+/// A finished run of dataset `ds` in the data dir at `home`, as the server writes it (read on the next start).
+fn write_run(home: &Path, id: &str, ds: &Dataset) {
+    let dir = home.join("runs").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = json!({
+        "run": { "id": id, "name": id, "status": "completed", "config": { "dataset_id": ds.id },
+                 "created": "2026-11-01T00:00:00Z", "epoch": 1, "epochs": 1, "step": 1, "steps_per_epoch": 1,
+                 "device": "cpu" },
+        "dataset": { "id": ds.id, "name": ds.name, "path": ds.path, "format": ds.format },
+    });
+    std::fs::write(dir.join("run.json"), run.to_string()).unwrap();
+}
+
 /// A small synthetic YOLO dataset written with folo-data.
 fn write_shapes(dir: &Path, images: usize) {
     let cfg = folo_data::synthetic::SyntheticConfig { images, imgsz: 64, seed: 5, ..Default::default() };
@@ -232,16 +245,30 @@ async fn coco_folders_and_registration_errors() {
     let page: ImagePage = ok(&app, get(&format!("/api/datasets/{}/images?limit=1", b.id))).await;
     assert!(page.images[0].file.starts_with("images/train/"), "{}", page.images[0].file);
 
+    // A COCO file registered alone is named after the folder above annotations/, numbered as that name is taken.
+    let file = t.join("coco/annotations/instances_train.json");
+    let c: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": file }))).await;
+    assert_eq!(c.name, "coco-2");
+
     let missing = json!({ "path": t.join("nope").to_str().unwrap() });
     err(&app, post_json("/api/datasets", missing), StatusCode::NOT_FOUND, "path_not_found").await;
     std::fs::create_dir_all(t.join("empty")).unwrap();
     let empty = json!({ "path": t.join("empty").to_str().unwrap() });
-    err(&app, post_json("/api/datasets", empty), StatusCode::BAD_REQUEST, "unknown_format").await;
+    let e = err(&app, post_json("/api/datasets", empty), StatusCode::BAD_REQUEST, "unknown_format").await;
+    assert!(e.message.starts_with("could not detect a dataset"), "{}", e.message);
+    assert_eq!(e.hint, None, "the message says it once");
+    // Images without labels are said as that, pointing to labeling.
+    image::RgbImage::new(8, 8).save(t.join("empty/a.jpg")).unwrap();
+    image::RgbImage::new(8, 8).save(t.join("empty/b.png")).unwrap();
+    let body = json!({ "path": t.join("empty") });
+    let e = err(&app, post_json("/api/datasets", body), StatusCode::BAD_REQUEST, "unknown_format").await;
+    assert!(e.message.ends_with("has 2 images but no labels"), "{}", e.message);
+    assert!(e.hint.unwrap().starts_with("label them first"));
     std::fs::write(yolo.join("data.yaml"), "train: images/train\nnc: 3\nnames: [a]\n").unwrap();
     let bad = json!({ "path": yolo.to_str().unwrap() });
     err(&app, post_json("/api/datasets", bad), StatusCode::BAD_REQUEST, "invalid_dataset").await;
     let list: DatasetList = ok(&app, get("/api/datasets")).await;
-    assert_eq!(list.datasets.len(), 2, "failed registrations are not recorded");
+    assert_eq!(list.datasets.len(), 3, "failed registrations are not recorded");
 }
 
 #[tokio::test]
@@ -280,26 +307,17 @@ async fn external_split_sources_are_watched() {
 }
 
 #[tokio::test]
-async fn relative_paths_are_registered_absolute() {
-    // Under the working directory (the package folder), so a relative path to it exists.
-    let name = format!(".folo-rel-test-{}", std::process::id());
-    let local = TestDir::at(std::env::current_dir().unwrap().join(&name));
-    let yolo = local.join("yolo");
-    write_shapes(&yolo, 6);
-    let loaded = folo_data::open(&yolo).unwrap();
-    folo_data::convert::convert(&loaded, &local.join("coco"), folo_data::Format::Coco).unwrap();
+async fn relative_paths_are_refused() {
+    // A relative path would resolve against the server's working directory, a folder the client never sees.
     let t = TestDir::new("real-relative");
     let app = app(&t.join("home"));
-    let rel = format!("./{name}/coco/annotations/instances_train.json");
-    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": rel }))).await;
-    assert!(Path::new(&ds.path).is_absolute(), "{}", ds.path);
-    assert_eq!((ds.format, ds.splits.train), (DatasetFormat::Coco, loaded.split_sizes()[0] as u64));
-    let page: ImagePage = ok(&app, get(&format!("/api/datasets/{}/images?limit=100", ds.id))).await;
-    for im in &page.images {
-        let (status, _, b) =
-            send(&app, get(&format!("/api/datasets/{}/images/{}?thumb=16", ds.id, im.id))).await;
-        assert_eq!(status, StatusCode::OK, "{}: {}", im.file, String::from_utf8_lossy(&b));
+    for rel in ["shapes", "./shapes/data.yaml", "\"shapes\""] {
+        let body = json!({ "path": rel });
+        let e = err(&app, post_json("/api/datasets", body), StatusCode::BAD_REQUEST, "invalid_body").await;
+        assert!(e.message.ends_with("is not a full path"), "{}", e.message);
     }
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert!(list.datasets.is_empty());
 }
 
 #[tokio::test]
@@ -471,4 +489,110 @@ async fn registering_a_folder_again_returns_the_same_dataset() {
     assert_eq!(again.id, ids[0].id);
     let list: DatasetList = ok(&a, get("/api/datasets")).await;
     assert_eq!(list.datasets.len(), 1);
+    // Unregistered and registered again, the folder gets its id back while a run uses it (that run finds it again).
+    drop(a);
+    write_run(&home, "run_0001", &again);
+    let a = restart(&home);
+    let (status, _, _) = send(&a, delete(&format!("/api/datasets/{}", again.id))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let back: Dataset =
+        ok(&a, post_json("/api/datasets", json!({ "path": data.join("..").join("shapes") }))).await;
+    assert_eq!(back.id, ids[0].id);
+}
+
+/// A registered folder that is moved away stays in the list (also after a restart), says what is wrong, can be
+/// unregistered, and works again when it is back.
+#[tokio::test]
+async fn a_missing_folder_stays_listed_and_can_be_unregistered() {
+    let t = TestDir::new("real-moved");
+    let (home, data, moved) = (t.join("home"), t.join("shapes"), t.join("shapes-moved"));
+    write_shapes(&data, 6);
+    let app = app(&home);
+    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data, "name": "mine" }))).await;
+    std::fs::rename(&data, &moved).unwrap();
+    for app in [app.clone(), restart(&home)] {
+        let list: DatasetList = ok(&app, get("/api/datasets")).await;
+        assert_eq!(list.datasets.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["mine"]);
+        let e = err(&app, get(&format!("/api/datasets/{}", ds.id)), StatusCode::NOT_FOUND, "path_not_found")
+            .await;
+        assert!(e.message.starts_with("the folder of dataset 'mine' is gone"), "{}", e.message);
+        assert!(e.hint.unwrap().contains("move the folder back"));
+    }
+    std::fs::rename(&moved, &data).unwrap();
+    let back: Dataset = ok(&app, get(&format!("/api/datasets/{}", ds.id))).await;
+    assert_eq!(back.splits, ds.splits);
+    std::fs::rename(&data, &moved).unwrap();
+    let app = restart(&home);
+    let (status, _, _) = send(&app, delete(&format!("/api/datasets/{}", ds.id))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert!(list.datasets.is_empty());
+}
+
+/// FOLO's own sample set passes FOLO's own health checks: Studio warns when more than 10% of the boxes are under 5%
+/// of the image side (web/src/routes/dataset/health.ts, "tiny boxes"), so a sample set must not open with that.
+#[tokio::test]
+async fn a_sample_set_has_few_tiny_boxes() {
+    let t = TestDir::new("real-synth-tiny");
+    let app = app(&t.join("home"));
+    for imgsz in [640, 1024] {
+        let body = json!({ "name": "shapes-synth", "images": 150, "imgsz": imgsz, "seed": 0 });
+        let ds: Dataset = ok(&app, post_json("/api/datasets/synthetic", body)).await;
+        let h = ds.stats.unwrap().box_size_hist;
+        let total: u64 = h.counts.iter().sum();
+        let tiny: u64 =
+            h.counts.iter().zip(&h.edges[1..]).filter(|(_, e)| **e <= 0.05 + 1e-9).map(|(c, _)| c).sum();
+        let share = tiny as f64 / total as f64;
+        assert!(share < 0.09, "{imgsz} px: {:.1}% tiny boxes", share * 100.0);
+    }
+}
+
+/// `DELETE ?files=true` deletes the folder of a dataset FOLO wrote into its data dir, and never a folder elsewhere.
+#[tokio::test]
+async fn generated_datasets_can_go_with_their_files() {
+    let t = TestDir::new("real-delete-files");
+    let (home, outside) = (t.join("home"), t.join("mine"));
+    write_shapes(&outside, 4);
+    let app = app(&home);
+    let body = json!({ "name": "shapes-synth", "images": 10, "imgsz": 64 });
+    let made: Dataset = ok(&app, post_json("/api/datasets/synthetic", body)).await;
+    let mine: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": outside }))).await;
+    let uri = |d: &Dataset| format!("/api/datasets/{}?files=true", d.id);
+    let e = err(&app, delete(&uri(&mine)), StatusCode::BAD_REQUEST, "invalid_query").await;
+    assert!(e.message.contains("not a folder FOLO wrote"), "{}", e.message);
+    assert!(outside.join("data.yaml").is_file(), "files elsewhere are never deleted");
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert_eq!(list.datasets.len(), 2, "a refused deletion unregisters nothing");
+    assert!(Path::new(&made.path).is_dir());
+    let (status, _, _) = send(&app, delete(&uri(&made))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!Path::new(&made.path).exists(), "the generated images are gone");
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert_eq!(list.datasets.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), [mine.id.as_str()]);
+}
+
+/// A registry file written before tombstones (a plain list) loads; a dataset it holds, unregistered by this version
+/// while a run uses it, gets its id back when its folder is registered again.
+#[tokio::test]
+async fn a_registry_from_before_tombstones_loads_and_reconnects() {
+    let t = TestDir::new("real-legacy-registry");
+    let (home, data) = (t.join("home"), t.join("shapes"));
+    write_shapes(&data, 6);
+    std::fs::create_dir_all(&home).unwrap();
+    let legacy = json!([{ "id": "ds_0bad", "name": "old", "path": data, "format": "yolo",
+                          "created": "2026-10-01T00:00:00Z" }]);
+    std::fs::write(home.join("datasets.json"), legacy.to_string()).unwrap();
+    let app = app(&home);
+    let ds: Dataset = ok(&app, get("/api/datasets/ds_0bad")).await;
+    assert_eq!((ds.name.as_str(), ds.splits.train + ds.splits.val), ("old", 6));
+    drop(app);
+    write_run(&home, "run_0002", &ds);
+    let app = restart(&home);
+    let (status, _, _) = send(&app, delete("/api/datasets/ds_0bad")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let removed: Value =
+        serde_json::from_slice(&std::fs::read(home.join("datasets.removed.json")).unwrap()).unwrap();
+    assert_eq!(removed[0]["id"], "ds_0bad");
+    let back: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data }))).await;
+    assert_eq!(back.id, "ds_0bad");
 }

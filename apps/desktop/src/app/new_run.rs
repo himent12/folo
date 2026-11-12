@@ -13,7 +13,8 @@ use crate::store::*;
 use crate::ui::*;
 
 use super::forms::{
-    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, batch_index, carry_over, parse_epochs, parse_lr,
+    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, again_run_name, auto_close_mosaic, batch_index,
+    carry_over, free_run_name, parse_epochs, parse_lr, run_name_error,
 };
 use super::{FoloApp, Route, RunFilter};
 
@@ -22,13 +23,36 @@ impl FoloApp {
     /// submission is pending (that run is being created; keeping it would allow a duplicate).
     pub(super) fn keep_draft(&mut self, mut f: NewRunForm) -> Option<NewRunForm> {
         if f.submitting {
-            self.new_run_draft_ds = None;
             return None;
         }
-        self.new_run_draft_ds =
-            self.store.datasets.ready().and_then(|d| d.get(f.dataset)).map(|d| d.id.clone());
         f.error = None;
         Some(f)
+    }
+
+    /// The New run form's dataset; none before the list is in, or once it was deleted.
+    pub fn nr_dataset(&self) -> Option<&Dataset> {
+        self.store.dataset_summary(&self.new_run.as_ref()?.dataset)
+    }
+
+    /// The New run form's dataset was removed (while it was open, or before it was opened for it, from
+    /// a cached page or a run's Train again): the list is in without it, and the form asks for another
+    /// before it starts.
+    pub fn nr_dataset_gone(&self) -> bool {
+        self.new_run.is_some() && self.store.datasets.ready().is_some() && self.nr_dataset().is_none()
+    }
+
+    /// What New run calls its removed dataset: the name it was deleted under, or the one a run trained
+    /// on it recorded, else "That dataset".
+    pub fn nr_gone_name(&self) -> String {
+        let Some(id) = self.new_run.as_ref().map(|f| &f.dataset) else { return String::new() };
+        let recorded = || {
+            let runs = self.store.runs.ready()?;
+            runs.iter()
+                .filter(|r| r.config.dataset_id == *id)
+                .find_map(|r| r.dataset.as_ref())
+                .map(|d| d.name.clone())
+        };
+        self.deleted.get(id).cloned().or_else(recorded).unwrap_or_else(|| "That dataset".into())
     }
 
     pub fn close_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -47,7 +71,8 @@ impl FoloApp {
     ) {
         self.open_new_run(Some(&config.dataset_id), window, cx);
         let idx = |list: &[u32], v: u32| list.iter().position(|x| *x == v);
-        let name = format!("{}-2", config.name);
+        let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
+        let name = again_run_name(&config.name, runs);
         let cloud_on = self.cloud_on();
         if let Some(f) = self.new_run.as_mut() {
             f.arch = ARCHS.iter().position(|a| *a == config.arch).unwrap_or(f.arch);
@@ -67,6 +92,8 @@ impl FoloApp {
             f.mixup = config.augment.mixup;
             f.fliplr = config.augment.fliplr;
             f.close_mosaic = config.augment.close_mosaic as f32;
+            // That run's default still follows the epochs; a value it set by hand stays.
+            f.close_auto = config.augment.close_mosaic == auto_close_mosaic(config.epochs);
             f.scale = config.augment.scale;
             f.amp = config.amp;
             f.e2e = config.head == Head::O2o;
@@ -82,6 +109,8 @@ impl FoloApp {
                 let (hi, hv) = (f.hours_input.clone(), crate::ui::hours_value(c.max_hours));
                 hi.update(cx, |i, cx| i.set_text(hv, cx));
             }
+            // Named after that run, not suggested from the choices: it stays as it is.
+            f.name_suggested = None;
             let input = f.name.clone();
             input.update(cx, |i, cx| i.set_text(name, cx));
         }
@@ -99,43 +128,48 @@ impl FoloApp {
         }
         // A plain New run picks up a draft left by Esc or Cancel; one for a specific dataset (or
         // prefilled from a run) starts fresh.
-        // Its dataset is found again by id; gone (or the list unloaded), the draft is dropped.
-        let draft_ds = self
-            .new_run_draft_ds
-            .take()
-            .and_then(|id| self.store.datasets.ready().and_then(|d| d.iter().position(|d| d.id == id)));
-        if let Some(mut draft) = self.new_run_draft.take()
+        // Its dataset deleted meanwhile (or the list unloaded), the draft is dropped.
+        if let Some(draft) = self.new_run_draft.take()
             && self.new_run.is_none()
             && dataset.is_none()
-            && let Some(idx) = draft_ds
+            && self.store.dataset_summary(&draft.dataset).is_some()
         {
-            draft.dataset = idx;
             let fh = draft.name.read(cx).focus_handle(cx);
             self.new_run = Some(draft);
             window.focus(&fh);
             cx.notify();
             return;
         }
-        let idx =
-            dataset.and_then(|id| self.store.datasets.ready()?.iter().position(|d| d.id == id)).unwrap_or(0);
-        let n = self.store.runs.ready().map_or(0, |r| r.len()) + 1;
-        let ds_name = self
-            .store
-            .datasets
-            .ready()
-            .and_then(|d| d.get(idx))
-            .map_or("shapes".to_string(), |d| d.name.clone());
+        let list = self.store.datasets.ready().map(Vec::as_slice).unwrap_or_default();
+        // A dataset asked for by id that is gone (removed since its page or run was read) is never
+        // swapped for another in silence: the form opens on it, says it was removed and asks for a
+        // choice. Only a plain New run starts on the first dataset.
+        let (ds_id, ds_name) = match dataset {
+            Some(id) => match list.iter().find(|d| d.id == id) {
+                Some(ds) => (ds.id.clone(), ds.name.clone()),
+                None => (id.to_string(), self.deleted.get(id).cloned().unwrap_or_else(|| "run".into())),
+            },
+            None => match list.first() {
+                Some(ds) => (ds.id.clone(), ds.name.clone()),
+                None => return,
+            },
+        };
+        // The last started run's choices, else the defaults (s, 640 px, 100 epochs).
+        let (arch, imgsz, epochs) = self.new_run_last.unwrap_or((1, 2, 100.0));
+        let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
+        let suggested = free_run_name(&ds_name, ARCHS[arch], runs);
         let name = cx.new(|cx| {
             let mut i = TextInput::new("run name", cx);
-            i.set_text(format!("{ds_name}-s-{n}"), cx);
+            i.set_text(suggested.clone(), cx);
             i
         });
         let fh = name.read(cx).focus_handle(cx);
         let epochs_input = cx.new(|cx| {
             let mut i = TextInput::new("100", cx);
-            i.set_text("100", cx);
+            i.set_text(format!("{epochs:.0}"), cx);
             i
         });
+        let close = auto_close_mosaic(epochs.round() as u32);
         let lr_input = cx.new(|cx| {
             let mut i = TextInput::new("0.01", cx);
             i.set_text("0.010", cx);
@@ -143,7 +177,7 @@ impl FoloApp {
         });
         let close_input = cx.new(|cx| {
             let mut i = TextInput::new("10", cx);
-            i.set_text("10", cx);
+            i.set_text(close.to_string(), cx);
             i
         });
         let hours_input = cx.new(|cx| {
@@ -152,6 +186,15 @@ impl FoloApp {
             i
         });
         let subs = vec![
+            cx.subscribe(&name, |this: &mut Self, _, ev: &InputEvent, _| {
+                let InputEvent::Changed(s) = ev;
+                // Any other text than the suggestion is the user's: it stays as typed.
+                if let Some(f) = this.new_run.as_mut()
+                    && f.name_suggested.as_deref().is_some_and(|n| n != s.as_ref())
+                {
+                    f.name_suggested = None;
+                }
+            }),
             cx.subscribe(&hours_input, |this: &mut Self, _, ev: &InputEvent, cx| {
                 let InputEvent::Changed(s) = ev;
                 if let Some(f) = this.new_run.as_mut() {
@@ -173,6 +216,10 @@ impl FoloApp {
             cx.subscribe(&close_input, |this: &mut Self, _, ev: &InputEvent, cx| {
                 let InputEvent::Changed(s) = ev;
                 if let Some(f) = this.new_run.as_mut() {
+                    // Any other text than the default the form put there is the user's.
+                    if s.trim() != format!("{:.0}", f.close_mosaic) {
+                        f.close_auto = false;
+                    }
                     f.check_close(s);
                     cx.notify();
                 }
@@ -187,9 +234,14 @@ impl FoloApp {
                         }
                         None => f.epochs_invalid = true,
                     }
-                    // Close mosaic is bounded by the epochs: recheck it against the new count.
-                    let close = f.close_input.read(cx).text();
-                    f.check_close(&close);
+                    // Close mosaic follows the epochs while it is the default; a value set by
+                    // hand is bounded by them: recheck it against the new count.
+                    if let Some(v) = f.follow_epochs() {
+                        f.close_input.clone().update(cx, |i, cx| i.set_text(v, cx));
+                    } else if !f.close_auto {
+                        let close = f.close_input.read(cx).text();
+                        f.check_close(&close);
+                    }
                     cx.notify();
                 }
             }),
@@ -214,11 +266,12 @@ impl FoloApp {
         ];
         self.new_run = Some(NewRunForm {
             name,
-            dataset: idx,
-            arch: 1,
-            epochs: 100.0,
+            name_suggested: Some(suggested),
+            dataset: ds_id,
+            arch,
+            epochs,
             batch: batch_index(16),
-            imgsz: 2,
+            imgsz,
             device: 0,
             optimizer: 0,
             optimizer_unknown: false,
@@ -226,7 +279,7 @@ impl FoloApp {
             mosaic: 1.0,
             mixup: 0.0,
             fliplr: 0.5,
-            close_mosaic: 10.0,
+            close_mosaic: close as f32,
             scale: 0.5,
             note: None,
             base: None,
@@ -234,6 +287,7 @@ impl FoloApp {
             lr_input,
             close_input,
             close_invalid: false,
+            close_auto: true,
             amp: false,
             e2e: false,
             advanced: false,
@@ -255,6 +309,19 @@ impl FoloApp {
         cx.notify();
     }
 
+    /// Suggests the name again for the form's dataset and architecture, unless it was typed.
+    pub fn resuggest_run_name(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.new_run.as_mut() else { return };
+        let Some(ds) = self.store.dataset_summary(&f.dataset) else { return };
+        let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
+        let name = free_run_name(&ds.name, ARCHS[f.arch], runs);
+        if f.name_suggested.as_ref().is_none_or(|s| *s == name) {
+            return;
+        }
+        f.name_suggested = Some(name.clone());
+        f.name.clone().update(cx, |i, cx| i.set_text(name, cx));
+    }
+
     /// The New run form as the config it would submit (its name as typed), or None without a
     /// form or dataset. Submitting and the server's estimate both use it.
     pub fn form_config(&self, cx: &App) -> Option<TrainConfig> {
@@ -267,7 +334,7 @@ impl FoloApp {
         );
         // On a cloud instance mixed precision is checked when it boots, not against this machine.
         let amp_ok = compute.is_some() || self.amp_blocked(DEVICES[form.device]).is_none();
-        let ds = self.store.datasets.ready().and_then(|d| d.get(form.dataset))?;
+        let ds = self.store.dataset_summary(&form.dataset)?;
         Some(carry_over(
             form.base.as_ref(),
             TrainConfig {
@@ -400,8 +467,8 @@ impl FoloApp {
             return;
         }
         let Some(config) = config else { return };
-        if config.name.is_empty() {
-            form.error = Some(ApiError::new("invalid_name", "Give the run a name."));
+        if let Some(why) = run_name_error(&config.name) {
+            form.error = Some(ApiError::new("invalid_name", why));
             // The error shows at the top of the form, by the Name field: go there.
             let name_fh = form.name.read(cx).focus_handle(cx);
             window.focus(&name_fh);
@@ -426,10 +493,22 @@ impl FoloApp {
                         if let Some(runs) = this.store.runs.ready_mut() {
                             runs.insert(0, run);
                         }
+                        this.changed_here(super::lists::List::Runs, cx);
                         this.subscribe_active(cx);
                         let run = this.store.run(&id).cloned();
                         let cloud = run.as_ref().and_then(|r| Some(this.cloud_device(r, r.cloud.as_ref()?)));
-                        let queued = run.is_some_and(|r| r.status == crate::api::RunStatus::Queued);
+                        // The server answers `queued` first even when it trains at once: say
+                        // "Queued" only when it waits behind another run.
+                        let runs = this.store.runs.ready().map(|r| r.as_slice()).unwrap_or_default();
+                        let wait = run.as_ref().filter(|r| waits_to_start(r, runs)).map(|r| {
+                            match (r.queue_position, training_now(runs, &r.id)) {
+                                (Some(p), _) if p > 1 => {
+                                    format!("{}: it starts after the runs ahead of it.", queue_text(Some(p)))
+                                }
+                                (_, Some(a)) => format!("It starts when {} finishes.", a.name),
+                                _ => "It starts when the current run finishes.".to_string(),
+                            }
+                        });
                         if let Some(on) = cloud {
                             // It waits on its instance, not in the queue.
                             this.toast(
@@ -439,18 +518,18 @@ impl FoloApp {
                                 cx,
                             );
                             this.refresh_instances(cx);
-                        } else if queued {
+                        } else if let Some(wait) = wait {
                             // The run's page opens next, so the action is the queue it waits in.
                             this.toast_with(
                                 Tone::Info,
                                 format!("Queued {name}"),
-                                Some("It starts when the current run finishes.".into()),
+                                Some(wait.into()),
                                 Some((
                                     "View queue".into(),
                                     Rc::new(
                                         move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
+                                            this.navigate(Route::Runs, w, cx);
                                             this.run_filter = RunFilter::Active;
-                                            this.navigate(Route::Runs, w, cx)
                                         },
                                     ),
                                 )),
@@ -459,13 +538,15 @@ impl FoloApp {
                         } else {
                             this.toast(
                                 Tone::Accent,
-                                format!("Training {name}"),
+                                format!("Started {name}"),
                                 Some("Live metrics stream into the dashboard.".into()),
                                 cx,
                             );
                         }
                         // An earlier, dismissed submission leaves the form now open alone.
                         if mine {
+                            // The next New run starts from these choices.
+                            this.new_run_last = this.new_run.as_ref().map(|f| (f.arch, f.imgsz, f.epochs));
                             this.new_run = None;
                             this.overlay_return = None;
                             let prev = std::mem::replace(&mut this.route, Route::Run(id));

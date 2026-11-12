@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 // The palette's actions on what the query names: "New run on <dataset>" and "Open <model> in Playground" show once a
 // query names one, rank with the entities, are options a screen reader can name, and run from the keyboard.
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import type { Run } from '$lib/api/types';
 import { router } from '$lib/router';
 import CommandPalette, { type CommandPaletteProps } from './CommandPalette';
 
@@ -89,6 +91,24 @@ describe('CommandPalette actions on entities', () => {
 
 });
 
+describe('CommandPalette: labeling jobs and loops', () => {
+  it('finds a labeling job and a loop by name, like a benchmark, and opens them', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    await openWith('warehouse-bins', '#pi-label-lb_7c21');
+    const job = document.getElementById('pi-label-lb_7c21')!;
+    expect(job.querySelector('.label')?.textContent?.trim()).toBe('warehouse-bins');
+    expect(job.textContent).toMatch(/0 of 40 images labeled/);
+    job.click();
+    expect(go).toHaveBeenCalledWith('/datasets/label/lb_7c21');
+    unmount(c!);
+    c = undefined;
+    const loop = (await Promise.all((await hub.api.benches()).map((b) => hub.api.benchLoops(b.id)))).flat()[0]!;
+    await openWith(loop.name, `#pi-loop-${loop.id}`);
+    document.getElementById(`pi-loop-${loop.id}`)!.click();
+    expect(go).toHaveBeenLastCalledWith(`/benchmarks/${loop.bench_id}/loops/${loop.id}`);
+  });
+});
+
 describe('CommandPalette with no query', () => {
   const key = (input: HTMLElement, k: string) => {
     input.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
@@ -155,5 +175,76 @@ describe('CommandPalette with no query', () => {
     expect(stop).toHaveBeenCalledOnce();
     pageCommandList.items = [];
     localStorage.removeItem('folo.palette.recent');
+  });
+});
+
+describe('CommandPalette: Settings and touch (shell F14, F17)', () => {
+  it("finds Settings' sections by what they hold, and opens the section", async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const input = await openWith('cloud', '[id="pi-settings-cloud"]');
+    expect(options()).toEqual(['Cloud']);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    expect(go).toHaveBeenCalledWith('/settings?section=cloud');
+  });
+
+  it('offers no Cloud section on a server without cloud compute', async () => {
+    hub.api = new MockApi('cloud-off', 0);
+    await openWith('settings', '[id="pi-settings-connection"]');
+    // Wait until the system answer is in: the sections then settle.
+    await vi.waitFor(async () => expect((await hub.api.system()).features).not.toContain('cloud'));
+    flushSync();
+    expect(document.querySelector('[id="pi-settings-cloud"]')).toBeNull();
+  });
+
+  it('shows no key hints, footer or sidebar action on a touch-only device', async () => {
+    const real = window.matchMedia;
+    vi.spyOn(window, 'matchMedia').mockImplementation((q: string) => ({ ...real.call(window, q), matches: q.includes('hover: none') }) as MediaQueryList);
+    await openWith('o', '[role="option"]');
+    expect(options()).toContain('Overview');
+    expect(options()).not.toContain('Collapse sidebar');
+    expect(document.querySelector('.palette footer')).toBeNull();
+    expect(document.querySelector('.palette kbd')).toBeNull();
+  });
+});
+
+describe('CommandPalette after a switch to another server', () => {
+  it('lists nothing of the server before: neither what it listed nor an answer that comes late (review R4)', async () => {
+    const open = signal(true);
+    c = render(() => <CommandPalette bind:open={open} onshortcuts={() => {}} />, target);
+    const runs = () => document.querySelectorAll('[id^="pi-run-"]').length;
+    await vi.waitFor(() => {
+      flushSync();
+      expect(runs()).toBeGreaterThan(0);
+    });
+    open.set(false);
+    flushSync();
+
+    // Server B fails its run list; server A's own answer to an opening just before the switch arrives after it.
+    let late!: (r: Run[]) => void;
+    const a = new MockApi('normal', 0);
+    const aRuns = await a.runs();
+    a.runs = () => new Promise((r) => (late = r));
+    hub.api = a;
+    open.set(true);
+    flushSync();
+    open.set(false);
+    flushSync();
+    const b = new MockApi('normal', 0);
+    b.runs = () => Promise.reject(new ApiError(500, 'internal', 'the run index could not be read'));
+    hub.api = b;
+    hub.epoch++;
+    open.set(true);
+    flushSync();
+    late(aRuns);
+    // A query that names server A's runs as well as the dataset B lists.
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    await vi.waitFor(() => {
+      input.value = 'fasteners';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      expect(document.querySelector('[id^="pi-ds-"]')).not.toBeNull();
+    });
+    expect(aRuns.some((r) => r.name.includes('fasteners'))).toBe(true);
+    expect(runs()).toBe(0);
   });
 });

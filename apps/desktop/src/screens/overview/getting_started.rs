@@ -3,7 +3,7 @@
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 
-use crate::app::{FoloApp, Route, act};
+use crate::app::{FoloApp, Route, ServerMode, act};
 use crate::controls::Btn;
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
@@ -183,6 +183,9 @@ impl FoloApp {
                 )
                 .child(text(ty::SM, t.text_tertiary).child(what.to_string()))
         };
+        // Connected to a folo serve already: starting one is not the advice, and the generated
+        // folder is wherever the terminal runs (the server shares no working folder with it).
+        let connected = self.server_mode != ServerMode::Mock && self.store.health.ready().is_some();
         let terminal = panel(&t)
             .p(px(16.))
             .flex()
@@ -191,8 +194,8 @@ impl FoloApp {
             .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child("Or from a terminal"))
             // Honest about what reaches this app: the server and the datasets registered with it;
             // `folo train` runs on its own (runs/ in the working folder).
-            .child(cmd(0, "start it, then Connect in Settings"))
-            .child(cmd(1, "then Add dataset → choose ./shapes"))
+            .when(!connected, |d| d.child(cmd(0, "start it, then Connect in Settings")))
+            .child(cmd(1, "makes ./shapes in the terminal's folder; then Add dataset → choose it"))
             // Training from the terminal stands apart from the sequence above.
             .child(div().pt(px(6.)).child(caption(&t, "Independent CLI training")))
             .child(cmd(2, "trains here in the terminal; this run won't appear in Desktop"));

@@ -2,7 +2,7 @@
 // (default: dark + light, desktop + mobile). `setup(page)` drives the UI into the state before the shot.
 // `search` adds query params to the page URL (e.g. `scenario=empty` for the mock), next to `mock=1`.
 
-/** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'tablet' | 'mobile' | 'small')[], advance?: number, search?: string,
+/** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'wide' | 'laptop' | 'tablet' | 'mobile' | 'small')[], advance?: number, search?: string,
  *   fullPage?: boolean, keepScroll?: boolean, touch?: false, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
 // `touch: false` keeps a scene out of --qa's coarse-pointer pass over phone states: a scene about a keyboard feature
 // (shortcuts) or one that sets up touch itself (the touch hint).

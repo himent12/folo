@@ -4,7 +4,8 @@
  */
 import FolderOpen from '$icons/folder-open';
 import Upload from '$icons/upload';
-import { bindable, createUniqueId, css, effect, MediaQuery, signal } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, MediaQuery, signal } from 'fw';
+import { folderPath, folderPathError } from '$lib/label';
 import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import { media } from '$lib/design/tokens';
 import Button from '$lib/ui/Button';
@@ -15,7 +16,7 @@ import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import Tabs from '$lib/ui/Tabs';
 import Viewfinder from '$lib/ui/Viewfinder';
-import type { Uploads } from './uploads';
+import { whyNothingAdded, type Uploads } from './uploads';
 
 export interface AddImagesDialogProps {
   open?: boolean;
@@ -32,13 +33,22 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
   const touch = new MediaQuery(TOUCH_ONLY, false);
   const phone = new MediaQuery(media.phone, false);
   const path = signal('');
+  /** The path without the quotes and spaces around it (Explorer's "Copy as path"). */
+  const folder = computed(() => folderPath(path.get()));
+  /** Set by the first submit: from then on a relative path says so as it is typed. */
+  const tried = signal(false);
+  const pathError = computed(() => (tried.get() ? folderPathError(folder.get()) : null));
   const busy = signal(false);
   const error = signal<unknown>(undefined);
+  /** Why the last folder added nothing (no images there, a file that is not one, all in the job already). */
+  const nothing = signal<string | null>(null);
   const dragging = signal(false);
 
   effect(() => {
     if (!open.get()) {
       error.set(undefined);
+      nothing.set(null);
+      tried.set(false);
       busy.set(false);
       dragging.set(false);
     }
@@ -55,11 +65,17 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
-    if (!path.peek().trim() || busy.peek()) return;
+    tried.set(true);
+    if (!folder.peek() || pathError.peek() || busy.peek()) return;
     busy.set(true);
     error.set(undefined);
+    nothing.set(null);
     try {
-      await props.uploads.folder(path.peek().trim());
+      const answer = await props.uploads.folder(folder.peek());
+      if (answer && !answer.added.length) {
+        nothing.set(whyNothingAdded(answer.skipped));
+        return;
+      }
       open.set(false);
       path.set('');
     } catch (err) {
@@ -78,7 +94,7 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
         <>
           {tab.get() === 'folder' ? (
             <>
-              {!path.get().trim() ? (
+              {!folder.get() ? (
                 <p class="why" data-gate-why>
                   Enter a folder path
                 </p>
@@ -86,7 +102,7 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
               <Button variant="ghost" onclick={() => open.set(false)}>
                 Cancel
               </Button>
-              <Gate reason={path.get().trim() ? null : 'Enter a folder path'}>
+              <Gate reason={folder.get() ? null : 'Enter a folder path'}>
                 {(why) => (
                   <Button
                     variant="primary"
@@ -151,6 +167,7 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
               label="Folder"
               for={`${uid}-path`}
               hint="On the machine running `folo serve`. Its images, in subfolders too, are read in place, never copied or changed."
+              error={pathError.get()}
             >
               <Input
                 id={`${uid}-path`}
@@ -163,6 +180,12 @@ export default function AddImagesDialog(props: AddImagesDialogProps) {
               />
             </Field>
             {error.get() ? <ErrorState error={error.get()} title="Could not add this folder" compact /> : null}
+            {nothing.get() ? (
+              <div class="nothing" role="status">
+                <p class="title">Nothing was added</p>
+                <p>{nothing.get()}</p>
+              </div>
+            ) : null}
           </form>
         )}
       </div>
@@ -203,6 +226,19 @@ css`
     font-family: var(--font-sans);
     font-size: var(--type-base-size);
     color: var(--text-tertiary);
+  }
+  .nothing {
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--bg-inset);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .nothing .title {
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
   }
   .why {
     margin-right: auto;

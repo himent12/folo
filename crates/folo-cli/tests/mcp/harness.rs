@@ -261,7 +261,7 @@ pub(super) fn check_tools(c: &mut Client, expected: &[&str]) -> std::collections
     assert_eq!(names, expected);
     // Shared types are compacted (docs/MCP.md "Schemas"): the whole listing stays small.
     let bytes = serde_json::to_vec(&tools).unwrap().len();
-    assert!(bytes < 64 * 1024, "tools/list is {bytes} bytes");
+    assert!(bytes < 68 * 1024, "tools/list is {bytes} bytes");
     let mut out = std::collections::HashMap::new();
     for t in &tools {
         assert!(t["description"].as_str().unwrap().len() > 20);

@@ -139,10 +139,7 @@ impl FoloApp {
                         // dataset, then the e2e tag for an end-to-end run.
                         // The e2e tag rides its architecture, as in the Runs and Models lists; the
                         // dataset after them gives way first.
-                        let ds_name = self
-                            .store
-                            .dataset_summary(&r.config.dataset_id)
-                            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+                        let ds_name = self.store.run_dataset_name(&r);
                         let meta = |w: f32| {
                             div().w(px(w)).flex_none().child(meta_row(
                                 ty::SM,
@@ -251,23 +248,20 @@ impl FoloApp {
                 .into_any_element(),
             Load::Ready(models) => 'card: {
                 // Each evaluated model's dataset (from the run that trained it; an imported model
-                // without one is left out: there's nothing to compare it with).
-                let ds_of = |m: &crate::api::Model| {
-                    m.run_id.as_ref().and_then(|r| self.store.run(r)).map(|r| r.config.dataset_id.clone())
-                };
+                // without one is left out: there's nothing to compare it with). The best by the
+                // rule every pick uses (`better_model`: a tie takes the "-best" checkpoint).
                 let mut best: Vec<(String, crate::api::Model)> = Vec::new();
                 for m in models.iter().filter(|m| m.metrics.is_some()) {
-                    let Some(ds) = ds_of(m) else { continue };
-                    let map = |m: &crate::api::Model| m.metrics.as_ref().map_or(0., |x| x.map50_95);
+                    let Some(ds) = self.store.model_dataset(m).map(str::to_string) else { continue };
                     match best.iter_mut().find(|(d, _)| *d == ds) {
-                        Some((_, b)) if map(m) > map(b) => *b = m.clone(),
+                        Some((_, b)) if crate::store::better_model(m, b).is_lt() => *b = m.clone(),
                         Some(_) => {}
                         None => best.push((ds, m.clone())),
                     }
                 }
                 // Datasets in name order (their mAPs aren't comparable, so no rank between rows).
-                let name_of =
-                    |ds: &str| self.store.dataset_summary(ds).map_or(ds.to_string(), |d| d.name.clone());
+                // A removed dataset by the name its runs recorded, marked (never its id).
+                let name_of = |ds: &str| self.store.dataset_name(ds);
                 best.sort_by_key(|(ds, _)| name_of(ds));
                 let models: Vec<(String, crate::api::Model)> =
                     best.into_iter().map(|(ds, m)| (name_of(&ds), m)).collect();

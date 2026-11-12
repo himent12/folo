@@ -11,7 +11,7 @@ import Upload from '$icons/upload';
 import { computed, createRoot, css, effect, getOwner, Key, MediaQuery, onCleanup, signal, type Signal } from 'fw';
 import type { LabelImage } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
-import { num } from '$lib/format';
+import { count, num } from '$lib/format';
 import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
@@ -27,11 +27,19 @@ import LabelTile from './LabelTile';
 import UploadStatus from './UploadStatus';
 import type { Uploads } from './uploads';
 
-export type Show = 'all' | 'pending' | 'labeled' | 'failed';
+export type Show = 'all' | 'pending' | 'review' | 'reviewed' | 'failed';
 
-/** Whether an image is in a filter: "To label" holds the images waiting and the ones with the agent now. */
+/**
+ * Whether an image is in a filter: "To label" holds the images waiting and the ones with the agent now; a labeled
+ * image is "To review" until a person checked it, then "Reviewed".
+ */
 export const inFilter = (img: LabelImage, show: Show) =>
-  show === 'all' || (show === 'pending' ? img.status === 'pending' || img.status === 'labeling' : img.status === show);
+  show === 'all' ||
+  (show === 'pending'
+    ? img.status === 'pending' || img.status === 'labeling'
+    : show === 'review' || show === 'reviewed'
+      ? img.status === 'labeled' && !!img.reviewed === (show === 'reviewed')
+      : img.status === show);
 
 export interface ImagesAreaProps {
   jobId: string;
@@ -50,7 +58,8 @@ export interface ImagesAreaProps {
 const FILTERS = [
   ['all', 'All'],
   ['pending', 'To label'],
-  ['labeled', 'Labeled'],
+  ['review', 'To review'],
+  ['reviewed', 'Reviewed'],
   ['failed', 'Failed'],
 ] as const;
 
@@ -62,10 +71,10 @@ export default function ImagesArea(props: ImagesAreaProps) {
 
   // One pass over the images (up to 10,000, re-counted on every image event of a run) instead of one per filter.
   const counts = computed(() => {
-    const c = { all: props.images.length, pending: 0, labeled: 0, failed: 0 };
+    const c = { all: props.images.length, pending: 0, review: 0, reviewed: 0, failed: 0 };
     for (const i of props.images) {
       if (i.status === 'pending' || i.status === 'labeling') c.pending++;
-      else if (i.status === 'labeled') c.labeled++;
+      else if (i.status === 'labeled') c[i.reviewed ? 'reviewed' : 'review']++;
       else if (i.status === 'failed') c.failed++;
     }
     return c;
@@ -98,7 +107,9 @@ export default function ImagesArea(props: ImagesAreaProps) {
 
   const label = (i: number) => {
     const img = shown.get()[i];
-    return img ? `${img.file}, ${img.status === 'labeled' ? `${img.boxes.length} ${img.boxes.length === 1 ? 'box' : 'boxes'}` : img.status}` : 'Image';
+    return img
+      ? `${img.file}, ${img.status === 'labeled' ? `${count(img.boxes.length, 'box')}${img.reviewed ? ', reviewed' : ''}` : img.status}`
+      : 'Image';
   };
 
   // ---------- the tiles, keyed by image id ----------
@@ -264,7 +275,13 @@ export default function ImagesArea(props: ImagesAreaProps) {
             icon={ImageOff}
             title="No images here"
             description={
-              props.show === 'failed' ? 'The agent labeled every image it was given.' : props.show === 'labeled' ? 'No image is labeled yet.' : 'Every image has labels.'
+              props.show === 'failed'
+                ? 'The agent labeled every image it was given.'
+                : props.show === 'review'
+                  ? 'Every labeled image is reviewed.'
+                  : props.show === 'reviewed'
+                    ? 'No image is reviewed yet: open one and press Enter when its labels look right.'
+                    : 'Every image has labels.'
             }
             actions={() => <Button onclick={() => props.onshow('all')}>Show all</Button>}
           />

@@ -11,6 +11,12 @@ use crate::ui::*;
 
 use super::{Action, FoloApp, Inspector, Palette, Toast};
 
+/// How long a toast shows before it leaves by itself (not counting time hovered or focused): a
+/// toast with an action gets long enough to read it and reach the button.
+pub(super) fn toast_ttl(has_action: bool) -> Duration {
+    Duration::from_millis(if has_action { 12_000 } else { 4200 })
+}
+
 impl FoloApp {
     pub fn toast(
         &mut self,
@@ -32,12 +38,13 @@ impl FoloApp {
     ) {
         self.toast_seq += 1;
         let id = self.toast_seq;
-        // Toasts with an action stay until used or dismissed; others expire, but not while hovered.
-        let expires = action.is_none();
+        // Every toast expires, none while hovered or focused; one with an action stays longer, so
+        // there is time to use it.
+        let ttl = toast_ttl(action.is_some());
         self.toasts.push(Toast { id, tone, title: title.into(), body, action });
-        // Over three, the oldest passive toast goes first: one with an action waits for its action
-        // or a dismissal (the stack folds them) unless five are waiting. The focused toast stays,
-        // and so does the one just added (it would vanish unseen).
+        // Over three, the oldest passive toast goes first: one with an action stays for its action
+        // (the stack folds them) unless five are waiting. The focused toast stays, and so does the
+        // one just added (it would vanish unseen).
         while self.toasts.len() > 3 {
             let keep = |t: &Toast| t.id != id && Some(t.id) != self.toast_focus;
             let gone = self
@@ -48,9 +55,9 @@ impl FoloApp {
             let Some(i) = gone else { break };
             self.toasts.remove(i);
         }
-        if !self.frozen && expires {
+        if !self.frozen {
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(4200)).await;
+                cx.background_executor().timer(ttl).await;
                 loop {
                     let hovered = this
                         .update(cx, |this, _| {
@@ -96,6 +103,7 @@ impl FoloApp {
             if let Some(p) = this.palette.as_mut() {
                 p.query = q.to_string();
                 p.selected = 0;
+                p.shown.clear();
             }
             cx.notify();
         });
@@ -105,6 +113,7 @@ impl FoloApp {
             input,
             query: String::new(),
             selected: 0,
+            shown: Vec::new(),
             scroll: ScrollHandle::new(),
             _sub: sub,
         });
@@ -135,6 +144,17 @@ impl FoloApp {
         self.remember_focus(window, cx);
         self.confirm_stop = Some(id);
         let fh = self.fh("stop-cancel", cx);
+        window.focus(&fh);
+        cx.notify();
+    }
+
+    /// Ask before deleting a run or a dataset; the safe choice has focus.
+    pub fn ask_delete(&mut self, target: super::DeleteTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_focus(window, cx);
+        self.palette = None;
+        self.confirm_delete = Some(target);
+        self.delete_files = false;
+        let fh = self.fh("del-cancel", cx);
         window.focus(&fh);
         cx.notify();
     }
@@ -181,10 +201,23 @@ impl FoloApp {
     }
 
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.inspector = None;
-        match self.inspector_return.take() {
-            Some(fh) => window.focus(&fh),
-            None => window.focus(&self.root_focus),
+        let closed = self.inspector.take();
+        let opener = self.inspector_return.take();
+        // Opened from the dataset's grid: back on the image it showed last (scrolled into view and
+        // focused), not on the tile it was opened from (←/→ may have walked far from it).
+        let last =
+            closed.filter(|i| i.sample.is_none() && self.route == super::Route::Dataset(i.dataset.clone()));
+        if let Some(i) = last
+            && let Some(id) = self.filtered_image(&i.dataset, i.index).map(|m| m.id.clone())
+        {
+            self.grid_scroll.scroll_to_item(i.index / self.grid_cols(), folo_ui::ScrollStrategy::Center);
+            let fh = self.fh(format!("tile-{id}"), cx);
+            window.focus(&fh);
+        } else {
+            match opener {
+                Some(fh) => window.focus(&fh),
+                None => window.focus(&self.root_focus),
+            }
         }
         cx.notify();
     }
@@ -195,6 +228,9 @@ impl FoloApp {
             self.export_open = false;
         } else if self.palette.is_some() {
             self.close_palette(window, cx);
+        } else if self.confirm_delete.is_some() {
+            self.confirm_delete = None;
+            self.restore_focus(window);
         } else if self.confirm_stop.is_some() {
             self.confirm_stop = None;
             self.restore_focus(window);
@@ -215,5 +251,14 @@ impl FoloApp {
             self.navigate(p, window, cx);
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_toast_expires_and_action_toasts_last_longer() {
+        let (plain, action) = (super::toast_ttl(false), super::toast_ttl(true));
+        assert!(action > plain && action.as_secs() >= 10 && action.as_secs() <= 15, "{action:?}");
     }
 }

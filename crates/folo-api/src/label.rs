@@ -392,6 +392,10 @@ pub struct LabelImage {
     pub source: Option<LabelSource>,
     /// Why the last agent call for it failed (`status: failed`), else `null`.
     pub error: Option<String>,
+    /// A person checked its labels: saved boxes drawn by hand, or marked them right. Only a `labeled` image is
+    /// reviewed; an agent that labels it again clears it.
+    #[serde(default)]
+    pub reviewed: bool,
 }
 
 /// `GET /api/label/jobs/{id}/images`.
@@ -408,8 +412,12 @@ pub struct LabelImagePage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UpdateLabelImage {
-    /// The image's boxes, pixel `xyxy`, replacing what it has.
-    pub boxes: Vec<BBox>,
+    /// The image's boxes, pixel `xyxy`, replacing what it has; absent: they stay (to mark them reviewed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boxes: Option<Vec<BBox>>,
+    /// Marks the image reviewed or not; absent: reviewed when `boxes` are given, else unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed: Option<bool>,
 }
 
 /// Which images an agent run labels.
@@ -596,7 +604,12 @@ mod tests {
             boxes: vec![BBox { class: 1, x1: 1.0, y1: 2.0, x2: 30.0, y2: 40.0 }],
             source: Some(LabelSource::Agent),
             error: None,
+            reviewed: true,
         };
+        // An older server sends no `reviewed`: nobody checked the image.
+        let mut old = serde_json::to_value(&image).unwrap();
+        old.as_object_mut().unwrap().remove("reviewed");
+        assert!(!serde_json::from_value::<LabelImage>(old).unwrap().reviewed);
         let ev = LabelEvent::Image(image);
         assert_eq!(ev.name(), "image");
         assert_eq!(LabelEvent::from_sse(ev.name(), &ev.data_json()).unwrap().unwrap(), ev);

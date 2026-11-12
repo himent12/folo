@@ -1,18 +1,23 @@
 //! Registered datasets: the registry file, their cached indexes (loaded, built and re-checked) and registering
 //! a folder.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::http::StatusCode;
 use folo_api::{Dataset, DatasetFormat};
 
 use crate::error::{Error, Result};
-use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, write_atomic};
+use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, default_name, write_atomic};
 use crate::runs::DatasetRef;
 use crate::store::Store;
 use crate::util::{claim_dir, fnv1a, rfc3339, unique_id, unix_now};
 
+use super::registry::{
+    Gains, RegistryFile, Tombstone, read_registry, registry_path, tombstones_path, write_registry,
+};
 use super::{Entry, RealStore, Registration, State};
 
 impl RealStore {
@@ -47,7 +52,9 @@ impl RealStore {
         }
         let reg = e.reg();
         tracing::info!(id = %reg.id, "dataset files changed; re-indexing");
-        match Index::build(&reg.path, reg.format, &own_state(&self.data_dir)) {
+        match Index::build(&reg.path, reg.format, &own_state(&self.data_dir))
+            .map_err(|err| folder_gone(err, &reg))
+        {
             Ok(idx) => {
                 let idx = Arc::new(idx);
                 save_index(&self.data_dir, e, &idx);
@@ -72,12 +79,12 @@ impl RealStore {
             r.splits = idx.splits;
             changed
         };
-        if changed && let Ok(mut regs) = read_registry(&self.data_dir) {
+        if changed && let Ok(mut file) = read_registry(&self.data_dir) {
             let r = e.reg();
-            for x in regs.iter_mut().filter(|x| x.id == r.id) {
+            for x in file.datasets.iter_mut().filter(|x| x.id == r.id) {
                 *x = r.clone();
             }
-            if let Err(err) = write_registry(&self.data_dir, &regs) {
+            if let Err(err) = write_registry(&self.data_dir, &file, Gains::Registration) {
                 tracing::warn!("{err}");
             }
         }
@@ -104,6 +111,8 @@ impl RealStore {
         path: String,
         format: DatasetFormat,
     ) -> Result<Dataset> {
+        // Shared with run admission; a deletion of dataset files waits for it (see `RealStore::files`).
+        let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
         // Registered absolute, so the registry works whatever the working directory of the next start.
         let path = absolute(Path::new(&path)).to_string_lossy().into_owned();
         // Registering a folder again (by its canonical path) returns the dataset it already is. Checked before
@@ -127,13 +136,26 @@ impl RealStore {
             drop(list);
             return self.get_dataset(&id);
         }
-        let mut regs = read_registry(&self.data_dir)?;
-        // Unique against loaded datasets and registrations whose folder is currently missing.
-        let id = unique_id("ds", fnv1a(path.as_bytes()) ^ unix_now().to_bits(), |id| {
-            list.iter().any(|e| e.reg.lock().unwrap().id == id) || regs.iter().any(|r| r.id == id)
-        });
+        let mut file = read_registry(&self.data_dir)?;
+        let used = self.run_dataset_ids();
+        let live = |id: &str| list.iter().any(|e| e.reg.lock().unwrap().id == id);
+        // The dataset unregistered before (its canonical path and format, from its tombstone) gets its id back, so
+        // the runs that trained on it find it again. Any other gets an id no dataset, tombstone or run has.
+        let back = want
+            .as_deref()
+            .and_then(|w| file.tombstones.iter().position(|t| t.is(w, idx.format) && !live(&t.id)));
+        let id = match back {
+            Some(i) => file.tombstones.remove(i).id,
+            None => unique_id("ds", fnv1a(path.as_bytes()) ^ unix_now().to_bits(), |id| {
+                live(id) || file.holds(id) || used.contains(id)
+            }),
+        };
         let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
-            idx.base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dataset".into())
+            let lower = |n: &str| n.to_lowercase();
+            default_name(Path::new(&path), |n| {
+                list.iter().any(|e| lower(&e.reg.lock().unwrap().name) == lower(n))
+                    || file.datasets.iter().any(|r| lower(&r.name) == lower(n))
+            })
         });
         let reg = Registration {
             id,
@@ -144,13 +166,55 @@ impl RealStore {
             classes: idx.classes.clone(),
             splits: idx.splits,
         };
-        regs.push(reg.clone());
-        write_registry(&self.data_dir, &regs)?;
+        file.datasets.push(reg.clone());
+        self.save_registry(&mut file, Gains::Registration)?;
         let out = Self::meta(&reg, Some(&idx));
         let entry = Arc::new(Entry::new(reg, State::Ready(idx.clone())));
         save_index(&self.data_dir, &entry, &idx);
         list.push(entry);
         Ok(out)
+    }
+
+    /// The dataset ids the runs reference.
+    fn run_dataset_ids(&self) -> HashSet<String> {
+        self.runs.entries().iter().map(|e| e.dataset().id).collect()
+    }
+
+    /// Writes the registry, without the tombstones whose id no run references any more.
+    pub(super) fn save_registry(&self, file: &mut RegistryFile, gains: Gains) -> Result<()> {
+        let used = self.run_dataset_ids();
+        file.prune(&|id| used.contains(id));
+        write_registry(&self.data_dir, file, gains)
+    }
+
+    /// Unregisters dataset `id`, keeping its tombstone while runs reference it. The caller holds [`RealStore::files`]
+    /// exclusively: a run admitted under the shared lease is in the run registry before the tombstones are pruned, so
+    /// it never names an id whose identity was dropped.
+    pub(super) fn unregister(&self, id: &str) -> Result<()> {
+        let mut list = self.entries.write().unwrap();
+        let mut file = read_registry(&self.data_dir)?;
+        let entry = list.iter().find(|e| e.reg.lock().unwrap().id == id).cloned();
+        let Some(reg) =
+            entry.as_ref().map(|e| e.reg()).or_else(|| file.datasets.iter().find(|r| r.id == id).cloned())
+        else {
+            return Err(Error::not_found("dataset", id));
+        };
+        // Its tombstone keeps the id for it while runs reference it (`crate::real::registry`).
+        file.datasets.retain(|r| r.id != id);
+        file.tombstones.retain(|t| t.id != id);
+        file.tombstones.push(Tombstone::of(&reg, rfc3339(unix_now())));
+        self.save_registry(&mut file, Gains::Tombstone)?;
+        list.retain(|e| e.reg.lock().unwrap().id != id);
+        // Caches are ours to delete; the dataset's own files never are. Marking the entry deleted first (under the
+        // lock cache writers hold) keeps in-flight indexers and thumbnails from writing them back.
+        let _deleted = entry.as_ref().map(|e| {
+            let mut d = e.deleted.lock().unwrap();
+            *d = true;
+            d
+        });
+        let _ = std::fs::remove_file(index_path(&self.data_dir, id));
+        let _ = std::fs::remove_dir_all(self.thumbs_dir(id));
+        Ok(())
     }
 
     pub(super) fn thumbs_dir(&self, id: &str) -> PathBuf {
@@ -160,7 +224,7 @@ impl RealStore {
     /// The registered dataset `id` as a run / eval reference.
     pub(super) fn dataset_ref(&self, e: &Entry) -> DatasetRef {
         let r = e.reg();
-        DatasetRef { id: r.id, name: r.name, path: r.path, format: r.format }
+        DatasetRef { id: r.id, name: r.name, path: r.path, format: r.format, classes: r.classes }
     }
 
     /// A new, empty folder `datasets/<base>` (`-2`, `-3`, ... when taken) for a dataset this server writes.
@@ -171,39 +235,29 @@ impl RealStore {
     }
 }
 
+/// A registered dataset whose folder no longer exists: said as that (still `404 path_not_found`), not with the
+/// registration error's advice on which folder to pass.
+fn folder_gone(err: Error, reg: &Registration) -> Error {
+    if err.body.code != "path_not_found" || Path::new(&reg.path).exists() {
+        return err;
+    }
+    let (name, path) = (&reg.name, folo_data::paths::shown(&reg.path));
+    let message = format!("the folder of dataset '{name}' is gone: '{path}' does not exist");
+    Error::new(StatusCode::NOT_FOUND, "path_not_found", message).hint(format!(
+        "move the folder back (FOLO picks it up again within seconds), or unregister the dataset with \
+         DELETE /api/datasets/{} (its files are never deleted)",
+        reg.id
+    ))
+}
+
 /// The server's own files in the data dir, left out of dataset fingerprints (the data dir may sit inside a
 /// registered dataset folder; caching an index must not make it stale).
 fn own_state(dir: &Path) -> Vec<PathBuf> {
-    vec![dir.join("cache"), dir.join("label"), dir.join("bench"), registry_path(dir)]
-}
-
-fn registry_path(dir: &Path) -> PathBuf {
-    dir.join("datasets.json")
+    vec![dir.join("cache"), dir.join("label"), dir.join("bench"), registry_path(dir), tombstones_path(dir)]
 }
 
 pub(super) fn index_path(dir: &Path, id: &str) -> PathBuf {
     dir.join("cache").join("datasets").join(format!("{id}.json"))
-}
-
-/// The registry. A missing file is an empty registry; an unreadable or malformed one is an error, so it is never
-/// overwritten (and its registrations lost) by the next write.
-pub(super) fn read_registry(dir: &Path) -> Result<Vec<Registration>> {
-    let path = registry_path(dir);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(Error::internal(format!("reading {}: {e}", path.display()))),
-    };
-    serde_json::from_str(&text).map_err(|e| {
-        Error::internal(format!("{} is malformed: {e}", path.display()))
-            .hint("fix the JSON by hand or move the file away; FOLO will not overwrite it")
-    })
-}
-
-pub(super) fn write_registry(dir: &Path, regs: &[Registration]) -> Result<()> {
-    let path = registry_path(dir);
-    let bytes = serde_json::to_vec_pretty(regs).expect("registrations serialize");
-    write_atomic(&path, &bytes).map_err(|e| Error::internal(format!("writing {}: {e}", path.display())))
 }
 
 fn save_index(dir: &Path, e: &Entry, idx: &Index) {
@@ -239,7 +293,7 @@ pub(super) fn load_or_build(dir: &Path, e: &Entry) {
         return;
     }
     let t0 = Instant::now();
-    match Index::build(&reg.path, reg.format, &own_state(dir)) {
+    match Index::build(&reg.path, reg.format, &own_state(dir)).map_err(|err| folder_gone(err, &reg)) {
         Ok(idx) => {
             tracing::info!(id = %reg.id, images = idx.images.len(), secs = t0.elapsed().as_secs_f32(), "indexed");
             save_index(dir, e, &idx);

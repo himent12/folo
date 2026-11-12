@@ -453,6 +453,7 @@ impl MockBackend {
                         created: time::format(created),
                         started,
                         finished,
+                        paused_s: None,
                         epoch: 0,
                         epochs: s.config.epochs,
                         step: s.step,
@@ -468,6 +469,11 @@ impl MockBackend {
                         }),
                         queue_position: (s.status == RunStatus::Queued).then_some(1),
                         cloud: None,
+                        // As the server records it when the run is created.
+                        dataset: datasets
+                            .iter()
+                            .find(|d| d.ds.id == s.config.dataset_id)
+                            .map(|d| RunDataset { name: d.ds.name.clone(), classes: d.ds.classes.clone() }),
                         config: s.config,
                     },
                     curve,
@@ -542,6 +548,8 @@ impl MockBackend {
             empty: false,
             connections: Mutex::new(vec![runpod_connection()]),
             benches: Arc::new(crate::api::mock_bench::MockBench::new(frozen, now)),
+            removed: Mutex::default(),
+            holds: Default::default(),
             clock,
         }
     }

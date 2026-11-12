@@ -25,6 +25,7 @@ import { planPasses } from '$lib/bench/plan';
 import { AGENT_IMAGES, IMAGES_PAGE_MAX, isEntryActive, BENCH_NAME_MAX } from '$lib/bench/rules';
 import { classColor } from '$lib/design/tokens';
 import { bytes, num } from '$lib/format';
+import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
 import CommandLine from '$lib/ui/CommandLine';
 import Dialog from '$lib/ui/Dialog';
@@ -40,7 +41,7 @@ import Switch from '$lib/ui/Switch';
 import AgentFields from '../label/AgentFields';
 import type { AgentChoice } from '../label/agentChoice';
 import { modelLabel } from '../label/words';
-import { imagesText } from './words';
+import { imagesText, noModelHelp } from './words';
 
 export type EntryKind = 'model' | 'agent' | 'external';
 
@@ -147,6 +148,8 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
       };
     }),
   );
+  /** Models are there, but none knows a class of the benchmark: the picker has nothing to offer, the dialog says why. */
+  const noModel = computed(() => (props.models?.length && !props.models.some((m) => shared(m) > 0) ? noModelHelp(props.bench) : null));
   /** A model entry waits for the model entry that runs (they take the GPU one at a time). */
   const ahead = computed(() => props.entries.find((e) => e.contestant.kind === 'model' && isEntryActive(e)));
   const passes = computed(() => planPasses(props.bench.plan));
@@ -235,6 +238,11 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
     };
   });
   const show = (e: string | null) => (touched.get() ? e : null);
+  /** The Images field says a value out of range as soon as it is typed, not on submit (an empty one is said then). */
+  const imagesShown = computed(() => {
+    const text = kind.get() === 'model' ? modelImages.get() : agentImages.get();
+    return touched.get() || text.trim() ? errs.get().images : null;
+  });
   const missingWhy = computed(() => {
     const k = kind.get();
     if (k === 'model') {
@@ -246,7 +254,9 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
           ? 'Loading models'
           : !models.length
             ? 'Train or import a model first'
-            : !m
+            : noModel.get()
+              ? 'No model knows these classes'
+              : !m
               ? 'Pick a model'
               : missing.get().length === props.bench.classes.length
                 ? `None of ${m.name}'s classes is a class of this benchmark`
@@ -264,7 +274,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
             ? 'Enter a name'
             : null;
   });
-  const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : undefined));
+  const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : (imagesShown.get() ?? undefined)));
   const reason = computed(() => missingWhy.get() ?? (shownErr.get() ? 'Fix the fields first' : null));
 
   /** Sends the file: one request, or an open entry in parts with its bar; nothing is left behind if it fails. */
@@ -416,8 +426,25 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
               for={`${uid}-model`}
               hint={model.get() ? `\`${model.get()!.arch}\` at ${num(model.get()!.imgsz)} px, matched to the benchmark's classes by name.` : undefined}
             >
-              <Select id={`${uid}-model`} bind:value={modelId} disabled={!props.models?.length} options={modelOptions.get()} />
+              <Select id={`${uid}-model`} bind:value={modelId} disabled={!props.models?.length || !!noModel.get()} options={modelOptions.get()} />
             </Field>
+            {noModel.get() ? (
+              <div class="no-model" role="status">
+                <p class="nm-title">{noModel.get()!.title}</p>
+                <p class="note">{noModel.get()!.text}</p>
+                <div class="nm-actions">
+                  <Button size="sm" href={href(noModel.get()!.action.path)}>
+                    {noModel.get()!.action.label}
+                  </Button>
+                  <Button size="sm" variant="ghost" onclick={() => kind.set('agent')}>
+                    Use an agent
+                  </Button>
+                  <Button size="sm" variant="ghost" onclick={() => kind.set('external')}>
+                    Send predictions
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {props.modelsError && !props.models ? <ErrorState error={props.modelsError} title="Could not load the models" compact /> : null}
             {model.get() ? (
               <div class="classes">
@@ -447,7 +474,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
             <Field
               label="Images"
               for={`${uid}-mimages`}
-              error={show(errs.get().images)}
+              error={imagesShown.get()}
               hint="Empty runs all of them. Fewer runs the first of the benchmark's seeded order, a fair sample, but the entry is partial."
             >
               <div class="narrow">
@@ -456,7 +483,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
                   bind:value={modelImages}
                   inputmode="numeric"
                   placeholder={`All ${num(props.bench.images)}`}
-                  invalid={!!show(errs.get().images)}
+                  invalid={!!imagesShown.get()}
                 />
               </div>
             </Field>
@@ -490,7 +517,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
             <Field
               label="Images"
               for={`${uid}-aimages`}
-              error={show(errs.get().images)}
+              error={imagesShown.get()}
               hint={
                 agent.get() && agentCalls.get()
                   ? `The first of the benchmark's seeded order, a fair sample: about ${num(agentCalls.get())} calls to ${agent.get()!.name} (${modelLabel(props.choice.model || null, agent.get())}).`
@@ -498,7 +525,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
               }
             >
               <div class="narrow">
-                <Input id={`${uid}-aimages`} bind:value={agentImages} inputmode="numeric" invalid={!!show(errs.get().images)} />
+                <Input id={`${uid}-aimages`} bind:value={agentImages} inputmode="numeric" invalid={!!imagesShown.get()} />
               </div>
             </Field>
             {props.bench.plan.conditions.length ? (
@@ -633,8 +660,17 @@ css`
   .narrow {
     max-width: 200px;
   }
-  .classes {
+  .classes,
+  .no-model {
     display: grid;
+    gap: var(--space-2);
+  }
+  .nm-title {
+    font-weight: var(--weight-medium);
+  }
+  .nm-actions {
+    display: flex;
+    flex-wrap: wrap;
     gap: var(--space-2);
   }
   .cl-head {

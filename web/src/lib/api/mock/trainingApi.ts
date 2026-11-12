@@ -70,7 +70,10 @@ export class MockTrainingApi extends MockServer {
   /** A run snapshot with its place in the queue. */
   #toRun(p: RunProfile, now: number): Run {
     const i = this.state.queue.indexOf(p.id);
-    return { ...toRun(p, now), queue_position: i < 0 ? null : i + 1 };
+    // The dataset as the run was created on it (docs/API.md, Run.dataset): it still names it once removed.
+    p.datasetName ??= this.state.datasets.find((d) => d.id === p.config.dataset_id)?.name;
+    const dataset = p.datasetName ? { dataset: { name: p.datasetName, classes: p.classNames } } : {};
+    return { ...toRun(p, now), queue_position: i < 0 ? null : i + 1, ...dataset };
   }
 
   /** Logs `message` for run `id`: kept for `/logs` and sent to its live subscribers. */
@@ -149,6 +152,8 @@ export class MockTrainingApi extends MockServer {
   createRun(body: TrainConfig): Promise<Run> {
     return this.call(() => {
       const ds = this.spec(body.dataset_id);
+      // The real server's cap (docs/API.md, TrainConfig), as long as a dataset's name.
+      if ([...body.name].length > 64) throw new ApiError(400, 'invalid_config', 'name: must be at most 64 characters');
       const c = this.#withWeights(body);
       const cloud = this.#compute(c);
       if (cloud) return this.#createCloudRun(c, ds, cloud);
@@ -344,8 +349,11 @@ export class MockTrainingApi extends MockServer {
     return this.call(() => {
       const p = this.#profile(id);
       const status = progressAt(p, Date.now()).status;
-      if (status === 'queued' || status === 'running' || status === 'stopping')
+      // A run waiting in the queue that never started leaves it (a cloud run's hand-over is under way: stop it).
+      const waiting = status === 'queued' && !p.cloud;
+      if (!waiting && (status === 'queued' || status === 'running' || status === 'stopping'))
         throw new ApiError(409, 'run_active', `Run ${p.name} is ${status}.`, 'Stop it first.');
+      this.state.queue = this.state.queue.filter((x) => x !== id);
       this.state.runs = this.state.runs.filter((r) => r.id !== id);
     });
   }
@@ -409,7 +417,8 @@ export class MockTrainingApi extends MockServer {
       const done = Math.floor(progressAt(p, Date.now()).done);
       // `epoch` is 1-based like the API; `e` indexes the run model (0-based).
       const e = Math.max(0, Math.min(done - 1, (epoch ?? done) - 1));
-      const ds = this.spec(p.config.dataset_id);
+      // The samples are the run's: they outlive its dataset's registration, as on a real server.
+      const ds = this.state.datasets.find((d) => d.id === p.config.dataset_id) ?? specs.find((d) => d.id === p.config.dataset_id) ?? this.spec(p.config.dataset_id);
       const quality = done > 0 ? epochAt(p, e).val.map50_95 : 0;
       const samples: Sample[] = [];
       // A fixed set of up to 16 validation images, spread evenly over the split; a dataset with no validation images

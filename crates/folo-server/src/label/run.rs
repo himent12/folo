@@ -284,11 +284,14 @@ impl Run<'_> {
                     record.status = LabelImageStatus::Labeled;
                     record.source = Some(LabelSource::Agent);
                     record.error = None;
+                    // New labels nobody has checked yet.
+                    record.reviewed = false;
                 }
                 Outcome::Failed(why) => {
                     failed += 1;
                     record.status = LabelImageStatus::Failed;
                     record.error = Some(why.clone());
+                    record.reviewed = false;
                     if !failures.contains(&why) {
                         failures.push(why);
                     }

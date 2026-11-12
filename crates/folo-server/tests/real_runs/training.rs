@@ -337,6 +337,8 @@ async fn train_evaluate_predict_and_reload() {
         ok(&app, multipart(&model_id, Some(("image.jpg", png)), &[("conf", "0.001")])).await;
     assert_eq!((r2.image.width, r2.image.height), (64, 64));
     assert!(!r2.boxes.is_empty());
+    // The model's first prediction since it was loaded says its timing includes the warm-up; the next one does not.
+    assert!(r.cold && !r2.cold, "cold: first {}, second {}", r.cold, r2.cold);
     let bad = multipart(&model_id, Some(("x.jpg", b"not an image".to_vec())), &[]);
     err(&app, bad, StatusCode::UNPROCESSABLE_ENTITY, "image_decode_failed").await;
     let p = json!({ "model_id": "m_none", "dataset_id": ds.id, "image_id": "0" });

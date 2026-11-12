@@ -9,6 +9,8 @@ import { computed, css, effect, MediaQuery, signal, tick } from 'fw';
 import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import { hub } from '$lib/api/index';
 import { fromModelEval } from '$lib/api/evaluation';
+import { ApiError } from '$lib/api/client';
+import { refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model as ModelT, Run } from '$lib/api/types';
 import { fallbackNotice, sourceShort, splitWord, type EvalSource } from '$lib/evaluated';
@@ -19,6 +21,7 @@ import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
 import Button from '$lib/ui/Button';
+import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Menu from '$lib/ui/Menu';
 import Panel from '$lib/ui/Panel';
@@ -36,11 +39,16 @@ import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/section
 import { media } from '$lib/design/tokens';
 import KpiSummary from './model/KpiSummary';
 import DetailsList from './model/DetailsList';
+import { weightsEpoch } from './model/weightsEpoch';
 import ConfusionPanel from './model/ConfusionPanel';
 
 export default function Model() {
   const id = computed(() => router.route.params.id ?? '');
   const model = new Resource((s) => hub.api.model(id.get(), s));
+  // A run that ends, or is deleted, changes the models: this one's metrics, or whether it still exists.
+  refreshOnModelsChange(model);
+  /** The model went away while shown (its run was deleted): the page says so instead of showing what it was. */
+  const gone = computed(() => (model.stale instanceof ApiError && model.stale.status === 404 ? model.stale : null));
 
   effect(() => {
     setCrumbs({ label: 'Models', path: '/models' }, { label: model.data?.name ?? id.get() });
@@ -76,6 +84,14 @@ export default function Model() {
   const evaluation = new Resource((s) => hub.api.modelEval(id.get(), s));
   // This server's measured latency for the architecture (GET /api/system/throughput), where it has predicted with it.
   const tp = new Resource((s) => loadThroughput(hub.api, s));
+  /** No registered dataset has this model's classes (an imported file): nothing to evaluate on, and no retry helps. */
+  const unevaluable = computed(() => evaluation.error instanceof ApiError && evaluation.error.code === 'no_matching_dataset');
+  const notEvaluated = () => (
+    <EmptyState
+      title="Not evaluated"
+      description={`No registered dataset has this model's ${m().classes.length === 1 ? 'class' : `${num(m().classes.length)} classes`}. Register one with the same classes, in the same order, to see its curves and per-class figures.`}
+    />
+  );
   const ev = computed(() => {
     if (!evaluation.data) return null;
     const e = fromModelEval(evaluation.data);
@@ -200,6 +216,7 @@ export default function Model() {
               {run()?.name ?? m().run_id}
             </a>
           </span>
+          {weightsEpoch(m(), run()) ? <span>{weightsEpoch(m(), run())}</span> : null}
           {lineageNote()}
         </>
       ) : m().source === 'published' ? (
@@ -222,6 +239,7 @@ export default function Model() {
       source={source.get()}
       ev={ev.get()}
       lineage={lineage.get()}
+      unevaluated={unevaluable.get()}
       stored={stored.get()}
       head={head()}
       bind:aboutOpen={aboutOpen}
@@ -230,10 +248,10 @@ export default function Model() {
 
   return (
     <>
-      {model.error && !model.data ? (
+      {(model.error && !model.data) || gone.get() ? (
         <Page title="Model" actions={() => <Button icon={ArrowLeft} href={href('/models')}>All models</Button>}>
           {/* Nothing to frame: the message frameless on the content edge (DESIGN_DIRECTION 8), as on Run and Not found. */}
-          <ErrorState error={model.error} retry={() => model.refresh()} title="Could not load this model" />
+          <ErrorState error={gone.get() ?? model.error} retry={() => model.refresh()} title="Could not load this model" />
         </Page>
       ) : !model.data ? (
         <Page title="Model" sub={() => <Skeleton w="320px" h="14px" />}>
@@ -380,6 +398,8 @@ export default function Model() {
                         bind:hovered={prHovered}
                         onback={backTo.get() !== null ? backToClasses : undefined}
                       />
+                    ) : unevaluable.get() ? (
+                      notEvaluated()
                     ) : evaluation.error ? (
                       <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
                     ) : (
@@ -405,8 +425,12 @@ export default function Model() {
                     ) : evaluation.error ? (
                       // The failure is said once, in the curves' panel (or here on a phone, where that panel is another section).
                       <>
-                        {phone.current ? (
+                        {phone.current && unevaluable.get() ? (
+                          notEvaluated()
+                        ) : phone.current ? (
                           <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
+                        ) : unevaluable.get() ? (
+                          <p class="quiet">Not evaluated.</p>
                         ) : (
                           <p class="quiet">The per-class figures show once the evaluation loads.</p>
                         )}

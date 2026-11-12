@@ -4,21 +4,22 @@ import ImageOff from '$icons/image-off';
 import Play from '$icons/play';
 import Scan from '$icons/scan';
 import Trash from '$icons/trash-2';
+import TriangleAlert from '$icons/triangle-alert';
 import X from '$icons/x';
-import { computed, css, effect, Index, Key, MediaQuery, signal } from 'fw';
+import { computed, css, effect, Index, Key, MediaQuery, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Split } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
-import { ago, compact, num } from '$lib/format';
+import { ago, compact, count, num } from '$lib/format';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import { entryState } from '$lib/shell/entryMemory';
 import Button from '$lib/ui/Button';
-import Dialog from '$lib/ui/Dialog';
+import Gate from '$lib/ui/Gate';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
-import { DialogStatus } from '$lib/ui/feedback';
 import { gridView } from '$lib/ui/gridView';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Meta from '$lib/ui/Meta';
@@ -32,9 +33,11 @@ import { toast } from '$lib/ui/toast';
 import ToggleButton from '$lib/ui/ToggleButton';
 import ClassPicker from './dataset/ClassPicker';
 import DisplayMenu from './dataset/DisplayMenu';
-import { findingCount, findingLabel, healthChecks, imageCount } from './dataset/health';
+import { findingCount, findingLabel, healthChecks, imageCount, noTraining } from './dataset/health';
+import { missingError, readDataset } from './datasets/problem';
 import ImageGrid from './dataset/ImageGrid';
 import Inspector from './dataset/Inspector';
+import RemoveDialog from './dataset/RemoveDialog';
 import { ImagePager } from './dataset/pager';
 import StatsTab from './dataset/StatsTab';
 
@@ -59,8 +62,31 @@ export default function Dataset() {
   const clsParam = computed(() => router.route.query.get('class'));
   const imageParam = computed(() => router.route.query.get('image'));
 
-  const ds = new Resource((s) => hub.api.dataset(id.get(), s));
+  // A folder found missing is not asked about again on every visit, only on Retry (./datasets/problem readDataset).
+  let again = false;
+  const ds = new Resource((s) => {
+    const api = hub.api;
+    const key = id.get();
+    const fresh = again;
+    again = false;
+    return readDataset(api, key, () => api.dataset(key, s), fresh);
+  });
+  const retry = () => {
+    again = true;
+    void ds.refresh();
+  };
   const d = () => ds.data;
+  /** The dataset could not be read: what went wrong. */
+  const failure = computed(() => (ds.error && !d() ? ds.error : undefined));
+  /** Its folder is gone (moved, renamed, deleted): the dataset is still registered, so it can be removed. */
+  const gone = computed(() => {
+    const e = failure.get();
+    return e instanceof ApiError && e.code === 'path_not_found';
+  });
+  /** A dataset that cannot be read, as the list has it: its name for the page, and that it is there to remove. */
+  const listed = new Resource(async (s) => (failure.get() ? ((await hub.api.datasets(s)).find((x) => x.id === id.get()) ?? null) : null));
+  /** The dataset the header's actions (Copy path, Remove from FOLO) act on, whether or not it could be read. */
+  const target = () => d() ?? listed.data ?? undefined;
 
   const cls = computed(() => {
     const p = clsParam.get();
@@ -74,20 +100,43 @@ export default function Dataset() {
   });
 
   effect(() => {
-    setCrumbs({ label: 'Datasets', path: '/datasets' }, { label: d()?.name ?? id.get() });
+    setCrumbs({ label: 'Datasets', path: '/datasets' }, { label: target()?.name ?? id.get() });
   });
   // The header's "Train on this dataset" is this page's create action: the top bar's New run steps aside.
   ownCreateAction();
 
-  /** Replaces query params (null removes one) without adding history entries. */
-  function setQuery(patch: Record<string, string | null>) {
+  // History: opening an image, and the first filter on an unfiltered view, add an entry, so Back closes the image or
+  // undoes the filter instead of leaving the dataset; everything else (stepping through images, changing a filter, a
+  // tab) replaces the entry. A change that comes back to the view an entry was added from goes Back to it, so Close
+  // and Back agree and no entry is left over. Each entry this page added keeps the view (path and query) it was added
+  // from with it (lib/shell/entryMemory), so Forward to it and a reload of it know that view as well as Back does. An
+  // entry reached otherwise (a link, a pasted URL) has none: its changes replace it.
+  const from = entryState<string>('dataset.from');
+  const view = (path: string, q: URLSearchParams | string) => `${path}?${q}`;
+
+  /** Changes query params (null removes one): `push` adds a history entry, anything else replaces this one. */
+  function setQuery(patch: Record<string, string | null>, push = false) {
+    const before = router.route.query.toString();
     const q = new URLSearchParams(router.route.query);
     for (const [k, v] of Object.entries(patch)) {
       if (v === null) q.delete(k);
       else q.set(k, v);
     }
     const s = q.toString();
-    router.go(`/datasets/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`, { replace: true });
+    if (s === before) return;
+    const at = router.route.path;
+    const path = `/datasets/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`;
+    if (push) {
+      const was = router.entry;
+      router.go(path);
+      if (router.entry !== was) from.set(view(at, before));
+    } else if (from.get() === view(at, s)) history.back();
+    else router.go(path, { replace: true });
+  }
+
+  /** A filter change: the first one on an unfiltered view adds a history entry. */
+  function setFilter(patch: Record<string, string | null>) {
+    setQuery({ ...patch, image: null }, !filtered.peek());
   }
 
   // ---------- image list for the current filter ----------
@@ -119,7 +168,7 @@ export default function Dataset() {
 
   // ---------- header actions ----------
   async function copyPath() {
-    const dd = d();
+    const dd = target();
     if (!dd) return;
     // page-level: the header's Copy path, outside any dialog.
     try {
@@ -131,24 +180,6 @@ export default function Dataset() {
   }
 
   const confirmDelete = signal(false);
-  const deleting = signal(false);
-  /** A failed delete says so in its dialog, which stays open for another try (the toaster sits behind the modal). */
-  const deleteStatus = new DialogStatus();
-  async function remove() {
-    const dd = d();
-    if (!dd) return;
-    deleting.set(true);
-    try {
-      await hub.api.deleteDataset(dd.id);
-      confirmDelete.set(false);
-      toast.success('Dataset removed', `${dd.name} is no longer registered. Files on disk were not touched.`);
-      router.go('/datasets');
-    } catch (e) {
-      deleteStatus.error(e, 'Could not delete the dataset');
-    } finally {
-      deleting.set(false);
-    }
-  }
 
   // ---------- derived view data ----------
   const total = computed(() => {
@@ -156,13 +187,19 @@ export default function Dataset() {
     return dd ? imageCount(dd) : 0;
   });
   // The check's counts by severity (servers before them send none; a failure only leaves them out).
-  const check = new Resource((s) => hub.api.datasetIssues(id.get(), { limit: 0 }, s));
+  // Not for a dataset that cannot be read: its check would fail the same way.
+  const check = new Resource((s) => (failure.get() || missingError(hub.api, id.get()) !== undefined ? Promise.resolve(null) : hub.api.datasetIssues(id.get(), { limit: 0 }, s)));
   const counts = computed(() => check.data?.counts);
   const findings = computed(() => {
     const dd = d();
     return dd?.stats ? findingCount(healthChecks(dd, dd.stats, counts.get())) : 0;
   });
   const filtered = computed(() => cls.get() !== undefined || split.get() !== 'all');
+  /** Why Train is off: no image is in the train split (a COCO test file registered alone puts them all in test). */
+  const untrainable = computed(() => {
+    const dd = d();
+    return dd ? noTraining(dd) : null;
+  });
   const splitOptions = computed(() => {
     const dd = d();
     if (!dd) return [];
@@ -173,36 +210,78 @@ export default function Dataset() {
   });
 
   function openImage(_i: number, imageId: string) {
-    setQuery({ image: imageId });
+    setQuery({ image: imageId }, true);
   }
+
+  /** The image the inspector last showed, revealed in the grid when it closes (by Close, Esc or Back). */
+  const reveal = signal<{ i: number } | null>(null);
+  let lastImage: string | null = null;
+  effect(() => {
+    const im = imageParam.get();
+    if (im === null && lastImage !== null) {
+      const i = untrack(() => pager.get()?.indexOf(lastImage!) ?? -1);
+      if (i >= 0) reveal.set({ i });
+    }
+    lastImage = im;
+  });
 
   const moreItems: MenuItem[] = [
     { label: 'Copy path', icon: Copy, onclick: copyPath },
-    { label: 'Delete dataset', icon: Trash, danger: true, onclick: () => confirmDelete.set(true) },
+    { label: 'Remove from FOLO', icon: Trash, danger: true, onclick: () => confirmDelete.set(true) },
   ];
 
   const dd = () => d()!;
+  const tg = () => target()!;
   const pg = () => pager.get()!;
   /** The filtered count, "…" until the first page answers. */
   const matched = () => (pager.get()?.total != null ? num(pager.get()!.total!) : '…');
 
   return (
     <>
-      {ds.error && !d() ? (
+      {failure.get() ? (
         /* Nothing to frame: the message frameless on the content edge (DESIGN_DIRECTION 8), as on Run and Not found;
-           the way back is the header's action, as on Model. */
+           the way back is the header's action, as on Model. A dataset that is still registered keeps its name and its
+           ⋯ menu, so it can always be removed. */
         <Page
-          title="Dataset"
+          title={listed.data?.name ?? 'Dataset'}
           actions={() => (
-            <Button icon={ArrowLeft} href={href('/datasets')}>
-              All datasets
-            </Button>
+            <>
+              <Button icon={ArrowLeft} href={href('/datasets')}>
+                All datasets
+              </Button>
+              {listed.data ? <Menu label="More dataset actions" items={moreItems} /> : null}
+            </>
           )}
         >
-          {ds.error instanceof ApiError && ds.error.status === 404 ? (
-            <ErrorState error={ds.error} title="Dataset not found" />
+          {gone.get() ? (
+            <ErrorState
+              error={failure.get()}
+              title="Folder missing"
+              hint="It was moved, renamed or deleted. Put it back and press Retry, or remove the dataset from FOLO: its files are never deleted."
+              retry={retry}
+              actions={
+                listed.data ? (
+                  <Button size="sm" icon={Trash} onclick={() => confirmDelete.set(true)}>
+                    Remove from FOLO
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : failure.get() instanceof ApiError && (failure.get() as ApiError).status === 404 ? (
+            <ErrorState error={failure.get()} title="Dataset not found" />
           ) : (
-            <ErrorState error={ds.error} title="Could not load this dataset" retry={() => ds.refresh()} />
+            <ErrorState
+              error={failure.get()}
+              title="Could not load this dataset"
+              retry={retry}
+              actions={
+                listed.data ? (
+                  <Button size="sm" icon={Trash} onclick={() => confirmDelete.set(true)}>
+                    Remove from FOLO
+                  </Button>
+                ) : undefined
+              }
+            />
           )}
         </Page>
       ) : !d() ? (
@@ -228,8 +307,8 @@ export default function Dataset() {
                   <span class="meta-sm num">
                     <Meta line>
                       <span class="faint">{dd().format}</span>
-                      <span>{num(total.get())} images</span>
-                      <span>{dd().classes.length} classes</span>
+                      <span>{count(total.get(), 'image')}</span>
+                      <span>{count(dd().classes.length, 'class')}</span>
                     </Meta>
                   </span>
                 ) : (
@@ -241,7 +320,7 @@ export default function Dataset() {
                     <span class="num">{num(dd().splits.train)} train</span>
                     <span class="num">{num(dd().splits.val)} val</span>
                     <span class="num">{num(dd().splits.test)} test</span>
-                    <span class="num">{dd().classes.length} classes</span>
+                    <span class="num">{count(dd().classes.length, 'class')}</span>
                     <span class="faint">added {ago(dd().created)}</span>
                   </Meta>
                 )}
@@ -249,16 +328,28 @@ export default function Dataset() {
             )}
             actions={() => (
               <>
-                {phone() ? (
-                  /* Phones: the page's main action keeps a word (an icon-only lime square does not say what it does). */
-                  <Button variant="primary" icon={Play} aria-label="Train on this dataset" href={href(`/runs/new?dataset=${encodeURIComponent(dd().id)}`)}>
-                    Train
-                  </Button>
-                ) : (
-                  <Button variant="primary" icon={Play} href={href(`/runs/new?dataset=${encodeURIComponent(dd().id)}`)}>
-                    Train on this dataset
-                  </Button>
-                )}
+                {/* A dataset with no training images cannot train: the action says so instead of leading to a run that fails. */}
+                <Gate reason={untrainable.get()?.reason}>
+                  {(why) =>
+                    phone() ? (
+                      /* Phones: the page's main action keeps a word (an icon-only lime square does not say what it does). */
+                      <Button
+                        variant="primary"
+                        icon={Play}
+                        aria-label="Train on this dataset"
+                        disabled={!!why()}
+                        aria-describedby={why()}
+                        href={href(`/runs/new?dataset=${encodeURIComponent(dd().id)}`)}
+                      >
+                        Train
+                      </Button>
+                    ) : (
+                      <Button variant="primary" icon={Play} disabled={!!why()} aria-describedby={why()} href={href(`/runs/new?dataset=${encodeURIComponent(dd().id)}`)}>
+                        Train on this dataset
+                      </Button>
+                    )
+                  }
+                </Gate>
                 <Menu label="More dataset actions" items={moreItems} />
               </>
             )}
@@ -277,10 +368,19 @@ export default function Dataset() {
             </div>
 
             <div id="ds-tab-panel" role="tabpanel" aria-labelledby={`ds-tab-${tab.get()}`} class="panel">
+              {untrainable.get() ? (
+                <p class="no-train">
+                  <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+                  <span>
+                    No training images: {untrainable.get()!.where}. Training needs a train split, such as <span class="mono">images/train/</span> in a YOLO
+                    folder or a COCO <span class="mono">instances_train.json</span>.
+                  </span>
+                </p>
+              ) : null}
               {tab.get() === 'stats' ? (
                 <>
                   {dd().stats ? (
-                    <StatsTab dataset={dd()} stats={dd().stats!} counts={counts.get()} onclass={(c) => setQuery({ tab: null, class: String(c), image: null })} />
+                    <StatsTab dataset={dd()} stats={dd().stats!} counts={counts.get()} onclass={(c) => setQuery({ tab: null, class: String(c), image: null }, !filtered.peek())} />
                   ) : (
                     <Panel>
                       <EmptyState icon={ImageOff} title="No statistics" description="The server did not return statistics for this dataset." />
@@ -298,7 +398,7 @@ export default function Dataset() {
                           size="sm"
                           options={splitOptions.get().map((o) => ({ value: o.value, label: o.value === 'all' ? o.label : `${o.label} · ${o.meta}` }))}
                           value={split.get()}
-                          onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
+                          onchange={(s) => setFilter({ split: s === 'all' ? null : s })}
                         />
                       </span>
                     ) : (
@@ -307,7 +407,7 @@ export default function Dataset() {
                         size="sm"
                         options={splitOptions.get()}
                         value={split.get()}
-                        onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
+                        onchange={(s) => setFilter({ split: s === 'all' ? null : s })}
                       />
                     )}
                     <ClassPicker
@@ -315,7 +415,7 @@ export default function Dataset() {
                       classes={dd().classes}
                       counts={dd().stats?.class_counts}
                       value={cls.get()}
-                      onchange={(c) => setQuery({ class: c === undefined ? null : String(c), image: null })}
+                      onchange={(c) => setFilter({ class: c === undefined ? null : String(c) })}
                     />
                     {/* Phones, filtered: the count and Clear on a row of their own under the pickers ("1,873 of 2,400"). */}
                     {phone() && filtered.get() ? <span class="break" aria-hidden="true"></span> : null}
@@ -333,14 +433,14 @@ export default function Dataset() {
                         </>
                       ) : filtered.get() ? (
                         <>
-                          {matched()} of {num(total.get())} images
+                          {matched()} of {count(total.get(), 'image')}
                         </>
                       ) : (
-                        <>{num(total.get())} images</>
+                        <>{count(total.get(), 'image')}</>
                       )}
                     </span>
                     {filtered.get() ? (
-                      <button type="button" class="clear" aria-label="Clear filters" onclick={() => setQuery({ split: null, class: null, image: null })}>
+                      <button type="button" class="clear" aria-label="Clear filters" onclick={() => setFilter({ split: null, class: null })}>
                         <X size={12} strokeWidth={2} aria-hidden="true" />
                         Clear
                       </button>
@@ -374,12 +474,12 @@ export default function Dataset() {
                             ? `No ${split.get() === 'all' ? '' : `${split.get()} `}image contains a ${dd().classes[cls.get()!]}.`
                             : `The ${split.get()} split is empty.`
                         }
-                        actions={() => <Button onclick={() => setQuery({ split: null, class: null })}>Clear filters</Button>}
+                        actions={() => <Button onclick={() => setFilter({ split: null, class: null })}>Clear filters</Button>}
                       />
                     </Panel>
                   ) : pager.get() ? (
                     <Key when={pager.get()}>
-                      <ImageGrid pager={pg()} classes={dd().classes} density={density()} boxes={boxes()} only={only.get()} onopen={openImage} />
+                      <ImageGrid pager={pg()} classes={dd().classes} density={density()} boxes={boxes()} only={only.get()} reveal={reveal.get()} onopen={openImage} />
                     </Key>
                   ) : null}
                 </>
@@ -403,26 +503,11 @@ export default function Dataset() {
             />
           ) : null}
 
-          <Dialog
-            bind:open={confirmDelete}
-            title={`Delete ${dd().name}?`}
-            size="sm"
-            status={deleteStatus}
-            footer={() => (
-              <>
-                <Button onclick={() => confirmDelete.set(false)}>Cancel</Button>
-                <Button variant="destructive" icon={Trash} loading={deleting.get()} onclick={remove}>
-                  Delete dataset
-                </Button>
-              </>
-            )}
-          >
-            <p class="confirm">
-              <b>{dd().name}</b> will be unregistered from FOLO. The files in <span class="mono">{dd().path}</span> stay on disk, and runs that used it keep their results.
-            </p>
-          </Dialog>
         </>
       )}
+      {target() ? (
+        <RemoveDialog bind:open={confirmDelete} dataset={tg()} />
+      ) : null}
     </>
   );
 }
@@ -517,16 +602,17 @@ css`
       height: 44px;
     }
   }
-  .confirm {
+  .no-train {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
-  .confirm b {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-  }
-  .confirm .mono {
-    color: var(--text-primary);
-    overflow-wrap: anywhere;
+  .no-train :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--warning-text);
   }
   .sk-page {
     max-width: calc(var(--size-content-max) + 2 * var(--space-6));

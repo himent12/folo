@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The labeling editor on the job page, over the mock: saving (also while another image opens or the boxes change),
 // leaving with unsaved boxes by any route, saving an image not labeled yet as it is, its keys only while it is the
-// topmost dialog, and the keyboard's way to add, move and resize a box.
+// topmost dialog, the keyboard's way to add, move and resize a box, and "Ask the agent again" following its run.
 import { flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
@@ -46,8 +46,8 @@ function deferred<T>() {
 }
 
 /** The fresh job's page with image `image` open in the editor (its 40 images are pending, without boxes). */
-async function openEditor(image = '1') {
-  const at = `#/datasets/label/lb_7c21?image=${image}`;
+async function openEditor(image = '1', job = 'lb_7c21') {
+  const at = `#/datasets/label/${job}?image=${image}`;
   history.replaceState(null, '', at);
   router.route = parse(at);
   c = mount(LabelJobPage, { target });
@@ -239,9 +239,157 @@ describe('the labeling editor: keys', () => {
     expect(sent.mock.calls[0]![2]).toEqual([{ class: 0, x1, y1, x2: x1 + side + 1, y2: y1 + side + 10 } satisfies Box]);
   });
 
+  it('keeps working after Save: focus dropped to the page by the disabled button comes back to the editor', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    click(inEditor('Save'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(footer()).toMatch(/No changes yet/);
+    });
+    // The browser moves focus off a button that turns disabled: to the body, outside the dialog.
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(key('j', {}, document.body).defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(router.route.query.get('image')).toBe('2'));
+    expect(document.activeElement).toBe(editor());
+    // Not while another dialog is open over it.
+    const over = document.createElement('dialog');
+    document.body.appendChild(over);
+    over.showModal();
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(key('k', {}, document.body).defaultPrevented).toBe(false);
+    over.remove();
+  });
+
   it('leaves the arrows alone when no box is selected', async () => {
     await openEditor('1');
     expect(key('ArrowRight').defaultPrevented).toBe(false);
+  });
+});
+
+describe('the labeling editor: asking the agent again', () => {
+  it("follows the run it started: the line becomes the image's new boxes once the run ends", async () => {
+    await openEditor('2');
+    const ask = await vi.waitFor(() => {
+      flushSync();
+      const b = inEditor('Ask Claude Code');
+      if (!b || b.disabled) throw new Error('agents loading');
+      return b;
+    });
+    click(ask);
+    const line = () => editor()!.querySelector('.dialog-status')?.textContent ?? '';
+    await vi.waitFor(() => {
+      flushSync();
+      expect(line()).toMatch(/is labeling this image again/);
+    });
+    // The mock's agent answers a call 1.5 s after the run starts: its stream applies it on the next tick.
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 2000);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(line()).toMatch(/New boxes/);
+    });
+    expect(line()).not.toMatch(/is labeling this image again/);
+  });
+
+  // review R3: the answer to "Ask the agent again" came after another image was opened, and that image's line said the
+  // agent was labeling it, then "New boxes" with its own unchanged boxes.
+  it.each([
+    ['Next', () => void key('j')],
+    ['closing and opening another image', () => (router.go('/datasets/label/lb_7c21'), router.go('/datasets/label/lb_7c21?image=3'))],
+  ])('keeps its line and outcome on the image that asked, after %s', async (_, leave) => {
+    await openEditor('2');
+    const ask = await vi.waitFor(() => {
+      flushSync();
+      const b = inEditor('Ask Claude Code');
+      if (!b || b.disabled) throw new Error('agents loading');
+      return b;
+    });
+    const answer = deferred<void>();
+    const start = hub.api.startLabeling.bind(hub.api);
+    const started = vi.spyOn(hub.api, 'startLabeling').mockImplementation(async (...a) => (await answer.promise, start(...a)));
+    click(ask);
+    expect(started).toHaveBeenCalledWith('lb_7c21', expect.objectContaining({ image_ids: ['2'] }));
+    leave();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('3');
+      expect(editor()?.open && editor()?.querySelector('.ed')).toBeTruthy();
+    });
+    const line = () => editor()!.querySelector('.dialog-status')?.textContent ?? '';
+    answer.resolve();
+    await started.mock.results[0]!.value;
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(line()).not.toMatch(/again/);
+    // The run goes on and ends (the mock's agent answers 1.5 s after it starts); image 3's line says nothing of it.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2000);
+    await vi.waitFor(async () => {
+      flushSync();
+      const two = (await hub.api.labelImages('lb_7c21', { limit: 5 })).images.find((i) => i.id === '2');
+      expect(two?.status).toBe('labeled');
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    flushSync();
+    expect(router.route.query.get('image')).toBe('3');
+    expect(line()).not.toMatch(/again|New boxes/);
+  });
+});
+
+describe('the labeling editor: reviewing', () => {
+  // lb_51d0: 36 images labeled, the first 22 reviewed.
+  it('marks labels that look right reviewed with Enter and opens the next image to review', async () => {
+    await openEditor('23', 'lb_51d0');
+    expect(footer()).toMatch(/Labels right\?/);
+    expect(inEditor('Save')).toBeUndefined();
+    expect(key('Enter').defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(router.route.query.get('image')).toBe('24'));
+    const page = await hub.api.labelImages('lb_51d0', { limit: 24 });
+    expect(page.images[22]).toMatchObject({ id: '23', source: 'agent', reviewed: true });
+    expect(page.images[23]!.reviewed).toBe(false);
+  });
+
+  it('says a reviewed image is reviewed, and can take it back; Enter on a button is the button’s', async () => {
+    await openEditor('5', 'lb_51d0');
+    expect(footer()).toMatch(/^Reviewed\./);
+    expect(inEditor('Looks right')).toBeUndefined();
+    expect(key('Enter').defaultPrevented).toBe(false);
+    click(inEditor('Mark not reviewed'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(inEditor('Looks right')).toBeDefined();
+    });
+    expect(key('Enter', {}, inEditor('Discard')!).defaultPrevented).toBe(false);
+    expect(router.route.query.get('image')).toBe('5');
+  });
+});
+
+describe('the labeling editor: saving from the keyboard (v-models-label N3)', () => {
+  it('saves with Ctrl+S and stays, never the browser’s Save page', async () => {
+    await openEditor('23', 'lb_51d0');
+    const sent = vi.spyOn(hub.api, 'updateLabelImage');
+    // Nothing to save: the key is still the editor's.
+    expect(key('s', { ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(sent).not.toHaveBeenCalled();
+    click(inEditor('Add box'));
+    expect(footer()).toMatch(/Unsaved changes\. .* saves them and opens the next image to review\./);
+    expect(key('s', { metaKey: true }).defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(footer()).toMatch(/^Reviewed\./);
+    });
+    expect(router.route.query.get('image')).toBe('23');
+  });
+
+  it('saves with Enter when there are changes, and opens the next image to review', async () => {
+    await openEditor('23', 'lb_51d0');
+    click(inEditor('Add box'));
+    expect(key('Enter').defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(router.route.query.get('image')).toBe('24'));
+    const page = await hub.api.labelImages('lb_51d0', { limit: 24 });
+    expect(page.images[22]).toMatchObject({ id: '23', source: 'manual', reviewed: true });
+    expect(page.images[22]!.boxes.length).toBeGreaterThan(0);
   });
 });
 

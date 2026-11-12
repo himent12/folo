@@ -9,6 +9,7 @@ mod cloud;
 mod datasets;
 mod events;
 mod fixtures;
+mod hold;
 mod predictions;
 mod throughput;
 mod training;
@@ -51,6 +52,10 @@ pub struct MockBackend {
     connections: Mutex<Vec<CloudConnection>>,
     /// Vision benchmarks and coding-agent fixtures (lazily seeded on first use).
     benches: Arc<super::mock_bench::MockBench>,
+    /// Datasets unregistered and runs deleted through the API (a deleted run's models go with it).
+    removed: Mutex<std::collections::HashSet<String>>,
+    /// Calls a test holds back once answered ([`MockBackend::hold`]).
+    holds: Mutex<Vec<(&'static str, Arc<hold::Gate>)>>,
     clock: Clock,
 }
 
@@ -139,8 +144,19 @@ impl MockBackend {
     fn fixture(&self, id: &str) -> ApiResult<&DatasetFixture> {
         self.datasets
             .iter()
-            .find(|d| d.ds.id == id)
+            .find(|d| d.ds.id == id && !self.is_removed(id))
             .ok_or_else(|| ApiError::new("dataset_not_found", format!("No dataset with id {id}")))
+    }
+
+    /// Lists a removed dataset (or run) again, as registering its folder again does on a server.
+    #[cfg(test)]
+    pub fn restore(&self, id: &str) {
+        self.removed.lock().unwrap().remove(id);
+    }
+
+    /// A dataset or run deleted through the API.
+    fn is_removed(&self, id: &str) -> bool {
+        self.removed.lock().unwrap().contains(id)
     }
 
     /// Current step of a run fixture, advancing live runs with the clock.

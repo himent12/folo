@@ -96,6 +96,26 @@ describe('Resource', () => {
     expect(lastSignal?.aborted).toBe(true);
   });
 
+  it("drops the last server's data on a reconnect: the new one's failure shows, not that data (review R4)", async () => {
+    let fail = false;
+    let r!: Resource<string>;
+    const stop = root(() => {
+      r = new Resource(() => (fail ? Promise.reject(new Error('HTTP 500')) : Promise.resolve('server A')));
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.data).toBe('server A');
+
+    fail = true;
+    hub.epoch++;
+    flushSync();
+    expect([r.data, r.updated, r.loading]).toEqual([undefined, null, true]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.data).toBeUndefined();
+    expect((r.error as Error).message).toBe('HTTP 500');
+    stop();
+  });
+
   it('ignores results that arrive after cleanup', async () => {
     const d = deferred<number>();
     let r!: Resource<number>;

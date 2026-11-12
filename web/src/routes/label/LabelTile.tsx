@@ -1,8 +1,10 @@
 /**
  * One image of a labeling job in the grid, in each of its states: waiting (the image alone), with the agent (a live
  * mark), labeled (its boxes, or "No objects" at rest, so a background image never reads as a tile that failed to
- * load), failed (dimmed, with the word). An image corrected by hand says "Edited".
+ * load), failed (dimmed, with the word). An image corrected by hand says "Edited", one a person checked (marked right,
+ * or saved by hand) "Reviewed": an edited image says both, and "Mark not reviewed" takes the second away.
  */
+import Check from '$icons/check';
 import CircleAlert from '$icons/circle-alert';
 import Pencil from '$icons/pencil';
 import { computed, css } from 'fw';
@@ -58,6 +60,12 @@ export default function LabelTile(props: LabelTileProps) {
           <span class="mark">
             <Pencil size={12} strokeWidth={2} aria-hidden="true" />
             Edited
+          </span>
+        ) : null}
+        {labeled() && props.img.reviewed ? (
+          <span class="mark">
+            <Check size={12} strokeWidth={2} aria-hidden="true" />
+            Reviewed
           </span>
         ) : null}
       </span>

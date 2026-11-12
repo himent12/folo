@@ -3,8 +3,10 @@ import Check from '$icons/check';
 import CircleCheck from '$icons/circle-check';
 import FlaskConical from '$icons/flask-conical';
 import PlugZap from '$icons/plug-zap';
-import { computed, css, signal } from 'fw';
+import WifiOff from '$icons/wifi-off';
+import { computed, css, effect, signal } from 'fw';
 import { HttpApi } from '$lib/api/client';
+import { isHealth, NOT_FOLO, refusal } from '$lib/api/handshake';
 import { hub } from '$lib/api/index';
 import { prefs } from '$lib/prefs';
 import Button from '$lib/ui/Button';
@@ -14,6 +16,22 @@ import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
 
 type Test = { ok: true; version: string; mock: boolean; ms: number } | { ok: false; message: string };
+
+/**
+ * The address to use for what was typed: trimmed, no trailing slash, and `http://` assumed when no scheme was typed
+ * (`localhost:7915`, `127.0.0.1:7915`), as a browser's address bar does. Empty stays empty (this page's server).
+ */
+export function serverAddress(typed: string): string {
+  const v = typed.trim().replace(/\/+$/, '');
+  return v && !/^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? `http://${v}` : v;
+}
+
+/** What is wrong with an address (as `serverAddress` gives it), in words for the field; null when it will do. */
+export function addressProblem(address: string): string | null {
+  if (!address) return null;
+  if (!/^https?:\/\//i.test(address)) return 'The server URL must start with http:// or https://.';
+  return /^https?:\/\/[^\s/]+(?:\/\S*)?$/i.test(address) ? null : 'Use a full address like http://127.0.0.1:7878.';
+}
 
 export default function ConnectionPanel() {
   // ---- connection ----
@@ -32,23 +50,35 @@ export default function ConnectionPanel() {
   });
   const forced =typeof location !== 'undefined' && new URLSearchParams(location.search).get('mock') === '1';
 
-  const normalized = computed(() => url.get().trim().replace(/\/+$/, ''));
-  const invalid = computed(() => normalized.get() !== '' && !/^https?:\/\/[^\s/]+/i.test(normalized.get()));
+  const normalized = computed(() => serverAddress(url.get()));
+  const problem = computed(() => addressProblem(normalized.get()));
+  const invalid = computed(() => problem.get() !== null);
   const dirty = computed(() => normalized.get() !== prefs.serverUrl);
+  // A test result is about the address it tested: another address clears it (and a test still out is dropped).
+  let tested = 0;
+  effect(() => {
+    void normalized.get();
+    tested++;
+    test.set(null);
+    testing.set(false);
+  });
 
   async function runTest() {
     if (invalid.peek()) return;
     testing.set(true);
     test.set(null);
+    const mine = tested;
     const t0 = performance.now();
     try {
-      const h = await new HttpApi(normalized.peek()).health(AbortSignal.timeout(3000));
-      test.set({ ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 });
+      const h: unknown = await new HttpApi(normalized.peek()).health(AbortSignal.timeout(3000));
+      if (mine !== tested) return;
+      test.set(isHealth(h) ? { ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 } : { ok: false, message: NOT_FOLO });
     } catch (e) {
       const timeout = e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError');
-      test.set({ ok: false, message: timeout ? 'No answer within 3 s.' : e instanceof Error ? e.message : String(e) });
+      const message = timeout ? 'No answer within 3 s.' : (refusal(e) ?? (e instanceof Error ? e.message : String(e)));
+      if (mine === tested) test.set({ ok: false, message });
     } finally {
-      testing.set(false);
+      if (mine === tested) testing.set(false);
     }
   }
 
@@ -59,17 +89,27 @@ export default function ConnectionPanel() {
     await hub.connect();
     if (hub.mode === 'live') toast.success('Connected', `folo serve ${hub.version} at ${hub.serverUrl}`);
     else if (forced) toast.info('Saved', 'Demo data stays on while the address has ?mock=1.');
-    else toast.error(new Error(`Could not reach ${hub.serverUrl}; showing demo data.`), 'Saved, but not connected');
+    else if (hub.refused) toast.error(new Error(`${hub.serverUrl}: ${hub.refused} Studio keeps trying.`), 'Saved, but not connected');
+    else toast.error(new Error(`No answer from ${hub.serverUrl} yet. Studio keeps trying.`), 'Saved, but not connected');
+  }
+
+  /** Demo data only when asked for: this page again with `?mock=1` (the screen kept). */
+  function useDemo() {
+    const to = new URL(location.href);
+    to.searchParams.set('mock', '1');
+    location.assign(to.href);
   }
 
   return (
     <Panel title="Connection" id="connection" divided>
       <div class="stack">
-        <div class="status" data-mode={hub.mode}>
+        <div class="status" data-mode={hub.offline ? 'offline' : hub.mode}>
           {/* Demo data is a mode, not a degraded state: the sidebar's neutral flask, never the warning hue. A server
               that answers gets the mark and the word Settings > Cloud gives a working connection (a check in a
               circle, "Connected"), not a ringed dot and "Live". */}
-          {hub.mode === 'mock' ? (
+          {hub.offline ? (
+            <WifiOff class="led-glyph off" size={16} strokeWidth={1.75} aria-hidden="true" />
+          ) : hub.mode === 'mock' ? (
             <FlaskConical class="led-glyph" size={16} strokeWidth={1.75} aria-hidden="true" />
           ) : hub.mode === 'live' ? (
             <CircleCheck class="led-glyph ok" size={16} strokeWidth={1.75} aria-hidden="true" />
@@ -77,7 +117,22 @@ export default function ConnectionPanel() {
             <span class="led" aria-hidden="true"></span>
           )}
           <div class="status-text">
-            {hub.mode === 'live' ? (
+            {hub.offline ? (
+              <>
+                <p class="s-title">{hub.refused ? 'Not connected' : 'Server offline'}</p>
+                <p class="s-desc">
+                  {hub.refused ? (
+                    <>
+                      <span class="mono">{hub.serverUrl}</span>: {hub.refused} Retrying…
+                    </>
+                  ) : (
+                    <>
+                      No answer from <span class="mono">{hub.serverUrl}</span>. Retrying…
+                    </>
+                  )}
+                </p>
+              </>
+            ) : hub.mode === 'live' ? (
               <>
                 <p class="s-title">
                   Connected <span class="mono faint">folo serve {hub.version}</span>
@@ -90,15 +145,7 @@ export default function ConnectionPanel() {
               <>
                 {/* What it means for the user, in one line; why (the address, the endpoint) is in Technical details. */}
                 <p class="s-title">Using demo data</p>
-                <p class="s-desc">
-                  {hub.reason === 'forced' ? (
-                    'Sample runs, datasets and models.'
-                  ) : (
-                    <>
-                      No server answered. Start <span class="mono">folo serve</span> or enter its address below.
-                    </>
-                  )}
-                </p>
+                <p class="s-desc">Sample runs, datasets and models.</p>
               </>
             ) : (
               <>
@@ -111,7 +158,7 @@ export default function ConnectionPanel() {
           </div>
         </div>
 
-        <Field label="Server URL" for="server-url" hint="Leave blank to use this server." error={invalid.get() ? 'Use a full address like http://127.0.0.1:7878.' : null}>
+        <Field label="Server URL" for="server-url" hint="Leave blank to use this server." error={problem.get()}>
           <div class="url-row">
             <Input
               id="server-url"
@@ -162,15 +209,7 @@ export default function ConnectionPanel() {
               <>
                 <dt>Demo data</dt>
                 <dd>
-                  {hub.reason === 'forced' ? (
-                    <>
-                      On because the address has <span class="mono">?mock=1</span>; remove it to connect to a server.
-                    </>
-                  ) : (
-                    <>
-                      Shown because <span class="mono">{hub.serverUrl}</span> did not answer.
-                    </>
-                  )}
+                  On because the address has <span class="mono">?mock=1</span>; remove it to connect to a server.
                 </dd>
               </>
             ) : null}
@@ -188,6 +227,12 @@ export default function ConnectionPanel() {
         </details>
 
         <div class="row-actions">
+          {/* No server to show: sample data is a choice, never a fallback Studio makes by itself. */}
+          {hub.offline && hub.mode === 'connecting' ? (
+            <Button variant="ghost" icon={FlaskConical} onclick={useDemo}>
+              Use demo data
+            </Button>
+          ) : null}
           {/* The primary action only once there is something to save; reconnecting as is stays secondary. */}
           <Button variant={dirty.get() ? 'primary' : 'secondary'} disabled={invalid.get()} onclick={save}>
             {dirty.get() ? 'Save and reconnect' : 'Reconnect'}
@@ -229,6 +274,9 @@ css`
   }
   .status :global(.led-glyph.ok) {
     color: var(--success-text);
+  }
+  .status :global(.led-glyph.off) {
+    color: var(--danger-text);
   }
   .status-text {
     display: grid;
@@ -343,7 +391,9 @@ css`
   }
   .row-actions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
+    gap: var(--space-2);
     padding-top: var(--space-3);
     border-top: 1px solid var(--line-subtle);
   }

@@ -70,10 +70,9 @@ impl FoloApp {
                 window,
                 cx,
                 act(move |this, w, cx| {
-                    this.play_model = Some(mid.clone());
                     this.play_pred = Load::Idle;
                     this.navigate(Route::Playground, w, cx);
-                    this.run_predict(cx);
+                    this.pick_play_model(mid.clone(), cx);
                 }),
             )
             .into_any_element();
@@ -167,7 +166,11 @@ impl FoloApp {
             });
         // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
         // The headline names the split; this tile's narrow caption says where on the curve.
-        let op_point = pr_caption(mm.as_ref().and_then(|x| x.best_f1_conf), "", true);
+        let op_point = pr_caption(
+            mm.as_ref().and_then(|x| operating_conf(x.best_f1_conf, x.precision, x.recall)),
+            "",
+            true,
+        );
         let tile = |content: folo_ui::Div| {
             div()
                 .flex_grow()

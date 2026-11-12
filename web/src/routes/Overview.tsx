@@ -7,20 +7,25 @@ import WifiOff from '$icons/wifi-off';
 import RefreshCwOff from '$icons/refresh-cw-off';
 import { computed, css, For, Key, signal } from 'fw';
 import { runProgress } from '$lib/api/progress';
+import { readDatasets } from '$lib/api/datasetReads';
 import { hub } from '$lib/api/index';
+import { modelsResource } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Run } from '$lib/api/types';
 import RunSpark from '$lib/charts/RunSpark';
 import ClassStrip from '$lib/detect/ClassStrip';
-import { ago, bytes, compact, metric } from '$lib/format';
+import { ago, bytes, compact, count, metric } from '$lib/format';
 import { rankByContext, scoreContext, scoreTag } from '$lib/scoreSummary';
 import { balanced } from '$lib/ui/balancedGrid';
 import { failureCause } from '$lib/oom';
 import { tooltip } from '$lib/ui/tooltip';
 import { prefs } from '$lib/prefs';
+import { runDatasetLabel } from '$lib/runDataset';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
+import { watched } from '$lib/shell/runList';
+import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -32,9 +37,14 @@ import TableState from '$lib/ui/TableState';
 import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
+import { PROBLEM_LABEL } from './datasets/problem';
 import LiveRunCard from './overview/LiveRunCard';
+import { slotRun } from './overview/slot';
+import AlsoRunning from './overview/AlsoRunning';
 import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
+import { hasFeature } from '$lib/api/queue';
+import { LABEL_FEATURE } from '$lib/label';
 
 const total = (d: Dataset) => d.splits.train + d.splits.val + d.splits.test;
 
@@ -42,22 +52,29 @@ export default function Overview() {
   setCrumbs({ label: 'Overview' });
 
   const runs = new Resource((s) => hub.api.runs(s), { poll: 5000 });
-  const models = new Resource((s) => hub.api.models(s));
-  // The list endpoint has no stats; fetch each dataset for its class balance.
-  const datasets = new Resource(async (s) => {
-    const list = await hub.api.datasets(s);
-    return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
-  });
+  // Kept current as runs end or go (lib/api/models), as on every screen that lists models.
+  const models = modelsResource();
+  // The list endpoint has no stats; each dataset is read for its class balance (a missing folder is marked, and not
+  // asked about again on every visit: lib/api/datasetReads).
+  const datasets = new Resource(readDatasets);
+  // Which optional features the server has (labeling, benchmarks): what else Overview can point to.
+  const system = new Resource((s) => hub.api.system(s));
+  // The run list the sidebar's live card reads (the shell polls it every 2 s, shell/RunWatch) while it is current, so the
+  // Training card and Recent runs never say something the sidebar contradicts; this page's own list when the shell's
+  // stopped refreshing.
+  const runList = computed(() => (watched.runs && (watched.since === null || !runs.data) ? watched.runs : runs.data));
+  const runsFailed = computed(() => !!runs.error && !runList.get());
 
-  const live = computed(() => runs.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
+  // The run training, or starting (./overview/slot): a run just started shows here at once, as it does in the sidebar.
+  const live = computed(() => slotRun(runList.get()));
   const recent = computed(() => {
     const id = live.get()?.id;
-    return (runs.data ?? []).filter((r) => r.id !== id).slice(0, 6);
+    return (runList.get() ?? []).filter((r) => r.id !== id).slice(0, 6);
   });
   const all = [runs, models, datasets];
   // Nothing loaded and every request failed: one page-level block says why and how to recover, instead of four panels
   // each saying the same thing (DESIGN_DIRECTION §2.8).
-  const down = computed(() => all.every((r) => !!r.error && !r.data));
+  const down = computed(() => runsFailed.get() && [models, datasets].every((r) => !!r.error && !r.data));
   // Something loaded, then the server stopped answering: keep it, and say once that it is stale. Two clocks, never
   // confused (lib/api/freshness): the lists' snapshots and the live run's stream. While the stream still streams, only
   // the lists are behind, and the notice says exactly that; the live card stays live. When the stream went quiet too,
@@ -67,26 +84,40 @@ export default function Overview() {
   const streamLost = signal<number | null>(null);
   const streaming = computed(() => !!live.get() && streamLost.get() === null);
   const now = new Now(() => stale.get());
-  const fresh = computed(() => datasets.data?.length === 0 && runs.data?.length === 0 && models.data?.length === 0);
+  const noDatasets = computed(() => datasets.data?.length === 0);
+  const fresh = computed(() => noDatasets.get() && runList.get()?.length === 0 && models.data?.length === 0);
   function retryAll() {
     void runs.refresh();
     void models.refresh();
     void datasets.refresh();
   }
   const dsById = computed(() => new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
-  const runById = computed(() => new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r])));
+  // A run's dataset by name, a placeholder while the datasets load, the name it recorded once it was removed.
+  const dsLabel = (r: Run) => runDatasetLabel(r, datasets.data ? dsById.get() : undefined, !!datasets.error);
+  const runById = computed(() => new Map<string, Run>((runList.get() ?? []).map((r) => [r.id, r])));
   // A score ranks only against scores on the same dataset and split (lib/scoreSummary): the best of each comparable
   // group, its dataset named above it and any split but validation tagged beside the score. Imported and published
   // weights have no known split here, so they are counted under the list, not ranked in it.
   const ranking = computed(() => {
     const runMap = runById.get();
     const dsMap = dsById.get();
-    return rankByContext(models.data ?? [], (m) => scoreContext(m, runMap, dsMap), (m) => m.metrics?.map50_95, (m) => m.created);
+    return rankByContext(
+      models.data ?? [],
+      (m) => scoreContext(m, runMap, dsMap),
+      (m) => m.metrics?.map50_95,
+      (m) => m.created,
+      (m) => m.name,
+    );
   });
   const topModels = computed(() => ranking.get().groups.slice(0, 6).map((g) => ({ m: g.items[0]!, ctx: g.ctx })));
   const unranked = computed(() => ranking.get().unranked.length + Math.max(0, ranking.get().groups.length - 6));
   // The ranking needs each model's run and dataset: wait for both (a failed one leaves the splits unknown).
-  const rankReady = computed(() => !!models.data && (!!runs.data || !!runs.error) && (!!datasets.data || !!datasets.error));
+  const rankReady = computed(() => !!models.data && (!!runList.get() || !!runs.error) && (!!datasets.data || !!datasets.error));
+  // Why: a model's split is known from its run and dataset, so when either list failed to load that is the reason.
+  const unrankedWhy = computed(() => {
+    const failed = [runsFailed.get() && 'runs', !!datasets.error && !datasets.data && 'datasets'].filter(Boolean);
+    return failed.length ? `could not load ${failed.join(' and ')}` : 'evaluation split unknown';
+  });
   const firstDatasets = computed(() => (datasets.data ?? []).slice(0, 6));
 
   const retry = () => (
@@ -99,41 +130,60 @@ export default function Overview() {
     <Page title="Overview">
       {fresh.get() ? (
         // A fresh install: one path forward instead of a page of empty panels.
-        <section class="onboard" aria-labelledby="onboard-title">
-          <div class="ob-head">
-            <h2 id="onboard-title">Train your first detector</h2>{' '}
-            <p>Three steps from a folder of images to boxes on new ones.</p>
-          </div>{' '}
-          <ol class="steps">
-            <li class="on">
-              <span class="n">1</span>{' '}
-              <div>
-                <b>Add a dataset</b>
-                <span>Register a YOLO or COCO folder, or generate a sample set of shapes in seconds.</span>
-              </div>{' '}
-              <div class="ob-actions">
-                <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>
-                  Add dataset
-                </Button>{' '}
-                <Button href={href('/datasets?add=synthetic')}>Generate sample set</Button>
-              </div>
-            </li>{' '}
-            <li>
-              <span class="n">2</span>{' '}
-              <div>
-                <b>Train</b>
-                <span>Pick a model size; loss, mAP and validation samples stream in live.</span>
-              </div>
-            </li>{' '}
-            <li>
-              <span class="n">3</span>{' '}
-              <div>
-                <b>Inspect predictions</b>
-                <span>Drop any image into the Playground and tune confidence and IoU instantly.</span>
-              </div>
-            </li>
-          </ol>
-        </section>
+        <>
+          <section class="onboard" aria-labelledby="onboard-title">
+            <div class="ob-head">
+              <h2 id="onboard-title">Train your first detector</h2>{' '}
+              <p>Three steps from a folder of images to boxes on new ones.</p>
+            </div>{' '}
+            <ol class="steps">
+              <li class="on">
+                <span class="n">1</span>{' '}
+                <div>
+                  <b>Add a dataset</b>
+                  <span>Register a YOLO or COCO folder, or generate a sample set of shapes in seconds.</span>
+                </div>{' '}
+                <div class="ob-actions">
+                  <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>
+                    Add dataset
+                  </Button>{' '}
+                  <Button href={href('/datasets?add=synthetic')}>Generate sample set</Button>
+                </div>
+                {hasFeature(system.data, LABEL_FEATURE) ? (
+                  // Label images lives under Datasets: the first step is where people with unlabeled images look for it.
+                  <p class="ob-alt">
+                    Have images but no labels?{' '}
+                    <a class="ob-link" href={href('/datasets/label')}>
+                      Label them with an agent
+                    </a>
+                  </p>
+                ) : !system.data && !system.error ? (
+                  // Until the server says what it has (a server just started takes seconds to), the line keeps its place,
+                  // so it never pops in under the buttons (v-shell N11); a real server always has labeling.
+                  <p class="ob-alt held" aria-hidden="true">
+                    Have images but no labels? <span class="ob-link">Label them with an agent</span>
+                  </p>
+                ) : null}
+              </li>{' '}
+              <li>
+                <span class="n">2</span>{' '}
+                <div>
+                  <b>Train</b>
+                  <span>Pick a model size; loss, mAP and validation samples stream in live.</span>
+                </div>
+              </li>{' '}
+              <li>
+                <span class="n">3</span>{' '}
+                <div>
+                  <b>Inspect predictions</b>
+                  <span>Drop any image into the Playground and tune confidence and IoU instantly.</span>
+                </div>
+              </li>
+            </ol>
+          </section>{' '}
+          {/* A labeling job can run before there is any dataset (it makes one). */}
+          <AlsoRunning system={system.data} />
+        </>
       ) : down.get() ? (
         // Nothing loaded and every request failed: one recovery block (Retry, Connection settings) in the frame the live
         // card would fill, the page's focal slot, never four panels each saying the server has not answered and never a
@@ -159,18 +209,36 @@ export default function Overview() {
             </div>
           ) : null}{' '}
           <div class="live">
-            {runs.error && !runs.data ? (
+            {runsFailed.get() ? (
               <Panel title="Training">
-                <ErrorState error={runs.error} retry={() => runs.refresh()} compact />
+                <ErrorState error={runs.error} retry={() => runs.refresh()} title="Could not check what is training" compact />
               </Panel>
-            ) : !runs.data ? (
-              // The live card itself with placeholder values, so nothing jumps when it arrives.
-              <LiveRunCard run={null} />
+            ) : !runList.get() ? (
+              // The common state's shape (Nothing is training: the mark, a title, two lines and a button), so nothing
+              // below moves when it arrives; a run training is the exception, and grows the card once.
+              <Panel title="Training">
+                <div class="idle-sk" aria-busy="true" aria-label="Loading training">
+                  <Skeleton w="24px" h="24px" />
+                  <span class="l-20">
+                    <Skeleton w="120px" h="12px" />
+                  </span>
+                  <span class="l-20">
+                    <Skeleton w="min(320px, 100%)" h="10px" />
+                  </span>
+                  <span class="l-20">
+                    <Skeleton w="64px" h="10px" />
+                  </span>
+                  <span class="idle-cta">
+                    <Skeleton w="96px" h="var(--control-md)" />
+                  </span>
+                </div>
+              </Panel>
             ) : live.get() ? (
               <Key when={live.get()!.id}>
                 <LiveRunCard
                   run={live.get()!}
                   dataset={datasets.data ? (dsById.get().get(live.get()!.config.dataset_id) ?? null) : datasets.error ? null : undefined}
+                  datasetName={dsLabel(live.get()!)}
                   bind:lost={streamLost}
                 />
               </Key>
@@ -179,21 +247,35 @@ export default function Overview() {
                 <EmptyState
                   icon={Activity}
                   title="Nothing is training"
-                  description={runs.data.length ? 'Start a run to watch its loss, mAP and samples update live here.' : 'Train your first detector: pick a dataset, a model size and go.'}
-                  actions={() => (
-                    <Button variant="primary" icon={Plus} href={href('/runs/new')}>
-                      New run
-                    </Button>
-                  )}
+                  description={
+                    noDatasets.get()
+                      ? 'Add a dataset to train on, then start a run to watch it here.'
+                      : runList.get()!.length
+                        ? 'Start a run to watch its loss, mAP and samples update live here.'
+                        : 'Train your first detector: pick a dataset, a model size and go.'
+                  }
+                  actions={() =>
+                    // With no dataset, New run could only say "Add a dataset first": open Add dataset instead.
+                    noDatasets.get() ? (
+                      <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>
+                        Add dataset
+                      </Button>
+                    ) : (
+                      <Button variant="primary" icon={Plus} href={href('/runs/new')}>
+                        New run
+                      </Button>
+                    )
+                  }
                 />
               </Panel>
             )}
           </div>{' '}
+          <AlsoRunning system={system.data} />{' '}
           <div class="cols">
             <div class="col-main">
               <Panel
                 title="Recent runs"
-                meta={runs.data ? `${recent.get().length} of ${runs.data.length}` : undefined}
+                meta={runList.get() ? `${recent.get().length} of ${runList.get()!.length}` : undefined}
                 pad="none"
                 id="recent-runs"
                 actions={() => (
@@ -205,8 +287,8 @@ export default function Overview() {
                 {/* The table frame in every state: placeholder rows while loading, the message inside it when there is
                     nothing (without column heads over it, as on the list pages). */}
                 <div class="scroll">
-                  <table class="table tall" aria-busy={!runs.data} aria-label="Recent runs">
-                    {(runs.data ? recent.get().length > 0 : !runs.error) ? (
+                  <table class="table tall" aria-busy={!runList.get()} aria-label="Recent runs">
+                    {(runList.get() ? recent.get().length > 0 : !runs.error) ? (
                       <thead>
                         {/* Fixed widths on the shared header row: one geometry loading and loaded. */}
                         <tr>
@@ -218,7 +300,7 @@ export default function Overview() {
                           <th class="r" style:width="88px">
                             mAP50-95
                           </th>
-                          <th class="hide-sm" style:width="120px">
+                          <th class="hide-sm trend" style:width="120px">
                             mAP50-95 trend
                           </th>
                           <th class="r hide-sm" style:width="96px">
@@ -228,11 +310,11 @@ export default function Overview() {
                       </thead>
                     ) : null}
                     <tbody>
-                      {runs.error && !runs.data ? (
+                      {runsFailed.get() ? (
                         <TableState cols={6}>
-                          <ErrorState error={runs.error} retry={() => runs.refresh()} />
+                          <ErrorState error={runs.error} retry={() => runs.refresh()} title="Could not load recent runs" />
                         </TableState>
-                      ) : !runs.data ? (
+                      ) : !runList.get() ? (
                         <For each={[0, 1, 2, 3, 4, 5]} key={(i) => i}>
                           {() => (
                             <tr aria-hidden="true">
@@ -260,7 +342,7 @@ export default function Overview() {
                                   <Skeleton w="40px" h="12px" />
                                 </span>
                               </td>
-                              <td class="hide-sm">
+                              <td class="hide-sm trend">
                                 <Skeleton w="88px" h="12px" />
                               </td>
                               <td class="r hide-sm">
@@ -280,12 +362,20 @@ export default function Overview() {
                           {(r) => (
                             <tr class="link" onclick={() => router.go(`/runs/${r().id}`)}>
                               <td>
-                                <a class="run-name" href={href(`/runs/${r().id}`)} onclick={(e) => e.stopPropagation()}>
+                                <a class="run-name" href={href(`/runs/${r().id}`)} onclick={(e) => e.stopPropagation()} use:tooltip={r().name}>
                                   {r().name}
                                 </a>{' '}
                                 <span class="sub">
                                   <Meta line>
-                                    <span class="ds">{dsById.get().get(r().config.dataset_id)?.name ?? r().config.dataset_id}</span>
+                                    {dsLabel(r()) === undefined ? (
+                                      <span class="ds">
+                                        &#8203;<Skeleton inline w="72px" h="10px" />
+                                      </span>
+                                    ) : dsLabel(r()) ? (
+                                      <span class="ds" use:tooltip={dsLabel(r())}>
+                                        {dsLabel(r())}
+                                      </span>
+                                    ) : null}
                                     <Ident value={r().config.arch} />
                                   </Meta>
                                 </span>
@@ -307,7 +397,7 @@ export default function Overview() {
                                 </div>
                               </td>
                               <td class="r num">{r().best ? metric(r().best!.map50_95) : <NoValue />}</td>
-                              <td class="hide-sm">
+                              <td class="hide-sm trend">
                                 <RunSpark run={r()} />
                               </td>
                               <td class="r faint hide-sm">{ago(r().created)}</td>
@@ -335,7 +425,7 @@ export default function Overview() {
                 )}
               >
                 {models.error && !models.data ? (
-                  <ErrorState error={models.error} retry={() => models.refresh()} />
+                  <ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" />
                 ) : !rankReady.get() ? (
                   // The loaded list's rows (dataset, name, meta; mAP on the right) at their height.
                   <ul class="models" aria-busy="true" aria-label="Loading models" use:balanced={{ n: 4, min: 280 }}>
@@ -382,7 +472,7 @@ export default function Overview() {
                                     <span class="m-sub num">
                                       <Meta line>
                                         <Ident value={t().m.arch} />
-                                        <span>{t().m.classes.length} classes</span>
+                                        <span>{count(t().m.classes.length, 'class')}</span>
                                         <span>{bytes(t().m.bytes, prefs.units)}</span>
                                       </Meta>
                                     </span>
@@ -408,7 +498,7 @@ export default function Overview() {
                     {unranked.get() ? (
                       // Imported and published weights (and any model whose split is unknown) are not ranked against these.
                       <p class="unranked" class:alone={!topModels.get().length}>
-                        {unranked.get()} {unranked.get() === 1 ? 'model' : 'models'} not ranked: evaluation split unknown.
+                        {count(unranked.get(), 'model')} not ranked: {unrankedWhy.get()}.
                       </p>
                     ) : null}
                   </>
@@ -426,7 +516,7 @@ export default function Overview() {
                 )}
               >
                 {datasets.error && !datasets.data ? (
-                  <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
+                  <ErrorState error={datasets.error} retry={() => datasets.refresh()} title="Could not load datasets" compact />
                 ) : !datasets.data ? (
                   <ul class="dslist" aria-busy="true" aria-label="Loading datasets" use:balanced={{ n: 3, min: 280 }}>
                     <For each={[0, 1, 2]} key={(i) => i}>
@@ -448,7 +538,16 @@ export default function Overview() {
                     </For>
                   </ul>
                 ) : datasets.data.length === 0 ? (
-                  <EmptyState icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a sample set of shapes." />
+                  <EmptyState
+                    icon={Images}
+                    title="No datasets registered"
+                    description="Register a YOLO or COCO folder, or generate a sample set of shapes."
+                    actions={() => (
+                      <Button size="sm" icon={Plus} href={href('/datasets?add=folder')}>
+                        Add dataset
+                      </Button>
+                    )}
+                  />
                 ) : (
                   <ul class="dslist" use:balanced={{ n: Math.min(6, datasets.data.length), min: 280 }}>
                     <For each={firstDatasets.get()} key={(d) => d.id}>
@@ -458,11 +557,16 @@ export default function Overview() {
                           <a href={href(`/datasets/${d().id}`)}>
                             <span class="d-row">
                               <span class="d-name truncate">{d().name}</span>{' '}
+                              {/* A folder gone since it was registered: the Datasets list's word in place of its counts. */}
                               <span class="d-nums num">
-                                <Meta line>
-                                  <span>{compact(total(d()))} images</span>
-                                  <span>{d().classes.length} classes</span>
-                                </Meta>
+                                {d().problem ? (
+                                  <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge>
+                                ) : (
+                                  <Meta line>
+                                    <span>{`${compact(total(d()))} ${total(d()) === 1 ? 'image' : 'images'}`}</span>
+                                    <span>{count(d().classes.length, 'class')}</span>
+                                  </Meta>
+                                )}
                               </span>
                             </span>
                           </a>{' '}
@@ -558,6 +662,23 @@ css`
     flex-wrap: wrap;
     margin-top: var(--space-1);
   }
+  .ob-alt {
+    grid-column: 2;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+  }
+  .ob-alt.held {
+    visibility: hidden;
+  }
+  .ob-link {
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .ob-link:hover {
+    text-decoration-color: var(--text-secondary);
+  }
   /* A container query, not a tier: the onboarding card sits in the content column, whose width depends on the sidebar
      as much as on the viewport; three steps need 840 px of it. */
   @container (min-width: 840px) {
@@ -589,8 +710,17 @@ css`
   .live {
     min-width: 0;
   }
+  /* The table fits its card at every width, never scrolling sideways: the trend goes first when the card is narrower
+     than all six columns (a 1280 px laptop puts Best models beside it), and a long run name ends in an ellipsis
+     rather than widen its column (its meta line sets the column's least width). */
   .scroll {
+    container-type: inline-size;
     overflow-x: auto;
+  }
+  @container (max-width: 739px) {
+    .trend {
+      display: none;
+    }
   }
   /* Skeleton bars centred in the line box of the text they stand for (13/20 body, 12/16 meta). */
   .l-20,
@@ -605,8 +735,44 @@ css`
   .l-20.end {
     justify-content: flex-end;
   }
+  /* Neither line sets the Run column's least width (the container query above keeps it 170 px or more): the name ends
+     in an ellipsis, and on its meta line only the dataset's name does, never the size beside it (a fact). */
+  .run-name,
+  .sub {
+    width: 0;
+    min-width: 100%;
+  }
+  .idle-sk {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    column-gap: var(--space-3);
+    align-items: center;
+    padding: var(--space-1) 0;
+  }
+  .idle-sk > :not(:first-child) {
+    grid-column: 2;
+  }
+  .idle-cta {
+    margin-top: var(--space-3);
+  }
   .run-name {
     display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  @media (min-width: 768px) {
+    .sub :global(.ui-meta.line) {
+      display: flex;
+      flex-wrap: nowrap;
+    }
+    .sub :global(.ui-meta.line > *) {
+      flex: none;
+    }
+    .sub :global(.ui-meta.line > .ds) {
+      flex: 0 1 auto;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
   }
   /* Stale data: one notice over the page, the panels keep what they have. */
   .stale {

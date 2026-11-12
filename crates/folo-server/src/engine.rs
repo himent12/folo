@@ -128,8 +128,8 @@ fn adapter_rank(a: &folo_gpu::AdapterSummary) -> (u8, u8) {
 
 /// `/api/system`'s `gpus`: each physical adapter once (through its preferred backend; software adapters are left
 /// out), best first, so ordinal 0 is the adapter `gpu:0` uses. When the GPU backend is already running, its
-/// adapter is ordinal 0. Enumerated once per process. wgpu does not report memory size or utilisation, so
-/// `memory_bytes` is 0 and `util` is `null`.
+/// adapter is ordinal 0. Enumerated once per process. `memory_bytes` is the adapter's largest device-local heap where
+/// its backend is Vulkan (folo-gpu reads it there), else 0; wgpu does not report utilisation, so `util` is `null`.
 pub fn gpus() -> Vec<GpuInfo> {
     static GPUS: OnceLock<Vec<GpuInfo>> = OnceLock::new();
     GPUS.get_or_init(|| {
@@ -160,7 +160,7 @@ pub fn gpus() -> Vec<GpuInfo> {
                 ordinal: out.len() as u32,
                 name: a.name.clone(),
                 backend: api_backend(&a.backend).expect("filtered above"),
-                memory_bytes: 0,
+                memory_bytes: a.memory_bytes,
                 util: None,
             });
         }

@@ -126,6 +126,8 @@ impl Agent for Codex {
                 "the account's usage limit was reached; start again once it resets, or use another agent"
                     .into(),
             )
+        } else if m.contains("printed no reply") {
+            Some("run `codex exec hi` in a terminal on the server's machine to see why (a sign-in, a limit or an update it asks for)".into())
         } else {
             None
         }
@@ -301,7 +303,9 @@ mod tests {
         assert!(Codex::new().hint("unexpected status 401 Unauthorized").unwrap().contains("codex login"));
         let err = parse(&output("", "Error: Unknown feature flag: nope\n", false)).unwrap_err();
         assert_eq!(err, AgentError::Failed("Error: Unknown feature flag: nope".into()));
-        assert!(matches!(parse(&output("", "", true)).unwrap_err(), AgentError::Unavailable(_)));
+        let err = parse(&output("", "", true)).unwrap_err();
+        let AgentError::Unavailable(message) = &err else { panic!("{err:?}") };
+        assert!(Codex::new().hint(message).unwrap().contains("`codex exec hi`"));
     }
 
     #[test]

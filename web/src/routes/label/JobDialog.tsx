@@ -20,6 +20,8 @@ import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import TextArea from '$lib/ui/TextArea';
 import { toast } from '$lib/ui/toast';
+import { count } from '$lib/format';
+import { leftOutText } from './words';
 
 export interface JobDialogProps {
   open?: boolean;
@@ -47,19 +49,32 @@ export default function JobDialog(props: JobDialogProps) {
   const name = signal('');
   const classes = signal<string[]>([]);
   const draft = signal('');
+  /** The names the last addition could not take: past the limit of classes. */
+  const leftOut = signal<string[]>([]);
   const instructions = signal('');
 
-  // Every opening (or another job) starts from the job as it is (or blank); a change of the job while it is open (an
-  // upload, a run's progress) keeps the edits, and a submit in flight.
+  // Every opening (or another job) starts from the job as it is; a change of the job while it is open (an upload, a
+  // run's progress) keeps the edits, and a submit in flight. A new job keeps what was typed while the page lives
+  // (closed by Esc or a stray click, it opens again as it was) until it is created.
   const jobId = computed(() => props.job?.id);
+  let created = true;
   effect(() => {
     if (!open.get()) return;
     void jobId.get();
     untrack(() => {
       const job = props.job;
+      // Name first: the dialog itself has focus once open, and typing should not go nowhere.
+      if (!job) requestAnimationFrame(() => document.getElementById(`${uid}-name`)?.focus());
+      if (!job && !created) {
+        error.set(undefined);
+        busy.set(false);
+        return;
+      }
+      created = !!job;
       name.set(job?.name ?? '');
       classes.set(job ? [...job.classes] : []);
       draft.set('');
+      leftOut.set([]);
       instructions.set('');
       error.set(undefined);
       touched.set(false);
@@ -99,11 +114,13 @@ export default function JobDialog(props: JobDialogProps) {
         await props.onsave?.({ name: name.peek().trim(), classes: all.peek() });
         open.set(false);
       } else {
-        const created = await hub.api.createLabelJob({ name: name.peek().trim(), classes: all.peek(), instructions: instructions.peek().trim() });
+        const made = await hub.api.createLabelJob({ name: name.peek().trim(), classes: all.peek(), instructions: instructions.peek().trim() });
+        // The next New labeling job starts blank.
+        created = true;
         // The dialog closes first: what was made is said over the job's page it opens.
         open.set(false);
-        toast.success('Labeling job created', `${created.name} · ${created.classes.length} ${created.classes.length === 1 ? 'class' : 'classes'}`);
-        router.go(`/datasets/label/${created.id}`);
+        toast.success('Labeling job created', `${made.name} · ${count(made.classes.length, 'class')}`);
+        router.go(`/datasets/label/${made.id}`);
       }
     } catch (err) {
       error.set(err);
@@ -201,12 +218,18 @@ export default function JobDialog(props: JobDialogProps) {
           </Field>
         ) : (
           <>
-            <Field label="Classes" for={`${uid}-classes`} error={show(errs.get().classes)} hint={`Press Enter or comma to add. Up to ${CLASSES_MAX}.`}>
+            <Field
+              label="Classes"
+              for={`${uid}-classes`}
+              error={show(errs.get().classes)}
+              hint={leftOut.get().length ? leftOutText(leftOut.get()) : `Press Enter or comma to add. Up to ${CLASSES_MAX}.`}
+            >
               <ClassChips
                 id={`${uid}-classes`}
                 bind:classes={classes}
                 bind:draft={draft}
                 max={CLASSES_MAX}
+                onleftout={(names) => leftOut.set(names)}
                 placeholder="car, person, …"
                 invalid={!!show(errs.get().classes)}
               />
@@ -221,7 +244,7 @@ export default function JobDialog(props: JobDialogProps) {
                 id={`${uid}-instructions`}
                 bind:value={instructions}
                 rows={4}
-                placeholder="Label every car and pedestrian, also partly hidden ones. Ignore reflections and posters."
+                placeholder="e.g. Label every car and pedestrian, also partly hidden ones. Ignore reflections and posters."
                 invalid={!!show(errs.get().instructions)}
               />
             </Field>

@@ -17,6 +17,9 @@ export interface PerClassProps {
   loading: boolean;
   /** Rail width: class, AP50-95, change, bar. */
   compact?: boolean;
+  /** The run's history failed to load: one quiet line in place of "appear after the first validation pass"; the
+   * metrics panel has the error and its Retry. */
+  unavailable?: boolean;
 }
 
 /** The last two epochs, compared by identity: a step (which bumps `version` too) leaves them as they were. */
@@ -63,7 +66,9 @@ export default function PerClass(props: PerClassProps) {
       pad="none"
       id="per-class"
     >
-      {props.loading ? (
+      {props.unavailable ? (
+        <p class="none">Per-class results show once the run's metrics load.</p>
+      ) : props.loading ? (
         <div class="sk">
           <Index each={[0, 1, 2, 3]}>{() => <Skeleton h="18px" />}</Index>
         </div>

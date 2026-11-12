@@ -22,9 +22,10 @@ impl FoloApp {
     pub(super) fn play_side(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let models = self.store.models.ready().cloned().unwrap_or_default();
-        let sel =
-            self.play_model.as_ref().and_then(|id| models.iter().position(|m| &m.id == id)).unwrap_or(0);
-        let model = models.get(sel).cloned();
+        // The model Playground runs, and no other in its place (a deleted one is replaced, and that
+        // said, as soon as the list shows it gone).
+        let model = self.play_shown_model().cloned();
+        let sel = model.as_ref().and_then(|m| models.iter().position(|x| x.id == m.id)).unwrap_or(0);
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.
         let e2e = model.as_ref().is_some_and(|m| self.model_e2e(m));
@@ -65,8 +66,7 @@ impl FoloApp {
             cx,
             Rc::new(move |this, i, _, cx| {
                 if let Some(id) = ids.get(i) {
-                    this.play_model = Some(id.clone());
-                    this.run_predict(cx);
+                    this.pick_play_model(id.clone(), cx);
                 }
             }),
         );
@@ -178,6 +178,9 @@ impl FoloApp {
                     // click away while the slider is elsewhere.
                     // A fixed row, so using it moves nothing: a secondary link while the slider is
                     // elsewhere, a quiet note once it's there (accent stays the slider's).
+                    // Always there for a picked model (empty without a best-F1 threshold), so picking
+                    // one doesn't push what is under it down.
+                    .when(best_conf.is_none() && model.is_some(), |d| d.child(div().h(px(20.))))
                     .when_some(best_conf, |d, c| {
                         let at = (c - self.play_conf).abs() < 0.0005;
                         let row = div().h(px(20.)).flex().justify_end().items_center();
@@ -351,24 +354,25 @@ impl FoloApp {
                         div()
                             .flex()
                             .justify_between()
-                            .items_baseline()
+                            .items_start()
                             .gap(px(8.))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .flex()
-                                    .items_baseline()
-                                    .gap(px(6.))
+                                    .flex_col()
+                                    .gap(px(2.))
                                     // Where the number comes from: the built-in demo simulates it; a
                                     // server or this app times one image (not sustained throughput).
                                     .child(
                                         text(ty::SM, t.text_secondary)
                                             .font_weight(FontWeight::MEDIUM)
-                                            .flex_none()
                                             .child(if simulated { "Simulated latency" } else { "Latency" }),
                                     )
-                                    .child(text(ty::SM, t.text_tertiary).tnum().min_w_0().ellipsis().child(
+                                    // Under the label, whole: beside it a local GPU's name left no room
+                                    // ("RTX 4080 SUPER in this app · o…").
+                                    .child(text(ty::SM, t.text_tertiary).tnum().whitespace_normal().child(
                                         // The demo has no device of its own to name.
                                         if simulated {
                                             "one image".to_string()
@@ -453,6 +457,8 @@ impl FoloApp {
                     ))
                     .child(
                         div()
+                            // Another device's boxes while the picked one runs: dimmed.
+                            .when(self.play_pred_dim && self.play_pred_pending, |d| d.opacity(0.5))
                             .px(px(8.))
                             .py(px(4.))
                             .flex()
@@ -702,7 +708,7 @@ impl FoloApp {
 /// model found nothing (precision and recall 0), where that threshold is only the end of the search
 /// grid and using it would hide every detection.
 fn offered_conf(m: &crate::api::ModelMetrics) -> Option<f32> {
-    m.best_f1_conf.filter(|_| m.precision > 0. || m.recall > 0.)
+    operating_conf(m.best_f1_conf, m.precision, m.recall)
 }
 
 #[cfg(test)]

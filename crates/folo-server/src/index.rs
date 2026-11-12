@@ -191,15 +191,74 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
                 "pass the dataset root: the folder holding data.yaml, images/ + labels/, or annotations/",
             )
         }
-        DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => {
-            Error::new(StatusCode::BAD_REQUEST, "unknown_format", m).hint(
-                "expected data.yaml or images/ + labels/ (YOLO), or annotations/instances_*.json (COCO)",
-            )
-        }
+        // The message already says what a dataset folder holds; images there without labels are said as that.
+        DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => match images_under(Path::new(path)) {
+            0 => Error::new(StatusCode::BAD_REQUEST, "unknown_format", m),
+            n => {
+                let (path, s) = (folo_data::paths::shown(path), if n == 1 { "" } else { "s" });
+                let message = format!("'{path}' has {n} image{s} but no labels");
+                Error::new(StatusCode::BAD_REQUEST, "unknown_format", message).hint(
+                    "label them first (FOLO Studio: Datasets, Label images), or add YOLO labels/ or a COCO \
+                     annotations/ JSON",
+                )
+            }
+        },
         DataError::Format(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", m),
         DataError::Config(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_body", m),
         e => Error::internal(e.to_string()),
     }
+}
+
+/// Image files under `dir` (a few levels deep, counted up to 10,000), for a folder that is not a dataset.
+fn images_under(dir: &Path) -> usize {
+    walkdir::WalkDir::new(dir)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file() && folo_data::is_image_path(e.path()))
+        .take(10_000)
+        .count()
+}
+
+/// The path of a dataset to register, as sent: surrounding whitespace and one pair of matching quotes removed
+/// (Windows' "Copy as path" adds them). It must be absolute: a relative one would resolve against the server's
+/// working directory, a folder the person who sent it never sees (`400 invalid_body`).
+pub fn requested_path(raw: &str) -> Result<String> {
+    let t = raw.trim();
+    let t = ['"', '\''].iter().find_map(|&q| t.strip_prefix(q)?.strip_suffix(q)).unwrap_or(t).trim();
+    let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_body", m);
+    if t.is_empty() {
+        return Err(bad("path must not be empty".into()));
+    }
+    if !Path::new(t).is_absolute() {
+        return Err(bad(format!("'{t}' is not a full path")).hint(
+            "use the folder's full path on the machine running folo serve, such as D:/data/my-dataset",
+        ));
+    }
+    Ok(t.to_string())
+}
+
+/// The name of a dataset registered without one: its folder's name (the folder above `annotations/` for a COCO file,
+/// the folder of a `data.yaml`, a file's stem otherwise), numbered `-2`, `-3`, ... while `taken` says a dataset has it.
+pub fn default_name(path: &Path, taken: impl Fn(&str) -> bool) -> String {
+    let name = |p: Option<&Path>| p.and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
+    let base = if path.is_file() {
+        let dir = path.parent();
+        let yaml =
+            path.extension().is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"));
+        match name(dir) {
+            Some(d) if yaml => Some(d),
+            Some(d) if d.eq_ignore_ascii_case("annotations") => name(dir.and_then(Path::parent)),
+            _ => path.file_stem().map(|n| n.to_string_lossy().into_owned()),
+        }
+    } else {
+        name(Some(path))
+    };
+    let base = base.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "dataset".into());
+    if !taken(&base) {
+        return base;
+    }
+    (2..).map(|n| format!("{base}-{n}")).find(|n| !taken(n)).expect("some number is free")
 }
 
 use folo_data::paths::relative_to;
@@ -222,6 +281,51 @@ fn watch_dirs(base: &Path, ds: &folo_data::LoadedDataset) -> Vec<PathBuf> {
     }
     dirs.sort();
     dirs
+}
+
+/// The paths the dataset at `path` reads its images and labels from (its own folder, its root and every source:
+/// split folders and lists, the folders of its images and labels), each resolved through links before any is
+/// dropped for lying inside another, so a folder that is a junction or symlink shows where it leads. Found without
+/// reading the images. An error when they cannot all be known: the description cannot be read, or one of them
+/// cannot be resolved or (a folder) listed. A link to a single file is not followed beyond the folder holding it.
+pub fn reads(path: &str, format: DatasetFormat) -> std::result::Result<Vec<PathBuf>, String> {
+    let p = absolute(Path::new(path));
+    let base = if p.is_file() { p.parent().unwrap_or(&p).to_path_buf() } else { p.clone() };
+    let opts = folo_data::OpenOptions { format: data_format(format), verify_images: false };
+    let ds = folo_data::open_with(&p, &opts).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for s in [base, ds.root].into_iter().chain(ds.sources) {
+        let s = lexical(&s);
+        out.push(resolved(&s).map_err(|e| format!("{}: {e}", folo_data::paths::shown(&s)))?);
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// `p` canonical (links followed); a path that does not exist yet is its nearest existing parent's canonical form
+/// with the rest appended. A folder must be listable.
+fn resolved(p: &Path) -> std::io::Result<PathBuf> {
+    let mut at = p;
+    let mut rest = Vec::new();
+    loop {
+        match std::fs::canonicalize(at) {
+            Ok(c) => {
+                if rest.is_empty() && c.is_dir() {
+                    std::fs::read_dir(&c)?;
+                }
+                return Ok(rest.iter().rev().fold(c, |c, r| c.join(r)));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match (at.file_name(), at.parent()) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name);
+                    at = parent;
+                }
+                _ => return Err(e),
+            },
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 impl Index {
@@ -486,6 +590,49 @@ mod tests {
 
     fn tmp(tag: &str) -> TestDir {
         TestDir::new(&format!("index-{tag}"))
+    }
+
+    #[test]
+    fn default_names_come_from_the_folder_and_are_numbered_when_taken() {
+        let dir = tmp("names");
+        let bccd = dir.join("bccd");
+        std::fs::create_dir_all(bccd.join("annotations")).unwrap();
+        for f in ["annotations/instances_test.json", "data.yaml", "loose.json"] {
+            std::fs::write(bccd.join(f), "{}").unwrap();
+        }
+        let free = |_: &str| false;
+        assert_eq!(default_name(&bccd, free), "bccd");
+        assert_eq!(default_name(&bccd.join("annotations/instances_test.json"), free), "bccd");
+        assert_eq!(default_name(&bccd.join("data.yaml"), free), "bccd");
+        assert_eq!(default_name(&bccd.join("loose.json"), free), "loose");
+        let taken = |n: &str| ["bccd", "bccd-2"].contains(&n.to_lowercase().as_str());
+        assert_eq!(default_name(&bccd, taken), "bccd-3");
+    }
+
+    #[test]
+    fn requested_paths_lose_quotes_and_must_be_absolute() {
+        let dir = tmp("requested");
+        let p = dir.to_str().unwrap();
+        for raw in [
+            p.to_string(),
+            format!("\"{p}\""),
+            format!("  '{p}' "),
+            format!(
+                "\" {p}\"
+"
+            ),
+        ] {
+            assert_eq!(requested_path(&raw).unwrap(), p, "{raw:?}");
+        }
+        for raw in ["bccd", "\"data/x\"", "  ", "\"\""] {
+            let e = requested_path(raw).unwrap_err();
+            assert_eq!(
+                (e.status, e.body.code.as_str()),
+                (StatusCode::BAD_REQUEST, "invalid_body"),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(requested_path("bccd").unwrap_err().body.message, "'bccd' is not a full path");
     }
 
     #[test]

@@ -8,7 +8,7 @@ import { bindable, computed, css, defaults, effect, Index, signal, untrack } fro
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { DatasetIssue, IssueCounts, IssueKind, IssueSeverity } from '$lib/api/types';
-import { issueCaption, KIND_LABEL, KINDS, loadIssues } from './issues';
+import { issueCaption, KIND_LABEL, KINDS, loadIssues, loadKinds } from './issues';
 import { num } from '$lib/format';
 import { quote } from '$lib/trainCli';
 import CommandLine from '$lib/ui/CommandLine';
@@ -23,6 +23,8 @@ export interface IssueListProps {
   severity?: IssueSeverity;
   severityFilter?: boolean;
   counts?: IssueCounts;
+  /** Only these kinds of the severity (a finding's own issues), when given. */
+  kinds?: readonly IssueKind[];
 }
 
 const PAGE = 50;
@@ -41,7 +43,11 @@ export default function IssueList(props: IssueListProps) {
   const shown = signal(PAGE);
   // Every server can filter by kind; a whole severity is one `?severity=` query where the server sends `counts`,
   // else each of its kinds in turn (./issues), so "no errors" is only said when none exist.
-  const res = new Resource((s) => loadIssues(hub.api, id.get(), sev.get(), CAP, s, kind.get() === 'all' ? undefined : (kind.get() as IssueKind)));
+  const res = new Resource((s) =>
+    kind.get() === 'all' && p.kinds
+      ? loadKinds(hub.api, id.get(), sev.get(), p.kinds, CAP, s)
+      : loadIssues(hub.api, id.get(), sev.get(), CAP, s, kind.get() === 'all' ? undefined : (kind.get() as IssueKind)),
+  );
   const list = computed<DatasetIssue[]>(() => res.data?.list ?? []);
   const total = computed(() => res.data?.total ?? 0);
   // Counts from the latest answer that had them (the parent's until then); without them, per-kind totals of the last
@@ -64,7 +70,7 @@ export default function IssueList(props: IssueListProps) {
     const k = known.get();
     return k ? Object.fromEntries(KINDS[sev.get()].filter((x) => k.by_kind[x]).map((x) => [x, k.by_kind[x]!])) : lastByKind.get();
   });
-  const kinds = computed(() => KINDS[sev.get()].filter((k) => byKind.get()[k]));
+  const kinds = computed(() => KINDS[sev.get()].filter((k) => byKind.get()[k] && (!p.kinds || p.kinds.includes(k))));
   const sevOptions = computed(() =>
     (['error', 'warning', 'info'] as const).map((v) => ({
       value: v,

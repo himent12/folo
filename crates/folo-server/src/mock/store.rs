@@ -1,6 +1,7 @@
 //! [`Store`] for [`MockStore`].
 
 use std::io::Cursor;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -12,7 +13,7 @@ use folo_api::{
 };
 
 use crate::error::{Error, Result};
-use crate::index::Index;
+use crate::index::{Index, default_name, requested_path};
 use crate::store::{
     ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
     Store, Subscription, Weights, WeightsFormat,
@@ -191,7 +192,8 @@ impl Store for MockStore {
         Ok(self.datasets.read().unwrap().iter().map(|d| d.meta().clone()).collect())
     }
 
-    fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
+    fn register_dataset(&self, mut req: RegisterDataset) -> Result<Dataset> {
+        req.path = requested_path(&req.path)?;
         // Registering a folder again (by its canonical path) returns the dataset it already is: checked before
         // indexing and again under the write lock.
         let want = std::fs::canonicalize(&req.path).ok();
@@ -215,15 +217,22 @@ impl Store for MockStore {
         if let Some(d) = same(&list) {
             return Ok(d);
         }
-        let id = unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
-            list.iter().any(|d| d.meta().id == id)
+        // As in real mode: the same folder registered again gets its id back; another gets an id never used.
+        let mut retired = self.retired.write().unwrap();
+        let back = retired.iter().position(|(path, format, id)| {
+            path.is_some()
+                && *path == want
+                && *format == index.format
+                && !list.iter().any(|d| d.meta().id == *id)
         });
+        let id = match back {
+            Some(i) => retired.remove(i).2,
+            None => unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
+                list.iter().any(|d| d.meta().id == id) || retired.iter().any(|r| r.2 == id)
+            }),
+        };
         let name = req.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
-            index
-                .base
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "dataset".into())
+            default_name(Path::new(&req.path), |n| list.iter().any(|d| d.meta().name.eq_ignore_ascii_case(n)))
         });
         let meta = Dataset {
             id,
@@ -272,7 +281,10 @@ impl Store for MockStore {
             0,
         );
         let mut list = self.datasets.write().unwrap();
-        ds.meta.id = unique_id("ds", seed, |id| list.iter().any(|d| d.meta().id == id));
+        let retired = self.retired.read().unwrap();
+        ds.meta.id = unique_id("ds", seed, |id| {
+            list.iter().any(|d| d.meta().id == id) || retired.iter().any(|r| r.2 == id)
+        });
         let entry = Arc::new(DatasetEntry::Proc(ds));
         let out = entry.with_stats();
         list.push(entry);
@@ -295,11 +307,36 @@ impl Store for MockStore {
         self.dataset(id)?.image(image_id, thumb)
     }
 
+    fn delete_dataset_files(&self, id: &str) -> Result<()> {
+        // Mock mode writes no files: a generated set (made in memory) goes like any other; a folder on disk is
+        // never this server's to delete.
+        if matches!(&*self.dataset(id)?, DatasetEntry::Disk(..)) {
+            let m = "a folder registered from disk is not one this server wrote; its files are never deleted";
+            return Err(Error::new(StatusCode::BAD_REQUEST, "invalid_query", m.to_string()));
+        }
+        // As in real mode, never while a run is active (the scripted live run does not count).
+        let runs = self.runs.read().unwrap();
+        if let Some(r) = runs.iter().find(|r| r.0.id != LIVE_RUN && r.0.snap().status.is_active()) {
+            let m = format!(
+                "run {} is queued or training; files are deleted only while no run is",
+                r.0.config.name
+            );
+            return Err(Error::conflict("run_active", m).hint("wait for it to end, or stop it first"));
+        }
+        drop(runs);
+        self.delete_dataset(id)
+    }
+
     fn delete_dataset(&self, id: &str) -> Result<()> {
         let mut ds = self.datasets.write().unwrap();
-        let before = ds.len();
-        ds.retain(|d| d.meta().id != id);
-        if ds.len() == before { Err(Error::not_found("dataset", id)) } else { Ok(()) }
+        let i = ds.iter().position(|d| d.meta().id == id).ok_or_else(|| Error::not_found("dataset", id))?;
+        let gone = ds.remove(i);
+        let path = match &*gone {
+            DatasetEntry::Disk(meta, _) => std::fs::canonicalize(&meta.path).ok(),
+            DatasetEntry::Proc(_) => None,
+        };
+        self.retired.write().unwrap().push((path, gone.meta().format, id.to_string()));
+        Ok(())
     }
 
     fn list_models(&self) -> Result<Vec<Model>> {
@@ -345,6 +382,7 @@ impl Store for MockStore {
 
     fn create_run(&self, mut config: TrainConfig) -> Result<Run> {
         let ds = self.dataset(&config.dataset_id)?;
+        crate::store::check_run_name(&config.name)?;
         self.validate(&config)?;
         // A cloud run rents an offer of its connection, and its worker checks `amp`.
         let offer = match &config.compute {
@@ -379,7 +417,7 @@ impl Store for MockStore {
             ));
         }
         if config.name.trim().is_empty() {
-            config.name = format!("{}-{}", meta.name, &config.arch.as_str()[5..]);
+            config.name = crate::store::default_run_name(&meta.name, config.arch);
         }
         // Ids are allocated under the runs write lock so concurrent creates cannot pick the same one, and model
         // ids are checked against every model that exists or will exist when a run completes.
@@ -492,13 +530,21 @@ impl Store for MockStore {
 
     fn delete_run(&self, id: &str) -> Result<()> {
         let (run, _) = self.run(id)?;
-        if run.is_active() {
+        // A local run waiting in the queue that never started leaves it (as in real mode); any other active run stays.
+        let api = run.to_api();
+        let never_started = api.status == folo_api::RunStatus::Queued
+            && api.started.is_none()
+            && api.config.compute.is_none();
+        if run.is_active() && !never_started {
             return Err(Error::conflict("run_active", format!("run '{id}' is still active"))
                 .hint(format!("stop it first: POST /api/runs/{id}/stop")));
         }
         run.delete();
         self.runs.write().unwrap().retain(|r| r.0.id != id);
-        self.queue.lock().unwrap().retain(|r| r.id != id);
+        let mut queue = self.queue.lock().unwrap();
+        queue.retain(|r| r.id != id);
+        // The runs behind it start earlier now.
+        runs::reschedule(&queue, std::time::Instant::now());
         Ok(())
     }
 
@@ -609,6 +655,7 @@ impl Store for MockStore {
                 total_ms: round(preprocess_ms + inference_ms + postprocess_ms),
             },
             device: "gpu:0".into(),
+            cold: false,
         })
     }
 

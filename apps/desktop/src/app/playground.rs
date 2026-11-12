@@ -20,12 +20,7 @@ impl FoloApp {
     pub fn play_dataset_image(&mut self, dataset: &str, image_id: &str, cx: &mut Context<Self>) {
         let input = PredictInput::Dataset { dataset_id: dataset.to_string(), image_id: image_id.to_string() };
         let (d, i) = (dataset.to_string(), image_id.to_string());
-        let name: SharedString = format!(
-            "{} / {}",
-            self.store.dataset_summary(dataset).map_or(dataset, |d| d.name.as_str()),
-            image_id
-        )
-        .into();
+        let name: SharedString = format!("{} / {}", self.store.dataset_name(dataset), image_id).into();
         self.play_load_seq += 1;
         let seq = self.play_load_seq;
         self.fetch(
@@ -120,6 +115,7 @@ impl FoloApp {
         }
         self.play_pred = Load::Idle;
         self.play_pred_pending = false;
+        self.play_pred_dim = false;
         self.play_pred_for = None;
         self.play_hover = None;
         self.play_zoom = 1.0;
@@ -131,9 +127,15 @@ impl FoloApp {
     pub fn set_play_target(&mut self, target: Option<crate::local::Target>, cx: &mut Context<Self>) {
         if self.play_target != target {
             self.play_target = target;
-            // Another device's answer (and timing): "Detecting…" while it runs, not the previous
-            // result, or an OOM error and its Retry still live during the CPU fallback.
-            self.rerun_predict(cx);
+            if matches!(self.play_pred, Load::Ready(_)) {
+                // The same image and model: the boxes stay up, dimmed and "Updating…", until the
+                // other device answers, instead of blanking to placeholder rows.
+                self.play_pred_dim = true;
+                self.run_predict(cx);
+            } else {
+                // An error (an OOM and its Retry) isn't left live during the fallback.
+                self.rerun_predict(cx);
+            }
         }
     }
 
@@ -157,10 +159,79 @@ impl FoloApp {
         .detach();
     }
 
+    /// Playground uses model `id` (picked from its list, or a model's Try in Playground) and runs it on
+    /// the image on stage.
+    pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
+        self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
+        self.play_model = Some(id);
+        self.run_predict(cx);
+    }
+
+    /// The model Playground shows and runs: only `play_model`, never another in its place.
+    pub fn play_shown_model(&self) -> Option<&Model> {
+        let id = self.play_model.as_ref()?;
+        self.store.models.ready()?.iter().find(|m| m.id == *id)
+    }
+
+    /// Whether the Playground's model is one that run `run` made (`made`, deleted with it), also while
+    /// the model list is loading.
+    pub(super) fn play_model_made_by(&self, run: &str, made: &[String]) -> bool {
+        self.play_model.as_ref().is_some_and(|m| made.contains(m))
+            || self.play_model_run.as_deref() == Some(run)
+    }
+
+    /// The Playground's model against the model list as it now stands (after each list installed, and
+    /// a delete here): gone (deleted here or by another client), everything it predicted, shown or still
+    /// out, is dropped, the best model left is picked and run on the image on stage, and the person is
+    /// told once, when Playground is in use. Without a model yet (the first list), the best is picked.
+    pub(super) fn reconcile_play_model(&mut self, cx: &mut Context<Self>) {
+        let Some(models) = self.store.models.ready() else { return };
+        if let Some(id) = self.play_model.clone()
+            && !models.iter().any(|m| m.id == id)
+        {
+            let name = self.deleted.get(&id).cloned().unwrap_or(id);
+            self.drop_play_model(Some(name));
+        }
+        if self.play_model.is_some() {
+            return;
+        }
+        // The best model (not the newest checkpoint, which may have learned nothing yet).
+        let best = self.store.best_model(None).map(|m| (m.id.clone(), m.name.clone(), m.run_id.clone()));
+        let in_use = self.play_image.is_some() || self.route == Route::Playground;
+        if let Some(gone) = self.play_model_gone.take().filter(|_| in_use) {
+            let body = match &best {
+                Some((_, next, _)) => format!("Playground now uses {next}."),
+                None => "No other model is left: train one first.".to_string(),
+            };
+            self.toast(Tone::Neutral, format!("{gone} was deleted"), Some(body.into()), cx);
+        }
+        if let Some((id, _, run)) = best {
+            self.play_model = Some(id);
+            self.play_model_run = run;
+            self.run_predict(cx);
+        }
+    }
+
+    /// The Playground's model is gone (its run was deleted, here or elsewhere; `name` says which):
+    /// nothing it predicted is shown, and an answer still out for it is dropped when it comes.
+    /// [`Self::reconcile_play_model`] picks another.
+    pub(super) fn drop_play_model(&mut self, name: Option<String>) {
+        self.play_model = None;
+        self.play_model_run = None;
+        self.play_model_gone = name;
+        self.play_pred_seq += 1;
+        self.play_pred = Load::Idle;
+        self.play_pred_for = None;
+        self.play_pred_pending = false;
+        self.play_pred_dim = false;
+        self.play_hover = None;
+    }
+
     /// Predict again from scratch, showing "Detecting…" meanwhile (Retry, or another device). A plain
     /// rerun of the same image and model, an IoU change, keeps the old result up instead.
     pub fn rerun_predict(&mut self, cx: &mut Context<Self>) {
         self.play_pred_for = None;
+        self.play_pred_dim = false;
         self.run_predict(cx);
     }
 
@@ -220,6 +291,7 @@ impl FoloApp {
                     this.play_pred = r.into();
                     this.play_pred_for = Some(key);
                     this.play_pred_pending = false;
+                    this.play_pred_dim = false;
                 }
             },
         );
@@ -257,9 +329,7 @@ impl FoloApp {
             prompt: Some("Open image".into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(p) = paths.into_iter().next()
-            {
+            if let Some(p) = super::actions::picked(&this, rx.await, cx) {
                 this.update(cx, |this, cx| {
                     this.route = Route::Playground;
                     this.play_file(p, cx);

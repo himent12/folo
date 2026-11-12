@@ -5,12 +5,114 @@
 //! and minimize / un-minimize use the
 //! non-activating show commands. Caption commands (`WM_SYSCOMMAND`) are routed here, and a move or
 //! size loop driven by the real mouse never starts.
+//!
+//! No other window of the process may reach a display either. The file dialogs and the shell's
+//! launches are refused by the gate every backend shares (`platform/services.rs`): a dialog's owner is
+//! the active window, and an off-screen window is never active, so the dialog had none and Windows
+//! centred it on the primary display at its remembered size (1200 x 720), on the screen of whoever uses
+//! the PC; Explorer and the browser open windows of other processes there. Anything else that shows a
+//! window (a library's dialog, another thread's) is moved off the displays as soon as it shows or moves
+//! (`Parker`), and named on stderr.
 
 use super::window::{OFFSCREEN_ORIGIN, WindowInner};
 use ::windows::Win32::Foundation::{HWND, RECT};
 use ::windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect};
+use ::windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+use ::windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use ::windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use ::windows::Win32::UI::WindowsAndMessaging::*;
+
+/// Moves `hwnd` to the off-screen origin, keeping its size, when it is a top-level window that any
+/// display shows a part of; true if it moved it. Without activating it or changing the z-order, and
+/// without waiting on another thread's window.
+pub(crate) fn park(hwnd: HWND) -> bool {
+    // SAFETY: plain queries.
+    let top = unsafe { GetAncestor(hwnd, GA_ROOT) } == hwnd;
+    let r = window_rect(hwnd);
+    if !top || r.right <= r.left || r.bottom <= r.top || !on_a_display(&r) {
+        return false;
+    }
+    // SAFETY: plain queries.
+    let other_thread = unsafe { GetWindowThreadProcessId(hwnd, None) != GetCurrentThreadId() };
+    let mut flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE;
+    if other_thread {
+        flags |= SWP_ASYNCWINDOWPOS;
+    }
+    // SAFETY: repositioning a window of this process.
+    unsafe { SetWindowPos(hwnd, None, OFFSCREEN_ORIGIN, OFFSCREEN_ORIGIN, 0, 0, flags) }.is_ok()
+}
+
+/// While alive, every window of this process that shows or moves onto a display is parked off
+/// screen (`park`). Events come through the message loop of the thread that installed it.
+pub(crate) struct Parker([HWINEVENTHOOK; 2]);
+
+impl Parker {
+    /// Hooks this process's windows showing and moving; `None` if Windows refused.
+    pub(crate) fn install() -> Option<Self> {
+        // SAFETY: out-of-context hooks for our own process; the callback is a plain function.
+        let hook = |event| unsafe {
+            SetWinEventHook(
+                event,
+                event,
+                None,
+                Some(on_event),
+                GetCurrentProcessId(),
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            )
+        };
+        let hooks = [hook(EVENT_OBJECT_SHOW), hook(EVENT_OBJECT_LOCATIONCHANGE)];
+        if hooks.iter().any(|h| h.is_invalid()) {
+            drop(Parker(hooks));
+            return None;
+        }
+        Some(Parker(hooks))
+    }
+}
+
+impl Drop for Parker {
+    fn drop(&mut self) {
+        for hook in self.0 {
+            if !hook.is_invalid() {
+                // SAFETY: a hook this thread installed.
+                let _ = unsafe { UnhookWinEvent(hook) };
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn on_event(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: HWND,
+    object: i32,
+    child: i32,
+    _: u32,
+    _: u32,
+) {
+    // The window itself (not its caret, cursor or a child object), visible.
+    // SAFETY: a plain query.
+    if object != OBJID_WINDOW.0 || child != CHILDID_SELF as i32 || !unsafe { IsWindowVisible(hwnd) }.as_bool()
+    {
+        return;
+    }
+    let before = window_rect(hwnd);
+    if park(hwnd) {
+        let mut class = [0u16; 128];
+        let mut title = [0u16; 128];
+        // SAFETY: valid buffers.
+        let (c, t) = unsafe { (GetClassNameW(hwnd, &mut class), GetWindowTextW(hwnd, &mut title)) };
+        eprintln!(
+            "folo-ui: off screen: moved a {} window '{}' at ({}, {})-({}, {}) off the displays",
+            String::from_utf16_lossy(&class[..c.max(0) as usize]),
+            String::from_utf16_lossy(&title[..t.max(0) as usize]),
+            before.left,
+            before.top,
+            before.right,
+            before.bottom,
+        );
+    }
+}
 
 /// The window's rectangle in screen pixels.
 pub(crate) fn window_rect(hwnd: HWND) -> RECT {

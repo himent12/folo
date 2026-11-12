@@ -4,10 +4,14 @@
 mod actions;
 mod connection;
 mod data;
+mod deleted;
 mod descriptions;
 mod drag;
 mod focus;
 mod forms;
+#[cfg(test)]
+mod list_tests;
+mod lists;
 mod navigation;
 mod new_run;
 mod overlay_state;
@@ -16,6 +20,8 @@ mod playground;
 mod preferences;
 mod render;
 mod sidebar;
+#[cfg(test)]
+pub(crate) mod tests;
 mod titlebar;
 
 use std::cell::RefCell;
@@ -37,7 +43,7 @@ use crate::ui::*;
 pub use focus::focus_ring;
 pub use forms::{
     ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, format_lr,
-    parse_images, retry_batch,
+    retry_batch, synth_errors,
 };
 pub use playground::PLAY_CONF_FLOOR;
 pub use sidebar::logo;
@@ -169,6 +175,15 @@ pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'stati
     Rc::new(f)
 }
 
+/// What the delete confirmation is about.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DeleteTarget {
+    /// A run that is not active: its folder, weights and models go.
+    Run(String),
+    /// A dataset: unregistered, its files stay (unless `delete_files`, for one the server wrote).
+    Dataset(String),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RunFilter {
     All,
@@ -229,6 +244,9 @@ pub struct Palette {
     pub input: Entity<TextInput>,
     pub query: String,
     pub selected: usize,
+    /// The rows as last drawn (group, title): when the list changes under the highlight (a run or
+    /// dataset deleted), the highlight stays on its item instead of on its old place.
+    pub shown: Vec<(&'static str, String)>,
     pub scroll: ScrollHandle,
     _sub: Subscription,
 }
@@ -267,6 +285,9 @@ pub struct FoloApp {
     pub switch_seen: RefCell<HashMap<String, (bool, Option<std::time::Instant>)>>,
     /// The last input came from the keyboard, so focus rings are shown.
     pub kb: bool,
+    /// The pointer moved since the last key: a keyboard focus tip (an image tile's) gives way to the
+    /// pointer's own tooltips instead of standing beside them.
+    pub pointer_moved: bool,
     pub page_scroll: ScrollHandle,
     /// A scroll thumb being dragged: its container, the pointer's start y and the start offset.
     pub scroll_drag: Option<(ScrollHandle, Pixels, Pixels)>,
@@ -339,7 +360,13 @@ pub struct FoloApp {
     pub cm_cell: Option<(usize, usize)>,
 
     // Playground
+    /// The model Playground runs; always one of the loaded list once it is in
+    /// ([`FoloApp::reconcile_play_model`]).
     pub play_model: Option<String>,
+    /// The run that made `play_model`: its delete drops the model even while the list is loading.
+    play_model_run: Option<String>,
+    /// The name of the model Playground lost (deleted), said once the next one is picked.
+    play_model_gone: Option<String>,
     pub play_conf: f32,
     /// The confidence the current predictions were fetched down to: a threshold below it refetches.
     pub play_fetched_floor: f32,
@@ -367,6 +394,8 @@ pub struct FoloApp {
     /// The latest prediction hasn't answered: shown results are the previous ones (an IoU change
     /// keeps them up meanwhile).
     pub play_pred_pending: bool,
+    /// The shown result is another device's, kept (dimmed) while the one now picked runs.
+    pub play_pred_dim: bool,
     /// Image generation and model the current `play_pred` belongs to.
     play_pred_for: Option<(u64, String)>,
 
@@ -386,9 +415,9 @@ pub struct FoloApp {
     /// A New run form closed without starting (Esc, the scrim, Cancel): the next plain New run
     /// reopens it as it was, so a stray click doesn't lose a configured run.
     pub new_run_draft: Option<NewRunForm>,
-    /// The draft's dataset by id (the list can gain datasets at the front while the draft waits,
-    /// so its index alone could point at another one).
-    pub new_run_draft_ds: Option<String>,
+    /// The architecture, image size and epochs of the last run started from the dialog: a fresh
+    /// New run opens on them (this session), not on the defaults again.
+    pub new_run_last: Option<(usize, usize, f32)>,
     /// `--open new-run`: open the dialog once the dataset list is in (it needs one to start from).
     pub open_new_run_pending: bool,
     /// The Generate synthetic dataset dialog.
@@ -399,6 +428,10 @@ pub struct FoloApp {
     /// The window is below 1120 px wide (16 px page gutters); set each render.
     pub narrow: bool,
     pub confirm_stop: Option<String>,
+    pub confirm_delete: Option<DeleteTarget>,
+    /// Remove a dataset with its files (`?files=true`): asked in its confirmation, off each time
+    /// it opens, offered only for a dataset the server wrote.
+    pub delete_files: bool,
     /// The server's estimate for the New run form's config, keyed by that config (servers with
     /// `run_estimate`); the last good answer stands while a changed config is out.
     pub nr_estimate: Option<(String, Load<crate::api::RunEstimate>)>,
@@ -411,6 +444,9 @@ pub struct FoloApp {
     pub bench: crate::bench::BenchState,
     /// A page to open on the next render (set where no window is at hand, e.g. after a request).
     pub route_pending: Option<Route>,
+    /// Runs, models and datasets deleted lately, by id, with their names: a link to one left behind
+    /// (an earlier toast's Open, the palette) opens its list instead, saying so.
+    pub deleted: deleted::Deleted,
     /// Which half of it shows: training (0) or inference (1); reference rows too or measured only.
     pub tp_view: usize,
     pub tp_all: bool,
@@ -468,6 +504,8 @@ pub struct FoloApp {
     backend_gen: u64,
     /// Bumped on every connection attempt; only the latest one may install its result.
     connect_seq: u64,
+    /// The order of the dataset, model and run lists' answers: older ones are dropped.
+    list_tickets: lists::ListTickets,
     /// The latest request per (run, "metrics" | "logs"); older responses are dropped.
     history_tickets: HashMap<(String, &'static str), u64>,
     history_seq: u64,
@@ -499,6 +537,7 @@ impl FoloApp {
             focus: RefCell::new(HashMap::new()),
             switch_seen: RefCell::new(HashMap::new()),
             kb: false,
+            pointer_moved: false,
             page_scroll: ScrollHandle::new(),
             scroll_drag: None,
             play_side_scroll: ScrollHandle::new(),
@@ -544,6 +583,8 @@ impl FoloApp {
             confusion_norm: true,
             cm_cell: None,
             play_model: None,
+            play_model_run: None,
+            play_model_gone: None,
             play_conf: 0.25,
             play_fetched_floor: PLAY_CONF_FLOOR,
             play_picker_open: false,
@@ -561,6 +602,7 @@ impl FoloApp {
             play_image_gen: 0,
             play_pred_seq: 0,
             play_pred_pending: false,
+            play_pred_dim: false,
             play_pred_for: None,
             server_mode: ServerMode::Mock,
             server_url,
@@ -572,19 +614,22 @@ impl FoloApp {
             palette: None,
             new_run: None,
             new_run_draft: None,
-            new_run_draft_ds: None,
+            new_run_last: None,
             open_new_run_pending: false,
             synth: None,
             synth_seq: 0,
             restore_pending: false,
             narrow: false,
             confirm_stop: None,
+            confirm_delete: None,
+            delete_files: false,
             nr_estimate: None,
             nr_estimate_last: None,
             throughput: Load::Idle,
             cloud: Default::default(),
             bench: Default::default(),
             route_pending: None,
+            deleted: Default::default(),
             tp_view: 0,
             tp_all: false,
             bench_busy: false,
@@ -615,6 +660,7 @@ impl FoloApp {
             sub_attempt: HashMap::new(),
             backend_gen: 0,
             connect_seq: 0,
+            list_tickets: Default::default(),
             history_tickets: HashMap::new(),
             history_seq: 0,
             _tasks: Vec::new(),

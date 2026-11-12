@@ -10,7 +10,7 @@ use super::class_table::num_cell;
 use crate::api::{Model, time};
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
-use crate::screens::{loading_rows, page_header, th};
+use crate::screens::{FirstStep, loading_rows, page_header, th};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
@@ -114,9 +114,28 @@ impl FoloApp {
         });
         let body = match models {
             None => panel(&t).child(head).child(loading_rows(&t, "models", 4)).into_any_element(),
-            Some(m) if m.is_empty() => panel(&t)
-                .child(empty_state(&t, "icons/box.svg", "No models yet", "When a run finishes, its best weights appear here, ready to evaluate, export or try in the Playground.", Tone::Neutral))
-                .into_any_element(),
+            Some(m) if m.is_empty() => {
+                // An empty server: what to do first, and the button that does it.
+                let step = self.next_first_step();
+                let body = match step {
+                    FirstStep::AddDataset => {
+                        "Models come from training runs, and a run needs a dataset first."
+                    }
+                    FirstStep::NewRun => {
+                        "Train a run: when it finishes, its best weights appear here, ready to evaluate, export or try in the Playground."
+                    }
+                    FirstStep::Wait => {
+                        "When a run finishes, its best weights appear here, ready to evaluate, export or try in the Playground."
+                    }
+                };
+                let first = self.first_step_button("models-first", step, window, cx);
+                panel(&t)
+                    .child(
+                        empty_state(&t, "icons/box.svg", "No models yet", body, Tone::Neutral)
+                            .children(first),
+                    )
+                    .into_any_element()
+            }
             Some(m) => {
                 let ids: Vec<String> = m.iter().map(|m| m.id.clone()).collect();
                 let rows: Vec<AnyElement> = m
@@ -150,9 +169,7 @@ impl FoloApp {
                             .as_ref()
                             .and_then(|r| self.store.run(r))
                             .map(|r| {
-                                self.store
-                                    .dataset_summary(&r.config.dataset_id)
-                                    .map_or(r.config.dataset_id.clone(), |d| d.name.clone())
+                                self.store.run_dataset_name(r)
                             })
                             .map_or_else(
                                 // Published weights say what they are (`about`), not "unknown".
@@ -186,23 +203,93 @@ impl FoloApp {
                                     cx.stop_propagation();
                                 }
                             }))
-                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).ellipsis().child(m.name.clone())).child(text(ty::SM, t.text_tertiary).w(px(name_w)).ellipsis().child(eval_on)))
-                            .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id)))))
-                            .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().ellipsis().child(run.trim_start_matches("from ").to_string())))
-                            .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| text(ty::SM, t.text_primary).tnum().child(f3(mm.map50_95)))))
-                            .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
-                            .when(params_col, |d| d.child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{p} {pu}")))))
-                            .child(num_cell(84., text(ty::SM, t.text_secondary).tnum().child(format!("{b} {bu}"))))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("m-name-{}", m.id)))
+                                    .flex_1()
+                                    .min_w(px(200.))
+                                    .when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| {
+                                        d.tooltip(crate::controls::tip(m.name.clone(), None))
+                                    })
+                                    .child(
+                                        text(ty::SM, t.text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .w(px(name_w))
+                                            .ellipsis()
+                                            .child(m.name.clone()),
+                                    )
+                                    .child(
+                                        text(ty::SM, t.text_tertiary).w(px(name_w)).ellipsis().child(eval_on),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w(px(150.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        text(ty::SM, t.text_secondary)
+                                            .tnum()
+                                            .whitespace_nowrap()
+                                            .child(format!("{} · {} px", m.arch.as_str(), m.imgsz)),
+                                    )
+                                    .when(self.model_e2e(m), |d| {
+                                        d.child(e2e_tag(&t, format!("e2e-m-{}", m.id)))
+                                    }),
+                            )
+                            .when(wide, |d| {
+                                d.child(
+                                    text(ty::SM, t.text_tertiary)
+                                        .w(px(150.))
+                                        .flex_none()
+                                        .ellipsis()
+                                        .child(run.trim_start_matches("from ").to_string()),
+                                )
+                            })
+                            .child(num_cell(
+                                130.,
+                                metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| {
+                                    text(ty::SM, t.text_primary).tnum().child(f3(mm.map50_95))
+                                }),
+                            ))
+                            .child(num_cell(
+                                72.,
+                                text(ty::SM, t.text_secondary)
+                                    .tnum()
+                                    .child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50))),
+                            ))
+                            .when(params_col, |d| {
+                                d.child(num_cell(
+                                    72.,
+                                    text(ty::SM, t.text_secondary).tnum().child(format!("{p} {pu}")),
+                                ))
+                            })
+                            .child(num_cell(
+                                84.,
+                                text(ty::SM, t.text_secondary).tnum().child(format!("{b} {bu}")),
+                            ))
                             .child(num_cell(84., {
                                 // Relative in the column, the exact local time on hover.
                                 let at = time::parse(&m.created);
                                 text(ty::SM, t.text_tertiary)
                                     .id(SharedString::from(format!("mc-{}", m.id)))
-                                    .when_some(at, |d, c| d.tooltip(crate::controls::tip(time::local_datetime(c), None)))
+                                    .when_some(at, |d, c| {
+                                        d.tooltip(crate::controls::tip(time::local_datetime(c), None))
+                                    })
                                     .tnum()
                                     .child(at.map_or(String::new(), |c| time::ago(c, now)))
                             }));
-                        self.bind(row, &key, 0., window, cx, act(move |this, w, cx| this.navigate(Route::Model(id.clone()), w, cx))).into_any_element()
+                        self.bind(
+                            row,
+                            &key,
+                            0.,
+                            window,
+                            cx,
+                            act(move |this, w, cx| this.navigate(Route::Model(id.clone()), w, cx)),
+                        )
+                        .into_any_element()
                     })
                     .collect();
                 panel(&t).overflow_hidden().child(head).children(rows).into_any_element()

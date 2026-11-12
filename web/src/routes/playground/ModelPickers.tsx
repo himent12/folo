@@ -44,40 +44,44 @@ export default function ModelPickers(props: ModelPickersProps) {
               value={props.modelId ?? ''}
               options={props.choices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short }))}
               onchange={props.chooseModel}
-              describedby={props.pickedMeta ? 'model-meta' : undefined}
+              describedby={props.model ? 'model-meta' : undefined}
             />
             {props.model ? <Button icon={ArrowUpRight} href={href(`/models/${props.model.id}`)} aria-label={`Open ${props.model.name}`} /> : null}
-            {props.pickedMeta ? (
+            {/* Always a line ("Not evaluated" for a model without a score), so switching models never moves the page. */}
+            {props.model ? (
               <p class="pick-meta num" id="model-meta">
-                {props.pickedMeta}
+                {props.pickedMeta ?? 'Not evaluated'}
               </p>
             ) : null}
           </div>
-          <div class="runon" role="group" aria-label="Run on" aria-describedby={props.runOnNote ? 'runon-note' : undefined}>
-            <span class="pick-label" aria-hidden="true">
-              Run on
-            </span>
-            {/* A choice that is off says why in its own tip, and the image panel's status line says it once ("No WebGPU in
-                this browser"), so the toolbar stays one row at every tier: never a note wrapping under the group (round
-                24's tablet). The group's description is the same words, for assistive technology. */}
-            <span class="runon-seg">
-              <Segmented
-                label="Run the model on"
-                size="sm"
-                bind:value={runOn}
-                options={[
-                  { value: 'server', label: 'Server' },
-                  { value: 'webgpu', label: 'WebGPU', disabled: !props.webgpu || !!props.browserOff, tip: props.browserOff ?? 'No WebGPU in this browser' },
-                  { value: 'cpu', label: 'CPU', disabled: !!props.browserOff, tip: props.browserOff ?? undefined },
-                ]}
-              />
-              {props.runOnNote ? (
-                <span class="sr-only" id="runon-note">
-                  {props.runOnNote}
-                </span>
-              ) : null}
-            </span>
-          </div>
+          {/* A build of Studio without the in-browser runtime runs on the server only: no choice to show. */}
+          {props.browserOff ? null : (
+            <div class="runon" role="group" aria-label="Run on" aria-describedby={props.runOnNote ? 'runon-note' : undefined}>
+              <span class="pick-label" aria-hidden="true">
+                Run on
+              </span>
+              {/* A choice that is off says why in its own tip, and the image panel's status line says it once ("No WebGPU
+                  in this browser"), so the toolbar stays one row at every tier: never a note wrapping under the group
+                  (round 24's tablet). The group's description is the same words, for assistive technology. */}
+              <span class="runon-seg">
+                <Segmented
+                  label="Run the model on"
+                  size="sm"
+                  bind:value={runOn}
+                  options={[
+                    { value: 'server', label: 'Server' },
+                    { value: 'webgpu', label: 'WebGPU', disabled: !props.webgpu, tip: 'No WebGPU in this browser' },
+                    { value: 'cpu', label: 'CPU' },
+                  ]}
+                />
+                {props.runOnNote ? (
+                  <span class="sr-only" id="runon-note">
+                    {props.runOnNote}
+                  </span>
+                ) : null}
+              </span>
+            </div>
+          )}
         </>
       ) : null}
     </>

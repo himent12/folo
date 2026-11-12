@@ -3,6 +3,7 @@ import { flush as flushSync } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
+import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
 import type { ModelEval } from '$lib/api/types';
 import { parse, router } from '$lib/router';
@@ -68,7 +69,9 @@ describe('Model: what was evaluated', () => {
     await open('m_mini_n');
     const notes = target.querySelectorAll('[role="note"][aria-label="Evaluation split"]');
     expect(notes).toHaveLength(1);
-    expect(target.querySelector('section.kpis')?.getAttribute('aria-label')).toBe('Metrics on the training split');
+    // An imported file: its stored numbers are not this evaluation's (see 'an imported file' below), so the strip
+    // names no split; the curves, the per-class table and Details do.
+    expect(target.querySelector('section.kpis')?.getAttribute('aria-label')).toBe('Metrics stored with the file');
     expect(text('#pr-title .meta')).toBe('fasteners-mini · training split · IoU 0.5');
     expect(text('#per-class .foot')).toContain('24 training images of fasteners-mini');
     const dd = [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Evaluated on')?.querySelector('dd');
@@ -123,5 +126,39 @@ describe('Model on a phone: the work before the summary', () => {
     flushSync();
     expect(line.getAttribute('aria-expanded')).toBe('true');
     expect(target.querySelectorAll('section.kpi-grid .kg-cell')).toHaveLength(4);
+  });
+});
+
+describe('Model: no dataset to evaluate on', () => {
+  it('says it is not evaluated, with no Retry and no class dump', async () => {
+    const api = hub.api as MockApi;
+    api.modelEval = async () => {
+      throw new ApiError(404, 'no_matching_dataset', "no registered dataset has this model's 80 classes (person, bicycle, car, motorcycle, …)", 'register a dataset');
+    };
+    router.route = parse('#/models/m_coco_s');
+    c = mount(Model, { target });
+    await until(() => text('#pr-title').length && target.querySelector('.empty'), 'the empty state');
+    const panel = target.querySelector('.empty')!.textContent!;
+    expect(panel).toContain('Not evaluated');
+    expect(panel).toContain('80 classes');
+    expect(panel).not.toContain('person');
+    expect([...target.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Retry')).toBe(false);
+    expect(target.textContent).toContain('Not evaluated: no registered dataset has its classes');
+    expect(target.textContent).not.toContain('split not reported');
+  });
+});
+
+describe('Model: an imported file', () => {
+  // models F15: the list put an imported checkpoint under "split unknown" while its page said its numbers were on the
+  // validation split of shapes (that was the server's own evaluation, the curves, not the numbers stored in the file).
+  it("does not give the file's stored metrics the curves' dataset and split", async () => {
+    await open('m_mini_n');
+    const strip = target.querySelector('section.kpis')!;
+    expect(strip.getAttribute('aria-label')).toBe('Metrics stored with the file');
+    strip.querySelector<HTMLButtonElement>('.k-help button, button.k-help, .k-help')!.click();
+    flushSync();
+    const help = await until(() => target.querySelector('#metric-help'), 'the help');
+    expect(help.textContent).toContain('Not recorded: these numbers came with the file');
+    expect(help.textContent).toContain("this server's own evaluation, on fasteners-mini · training split");
   });
 });

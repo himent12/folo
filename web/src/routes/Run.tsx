@@ -5,23 +5,27 @@
 // looked for in new lines only (run/warningsLog, the Svelte page scanned the whole log on every step), and the parts
 // that depend on the run's settings (Config, lineage, the dataset, the menus) get values that keep their identity
 // while only its progress moves, so a step re-renders the progress and nothing else.
+import ArrowLeft from '$icons/arrow-left';
 import Box from '$icons/box';
 import ChevronsUp from '$icons/chevrons-up';
 import GitCompare from '$icons/git-compare-arrows';
 import ScanSearch from '$icons/scan-search';
-import Square from '$icons/square';
+import CircleStop from '$icons/circle-stop';
 import Trash from '$icons/trash-2';
 import X from '$icons/x';
 import WifiOff from '$icons/wifi-off';
 import TriangleAlert from '$icons/triangle-alert';
 import Copy from '$icons/copy';
 import Play from '$icons/play';
+import RotateCcw from '$icons/rotate-ccw';
 import CloudUpload from '$icons/cloud-upload';
-import { computed, css, effect, For, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, effect, MediaQuery, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { LiveRun } from '$lib/api/live';
+import { modelsResource } from '$lib/api/models';
+import { trainingSeconds } from '$lib/api/progress';
 import { Resource } from '$lib/api/resource';
-import { hasFeature, ordinal, queuePlace, withQueueMove } from '$lib/api/queue';
+import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
 import type { QueueRequest } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
 import { ago, deviceName, eta } from '$lib/format';
@@ -34,19 +38,17 @@ import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import { DialogStatus } from '$lib/ui/feedback';
-import EmptyState from '$lib/ui/EmptyState';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Tabs from '$lib/ui/Tabs';
 import ErrorState from '$lib/ui/ErrorState';
 import StatusBadge from '$lib/ui/StatusBadge';
 import Ident from '$lib/ui/Ident';
-import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
 import { tooltip } from '$lib/ui/tooltip';
 import ConfigPanel from './run/ConfigPanel';
 import { HEAD_LABEL } from './run/resolved';
 import Logs from './run/Logs';
-import Outcome from './run/Outcome';
+import Outcome, { canContinue } from './run/Outcome';
 import Callout from './run/Callout';
 import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
 import PerClass from './run/PerClass';
@@ -54,7 +56,7 @@ import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
 import RunMetrics from './run/RunMetrics';
 import Samples from './run/Samples';
-import { moveQueued, queueItems, queueWait, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
+import { moveQueued, queueItems, queueWait, REMOVE_LABEL, removedToast, removeDescription, removeQueued, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
 import { WarningsLog } from './run/warningsLog';
 import { beforeTraining, phaseTitle, phaseWhat, providerName } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
@@ -62,6 +64,11 @@ import CloudPanel from './run/CloudPanel';
 import { isOom } from '$lib/oom';
 import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import RunSkeleton from './run/RunSkeleton';
+import WaitingPanels from './run/WaitingPanels';
+import { exactTime } from './runs/when';
+import DeleteRun from './run/DeleteRun';
+import { goneEvalOn } from './run/goneEvalOn';
+import { stopDescription, stoppedToast } from './run/StopRun';
 
 type Section = 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
 const NO_CLASSES: string[] = [];
@@ -85,10 +92,25 @@ export default function Run() {
     const c = config.get();
     return c ? datasets.data?.find((d) => d.id === c.dataset_id) : undefined;
   });
-  const classes = computed(() => dataset.get()?.classes ?? NO_CLASSES);
+  // A run whose dataset was removed still names it and its classes: as recorded with the run (Run.dataset), for older
+  // runs its model's class names; the per-class table says "class 0" only when none of them knows.
+  const recorded = computed(() => run.get()?.dataset);
+  /** The datasets are in and the run's is not among them: it was removed. */
+  const datasetGone = computed(() => !!datasets.data && !dataset.get());
+  const datasetName = computed(() => dataset.get()?.name ?? recorded.get()?.name);
+  const modelClasses = computed(() => {
+    const id = run.get()?.model_id;
+    return id ? models.data?.find((m) => m.id === id)?.classes : undefined;
+  });
+  const classes = computed(() => dataset.get()?.classes ?? (recorded.get()?.classes.length ? recorded.get()!.classes : modelClasses.get()) ?? NO_CLASSES);
   // A dataset with no validation images trains and validates on its training split (docs/API.md, Split fallback): the
   // page says so once, as the Model page does, and its titles name that split rather than "Validation".
-  const evalOn = computed(() => runEvalSource(dataset.get()));
+  // Once the dataset is removed, the trainer's log says which split the epochs were scored on (./run/goneEvalOn).
+  const evalOn = computed(() => {
+    if (!datasetGone.get()) return runEvalSource(dataset.get());
+    void live.version;
+    return goneEvalOn(datasetName.get() ?? null, live.logs);
+  });
   const splitNotice = computed(() => (evalOn.get() ? fallbackNotice(evalOn.get()!) : null));
 
   const crumbName = computed(() => run.get()?.name ?? id.get());
@@ -102,6 +124,12 @@ export default function Run() {
     return live.steps.length;
   });
   const queuedOnly = computed(() => status.get() === 'queued' && stepCount.get() === 0);
+  /**
+   * The run loaded but its history (metrics) did not: the metrics panel says so with the one Retry, the panels derived
+   * from them (samples, per class) say they wait for it, and the log, a request of its own, shows what it got.
+   */
+  const historyError = computed(() => (run.get() ? live.error : undefined));
+  const retryHistory = () => live.retry();
 
   // A cloud run (docs/CLOUD.md): where it runs, said by its provider's name ("RunPod · RTX 4090"), and its hand-over
   // in the waiting state's place while nothing trains yet.
@@ -178,7 +206,12 @@ export default function Run() {
     return all?.known ? `about ${timeRange(all.lo, all.hi)}` : inFront.get().length > 1 ? 'lengths not known yet' : 'length not known yet';
   });
   /** Start next is a move only when something is in front (or nothing trains, and it starts at once). */
-  const canStart = computed(() => place.get() !== null && (place.get()! > 1 || !ahead.get()));
+  const canStart = computed(() => place.get() !== null && (place.get()! > 1 || !ahead.get()) && !starting.get());
+  /**
+   * Nothing trains and the run is at the front of the queue (or the worker has taken it off): the worker is reading
+   * its dataset and building its model, until the server reports it `running`.
+   */
+  const starting = computed(() => !cloud.get() && status.get() === 'queued' && !!others.data && !ahead.get() && (place.get() ?? 1) === 1);
 
   /** Moves this run in the queue: the new order at once (here and in the queue list), the old one back on a refusal. */
   async function move(req: QueueRequest) {
@@ -228,9 +261,17 @@ export default function Run() {
     void live.version;
     return live.epochs.length;
   });
+  /**
+   * It ended without a training step (interrupted before it started, failed before its first one, its dataset's folder
+   * gone): the metrics say so in one line, and there are no samples or per-class results to wait for.
+   */
+  const neverTrained = computed(
+    () => !active.get() && !live.loading && historyError.get() === undefined && stepCount.get() === 0 && epochsDone.get() === 0 && (run.get()?.step ?? 0) === 0,
+  );
+  // How long it took, as the Runs list says: from start to end, less the time it sat stopped before a resume.
   const elapsed = computed(() => {
     const r = run.get();
-    return r?.started ? ((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000 : null;
+    return r ? trainingSeconds(r) : null;
   });
   // The trainer's "too short to learn" warnings, from the log (./run/warnings): one callout, never a toast. Read from
   // the lines added since the last update only (./run/warningsLog).
@@ -243,8 +284,8 @@ export default function Run() {
   // Below 960 px one section shows at a time. A queued run has nothing to sample yet, so it opens on its Config (the
   // dependency and start estimate are in the banner above); once picked, the choice holds.
   const picked = signal<Section | null>(null);
-  const section = computed<Section>(() => picked.get() ?? (queuedOnly.get() ? 'config' : 'samples'));
-  const models = new Resource((s) => hub.api.models(s));
+  const section = computed<Section>(() => picked.get() ?? (queuedOnly.get() ? 'config' : neverTrained.get() ? 'logs' : 'samples'));
+  const models = modelsResource();
   /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
   const stacked = new MediaQuery(media.upToLaptop, false);
   const phone = new MediaQuery(media.phone, false);
@@ -259,35 +300,28 @@ export default function Run() {
   // A confirm that fails says so in its dialog, which stays open for Retry (the toaster sits behind the modal); one
   // that succeeds closes it and the page says what happened.
   const stopStatus = new DialogStatus();
-  const deleteStatus = new DialogStatus();
 
   async function stop() {
     const cur = run.peek();
     if (!cur) return;
     busy.set(true);
     try {
+      if (removing.peek()) {
+        // A run that never started is deleted (it leaves the list); a resumed one stops with what it trained.
+        const r = await removeQueued(cur);
+        stopOpen.set(false);
+        removedToast(cur);
+        if (r) live.run = r;
+        else router.go('/runs', { replace: true });
+        return;
+      }
       const r = await hub.api.stopRun(cur.id);
       live.run = r;
       stopOpen.set(false);
-      toast.info(`Stopping ${r.name}`, r.cloud && r.epoch === 0 ? 'Its instance is released; nothing had trained yet.' : `The checkpoint from epoch ${r.epoch} is kept.`);
+      // The checkpoint is the last finished epoch's: none before the first one ends.
+      stoppedToast(r, untrack(() => epochsDone.get()));
     } catch (e) {
       stopStatus.error(e, removing.peek() ? 'Could not remove the run from the queue' : 'Could not stop the run');
-    } finally {
-      busy.set(false);
-    }
-  }
-
-  async function remove() {
-    const cur = run.peek();
-    if (!cur) return;
-    busy.set(true);
-    try {
-      await hub.api.deleteRun(cur.id);
-      deleteOpen.set(false);
-      toast.success(`Deleted ${cur.name}`, 'Checkpoints on disk were left in place.');
-      router.go('/runs');
-    } catch (e) {
-      deleteStatus.error(e, 'Could not delete the run');
     } finally {
       busy.set(false);
     }
@@ -296,16 +330,16 @@ export default function Run() {
   /**
    * The header's ⋯ (DESIGN_DIRECTION §13, one action set): the header shows one secondary, Compare (in the menu on
    * phones), and a running run's state action, Stop; the rest is here, the destructive action last on every detail
-   * page (Remove from queue for a waiting run, Delete run for a finished one), each behind its confirm dialog. Try model
-   * is here only for a run that did not complete: a completed run's callout offers Try in Playground.
+   * page (Remove from queue for a waiting run, Delete run for a finished one), each behind its confirm dialog. A run
+   * with a model has Open model and Try in Playground here whatever its status, as its callout does.
    */
   const menuItems = (compare: boolean): MenuItem[] => {
     const r = run.get();
     if (!r) return [];
     const out: MenuItem[] = compare ? [{ label: 'Compare', icon: GitCompare, href: href(`/runs/compare?ids=${r.id}`) }] : [];
     if (r.model_id) {
-      if (r.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${r.model_id}`) });
+      out.push({ label: 'Try in Playground', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
     }
     // The queue's one action set (`queueItems`), whole, as on the Runs list: the open menu covers the callout's Start
     // next, so the menu never relies on it. Remove from queue last.
@@ -325,7 +359,7 @@ export default function Run() {
   const later = computed(() => [
     { name: 'Metrics', what: 'mAP, precision and recall, loss, LR and throughput, by epoch' },
     { name: 'Samples', what: `Predictions on 16 ${scoresTitle(evalOn.get()).toLowerCase()} images after every epoch` },
-    { name: 'Per class', what: `AP for each of ${dataset.get()?.classes.length ?? 'its'} classes` },
+    { name: 'Per class', what: `AP for each of ${classes.get().length || 'its'} classes` },
     { name: 'Logs', what: "The trainer's output, live" },
   ]);
 
@@ -335,10 +369,14 @@ export default function Run() {
     const r = run.get();
     if (!r) return [];
     const out: PageCommand[] = [];
-    if (r.status === 'running' || (r.cloud && r.status === 'queued')) out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: Square, run: () => stopOpen.set(true) });
+    if (r.status === 'running' || (r.cloud && r.status === 'queued')) out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: CircleStop, run: () => stopOpen.set(true) });
     // As the run's banner: anything but out of memory continues from the last checkpoint.
     if (r.status === 'stopped' || (r.status === 'failed' && !isOom(r.error)))
-      out.push({ id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() });
+      out.push(
+        canContinue(r)
+          ? { id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() }
+          : { id: 'run-resume', label: `Start ${r.name} again`, match: ['Start again', 'Resume run'], icon: RotateCcw, run: () => void resume() },
+      );
     out.push({ id: 'run-compare', label: `Compare ${r.name}`, match: ['Compare run'], icon: GitCompare, run: () => router.go(`/runs/compare?ids=${r.id}`) });
     out.push({ id: 'run-copy-id', label: 'Copy run id', match: [r.id], icon: Copy, run: () => void copyText(r.id, 'run id') });
     const line = runCli.get();
@@ -355,7 +393,7 @@ export default function Run() {
     try {
       const id = cur.id;
       const r = await live.resume(() => hub.api.resumeRun(id));
-      toast.success(`Resuming ${r.name}`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts over.');
+      toast.success(r.epoch > 0 ? `Resuming ${r.name}` : `Starting ${r.name} again`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts over.');
     } catch (e) {
       // page-level: as above.
       toast.error(e, 'Could not resume the run');
@@ -373,6 +411,8 @@ export default function Run() {
       <>
         {handover.get() ? (
           phaseWhat(handover.get()!, provider.get(), prefs.units)
+        ) : starting.get() ? (
+          'Preparing data and building the model…'
         ) : place.get() !== null && place.get()! > 1 ? (
           // Behind other waiting runs: when it should start, then each run in front with its own time in brackets, in
           // queue order (what trains now, then the waiting ones), so the sum is checkable. A run whose length the server
@@ -407,19 +447,26 @@ export default function Run() {
     </>
   );
 
-  const when = () => (R().started ? `started ${ago(R().started!)}` : `created ${ago(R().created)}`);
+  // One word in every state ("created", as the Runs list's column), the exact times on hover.
+  const when = () => (
+    <time datetime={R().created} title={`Created ${exactTime(R().created)}${R().started ? ` · started ${exactTime(R().started)}` : ''}`}>
+      created {ago(R().created)}
+    </time>
+  );
 
   return (
     <>
       {live.error && !run.get() ? (
-        <Page title="Run">
+        // The way back is the header's action, as on the other detail pages (Model, Dataset, Benchmark).
+        <Page title="Run" actions={() => <Button icon={ArrowLeft} href={href('/runs')}>All runs</Button>}>
           <ErrorState error={live.error} title="Could not load this run" retry={() => live.retry()} />
-          <EmptyState title="Check the run id" description="It may have been deleted; every run is listed on the Runs page." actions={() => <Button href={href('/runs')}>All runs</Button>} />
         </Page>
       ) : !run.get() ? (
         <RunSkeleton />
       ) : (
         <>
+          {/* A box of no layout of its own: what lets the styles below reach the page's title. */}
+          <div class="run-page">
           <Page
             title={R().name}
             inlineActions
@@ -441,9 +488,14 @@ export default function Run() {
               // the size and batch step out (Config has them), below 1024 the time joins the status row and, on a line
               // with the precision or head items, the device steps out too. Phones keep the dataset, model and lineage.
               <Meta class={config.get()!.amp || config.get()!.head === 'o2o' ? 'run-meta extra' : 'run-meta'}>
-                <a class="link" href={href(`/datasets/${config.get()!.dataset_id}`)}>
-                  {dataset.get()?.name ?? config.get()!.dataset_id}
-                </a>
+                {datasetGone.get() ? (
+                  // Removed from FOLO: its name as recorded, no link to a page that is gone.
+                  <span title="This dataset is no longer registered in FOLO">{datasetName.get() ?? 'Removed dataset'} (removed)</span>
+                ) : (
+                  <a class="link" href={href(`/datasets/${config.get()!.dataset_id}`)}>
+                    {datasetName.get() ?? config.get()!.dataset_id}
+                  </a>
+                )}
                 <Ident value={config.get()!.arch} />
                 {/* Phones: size, batch and device are in the Config section; the id is in the URL. */}
                 <span class="cfg num size">{config.get()!.imgsz} px</span>
@@ -488,12 +540,12 @@ export default function Run() {
                   // hand-over too: its instance costs money from the launch.
                   <>
                     <span class="wide-only">
-                      <Button variant="danger" icon={Square} onclick={() => stopOpen.set(true)}>
+                      <Button variant="danger" icon={CircleStop} onclick={() => stopOpen.set(true)}>
                         Stop
                       </Button>
                     </span>
                     <span class="phone-only">
-                      <Button variant="danger" icon={Square} aria-label={`Stop ${R().name}`} title="Stop run" onclick={() => stopOpen.set(true)} />
+                      <Button variant="danger" icon={CircleStop} aria-label={`Stop ${R().name}`} title="Stop run" onclick={() => stopOpen.set(true)} />
                     </span>
                   </>
                 ) : null}
@@ -514,10 +566,13 @@ export default function Run() {
               resuming={resuming.get()}
               onresume={resume}
               waiting={queuedOnly.get() ? waiting : undefined}
-              waitingTitle={handover.get() ? phaseTitle(handover.get()!, provider.get()) : place.get() !== null ? queuePlace(place.get()!) : undefined}
+              waitingTitle={
+                handover.get() ? phaseTitle(handover.get()!, provider.get()) : starting.get() ? 'Starting' : place.get() !== null ? queuePlace(place.get()!) : undefined
+              }
               waitingIcon={handover.get() && beforeTraining(handover.get()!.phase) ? CloudUpload : undefined}
               waitingActions={canStart.get() ? startNext : undefined}
               warnings={warnings.get()}
+              datasetName={datasetName.get()}
               system={system.data ?? (system.error ? null : undefined)}
             />
 
@@ -533,65 +588,17 @@ export default function Run() {
               // show the config's essentials, the rest folded (the work before the reference).
               <div class="waiting">
                 <div class="w-main">
-                  <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={dataset.get()?.name} weights={lineage.get()} essential={phone.current} cli={runCli.get()} />
+                  <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={datasetName.get()} weights={lineage.get()} essential={phone.current} cli={runCli.get()} />
                 </div>
                 <div class="w-side">
                   {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} /> : null}
-                  {place.get() !== null && queue.get().length ? (
-                    <Panel title="Queue" meta={`${waitingCount.get()} waiting`} pad="none" id="queue">
-                      <ol class="queue">
-                        {ahead.get() ? (
-                          <li class="q-row">
-                            <span class="q-n">
-                              <span class="live-dot" aria-hidden="true"></span>
-                              <span class="sr-only">Training</span>
-                            </span>
-                            <a class="q-name" href={href(`/runs/${ahead.get()!.id}`)}>
-                              {ahead.get()!.name}
-                            </a>
-                            <span class="q-meta num">{ahead.get()!.eta_s !== null ? `${eta(ahead.get()!.eta_s)} left` : 'training'}</span>
-                          </li>
-                        ) : null}
-                        <For each={queue.get()} key={(q) => q.id}>
-                          {(q) => {
-                            const self = () => q().id === R().id;
-                            return (
-                              <li class="q-row" class:self={self()} aria-current={self() ? 'true' : undefined}>
-                                <span class="q-n num" aria-label={ordinal(q().queue_position ?? 0)}>
-                                  {q().queue_position}
-                                </span>
-                                {self() ? (
-                                  <>
-                                    <span class="q-name">{q().name}</span>
-                                    <span class="q-meta">this run</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <a class="q-name" href={href(`/runs/${q().id}`)}>
-                                      {q().name}
-                                    </a>
-                                    <span class="q-meta"></span>
-                                  </>
-                                )}
-                              </li>
-                            );
-                          }}
-                        </For>
-                      </ol>
-                    </Panel>
-                  ) : null}
-                  <Panel title="When training starts" pad="none" id="later">
-                    <ul class="later">
-                      <For each={later.get()} key={(l) => l.name}>
-                        {(l) => (
-                          <li>
-                            <span class="l-name">{l().name}</span>
-                            <span class="l-what">{l().what}</span>
-                          </li>
-                        )}
-                      </For>
-                    </ul>
-                  </Panel>
+                  <WaitingPanels
+                    queue={place.get() !== null ? queue.get() : []}
+                    ahead={ahead.get()}
+                    self={R().id}
+                    waiting={waitingCount.get()}
+                    later={later.get()}
+                  />
                 </div>
               </div>
             ) : (
@@ -606,6 +613,9 @@ export default function Run() {
                   loading={live.loading}
                   queued={queuedOnly.get()}
                   evalOn={evalOn.get()}
+                  error={historyError.get()}
+                  retry={retryHistory}
+                  never={neverTrained.get()}
                 />
 
                 {/* Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right,
@@ -619,8 +629,12 @@ export default function Run() {
                     value={section.get()}
                     onchange={(v) => picked.set(v)}
                     tabs={[
-                      { value: 'samples', label: 'Samples' },
-                      { value: 'classes', label: 'Classes' },
+                      ...(neverTrained.get()
+                        ? []
+                        : [
+                            { value: 'samples' as const, label: 'Samples' },
+                            { value: 'classes' as const, label: 'Classes' },
+                          ]),
                       { value: 'logs', label: 'Logs' },
                       ...(isCloud.get() ? [{ value: 'cloud' as const, label: 'Cloud' }] : []),
                       { value: 'config', label: 'Config' },
@@ -630,23 +644,36 @@ export default function Run() {
                 <div
                   class="detail"
                   class:cloud={isCloud.get()}
+                  class:never={neverTrained.get()}
                   data-show={section.get()}
                   id="run-sec-panel"
                   role={stacked.current ? 'tabpanel' : undefined}
                   aria-labelledby={stacked.current ? `run-sec-${section.get()}` : undefined}
                 >
                   <div class="main-col">
-                    <div class="part" data-part="samples">
-                      <Samples runId={R().id} classes={classes.get()} epochsDone={epochsDone.get()} title={`${scoresTitle(evalOn.get())} samples`} />
-                    </div>
+                    {/* A run that never trained has no samples or per-class results: the log and Config are its row. */}
+                    {!neverTrained.get() ? (
+                      <div class="part" data-part="samples">
+                        <Samples
+                          runId={R().id}
+                          classes={classes.get()}
+                          datasetGone={datasetGone.get()}
+                          epochsDone={epochsDone.get()}
+                          title={`${scoresTitle(evalOn.get())} samples`}
+                          unavailable={historyError.get() !== undefined}
+                        />
+                      </div>
+                    ) : null}
                     <div class="part" data-part="logs">
                       <Logs log={live.logsLog} version={live.version} live={active.get()} />
                     </div>
                   </div>
                   <aside class="rail" aria-label="Per-class results and config">
-                    <div class="part" data-part="classes">
-                      <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact />
-                    </div>
+                    {!neverTrained.get() ? (
+                      <div class="part" data-part="classes">
+                        <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} />
+                      </div>
+                    ) : null}
                     {cloud.get() ? (
                       <div class="part" data-part="cloud">
                         <CloudPanel cloud={cloud.get()!} provider={provider.get()} />
@@ -659,7 +686,7 @@ export default function Run() {
                       <ConfigPanel
                         config={config.get()!}
                         resolved={resolved.get()}
-                        datasetName={dataset.get()?.name}
+                        datasetName={datasetName.get()}
                         weights={lineage.get()}
                         compact={!stacked.current || phone.current}
                         cli={runCli.get()}
@@ -670,45 +697,24 @@ export default function Run() {
               </>
             )}
           </Page>
+          </div>
 
           <Dialog
             bind:open={stopOpen}
             title={removing.get() ? removeTitle(R().name) : `Stop ${R().name}?`}
-            description={
-              removing.get()
-                ? REMOVE_DESCRIPTION
-                : handover.get()
-                  ? 'Its instance is released now; nothing has trained yet.'
-                  : cloud.get()
-                    ? 'Training stops after the current step. The last checkpoint is copied here, saved as a model, and the instance released.'
-                    : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'
-            }
+            description={removing.get() ? removeDescription(R()) : stopDescription(R(), epochsDone.get())}
             size="sm"
             status={stopStatus}
             footer={() => (
               <>
                 <Button onclick={() => stopOpen.set(false)}>{removing.get() ? 'Keep it queued' : handover.get() ? 'Keep going' : 'Keep training'}</Button>
-                <Button variant="destructive" icon={removing.get() ? X : Square} loading={busy.get()} onclick={stop}>
+                <Button variant="destructive" icon={removing.get() ? X : CircleStop} loading={busy.get()} onclick={stop}>
                   {removing.get() ? REMOVE_LABEL : 'Stop run'}
                 </Button>
               </>
             )}
           />
-          <Dialog
-            bind:open={deleteOpen}
-            title={`Delete ${R().name}?`}
-            description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched."
-            size="sm"
-            status={deleteStatus}
-            footer={() => (
-              <>
-                <Button onclick={() => deleteOpen.set(false)}>Cancel</Button>
-                <Button variant="destructive" icon={Trash} loading={busy.get()} onclick={remove}>
-                  Delete run
-                </Button>
-              </>
-            )}
-          />
+          <DeleteRun run={deleteOpen.get() ? R() : null} onclose={() => deleteOpen.set(false)} ondeleted={() => router.go('/runs', { replace: true })} />
         </>
       )}
     </>
@@ -716,6 +722,19 @@ export default function Run() {
 }
 
 css`
+  .run-page {
+    display: contents;
+  }
+  /* A long name (run names were not capped before 64 characters) takes two lines at most, broken anywhere, never a
+     wall of four; the breadcrumb and Config have it too. */
+  .run-page :global(h1[data-route-focus]) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
   :global(.ident.id) {
     font-size: var(--type-sm-size);
   }
@@ -789,80 +808,6 @@ css`
       display: none;
     }
   }
-  .queue,
-  .later {
-    list-style: none;
-    margin: 0;
-    padding: 0 0 var(--space-2);
-  }
-  .q-row {
-    display: grid;
-    grid-template-columns: 24px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-2);
-    height: 36px;
-    padding: 0 var(--space-4);
-    border-top: 1px solid var(--line-subtle);
-  }
-  .q-row:first-child {
-    border-top: 0;
-  }
-  /* Each name is a link: a 44 px row on touch screens. */
-  @media (pointer: coarse) {
-    .q-row {
-      height: 44px;
-    }
-  }
-  .q-n {
-    color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-  }
-  .live-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--accent-line);
-  }
-  .q-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-primary);
-  }
-  a.q-name:hover {
-    text-decoration: underline;
-    text-decoration-color: var(--line-strong);
-    text-underline-offset: 3px;
-  }
-  .q-row.self {
-    background: var(--bg-active);
-  }
-  .q-row.self .q-name {
-    font-weight: var(--weight-medium);
-  }
-  .q-meta {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    white-space: nowrap;
-  }
-  .later li {
-    display: grid;
-    gap: 2px;
-    padding: var(--space-2) var(--space-4);
-    border-top: 1px solid var(--line-subtle);
-  }
-  .later li:first-child {
-    border-top: 0;
-  }
-  .l-name {
-    font-weight: var(--weight-medium);
-  }
-  .l-what {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-  }
   /* The two columns end together: each column's last panel takes what the other column adds. Usually the rail is the
      taller, and the log (at least 200 px) grows to its bottom; under a short rail (few classes) Config's frame runs
      down to the log's end, as a properties rail runs the page's height. No fixed heights. */
@@ -907,6 +852,22 @@ css`
     }
     .detail.cloud [data-part='logs'] {
       grid-row: span 2;
+    }
+    /* A run that never trained: no samples / per-class row, so the log and Config (a cloud run's Cloud panel above
+       Config) are the rows. */
+    .detail.never {
+      grid-template-rows: minmax(0, 1fr);
+    }
+    .detail.never .main-col,
+    .detail.never .rail {
+      grid-row: 1 / 2;
+    }
+    .detail.cloud.never {
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+    .detail.cloud.never .main-col,
+    .detail.cloud.never .rail {
+      grid-row: 1 / 3;
     }
   }
   .phone-pick {

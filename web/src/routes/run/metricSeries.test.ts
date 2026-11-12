@@ -7,7 +7,7 @@ import { AppendLog } from '$lib/api/appendLog';
 import { stepsPerEpoch } from '$lib/api/progress';
 import type { Epoch, Step } from '$lib/api/types';
 import { smooth, type Pt } from '$lib/charts/downsample';
-import { EpochSeries, joinExtents, Smoother, StepSeries, type StepField } from './metricSeries';
+import { EpochSeries, joinExtents, liveHorizon, Smoother, StepSeries, type StepField } from './metricSeries';
 
 /** A seeded PRNG (mulberry32): the same series every run. */
 function rng(seed: number) {
@@ -165,5 +165,15 @@ describe('EpochSeries', () => {
     log.replace([ep(1), ep(2)]);
     series.sync();
     expect(series.points('map50').map((p) => p.y)).toEqual([1 / 50, 2 / 50]);
+  });
+});
+
+describe('liveHorizon: a live run\'s "So far" range', () => {
+  it('holds a short run at its plan from the first point (the mosaic mark stays in view)', () => {
+    for (const observed of [0, 0.2, 1, 3.4]) expect(liveHorizon(observed, 5, 'observed')).toEqual([0, 5]);
+  });
+  it('grows in steps of 5, 10, 20, 50, … epochs, never past the plan', () => {
+    expect([1, 5.5, 11, 21, 51, 201].map((o) => liveHorizon(o, 300, 'observed')[1])).toEqual([5, 10, 20, 50, 100, 300]);
+    expect(liveHorizon(3, 300, 'full')).toEqual([0, 300]);
   });
 });

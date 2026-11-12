@@ -1,6 +1,7 @@
 //! Overlays drawn above the page: command palette, dialogs, the image inspector and toasts.
 
 mod cloud_dialogs;
+mod confirm_delete;
 mod confirm_stop;
 mod inspector;
 mod new_run;
@@ -72,6 +73,9 @@ impl FoloApp {
         }
         if let Some(id) = self.confirm_stop.clone() {
             out.push(self.stop_dialog(&id, window, cx));
+        }
+        if let Some(target) = self.confirm_delete.clone() {
+            out.push(self.delete_dialog(&target, window, cx));
         }
         if self.cloud.connect.is_some() {
             out.push(self.connect_dialog(window, cx));
@@ -175,13 +179,18 @@ impl FoloApp {
                                         .pt(px(18.))
                                         .pb(px(14.))
                                         .child(
+                                            // A long name in the title ends in "…" short of the close
+                                            // button (the body names it in full), never cut mid-glyph.
                                             div()
+                                                .flex_1()
+                                                .min_w_0()
                                                 .flex()
                                                 .flex_col()
                                                 .gap(px(4.))
                                                 .child(
                                                     text(ty::XL, t.text_primary)
                                                         .font_weight(FontWeight::SEMIBOLD)
+                                                        .ellipsis()
                                                         .child(title.to_string()),
                                                 )
                                                 .when_some(subtitle, |d, s| {

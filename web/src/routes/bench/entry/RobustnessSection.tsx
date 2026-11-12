@@ -160,7 +160,7 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
     <div class="rob" id="robustness">
       <Panel title="Robustness" meta="accuracy kept under each condition" pad="none">
         <p class="lead">
-          {reading.get()} Darker cells lost more; each cell is the accuracy kept at that severity, of {metric(clean.get())} unchanged.
+          {reading.get()} The stronger a cell’s shade, the more it lost; each cell is the accuracy kept at that severity, of {metric(clean.get())} unchanged.
         </p>
         <div class="scroll">
           <table

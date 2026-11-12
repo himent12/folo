@@ -1,6 +1,9 @@
 import type { Arch, Augment, Dataset, Model } from '$lib/api/types';
+import type { ListedDataset } from '../datasets/problem';
 import type { CloudPick } from './cloudPick';
 import { devWord } from './device';
+import { MAX_RUN_NAME, runName } from './name';
+import { num } from '$lib/format';
 
 /** A review row's or a form error's way back to its control (RunNew's `jump`). */
 export type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'head' | 'close' | 'runon' | 'offer' | 'hours';
@@ -53,6 +56,28 @@ export function jumpTarget(key: Jump): HTMLElement | null {
   }
 }
 
+/**
+ * A dataset with nothing in its train split cannot be trained on (the server refuses it): where its images are
+ * instead, "No training images (72 in test)."
+ */
+export function noTrainImages(dataset: Dataset): string | null {
+  const s = dataset.splits;
+  if (s.train > 0) return null;
+  const rest = [s.val ? `${num(s.val)} in val` : '', s.test ? `${num(s.test)} in test` : ''].filter(Boolean).join(', ');
+  return rest ? `No training images (${rest}).` : 'No images to train on.';
+}
+
+/**
+ * What stops training on the picked dataset, said at the picker: none picked, or the one asked for (a draft's, a
+ * link's) gone (`gone`: the line that says so), its folder missing or unreadable, or no train split.
+ */
+export function datasetError(dataset: ListedDataset | undefined, gone: string | null): string | null {
+  if (!dataset) return gone ?? 'Pick a dataset.';
+  if (dataset.problem === 'missing') return 'Folder missing: put it back, or pick another dataset.';
+  if (dataset.problem === 'unreadable') return "Can't read its folder as a dataset now: pick another dataset.";
+  return noTrainImages(dataset);
+}
+
 /** Number inputs bind `null` when cleared; accept only finite whole numbers in range. */
 export const isInt = (v: unknown, lo: number, hi: number) => typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
 
@@ -63,7 +88,8 @@ export function formErrors(
   lr0: number,
   seed: number,
   augment: Augment,
-  dataset: Dataset | undefined,
+  dataset: ListedDataset | undefined,
+  gone: string | null,
   weights: string,
   picked: Model | undefined,
   arch: Arch,
@@ -75,13 +101,21 @@ export function formErrors(
   cloudOn: boolean,
   cloudPick: CloudPick,
 ): FormErrors {
+  const n = runName(name);
   return {
-    name: !name.trim() ? 'Give the run a name.' : /[^\w.-]/.test(name.trim()) ? 'Letters, digits, dot, dash and underscore only.' : null,
+    // Other characters become dashes (runnew/name), so only an empty or a long name is wrong.
+    name: !name.trim()
+      ? 'Give the run a name.'
+      : !n
+        ? 'Use letters or digits.'
+        : n.length > MAX_RUN_NAME
+          ? `At most ${MAX_RUN_NAME} characters (this one has ${n.length}).`
+          : null,
     epochs: !isInt(epochs, 1, 10000) ? 'A whole number from 1 to 10,000.' : null,
     lr0: !(typeof lr0 === 'number' && lr0 > 0 && lr0 < 10) ? 'Greater than 0 and below 10.' : null,
     seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
-    dataset: !dataset ? 'Pick a dataset.' : null,
+    dataset: datasetError(dataset, gone),
     weights: weights !== 'none' && picked?.arch !== arch ? 'Pick weights of the same model size.' : null,
     // The field says what to pick; the line beside Start only names the problem and leads there.
     device: deviceErr && !onCloud ? `${devWord(device)} is not available.` : null,

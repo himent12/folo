@@ -1,6 +1,6 @@
 use super::*;
 use axum::http::StatusCode;
-use folo_api::{Epoch, TrainConfig};
+use folo_api::{Epoch, LogLevel, LogLine, StatusEvent, TrainConfig};
 use folo_test_support::TestDir;
 
 use super::history::read_metrics;
@@ -39,6 +39,7 @@ fn a_step_cursor_never_skips_a_step() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
     let step = |s: u64| -> Step {
@@ -58,15 +59,10 @@ fn a_step_cursor_never_skips_a_step() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A create or resume that passed `check_open` before the shutdown and reaches `enqueue` after it: the run is
-/// marked stopped instead of queued, and no worker starts.
-#[test]
-fn enqueue_after_shutdown_refuses_and_stops_the_run() {
-    let dir = TestDir::new("runs-late");
-    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
-    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
+/// The record of run `id` queued with `config` that never started.
+fn queued_file(id: &str, config: TrainConfig) -> RunFile {
     let run = Run {
-        id: "run_late".into(),
+        id: id.into(),
         name: config.name.clone(),
         status: RunStatus::Queued,
         epochs: config.epochs,
@@ -74,6 +70,7 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         created: now(),
         started: None,
         finished: None,
+        paused_s: None,
         epoch: 0,
         step: 0,
         steps_per_epoch: 0,
@@ -86,14 +83,35 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         resolved: None,
         queue_position: None,
         cloud: None,
+        dataset: None,
     };
     let dataset = DatasetRef {
         id: "ds_1".into(),
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
-    let file = RunFile { run, dataset, weights: None, val_offset: 0, epochs_done: 0, last_metrics: None };
+    RunFile {
+        run,
+        dataset,
+        weights: None,
+        val_offset: 0,
+        epochs_done: 0,
+        last_metrics: None,
+        resumed_at: None,
+        alive_at: None,
+    }
+}
+
+/// A create or resume that passed `check_open` before the shutdown and reaches `enqueue` after it: the run is
+/// marked stopped instead of queued, and no worker starts.
+#[test]
+fn enqueue_after_shutdown_refuses_and_stops_the_run() {
+    let dir = TestDir::new("runs-late");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
+    let file = queued_file("run_late", config);
     std::fs::create_dir_all(dir.join("run_late")).unwrap();
     let entry = Arc::new(RunEntry::new("run_late".into(), dir.join("run_late"), file));
     runs.list.write().unwrap().push(entry.clone());
@@ -143,6 +161,7 @@ fn a_run_stopped_before_it_is_queued_stays_out_of_the_queue() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
     runs.stop(e.id()).unwrap();
@@ -169,6 +188,7 @@ fn listed_queue_positions_are_one_snapshot() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let ids: Vec<String> = (0..4).map(|i| format!("run_q{i}")).collect();
     for id in &ids {
@@ -181,6 +201,7 @@ fn listed_queue_positions_are_one_snapshot() {
             created: now(),
             started: None,
             finished: None,
+            paused_s: None,
             epoch: 0,
             step: 0,
             steps_per_epoch: 0,
@@ -193,6 +214,7 @@ fn listed_queue_positions_are_one_snapshot() {
             resolved: None,
             queue_position: None,
             cloud: None,
+            dataset: None,
         };
         let file = RunFile {
             run,
@@ -201,6 +223,8 @@ fn listed_queue_positions_are_one_snapshot() {
             val_offset: 0,
             epochs_done: 0,
             last_metrics: None,
+            resumed_at: None,
+            alive_at: None,
         };
         std::fs::create_dir_all(dir.join(id)).unwrap();
         let entry = Arc::new(RunEntry::new(id.clone(), dir.join(id), file));
@@ -283,4 +307,268 @@ fn only_complete_epochs_after_the_first_are_samples() {
 fn run_model_ids() {
     assert_eq!(run_model_id("run_7d1e", false), "m_7d1e");
     assert_eq!(run_model_id("run_7d1e", true), "m_7d1e-last");
+}
+
+/// A failed run names the epoch it failed in (its steps were in epoch 2, one epoch had finished); a stopped one the
+/// last epoch it finished (its checkpoint's).
+#[test]
+fn a_failed_run_names_the_epoch_it_failed_in() {
+    let dir = TestDir::new("runs-failed-epoch");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"f"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let loss = r#""loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1"#;
+    let step: Step = serde_json::from_str(&format!(r#"{{"epoch":2,"step":25,{loss}}}"#)).unwrap();
+    e.on_event(&RunEvent::Step(step));
+    for (status, epoch) in [(RunStatus::Failed, 2), (RunStatus::Stopped, 1)] {
+        let mut st = e.state.lock().unwrap();
+        st.file.epochs_done = 1;
+        st.file.run.epoch = 2;
+        e.finish(&mut st, status, None);
+        assert_eq!(st.file.run.epoch, epoch, "{status:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_epoch_is_one_log_line() {
+    let loss = r#"{"box":1,"cls":1,"dfl":1,"total":3.21449}"#;
+    let val = r#"{"map50":0.1,"map50_95":0.0734,"precision":0.1,"recall":0.1,"per_class":[]}"#;
+    let e: Epoch =
+        serde_json::from_str(&format!(r#"{{"epoch":3,"train_loss":{loss},"val":{val},"duration_s":15.24}}"#))
+            .unwrap();
+    assert_eq!(super::entry::epoch_line(&e, 5), "epoch 3/5: loss 3.214, mAP50-95 0.073, 15.2 s");
+}
+
+/// A resumed run's `paused_s`: the time from its end to the resume, then the wait in the queue once it trains again;
+/// a stop while it waited counts from that resume. A run resumed before it ever started has none.
+#[test]
+fn a_resumed_run_records_the_time_it_was_not_training() {
+    let dir = TestDir::new("runs-paused");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"p"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let t = unix_now().floor();
+    let ended = |started: Option<f64>, finished: f64| {
+        let mut st = e.state.lock().unwrap();
+        st.file.run.status = RunStatus::Stopped;
+        st.file.run.started = started.map(rfc3339);
+        st.file.run.finished = Some(rfc3339(finished));
+    };
+    let paused = || e.run().paused_s;
+    // Each of the `adds` additions so far was measured against a "now" at or after `t`, so each may be late by the
+    // time this test has taken (whole seconds, as the server counts), and never early.
+    let near = |got: Option<f64>, want: f64, adds: f64| {
+        let got = got.expect("paused_s set");
+        let late = adds * (unix_now().floor() - t);
+        assert!((want..=want + late).contains(&got), "paused_s {got}, want {want} to {}", want + late);
+    };
+
+    // Stopped before it ever trained: resuming it starts it over, with nothing to leave out.
+    ended(None, t - 100.0);
+    runs.restart(&e, config.clone(), None).unwrap();
+    assert_eq!(paused(), None);
+    assert_eq!(serde_json::to_value(e.run()).unwrap().get("paused_s"), None, "absent, not null");
+
+    // Trained, stopped overnight (10 h ago), resumed now: the night counts, and the wait in the queue once it trains.
+    ended(Some(t - 40_000.0), t - 36_000.0);
+    runs.restart(&e, config.clone(), None).unwrap();
+    near(paused(), 36_000.0, 1.0);
+    e.state.lock().unwrap().file.resumed_at = Some(t - 60.0);
+    e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
+    near(paused(), 36_060.0, 2.0);
+    assert_eq!(e.state.lock().unwrap().file.resumed_at, None);
+
+    // Resumed, stopped while it waited (it never trained in between), resumed again: from the first resume on (each
+    // resume is "now"; the first is moved 500 s back by hand).
+    ended(Some(t - 40_000.0), t - 50.0);
+    runs.restart(&e, config.clone(), None).unwrap();
+    e.state.lock().unwrap().file.resumed_at = Some(t - 500.0);
+    ended(Some(t - 40_000.0), t - 100.0);
+    runs.restart(&e, config.clone(), None).unwrap();
+    near(paused(), 36_060.0 + 50.0 + 500.0, 4.0);
+
+    // The reviewer's case: trained 60 s, stopped, resumed an hour later behind a long run (moved back by hand), and
+    // stopped while it still waited. Training time, as the API defines it, is 60 s while it waits, once it is
+    // stopped there (the wait is settled into `paused_s`), and after the next resume until it trains.
+    let training = || {
+        let r = e.run();
+        let secs = |s: &Option<String>| s.as_deref().and_then(crate::util::parse_rfc3339);
+        secs(&r.finished).unwrap_or_else(|| unix_now().floor())
+            - secs(&r.started).unwrap()
+            - r.paused_s.unwrap()
+    };
+    let sixty = |got: f64| {
+        let late = 2.0 * (unix_now().floor() - t) + 1.0;
+        assert!((60.0 - late..=60.0 + late).contains(&got), "trained {got} s, want 60");
+    };
+    ended(Some(t - 7200.0), t - 7140.0);
+    e.state.lock().unwrap().file.run.paused_s = None;
+    runs.restart(&e, config.clone(), None).unwrap();
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.run.paused_s = Some(3540.0);
+        st.file.resumed_at = Some(t - 3600.0);
+    }
+    sixty(training());
+    runs.stop(e.id()).unwrap();
+    assert_eq!(e.run().status, RunStatus::Stopped);
+    assert_eq!(e.state.lock().unwrap().file.resumed_at, None, "the wait is settled");
+    sixty(training());
+    near(paused(), 7140.0, 2.0);
+    runs.restart(&e, config, None).unwrap();
+    sixty(training());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A cloud run another process follows (`queued`, never started, so not claimed here): deleting it is `409
+/// run_active` and its folder stays; only a local run that never started may be deleted while it waits.
+#[test]
+fn a_cloud_run_followed_elsewhere_is_not_deleted() {
+    let dir = TestDir::new("runs-delete-cloud");
+    let config: TrainConfig = serde_json::from_str(
+        r#"{"dataset_id":"ds_1","name":"c","compute":{"connection_id":"cc_1","offer_id":"o"}}"#,
+    )
+    .unwrap();
+    let run_dir = dir.join("run_c");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("run.json"), serde_json::to_vec(&queued_file("run_c", config)).unwrap())
+        .unwrap();
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let e = runs.delete("run_c").unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::CONFLICT, "run_active"));
+    assert!(e.body.message.contains("another FOLO process"), "{}", e.body.message);
+    assert!(run_dir.join("run.json").is_file() && runs.get("run_c").is_ok());
+    runs.shutdown(None);
+}
+
+/// A run named past today's 64-character limit by an older version still resumes, its config sent back as it is.
+#[test]
+fn a_run_with_a_legacy_long_name_resumes() {
+    let dir = TestDir::new("runs-long-name");
+    let name = "n".repeat(80);
+    let config: TrainConfig =
+        serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1", "name": name })).unwrap();
+    let mut file = queued_file("run_long", config.clone());
+    file.dataset.path = dir.to_string_lossy().into_owned();
+    let run_dir = dir.join("run_long");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("run.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let fields = serde_json::to_value(&config).unwrap().as_object().unwrap().clone();
+    let (e, wanted) = runs.resume_config("run_long", &fields).unwrap();
+    assert_eq!(wanted.name, name);
+    assert_eq!(runs.restart(&e, wanted, None).unwrap().name, name);
+    runs.shutdown(None);
+}
+
+/// A run the server was killed under ends when it last trained, not when the server starts again: at `alive_at`,
+/// which a training run keeps up to date; in a `run.json` from before it, at the newest of its files; at a resume it
+/// waited after without training again. Its resume then leaves the time the server was down out of training time.
+#[test]
+fn a_run_left_training_ends_when_it_last_trained() {
+    let dir = TestDir::new("runs-killed");
+    let open = || Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let runs = open();
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"k"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let t = unix_now().floor();
+    let running = |alive: Option<f64>, resumed: Option<f64>| {
+        let mut st = e.state.lock().unwrap();
+        st.file.run.status = RunStatus::Running;
+        st.file.run.started = Some(rfc3339(t - 1000.0));
+        st.file.run.finished = None;
+        st.file.alive_at = alive;
+        st.file.resumed_at = resumed;
+        e.persist(&st);
+    };
+    let after_restart = || {
+        let run = open().get(e.id()).unwrap().run();
+        assert_eq!((run.status, run.error_code.as_deref()), (RunStatus::Stopped, Some("interrupted")));
+        run
+    };
+
+    // A step keeps `alive_at` (written at most every ALIVE_EVERY) for a kill to find.
+    running(None, None);
+    let step: Step = serde_json::from_str(
+        r#"{"epoch":1,"step":1,"loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1}"#,
+    )
+    .unwrap();
+    e.on_event(&RunEvent::Step(step));
+    let alive = e.state.lock().unwrap().file.alive_at.expect("alive_at set by a step");
+    assert!((t..=unix_now()).contains(&alive), "alive_at {alive}, now {t}");
+
+    // So does a phase that sends no steps, only log lines: written once the last write is ALIVE_EVERY old by the
+    // monotonic clock, also after the wall clock was set back (`alive_at` an hour ahead of now); sooner than that, a
+    // report sets it in memory only.
+    let on_disk = || {
+        let f: RunFile = serde_json::from_slice(&std::fs::read(e.dir.join("run.json")).unwrap()).unwrap();
+        f.alive_at.unwrap()
+    };
+    // Between the start of this test and now, however long the machine took over it.
+    let near_now = |at: f64| assert!((t..=unix_now()).contains(&at), "alive_at {at}, now {t}");
+    let log = RunEvent::Log(LogLine { t: now(), level: LogLevel::Info, message: "validating".into() });
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.alive_at = Some(t + 3600.0);
+        e.persist(&st);
+        st.alive_written = std::time::Instant::now().checked_sub(ALIVE_EVERY);
+    }
+    e.on_event(&log);
+    near_now(on_disk());
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.alive_at = Some(t - 50.0);
+        e.persist(&st);
+    }
+    e.on_event(&log);
+    assert_eq!(on_disk(), t - 50.0);
+    near_now(e.state.lock().unwrap().file.alive_at.unwrap());
+
+    // Killed 900 s after it started, down until now: it ended then, and trained 100 s.
+    running(Some(t - 900.0), None);
+    assert_eq!(after_restart().finished.as_deref(), Some(rfc3339(t - 900.0).as_str()));
+
+    // A run.json from before `alive_at`: the newest of its files (all written 700 s ago, here).
+    running(None, None);
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(t - 700.0);
+    for f in ["run.json", "log.jsonl"] {
+        std::fs::File::options().write(true).open(e.dir.join(f)).unwrap().set_modified(then).unwrap();
+    }
+    assert_eq!(after_restart().finished.as_deref(), Some(rfc3339(t - 700.0).as_str()));
+
+    // Resumed 300 s ago and killed while it waited: it ended at that resume, and resuming it now leaves the 300 s
+    // out (with the 100 s from its first end to that resume, recorded then).
+    running(Some(t - 400.0), Some(t - 300.0));
+    e.state.lock().unwrap().file.run.paused_s = Some(100.0);
+    e.persist(&e.state.lock().unwrap());
+    let runs = open();
+    let e2 = runs.get(e.id()).unwrap();
+    assert_eq!(e2.run().finished.as_deref(), Some(rfc3339(t - 300.0).as_str()));
+    runs.restart(&e2, config, None).unwrap();
+    let paused = e2.run().paused_s.unwrap();
+    let late = unix_now().floor() - t;
+    assert!((400.0..=400.0 + late).contains(&paused), "paused_s {paused}, want 400 to {}", 400.0 + late);
+    let _ = std::fs::remove_dir_all(&dir);
 }

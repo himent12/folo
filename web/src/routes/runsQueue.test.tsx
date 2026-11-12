@@ -57,7 +57,10 @@ describe('Runs: the training queue', () => {
     await open(new MockApi('normal', 0));
     expect(place('run_q4n2')).toBe('1st in queue');
     expect(place('run_q7c5')).toBe('2nd in queue');
-    expect(row('run_7d1e').querySelector('td.act button')).toBeNull();
+    // The training run's ⋯ opens it or stops it.
+    expect((await menu('run_7d1e')).map((i) => i.textContent?.trim())).toEqual(['Open run', 'Stop']);
+    document.body.click();
+    flushSync();
     // The front run cannot move up; the live run trains, so Start next (not "now"), and only for the one behind. The
     // queue's one action set ends with Remove from queue, as on the run's own page.
     expect((await menu('run_q4n2')).map((b) => b.textContent?.trim())).toEqual(['Move down', 'Remove from queue']);
@@ -113,7 +116,10 @@ describe('Runs: the training queue', () => {
     );
     await new Promise((r) => setTimeout(r, 20));
     flushSync();
-    expect(target.querySelectorAll('td.act button')).toHaveLength(0);
+    // No queue actions on any row (finished rows keep their own ⋯: the model and Delete); a waiting run can still leave
+    // the queue, as on its page.
+    expect(target.querySelectorAll('td.act button[aria-label^="Queue actions"]')).toHaveLength(0);
+    expect((await menu('run_q7c5')).map((i) => i.textContent?.trim())).toEqual(['Open run', 'Remove from queue']);
     expect(place('run_q7c5')).toBeUndefined();
   });
 });
@@ -144,7 +150,10 @@ describe('a cloud run in its hand-over', () => {
     expect(row('run_c9e4').querySelector('.badge')?.textContent?.trim()).toBe('Uploading data');
     expect(row('run_c9e4').querySelector('.badge')?.classList.contains('queued')).toBe(true);
     expect(place('run_c9e4')).toBeUndefined();
-    expect(row('run_c9e4').querySelector('td.act button')).toBeNull();
+    // Its ⋯: open it, or stop it (its instance costs from the launch), never queue moves.
+    expect((await menu('run_c9e4')).map((i) => i.textContent?.trim())).toEqual(['Open run', 'Stop']);
+    document.body.click();
+    flushSync();
     // Phones: the status word leads the row's meta line.
     const phone = target.querySelector(`ul.rows a[href$="/runs/run_c9e4"] .r-meta`);
     expect(phone?.textContent).toMatch(/^Uploading data/);

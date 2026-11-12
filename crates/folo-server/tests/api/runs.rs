@@ -56,7 +56,7 @@ async fn runs_lifecycle() {
     // Create, stop, delete.
     let ds: DatasetList = ok(&app, get("/api/datasets")).await;
     let cfg = json!({ "dataset_id": ds.datasets[0].id, "arch": "folo-s", "epochs": 5 });
-    let (status, _, b) = send(&app, post_json("/api/runs", cfg)).await;
+    let (status, _, b) = send(&app, post_json("/api/runs", cfg.clone())).await;
     assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
     let run: Run = serde_json::from_slice(&b).unwrap();
     assert_eq!(run.status, RunStatus::Queued);
@@ -64,6 +64,15 @@ async fn runs_lifecycle() {
     assert_eq!(run.config.batch, 16);
     let list: RunList = ok(&app, get("/api/runs")).await;
     assert_eq!(list.runs[0].id, run.id, "newest first");
+    // A run that waits and never started is removed from the queue and deleted; a running one is refused.
+    let (status, _, _) =
+        send(&app, Request::delete(format!("/api/runs/{}", run.id)).body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    err(&app, get(&format!("/api/runs/{}", run.id)), StatusCode::NOT_FOUND, "run_not_found").await;
+    let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
+    // It starts 2 s after it is created and trains 6 s an epoch.
+    store.pass_time(Duration::from_secs(5));
+    assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", run.id))).await.status, RunStatus::Running);
     err(
         &app,
         Request::delete(format!("/api/runs/{}", run.id)).body(Body::empty()).unwrap(),
@@ -94,6 +103,28 @@ async fn runs_lifecycle() {
     let bad = json!({ "dataset_id": ds.datasets[0].id, "imgsz": 100 });
     let e = err(&app, post_json("/api/runs", bad), StatusCode::BAD_REQUEST, "invalid_config").await;
     assert!(e.message.contains("imgsz"));
+    // Run names are at most 64 characters, as dataset names are: 64 is fine, 65 is not.
+    let long = json!({ "dataset_id": ds.datasets[0].id, "name": "x".repeat(65) });
+    let e = err(&app, post_json("/api/runs", long), StatusCode::BAD_REQUEST, "invalid_config").await;
+    assert_eq!(e.message, "name: must be at most 64 characters");
+    let fits = json!({ "dataset_id": ds.datasets[0].id, "name": "é".repeat(64) });
+    let fits: Run = ok(&app, post_json("/api/runs", fits)).await;
+    assert_eq!(fits.name.chars().count(), 64);
+    // A name left empty is made from a dataset name of up to 64 characters and the size, cut to fit, so the config
+    // the run reports can be sent again as a new run.
+    let long: Dataset = ok(
+        &app,
+        post_json(
+            "/api/datasets/synthetic",
+            json!({ "name": "d".repeat(64), "images": 10, "classes": ["a"] }),
+        ),
+    )
+    .await;
+    let named: Run =
+        ok(&app, post_json("/api/runs", json!({ "dataset_id": long.id, "arch": "folo-n" }))).await;
+    assert_eq!(named.name, format!("{}-n", "d".repeat(62)));
+    let again: Run = ok(&app, post_json("/api/runs", serde_json::to_value(&named.config).unwrap())).await;
+    assert_eq!(again.name, named.name);
     // An optimizer this build does not know decodes (Optimizer::Unknown) but is refused, not trained with.
     let bad = json!({ "dataset_id": ds.datasets[0].id, "optimizer": "lion" });
     let e = err(&app, post_json("/api/runs", bad), StatusCode::BAD_REQUEST, "invalid_config").await;

@@ -3,14 +3,15 @@ import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Sparkles from '$icons/sparkles';
 import Tags from '$icons/tags';
-import { computed, css, For, signal, untrack } from 'fw';
+import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import ClassStrip from '$lib/detect/ClassStrip';
-import { ago, num } from '$lib/format';
+import { ago, count, num } from '$lib/format';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -25,30 +26,100 @@ import Meta from '$lib/ui/Meta';
 import { rowNav } from '$lib/ui/rowNav';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import { imageCount } from './dataset/health';
+import { datasetChanges, generationEnded, landed, pendingGeneration } from './datasets/changes';
+import { datasetProblem, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
 /** Columns of the desktop table (for state rows that span it), the empty last one included. */
 const COLS = 10;
+/** How often the list reads itself again while a sample set this tab asked for still generates. */
+const GENERATION_POLL_MS = 3000;
 
 export default function Datasets() {
   setCrumbs({ label: 'Datasets' });
   // The header's create action is the one in the top-right corner (the top bar's New run steps aside).
   ownCreateAction();
 
-  // The list endpoint has no stats; fetch each dataset for its class balance and box count.
+  // The list endpoint has no stats; fetch each dataset for its class balance and box count (and to learn which ones
+  // cannot be read: a folder that was moved is marked, not shown as if nothing were wrong).
+  // A dataset whose folder was found missing is not read again on every visit (./datasets/problem readDataset): only
+  // when the list may have changed (`again`, below).
+  let again = false;
   const datasets = new Resource(async (s) => {
-    const list = await hub.api.datasets(s);
-    return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
+    const api = hub.api;
+    const fresh = again;
+    again = false;
+    const list = await api.datasets(s);
+    return Promise.all(
+      list.map((d): Promise<ListedDataset> => readDataset(api, d.id, () => api.dataset(d.id, s), fresh).catch((e) => ({ ...d, problem: datasetProblem(e) }))),
+    );
+  });
+  const reread = () => {
+    again = true;
+    void datasets.refresh();
+  };
+  // The list goes stale otherwise: read it again after a dataset action in this tab, and when the tab comes back (one
+  // added in another tab, by an agent, or a folder moved meanwhile).
+  const seen = datasetChanges.peek();
+  effect(() => {
+    if (datasetChanges.get() !== seen) untrack(reread);
+  });
+  // A sample set this tab asked for of this server before a reload is still generating: read the list a few seconds
+  // after each read has settled (one slower than that is never cut short by the next), while the tab is shown, until
+  // it is there (./datasets/changes).
+  effect(() => {
+    const list = datasets.data;
+    const server = untrack(() => hub.server);
+    const g = untrack(() => pendingGeneration(server));
+    if (!g || !list) return;
+    if (landed(g, list)) return void generationEnded(g);
+    // A read that finds nothing new keeps the same list (Resource), so this runs on its own clock until one does.
+    let live = true;
+    let t: ReturnType<typeof setTimeout>;
+    const later = () => {
+      if (live) t = setTimeout(tick, GENERATION_POLL_MS);
+    };
+    const tick = () => {
+      if (!live || !pendingGeneration(server)) return;
+      if (document.visibilityState !== 'visible' || datasets.loading || datasets.refreshing) return later();
+      void datasets.refresh().finally(later);
+    };
+    later();
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  });
+  effect(() => {
+    const back = () => document.visibilityState === 'visible' && !datasets.loading && reread();
+    document.addEventListener('visibilitychange', back);
+    return () => document.removeEventListener('visibilitychange', back);
   });
 
-  // `#/datasets?add=folder|synthetic` opens the dialog (used by the onboarding on an empty Overview).
-  const addParam = untrack(() => router.route.query.get('add'));
-  const adding = signal(addParam === 'folder' || addParam === 'synthetic');
-  const addMode = signal<'folder' | 'synthetic'>(addParam === 'synthetic' ? 'synthetic' : 'folder');
+  // `#/datasets?add=folder|synthetic` opens the dialog (the onboarding on an empty Overview, New run's empty state), also
+  // when it is followed here, in place. Closing the dialog takes `?add=` out of the URL, so a reload does not open it
+  // again.
+  const addParam = computed(() => (router.route.name === 'datasets' ? router.route.query.get('add') : null));
+  const asked = (p: string | null): p is 'folder' | 'synthetic' => p === 'folder' || p === 'synthetic';
+  const first = untrack(() => addParam.get());
+  const adding = signal(asked(first));
+  const addMode = signal<'folder' | 'synthetic'>(first === 'synthetic' ? 'synthetic' : 'folder');
   function add(m: 'folder' | 'synthetic') {
     addMode.set(m);
     adding.set(true);
   }
+  effect(() => {
+    const p = addParam.get();
+    if (asked(p)) untrack(() => add(p));
+  });
+  effect(() => {
+    if (adding.get()) return;
+    const q = untrack(() => router.route.query);
+    if (untrack(() => router.route.name) !== 'datasets' || !q.has('add')) return;
+    const rest = new URLSearchParams(q);
+    rest.delete('add');
+    untrack(() => router.go(`/datasets${rest.toString() ? `?${rest}` : ''}`, { replace: true }));
+  });
 
   const query = signal('');
   // The toolbar's filter, at its left as on Runs and Models (one shape for the three list toolbars): by format.
@@ -254,7 +325,15 @@ export default function Datasets() {
                         <td class="r num muted">{num(d().splits.train)}</td>
                         <td class="r num muted">{num(d().splits.val)}</td>
                         <td class="r num muted">{num(d().splits.test)}</td>
-                        <td>{d().stats ? <ClassStrip counts={d().stats!.class_counts} classes={d().classes} /> : <span class="faint">—</span>}</td>
+                        <td>
+                          {d().problem ? (
+                            <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge>
+                          ) : d().stats ? (
+                            <ClassStrip counts={d().stats!.class_counts} classes={d().classes} />
+                          ) : (
+                            <span class="faint">—</span>
+                          )}
+                        </td>
                         {/* Full numbers, like the split columns beside it: one format per column. */}
                         <td class="r num hide-md">{num(d().stats?.boxes)}</td>
                         <td class="r faint hide-md">{ago(d().created)}</td>
@@ -279,8 +358,8 @@ export default function Datasets() {
                         <span class="name truncate">{d().name}</span>{' '}
                         <span class="m-meta m-total num">
                           <Meta>
-                            <span>{num(imageCount(d()))} images</span>
-                            <span>{d().classes.length} classes</span>
+                            <span>{count(imageCount(d()), 'image')}</span>
+                            <span>{count(d().classes.length, 'class')}</span>
                           </Meta>
                         </span>{' '}
                         <span class="m-meta num">
@@ -292,7 +371,11 @@ export default function Datasets() {
                         </span>
                       </span>
                     </a>{' '}
-                    {d().stats ? (
+                    {d().problem ? (
+                      <span class="m-side">
+                        <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge>
+                      </span>
+                    ) : d().stats ? (
                       <span class="m-side">
                         <span class="m-strip">
                           <ClassStrip counts={d().stats!.class_counts} classes={d().classes} height={4} named />
@@ -332,8 +415,8 @@ export default function Datasets() {
                 {shown.get().length < datasets.data.length ? `${shown.get().length} of ${datasets.data.length}` : shown.get().length}{' '}
                 {datasets.data.length === 1 ? 'dataset' : 'datasets'}
               </span>{' '}
-              <span>{num(totals.get().images)} images</span>{' '}
-              <span>{num(totals.get().boxes)} boxes</span>
+              <span>{count(totals.get().images, 'image')}</span>{' '}
+              <span>{count(totals.get().boxes, 'box')}</span>
             </Meta>
           </p>
         ) : null}

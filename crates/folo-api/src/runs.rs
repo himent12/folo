@@ -203,9 +203,20 @@ pub struct Run {
     pub created: String,
     /// When training started, if it has.
     pub started: Option<String>,
-    /// When it reached `stopped`, `completed` or `failed`.
+    /// When it reached `stopped`, `completed` or `failed`; for a run whose server was killed under it (`stopped`,
+    /// `interrupted`), when it last reported (a step, an epoch, a log line; recorded at least every 10 s while those
+    /// come): a run killed during a long phase that reports nothing (a long validation pass) ends at its last
+    /// report, before that phase.
     pub finished: Option<String>,
-    /// Current epoch, 1-based; 0 before the first step. Equals the last epoch once finished.
+    /// Seconds a resumed run spent not training since `started`: from each end (stop, failure) until it trained
+    /// again, summed over its resumes; while it waits in the queue after a resume, the wait so far is included (and
+    /// a resumed run that ends there keeps it). Its training time is `finished` (or now, while it is active) minus
+    /// `started` minus this, so it does not grow while the run waits. Absent for a run never resumed, and from servers
+    /// that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_s: Option<f64>,
+    /// Current epoch, 1-based; 0 before the first step. Once ended: the last epoch it finished (`completed`,
+    /// `stopped`), or the epoch it failed in (`failed`).
     pub epoch: u32,
     /// Total epochs.
     pub epochs: u32,
@@ -236,6 +247,21 @@ pub struct Run {
     /// Where a cloud run (`config.compute`) executes and how far it is; absent for runs on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<RunCloud>,
+    /// The dataset as it was when the run was created, so the run still names it (and its classes) once the dataset
+    /// is removed; absent from servers that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<RunDataset>,
+}
+
+/// `Run.dataset`: the name and class names of the dataset a run trains on, recorded when it was created.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RunDataset {
+    /// The dataset's name.
+    pub name: String,
+    /// Its class names, in class order; empty for runs created before they were recorded.
+    #[serde(default)]
+    pub classes: Vec<String>,
 }
 
 /// [`Run::resolved`]: the settings a run actually trains with, after `optimizer: auto` and the batch scaling of

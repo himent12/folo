@@ -39,25 +39,17 @@ impl FoloApp {
         });
         let compute_rows = cloud_on.then(|| self.nr_compute_rows(cloud.as_ref(), window, cx));
         let datasets = self.store.datasets.ready().cloned().unwrap_or_default();
+        let ds = self.nr_dataset().cloned();
+        let ds_gone = self.nr_dataset_gone();
+        let gone_name = self.nr_gone_name();
         let f = self.new_run.as_ref().unwrap();
-        let (ds_i, arch, epochs, batch, imgsz, device, opt, lr0, mosaic, mixup, fliplr) = (
-            f.dataset,
-            f.arch,
-            f.epochs,
-            f.batch,
-            f.imgsz,
-            f.device,
-            f.optimizer,
-            f.lr0,
-            f.mosaic,
-            f.mixup,
-            f.fliplr,
-        );
+        let ds_i = datasets.iter().position(|d| d.id == f.dataset);
+        let (arch, epochs, batch, imgsz, device, opt, lr0, mosaic, mixup, fliplr) =
+            (f.arch, f.epochs, f.batch, f.imgsz, f.device, f.optimizer, f.lr0, f.mosaic, f.mixup, f.fliplr);
         let name_input = f.name.clone();
         let error = f.error.clone();
         let submitting = f.submitting;
         let opt_unknown = f.optimizer_unknown;
-        let ds = datasets.get(ds_i).cloned();
         // Advanced: what differs from a fresh form's defaults, so a collapsed group still says
         // what it will do. Open while one of its fields needs fixing.
         let adv_summary = {
@@ -121,24 +113,33 @@ impl FoloApp {
             .when(name_ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
             .child(name_input)
             .into_any_element();
+        let ds_ids: Vec<String> = datasets.iter().map(|d| d.id.clone()).collect();
         let ds_select = self.select(
             "nr-dataset",
-            ds.as_ref().map_or("No datasets".into(), |d| SharedString::from(d.name.clone())),
+            match &ds {
+                Some(d) => SharedString::from(d.name.clone()),
+                None if ds_gone => "Pick a dataset".into(),
+                None => "No datasets".into(),
+            },
             datasets
                 .iter()
                 .map(|d| {
                     (
                         SharedString::from(d.name.clone()),
-                        Some(SharedString::from(format!("{} images", int(d.splits.total())))),
+                        Some(SharedString::from(counted(d.splits.total(), "image", "images"))),
                     )
                 })
                 .collect(),
-            ds_i,
+            // Deleted, none of them is the choice.
+            ds_i.unwrap_or(datasets.len()),
             window,
             cx,
-            Rc::new(|this, i, _, _| {
-                if let Some(f) = this.new_run.as_mut() {
-                    f.dataset = i;
+            Rc::new(move |this, i, _, cx| {
+                if let Some(f) = this.new_run.as_mut()
+                    && let Some(id) = ds_ids.get(i)
+                {
+                    f.dataset = id.clone();
+                    this.resuggest_run_name(cx);
                 }
             }),
         );
@@ -167,7 +168,20 @@ impl FoloApp {
         let arch_seg = div()
             .w_full()
             .font_family(crate::theme::MONO)
-            .child(seg(self, "nr-arch", &["n", "s", "m", "l", "x"], arch, window, cx, |f, i| f.arch = i))
+            .child(self.segmented_fill(
+                "nr-arch",
+                &["n", "s", "m", "l", "x"],
+                arch,
+                window,
+                cx,
+                Rc::new(|this, i, _, cx| {
+                    if let Some(f) = this.new_run.as_mut() {
+                        f.arch = i;
+                        // The suggested name carries the architecture's letter.
+                        this.resuggest_run_name(cx);
+                    }
+                }),
+            ))
             .into_any_element();
         let batch_labels: Vec<String> = BATCHES.iter().map(|b| b.to_string()).collect();
         let batch_refs: Vec<&str> = batch_labels.iter().map(String::as_str).collect();
@@ -413,6 +427,12 @@ impl FoloApp {
                                     ),
                             )
                             .child(ds_select)
+                            .when(ds_gone, |d| {
+                                d.child(
+                                    text(ty::SM, t.danger_text)
+                                        .child(format!("{} was removed. Pick another.", gone_name)),
+                                )
+                            })
                     }),
                 ),
             )
@@ -513,8 +533,10 @@ impl FoloApp {
                                     close_slider,
                                     close_bad.then_some("Enter a whole number up to the epoch count"),
                                 ))
-                                // Which epochs those are (the label already says what they do).
-                                .child(text(ty::SM, t.text_tertiary).child({
+                                // Which epochs those are (the label already says what they do);
+                                // none while either count is invalid (it would describe the last
+                                // good one).
+                                .when(!epochs_bad && !close_bad, |d| d.child(text(ty::SM, t.text_tertiary).child({
                                     // As the engine runs it: capped at half the run.
                                     let last = epochs.round().max(1.) as u32;
                                     let asked = close_mosaic.round() as u32;
@@ -528,7 +550,7 @@ impl FoloApp {
                                         1 => format!("Epoch {last} trains on whole images{capped}"),
                                         _ => format!("Epochs {}–{last} train on whole images{capped}", last - n + 1),
                                     }
-                                })),
+                                }))),
                         ),
                     ),
             )

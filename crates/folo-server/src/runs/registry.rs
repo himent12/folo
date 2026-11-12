@@ -11,7 +11,9 @@ use folo_api::{LogLevel, Run, RunStatus};
 use crate::error::{Error, Result};
 use crate::throughput::Throughput;
 
+use super::entry::INTERRUPTED;
 use super::history::reconcile;
+use super::queue::followed_elsewhere;
 use super::{Queue, RunEntry, RunFile, Runs};
 
 impl Runs {
@@ -51,18 +53,26 @@ impl Runs {
                     let mut st = e.state.lock().unwrap();
                     // An active cloud run trains on its worker without this server: `crate::cloud` follows it again
                     // or ends it.
+                    // One that was stopping had been asked to stop: it ends as a stop, the others as interrupted.
                     if st.file.run.status.is_active() && st.file.run.config.compute.is_none() {
                         let was = st.file.run.status;
                         reconcile(&mut st.file, &e.dir);
-                        e.finish(&mut st, RunStatus::Stopped, None);
+                        let code = (was != RunStatus::Stopping).then(|| INTERRUPTED.to_string());
+                        e.finish_with_code(&mut st, RunStatus::Stopped, None, code);
                         drop(st);
                         e.log(
                             LogLevel::Warn,
-                            format!(
-                                "the server stopped while the run was {}; it is stopped now (resume it with \
-                                 POST /api/runs and resume_run_id)",
-                                serde_json::to_value(was).unwrap().as_str().unwrap_or("active")
-                            ),
+                            match was {
+                                RunStatus::Queued => {
+                                    "the server stopped while the run waited in the queue; start it from its page \
+                                     in Studio"
+                                }
+                                RunStatus::Stopping => "the server stopped while the run was stopping; it is stopped now",
+                                _ => {
+                                    "the server stopped during training; resume the run from its page in Studio (it \
+                                     continues from its last checkpoint)"
+                                }
+                            },
                         );
                     }
                 }
@@ -157,7 +167,7 @@ impl Runs {
             .iter()
             .zip(&states)
             .map(|(e, st)| {
-                let mut r = st.file.run.clone();
+                let mut r = st.file.shown();
                 r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
                 r
             })
@@ -175,7 +185,7 @@ impl Runs {
     /// before it can report `running`, and a stop removes it from the queue under its state lock.
     pub(super) fn record(&self, e: &RunEntry) -> Run {
         let st = e.state.lock().unwrap();
-        let mut r = st.file.run.clone();
+        let mut r = st.file.shown();
         let q = self.queue.lock().unwrap();
         r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
         r
@@ -187,14 +197,28 @@ impl Runs {
         q.runs.iter().position(|e| e.id == id).map(|i| i as u32 + 1)
     }
 
-    /// Deletes a finished run and its folder.
+    /// Deletes a finished run and its folder, or a local run waiting in this server's queue that never started (it
+    /// leaves the queue). A run that trains, stops, is being started or waits to resume is `409 run_active`, and so
+    /// is every active cloud run: its instance may be starting, here or for another process on this data dir.
     pub fn delete(&self, id: &str) -> Result<PathBuf> {
+        // Lock order: registry, then the run's state, then the queue (as the worker and `stop` take them).
         let mut list = self.list.write().unwrap();
         let e = list.iter().find(|e| e.id == id).cloned().ok_or_else(|| Error::not_found("run", id))?;
         let mut st = e.state.lock().unwrap();
-        if st.file.run.status.is_active() || st.claimed {
+        let r = &st.file.run;
+        let cloud = r.config.compute.is_some();
+        if cloud && r.status.is_active() && !st.claimed {
+            return Err(followed_elsewhere(id));
+        }
+        let never_started = !cloud && r.status == RunStatus::Queued && r.started.is_none() && !st.claimed;
+        if (r.status.is_active() && !never_started) || st.claimed {
             return Err(Error::conflict("run_active", format!("run '{id}' is still active"))
-                .hint("stop it first (POST /api/runs/{id}/stop)"));
+                .hint(format!("stop it first (POST /api/runs/{id}/stop)")));
+        }
+        if never_started {
+            let mut q = self.queue.lock().unwrap();
+            q.runs.retain(|x| x.id != id);
+            Self::notify_queue(&q);
         }
         st.deleted = true;
         list.retain(|x| x.id != id);

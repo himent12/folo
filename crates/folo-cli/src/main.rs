@@ -429,6 +429,7 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
                 "driver_info": a.driver_info,
                 "shader_f16": a.shader_f16,
                 "tensor_cores": a.tensor_cores,
+                "memory_bytes": a.memory_bytes,
                 "max_buffer_bytes": a.max_buffer_size,
                 "max_storage_binding_bytes": a.max_storage_buffer_binding_size,
                 "workgroup_storage_bytes": a.max_compute_workgroup_storage_size,

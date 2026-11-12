@@ -5,7 +5,7 @@
 import { computed, css, effect, signal } from 'fw';
 import { asOf, etaText, Now } from '$lib/api/freshness';
 import { streamedRun } from '$lib/api/live';
-import { runProgress } from '$lib/api/progress';
+import { ETA_PENDING, etaSettled, runProgress } from '$lib/api/progress';
 import type { Run } from '$lib/api/types';
 import { href } from '$lib/router';
 import Progress from '$lib/ui/Progress';
@@ -41,7 +41,8 @@ export default function SidebarLive(props: { collapsed: boolean }) {
   effect(() => {
     const id = live.get()?.id ?? null;
     const name = live.get()?.name;
-    if (!watched.runs) return;
+    // No list (yet) from the server in use: its first is where things stand there, not a run that started.
+    if (!watched.runs) return void (seen = undefined);
     if (seen !== undefined && id && id !== seen) said.set(`${name} started training`);
     seen = id;
   });
@@ -67,7 +68,7 @@ export default function SidebarLive(props: { collapsed: boolean }) {
                   ? `${run().name}, last known ${asOf(since.get() as number, now.current)}: epoch ${run().epoch} of ${run().epochs}`
                   : `Live run ${run().name}, epoch ${run().epoch} of ${run().epochs}`
               }
-              use:tooltip={{ text: `${run().name} · epoch ${run().epoch}/${run().epochs}`, side: 'right' }}
+              use:tooltip={{ text: `${run().name} · epoch ${run().epoch} of ${run().epochs}`, side: 'right' }}
             >
               <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
                 <circle cx="12" cy="12" r="10" class="track" />
@@ -80,12 +81,15 @@ export default function SidebarLive(props: { collapsed: boolean }) {
               <span class="top">
                 <span class="pulse" aria-hidden="true"></span>
                 <span class="label">{held() ? `Last known · ${asOf(since.get() as number, now.current)}` : 'Training'}</span>
-                <span class="eta num">{`${held() && run().eta_s !== null ? '~' : ''}${etaText(run().eta_s, null, now.current)}`}</span>
+                {/* As the run page says it: no time left until the first epoch is done (lib/api/progress etaSettled). */}
+                <span class="eta num">
+                  {etaSettled(run()) ? `${held() && run().eta_s !== null ? '~' : ''}${etaText(run().eta_s, null, now.current)}` : ETA_PENDING}
+                </span>
               </span>
               <span class="name truncate">{run().name}</span>
               <Progress value={progress.get()} size="xs" label="Training progress" tone={held() ? 'neutral' : 'accent'} />
               <span class="meta num">
-                <span>{`Epoch ${run().epoch}/${run().epochs}`}</span>
+                <span>{`Epoch ${run().epoch} of ${run().epochs}`}</span>
                 {run().best ? <span>{`mAP50-95 ${run().best?.map50_95.toFixed(3)}`}</span> : null}
               </span>
               {queued.get() > 0 ? <span class="queued">{`+${queued.get()} queued`}</span> : null}

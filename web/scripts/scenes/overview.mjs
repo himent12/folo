@@ -5,7 +5,8 @@
 /** @type {Scene[]} */
 export const overviewScenes = [
   // The live run at the moment run-live shows it (the same `advance`), so the two screens' epoch and progress agree.
-  { name: 'overview', path: '/', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  // `wide`: Recent runs beside Best models at their narrowest, where all six columns did not fit (shell F10).
+  { name: 'overview', path: '/', advance: 4000, viewports: ['desktop', 'wide', 'laptop', 'tablet', 'mobile'] },
   // A model scored on its training split (fasteners-mini has no validation images): Best models tags its score
   // ("Training split"), ranks it only within its own dataset and split, and counts imported and published weights apart.
   { name: 'overview-train-split', path: '/', search: 'scenario=train-split', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },

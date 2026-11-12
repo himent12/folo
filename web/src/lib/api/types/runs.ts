@@ -52,6 +52,11 @@ export interface Run {
   created: Time;
   started: Time | null;
   finished: Time | null;
+  /**
+   * A resumed run's seconds not training since `started` (from each end until it trained again): its training time is
+   * `finished` (or now) − `started` − this. Missing for a run never resumed and from older servers.
+   */
+  paused_s?: number;
   epoch: number;
   epochs: number;
   step: number;
@@ -61,7 +66,10 @@ export interface Run {
   device: string;
   model_id: string | null;
   error: string | null;
-  /** Stable error code when failed (e.g. `not_supported`); missing otherwise and from older servers. */
+  /**
+   * Stable error code when failed (e.g. `not_supported`); `interrupted` on a `stopped` run the server's stop or restart
+   * ended; missing otherwise and from older servers.
+   */
   error_code?: string;
   /** What the trainer resolved `config` to (auto optimizer, effective LR, ...); `null` until built, missing: older server. */
   resolved?: ResolvedTrain | null;
@@ -69,6 +77,11 @@ export interface Run {
   queue_position?: number | null;
   /** Where a cloud run (`config.compute`) executes and how far it is; missing for every other run. */
   cloud?: RunCloud;
+  /**
+   * The dataset as it was when the run was created, so the run still names it (and its classes) once the dataset is
+   * removed; `classes` is empty for runs from before they were recorded. Missing from older servers.
+   */
+  dataset?: { name: string; classes: string[] };
 }
 
 /** `Run.resolved` (docs/API.md): the settings a run actually trains with. */

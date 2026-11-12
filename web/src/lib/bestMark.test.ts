@@ -10,6 +10,10 @@ describe('bestMark', () => {
     expect(m.decimals).toBe(3);
   });
 
+  it('marks nothing when nothing scored (a model at 0.000 is not "best")', () => {
+    expect([...bestMark([0, 0, null]).best]).toEqual([]);
+  });
+
   it('marks every value of an exact tie "joint best" (fasteners-n-best and fasteners-n-f16)', () => {
     const m = bestMark([0.6041, 0.6041, 0.5]);
     expect([...m.best].sort()).toEqual([0, 1]);

@@ -168,8 +168,13 @@ impl FoloApp {
                             f.epochs_invalid = false;
                             let (input, v) = (f.epochs_input.clone(), format!("{:.0}", f.epochs));
                             input.update(cx, |i, cx| i.set_text(v, cx));
-                            let close = f.close_input.read(cx).text();
-                            f.check_close(&close);
+                            // Close mosaic follows while it is the default, else is rechecked.
+                            if let Some(v) = f.follow_epochs() {
+                                f.close_input.clone().update(cx, |i, cx| i.set_text(v, cx));
+                            } else if !f.close_auto {
+                                let close = f.close_input.read(cx).text();
+                                f.check_close(&close);
+                            }
                         }
                         "nr-lr0" => {
                             // Above 0 and below 10, the range the field accepts.
@@ -181,6 +186,7 @@ impl FoloApp {
                         "nr-mixup" => f.mixup = q(at(0., 0.5), 0.05),
                         "nr-fliplr" => f.fliplr = q(at(0., 1.), 0.05),
                         "nr-close" => {
+                            f.close_auto = false;
                             f.close_mosaic = snap(at(0., 30.), 1.).round().max(0.);
                             let (input, v) = (f.close_input.clone(), format!("{:.0}", f.close_mosaic));
                             input.update(cx, |i, cx| i.set_text(v.clone(), cx));

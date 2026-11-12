@@ -2,6 +2,7 @@
 
 pub mod bench;
 pub mod datasets;
+mod first_step;
 pub mod models;
 pub mod overview;
 pub mod playground;
@@ -22,6 +23,8 @@ use crate::store::ImgKind;
 use crate::theme::{Theme, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, paint_image_with_boxes};
+
+pub use first_step::FirstStep;
 
 /// Title, one line of context, and actions on the right.
 pub fn page_header(
@@ -148,6 +151,7 @@ impl FoloApp {
         s.health = Load::Idle;
         s.system = Load::Idle;
         s.capabilities = None;
+        s.data_dir = None;
         s.features.clear();
         s.datasets = Load::Idle;
         s.models = Load::Idle;

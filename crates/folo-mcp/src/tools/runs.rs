@@ -3,11 +3,11 @@
 use std::collections::{BTreeMap, HashSet};
 
 use folo_api::{LogLevel, LogLine, QueueRequest, Run, RunMetrics};
-use folo_server::store::{LogsQuery, MetricsQuery, QueueMove};
+use folo_server::store::{LogsQuery, MAX_RUN_NAME_CHARS, MetricsQuery, QueueMove};
 use rmcp::model::JsonObject;
 use serde_json::Value;
 
-use super::arguments::{check_name, parse_args};
+use super::arguments::{check_name_at, parse_args};
 use super::results::{MAX_NAME_CHARS, MAX_RESULT_BYTES, Output, json_len, out, page_of, short};
 use crate::errors::{Error, invalid_arguments};
 use crate::server::Inner;
@@ -44,7 +44,8 @@ impl Inner {
             }
             e
         })?;
-        check_name("name", &a.config.name)?;
+        // The server's limit (`POST /api/runs`), also in the inputSchema's `maxLength`.
+        check_name_at("name", &a.config.name, MAX_RUN_NAME_CHARS)?;
         self.ensure_dataset(&a.config.dataset_id).await?;
         if let (Some(arch), Some(w)) = (explicit_arch, a.config.weights.clone()) {
             let model = self.blocking(move |s| s.get_model(&w)).await?;

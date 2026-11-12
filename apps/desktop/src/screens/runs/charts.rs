@@ -14,6 +14,10 @@ use crate::charts::{HoverFn, LineChart, Marker, Series, line_chart};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
+/// The loss lines' smoothing: Studio's default (`DEFAULT_SMOOTHING`, the same debiased EMA), so the
+/// two front ends show the same smoothed loss.
+const LOSS_EMA: f32 = 0.98;
+
 impl FoloApp {
     pub(super) fn run_charts(
         &mut self,
@@ -35,7 +39,18 @@ impl FoloApp {
                 .run_data
                 .get(&r.id)
                 .and_then(|x| x.ready())
-                .map(|x| x.metrics.epochs.iter().map(|e| (e.epoch as f32, e.val.best_f1_conf)).collect())
+                .map(|x| {
+                    x.metrics
+                        .epochs
+                        .iter()
+                        .map(|e| {
+                            (
+                                e.epoch as f32,
+                                operating_conf(e.val.best_f1_conf, e.val.precision, e.val.recall),
+                            )
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             let total = if r.status.is_active() || r.status == RunStatus::Completed {
                 r.epochs as f32
@@ -110,7 +125,7 @@ impl FoloApp {
         let loss_series: Vec<Series> = (0..4)
             .filter(|&i| self.loss_parts[i])
             .map(|i| {
-                let s = Series::new(names[i], colors[i], d.loss[i].clone()).smooth(0.94).live(live);
+                let s = Series::new(names[i], colors[i], d.loss[i].clone()).smooth(LOSS_EMA).live(live);
                 match i {
                     1 => s.dashed(),
                     2 => s.dotted(),
@@ -209,7 +224,7 @@ impl FoloApp {
             let on = self.loss_parts[i];
             let key = format!("loss-part-{name}");
             let color = colors[i];
-            let value = on.then(|| v(&crate::charts::smoothed(&d.loss[i], 0.94), f3v)).flatten();
+            let value = on.then(|| v(&crate::charts::smoothed(&d.loss[i], LOSS_EMA), f3v)).flatten();
             let el = div()
                 .id(SharedString::from(key.clone()))
                 .h(px(20.))
@@ -270,7 +285,7 @@ impl FoloApp {
         // The smoothing explanation, on hover and on keyboard focus.
         let loss_help = self.help_icon(
             "loss-ema-help",
-            "Lines are an exponential moving average (0.94) of per-step loss; the faint trace is raw",
+            "Lines and their values are an exponential moving average (0.98, about the last 50 steps) of per-step loss, as in Studio; the faint trace is raw",
             window,
             cx,
         );
@@ -313,16 +328,11 @@ impl FoloApp {
             .child(crate::ui::legend_value(&t, "precision", t.chart_series[2], false, v(&d.precision, f3v)))
             .child(crate::ui::legend_value(&t, "recall", t.chart_series[3], true, v(&d.recall, f3v)))
             .into_any_element();
-        // In the axis's power of ten ("× 10⁻³" is printed once, on the axis).
-        // The axis's own top, so caption, ticks and legend share one power.
+        // The axis's power of ten ("× 10⁻³", in the caption, once); the legend value in normalised
+        // notation as Studio writes it ("1.43×10⁻⁵", not "0.014×10⁻³"), so it reads on its own.
         let lr_pow = crate::charts::axis_pow(0., lr_top, 3);
-        // The legend value is in the axis's power, written out ("6.58×10⁻³", "0.10×10⁻³"): one
-        // power per card, and the value still reads on its own (the dogfood report's ask).
-        let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| match lr_pow {
-            // In f64: a tiny valid rate would overflow 10^-p in f32.
-            Some(p) if x.is_finite() => crate::charts::in_pow(x as f64, p),
-            _ => format!("{x:.4}"),
-        });
+        // In f64: a tiny valid rate would overflow 10^-p in f32.
+        let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| lr_sci(x as f64));
         let lr_legend =
             crate::ui::legend_value(&t, "lr", t.text_tertiary, false, lr_value).into_any_element();
         // What the run actually trains with (Run.resolved, once the trainer is built): the
@@ -346,6 +356,13 @@ impl FoloApp {
             (Some(s), None) => s,
             (None, Some(p)) => format!("per step · by epoch · × 10{}", crate::charts::superscript(p)),
             (None, None) => "per step · by epoch".to_string(),
+        };
+        // The total as Studio's Loss tab says it: the step's raw reading and the smoothed line's
+        // value, at the cursor or the latest step, so the two numbers never seem to disagree.
+        let loss_caption = match (v(&d.loss[3], f3v), v(&crate::charts::smoothed(&d.loss[3], LOSS_EMA), f3v))
+        {
+            (Some(raw), Some(smooth)) => format!("raw {raw} · smoothed {smooth} · log scale"),
+            _ => "log scale · EMA 0.98".to_string(),
         };
         // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
         let stack = window.viewport_size().width < px(1120.);
@@ -372,8 +389,7 @@ impl FoloApp {
             .gap(px(16.))
             .child(row(
                 card(map_title, "per epoch", map_legend, line_chart(&t, map)).into_any_element(),
-                card("Training loss", "log scale · EMA 0.94", loss_legend, line_chart(&t, loss))
-                    .into_any_element(),
+                card("Training loss", &loss_caption, loss_legend, line_chart(&t, loss)).into_any_element(),
                 if pair_a { -0.5 } else { -0.6 },
                 if pair_a { 0.5 } else { 0.4 },
             ))

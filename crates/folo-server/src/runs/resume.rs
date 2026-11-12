@@ -10,8 +10,10 @@ use folo_api::{LogLevel, Run, RunCloud, RunEvent, RunStatus, TrainConfig};
 use crate::engine;
 use crate::error::{Error, Result};
 
+use crate::util::{parse_rfc3339, unix_now};
+
 use super::entry::status_event;
-use super::{RunEntry, RunState, Runs};
+use super::{RunEntry, RunState, Runs, add_paused};
 
 impl Runs {
     /// What `POST /api/runs` with `resume_run_id` asks of a `stopped` or `failed` run: the run, and its config with
@@ -107,6 +109,17 @@ impl Runs {
         resumable(&st, &e.id)?;
         let last = e.dir.join("weights").join("last.folo");
         st.claimed = cloud.is_some();
+        // Not training from its end (or from a resume it has not trained since: it was stopped while it waited) until
+        // it trains again: the first part now, the wait in the queue once it starts (`RunEntry::on_event`).
+        let at = unix_now().floor();
+        let file = &mut st.file;
+        if file.run.started.is_some() {
+            let since = file.resumed_at.or_else(|| file.run.finished.as_deref().and_then(parse_rfc3339));
+            if let Some(since) = since {
+                add_paused(&mut file.run, at - since);
+            }
+            file.resumed_at = Some(at);
+        }
         let r = &mut st.file.run;
         r.config.device = wanted.device;
         r.config.compute = wanted.compute;
@@ -122,7 +135,7 @@ impl Runs {
         e.stop.store(false, Ordering::Relaxed);
         e.persist(&st);
         e.send(RunEvent::Status(status_event(&st.file.run)));
-        let run = st.file.run.clone();
+        let run = st.file.shown();
         drop(st);
         e.log(
             LogLevel::Info,
