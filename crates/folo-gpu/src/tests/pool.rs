@@ -1,10 +1,12 @@
 //! The buffer pool's hand-out order and cache bound (`pool.rs`): the same request of every step gets the same buffer
-//! whatever order the last step freed its buffers in, a step whose size classes peak at different times keeps all
-//! its buffers, and classes that stop being requested leave the cache.
+//! whatever order the last step freed its buffers in (also through a context, where it keeps the bind groups), a step
+//! whose size classes peak at different times keeps all its buffers, classes that stop being requested leave the
+//! cache, and the pool never holds more than a cache bounded by the high-water mark alone would.
 
 use super::{Rng, gpu};
 use crate::context::buffer_id;
 use crate::pool::{BufferPool, NEED_WINDOW};
+use crate::{GpuTensor, UnaryOp};
 
 const USAGE: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE;
 const MIB: u64 = 1 << 20;
@@ -50,6 +52,107 @@ fn every_step_gets_the_same_buffers_whatever_the_free_order() {
         }
     }
     assert_eq!(pool.stats().misses, misses, "no buffer created after the first step");
+}
+
+/// The same through a context: a "step" of elementwise ops on three sizes, its temporaries dropped in a shuffled
+/// order, creates no buffer and no bind group once warmed up. With newest-first reuse each op got other buffers every
+/// step (the free order decided which), and its bind groups missed the cache.
+#[test]
+fn a_context_step_reuses_its_buffers_and_bind_groups_whatever_the_free_order() {
+    let _shared = gpu!();
+    // A context of its own, so other tests' dispatches and allocations do not move its counters.
+    let ctx = match crate::GpuContext::new() {
+        Ok(c) => c,
+        Err(e) => return eprintln!("note: skipping, no second context: {e}"),
+    };
+    let mut rng = Rng::new(21);
+    let step = |rng: &mut Rng| {
+        let mut temps = Vec::new();
+        for n in [3000, 5000, 9000] {
+            let x = rng.vec(n, -1.0, 1.0);
+            let a = GpuTensor::from_slice(&ctx, &x, &[n]).unwrap();
+            let b = a.mul(&a).unwrap();
+            let c = b.add(&a).unwrap();
+            let d = c.unary(UnaryOp::Neg).unwrap();
+            let e = d.mul(&b).unwrap();
+            let got = e.to_vec().unwrap();
+            for (i, (&g, &v)) in got.iter().zip(&x).enumerate() {
+                let want = -(v * v + v) * (v * v);
+                assert!((g - want).abs() <= 1e-6, "n {n}, element {i}: {g} vs {want}");
+            }
+            temps.extend([a, b, c, d, e]);
+        }
+        shuffle(&mut temps, rng);
+        drop(temps);
+    };
+    for _ in 0..3 {
+        step(&mut rng);
+    }
+    let (binds, misses) = (ctx.work_stats().bind_groups, ctx.pool_stats().misses);
+    for i in 0..6 {
+        step(&mut rng);
+        let s = ctx.pool_stats();
+        assert_eq!(s.misses, misses, "step {i} created a buffer: {s:?}");
+        assert_eq!(ctx.work_stats().bind_groups, binds, "step {i} created a bind group");
+    }
+}
+
+/// A miss evicts before it allocates: 4 MiB then 5 MiB taken and freed, then 6 MiB taken. The need (15 MiB, bounded
+/// to twice the 6 MiB high-water mark) less the 6 MiB live leaves a 6 MiB cap, so the 4 MiB buffer goes before the
+/// 6 MiB one is created: 6 + 5 = 11 MiB held, what a cache bounded by the high-water mark alone held (it evicted the
+/// 4 MiB buffer when the 5 MiB one came back). Without the eviction on the miss the pool held 6 + 9 = 15 MiB.
+#[test]
+fn a_miss_evicts_before_it_allocates() {
+    let ctx = gpu!();
+    let dev = ctx.wgpu_device();
+    let mut pool = BufferPool::new(1024);
+    for class in [4 * MIB, 5 * MIB] {
+        let b = pool.take(dev, class, USAGE);
+        pool.give(b, class);
+    }
+    assert_eq!(pool.stats().cached_bytes, 9 * MIB, "both kept: the need is 9 MiB");
+    let six = pool.take(dev, 6 * MIB, USAGE);
+    let s = pool.stats();
+    assert_eq!((s.live_bytes, s.cached_bytes, s.peak_held_bytes), (6 * MIB, 5 * MIB, 11 * MIB), "{s:?}");
+
+    // `reset_peak` restarts the held peak from what is held now, cached buffers included.
+    pool.give(six, 6 * MIB);
+    let four = pool.take(dev, 4 * MIB, USAGE);
+    let s = pool.stats();
+    assert_eq!(s.peak_held_bytes, 11 * MIB, "{s:?}");
+    assert!(s.cached_bytes > 0, "{s:?}");
+    pool.reset_peak();
+    let s = pool.stats();
+    assert_eq!(
+        (s.peak_live_bytes, s.peak_held_bytes),
+        (s.live_bytes, s.live_bytes + s.cached_bytes),
+        "{s:?}"
+    );
+    assert!(s.peak_held_bytes < 11 * MIB, "{s:?}");
+    pool.give(four, 4 * MIB);
+}
+
+/// Three workloads of the same live size (16 MiB) in one window: 4 x 4 MiB, then 8 x 2 MiB, then 16 x 1 MiB, each
+/// taken at once and freed. By hand (cap `c = max(16, min(need, 32) - live)` MiB, misses evict before allocating):
+/// the first holds 16 MiB and leaves 16 cached; the second's takes see `c` = 16, so 16 cached + 16 live = 32 at its
+/// last take, and its frees (`c` = 32 - live) keep everything, 32 cached; the third's take `k` sees `c` = 32 - k and
+/// evicts a 4 MiB buffer whenever 32 - k drops below the cache, so live + cached peaks at 32 (= 16 + 16 at its last
+/// take). A cache bounded by the 16 MiB high-water mark alone held the same 32 MiB at most (16 live, 16 cached); a
+/// bound checked only on frees held 16 live on top of 32 cached, 48 MiB.
+#[test]
+fn successive_workloads_hold_no_more_than_twice_the_high_water_mark() {
+    let ctx = gpu!();
+    let dev = ctx.wgpu_device();
+    let mut pool = BufferPool::new(1024);
+    for (count, class) in [(4, 4 * MIB), (8, 2 * MIB), (16, MIB)] {
+        let held: Vec<_> = (0..count).map(|_| pool.take(dev, class, USAGE)).collect();
+        for b in held {
+            pool.give(b, class);
+        }
+    }
+    let s = pool.stats();
+    assert_eq!((s.misses, s.peak_live_bytes), (28, 16 * MIB), "{s:?}");
+    assert_eq!(s.peak_held_bytes, 32 * MIB, "{s:?}");
 }
 
 fn shuffle<T>(v: &mut [T], rng: &mut Rng) {

@@ -21,7 +21,8 @@ impl GpuContext {
             .map(|r| (r.total_allocated_bytes, r.total_reserved_bytes))
     }
 
-    /// Restart the pool's peak-memory counter ([`PoolStats::peak_live_bytes`]) from the current live bytes.
+    /// Restart the pool's peak-memory counters ([`PoolStats::peak_live_bytes`] from the current live bytes,
+    /// [`PoolStats::peak_held_bytes`] from the live plus cached bytes).
     pub fn reset_peak_memory(&self) {
         self.inner.pool.lock().expect("pool lock").reset_peak();
     }

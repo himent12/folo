@@ -77,9 +77,10 @@ fn a_cleared_pool_forgets_its_old_high_water_mark() {
         pool.give(b, 2048);
     }
     // A training step's worth (8 KiB live at once) stays cached although the cap is 1 KiB.
-    assert_eq!(pool.stats().cached_bytes, 8192);
+    assert_eq!((pool.stats().cached_bytes, pool.stats().need_bytes), (8192, 8192));
     pool.clear();
-    assert_eq!(pool.stats().cached_bytes, 0);
+    // The clear forgets the need with the cached buffers.
+    assert_eq!((pool.stats().cached_bytes, pool.stats().need_bytes), (0, 0));
     // After the clear the cap follows the new high-water mark (2 KiB), not the old 8 KiB: once the 2 KiB class has
     // left the need (two windows of 1 KiB requests), a 1 KiB buffer freed after a cached 2 KiB one evicts it (with the
     // old mark both would stay, 3 KiB).
@@ -90,6 +91,12 @@ fn a_cleared_pool_forgets_its_old_high_water_mark() {
         pool.give(b, 1024);
     }
     assert_eq!(pool.stats().cached_bytes, 1024, "{:?}", pool.stats());
+    // A buffer still lent out at the clear stays in the need, and only it.
+    let held = pool.take(ctx.wgpu_device(), 4096, usage);
+    assert_eq!(pool.stats().need_bytes, 1024 + 4096);
+    pool.clear();
+    assert_eq!((pool.stats().cached_bytes, pool.stats().need_bytes), (0, 4096), "{:?}", pool.stats());
+    pool.give(held, 4096);
 }
 
 #[test]

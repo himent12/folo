@@ -230,15 +230,20 @@ the same process it did not, which is why lane gpu-dispatch saw 0 there.
 - The cache bound adds the *need*: per size class, the most buffers lent out at once in the current or the
   previous window of 4096 requests (about three folo-n steps), times the class size, summed. The free lists may
   hold the need less the live bytes (besides the old 2 GiB floor and live high-water mark), counted at most up to
-  twice the live high-water mark, which is what the old rule already allowed the pool to hold (live bytes plus a
-  cache as big as the high-water mark). Classes no longer requested (validation, a last partial batch) leave the
-  need after two windows and are then evicted least recently freed first, as before.
+  twice the live high-water mark. Classes no longer requested (validation, a last partial batch) leave the need
+  after two windows and are then evicted least recently freed first, as before.
+- The bound is enforced on every allocation miss (before the new buffer is created) as well as on every free
+  (review finding: checked on frees only, a miss could stack a new buffer on a cache filled for the need, about
+  3× the high-water mark held across successive workloads). With `M` the 2 GiB floor and `H` the high-water mark
+  the pool now holds at most `max(live + max(M, H), min(need, 2H)) ≤ 2·max(M, H)`, never more than the old rule
+  (a cache of `max(M, H)` on top of the live bytes).
 - `PoolStats` gains `peak_held_bytes` (live + cached at most: the pool's device memory) and `need_bytes`;
   `GpuContext::device_memory()` returns wgpu's allocator report (allocated, reserved). The `gpu` bench prints them
   per training precision, the reserved bytes sampled at the end of every phase of the split steps.
 
-**Numbers** (`pr1-train/`: 3 rounds, f32 and AMP in separate processes, GPU 0–1% before each run, CPU 11–94%
-busy; median and range of each binary's per-run median):
+**Numbers** (`pr1-train/`: 3 rounds, f32 and AMP in separate processes, GPU 0–1% before each run, CPU 0–94%
+busy (one sample read 0%); median and range of each binary's per-run median). These train numbers were measured
+before the bound was enforced on allocation misses too (above) and are to be re-measured:
 
 | folo-n b16 | `main` 647b981f | `main` ed265317 | PR | vs ed265317 |
 |---|---|---|---|---|
@@ -248,12 +253,14 @@ busy; median and range of each binary's per-run median):
 | AMP train step | 30.61 ms (28.64–31.03) | 28.55 (26.88–28.66) | **27.14** (26.37–27.88) | −4.9% |
 | AMP host encode, sum | 13.7 ms (8.8–18.0) | 14.4 (8.7–21.4) | **8.8** (7.1–14.0) | −39% |
 | AMP new bind groups / buffers per step | n/a | 979 / 46 (24% reuse) | **0 / 0** (100%) | |
-| f32 peak live / held by the pool / device memory | 3467 MiB / – / – | 3467 / 4191 / 4608 | 3467 / 4196 / 4608 | same |
+| f32 peak live / held by the pool / device memory | 3467 MiB / – / – | 3467 / 4191 / 4608 | 3467 / 4196 / 4608 | held +5 MiB (+0.1%), rest same |
 | AMP peak live / held / device memory | 2022 MiB / – / – | 2022 / 2472 / 2816 | 2022 / 2472 / 2816 | same |
 
 The pool already reached the step's need at its peak before (it held 4191 MiB while the step ran, then evicted
-at the end of the backward), so keeping those buffers does not raise the peak; wgpu's allocator reserves the same
-4608 / 2816 MiB on both. The split rows show the f32 backward phase 32.4–35.1 → 29.1–30.3 ms with each phase
+at the end of the backward), so keeping those buffers barely moves it: the pool's held peak is 4191 → 4196 MiB in
+f32 (+5 MiB, +0.1%) and 2472 → 2472 in AMP, the peak live bytes are unchanged, and wgpu's allocator reserves the same
+4608 / 2816 MiB on both. The split rows show the f32 backward phase 32.6–35.0 → 29.2–30.2 ms (the per-run medians;
+`main` 35.0, 32.6, 34.1, the PR 30.2, 29.2, 29.9) with each phase
 synchronised: the recreated buffers cost GPU time too (wgpu zero-fills a new buffer before its first use).
 
 **Inference** (`pr1-infer/`, `gpu` bench forward + predict, folo-n and folo-s, f32 and f16 TC, 3 rounds, CPU 76–97%):
@@ -269,4 +276,9 @@ mid-step and at the end, give the same buffer for every request in all twelve st
 first (it fails with the newest-first rule, checked); a step whose two classes peak apart (4 MiB, then 5 MiB) keeps
 all 9 MiB and creates nothing after its first run; a class not requested for two windows is evicted, and forty
 classes requested one at a time keep at most twice the live high-water mark. Three older tests that evicted
-inside a window now pass two windows first.
+inside a window now pass two windows first. After review: a step of elementwise ops on a private `GpuContext`, its
+temporaries dropped in a shuffled order, creates no buffer and no bind group after warm-up (it fails with
+most-recently-freed reuse, checked); a miss evicts before it allocates (4 MiB, 5 MiB, then 6 MiB: 11 MiB held, what
+the old rule held, 15 without the fix); three workloads of 16 MiB live (4 × 4, 8 × 2, 16 × 1 MiB) hold at most
+32 MiB, twice the high-water mark (48 without the fix); `clear()` drops the need except buffers still lent out;
+`reset_peak` restarts the held peak from live plus cached.

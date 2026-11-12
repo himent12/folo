@@ -22,10 +22,12 @@
 //! without creating a buffer. It exceeds the live high-water mark when classes peak at different times (a folo-n
 //! f32 training step needs 4.1 GiB of buffers for 3.4 GiB live at most), and without it the pool evicted and
 //! recreated about 55 buffers every step. Classes no longer requested drop out of the need after two windows
-//! (validation between epochs, the last partial batch); the need is bounded by twice the live high-water mark,
-//! which the old cap already allowed the pool to hold (live bytes plus a cache as large as the high-water mark).
-//! When a returned buffer does not fit, the least recently freed buffers are evicted first (the driver frees them
-//! once in-flight work is done); [`crate::GpuContext::trim_pool`] empties the cache.
+//! (validation between epochs, the last partial batch). The cap is enforced on every free and on every allocation
+//! miss, before the new buffer is created: the least recently freed buffers are evicted until the cache fits (the
+//! driver frees them once in-flight work is done). With `M` the configured cap and `H` the high-water mark, the
+//! memory the pool holds (live plus cached) is therefore at most `max(live + max(M, H), min(need, 2H))
+//! <= 2 max(M, H)` at all times: never more than a cache bounded by `max(M, H)` alone could hold on top of the live
+//! bytes. [`crate::GpuContext::trim_pool`] empties the cache.
 //!
 //! Reusing a buffer while earlier encoded work still reads it is safe: every dispatch and copy goes through
 //! one queue in encoding order, and wgpu inserts the barriers between dispatches that touch the same buffer.
@@ -203,7 +205,8 @@ impl BufferPool {
         self.stats
     }
 
-    /// Restart [`PoolStats::peak_live_bytes`] from the current live bytes.
+    /// Restart [`PoolStats::peak_live_bytes`] from the current live bytes and [`PoolStats::peak_held_bytes`] from
+    /// the current live plus cached bytes.
     pub fn reset_peak(&mut self) {
         self.stats.peak_live_bytes = self.stats.live_bytes;
         self.stats.peak_held_bytes = self.stats.live_bytes + self.stats.cached_bytes;
@@ -223,6 +226,25 @@ impl BufferPool {
     fn note_held(&mut self) {
         let held = self.stats.live_bytes + self.stats.cached_bytes;
         self.stats.peak_held_bytes = self.stats.peak_held_bytes.max(held);
+    }
+
+    /// The bytes the free lists may hold now: the largest of [`BufferPool::max_cached_bytes`], the live high-water
+    /// mark and the need (at most twice the high-water mark) less the live bytes (see the module docs).
+    fn cache_cap(&self) -> u64 {
+        let need = self.stats.need_bytes.min(2 * self.high_water).saturating_sub(self.stats.live_bytes);
+        self.max_cached_bytes.max(self.high_water).max(need)
+    }
+
+    /// Evicts the least recently freed buffers until the free lists hold at most `limit` bytes.
+    fn evict_to(&mut self, limit: u64) {
+        while self.stats.cached_bytes > limit {
+            let Some((stamp, key, n)) = self.order.pop_front() else { break };
+            if let Some(gone) = self.free.get_mut(&key).and_then(|l| l.remove(&(n, stamp))) {
+                self.retire(&gone);
+                self.stats.cached_bytes -= key.0;
+                self.cached_buffers -= 1;
+            }
+        }
     }
 
     /// Drops every cached buffer.
@@ -266,6 +288,9 @@ impl BufferPool {
             self.cached_buffers -= 1;
             return buf;
         }
+        // The bound holds on every allocation as well as every free, so a new buffer never lands on top of a cache
+        // filled for a need the live buffers now take part of (see the module docs).
+        self.evict_to(self.cache_cap());
         self.stats.misses += 1;
         self.stats.allocated_bytes += class;
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -286,20 +311,12 @@ impl BufferPool {
         if let Some(lent) = self.lent.get_mut(&(class, buf.usage())) {
             lent.now = lent.now.saturating_sub(1);
         }
-        let need = self.stats.need_bytes.min(2 * self.high_water).saturating_sub(self.stats.live_bytes);
-        let cap = self.max_cached_bytes.max(self.high_water).max(need);
+        let cap = self.cache_cap();
         if class > cap {
             self.retire(&buf);
             return;
         }
-        while self.stats.cached_bytes + class > cap {
-            let Some((stamp, key, n)) = self.order.pop_front() else { break };
-            if let Some(gone) = self.free.get_mut(&key).and_then(|l| l.remove(&(n, stamp))) {
-                self.retire(&gone);
-                self.stats.cached_bytes -= key.0;
-                self.cached_buffers -= 1;
-            }
-        }
+        self.evict_to(cap - class);
         let key = (class, buf.usage());
         let n = self.owned.get(&crate::context::buffer_id(&buf)).copied().unwrap_or(u64::MAX);
         self.stamp += 1;
