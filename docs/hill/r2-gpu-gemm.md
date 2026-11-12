@@ -266,6 +266,10 @@ does not touch, swung by up to 13% in the same window. Train-only AMP A/B, 3 rou
 folo-s 57.43 ms (56.86–57.92) → 55.97 (54.74–56.26), forward phase 16.8–17.0 → 15.1–15.6 ms, backward the same;
 folo-n 28.91 → 28.85 ms, tie.
 
+folo-m (not in the sweep; channel counts up to 768): `gpu` forward f16tc, 3 rounds, GPU 1–5% before every run
+(`ab/tiles_m`): batch 16 564 img/s (528–569) → 668 (599–704), median 28.98 ms (28.46–40.18) → 23.20 (23.08–23.22);
+batch 1 median 2.86 ms (2.80–2.95) → 2.75 (2.70–3.15).
+
 **Accuracy** with PR 2 and PR 3 together (`folo val --model D:/folo-weights/folo-n-coco.folo --data
 D:/folo-data/coco`, val2017): f32 mAP50 0.44945 / mAP50-95 0.30999 (main: the same); `--half --tensor-cores`
 0.44943 / 0.30995 (main 0.44944 / 0.31003). Largest gap 0.00008 (bound 0.002).
