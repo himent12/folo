@@ -613,6 +613,61 @@ mod tests {
         assert!(non_max_suppression_rows(&[], nc, &NmsConfig::val()).is_empty());
     }
 
+    /// NMS from shuffled `(anchor, class, score)` pairs is NMS from the rows they come from: tied scores on
+    /// overlapping boxes (the winner is the first in `(anchor, class)` order), scores below, at and above `conf`,
+    /// NaNs, a class filter, agnostic NMS, the candidate cap, and no pairs at all.
+    #[test]
+    fn pairs_match_rows_nms() {
+        let (a, nc) = (40usize, 3usize);
+        let conf = 0.25f32;
+        let levels = [0.5, 0.5, conf, 0.3, f32::NAN, 0.1, 0.5, 0.0, f32::from_bits(conf.to_bits() + 1)];
+        let mut rows = Vec::with_capacity(a * (4 + nc));
+        let mut pairs = Vec::new();
+        for i in 0..a {
+            // Groups of four boxes one pixel apart (IoU about 0.9), the groups far apart.
+            let x = (i / 4 * 30 + i % 4) as f32;
+            rows.extend_from_slice(&[x, 0.0, x + 20.0, 20.0]);
+            for c in 0..nc {
+                let s = levels[(i * 3 + c * 5) % levels.len()];
+                rows.push(s);
+                pairs.push((i as u32, c as u32, s));
+            }
+        }
+        // Two lone boxes with nothing above conf: no detections, though nothing would suppress them.
+        for (i, s) in [(a, [conf, f32::NAN, 0.1]), (a + 1, [0.0, conf, f32::NAN])] {
+            let x = (i * 30) as f32;
+            rows.extend_from_slice(&[x, 0.0, x + 20.0, 20.0]);
+            rows.extend_from_slice(&s);
+            pairs.extend((0..nc).map(|c| (i as u32, c as u32, s[c])));
+        }
+        // A fixed shuffle that puts later anchors before earlier ones.
+        let mut state = 7u64;
+        for k in (1..pairs.len()).rev() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            pairs.swap(k, (state >> 33) as usize % (k + 1));
+        }
+        let bbox = |i: u32| {
+            let r = &rows[i as usize * (4 + nc)..];
+            Xyxy::new(r[0], r[1], r[2], r[3])
+        };
+        let val = NmsConfig { conf, ..NmsConfig::val() };
+        for cfg in [
+            val.clone(),
+            NmsConfig { classes: Some(vec![0, 2]), ..val.clone() },
+            NmsConfig { agnostic: true, ..val.clone() },
+            NmsConfig { max_candidates: 9, max_det: 5, ..val.clone() },
+        ] {
+            let want = non_max_suppression_rows(&rows, nc, &cfg);
+            assert!(want.len() >= 5, "{cfg:?}: {want:?}");
+            assert_eq!(non_max_suppression_pairs(pairs.clone(), bbox, &cfg), want, "{cfg:?}");
+        }
+        // Nothing above conf, as rows or as (no) pairs.
+        let none = NmsConfig { conf: 0.5, ..val };
+        assert!(non_max_suppression_rows(&rows, nc, &none).is_empty());
+        assert!(non_max_suppression_pairs(pairs, bbox, &none).is_empty());
+        assert!(non_max_suppression_pairs(Vec::new(), bbox, &NmsConfig::val()).is_empty());
+    }
+
     #[test]
     fn candidates_match_full_nms() {
         // 50 anchors, 4 classes, many overlapping boxes and tied scores.

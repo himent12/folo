@@ -394,9 +394,12 @@ fn assert_no_f32_noise(v: &Value) {
 const UNSTOPPED_EPOCHS: &str = "1000";
 
 /// Runs `folo train` with `args` (and `--json`), sends `folo stop` to `run` when the first `epoch` record arrives,
-/// and returns every record once the process has exited successfully.
+/// and returns every record once the process has exited successfully. A run still going [`STOP_DEADLINE`] after it
+/// started fails the test (the guard kills the process), so a trainer that ignores the stop cannot hang it.
 fn train_until_stopped(args: &[&str], run: &Path) -> Vec<Value> {
     use std::io::BufRead;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + STOP_DEADLINE;
     let mut child: ChildGuard = folo_cmd()
         .args(["train", "--json"])
         .args(args)
@@ -405,10 +408,27 @@ fn train_until_stopped(args: &[&str], run: &Path) -> Vec<Value> {
         .spawn()
         .unwrap()
         .into();
+    // Lines arrive on a channel so the wait for the next one can time out; the reader ends when the process does.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines().map_while(std::io::Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
     let mut records = Vec::new();
     let mut asked = false;
-    for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
-        let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
+    loop {
+        let line = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "folo train {args:?} still running {STOP_DEADLINE:?} after it started (stop sent: {asked}); killed"
+            ),
+        };
+        let v: Value = serde_json::from_str(&line).unwrap();
         if v["event"] == "epoch" && !asked {
             let (code, lines, stderr) = folo(&["stop", "--json", s(run)]);
             assert_eq!(code, 0, "{stderr}");
@@ -417,9 +437,20 @@ fn train_until_stopped(args: &[&str], run: &Path) -> Vec<Value> {
         }
         records.push(v);
     }
-    assert!(child.wait().unwrap().success());
+    // Its output is closed; it should be gone at once.
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "folo train {args:?} closed its output but did not exit; killed");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "{status}");
     records
 }
+
+/// How long [`train_until_stopped`] lets a run take, start to exit: far more than a stopped run needs.
+const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// `folo stop` ends a running `folo train` after its current batch (status `stopped`); `--resume` then refuses a
 /// changed setting, and `--json-events epoch` leaves the step records out.
