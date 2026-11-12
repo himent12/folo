@@ -174,7 +174,7 @@ one-group step bit for bit; 4 bindings or a matrix past the limit decline it and
 were. `partition_fits_the_limit` (CPU) checks the groups against the limit. `tests/optim.rs` (two steps against an f64 re-implementation of the reference) is the CPU path,
 unchanged.
 
-## Not shipped: AMP step overhead (branch `train/amp-step`, 37c08686, no PR)
+## Not shipped: AMP step overhead (branch `train/amp-step`, 0b74e5f7 after rebasing on #191, no PR)
 
 Item 3 of the brief plus the accumulator's copies. Two changes:
 - **Cached f16 weights.** Autocast's f16 copy of each conv weight / bias is cached on its storage with the storage
@@ -196,8 +196,65 @@ End to end it is a **tie**:
 - `ab-amp2-clip`, 3 rounds: 526 vs 507.
 - `ab-amp3`, AMP only, 6 rounds, host 21-85 %: 522 vs 529 (+1.3 %).
 
-About 1 GPU-ms of a 29 ms step is inside this machine's noise. The branch is left for a re-measure in a quiet
-window; it adds a cache to folo-core's storage cells, which is not worth it without a measured win.
+Rebased on main 912da99d and measured again against it (`prof.sh p1|p2 main2 amp3`, `ab.sh amp4 4 main2 amp3`,
+host 15-97 %):
+- Profiled pair p2: forward 8.83 → 8.42 GPU-ms, casts 0.83 → 0.41 ms; optimizer phase 1.15 → 0.32 GPU-ms,
+  290 → 57 dispatches.
+- End to end, AMP img/s: main 567 / 548 / 587 / 499 (median 557.5) vs 535 / 572 / 545 / 521 (median 540).
+
+Still a tie. About 1 GPU-ms of a 27-29 ms step is inside this machine's noise. The branch is left for a
+re-measure in a quiet window: it adds a cache to folo-core's storage cells, which is not worth it without a
+measured win.
+
+## Final: current main against 647b981f
+
+Run after every lane's merges so far: main 56a2ba38, which includes this lane's #184, #191 and #195 and other
+lanes' #181-#196. The rows therefore show the whole round, not this lane alone; this lane's share is the PR 1 / PR 2
+A/Bs above.
+
+Method: folo-n / folo-s, batch 16, 640 px, `ab.sh fin-n|fin-clip|fin-mu 3 base main3` and `ab.sh fin-s1|s2|s3 1
+base main3`, the bench at High priority. `main3` is the bench built at 56a2ba38. Raw outputs are under
+`D:/folo-data/runs-hill2/gpu-train/ab-fin-*/` (lines of an earlier, interrupted attempt with `main2` are in the
+same summaries). Host load was 31-100 %. Figures are img/s, median of 3 rounds (range).
+
+| row | 647b981f | main 56a2ba38 | change |
+|---|---|---|---|
+| folo-n f32 | 318 (316-336) | 333 (326-351) | +4.7 % |
+| folo-n AMP | 513 (512-520) | 596 (545-599) | +16 % |
+| folo-n f32, clip 10 | 334 (327-343) | 350 (340-361) | +4.8 % |
+| folo-n AMP, clip 10 | 520 (502-525) | 552 (395-584) | +6 % |
+| folo-n f32, MuSGD | 299 (182-308) | 347 (330-354) | +16 % |
+| folo-n AMP, MuSGD | 411 (372-421) | 510 (343-525) | +24 % |
+| folo-s f32 | 148 (108-151) | 151 (144-154) | +2 % (tie) |
+| folo-s AMP | 274 (270-278) | 279 (230-291) | +2 % (tie) |
+| peak memory, folo-n f32 / AMP (MuSGD) | 3467 / 2022 (3478 / 2033) MiB | the same | |
+| peak memory, folo-s f32 / AMP | 6520 / 3713 MiB | the same | |
+
+Runs with foreign GPU load before them (`gpu load before train`), kept in the ranges:
+- base f32 MuSGD round 3 (64 %);
+- base AMP MuSGD round 3 (25 %);
+- main3 AMP MuSGD round 1 (16 %) and round 3 (64 %);
+- base folo-s f32 round 1 (15 %);
+- base folo-s AMP round 2 (60 %).
+
+The MuSGD medians (411 / 510) come from contended runs, so the +24 % is a noisy observation. The cleaner
+comparisons are PR 2's A/B and the alternated overhead table below. main3's folo-s AMP round 2 (230) dropped
+without visible GPU load.
+
+**MuSGD's overhead over SGD.** Measured on the same binary, alternated SGD / MuSGD (`ovh.sh main3 3 main3`,
+host 0-94 %):
+
+| | SGD | MuSGD | overhead |
+|---|---|---|---|
+| f32 | 337 / 338 / 338 | 359 / 358 / 354 | none (MuSGD measures about 6 % faster, as in `ovh-mu2`) |
+| AMP | 567 / 444 / 549 (median 549) | 413 / 513 / 521 (median 513) | +7 % on medians; fastest steps 27.3-27.9 vs 28.1-29.2 ms, +5 % |
+
+On 647b981f (PR 1's hold 3) the overhead was +4.7 % (f32) and +20 % (AMP). The faster f32 MuSGD step is
+consistent across holds but not explained; it is the same bench with another optimizer, so the loss and assigner
+see other weights.
+
+**Against the brief's targets** (f32 ≥ 390, AMP ≥ 620 img/s, MuSGD overhead ≤ 6 %): AMP reached 596, f32 333 and
+350 with clipping. MuSGD's overhead is gone in f32 and +4-7 % under AMP. folo-s moved by about 2 %.
 
 ## Negative results
 
@@ -233,4 +290,7 @@ window; it adds a cache to folo-core's storage cells, which is not worth it with
      require them on the GPU runner.
    - Timing-sensitive tests fail under load: folo-cli `format_picks_the_labels_and_resume_keeps_it` (its `stop`
      races a 6-epoch CPU run) and folo-server `cloud::ledger` (a 5 s tolerance).
-   - folo-vision `tiny_amp_run_learns` fails on main since #186 (reported to the orchestrator and gpu-gemm).
+   - folo-vision `tiny_amp_run_learns` failed on main after #186: its bound sat inside its own seed spread
+     (fixed by gpu-gemm in #193). `amp_trains_the_dual_head` had the same problem: seeds 0-5 gave 0.93-1.25
+     against a bound of 1.15. #195 (this lane) moved it to 1.3, added a no-skipped-batch check and a direct
+     autocast check of the one-to-one branch.
