@@ -27,6 +27,13 @@ also needs a built web app. Without the feature, `folo serve` serves `web/dist` 
 
 ## Conventions (every command)
 
+### Caches
+Every command keeps two caches under `$FOLO_CACHE_DIR`, else `<FOLO_HOME or ~/.folo>/cache`: compiled GPU pipelines
+(`gpu/`, docs/GPU.md Pipeline cache) and dataset scans (`scan/`, docs/DATA.md Scan cache). They only make a second
+start faster (COCO `folo train` reaches its first step in seconds instead of a minute) and never change a result;
+a missing, corrupt or stale entry is rebuilt silently. `FOLO_NO_CACHE=1` turns both off; deleting the folder is
+always safe.
+
 ### `--json`
 A global flag. With it, **stdout carries only JSON, one object per line** (JSON Lines), and all human text (progress,
 tables, hints, logs) goes to **stderr**. Without it, human text goes to stdout and errors to stderr. Logs from the

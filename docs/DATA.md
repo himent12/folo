@@ -58,6 +58,31 @@ dataset without class names (counted from all labels then) is opened whole. `fol
 opens without checking train2017's 118 287 images (the probe of a file not opened before costs about 6 ms on the dev
 machine, 0.35 ms each at 28 threads: 40-50 s for train2017).
 
+### Scan cache
+Opening a large dataset costs a header probe per image (COCO train2017: 30-80 s on the dev machine when the files
+were not opened since boot) and, for COCO, a parse of the JSON (5-8 s for train2017's 448 MB). With
+`folo_data::set_scan_cache_dir(Some(dir))` (`folo` sets `<FOLO_HOME>/cache/scan`, docs/CLI.md Caches; off by default)
+an open keeps what it learnt in `dir` and the next one reuses it (`dataset/cache/`):
+
+- **Per folder** (`dir-<hash>.bin`, keyed by the folder's absolute path): every image's probe result (its size, or
+  the codec's message when it cannot be decoded) and every YOLO label's parse (boxes and warnings, or why it is
+  broken, with the class count it was checked against), each with the file's length and modification time. One
+  directory read gives those for every file of the folder (free on Windows, where a `stat` opens the file), and a
+  file is reused only while both match. IO errors are never cached, and files modified in the last 2 s are not
+  cached (a same-tick rewrite could keep both).
+- **Per COCO annotation set** (`coco-<hash>.bin`, keyed by the JSON paths as given and absolute, and the wanted
+  splits): everything derived from the JSON files alone (classes, issues, each image's boxes), reused only while
+  every JSON file keeps its length and modification time. The image folder is still chosen and the images still
+  checked against the disk (through the per-folder entries) at every open.
+
+An open comes out exactly as without the cache: the same entries in the same order and the same issues and messages
+(tested with corrupt, truncated and stale cache files and with files rewritten under an unchanged stamp). Every
+cache file is checked as a whole (magic, format version, its key, an FNV-1a checksum of its contents) and ignored
+when anything is off; writes are atomic (temporary file + rename), and cache files not written for 60 days are
+deleted when the next one is written. Only folders holding at least `SCAN_CACHE_MIN_FILES` (256) files of a dataset
+are listed and cached, and COCO sets with at least that many images. With a read guard installed nothing is listed
+or cached. COCO train + val on the dev machine: 51 s cold, 0.3 s warm (docs/hill/r2-trainer.md).
+
 `LoadedDataset::sources` lists every file and folder a dataset was read from (description files, split folders and
 image lists, folders of every candidate image and label, split paths that do not exist yet), so callers such as
 the server can detect changes.

@@ -13,6 +13,7 @@ mod elementwise;
 mod f16;
 mod gemm;
 mod layout;
+mod pipeline_cache;
 mod reduce;
 mod runtime;
 

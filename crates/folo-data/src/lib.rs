@@ -71,6 +71,7 @@ pub mod warp;
 
 pub use augment::{AugmentConfig, TrainTransform, Transformed};
 pub use bbox::BBox;
+pub use dataset::cache::{MIN_FILES as SCAN_CACHE_MIN_FILES, scan_cache_dir, set_scan_cache_dir};
 pub use dataset::{
     CocoAnnotation, CocoGroundTruth, CocoImage, Dataset, FileDataset, Format, ImageEntry, InMemoryDataset,
     Issue, IssueKind, LoadReport, LoadedDataset, OpenOptions, Split, UNDETECTED, coco_annotation_files,

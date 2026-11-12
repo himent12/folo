@@ -760,6 +760,7 @@ dependencies = [
  "bytemuck",
  "folo-core",
  "folo-nn",
+ "folo-test-support",
  "half",
  "pollster",
  "thiserror",

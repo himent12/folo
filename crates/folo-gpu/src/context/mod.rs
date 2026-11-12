@@ -92,6 +92,9 @@ pub struct GpuOptions {
     pub tensor_cores: bool,
     /// Time every kernel ([`crate::profile`]), when the adapter has timestamp queries inside passes.
     pub profile: bool,
+    /// Folder of the persistent pipeline cache ([`crate::pipeline_cache`]); `None` keeps it off. Defaults to
+    /// [`crate::set_pipeline_cache_dir`]'s folder.
+    pub pipeline_cache_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for GpuOptions {
@@ -103,6 +106,7 @@ impl Default for GpuOptions {
             enable_f16: true,
             tensor_cores: false,
             profile: false,
+            pipeline_cache_dir: crate::pipeline_cache::pipeline_cache_dir(),
         }
     }
 }
@@ -230,6 +234,8 @@ struct Inner {
     flush_every: AtomicU32,
     /// Per-kernel timestamp queries (`FOLO_GPU_PROFILE=1`, see [`crate::profile`]).
     profiler: Option<Mutex<Profiler>>,
+    /// Compiled pipelines kept on disk between processes ([`crate::pipeline_cache`]).
+    pipeline_cache: Option<Arc<crate::pipeline_cache::DiskCache>>,
 }
 
 /// The idle staging buffers of [`GpuContext::upload_with`].

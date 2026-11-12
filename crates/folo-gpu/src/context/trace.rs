@@ -63,6 +63,11 @@ impl GpuContext {
         self.inner.profiler.is_some()
     }
 
+    /// The file of this context's persistent pipeline cache, when it has one ([`crate::pipeline_cache`]).
+    pub fn pipeline_cache_file(&self) -> Option<&std::path::Path> {
+        self.inner.pipeline_cache.as_deref().map(|d| d.path())
+    }
+
     /// Submits the open batch, waits for it, and returns the GPU time per label since the last call (largest
     /// first), resetting the totals. Empty unless [`GpuContext::profiling`].
     pub fn profile_take(&self) -> Vec<ProfileRow> {

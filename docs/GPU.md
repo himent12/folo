@@ -119,6 +119,19 @@ can therefore size workgroup arrays, select code paths and compile bounds checks
 `(kernel name, spec)`, and compilation happens on first use. Rendering constants as source text works the same
 on every backend, including browser WebGPU; pipeline-overridable constants cannot size arrays on every backend.
 
+Compiled pipelines also persist between processes (`pipeline_cache.rs`): once `set_pipeline_cache_dir(Some(dir))`
+names a folder (`folo` sets `<FOLO_HOME>/cache/gpu`, docs/CLI.md Caches; off by default, so tests write nothing),
+contexts created afterwards on an adapter with `wgpu::Features::PIPELINE_CACHE` (Vulkan; DX12, Metal and the browser
+have none, and nothing changes there) compile every pipeline through one `wgpu::PipelineCache` loaded from
+`<dir>/wgpu_pipeline_cache_vulkan_<vendor>_<device>.bin`. The file carries FOLO's header (magic, format, the
+folo-gpu version, the adapter's name and driver, the payload length and an FNV-1a checksum of the payload) in
+front of wgpu's data: a file from another driver, adapter or folo-gpu version, a torn or corrupt one, or one over
+256 MB is ignored and the cache starts empty, and wgpu and the driver validate their own headers again
+(`fallback: true`). A changed shader simply misses (pipelines are found by their code). A saver thread writes the
+file atomically (temporary file + rename) about a second after the last new pipeline, and dropping the context or
+calling `save_pipeline_caches()` (`folo` does when a command ends) writes what is left; no error of the cache ever
+fails a run. Effect on the dev machine: docs/hill/r2-trainer.md.
+
 ### In the browser
 
 On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the page's thread there, so:

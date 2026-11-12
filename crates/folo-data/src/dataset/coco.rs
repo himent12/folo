@@ -290,12 +290,106 @@ pub(crate) fn open_jsons(
     opts: &OpenOptions,
     wanted: &[Split],
 ) -> Result<LoadedDataset> {
+    let settings = super::cache::Settings::current();
+    let ann = super::cache::coco::load_or_read(&settings, &jsons, wanted, || {
+        read_annotations(root, &jsons, wanted)
+    })?;
+    let Annotations { issues, classes, other_files, splits } = ann;
+    let mut report = LoadReport { issues };
+    let mut deps: std::collections::BTreeSet<PathBuf> = std::iter::once(root.to_path_buf()).collect();
+    deps.extend(other_files);
+    let mut by_split: BTreeMap<Split, Vec<Candidate>> = BTreeMap::new();
+    for p in splits {
+        deps.insert(p.path.clone());
+        let files: Vec<&str> = p.files.iter().map(String::as_str).collect();
+        let base = image_base(root, &p.path, p.split, &files);
+        let list = by_split.entry(p.split).or_default();
+        for im in p.images {
+            let image = base.join(&p.files[im.row]);
+            deps.extend(image.parent().map(Path::to_path_buf));
+            list.push(Candidate {
+                image,
+                labels: LabelSource::Coco {
+                    boxes: im.boxes,
+                    declared: im.declared,
+                    broken: im.broken,
+                    label: p.path.clone(),
+                },
+            });
+        }
+    }
+    let mut built: BTreeMap<Split, Vec<super::ImageEntry>> = BTreeMap::new();
+    for (split, cands) in by_split {
+        let entries = super::build_entries(cands, Some(classes.len()), opts, &mut report);
+        built.entry(split).or_default().extend(entries);
+    }
+    let mut take = |s: Split| FileDataset::new(s, classes.clone(), built.remove(&s).unwrap_or_default());
+    let (train, val, test) = (take(Split::Train), take(Split::Val), take(Split::Test));
+    let sources = deps.into_iter().collect();
+    Ok(LoadedDataset {
+        format: Format::Coco,
+        root: root.to_path_buf(),
+        classes,
+        train,
+        val,
+        test,
+        report,
+        sources,
+    })
+}
+
+/// What [`open_jsons`] derives from the JSON files alone, before it looks for the images: the part the scan cache
+/// keeps (`cache::coco`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Annotations {
+    /// The issues found in the files, in order.
+    pub issues: Vec<super::Issue>,
+    /// Class names, by category id.
+    pub classes: Vec<String>,
+    /// Files of the splits not wanted (read for their categories only).
+    pub other_files: Vec<PathBuf>,
+    /// The wanted splits' files, in order.
+    pub splits: Vec<SplitAnnotations>,
+}
+
+/// One wanted COCO file.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SplitAnnotations {
+    pub split: Split,
+    pub path: PathBuf,
+    /// Every image entry's `file_name`, in file order (duplicates included: they count when the image folder
+    /// is chosen).
+    pub files: Vec<String>,
+    /// The images kept (the first entry of every id), in file order.
+    pub images: Vec<ImageAnnotations>,
+}
+
+/// One image of a COCO file and its boxes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ImageAnnotations {
+    /// Index of its `file_name` in [`SplitAnnotations::files`].
+    pub row: usize,
+    /// The size the JSON declares.
+    pub declared: Option<(u32, u32)>,
+    /// `(class, pixel xyxy)`.
+    pub boxes: Vec<(u32, [f32; 4])>,
+    /// The first reason its annotations are broken.
+    pub broken: Option<String>,
+}
+
+/// Reads and parses the COCO files (the uncached half of [`open_jsons`]).
+pub(crate) fn read_annotations(
+    root: &Path,
+    jsons: &[(Split, PathBuf)],
+    wanted: &[Split],
+) -> Result<Annotations> {
     let mut report = LoadReport::default();
     let mut categories: BTreeMap<u64, String> = BTreeMap::new();
     let mut parsed = Vec::new();
     // Files of the splits not wanted, read for their categories only (every file's count for the class ids).
     let mut other_files = Vec::new();
     for (split, path) in jsons {
+        let (split, path) = (*split, path.clone());
         let bytes = crate::guard::check(&path)
             .and_then(|_| std::fs::read(&path))
             .map_err(|e| DataError::io(&path, e))?;
@@ -380,13 +474,8 @@ pub(crate) fn open_jsons(
     let remap: HashMap<u64, u32> = categories.keys().enumerate().map(|(i, &id)| (id, i as u32)).collect();
     let classes: Vec<String> = categories.into_values().collect();
 
-    let mut deps: std::collections::BTreeSet<PathBuf> = std::iter::once(root.to_path_buf()).collect();
-    deps.extend(other_files);
-    let mut by_split: BTreeMap<Split, Vec<Candidate>> = BTreeMap::new();
+    let mut splits = Vec::with_capacity(parsed.len());
     for p in parsed {
-        deps.insert(p.path.clone());
-        let files: Vec<&str> = p.images.iter().map(|im| im.1.as_str()).collect();
-        let base = image_base(root, &p.path, p.split, &files);
         let mut per_image: HashMap<&str, ImageAnns> = HashMap::new();
         let known: HashMap<&str, ()> = p.images.iter().map(|(id, _, _)| (id.as_str(), ())).collect();
         for (img, cat, bbox) in &p.anns {
@@ -415,11 +504,11 @@ pub(crate) fn open_jsons(
                 }
             }
         }
-        let list = by_split.entry(p.split).or_default();
         // Image id -> the file of its first entry: a second entry with the id is left out (its annotations cannot
         // be told apart from the first's).
         let mut first: HashMap<&str, &str> = HashMap::new();
-        for (id, file, declared) in &p.images {
+        let mut images = Vec::with_capacity(p.images.len());
+        for (row, (id, file, declared)) in p.images.iter().enumerate() {
             if let Some(&kept) = first.get(id.as_str()) {
                 report.push(
                     IssueKind::Other,
@@ -430,32 +519,12 @@ pub(crate) fn open_jsons(
             }
             first.insert(id, file);
             let (boxes, broken) = per_image.remove(id.as_str()).unwrap_or_default();
-            let image = base.join(file);
-            deps.extend(image.parent().map(Path::to_path_buf));
-            list.push(Candidate {
-                image,
-                labels: LabelSource::Coco { boxes, declared: *declared, broken, label: p.path.clone() },
-            });
+            images.push(ImageAnnotations { row, declared: *declared, boxes, broken });
         }
+        let files = p.images.into_iter().map(|(_, file, _)| file).collect();
+        splits.push(SplitAnnotations { split: p.split, path: p.path, files, images });
     }
-    let mut built: BTreeMap<Split, Vec<super::ImageEntry>> = BTreeMap::new();
-    for (split, cands) in by_split {
-        let entries = super::build_entries(cands, Some(classes.len()), opts, &mut report);
-        built.entry(split).or_default().extend(entries);
-    }
-    let mut take = |s: Split| FileDataset::new(s, classes.clone(), built.remove(&s).unwrap_or_default());
-    let (train, val, test) = (take(Split::Train), take(Split::Val), take(Split::Test));
-    let sources = deps.into_iter().collect();
-    Ok(LoadedDataset {
-        format: Format::Coco,
-        root: root.to_path_buf(),
-        classes,
-        train,
-        val,
-        test,
-        report,
-        sources,
-    })
+    Ok(Annotations { issues: report.issues, classes, other_files, splits })
 }
 
 /// Picks the folder the JSON's `file_name`s are relative to by probing a few images.

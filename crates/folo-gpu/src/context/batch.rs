@@ -116,7 +116,11 @@ impl GpuContext {
             return Ok(k.clone());
         }
         // Compile outside the lock: pipeline creation can take tens of milliseconds.
-        let kernel = Arc::new(Kernel::compile(&self.inner.device, def, &key.spec)?);
+        let disk = self.inner.pipeline_cache.as_deref();
+        let kernel = Arc::new(Kernel::compile(&self.inner.device, def, &key.spec, disk.map(|d| &d.cache))?);
+        if let Some(d) = disk {
+            d.compiled();
+        }
         Ok(self.inner.kernels.lock().expect("kernel lock").entry(key).or_insert(kernel).clone())
     }
 

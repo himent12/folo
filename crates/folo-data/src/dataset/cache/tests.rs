@@ -1,0 +1,220 @@
+use super::*;
+use crate::dataset::{LoadedDataset, OpenOptions, Split, open_with};
+use folo_test_support::TestDir;
+use std::time::Duration;
+
+fn settings(cache: &Path) -> Settings {
+    Settings { dir: Some(cache.to_path_buf()), min_files: 1, list: true }
+}
+
+fn uncached() -> Settings {
+    Settings { dir: None, min_files: usize::MAX, list: false }
+}
+
+/// Moves a file's modification time an hour back, so its stamp is settled and cacheable.
+fn age(path: &Path) {
+    let f = std::fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+}
+
+fn png(path: &Path, w: u32, h: u32) {
+    image::RgbImage::from_pixel(w, h, image::Rgb([90, 120, 30])).save(path).unwrap();
+    age(path);
+}
+
+fn write(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    age(path);
+}
+
+/// Everything an open returns, for comparisons.
+fn view(d: &LoadedDataset) -> String {
+    format!(
+        "{:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+        d.format,
+        d.classes,
+        d.train.entries(),
+        d.val.entries(),
+        d.test.entries(),
+        d.report,
+        d.sources
+    )
+}
+
+fn open(path: &Path, s: Settings) -> String {
+    with_settings(s, || view(&open_with(path, &OpenOptions::default()).unwrap()))
+}
+
+/// A YOLO set: good images with labels, a background image, a corrupt image, a broken and a warned label.
+fn yolo(root: &Path) {
+    for split in ["train", "val"] {
+        std::fs::create_dir_all(root.join("images").join(split)).unwrap();
+        std::fs::create_dir_all(root.join("labels").join(split)).unwrap();
+    }
+    write(&root.join("data.yaml"), "path: .\ntrain: images/train\nval: images/val\nnames: [a, b]\n");
+    for i in 0..4 {
+        png(&root.join(format!("images/train/{i}.png")), 20 + i, 10);
+        write(&root.join(format!("labels/train/{i}.txt")), &format!("{} 0.5 0.5 0.2 0.{}\n", i % 2, i + 1));
+    }
+    png(&root.join("images/train/background.png"), 8, 8);
+    write(&root.join("images/train/corrupt.png"), "not a png");
+    png(&root.join("images/train/broken.png"), 8, 8);
+    write(&root.join("labels/train/broken.txt"), "7 0.5 0.5 0.2 0.2\n");
+    png(&root.join("images/train/warned.png"), 8, 8);
+    write(&root.join("labels/train/warned.txt"), "0 0.5 0.5 0.2 0.2\n0 0.5 0.5 0.2 0.2\n");
+    png(&root.join("images/val/v.png"), 30, 12);
+    write(&root.join("labels/val/v.txt"), "1 0.4 0.4 0.1 0.1\n");
+}
+
+#[test]
+fn yolo_opens_the_same_with_and_without_the_cache_and_sees_changes() {
+    let data = TestDir::new("scan-yolo");
+    let cache = TestDir::new("scan-yolo-cache");
+    yolo(&data);
+    let plain = open(&data, uncached());
+    assert_eq!(open(&data, settings(&cache)), plain, "cold cache");
+    assert!(std::fs::read_dir(&*cache).unwrap().count() >= 2, "a cache file per folder");
+    assert_eq!(open(&data, settings(&cache)), plain, "warm cache");
+
+    // The cache is what answers: a label rewritten with its old length and modification time is not re-read.
+    let label = data.join("labels/train/0.txt");
+    let stamp = Stamp::of(&std::fs::metadata(&label).unwrap()).unwrap();
+    let mtime = std::fs::metadata(&label).unwrap().modified().unwrap();
+    std::fs::write(&label, "1 0.5 0.5 0.2 0.1\n").unwrap();
+    std::fs::File::options().write(true).open(&label).unwrap().set_modified(mtime).unwrap();
+    assert_eq!(Stamp::of(&std::fs::metadata(&label).unwrap()).unwrap(), stamp);
+    assert_eq!(open(&data, settings(&cache)), plain, "same stamp: cached");
+    // A new modification time (or length) is seen.
+    age(&label);
+    let changed = open(&data, uncached());
+    assert_ne!(changed, plain);
+    assert_eq!(open(&data, settings(&cache)), changed, "new stamp: re-read");
+
+    // A fixed corrupt image and a new image are seen too.
+    png(&data.join("images/train/corrupt.png"), 9, 9);
+    png(&data.join("images/train/new.png"), 9, 9);
+    std::fs::remove_file(data.join("images/train/1.png")).unwrap();
+    let changed = open(&data, uncached());
+    assert_eq!(open(&data, settings(&cache)), changed);
+}
+
+#[test]
+fn corrupt_or_foreign_cache_files_fall_back_to_a_normal_open() {
+    let data = TestDir::new("scan-corrupt");
+    let cache = TestDir::new("scan-corrupt-cache");
+    yolo(&data);
+    let plain = open(&data, uncached());
+    open(&data, settings(&cache));
+    let files: Vec<PathBuf> = std::fs::read_dir(&*cache).unwrap().map(|e| e.unwrap().path()).collect();
+    assert!(!files.is_empty());
+    for f in &files {
+        let good = std::fs::read(f).unwrap();
+        // Every truncation and a flipped byte anywhere: the open is still exact.
+        for cut in [0, 7, 12, good.len() / 2, good.len() - 1] {
+            std::fs::write(f, &good[..cut]).unwrap();
+            assert_eq!(open(&data, settings(&cache)), plain, "{} cut to {cut}", f.display());
+        }
+        for i in [0, 9, 20, good.len() / 3, good.len() - 2] {
+            let mut bad = good.clone();
+            bad[i] ^= 0x40;
+            std::fs::write(f, &bad).unwrap();
+            assert_eq!(open(&data, settings(&cache)), plain, "{} byte {i} flipped", f.display());
+        }
+    }
+}
+
+#[test]
+fn small_folders_are_not_cached() {
+    let data = TestDir::new("scan-small");
+    let cache = TestDir::new("scan-small-cache");
+    yolo(&data);
+    let s = Settings { min_files: 1000, ..settings(&cache) };
+    assert_eq!(open(&data, s), open(&data, uncached()));
+    assert_eq!(std::fs::read_dir(&*cache).map(|r| r.count()).unwrap_or(0), 0);
+}
+
+fn coco(root: &Path) {
+    std::fs::create_dir_all(root.join("annotations")).unwrap();
+    std::fs::create_dir_all(root.join("train2017")).unwrap();
+    std::fs::create_dir_all(root.join("val2017")).unwrap();
+    for (dir, n) in [("train2017", 5), ("val2017", 2)] {
+        for i in 0..n {
+            png(&root.join(dir).join(format!("{i}.png")), 40, 30);
+        }
+    }
+    write(&root.join("train2017/bad.png"), "x");
+    let train = r#"{"images": [
+        {"id": 1, "file_name": "0.png", "width": 40, "height": 30},
+        {"id": 2, "file_name": "1.png", "width": 41, "height": 30},
+        {"id": 3, "file_name": "2.png"},
+        {"id": 3, "file_name": "3.png"},
+        {"id": 4, "file_name": "4.png", "width": 40, "height": 30},
+        {"id": 5, "file_name": "bad.png", "width": 4, "height": 3},
+        {"id": 6, "file_name": "gone.png", "width": 4, "height": 3}],
+      "annotations": [
+        {"image_id": 1, "category_id": 1, "bbox": [1.25, 2, 10.1, 5]},
+        {"image_id": 1, "category_id": 3, "bbox": [0, 0, 39, 29]},
+        {"image_id": 2, "category_id": 9, "bbox": [0, 0, 1, 1]},
+        {"image_id": 3, "category_id": 1, "bbox": [0, 0, 0, 1]},
+        {"image_id": 4, "category_id": 1, "bbox": "x"},
+        {"image_id": 99, "category_id": 1, "bbox": [0, 0, 1, 1]},
+        {"image_id": 1, "category_id": 1, "bbox": [0, 0, 1, 1], "iscrowd": 1}],
+      "categories": [{"id": 1, "name": "cat"}, {"id": 3, "name": "dog"}]}"#;
+    write(&root.join("annotations/instances_train2017.json"), train);
+    let val = r#"{"images": [{"id": 1, "file_name": "0.png", "width": 40, "height": 30},
+        {"id": 2, "file_name": "1.png", "width": 40, "height": 30}],
+      "annotations": [{"image_id": 2, "category_id": 3, "bbox": [3, 4, 5, 6]}],
+      "categories": [{"id": 1, "name": "cat"}, {"id": 3, "name": "dog"}, {"id": 4, "name": "eel"}]}"#;
+    write(&root.join("annotations/instances_val2017.json"), val);
+}
+
+#[test]
+fn coco_opens_the_same_with_and_without_the_cache_and_sees_changes() {
+    let data = TestDir::new("scan-coco");
+    let cache = TestDir::new("scan-coco-cache");
+    coco(&data);
+    let plain = open(&data, uncached());
+    assert_eq!(open(&data, settings(&cache)), plain, "cold cache");
+    let names: Vec<String> =
+        std::fs::read_dir(&*cache).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    assert!(names.iter().any(|n| n.starts_with("coco-")), "{names:?}");
+    assert_eq!(open(&data, settings(&cache)), plain, "warm cache");
+    // One split only: its own cache entry, exactly what an uncached open of that split gives.
+    let val_only = |s| {
+        with_settings(s, || {
+            view(&crate::dataset::open_splits(&*data, &OpenOptions::default(), &[Split::Val]).unwrap())
+        })
+    };
+    assert_eq!(val_only(settings(&cache)), val_only(uncached()));
+    assert_eq!(val_only(settings(&cache)), val_only(uncached()));
+
+    // The cache answers while the JSON keeps its length and modification time...
+    let json = data.join("annotations/instances_train2017.json");
+    let mtime = std::fs::metadata(&json).unwrap().modified().unwrap();
+    let text = std::fs::read_to_string(&json).unwrap().replace("[1.25, 2, 10.1, 5]", "[2.25, 2, 10.1, 5]");
+    std::fs::write(&json, &text).unwrap();
+    std::fs::File::options().write(true).open(&json).unwrap().set_modified(mtime).unwrap();
+    assert_eq!(open(&data, settings(&cache)), plain, "same stamp: cached");
+    // ...and a changed JSON is read again.
+    age(&json);
+    let changed = open(&data, uncached());
+    assert_ne!(changed, plain);
+    assert_eq!(open(&data, settings(&cache)), changed);
+}
+
+#[test]
+fn annotations_round_trip_exactly() {
+    let data = TestDir::new("scan-coco-codec");
+    coco(&data);
+    let jsons = crate::dataset::coco::find_jsons(&data);
+    let read = || crate::dataset::coco::read_annotations(&data, &jsons, &Split::ALL).unwrap();
+    let a = read();
+    let stamps = [Stamp { len: 1, mtime: -5 }, Stamp { len: 2, mtime: 7 }];
+    let bytes = coco::encode(&a, &stamps).unwrap();
+    assert_eq!(coco::decode(&bytes, &stamps), Some(a));
+    assert_eq!(coco::decode(&bytes, &stamps[..1]), None);
+    assert_eq!(coco::decode(&bytes, &[stamps[0], Stamp { len: 2, mtime: 8 }]), None);
+    for cut in 0..bytes.len() {
+        assert_eq!(coco::decode(&bytes[..cut], &stamps), None, "cut to {cut}");
+    }
+}

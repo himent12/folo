@@ -206,7 +206,13 @@ pub(crate) fn render(def: &KernelDef, spec: &Spec) -> String {
 }
 
 impl Kernel {
-    pub fn compile(device: &wgpu::Device, def: &'static KernelDef, spec: &Spec) -> Result<Self> {
+    /// Compiles `def` specialised with `spec`, through the persistent pipeline cache when there is one.
+    pub fn compile(
+        device: &wgpu::Device,
+        def: &'static KernelDef,
+        spec: &Spec,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Result<Self> {
         let src = render(def, spec);
         // Natively, compile errors are caught in an error scope. In the browser the scope's result arrives
         // asynchronously and nothing may block for it, so errors go to the device's uncaptured-error sink
@@ -258,7 +264,7 @@ impl Kernel {
                 // Kernels initialise the workgroup memory they read.
                 zero_initialize_workgroup_memory: false,
             },
-            cache: None,
+            cache,
         });
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(err) = pollster::block_on(scope.pop()) {
