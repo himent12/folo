@@ -1,5 +1,6 @@
 //! folo-nn on the GPU (folo-gpu's backend): moving modules, optimizer state and EMAs between devices, the
-//! fused train-mode BatchNorm kernels and the fused Conv + bias + activation inference path.
+//! fused train-mode BatchNorm kernels and the fused Conv + bias + activation inference path; MuSGD's fused Muon
+//! step in `muon.rs`.
 //!
 //! Every test returns early, with a note, when there is no hardware adapter (CI). Software adapters (WARP,
 //! llvmpipe) are skipped too unless `FOLO_GPU_TEST_SOFTWARE=1`, as in folo-gpu's own tests.
@@ -48,6 +49,8 @@ fn close(got: &Tensor, want: &Tensor, atol: f32, rtol: f32, what: &str) {
         );
     }
 }
+
+mod muon;
 
 /// Two Conv-BN-SiLU blocks and a plain conv head: every kind of tensor a detector has.
 struct Net {

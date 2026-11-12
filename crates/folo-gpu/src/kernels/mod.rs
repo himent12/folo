@@ -14,6 +14,7 @@ pub mod ew;
 pub mod gemm;
 pub mod gemm_cat;
 pub mod layout;
+pub mod muon;
 pub mod norm;
 pub mod optim;
 pub mod pool_grad;

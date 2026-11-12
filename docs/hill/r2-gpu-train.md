@@ -97,10 +97,140 @@ Hold 3, each bench process at High priority (`ab.sh` sets it), host 2-57 %, GPU 
 f32 wins every round; AMP three of four. Peak memory unchanged (3467 / 2022 MiB, the bench's own line). This is
 the PR's claim; holds 1-2 only say the direction under heavy contention.
 
+folo-s (`FOLO_BENCH_SCALES=s ab.sh wgs 3 base wg`, High priority, host 82-100 %, merged as #184): f32 147 / 145 /
+146 (main) vs 146 / 147 / 147, a tie; AMP 267 / 270 / 268 vs 251 / 275 / 278: median 268 → 275 (+2.6 %, inside the
+±3 % tie band; fastest steps 58.7-59.2 → 57.1-57.6 ms). folo-s's weight gradients have wider channels, where the
+old gather cost relatively less. Peak memory unchanged (6520 / 3713 MiB).
+
+## PR 2: MuSGD's Muon step in fused kernels (`train/musgd-fused`)
+
+**Finding.** On main the Muon half of MuSGD is tensor ops: per column bucket a pad and stack, the norm (four ops),
+five Newton–Schulz steps of nine ops each (a transpose copy, three matmuls, five elementwise), then per weight a
+narrow / transpose / contiguous / scale, plus the Nesterov mix as one `mul_scalar` per weight. Profiled (folo-n,
+f32): 7.7 GPU-ms in 1225 dispatches per step (255 matmuls, 580 elementwise, 224 copies), 6.4 ms of host encoding,
+step phase 6.9 ms (SGD: 1.2 ms). Under AMP the step phase is 12.1 ms against SGD's 2.4.
+
+**Change.** `Tensor::muon_step_many_` (a new optional `Backend::muon_step_many` hook; the CPU keeps the tensor
+ops) and `folo_gpu::kernels::muon`: a multi-tensor gather (Nesterov mix, each matrix oriented rows ≤ cols into one
+workspace, a partial sum of squares per 256 elements), the Frobenius norms from the partials and the division over
+all elements, per Newton–Schulz step three grouped GEMMs over all matrices at once (each workgroup binary-searches
+its matrix and 64×64 tile in a table; `A = X·Xᵀ` is symmetric bit for bit, so `A·A` reads `A` as its own transpose;
+no zero padding), and a multi-tensor `p = p · 1 + (X · scale) · (−lr)`. About `2 · ⌈n / 16⌉ + 17` dispatches for
+`n` matrices. Same arithmetic per element as the tensor ops except the summation order of the products and of the
+norm. The workspaces of all matrices must fit one storage binding, so the matrices run in consecutive groups that
+each fit the device's largest binding (one group on this card); a device with fewer than 5 storage bindings per
+kernel, or a matrix that alone is past the limit, declines the call before anything is written
+(`NotSupported`), and MuSGD falls back to the tensor ops.
+
+**Steps** (profiled, folo-n f32, optimizer phase GPU time per step; `FOLO_BENCH_OPTIM=musgd bash
+D:/folo-build/hill2-gpu-train/bin/prof.sh <tag> <bin>`: main's `prof-base-musgd.txt`, `prof-m1-mu.txt`,
+`prof-m2-mu2.txt`). The binaries: `mu` is the first fused version (commit `821c5dd1` after the rebase, `214e562f`
+before it), `mu2` the version shipped before review (`eb09c3db`, was `0893ff56`).
+
+| version | GPU ms | dispatches | largest items |
+|---|---|---|---|
+| main | 7.67 | 1225 | matmuls 2.95, elementwise 2.68, copies 1.19 |
+| fused v1 (`mu`: one-workgroup norm, scalar GEMM tiles, result as views + `axpby_many`) | 3.13 | 139 | GEMMs 2.14, 86 view copies 0.35, norm 0.33 |
+| fused (`mu2`, shipped: unrolled vec4 GEMM tiles, parallel norm, update fused into the last kernel) | **1.47** | **53** | GEMMs 1.14, SGD 0.17 |
+
+The view copies of v1: the GPU backend densifies gradient views at a nonzero offset, so `p −= lr · O` over views
+of one result copied every matrix; the shipped version writes the parameters from the workspace directly.
+
+**A/B, main vs this branch, both MuSGD** (`FOLO_BENCH_OPTIM=musgd ab.sh mu3 3 base mu2`, High priority, host
+26-99 %), img/s at the median of each run:
+
+| round | f32 main | f32 fused | AMP main | AMP fused |
+|---|---|---|---|---|
+| 1 | 303 | 321 | 355 | 488 |
+| 2 | 315 | 338 | 367 | 487 |
+| 3 | 306 | 324 | 359 | 499 |
+| **median** | **306** | **324, +6 %** | **359** | **488, +36 %** |
+
+**MuSGD's overhead over SGD** (the step's img/s with SGD over with MuSGD, minus 1, same binary, same hold):
+
+| | f32 | AMP | source |
+|---|---|---|---|
+| main | 333 / 318: **+4.7 %** | 542.5 / 453: **+20 %** | hold 3 of PR 1 (`ab-wg3`, `ab-mu2`, base runs, host 2-65 %) |
+| fused | 321 / 336: none (MuSGD measured 4 % faster) | 518 / 495: **+4.6 %** | `ovh.sh mu2 3 mu2` (`ovh-mu2/`, alternated SGD / MuSGD, host 73-87 %) |
+
+The fused row comes from one hold under load (host 73-87 %), where the AMP overhead of the single rounds ranged from
+about −4 % to +5 %: MuSGD within 6 % of SGD in both precisions on the 640 px bench is what was observed there, not a
+bound. The "17 %" of docs/hill/learn.md was measured
+on the 320 px proxy, where the step is a quarter of the work and the Muon half (whose cost does not scale with the
+image size) weighs four times as much; the fused step's ~1.5 GPU-ms against main's 7.7 should take most of that
+back too (not measured at 320 px). Peak memory: 3478 / 2033 MiB, as main's MuSGD.
+
+**Correctness.** `crates/folo-nn/tests/gpu/muon.rs`: `fused_muon_matches_tensor_ops` (the fused update against the
+Nesterov mix, `orthogonalize_many` and `p − lr·O` as tensor ops on the CPU, with `lr = 1` so the parameter carries
+`O` at full size; wide, tall (transposed), multi-tile, single-row / single-column and square matrices, scales
+other than 1, 20 matrices so the multi-tensor kernels take two dispatches; Nesterov and plain; momenta and
+gradients unchanged; a broken transpose fails it), `fused_muon_edge_cases` (a zero momentum and gradient leave `p`
+as it was, one near zero has a norm about the eps, a 160×1152 matrix makes the norm loop run three times per
+invocation, a NaN gradient turns that parameter NaN exactly where the tensor ops do and nothing else, an empty
+matrix; dropping the eps or the norm loop fails it), and `crates/folo-nn/tests/gpu/main.rs`'s
+`training_steps_on_gpu_match_cpu` (MuSGD: two steps on the CPU, then three on the GPU, against three more on the
+CPU). folo-gpu's `tests/muon.rs`: split into three groups by a small limit with 5 bindings, the step equals the
+one-group step bit for bit; 4 bindings or a matrix past the limit decline it and leave the parameters as they
+were. `partition_fits_the_limit` (CPU) checks the groups against the limit. `tests/optim.rs` (two steps against an f64 re-implementation of the reference) is the CPU path,
+unchanged.
+
+## Not shipped: AMP step overhead (branch `train/amp-step`, 37c08686, no PR)
+
+Item 3 of the brief plus the accumulator's copies. Two changes:
+- **Cached f16 weights.** Autocast's f16 copy of each conv weight / bias is cached on its storage with the storage
+  version it was cast at (`Tensor::autocast_f16`). The optimizers recast the copies of the parameters they updated
+  right after their step, in multi-tensor casts (`Tensor::refresh_autocast_f16`, `Backend::cast_f16_many`,
+  `kernels::cast_many`; same rounding as `cast_any`).
+- **Accumulator first pass.** A window's first pass overwrites the reused buffers with `OptimStep::Axpby { a: 0 }`
+  (the stale buffer is not read) in 16-tensor dispatches, instead of 255 copies.
+
+Both are tested: the cached copies equal fresh casts bit for bit after optimizer steps and after a direct write
+(a check that ignores the version fails it), and stale infinities / NaNs do not survive the overwrite.
+
+Profiled (folo-n AMP, `prof-a2-amp2.txt`):
+- forward: 526 → 433 dispatches (98 casts → 5);
+- optimizer phase: 1.15 → 0.34 GPU-ms, 290 → 57 dispatches.
+
+End to end it is a **tie**:
+- `ab-amp2`, 4 rounds, host 54-100 %: AMP median 507.5 (main) vs 495.5 img/s, with one disturbed run.
+- `ab-amp2-clip`, 3 rounds: 526 vs 507.
+- `ab-amp3`, AMP only, 6 rounds, host 21-85 %: 522 vs 529 (+1.3 %).
+
+About 1 GPU-ms of a 29 ms step is inside this machine's noise. The branch is left for a re-measure in a quiet
+window; it adds a cache to folo-core's storage cells, which is not worth it without a measured win.
+
 ## Negative results
 
-- A warp-wide run along `k` (above): coalesced loads, but the tensor-core tile stores conflict 4-way.
+- A warp-wide run along `k` (PR 1 above): coalesced loads, but the tensor-core tile stores conflict 4-way.
+- Run lengths 4 / 8 / 16 for the weight-gradient B tile: within the profiler's noise of each other.
+- The AMP step changes above: real GPU and dispatch savings, no measurable end-to-end gain (a tie).
+- The first fused Muon version: one workgroup per matrix for the norm, and the result returned as views. Views
+  at a nonzero offset are densified (copied) by the GPU backend's multi-tensor update: 86 copies, 0.35 ms.
 
-## Leftovers
+## Leftovers, by expected gain
 
-TODO
+1. **f32 weight gradients**: still 10.6-10.8 GPU-ms plus 1.0-1.2 ms of split-K reductions per folo-n step. The
+   forward convs do the same FLOPs in about 7 ms.
+   - The regular tiles (4×4 / 4×8 per invocation) and the column reduction of the partial slabs (`reduce_cols`
+     over up to 1024 × N partials) are the next places.
+   - f16x2 splitting on tensor cores was not tried: gradient magnitudes below f16's range need per-tensor scaling.
+   - The f32 targets of the brief (390 img/s f32) were not reached: PR 1 gave +4.6 % (333 → 348.5).
+2. **Concat in the training forward** (item 5): `copy_into` 1.4 / 0.6 GPU-ms (f32 / AMP) in the forward plus the
+   backward's strided copies. #185 (gpu-dispatch) made convs read concatenations in place in inference; the
+   training-mode `ConvBnAct::forward_cat` with BatchNorm still copies (`Tensor::cat`, then the conv).
+   - Not started this round: the expected 2-3 % of the step would not measure clearly on this shared host.
+   - A design: a recorded conv over the parts whose forward is #185's `gemm_cat` (B rows from up to four part
+     buffers). Its input gradient is written once and split as views, which every consumer reads in place. Its
+     weight gradient gathers its B tile from the parts too (a `CAT` variant of `CONV_MODE` 3 in both generators,
+     choosing the part buffer by the `ci` range of each tile column).
+3. **The AMP step branch** above (about 1 GPU-ms and 330 dispatches per step): re-measure when the host is quiet.
+4. **Muon GEMMs** (1.14 GPU-ms per step): the gram stage's tiles on the largest matrices (256 × 2304 in folo-n)
+   run their whole K serially. Split-K or narrower tiles would help, or tensor cores (the reference computes in
+   bf16).
+5. **MuSGD at 320 px** (the proxy's 17 %): not measured after the change.
+6. **Test infrastructure**:
+   - `gpu!()` (folo-nn) and `coop_ctx` (folo-gpu) skip silently when no adapter / no tensor cores; CI should
+     require them on the GPU runner.
+   - Timing-sensitive tests fail under load: folo-cli `format_picks_the_labels_and_resume_keeps_it` (its `stop`
+     races a 6-epoch CPU run) and folo-server `cloud::ledger` (a 5 s tolerance).
+   - folo-vision `tiny_amp_run_learns` fails on main since #186 (reported to the orchestrator and gpu-gemm).

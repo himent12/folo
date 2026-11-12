@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use folo_core::backend::OptimStep;
+use folo_core::backend::{MuonSettings, OptimStep};
 use folo_core::{DType, Device, Tensor};
 
 use serde::{Deserialize, Serialize};
@@ -144,6 +144,11 @@ impl MuSgd {
             let gr: Vec<&Tensor> = gs.iter().collect();
             // m = μ · m + (1 − μ) · g
             axpby_many(&bs, &gr, mu, 1.0 - mu)?;
+            let lr = (self.weights.muon * g.lr) as f32;
+            // The rest of the Muon step in a few kernels for all of them, where the backend has it.
+            if muon_fused(&ps, &bs, &gr, mu, g.nesterov, lr)? {
+                continue;
+            }
             // u = μ · m + (1 − μ) · g (Nesterov), else m.
             let us = if g.nesterov {
                 let us = gs.iter().map(|x| x.mul_scalar(1.0 - mu)).collect::<folo_core::Result<Vec<_>>>()?;
@@ -154,12 +159,31 @@ impl MuSgd {
                 bs.iter().map(|b| b.mul_scalar(1.0)).collect::<folo_core::Result<Vec<_>>>()?
             };
             let os = orthogonalize_many(&us)?;
-            let lr = (self.weights.muon * g.lr) as f32;
             let or: Vec<&Tensor> = os.iter().collect();
             axpby_many(&ps, &or, 1.0, -lr)?;
         }
         Ok(())
     }
+}
+
+/// The rest of [`MuSgd::muon_step`] after the momentum update (the Nesterov mix of each momentum buffer `bs[i]`
+/// and gradient `gs[i]`, [`orthogonalize_many`] and `p −= lr · O`) through the backend's fused kernels
+/// (`Tensor::muon_step_many_`); `false`, touching nothing, where the backend has none.
+fn muon_fused(
+    ps: &[&Tensor],
+    bs: &[&Tensor],
+    gs: &[&Tensor],
+    mu: f32,
+    nesterov: bool,
+    lr: f32,
+) -> Result<bool> {
+    if ps.iter().all(|p| p.device().is_cpu()) {
+        return Ok(false);
+    }
+    let scales: Vec<f32> = ps.iter().map(|p| muon_scale(p.dims())).collect();
+    let settings =
+        MuonSettings { momentum: mu, nesterov, coeffs: NS_COEFFS, steps: NS_STEPS, eps: NS_EPS, lr };
+    Ok(Tensor::muon_step_many_(ps, bs, gs, &scales, &settings)?)
 }
 
 /// `p = a · p + b · g` for every pair: one multi-tensor call on a device that has it, else tensor ops.
