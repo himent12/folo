@@ -3,7 +3,8 @@ import Check from '$icons/check';
 import CircleAlert from '$icons/circle-alert';
 import { bindable, css, For, Index } from 'fw';
 import type { Resource } from '$lib/api/resource';
-import type { Dataset } from '$lib/api/types';
+import Badge from '$lib/ui/Badge';
+import { PROBLEM_LABEL, type ListedDataset } from '../datasets/problem';
 import ClassStrip from '$lib/detect/ClassStrip';
 import { compact, count, num } from '$lib/format';
 import Panel from '$lib/ui/Panel';
@@ -15,9 +16,9 @@ import type { FormErrors } from './jump';
 
 
 export interface DatasetSectionProps {
-  datasets: Resource<Dataset[]>;
+  datasets: Resource<ListedDataset[]>;
   datasetId: string;
-  dataset: Dataset | undefined;
+  dataset: ListedDataset | undefined;
   errors: FormErrors;
 }
 
@@ -39,9 +40,9 @@ export default function DatasetSection(props: DatasetSectionProps) {
               label="Dataset"
               bind:value={datasetId}
               invalid={!!props.errors.dataset}
-              options={props.datasets.data!.map((d) => ({ value: d.id, label: d.name }))}
+              options={props.datasets.data!.map((d) => ({ value: d.id, label: d.problem ? `${d.name} (${PROBLEM_LABEL[d.problem]})` : d.name }))}
             />
-            {props.dataset ? (
+            {props.dataset && !props.dataset.problem ? (
               <p class="ds-line num">
                 <Meta>
                   <span>{num(props.dataset.splits.train)} train</span>
@@ -78,7 +79,8 @@ export default function DatasetSection(props: DatasetSectionProps) {
                           ) : null}
                           {d().name}
                         </span>
-                        <span class="c-fmt">{d().format}</span>
+                        {/* A folder gone since it was registered: the Datasets list's word, and Start says why it waits. */}
+                        {d().problem ? <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge> : <span class="c-fmt">{d().format}</span>}
                       </span>
                       {/* Breaks only between the parts, and a wrapped line never ends on "·" (ui/Meta). */}
                       <span class="c-meta num">
@@ -105,7 +107,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
               <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
               <span>
                 {props.errors.dataset}
-                {props.dataset ? ' Training needs images in a train split: pick another dataset, or add training images to this one.' : ''}
+                {props.dataset && !props.dataset.problem ? ' Training needs images in a train split: pick another dataset, or add training images to this one.' : ''}
               </span>
             </p>
           ) : null}

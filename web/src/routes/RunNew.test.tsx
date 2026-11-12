@@ -3,6 +3,7 @@ import { flush as flushSync, tick } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, hub } from '$lib/api/index';
+import { RECHECK } from '$lib/api/datasetReads';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
 import { page } from '$lib/shell/crumbs';
@@ -556,6 +557,63 @@ describe('New run: the draft', () => {
     await reopen();
     expect(field('epochs')).toBe('100');
     expect(JSON.parse(sessionStorage.getItem('folo.runNew.draft')!).augment.hsv).toEqual([0.015, 0.7, 0.4]);
+  });
+});
+
+describe('New run: a dataset that cannot be trained on (v-data-runs N3, N6; v-shell N9)', () => {
+  const starts = () => [...target.querySelectorAll<HTMLButtonElement>('button[type="submit"]')];
+  const asked = (spy: { mock: { calls: unknown[][] } }, id: string) => spy.mock.calls.filter((c) => c[0] === id || (c[0] as { dataset_id?: string })?.dataset_id === id).length;
+
+  it('marks a missing folder, keeps Start off with the reason, and asks nothing more of it, also on the next visit', async () => {
+    const read = vi.spyOn(api, 'dataset');
+    read.mockImplementation(async (id, sig) => {
+      if (id === 'ds_shapes_hard') throw new ApiError(404, 'path_not_found', 'the folder of dataset shapes-hard is gone');
+      return MockApi.prototype.dataset.call(api, id, sig);
+    });
+    const images = vi.spyOn(api, 'datasetImages');
+    const estimate = vi.spyOn(api, 'estimateRun');
+    await open('?dataset=ds_shapes_hard');
+    const card = target.querySelector('input[name="dataset"][value="ds_shapes_hard"]')!.closest('.card')!;
+    expect(card.querySelector('.badge')?.textContent).toBe('Folder missing');
+    expect(starts().every((b) => b.disabled)).toBe(true);
+    expect(target.querySelector('#start-why')?.textContent).toBe('Dataset: Folder missing: put it back, or pick another dataset.');
+    await new Promise((r) => setTimeout(r, 50));
+    expect([asked(read, 'ds_shapes_hard'), asked(images, 'ds_shapes_hard'), asked(estimate, 'ds_shapes_hard')]).toEqual([1, 0, 0]);
+
+    // Another visit soon after: the list's mark, not the same failing read again.
+    unmount(c!);
+    await open('?dataset=ds_shapes_hard');
+    await until(() => target.querySelector('.card .badge')?.textContent === 'Folder missing', 'the mark');
+    expect(asked(read, 'ds_shapes_hard')).toBe(1);
+
+    // The folder put back: the first read after RECHECK finds it, and Start is on.
+    read.mockRestore();
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + RECHECK + 1);
+    unmount(c!);
+    await open('?dataset=ds_shapes_hard');
+    await until(() => starts().every((b) => !b.disabled), 'Start');
+    expect(target.querySelector('.card .badge')).toBeNull();
+    vi.restoreAllMocks();
+  });
+
+  it("says a draft's or a link's dataset was removed instead of switching to another in silence", async () => {
+    const images = vi.spyOn(api, 'datasetImages');
+    const estimate = vi.spyOn(api, 'estimateRun');
+    vi.spyOn(api, 'runs').mockImplementation(async (sig) => {
+      const list = await MockApi.prototype.runs.call(api, sig);
+      return [{ ...list[0]!, config: { ...list[0]!.config, dataset_id: 'ds_gone' }, dataset: { name: 'shapes-five', classes: [] } }, ...list.slice(1)];
+    });
+    await open('?dataset=ds_gone');
+    await until(() => target.querySelector('#start-why')?.textContent?.includes('removed'), 'the line');
+    expect(target.querySelector('input[name="dataset"]:checked')).toBeNull();
+    expect(target.querySelector('#start-why')?.textContent).toBe('Dataset: shapes-five was removed: pick a dataset.');
+    expect(target.querySelector('#dataset-error')?.textContent).toBe('shapes-five was removed: pick a dataset.');
+    expect([asked(images, 'ds_gone'), asked(estimate, 'ds_gone')]).toEqual([0, 0]);
+    // Picking one is all it takes.
+    target.querySelector<HTMLInputElement>('input[name="dataset"][value="ds_shapes"]')!.click();
+    await until(() => starts().every((b) => !b.disabled), 'Start');
+    expect(target.querySelector('#dataset-error')).toBeNull();
   });
 });
 

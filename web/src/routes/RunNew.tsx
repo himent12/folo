@@ -3,6 +3,7 @@ import Play from '$icons/play';
 import Plus from '$icons/plus';
 import { computed, css, deep, effect, Key, signal, tick, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
+import { readDatasets } from '$lib/api/datasetReads';
 import { Resource } from '$lib/api/resource';
 import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/api/types';
 import { modelChoices, scoreMeta } from '$lib/scoreSummary';
@@ -132,10 +133,8 @@ function RunNewForm() {
   /** Below 960 px the dock opens the summary as a sheet, so the run can be reviewed without scrolling down. */
   const sumOpen = signal(false);
 
-  const datasets = new Resource(async (s) => {
-    const list = await hub.api.datasets(s);
-    return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
-  });
+  // Each read for its stats; one whose folder is missing is marked, and Start waits (lib/api/datasetReads).
+  const datasets = new Resource(readDatasets);
   const system = new Resource((s) => hub.api.system(s));
   // Run on (servers with the `cloud` feature): this machine or a cloud connection, its GPU and the time limit.
   const cloudPick = new CloudPick(() => system.data);
@@ -199,11 +198,17 @@ function RunNewForm() {
     }
   });
 
-  // The first dataset until one is picked; also in place of a draft's dataset that has since been removed.
+  // The first dataset until one is picked. One a draft or a link asked for that is gone is not swapped for another in
+  // silence: none is picked, and the picker says which one went (by the name its runs recorded, where one has).
   effect(() => {
     const list = datasets.data;
-    const id = untrack(() => datasetId.get());
-    if (list?.length && (!id || (id === draft?.datasetId && !list.some((d) => d.id === id)))) datasetId.set(list[0]!.id);
+    if (list?.length && !untrack(() => datasetId.get())) datasetId.set(list[0]!.id);
+  });
+  const gone = computed(() => {
+    const id = datasetId.get();
+    if (!id || !datasets.data || datasets.data.some((d) => d.id === id)) return null;
+    const was = runs.data?.find((r) => r.config.dataset_id === id)?.dataset?.name;
+    return `${was ?? 'The dataset asked for'} was removed: pick a dataset.`;
   });
 
   // The draft follows every edit, once the form holds what the link asked for; a start clears it (below).
@@ -288,12 +293,17 @@ function RunNewForm() {
     if (!untrack(() => nameEdited.get())) name.set(auto);
   });
 
+  /** The picked dataset, where its images can be read (listed, folder there): nothing is asked of one that is not. */
+  const readableId = computed(() => {
+    const d = dataset.get();
+    return d && !d.problem ? d.id : '';
+  });
   // A few training images for the augmentation preview.
-  const sampleImages = new Resource<DatasetImage[]>((s) => sampleImagesOf(datasetId.get(), s));
+  const sampleImages = new Resource<DatasetImage[]>((s) => sampleImagesOf(readableId.get(), s));
 
   // The training images' sizes, to train a dataset of small images at its own size. Read only for a dataset small
   // enough to list in a few pages (the stats do not carry image sizes); otherwise null, and the size stays 640.
-  const trainSizes = new Resource((s) => trainSizesOf(datasetId.get(), s));
+  const trainSizes = new Resource((s) => trainSizesOf(readableId.get(), s));
   const datasetImgsz = computed(() => {
     const t = trainSizes.data;
     return t && t.id === datasetId.get() ? defaultImgsz(t.sizes) : null;
@@ -392,6 +402,7 @@ function RunNewForm() {
       seed.get(),
       augment.get(),
       dataset.get(),
+      gone.get(),
       weights.get(),
       picked.get(),
       arch.get(),

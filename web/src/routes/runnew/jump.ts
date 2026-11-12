@@ -1,4 +1,5 @@
 import type { Arch, Augment, Dataset, Model } from '$lib/api/types';
+import type { ListedDataset } from '../datasets/problem';
 import type { CloudPick } from './cloudPick';
 import { devWord } from './device';
 import { MAX_RUN_NAME, runName } from './name';
@@ -66,6 +67,17 @@ export function noTrainImages(dataset: Dataset): string | null {
   return rest ? `No training images (${rest}).` : 'No images to train on.';
 }
 
+/**
+ * What stops training on the picked dataset, said at the picker: none picked, or the one asked for (a draft's, a
+ * link's) gone (`gone`: the line that says so), its folder missing or unreadable, or no train split.
+ */
+export function datasetError(dataset: ListedDataset | undefined, gone: string | null): string | null {
+  if (!dataset) return gone ?? 'Pick a dataset.';
+  if (dataset.problem === 'missing') return 'Folder missing: put it back, or pick another dataset.';
+  if (dataset.problem === 'unreadable') return "Can't read its folder as a dataset now: pick another dataset.";
+  return noTrainImages(dataset);
+}
+
 /** Number inputs bind `null` when cleared; accept only finite whole numbers in range. */
 export const isInt = (v: unknown, lo: number, hi: number) => typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
 
@@ -76,7 +88,8 @@ export function formErrors(
   lr0: number,
   seed: number,
   augment: Augment,
-  dataset: Dataset | undefined,
+  dataset: ListedDataset | undefined,
+  gone: string | null,
   weights: string,
   picked: Model | undefined,
   arch: Arch,
@@ -102,7 +115,7 @@ export function formErrors(
     lr0: !(typeof lr0 === 'number' && lr0 > 0 && lr0 < 10) ? 'Greater than 0 and below 10.' : null,
     seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
-    dataset: !dataset ? 'Pick a dataset.' : noTrainImages(dataset),
+    dataset: datasetError(dataset, gone),
     weights: weights !== 'none' && picked?.arch !== arch ? 'Pick weights of the same model size.' : null,
     // The field says what to pick; the line beside Start only names the problem and leads there.
     device: deviceErr && !onCloud ? `${devWord(device)} is not available.` : null,
