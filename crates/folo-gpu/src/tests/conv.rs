@@ -199,6 +199,27 @@ fn conv_split_k() {
     let mut d = desc(1, 64, 20, 20, 64, 1, Window2d::square(3, 1, 1));
     d.act = UnaryOp::Silu;
     assert_eq!(run(&d, true, ConvPlan::default(), 71), 4);
+    // The same layer on a channel slice read in place (channels 16..80 of 96, two images): split-K reads `B` at
+    // the slice's offset and image stride.
+    let mut rng = Rng::new(72);
+    let (n, c_all, c0, hw) = (2, 96, 16, 400);
+    let full = rng.vec(n * c_all * hw, -1.0, 1.0);
+    let (w, b) = (rng.vec(64 * 64 * 9, -1.0, 1.0), rng.vec(64, -1.0, 1.0));
+    let slice: Vec<f32> =
+        (0..n).flat_map(|i| full[(i * c_all + c0) * hw..(i * c_all + c0 + 64) * hw].to_vec()).collect();
+    let mut d = desc(n, 64, 20, 20, 64, 1, Window2d::square(3, 1, 1));
+    d.act = UnaryOp::Silu;
+    let want = cpu_conv(&d, &slice, &w, Some(&b));
+    let up = |v: &[f32]| GpuTensor::from_slice(&ctx, v, &[v.len()]).unwrap();
+    let (gx, gw, gb) = (up(&full), up(&w), up(&b));
+    let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F32).unwrap();
+    let at = conv::ConvInput { offset: c0 * hw, n_stride: c_all * hw };
+    let chunks = traced_splits(&ctx, || {
+        conv::conv2d_input(&ctx, &d, (gx.raw(), at), gw.raw(), Some(gb.raw()), gy.raw(), None).unwrap();
+    });
+    assert_eq!(chunks, 4);
+    let atol = 2e-5 * (64.0f32 * 9.0).sqrt();
+    assert_close(&gy.to_vec().unwrap(), &want, atol, 1e-5, "split-K conv on a channel slice");
 }
 
 #[test]
