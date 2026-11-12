@@ -393,10 +393,13 @@ larger band budget with one band per thread, once at 28 threads, gave the same p
 ~0.06 ms: not worth the code.
 
 **Winograd F(4x4, 3x3)** (`f43.patch`: the driver of PR 3 generic over the tile size, `M + 2 = 6` transform
-rows, 36 GEMMs, the weights cached under their own key; F(2x2, 3x3) bit for bit unchanged). Correct against the
-f64 reference within the same absolute-algorithm bound `(C + 32) · 2^-23 · S` (both variants, all the PR 3 cases,
-deterministic across thread counts). Its error is larger: 6–12 · 2^-23 · Σ|terms| of the direct sum and 3–12 ·
-10⁻⁶ (2.7–12) of the largest output on folo-n shapes, against 0.3–1.0 and 2.5–7.3 · 10⁻⁷ for F(2x2, 3x3) (log
+rows, 36 GEMMs, the weights cached under their own key; F(2x2, 3x3), where it is still chosen, gives its previous bits).
+Correct against the f64 reference within a common bound for both variants, `(C + 32) · 2^-23 · S` before bias
+and activation, where `S` is the exact computation with the absolute values of every transform coefficient, input
+and weight (`|Bᵀ| |d| |B|`, `|G| |g| |Gᵀ|`, summed over channels, `|Aᵀ| · |A|`), assuming no overflow or
+underflow (PR 3 states F(2x2, 3x3)'s special case, `S ≤ 9 Σ_c D_c G_c`); all the PR 3 cases, deterministic across
+thread counts. Its error is larger: 6–12 · 2^-23 · Σ|terms| of the direct sum and (2.7–12) · 10⁻⁶ of the largest
+output on folo-n shapes, against 0.3–1.0 and 2.5–7.3 · 10⁻⁷ for F(2x2, 3x3) (log
 `f43_errors.txt`; the direct conv's own bound is K = 9C times Σ|terms|).
 
 - One pinned P-core (`f43_prof.txt`, a temporary phase timer): 1.1–1.9x faster than F(2x2, 3x3) (64→64 at 80²
@@ -418,8 +421,9 @@ deterministic across thread counts). Its error is larger: 6–12 · 2^-23 · Σ|
   more than computing.
 - **Winograd F(4x4, 3x3)** on a quiet machine (above, `f43.patch`): 1.1–1.9x per core over F(2x2, 3x3), a tie
   in the forward under 10–17 busy cores; its input transform (32–51% of its time on one core) is the next cost.
-- Stride-2 convs (2.8 ms of convs timed alone): bands did not help (above); the remaining idea is fewer flops
-  (a stride-2 3x3 conv is four stride-1 convs over the input's phases with 2x2, 2x1, 1x2 and 1x1 kernels, which
-  Winograd F(2, 2) would cut by ~1.4x).
+- Stride-2 convs (2.8 ms of convs timed alone): bands did not help (above); the remaining idea is fewer multiplies
+  (a stride-2 3x3 conv is four stride-1 convs over the input's phases with 2x2, 2x1, 1x2 and 1x1 kernels; with
+  Winograd F(2, 2) along each two-tap dimension they need 25 channel-pair multiplies per four outputs instead of
+  36: ~1.4x fewer for complete tiles, before the transforms and the sum of the four phases' results).
 - The depthwise convs of the head (0.47 ms of convs timed alone) and the shifted-rows copy of the convs that
   stay direct.
