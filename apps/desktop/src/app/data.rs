@@ -72,7 +72,7 @@ impl FoloApp {
             self.fetch(
                 cx,
                 |api| api.models(),
-                |this, r, _| {
+                |this, r, cx| {
                     this.store.models = r
                         .map(|mut m| {
                             m.sort_by(|a, b| b.created.cmp(&a.created));
@@ -80,9 +80,11 @@ impl FoloApp {
                         })
                         .into();
                     // Playground starts on the best model (not the newest checkpoint, which may
-                    // have learned nothing yet).
+                    // have learned nothing yet), and so does it again after its model was
+                    // deleted: an image already on stage is predicted with it.
                     if this.play_model.is_none() {
                         this.play_model = this.store.best_model(None).map(|m| m.id.clone());
+                        this.run_predict(cx);
                     }
                 },
             );

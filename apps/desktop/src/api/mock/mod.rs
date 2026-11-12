@@ -53,7 +53,21 @@ pub struct MockBackend {
     benches: Arc<super::mock_bench::MockBench>,
     /// Datasets unregistered and runs deleted through the API (a deleted run's models go with it).
     removed: Mutex<std::collections::HashSet<String>>,
+    /// A prediction that answers late ([`MockBackend::answer_next_predict_late`]).
+    late: (Mutex<Late>, std::sync::Condvar),
     clock: Clock,
+}
+
+/// Where [`MockBackend::answer_next_predict_late`] is.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Late {
+    #[default]
+    Off,
+    /// The next prediction waits (only tests arm it).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Armed,
+    /// One is waiting for the next to be asked.
+    Waiting,
 }
 
 const LIVE_ID: &str = "run_a19f";

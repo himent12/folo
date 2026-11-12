@@ -282,7 +282,7 @@ impl FoloApp {
                 Ok(()) => {
                     let body = match &target {
                         DeleteTarget::Run(id) => {
-                            this.forget_run(id);
+                            this.forget_run(id, cx);
                             None
                         }
                         DeleteTarget::Dataset(id) => {
@@ -302,7 +302,7 @@ impl FoloApp {
 
     /// Drops a deleted run (and the models it made, fetched again) from what the app holds, and
     /// leaves its page for the list.
-    fn forget_run(&mut self, id: &str) {
+    fn forget_run(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(runs) = self.store.runs.ready_mut() {
             runs.retain(|r| r.id != id);
         }
@@ -319,10 +319,11 @@ impl FoloApp {
             .map(|m| m.id.clone())
             .collect();
         if self.play_model.as_ref().is_some_and(|m| made.contains(m)) {
-            self.play_model = None;
-            self.play_pred = Load::Idle;
+            self.drop_play_model();
         }
+        // Fetched again now, not on the next refresh: Playground picks its next model from it.
         self.store.models = Load::Idle;
+        self.ensure_core(cx);
         if matches!(&self.route, Route::Run(r) if r == id) {
             self.route_pending = Some(Route::Runs);
         }
@@ -351,7 +352,7 @@ impl FoloApp {
             move |api| api.delete_run(&rid),
             move |this, r, cx| match r {
                 Ok(()) => {
-                    this.forget_run(&id);
+                    this.forget_run(&id, cx);
                     this.toast(
                         Tone::Neutral,
                         format!("Removed {name} from the queue"),

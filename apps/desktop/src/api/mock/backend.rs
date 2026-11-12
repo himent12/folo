@@ -640,7 +640,9 @@ impl Backend for MockBackend {
     }
 
     fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse> {
-        self.predict_for(req)
+        let r = self.predict_for(req);
+        self.maybe_answer_late();
+        r
     }
 
     // ---------- vision benchmarks (deterministic fixtures, `mock_bench`) ----------

@@ -12,16 +12,19 @@ use crate::theme::{Mode, Theme};
 
 /// The app on the demo data (frozen: no live clock), its lists loaded.
 pub(crate) fn open() -> (HeadlessApp, WindowHandle<FoloApp>) {
+    open_with(Arc::new(MockBackend::new(4200, true)))
+}
+
+/// [`open`] on a demo backend the test keeps a hand on.
+pub(crate) fn open_with(api: Arc<MockBackend>) -> (HeadlessApp, WindowHandle<FoloApp>) {
     let mut app = HeadlessApp::new(HeadlessOptions::default());
     let window = app.update(|cx| {
         cx.set_global(Theme::new(Mode::Dark));
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1280.), px(800.)));
         let options =
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
-        cx.open_window(options, |window, cx| {
-            cx.new(|cx| FoloApp::new(Arc::new(MockBackend::new(4200, true)), true, window, cx))
-        })
-        .expect("open window")
+        cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api, true, window, cx)))
+            .expect("open window")
     });
     drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
     (app, window)
@@ -221,6 +224,39 @@ fn another_device_keeps_the_boxes_up_until_it_answers() {
     // Its answer (here the demo's refusal) replaces them, undimmed.
     app.run_until_idle();
     drive(&mut app, window, |this, _, _| assert!(!this.play_pred_dim && !this.play_pred_pending));
+}
+
+#[test]
+fn deleting_the_playground_models_run_drops_its_late_answer_and_predicts_with_the_next() {
+    use super::DeleteTarget;
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    // Playground on the best model, an image on stage, its boxes in.
+    let (first, run) = drive(&mut app, window, |this, _, cx| {
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+        let first = this.play_model.clone().expect("the best model is picked");
+        let run = this.store.models.ready().unwrap().iter().find(|m| m.id == first).unwrap().run_id.clone();
+        (first, run.expect("made by a run"))
+    });
+    assert!(drive(&mut app, window, |this, _, _| this.play_pred.ready().is_some()));
+    // Asked again (the result kept up meanwhile), on a slow device: while it runs, the model's run
+    // is deleted, and its answer only comes once the model list is in again.
+    api.answer_next_predict_late();
+    drive(&mut app, window, |this, w, cx| {
+        this.play_pred_dim = true;
+        this.run_predict(cx);
+        this.ask_delete(DeleteTarget::Run(run.clone()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        let next = this.play_model.clone().expect("another model is picked");
+        assert_ne!(next, first);
+        // The image on stage is predicted with it, and nothing of the deleted model's is shown.
+        let shown = this.play_pred.ready().map(|p| p.model_id.clone());
+        assert_eq!(shown.as_deref(), Some(next.as_str()));
+        assert_eq!(this.play_pred_for.as_ref().map(|(_, m)| m), Some(&next));
+        assert!(!this.play_pred_pending && !this.play_pred_dim);
+    });
 }
 
 #[test]
