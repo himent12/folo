@@ -21,6 +21,7 @@
 mod copy;
 mod elementwise;
 mod fused;
+mod half;
 mod inplace;
 mod muon;
 mod nn;

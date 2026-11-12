@@ -34,6 +34,7 @@
 //! kernel list may ask a generator for.
 
 pub(crate) mod bounds;
+pub mod cast_many;
 pub mod conv;
 pub mod coop;
 pub mod detect;

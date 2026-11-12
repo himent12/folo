@@ -813,6 +813,24 @@ impl Backend for GpuBackend {
         }
     }
 
+    fn cast_f16_many(&self, srcs: &[View<'_>]) -> Result<Vec<Storage>> {
+        let _p = profile::scope(|| "cast_f16_many".to_string());
+        let mut outs = Vec::with_capacity(srcs.len());
+        let mut items = Vec::with_capacity(srcs.len());
+        for v in srcs {
+            let n = v.layout.numel();
+            if v.storage.dtype() != CoreDType::F32 || v.layout.contiguous_range() != Some(0..n) {
+                return Err(Error::NotSupported { op: "cast_f16_many", backend: BACKEND_NAME });
+            }
+            outs.push((self.alloc(CoreDType::F16, n)?, n));
+        }
+        for (v, (out, n)) in srcs.iter().zip(&outs) {
+            items.push((self.buf(v)?, out.raw(), *n));
+        }
+        crate::kernels::cast_many::cast_f16_many(&self.ctx, &items).core()?;
+        Ok(outs.into_iter().map(|(out, n)| self.wrap(CoreDType::F16, n, out)).collect())
+    }
+
     fn unscale_check(&self, x: &mut Storage, n: usize, factor: f32, flag: &mut Storage) -> Result<()> {
         let _p = profile::scope(|| "unscale".to_string());
         let (xb, fb) = (self.storage_buf(x)?, self.storage_buf(flag)?);

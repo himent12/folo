@@ -338,7 +338,7 @@ const FILL_SRC: &str = "@group(0) @binding(1) var<storage, read_write> Y: array<
      \x20 Y[t] = select(pu(1u), pu(2u), (t & 1u) == 1u);\n}\n";
 
 /// Conversions shared by casts.
-const CAST_FNS: &str = r#"
+pub(crate) const CAST_FNS: &str = r#"
 fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }
 // f32 to binary16 bits, rounding to nearest even in integer arithmetic (WGSL leaves `pack2x16float`'s rounding
 // to the implementation), with the `half` crate's NaN encoding.

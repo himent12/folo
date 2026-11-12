@@ -181,6 +181,7 @@ impl Optimizer for AdamW {
             let (m, v) = &state[gi][pi];
             update(p, g, m, v, &coefs[gi])
         })?;
+        super::refresh_autocast_f16(&self.groups)?;
         self.step += 1;
         Ok(())
     }

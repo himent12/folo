@@ -1,6 +1,6 @@
 // In-place optimizer updates, one thread per element, in the exact op order of folo-nn's CPU loops.
 // Spec: MODE (0 SGD, 1 SGD with a momentum buffer, 2 AdamW, 3 p = a·p + b·g), FLAG (SGD: weight decay,
-// AdamW: decoupled decay), NESTEROV. Params: 0 = n, then
+// AdamW: decoupled decay, axpby: a = 0, the old value not read), NESTEROV. Params: 0 = n, then
 //   SGD:   1 = lr, 2 = momentum, 3 = weight decay
 //   AdamW: 1 = decay, 2 = β1, 3 = 1 − β1, 4 = β2, 5 = 1 − β2, 6 = step size, 7 = sqrt(1 − β2^t), 8 = ε
 //   axpby: 1 = a, 2 = b
@@ -38,7 +38,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             p = p + (-pf(6u)) * (m / denom);
         }
         default: {
-            p = p * pf(1u) + g * pf(2u);
+            if (FLAG) { p = g * pf(2u); } else { p = p * pf(1u) + g * pf(2u); }
         }
     }
     PARAM[i] = p;

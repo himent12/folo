@@ -673,6 +673,12 @@ pub trait Backend: Send + Sync + 'static {
         unsupported!(self, "muon_step_many")
     }
 
+    /// `F32` → `F16` casts of many dense `F32` views (each from element 0 of its storage) in as few kernels as the
+    /// backend can, each rounded as [`Backend::cast`] rounds it. Reached through `Tensor::refresh_autocast_f16`.
+    fn cast_f16_many(&self, srcs: &[View<'_>]) -> Result<Vec<Storage>> {
+        unsupported!(self, "cast_f16_many")
+    }
+
     // ----- Detector pre- and post-processing (optional; callers fall back to host code) -----
 
     /// Letterbox `U8` RGB images (`images[i]` is `[H_i, W_i, 3]`) onto one `[B, 3, OH, OW]` canvas of `dtype`
@@ -824,7 +830,8 @@ pub enum OptimStep {
         /// ε.
         eps: f32,
     },
-    /// `p = p · a + g · b` (the EMA update with `a = d`, `b = 1 − d`).
+    /// `p = p · a + g · b` (the EMA update with `a = d`, `b = 1 − d`). With `a = 0` the old value is not read:
+    /// `p = g · b`, so a stale inf or NaN in `p` does not survive (a gradient accumulator's first pass).
     Axpby {
         /// Weight of the old value.
         a: f32,
