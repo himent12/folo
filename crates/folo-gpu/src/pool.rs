@@ -13,12 +13,22 @@
 //! one queue in encoding order, and wgpu inserts the barriers between dispatches that touch the same buffer.
 //! The one ordering hazard, `Queue::write_buffer` jumping ahead of not-yet-submitted work, is handled by
 //! [`crate::GpuContext`], which flushes the open batch before every upload.
+//!
+//! The context caches bind groups by buffer, and a cached bind group keeps its buffers alive, so the pool records
+//! the id of every buffer it lets go of ([`BufferPool::take_retired`]); the next dispatch or submission drops the
+//! bind groups that use them (`context/binds.rs`). It also knows the ids of every buffer it created and has not let
+//! go of ([`BufferPool::owns`]): only those are cached, since only their release is reported.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use crate::context::binds::FxSet;
 
 /// Smallest size class in bytes.
 pub const MIN_CLASS: u64 = 256;
+/// Retired buffer ids the pool keeps before it asks for the whole bind-group cache to be dropped instead.
+const MAX_RETIRED: usize = 4096;
 
 /// Rounds a request up to its size class (see the module docs).
 pub fn size_class(bytes: u64) -> u64 {
@@ -71,6 +81,22 @@ pub struct BufferPool {
     stats: PoolStats,
     /// Bytes the free lists may always hold (they may hold up to the live-bytes high-water mark).
     pub max_cached_bytes: u64,
+    /// Ids of the buffers let go of since the last [`BufferPool::take_retired`].
+    retired: Retired,
+    /// Set when `retired` is not empty, so the dispatch path can check without taking the pool lock.
+    retired_flag: Arc<AtomicBool>,
+    /// Ids of the buffers this pool created and has not let go of (cached or lent out).
+    owned: FxSet,
+}
+
+/// What [`BufferPool::take_retired`] returns: the ids of the buffers the pool let go of, or `All` when there
+/// were more than [`MAX_RETIRED`].
+#[derive(Debug, Default)]
+pub(crate) enum Retired {
+    #[default]
+    None,
+    Some(HashSet<u64>),
+    All,
 }
 
 impl Default for BufferPool {
@@ -90,7 +116,42 @@ impl BufferPool {
             high_water: 0,
             stats: PoolStats::default(),
             max_cached_bytes,
+            retired: Retired::None,
+            retired_flag: Arc::default(),
+            owned: FxSet::default(),
         }
+    }
+
+    /// The flag set whenever a buffer is retired (cleared by [`BufferPool::take_retired`]).
+    pub(crate) fn retired_flag(&self) -> Arc<AtomicBool> {
+        self.retired_flag.clone()
+    }
+
+    /// The buffers let go of since the last call (see the module docs).
+    pub(crate) fn take_retired(&mut self) -> Retired {
+        self.retired_flag.store(false, Ordering::Relaxed);
+        std::mem::take(&mut self.retired)
+    }
+
+    /// Whether the buffer with this id (`context::buffer_id`) is one the pool created and still holds or has lent
+    /// out, so its release will be reported.
+    pub(crate) fn owns(&self, id: u64) -> bool {
+        self.owned.contains(&id)
+    }
+
+    /// Records that `buf` is no longer the pool's (it is dropped right after).
+    fn retire(&mut self, buf: &wgpu::Buffer) {
+        let id = crate::context::buffer_id(buf);
+        self.owned.remove(&id);
+        match &mut self.retired {
+            Retired::All => {}
+            Retired::Some(ids) if ids.len() >= MAX_RETIRED => self.retired = Retired::All,
+            Retired::Some(ids) => {
+                ids.insert(id);
+            }
+            Retired::None => self.retired = Retired::Some(HashSet::from([id])),
+        }
+        self.retired_flag.store(true, Ordering::Relaxed);
     }
 
     /// Current counters.
@@ -105,7 +166,10 @@ impl BufferPool {
 
     /// Drops every cached buffer.
     pub fn clear(&mut self) {
-        self.free.clear();
+        let free = std::mem::take(&mut self.free);
+        for (_, buf) in free.values().flatten() {
+            self.retire(buf);
+        }
         self.order.clear();
         self.cached_buffers = 0;
         self.stats.cached_bytes = 0;
@@ -130,12 +194,14 @@ impl BufferPool {
         }
         self.stats.misses += 1;
         self.stats.allocated_bytes += class;
-        device.create_buffer(&wgpu::BufferDescriptor {
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("folo-gpu pooled"),
             size: class,
             usage,
             mapped_at_creation: false,
-        })
+        });
+        self.owned.insert(crate::context::buffer_id(&buf));
+        buf
     }
 
     /// Returns a buffer to its free list, evicting the least recently freed buffers if the cache is full.
@@ -143,13 +209,15 @@ impl BufferPool {
         self.stats.live_bytes = self.stats.live_bytes.saturating_sub(class);
         let cap = self.max_cached_bytes.max(self.high_water);
         if class > cap {
+            self.retire(&buf);
             return;
         }
         while self.stats.cached_bytes + class > cap {
             let Some((stamp, key)) = self.order.pop_front() else { break };
             let Some(list) = self.free.get_mut(&key) else { continue };
             if list.front().is_some_and(|(s, _)| *s == stamp) {
-                list.pop_front();
+                let (_, gone) = list.pop_front().expect("front checked");
+                self.retire(&gone);
                 self.stats.cached_bytes -= key.0;
                 self.cached_buffers -= 1;
             }
@@ -201,10 +269,10 @@ impl std::fmt::Debug for GpuBuffer {
 
 impl Drop for GpuBuffer {
     fn drop(&mut self) {
-        if let Some(buf) = self.buf.take()
-            && let Ok(mut pool) = self.pool.lock()
-        {
-            pool.give(buf, self.class);
+        // A poisoned pool still takes the buffer back: giving it is what retires it (reports its release to the
+        // bind-group cache), and a buffer dropped silently could stay pinned by a cached bind group.
+        if let Some(buf) = self.buf.take() {
+            self.pool.lock().unwrap_or_else(|p| p.into_inner()).give(buf, self.class);
         }
     }
 }

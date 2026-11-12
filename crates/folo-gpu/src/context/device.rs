@@ -13,6 +13,7 @@ use super::{
     MAX_DISPATCHES_PER_BATCH, SHARED, TENSOR_CORES_NOT_REQUESTED,
 };
 use crate::error::{GpuError, Result};
+use crate::pool::BufferPool;
 use crate::profile::Profiler;
 
 /// What `folo doctor` prints about an adapter.
@@ -345,6 +346,8 @@ impl GpuContext {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let pool = BufferPool::default();
+        let retired = pool.retired_flag();
         let ctx = Self {
             inner: Arc::new(Inner {
                 adapter,
@@ -352,7 +355,8 @@ impl GpuContext {
                 queue,
                 summary,
                 caps,
-                pool: Arc::default(),
+                pool: Arc::new(Mutex::new(pool)),
+                retired,
                 kernels: Mutex::default(),
                 batch: Mutex::default(),
                 errors,
@@ -360,6 +364,7 @@ impl GpuContext {
                 dummy,
                 dispatches: AtomicU64::new(0),
                 submissions: AtomicU64::new(0),
+                bind_groups: AtomicU64::new(0),
                 tensor_cores: AtomicBool::new(false),
                 tensor_cores_status: Mutex::new(status),
                 experimental: coop,
@@ -376,6 +381,9 @@ impl GpuContext {
                 profiler,
             }),
         };
+        if std::env::var(super::ENV_NO_BIND_CACHE).is_ok_and(|v| v != "0" && !v.is_empty()) {
+            ctx.set_bind_cache(false);
+        }
         if !coop {
             return Ok(ctx);
         }

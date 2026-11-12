@@ -82,8 +82,27 @@ The batch is submitted when:
 - you call `ctx.flush()` (submit without waiting) or `ctx.sync()` (submit, wait, report errors).
 
 A forward pass is therefore a handful of submissions. Each dispatch's parameters take a 256-byte slot in a
-64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches and submissions
-(the backend benchmark prints them per pass).
+64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches, submissions and
+bind groups created (the backend benchmark prints them per pass).
+
+**Bind-group cache.** The parameter block is bound with a dynamic offset (its slot in the arena chunk), so a bind
+group depends only on the kernel's layout, the arena chunk and the storage buffers, and the context keeps the bind
+groups it made, keyed by those (`context/binds.rs`; creating one costs 3–4 µs of host time). An inference forward
+meets the same combinations on every call and creates no bind group after its first calls. A training step reuses
+only some (about 27% of a folo-n b16 f32 step's dispatches, 56% with AMP): the pool's buffers do not come back in
+the same order every step. So a miss is kept cheap (an FxHash-style key and a set insert) and a combination is
+cached only on its second sighting; one seen once is just remembered in a bounded set of recent keys (a forward
+hits from its third call on). A cached bind group keeps its buffers alive, so only buffers the pool owns (created
+and not yet let go of) and the context's dummy buffer are cached; a raw buffer passed to a kernel, or a traced
+buffer replayed after the pool dropped it, never is. The pool records every buffer it lets go of (evicted, or
+dropped by `trim_pool()`), and the next dispatch or submission (so `flush()` and `sync()` too) drops the bind groups
+that hold one, found through an exact index from buffer to entries, which shrinks whenever an entry leaves; a
+training step retires buffers all the time, and sweeping the whole cache each time made the optimizer phase 4×
+slower. `release_memory()` empties the cache. The cache holds at most two generations of 4096 bind groups: when the
+current one is full it becomes the old one and the previous old one is dropped, and an old entry used again moves
+back. `ctx.bind_cache_len()` is its size; `ctx.set_bind_cache(false)` (or `FOLO_GPU_NO_BIND_CACHE=1` for contexts
+created afterwards) turns it off for A/B runs, and the `dispatch_ab` bench of folo-vision compares both in one
+process.
 
 The interval was 1024 until the training-step profile showed the GPU idle for most of the host's encoding and
 submission time: a step's 1300 dispatches went out in 3 submissions, so the GPU waited for each one to be built

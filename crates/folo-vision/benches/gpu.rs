@@ -77,9 +77,12 @@ fn latency(dev: Device, warm: usize, iters: usize, mut f: impl FnMut()) -> Stats
     )
 }
 
-/// Back to back, one synchronise at the end: ms per call.
+/// Calls [`throughput`] makes before the timed ones.
+const THROUGHPUT_WARMUP: usize = 3;
+
+/// Back to back, one synchronise at the end: ms per call. Makes `iters + THROUGHPUT_WARMUP` calls.
 fn throughput(dev: Device, iters: usize, mut f: impl FnMut()) -> f64 {
-    for _ in 0..3 {
+    for _ in 0..THROUGHPUT_WARMUP {
         f();
     }
     synchronize(dev).expect("sync");
@@ -152,14 +155,17 @@ fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, tc: 
             let s = latency(dev, 25, iters, || drop(black_box(model.forward(&x).expect("forward"))));
             let peak = ctx.pool_stats().peak_live_bytes;
             row(&format!("forward b{batch} (fused, {label})"), &s, batch);
+            let w2 = ctx.work_stats();
             let t = throughput(dev, iters, || drop(black_box(model.forward(&x).expect("forward"))));
+            let w3 = ctx.work_stats();
             println!(
-                "    pipelined {:.2} ms/call = {:.0} img/s; {} dispatches, {} submissions per call; peak {:.0} MiB \
-             (activations {:.0} MiB above weights + input)",
+                "    pipelined {:.2} ms/call = {:.0} img/s; {} dispatches, {} submissions, {:.1} new bind groups per \
+             call; peak {:.0} MiB (activations {:.0} MiB above weights + input)",
                 t,
                 batch as f64 * 1e3 / t,
                 w1.dispatches - w0.dispatches,
                 w1.submissions - w0.submissions,
+                (w3.bind_groups - w2.bind_groups) as f64 / (iters + THROUGHPUT_WARMUP) as f64,
                 mib(peak),
                 mib(peak.saturating_sub(base)),
             );
@@ -346,7 +352,10 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     }
     let w1 = ctx.work_stats();
     ctx.reset_peak_memory();
+    let misses = ctx.pool_stats().misses;
     let s = stats((0..10).map(|_| step(false, false).0).collect());
+    let w2 = ctx.work_stats();
+    let misses = ctx.pool_stats().misses - misses;
     let peak = ctx.pool_stats().peak_live_bytes;
     row(&format!("train step b16 ({label}, {optim})"), &s, 16);
     let mut split = |host: bool| {
@@ -360,10 +369,13 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     let ((f, l, b, o), enc) = split(false);
     println!(
         "    split (medians, each phase synchronised): forward {f:.1} ms, loss {l:.1} ms, backward {b:.1} ms, \
-         {} {o:.1} ms; {} dispatches and {} submissions per step; peak {:.0} MiB",
+         {} {o:.1} ms; {} dispatches, {} submissions, {:.0} new bind groups and {:.0} new buffers per step; \
+         peak {:.0} MiB",
         if amp { format!("unscale + check + {optim}") } else { optim.to_string() },
         (w1.dispatches - w0.dispatches) / 3,
         (w1.submissions - w0.submissions) / 3,
+        (w2.bind_groups - w1.bind_groups) as f64 / 10.0,
+        misses as f64 / 10.0,
         mib(peak)
     );
     println!(

@@ -6,8 +6,8 @@
 //! checks. The pipeline cache in [`crate::GpuContext`] is keyed by `(kernel name, spec)`.
 //!
 //! Every kernel sees the same bind group layout shape: `@binding(0)` is a 256-byte uniform parameter block
-//! ([`Params`], read with `pu(i)` / `pf(i)` / `pi(i)` from [`PRELUDE`]) and `@binding(1..)` are the storage
-//! buffers in [`KernelDef::storage`] order.
+//! ([`Params`], read with `pu(i)` / `pf(i)` / `pi(i)` from [`PRELUDE`], bound at a dynamic offset) and
+//! `@binding(1..)` are the storage buffers in [`KernelDef::storage`] order.
 
 use crate::error::{GpuError, Result};
 
@@ -222,7 +222,8 @@ impl Kernel {
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
+                // The slot in the uniform chunk, so one bind group serves every dispatch on the same buffers.
+                has_dynamic_offset: true,
                 min_binding_size: wgpu::BufferSize::new(UNIFORM_SLOT),
             },
             count: None,
