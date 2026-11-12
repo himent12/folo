@@ -189,7 +189,7 @@ describe('Overview', () => {
     expect(link.getAttribute('href')).toBe('#/datasets/label');
   });
 
-  it('refetches Best models when a run ends, and not on an unchanged list', async () => {
+  it('refetches Best models when a run ends or is deleted, and not on an unchanged list', async () => {
     const runs = await idleRuns();
     const run = runs.find((r) => r.status === 'completed')!;
     const api = new MockApi('normal', 0);
@@ -208,5 +208,10 @@ describe('Overview', () => {
     flush();
     expect(models).toHaveBeenCalledTimes(2);
     await training((t) => t.includes('Nothing is training'), 'the empty slot');
+
+    // Deleting the run takes its models with it.
+    watched.runs = list.filter((r) => r.id !== run.id);
+    flush();
+    expect(models).toHaveBeenCalledTimes(3);
   });
 });

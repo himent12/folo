@@ -5,9 +5,10 @@ import Images from '$icons/images';
 import Plus from '$icons/plus';
 import WifiOff from '$icons/wifi-off';
 import RefreshCwOff from '$icons/refresh-cw-off';
-import { computed, css, effect, For, Key, signal, untrack } from 'fw';
+import { computed, css, For, Key, signal } from 'fw';
 import { runProgress } from '$lib/api/progress';
 import { hub } from '$lib/api/index';
+import { modelsResource } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Run } from '$lib/api/types';
 import RunSpark from '$lib/charts/RunSpark';
@@ -34,7 +35,6 @@ import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
 import LiveRunCard from './overview/LiveRunCard';
-import { modelsMayHaveChanged } from './overview/runChanges';
 import { slotRun } from './overview/slot';
 import { datasetLabel } from './overview/datasetLabel';
 import AlsoRunning from './overview/AlsoRunning';
@@ -50,7 +50,8 @@ export default function Overview() {
   setCrumbs({ label: 'Overview' });
 
   const runs = new Resource((s) => hub.api.runs(s), { poll: 5000 });
-  const models = new Resource((s) => hub.api.models(s));
+  // Kept current as runs end or go (lib/api/models), as on every screen that lists models.
+  const models = modelsResource();
   // The list endpoint has no stats; fetch each dataset for its class balance.
   const datasets = new Resource(async (s) => {
     const list = await hub.api.datasets(s);
@@ -63,17 +64,6 @@ export default function Overview() {
   // stopped refreshing.
   const runList = computed(() => (watched.runs && (watched.since === null || !runs.data) ? watched.runs : runs.data));
   const runsFailed = computed(() => !!runs.error && !runList.get());
-
-  // A run that ended saved a model (and a deleted one took its models with it): Best models catches up then (./overview/runChanges).
-  let seenRuns: Run[] | undefined;
-  effect(() => {
-    const next = runList.get();
-    if (!next) return;
-    untrack(() => {
-      if (modelsMayHaveChanged(seenRuns, next)) void models.refresh();
-      seenRuns = next;
-    });
-  });
 
   // The run training, or starting (./overview/slot): a run just started shows here at once, as it does in the sidebar.
   const live = computed(() => slotRun(runList.get()));
