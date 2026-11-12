@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { render } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
@@ -147,6 +147,56 @@ describe('AddDatasetDialog', () => {
     expect(go).not.toHaveBeenCalled();
     toast.items.at(-1)!.action!.run();
     expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');
+  });
+
+  it('never lets a dismissed request move the person, also when the dialog was opened again meanwhile', async () => {
+    let finish!: () => void;
+    const ds = await hub.api.dataset('ds_shapes');
+    vi.spyOn(hub.api, 'createSyntheticDataset').mockImplementation(() => new Promise((res) => (finish = () => res(ds))));
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const open = signal(true);
+    c = render(() => <AddDatasetDialog bind:open={open} mode="synthetic" />, target);
+    flushSync();
+    document.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    open.set(false);
+    flushSync();
+    open.set(true);
+    flushSync();
+    const before = toast.items.length;
+    finish();
+    // The new opening stays open where it is, and says it there (a toast would sit behind it).
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('dialog')!.textContent).toContain('Synthetic dataset ready');
+    });
+    expect(open.peek()).toBe(true);
+    expect(go).not.toHaveBeenCalled();
+    expect(toast.items.length).toBe(before);
+  });
+
+  it('answers with a toast once the dialog is gone (Back while it runs), a failure too', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const ds = await hub.api.dataset('ds_shapes');
+    let finish!: (ok: boolean) => void;
+    vi.spyOn(hub.api, 'createSyntheticDataset').mockImplementation(
+      () => new Promise((res, rej) => (finish = (ok) => (ok ? res(ds) : rej(new ApiError(500, 'internal', 'disk full'))))),
+    );
+    const start = () => {
+      c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'synthetic' } });
+      flushSync();
+      document.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+      flushSync();
+      unmount(c);
+      c = undefined;
+    };
+    start();
+    finish(true);
+    await vi.waitFor(() => expect(toast.items.at(-1)?.title).toBe('Synthetic dataset ready'));
+    expect(go).not.toHaveBeenCalled();
+    start();
+    finish(false);
+    await vi.waitFor(() => expect(toast.items.at(-1)).toMatchObject({ tone: 'error' }));
   });
 
   it('says where the images went when none can train (a COCO test file registered alone)', async () => {

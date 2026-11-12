@@ -2,7 +2,7 @@
 import FolderOpen from '$icons/folder-open';
 import Sparkles from '$icons/sparkles';
 import Tags from '$icons/tags';
-import { bindable, computed, createUniqueId, css, effect, signal } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, onCleanup, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { CreateDataset } from '$lib/api/types';
 import { count, duration } from '$lib/format';
@@ -11,6 +11,7 @@ import Button from '$lib/ui/Button';
 import ClassChips, { addClasses } from '$lib/ui/ClassChips';
 import Dialog from '$lib/ui/Dialog';
 import ErrorState from '$lib/ui/ErrorState';
+import { DialogStatus } from '$lib/ui/feedback';
 import Field from '$lib/ui/Field.tsx';
 import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
@@ -64,6 +65,25 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     const t = setInterval(() => elapsed.set((Date.now() - w.since) / 1000), 1000);
     return () => clearInterval(t);
   });
+  /**
+   * The request of this opening, while it may still answer in the dialog (close it, open its dataset). It loses that
+   * for good once this opening is dismissed or the dialog goes (Back): its answer then never moves the person. It is a
+   * toast with Open, or, when the dialog was opened again meanwhile, a line in that opening's status region (a toast
+   * would sit behind it).
+   */
+  let attached: { yes: boolean } | null = null;
+  const detach = () => {
+    if (attached) attached.yes = false;
+    attached = null;
+  };
+  let gone = false;
+  onCleanup(() => {
+    gone = true;
+    detach();
+  });
+  /** Some opening of the dialog is on screen. */
+  const showing = () => !gone && open.peek();
+  const status = new DialogStatus();
   const error = signal<unknown>(undefined);
   const touched = signal(false);
 
@@ -157,6 +177,9 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     const m = mode.get();
     const images = Math.round(sImages.get() ?? 0);
     work.set({ what: m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${count(images, 'image')}`, since: Date.now() });
+    const mine = { yes: true };
+    attached = mine;
+    const here = () => mine.yes && showing();
     try {
       // Registering a folder that is already registered answers with that dataset (docs/API.md), not a copy.
       const before = m === 'folder' ? (props.known ?? fetched.peek() ?? (await hub.api.datasets().catch(() => []))) : [];
@@ -177,8 +200,14 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       const detail = nt ? `${ds.name} · ${nt.where}, none to train on` : `${ds.name} · ${count(ds.splits.train + ds.splits.val + ds.splits.test, 'image')}`;
       work.set(null);
       if (!known) datasetsChanged();
-      if (!open.peek()) {
-        // Dismissed while it ran: wherever the person is now, they stay there; the toast offers the dataset.
+      if (!here()) {
+        // Dismissed while it ran (or gone, or opened anew): wherever the person is now, they stay there.
+        if (showing()) {
+          if (known) status.info(title, 'That folder is in the list.');
+          else status.success(title, detail);
+          return;
+        }
+        // page-level: no opening of the dialog is on screen (above); the toast offers the dataset.
         const go = { label: 'Open', run: () => router.go(`/datasets/${ds.id}`) };
         if (known) toast.info(title, 'That folder is in the list.', go);
         else toast.success(title, detail, go);
@@ -191,19 +220,24 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       router.go(`/datasets/${ds.id}`);
     } catch (err) {
       work.set(null);
-      if (open.peek()) error.set(err);
+      if (here()) error.set(err);
+      else if (showing()) status.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
+      // page-level: no opening of the dialog is on screen.
       else toast.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
     }
   }
 
   effect(() => {
-    if (!open.get()) reset();
+    if (open.get()) return;
+    reset();
+    detach();
   });
 
   return (
     <Dialog
       bind:open={open}
       onclose={onclose}
+      status={status}
       title="Add dataset"
       description="Register a folder the server can read, or generate a sample set of shapes to try FOLO."
       footer={() => (
