@@ -100,4 +100,25 @@ describe('entryMemory', () => {
     await settle();
     expect(picked.get()).toEqual(['run_1', 'run_2']);
   });
+
+  // review forms-models R4 (the same flaw): what a reload reads back was trusted, and an entry kept as a number made
+  // every scroll throw.
+  it('reads back only entries of the shape it writes', async () => {
+    const at = router.entry;
+    const reload = (entries: unknown) => {
+      sessionStorage.setItem('folo.entries', JSON.stringify(entries));
+      uninstall();
+      uninstall = installEntryMemory();
+    };
+    reload([[at, 5], ['a', {}]]);
+    expect(() => scroll(400)).not.toThrow();
+    reload([[at, { y: 'x' }]]);
+    expect(restoringScroll()).toBe(false);
+    reload({ [at]: { y: 300 } });
+    expect(restoringScroll()).toBe(false);
+    // A sound entry among others that are not is kept: a reload brings it back to its place.
+    reload([[at + 1, { y: 300, state: [] }], [at, { y: 640 }], [at + 2, null]]);
+    await frames(40);
+    expect(window.scrollY).toBe(640);
+  });
 });
