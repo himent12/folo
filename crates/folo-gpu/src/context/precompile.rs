@@ -135,7 +135,7 @@ impl Slot {
 
 impl GpuContext {
     /// Starts recording the kernels this context uses from now on as a run of `kind` at `shape`, and compiles on
-    /// worker threads (one per core) the kernels an earlier process recorded for the same kind and shape on this
+    /// worker threads (half the cores, at most [`DEFAULT_MAX_PRECOMPILE_THREADS`]; [`ENV_PRECOMPILE_THREADS`]) the kernels an earlier process recorded for the same kind and shape on this
     /// adapter, in the order that process first used them, so the first steps of a run find their pipelines ready.
     /// With no list for `shape`, the most recently written list of `kind` is compiled instead (most kernels are
     /// shared). `kind` names what decides most kernels (`folo train` passes the command, model, precision, head,
@@ -369,12 +369,35 @@ impl GpuContext {
     }
 }
 
-/// Compiles `jobs` in order on one thread per core (fewer for a short list). A worker stops when the context is
+/// Environment variable that sets how many precompile workers a list gets (`FOLO_GPU_PRECOMPILE_THREADS=8`; at
+/// least 1). Unset: [`DEFAULT_MAX_PRECOMPILE_THREADS`] or half the cores, whichever is fewer.
+pub const ENV_PRECOMPILE_THREADS: &str = "FOLO_GPU_PRECOMPILE_THREADS";
+
+/// The most precompile workers by default. On the dev machine (28 threads, shared) a warm start's training thread
+/// waited 0.013-0.015 s with 12 workers in every round, but up to 0.77 s with 28 (pipeline creation contends in the
+/// driver: the workers' summed compile time grew from 2 s to 31 s), and 0.12-0.36 s with 6 or 3; with the driver's
+/// cache cold, 12 workers left 4.4-4.8 s on the training thread against 3.4-4.1 s with 28 (docs/hill/r2-trainer.md).
+pub const DEFAULT_MAX_PRECOMPILE_THREADS: usize = 12;
+
+/// Workers per list: [`ENV_PRECOMPILE_THREADS`], else half the cores up to [`DEFAULT_MAX_PRECOMPILE_THREADS`].
+#[cfg(not(target_arch = "wasm32"))]
+fn worker_count() -> usize {
+    std::env::var(ENV_PRECOMPILE_THREADS)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+            (cores / 2).min(DEFAULT_MAX_PRECOMPILE_THREADS)
+        })
+        .max(1)
+}
+
+/// Compiles `jobs` in order on [`worker_count`] threads (fewer for a short list). A worker stops when the context is
 /// gone; a kernel that panics while it is built (a list from another build asking for constants the generator
 /// does not expect) counts as failed.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_workers(inner: Weak<Inner>, jobs: Arc<Vec<(KernelKey, &'static KernelDef, Arc<Slot>)>>) {
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(jobs.len());
+    let threads = worker_count().min(jobs.len());
     let next = Arc::new(AtomicUsize::new(0));
     for i in 0..threads {
         let (inner, jobs2, next) = (inner.clone(), jobs.clone(), next.clone());

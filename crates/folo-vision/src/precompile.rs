@@ -1,6 +1,6 @@
 //! Parallel GPU pipeline precompile for training and inference ([`folo_gpu::GpuContext::precompile`]): a run
 //! names its kind (command, model, precision, class count) and shape (image size, batch), and the kernels an
-//! earlier run of the same kind and shape used compile on every core while this one opens its data and builds its
+//! earlier run of the same kind and shape used compile on worker threads while this one opens its data and builds its
 //! model (docs/GPU.md, Pipeline cache).
 
 use folo_core::{DType, Device};

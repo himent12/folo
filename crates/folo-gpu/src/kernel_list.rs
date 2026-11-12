@@ -1,5 +1,5 @@
 //! Kernel lists: the kernels (name and specialisation constants, in order of first use) one kind of run compiled,
-//! kept on disk beside the pipeline cache so the next run of that kind compiles them all up front on every core
+//! kept on disk beside the pipeline cache so the next run of that kind compiles them all up front on worker threads
 //! instead of one by one as its first step meets them ([`crate::GpuContext::precompile`], docs/GPU.md, Pipeline
 //! cache).
 //!

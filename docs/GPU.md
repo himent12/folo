@@ -183,7 +183,8 @@ kernels one at a time and compiles each (WGSL parsing in naga, about 1 s in all,
 driver's compile when its cache is cold: 30 s for a first AMP run). `GpuContext::precompile(kind, shape)` records,
 in the same folder, the kernels a context uses from then on (name and spec, in order of first use) as
 `kernels-<backend>-<vendor>-<device>-<kind hash>-<shape hash>.list` (`kernel_list.rs`), and at the next call with the
-same kind and shape compiles that list on worker threads, one per core, while the caller goes on. A thread that
+same kind and shape compiles that list on worker threads (half the cores, at most 12; `FOLO_GPU_PRECOMPILE_THREADS=n`
+sets the count: more workers contend in the driver, see docs/hill/r2-trainer.md) while the caller goes on. A thread that
 needs a kernel takes it ready, waits for the worker compiling it, or compiles it itself when no worker has started
 it, so a list is only ever a hint. `folo train` (and the server's runs) pass `train <arch> <f32|amp> head <head>
 <optimizer> nc <classes>` and `imgsz <n> batch <n>` (tile sizes and bounds checks follow the shapes); `folo

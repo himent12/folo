@@ -29,7 +29,7 @@ also needs a built web app. Without the feature, `folo serve` serves `web/dist` 
 
 ### Caches
 Every command keeps two caches under `$FOLO_CACHE_DIR`, else `<FOLO_HOME or ~/.folo>/cache`: compiled GPU pipelines
-and the lists of kernels each kind of run used, which the next such run compiles on every core before its first
+and the lists of kernels each kind of run used, which the next such run compiles on worker threads before its first
 step (`gpu/`, docs/GPU.md Pipeline cache) and dataset scans (`scan/`, docs/DATA.md Scan cache). They only make a second
 start faster (COCO `folo train` reaches its first step in seconds instead of a minute) and do not change a result
 as long as every change to a dataset file changes its length or modification time (the dataset is the one found
