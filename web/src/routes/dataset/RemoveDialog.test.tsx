@@ -89,4 +89,20 @@ describe('RemoveDialog', () => {
     confirm.click();
     await vi.waitFor(() => expect(del).toHaveBeenCalledWith('ds_x', { files: true }));
   });
+
+  it('does not offer the files while a run on any dataset is queued or training, and says when it will', async () => {
+    const run = (name: string, status: Run['status'], dataset_id: string) => ({ name, status, config: { dataset_id } }) as Run;
+    vi.spyOn(hub.api, 'runs').mockResolvedValue([run('elsewhere', 'queued', 'ds_other')]);
+    const sys = await hub.api.system();
+    vi.spyOn(hub.api, 'system').mockResolvedValue({ ...sys, data_dir: 'D:/folo' });
+    const dataset = { id: 'ds_x', name: 'shapes-synth', path: 'D:/folo/datasets/shapes-synth', splits: { train: 800, val: 200, test: 0 } };
+    c = render(() => <RemoveDialog open dataset={dataset} />, target);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('dialog')!.textContent).toContain('Its 1,000 generated images can be deleted too once no run is queued or training.');
+    });
+    expect(document.querySelector('dialog .switch')).toBeNull();
+    // No run trained on this dataset, so nothing is said about runs losing their samples.
+    expect(document.querySelector('dialog')!.textContent).not.toContain('trained on it');
+  });
 });
