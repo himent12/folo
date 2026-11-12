@@ -1,8 +1,8 @@
 //! Raw element buffers behind tensors.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use half::f16;
 
@@ -217,6 +217,56 @@ impl Storage {
     }
 }
 
+/// Values a backend derived from a storage's data (a conv's Winograd-transformed weights), each under its type
+/// and a key naming what it is and the layout it was read through. They are made only under the storage's read
+/// lock and cleared whenever its write lock is taken, so a value never outlives the data it was made from: a
+/// fused model's weights are transformed on their first forward and reused until they are written.
+#[derive(Default)]
+pub(crate) struct Derived(Mutex<Vec<DerivedEntry>>);
+
+/// One derived value: its type, its key and the value.
+type DerivedEntry = (TypeId, u64, Arc<dyn Any + Send + Sync>);
+
+/// Derived values kept per storage; the oldest goes first.
+const DERIVED_KEPT: usize = 2;
+
+impl Derived {
+    /// The value under `key`, made by `make` (and kept) if there is none. Two threads that miss at once both
+    /// make it; the first one kept wins.
+    pub(crate) fn get_or_make<T: Any + Send + Sync>(&self, key: u64, make: impl FnOnce() -> T) -> Arc<T> {
+        let lock = || self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let id = TypeId::of::<T>();
+        let find = |l: &[DerivedEntry]| {
+            l.iter().find(|e| e.0 == id && e.1 == key).and_then(|e| e.2.clone().downcast::<T>().ok())
+        };
+        if let Some(v) = find(&lock()) {
+            return v;
+        }
+        let v = Arc::new(make());
+        let mut l = lock();
+        if let Some(kept) = find(&l) {
+            return kept;
+        }
+        if l.len() >= DERIVED_KEPT {
+            l.remove(0);
+        }
+        l.push((id, key, v.clone()));
+        v
+    }
+
+    /// Drop every value (the data is about to change).
+    fn clear(&self) {
+        let old = std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(old);
+    }
+}
+
+impl std::fmt::Debug for Derived {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Derived({})", self.0.lock().map_or(0, |l| l.len()))
+    }
+}
+
 /// Shared, lockable storage with a version counter bumped on every in-place write. Autograd records the
 /// version when an op saves its inputs and refuses to run backward if it changed.
 ///
@@ -225,6 +275,8 @@ impl Storage {
 /// are atomics so `Tensor::device()` / `Tensor::dtype()` never take the lock.
 pub(crate) struct StorageCell {
     data: RwLock<Storage>,
+    /// Cleared whenever `data`'s write lock is taken.
+    derived: Derived,
     version: AtomicU64,
     device: AtomicU64,
     dtype: AtomicU8,
@@ -255,7 +307,13 @@ impl StorageCell {
     pub fn new(s: Storage) -> Self {
         let device = AtomicU64::new(encode_device(s.device()));
         let dtype = AtomicU8::new(encode_dtype(s.dtype()));
-        StorageCell { data: RwLock::new(s), version: AtomicU64::new(0), device, dtype }
+        StorageCell {
+            data: RwLock::new(s),
+            derived: Derived::default(),
+            version: AtomicU64::new(0),
+            device,
+            dtype,
+        }
     }
 
     /// The element type of the data.
@@ -285,16 +343,25 @@ impl StorageCell {
         self.data.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Write access; bumps the version.
+    /// Write access; bumps the version and drops the derived values.
     pub fn write(&self) -> RwLockWriteGuard<'_, Storage> {
         self.version.fetch_add(1, Ordering::Relaxed);
-        self.data.write().unwrap_or_else(|e| e.into_inner())
+        let g = self.data.write().unwrap_or_else(|e| e.into_inner());
+        self.derived.clear();
+        g
+    }
+
+    /// The values backends derived from the data (see [`Derived`]).
+    pub fn derived(&self) -> &Derived {
+        &self.derived
     }
 
     /// Write access without a version bump, for callers that may not write after all (a fused backend hook that
     /// can answer `NotSupported`); they call [`StorageCell::mark_modified`] once the data did change.
     pub fn write_unversioned(&self) -> RwLockWriteGuard<'_, Storage> {
-        self.data.write().unwrap_or_else(|e| e.into_inner())
+        let g = self.data.write().unwrap_or_else(|e| e.into_inner());
+        self.derived.clear();
+        g
     }
 
     /// Bump the version after a write through [`StorageCell::write_unversioned`].

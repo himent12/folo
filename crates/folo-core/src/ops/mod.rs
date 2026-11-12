@@ -40,7 +40,7 @@ pub(crate) fn with_views<R, const N: usize>(
         };
     }
     let guards: SmallVec<[_; 4]> = cells.iter().map(|c| c.read()).collect();
-    let views = std::array::from_fn(|i| View::new(&guards[idx[i]], layouts[i]));
+    let views = std::array::from_fn(|i| View::of_cell(&guards[idx[i]], layouts[i], cells[idx[i]].derived()));
     f(views)
 }
 
@@ -58,8 +58,11 @@ pub(crate) fn with_views_dyn<R>(ts: &[&Tensor], f: impl FnOnce(&[View<'_>]) -> R
         });
     }
     let guards: SmallVec<[_; 4]> = cells.iter().map(|c| c.read()).collect();
-    let views: SmallVec<[View<'_>; 8]> =
-        ts.iter().zip(&idx).map(|(t, &i)| View::new(&guards[i], t.layout())).collect();
+    let views: SmallVec<[View<'_>; 8]> = ts
+        .iter()
+        .zip(&idx)
+        .map(|(t, &i)| View::of_cell(&guards[i], t.layout(), cells[i].derived()))
+        .collect();
     f(&views)
 }
 

@@ -46,6 +46,22 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   under `no_grad`): bias and SiLU on the micro-kernel's accumulators before they are stored, other activations as
   a pass over each finished block; SiLU there is an 8-lane AVX2 `x · sigmoid(x)` with relative error below
   `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
+  These fused entry points (`conv2d_act`, `conv2d_act_cat`: nothing is recorded) run a dense 3x3 stride-1 conv with
+  at least 16 input and 8 output channels (at most 4096 together, which bounds the per-thread scratch), and a
+  32x32 or larger output or `c · o >= 4096`, as Winograd F(2x2, 3x3) (`cpu/conv/winograd.rs`): 16 multiplies per
+  2x2 output tile and channel pair instead of 36. The weights are transformed once per weight tensor and kept
+  with its storage until the storage is next written (`View::derived`: every write lock clears it; a view whose
+  `storage` field was pointed elsewhere neither uses nor fills it). The tiles are cut into blocks; a block transforms its input
+  patches, runs 16 small GEMMs through the row-pointer micro-kernel and transforms the results into its output
+  tiles while they are in L2 (an image with too few blocks for the pool runs in two passes, the input transforms
+  split by input channels, then the GEMMs and output transforms by output channels). Not bit for bit the direct
+  conv: an output is within `(C + 8) · 2^-23 · 9 · Σ_c D_c · G_c` of the exact sum (`D_c`, `G_c`: the sums of
+  |inputs| over its tile's 4x4 input patch and of |weights| over its 3x3 kernel in channel c; derived in the
+  module doc, tested; it assumes no step overflows or underflows, and inputs within a factor ~4 of `f32::MAX` can
+  overflow in the input transform where the direct sum would not), an error that grows with C like the direct
+  conv's `K · 2^-23 · Σ|terms|`; COCO val AP of
+  folo-n-coco changed by less than 1e-6. The same
+  bits for any thread count or batch. The autograd conv (`conv2d_with`) keeps the direct conv.
   `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
   (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
   separable (row pass, then column pass; same first-maximum argmax as a direct scan); when nothing is recorded
