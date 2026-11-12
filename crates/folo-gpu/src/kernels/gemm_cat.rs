@@ -12,7 +12,8 @@ use std::fmt::Write as _;
 
 use super::check_buf;
 use super::gemm::{
-    GEMM_CAT, GemmBias, GemmDesc, TileConfig, base_spec, check_config, check_dtype, gemm_params,
+    BatchStrides, GEMM_CAT, GemmBias, GemmDesc, TileConfig, base_spec, check_config, check_dtype, extent,
+    gemm_params,
 };
 use crate::DType;
 use crate::context::GpuContext;
@@ -21,6 +22,8 @@ use crate::kernels::coop;
 
 /// Most parts one GEMM reads in place.
 pub const MAX_CAT_PARTS: usize = 4;
+/// Storage bindings of the `CAT` kernels (`A`, part 0, bias, `C`, parts 1..): a device must allow this many.
+pub const CAT_STORAGE_BUFFERS: u32 = 4 + MAX_CAT_PARTS as u32 - 1;
 /// First uniform word of the part table.
 pub(crate) const CAT_WORD: usize = 40;
 
@@ -76,8 +79,11 @@ pub(crate) fn part_table(d: &GemmDesc, parts: &[CatPart<'_>]) -> Result<([u32; 1
         return Err(shape_err("gemm_cat: B must not be transposed and the inner batch must be 1"));
     }
     let rows: usize = parts.iter().map(|p| p.rows).sum();
-    if rows != d.k || parts.iter().any(|p| p.rows == 0) {
+    if rows != d.k {
         return Err(shape_err(format!("gemm_cat: parts hold {rows} rows of B, K is {}", d.k)));
+    }
+    if parts.iter().any(|p| p.rows == 0) {
+        return Err(shape_err("gemm_cat: a part holds no rows (leave it out)"));
     }
     if d.ldb < d.n {
         return Err(shape_err(format!("gemm_cat: ldb {} < N {}", d.ldb, d.n)));
@@ -88,14 +94,8 @@ pub(crate) fn part_table(d: &GemmDesc, parts: &[CatPart<'_>]) -> Result<([u32; 1
     let mut end = 0;
     let mut vec = d.ldb.is_multiple_of(4) && d.n.is_multiple_of(4);
     for (i, p) in parts.iter().enumerate() {
-        let last = (|| {
-            p.offset
-                .checked_add((d.batch.0 - 1).checked_mul(p.outer)?)?
-                .checked_add((p.rows - 1).checked_mul(d.ldb)?)?
-                .checked_add(d.n)
-        })()
-        .ok_or_else(|| GpuError::Limit("gemm_cat part extent overflows".into()))?;
-        check_buf(p.buf, last, d.dtype, "gemm_cat B part")?;
+        let at = BatchStrides { offset: p.offset, outer: p.outer, inner: 0 };
+        check_buf(p.buf, extent(&at, d.batch, p.rows, d.n, d.ldb)?, d.dtype, "gemm_cat B part")?;
         end += p.rows;
         table[i] = u(end)?;
         table[4 + i] = u(p.offset)?;
@@ -107,6 +107,10 @@ pub(crate) fn part_table(d: &GemmDesc, parts: &[CatPart<'_>]) -> Result<([u32; 1
 
 /// `C = alpha · A · cat(parts) (+ bias) → act` for the GEMM `d` (its `b` strides are ignored; `B` is the
 /// concatenation of `parts` along the rows), on tensor cores for f16 when the context has them on.
+///
+/// Every part holds at least one row. `c` is written while the others are read in the same dispatch, so it
+/// must not be `a`, the bias or any part's buffer. The kernel binds [`CAT_STORAGE_BUFFERS`] storage buffers;
+/// on a device that allows fewer this is [`GpuError::Unsupported`].
 pub fn gemm_cat(
     ctx: &GpuContext,
     d: &GemmDesc,
@@ -117,28 +121,26 @@ pub fn gemm_cat(
     cfg: Option<TileConfig>,
 ) -> Result<()> {
     check_dtype(ctx, d.dtype, "gemm_cat")?;
-    let (table, vec_b) = part_table(d, parts)?;
+    if ctx.caps().max_storage_buffers < CAT_STORAGE_BUFFERS {
+        return Err(GpuError::Unsupported("gemm_cat: 7 storage buffers per shader stage"));
+    }
     if d.m == 0 || d.n == 0 || d.batch.0 == 0 {
         return Ok(());
     }
+    let (table, vec_b) = part_table(d, parts)?;
     if d.trans_a || d.lda < d.k || d.ldc < d.n {
         return Err(shape_err(format!("gemm_cat: unsupported A or C layout in {d:?}")));
     }
-    let ext = |off: usize, outer: usize, rows: usize, ld: usize, cols: usize| {
-        off.checked_add((d.batch.0 - 1).checked_mul(outer)?)?
-            .checked_add((rows - 1).checked_mul(ld)?)?
-            .checked_add(cols)
-    };
-    let a_len =
-        ext(d.a.offset, d.a.outer, d.m, d.lda, d.k).ok_or_else(|| GpuError::Limit("gemm_cat A".into()))?;
-    let c_len =
-        ext(d.c.offset, d.c.outer, d.m, d.ldc, d.n).ok_or_else(|| GpuError::Limit("gemm_cat C".into()))?;
-    check_buf(a, a_len, d.dtype, "gemm_cat A")?;
-    check_buf(c, c_len, d.dtype, "gemm_cat C")?;
+    if parts.iter().map(|p| p.buf).chain([a]).chain(bias).any(|b| b == c) {
+        return Err(shape_err("gemm_cat: C must not share a buffer with A, the bias or a part of B"));
+    }
+    check_buf(a, extent(&d.a, d.batch, d.m, d.k, d.lda)?, d.dtype, "gemm_cat A")?;
+    check_buf(c, extent(&d.c, d.batch, d.m, d.n, d.ldc)?, d.dtype, "gemm_cat C")?;
     let bias_buf = match (d.bias, bias) {
         (GemmBias::None, _) => ctx.dummy(),
         (GemmBias::Row, Some(b)) => {
-            check_buf(b, d.bias_strides.offset + d.m, d.dtype, "gemm_cat bias")?;
+            // The shaders read `BIAS[offBias + b1·outer + b2·inner + row]`.
+            check_buf(b, extent(&d.bias_strides, d.batch, 1, d.m, d.m)?, d.dtype, "gemm_cat bias")?;
             b
         }
         _ => return Err(shape_err("gemm_cat: only a row bias is supported")),

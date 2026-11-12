@@ -714,8 +714,14 @@ pub(crate) static GEMM_CAT: KernelDef = KernelDef {
     source: Source::Generated(gen_gemm),
 };
 
-/// Highest element index (exclusive) a strided batched matrix operand touches.
-fn extent(s: &BatchStrides, batch: (usize, usize), rows: usize, cols: usize, ld: usize) -> Result<usize> {
+/// Highest element index (exclusive) a strided batched matrix operand touches (0 when it touches none).
+pub(crate) fn extent(
+    s: &BatchStrides,
+    batch: (usize, usize),
+    rows: usize,
+    cols: usize,
+    ld: usize,
+) -> Result<usize> {
     if rows == 0 || cols == 0 || batch.0 == 0 || batch.1 == 0 {
         return Ok(0);
     }

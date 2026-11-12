@@ -16,7 +16,7 @@ use super::{BACKEND_NAME, GpuBackend, core_err};
 use crate::error::GpuError;
 use crate::kernels::conv;
 use crate::kernels::ew::EwOp;
-use crate::kernels::gemm_cat::MAX_CAT_PARTS;
+use crate::kernels::gemm_cat::{CAT_STORAGE_BUFFERS, MAX_CAT_PARTS};
 use crate::kernels::layout;
 use crate::kernels::norm::{self, BnRunning};
 use crate::kernels::optim;
@@ -565,11 +565,27 @@ impl Backend for GpuBackend {
         // 1×1 convs over 2 to `MAX_CAT_PARTS` parts whose images are contiguous: one GEMM reads them in place.
         // Anything else is `NotSupported`, and the caller concatenates first.
         let unsupported = Error::NotSupported { op: "conv2d_act_cat", backend: BACKEND_NAME };
-        if xs.len() < 2 || xs.len() > MAX_CAT_PARTS || xs.iter().any(|x| x.shape().rank() != 4) {
+        if xs.is_empty()
+            || xs.iter().any(|x| x.shape().rank() != 4)
+            || self.ctx.caps().max_storage_buffers < CAT_STORAGE_BUFFERS
+        {
             return Err(unsupported);
         }
-        let dtype = xs[0].storage.dtype();
         let (n, _, h, wi) = nchw(xs[0].shape());
+        if xs.iter().any(|x| {
+            let (pn, _, ph, pw) = nchw(x.shape());
+            (pn, ph, pw) != (n, h, wi)
+        }) {
+            return Err(unsupported);
+        }
+        // Parts without channels add nothing; with one part left this is the plain conv on it.
+        let xs: Vec<View<'_>> = xs.iter().copied().filter(|x| nchw(x.shape()).1 > 0).collect();
+        match xs.len() {
+            1 => return self.conv2d_act(xs[0], w, bias, p, act),
+            2..=MAX_CAT_PARTS => {}
+            _ => return Err(unsupported),
+        }
+        let dtype = xs[0].storage.dtype();
         let c: usize = xs.iter().map(|x| nchw(x.shape()).1).sum();
         let mut d = self.conv_desc(&Shape::new(&[n, c, h, wi]), w.shape(), p, dtype);
         d.act = conv_act(act).ok_or(unsupported.clone())?;
@@ -577,12 +593,9 @@ impl Backend for GpuBackend {
             return Err(unsupported);
         }
         let mut parts = Vec::with_capacity(xs.len());
-        for x in xs {
-            let (pn, pc, ph, pw) = nchw(x.shape());
-            let Some(at) = conv_input(x).filter(|_| (pn, ph, pw) == (n, h, wi)) else {
-                return Err(unsupported);
-            };
-            parts.push(conv::ConvPart { buf: self.buf(x)?, channels: pc, at });
+        for x in &xs {
+            let Some(at) = conv_input(x) else { return Err(unsupported) };
+            parts.push(conv::ConvPart { buf: self.buf(x)?, channels: nchw(x.shape()).1, at });
         }
         let _p = profile::scope(|| format!("conv_cat {} {}", xs.len(), conv_label(&d)));
         let (oh, ow) = d.output().core()?;

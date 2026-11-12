@@ -177,7 +177,8 @@ pub fn conv2d_input(
 /// `y = act(conv2d(cat(parts, 1), weight) + bias)` for a 1×1, stride-1, unpadded, ungrouped conv, reading the
 /// parts of the channel concatenation in place (no concatenation is written): one GEMM whose `B` rows come from
 /// the parts' buffers ([`crate::kernels::gemm_cat`]). `d.c_in` is the parts' total; 2 to
-/// [`MAX_CAT_PARTS`] parts.
+/// [`MAX_CAT_PARTS`] parts, each with at least one channel. `y` must not be the buffer of a part, the weight or
+/// the bias (it is written in the dispatch that reads them).
 pub fn conv2d_cat(
     ctx: &GpuContext,
     d: &Conv2dDesc,

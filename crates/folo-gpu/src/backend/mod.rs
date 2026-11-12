@@ -209,6 +209,16 @@ pub fn dense_buffer(t: &folo_core::Tensor) -> Option<wgpu::Buffer> {
     })
 }
 
+/// The wgpu buffer behind any GPU tensor (whatever its layout), for tests that trace which operations touch it.
+#[cfg(test)]
+pub(crate) fn storage_buffer(t: &folo_core::Tensor) -> wgpu::Buffer {
+    t.with_view(|v| match v.storage {
+        Storage::Device(ds) => ds.downcast_ref::<GpuStorage>().map(|s| s.buf.raw().clone()),
+        Storage::Cpu(_) => None,
+    })
+    .expect("a GPU tensor")
+}
+
 /// Whether a folo-core error is this backend reporting a lost device ([`GpuError::DeviceLost`]): the GPU was reset
 /// or removed, so nothing on it can continue and a run should stop and resume from its last checkpoint.
 pub fn is_device_lost(e: &Error) -> bool {

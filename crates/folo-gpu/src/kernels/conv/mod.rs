@@ -114,10 +114,14 @@ impl Conv2dDesc {
                 "conv2d: images {n_stride} elements apart overlap ({image} each)"
             )));
         }
-        let last = (self.n.max(1) - 1)
-            .checked_mul(n_stride)
-            .and_then(|v| v.checked_add(offset)?.checked_add(image))
-            .ok_or_else(|| shape_err("conv2d: input extent overflows"))?;
+        // An empty batch (or empty images) reads nothing.
+        let last = match self.n.checked_sub(1) {
+            Some(last_image) if image > 0 => last_image
+                .checked_mul(n_stride)
+                .and_then(|v| v.checked_add(offset)?.checked_add(image))
+                .ok_or_else(|| shape_err("conv2d: input extent overflows"))?,
+            _ => 0,
+        };
         check_buf(x, last, self.dtype, "conv2d input")?;
         check_buf(
             weight,
