@@ -23,6 +23,9 @@ impl RealStore {
     /// `POST /api/runs`: checks `config` and queues a new run, which continues the training state in the
     /// `checkpoint` file when there is one (it becomes the run's `weights/last.folo`).
     pub(super) fn start_run(&self, mut config: TrainConfig, checkpoint: Option<&Path>) -> Result<Run> {
+        // Shared with registration; a deletion of dataset files waits until the run is in the registry (see
+        // `RealStore::files`).
+        let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
         crate::store::check_run_name(&config.name)?;
         let e = self.entry(&config.dataset_id)?;
         let idx = self.fresh_index(&e)?;
@@ -36,7 +39,7 @@ impl RealStore {
         let (weights, target) = self.run_settings(&mut config)?;
         let ds = self.dataset_ref(&e);
         if config.name.trim().is_empty() {
-            config.name = format!("{}-{}", ds.name, config.arch.as_str().trim_start_matches("folo-"));
+            config.name = crate::store::default_run_name(&ds.name, config.arch);
         }
         let val_offset = if idx.splits.val == 0 { 0 } else { idx.splits.train };
         match target {

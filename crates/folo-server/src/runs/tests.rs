@@ -59,15 +59,10 @@ fn a_step_cursor_never_skips_a_step() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A create or resume that passed `check_open` before the shutdown and reaches `enqueue` after it: the run is
-/// marked stopped instead of queued, and no worker starts.
-#[test]
-fn enqueue_after_shutdown_refuses_and_stops_the_run() {
-    let dir = TestDir::new("runs-late");
-    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
-    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
+/// The record of run `id` queued with `config` that never started.
+fn queued_file(id: &str, config: TrainConfig) -> RunFile {
     let run = Run {
-        id: "run_late".into(),
+        id: id.into(),
         name: config.name.clone(),
         status: RunStatus::Queued,
         epochs: config.epochs,
@@ -97,7 +92,7 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         format: DatasetFormat::Yolo,
         classes: vec![],
     };
-    let file = RunFile {
+    RunFile {
         run,
         dataset,
         weights: None,
@@ -105,7 +100,17 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         epochs_done: 0,
         last_metrics: None,
         resumed_at: None,
-    };
+    }
+}
+
+/// A create or resume that passed `check_open` before the shutdown and reaches `enqueue` after it: the run is
+/// marked stopped instead of queued, and no worker starts.
+#[test]
+fn enqueue_after_shutdown_refuses_and_stops_the_run() {
+    let dir = TestDir::new("runs-late");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
+    let file = queued_file("run_late", config);
     std::fs::create_dir_all(dir.join("run_late")).unwrap();
     let entry = Arc::new(RunEntry::new("run_late".into(), dir.join("run_late"), file));
     runs.list.write().unwrap().push(entry.clone());
@@ -392,4 +397,45 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
     runs.restart(&e, config, None).unwrap();
     near(paused(), 36_060.0 + 50.0 + 500.0);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A cloud run another process follows (`queued`, never started, so not claimed here): deleting it is `409
+/// run_active` and its folder stays; only a local run that never started may be deleted while it waits.
+#[test]
+fn a_cloud_run_followed_elsewhere_is_not_deleted() {
+    let dir = TestDir::new("runs-delete-cloud");
+    let config: TrainConfig = serde_json::from_str(
+        r#"{"dataset_id":"ds_1","name":"c","compute":{"connection_id":"cc_1","offer_id":"o"}}"#,
+    )
+    .unwrap();
+    let run_dir = dir.join("run_c");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("run.json"), serde_json::to_vec(&queued_file("run_c", config)).unwrap())
+        .unwrap();
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let e = runs.delete("run_c").unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::CONFLICT, "run_active"));
+    assert!(e.body.message.contains("another FOLO process"), "{}", e.body.message);
+    assert!(run_dir.join("run.json").is_file() && runs.get("run_c").is_ok());
+    runs.shutdown(None);
+}
+
+/// A run named past today's 64-character limit by an older version still resumes, its config sent back as it is.
+#[test]
+fn a_run_with_a_legacy_long_name_resumes() {
+    let dir = TestDir::new("runs-long-name");
+    let name = "n".repeat(80);
+    let config: TrainConfig =
+        serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1", "name": name })).unwrap();
+    let mut file = queued_file("run_long", config.clone());
+    file.dataset.path = dir.to_string_lossy().into_owned();
+    let run_dir = dir.join("run_long");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("run.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let fields = serde_json::to_value(&config).unwrap().as_object().unwrap().clone();
+    let (e, wanted) = runs.resume_config("run_long", &fields).unwrap();
+    assert_eq!(wanted.name, name);
+    assert_eq!(runs.restart(&e, wanted, None).unwrap().name, name);
+    runs.shutdown(None);
 }

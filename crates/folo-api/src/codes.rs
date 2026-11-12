@@ -104,6 +104,12 @@ pub const CODES: &[Code] = &[
     // Conflicts.
     c("run_active", 409, 1, "the run is still queued, running or stopping"),
     c("run_not_active", 409, 1, "stopping a run that already finished"),
+    c(
+        "dataset_in_use",
+        409,
+        1,
+        "deleting a dataset's files while another dataset, or runs of an unregistered one, read files there",
+    ),
     c("run_not_resumable", 409, 1, "resuming a run that completed; start a new run from its weights instead"),
     c(
         "run_not_queued",

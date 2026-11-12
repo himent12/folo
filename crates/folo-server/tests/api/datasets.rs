@@ -239,3 +239,24 @@ async fn mock_mode_deletes_a_generated_set_with_files_but_never_a_folder() {
     let (status, _, _) = send(&app, del(&made.id)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
+
+/// Mock mode keeps an unregistered folder's id for it, as real mode's tombstones do: the folder registered again
+/// gets it back, another folder never gets it.
+#[tokio::test]
+async fn mock_mode_gives_a_folder_its_id_back_and_never_to_another() {
+    let dir = TestDir::new("mock-ids");
+    for d in ["a", "b"] {
+        std::fs::create_dir_all(dir.join(d).join("images")).unwrap();
+        std::fs::create_dir_all(dir.join(d).join("labels")).unwrap();
+    }
+    let (server, _) = mock();
+    let app = server.router();
+    let register = |d: &str| post_json("/api/datasets", json!({ "path": dir.join(d).to_str().unwrap() }));
+    let del = |id: &str| Request::delete(format!("/api/datasets/{id}")).body(Body::empty()).unwrap();
+    let a: Dataset = ok(&app, register("a")).await;
+    assert_eq!(send(&app, del(&a.id)).await.0, StatusCode::NO_CONTENT);
+    let b: Dataset = ok(&app, register("b")).await;
+    assert_ne!(b.id, a.id);
+    let again: Dataset = ok(&app, register("a")).await;
+    assert_eq!(again.id, a.id);
+}

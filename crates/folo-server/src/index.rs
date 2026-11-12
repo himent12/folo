@@ -283,6 +283,19 @@ fn watch_dirs(base: &Path, ds: &folo_data::LoadedDataset) -> Vec<PathBuf> {
     dirs
 }
 
+/// The folders the dataset at `path` reads its images and labels from (those an [`Index`] of it watches: its own
+/// folder, its root and split sources), found without reading the images; only its own folder when it cannot be
+/// read.
+pub fn reads(path: &str, format: DatasetFormat) -> Vec<PathBuf> {
+    let p = absolute(Path::new(path));
+    let base = if p.is_file() { p.parent().unwrap_or(&p).to_path_buf() } else { p.clone() };
+    let opts = folo_data::OpenOptions { format: data_format(format), verify_images: false };
+    match folo_data::open_with(&p, &opts) {
+        Ok(ds) => watch_dirs(&base, &ds),
+        Err(_) => vec![base],
+    }
+}
+
 impl Index {
     /// Reads the dataset at `path` (a folder, `data.yaml` or COCO `.json`) with folo-data. Image headers are read
     /// in parallel; corrupt and missing images and images with broken labels are left out.

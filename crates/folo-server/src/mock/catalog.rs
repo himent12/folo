@@ -314,6 +314,7 @@ impl MockStore {
 
         MockStore {
             datasets: RwLock::new(datasets),
+            retired: RwLock::default(),
             models: RwLock::new(models),
             runs: RwLock::new(runs),
             queue: std::sync::Mutex::default(),
