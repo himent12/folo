@@ -261,8 +261,8 @@ fn check_train_count(n: usize, x: &Tensor) -> Result<()> {
     Ok(())
 }
 
-/// Train-mode BatchNorm followed by activation `ACT` on the CPU: per-channel statistics in `f64` (two
-/// passes), then the output `act(z)`, `z = (x − mean) · inv · γ + β`, with a hand-written backward:
+/// Train-mode BatchNorm followed by activation `ACT` on the CPU: per-channel statistics in `f64` (one read of
+/// x, [`plane_stats`]), then the output `act(z)`, `z = (x − mean) · inv · γ + β`, with a hand-written backward:
 /// `dx = γ · inv / n · (n · g' − Σg' − x̂ · Σ(g' · x̂))`, `dγ = Σ(g' · x̂)`, `dβ = Σg'`, where
 /// `g' = g · act'(z)` (`z` recomputed from `x`), `x̂ = (x − mean) · inv` and `inv = 1 / sqrt(var + eps)`.
 /// The activation and its gradient run inside the BatchNorm passes, bit for bit the BatchNorm followed by the
@@ -277,34 +277,26 @@ fn train_cpu<const ACT: u8>(
     let (nb, c, h, w) = x.dims4()?;
     let hw = h * w;
     let n = (nb * hw) as f64;
-    // Per-channel sums of per-plane partial sums, planes added in image order (deterministic for any thread
-    // count). Planes are the parallel unit, so a layer with few channels still uses every thread.
-    let per_channel = move |plane: &[(f64, f64)]| -> Vec<(f64, f64)> {
-        (0..c)
-            .map(|ch| (0..nb).map(|b| plane[b * c + ch]).fold((0.0, 0.0), |a, v| (a.0 + v.0, a.1 + v.1)))
-            .collect()
-    };
+    // One read of x: each plane's sum and moments (`plane_stats`), combined per channel in image order: the
+    // sums added (the mean is `Σ / n`), the moments merged with Chan's formula (the variance is `M2 / n`).
+    // Deterministic for any thread count. Planes are the parallel unit, so a layer with few channels still uses
+    // every thread.
     let (mean, inv, var) = x.with_f32_slice(|xs| {
-        let sums: Vec<(f64, f64)> = if hw == 0 {
-            vec![(0.0, 0.0); nb * c]
+        let planes: Vec<(f64, Moments)> = if hw == 0 {
+            vec![(0.0, Moments::default()); nb * c]
         } else {
-            xs.par_chunks(hw).map(|p| (sum_f64(p, |v| v as f64), 0.0)).collect()
+            xs.par_chunks(hw).map(|p| with_avx2(|| plane_stats(p))).collect()
         };
-        let mean: Vec<f64> = per_channel(&sums).iter().map(|s| s.0 / n).collect();
-        let sq: Vec<(f64, f64)> = if hw == 0 {
-            sums
-        } else {
-            xs.par_chunks(hw)
-                .enumerate()
-                .map(|(p, xp)| {
-                    let m = mean[p % c];
-                    (sum_f64(xp, |v| (v as f64 - m) * (v as f64 - m)), 0.0)
-                })
-                .collect()
-        };
-        let var: Vec<f64> = per_channel(&sq).iter().map(|s| s.0 / n).collect();
+        let stats: Vec<(f64, Moments)> = (0..c)
+            .map(|ch| {
+                (0..nb)
+                    .map(|b| planes[b * c + ch])
+                    .fold((0.0, Moments::default()), |a, p| (a.0 + p.0, Moments::merge(a.1, p.1)))
+            })
+            .collect();
+        let var: Vec<f64> = stats.iter().map(|s| s.1.m2 / n).collect();
         let inv: Vec<f32> = var.iter().map(|v| (1.0 / (v + eps).sqrt()) as f32).collect();
-        let mean: Vec<f32> = mean.iter().map(|&m| m as f32).collect();
+        let mean: Vec<f32> = stats.iter().map(|s| (s.0 / n) as f32).collect();
         (mean, inv, var.iter().map(|&v| v as f32).collect::<Vec<f32>>())
     })?;
     let g = gamma.to_vec::<f32>()?;
@@ -317,9 +309,11 @@ fn train_cpu<const ACT: u8>(
             y.par_chunks_mut(hw).zip(xs.par_chunks(hw)).enumerate().for_each(|(p, (o, xp))| {
                 let ch = p % c;
                 let (m, s, b) = (mean[ch], scale[ch], bv[ch]);
-                for (o, &v) in o.iter_mut().zip(xp) {
-                    *o = act_fwd::<ACT>((v - m) * s + b);
-                }
+                with_avx2(|| {
+                    for (o, &v) in o.iter_mut().zip(xp) {
+                        *o = act_fwd::<ACT>((v - m) * s + b);
+                    }
+                });
             });
         }
         y
@@ -333,13 +327,20 @@ fn train_cpu<const ACT: u8>(
         ACT_RELU => "batch_norm2d_relu",
         _ => "batch_norm2d",
     };
+    // Per-channel sums of per-plane partial sums, planes added in image order.
+    let per_channel = move |plane: &[(f64, f64)]| -> Vec<(f64, f64)> {
+        (0..c)
+            .map(|ch| (0..nb).map(|b| plane[b * c + ch]).fold((0.0, 0.0), |a, v| (a.0 + v.0, a.1 + v.1)))
+            .collect()
+    };
     let y = Tensor::custom_op(name, &[x, gamma, beta], y, move |gy| {
         let gy = gy.contiguous()?;
         let (dx, dg, db) = gy.with_f32_slice(|gs| {
             xd.with_f32_slice(|xs| {
                 // Every element is written below. With an activation, the first pass stores each plane's
                 // `g' = g · act'(z)` here (one vectorised f32 loop) and sums it while it is in cache; the
-                // second pass turns it into dx in place.
+                // second pass turns it into dx in place. (Recomputing `g'` in the second pass instead of storing
+                // it measured slower: the pass is compute-bound, not memory-bound.)
                 let mut dx = folo_core::cpu::take_buffer(xs.len());
                 let planes: Vec<(f64, f64)> = if hw == 0 {
                     vec![(0.0, 0.0); nb * c]
@@ -351,15 +352,17 @@ fn train_cpu<const ACT: u8>(
                         .map(|(p, ((o, gp), xp))| {
                             let ch = p % c;
                             let (m, i, s, b) = (mean[ch], inv[ch], scale[ch], bv[ch]);
-                            let gp = if ACT == ACT_NONE {
-                                gp
-                            } else {
-                                for ((o, &gv), &v) in o.iter_mut().zip(gp).zip(xp) {
-                                    *o = act_bwd::<ACT>((v - m) * s + b, gv);
-                                }
-                                &*o
-                            };
-                            sum2_f64(gp, xp, |g, v| (g as f64, g as f64 * ((v - m) * i) as f64))
+                            with_avx2(|| {
+                                let gp = if ACT == ACT_NONE {
+                                    gp
+                                } else {
+                                    for ((o, &gv), &v) in o.iter_mut().zip(gp).zip(xp) {
+                                        *o = act_bwd::<ACT>((v - m) * s + b, gv);
+                                    }
+                                    &*o
+                                };
+                                sum2_f64(gp, xp, |g, v| (g as f64, g as f64 * ((v - m) * i) as f64))
+                            })
                         })
                         .collect()
                 };
@@ -371,15 +374,17 @@ fn train_cpu<const ACT: u8>(
                         let k = g[ch] * i / n as f32;
                         let (sg, sgx) = (sums[ch].0 as f32, sums[ch].1 as f32);
                         let r = p * hw..(p + 1) * hw;
-                        if ACT == ACT_NONE {
-                            for ((o, &gv), &v) in o.iter_mut().zip(&gs[r.clone()]).zip(&xs[r]) {
-                                *o = k * (n as f32 * gv - sg - (v - m) * i * sgx);
+                        with_avx2(|| {
+                            if ACT == ACT_NONE {
+                                for ((o, &gv), &v) in o.iter_mut().zip(&gs[r.clone()]).zip(&xs[r]) {
+                                    *o = k * (n as f32 * gv - sg - (v - m) * i * sgx);
+                                }
+                            } else {
+                                for (o, &v) in o.iter_mut().zip(&xs[r]) {
+                                    *o = k * (n as f32 * *o - sg - (v - m) * i * sgx);
+                                }
                             }
-                        } else {
-                            for (o, &v) in o.iter_mut().zip(&xs[r]) {
-                                *o = k * (n as f32 * *o - sg - (v - m) * i * sgx);
-                            }
-                        }
+                        });
                     });
                 }
                 let dg: Vec<f32> = sums.iter().map(|s| s.1 as f32).collect();
@@ -396,18 +401,101 @@ fn train_cpu<const ACT: u8>(
     Ok((y, mean_t, var_t))
 }
 
-/// `sum(f(v))` in `f64` with 8 independent accumulators, so the loop vectorises.
-#[inline]
-fn sum_f64(xs: &[f32], f: impl Fn(f32) -> f64) -> f64 {
-    let mut acc = [0f64; 8];
-    let (chunks, rest) = xs.as_chunks::<8>();
-    for ch in chunks {
-        for i in 0..8 {
-            acc[i] += f(ch[i]);
+/// `f()` compiled for AVX2 when the CPU has it (detected at run time; the build targets baseline x86-64, whose
+/// SSE2 loops are half as wide), else as is. Bit for bit the same result either way: the same IEEE operations
+/// lane by lane, and Rust never fuses a multiply and an add on its own (FMA is not enabled here).
+#[inline(always)]
+fn with_avx2<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2")]
+        unsafe fn run<R>(f: impl FnOnce() -> R) -> R {
+            f()
+        }
+        #[cfg(test)]
+        let fallback = FORCE_FALLBACK.load(std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        let fallback = false;
+        if !fallback && std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU supports AVX2 (detected above).
+            return unsafe { run(f) };
         }
     }
-    let tail: f64 = rest.iter().map(|&v| f(v)).sum();
-    acc.iter().sum::<f64>() + tail
+    f()
+}
+
+/// Test-only: [`with_avx2`] runs its closure as is, so a test can compare the two builds of the loops.
+#[cfg(test)]
+static FORCE_FALLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Count, mean and sum of squared deviations (`M2`) of some values, in `f64`, as [`plane_stats`] makes them
+/// and [`Moments::merge`] combines them. The mean here only serves the merge; the reported mean is a sum.
+#[derive(Clone, Copy, Debug, Default)]
+struct Moments {
+    n: f64,
+    mean: f64,
+    m2: f64,
+}
+
+impl Moments {
+    /// Chan's parallel combination of two sets' moments: `M2 = M2a + M2b + d² · na · nb / n` with `d` the
+    /// difference of the means, a sum of non-negative terms (no cancellation as in `Σv² − n·mean²`).
+    fn merge(a: Moments, b: Moments) -> Moments {
+        if b.n == 0.0 {
+            return a;
+        }
+        if a.n == 0.0 {
+            return b;
+        }
+        let n = a.n + b.n;
+        let d = b.mean - a.mean;
+        Moments { n, mean: a.mean + d * (b.n / n), m2: a.m2 + b.m2 + d * d * (a.n * b.n / n) }
+    }
+}
+
+/// Floats per block of [`plane_stats`]: a multiple of 8 (the lanes of the plane sum), and 1 KiB, so a block
+/// is still in L1 for its second loop.
+const STAT_BLOCK: usize = 256;
+
+/// One plane's sum and moments in one read, a block of [`STAT_BLOCK`] floats at a time, in `f64`.
+///
+/// - The **sum** is exactly the two-pass code's: 8 independent accumulators across the whole plane (each
+///   block feeds them in turn, so every lane sees the same values in the same order), then the tail. Summed per
+///   channel in image order and divided by `n`, it is bit for bit the old mean.
+/// - **M2**: each block's own mean, then `Σ(v − mean_b)²` over the block while it is in L1, and the blocks
+///   merged with Chan's formula. Every term is a square, so M2 cannot go negative, and a NaN or an infinity
+///   in the plane makes it NaN (as the two-pass `Σ(v − mean)²` does).
+#[inline]
+fn plane_stats(p: &[f32]) -> (f64, Moments) {
+    let mut acc = [0f64; 8];
+    let mut m = Moments::default();
+    let mut tail: &[f32] = &[];
+    for blk in p.chunks(STAT_BLOCK) {
+        let (chunks, rest) = blk.as_chunks::<8>();
+        let mut bs = [0f64; 8];
+        for ch in chunks {
+            for i in 0..8 {
+                acc[i] += ch[i] as f64;
+                bs[i] += ch[i] as f64;
+            }
+        }
+        let bn = blk.len() as f64;
+        let mean = (bs.iter().sum::<f64>() + rest.iter().map(|&v| v as f64).sum::<f64>()) / bn;
+        let mut sq = [0f64; 8];
+        for ch in chunks {
+            for i in 0..8 {
+                let d = ch[i] as f64 - mean;
+                sq[i] += d * d;
+            }
+        }
+        let m2 =
+            sq.iter().sum::<f64>() + rest.iter().map(|&v| (v as f64 - mean) * (v as f64 - mean)).sum::<f64>();
+        m = Moments::merge(m, Moments { n: bn, mean, m2 });
+        // Only the last block can have a rest (the blocks are whole lanes): the plane's tail.
+        tail = rest;
+    }
+    let tail: f64 = tail.iter().map(|&v| v as f64).sum();
+    (acc.iter().sum::<f64>() + tail, m)
 }
 
 /// The two sums `(sum f(a, b).0, sum f(a, b).1)` in `f64` with 4 independent accumulator pairs.
@@ -548,7 +636,7 @@ mod tests {
     fn fused_activation_is_bitwise_bn_then_act() {
         let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
         for act in [Activation::Silu, Activation::Relu] {
-            for dims in [[3, 4, 5, 6], [2, 3, 1, 13], [4, 2, 8, 8]] {
+            for dims in [[3, 4, 5, 6], [2, 3, 1, 13], [4, 2, 8, 8], [2, 3, 33, 17]] {
                 let mut rng = Rng::seed(11);
                 let x = Tensor::randn(dims, 0.3, 1.5, &mut rng).requires_grad_();
                 let w = Tensor::randn(dims, 0.0, 1.0, &mut rng);
@@ -570,6 +658,127 @@ mod tests {
                 };
                 assert_eq!(run(true), run(false), "{act:?} {dims:?}");
             }
+        }
+    }
+
+    /// The one-read statistics: the mean is bit for bit the old two-pass code's (8-lane `f64` sums per plane,
+    /// planes added in image order, `/ n`), and the variance matches a two-pass `f64` reference to f32
+    /// precision, also where `Σv² − n·mean²` cancels: a mean 10⁴ or 10⁷ times the standard deviation, a
+    /// constant channel, single-element planes, one outlier per plane, an extreme first value, a sum that
+    /// needs every term. An infinity or a NaN gives a NaN variance, as before.
+    #[test]
+    fn one_pass_statistics_match_two_pass_reference() {
+        type Case = ([usize; 4], fn(usize) -> f32);
+        let cases: [Case; 10] = [
+            ([3, 2, 7, 9], |i| 1.0e4 + ((i * 7919) % 101) as f32 * 1e-2),
+            // f32 has 1 ulp at 10⁷: integers around 10⁷, spread under 1.
+            ([2, 2, 16, 20], |i| 1.0e7 + ((i * 7919) % 3) as f32),
+            ([2, 3, 4, 4], |i| if i % 48 < 16 { 3.25 } else { ((i * 31) % 17) as f32 - 8.0 }),
+            ([5, 2, 1, 1], |i| (i as f32 * 0.37).sin() * 100.0),
+            ([2, 2, 30, 30], |i| if i % 900 == 0 { 1.0e6 } else { (i % 13) as f32 * 0.1 }),
+            ([1, 1, 200, 200], |i| if i == 0 { 1.0e6 } else { 0.1 }),
+            ([1, 1, 2, 2], |i| [1.0e16, -1.0e16, 1.0, 1.0][i]),
+            ([1, 1, 1, 2], |i| [0.0, f32::INFINITY][i]),
+            ([1, 1, 1, 2], |i| [0.0, f32::NAN][i]),
+            ([2, 1, 3, 100], |i| if i == 150 { f32::INFINITY } else { i as f32 }),
+        ];
+        for (dims, f) in cases {
+            let [nb, c, h, w] = dims;
+            let hw = h * w;
+            let data: Vec<f32> = (0..nb * c * hw).map(f).collect();
+            let x = Tensor::from_vec(data.clone(), dims).unwrap();
+            let (g, b) = (Tensor::ones([c]), Tensor::zeros([c]));
+            let (_, mean, var) = train_cpu::<ACT_NONE>(&x, &g, &b, BN_EPS).unwrap();
+            let (mean, var) = (mean.to_vec::<f32>().unwrap(), var.to_vec::<f32>().unwrap());
+            for ch in 0..c {
+                let planes = || (0..nb).map(|i| &data[(i * c + ch) * hw..(i * c + ch + 1) * hw]);
+                // The old mean, as origin/main computed it.
+                let old_sum = |p: &[f32]| {
+                    let mut acc = [0f64; 8];
+                    let (chunks, rest) = p.as_chunks::<8>();
+                    for chunk in chunks {
+                        for i in 0..8 {
+                            acc[i] += chunk[i] as f64;
+                        }
+                    }
+                    let tail: f64 = rest.iter().map(|&v| v as f64).sum();
+                    acc.iter().sum::<f64>() + tail
+                };
+                let n = (nb * hw) as f64;
+                let old_mean = (planes().map(old_sum).fold(0.0, |a, s| a + s) / n) as f32;
+                assert_eq!(
+                    mean[ch].to_bits(),
+                    old_mean.to_bits(),
+                    "{dims:?} ch {ch}: mean {} vs {old_mean}",
+                    mean[ch]
+                );
+                // Two-pass f64 reference of the variance.
+                let vals: Vec<f64> = planes().flatten().map(|&v| v as f64).collect();
+                let m = vals.iter().sum::<f64>() / n;
+                let v = vals.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / n;
+                let close =
+                    |got: f32, want: f64| (got as f64 - want).abs() <= 2.0 * f32::EPSILON as f64 * want.abs();
+                assert!(
+                    close(var[ch], v) || (v == 0.0 && var[ch] == 0.0) || (v.is_nan() && var[ch].is_nan()),
+                    "{dims:?} ch {ch}: var {} vs {v}",
+                    var[ch]
+                );
+                if dims == [2, 2, 16, 20] {
+                    // The case bites: the naive formula is far off here.
+                    let naive = vals.iter().map(|x| x * x).sum::<f64>() / n - m * m;
+                    assert!(!close(naive as f32, v), "naive {naive} vs {v}");
+                }
+            }
+        }
+        // The values the review pinned: an extreme first value, and a mean that needs the small terms.
+        let stats = |dims: [usize; 4], data: Vec<f32>| {
+            let x = Tensor::from_vec(data, dims).unwrap();
+            let (_, m, v) =
+                train_cpu::<ACT_NONE>(&x, &Tensor::ones([1]), &Tensor::zeros([1]), BN_EPS).unwrap();
+            (m.to_vec::<f32>().unwrap()[0], v.to_vec::<f32>().unwrap()[0])
+        };
+        // At this size the first draft (sums shifted by the plane's first value) was 132 f32 ulp off.
+        let mut data = vec![0.1f32; 1000 * 1000];
+        data[0] = 1.0e6;
+        let (n, k, r) = (1.0e6f64, 1.0e6f64, 0.1f32 as f64);
+        let want = (k - r) * (k - r) * (n - 1.0) / (n * n);
+        let (_, v) = stats([1, 1, 1000, 1000], data);
+        assert!((v as f64 - want).abs() <= f32::EPSILON as f64 * want, "var {v} vs {want}");
+        assert_eq!(stats([1, 1, 2, 2], vec![1.0e16, -1.0e16, 1.0, 1.0]).0, 0.5);
+        let (m, v) = stats([1, 1, 1, 2], vec![0.0, f32::INFINITY]);
+        assert!(m == f32::INFINITY && v.is_nan(), "mean {m} var {v}");
+        let (m, v) = stats([1, 1, 1, 2], vec![0.0, f32::NAN]);
+        assert!(m.is_nan() && v.is_nan(), "mean {m} var {v}");
+    }
+
+    /// The AVX2 build of the per-plane loops and the plain one give the same bits: output, statistics and
+    /// gradients of x, gamma and beta, with SiLU fused in. Planes of one value, of whole lanes, and of
+    /// several statistics blocks with a ragged tail.
+    #[test]
+    fn avx2_and_fallback_are_bitwise_equal() {
+        use std::sync::atomic::Ordering::SeqCst;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                FORCE_FALLBACK.store(false, SeqCst);
+            }
+        }
+        let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        for dims in [[3, 2, 1, 1], [2, 3, 5, 7], [2, 2, 16, 16], [1, 2, 17, 19], [2, 3, 33, 17]] {
+            let mut rng = Rng::seed(13);
+            let x = Tensor::randn(dims, 0.3, 1.5, &mut rng).requires_grad_();
+            let gamma = Tensor::rand_uniform([dims[1]], 0.5, 1.5, &mut rng).requires_grad_();
+            let beta = Tensor::rand_uniform([dims[1]], -0.5, 0.5, &mut rng).requires_grad_();
+            let w = Tensor::randn(dims, 0.0, 1.0, &mut rng);
+            let run = |fallback: bool| {
+                let _reset = Reset;
+                FORCE_FALLBACK.store(fallback, SeqCst);
+                let (y, m, v) = train_cpu::<ACT_SILU>(&x, &gamma, &beta, BN_EPS).unwrap();
+                let gr = y.mul(&w).unwrap().sum_all().unwrap().backward().unwrap();
+                let grads = [&x, &gamma, &beta].map(|t| bits(gr.get(t).unwrap()));
+                (bits(&y), bits(&m), bits(&v), grads)
+            };
+            assert_eq!(run(false), run(true), "{dims:?}");
         }
     }
 }
