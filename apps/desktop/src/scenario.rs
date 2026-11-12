@@ -370,6 +370,12 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         // The form needs the dataset list; load it synchronously from the frozen mock.
         app.store.datasets = app.store.api.datasets().into();
         app.open_new_run(Some("ds_3b91"), window, cx);
+        if s.has("deleted")
+            && let Some(list) = app.store.datasets.ready_mut()
+        {
+            // Its dataset deleted while the form is open: it asks for another.
+            list.retain(|d| d.id != "ds_3b91");
+        }
         if s.has("cloud") {
             // RunPod's RTX 4090 (Secure Cloud) chosen with its offers in; Stop after follows the
             // estimate.

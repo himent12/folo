@@ -39,25 +39,16 @@ impl FoloApp {
         });
         let compute_rows = cloud_on.then(|| self.nr_compute_rows(cloud.as_ref(), window, cx));
         let datasets = self.store.datasets.ready().cloned().unwrap_or_default();
+        let ds = self.nr_dataset().cloned();
+        let ds_gone = self.nr_dataset_gone();
         let f = self.new_run.as_ref().unwrap();
-        let (ds_i, arch, epochs, batch, imgsz, device, opt, lr0, mosaic, mixup, fliplr) = (
-            f.dataset,
-            f.arch,
-            f.epochs,
-            f.batch,
-            f.imgsz,
-            f.device,
-            f.optimizer,
-            f.lr0,
-            f.mosaic,
-            f.mixup,
-            f.fliplr,
-        );
+        let ds_i = datasets.iter().position(|d| d.id == f.dataset);
+        let (arch, epochs, batch, imgsz, device, opt, lr0, mosaic, mixup, fliplr) =
+            (f.arch, f.epochs, f.batch, f.imgsz, f.device, f.optimizer, f.lr0, f.mosaic, f.mixup, f.fliplr);
         let name_input = f.name.clone();
         let error = f.error.clone();
         let submitting = f.submitting;
         let opt_unknown = f.optimizer_unknown;
-        let ds = datasets.get(ds_i).cloned();
         // Advanced: what differs from a fresh form's defaults, so a collapsed group still says
         // what it will do. Open while one of its fields needs fixing.
         let adv_summary = {
@@ -121,9 +112,14 @@ impl FoloApp {
             .when(name_ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
             .child(name_input)
             .into_any_element();
+        let ds_ids: Vec<String> = datasets.iter().map(|d| d.id.clone()).collect();
         let ds_select = self.select(
             "nr-dataset",
-            ds.as_ref().map_or("No datasets".into(), |d| SharedString::from(d.name.clone())),
+            match &ds {
+                Some(d) => SharedString::from(d.name.clone()),
+                None if ds_gone => "Pick a dataset".into(),
+                None => "No datasets".into(),
+            },
             datasets
                 .iter()
                 .map(|d| {
@@ -133,12 +129,15 @@ impl FoloApp {
                     )
                 })
                 .collect(),
-            ds_i,
+            // Deleted, none of them is the choice.
+            ds_i.unwrap_or(datasets.len()),
             window,
             cx,
-            Rc::new(|this, i, _, cx| {
-                if let Some(f) = this.new_run.as_mut() {
-                    f.dataset = i;
+            Rc::new(move |this, i, _, cx| {
+                if let Some(f) = this.new_run.as_mut()
+                    && let Some(id) = ds_ids.get(i)
+                {
+                    f.dataset = id.clone();
                     this.resuggest_run_name(cx);
                 }
             }),
@@ -427,6 +426,12 @@ impl FoloApp {
                                     ),
                             )
                             .child(ds_select)
+                            .when(ds_gone, |d| {
+                                d.child(
+                                    text(ty::SM, t.danger_text)
+                                        .child("That dataset was deleted. Pick another."),
+                                )
+                            })
                     }),
                 ),
             )

@@ -240,6 +240,9 @@ pub struct Palette {
     pub input: Entity<TextInput>,
     pub query: String,
     pub selected: usize,
+    /// The rows as last drawn (group, title): when the list changes under the highlight (a run or
+    /// dataset deleted), the highlight stays on its item instead of on its old place.
+    pub shown: Vec<(&'static str, String)>,
     pub scroll: ScrollHandle,
     _sub: Subscription,
 }
@@ -399,9 +402,6 @@ pub struct FoloApp {
     /// A New run form closed without starting (Esc, the scrim, Cancel): the next plain New run
     /// reopens it as it was, so a stray click doesn't lose a configured run.
     pub new_run_draft: Option<NewRunForm>,
-    /// The draft's dataset by id (the list can gain datasets at the front while the draft waits,
-    /// so its index alone could point at another one).
-    pub new_run_draft_ds: Option<String>,
     /// The architecture, image size and epochs of the last run started from the dialog: a fresh
     /// New run opens on them (this session), not on the defaults again.
     pub new_run_last: Option<(usize, usize, f32)>,
@@ -590,7 +590,6 @@ impl FoloApp {
             palette: None,
             new_run: None,
             new_run_draft: None,
-            new_run_draft_ds: None,
             new_run_last: None,
             open_new_run_pending: false,
             synth: None,

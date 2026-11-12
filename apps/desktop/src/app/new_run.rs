@@ -23,13 +23,21 @@ impl FoloApp {
     /// submission is pending (that run is being created; keeping it would allow a duplicate).
     pub(super) fn keep_draft(&mut self, mut f: NewRunForm) -> Option<NewRunForm> {
         if f.submitting {
-            self.new_run_draft_ds = None;
             return None;
         }
-        self.new_run_draft_ds =
-            self.store.datasets.ready().and_then(|d| d.get(f.dataset)).map(|d| d.id.clone());
         f.error = None;
         Some(f)
+    }
+
+    /// The New run form's dataset; none before the list is in, or once it was deleted.
+    pub fn nr_dataset(&self) -> Option<&Dataset> {
+        self.store.dataset_summary(&self.new_run.as_ref()?.dataset)
+    }
+
+    /// The New run form's dataset was deleted while it was open: the list is in without it, and
+    /// the form asks for another before it starts.
+    pub fn nr_dataset_gone(&self) -> bool {
+        self.new_run.is_some() && self.store.datasets.ready().is_some() && self.nr_dataset().is_none()
     }
 
     pub fn close_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -104,32 +112,24 @@ impl FoloApp {
         }
         // A plain New run picks up a draft left by Esc or Cancel; one for a specific dataset (or
         // prefilled from a run) starts fresh.
-        // Its dataset is found again by id; gone (or the list unloaded), the draft is dropped.
-        let draft_ds = self
-            .new_run_draft_ds
-            .take()
-            .and_then(|id| self.store.datasets.ready().and_then(|d| d.iter().position(|d| d.id == id)));
-        if let Some(mut draft) = self.new_run_draft.take()
+        // Its dataset deleted meanwhile (or the list unloaded), the draft is dropped.
+        if let Some(draft) = self.new_run_draft.take()
             && self.new_run.is_none()
             && dataset.is_none()
-            && let Some(idx) = draft_ds
+            && self.store.dataset_summary(&draft.dataset).is_some()
         {
-            draft.dataset = idx;
             let fh = draft.name.read(cx).focus_handle(cx);
             self.new_run = Some(draft);
             window.focus(&fh);
             cx.notify();
             return;
         }
-        let idx =
-            dataset.and_then(|id| self.store.datasets.ready()?.iter().position(|d| d.id == id)).unwrap_or(0);
+        let list = self.store.datasets.ready().map(Vec::as_slice).unwrap_or_default();
+        let Some(ds) = dataset.and_then(|id| list.iter().find(|d| d.id == id)).or(list.first()) else {
+            return;
+        };
+        let (ds_id, ds_name) = (ds.id.clone(), ds.name.clone());
         let n = self.store.runs.ready().map_or(0, |r| r.len()) + 1;
-        let ds_name = self
-            .store
-            .datasets
-            .ready()
-            .and_then(|d| d.get(idx))
-            .map_or("shapes".to_string(), |d| d.name.clone());
         // The last started run's choices, else the defaults (s, 640 px, 100 epochs).
         let (arch, imgsz, epochs) = self.new_run_last.unwrap_or((1, 2, 100.0));
         let suggested = suggested_name(&ds_name, ARCHS[arch], n);
@@ -242,7 +242,7 @@ impl FoloApp {
         self.new_run = Some(NewRunForm {
             name,
             name_suggested: Some(suggested),
-            dataset: idx,
+            dataset: ds_id,
             arch,
             epochs,
             batch: batch_index(16),
@@ -288,7 +288,7 @@ impl FoloApp {
     pub fn resuggest_run_name(&mut self, cx: &mut Context<Self>) {
         let n = self.store.runs.ready().map_or(0, |r| r.len()) + 1;
         let Some(f) = self.new_run.as_mut() else { return };
-        let Some(ds) = self.store.datasets.ready().and_then(|d| d.get(f.dataset)) else { return };
+        let Some(ds) = self.store.dataset_summary(&f.dataset) else { return };
         let name = suggested_name(&ds.name, ARCHS[f.arch], n);
         if f.name_suggested.as_ref().is_none_or(|s| *s == name) {
             return;
@@ -309,7 +309,7 @@ impl FoloApp {
         );
         // On a cloud instance mixed precision is checked when it boots, not against this machine.
         let amp_ok = compute.is_some() || self.amp_blocked(DEVICES[form.device]).is_none();
-        let ds = self.store.datasets.ready().and_then(|d| d.get(form.dataset))?;
+        let ds = self.store.dataset_summary(&form.dataset)?;
         Some(carry_over(
             form.base.as_ref(),
             TrainConfig {

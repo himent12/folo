@@ -2,6 +2,7 @@
 
 use folo_ui::Context;
 
+use super::create::{SourceChoice, SourcePick};
 use super::load::route_bench;
 use super::merge::upsert_loop;
 use super::run::model_teaches;
@@ -20,6 +21,13 @@ impl FoloApp {
         if let Some(list) = self.bench.loops.get_mut(bench).and_then(|x| x.ready_mut()) {
             upsert_loop(list, l);
         }
+    }
+
+    /// The New loop form's teacher was deleted (its run was) while the form was open: the model
+    /// list is in without it.
+    pub fn loop_teacher_deleted(&self) -> bool {
+        let Some(id) = self.bench.new_loop.as_ref().and_then(|f| f.teacher.as_ref()) else { return false };
+        self.store.models.ready().is_some_and(|l| !l.iter().any(|m| m.id == *id))
     }
 
     /// The models that can teach a loop on `b` (its classes, in its order), newest first.
@@ -44,12 +52,13 @@ impl FoloApp {
             })
         });
         let teacher = best.or_else(|| teachers.first().map(|m| m.id.clone()));
+        let pool = self.bench_sources().first().map(SourcePick::id);
         self.bench.form_seq += 1;
         self.bench.new_loop = Some(NewLoopForm {
             bench,
             seq: self.bench.form_seq,
             teacher,
-            pool: 0,
+            pool,
             generations: 0,
             epochs: 1,
             submitting: false,
@@ -61,20 +70,27 @@ impl FoloApp {
     /// Starts the loop the New loop form describes.
     pub fn submit_new_loop(&mut self, bench: &str, cx: &mut Context<Self>) {
         let sources = self.bench_sources();
+        let choice = self.source_choice(&sources, self.bench.new_loop.as_ref().and_then(|f| f.pool.as_ref()));
+        let teacher_gone = self.loop_teacher_deleted();
         let Some(f) = self.bench.new_loop.as_mut() else { return };
         if f.submitting {
             return;
         }
-        let Some(teacher) = f.teacher.clone() else {
-            f.error = Some(ApiError::new("invalid_body", "Pick a teacher: a model of this server"));
+        let refuse = |f: &mut NewLoopForm, why: &str, cx: &mut Context<Self>| {
+            f.error = Some(ApiError::new("invalid_body", why));
             cx.notify();
-            return;
         };
-        let Some(pool) = sources.get(f.pool) else {
-            f.error =
-                Some(ApiError::new("invalid_body", "Add a dataset first: the teacher labels its images"));
-            cx.notify();
-            return;
+        let teacher = match f.teacher.clone() {
+            Some(_) if teacher_gone => return refuse(f, "Its teacher was deleted: pick another", cx),
+            Some(t) => t,
+            None => return refuse(f, "Pick a teacher: a model of this server", cx),
+        };
+        let pool = match choice {
+            SourceChoice::At(i) => &sources[i],
+            SourceChoice::Missing => {
+                return refuse(f, "Add a dataset first: the teacher labels its images", cx);
+            }
+            SourceChoice::Deleted => return refuse(f, "Its pool was deleted: pick another", cx),
         };
         let req = StartBenchLoop {
             name: None,

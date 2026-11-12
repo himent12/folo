@@ -324,6 +324,8 @@ impl FoloApp {
         // Fetched again now, not on the next refresh: Playground picks its next model from it.
         self.store.models = Load::Idle;
         self.ensure_core(cx);
+        // An open select may list it, or its models: its highlight is an index into that list.
+        self.menu_open = None;
         if matches!(&self.route, Route::Run(r) if r == id) {
             self.route_pending = Some(Route::Runs);
         }
@@ -336,6 +338,9 @@ impl FoloApp {
         }
         self.store.dataset.remove(id);
         self.store.images.remove(id);
+        // An open select may list it (New run's datasets): its highlight is an index into the list.
+        // The forms hold their dataset by id, so the choice in them stays what it was.
+        self.menu_open = None;
         if matches!(&self.route, Route::Dataset(d) if d == id) {
             self.route_pending = Some(Route::Datasets);
         }
