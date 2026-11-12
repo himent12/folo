@@ -35,7 +35,6 @@ import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import { DialogStatus } from '$lib/ui/feedback';
-import EmptyState from '$lib/ui/EmptyState';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Tabs from '$lib/ui/Tabs';
 import ErrorState from '$lib/ui/ErrorState';
@@ -458,7 +457,6 @@ export default function Run() {
       {live.error && !run.get() ? (
         <Page title="Run">
           <ErrorState error={live.error} title="Could not load this run" retry={() => live.retry()} />
-          <EmptyState title="Check the run id" description="It may have been deleted; every run is listed on the Runs page." actions={() => <Button href={href('/runs')}>All runs</Button>} />
         </Page>
       ) : !run.get() ? (
         <RunSkeleton />
