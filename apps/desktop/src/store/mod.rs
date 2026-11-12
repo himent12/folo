@@ -156,6 +156,21 @@ impl Store {
         }
     }
 
+    /// How a dataset is named by its id where no run is at hand (a model's row, a crumb): the
+    /// registered name, else as a run trained on it names it ([`Self::run_dataset_name`]: the
+    /// recorded name marked "(removed)"); the raw id only when no run knows it either.
+    pub fn dataset_name(&self, id: &str) -> String {
+        if let Some(d) = self.dataset_summary(id) {
+            return d.name.clone();
+        }
+        let run = self.runs.ready().and_then(|runs| {
+            // A run that recorded the name, if any did.
+            let on = || runs.iter().filter(|r| r.config.dataset_id == id);
+            on().find(|r| r.dataset.is_some()).or_else(|| on().next())
+        });
+        run.map_or(id.to_string(), |r| self.run_dataset_name(r))
+    }
+
     /// The server stopped answering (the last `/system` refresh couldn't connect).
     pub fn unreachable(&self) -> bool {
         matches!(&self.health, Load::Failed(e) if e.code == "server_unreachable")
@@ -216,5 +231,25 @@ mod tests {
         assert_eq!(store.run_dataset_name(&run), format!("{name} (removed)"));
         run.dataset = None;
         assert_eq!(store.run_dataset_name(&run), "removed dataset");
+    }
+
+    #[test]
+    fn a_removed_dataset_is_named_by_what_its_runs_recorded() {
+        let api = Arc::new(MockBackend::new(4200, true));
+        let mut store = Store::new(api.clone());
+        let datasets = api.datasets().unwrap();
+        let mut runs = api.runs().unwrap();
+        let id = runs[0].config.dataset_id.clone();
+        let name = datasets.iter().find(|d| d.id == id).unwrap().name.clone();
+        for r in runs.iter_mut().filter(|r| r.config.dataset_id == id) {
+            r.dataset = Some(RunDataset { name: name.clone(), classes: Vec::new() });
+        }
+        store.runs = Load::Ready(runs);
+        store.datasets = Load::Ready(datasets.clone());
+        assert_eq!(store.dataset_name(&id), name);
+        store.datasets = Load::Ready(datasets.into_iter().filter(|d| d.id != id).collect());
+        assert_eq!(store.dataset_name(&id), format!("{name} (removed)"), "never the raw id {id}");
+        // Nothing knows it: only then the id.
+        assert_eq!(store.dataset_name("ds_none"), "ds_none");
     }
 }

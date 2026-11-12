@@ -20,12 +20,7 @@ impl FoloApp {
     pub fn play_dataset_image(&mut self, dataset: &str, image_id: &str, cx: &mut Context<Self>) {
         let input = PredictInput::Dataset { dataset_id: dataset.to_string(), image_id: image_id.to_string() };
         let (d, i) = (dataset.to_string(), image_id.to_string());
-        let name: SharedString = format!(
-            "{} / {}",
-            self.store.dataset_summary(dataset).map_or(dataset, |d| d.name.as_str()),
-            image_id
-        )
-        .into();
+        let name: SharedString = format!("{} / {}", self.store.dataset_name(dataset), image_id).into();
         self.play_load_seq += 1;
         let seq = self.play_load_seq;
         self.fetch(

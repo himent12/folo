@@ -260,8 +260,8 @@ impl FoloApp {
                     }
                 }
                 // Datasets in name order (their mAPs aren't comparable, so no rank between rows).
-                let name_of =
-                    |ds: &str| self.store.dataset_summary(ds).map_or(ds.to_string(), |d| d.name.clone());
+                // A removed dataset by the name its runs recorded, marked (never its id).
+                let name_of = |ds: &str| self.store.dataset_name(ds);
                 best.sort_by_key(|(ds, _)| name_of(ds));
                 let models: Vec<(String, crate::api::Model)> =
                     best.into_iter().map(|(ds, m)| (name_of(&ds), m)).collect();
