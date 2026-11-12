@@ -63,6 +63,17 @@ fn reference(x: &[f32], wt: &[f32], g: &ConvGeom) -> Vec<(f64, f64)> {
 /// the f64 reference. Tolerance: the f32 summation bound `K · 2^-23 · Σ|terms|` for a K-term dot product in
 /// any order, carried through the activation (slope at most 1.1), plus SiLU's own relative error.
 fn check(cases: &[Case]) {
+    check_with(cases, None, |x, wt, out, g, epi| conv2d_forward(x, wt, out, g, false, epi), true);
+}
+
+/// [`check`] of `forward` (overwriting): the summation term of the tolerance is `terms · 2^-23 · Σ|terms|`
+/// (`terms` is K when `None`); the accumulating case runs only if `accumulate`.
+fn check_with(
+    cases: &[Case],
+    terms: Option<f64>,
+    forward: impl Fn(&[f32], &[f32], &mut [f32], &ConvGeom, Option<ChannelEpilogue<'_>>),
+    accumulate: bool,
+) {
     let bias_of = |o: usize| (0..o).map(|c| c as f32 * 0.25 - 1.0).collect::<Vec<f32>>();
     let silu = |v: f64| v / (1.0 + (-v).exp());
     for (i, &(n, c, hw, o, k, prm)) in cases.iter().enumerate() {
@@ -72,13 +83,13 @@ fn check(cases: &[Case]) {
         let want = reference(&x, &wt, &g);
         let bias = bias_of(o);
         let ohw = g.ohw();
-        let kterms = g.kdim() as f64;
+        let kterms = terms.unwrap_or(g.kdim() as f64);
         for (e, act) in [None, Some(UnaryOp::Silu), Some(UnaryOp::Relu)].into_iter().enumerate() {
             for with_bias in [false, true] {
                 let epi = BiasAct { bias: with_bias.then_some(&bias[..]), act };
                 let epi = (with_bias || act.is_some()).then_some(epi);
                 let mut got = vec![f32::NAN; n * o * ohw];
-                conv2d_forward(&x, &wt, &mut got, &g, false, epi);
+                forward(&x, &wt, &mut got, &g, epi);
                 for (q, (&y, &(s, a))) in got.iter().zip(&want).enumerate() {
                     let b = if with_bias { bias[(q / ohw) % o] as f64 } else { 0.0 };
                     let t = s + b;
@@ -95,13 +106,16 @@ fn check(cases: &[Case]) {
                 }
             }
         }
+        if !accumulate {
+            continue;
+        }
         // Accumulating into a prior output (no epilogue).
         let prior = data(n * o * ohw, 900 + i as u32);
         let mut got = prior.clone();
         conv2d_forward(&x, &wt, &mut got, &g, true, None);
         for (q, ((&y, &(s, a)), &p0)) in got.iter().zip(&want).zip(&prior).enumerate() {
             let want = s + p0 as f64;
-            let tol = (kterms + 1.0) * 1.2e-7 * (a + (p0 as f64).abs()) + 1e-7;
+            let tol = (g.kdim() as f64 + 1.0) * 1.2e-7 * (a + (p0 as f64).abs()) + 1e-7;
             assert!((y as f64 - want).abs() <= tol, "case {i} accumulate at {q}: {y} vs {want}");
         }
     }
@@ -259,6 +273,77 @@ fn image_scratch_budget_does_not_change_results() {
         for budget in [IMAGE_SCRATCH_BUDGET, 1, 3 * one] {
             let got = with_budget(budget, || conv_bits(&g));
             assert!(got == all, "case {i}, budget {budget}: results differ");
+        }
+    }
+}
+
+/// The Winograd cases: odd and even output sizes (a last tile row or column half outside the image), 1x1 and 1x2
+/// images (one tile, mostly padding), no padding and wide padding (tiles that see only zeros), tiny and odd
+/// channel counts, more input channels than one `KC` block, rows of more than one 64-tile segment, blocks that
+/// end mid tile row, a batch, and folo-n shapes.
+fn winograd_cases() -> Vec<Case> {
+    let p = |pad: usize| params([1, 1], [pad, pad], [1, 1], 1);
+    vec![
+        (1, 1, [1, 1], 1, [3, 3], p(1)),
+        (1, 2, [1, 2], 3, [3, 3], p(1)),
+        (1, 3, [2, 2], 1, [3, 3], p(1)),
+        (2, 5, [7, 9], 7, [3, 3], p(1)),
+        (1, 4, [3, 3], 5, [3, 3], p(0)),
+        (1, 4, [6, 5], 3, [3, 3], p(0)),
+        (1, 3, [4, 7], 2, [3, 3], p(3)),
+        (1, 7, [33, 35], 9, [3, 3], p(1)),
+        (1, 2, [5, 300], 3, [3, 3], p(1)),
+        (1, 300, [6, 7], 13, [3, 3], p(1)),
+        (3, 32, [20, 20], 64, [3, 3], p(1)),
+        (1, 64, [40, 40], 64, [3, 3], p(1)),
+        (1, 16, [80, 80], 32, [3, 3], p(1)),
+    ]
+}
+
+/// [`winograd_forward`] with freshly transformed weights.
+fn winograd(x: &[f32], wt: &[f32], out: &mut [f32], g: &ConvGeom, epi: Option<ChannelEpilogue<'_>>) {
+    assert!(super::winograd::winograd_shape(g));
+    let u = transform_weights(wt, g.o, g.c);
+    let part = [ConvPart::contiguous(x, g.c, g.h * g.w)];
+    winograd_forward(ConvInput { parts: &part }, &u, out, g, epi);
+}
+
+/// Winograd F(2x2, 3x3) against the f64 reference on [`winograd_cases`], within `2 · 2^-23 · Σ|terms|` (no
+/// factor K: its sums are over the input channels only, and on these cases and on random folo-n shapes its
+/// largest error was 0.4-0.6 · 2^-23 · Σ|terms|, against 0.2-1.05 for the direct conv), plus the activation's.
+#[test]
+fn winograd_matches_reference() {
+    check_with(&winograd_cases(), Some(2.0), winograd, false);
+}
+
+/// Winograd results do not depend on the thread count (the blocks a pool size makes) or on the batch: one
+/// thread, 3 and 28 threads, and each image of a batch alone, all bit for bit the same.
+#[test]
+fn winograd_is_deterministic() {
+    for (i, (n, c, hw, o, k, prm)) in winograd_cases().into_iter().enumerate() {
+        let g = geom(n, c, hw, o, k, prm);
+        let x = data(n * c * hw[0] * hw[1], 70 + i as u32);
+        let wt = data(o * g.kdim(), 700 + i as u32);
+        let bias: Vec<f32> = (0..o).map(|c| c as f32 * 0.1 - 0.5).collect();
+        let epi = Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Silu) });
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            let mut y = vec![f32::NAN; n * o * g.ohw()];
+            pool.install(|| winograd(&x, &wt, &mut y, &g, epi));
+            y.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        };
+        let one = run(1);
+        assert!(run(3) == one && run(28) == one, "case {i} ({g:?}): results depend on the thread count");
+        let per = c * hw[0] * hw[1];
+        let g1 = ConvGeom { n: 1, ..g };
+        for img in 0..n {
+            let mut y = vec![f32::NAN; o * g.ohw()];
+            winograd(&x[img * per..(img + 1) * per], &wt, &mut y, &g1, epi);
+            let bits: Vec<u32> = y.iter().map(|v| v.to_bits()).collect();
+            assert!(
+                bits[..] == one[img * o * g.ohw()..(img + 1) * o * g.ohw()],
+                "case {i}: image {img} alone differs"
+            );
         }
     }
 }

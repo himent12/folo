@@ -46,6 +46,16 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   under `no_grad`): bias and SiLU on the micro-kernel's accumulators before they are stored, other activations as
   a pass over each finished block; SiLU there is an 8-lane AVX2 `x · sigmoid(x)` with relative error below
   `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
+  These fused entry points (`conv2d_act`, `conv2d_act_cat`: nothing is recorded) run a dense 3x3 stride-1 conv with
+  at least 16 input and 8 output channels, and a 32x32 or larger output or `c · o >= 4096`, as Winograd
+  F(2x2, 3x3) (`cpu/conv/winograd.rs`): 16 multiplies per 2x2 output tile and channel pair instead of 36. The
+  weights are transformed once per weight tensor and kept with its storage until the storage is next written
+  (`View::derived`: every write lock clears it). The tiles are cut into blocks; a block transforms its input
+  patches, runs 16 small GEMMs through the row-pointer micro-kernel and transforms the results into its output
+  tiles while they are in L2 (an image with too few blocks for the pool runs in two passes, the input transforms
+  split by input channels, then the GEMMs and output transforms by output channels). Not bit for bit the direct
+  conv (within `2 · 2^-23 · Σ|terms|`, tested; COCO val AP of folo-n-coco unchanged to 6 decimals), and the same
+  bits for any thread count or batch. The autograd conv (`conv2d_with`) keeps the direct conv.
   `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
   (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
   separable (row pass, then column pass; same first-maximum argmax as a direct scan); when nothing is recorded

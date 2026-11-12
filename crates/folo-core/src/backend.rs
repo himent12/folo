@@ -26,6 +26,7 @@
 
 use std::sync::{Arc, LazyLock, RwLock};
 
+use crate::storage::Derived;
 use crate::{CpuStorage, DType, Device, Error, Layout, Result, Shape, Storage};
 
 /// A storage plus the layout to read it with.
@@ -35,12 +36,34 @@ pub struct View<'a> {
     pub storage: &'a Storage,
     /// How to read it.
     pub layout: &'a Layout,
+    /// The storage's derived values, for a view of a tensor.
+    derived: Option<&'a Derived>,
 }
 
 impl<'a> View<'a> {
     /// Pair a storage with a layout.
     pub fn new(storage: &'a Storage, layout: &'a Layout) -> Self {
-        View { storage, layout }
+        View { storage, layout, derived: None }
+    }
+
+    /// A view of a tensor's storage, with the storage's derived values (see [`View::derived`]).
+    pub(crate) fn of_cell(storage: &'a Storage, layout: &'a Layout, derived: &'a Derived) -> Self {
+        View { storage, layout, derived: Some(derived) }
+    }
+
+    /// A value derived from this view's data, kept with the storage until its data is next written, under its
+    /// type and `key` (which must name what the value is and everything it depends on besides the data, such
+    /// as the layout); made by `make` on a miss. A view without a storage of its own ([`View::new`]) makes it
+    /// every time.
+    pub(crate) fn derived<T: std::any::Any + Send + Sync>(
+        &self,
+        key: u64,
+        make: impl FnOnce() -> T,
+    ) -> Arc<T> {
+        match self.derived {
+            Some(d) => d.get_or_make(key, make),
+            None => Arc::new(make()),
+        }
     }
 
     /// The logical shape.

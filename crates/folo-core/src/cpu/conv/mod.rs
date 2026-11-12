@@ -8,6 +8,7 @@ mod im2col;
 mod kernel_tests;
 mod shifted;
 mod small_c;
+mod winograd;
 
 use rayon::prelude::*;
 
@@ -17,6 +18,7 @@ use depthwise::depthwise_forward;
 use im2col::{Im2Col, PlaneRows};
 use shifted::{ShiftedRows, shifted_scratch};
 use small_c::{small_c_forward, uses_small_c};
+pub(crate) use winograd::{transform_weights, uses_winograd, winograd_forward};
 
 pub(crate) use backward_input::{backward_input_overwrites, conv2d_backward_input};
 pub(crate) use backward_weight::conv2d_backward_weight;

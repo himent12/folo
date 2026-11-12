@@ -23,9 +23,9 @@ mod tests;
 use crate::backend::UnaryOp;
 
 pub(crate) use arows::gemm_arows;
-pub(crate) use blocked::gemm_ex;
+pub(crate) use blocked::{gemm_ex, with_scratch};
 pub use kernel::{uses_avx2, uses_simd128};
-pub(crate) use rows::{ColumnMap, RowPtrs, gemm_rows};
+pub(crate) use rows::{ColumnMap, RowPtrs, gemm_rows, gemm_rows_serial};
 
 /// Rows of a micro-tile.
 pub const MR: usize = 6;

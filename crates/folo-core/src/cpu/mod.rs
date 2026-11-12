@@ -356,7 +356,7 @@ impl Backend for CpuBackend {
     }
 
     fn conv2d(&self, x: View<'_>, w: View<'_>, bias: Option<View<'_>>, p: &Conv2dParams) -> Result<Storage> {
-        self.conv2d_act(x, w, bias, p, None)
+        conv_forward(&[x], w, bias, p, None, false)
     }
 
     fn conv2d_act(
@@ -367,7 +367,7 @@ impl Backend for CpuBackend {
         p: &Conv2dParams,
         act: Option<UnaryOp>,
     ) -> Result<Storage> {
-        self.conv2d_act_cat(&[x], w, bias, p, act)
+        conv_forward(&[x], w, bias, p, act, true)
     }
 
     fn conv2d_act_cat(
@@ -378,46 +378,8 @@ impl Backend for CpuBackend {
         p: &Conv2dParams,
         act: Option<UnaryOp>,
     ) -> Result<Storage> {
-        // Parts whose images are each contiguous (a channel slice, for example) are read in place.
-        let owned = xs
-            .iter()
-            .map(|x| match conv_part(x)? {
-                Some(_) => Ok(None),
-                None => contiguous_f32(x, "conv2d").map(|d| Some(d.into_owned())),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let (n, _, h, wi) = nchw(xs[0].shape());
-        let mut parts = Vec::with_capacity(xs.len());
-        for (x, o) in xs.iter().zip(&owned) {
-            let c = x.shape().dims()[1];
-            parts.push(match o {
-                Some(d) => conv::ConvPart::contiguous(d, c, h * wi),
-                None => conv_part(x)?.expect("checked above"),
-            });
-        }
-        let c = parts.iter().map(|p| p.c).sum();
-        let wd = contiguous_f32(&w, "conv2d")?;
-        let (o, _, kh, kw) = nchw(w.shape());
-        let [oh, ow] = p.output_hw(h, wi, kh, kw).expect("conv2d: output size validated by the caller");
-        let g = conv::ConvGeom { n, c, h, w: wi, o, kh, kw, oh, ow, p: *p };
-        let mut out = alloc_uninit(n * o * oh * ow);
-        let bd = bias.map(|b| contiguous_f32(&b, "conv2d")).transpose()?;
-        if !out.is_empty() {
-            // Bias and activation are applied to each finished block of the output, while it is in cache.
-            let epi = gemm::BiasAct { bias: bd.as_deref(), act };
-            let fused = bd.is_some() || act.is_some();
-            conv::conv2d_forward_parts(
-                conv::ConvInput { parts: &parts },
-                &wd,
-                &mut out,
-                &g,
-                false,
-                fused.then_some(epi),
-            );
-        }
-        Ok(f32_storage(out))
+        conv_forward(xs, w, bias, p, act, true)
     }
-
     fn conv2d_backward_input(
         &self,
         grad: View<'_>,
@@ -609,4 +571,70 @@ impl Backend for CpuBackend {
         let (v, i) = reduce::topk(&xd, rows, d, k, largest);
         Ok((f32_storage(v), Storage::Cpu(CpuStorage::I64(i))))
     }
+}
+
+/// conv2d forward over the channel concatenation of `xs` with bias and activation, for every conv entry point.
+/// `inference` (the fused entry points, which never record a gradient) may take Winograd F(2x2, 3x3), which is
+/// not bit for bit the direct conv; the autograd forward keeps the direct conv that its backward matches.
+fn conv_forward(
+    xs: &[View<'_>],
+    w: View<'_>,
+    bias: Option<View<'_>>,
+    p: &Conv2dParams,
+    act: Option<UnaryOp>,
+    inference: bool,
+) -> Result<Storage> {
+    // Parts whose images are each contiguous (a channel slice, for example) are read in place.
+    let owned = xs
+        .iter()
+        .map(|x| match conv_part(x)? {
+            Some(_) => Ok(None),
+            None => contiguous_f32(x, "conv2d").map(|d| Some(d.into_owned())),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (n, _, h, wi) = nchw(xs[0].shape());
+    let mut parts = Vec::with_capacity(xs.len());
+    for (x, o) in xs.iter().zip(&owned) {
+        let c = x.shape().dims()[1];
+        parts.push(match o {
+            Some(d) => conv::ConvPart::contiguous(d, c, h * wi),
+            None => conv_part(x)?.expect("checked above"),
+        });
+    }
+    let c = parts.iter().map(|p| p.c).sum();
+    let wd = contiguous_f32(&w, "conv2d")?;
+    let (o, _, kh, kw) = nchw(w.shape());
+    let [oh, ow] = p.output_hw(h, wi, kh, kw).expect("conv2d: output size validated by the caller");
+    let g = conv::ConvGeom { n, c, h, w: wi, o, kh, kw, oh, ow, p: *p };
+    let mut out = alloc_uninit(n * o * oh * ow);
+    let bd = bias.map(|b| contiguous_f32(&b, "conv2d")).transpose()?;
+    if !out.is_empty() {
+        // Bias and activation are applied to each finished block of the output, while it is in cache.
+        let epi = gemm::BiasAct { bias: bd.as_deref(), act };
+        let fused = bd.is_some() || act.is_some();
+        if inference && conv::uses_winograd(&g) {
+            // Transformed once per weight tensor, and kept with it until it is written.
+            let key = derived_key("winograd f(2x2, 3x3)", w.layout);
+            let u = w.derived(key, || conv::transform_weights(&wd, o, c));
+            conv::winograd_forward(conv::ConvInput { parts: &parts }, &u, &mut out, &g, fused.then_some(epi));
+            return Ok(f32_storage(out));
+        }
+        conv::conv2d_forward_parts(
+            conv::ConvInput { parts: &parts },
+            &wd,
+            &mut out,
+            &g,
+            false,
+            fused.then_some(epi),
+        );
+    }
+    Ok(f32_storage(out))
+}
+
+/// The key of a value derived from data read through `layout` ([`View::derived`]): `what` and the layout.
+fn derived_key(what: &str, layout: &Layout) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    (what, layout.offset(), layout.shape().dims(), layout.strides()).hash(&mut h);
+    h.finish()
 }

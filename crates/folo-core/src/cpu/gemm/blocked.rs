@@ -19,7 +19,7 @@ thread_local! {
 const PACK_BUFS_KEPT: usize = 4;
 
 /// Run `f` with a scratch buffer of at least `len` floats, reused across calls on the same thread.
-pub(super) fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [f32]) -> R) -> R {
+pub(crate) fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [f32]) -> R) -> R {
     // The smallest kept buffer that is large enough, else the largest (grown below).
     let mut buf = PACK_BUFS
         .with(|b| {
