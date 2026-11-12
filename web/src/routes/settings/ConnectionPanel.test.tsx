@@ -63,6 +63,29 @@ describe('ConnectionPanel', () => {
     target.remove();
   });
 
+  it("tests an address by FOLO's health payload, and says what else answered (review studio-2 R1, R4)", async () => {
+    let answer = Response.json({ service: 'other' });
+    vi.stubGlobal('fetch', async () => answer);
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = render(() => <ConnectionPanel />, target);
+    flush();
+    const testIt = async (expected: string) => {
+      [...target.querySelectorAll('button')].find((b) => b.textContent?.includes('Test'))!.click();
+      await vi.waitFor(() => {
+        flush();
+        expect(target.querySelector('.test')?.textContent).toContain(expected);
+      });
+    };
+    await testIt('This address answered, but not as a FOLO server.');
+    answer = new Response('', { status: 401 });
+    await testIt('This server asks for sign-in (401).');
+    answer = Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+    await testIt('Reachable: folo serve 0.1.0');
+    c.unmount();
+    target.remove();
+  });
+
   it('offers demo data while no server answers, as a choice that reloads with ?mock=1 (v-shell N1)', async () => {
     vi.stubGlobal('fetch', async () => {
       throw new TypeError('Failed to fetch');

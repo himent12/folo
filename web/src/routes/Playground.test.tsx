@@ -313,6 +313,59 @@ describe('Playground: the session', () => {
     expect(session.get()?.source).toMatchObject({ img: { id: b!.id } });
   });
 
+  // review studio-2 R2: a URL leaves out the thresholds that are the defaults, so one followed while the page is open
+  // that names none means the defaults, not the values on screen; its own later write keeps them so.
+  it('takes the defaults from a followed URL that names no thresholds, on Back and Forward', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    const ds = (await api.datasets())[0]!;
+    const [, a] = (await api.datasetImages(ds.id, { split: 'val', limit: 2 })).images;
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    const plain = link(ds.id, a!.id, 1, 'model=m_hard_s');
+    const tuned = link(ds.id, a!.id, 1, 'model=m_hard_s&conf=0.8&iou=0.9&max=20');
+    location.hash = `#${plain.path}?${plain.query}`;
+    router.route = plain;
+    c = mount(Playground, { target });
+    await until(() => target.querySelector('#pg-panel tbody tr'), "A's detections");
+    const thresholds = () => {
+      const s = session.get()!;
+      return [s.conf, s.iou, s.maxDet];
+    };
+    const written = () => ['conf', 'iou', 'max'].map((p) => router.route.query.get(p));
+    const settled = async () => {
+      await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+      flushSync();
+    };
+    expect(thresholds()).toEqual([0.25, 0.7, 300]);
+
+    // A link to the tuned URL, then Back to the plain one and Forward again: the browser moves, the router follows.
+    location.hash = `#${tuned.path}?${tuned.query}`;
+    await until(() => router.route.query.get('conf') === '0.8', 'the tuned route');
+    await until(() => thresholds()[0] === 0.8, 'the tuned thresholds');
+    expect(thresholds()).toEqual([0.8, 0.9, 20]);
+    await settled();
+    expect(written()).toEqual(['0.8', '0.9', '20']);
+
+    history.back();
+    await until(() => router.route.query.get('conf') === null, 'the plain route');
+    await until(() => thresholds()[0] === 0.25, 'the default thresholds');
+    expect(thresholds()).toEqual([0.25, 0.7, 300]);
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.25');
+    // The page's own write a moment later names no threshold either (it would put 0.8 back otherwise).
+    await settled();
+    expect(written()).toEqual([null, null, null]);
+
+    history.forward();
+    await until(() => router.route.query.get('conf') === '0.8', 'the tuned route again');
+    await until(() => thresholds()[0] === 0.8, 'the tuned thresholds again');
+    expect(thresholds()).toEqual([0.8, 0.9, 20]);
+    await settled();
+    expect(written()).toEqual(['0.8', '0.9', '20']);
+  });
+
   // review R2: a linked image still being looked up is a choice like any other; one made after it wins.
   it('keeps an image chosen while a linked one loads', async () => {
     const api = new MockApi('normal', 0);

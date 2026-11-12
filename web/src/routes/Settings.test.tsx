@@ -6,7 +6,9 @@ import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { prefs } from '$lib/prefs';
 import { parse, router } from '$lib/router';
+import { installEntryMemory, restoringScroll } from '$lib/shell/entryMemory';
 import { focusRoute } from '$lib/shell/routeFocus';
+import { tabHistory } from '$lib/tabHistory.testing';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { render } from '../../framework/testing';
 import Settings from './Settings';
@@ -172,6 +174,86 @@ describe('Settings', () => {
     expect(document.activeElement).toBe(heading);
     expect(top).not.toHaveBeenCalled();
     top.mockRestore();
+  });
+
+  // review studio-2 R5: Back to a Settings entry opened on ?section=units, scrolled on since, returns to that scroll;
+  // the section's hold (it keeps a section at the top while what is above it loads) is only for a new navigation, so a
+  // column that grows late, after the restore has let go, does not take the page back to Units.
+  it('gives the position Back restores precedence over the section the URL names, also when content above comes late', async () => {
+    hub.api = new MockApi('normal', 0);
+    vi.useFakeTimers();
+    sessionStorage.clear();
+    const tab = tabHistory();
+    router.go('/runs', { replace: true });
+    let y = 0;
+    const scroll = (to: number) => {
+      y = to;
+      window.dispatchEvent(new Event('scroll'));
+    };
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => y);
+    vi.spyOn(window, 'scrollTo').mockImplementation(((_x: number, to: number) => scroll(to)) as typeof window.scrollTo);
+    vi.spyOn(document.documentElement, 'scrollHeight', 'get').mockImplementation(() => 5000);
+    // Units sits at 800; a jump to it scrolls there.
+    const jumps: string[] = [];
+    const real = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      jumps.push(this.id);
+      scroll(800);
+    };
+    // The column's size changes when the test says so (what is above Units arriving).
+    const observers = new Set<() => void>();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        #cb: () => void;
+        constructor(cb: () => void) {
+          this.#cb = cb;
+        }
+        observe() {
+          observers.add(this.#cb);
+        }
+        disconnect() {
+          observers.delete(this.#cb);
+        }
+      },
+    );
+    const grow = () => [...observers].forEach((cb) => cb());
+    const uninstall = installEntryMemory();
+    try {
+      // A new navigation to the section: it is jumped to, and held while the column grows.
+      router.go('/settings?section=units');
+      c = mount(Settings, { target });
+      await vi.advanceTimersByTimeAsync(50);
+      flushSync();
+      expect(jumps).toEqual(['units']);
+      grow();
+      expect(jumps).toEqual(['units', 'units']);
+      // The person scrolls on, down to About, and leaves for Runs.
+      window.dispatchEvent(new Event('wheel'));
+      scroll(2000);
+      router.go('/runs');
+      unmount(c);
+      c = undefined;
+
+      tab.back();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(router.route.query.get('section')).toBe('units');
+      c = mount(Settings, { target });
+      // The restore lets go once the height has been steady for its settling window.
+      await vi.advanceTimersByTimeAsync(1000);
+      flushSync();
+      expect([restoringScroll(), y]).toEqual([false, 2000]);
+      // What is above Units arrives after that: the page stays where the person was.
+      grow();
+      await vi.advanceTimersByTimeAsync(50);
+      expect([jumps, y]).toEqual([['units', 'units'], 2000]);
+    } finally {
+      uninstall();
+      HTMLElement.prototype.scrollIntoView = real;
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
   });
 
   it('says which theme is current in its own card and in its radio’s name', () => {

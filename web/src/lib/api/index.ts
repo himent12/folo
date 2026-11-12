@@ -11,6 +11,7 @@
 import { computed, signal } from 'fw';
 import { prefs } from '$lib/prefs';
 import { ApiError, HttpApi, type Api } from './client';
+import { isHealth, NOT_FOLO, refusal } from './handshake';
 import { PROBE_DELAYS, Reach } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
@@ -58,6 +59,7 @@ class Hub {
   #reason = signal<'forced' | null>(null);
   /** A connect has had no answer yet, past SLOW_CONNECT or a failed check: offline while it keeps asking. */
   #unreachable = signal(false);
+  #refused = signal<string | null>(null);
   #version = signal<string | null>(null);
   #api = signal<Api>(placeholder());
   #shared = computed(() => shareApi(this.#api.get()));
@@ -96,6 +98,13 @@ class Hub {
    */
   get offline(): boolean {
     return scenario === 'error' || this.#unreachable.get() || this.#reach.offline;
+  }
+  /**
+   * While connecting: what the address answered when it answered but not as a usable FOLO server (not its health
+   * payload, a sign-in wall), in words for the user; null when nothing answered. Offline meanwhile, and still asking.
+   */
+  get refused(): string | null {
+    return this.#refused.get();
   }
   /** Bumps each time the server answers again after an outage: Resources in error or holding data refetch. */
   get back(): number {
@@ -136,6 +145,7 @@ class Hub {
     this.#ctrl = ctrl;
     this.mode = 'connecting';
     this.#unreachable.set(false);
+    this.#refused.set(null);
     this.#reach.reset(null);
     if (forcedMock) {
       await this.#useMock('forced', attempt);
@@ -145,19 +155,24 @@ class Hub {
     await new Promise<void>((settled) => void this.#reachServer(http, attempt, ctrl.signal, settled));
   }
 
-  /** Asks the server for its health until it answers (or a newer connect takes over), then goes live. */
+  /**
+   * Asks the server for its health until it answers with FOLO's (or a newer connect takes over), then goes live. An
+   * answer that is not (another program, a 404 page, a sign-in wall) is said (`refused`) and asked again.
+   */
   async #reachServer(http: HttpApi, attempt: number, abort: AbortSignal, settled: () => void): Promise<void> {
-    const unreachable = () => {
+    const unreachable = (refused?: string | null) => {
       if (attempt !== this.#attempt) return;
+      if (refused !== undefined) this.#refused.set(refused);
       this.#unreachable.set(true);
       settled();
     };
     try {
       for (let i = 0; ; i++) {
-        const slow = setTimeout(unreachable, SLOW_CONNECT);
+        const slow = setTimeout(() => unreachable(), SLOW_CONNECT);
         try {
-          const h = await http.health(AbortSignal.any([abort, AbortSignal.timeout(CONNECT_TIMEOUT)]));
+          const h: unknown = await http.health(AbortSignal.any([abort, AbortSignal.timeout(CONNECT_TIMEOUT)]));
           if (attempt !== this.#attempt) return;
+          if (!isHealth(h)) throw new ApiError(200, 'not_folo', NOT_FOLO);
           this.api = http;
           // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached
           // nothing fails the probe.
@@ -169,13 +184,14 @@ class Hub {
           this.version = h.version;
           this.reason = null;
           this.#unreachable.set(false);
+          this.#refused.set(null);
           this.mode = 'live';
           this.epoch++;
           return;
-        } catch {
-          // Nothing answered, or not a FOLO server's health (the dev server's proxy answers 500 when nothing is
-          // behind it): ask again shortly.
-          unreachable();
+        } catch (e) {
+          // Nothing answered (the dev server's proxy answers 500 when nothing is behind it), or something that is not
+          // a FOLO server's health: ask again shortly.
+          unreachable(refusal(e));
         } finally {
           clearTimeout(slow);
         }

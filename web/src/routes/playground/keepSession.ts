@@ -96,12 +96,15 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     }
   } else if (url.image) follow(url.image);
 
-  /** A URL changed while the page is open: what it names replaces what is shown; what it leaves out stays. */
+  /**
+   * A URL changed while the page is open: what it names replaces what is shown. A threshold it leaves out is the
+   * default (playgroundPath writes only the others); a model or image it leaves out stays.
+   */
   function apply(u: FromUrl) {
     if (u.model) k.pickModel(u.model);
-    if (u.conf !== null) k.conf.set(u.conf);
-    if (u.iou !== null) k.iou.set(u.iou);
-    if (u.maxDet !== null) k.maxDet.set(u.maxDet);
+    k.conf.set(u.conf ?? DEFAULTS.conf);
+    k.iou.set(u.iou ?? DEFAULTS.iou);
+    k.maxDet.set(u.maxDet ?? DEFAULTS.maxDet);
     const ref = u.image;
     if (!ref) return;
     const s = k.source.peek();
@@ -111,8 +114,8 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     if (!shown && !coming) follow(ref);
   }
 
-  // Followed from the outside (an edited URL, Back or Forward, a link). The page's own writes (below) are told apart
-  // by the path they wrote, and name what is shown already besides.
+  // Followed from the outside (an edited URL, Back or Forward, a link). The page's own write (below) is told apart by
+  // the path it wrote, once: the same path reached later by Back or Forward is followed (it may name other values).
   let wrote: string | null = null;
   let seen = String(router.route.query);
   effect(() => {
@@ -120,7 +123,9 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     const qs = String(r.query);
     if (r.name !== 'playground' || qs === seen) return;
     seen = qs;
-    if (`${r.path}${qs ? `?${qs}` : ''}` !== wrote) untrack(() => apply(fromUrl(r.query)));
+    const own = `${r.path}${qs ? `?${qs}` : ''}` === wrote;
+    wrote = null;
+    if (!own) untrack(() => apply(fromUrl(r.query)));
   });
 
   // Kept as it changes.

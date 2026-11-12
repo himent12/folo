@@ -15,6 +15,7 @@ import { bytes } from '$lib/format';
 import { prefs, type ThemePref, type Units } from '$lib/prefs';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
+import { returnedToPosition } from '$lib/shell/entryMemory';
 import { landOn } from '$lib/shell/routeFocus';
 import { showShortcuts } from '$lib/shell/shortcuts';
 import { fadeScroll } from '$lib/ui/fadeScroll';
@@ -184,18 +185,26 @@ export default function Settings() {
   // palette's "Units" on Runs) keeps to it instead of taking the page back to its top (v-shell N6).
   const asked = computed(() => (router.route.name === 'settings' ? router.route.query.get('section') : null));
   let opened: string | null = null;
+  let jumping = 0;
   effect(() => {
     const a = asked.get();
     // Back to the bare page: the next `?section=` opens its section again, the one opened last included.
     if (!a) opened = null;
     if (!a || a === opened || !sections.get().some((s) => s.id === a)) return;
     opened = a;
+    // Back, Forward or a reload to where the person had scrolled: that position wins (shell/entryMemory), the section
+    // is jumped to and held only when it is navigated to anew. A hold of the entry before lets go at its next resize.
+    if (returnedToPosition()) {
+      cancelAnimationFrame(jumping);
+      chosen = null;
+      return;
+    }
     const heading = document.getElementById(`${a}-title`) ?? document.getElementById(a);
     if (heading) {
       if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
       landOn(heading);
     }
-    requestAnimationFrame(() => (goTo(a), hold(a)));
+    jumping = requestAnimationFrame(() => (goTo(a), hold(a)));
   });
   /**
    * Keeps a section the URL opened at the top while what is above it loads and moves it down (the Cloud panel and its
@@ -219,7 +228,11 @@ export default function Settings() {
       unhold = () => {};
     };
   }
-  onCleanup(() => unhold());
+  onCleanup(() => {
+    // A page left within the frame never jumps (nor holds the next page's section).
+    cancelAnimationFrame(jumping);
+    unhold();
+  });
 
   const units = signal<Units>(prefs.units);
 

@@ -6,6 +6,7 @@ import PlugZap from '$icons/plug-zap';
 import WifiOff from '$icons/wifi-off';
 import { computed, css, effect, signal } from 'fw';
 import { HttpApi } from '$lib/api/client';
+import { isHealth, NOT_FOLO, refusal } from '$lib/api/handshake';
 import { hub } from '$lib/api/index';
 import { prefs } from '$lib/prefs';
 import Button from '$lib/ui/Button';
@@ -69,11 +70,13 @@ export default function ConnectionPanel() {
     const mine = tested;
     const t0 = performance.now();
     try {
-      const h = await new HttpApi(normalized.peek()).health(AbortSignal.timeout(3000));
-      if (mine === tested) test.set({ ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 });
+      const h: unknown = await new HttpApi(normalized.peek()).health(AbortSignal.timeout(3000));
+      if (mine !== tested) return;
+      test.set(isHealth(h) ? { ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 } : { ok: false, message: NOT_FOLO });
     } catch (e) {
       const timeout = e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError');
-      if (mine === tested) test.set({ ok: false, message: timeout ? 'No answer within 3 s.' : e instanceof Error ? e.message : String(e) });
+      const message = timeout ? 'No answer within 3 s.' : (refusal(e) ?? (e instanceof Error ? e.message : String(e)));
+      if (mine === tested) test.set({ ok: false, message });
     } finally {
       if (mine === tested) testing.set(false);
     }
@@ -86,6 +89,7 @@ export default function ConnectionPanel() {
     await hub.connect();
     if (hub.mode === 'live') toast.success('Connected', `folo serve ${hub.version} at ${hub.serverUrl}`);
     else if (forced) toast.info('Saved', 'Demo data stays on while the address has ?mock=1.');
+    else if (hub.refused) toast.error(new Error(`${hub.serverUrl}: ${hub.refused} Studio keeps trying.`), 'Saved, but not connected');
     else toast.error(new Error(`No answer from ${hub.serverUrl} yet. Studio keeps trying.`), 'Saved, but not connected');
   }
 
@@ -115,9 +119,17 @@ export default function ConnectionPanel() {
           <div class="status-text">
             {hub.offline ? (
               <>
-                <p class="s-title">Server offline</p>
+                <p class="s-title">{hub.refused ? 'Not connected' : 'Server offline'}</p>
                 <p class="s-desc">
-                  No answer from <span class="mono">{hub.serverUrl}</span>. Retrying…
+                  {hub.refused ? (
+                    <>
+                      <span class="mono">{hub.serverUrl}</span>: {hub.refused} Retrying…
+                    </>
+                  ) : (
+                    <>
+                      No answer from <span class="mono">{hub.serverUrl}</span>. Retrying…
+                    </>
+                  )}
                 </p>
               </>
             ) : hub.mode === 'live' ? (
