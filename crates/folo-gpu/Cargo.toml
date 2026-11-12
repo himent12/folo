@@ -38,6 +38,10 @@ name = "conv"
 harness = false
 
 [[bench]]
+name = "conv_model"
+harness = false
+
+[[bench]]
 name = "elementwise"
 harness = false
 

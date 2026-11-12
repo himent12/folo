@@ -229,6 +229,19 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
 - `CONV_MODE = 1` turns the same generator into implicit-GEMM conv. The B tile is gathered straight from the NCHW
   image. Each thread keeps one output pixel for the whole K loop, so the per-element index math is a few
   divisions by constants. No im2col buffer is ever written.
+- **Forward split-K** (`kernels::conv::split`, both generators). folo's 3×3 convs at 40 and 20 px have few output
+  tiles but a long `K` (64–256 workgroups at batch 16 for 80 SMs, `K` up to 4608), and at batch 1 every layer
+  below 160 px has only a handful. When a forward implicit-GEMM conv has fewer than 320 workgroups and at least 18
+  `BK` tiles of `K`, `K` is split into up to 8 chunks, aiming at about 480 workgroups. The count is capped at one
+  chunk per 9 tiles of `K` (`splits <= k_tiles / 9`); that caps the count, not every chunk's length: the chunks
+  are one length, a multiple of `BK`, and the last one ends short (`K = 441` at `BK = 16`: 28 tiles, 3 chunks of
+  160, the last 121 long). Every chunk is a workgroup layer (`SPLIT = true`) that writes an f32 partial
+  slab of the whole output without bias or activation, and `conv_split_finish` sums the slabs (unrolled, `vec4`
+  when `OH·OW` is a multiple of 4) and applies the bias and activation, rounding to f16 for an f16 output. The
+  slabs come from the buffer pool (at most 64 MiB). `ConvPlan::splits` forces a chunk count (tests, tuning);
+  `cargo bench -p folo-gpu --bench conv_model` times folo-n / folo-s's weakest forward convs, and with
+  `FOLO_CONV_TUNE=1` every tile config at 1–8 chunks. 1×1 stride-1 convs (the pointwise GEMM) and depthwise
+  convs are not split; a strided 1×1 conv is implicit GEMM and is.
 - `CONV_MODE = 2` is the input gradient as a transposed conv: each thread owns one input pixel and, for
   `k = (c_out, kh, kw)`, reads the output-gradient pixel `((ih + PH - kh·DH) / SH, (iw + PW - kw·DW) / SW)` when
   the divisions are exact and in range (a strided conv leaves the rest zero). `A` is the weight permuted once to
@@ -290,8 +303,8 @@ Notes from the tuning runs:
 - **Padding the workgroup-tile rows** by one vec4 removes a 2-way bank conflict in the A scatter, but it was
   slightly slower overall and was dropped.
 - **DX12 (FXC)** reaches 9.7 / 15.4 / 20.9 / 25.2 TFLOPS on the same kernels.
-- **Not tried yet:** subgroup (warp) shuffles, split-K for skinny problems, and a persistent-kernel / stream-K
-  schedule. Cooperative matrices (tensor cores) are the next section; they are native-only (not in stable WebGPU).
+- **Not tried yet:** subgroup (warp) shuffles, split-K for skinny plain GEMMs (the forward convs have it, above),
+  and a persistent-kernel / stream-K schedule. Cooperative matrices (tensor cores) are the next section; they are native-only (not in stable WebGPU).
 
 ### Tensor cores (cooperative matrices)
 

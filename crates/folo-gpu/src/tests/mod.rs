@@ -113,3 +113,22 @@ pub(crate) fn f16_round(v: &[f32]) -> Vec<f32> {
 pub(crate) fn to_f16(v: &[f32]) -> Vec<half::f16> {
     v.iter().map(|&x| half::f16::from_f32(x)).collect()
 }
+
+/// The `K` chunks the forward conv that `f` encodes on `ctx` ran as: the `S` of its split-K finish pass, 1 when it
+/// did not split. Read from a trace, so no other test may encode on `ctx` meanwhile.
+#[track_caller]
+pub(crate) fn traced_splits(ctx: &GpuContext, f: impl FnOnce()) -> usize {
+    ctx.trace_begin();
+    f();
+    let splits: Vec<usize> = ctx
+        .trace_end()
+        .iter()
+        .filter(|op| op.name == "conv_split_finish")
+        .map(|op| {
+            let s = op.spec.split(' ').find_map(|p| p.strip_prefix("S="));
+            s.and_then(|s| s.parse().ok()).unwrap_or_else(|| panic!("no S in {:?}", op.spec))
+        })
+        .collect();
+    assert!(splits.len() <= 1, "one conv, several split-K finish passes: {splits:?}");
+    splits.first().copied().unwrap_or(1)
+}
