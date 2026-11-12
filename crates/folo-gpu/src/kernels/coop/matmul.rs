@@ -9,7 +9,8 @@ use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::check_buf;
 use crate::kernels::gemm::{BatchStrides, GemmBias, GemmDesc, gemm_params};
-use crate::pipeline::{Kernel, Spec};
+use crate::kernels::residual::Residual;
+use crate::pipeline::{Kernel, KernelDef, Spec};
 
 pub(super) fn base_spec(d: &GemmDesc, out: DType, cfg: CoopConfig) -> Spec {
     Spec::new()
@@ -35,7 +36,12 @@ pub(super) fn base_spec(d: &GemmDesc, out: DType, cfg: CoopConfig) -> Spec {
 /// Builds (or fetches) a tensor-core pipeline. A build failure turns tensor cores off for the context and returns
 /// `None`, so the caller can fall back to the regular kernel.
 pub(super) fn build(ctx: &GpuContext, spec: Spec) -> Option<Arc<Kernel>> {
-    match ctx.kernel(&COOP, spec) {
+    build_def(ctx, &COOP, spec)
+}
+
+/// [`build`] of another tensor-core kernel definition (the residual and concatenation variants).
+pub(super) fn build_def(ctx: &GpuContext, def: &'static KernelDef, spec: Spec) -> Option<Arc<Kernel>> {
+    match ctx.kernel(def, spec) {
         Ok(k) => Some(k),
         Err(e) => {
             ctx.disable_tensor_cores(format!("a tensor-core kernel failed to build ({e})"));
@@ -118,7 +124,7 @@ pub fn gemm(
         }
         (_, None) => return Err(shape_err("gemm: bias kind set but no bias buffer")),
     };
-    if !encode_gemm(ctx, d, out, a, b, bias_buf, c, cfg)? {
+    if !encode_gemm(ctx, d, out, a, b, bias_buf, c, cfg, None)? {
         return Err(GpuError::Unsupported("tensor cores (a tensor-core kernel failed to build)"));
     }
     Ok(())
@@ -135,6 +141,7 @@ pub(crate) fn encode_gemm(
     bias: &wgpu::Buffer,
     c: &wgpu::Buffer,
     cfg: Option<CoopConfig>,
+    res: Option<Residual<'_>>,
 ) -> Result<bool> {
     let batch = d.batch.0.saturating_mul(d.batch.1);
     let Some(cfg) = resolve(ctx, cfg, || pick_config(d.m, d.n, batch))? else { return Ok(false) };
@@ -144,7 +151,10 @@ pub(crate) fn encode_gemm(
     let vec_b = d.ldb.is_multiple_of(4)
         && aligned4(&d.b)
         && if d.trans_b { d.k.is_multiple_of(4) } else { d.n.is_multiple_of(4) };
-    let vec_c = d.ldc.is_multiple_of(4) && aligned4(&d.c) && d.n.is_multiple_of(4);
+    let vec_c = d.ldc.is_multiple_of(4)
+        && aligned4(&d.c)
+        && d.n.is_multiple_of(4)
+        && res.as_ref().is_none_or(Residual::aligned4);
     let check = !d.m.is_multiple_of(cfg.bm as usize)
         || !d.n.is_multiple_of(cfg.bn as usize)
         || !d.k.is_multiple_of(cfg.bk as usize);
@@ -156,7 +166,11 @@ pub(crate) fn encode_gemm(
         .bool("TRANS_B", d.trans_b)
         .bool("CHECK", check)
         .u32("CONV_MODE", 0);
-    let Some(k) = build(ctx, spec) else { return Ok(false) };
+    let built = match res {
+        Some(_) => build_def(ctx, &super::shader::COOP_RES, spec.bool("RESID", true)),
+        None => build(ctx, spec),
+    };
+    let Some(k) = built else { return Ok(false) };
     let groups = [
         u32::try_from(d.n.div_ceil(cfg.bn as usize))
             .map_err(|_| GpuError::Limit("gemm N too large".into()))?,
@@ -164,7 +178,10 @@ pub(crate) fn encode_gemm(
             .map_err(|_| GpuError::Limit("gemm M too large".into()))?,
         u32::try_from(batch).map_err(|_| GpuError::Limit("gemm batch too large".into()))?,
     ];
-    ctx.dispatch(&k, &[a, b, bias, c], &gemm_params(d)?, groups)?;
+    match res {
+        Some(r) => ctx.dispatch(&k, &[a, b, bias, c, r.buf], &r.params(gemm_params(d)?)?, groups)?,
+        None => ctx.dispatch(&k, &[a, b, bias, c], &gemm_params(d)?, groups)?,
+    }
     Ok(true)
 }
 
@@ -199,13 +216,7 @@ pub(crate) fn encode_gemm_cat(
         .bool("CHECK", check)
         .u32("CONV_MODE", 0)
         .u32("CAT", parts);
-    let k = match ctx.kernel(&super::shader::COOP_CAT, spec) {
-        Ok(k) => k,
-        Err(e) => {
-            ctx.disable_tensor_cores(format!("a tensor-core kernel failed to build ({e})"));
-            return Ok(false);
-        }
-    };
+    let Some(k) = build_def(ctx, &super::shader::COOP_CAT, spec) else { return Ok(false) };
     let groups = [
         u32::try_from(d.n.div_ceil(cfg.bn as usize))
             .map_err(|_| GpuError::Limit("gemm N too large".into()))?,

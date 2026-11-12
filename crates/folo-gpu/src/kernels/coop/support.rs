@@ -164,7 +164,7 @@ pub(crate) fn self_test(ctx: &GpuContext) -> Result<()> {
             ctx.upload(bytemuck::cast_slice(&bias))?
         };
         let gc = ctx.alloc(out.bytes(m * n))?;
-        let built = encode_gemm(ctx, &d, out, ga.raw(), gb.raw(), gbias.raw(), gc.raw(), None)?;
+        let built = encode_gemm(ctx, &d, out, ga.raw(), gb.raw(), gbias.raw(), gc.raw(), None, None)?;
         if !built {
             // `build` recorded the compiler's message in the status.
             return Err(GpuError::Wgpu(ctx.tensor_cores_status()));

@@ -498,6 +498,20 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Storage> {
         unsupported!(self, "conv2d_act")
     }
+    /// [`Backend::conv2d_act`] plus `residual` (the conv output's shape and dtype) added after the activation,
+    /// `act(conv2d(x, w) + bias) + residual`: a residual connection in the conv's epilogue. No gradient is ever
+    /// needed. Reached through `Tensor::conv2d_act_add`, which falls back to [`Backend::conv2d_act`] then an add.
+    fn conv2d_act_add(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        residual: View<'_>,
+    ) -> Result<Storage> {
+        unsupported!(self, "conv2d_act_add")
+    }
     /// [`Backend::conv2d_act`] over the channel concatenation of `xs` (each `[N, C_i, H, W]` with the same `N`,
     /// `H`, `W`; `w` has `ΣC_i / groups` input channels), without writing the concatenation. Reached through
     /// `Tensor::conv2d_act_cat`, which falls back to `cat` then [`Backend::conv2d_act`].

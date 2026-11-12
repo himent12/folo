@@ -19,6 +19,7 @@ use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::elementwise::UnaryOp;
+use crate::kernels::residual::{RESID_WORD, Residual};
 use crate::kernels::{UNARY_FN, coop};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
@@ -279,6 +280,8 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let bias = spec.get_u32("BIAS_KIND", 0);
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`super::gemm_cat`; plain GEMM, `B` not transposed).
     let cat = spec.get_u32("CAT", 1);
+    // `RESID`: `R` (`C`'s shape and dtype, at `@binding(5)`) is added after the activation (a residual connection).
+    let resid = spec.get_bool("RESID");
     let f16 = spec.is_f16();
     // `OUT_F32`: f16 operands but an f32 `C` (the weight gradient's f32 partial slabs / f32 result).
     let c_f16 = f16 && !spec.get_bool("OUT_F32");
@@ -312,6 +315,9 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> C: array<{}>;", wgsl_ty(c_f16, vc));
     if cat > 1 {
         s.push_str(&super::gemm_cat::cat_source(cat, "B", wgsl_ty(f16, vb), vb));
+    }
+    if resid {
+        let _ = writeln!(s, "@group(0) @binding(5) var<storage, read> R: array<{}>;", wgsl_ty(c_f16, vc));
     }
     let _ = writeln!(s, "var<workgroup> As: array<array<vec4<f32>, {bm4}>, {}>;", 2 * bk);
     let _ = writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {bn4}>, {}>;", 2 * bk);
@@ -647,6 +653,9 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
 
     // --- epilogue --------------------------------------------------------------------------------------------
     s.push_str("  let alpha = pf(7u); let act_alpha = pf(17u);\n");
+    if resid {
+        let _ = writeln!(s, "  let offR = pu({RESID_WORD}u) + b1 * pu({}u) + b2 * pu(16u);", RESID_WORD + 1);
+    }
     for i in 0..tm / 4 {
         for r in 0..4 {
             let row_i = i * 4 + r;
@@ -664,6 +673,9 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                     _ => {}
                 }
                 s.push_str("      v = unary4(ACT, v, act_alpha);\n");
+                if resid && vc {
+                    s.push_str("      if (col < N) { v += vec4<f32>(R[(offR + row * ldc + col) / 4u]); }\n");
+                }
                 if vc {
                     let cast = if c_f16 { "vec4<f16>(v)" } else { "v" };
                     let _ =
@@ -673,8 +685,13 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                         s.push_str("      var pp = ppix_at(col);\n");
                     }
                     for c in 0..4 {
-                        let cast = if c_f16 { format!("f16(v[{c}])") } else { format!("v[{c}]") };
                         let at = if phase { "ppix_off(pp)".to_string() } else { format!("col + {c}u") };
+                        let val = if resid {
+                            format!("(v[{c}] + f32(R[offR + row * ldc + {at}]))")
+                        } else {
+                            format!("v[{c}]")
+                        };
+                        let cast = if c_f16 { format!("f16({val})") } else { val };
                         let _ = writeln!(
                             s,
                             "      if (col + {c}u < N) {{ C[offC + row * ldc + {at}] = {cast}; }}"
@@ -696,6 +713,13 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
 pub(crate) static GEMM: KernelDef = KernelDef {
     name: "gemm",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_gemm),
+};
+
+/// [`GEMM`] with a residual added after the activation (`RESID`, `R` at `@binding(5)`).
+pub(crate) static GEMM_RES: KernelDef = KernelDef {
+    name: "gemm_res",
+    storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],
     source: Source::Generated(gen_gemm),
 };
 
@@ -797,7 +821,7 @@ pub fn gemm(
     bias: Option<&wgpu::Buffer>,
     c: &wgpu::Buffer,
 ) -> Result<()> {
-    gemm_impl(ctx, d, a, b, bias, c, None)
+    gemm_impl(ctx, d, a, b, bias, c, None, None)
 }
 
 /// [`gemm`] with an explicit tile configuration (benchmarks and tuning).
@@ -810,12 +834,13 @@ pub fn gemm_with_config(
     c: &wgpu::Buffer,
     cfg: TileConfig,
 ) -> Result<()> {
-    gemm_impl(ctx, d, a, b, bias, c, Some(cfg))
+    gemm_impl(ctx, d, a, b, bias, c, Some(cfg), None)
 }
 
 /// [`gemm`] (`cfg == None`: tensor cores for f16 when the context has them on, else a picked tile config) or
-/// [`gemm_with_config`].
-fn gemm_impl(
+/// [`gemm_with_config`], plus `res` added after the activation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_impl(
     ctx: &GpuContext,
     d: &GemmDesc,
     a: &wgpu::Buffer,
@@ -823,6 +848,7 @@ fn gemm_impl(
     bias: Option<&wgpu::Buffer>,
     c: &wgpu::Buffer,
     cfg: Option<TileConfig>,
+    res: Option<Residual<'_>>,
 ) -> Result<()> {
     check_dtype(ctx, d.dtype, "gemm")?;
     if let Some(cfg) = cfg {
@@ -855,10 +881,13 @@ fn gemm_impl(
         }
         (_, None) => return Err(shape_err("gemm: bias kind set but no bias buffer")),
     };
+    if let Some(r) = &res {
+        r.check(d)?;
+    }
     if cfg.is_none()
         && d.dtype == DType::F16
         && ctx.tensor_cores()
-        && coop::encode_gemm(ctx, d, DType::F16, a, b, bias_buf, c, None)?
+        && coop::encode_gemm(ctx, d, DType::F16, a, b, bias_buf, c, None, res)?
     {
         return Ok(());
     }
@@ -870,11 +899,14 @@ fn gemm_impl(
     let vec_b = d.ldb.is_multiple_of(4)
         && d.b.aligned4()
         && if d.trans_b { d.k.is_multiple_of(4) } else { d.n.is_multiple_of(4) };
-    let vec_c = d.ldc.is_multiple_of(4) && d.c.aligned4() && d.n.is_multiple_of(4);
+    let vec_c = d.ldc.is_multiple_of(4)
+        && d.c.aligned4()
+        && d.n.is_multiple_of(4)
+        && res.as_ref().is_none_or(Residual::aligned4);
     let check = !d.m.is_multiple_of(cfg.bm as usize)
         || !d.n.is_multiple_of(cfg.bn as usize)
         || !d.k.is_multiple_of(cfg.bk as usize);
-    let spec = base_spec(d, cfg)
+    let mut spec = base_spec(d, cfg)
         .bool("VEC_A", vec_a)
         .bool("VEC_B", vec_b)
         .bool("VEC_C", vec_c)
@@ -882,7 +914,10 @@ fn gemm_impl(
         .bool("TRANS_B", d.trans_b)
         .bool("CHECK", check)
         .u32("CONV_MODE", 0);
-    let k = ctx.kernel(&GEMM, spec)?;
+    if res.is_some() {
+        spec = spec.bool("RESID", true);
+    }
+    let k = ctx.kernel(if res.is_some() { &GEMM_RES } else { &GEMM }, spec)?;
     let groups = [
         d.n.div_ceil(cfg.bn as usize) as u32,
         d.m.div_ceil(cfg.bm as usize) as u32,
@@ -892,5 +927,8 @@ fn gemm_impl(
             .and_then(|b| u32::try_from(b).ok())
             .ok_or_else(|| GpuError::Limit("gemm batch too large".into()))?,
     ];
-    ctx.dispatch(&k, &[a, b, bias_buf, c], &gemm_params(d)?, groups)
+    match res {
+        Some(r) => ctx.dispatch(&k, &[a, b, bias_buf, c, r.buf], &r.params(gemm_params(d)?)?, groups),
+        None => ctx.dispatch(&k, &[a, b, bias_buf, c], &gemm_params(d)?, groups),
+    }
 }

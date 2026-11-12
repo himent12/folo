@@ -1,4 +1,4 @@
-//! Convs that read their input in place: a 1×1 conv over a channel concatenation (`conv2d_act_cat`, the parts
+//! Convs that read their operands in place: a 1×1 conv over a channel concatenation (`conv2d_act_cat`, the parts
 //! never copied into one tensor) and any non-depthwise conv on a channel slice (`narrow` along dim 1), against the
 //! CPU backend. The routing checks trace the operations a call encodes: an in-place read is one GEMM on the
 //! parts' own buffers, with no copy or gather of them first.
@@ -295,5 +295,66 @@ fn gemm_cat_tile_multiples_bias_strides_and_misuse() {
     for (bm, bn, bb) in [(0, n, batch), (m, 0, batch), (m, n, 0)] {
         let e = GemmDesc { m: bm, n: bn, batch: (bb, 1), ..d.clone() };
         gemm_cat(&ctx, &e, tiny.raw(), &parts, Some(tiny.raw()), tiny.raw(), None).unwrap();
+    }
+}
+
+/// `conv2d_act_add`: the residual added in the conv's epilogue (3×3 implicit GEMM and 1×1 GEMM; dense, channel
+/// slice and odd-offset residuals; vector and scalar stores), against the CPU and, in f32, to an ulp against the
+/// GPU's own conv then add.
+#[test]
+fn conv_adds_a_residual_in_its_epilogue() {
+    let dev = dev!();
+    let _g = no_grad();
+    let act = Some(UnaryOp::Silu);
+    for dtype in [DType::F32, DType::F16] {
+        if dtype == DType::F16 && !crate::tests::ctx().is_some_and(|c| c.caps().shader_f16) {
+            continue;
+        }
+        for (n, h, w, k) in [(1, 8, 8, 3), (2, 8, 8, 3), (2, 5, 7, 3), (1, 8, 8, 1), (2, 5, 7, 1)] {
+            let pad = k / 2;
+            let p = Conv2dParams { padding: [pad, pad], ..Conv2dParams::default() };
+            let x = rounded(randn(&[n, 6, h, w], 40), dtype);
+            let wt = rounded(randn(&[6, 6, k, k], 41), dtype);
+            let bias = rounded(randn(&[6], 42), dtype);
+            // The residual four ways: dense, a channel slice, at an odd offset (scalar epilogue), and with strided
+            // images (not addressable: the add runs after the conv).
+            let big = rounded(randn(&[n, 9, h, w], 43), dtype);
+            let flat = rounded(randn(&[n * 6 * h * w + 1], 44), dtype);
+            let wide = rounded(randn(&[n, 6, h, w * 2 + 1], 46), dtype);
+            for (ri, which) in ["dense", "slice", "odd", "strided"].iter().enumerate() {
+                let pick = |t: &Tensor, big: &Tensor, flat: &Tensor, wide: &Tensor| -> Tensor {
+                    match ri {
+                        0 => t.clone(),
+                        1 => big.narrow(1, 2, 6).unwrap(),
+                        2 => flat.narrow(0, 1, n * 6 * h * w).unwrap().reshape([n, 6, h, w]).unwrap(),
+                        _ => wide.narrow(3, 1, w).unwrap(),
+                    }
+                };
+                let r_dense = rounded(randn(&[n, 6, h, w], 45), dtype);
+                let r = pick(&r_dense, &big, &flat, &wide);
+                let cpu = x.conv2d_act_add(&wt, Some(&bias), &p, act, &r).unwrap();
+                let to = |t: &Tensor| t.to_device(dev).unwrap().to_dtype(dtype).unwrap();
+                let gr = pick(&to(&r_dense), &to(&big), &to(&flat), &to(&wide));
+                let (gx, gw, gb) = (to(&x), to(&wt), to(&bias));
+                let what = format!("{dtype:?} n{n} {h}x{w} k{k} residual {which}");
+                let gpu = gx.conv2d_act_add(&gw, Some(&gb), &p, act, &gr).unwrap();
+                let direct = folo_core::backend::backend(dev).unwrap();
+                let fused = gx.with_view(|xv| {
+                    gw.with_view(|wv| {
+                        gb.with_view(|bv| {
+                            gr.with_view(|rv| direct.conv2d_act_add(xv, wv, Some(bv), &p, act, rv))
+                        })
+                    })
+                });
+                assert_eq!(fused.is_ok(), ri < 3, "{what}: read in place");
+                let (atol, rtol) = if dtype == DType::F16 { (1e-2, 1e-2) } else { (1e-4, 1e-4) };
+                assert_close_t(&gpu.to_dtype(DType::F32).unwrap(), &cpu, atol, rtol, &what);
+                if dtype == DType::F32 {
+                    // The GPU's own conv then add, to an ulp: the driver may contract `act(v) + r` into an FMA.
+                    let composite = gr.add(&gx.conv2d_act(&gw, Some(&gb), &p, act).unwrap()).unwrap();
+                    assert_close_t(&gpu, &composite, 1e-6, 1e-6, &format!("{what} against conv + add"));
+                }
+            }
+        }
     }
 }

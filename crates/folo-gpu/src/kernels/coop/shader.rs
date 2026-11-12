@@ -61,6 +61,8 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let bias = spec.get_u32("BIAS_KIND", 0);
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`crate::kernels::gemm_cat`).
     let cat = spec.get_u32("CAT", 1);
+    // `RESID`: `MR` (`C`'s shape and type, `@binding(5)`) is added after the activation.
+    let resid = spec.get_bool("RESID");
     let ct = if spec.get_bool("OUT_F16") { "f16" } else { "f32" };
     let (a_len, b_len) = (bm * sa, bk * sb);
 
@@ -85,6 +87,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> MC: array<{}>;", vty(vc, "CT"));
     if cat > 1 {
         s.push_str(&crate::kernels::gemm_cat::cat_source(cat, "MB", &vty(vb, "f16"), vb));
+    }
+    if resid {
+        let _ = writeln!(s, "@group(0) @binding(5) var<storage, read> MR: array<{}>;", vty(vc, "CT"));
     }
     for b in 0..2 {
         let _ = writeln!(s, "var<workgroup> As{b}: array<f16, {a_len}>;");
@@ -426,6 +431,10 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
          \x20 let er = (lane & 31u) >> 1u; let ec = (lane & 1u) * 8u;\n",
     );
     let _ = writeln!(s, "  let cbase = sg * {FRAG}u;");
+    if resid {
+        let w = crate::kernels::residual::RESID_WORD;
+        let _ = writeln!(s, "  let offR = pu({w}u) + b1 * pu({}u) + b2 * pu(16u);", w + 1);
+    }
     for i in 0..fm {
         for j in 0..fnn {
             let _ = writeln!(s, "  coopStoreT(acc{i}_{j}, &Cs[cbase], 16u);");
@@ -464,13 +473,20 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             }
             s.push_str("      v0 = unary4(ACT, v0, act_alpha); v1 = unary4(ACT, v1, act_alpha);\n");
             let at = "offC + row * ldc + col";
+            let rt = "offR + row * ldc + col";
             if vc {
-                if check {
-                    let _ = writeln!(s, "      if (col < N) {{ MC[({at}) / 4u] = vec4<CT>(v0); }}");
-                    let _ = writeln!(s, "      if (col + 4u < N) {{ MC[({at}) / 4u + 1u] = vec4<CT>(v1); }}");
+                let (r0, r1) = if resid {
+                    (format!(" + vec4<f32>(MR[({rt}) / 4u])"), format!(" + vec4<f32>(MR[({rt}) / 4u + 1u])"))
                 } else {
-                    let _ = writeln!(s, "      MC[({at}) / 4u] = vec4<CT>(v0);");
-                    let _ = writeln!(s, "      MC[({at}) / 4u + 1u] = vec4<CT>(v1);");
+                    (String::new(), String::new())
+                };
+                if check {
+                    let _ = writeln!(s, "      if (col < N) {{ MC[({at}) / 4u] = vec4<CT>(v0{r0}); }}");
+                    let _ =
+                        writeln!(s, "      if (col + 4u < N) {{ MC[({at}) / 4u + 1u] = vec4<CT>(v1{r1}); }}");
+                } else {
+                    let _ = writeln!(s, "      MC[({at}) / 4u] = vec4<CT>(v0{r0});");
+                    let _ = writeln!(s, "      MC[({at}) / 4u + 1u] = vec4<CT>(v1{r1});");
                 }
             } else {
                 if phase {
@@ -483,10 +499,12 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                     } else {
                         format!("{at} + {c}u")
                     };
+                    let val =
+                        if resid { format!("{v}[{x}] + f32(MR[{rt} + {c}u])") } else { format!("{v}[{x}]") };
                     if check {
-                        let _ = writeln!(s, "      if (col + {c}u < N) {{ MC[{at}] = CT({v}[{x}]); }}");
+                        let _ = writeln!(s, "      if (col + {c}u < N) {{ MC[{at}] = CT({val}); }}");
                     } else {
-                        let _ = writeln!(s, "      MC[{at}] = CT({v}[{x}]);");
+                        let _ = writeln!(s, "      MC[{at}] = CT({val});");
                     }
                     if phase && c < 7 {
                         s.push_str("      ppix_next(&pp);\n");
@@ -503,6 +521,13 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
 pub(crate) static COOP: KernelDef = KernelDef {
     name: "coop_gemm",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_coop),
+};
+
+/// [`COOP`] with a residual added after the activation (`RESID`, `MR` at `@binding(5)`).
+pub(crate) static COOP_RES: KernelDef = KernelDef {
+    name: "coop_gemm_res",
+    storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],
     source: Source::Generated(gen_coop),
 };
 

@@ -104,6 +104,22 @@ impl ConvBnAct {
         }
     }
 
+    /// `residual + forward(x)` (`residual` has the output's shape): a residual connection. When the conv runs as
+    /// one fused kernel (as in [`Forward::forward`]), the add is part of its epilogue through
+    /// [`Tensor::conv2d_act_add`] (on backends with that kernel); in training it is `forward` then an add.
+    pub fn forward_add(&self, x: &Tensor, residual: &Tensor) -> Result<Tensor> {
+        let p = self.conv.config().params();
+        let act = self.act.unary_op();
+        match &self.bn {
+            None => Ok(x.conv2d_act_add(&self.conv.weight, self.conv.bias.as_ref(), &p, act, residual)?),
+            Some(bn) if !bn.is_training() && (!x.device().is_cpu() || !is_grad_enabled()) => {
+                let (w, b) = self.folded_eval(bn)?;
+                Ok(x.conv2d_act_add(&w, Some(&b), &p, act, residual)?)
+            }
+            Some(_) => Ok(residual.add(&self.forward(x)?)?),
+        }
+    }
+
     /// The eval-mode BatchNorm folded into the conv on the fly: `(W · k, β − mean · k (+ b · k))`, small
     /// per-channel ops that stay differentiable.
     fn folded_eval(&self, bn: &BatchNorm2d) -> Result<(Tensor, Tensor)> {

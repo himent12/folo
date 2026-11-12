@@ -8,8 +8,9 @@ use crate::context::GpuContext;
 use crate::error::Result;
 use crate::error::shape_err;
 use crate::kernels::coop;
-use crate::kernels::gemm::{self, GEMM, TileConfig, base_spec, check_dtype, gemm_params};
+use crate::kernels::gemm::{self, GEMM, GEMM_RES, TileConfig, base_spec, check_dtype, gemm_params};
 use crate::kernels::gemm_cat::{CatPart, MAX_CAT_PARTS, gemm_cat};
+use crate::kernels::residual::Residual;
 use crate::pipeline::Params;
 
 /// Where a forward conv reads its input in its buffer: from element `offset`, images `n_stride` elements apart,
@@ -61,11 +62,13 @@ pub fn conv2d_with_config(
     cfg: Option<TileConfig>,
 ) -> Result<(usize, usize)> {
     let dense = ConvInput { offset: 0, n_stride: d.c_in * d.h * d.w };
-    conv2d_input(ctx, d, (x, dense), weight, bias, y, cfg)
+    conv2d_input(ctx, d, (x, dense), weight, bias, y, cfg, None)
 }
 
-/// [`conv2d_with_config`] on an input read from `x` as `at` says (a channel slice read in place). Depthwise convs
-/// take only dense inputs.
+/// [`conv2d_with_config`] on an input read from `x` as `at` says (a channel slice read in place), plus `res`
+/// (`[N, C_out, OH, OW]`, read like an input) added after the activation: `y = act(conv2d(x) + bias) + res`, a
+/// residual connection in the epilogue. Depthwise convs take only dense inputs and no residual.
+#[allow(clippy::too_many_arguments)]
 pub fn conv2d_input(
     ctx: &GpuContext,
     d: &Conv2dDesc,
@@ -74,6 +77,7 @@ pub fn conv2d_input(
     bias: Option<&wgpu::Buffer>,
     y: &wgpu::Buffer,
     cfg: Option<TileConfig>,
+    res: Option<(&wgpu::Buffer, ConvInput)>,
 ) -> Result<(usize, usize)> {
     check_dtype(ctx, d.dtype, "conv2d")?;
     let (oh, ow) = d.check_input_buffers((x, at.offset, at.n_stride), weight, bias, y)?;
@@ -81,10 +85,11 @@ pub fn conv2d_input(
         return Ok((oh, ow));
     }
     let dense = at.offset == 0 && (d.n <= 1 || at.n_stride == d.c_in * d.h * d.w);
+    let res = res.map(|(buf, r)| Residual { buf, offset: r.offset, outer: r.n_stride });
 
     if d.is_depthwise() {
-        if !dense {
-            return Err(shape_err("conv2d: a depthwise conv reads only dense inputs"));
+        if !dense || res.is_some() {
+            return Err(shape_err("conv2d: a depthwise conv reads only dense inputs and adds no residual"));
         }
         let spec = d
             .win
@@ -115,14 +120,17 @@ pub fn conv2d_input(
     let mut g = d.gemm_view(oh, ow, bias.is_some());
     g.b.offset = at.offset;
     g.b.outer = at.n_stride;
+    if let Some(r) = &res {
+        r.check(&g)?;
+    }
 
     // Tensor cores for f16 when the context has them on (an explicit tile config means the regular kernels).
     if cfg.is_none() && d.dtype == DType::F16 && ctx.tensor_cores() {
         let bias_buf = bias.unwrap_or(ctx.dummy());
         let done = if d.is_pointwise() {
-            coop::encode_gemm(ctx, &g, DType::F16, weight, x, bias_buf, y, None)?
+            coop::encode_gemm(ctx, &g, DType::F16, weight, x, bias_buf, y, None, res)?
         } else {
-            coop::encode_conv(ctx, d, &g, DType::F16, x, weight, bias_buf, y, None)?
+            coop::encode_conv(ctx, d, &g, DType::F16, x, weight, bias_buf, y, None, res)?
         };
         if done {
             return Ok((oh, ow));
@@ -131,7 +139,7 @@ pub fn conv2d_input(
 
     if d.is_pointwise() {
         let cfg = cfg.unwrap_or_else(|| gemm::pick_config_conv(ctx, &g));
-        gemm::gemm_with_config(ctx, &g, weight, x, bias, y, cfg)?;
+        gemm::gemm_impl(ctx, &g, weight, x, bias, y, Some(cfg), res)?;
         return Ok((oh, ow));
     }
 
@@ -142,7 +150,7 @@ pub fn conv2d_input(
         || !g.n.is_multiple_of(cfg.bn as usize)
         || !g.k.is_multiple_of(cfg.bk as usize);
     let vec_a = k_dim.is_multiple_of(4);
-    let vec_c = hw_out % 4 == 0;
+    let vec_c = hw_out % 4 == 0 && res.as_ref().is_none_or(Residual::aligned4);
     let spec = base_spec(&g, cfg)
         .bool("VEC_A", vec_a)
         .bool("VEC_B", false)
@@ -163,14 +171,21 @@ pub fn conv2d_input(
         spec = spec.u32(name, v);
     }
     let spec = spec.i32("PH", d.win.padding.0 as i32).i32("PW", d.win.padding.1 as i32);
-    let kernel = ctx.kernel(&GEMM, spec)?;
+    let kernel = match res {
+        Some(_) => ctx.kernel(&GEMM_RES, spec.bool("RESID", true))?,
+        None => ctx.kernel(&GEMM, spec)?,
+    };
     let p = gemm_params(&g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
     let groups = [
         hw_out.div_ceil(cfg.bn as usize) as u32,
         cout_g.div_ceil(cfg.bm as usize) as u32,
         u32::try_from(d.n * d.groups).unwrap_or(u32::MAX),
     ];
-    ctx.dispatch(&kernel, &[weight, x, bias.unwrap_or(ctx.dummy()), y], &p, groups)?;
+    let bias = bias.unwrap_or(ctx.dummy());
+    match res {
+        Some(r) => ctx.dispatch(&kernel, &[weight, x, bias, y, r.buf], &r.params(p)?, groups)?,
+        None => ctx.dispatch(&kernel, &[weight, x, bias, y], &p, groups)?,
+    }
     Ok((oh, ow))
 }
 

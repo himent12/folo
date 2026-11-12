@@ -543,7 +543,8 @@ impl Backend for GpuBackend {
             && let Some(at) = conv_input(&x)
         {
             let bias = bd.as_ref().map(|b| b.raw());
-            conv::conv2d_input(&self.ctx, &d, (self.buf(&x)?, at), wd.raw(), bias, out.raw(), None).core()?;
+            conv::conv2d_input(&self.ctx, &d, (self.buf(&x)?, at), wd.raw(), bias, out.raw(), None, None)
+                .core()?;
             return Ok(self.wrap(dtype, len, out));
         }
         let xd = self.dense(&x)?;
@@ -551,6 +552,41 @@ impl Backend for GpuBackend {
         self.conv_by_batch(&d, (xd.raw(), per.0), (out.raw(), per.1), |d, x, y| {
             conv::conv2d(&self.ctx, d, x, wd.raw(), bd.as_ref().map(|b| b.raw()), y).map(drop)
         })?;
+        Ok(self.wrap(dtype, len, out))
+    }
+
+    fn conv2d_act_add(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        residual: View<'_>,
+    ) -> Result<Storage> {
+        // The residual is read in place in the GEMM epilogue (any view with contiguous images); depthwise convs,
+        // batches beyond one dispatch and other residual layouts are `NotSupported` (the caller adds after).
+        let unsupported = Error::NotSupported { op: "conv2d_act_add", backend: BACKEND_NAME };
+        let dtype = x.storage.dtype();
+        let mut d = self.conv_desc(x.shape(), w.shape(), p, dtype);
+        d.act = conv_act(act).ok_or(unsupported.clone())?;
+        let (oh, ow) = d.output().core()?;
+        let rat = conv_input(&residual).filter(|_| residual.shape().dims() == [d.n, d.c_out, oh, ow]);
+        let (Some(rat), false, true) = (rat, d.is_depthwise(), d.n * d.groups <= 65535) else {
+            return Err(unsupported);
+        };
+        let _p = profile::scope(|| format!("conv_add {}", conv_label(&d)));
+        let len = d.n * d.c_out * oh * ow;
+        let out = self.alloc(dtype, len)?;
+        let wd = self.dense(&w)?;
+        let bd = bias.as_ref().map(|b| self.dense(b)).transpose()?;
+        let (xd, at) = match conv_input(&x) {
+            Some(at) => (Dense::Borrowed(self.buf(&x)?), at),
+            None => (self.dense(&x)?, conv::ConvInput { offset: 0, n_stride: d.c_in * d.h * d.w }),
+        };
+        let res = Some((self.buf(&residual)?, rat));
+        let bias = bd.as_ref().map(|b| b.raw());
+        conv::conv2d_input(&self.ctx, &d, (xd.raw(), at), wd.raw(), bias, out.raw(), None, res).core()?;
         Ok(self.wrap(dtype, len, out))
     }
 

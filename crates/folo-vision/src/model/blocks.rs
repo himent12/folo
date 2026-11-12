@@ -99,8 +99,9 @@ impl Module for Bottleneck {
 
 impl Forward for Bottleneck {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let y = self.cv2.forward(&self.cv1.forward(x)?)?;
-        Ok(if self.residual { x.add(&y)? } else { y })
+        let h = self.cv1.forward(x)?;
+        // The residual add runs in cv2's epilogue when the conv is fused (eval mode on the GPU).
+        if self.residual { self.cv2.forward_add(&h, x) } else { self.cv2.forward(&h) }
     }
 }
 
@@ -358,8 +359,14 @@ impl Module for Attention {
     }
 }
 
-impl Forward for Attention {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+impl Attention {
+    /// `residual + forward(x)`, the add in the output projection's epilogue when it runs fused.
+    pub fn forward_add(&self, x: &Tensor, residual: &Tensor) -> Result<Tensor> {
+        self.proj.forward_add(&self.mixed(x)?, residual)
+    }
+
+    /// The output projection's input: the attention output plus the positional encoding of `v`.
+    fn mixed(&self, x: &Tensor) -> Result<Tensor> {
         let (b, c, h, w) = x.dims4()?;
         let n = h * w;
         let (heads, kd, hd) = (self.heads, self.key_dim, self.head_dim);
@@ -373,7 +380,13 @@ impl Forward for Attention {
         // o[b, h, d, i] = Σ_j v[d, j] · A[i, j].
         let o = v.matmul(&attn.transpose(2, 3)?)?.reshape([b, c, h, w])?;
         let v = v.reshape([b, c, h, w])?;
-        self.proj.forward(&o.add(&self.pe.forward(&v)?)?)
+        Ok(o.add(&self.pe.forward(&v)?)?)
+    }
+}
+
+impl Forward for Attention {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.proj.forward(&self.mixed(x)?)
     }
 }
 
@@ -416,9 +429,9 @@ impl Module for PsaBlock {
 
 impl Forward for PsaBlock {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = x.add(&self.attn.forward(x)?)?;
-        let y = self.ffn2.forward(&self.ffn1.forward(&x)?)?;
-        Ok(x.add(&y)?)
+        // Both residual adds run in the closing conv's epilogue when it is fused.
+        let x = self.attn.forward_add(x, x)?;
+        self.ffn2.forward_add(&self.ffn1.forward(&x)?, &x)
     }
 }
 

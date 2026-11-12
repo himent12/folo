@@ -270,7 +270,7 @@ pub fn conv2d_backward_input(
     if coop {
         // A 1×1 conv (stride 1, no padding) has the same view as a plain GEMM over the transposed weight.
         let done = if d.is_pointwise() {
-            coop::encode_gemm(ctx, &g, DType::F16, wt.raw(), grad, ctx.dummy(), gx, None)?
+            coop::encode_gemm(ctx, &g, DType::F16, wt.raw(), grad, ctx.dummy(), gx, None, None)?
         } else {
             coop::encode_conv_backward_input(ctx, d, &g, wt.raw(), grad, gx)?
         };

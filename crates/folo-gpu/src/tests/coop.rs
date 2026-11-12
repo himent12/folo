@@ -776,7 +776,51 @@ fn coop_conv_reads_parts_and_slices_in_place() {
         let (gw, gb) = (upload(&ctx, &wt, DType::F16), upload(&ctx, &b, DType::F16));
         let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F16).unwrap();
         let at = conv::ConvInput { offset: 4 * hw, n_stride: 24 * hw };
-        conv::conv2d_input(&ctx, &d, (gx.raw(), at), gw.raw(), Some(gb.raw()), gy.raw(), None).unwrap();
+        conv::conv2d_input(&ctx, &d, (gx.raw(), at), gw.raw(), Some(gb.raw()), gy.raw(), None, None).unwrap();
         assert_within(&gy.to_vec().unwrap(), &want, &tol, &format!("coop conv on a slice k{k}"));
+    }
+}
+
+/// A residual added in the tensor-core epilogue (`conv::conv2d_input` with `res`): the implicit-GEMM conv and the
+/// 1×1 GEMM, a dense and a channel-slice residual, vector and scalar stores.
+#[test]
+fn coop_conv_adds_a_residual_in_its_epilogue() {
+    let (ctx, _g) = coop!();
+    let mut rng = Rng::new(91);
+    for (k, pad, h, w) in [(3, 1, 8, 8), (3, 1, 5, 7), (1, 0, 8, 8), (1, 0, 5, 7)] {
+        let d = cdesc(2, 16, h, w, 32, 1, Window2d::square(k, 1, pad));
+        let hw = h * w;
+        let x = f16_round(&rng.vec(2 * 16 * hw, -1.0, 1.0));
+        let wt = f16_round(&rng.vec(32 * 16 * k * k, -1.0, 1.0));
+        let b = f16_round(&rng.vec(32, -1.0, 1.0));
+        let r = f16_round(&rng.vec(2 * 32 * hw, -1.0, 1.0));
+        let y = cpu_conv(&d, &x, &wt, Some(&b), false);
+        let want: Vec<f32> = y.iter().zip(&r).map(|(a, b)| a + b).collect();
+        let sums = cpu_conv(&d, &x, &wt, None, true);
+        let bmax = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let tol: Vec<f64> =
+            want.iter().zip(&sums).map(|(&y, &s)| bound(y, s as f64, 16 * k * k, bmax, DType::F16)).collect();
+        let (gx, gw, gb) =
+            (upload(&ctx, &x, DType::F16), upload(&ctx, &wt, DType::F16), upload(&ctx, &b, DType::F16));
+        let dense = conv::ConvInput { offset: 0, n_stride: 16 * hw };
+        for slice in [false, true] {
+            let (gr, rat) = if slice {
+                let big = embed(&r, 2, 32, hw, 40, 5, &mut rng);
+                (upload(&ctx, &big, DType::F16), conv::ConvInput { offset: 5 * hw, n_stride: 40 * hw })
+            } else {
+                (upload(&ctx, &r, DType::F16), conv::ConvInput { offset: 0, n_stride: 32 * hw })
+            };
+            let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F16).unwrap();
+            let res = Some((gr.raw(), rat));
+            conv::conv2d_input(&ctx, &d, (gx.raw(), dense), gw.raw(), Some(gb.raw()), gy.raw(), None, res)
+                .unwrap();
+            assert!(ctx.tensor_cores(), "{}", ctx.tensor_cores_status());
+            assert_within(
+                &gy.to_vec().unwrap(),
+                &want,
+                &tol,
+                &format!("coop residual k{k} {h}x{w} slice={slice}"),
+            );
+        }
     }
 }

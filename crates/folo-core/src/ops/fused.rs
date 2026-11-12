@@ -96,6 +96,57 @@ impl Tensor {
         }
     }
 
+    /// `act(conv2d(self, weight) + bias) + residual` (`residual` has the conv output's shape): a residual
+    /// connection. When nothing is being recorded and the backend has the kernel
+    /// ([`crate::backend::Backend::conv2d_act_add`], the GPU does), the add is part of the conv's epilogue;
+    /// otherwise this is [`Tensor::conv2d_act`] then [`Tensor::add`], with autograd.
+    pub fn conv2d_act_add(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        residual: &Tensor,
+    ) -> Result<Tensor> {
+        let records = is_grad_enabled()
+            && (self.requires_grad()
+                || weight.requires_grad()
+                || bias.is_some_and(Tensor::requires_grad)
+                || residual.requires_grad());
+        let (dev, dt) = (self.device(), self.dtype());
+        let uniform = weight.device() == dev
+            && weight.dtype() == dt
+            && bias.is_none_or(|b| b.device() == dev && b.dtype() == dt)
+            && residual.device() == dev
+            && residual.dtype() == dt
+            && self.check_float("conv2d_act_add").is_ok();
+        if !records
+            && uniform
+            && let Some(shape) = conv_out_shape(self, weight, bias, p)
+            && residual.shape() == &shape
+        {
+            let b = self.backend()?;
+            let r = match bias {
+                Some(bt) => with_views(
+                    [self, weight, bt, residual],
+                    [self.layout(), weight.layout(), bt.layout(), residual.layout()],
+                    |v| b.conv2d_act_add(v[0], v[1], Some(v[2]), p, act, v[3]),
+                ),
+                None => with_views(
+                    [self, weight, residual],
+                    [self.layout(), weight.layout(), residual.layout()],
+                    |v| b.conv2d_act_add(v[0], v[1], None, p, act, v[2]),
+                ),
+            };
+            match r {
+                Ok(s) => return Tensor::wrap(s, shape, "conv2d_act_add"),
+                Err(e) if unsupported(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        residual.add(&self.conv2d_act(weight, bias, p, act)?)
+    }
+
     /// [`Tensor::conv2d_act`] of `Tensor::cat(xs, 1)`. When nothing is being recorded and the backend has the
     /// kernel ([`crate::backend::Backend::conv2d_act_cat`]: the CPU, and the GPU for 1×1 convs), the conv reads
     /// each part in place and the concatenation is never written; otherwise this is `cat` then

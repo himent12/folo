@@ -3,13 +3,14 @@
 
 #[cfg(doc)]
 use super::matmul::gemm;
-use super::matmul::{base_spec, build, check_io, encode_gemm};
+use super::matmul::{base_spec, build, build_def, check_io, encode_gemm};
 use super::{CoopConfig, pick_config, resolve};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
 use crate::kernels::conv::Conv2dDesc;
 use crate::kernels::gemm::{GemmDesc, gemm_params};
+use crate::kernels::residual::Residual;
 use crate::pipeline::Spec;
 
 /// Tensor-core conv2d: `y = act(conv2d(x, weight) + bias)` with f16 `x` and `weight` (`d.dtype` must be
@@ -39,9 +40,9 @@ pub fn conv2d(
     let g = d.gemm_view(oh, ow, bias.is_some());
     let bias = bias.unwrap_or(ctx.dummy());
     let built = if d.is_pointwise() {
-        encode_gemm(ctx, &g, out, weight, x, bias, y, cfg)?
+        encode_gemm(ctx, &g, out, weight, x, bias, y, cfg, None)?
     } else {
-        encode_conv(ctx, d, &g, out, x, weight, bias, y, cfg)?
+        encode_conv(ctx, d, &g, out, x, weight, bias, y, cfg, None)?
     };
     if !built {
         return Err(GpuError::Unsupported("tensor cores (a tensor-core kernel failed to build)"));
@@ -63,6 +64,7 @@ pub(crate) fn encode_conv(
     bias: &wgpu::Buffer,
     y: &wgpu::Buffer,
     cfg: Option<CoopConfig>,
+    res: Option<Residual<'_>>,
 ) -> Result<bool> {
     let (oh, ow) = d.output()?;
     let Some(cfg) = resolve(ctx, cfg, || pick_config(g.m, g.n, d.n * d.groups))? else { return Ok(false) };
@@ -72,16 +74,23 @@ pub(crate) fn encode_conv(
     let mut spec = base_spec(g, out, cfg)
         .bool("VEC_A", g.k.is_multiple_of(4))
         .bool("VEC_B", false)
-        .bool("VEC_C", g.n.is_multiple_of(4))
+        .bool("VEC_C", g.n.is_multiple_of(4) && res.as_ref().is_none_or(Residual::aligned4))
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
         .bool("CHECK", check)
         .u32("CONV_MODE", 1);
     spec = with_window(spec, d);
-    let Some(kernel) = build(ctx, spec) else { return Ok(false) };
+    let built = match res {
+        Some(_) => build_def(ctx, &super::shader::COOP_RES, spec.bool("RESID", true)),
+        None => build(ctx, spec),
+    };
+    let Some(kernel) = built else { return Ok(false) };
     let p = gemm_params(g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
     let groups = grid(g, cfg, d.n * d.groups)?;
-    ctx.dispatch(&kernel, &[weight, x, bias, y], &p, groups)?;
+    match res {
+        Some(r) => ctx.dispatch(&kernel, &[weight, x, bias, y, r.buf], &r.params(p)?, groups)?,
+        None => ctx.dispatch(&kernel, &[weight, x, bias, y], &p, groups)?,
+    }
     Ok(true)
 }
 

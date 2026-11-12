@@ -19,6 +19,7 @@ pub mod optim;
 pub mod pool_grad;
 pub mod pooling;
 pub mod reduce;
+pub mod residual;
 pub mod strided;
 pub mod vision;
 
