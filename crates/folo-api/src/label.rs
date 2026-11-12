@@ -604,7 +604,12 @@ mod tests {
             boxes: vec![BBox { class: 1, x1: 1.0, y1: 2.0, x2: 30.0, y2: 40.0 }],
             source: Some(LabelSource::Agent),
             error: None,
+            reviewed: true,
         };
+        // An older server sends no `reviewed`: nobody checked the image.
+        let mut old = serde_json::to_value(&image).unwrap();
+        old.as_object_mut().unwrap().remove("reviewed");
+        assert!(!serde_json::from_value::<LabelImage>(old).unwrap().reviewed);
         let ev = LabelEvent::Image(image);
         assert_eq!(ev.name(), "image");
         assert_eq!(LabelEvent::from_sse(ev.name(), &ev.data_json()).unwrap().unwrap(), ev);
