@@ -159,6 +159,12 @@ impl MockBackend {
             .ok_or_else(|| ApiError::new("dataset_not_found", format!("No dataset with id {id}")))
     }
 
+    /// Lists a removed dataset (or run) again, as registering its folder again does on a server.
+    #[cfg(test)]
+    pub fn restore(&self, id: &str) {
+        self.removed.lock().unwrap().remove(id);
+    }
+
     /// A dataset or run deleted through the API.
     fn is_removed(&self, id: &str) -> bool {
         self.removed.lock().unwrap().contains(id)

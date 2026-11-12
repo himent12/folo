@@ -495,3 +495,48 @@ fn a_toast_leaves_on_the_clock_but_not_while_hovered() {
     app.advance_clock(Duration::from_millis(800));
     assert!(titles(&mut app).is_empty(), "left once the pointer did");
 }
+
+#[test]
+fn lists_changed_elsewhere_show_at_the_next_refresh() {
+    use super::{DeleteTarget, Route};
+    use crate::api::Backend;
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let (id, run) = drive(&mut app, window, |this, _, _| {
+        let runs = this.store.runs.ready().unwrap();
+        let run = runs.iter().find(|r| this.store.dataset_summary(&r.config.dataset_id).is_some()).unwrap();
+        (run.config.dataset_id.clone(), run.clone())
+    });
+    // Removed elsewhere (Studio, the CLI): gone at the next refresh, and its runs say so.
+    api.delete_dataset(&id).unwrap();
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset_summary(&id).is_none());
+        assert!(
+            this.store.run_dataset_name(&run).contains("removed"),
+            "{}",
+            this.store.run_dataset_name(&run)
+        );
+    });
+    // Its folder registered again: listed, and "(removed)" goes.
+    api.restore(&id);
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset_summary(&id).is_some());
+        assert!(!this.store.run_dataset_name(&run).contains("removed"));
+    });
+    // Deleted here, then registered again elsewhere: no longer treated as deleted (its page opens).
+    drive(&mut app, window, |this, w, cx| {
+        this.ask_delete(DeleteTarget::Dataset(id.clone()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    api.restore(&id);
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.store.dataset_summary(&id).is_some());
+        this.navigate(Route::Dataset(id.clone()), w, cx);
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| assert_eq!(this.route, Route::Dataset(id.clone())));
+}
