@@ -2,7 +2,8 @@
 // (a model page, the run, the sidebar) and coming back, Back / Forward included, finds them as they were. It is kept
 // in memory (an uploaded file cannot go anywhere else); what can be named is also in the URL (`?model=…&dataset=…&
 // image=…&split=…&at=…&conf=…&iou=…&max=…`), so a link or a reload restores a dataset image and the thresholds. What
-// the URL names wins over what is in memory, field by field.
+// the URL names wins over what is in memory, field by field, and over what is shown when the URL changes while the
+// page is open (./keepSession).
 
 import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Prediction, Split } from '$lib/api/types';
@@ -54,8 +55,9 @@ export interface ImageRef {
   at: number | null;
 }
 
-/** What the URL says: a dataset image and thresholds (each absent when not named, or out of range). */
+/** What the URL says: a model, a dataset image and thresholds (each absent when not named, or out of range). */
 export interface FromUrl {
+  model: string | null;
   image: ImageRef | null;
   conf: number | null;
   iou: number | null;
@@ -76,6 +78,7 @@ export function fromUrl(q: URLSearchParams): FromUrl {
   const split = q.get('split') ?? 'val';
   const at = number(q, 'at', 0, Number.MAX_SAFE_INTEGER);
   return {
+    model: q.get('model') || null,
     image: dataset && image && SPLITS.includes(split) ? { dataset, image, split: split as Split, at: at === null ? null : Math.floor(at) } : null,
     conf: number(q, 'conf', 0.01, 0.95),
     iou: number(q, 'iou', 0.05, 0.95),

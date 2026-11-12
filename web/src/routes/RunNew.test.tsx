@@ -529,6 +529,17 @@ describe('New run: the draft', () => {
     await reopen('?dataset=ds_shapes');
     expect(dataset()).toBe(first);
   });
+
+  // review R4: a draft that is JSON but not a draft of this form (`augment.hsv` null) was trusted, and the form threw.
+  it('opens with its defaults over a draft of another shape, and keeps a sound one after', async () => {
+    await open();
+    type('epochs', '7');
+    const kept = JSON.parse(sessionStorage.getItem('folo.runNew.draft')!);
+    sessionStorage.setItem('folo.runNew.draft', JSON.stringify({ ...kept, augment: { ...kept.augment, hsv: null } }));
+    await reopen();
+    expect(field('epochs')).toBe('100');
+    expect(JSON.parse(sessionStorage.getItem('folo.runNew.draft')!).augment.hsv).toEqual([0.015, 0.7, 0.4]);
+  });
 });
 
 describe('New run: the keyboard', () => {

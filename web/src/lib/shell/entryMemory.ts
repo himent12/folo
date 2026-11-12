@@ -34,10 +34,21 @@ let restoring: { until: number; frame: number } | null = null;
 /** The path of the screen on display (App's: not the URL's route while the next screen's chunk loads). */
 let shownPath = (): string | null => router.route.path;
 
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+/** An entry as `persist` writes it: its place and what is kept with it. A stored one of another shape is left out. */
+const isEntry = (e: unknown): e is [number, Kept] =>
+  Array.isArray(e) &&
+  e.length === 2 &&
+  Number.isSafeInteger(e[0]) &&
+  isObject(e[1]) &&
+  (e[1].y === undefined || Number.isFinite(e[1].y)) &&
+  (e[1].state === undefined || isObject(e[1].state));
+
 function load() {
   try {
     const raw = sessionStorage.getItem(KEY);
-    kept = raw ? new Map((JSON.parse(raw) as [number, Kept][]).filter(([p]) => typeof p === 'number')) : new Map();
+    const list: unknown = raw ? JSON.parse(raw) : [];
+    kept = new Map(Array.isArray(list) ? list.filter(isEntry) : []);
   } catch {
     kept = new Map();
   }

@@ -8,6 +8,8 @@
 import type { Arch, Augment, Optimizer } from '$lib/api/types';
 
 const KEY = 'folo.runNew.draft';
+const ARCHS: readonly string[] = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'] satisfies Arch[];
+const OPTIMIZERS: readonly string[] = ['auto', 'sgd', 'adamw', 'musgd'] satisfies Optimizer[];
 
 /** Run on's choice, as `CloudPick` holds it. */
 export interface CloudDraft {
@@ -44,16 +46,63 @@ export interface Draft {
   cloud: CloudDraft;
 }
 
-/** The tab's draft, or null (none, unreadable, or storage off). */
+type Fields = Record<string, unknown>;
+const isObject = (v: unknown): v is Fields => typeof v === 'object' && v !== null && !Array.isArray(v);
+const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+/** A number field as the form keeps it: a number as typed (its error says what is wrong), or `null` when cleared. */
+const typed = (v: unknown) => v === null || finite(v);
+const strings = (d: Fields, keys: string[]) => keys.every((k) => typeof d[k] === 'string');
+const flags = (d: Fields, keys: string[]) => keys.every((k) => typeof d[k] === 'boolean');
+
+/** Augmentation the trainer accepts (folo-data `Augment::validate`); close mosaic, as typed. */
+function isAugment(a: unknown): a is Augment {
+  if (!isObject(a)) return false;
+  const prob = (v: unknown) => finite(v) && v >= 0 && v <= 1;
+  const gain = (v: unknown) => finite(v) && v >= 0;
+  const hsv = Array.isArray(a.hsv) && a.hsv.length === 3 && a.hsv.every(gain);
+  const scale = finite(a.scale) && a.scale >= 0 && a.scale < 1;
+  return [a.mosaic, a.mixup, a.fliplr].every(prob) && gain(a.translate) && scale && hsv && typed(a.close_mosaic);
+}
+
+function isCloud(c: unknown): c is CloudDraft {
+  if (!isObject(c)) return false;
+  return typeof c.target === 'string' && (c.offerId === null || typeof c.offerId === 'string') && typed(c.hours) && flags(c, ['offerChosen', 'hoursEdited']);
+}
+
+/** Every field of a draft, of its type and in its range: what the form can restore without a check of its own. */
+export function isDraft(d: unknown): d is Draft {
+  return (
+    isObject(d) &&
+    strings(d, ['query', 'datasetId', 'batch', 'imgsz', 'device', 'weights', 'name']) &&
+    flags(d, ['imgszChosen', 'amp', 'e2e', 'nameEdited', 'closeEdited', 'advancedOpen', 'augOpen']) &&
+    ARCHS.includes(d.arch as string) &&
+    OPTIMIZERS.includes(d.optimizer as string) &&
+    [d.epochs, d.lr0, d.seed].every(typed) &&
+    isAugment(d.augment) &&
+    isCloud(d.cloud)
+  );
+}
+
+/**
+ * The tab's draft, or null (none, unreadable, or storage off). A draft from another version of the form (or
+ * hand-edited) is dropped whole rather than half applied, and removed, so the form opens with its defaults.
+ */
 export function readDraft(store: () => Storage = () => sessionStorage): Draft | null {
+  let raw: string | null;
   try {
-    const raw = store().getItem(KEY);
-    const d = raw ? (JSON.parse(raw) as Partial<Draft>) : null;
-    // A draft from another version of the form (or hand-edited) is dropped rather than half applied.
-    return d && typeof d.query === 'string' && typeof d.name === 'string' && typeof d.arch === 'string' && d.augment && d.cloud ? (d as Draft) : null;
+    raw = store().getItem(KEY);
   } catch {
     return null;
   }
+  if (!raw) return null;
+  try {
+    const d: unknown = JSON.parse(raw);
+    if (isDraft(d)) return d;
+  } catch {
+    // Not JSON: dropped as below.
+  }
+  clearDraft(store);
+  return null;
 }
 
 export function saveDraft(d: Draft, store: () => Storage = () => sessionStorage) {

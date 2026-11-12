@@ -9,6 +9,7 @@ import { resetWasmProbe } from '$lib/inference/browser';
 import { prefs } from '$lib/prefs';
 import { parse, router } from '$lib/router';
 import Playground from './Playground';
+import { URL_DELAY_MS } from './playground/keepSession';
 import { session } from './playground/session';
 
 /** Port of `mount(Playground, { target })`: renders into `target`; `unmount(c)` is `c.unmount()`. */
@@ -271,6 +272,70 @@ describe('Playground: the session', () => {
     await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
     expect(session.get()?.source).toMatchObject({ kind: 'dataset', img: { id: img.id }, at: 2 });
     expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.4');
+  });
+
+  const link = (ds: string, img: string, at: number, rest: string) => parse(`#/playground?${rest}&dataset=${ds}&image=${encodeURIComponent(img)}&split=val&at=${at}`);
+
+  // review R1: only the query changing keeps the page mounted (an edited URL, Back, a link to itself); it follows the
+  // URL, the model too after a pick in the list, and its own later write never puts the old state back.
+  it('follows a URL changed while it is open', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    const ds = (await api.datasets())[0]!;
+    const [, a, b] = (await api.datasetImages(ds.id, { split: 'val', limit: 3 })).images;
+    const predict = vi.spyOn(api, 'predict');
+    const last = () => predict.mock.calls.at(-1);
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = link(ds.id, a!.id, 1, 'model=m_hard_s&conf=0.4');
+    c = mount(Playground, { target });
+    await until(() => target.querySelector('#pg-panel tbody tr') && last()?.[1].model_id === 'm_hard_s', "A's detections");
+    const select = target.querySelector<HTMLSelectElement>('.model-pick select')!;
+    select.value = 'm_shapes_n';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => last()?.[1].model_id === 'm_shapes_n', 'the picked model');
+
+    // As an edited URL does: the browser moves, and the router follows (`hashchange`).
+    const to = link(ds.id, b!.id, 2, 'model=m_hard_s&conf=0.8');
+    location.hash = `#${to.path}?${to.query}`;
+    await until(() => router.route.query.get('image') === b!.id, 'the route');
+    const onB = () => (last()?.[0] as { image_id?: string } | undefined)?.image_id === b!.id && last()?.[1].model_id === 'm_hard_s';
+    await until(() => onB() && session.get()?.pred?.model_id === 'm_hard_s', "B's detections by the linked model");
+    expect(session.get()?.source).toMatchObject({ img: { id: b!.id } });
+    expect(target.querySelector<HTMLInputElement>('.slider input[type="range"]')!.value).toBe('0.8');
+    await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+    flushSync();
+    expect(Object.fromEntries(router.route.query)).toMatchObject({ model: 'm_hard_s', image: b!.id, conf: '0.8' });
+    expect(session.get()?.source).toMatchObject({ img: { id: b!.id } });
+  });
+
+  // review R2: a linked image still being looked up is a choice like any other; one made after it wins.
+  it('keeps an image chosen while a linked one loads', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    let release!: () => void;
+    const slow = new Promise<void>((r) => (release = r));
+    const dataset = api.dataset.bind(api);
+    api.dataset = async (id) => (await slow, dataset(id));
+    hub.api = api;
+    hub.mode = 'mock';
+    const ds = (await api.datasets())[0]!;
+    const linked = (await api.datasetImages(ds.id, { split: 'val', limit: 6 })).images[5]!;
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = link(ds.id, linked.id, 5, 'model=m_hard_s');
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('#pg-panel tbody tr'), "the sample's detections");
+    const chosen = (session.get()?.source as { img: { id: string } }).img.id;
+    expect(chosen).not.toBe(linked.id);
+    release();
+    await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+    flushSync();
+    expect(session.get()?.source).toMatchObject({ img: { id: chosen } });
+    expect(router.route.query.get('image')).toBe(chosen);
   });
 });
 

@@ -10,6 +10,7 @@ describe('Playground URL', () => {
     const path = playgroundPath({ model: 'm_a', source: { kind: 'dataset', ds, img, at: 12 }, conf: 0.5, iou: 0.7, maxDet: 300 });
     expect(path).toBe('/playground?model=m_a&dataset=ds_1&image=im+7&split=val&at=12&conf=0.5');
     expect(fromUrl(new URLSearchParams(path.split('?')[1]))).toEqual({
+      model: 'm_a',
       image: { dataset: 'ds_1', image: 'im 7', split: 'val', at: 12 },
       conf: 0.5,
       iou: null,
@@ -23,6 +24,6 @@ describe('Playground URL', () => {
   });
 
   it('ignores values out of range or not numbers', () => {
-    expect(fromUrl(new URLSearchParams('conf=2&iou=x&max=0&dataset=ds_1&image=i&split=nope'))).toEqual({ image: null, conf: null, iou: null, maxDet: null });
+    expect(fromUrl(new URLSearchParams('conf=2&iou=x&max=0&dataset=ds_1&image=i&split=nope'))).toEqual({ model: null, image: null, conf: null, iou: null, maxDet: null });
   });
 });
