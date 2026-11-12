@@ -155,7 +155,7 @@ impl TileConfig {
     /// 16×128 tiles, depth 32, 4×4 per thread, 128 threads (36 KiB): `M <= 16` (a 16-channel stem).
     pub const ROWS16: TileConfig = TileConfig { bm: 16, bn: 128, bk: 32, tm: 4, tn: 4 };
 
-    fn threads(&self) -> u32 {
+    pub(crate) fn threads(&self) -> u32 {
         (self.bm / self.tm) * (self.bn / self.tn)
     }
 
@@ -314,12 +314,23 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
         s.push_str(&super::gemm_cat::cat_source(cat, "B", wgsl_ty(f16, vb), vb));
     }
     let _ = writeln!(s, "var<workgroup> As: array<array<vec4<f32>, {bm4}>, {}>;", 2 * bk);
-    let _ = writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {bn4}>, {}>;", 2 * bk);
+    // `WG_PAD`: the weight gradient pads each B row by one vec4 (`2 · BK · 16` bytes, which
+    // `TileConfig::workgroup_bytes` leaves out, so the caller sets it only where that still fits): its stores go
+    // down short runs of rows (see `wgrad_b_units`), which would otherwise all hit the same banks.
+    let wg_pad = mode == 3 && spec.get_bool("WG_PAD");
+    let _ =
+        writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {}>, {}>;", bn4 + u32::from(wg_pad), 2 * bk);
     let _ = writeln!(s, "@compute @workgroup_size({wgx}, {wgy}, 1)");
     s.push_str(
         "fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid3: vec3<u32>) {\n",
     );
     let _ = writeln!(s, "  let tx = lid3.x; let ty = lid3.y; let tid = ty * {wgx}u + tx;");
+    // Runs of 16 pixels where the tile is that deep (two 32-byte sectors per column and load).
+    let wb =
+        (mode == 3).then(|| super::conv::wgrad_b_units(threads, bk, bn, spec.get_u32("WG_RUN", bk.min(16))));
+    if let Some(wb) = &wb {
+        let _ = writeln!(s, "  let wl = tid % {0}u; let wq = tid / {0}u;", wb.run);
+    }
     s.push_str(
         "  let M = pu(0u); let N = pu(1u);\n\
          let lda = pu(3u); let ldb = pu(4u); let ldc = pu(5u);\n",
@@ -382,11 +393,6 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
             "  let cj = n0 + bi; let cjok = cj < N;\n\
              let cih = i32(cj / IW) + PH; let ciw = i32(cj % IW) + PW;\n",
         ),
-        3 => s.push_str(
-            "  let cj = n0 + bi; let cjok = cj < N;\n\
-             let cci = cj / (KH * KW); let cr = cj % (KH * KW);\n\
-             let cdh = i32((cr / KW) * DH) - PH; let cdw = i32((cr % KW) * DW) - PW;\n",
-        ),
         _ => {}
     }
     let _ =
@@ -445,6 +451,10 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
             let _ = writeln!(load, "    {reg}{comp} = {val};");
         }
     }
+    if let Some(wb) = &wb {
+        let reg = |u: usize| format!("rb[{}][{}]", u / 4, u % 4);
+        load.push_str(&super::conv::wgrad_b_load(wb, "B", reg, "f32", "0.0"));
+    }
     for u in 0..pb.count {
         let o = format!("(bo + {}u)", u * pb.step);
         let (reg, comp) = if pb.vec {
@@ -496,18 +506,8 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                 );
                 continue;
             }
-            3 => {
-                // Unit (k = (n, oh, ow), j = (ci, kh, kw)): the image element that output pixel read.
-                let _ = writeln!(
-                    load,
-                    "    {{ let k = k0 + {o}; let nn = k / OHOW; let r = k % OHOW;\n\
-                     \x20     let ih = i32((r / OW) * SH) + cdh; let iw = i32((r % OW) * SW) + cdw;\n\
-                     \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
-                     \x20       {reg}{comp} = f32(B[offB + nn * SBN + (cci * IH + u32(ih)) * IW + u32(iw)]);\n\
-                     \x20     }} else {{ {reg}{comp} = 0.0; }} }}"
-                );
-                continue;
-            }
+            // Loaded above (`wgrad_b_load`).
+            3 => continue,
             _ => {}
         }
         let (idx, cond) = match (pb.vec, tb) {
@@ -571,7 +571,12 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                 }
             }
         }
-        for u in 0..pb.count {
+        for (u, w) in wb.iter().flat_map(|wb| wb.units.iter().map(move |w| (wb.run, w))).enumerate() {
+            let (run, w) = w;
+            let row = format!("{kb}u + {} * {run}u + wl", w.kq);
+            let _ = writeln!(st, "    Bs[{row}][{0} >> 2u][{0} & 3u] = rb[{1}][{2}];", w.jj, u / 4, u % 4);
+        }
+        for u in (0..pb.count).filter(|_| mode != 3) {
             let o = format!("(bo + {}u)", u * pb.step);
             let (x, y) = (u / 4, u % 4);
             match (pb.vec, tb) {
