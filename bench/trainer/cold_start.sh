@@ -7,7 +7,7 @@
 # the new build with the kernel list its previous run wrote but no pipeline cache (driver and FOLO pipeline caches
 # cold: a driver update, or a list copied from another machine). Prints what bench/trainer/warm_start.sh prints.
 # Every run's output is kept in $OUT/log-<n>.txt. A run that exits nonzero or times out, or whose output lacks the
-# epoch record or the compile timer's line, is printed as FAILED with its log, not as a sample.
+# epoch record, is printed as FAILED with its log, not as a sample.
 # Usage: BASE=... NEW=... OUT=D:/... [ROUNDS=3] bench/trainer/cold_start.sh "" | "--amp"
 set -u
 OUT=${OUT:?folder for caches and runs}
@@ -29,7 +29,6 @@ one() { # label exe cachedir
   first=$(grep '^folo-gpu: .* first uses' "$log" | tail -1 | sed 's/^folo-gpu: //')
   dur=$(grep -s '"event":"epoch"' "$OUT/fe/r/metrics.jsonl" | grep -o '"duration_s":[0-9.]*' | cut -d: -f2 | head -1)
   [ -n "$dur" ] || why="no epoch record"
-  [ -n "$trace" ] || why="no compile timer line${why:+, $why}"
   [ "$code" -eq 124 ] && why="timed out${why:+, $why}"
   [ "$code" -ne 0 ] && [ "$code" -ne 124 ] && why="exit $code${why:+, $why}"
   if [ -n "$why" ]; then

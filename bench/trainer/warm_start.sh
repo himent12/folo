@@ -7,7 +7,8 @@
 #            the kernels spent, only printed by builds with precompile).
 #   predict: `folo predict` of one image (process start to exit, which is the first image's latency plus start-up).
 # Every run's output is kept in $OUT/log-<name>-<n>.txt. A run that exits nonzero or times out, or whose output
-# lacks the epoch record (train) or the compile timer's line, is printed as FAILED with its log, not as a sample.
+# lacks the epoch record (train), is printed as FAILED (builds before the compile timer, such as
+# 647b981f, print no timer line; that is not a failure) with its log, not as a sample.
 # Usage: OUT=D:/... [ROUNDS=3] [AMP=--amp] bench/trainer/warm_start.sh train|predict name=path/folo.exe ...
 set -u
 mode=$1; shift
@@ -44,7 +45,6 @@ one() { # name exe
     [ -n "$dur" ] || why="no epoch record"
     dur="epoch1 ${dur}s "
   fi
-  [ -n "$trace" ] || why="no compile timer line${why:+, $why}"
   [ "$code" -eq 124 ] && why="timed out${why:+, $why}"
   [ "$code" -ne 0 ] && [ "$code" -ne 124 ] && why="exit $code${why:+, $why}"
   if [ -n "$why" ]; then
