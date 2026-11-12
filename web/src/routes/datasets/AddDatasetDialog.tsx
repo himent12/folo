@@ -181,7 +181,8 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     attached = mine;
     const here = () => mine.yes && showing();
     // A reload while it generates still waits for it (./changes pendingGeneration).
-    if (m === 'synthetic') generationStarted({ name: synthName.get(), since: Date.now(), ids: (props.known ?? fetched.peek() ?? []).map((d) => d.id) });
+    const gen = { server: hub.server, name: synthName.get(), since: Date.now(), ids: (props.known ?? fetched.peek() ?? []).map((d) => d.id) };
+    if (m === 'synthetic') generationStarted(gen);
     try {
       // Registering a folder that is already registered answers with that dataset (docs/API.md), not a copy.
       const before = m === 'folder' ? (props.known ?? fetched.peek() ?? (await hub.api.datasets().catch(() => []))) : [];
@@ -201,7 +202,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       const nt = noTraining(ds);
       const detail = nt ? `${ds.name} · ${nt.where}, none to train on` : `${ds.name} · ${count(ds.splits.train + ds.splits.val + ds.splits.test, 'image')}`;
       work.set(null);
-      if (m === 'synthetic') generationEnded();
+      if (m === 'synthetic') generationEnded(gen);
       if (!known) datasetsChanged();
       if (!here()) {
         // Dismissed while it ran (or gone, or opened anew): wherever the person is now, they stay there.
@@ -223,7 +224,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       router.go(`/datasets/${ds.id}`);
     } catch (err) {
       work.set(null);
-      if (m === 'synthetic') generationEnded();
+      if (m === 'synthetic') generationEnded(gen);
       if (here()) error.set(err);
       else if (showing()) status.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
       // page-level: no opening of the dialog is on screen.

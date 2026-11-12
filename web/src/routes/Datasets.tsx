@@ -64,19 +64,31 @@ export default function Datasets() {
   effect(() => {
     if (datasetChanges.get() !== seen) untrack(reread);
   });
-  // A sample set this tab asked for before a reload is still generating: read the list every few seconds until it is
-  // there (./datasets/changes).
+  // A sample set this tab asked for of this server before a reload is still generating: read the list a few seconds
+  // after each read has settled (one slower than that is never cut short by the next), while the tab is shown, until
+  // it is there (./datasets/changes).
   effect(() => {
     const list = datasets.data;
-    const g = untrack(() => pendingGeneration());
+    const server = untrack(() => hub.server);
+    const g = untrack(() => pendingGeneration(server));
     if (!g || !list) return;
-    if (landed(g, list)) return void generationEnded();
+    if (landed(g, list)) return void generationEnded(g);
     // A read that finds nothing new keeps the same list (Resource), so this runs on its own clock until one does.
-    const t = setInterval(() => {
-      if (pendingGeneration()) void datasets.refresh();
-      else clearInterval(t);
-    }, GENERATION_POLL_MS);
-    return () => clearInterval(t);
+    let live = true;
+    let t: ReturnType<typeof setTimeout>;
+    const later = () => {
+      if (live) t = setTimeout(tick, GENERATION_POLL_MS);
+    };
+    const tick = () => {
+      if (!live || !pendingGeneration(server)) return;
+      if (document.visibilityState !== 'visible' || datasets.loading || datasets.refreshing) return later();
+      void datasets.refresh().finally(later);
+    };
+    later();
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
   });
   effect(() => {
     const back = () => document.visibilityState === 'visible' && !datasets.loading && reread();

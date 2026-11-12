@@ -144,7 +144,8 @@ describe('Add dataset from the URL', () => {
 describe('a sample set generating across a reload', () => {
   it('has the list read itself again until the new dataset is there, then stops (datasets F10)', async () => {
     const before = await hub.api.datasets();
-    generationStarted({ name: 'shapes-synth', since: Date.now(), ids: before.map((d) => d.id) });
+    const g = { server: hub.server, name: 'shapes-synth', since: Date.now(), ids: before.map((d) => d.id) };
+    generationStarted(g);
     const list = vi.spyOn(hub.api, 'datasets');
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     try {
@@ -161,13 +162,108 @@ describe('a sample set generating across a reload', () => {
         flushSync();
       }
       expect(shown()).toBe(true);
-      expect(pendingGeneration()).toBeNull();
+      expect(pendingGeneration(hub.server)).toBeNull();
       const after = list.mock.calls.length;
       await vi.advanceTimersByTimeAsync(9000);
       expect(list.mock.calls.length).toBe(after);
     } finally {
       vi.useRealTimers();
-      generationEnded();
+      generationEnded(g);
+    }
+  });
+
+  // review studio-2 R3: a read slower than the poll's interval is never cut short by the next one.
+  it('waits for each read to settle before the next, and lands a set behind reads slower than the interval', async () => {
+    const api = hub.api;
+    const before = await api.datasets();
+    const g = { server: hub.server, name: 'slow-synth', since: Date.now(), ids: before.map((d) => d.id) };
+    generationStarted(g);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    let slow = false;
+    let aborted = 0;
+    const read = api.datasets.bind(api);
+    const list = vi.spyOn(api, 'datasets').mockImplementation((s?: AbortSignal) =>
+      !slow
+        ? read(s)
+        : new Promise((ok, no) => {
+            const t = setTimeout(() => void read().then(ok, no), 4000);
+            s?.addEventListener('abort', () => {
+              aborted++;
+              clearTimeout(t);
+              no(new DOMException('aborted', 'AbortError'));
+            });
+          }),
+    );
+    try {
+      open(Datasets, '/datasets');
+      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      slow = true;
+      const calls = list.mock.calls.length;
+      await read(undefined).then(() => api.createSyntheticDataset({ name: 'slow-synth', images: 10, classes: ['circle'], imgsz: 64, seed: 0 }));
+      // 3 s to the first poll, 4 s for its read; the next goes out 3 s after that, not while it is out.
+      await vi.advanceTimersByTimeAsync(3000 + 3900);
+      expect([list.mock.calls.length - calls, aborted]).toEqual([1, 0]);
+      const shown = () => !!target.querySelector('tr[aria-label^="slow-synth"]');
+      for (let i = 0; i < 40 && !shown(); i++) {
+        await vi.advanceTimersByTimeAsync(250);
+        flushSync();
+      }
+      expect([shown(), aborted, pendingGeneration(hub.server)]).toEqual([true, 0, null]);
+    } finally {
+      vi.useRealTimers();
+      generationEnded(g);
+    }
+  });
+
+  it('is not read while the tab is hidden', async () => {
+    const before = await hub.api.datasets();
+    const g = { server: hub.server, name: 'hidden-synth', since: Date.now(), ids: before.map((d) => d.id) };
+    generationStarted(g);
+    const list = vi.spyOn(hub.api, 'datasets');
+    const shown = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    try {
+      open(Datasets, '/datasets');
+      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      const calls = list.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(list.mock.calls.length).toBe(calls);
+      shown.mockReturnValue('visible');
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(list.mock.calls.length).toBe(calls + 1);
+    } finally {
+      vi.useRealTimers();
+      generationEnded(g);
+    }
+  });
+
+  // review studio-2 R6: the marker belongs to the server it was asked of.
+  it("is only waited for, and only forgotten, on the server it was asked of", async () => {
+    const before = await hub.api.datasets();
+    // Asked of another server; this one (the mock) already has a set by that name that is new to it.
+    const g = { server: 'http://127.0.0.1:7915', name: 'shapes-synth', since: Date.now(), ids: before.map((d) => d.id) };
+    generationStarted(g);
+    await hub.api.createSyntheticDataset({ name: 'shapes-synth', images: 10, classes: ['circle'], imgsz: 64, seed: 0 });
+    const list = vi.spyOn(hub.api, 'datasets');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    try {
+      open(Datasets, '/datasets');
+      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      const calls = list.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(list.mock.calls.length).toBe(calls);
+      expect(pendingGeneration(hub.server)).toBeNull();
+      expect(pendingGeneration(g.server)).toEqual(g);
+      // Over on that server, a newer generation asked for since is not forgotten by the older one's end.
+      const newer = { ...g, since: g.since + 1 };
+      generationStarted(newer);
+      generationEnded(g);
+      expect(pendingGeneration(g.server)).toEqual(newer);
+      generationEnded(newer);
+      expect(pendingGeneration(g.server)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      generationEnded(g);
     }
   });
 });

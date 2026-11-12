@@ -11,11 +11,13 @@ export function datasetsChanged() {
 }
 
 /**
- * A synthetic dataset this tab asked for that it has not seen land: its name, when, and the datasets there were then.
- * In sessionStorage, so a reload while it generates keeps it (datasets F10): the list then reads itself again until the
- * dataset is there (or the generation is long overdue). No server API says a generation is running.
+ * A synthetic dataset this tab asked for that it has not seen land: the server it was asked of (`hub.server`), its
+ * name, when, and the datasets there were then. In sessionStorage, so a reload while it generates keeps it (datasets
+ * F10): the list of that server then reads itself again until the dataset is there (or the generation is long
+ * overdue). No server API says a generation is running.
  */
 export interface Generation {
+  server: string;
   name: string;
   since: number;
   ids: string[];
@@ -33,19 +35,23 @@ export function generationStarted(g: Generation): void {
   }
 }
 
-export function generationEnded(): void {
+/** The generation `g` is over (landed, done, failed): forgotten, unless a newer one has been asked for since. */
+export function generationEnded(g: Generation): void {
   try {
+    const kept = JSON.parse(sessionStorage.getItem(KEY) ?? 'null') as Partial<Generation> | null;
+    if (kept && (kept.server !== g.server || kept.name !== g.name || kept.since !== g.since)) return;
     sessionStorage.removeItem(KEY);
   } catch {
     // As above.
   }
 }
 
-/** The generation this tab waits for, if any and not overdue at `now`. */
-export function pendingGeneration(now = Date.now()): Generation | null {
+/** The generation this tab waits for on `server` (`hub.server`), if any and not overdue at `now`. */
+export function pendingGeneration(server: string, now = Date.now()): Generation | null {
   try {
     const g = JSON.parse(sessionStorage.getItem(KEY) ?? 'null') as Generation | null;
-    if (g && typeof g.name === 'string' && typeof g.since === 'number' && Array.isArray(g.ids) && now - g.since < GIVE_UP_MS) return g;
+    const valid = g && g.server === server && typeof g.name === 'string' && typeof g.since === 'number' && Array.isArray(g.ids);
+    if (valid && now - g.since < GIVE_UP_MS) return g;
   } catch {
     // Unreadable: nothing to wait for.
   }
