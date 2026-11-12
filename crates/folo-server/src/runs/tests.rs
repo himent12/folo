@@ -517,7 +517,7 @@ fn a_run_left_training_ends_when_it_last_trained() {
     .unwrap();
     e.on_event(&RunEvent::Step(step));
     let alive = e.state.lock().unwrap().file.alive_at.expect("alive_at set by a step");
-    assert!((alive - t).abs() <= 2.0, "alive_at {alive}, now {t}");
+    assert!((t..=unix_now()).contains(&alive), "alive_at {alive}, now {t}");
 
     // So does a phase that sends no steps, only log lines: written once the last write is ALIVE_EVERY old by the
     // monotonic clock, also after the wall clock was set back (`alive_at` an hour ahead of now); sooner than that, a
@@ -526,7 +526,8 @@ fn a_run_left_training_ends_when_it_last_trained() {
         let f: RunFile = serde_json::from_slice(&std::fs::read(e.dir.join("run.json")).unwrap()).unwrap();
         f.alive_at.unwrap()
     };
-    let near_now = |at: f64| assert!((at - t).abs() <= 2.0, "alive_at {at}, now {t}");
+    // Between the start of this test and now, however long the machine took over it.
+    let near_now = |at: f64| assert!((t..=unix_now()).contains(&at), "alive_at {at}, now {t}");
     let log = RunEvent::Log(LogLine { t: now(), level: LogLevel::Info, message: "validating".into() });
     {
         let mut st = e.state.lock().unwrap();
@@ -567,6 +568,7 @@ fn a_run_left_training_ends_when_it_last_trained() {
     assert_eq!(e2.run().finished.as_deref(), Some(rfc3339(t - 300.0).as_str()));
     runs.restart(&e2, config, None).unwrap();
     let paused = e2.run().paused_s.unwrap();
-    assert!((paused - 400.0).abs() <= 2.0, "paused_s {paused}, want about 400");
+    let late = unix_now().floor() - t;
+    assert!((400.0..=400.0 + late).contains(&paused), "paused_s {paused}, want 400 to {}", 400.0 + late);
     let _ = std::fs::remove_dir_all(&dir);
 }
