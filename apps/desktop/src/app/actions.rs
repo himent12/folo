@@ -6,10 +6,10 @@ use folo_ui::{AppContext, Context, Focusable, Window};
 
 use crate::api::*;
 use crate::input::TextInput;
-use crate::store::Load;
 use crate::ui::*;
 
 use super::forms::{SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, parse_images};
+use super::lists::List;
 use super::{DeleteTarget, FoloApp, Route, ServerMode, act};
 
 impl FoloApp {
@@ -172,6 +172,7 @@ impl FoloApp {
         if let Some(list) = self.store.datasets.ready_mut() {
             upsert_dataset(list, ds);
         }
+        self.changed_here(List::Datasets, cx);
         self.toast_with(
             if existed == Some(true) { Tone::Info } else { Tone::Accent },
             match existed {
@@ -205,6 +206,7 @@ impl FoloApp {
                     {
                         *slot = run;
                     }
+                    this.changed_here(List::Runs, cx);
                     // Resumed steps replace the earlier ones. Retire everything tied to the old
                     // attempt (stream, in-flight history, buffered events), then open a fresh
                     // stream; the dashboard reloads history once it is open.
@@ -246,6 +248,7 @@ impl FoloApp {
                     {
                         *slot = run;
                     }
+                    this.changed_here(List::Runs, cx);
                     let title =
                         if started { format!("Started {name}") } else { format!("{name} starts next") };
                     this.toast(Tone::Neutral, title, None, cx);
@@ -293,7 +296,7 @@ impl FoloApp {
                         this.toast(Tone::Info, format!("Deleted {name}"), None, cx);
                     }
                     DeleteTarget::Dataset(id) => {
-                        this.forget_dataset(id);
+                        this.forget_dataset(id, cx);
                         // Studio's words.
                         let body = if files {
                             format!("{name} and its {} were deleted.", images.as_deref().unwrap_or("files"))
@@ -321,6 +324,7 @@ impl FoloApp {
         if let Some(runs) = self.store.runs.ready_mut() {
             runs.retain(|r| r.id != id);
         }
+        self.changed_here(List::Runs, cx);
         self.store.run_data.remove(id);
         self.store.samples.remove(id);
         self.store.logs.remove(id);
@@ -336,12 +340,17 @@ impl FoloApp {
                 m.id.clone()
             })
             .collect();
-        if self.play_model.as_ref().is_some_and(|m| made.contains(m)) {
-            self.drop_play_model();
+        if self.play_model_made_by(id, &made) {
+            let name = self.play_model.as_ref().and_then(|m| self.deleted.get(m)).cloned();
+            self.drop_play_model(name);
         }
-        // Fetched again now, not on the next refresh: Playground picks its next model from it.
-        self.store.models = Load::Idle;
-        self.ensure_core(cx);
+        // Gone from the list now, which is fetched again (an answer asked for before the delete still
+        // lists them, and is dropped). Playground takes the best model left at once.
+        if let Some(models) = self.store.models.ready_mut() {
+            models.retain(|m| !made.contains(&m.id));
+        }
+        self.reconcile_play_model(cx);
+        self.changed_here(List::Models, cx);
         // An open select may list it, or its models: its highlight is an index into that list.
         self.menu_open = None;
         self.leave_deleted();
@@ -355,7 +364,7 @@ impl FoloApp {
     }
 
     /// Drops an unregistered dataset from what the app holds, and leaves its page for the list.
-    fn forget_dataset(&mut self, id: &str) {
+    fn forget_dataset(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(d) = self.store.dataset_summary(id) {
             self.deleted.insert(id.to_string(), d.name.clone());
         }
@@ -366,6 +375,7 @@ impl FoloApp {
         if let Some(list) = self.store.datasets.ready_mut() {
             list.retain(|d| d.id != id);
         }
+        self.changed_here(List::Datasets, cx);
         self.store.dataset.remove(id);
         self.store.images.remove(id);
         // An open select may list it (New run's datasets): its highlight is an index into the list.
@@ -411,6 +421,8 @@ impl FoloApp {
         {
             prev = Some(std::mem::replace(&mut r.status, RunStatus::Stopping));
         }
+        // An answer asked for before would show it running again (and offer Stop).
+        self.list_tickets.changed(List::Runs);
         self.fetch(
             cx,
             move |api| api.stop_run(&rid),
@@ -429,6 +441,7 @@ impl FoloApp {
                     {
                         *slot = run;
                     }
+                    this.changed_here(List::Runs, cx);
                     let nothing = "No epoch had finished, so nothing is saved.".to_string();
                     let (title, body) = if dequeued {
                         // A resumed run that waited to continue: it keeps what it trained.

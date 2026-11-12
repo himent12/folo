@@ -104,10 +104,42 @@ pub struct SynthForm {
     pub error: Option<ApiError>,
 }
 
+/// The longest run name the server takes (docs/API.md, `POST /api/runs`), as for a dataset's.
+pub const MAX_RUN_NAME: usize = 64;
+
+/// `base` and then `suffix`, `base` shortened (and dashes left at its cut dropped) so the whole fits
+/// in [`MAX_RUN_NAME`] characters, as Studio's New run fits its names (`web/src/routes/runnew/name.ts`).
+pub fn fit_run_name(base: &str, suffix: &str) -> String {
+    let room = MAX_RUN_NAME.saturating_sub(suffix.chars().count());
+    let cut: String = base.chars().take(room).collect();
+    format!("{}{suffix}", cut.trim_end_matches('-'))
+}
+
+/// What is wrong with a typed run name, in Studio's words: empty, or longer than the server takes.
+pub fn run_name_error(name: &str) -> Option<String> {
+    let n = name.trim().chars().count();
+    if n == 0 {
+        Some("Give the run a name.".into())
+    } else if n > MAX_RUN_NAME {
+        Some(format!("At most {MAX_RUN_NAME} characters (this one has {n})."))
+    } else {
+        None
+    }
+}
+
 /// The name New run suggests: the dataset, the architecture's letter and the run's number
-/// ("shapes-n-4").
+/// ("shapes-n-4"), the dataset's part shortened to fit the length limit.
 pub fn suggested_name(dataset: &str, arch: Arch, n: usize) -> String {
-    format!("{dataset}-{}-{n}", arch.as_str().trim_start_matches("folo-"))
+    fit_run_name(dataset, &format!("-{}-{n}", arch.as_str().trim_start_matches("folo-")))
+}
+
+/// The name of a new run made from run `name` (New run from this run, Retry): `name-2`, or the next
+/// number no run of `runs` is called, `name` shortened to fit the length limit.
+pub fn again_run_name(name: &str, runs: &[Run]) -> String {
+    (2..)
+        .map(|n| fit_run_name(name, &format!("-{n}")))
+        .find(|candidate| !runs.iter().any(|r| r.name == *candidate))
+        .expect("a free number")
 }
 
 /// [`suggested_name`] numbered one past the run count, or the next number no run of `runs` is
@@ -320,6 +352,36 @@ mod form_tests {
         assert_eq!(super::free_run_name("shapes-v", Arch::N, &runs(&["shapes-v-n-5"])), "shapes-v-n-2");
         assert_eq!(super::free_run_name("shapes-v", Arch::S, &left), "shapes-v-s-6");
         assert_eq!(super::free_run_name("shapes-v", Arch::S, &[]), "shapes-v-s-1");
+    }
+
+    #[test]
+    fn every_suggested_name_fits_the_servers_limit() {
+        use super::{MAX_RUN_NAME, again_run_name, fit_run_name, run_name_error};
+        use crate::api::{Arch, Backend, Run};
+        let long = "a-very-long-dataset-name-registered-from-a-deeply-nested-folder-of-images";
+        let s = suggested_name(long, Arch::S, 12);
+        assert_eq!(s.chars().count(), MAX_RUN_NAME);
+        assert!(s.starts_with("a-very-long") && s.ends_with("-s-12"), "{s}");
+        // A cut right after a dash leaves no double dash.
+        assert_eq!(fit_run_name(&format!("{}-tail", "x".repeat(61)), "-2"), format!("{}-2", "x".repeat(61)));
+        // Characters, not bytes.
+        assert_eq!(fit_run_name(&"é".repeat(70), "").chars().count(), MAX_RUN_NAME);
+        // New run from a run named at the limit: shortened, numbered past the names taken.
+        let base = crate::api::mock::MockBackend::new(4200, true).runs().unwrap().remove(0);
+        let at_limit = "r".repeat(MAX_RUN_NAME);
+        let two = again_run_name(&at_limit, &[]);
+        assert_eq!((two.chars().count(), two.ends_with("-2")), (MAX_RUN_NAME, true));
+        let taken = vec![Run { name: two.clone(), ..base }];
+        let three = again_run_name(&at_limit, &taken);
+        assert!(three.ends_with("-3") && three.chars().count() == MAX_RUN_NAME, "{three}");
+        assert_eq!(again_run_name("shapes-s-1", &[]), "shapes-s-1-2");
+        // A typed name: Studio's words.
+        assert_eq!(run_name_error("  ").as_deref(), Some("Give the run a name."));
+        assert_eq!(run_name_error(&at_limit), None);
+        assert_eq!(
+            run_name_error(&format!("{at_limit}x")).as_deref(),
+            Some("At most 64 characters (this one has 65).")
+        );
     }
 
     #[test]

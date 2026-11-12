@@ -230,7 +230,7 @@ fn an_earlier_toasts_open_goes_to_the_list_once_its_dataset_is_deleted() {
     app.frame(window.into());
     drive(&mut app, window, |this, w, cx| {
         assert_eq!(this.route, Route::Datasets);
-        let said = format!("{name} was deleted");
+        let said = format!("{name} was removed");
         assert!(this.toasts.iter().any(|t| t.title == said.as_str()), "{said}");
         // Nor does Back lead there.
         this.back(w, cx);
@@ -260,39 +260,6 @@ fn another_device_keeps_the_boxes_up_until_it_answers() {
     // Its answer (here the demo's refusal) replaces them, undimmed.
     app.run_until_idle();
     drive(&mut app, window, |this, _, _| assert!(!this.play_pred_dim && !this.play_pred_pending));
-}
-
-#[test]
-fn deleting_the_playground_models_run_drops_its_late_answer_and_predicts_with_the_next() {
-    use super::DeleteTarget;
-    let api = Arc::new(MockBackend::new(4200, true));
-    let (mut app, window) = open_with(api.clone());
-    // Playground on the best model, an image on stage, its boxes in.
-    let (first, run) = drive(&mut app, window, |this, _, cx| {
-        this.play_dataset_image("ds_3b91", "img_03417", cx);
-        let first = this.play_model.clone().expect("the best model is picked");
-        let run = this.store.models.ready().unwrap().iter().find(|m| m.id == first).unwrap().run_id.clone();
-        (first, run.expect("made by a run"))
-    });
-    assert!(drive(&mut app, window, |this, _, _| this.play_pred.ready().is_some()));
-    // Asked again (the result kept up meanwhile), on a slow device: while it runs, the model's run
-    // is deleted, and its answer only comes once the model list is in again.
-    api.answer_next_predict_late();
-    drive(&mut app, window, |this, w, cx| {
-        this.play_pred_dim = true;
-        this.run_predict(cx);
-        this.ask_delete(DeleteTarget::Run(run.clone()), w, cx);
-        this.delete_confirmed(cx);
-    });
-    drive(&mut app, window, |this, _, _| {
-        let next = this.play_model.clone().expect("another model is picked");
-        assert_ne!(next, first);
-        // The image on stage is predicted with it, and nothing of the deleted model's is shown.
-        let shown = this.play_pred.ready().map(|p| p.model_id.clone());
-        assert_eq!(shown.as_deref(), Some(next.as_str()));
-        assert_eq!(this.play_pred_for.as_ref().map(|(_, m)| m), Some(&next));
-        assert!(!this.play_pred_pending && !this.play_pred_dim);
-    });
 }
 
 #[test]
@@ -636,4 +603,32 @@ fn closing_the_inspector_lands_on_the_image_it_showed_last() {
         this.close_inspector(w, cx);
         assert!(this.fh(format!("tile-{shown}"), cx).is_focused(w), "focus is on the image shown last");
     });
+}
+
+#[test]
+fn new_run_refuses_a_name_longer_than_the_server_takes_and_fits_its_own() {
+    let (mut app, window) = open();
+    // New run from a run whose name is at the limit: the suggestion still fits.
+    let long = "r".repeat(super::forms::MAX_RUN_NAME);
+    drive(&mut app, window, |this, w, cx| {
+        let mut config = this.store.runs.ready().unwrap()[0].config.clone();
+        config.name = long.clone();
+        this.open_new_run_from(&config, None, w, cx);
+    });
+    let name = run_name(&mut app, window);
+    assert!(name.chars().count() <= 64 && name.ends_with("-2"), "{name}");
+    // Typed one character over: refused in Studio's words, and nothing is sent.
+    type_into(&mut app, window, |f| f.name.clone(), &format!("{long}x"));
+    let api = drive(&mut app, window, |this, w, cx| {
+        this.submit_new_run(w, cx);
+        this.store.api.clone()
+    });
+    let runs = api.runs().unwrap().len();
+    drive(&mut app, window, |this, _, _| {
+        let f = this.new_run.as_ref().expect("still open");
+        assert!(!f.submitting);
+        let said = f.error.as_ref().map(|e| e.message.clone());
+        assert_eq!(said.as_deref(), Some("At most 64 characters (this one has 65)."));
+    });
+    assert_eq!(api.runs().unwrap().len(), runs);
 }

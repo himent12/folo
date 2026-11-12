@@ -107,6 +107,12 @@ impl HeadlessApp {
         self.dispatcher().run_until_idle();
     }
 
+    /// `run_until_idle`, but done once no more than `held` background jobs are left: those a test holds back
+    /// to release later (a slow answer that lands after others).
+    pub fn run_until_held(&mut self, held: usize) {
+        self.dispatcher().run_until_held(held);
+    }
+
     /// Advances the fake clock (due timers run, in order, each followed by a pump), then `run_until_idle`.
     pub fn advance_clock(&mut self, duration: Duration) {
         self.dispatcher().advance_clock(duration);

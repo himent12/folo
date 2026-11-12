@@ -1,8 +1,6 @@
 //! Moving between pages: navigate, back, the parent route, and the Ctrl+number shortcuts (inert
 //! while a dialog is up).
 
-use std::collections::HashMap;
-
 use folo_ui::{Context, Window, px};
 
 use crate::store::*;
@@ -12,7 +10,7 @@ use super::{FoloApp, Route};
 
 /// The list to open instead of `route` when it is the page of something in `deleted`, with that
 /// thing's name.
-pub(super) fn deleted_route(deleted: &HashMap<String, String>, route: &Route) -> Option<(String, Route)> {
+pub(super) fn deleted_route(deleted: &super::deleted::Deleted, route: &Route) -> Option<(String, Route)> {
     let (id, list) = match route {
         Route::Run(id) => (id, Route::Runs),
         Route::Model(id) => (id, Route::Models),
@@ -22,6 +20,15 @@ pub(super) fn deleted_route(deleted: &HashMap<String, String>, route: &Route) ->
     deleted.get(id).map(|name| (name.clone(), list))
 }
 
+/// What a link to `name`, gone, says: a dataset "was removed" (unregistered; its files may well be
+/// there), a run or a model "was deleted".
+pub(super) fn gone_title(name: &str, route: &Route) -> String {
+    match route {
+        Route::Dataset(_) => format!("{name} was removed"),
+        _ => format!("{name} was deleted"),
+    }
+}
+
 impl FoloApp {
     // ---------- navigation ----------
 
@@ -29,7 +36,7 @@ impl FoloApp {
         // A link to something deleted since it was made opens the list, and says why.
         let route = match deleted_route(&self.deleted, &route) {
             Some((name, list)) => {
-                self.toast(Tone::Neutral, format!("{name} was deleted"), None, cx);
+                self.toast(Tone::Neutral, gone_title(&name, &route), None, cx);
                 list
             }
             None => route,

@@ -123,6 +123,34 @@ pub(crate) fn reveal_path_command(path: &Path) -> Command {
     command
 }
 
+/// The dialogs and launches above (behind `Services`' off-screen gate).
+pub(crate) struct Launch;
+
+impl crate::platform::services::Launcher for Launch {
+    fn open_url(&self, url: &str) {
+        spawn_detached(open_url_command(url));
+    }
+
+    fn reveal_path(&self, path: &Path) {
+        spawn_detached(reveal_path_command(path));
+    }
+
+    fn prompt_for_paths(
+        &self,
+        options: PathPromptOptions,
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+        prompt_for_paths(options)
+    }
+
+    fn prompt_for_new_path(
+        &self,
+        directory: &Path,
+        suggested_name: Option<&str>,
+    ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+        prompt_for_new_path(directory, suggested_name)
+    }
+}
+
 /// Starts `command` and reaps it on a thread, so no zombie is left.
 pub(crate) fn spawn_detached(mut command: Command) {
     if let Ok(mut child) = command.spawn() {

@@ -4,10 +4,14 @@
 mod actions;
 mod connection;
 mod data;
+mod deleted;
 mod descriptions;
 mod drag;
 mod focus;
 mod forms;
+#[cfg(test)]
+mod list_tests;
+mod lists;
 mod navigation;
 mod new_run;
 mod overlay_state;
@@ -356,7 +360,13 @@ pub struct FoloApp {
     pub cm_cell: Option<(usize, usize)>,
 
     // Playground
+    /// The model Playground runs; always one of the loaded list once it is in
+    /// ([`FoloApp::reconcile_play_model`]).
     pub play_model: Option<String>,
+    /// The run that made `play_model`: its delete drops the model even while the list is loading.
+    play_model_run: Option<String>,
+    /// The name of the model Playground lost (deleted), said once the next one is picked.
+    play_model_gone: Option<String>,
     pub play_conf: f32,
     /// The confidence the current predictions were fetched down to: a threshold below it refetches.
     pub play_fetched_floor: f32,
@@ -434,9 +444,9 @@ pub struct FoloApp {
     pub bench: crate::bench::BenchState,
     /// A page to open on the next render (set where no window is at hand, e.g. after a request).
     pub route_pending: Option<Route>,
-    /// Runs, models and datasets this app deleted, by id, with their names: a link to one left
-    /// behind (an earlier toast's Open, the palette) opens its list instead, saying so.
-    pub deleted: HashMap<String, String>,
+    /// Runs, models and datasets deleted lately, by id, with their names: a link to one left behind
+    /// (an earlier toast's Open, the palette) opens its list instead, saying so.
+    pub deleted: deleted::Deleted,
     /// Which half of it shows: training (0) or inference (1); reference rows too or measured only.
     pub tp_view: usize,
     pub tp_all: bool,
@@ -494,6 +504,8 @@ pub struct FoloApp {
     backend_gen: u64,
     /// Bumped on every connection attempt; only the latest one may install its result.
     connect_seq: u64,
+    /// The order of the dataset, model and run lists' answers: older ones are dropped.
+    list_tickets: lists::ListTickets,
     /// The latest request per (run, "metrics" | "logs"); older responses are dropped.
     history_tickets: HashMap<(String, &'static str), u64>,
     history_seq: u64,
@@ -571,6 +583,8 @@ impl FoloApp {
             confusion_norm: true,
             cm_cell: None,
             play_model: None,
+            play_model_run: None,
+            play_model_gone: None,
             play_conf: 0.25,
             play_fetched_floor: PLAY_CONF_FLOOR,
             play_picker_open: false,
@@ -615,7 +629,7 @@ impl FoloApp {
             cloud: Default::default(),
             bench: Default::default(),
             route_pending: None,
-            deleted: HashMap::new(),
+            deleted: Default::default(),
             tp_view: 0,
             tp_all: false,
             bench_busy: false,
@@ -646,6 +660,7 @@ impl FoloApp {
             sub_attempt: HashMap::new(),
             backend_gen: 0,
             connect_seq: 0,
+            list_tickets: Default::default(),
             history_tickets: HashMap::new(),
             history_seq: 0,
             _tasks: Vec::new(),

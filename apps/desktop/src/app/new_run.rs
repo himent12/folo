@@ -13,8 +13,8 @@ use crate::store::*;
 use crate::ui::*;
 
 use super::forms::{
-    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, auto_close_mosaic, batch_index, carry_over,
-    free_run_name, parse_epochs, parse_lr,
+    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, again_run_name, auto_close_mosaic, batch_index,
+    carry_over, free_run_name, parse_epochs, parse_lr, run_name_error,
 };
 use super::{FoloApp, Route, RunFilter};
 
@@ -34,10 +34,25 @@ impl FoloApp {
         self.store.dataset_summary(&self.new_run.as_ref()?.dataset)
     }
 
-    /// The New run form's dataset was deleted while it was open: the list is in without it, and
-    /// the form asks for another before it starts.
+    /// The New run form's dataset was removed (while it was open, or before it was opened for it, from
+    /// a cached page or a run's Train again): the list is in without it, and the form asks for another
+    /// before it starts.
     pub fn nr_dataset_gone(&self) -> bool {
         self.new_run.is_some() && self.store.datasets.ready().is_some() && self.nr_dataset().is_none()
+    }
+
+    /// What New run calls its removed dataset: the name it was deleted under, or the one a run trained
+    /// on it recorded, else "That dataset".
+    pub fn nr_gone_name(&self) -> String {
+        let Some(id) = self.new_run.as_ref().map(|f| &f.dataset) else { return String::new() };
+        let recorded = || {
+            let runs = self.store.runs.ready()?;
+            runs.iter()
+                .filter(|r| r.config.dataset_id == *id)
+                .find_map(|r| r.dataset.as_ref())
+                .map(|d| d.name.clone())
+        };
+        self.deleted.get(id).cloned().or_else(recorded).unwrap_or_else(|| "That dataset".into())
     }
 
     pub fn close_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -56,7 +71,8 @@ impl FoloApp {
     ) {
         self.open_new_run(Some(&config.dataset_id), window, cx);
         let idx = |list: &[u32], v: u32| list.iter().position(|x| *x == v);
-        let name = format!("{}-2", config.name);
+        let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
+        let name = again_run_name(&config.name, runs);
         let cloud_on = self.cloud_on();
         if let Some(f) = self.new_run.as_mut() {
             f.arch = ARCHS.iter().position(|a| *a == config.arch).unwrap_or(f.arch);
@@ -125,10 +141,19 @@ impl FoloApp {
             return;
         }
         let list = self.store.datasets.ready().map(Vec::as_slice).unwrap_or_default();
-        let Some(ds) = dataset.and_then(|id| list.iter().find(|d| d.id == id)).or(list.first()) else {
-            return;
+        // A dataset asked for by id that is gone (removed since its page or run was read) is never
+        // swapped for another in silence: the form opens on it, says it was removed and asks for a
+        // choice. Only a plain New run starts on the first dataset.
+        let (ds_id, ds_name) = match dataset {
+            Some(id) => match list.iter().find(|d| d.id == id) {
+                Some(ds) => (ds.id.clone(), ds.name.clone()),
+                None => (id.to_string(), self.deleted.get(id).cloned().unwrap_or_else(|| "run".into())),
+            },
+            None => match list.first() {
+                Some(ds) => (ds.id.clone(), ds.name.clone()),
+                None => return,
+            },
         };
-        let (ds_id, ds_name) = (ds.id.clone(), ds.name.clone());
         // The last started run's choices, else the defaults (s, 640 px, 100 epochs).
         let (arch, imgsz, epochs) = self.new_run_last.unwrap_or((1, 2, 100.0));
         let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
@@ -442,8 +467,8 @@ impl FoloApp {
             return;
         }
         let Some(config) = config else { return };
-        if config.name.is_empty() {
-            form.error = Some(ApiError::new("invalid_name", "Give the run a name."));
+        if let Some(why) = run_name_error(&config.name) {
+            form.error = Some(ApiError::new("invalid_name", why));
             // The error shows at the top of the form, by the Name field: go there.
             let name_fh = form.name.read(cx).focus_handle(cx);
             window.focus(&name_fh);
@@ -468,6 +493,7 @@ impl FoloApp {
                         if let Some(runs) = this.store.runs.ready_mut() {
                             runs.insert(0, run);
                         }
+                        this.changed_here(super::lists::List::Runs, cx);
                         this.subscribe_active(cx);
                         let run = this.store.run(&id).cloned();
                         let cloud = run.as_ref().and_then(|r| Some(this.cloud_device(r, r.cloud.as_ref()?)));
