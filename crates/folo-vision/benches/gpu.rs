@@ -77,9 +77,12 @@ fn latency(dev: Device, warm: usize, iters: usize, mut f: impl FnMut()) -> Stats
     )
 }
 
-/// Back to back, one synchronise at the end: ms per call.
+/// Calls [`throughput`] makes before the timed ones.
+const THROUGHPUT_WARMUP: usize = 3;
+
+/// Back to back, one synchronise at the end: ms per call. Makes `iters + THROUGHPUT_WARMUP` calls.
 fn throughput(dev: Device, iters: usize, mut f: impl FnMut()) -> f64 {
-    for _ in 0..3 {
+    for _ in 0..THROUGHPUT_WARMUP {
         f();
     }
     synchronize(dev).expect("sync");
@@ -162,7 +165,7 @@ fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, tc: 
                 batch as f64 * 1e3 / t,
                 w1.dispatches - w0.dispatches,
                 w1.submissions - w0.submissions,
-                (w3.bind_groups - w2.bind_groups) as f64 / iters as f64,
+                (w3.bind_groups - w2.bind_groups) as f64 / (iters + THROUGHPUT_WARMUP) as f64,
                 mib(peak),
                 mib(peak.saturating_sub(base)),
             );

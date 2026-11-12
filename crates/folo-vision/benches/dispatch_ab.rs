@@ -1,11 +1,13 @@
-//! Host cost of a fused GPU forward with the bind-group cache on and off, interleaved in one process so load drift
-//! on a shared machine hits both alike. Run with `cargo bench -p folo-vision --bench dispatch_ab`
+//! Host cost of a fused GPU forward with the bind-group cache on and off, interleaved in one process (the order
+//! alternating by round) to balance call order and load drift on a shared machine between the two. Run with `cargo bench -p folo-vision --bench dispatch_ab`
 //! (`FOLO_BENCH_SCALES=n,s`, `FOLO_BENCH_PRECISION=f32,f16tc` and `FOLO_BENCH_BATCH=1,16` pick the configurations,
 //! defaults `n`, `f32,f16tc` and `1`; `f16tc` needs `FOLO_GPU_TENSOR_CORES=1`; `FOLO_BENCH_ROUNDS` rounds, default 12).
 //!
-//! Per configuration and round, each mode (cache on / off, the order alternating by round) runs 5 warm-up calls,
-//! then 30 synchronised forwards timing the encode (the `forward` call) and the whole call, then 30 calls back to
-//! back with one wait (pipelined). The table gives the median over rounds of each round's median, and its range.
+//! Per configuration and round, each mode (cache on / off) runs 5 warm-up calls, then 30 synchronised forwards
+//! timing the encode and the whole call, then 30 calls back to back with one wait (pipelined). "Encode" is the host
+//! time of the whole `forward()` call: allocation, bind-cache work, the automatic submissions of a full batch and
+//! the command recording, not the recording alone. Each round prints its per-mode medians (one line per round), and
+//! the table gives the median over rounds of each round's median, and its range.
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -18,6 +20,7 @@ use folo_nn::Module;
 use folo_vision::model::{FoloModel, ModelConfig};
 use folo_vision::predict::{Precision, f16_unavailable};
 
+/// The middle value; for an even count, the upper of the two middle ones (no averaging).
 fn median(mut v: Vec<f64>) -> f64 {
     v.sort_by(f64::total_cmp);
     v[v.len() / 2]
@@ -96,6 +99,14 @@ fn main() {
                         res[m][1].push(median(call));
                         res[m][2].push(t.elapsed().as_secs_f64() * 1e3 / 30.0);
                     }
+                    let mode =
+                        |m: usize| format!("{:.3} {:.3} {:.3}", res[m][0][r], res[m][1][r], res[m][2][r]);
+                    println!(
+                        "  folo-{scale} {prec}{} b{batch} round {r:>2} (encode, sync call, pipelined ms): on {}  off {}",
+                        if want_tc { " tc" } else { "" },
+                        mode(0),
+                        mode(1)
+                    );
                 }
                 ctx.set_bind_cache(true);
                 let label = if want_tc { format!("{prec}, tensor cores") } else { prec.to_string() };

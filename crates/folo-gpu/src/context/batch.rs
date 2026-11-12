@@ -89,6 +89,10 @@ impl GpuContext {
 
     pub(super) fn submit(&self, b: &mut Batch) {
         b.pass = None;
+        // Here too, so `flush()` and `sync()` release retired buffers when no dispatch follows.
+        if self.inner.retired.load(Ordering::Relaxed) {
+            self.sweep_binds(b);
+        }
         let Some(mut enc) = b.encoder.take() else { return };
         let mut prof = self.profiler();
         let timed = prof.as_ref().and_then(|p| p.resolve(&mut enc));
@@ -180,7 +184,14 @@ impl GpuContext {
         let chunk = &mut b.chunks[b.chunk];
         chunk.cpu[slot as usize..(slot + UNIFORM_SLOT) as usize].copy_from_slice(params.bytes());
         let mut created = false;
-        let bind = b.binds.get(&self.inner.device, &kernel.layout, &chunk.buf, buffers, &mut created);
+        // Only buffers whose release the pool reports may be cached (see `binds.rs`). The batch lock is held: the
+        // order `alloc` takes them in.
+        let cacheable = |bufs: &[&wgpu::Buffer], ids: &[u64]| {
+            let pool = self.inner.pool.lock().expect("pool lock");
+            bufs.iter().zip(ids).all(|(&buf, &id)| pool.owns(id) || *buf == self.inner.dummy)
+        };
+        let bind =
+            b.binds.get(&self.inner.device, &kernel.layout, &chunk.buf, buffers, cacheable, &mut created);
         if created {
             self.inner.bind_groups.fetch_add(1, Ordering::Relaxed);
         }
@@ -233,6 +244,12 @@ impl GpuContext {
     /// Bind groups in the cache (for tests and benchmarks).
     pub fn bind_cache_len(&self) -> usize {
         self.inner.batch.lock().expect("batch lock").binds.len()
+    }
+
+    /// The bind cache's reverse index: buffers listed and keys in all (for tests).
+    #[cfg(test)]
+    pub(crate) fn bind_index_size(&self) -> (usize, usize) {
+        self.inner.batch.lock().expect("batch lock").binds.index_size()
     }
 
     /// A 1-D launch of `threads` invocations with `wg` threads per workgroup, folded into x/y when it exceeds

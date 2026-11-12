@@ -65,6 +65,12 @@ impl GpuContext {
         Ok(released)
     }
 
+    /// Sets the pool's [`crate::pool::BufferPool::max_cached_bytes`] (for tests).
+    #[cfg(test)]
+    pub(crate) fn set_pool_cap(&self, bytes: u64) {
+        self.inner.pool.lock().expect("pool lock").max_cached_bytes = bytes;
+    }
+
     /// Idle staging buffers of [`GpuContext::upload_with`] (for tests).
     #[cfg(test)]
     pub(crate) fn idle_staging(&self) -> usize {

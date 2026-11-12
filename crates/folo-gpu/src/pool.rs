@@ -15,12 +15,15 @@
 //! [`crate::GpuContext`], which flushes the open batch before every upload.
 //!
 //! The context caches bind groups by buffer, and a cached bind group keeps its buffers alive, so the pool records
-//! the id of every buffer it lets go of ([`BufferPool::take_retired`]); the next dispatch drops the bind groups
-//! that use them (`context/binds.rs`).
+//! the id of every buffer it lets go of ([`BufferPool::take_retired`]); the next dispatch or submission drops the
+//! bind groups that use them (`context/binds.rs`). It also knows the ids of every buffer it created and has not let
+//! go of ([`BufferPool::owns`]): only those are cached, since only their release is reported.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use crate::context::binds::FxSet;
 
 /// Smallest size class in bytes.
 pub const MIN_CLASS: u64 = 256;
@@ -82,6 +85,8 @@ pub struct BufferPool {
     retired: Retired,
     /// Set when `retired` is not empty, so the dispatch path can check without taking the pool lock.
     retired_flag: Arc<AtomicBool>,
+    /// Ids of the buffers this pool created and has not let go of (cached or lent out).
+    owned: FxSet,
 }
 
 /// What [`BufferPool::take_retired`] returns: the ids of the buffers the pool let go of, or `All` when there
@@ -113,6 +118,7 @@ impl BufferPool {
             max_cached_bytes,
             retired: Retired::None,
             retired_flag: Arc::default(),
+            owned: FxSet::default(),
         }
     }
 
@@ -127,15 +133,23 @@ impl BufferPool {
         std::mem::take(&mut self.retired)
     }
 
+    /// Whether the buffer with this id (`context::buffer_id`) is one the pool created and still holds or has lent
+    /// out, so its release will be reported.
+    pub(crate) fn owns(&self, id: u64) -> bool {
+        self.owned.contains(&id)
+    }
+
     /// Records that `buf` is no longer the pool's (it is dropped right after).
     fn retire(&mut self, buf: &wgpu::Buffer) {
+        let id = crate::context::buffer_id(buf);
+        self.owned.remove(&id);
         match &mut self.retired {
             Retired::All => {}
             Retired::Some(ids) if ids.len() >= MAX_RETIRED => self.retired = Retired::All,
             Retired::Some(ids) => {
-                ids.insert(crate::context::buffer_id(buf));
+                ids.insert(id);
             }
-            Retired::None => self.retired = Retired::Some(HashSet::from([crate::context::buffer_id(buf)])),
+            Retired::None => self.retired = Retired::Some(HashSet::from([id])),
         }
         self.retired_flag.store(true, Ordering::Relaxed);
     }
@@ -180,12 +194,14 @@ impl BufferPool {
         }
         self.stats.misses += 1;
         self.stats.allocated_bytes += class;
-        device.create_buffer(&wgpu::BufferDescriptor {
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("folo-gpu pooled"),
             size: class,
             usage,
             mapped_at_creation: false,
-        })
+        });
+        self.owned.insert(crate::context::buffer_id(&buf));
+        buf
     }
 
     /// Returns a buffer to its free list, evicting the least recently freed buffers if the cache is full.

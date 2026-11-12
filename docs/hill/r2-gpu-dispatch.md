@@ -23,15 +23,27 @@ Baseline `main` 647b981f, RTX 4080 SUPER, 640×640.
 
 **What.** Every dispatch created a bind group (3–4 µs of host time each, round 1's timers). Now the uniform
 parameter block is bound with a dynamic offset (its slot in the 64 KiB arena chunk), so a bind group depends only
-on `(kernel layout, arena chunk, storage buffers)`, and `context/binds.rs` caches them under that key. The pool
-hands out the same buffers in the same order on every forward and training step, so after the first call a
-forward creates none (the `gpu` bench now prints new bind groups per call / per step).
+on `(kernel layout, arena chunk, storage buffers)`, and `context/binds.rs` caches them under that key. An
+inference forward meets the same combinations every call and creates no bind group after its first calls; a
+training step reuses only some (see Training below). The `gpu` bench now prints new bind groups per call / per
+step.
+
+Admission: a miss creates the bind group as before but caches it only if its key missed before (a bounded set of
+recent keys, cleared past 8192), so a combination seen once costs one hash and a set insert besides the bind group,
+and a forward hits from its third call on. Keys and the cache's maps use a small FxHash-style hasher instead of
+SipHash.
 
 Invalidation and bounds:
-- A cached bind group keeps its buffers alive. The pool records the id of every buffer it lets go of (evicted from
-  a free list, dropped by `trim_pool`, or too large to cache) and sets a flag; the next dispatch (or `trim_pool`)
-  drops every cached bind group that binds one of them. Past 4096 pending ids it asks for the whole cache to be
-  dropped instead. `release_memory` empties the cache with the uniform arena (whose chunks the bind groups hold).
+- A cached bind group keeps its buffers alive, so only buffers the pool owns (created by it and not yet let go of)
+  and the context's dummy buffer are cached. A raw buffer passed to a public kernel call, or a trace replaying
+  buffers the pool already let go of, is never cached: nothing would report its release.
+- The pool records the id of every buffer it lets go of (evicted from a free list, dropped by `trim_pool`, or too
+  large to cache) and sets a flag; the next dispatch or submission (so `flush` and `sync` too), or `trim_pool`,
+  drops every cached bind group that binds one of them, through an exact index from buffer id to keys: a key leaves
+  its buffers' sets whenever its entry leaves the cache (retired, dropped at a rollover, replaced after a
+  collision, cleared), so the index holds no more than the entries do. Past 4096 pending ids the pool asks for the
+  whole cache to be dropped instead. `release_memory` empties the cache with the uniform arena (whose chunks the
+  bind groups hold).
 - Two generations of at most 4096 bind groups: when the current one fills it becomes the old one and the previous
   old one is dropped; a hit in the old generation moves the entry back.
 - Hits compare the stored handles (layout, uniform chunk, every buffer), so a hash collision is a miss, never a
@@ -39,11 +51,15 @@ Invalidation and bounds:
 
 Touches `pipeline.rs` (lane `trainer`): one line, `has_dynamic_offset: true` on the uniform binding.
 
-Tests (`src/tests/binds.rs`): 300 dispatches on one buffer reuse one bind group and each reads its own parameters
-(sum exact), a second buffer gets its own, a 1024-dispatch batch spans four uniform chunks (one bind group per
-chunk); `trim_pool` and `release_memory` drop the entries of the buffers they free and later dispatches still
-compute right; the pool reports exactly the buffers it evicts or clears and switches to `All` past its bound; the
-cache never holds more than two generations and keeps a hot entry across rollovers.
+Tests (`src/tests/binds.rs`): 300 dispatches on one buffer create two bind groups (first sighting, then cached)
+and each reads its own parameters (sum exact), a second buffer gets its own, a 1024-dispatch batch spans four
+uniform chunks (two bind groups per chunk; every dispatch adds its own value, so a wrong chunk breaks the exact
+sum); `trim_pool` and `release_memory` drop the entries of the buffers they free and later dispatches still compute
+right; `sync()` alone drops the entries of an evicted buffer; a buffer made on the device directly is never cached,
+the dummy buffer is; the pool reports exactly the buffers it evicts or clears, switches to `All` past its bound and
+owns exactly what it holds or lends; the cache never holds more than two generations, keeps a hot entry across
+rollovers, and retiring a buffer drops its entries in both generations and nothing else; the index stays as small
+as the cache when a persistent buffer is paired with many retired short-lived ones.
 
 ### Numbers
 
@@ -85,12 +101,16 @@ encoding 200 replays of a dispatch, so a faster host leaves more of the GPU work
 GPU-bound b16 rows above do not move).
 
 **Training.** The first A/B (3 rounds against `main`, folo-n b16) showed the step faster overall (f32 54.6 →
-49.8 ms, AMP 32.4 → 30.8) but the optimizer phase 4× slower (f32 1.8 → 7.0 ms of host time). The pool evicts
-buffers throughout a step, and each eviction made the next dispatch sweep the whole cache (`retain` over thousands
-of entries). The cache now keeps an index from buffer id to the entries that bind it, so retiring a buffer costs only
-its own entries. Only 27% (f32) / 56% (AMP) of a training step's dispatches reuse a bind group (805 of 1109 / 556 of
-1275 create one): the pool's buffers do not come back in the same order every step. Numbers after the fix: below
-(pending a GPU slot when this PR opened).
+49.8 ms, AMP 32.4 → 30.8) but the optimizer phase 4× slower (f32 1.8 → 7.0 ms of synchronised optimizer phase
+time, its host encode 1.6 → 6.7 ms). The pool evicts buffers throughout a step, and each eviction made the next
+dispatch sweep the whole cache (`retain` over thousands of entries). A first fix kept an index from buffer id to
+the entries that bind it, so retiring a buffer cost only its own entries, but the optimizer phase's host encode
+still went 1.0 → 3.8 ms (f32): only 27% (f32) / 56% (AMP) of a training step's dispatches reuse a bind group (805
+of 1109 / 556 of 1275 create one), because the pool's buffers do not come back in the same order every step, and
+every miss paid for an entry (buffer clones, index pushes) while generation rollovers rebuilt the index and dropped
+4096 bind groups at a time. The fix is implemented: second-sight admission (a miss caches nothing unless its key
+missed before), the FxHash-style hasher, an exact index that shrinks with the cache, pool-owned buffers only, and
+the sweep on submission. Its measurement is pending.
 
 ## Negative results
 
