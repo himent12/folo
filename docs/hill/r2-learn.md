@@ -178,7 +178,7 @@ ran as written there.)
 - Opt-in, defaults unchanged: `musgd.{muon,sgd,cls_lr}` (YOLO26's published weights lost on BCCD, one seed) and
   `o2o_attached_epochs`.
 
-## Shipped (PR 2: `auto` rule 5)
+## Shipped (PR #194: `auto` rule 5)
 
 - **MuSGD step weights 0.5 / 0.5 for a run from scratch** (`AUTO_MUSGD_SCRATCH_WEIGHTS`), the reference trainer's
   0.2 / 1.0 for one from pretrained weights (`TrainConfig.transfer`, set by the trainer from `--weights` and stored
@@ -198,7 +198,8 @@ so these are other rounding trajectories of the same recipe.
   each: `auto` 0.0166, SGD 0.0853 and MuSGD 0.1133 (**+8.9%** over its best row). **Met against main** (replicated)
   **and above the Ultralytics rows** (+8.9%, about four times FOLO's own seed spread of 0.002, but the reference rows
   are single runs, not replicated here). (Rule 4 alone: 0.1135, level with Ultralytics' MuSGD.)
-- **BCCD ≥ yolo26n (0.626)**: 0.625 (0.6251 vs 0.6262): level, not above. Not met by its letter.
+- **BCCD ≥ yolo26n (0.626)**: 0.625 (0.6251 vs 0.6262): level, not above. Not met by its letter. (+0.018 over main's
+  0.607; the other three sets level or better.)
 
 ## Negative results
 
@@ -209,6 +210,10 @@ so these are other rounding trajectories of the same recipe.
 - On rule 4, one seed each on the proxy: `loss.tal.topk=13` 0.1126 and `--cos-lr` 0.1129 (rule 4: 0.1129–0.1143):
   nothing. `loss.cls_gain=1.0`: +4.5% on the proxy (three seeds) but level on the shapes gate and −0.006 on BCCD:
   not a default; a class-count effect (80 classes) is the likely reading and needs full COCO to tell.
+- Mosaic on BCCD (rule-5 build, seeds 0 and 1; test AP 0.6172 / 0.6268 at the default `close_mosaic` 10):
+  `--close-mosaic` 3, 20 or 50 give bit-identical results, because the best checkpoint is from epoch 37 / 26, before
+  mosaic closes in any of them (the closing epochs never decide the score); `--set augment.mosaic=0` 0.6196 / 0.6256,
+  level. A fine-tune peaks around epoch 17–37 of 100 and holds there, whatever the mosaic schedule.
 - ProgLoss and STAL (YOLO26): FOLO already has both (the o2m/o2o loss-weight decay of MODEL.md §6.6 and the 16 px
   candidate enlargement of §7.3); nothing to add.
 
@@ -220,4 +225,19 @@ so these are other rounding trajectories of the same recipe.
 - The Studio and Desktop offline estimates (`web/src/routes/runnew/estimate.ts`, `web/src/lib/api/mock/runs.ts`,
   `web/src/routes/run/resolved.ts`, `apps/desktop/src/api/mock/training.rs`) still mirror rule 3 and the 100-step
   floor; other lanes own them.
-- Full-scale COCO under rule 4 (the folo-s run used rule 3: momentum 0.9, bias warmup 0).
+- Full-scale COCO under rule 5 (the folo-s run used rule 3: momentum 0.9, bias warmup 0, weights 0.2 / 1.0).
+- EMA for short fine-tunes (item 4): with 400 optimizer steps the EMA decay `0.9999 · (1 − e^{−t/2000})` ends at
+  0.18, so BCCD's validated weights are nearly the live model; a shorter `tau` needs a config key (none today).
+- BCCD stays level with yolo26n (0.625 vs 0.626): its fine-tunes peak by epoch 17–37 and the remaining 60+ epochs add
+  nothing; what is left is the pretrained weights (folo-n-coco-v2, COCO AP 0.317, vs yolo26n's 0.409).
+- `GET /api/runs/{id}/cli` replays `musgd.*` values through the CLI's JSON parsing without `float_roundtrip`, so an
+  unusual value can differ in its last bit; a non-default `musgd.cls_lr` is not replayed (before #194 too).
+
+## Headline (three seeds per side unless noted)
+
+| | main 647b981f | after #188 + #194 | reference |
+|---|---:|---:|---:|
+| Proxy P1 AP (folo-n from scratch, 20 epochs) | 0.0757 | **0.1234** (+63%) | Ultralytics 8.4.198, one run each: MuSGD 0.1133, SGD 0.0853, `auto` 0.0166 |
+| Shapes gate mAP50-95 (one seed) | 0.892 | **0.934** | pass bar 0.75 |
+| BCCD fine-tune test AP | 0.607 | **0.625** (+0.018) | yolo26n 0.626 |
+| medical-pills / signature / brain-tumor | 0.804 / 0.989 / 0.452 | 0.807 / 0.989 / 0.450 | yolo26n 0.803 / 0.982 / 0.436 |
