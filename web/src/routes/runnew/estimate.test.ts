@@ -16,20 +16,22 @@ describe('oomScale', () => {
 
 describe('warmupIters', () => {
   it("matches the engine's own examples (folo_nn::sched)", () => {
-    expect(warmupIters(3, 30, 13)).toBe(100); // docs/MODEL.md §10.4: T = 390, the full floor
+    // A new run's `warmup_floor` is 0 (docs/MODEL.md §8.4), so W = min(round(warmup_epochs · spe), (epochs − 1) · spe).
+    expect(warmupIters(3, 30, 13)).toBe(39); // docs/MODEL.md §10.4: T = 390, 3 epochs (the old floor made it 100)
     expect(warmupIters(0, 30, 13)).toBe(0);
     expect(warmupIters(3, 1, 13)).toBe(0); // epochs − 1 = 0
-    expect(warmupIters(3, 10, 13)).toBe(39); // T = 130: floor 39, 3 epochs = 39
-    expect(warmupIters(3, 12, 3)).toBe(10); // T = 36: floor 10
-    expect(warmupIters(0.5, 37, 9)).toBe(99); // T = 333: floor 99
-    expect(warmupIters(0.5, 334, 1)).toBe(100); // T = 334: the full floor
+    expect(warmupIters(3, 10, 13)).toBe(39); // T = 130: 3 epochs = 39
+    expect(warmupIters(3, 12, 3)).toBe(9); // T = 36: 3 epochs = 9 (the old floor made it 10)
+    expect(warmupIters(0.5, 37, 9)).toBe(5); // half an epoch of 9, rounded half up as Rust's f64::round
+    expect(warmupIters(0.5, 334, 1)).toBe(1);
     expect(warmupIters(3, 4, 3)).toBe(9); // 3 epochs of 4, capped at epochs − 1
+    expect(warmupIters(3, 3, 5)).toBe(10); // 3 epochs of 3: capped at 2 epochs
   });
 });
 
 describe('warmup', () => {
   it("follows docs/MODEL.md's worked example (800 images, batch 16, 10 epochs)", () => {
-    // nb = 50, accumulate = 4, spe = 13, T = 130; F = min(100, 39) = 39, so W = min(max(39, 39), 9 · 13) = 39.
+    // nb = 50, accumulate = 4, spe = 13, T = 130; no floor, so W = min(round(3 · 13), 9 · 13) = 39.
     expect(warmup(800, 10, 16)).toEqual({ stepsPerEpoch: 13, accumulate: 4, steps: 130, warmup: 39 });
   });
   it('counts optimizer steps, not batches: a large batch accumulates nothing', () => {

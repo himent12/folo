@@ -110,7 +110,7 @@ fn default_lr0() -> f32 {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Optimizer {
-    /// MuSGD for long runs, AdamW for short ones (docs/MODEL.md §8.2).
+    /// MuSGD at lr0 0.01 for every run (`auto` rule 5, docs/MODEL.md §8.2).
     #[default]
     Auto,
     /// SGD with Nesterov momentum.
@@ -291,13 +291,14 @@ pub struct ResolvedTrain {
     pub nbs: u32,
     /// Optimizer steps per epoch: `ceil(batches per epoch / accumulate)`.
     pub optimizer_steps_per_epoch: u64,
-    /// Warmup length in optimizer steps (from `warmup_epochs`: at least 100, at most 30% of a short run).
+    /// Warmup length in optimizer steps (from `warmup_epochs`, at most every epoch but the last; runs made before
+    /// `warmup_floor` existed warm up for at least 100 steps, at most 30% of a short run).
     pub warmup_iters: u64,
     /// Warmup length as configured, in epochs.
     pub warmup_epochs: f64,
     /// Momentum / β1 at the start of warmup.
     pub warmup_momentum: f64,
-    /// The bias group's LR at the start of warmup (`0` under `auto`).
+    /// The bias group's LR at the start of warmup (`0.1`; `0` under `auto` rules 1 to 3).
     pub warmup_bias_lr: f64,
     /// Close-mosaic epochs the run trains with: `TrainConfig.augment.close_mosaic` capped at half the run
     /// (docs/MODEL.md §8.4), so mosaic is off for the last `close_mosaic` epochs. Left out by servers older than the

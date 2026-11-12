@@ -284,8 +284,8 @@ describe('mock queue (docs/API.md, POST /api/runs/{id}/queue)', () => {
     vi.advanceTimersByTime(2000);
     const r = await api.run('run_q4n2');
     expect(r.status).toBe('running');
-    // shapes-hard: 4000 images at batch 32 over 120 epochs is 7560 iterations: auto picks AdamW at 0.002 · 5 / 10.
-    expect(r.resolved).toMatchObject({ optimizer: 'adamw', lr0: 0.001, batch: 32, accumulate: 2 });
+    // shapes-hard: auto (rule 5) picks MuSGD at 0.01 for every run.
+    expect(r.resolved).toMatchObject({ optimizer: 'musgd', lr0: 0.01, batch: 32, accumulate: 2 });
     expect(await places(api)).toEqual({ run_q7c5: 1 });
     await expect(api.moveRun('run_31aa', { action: 'up' })).rejects.toMatchObject({ status: 409, code: 'run_not_queued' });
     await expect(api.moveRun('run_q7c5', { position: 0 })).rejects.toMatchObject({ status: 400, code: 'invalid_body' });

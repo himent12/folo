@@ -1035,8 +1035,9 @@ batch 2, in train mode so BN uses batch statistics).
   uninterrupted run.
 - Early stopping: with `patience = 2` and fitness `[0.1, 0.3, 0.2, 0.2]`, training stops after epoch 3
   (`best_epoch = 1`). A resume from the epoch-2 checkpoint stops at the same epoch.
-- `auto` (rule 4) picks MuSGD at `lr0 = 0.01`, momentum 0.937 and `warmup_bias_lr = 0.1` for the run above;
-  `auto_rule = 3` picks AdamW at `lr0 = 0.00125` for `nc = 4`, 2000 images and 30 epochs.
+- `auto` (rules 4 and 5) picks MuSGD at `lr0 = 0.01`, momentum 0.937 and `warmup_bias_lr = 0.1` for the run above,
+  with step weights 0.5 / 0.5 under rule 5 (a run from scratch); `auto_rule = 3` picks AdamW at `lr0 = 0.00125` for
+  `nc = 4`, 2000 images and 30 epochs.
 - EMA: after one update `d = 0.9999 · (1 − e^{−1/2000}) ≈ 4.99825e-4`.
 - **Overfit** (`#[ignore]`, about 1–2 min on CPU): folo-n at 320 px, 8 synthetic images, augmentation off, AdamW
   `lr0 = 0.002`, 300 steps, batch 8, no accumulation. The total loss must fall below 25% of its first value, and
@@ -1055,12 +1056,13 @@ AGPL-3.0: never commit them, any derived file, or the conversion script; gate th
 - Dataset: folo-data's synthetic shapes, 4 classes (circle, square, triangle, star), 2000 train and 200 val images
   at 320×320, 1 to 8 objects per image, object size 6 to 35% of the image side, textured backgrounds, seed 0.
 - Run: `folo train --arch folo-n --imgsz 320 --epochs 30 --batch 16 --close-mosaic 5 --seed 0`, other settings at
-  default (so `auto` rule 4 chooses MuSGD at `lr0 = 0.01`, momentum 0.937, `warmup_bias_lr = 0.1`; `nb = 125`,
-  accumulate 4, `spe = 32`, warmup `W = 96` iterations: 3 epochs, no floor).
+  default (so `auto` rule 5 chooses MuSGD at `lr0 = 0.01`, momentum 0.937, `warmup_bias_lr = 0.1` and step weights
+  0.5 / 0.5; `nb = 125`, accumulate 4, `spe = 32`, warmup `W = 96` iterations: 3 epochs, no floor).
 - **Pass:** EMA-model validation mAP@0.5 ≥ 0.90 and mAP@0.5:0.95 ≥ 0.75 by epoch 30, with no non-finite loss.
-- Measured (seed 0, RTX 4080 SUPER, docs/hill/r2-learn.md): final mAP@0.5 0.985 and mAP@0.5:0.95 0.926, the bar
-  first met at epoch 8. The `auto` of rule 3 (AdamW at `lr0 = 0.00125`, `warmup_bias_lr = 0`, `W = 100` with the
-  old floor) measured 0.980 / 0.892, first met at epoch 9.
+- Measured (seed 0, RTX 4080 SUPER, docs/hill/r2-learn.md): rule 5's settings give final mAP@0.5 0.988 and
+  mAP@0.5:0.95 0.934, the bar first met at epoch 8. Rule 4 (step weights 0.2 / 1.0) measured 0.985 / 0.926, first
+  met at epoch 8; the `auto` of rule 3 (AdamW at `lr0 = 0.00125`, `warmup_bias_lr = 0`, `W = 100` with the old floor)
+  0.980 / 0.892, first met at epoch 9.
 - Calibration (historical: made when `auto` chose AdamW here): the reference implementation (Ultralytics 8.4
   YOLO11n: the same topology, trained with AdamW, its `auto` at 0.00125, from scratch with this run configuration on
   a generator matching this description; its warmup is 375 batches ≈ 94 optimizer steps instead of the 100 FOLO had

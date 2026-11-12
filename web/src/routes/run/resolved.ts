@@ -1,5 +1,5 @@
 // A run's settings as it trains with them (docs/API.md, `Run.resolved`): `config` is what was asked for ("Optimizer
-// auto", "Initial LR 0.01"), `resolved` what the trainer made of it (AdamW at 0.001429). With `resolved`, the resolved
+// auto", "Initial LR 0.01"), `resolved` what the trainer made of it (MuSGD at 0.01). With `resolved`, the resolved
 // value is the one shown, the request a note beside it when it differs; without it (queued, older servers) the
 // request as today.
 
@@ -9,7 +9,7 @@ import { pct } from '$lib/format';
 
 /**
  * One setting: its value, whether that value is an identifier (mono, `ui/Ident`), a sans note after it, and what the
- * value means. A value cell holds one short value ("Auto"); an explanation of it ("AdamW for short runs, else SGD") is
+ * value means. A value cell holds one short value ("Auto"); an explanation of it ("MuSGD for every run") is
  * `about`, set as a `.sub` line under the setting's label, never a long value that wraps to a second line of its own.
  */
 export interface Setting {
@@ -21,11 +21,11 @@ export interface Setting {
 
 const OPTIMIZER: Record<ResolvedTrain['optimizer'], string> = { sgd: 'SGD', adamw: 'AdamW', musgd: 'MuSGD' };
 /** What "Auto" picks, in the words of the picker's option (`optimizerLabel`). */
-export const AUTO_OPTIMIZER_ABOUT = 'AdamW, or MuSGD for long runs';
+export const AUTO_OPTIMIZER_ABOUT = 'MuSGD for every run';
 
 /**
- * An optimizer as every screen names it (New run's picker and Summary, a run's Config, Compare): "Auto (AdamW for short
- * runs, else SGD)", "SGD", "AdamW". Named optimizers are names, set in sans like any other word: in Geist Mono the
+ * An optimizer as every screen names it (New run's picker and Summary, a run's Config, Compare): "Auto (MuSGD for every
+ * run)", "SGD", "AdamW". Named optimizers are names, set in sans like any other word: in Geist Mono the
  * struck W of "AdamW" reads as "₩" (DESIGN_DIRECTION §2.3, identifiers vs names).
  */
 export function optimizerLabel(o: Optimizer | ResolvedTrain['optimizer']): string {
@@ -33,7 +33,7 @@ export function optimizerLabel(o: Optimizer | ResolvedTrain['optimizer']): strin
 }
 
 /**
- * "AdamW (auto)", "SGD" (asked for by name); unresolved, the request: "Auto", what it picks under the label (`about`).
+ * "MuSGD (auto)", "SGD" (asked for by name); unresolved, the request: "Auto", what it picks under the label (`about`).
  * Never an identifier.
  */
 export function optimizerSetting(config: TrainConfig, resolved: ResolvedTrain | null | undefined): Setting {

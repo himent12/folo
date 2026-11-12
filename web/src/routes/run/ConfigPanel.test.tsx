@@ -50,16 +50,16 @@ function rows(resolved: ResolvedTrain | null, cfg: TrainConfig = config) {
 
 describe('ConfigPanel', () => {
   it('shows the resolved optimizer, LR, accumulation and warmup as the truth', () => {
-    // fasteners: 1920 images at batch 16 over 100 epochs is 3000 iterations: AdamW at max(0.002 · 5 / (4 + 8), 0.001).
+    // fasteners: 1920 images at batch 16 over 100 epochs; auto (rule 5) is MuSGD at 0.01 for every run.
     const r = rows(resolveTrain(config, 1920, 8, 120));
-    expect(r['Optimizer']?.textContent).toBe('AdamW (auto)');
-    expect(r['Initial LR']?.textContent).toBe('0.001 (requested 0.01)');
+    expect(r['Optimizer']?.textContent).toBe('MuSGD (auto)');
+    expect(r['Initial LR']?.textContent).toBe('0.01');
     // A batch and an optimizer step are two rows, never "per step" for a batch.
     expect(r['Batch']?.textContent).toBe('16');
     expect(r['Effective batch']?.textContent).toBe('64 (4 × 16)');
     expect(r['Warmup']?.textContent).toBe('360 optimizer steps (3 epochs)');
     expect(r['LR decay']?.textContent).toBe('Linear to 1%');
-    expect(r['Betas']?.textContent).toBe('0.9 · 0.999');
+    expect(r['Momentum']?.textContent).toBe('0.937');
     expect(r['Weight decay']?.textContent).toBe('0.0005');
   });
 
