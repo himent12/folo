@@ -327,7 +327,7 @@ ms normally, up to 10 s when the disk is busy (round 1), all before the next epo
 promises (docs/API.md) that the files are on disk when it arrives, so the write could not simply move.
 
 ### What changed
-- folo-vision `train/writer.rs`: the training thread takes the snapshot (`Trainer::checkpoint_snapshot`, the bytes
+- folo-vision `train/writer/`: the training thread takes the snapshot (`Trainer::checkpoint_snapshot`, the bytes
   `save_checkpoint` writes, every tensor on the host) and a writer thread writes the files (each to a temporary
   name, synced, renamed: a crash or stop mid-write leaves the previous checkpoint intact). One write at a time: the
   next epoch's end waits for the previous write. Tensors already on the host (a CPU run's weights, BatchNorm
@@ -338,17 +338,28 @@ promises (docs/API.md) that the files are on disk when it arrives, so the write 
   holds every event (the next epoch's steps and logs, in order); at each step the training thread checks the writer
   and, once it is done, delivers the epoch event and then the held events. A stop, a failure and the end of the run
   wait for the write first. A write that fails fails the run as if at the epoch's end: no epoch event, the held events
-  dropped, `status: failed`.
-- `Epoch.duration_s` now ends with the snapshot (training + validation + snapshot; docs/API.md).
+  dropped, `status: failed`. A trainer dropped with a write in flight (a panic unwinding mid-epoch) joins the writer
+  without delivering any event, so nothing writes into the run folder after it is gone. The samples JSON is written
+  atomically too.
+- `Epoch.duration_s` now ends with the snapshot (training + validation + snapshot, plus the wait for the previous
+  write when it is still running at the epoch's end; docs/API.md).
 - folo-server's test support paused a run by blocking in the event sink at the epoch event; the event now arrives
   while the next epoch trains (on a tiny set, only at its end), so two cloud tests stopped a run one epoch late. The
-  pause moved to a hidden `TrainOptions::after_epoch` hook the trainer calls at the epoch boundary, after the write is
-  settled and the event delivered (folo-server `runs/train.rs`, a neighbour's file: three lines).
+  pause moved to a hidden `TrainOptions::after_epoch` hook (`EpochHook`): at every boundary the trainer asks whether
+  it pauses; only then does it wait for the write, deliver the event and call the pause (folo-server: only while a
+  test holds runs, so Studio, Desktop, API and cloud-worker runs never wait for the write at the boundary). A test
+  that stopped a run with a run folder from its epoch event (`micro_run_learns_checkpoints_and_resumes_bit_exactly`,
+  which a reviewer saw finish 2 epochs) stops through the hook; the others stop runs without a run folder, whose epoch
+  event is still delivered at the boundary.
 
 ### Results
-Slow disk (a temporary build, not committed, that sleeps 1 s in every checkpoint write, `FOLO_TMP_WRITE_DELAY_MS`,
-and with `FOLO_TMP_SYNC=1` writes inline as main does; row-10 set, 4 epochs, `--batch 16 --imgsz 640 --workers 8
---close-mosaic 0 --device gpu:0`, 3 rounds alternated, process wall):
+Slow disk: `bench/trainer/slow_write.sh` (its header has the build steps) on a build with
+`bench/trainer/slow_write.patch` applied, temporary instrumentation in `train/writer/mod.rs` that sleeps
+`FOLO_TMP_WRITE_DELAY_MS` (1000) at the start of every checkpoint write and with `FOLO_TMP_SYNC=1` writes inline as
+main does (the path taken when no thread starts); row-10 set (`D:/folo-bench/data`), 4 epochs, `--batch 16 --imgsz
+640 --workers 8 --close-mosaic 0 --device gpu:0`, modes sync / async / none alternated over 3 rounds, process wall,
+every run's log kept under `$OUT`. The numbers below were measured with the same instrumentation on this PR's first
+commit (3318daeb), before the review fixes:
 
 | | process wall, median (range) |
 |---|---|

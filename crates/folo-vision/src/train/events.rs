@@ -55,7 +55,7 @@ pub(crate) struct Emitter {
     last_step: Option<Instant>,
     /// The run's length, `(epochs, steps_per_epoch)`, carried by every `status` event.
     length: (u32, u64),
-    /// While a checkpoint write runs (`train/writer.rs`): the events emitted meanwhile, in order, delivered after
+    /// While a checkpoint write runs (`train/writer/`): the events emitted meanwhile, in order, delivered after
     /// the epoch event that waits for the write.
     held: Option<Vec<Held>>,
 }

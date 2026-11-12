@@ -1,0 +1,25 @@
+diff --git a/crates/folo-vision/src/train/writer/mod.rs b/crates/folo-vision/src/train/writer/mod.rs
+index c62d4f71..4d0fa40a 100644
+--- a/crates/folo-vision/src/train/writer/mod.rs
++++ b/crates/folo-vision/src/train/writer/mod.rs
+@@ -87,6 +87,10 @@ impl Drop for WriterThread {
+ 
+ impl EpochFiles {
+     fn write(self) -> Result<()> {
++        // Temporary instrumentation (bench/trainer/slow_write.sh): a slow disk.
++        if let Some(ms) = std::env::var("FOLO_TMP_WRITE_DELAY_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
++            std::thread::sleep(std::time::Duration::from_millis(ms));
++        }
+         #[cfg(test)]
+         tests::wrote(&self);
+         let (map, tensors) = &self.contents;
+@@ -167,7 +171,8 @@ impl Trainer {
+         #[cfg(test)]
+         let (inline, gate) = (files.inline, files.gate.clone());
+         #[cfg(not(test))]
+-        let inline = false;
++        // Temporary instrumentation (bench/trainer/slow_write.sh): write on the training thread, as main did.
++        let inline = std::env::var("FOLO_TMP_SYNC").is_ok_and(|v| v == "1");
+         let files = std::sync::Arc::new(std::sync::Mutex::new(Some(files)));
+         let take = files.clone();
+         let spawned = if inline {

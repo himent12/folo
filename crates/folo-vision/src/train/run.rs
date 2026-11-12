@@ -204,8 +204,8 @@ impl Trainer {
             self.epoch = e + 1;
             self.at_boundary = true;
             // The checkpoint's snapshot is taken here; its files are written while the next epoch trains, and the
-            // epoch event is delivered once they are on disk (`train/writer.rs`). The epoch's time ends with the
-            // snapshot.
+            // epoch event is delivered once they are on disk (`train/writer/`). The epoch's time ends with the
+            // snapshot, and includes the wait for the previous epoch's write if it is still running.
             let files = self.epoch_files(e, improved, &val.samples)?;
             let duration_s = t0.elapsed().as_secs_f64();
             let batches = clock.wall[0] + clock.wall[1] - batches_before;
@@ -213,9 +213,13 @@ impl Trainer {
             let ep = folo_api::Epoch { epoch: e + 1, train_loss, val: metrics, duration_s };
             summary.epochs.push(ep.clone());
             self.write_epoch_files(files, RunEvent::Epoch(ep))?;
+            // Only a pause waits for the write (and delivers the epoch event first).
             if let Some(mut hook) = self.after_epoch.take() {
-                let written = self.settle_write();
-                hook(&self.stop);
+                let written = if hook.pauses(self.epoch) {
+                    self.settle_write().map(|()| hook.pause(self.epoch, &self.stop))
+                } else {
+                    Ok(())
+                };
                 self.after_epoch = Some(hook);
                 written?;
             }

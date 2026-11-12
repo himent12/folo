@@ -11,7 +11,7 @@ use folo_vision::{TrainData, TrainOptions, Trainer};
 use crate::engine;
 use crate::throughput::{Throughput, TrainKey, TrainSample};
 
-use super::{DatasetRef, EpochHold, Measure, RunEntry, data_format};
+use super::{DatasetRef, EpochHold, HoldHook, Measure, RunEntry, data_format};
 
 impl Measure {
     /// Epoch `e` (1-based) trains with mosaic.
@@ -139,8 +139,8 @@ fn build(
     let opts = TrainOptions {
         run_dir: Some(e.dir.clone()),
         events: Some(Box::new(move |ev: &RunEvent| sink.on_event(ev))),
-        // At the epoch boundary, after the epoch's event (its files written).
-        after_epoch: Some(Box::new(move |stop| hold.wait(stop))),
+        // While the hold is on: at the epoch boundary, after the epoch's event (its files written).
+        after_epoch: Some(Box::new(HoldHook(hold))),
         stop: e.stop.clone(),
         weights,
         ..TrainOptions::default()

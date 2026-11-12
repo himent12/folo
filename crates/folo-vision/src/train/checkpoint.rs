@@ -1,5 +1,5 @@
 //! Checkpoints: [`Trainer::save_checkpoint`] (the complete FORMAT.md training state), the host snapshot of it the
-//! epoch's files are written from (`train/writer.rs`), and the batched device-to-host download behind both.
+//! epoch's files are written from (`train/writer/`), and the batched device-to-host download behind both.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -26,7 +26,7 @@ impl Trainer {
     }
 
     /// The complete training state as [`Trainer::save_checkpoint`] writes it, with every tensor on the host: what
-    /// the checkpoint writer thread is handed (`train/writer.rs`). Only at an epoch boundary.
+    /// the checkpoint writer thread is handed (`train/writer/`). Only at an epoch boundary.
     pub(super) fn checkpoint_snapshot(&self) -> Result<FileContents> {
         if !self.at_boundary {
             return Err(Error::Config(format!(
