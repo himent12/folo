@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
-import type { Bench } from '$lib/api/types';
+import type { Bench, Model } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { toast } from '$lib/ui/toast';
@@ -108,12 +108,15 @@ describe('New benchmark', () => {
     splits.at(-1)!.click();
     flushSync();
     expect(document.querySelector('.note.warn')).not.toBeNull();
-    // An image limit outside 1–5000 is refused at the field, and holds Create.
-    type(document.querySelector('input[id$="-max"]')!, '0');
+    // An image limit outside 1–5000 is refused at the field as soon as it is typed (no "It takes all …" for it), and
+    // holds Create.
+    type(document.querySelector('input[id$="-max"]')!, '-5');
+    expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/5,000/);
+    expect(document.body.textContent).not.toMatch(/It takes all/);
+    expect(why(submit())).toBeTruthy();
     send();
     flushSync();
     expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/5,000/);
-    expect(why(submit())).toBeTruthy();
   });
 
   it('creates it with the default plan and opens its page', async () => {
@@ -131,9 +134,9 @@ describe('New benchmark', () => {
 });
 
 describe('Add entry', () => {
-  async function dialog(kind: 'model' | 'agent' | 'external', benchId = 'bn_3c90') {
+  async function dialog(kind: 'model' | 'agent' | 'external', benchId = 'bn_3c90', only?: (m: Model) => boolean) {
     const bench: Bench = await hub.api.bench(benchId);
-    const models = await hub.api.models();
+    const models = (await hub.api.models()).filter((m) => !only || only(m));
     const agents = await hub.api.labelAgents();
     const entries = await hub.api.benchEntries(benchId);
     const catalog = await hub.api.benchCatalog();
@@ -165,6 +168,28 @@ describe('Add entry', () => {
     flushSync();
     expect([...document.querySelectorAll('.chip.miss')].map((x) => x.textContent?.replace(/,.*$/, '').trim())).toEqual(['washer', 'screw', 'spring', 'rivet', 'pin', 'bearing']);
     expect(sel.querySelector<HTMLOptionElement>('option[value="m_coco_s"]')?.disabled).toBe(true);
+  });
+
+  it('says when no model knows a class of the benchmark, and how to get one', async () => {
+    await dialog('model', 'bn_3c90', (m) => m.id === 'm_coco_s');
+    const help = document.querySelector('.no-model')!;
+    expect(help.querySelector('.nm-title')?.textContent).toMatch(/^No model here knows bolt, nut, washer, screw or \d+ more$/);
+    expect(help.querySelector<HTMLAnchorElement>('a')?.getAttribute('href')).toMatch(/^#\/runs\/new\?dataset=|^#\/datasets\/label\//);
+    const add = submit();
+    expect(add.disabled).toBe(true);
+    expect(why(add)).toBe('No model knows these classes');
+    [...help.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Use an agent')!.click();
+    flushSync();
+    expect(document.querySelector('.no-model')).toBeNull();
+  });
+
+  it('says an image count out of range as soon as it is typed', async () => {
+    await dialog('model');
+    type(document.querySelector('input[id$="-mimages"]')!, '99999');
+    expect(document.querySelector('.field.invalid [role="alert"]')?.textContent).toMatch(/A whole number from 1 to/);
+    expect(why(submit())).toBe('Fix the fields first');
+    type(document.querySelector('input[id$="-mimages"]')!, '');
+    expect(document.querySelector('.field.invalid')).toBeNull();
   });
 
   it('starts an agent entry with the defaults', async () => {
@@ -358,6 +383,8 @@ describe('the benchmark page', () => {
     // Seven finished entries have a box (one graded on an earlier version of the benchmark); the running and the failed
     // one have none.
     expect(boxes).toHaveLength(7);
+    // The header asks to select two: the boxes show without a hover once two entries are finished.
+    expect(document.querySelector('table.board')?.classList.contains('pickable')).toBe(true);
     const compare = () => [...document.querySelectorAll<HTMLElement>('header a, header button')].find((b) => /^Compare/.test(b.textContent?.trim() ?? ''))!;
     expect(compare().getAttribute('aria-disabled') === 'true' || (compare() as HTMLButtonElement).disabled).toBe(true);
     for (const b of boxes.slice(0, 5)) {

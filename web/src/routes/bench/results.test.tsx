@@ -126,6 +126,10 @@ describe("an entry's page", () => {
       expect(rows).toHaveLength(12);
       const means = [...rows].map((r) => Number(r.querySelector('.mean')!.textContent!.replace('%', '')));
       expect(means).toEqual([...means].sort((a, b) => a - b));
+      // The ramp's ink is dark in light theme and bright in dark theme: the caption names neither.
+      const lead = document.querySelector('#robustness .lead')!.textContent!;
+      expect(lead).toMatch(/stronger a cell’s shade, the more it lost/);
+      expect(lead).not.toMatch(/darker|lighter/i);
       // Its charts announce a row at every stop.
       for (const s of speak('#self-labeling')) expect(s).toMatch(/^From [01]\.\d+ up: [\d,]+ labels?, \d+% right/);
       for (const s of speak('#calibration')) expect(s).toMatch(/\d/);
@@ -151,6 +155,9 @@ describe("an entry's page", () => {
     expect(document.querySelector('#score')).not.toBeNull();
     expect(document.querySelector('#calibration svg')).toBeNull();
     expect(document.querySelector('#robustness .heat')).toBeNull();
+    // A measured axis takes a larger share than its plan weight, and says which is which.
+    const w = document.querySelector('#score .r[data-axis="accuracy"] .c-w')!.textContent!;
+    expect(w).toMatch(/^weight \d+%\d+% in the plan$/);
   });
 
   it('shows a running entry where it is, and a failed one why', async () => {

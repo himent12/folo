@@ -51,7 +51,7 @@ export default function LabelJob() {
   const id = computed(() => router.route.params.id ?? '');
   const show = computed<Show>(() => {
     const s = router.route.query.get('show');
-    return s === 'pending' || s === 'labeled' || s === 'failed' ? s : 'all';
+    return s === 'pending' || s === 'review' || s === 'reviewed' || s === 'failed' ? s : 'all';
   });
   const imageParam = computed(() => router.route.query.get('image'));
 
@@ -85,6 +85,8 @@ export default function LabelJob() {
     router.go(`/datasets/label/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`, { replace: true });
   }
   const shown = computed(() => (show.get() === 'all' ? live.images : live.images.filter((i) => inFilter(i, show.get()))));
+  /** Labeled images a person has checked (the job's counts do not have them: the images do). */
+  const reviewed = computed(() => live.images.reduce((n, i) => n + (i.status === 'labeled' && i.reviewed ? 1 : 0), 0));
   // A linked image the job does not have (removed since, a stale link) would open the editor empty: the job holds all
   // its images once loaded, so the link is dropped and the page says why.
   effect(() => {
@@ -297,6 +299,11 @@ export default function LabelJob() {
               <Meta>
                 <span class="num">{imagesText(j().counts.images)}</span>
                 <span class="num">{num(j().counts.labeled)} labeled</span>
+                {j().counts.labeled ? (
+                  <span class="num">
+                    {num(reviewed.get())} of {num(j().counts.labeled)} reviewed
+                  </span>
+                ) : null}
                 <span class="num">
                   {j().classes.length} {j().classes.length === 1 ? 'class' : 'classes'}
                 </span>
@@ -375,6 +382,7 @@ export default function LabelJob() {
                     choice={choice}
                     bind:instructions={field(instructions, 'text')}
                     instructionsError={instructions.error}
+                    instructionsSaved={instructions.saved}
                     starting={starting.get()}
                     startError={startError.get()}
                     lost={live.lost !== null}

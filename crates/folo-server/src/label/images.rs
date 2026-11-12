@@ -10,13 +10,13 @@ use folo_api::{
 };
 
 use crate::error::Result;
-use crate::index::{absolute, read_image_with, write_atomic};
+use crate::index::{read_image_with, write_atomic};
 use crate::store::ImageData;
 use crate::util::fnv1a;
 
 use super::job::{Job, Record, stem_key, unique_file_name};
 use super::validate::check_boxes;
-use super::{BULK_IMAGES, Labeler, MAX_IMAGES, Upload, io_error, path_not_found};
+use super::{BULK_IMAGES, Labeler, MAX_IMAGES, Upload, folder_path, invalid, io_error, path_not_found};
 
 impl Labeler {
     /// `POST /api/label/jobs/{id}/images` (multipart): stores the uploads in the job's folder.
@@ -56,8 +56,10 @@ impl Labeler {
     /// `POST /api/label/jobs/{id}/images` (JSON): adds the images of a folder on this machine, in place.
     pub fn add_folder(&self, id: &str, path: &str) -> Result<LabelImagesAdded> {
         let job = self.job(id)?;
-        let folder = absolute(Path::new(path.trim()));
-        if path.trim().is_empty() || !folder.exists() {
+        let Some(folder) = folder_path(path)? else {
+            return Err(invalid("path must not be blank"));
+        };
+        if !folder.exists() {
             return Err(path_not_found(&folder));
         }
         self.add_folder_to(&job, &folder)
@@ -72,14 +74,27 @@ impl Labeler {
                 state.file.images.iter().filter_map(|r| r.external.clone()).collect();
             (known, MAX_IMAGES.saturating_sub(state.file.images.len()))
         };
+        // The other files' extensions, a few, say why a folder without images added nothing.
+        let mut others = std::collections::BTreeSet::new();
         let files = walkdir::WalkDir::new(folder)
             .sort_by_file_name()
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file() && folo_data::is_image_path(e.path()))
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| {
+                let image = folo_data::is_image_path(e.path());
+                if !image && others.len() < 4 {
+                    others.insert(
+                        e.path().extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default(),
+                    );
+                }
+                image
+            })
             .map(|e| e.into_path());
         let (mut staged, mut skipped, mut over) = (Vec::new(), Vec::new(), 0usize);
+        let mut found = 0usize;
         for path in files {
+            found += 1;
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             if known.contains(&path) {
                 skipped.push(SkippedImage { file: name, reason: "the job already has this file".into() });
@@ -99,6 +114,9 @@ impl Labeler {
                 file: folder.display().to_string(),
                 reason: format!("{over} more images were left out: a job holds at most {MAX_IMAGES}"),
             });
+        }
+        if found == 0 {
+            skipped.push(nothing_found(folder, &others));
         }
         self.insert(job, staged, skipped)
     }
@@ -168,6 +186,7 @@ impl Labeler {
                 boxes: Vec::new(),
                 source: None,
                 error: None,
+                reviewed: false,
             });
         }
         let added: Vec<LabelImage> = state.file.images[first_new..].iter().map(|r| state.image(r)).collect();
@@ -232,13 +251,23 @@ impl Labeler {
         })
     }
 
-    /// `PUT /api/label/jobs/{id}/images/{image_id}`: boxes drawn by hand.
+    /// `PUT /api/label/jobs/{id}/images/{image_id}`: boxes drawn by hand, and whether a person checked the labels.
     pub fn update_image(&self, id: &str, image_id: &str, req: UpdateLabelImage) -> Result<LabelImage> {
         let job = self.job(id)?;
         let mut state = job.live()?;
         let classes = state.file.classes.len();
         let record = state.record(image_id)?;
-        let boxes = check_boxes(&req.boxes, classes, (record.width, record.height))?;
+        let boxes = match &req.boxes {
+            Some(boxes) => Some(check_boxes(boxes, classes, (record.width, record.height))?),
+            None if req.reviewed.is_none() => return Err(invalid("give `boxes`, `reviewed` or both")),
+            // Only labels can be right: an image without them is saved with its boxes (none: a background image).
+            None if req.reviewed == Some(true) && record.status != LabelImageStatus::Labeled => {
+                return Err(invalid(format!(
+                    "image '{image_id}' has no labels to mark reviewed: save its boxes instead"
+                )));
+            }
+            None => None,
+        };
         // What the change replaces, to put back when it cannot be saved ([`State::claim`] takes the image out of
         // a run waiting for it).
         let old = record.clone();
@@ -246,10 +275,16 @@ impl Labeler {
         let total = state.file.run.as_ref().map(|r| r.total);
         state.claim(image_id)?;
         let record = state.record_mut(image_id).expect("the record was just read");
-        record.boxes = boxes;
-        record.status = LabelImageStatus::Labeled;
-        record.source = Some(LabelSource::Manual);
-        record.error = None;
+        if let Some(boxes) = boxes {
+            record.boxes = boxes;
+            record.status = LabelImageStatus::Labeled;
+            record.source = Some(LabelSource::Manual);
+            record.error = None;
+            record.reviewed = true;
+        }
+        if let Some(reviewed) = req.reviewed {
+            record.reviewed = reviewed;
+        }
         if let Err(e) = job.save(&state) {
             *state.record_mut(image_id).expect("the record was just read") = old;
             if let (Some(run), Some(total)) = (state.file.run.as_mut(), total) {
@@ -304,4 +339,18 @@ impl Source {
             let _ = std::fs::remove_file(tmp);
         }
     }
+}
+
+/// Why a folder (or a file) added nothing: a file is not an image, a folder has none (and which other files it has).
+fn nothing_found(path: &Path, others: &std::collections::BTreeSet<String>) -> SkippedImage {
+    if path.is_file() {
+        let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        return SkippedImage { file, reason: "not a JPEG, PNG, BMP or WebP file".into() };
+    }
+    let mut reason = "no JPEG, PNG, BMP or WebP images in this folder or its subfolders".to_string();
+    let kinds: Vec<String> = others.iter().filter(|x| !x.is_empty()).map(|x| format!(".{x}")).collect();
+    if !kinds.is_empty() {
+        reason.push_str(&format!(" (it has {} files)", kinds.join(", ")));
+    }
+    SkippedImage { file: path.display().to_string(), reason }
 }

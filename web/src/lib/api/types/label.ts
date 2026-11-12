@@ -115,6 +115,11 @@ export interface LabelImage {
   source: LabelSource | null;
   /** Why the last agent call for it failed (`status: failed`). */
   error: string | null;
+  /**
+   * A person checked its labels (saved boxes drawn by hand, or marked them right); only a `labeled` image is. An
+   * agent that labels it again clears it. Absent from older servers.
+   */
+  reviewed?: boolean;
 }
 
 /** `POST /api/label/jobs`. */

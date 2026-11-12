@@ -4,15 +4,17 @@ import { createComponent } from 'fw/internal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi, type Scenario } from '$lib/api/mock';
-import type { LabelJob } from '$lib/api/types';
+import type { LabelImagesAdded, LabelJob } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { toast } from '$lib/ui/toast';
 import { render } from '../../../framework/testing';
 import LabelJobPage from '../LabelJob';
 import LabelJobs from '../LabelJobs';
+import AddImagesDialog from './AddImagesDialog';
 import DatasetDialog, { type DatasetDialogProps } from './DatasetDialog';
 import JobDialog, { type JobDialogProps } from './JobDialog';
+import { whyNothingAdded, type Uploads } from './uploads';
 
 let target: HTMLElement;
 /** Port of `mount(comp, { target, props })`: the props object is read live (a `deep` one changes them). */
@@ -80,6 +82,32 @@ describe('New labeling job', () => {
     expect(why(submitButton())).toBe('Fix the classes first');
   });
 
+  it('focuses Name on open, and keeps what was typed when it is closed and opened again', async () => {
+    const props = deep({ open: true } as JobDialogProps);
+    open(JobDialog, props);
+    await vi.waitFor(() => expect(document.activeElement?.id).toMatch(/-name$/));
+    type(document.querySelector('input[id$="-name"]')!, 'street');
+    type(document.querySelector('input[id$="-classes"]')!, 'car, person');
+    type(document.querySelector('textarea')!, 'Every car.');
+    props.open = false;
+    flushSync();
+    props.open = true;
+    flushSync();
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('street');
+    expect(document.querySelector<HTMLInputElement>('input[id$="-classes"]')!.value).toBe('car, person');
+    expect(document.querySelector('textarea')!.value).toBe('Every car.');
+  });
+
+  it('says which pasted classes did not fit under the limit', () => {
+    open(JobDialog, { open: true });
+    const input = document.querySelector<HTMLInputElement>('input[id$="-classes"]')!;
+    type(input, Array.from({ length: 82 }, (_, i) => `c${i + 1}`).join(', '));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(document.querySelectorAll('.chip')).toHaveLength(80);
+    expect(document.getElementById(input.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Only 80 classes fit: c81 and c82 were not added.');
+  });
+
   it('creates the job and opens its page', async () => {
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     open(JobDialog, { open: true });
@@ -100,6 +128,50 @@ describe('New labeling job', () => {
     expect(text()).toMatch(/rename a class or add one, not remove one/);
     expect(document.querySelectorAll('dialog[open] button[aria-label^="Remove"]')).toHaveLength(0);
     expect(document.querySelectorAll('dialog[open] input[aria-label^="Class"]')).toHaveLength(4);
+  });
+});
+
+describe('Add images › Server folder', () => {
+  function folderTab(answer: LabelImagesAdded | null = null) {
+    const folder = vi.fn(async (_path: string) => answer);
+    open(AddImagesDialog, { open: true, tab: 'folder' as const, uploads: { folder } as unknown as Uploads, onbrowse: () => {} });
+    const input = document.querySelector<HTMLInputElement>('dialog[open] input')!;
+    const submit = () => {
+      submitButton().click();
+      flushSync();
+    };
+    return { folder, input, submit };
+  }
+
+  it('sends a path pasted with quotes and spaces around (Explorer’s "Copy as path") without them', async () => {
+    const { folder, input, submit } = folderTab();
+    type(input, '  "D:\\photos\\unlabeled cells"  ');
+    submit();
+    await vi.waitFor(() => expect(folder).toHaveBeenCalledWith('D:\\photos\\unlabeled cells'));
+  });
+
+  it('stays open and says why when the folder added nothing', async () => {
+    const reason = 'no JPEG, PNG, BMP or WebP images in this folder or its subfolders (it has .tif files)';
+    const { input, submit } = folderTab({ added: [], skipped: [{ file: 'D:/scans', reason }], job: {} as LabelJob });
+    type(input, 'D:/scans');
+    submit();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('dialog[open] .nothing')?.textContent).toBe(`Nothing was added${reason.replace('no', 'No')}.`);
+    });
+    expect(whyNothingAdded([1, 2, 3].map((i) => ({ file: `${i}.png`, reason: i < 3 ? 'the job already has this file' : 'not a readable image' })))).toBe(
+      '2 files: the job already has this file; 1 file: not a readable image.',
+    );
+  });
+
+  it('says a relative path is not a full one, and sends nothing', () => {
+    const { folder, input, submit } = folderTab();
+    type(input, "'photos'");
+    submit();
+    expect(folder).not.toHaveBeenCalled();
+    expect(document.querySelector('dialog[open] .field.invalid')?.textContent).toMatch(/Give the full path, such as D:\/photos/);
+    type(input, '/srv/photos');
+    expect(document.querySelector('dialog[open] .field.invalid')).toBeNull();
   });
 });
 
@@ -175,10 +247,21 @@ describe('the job page', () => {
 
   it('with images to label: the one primary is Label N images', async () => {
     await page('/datasets/label/lb_7c21');
+    // No example text in the instructions box as if it were the job's own.
+    expect(document.querySelector('textarea')?.getAttribute('placeholder')).toBe('None: the agent goes by the class names alone.');
     expect(button('Label 40 images')?.className).toMatch(/primary/);
     expect(primaries()).toHaveLength(1);
     expect(button('Create dataset')?.disabled).toBe(true);
     expect(text()).toMatch(/Create dataset: label an image first/);
+  });
+
+  it('before the first answer of a run: a line that the agent is working, and for how long', async () => {
+    await page('/datasets/label/lb_7c21');
+    button('Label 40 images')!.click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('.p-wait')?.textContent).toMatch(/^Claude Code is working on the first images · \d+s$/);
+    });
   });
 
   it('while an agent labels: progress and Stop, no primary', async () => {
@@ -194,6 +277,13 @@ describe('the job page', () => {
     expect(primaries()).toHaveLength(1);
     expect(text()).toMatch(/Tokens and cost as reported by the agent/);
     expect(button('Label all again')).toBeTruthy();
+    // How far review has got: in the header, and as filters.
+    await vi.waitFor(() => {
+      flushSync();
+      expect(text()).toMatch(/22 of 36 reviewed/);
+    });
+    const chips = [...document.querySelectorAll('[role="radio"]')].map((r) => r.textContent?.trim());
+    expect(chips).toEqual(expect.arrayContaining(['To review14', 'Reviewed22']));
   });
 
   it('after a failed run: its cause, the fix and Try again', async () => {
@@ -224,7 +314,13 @@ describe('the job list', () => {
       flushSync();
       expect(document.querySelectorAll('tr[data-row]')).toHaveLength(4);
     });
-    expect([...document.querySelectorAll('tr[data-row]')].map((r) => r.querySelector('.badge')?.textContent?.trim())).toEqual(['Idle', 'Labeling', 'Idle', 'Agent failed']);
+    expect([...document.querySelectorAll('tr[data-row]')].map((r) => r.querySelector('.badge')?.textContent?.trim())).toEqual(['Idle', 'Labeling', 'Idle', 'Last run failed']);
+    // A job whose last run failed is listed under Failed, not Idle.
+    const failed = [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"] button, [role="radio"]')].find((b) => b.textContent?.startsWith('Failed'));
+    expect(failed?.textContent).toBe('Failed1');
+    failed!.click();
+    flushSync();
+    expect([...document.querySelectorAll('tr[data-row]')].map((r) => r.querySelector('.badge')?.textContent?.trim())).toEqual(['Last run failed']);
     unmount(c!);
     hub.api = new MockApi('empty', 0);
     c = mount(LabelJobs, { target });

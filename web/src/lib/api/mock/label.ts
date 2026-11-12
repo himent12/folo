@@ -25,7 +25,7 @@ import type {
   StartLabeling,
   UpdateLabelJob,
 } from '../types';
-import { AGENT_NAME, classChangeError, classesError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
+import { AGENT_NAME, classChangeError, classesError, folderPath, folderPathError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
 import { imageSize, inventBoxes, predictBoxes, round } from './boxes';
 import { image, specs, type MockDatasetSpec } from './datasets';
 import { renderImage } from './render';
@@ -102,6 +102,8 @@ interface Img {
   boxes: Box[];
   source: 'agent' | 'manual' | null;
   error: string | null;
+  /** A person checked its labels (reported for a labeled image only). */
+  reviewed: boolean;
   /** Its pixels: an image of a mock dataset, or a file uploaded in this page. */
   from: { spec: MockDatasetSpec; index: number } | { blob: Blob; key: string };
   /** What it was before an agent call took it: a stopped call gives it back. */
@@ -182,7 +184,7 @@ export class MockLabeling {
 
   // ---------- seeded jobs ----------
 
-  /** Four jobs in four states: fresh, mid-run (it runs on in real time), fully labeled and reviewed, failed. */
+  /** Four jobs in four states: fresh, mid-run (it runs on in real time), fully labeled and partly reviewed, failed. */
   #seed() {
     const t0 = this.t0;
     const spec = (id: string) => specs.find((s) => s.id === id) as MockDatasetSpec;
@@ -200,7 +202,7 @@ export class MockLabeling {
       'Sign in to Claude Code on the server’s machine (run `claude` and follow /login), then start the run again.',
     );
 
-    // Labeled, reviewed and corrected by hand: ready to become a dataset.
+    // Labeled, partly reviewed and corrected by hand: ready to become a dataset.
     const done = this.#make(
       'lb_51d0',
       'fasteners-review',
@@ -221,6 +223,8 @@ export class MockLabeling {
       im.boxes = [];
       im.source = 'manual';
     }
+    // Reviewed as far as the 22nd image: the ones corrected by hand and the ones that looked right.
+    for (const im of done.images.slice(0, 22)) im.reviewed = true;
 
     // Labeling now: started 12 s before the page loaded, it finishes about 24 s after.
     const live = this.#make(
@@ -260,7 +264,7 @@ export class MockLabeling {
   }
 
   #img(job: Job, file: string, width: number, height: number, from: Img['from']): Img {
-    return { id: String(job.nextImage++), file, width, height, status: 'pending', boxes: [], source: null, error: null, from, before: null, failures: 0 };
+    return { id: String(job.nextImage++), file, width, height, status: 'pending', boxes: [], source: null, error: null, reviewed: false, from, before: null, failures: 0 };
   }
 
   // ---------- reading ----------
@@ -278,7 +282,8 @@ export class MockLabeling {
   }
 
   #toImage(im: Img): LabelImage {
-    return { id: im.id, file: im.file, width: im.width, height: im.height, status: im.status, boxes: im.boxes, source: im.source, error: im.error };
+    const reviewed = im.reviewed && im.status === 'labeled';
+    return { id: im.id, file: im.file, width: im.width, height: im.height, status: im.status, boxes: im.boxes, source: im.source, error: im.error, reviewed };
   }
 
   #toJob(j: Job): LabelJob {
@@ -392,7 +397,7 @@ export class MockLabeling {
   create(body: CreateLabelJob, now: number): LabelJob {
     this.#checkJobFields(body);
     // As on the server, a folder that cannot be found creates nothing.
-    const folder = body.path ? this.#folder(body.path) : null;
+    const folder = body.path && folderPath(body.path) ? this.#folder(body.path) : null;
     const id = `lb_${(hash(body.name + now + this.#next++) & 0xffff).toString(16).padStart(4, '0')}`;
     const job = this.#make(id, body.name.trim(), body.classes.map((c) => c.trim()), body.instructions ?? '', now);
     if (folder) this.#import(job, folder);
@@ -430,8 +435,11 @@ export class MockLabeling {
   // ---------- images ----------
 
   /** A mock dataset's folder (its path, whatever the spelling): what the demo server can "read". */
-  #folder(path: string): MockDatasetSpec {
-    const key = (p: string) => p.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  #folder(raw: string): MockDatasetSpec {
+    // As the server: the quotes and spaces around a pasted path are not part of it, and a relative path is refused.
+    const path = folderPath(raw);
+    if (folderPathError(path)) throw new ApiError(400, 'invalid_body', `path must be a full path: ${path} is relative`);
+    const key = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
     const s = specs.find((d) => key(d.path) === key(path));
     if (!s) throw new ApiError(404, 'path_not_found', `No folder at ${path}.`, 'The demo server cannot read your disk: try one of its own folders, such as D:/data/shapes.');
     return s;
@@ -539,10 +547,23 @@ export class MockLabeling {
       clipped.push(c);
     }
     this.#claim(j, im);
-    Object.assign(im, { boxes: clipped, status: 'labeled', source: 'manual', error: null });
+    Object.assign(im, { boxes: clipped, status: 'labeled', source: 'manual', error: null, reviewed: true });
     this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
     const out = this.#toJob(j);
     this.#emit(j.id, (h) => h.job?.(out));
+    return this.#toImage(im);
+  }
+
+  /** `PUT …/images/{id}` with `reviewed` alone: the labels checked (or not), the boxes as they are. */
+  reviewImage(id: string, imageId: string, reviewed: boolean, now: number): LabelImage {
+    const j = this.#job(id);
+    this.advance(j, now);
+    const im = this.#image(j, imageId);
+    if (reviewed && im.status !== 'labeled')
+      throw new ApiError(400, 'invalid_body', `image '${imageId}' has no labels to mark reviewed: save its boxes instead`);
+    this.#claim(j, im);
+    im.reviewed = reviewed;
+    this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
     return this.#toImage(im);
   }
 
@@ -721,12 +742,12 @@ export class MockLabeling {
       if (!im) continue;
       im.before = null;
       if (im.failures === 0 && hash(`${j.id}:${im.id}`) % 13 === 0) {
-        Object.assign(im, { status: 'failed', error: LEFT_OUT });
+        Object.assign(im, { status: 'failed', error: LEFT_OUT, reviewed: false });
         im.failures++;
         r.failed++;
         leftOut = true;
       } else {
-        Object.assign(im, { status: 'labeled', boxes: this.#draft(j, im, r), source: 'agent', error: null });
+        Object.assign(im, { status: 'labeled', boxes: this.#draft(j, im, r), source: 'agent', error: null, reviewed: false });
         boxes += im.boxes.length;
         labeled++;
         r.done++;

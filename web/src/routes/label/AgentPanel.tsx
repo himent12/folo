@@ -10,10 +10,10 @@ import Pencil from '$icons/pencil';
 import RotateCw from '$icons/rotate-cw';
 import Sparkles from '$icons/sparkles';
 import Square from '$icons/square';
-import { bindable, computed, createUniqueId, css, For, Index } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, For, Index, signal } from 'fw';
 import type { LabelAgent, LabelJob } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
-import { num } from '$lib/format';
+import { duration, num } from '$lib/format';
 import { AGENT_NAME, INSTRUCTIONS_MAX } from '$lib/label';
 import Button from '$lib/ui/Button';
 import CodeText from '$lib/ui/CodeText';
@@ -38,6 +38,8 @@ export interface AgentPanelProps {
   choice: AgentChoice;
   instructions?: string;
   instructionsError: string | null;
+  /** The instructions were just saved and not edited since: the field says so. */
+  instructionsSaved?: boolean;
   starting: boolean;
   startError: unknown;
   /** The stream is down: progress is as last heard. */
@@ -75,6 +77,18 @@ export default function AgentPanel(props: AgentPanelProps) {
     const r = run.get();
     return r ? r.done + r.failed : 0;
   });
+  // Until its first answer a run shows an empty bar: a line says it is working, and for how long.
+  const waiting = computed(() => props.job.status === 'running' && !!run.get() && done.get() === 0);
+  const elapsed = signal(0);
+  effect(() => {
+    const r = run.get();
+    if (!waiting.get() || !r) return;
+    const from = Date.parse(r.started);
+    const tick = () => elapsed.set(Math.max(0, (Date.now() - from) / 1000));
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  });
 
   return (
     <Panel title="Agent" pad="none">
@@ -94,6 +108,11 @@ export default function AgentPanel(props: AgentPanelProps) {
                 tone={props.lost ? 'neutral' : 'accent'}
                 label={`${done.get()} of ${run.get()!.total} images done`}
               />
+              {waiting.get() ? (
+                <p class="p-wait num">
+                  {AGENT_NAME[run.get()!.agent]} is working on the first images · {duration(elapsed.get())}
+                </p>
+              ) : null}
               <p class="p-meta">
                 <Meta>
                   <For each={runAgent(run.get()!, props.agents)}>{(f) => <span>{f()}</span>}</For>
@@ -179,7 +198,9 @@ export default function AgentPanel(props: AgentPanelProps) {
           hint={
             running.get()
               ? 'The agent has these for this run; change them once it is done.'
-              : 'What counts as each class and what to leave out, in your own words. Sent with every image.'
+              : props.instructionsSaved
+                ? 'Saved. Sent with every image.'
+                : 'What counts as each class and what to leave out, in your own words. Sent with every image.'
           }
         >
           <TextArea
@@ -187,7 +208,7 @@ export default function AgentPanel(props: AgentPanelProps) {
             bind:value={instructions}
             rows={5}
             readonly={running.get() || props.starting}
-            placeholder="Label every car and pedestrian, also partly hidden ones. Ignore reflections and posters."
+            placeholder="None: the agent goes by the class names alone."
             onblur={props.onsaveinstructions}
           />
         </Field>
@@ -269,6 +290,7 @@ css`
     font-weight: var(--weight-medium);
   }
   .p-meta,
+  .p-wait,
   .note {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);

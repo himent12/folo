@@ -91,6 +91,8 @@ export default function Leaderboard(props: LeaderboardProps) {
   const doneCount = computed(() => entries.get().filter(finished).length);
   const active = computed(() => entries.get().filter((e) => isEntryActive(e)).length);
   const picking = computed(() => selected.get().length > 0);
+  /** Two finished entries can be compared: their checkboxes show without a hover (the header asks to select them). */
+  const pickable = computed(() => doneCount.get() >= 2);
   const toggle = (id: string) => selected.set(toggleSelection(selected.peek(), id, entries.peek()));
 
   function items(e: BenchEntry): MenuItem[] {
@@ -168,6 +170,7 @@ export default function Leaderboard(props: LeaderboardProps) {
               <table
                 class="table tall board"
                 class:picking={picking.get()}
+                class:pickable={pickable.get()}
                 aria-label={`Leaderboard of ${props.bench.name}`}
                 use:rowNav={{ toggle: (row: HTMLElement) => toggle(row.dataset.id ?? '') }}
               >
@@ -602,7 +605,7 @@ css`
     transition: opacity var(--dur-fast) var(--ease-standard);
   }
   .board tbody tr:is(:hover, :focus-within, .on) .check input,
-  .board.picking .check input,
+  .board:is(.picking, .pickable) .check input,
   .board .check input:focus-visible {
     opacity: 1;
   }

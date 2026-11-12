@@ -91,6 +91,32 @@ export function sourcePath(s: BenchSource): string {
   return s.kind === 'dataset' ? `/datasets/${encodeURIComponent(s.dataset_id)}` : `/datasets/label/${encodeURIComponent(s.job_id)}`;
 }
 
+/** Names as a sentence lists them: "RBC", "RBC or WBC", "RBC, WBC or Platelets", "a, b, c, d or 3 more". */
+export function orList(names: readonly string[], max = 4): string {
+  if (names.length <= 1) return names[0] ?? '';
+  const shown = names.length > max ? [...names.slice(0, max), `${num(names.length - max)} more`] : [...names];
+  return `${shown.slice(0, -1).join(', ')} or ${shown.at(-1)}`;
+}
+
+/**
+ * Add entry when no model of the server knows a single class of the benchmark: what is wrong, and how to get a model
+ * that does (train one on the source dataset, or first make a dataset from the labeling job), with the page to go to.
+ */
+export function noModelHelp(b: Pick<Bench, 'classes' | 'source' | 'source_name'>): { title: string; text: string; action: { label: string; path: string } } {
+  const title = `No model here knows ${orList(b.classes)}`;
+  if (b.source.kind === 'dataset')
+    return {
+      title,
+      text: `Train one on ${b.source_name}, or run a coding agent or another model's predictions instead.`,
+      action: { label: `Train on ${b.source_name}`, path: `/runs/new?dataset=${encodeURIComponent(b.source.dataset_id)}` },
+    };
+  return {
+    title,
+    text: `Make a dataset from the labeling job ${b.source_name} and train a model on it, or run a coding agent or another model's predictions instead.`,
+    action: { label: 'Open the labeling job', path: sourcePath(b.source) },
+  };
+}
+
 /** The short fingerprint a person compares by eye: its first 4 and last 4 hex digits ("9c41…e2a0"). */
 export const shortFingerprint = (f: string) => (f.length > 10 ? `${f.slice(0, 4)}…${f.slice(-4)}` : f);
 

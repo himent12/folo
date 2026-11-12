@@ -5,6 +5,7 @@ import GitCompare from '$icons/git-compare-arrows';
 import Images from '$icons/images';
 import Keyboard from '$icons/keyboard';
 import PanelLeft from '$icons/panel-left';
+import Repeat from '$icons/repeat';
 import Plus from '$icons/plus';
 import ScanSearch from '$icons/scan-search';
 import Search from '$icons/search';
@@ -15,7 +16,7 @@ import Target from '$icons/target';
 import X from '$icons/x';
 import { bindable, computed, css, Dynamic, effect, For, Index, signal } from 'fw';
 import { hub } from '$lib/api/index';
-import type { Bench, Dataset, Model, Run, RunStatus } from '$lib/api/types';
+import type { Bench, BenchLoop, Dataset, LabelJob, Model, Run, RunStatus } from '$lib/api/types';
 import { failureCause } from '$lib/oom';
 import { prefs } from '$lib/prefs';
 import { router } from '$lib/router';
@@ -89,6 +90,9 @@ export default function CommandPalette(props: CommandPaletteProps) {
   /** Benchmarks, on servers that have them (a server without answers 501 or 404: none listed). */
   const benches = signal<Bench[]>([]);
   const benchesOk = signal(false);
+  /** Labeling jobs, and the benchmarks' self-improvement loops, on servers that have them (none listed otherwise). */
+  const labelJobs = signal<LabelJob[]>([]);
+  const loops = signal<BenchLoop[]>([]);
   /** The items chosen last (ids), read on open: with no query they head the list, under Recent. */
   const recent = signal<string[]>([]);
 
@@ -110,9 +114,15 @@ export default function CommandPalette(props: CommandPaletteProps) {
       api.datasets().then((d) => datasets.set(d), () => {});
       api.models().then((m) => models.set(m), () => {});
       api.benches().then(
-        (b) => (benches.set(b), benchesOk.set(true)),
-        () => (benches.set([]), benchesOk.set(false)),
+        (b) => {
+          benches.set(b);
+          benchesOk.set(true);
+          // Loops live under their benchmark: one request each (a server has a few benchmarks).
+          Promise.all(b.map((x) => api.benchLoops(x.id).catch(() => [] as BenchLoop[]))).then((l) => loops.set(l.flat()));
+        },
+        () => (benches.set([]), benchesOk.set(false), loops.set([])),
       );
+      api.labelJobs().then((j) => labelJobs.set(j), () => labelJobs.set([]));
     } else if (!open.get() && el.open) el.close();
   });
 
@@ -211,6 +221,24 @@ export default function CommandPalette(props: CommandPaletteProps) {
       icon: Target,
       run: go(`/benchmarks/${x.id}`),
     }));
+    const benchName = new Map(benches.get().map((x) => [x.id, x.name]));
+    const jobs: Item[] = labelJobs.get().map((x) => ({
+      id: `label-${x.id}`,
+      group: 'Labeling jobs',
+      label: x.name,
+      match: x.classes,
+      hint: [x.status === 'idle' ? `${x.counts.labeled.toLocaleString('en-US')} of ${x.counts.images.toLocaleString('en-US')} images labeled` : 'Labeling', `${x.classes.length} ${x.classes.length === 1 ? 'class' : 'classes'}`],
+      icon: Tags,
+      run: go(`/datasets/label/${x.id}`),
+    }));
+    const l: Item[] = loops.get().map((x) => ({
+      id: `loop-${x.id}`,
+      group: 'Loops',
+      label: x.name,
+      hint: [`${x.status.charAt(0).toUpperCase()}${x.status.slice(1)}`, `on ${benchName.get(x.bench_id) ?? 'a benchmark'}`],
+      icon: Repeat,
+      run: go(`/benchmarks/${x.bench_id}/loops/${x.id}`),
+    }));
     const m: Item[] = models.get().map((x) => ({
       id: `model-${x.id}`,
       group: 'Models',
@@ -257,6 +285,8 @@ export default function CommandPalette(props: CommandPaletteProps) {
       ...d.map((i) => ({ ...i, scoped: true })),
       ...m.map((i) => ({ ...i, scoped: true })),
       ...b.map((i) => ({ ...i, scoped: true })),
+      ...jobs.map((i) => ({ ...i, scoped: true })),
+      ...l.map((i) => ({ ...i, scoped: true })),
     ];
   });
 

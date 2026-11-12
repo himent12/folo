@@ -294,6 +294,33 @@ async fn folder_images_are_read_in_place() {
         "path_not_found",
     )
     .await;
+    // A path as Explorer's "Copy as path" gives it, in quotes with spaces around, is the same folder.
+    let quoted = format!(" \"{}\" ", photos.to_string_lossy());
+    let again: LabelImagesAdded = ok(app, post(&uri, json!({ "path": quoted }))).await;
+    assert!(again.added.is_empty());
+    assert_eq!(again.skipped.iter().filter(|s| s.reason == "the job already has this file").count(), 4);
+    // A folder without images, or a file that is not one, says why nothing was added.
+    std::fs::create_dir_all(t.join("notes/sub")).unwrap();
+    std::fs::write(t.join("notes/a.md"), "x").unwrap();
+    std::fs::write(t.join("notes/sub/b.TIF"), "x").unwrap();
+    let none: LabelImagesAdded =
+        ok(app, post(&uri, json!({ "path": t.join("notes").to_string_lossy() }))).await;
+    assert!(none.added.is_empty());
+    let reasons: Vec<&str> = none.skipped.iter().map(|s| s.reason.as_str()).collect();
+    assert_eq!(
+        reasons,
+        ["no JPEG, PNG, BMP or WebP images in this folder or its subfolders (it has .md, .tif files)"]
+    );
+    let file: LabelImagesAdded =
+        ok(app, post(&uri, json!({ "path": t.join("notes/a.md").to_string_lossy() }))).await;
+    assert_eq!(
+        (file.skipped[0].file.as_str(), file.skipped[0].reason.as_str()),
+        ("a.md", "not a JPEG, PNG, BMP or WebP file")
+    );
+    // A relative path is refused as such, never read from (and named after) the server's working directory.
+    let relative = post(&uri, json!({ "path": "\"photos\"" }));
+    let e = err(app, relative, StatusCode::BAD_REQUEST, "invalid_body").await;
+    assert_eq!(e.message, "path must be a full path: photos is relative");
 
     // Labeled and exported: the dataset has copies; deleting an image or the job leaves the folder alone.
     ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), json!({ "agent": "claude" })))
@@ -307,4 +334,41 @@ async fn folder_images_are_read_in_place() {
     send(app, delete(&format!("/api/label/jobs/{}/images/{}", job.id, page.images[0].id))).await;
     send(app, delete(&format!("/api/label/jobs/{}", job.id))).await;
     assert!(photos.join("a.png").is_file() && photos.join("day 2").join("a.png").is_file());
+}
+
+#[tokio::test]
+async fn a_person_marks_images_reviewed_and_the_agent_relabeling_one_clears_it() {
+    let t = TestDir::new("label-reviewed");
+    let f = fixture(&t.join("home"), vec![]);
+    let app = &f.app;
+    let job = job_with_images(app, 3).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    let page = images(app, &job.id, "").await;
+    let (a, b) = (page.images[0].id.clone(), page.images[1].id.clone());
+    let image = |id: &str| format!("{uri}/images/{id}");
+
+    // Without labels there is nothing to mark right; a request asking nothing is refused.
+    let none = put(&image(&a), json!({ "reviewed": true }));
+    assert!(err(app, none, StatusCode::BAD_REQUEST, "invalid_body").await.message.contains("save its boxes"));
+    err(app, put(&image(&a), json!({})), StatusCode::BAD_REQUEST, "invalid_body").await;
+
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    idle(app, &job.id).await;
+    let labeled = images(app, &job.id, "").await;
+    assert!(labeled.images.iter().all(|i| i.status == LabelImageStatus::Labeled && !i.reviewed));
+
+    // "Looks right": the agent's boxes stay its own, now reviewed. Saved boxes are reviewed too, and it can be undone.
+    let right: LabelImage = ok(app, put(&image(&a), json!({ "reviewed": true }))).await;
+    assert_eq!((right.reviewed, right.source), (true, Some(LabelSource::Agent)));
+    assert_eq!(right.boxes, labeled.images[0].boxes);
+    let saved: LabelImage = ok(app, put(&image(&b), json!({ "boxes": [] }))).await;
+    assert!(saved.reviewed);
+    let undone: LabelImage = ok(app, put(&image(&b), json!({ "reviewed": false }))).await;
+    assert_eq!((undone.reviewed, undone.source), (false, Some(LabelSource::Manual)));
+
+    // The agent labels the reviewed image again: its new boxes are not reviewed.
+    ok::<LabelJob>(app, post(&format!("{uri}/start"), json!({ "agent": "claude", "image_ids": [a] }))).await;
+    idle(app, &job.id).await;
+    let again = images(app, &job.id, "").await;
+    assert_eq!((again.images[0].source, again.images[0].reviewed), (Some(LabelSource::Agent), false));
 }

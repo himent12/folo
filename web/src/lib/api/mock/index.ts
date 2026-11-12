@@ -139,6 +139,10 @@ export class MockApi extends MockTrainingApi implements Api {
     return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.updateImage(jobId, imageId, boxes, Date.now()));
   }
 
+  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean): Promise<LabelImage> {
+    return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.reviewImage(jobId, imageId, reviewed, Date.now()));
+  }
+
   deleteLabelImage(jobId: string, imageId: string): Promise<void> {
     return this.#labelCall(`DELETE /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.deleteImage(jobId, imageId, Date.now()));
   }

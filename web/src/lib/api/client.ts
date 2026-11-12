@@ -206,6 +206,8 @@ export interface Api {
   importLabelImages(jobId: string, path: string): Promise<LabelImagesAdded>;
   /** Labels drawn by hand: they replace the image's boxes and it becomes `labeled` by `manual` (none: a background image). */
   updateLabelImage(jobId: string, imageId: string, boxes: Box[]): Promise<LabelImage>;
+  /** Marks a labeled image's labels as checked by a person (or not), leaving its boxes as they are. */
+  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean): Promise<LabelImage>;
   deleteLabelImage(jobId: string, imageId: string): Promise<void>;
   startLabeling(jobId: string, body: StartLabeling): Promise<LabelJob>;
   stopLabeling(jobId: string): Promise<LabelJob>;
@@ -509,6 +511,9 @@ export class HttpApi implements Api {
   }
   updateLabelImage(jobId: string, imageId: string, boxes: Box[]) {
     return this.#req<LabelImage>('PUT', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`, { boxes });
+  }
+  reviewLabelImage(jobId: string, imageId: string, reviewed: boolean) {
+    return this.#req<LabelImage>('PUT', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`, { reviewed });
   }
   deleteLabelImage(jobId: string, imageId: string) {
     return this.#req<void>('DELETE', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`);

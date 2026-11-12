@@ -2,8 +2,8 @@
 // What the labeling screens say about a job, a run and what it cost, one wording everywhere.
 
 import type { LabelAgent, LabelImage, LabelJob, LabelRun, LabelUsage, RunStatus } from '$lib/api/types';
-import { num, usd } from '$lib/format';
-import { AGENT_NAME } from '$lib/label';
+import { num, sentence, usd } from '$lib/format';
+import { AGENT_NAME, CLASSES_MAX } from '$lib/label';
 
 /** StatusBadge's `OwnStatus` (ui/StatusBadge.tsx). */
 interface OwnStatus {
@@ -13,13 +13,21 @@ interface OwnStatus {
 
 /**
  * A job's status as a status mark (the run status whose mark it shares) and its word: "Labeling" while an agent
- * works, "Stopping", "Agent failed" when its last run ended early, else "Idle".
+ * works, "Stopping", "Last run failed" when its last run ended early and images are still to label (once they are all
+ * labeled, by hand or by a later run, the failure is history), else "Idle".
  */
 export function jobStatus(job: LabelJob): OwnStatus {
   if (job.status === 'running') return { status: 'running', label: 'Labeling' };
   if (job.status === 'stopping') return { status: 'stopping', label: 'Stopping' };
-  if (job.run?.outcome === 'failed') return { status: 'failed', label: 'Agent failed' };
+  if (job.run?.outcome === 'failed' && toLabel(job) > 0) return { status: 'failed', label: 'Last run failed' };
   return { status: 'queued', label: 'Idle' };
+}
+
+/** What an addition of class names could not take: "Only 80 classes fit: c81 and c82 were not added." */
+export function leftOutText(names: readonly string[]): string {
+  const shown = names.length > 4 ? [...names.slice(0, 3), `${num(names.length - 3)} more`] : names;
+  const list = shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}` : (shown[0] ?? '');
+  return `Only ${num(CLASSES_MAX)} classes fit: ${list} ${names.length === 1 ? 'was' : 'were'} not added.`;
 }
 
 /** The images an unscoped run labels: those without labels (pending and failed). */
@@ -63,6 +71,22 @@ export function usageFacts(u: LabelUsage): string[] {
   ];
 }
 
+/**
+ * What the editor says once the run "Ask the agent again" started has ended: the image's new boxes, why the agent
+ * could not label it (the run's error and hint, or the image's own), or that the run was stopped. Null while the
+ * image is still with the agent (its last event may come after the run's end).
+ */
+export function askOutcome(run: LabelRun, img: LabelImage | undefined): { tone: 'success' | 'info' | 'error'; title: string; detail?: string } | null {
+  const failed = `${AGENT_NAME[run.agent]} could not label it again`;
+  // The status line sets no code: the server's words as plain sentences.
+  const said = (...parts: (string | null | undefined)[]) => parts.flatMap((p) => (p ? [sentence(p, true)] : [])).join(' ') || undefined;
+  if (run.outcome === 'failed') return { tone: 'error', title: failed, detail: said(run.error, run.hint) };
+  if (run.outcome === 'stopped') return { tone: 'info', title: 'The run was stopped', detail: 'The image keeps the boxes it had.' };
+  if (!img || img.status === 'labeling') return null;
+  if (img.status === 'failed') return { tone: 'error', title: failed, detail: said(img.error) };
+  return { tone: 'success', title: 'New boxes', detail: imageState(img) };
+}
+
 /** An image's state in words, as the editor says it: a failed one with the reason the server gives. */
 export function imageState(img: LabelImage): string {
   if (img.status === 'labeling') return 'The agent is labeling it';
@@ -70,5 +94,6 @@ export function imageState(img: LabelImage): string {
   if (img.status === 'pending') return 'Not labeled yet';
   const n = img.boxes.length;
   const what = n === 0 ? 'No objects' : `${num(n)} ${n === 1 ? 'box' : 'boxes'}`;
-  return img.source === 'manual' ? `${what}, edited by hand` : `${what}, drawn by the agent`;
+  const by = img.source === 'manual' ? `${what}, edited by hand` : `${what}, drawn by the agent`;
+  return img.reviewed ? `${by}, reviewed` : by;
 }

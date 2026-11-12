@@ -752,7 +752,7 @@ exported more than once.
   non-blank names of at most 64 characters (no `,`, `:`, line breaks or other control characters; they are
   compared without case); `instructions`:
   at most 4000 characters. With `path`, the images of that folder are added as by `POST …/images`
-  (`path_not_found` creates nothing). Anything else wrong is `400 invalid_body`, naming the field.
+  (`path_not_found` and a relative path create nothing). Anything else wrong is `400 invalid_body`, naming the field.
 - `GET /api/label/jobs/{id}` → `LabelJob`
 - `PUT /api/label/jobs/{id}` body `{ "name"?, "classes"?, "instructions"? }` → `LabelJob`. Absent fields stay.
   Boxes refer to classes by position, so once the job has boxes `classes` may only rename or append (a shorter
@@ -768,15 +768,20 @@ exported more than once.
   image file), whose images are read in place, not copied. A file that is not a readable image, an upload with
   the bytes of an image the job already has, or a folder image it already has (the same file) is listed in
   `skipped` with the reason instead of failing the request; so is everything past the job's limit of 10000
-  images. File names are unique within a job: a second `a.jpg` becomes `a-2.jpg`. `404 path_not_found` for a
-  missing folder. Images may be added while a run is active (they wait for the next run).
+  images, and a folder without a single image (one entry for the folder, naming a few of the other files'
+  extensions) or a `path` to a file that is not an image. File names are unique within a job: a second `a.jpg` becomes `a-2.jpg`. The path is taken without the
+  whitespace and one pair of matching quotes around it (Windows' "Copy as path"); a relative path is
+  `400 invalid_body` (it is never read from the server's working directory), a blank one too. `404 path_not_found`
+  for a missing folder. Images may be added while a run is active (they wait for the next run).
 - `GET /api/label/jobs/{id}/images?status=pending|labeling|labeled|failed&offset=0&limit=100` →
   `{ "total", "images": [LabelImage] }`, in the order the images were added. `limit` defaults to 100 and is capped
   at 1000; `total` counts all matches before `offset` / `limit`; any other `status` is `400 invalid_query`.
 - `GET /api/label/jobs/{id}/images/{image_id}` → the image bytes; `?thumb=256` as for dataset images.
-- `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes": [Box] }` → `LabelImage`: labels drawn by hand.
-  They replace the image's boxes; the image becomes `labeled` with `source: "manual"` (an empty list labels it
-  as a background image). Boxes are clipped to the image; one with a `class` outside the job's classes, a
+- `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes"?: [Box], "reviewed"?: bool }` → `LabelImage`:
+  labels drawn by hand, and whether a person checked them. `boxes` replace the image's boxes; the image becomes
+  `labeled` with `source: "manual"` and `reviewed: true` (an empty list labels it as a background image).
+  `reviewed` alone marks the labels it has as checked (or not) and leaves boxes and `source` alone; only a
+  `labeled` image can be marked reviewed (`400 invalid_body` otherwise, and for a body with neither field). Boxes are clipped to the image; one with a `class` outside the job's classes, a
   non-finite coordinate, or less than a pixel left after clipping is `400 invalid_body`, as are more than 1000
   boxes. `409 label_job_active` while the image is in an agent call (`labeling`). Every other image of a running
   job can be edited: one that still waited for the run leaves it (`run.total` drops by one), so labels drawn by
@@ -879,7 +884,8 @@ exported more than once.
   "status": "pending|labeling|labeled|failed",
   "boxes": [Box],                       // pixel xyxy; kept while the image is labeled again
   "source": null | "agent|manual",      // who drew `boxes`
-  "error": null | "..." }               // why the last agent call failed
+  "error": null | "...",                // why the last agent call failed
+  "reviewed": false }                   // a person checked its labels (labeled images only); an agent run clears it
 // StartLabeling (only agent is required; the rest shows the defaults)
 { "agent": "claude", "model": null, "effort": null, "scope": "unlabeled", "image_ids": null, "note": "",
   "batch": null, "parallel": null }

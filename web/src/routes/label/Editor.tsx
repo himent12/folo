@@ -4,18 +4,20 @@
  * move or resize it by dragging or with the arrow keys (Alt: resize; Shift: 10 px), draw a new one on empty image or
  * add one with Add box. Save (the hand-drawn labels replace the image's; none is a background image; an image not
  * labeled yet can be saved as it is) or Discard; leaving unsaved changes asks first, whichever way (J / K, Close, a
- * link, Back), and closing the tab warns. J / K step through the images in the current filter. "Ask the agent again"
+ * link, Back), and closing the tab warns. J / K step through the images in the current filter. "Looks right" (Enter)
+ * marks labels nobody changed as reviewed and opens the next image to review; saved boxes are reviewed too. "Ask the agent again"
  * runs the agent on this image alone with a note; "Remove image" takes it out of the job. An image the agent has right
  * now cannot be edited, and says so; one that waits for its turn in a run can, and then leaves the run. Its keys work
- * while it is the topmost dialog (shell/pageCommands `dialogKey`).
+ * while it is the topmost dialog (shell/pageCommands `dialogKey`), also after a button that had focus turned disabled.
  */
 import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
+import Check from '$icons/check';
 import Plus from '$icons/plus';
 import Sparkles from '$icons/sparkles';
 import Trash from '$icons/trash-2';
 import X from '$icons/x';
-import { computed, createUniqueId, css, effect, Index, onWindow, signal } from 'fw';
+import { computed, createUniqueId, css, effect, Index, MediaQuery, onWindow, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { LiveLabelJob } from '$lib/api/liveLabel';
 import type { Box, LabelImage, LabelJob } from '$lib/api/types';
@@ -24,18 +26,20 @@ import { num } from '$lib/format';
 import { NOTE_MAX } from '$lib/label';
 import { router } from '$lib/router';
 import { dialogKey } from '$lib/shell/pageCommands';
+import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import { DialogStatus } from '$lib/ui/feedback';
 import Field from '$lib/ui/Field.tsx';
 import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
+import Kbd from '$lib/ui/Kbd';
 import Select from '$lib/ui/Select';
 import { tooltip } from '$lib/ui/tooltip';
 import type { AgentChoice } from './agentChoice';
 import { newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
 import EditCanvas from './EditCanvas';
-import { imageState } from './words';
+import { askOutcome, imageState } from './words';
 
 export interface EditorProps {
   live: LiveLabelJob;
@@ -89,6 +93,7 @@ export default function Editor(props: EditorProps) {
       draft.set(cur.boxes);
       selected.set(null);
       note.set('');
+      asked.set(null);
       status.clear();
     } else if (!sameBoxes(cur.boxes, base.get()) && sameBoxes(draft.get(), base.get())) {
       base.set(cur.boxes);
@@ -165,6 +170,44 @@ export default function Editor(props: EditorProps) {
     }
   }
 
+  // ---------- reviewing ----------
+  /** "Looks right" applies: labels nobody has changed here or checked before, not with the agent. */
+  const reviewable = computed(() => {
+    const cur = img.get();
+    return !!cur && cur.status === 'labeled' && !cur.reviewed && !dirty.get() && !locked.get();
+  });
+  const reviewing = signal(false);
+  /** No keyboard to name a key for. */
+  const touch = new MediaQuery(TOUCH_ONLY, false);
+  /** The next image of the filter whose labels nobody has checked: after this one, then from the start. */
+  function nextToReview(fromId: string): string | null {
+    const list = props.images;
+    const i = list.findIndex((x) => x.id === fromId);
+    const order = i < 0 ? list : [...list.slice(i + 1), ...list.slice(0, i)];
+    return order.find((x) => x.id !== fromId && x.status === 'labeled' && !x.reviewed)?.id ?? null;
+  }
+  /** Marks the labels reviewed (and opens the next image to review) or not. */
+  async function review(reviewed: boolean) {
+    const cur = img.peek();
+    if (!cur || reviewing.peek()) return;
+    // Read before the answer: under "To review" the image leaves the filter once it is reviewed.
+    const next = reviewed ? nextToReview(cur.id) : null;
+    const mark = props.live.mark();
+    reviewing.set(true);
+    status.clear();
+    try {
+      const saved = await hub.api.reviewLabelImage(props.job.id, cur.id, reviewed);
+      props.live.put([saved], mark);
+      if (shownId !== cur.id || !reviewed) return;
+      if (next) props.onnavigate(next);
+      else status.success('Reviewed', 'Every labeled image here is reviewed.');
+    } catch (e) {
+      status.error(e, 'Could not mark the image');
+    } finally {
+      reviewing.set(false);
+    }
+  }
+
   // ---------- leaving with changes ----------
   /**
    * Where to go once unsaved changes are answered: another image, or away (null); or a navigation the router holds
@@ -205,7 +248,13 @@ export default function Editor(props: EditorProps) {
 
   const body = signal<HTMLElement>();
   function onkeydown(e: KeyboardEvent) {
-    if (!open.peek() || leaving.peek() || removing.peek() || !dialogKey(e, body.peek()?.closest('dialog'))) return;
+    if (!open.peek() || leaving.peek() || removing.peek()) return;
+    const dialog = body.peek()?.closest('dialog');
+    // A button that turns disabled under focus (Save once saved, Discard, Ask, Next on the last image) drops focus to
+    // the page's body, where no key reaches the dialog: with no other dialog open, the editor takes focus back.
+    const dropped = !!dialog?.open && e.target === document.body && [...document.querySelectorAll('dialog[open]')].every((d) => d === dialog);
+    if (dropped ? e.defaultPrevented || e.metaKey || e.ctrlKey : !dialogKey(e, dialog)) return;
+    if (dropped) dialog!.focus();
     const k = e.key;
     if (k in ARROWS) {
       if (!arrow(e)) return;
@@ -213,6 +262,11 @@ export default function Editor(props: EditorProps) {
     else if (k === 'j' || k === 'J') step(1);
     else if (k === 'k' || k === 'K') step(-1);
     else if (/^[1-9]$/.test(k)) setClass(Number(k) - 1);
+    // Enter on a control is that control's; anywhere else in the editor it is "Looks right".
+    else if (k === 'Enter') {
+      if (!reviewable.peek() || (e.target instanceof Element && e.target.closest('button, a, select, input, textarea'))) return;
+      void review(true);
+    }
     else if (k === 'Delete' || k === 'Backspace') removeBox();
     else return;
     e.preventDefault();
@@ -223,6 +277,18 @@ export default function Editor(props: EditorProps) {
   // ---------- asking the agent again ----------
   const note = signal('');
   const asking = signal(false);
+  /** When the run "Ask the agent again" started began (its `started`), followed until it ends; null: none. */
+  const asked = signal<string | null>(null);
+  // Once that run ends, the status line says what came of it: the new boxes, the agent's error, or the stop.
+  effect(() => {
+    const started = asked.get();
+    const run = props.job.run;
+    if (started === null || !run || run.started !== started || run.outcome === null) return;
+    const out = askOutcome(run, img.get());
+    if (!out) return;
+    asked.set(null);
+    status.show(out.tone, out.title, out.detail);
+  });
   const askWhy = computed(() =>
     props.job.status !== 'idle'
       ? 'The agent is busy with a run; ask once it is done'
@@ -241,8 +307,10 @@ export default function Editor(props: EditorProps) {
     asking.set(true);
     status.clear();
     try {
-      await props.live.act(() => hub.api.startLabeling(props.job.id, { ...req, image_ids: [cur.id], note: note.peek().trim() }));
+      const job = await props.live.act(() => hub.api.startLabeling(props.job.id, { ...req, image_ids: [cur.id], note: note.peek().trim() }));
       status.info(`${props.choice.agent?.name ?? 'The agent'} is labeling this image again`, 'Its new boxes show here when it is done.');
+      // After the line above: a run that has already ended (an agent that fails at once) replaces it.
+      if (job.run) asked.set(job.run.started);
     } catch (e) {
       status.error(e, 'Could not ask the agent');
     } finally {
@@ -298,6 +366,12 @@ export default function Editor(props: EditorProps) {
               </p>
             ) : savable.get() && !locked.get() ? (
               <p class="state">Save keeps it as labeled by hand, {draft.get().length ? 'with these boxes' : 'with no boxes: a background image'}.</p>
+            ) : reviewable.get() ? (
+              <p class="state">
+                Labels right? {touch.current ? 'Looks right' : <Kbd keys="Enter" subtle />} marks them reviewed and opens the next image to review.
+              </p>
+            ) : img.get()?.reviewed && !locked.get() ? (
+              <p class="state">Reviewed. Edit and save to change the labels.</p>
             ) : !locked.get() ? (
               <p class="state" data-gate-why>
                 No changes yet
@@ -306,13 +380,24 @@ export default function Editor(props: EditorProps) {
             <Button variant="ghost" disabled={!dirty.get()} onclick={() => (draft.set(base.peek()), selected.set(null))}>
               Discard
             </Button>
-            <Gate reason={locked.get() ? 'The image is with the agent' : savable.get() ? null : 'No changes yet'}>
-              {(why) => (
-                <Button variant="primary" loading={saving.get()} disabled={!!why()} aria-describedby={why()} onclick={save}>
-                  Save
-                </Button>
-              )}
-            </Gate>
+            {img.get()?.reviewed && !dirty.get() && !locked.get() ? (
+              <Button variant="ghost" loading={reviewing.get()} onclick={() => review(false)}>
+                Mark not reviewed
+              </Button>
+            ) : null}
+            {reviewable.get() ? (
+              <Button variant="primary" icon={Check} loading={reviewing.get()} onclick={() => review(true)}>
+                Looks right
+              </Button>
+            ) : (
+              <Gate reason={locked.get() ? 'The image is with the agent' : savable.get() ? null : 'No changes yet'}>
+                {(why) => (
+                  <Button variant="primary" loading={saving.get()} disabled={!!why()} aria-describedby={why()} onclick={save}>
+                    Save
+                  </Button>
+                )}
+              </Gate>
+            )}
           </>
         )}
       >
