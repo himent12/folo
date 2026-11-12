@@ -1,16 +1,16 @@
 //! Proxy mode: forwarding to `folo serve`, and its token.
 
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use folo_test_support::ChildGuard;
 use serde_json::{Value, json};
 
-use super::harness::{ALL_TOOLS, OLD, check_tools, checked, init_old, spawn};
+use super::harness::{ALL_TOOLS, OLD, check_tools, checked, folo_cmd, init_old, spawn};
 
 #[test]
 fn proxy_mode_forwards_to_folo_serve() {
-    let mut serve: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut serve: ChildGuard = folo_cmd()
         .args(["serve", "--mock", "--port", "0", "--json"])
         .env("RUST_LOG", "warn")
         .stdout(Stdio::piped())
@@ -123,7 +123,7 @@ fn proxy_mode_forwards_to_folo_serve() {
 #[test]
 fn proxy_mode_sends_the_token() {
     const SECRET: &str = "mcp-s3cret";
-    let mut serve: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut serve: ChildGuard = folo_cmd()
         .args(["serve", "--mock", "--port", "0", "--json"])
         .env("FOLO_TOKEN", SECRET)
         .env("RUST_LOG", "folo_server=debug,tower_http=trace")
@@ -161,7 +161,7 @@ fn proxy_mode_sends_the_token() {
     let log = log.join().unwrap();
     assert!(log.contains("/api/datasets") && !log.contains(SECRET), "{log}");
 
-    let empty = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let empty = folo_cmd()
         .args(["serve", "--mock", "--port", "0", "--token", ""])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

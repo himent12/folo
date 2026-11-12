@@ -41,7 +41,7 @@ pub(super) fn spawn_with_weights(
     inline: Option<&'static str>,
     weights: &std::path::Path,
 ) -> Client {
-    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut child: ChildGuard = folo_cmd()
         .arg("mcp")
         .args(args)
         .env("RUST_LOG", "warn")
@@ -345,4 +345,11 @@ pub(super) fn remove_dir_link(link: &std::path::Path) {
     if std::fs::remove_dir(link).is_err() {
         std::fs::remove_file(link).unwrap();
     }
+}
+
+/// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
+pub fn folo_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
+    c.env("FOLO_NO_CACHE", "1");
+    c
 }

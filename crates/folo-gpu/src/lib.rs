@@ -36,6 +36,7 @@ pub mod dtype;
 pub mod error;
 pub mod kernels;
 pub(crate) mod pipeline;
+pub mod pipeline_cache;
 pub mod pool;
 pub mod profile;
 pub mod tensor;
@@ -50,6 +51,7 @@ pub use context::{
 pub use dtype::DType;
 pub use error::{GpuError, Result};
 pub use kernels::elementwise::{BinaryOp, UnaryOp};
+pub use pipeline_cache::{pipeline_cache_dir, save_pipeline_caches, set_pipeline_cache_dir};
 pub use pool::{GpuBuffer, PoolStats};
 pub use tensor::GpuTensor;
 /// The write-only view of mapped staging memory that [`GpuContext::upload_with`] hands its `fill` closure.

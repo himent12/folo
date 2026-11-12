@@ -269,6 +269,10 @@ impl GpuContext {
         if options.enable_f16 && adapter.features().contains(wgpu::Features::SHADER_F16) {
             features |= wgpu::Features::SHADER_F16;
         }
+        let cache_file = crate::pipeline_cache::wanted(&adapter, options.pipeline_cache_dir.as_deref());
+        if cache_file.is_some() {
+            features |= wgpu::Features::PIPELINE_CACHE;
+        }
         let profile = options.profile && Profiler::supported(&adapter);
         if profile {
             features |= Profiler::features();
@@ -340,6 +344,9 @@ impl GpuContext {
             max_storage_buffers: dl.max_storage_buffers_per_shader_stage,
         };
         let profiler = profile.then(|| Mutex::new(Profiler::new(&device, &queue)));
+        let pipeline_cache = cache_file
+            .filter(|_| device.features().contains(wgpu::Features::PIPELINE_CACHE))
+            .map(|path| crate::pipeline_cache::DiskCache::open(&device, &adapter.get_info(), path));
         let dummy = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("folo-gpu dummy"),
             size: 256,
@@ -379,6 +386,7 @@ impl GpuContext {
                         .clamp(1, MAX_DISPATCHES_PER_BATCH),
                 ),
                 profiler,
+                pipeline_cache,
             }),
         };
         if std::env::var(super::ENV_NO_BIND_CACHE).is_ok_and(|v| v != "0" && !v.is_empty()) {

@@ -17,7 +17,7 @@ fn folo(args: &[&str]) -> (i32, Vec<Value>, String) {
 
 /// [`folo`] with `FOLO_WEIGHTS_DIR` (the `folo weights` cache) set to `cache`.
 fn folo_with(args: &[&str], cache: Option<&Path>) -> (i32, Vec<Value>, String) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_folo"));
+    let mut cmd = folo_cmd();
     cmd.args(args);
     if let Some(cache) = cache {
         cmd.env("FOLO_WEIGHTS_DIR", cache);
@@ -407,7 +407,7 @@ fn stop_resume_and_epoch_only_records() {
     write_yolo(&cfg, &data, ImageFormat::Png).unwrap();
     let project = root.join("runs");
     let run = project.join("long");
-    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut child: ChildGuard = folo_cmd()
         .args(["train", "--json", "--device", "cpu", "--data", s(&data), "--imgsz", "64", "--batch", "4"])
         .args(["--epochs", "6", "--workers", "1", "--project", s(&project), "--name", "long"])
         .stdout(std::process::Stdio::piped())
@@ -494,7 +494,7 @@ fn format_picks_the_labels_and_resume_keeps_it() {
     let run = project.join("coco");
     // Runs `folo train` with `args` and stops it after its first epoch; returns the final record.
     let train_one_epoch = |args: &[&str]| {
-        let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+        let mut child: ChildGuard = folo_cmd()
             .args(["train", "--json", "--device", "cpu", "--workers", "1"])
             .args(args)
             .stdout(std::process::Stdio::piped())
@@ -559,7 +559,7 @@ fn resume_keeps_the_runs_device() {
     let project = root.join("runs");
     let run = project.join("dev");
     // Stopped after its first epoch (a changed `epochs` would not match the checkpoint's schedule).
-    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut child: ChildGuard = folo_cmd()
         .args(["train", "--json", "--device", "cpu", "--workers", "1", "--data", s(&data), "--imgsz", "64"])
         .args(["--batch", "4", "--epochs", "3", "--project", s(&project), "--name", "dev"])
         .stdout(std::process::Stdio::piped())
@@ -581,7 +581,7 @@ fn resume_keeps_the_runs_device() {
     set_train_key(&ckpt, "device", serde_json::json!("gpu:7"));
     // Not through `folo()`, which adds --device cpu.
     let resume = |extra: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_folo"))
+        let out = folo_cmd()
             .args(["train", "--json", "--resume", s(&ckpt), "--json-events", "epoch"])
             .args(extra)
             .output()
@@ -834,4 +834,11 @@ fn weights_names_export_and_coco_val() {
         let b = d["bbox"].as_array().unwrap();
         assert!(b.len() == 4 && b[2].as_f64().unwrap() >= 0.0 && b[3].as_f64().unwrap() >= 0.0);
     }
+}
+
+/// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
+fn folo_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
+    c.env("FOLO_NO_CACHE", "1");
+    c
 }

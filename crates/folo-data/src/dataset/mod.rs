@@ -1,5 +1,6 @@
 //! Datasets: the [`Dataset`] trait, YOLO and COCO readers with format auto-detection, and the load report.
 
+pub(crate) mod cache;
 mod coco;
 
 pub use coco::{
@@ -447,34 +448,125 @@ pub(crate) fn build_entries(
     opts: &OpenOptions,
     report: &mut LoadReport,
 ) -> Vec<ImageEntry> {
-    let results: Vec<(Option<ImageEntry>, Vec<Issue>)> =
-        candidates.into_par_iter().map(|c| check_candidate(c, num_classes, opts)).collect();
+    let files = candidates.iter().flat_map(|c| {
+        let label = match &c.labels {
+            LabelSource::Yolo(l) => Some(l.as_path()),
+            LabelSource::Coco { .. } => None,
+        };
+        std::iter::once(c.image.as_path()).chain(label)
+    });
+    let probes = cache::probe::Probes::new(files, cache::Settings::current());
+    let results: Vec<Checked> =
+        candidates.into_par_iter().map(|c| check_candidate(c, num_classes, opts, &probes)).collect();
     let mut entries = Vec::with_capacity(results.len());
-    for (e, issues) in results {
+    let mut fresh = Vec::new();
+    for (e, issues, learnt) in results {
         report.issues.extend(issues);
         entries.extend(e);
+        fresh.extend(learnt);
     }
+    probes.save(fresh);
     entries
+}
+
+/// A checked candidate: its entry (unless skipped), its issues and what the scan cache should learn from it.
+type Checked = (Option<ImageEntry>, Vec<Issue>, Vec<cache::probe::Fresh>);
+
+/// The header probe of `image` (`(width, height)` or the issue), from the scan cache when it has it. A file gone
+/// since it was listed is a [`IssueKind::MissingImage`], any other failure a [`IssueKind::CorruptImage`].
+fn probe_image(
+    image: &Path,
+    stamp: Option<cache::Stamp>,
+    probes: &cache::probe::Probes,
+    fresh: &mut Vec<cache::probe::Fresh>,
+) -> std::result::Result<(u32, u32), (IssueKind, String)> {
+    use cache::probe::{Fresh, ImageProbe};
+    if let Some(s) = stamp
+        && let Some(p) = probes.image(image, s)
+    {
+        return match p {
+            ImageProbe::Size(w, h) => Ok((*w, *h)),
+            ImageProbe::Corrupt(m) => Err((IssueKind::CorruptImage, DataError::image(image, m).to_string())),
+        };
+    }
+    let probed = probe_size(image);
+    if let Some(s) = probes.cacheable(image, stamp) {
+        // Only what the file's bytes decide is cached, not a failure to read them.
+        match &probed {
+            Ok((w, h)) => fresh.push(Fresh::Image(image.to_path_buf(), s, ImageProbe::Size(*w, *h))),
+            Err(DataError::Image { message, .. }) => {
+                fresh.push(Fresh::Image(image.to_path_buf(), s, ImageProbe::Corrupt(message.clone())))
+            }
+            Err(_) => {}
+        }
+    }
+    probed.map_err(|e| match e {
+        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            (IssueKind::MissingImage, "image file not found".to_string())
+        }
+        e => (IssueKind::CorruptImage, e.to_string()),
+    })
+}
+
+/// The YOLO label file `label` read and parsed, from the scan cache when it has it. `Err` is the message of a
+/// [`IssueKind::BrokenLabel`] issue.
+fn parse_label(
+    label: &Path,
+    stamp: Option<cache::Stamp>,
+    num_classes: Option<usize>,
+    probes: &cache::probe::Probes,
+    fresh: &mut Vec<cache::probe::Fresh>,
+) -> std::result::Result<(Vec<BBox>, Vec<String>), String> {
+    use cache::probe::{Fresh, LabelParse};
+    if let Some(s) = stamp
+        && let Some(p) = probes.label(label, s, num_classes)
+    {
+        return match p {
+            LabelParse::Parsed { boxes, warnings } => Ok((boxes.clone(), warnings.clone())),
+            LabelParse::Broken(m) => Err(m.clone()),
+        };
+    }
+    let bytes = match crate::guard::check(label).and_then(|_| std::fs::read(label)) {
+        Ok(b) => b,
+        // A failed read is not cached.
+        Err(e) => return Err(e.to_string()),
+    };
+    let parsed = match String::from_utf8(bytes) {
+        Ok(text) => labels::parse_yolo(&text, num_classes)
+            .map(|p| (p.boxes, p.warnings))
+            .map_err(|(line, msg)| format!("line {line}: {msg}")),
+        Err(_) => Err("label file is not UTF-8 text".to_string()),
+    };
+    if let Some(s) = probes.cacheable(label, stamp) {
+        let p = match &parsed {
+            Ok((boxes, warnings)) => LabelParse::Parsed { boxes: boxes.clone(), warnings: warnings.clone() },
+            Err(m) => LabelParse::Broken(m.clone()),
+        };
+        fresh.push(Fresh::Label(label.to_path_buf(), s, num_classes, p));
+    }
+    parsed
 }
 
 fn check_candidate(
     c: Candidate,
     num_classes: Option<usize>,
     opts: &OpenOptions,
-) -> (Option<ImageEntry>, Vec<Issue>) {
+    probes: &cache::probe::Probes,
+) -> Checked {
     let mut issues = Vec::new();
+    let mut fresh = Vec::new();
     let issue = |kind, path: &Path, message: String| Issue { kind, path: path.to_path_buf(), message };
-    if !c.image.is_file() {
+    let Some(image) = probes.stat(&c.image).filter(|e| e.is_file) else {
         issues.push(issue(IssueKind::MissingImage, &c.image, "image file not found".into()));
-        return (None, issues);
-    }
+        return (None, issues, fresh);
+    };
     let need_size = opts.verify_images || matches!(&c.labels, LabelSource::Coco { declared: None, .. });
     let size = if need_size {
-        match probe_size(&c.image) {
+        match probe_image(&c.image, image.stamp, probes, &mut fresh) {
             Ok(s) => Some(s),
-            Err(e) => {
-                issues.push(issue(IssueKind::CorruptImage, &c.image, e.to_string()));
-                return (None, issues);
+            Err((kind, m)) => {
+                issues.push(issue(kind, &c.image, m));
+                return (None, issues, fresh);
             }
         }
     } else {
@@ -482,40 +574,22 @@ fn check_candidate(
     };
     match c.labels {
         LabelSource::Yolo(label) => {
-            let (boxes, label) = if label.is_file() {
-                let text = match crate::guard::check(&label).and_then(|_| std::fs::read(&label)) {
-                    Ok(bytes) => match String::from_utf8(bytes) {
-                        Ok(t) => t,
-                        Err(_) => {
-                            issues.push(issue(
-                                IssueKind::BrokenLabel,
-                                &label,
-                                "label file is not UTF-8 text".into(),
-                            ));
-                            return (None, issues);
-                        }
-                    },
-                    Err(e) => {
-                        issues.push(issue(IssueKind::BrokenLabel, &label, e.to_string()));
-                        return (None, issues);
-                    }
-                };
-                match labels::parse_yolo(&text, num_classes) {
-                    Ok(p) => {
-                        for w in p.warnings {
+            let (boxes, label) = match probes.stat(&label).filter(|e| e.is_file) {
+                Some(l) => match parse_label(&label, l.stamp, num_classes, probes, &mut fresh) {
+                    Ok((boxes, warnings)) => {
+                        for w in warnings {
                             issues.push(issue(IssueKind::LabelWarning, &label, w));
                         }
-                        (p.boxes, Some(label))
+                        (boxes, Some(label))
                     }
-                    Err((line, msg)) => {
-                        issues.push(issue(IssueKind::BrokenLabel, &label, format!("line {line}: {msg}")));
-                        return (None, issues);
+                    Err(m) => {
+                        issues.push(issue(IssueKind::BrokenLabel, &label, m));
+                        return (None, issues, fresh);
                     }
-                }
-            } else {
-                (Vec::new(), None)
+                },
+                None => (Vec::new(), None),
             };
-            (Some(ImageEntry { image: c.image, label, size, boxes }), issues)
+            (Some(ImageEntry { image: c.image, label, size, boxes }), issues, fresh)
         }
         LabelSource::Coco { boxes, declared, broken, label } => {
             if let Some(msg) = broken {
@@ -524,7 +598,7 @@ fn check_candidate(
                     &label,
                     format!("{}: {msg}", crate::paths::shown(&c.image)),
                 ));
-                return (None, issues);
+                return (None, issues, fresh);
             }
             if let (Some(d), Some(s)) = (declared, size)
                 && d != s
@@ -540,7 +614,7 @@ fn check_candidate(
             }
             let Some((w, h)) = size.or(declared) else {
                 issues.push(issue(IssueKind::CorruptImage, &c.image, "unknown image size".into()));
-                return (None, issues);
+                return (None, issues, fresh);
             };
             let (fw, fh) = (w as f32, h as f32);
             let mut out = Vec::with_capacity(boxes.len());
@@ -560,7 +634,7 @@ fn check_candidate(
                     format!("{dropped} zero-size box(es) dropped"),
                 ));
             }
-            (Some(ImageEntry { image: c.image, label: None, size: Some((w, h)), boxes: out }), issues)
+            (Some(ImageEntry { image: c.image, label: None, size: Some((w, h)), boxes: out }), issues, fresh)
         }
     }
 }
