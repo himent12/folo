@@ -413,8 +413,8 @@ is a user option; the readback overhead itself (one submit + wait per download, 
 ## Leftovers (second wave), largest expected gain first
 
 1. **First-ever start without a kernel list and with cold driver + pipeline caches** (a new machine or driver, first
-   AMP run there): still 26-40 s of serial driver compile on the training thread in the cold-cache rows above (a run
-   with no list but warm driver / pipeline caches compiles on demand in ~2-3 s). A fix needs deferred dispatch encoding
+   AMP run there): still 26-40 s of serial driver compile on the training thread in the cold-cache rows above (with
+   either cache warm a run without a list compiles on demand far faster; see the warm and serial rows above). A fix needs deferred dispatch encoding
    in folo-gpu `context/` (gpu-pool's files): `kernel()` returns at once with the bind group layout (cheap), the module
    and pipeline compile on the precompile workers, and the batch records dispatches and encodes them at submit, waiting
    only for pipelines it needs. Untested projection: with the workers compiling in parallel it might approach the
@@ -426,6 +426,6 @@ is a user option; the readback overhead itself (one submit + wait per download, 
    creation contends in the driver). Lists already keep first-use order and workers take entries in that order. Ideas
    not tried: bound how far the workers run ahead of the training thread (a window of N kernels past the last one it
    asked for), or per-worker pipeline caches.
-4. **`folo val`**: the GPU forward (see Item 3).
+4. **`folo val`**: the per-batch downloads / device wait (forward versus readback overhead unresolved; see Item 3).
 5. **Checkpoint writes**: one write at a time means a write longer than an epoch (huge models on slow disks) still makes
    the next epoch's end wait; a second pending snapshot would cost another host copy of the training state.
