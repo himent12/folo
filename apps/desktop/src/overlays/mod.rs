@@ -179,13 +179,18 @@ impl FoloApp {
                                         .pt(px(18.))
                                         .pb(px(14.))
                                         .child(
+                                            // A long name in the title ends in "…" short of the close
+                                            // button (the body names it in full), never cut mid-glyph.
                                             div()
+                                                .flex_1()
+                                                .min_w_0()
                                                 .flex()
                                                 .flex_col()
                                                 .gap(px(4.))
                                                 .child(
                                                     text(ty::XL, t.text_primary)
                                                         .font_weight(FontWeight::SEMIBOLD)
+                                                        .ellipsis()
                                                         .child(title.to_string()),
                                                 )
                                                 .when_some(subtitle, |d, s| {

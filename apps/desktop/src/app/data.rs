@@ -111,6 +111,7 @@ impl FoloApp {
                     }
                     let r = r.map(|s| {
                         this.store.capabilities = s.capabilities;
+                        this.store.data_dir = s.data_dir;
                         this.store.features = s.features;
                         s.system
                     });

@@ -508,7 +508,7 @@ fn lists_changed_elsewhere_show_at_the_next_refresh() {
         (run.config.dataset_id.clone(), run.clone())
     });
     // Removed elsewhere (Studio, the CLI): gone at the next refresh, and its runs say so.
-    api.delete_dataset(&id).unwrap();
+    api.delete_dataset(&id, false).unwrap();
     drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
     drive(&mut app, window, |this, _, _| {
         assert!(this.store.dataset_summary(&id).is_none());
@@ -539,4 +539,52 @@ fn lists_changed_elsewhere_show_at_the_next_refresh() {
     });
     app.frame(window.into());
     drive(&mut app, window, |this, _, _| assert_eq!(this.route, Route::Dataset(id.clone())));
+}
+
+#[test]
+fn a_generated_dataset_can_be_removed_with_its_files_as_in_studio() {
+    use super::DeleteTarget;
+    let (mut app, window) = open();
+    let id = drive(&mut app, window, |this, _, _| {
+        let runs = this.store.runs.ready().unwrap();
+        let ds = this.store.datasets.ready().unwrap();
+        let idle =
+            ds.iter().find(|d| !runs.iter().any(|r| r.config.dataset_id == d.id && r.status.is_active()));
+        let id = idle.expect("a dataset no run is using").id.clone();
+        // The demo has no data dir: its datasets are folders of the person's own, never offered.
+        assert!(!this.dataset_files_deletable(&id));
+        // A server's own: under <data dir>/datasets.
+        this.store.data_dir = Some("D:/srv/folo".into());
+        let d = this.store.datasets.ready_mut().unwrap().iter_mut().find(|d| d.id == id).unwrap();
+        d.path = r"D:\srv\folo\datasets\shapes".into();
+        assert!(this.dataset_files_deletable(&id));
+        id
+    });
+    // Asked for: the call carries ?files=true (the demo refuses it, which says it got there).
+    drive(&mut app, window, |this, w, cx| {
+        this.ask_delete(DeleteTarget::Dataset(id.clone()), w, cx);
+        assert!(!this.delete_files, "off each time it opens");
+        this.delete_files = true;
+        this.delete_confirmed(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        let t = this.toasts.last().unwrap();
+        assert!(t.title.starts_with("Couldn't remove"), "{}", t.title);
+        assert!(this.store.dataset_summary(&id).is_some());
+    });
+    // Not asked: unregistered, in Studio's words.
+    drive(&mut app, window, |this, w, cx| {
+        this.ask_delete(DeleteTarget::Dataset(id.clone()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        let t = this.toasts.last().unwrap();
+        assert_eq!(t.title.as_ref(), "Dataset removed");
+        assert!(
+            t.body
+                .as_ref()
+                .is_some_and(|b| b.ends_with("is no longer registered. Files on disk were not touched."))
+        );
+        assert!(this.store.dataset_summary(&id).is_none());
+    });
 }

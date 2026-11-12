@@ -71,6 +71,8 @@ pub struct Store {
     pub capabilities: Option<crate::api::Capabilities>,
     /// Optional API features the server reports (`/system` `features`, e.g. `queue_control`).
     pub features: Vec<String>,
+    /// The server's data dir (`/system` `data_dir`; absent in mock mode and from older servers).
+    pub data_dir: Option<String>,
     pub datasets: Load<Vec<Dataset>>,
     pub dataset: HashMap<String, Load<Dataset>>,
     /// All image metadata of a dataset (cheap: boxes only), for filtering and the grid.
@@ -105,6 +107,7 @@ impl Store {
             health: Load::Idle,
             system: Load::Idle,
             capabilities: None,
+            data_dir: None,
             features: Vec::new(),
             datasets: Load::Idle,
             dataset: HashMap::new(),
@@ -171,6 +174,12 @@ impl Store {
         run.map_or(id.to_string(), |r| self.run_dataset_name(r))
     }
 
+    /// Whether the server wrote this dataset into its own data dir (a generated set, a labeling job's
+    /// export, an upload), so its folder can go with it (`?files=true`), as Studio decides.
+    pub fn written_by_server(&self, d: &Dataset) -> bool {
+        written_by_server(&d.path, self.data_dir.as_deref())
+    }
+
     /// The server stopped answering (the last `/system` refresh couldn't connect).
     pub fn unreachable(&self) -> bool {
         matches!(&self.health, Load::Failed(e) if e.code == "server_unreachable")
@@ -187,6 +196,17 @@ impl Store {
             _ => {}
         }
     }
+}
+
+/// True when `path` is inside `<data_dir>/datasets/`, where the server writes the datasets it makes:
+/// `/` and `\` alike, a trailing separator ignored, and a Windows path compared ignoring case.
+pub fn written_by_server(path: &str, data_dir: Option<&str>) -> bool {
+    let norm = |p: &str| {
+        let s = p.replace('\\', "/").trim_end_matches('/').to_string();
+        let drive = s.as_bytes().get(1) == Some(&b':') && s.as_bytes()[0].is_ascii_alphabetic();
+        if drive { s.to_lowercase() } else { s }
+    };
+    data_dir.is_some_and(|dir| norm(path).starts_with(&format!("{}/datasets/", norm(dir))))
 }
 
 #[cfg(test)]
@@ -231,6 +251,19 @@ mod tests {
         assert_eq!(store.run_dataset_name(&run), format!("{name} (removed)"));
         run.dataset = None;
         assert_eq!(store.run_dataset_name(&run), "removed dataset");
+    }
+
+    #[test]
+    fn a_dataset_under_the_data_dirs_datasets_folder_was_written_by_the_server() {
+        let dir = Some("D:/folo-ux/data2-v-desktop-e2e");
+        assert!(written_by_server("D:\\folo-ux\\data2-v-desktop-e2e\\datasets\\Été 🎉 shapes", dir));
+        assert!(written_by_server("d:/FOLO-UX/data2-v-desktop-e2e/datasets/shapes/", dir));
+        assert!(!written_by_server("D:/folo-data/finetune/BCCD", dir));
+        assert!(!written_by_server("D:/folo-ux/data2-v-desktop-e2e/datasets", dir), "the folder itself");
+        assert!(!written_by_server("D:/folo-ux/data2-v-desktop-e2e-old/datasets/x", dir));
+        assert!(!written_by_server("D:/folo-ux/data2-v-desktop-e2e/datasets/x", None), "no data dir: never");
+        // Not a Windows path: case counts.
+        assert!(!written_by_server("/Srv/data/datasets/x", Some("/srv/data")));
     }
 
     #[test]

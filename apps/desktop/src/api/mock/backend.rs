@@ -360,9 +360,16 @@ impl Backend for MockBackend {
         Ok(())
     }
 
-    fn delete_dataset(&self, id: &str) -> ApiResult<()> {
+    fn delete_dataset(&self, id: &str, files: bool) -> ApiResult<()> {
         self.check()?;
         self.fixture(id)?;
+        // The demo's datasets are folders of its own, none generated into a data dir (it has none).
+        if files {
+            return Err(ApiError::new(
+                "invalid_query",
+                "Only a dataset FOLO generated can go with its files",
+            ));
+        }
         self.removed.lock().unwrap().insert(id.to_string());
         Ok(())
     }

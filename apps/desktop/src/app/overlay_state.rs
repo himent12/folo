@@ -153,6 +153,7 @@ impl FoloApp {
         self.remember_focus(window, cx);
         self.palette = None;
         self.confirm_delete = Some(target);
+        self.delete_files = false;
         let fh = self.fh("del-cancel", cx);
         window.focus(&fh);
         cx.notify();

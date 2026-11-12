@@ -271,29 +271,41 @@ impl FoloApp {
                 self.store.dataset_summary(id).map_or(id.clone(), |d| d.name.clone())
             }
         };
+        // A generated set's folder goes too when asked (and still allowed: no run started on it since).
+        let files = matches!(&target, DeleteTarget::Dataset(id) if self.delete_files && self.dataset_files_deletable(id));
+        let images = match &target {
+            DeleteTarget::Dataset(id) => self.store.dataset_summary(id).map(|d| {
+                counted(d.splits.train + d.splits.val + d.splits.test, "generated image", "generated images")
+            }),
+            DeleteTarget::Run(_) => None,
+        };
         let call = target.clone();
         self.fetch(
             cx,
             move |api| match &call {
                 DeleteTarget::Run(id) => api.delete_run(id),
-                DeleteTarget::Dataset(id) => api.delete_dataset(id),
+                DeleteTarget::Dataset(id) => api.delete_dataset(id, files),
             },
             move |this, r, cx| match r {
-                Ok(()) => {
-                    let body = match &target {
-                        DeleteTarget::Run(id) => {
-                            this.forget_run(id, cx);
-                            None
-                        }
-                        DeleteTarget::Dataset(id) => {
-                            this.forget_dataset(id);
-                            Some("Its files are still on disk.".into())
-                        }
-                    };
-                    this.toast(Tone::Info, format!("Deleted {name}"), body, cx);
-                }
+                Ok(()) => match &target {
+                    DeleteTarget::Run(id) => {
+                        this.forget_run(id, cx);
+                        this.toast(Tone::Info, format!("Deleted {name}"), None, cx);
+                    }
+                    DeleteTarget::Dataset(id) => {
+                        this.forget_dataset(id);
+                        // Studio's words.
+                        let body = if files {
+                            format!("{name} and its {} were deleted.", images.as_deref().unwrap_or("files"))
+                        } else {
+                            format!("{name} is no longer registered. Files on disk were not touched.")
+                        };
+                        this.toast(Tone::Info, "Dataset removed", Some(body.into()), cx);
+                    }
+                },
                 Err(e) => {
-                    this.toast(Tone::Danger, format!("Couldn't delete {name}"), Some(e.message.into()), cx)
+                    let verb = if matches!(target, DeleteTarget::Run(_)) { "delete" } else { "remove" };
+                    this.toast(Tone::Danger, format!("Couldn't {verb} {name}"), Some(e.message.into()), cx)
                 }
             },
         );
