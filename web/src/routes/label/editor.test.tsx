@@ -291,6 +291,49 @@ describe('the labeling editor: asking the agent again', () => {
     });
     expect(line()).not.toMatch(/is labeling this image again/);
   });
+
+  // review R3: the answer to "Ask the agent again" came after another image was opened, and that image's line said the
+  // agent was labeling it, then "New boxes" with its own unchanged boxes.
+  it.each([
+    ['Next', () => void key('j')],
+    ['closing and opening another image', () => (router.go('/datasets/label/lb_7c21'), router.go('/datasets/label/lb_7c21?image=3'))],
+  ])('keeps its line and outcome on the image that asked, after %s', async (_, leave) => {
+    await openEditor('2');
+    const ask = await vi.waitFor(() => {
+      flushSync();
+      const b = inEditor('Ask Claude Code');
+      if (!b || b.disabled) throw new Error('agents loading');
+      return b;
+    });
+    const answer = deferred<void>();
+    const start = hub.api.startLabeling.bind(hub.api);
+    const started = vi.spyOn(hub.api, 'startLabeling').mockImplementation(async (...a) => (await answer.promise, start(...a)));
+    click(ask);
+    expect(started).toHaveBeenCalledWith('lb_7c21', expect.objectContaining({ image_ids: ['2'] }));
+    leave();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('3');
+      expect(editor()?.open && editor()?.querySelector('.ed')).toBeTruthy();
+    });
+    const line = () => editor()!.querySelector('.dialog-status')?.textContent ?? '';
+    answer.resolve();
+    await started.mock.results[0]!.value;
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(line()).not.toMatch(/again/);
+    // The run goes on and ends (the mock's agent answers 1.5 s after it starts); image 3's line says nothing of it.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2000);
+    await vi.waitFor(async () => {
+      flushSync();
+      const two = (await hub.api.labelImages('lb_7c21', { limit: 5 })).images.find((i) => i.id === '2');
+      expect(two?.status).toBe('labeled');
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    flushSync();
+    expect(router.route.query.get('image')).toBe('3');
+    expect(line()).not.toMatch(/again|New boxes/);
+  });
 });
 
 describe('the labeling editor: reviewing', () => {

@@ -277,14 +277,18 @@ export default function Editor(props: EditorProps) {
   // ---------- asking the agent again ----------
   const note = signal('');
   const asking = signal(false);
-  /** When the run "Ask the agent again" started began (its `started`), followed until it ends; null: none. */
-  const asked = signal<string | null>(null);
+  /**
+   * The run "Ask the agent again" started (when it began, its `started`) and the image that asked, followed until it
+   * ends while that image is shown; null: none. Another image opened forgets it, as it does the line.
+   */
+  const asked = signal<{ image: string; started: string } | null>(null);
   // Once that run ends, the status line says what came of it: the new boxes, the agent's error, or the stop.
   effect(() => {
-    const started = asked.get();
+    const a = asked.get();
     const run = props.job.run;
-    if (started === null || !run || run.started !== started || run.outcome === null) return;
-    const out = askOutcome(run, img.get());
+    const cur = img.get();
+    if (a === null || !run || run.started !== a.started || run.outcome === null || cur?.id !== a.image) return;
+    const out = askOutcome(run, cur);
     if (!out) return;
     asked.set(null);
     status.show(out.tone, out.title, out.detail);
@@ -308,11 +312,13 @@ export default function Editor(props: EditorProps) {
     status.clear();
     try {
       const job = await props.live.act(() => hub.api.startLabeling(props.job.id, { ...req, image_ids: [cur.id], note: note.peek().trim() }));
+      // The job's own update is applied (`live.act`) wherever the editor is; the line only on the image that asked.
+      if (shownId !== cur.id || !open.peek()) return;
       status.info(`${props.choice.agent?.name ?? 'The agent'} is labeling this image again`, 'Its new boxes show here when it is done.');
       // After the line above: a run that has already ended (an agent that fails at once) replaces it.
-      if (job.run) asked.set(job.run.started);
+      if (job.run) asked.set({ image: cur.id, started: job.run.started });
     } catch (e) {
-      status.error(e, 'Could not ask the agent');
+      if (shownId === cur.id && open.peek()) status.error(e, 'Could not ask the agent');
     } finally {
       asking.set(false);
     }
