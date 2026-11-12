@@ -125,6 +125,24 @@ pub fn pick_config(m: usize, n: usize, batch: usize) -> CoopConfig {
     CoopConfig::C64X64
 }
 
+/// [`pick_config`] for the forward convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM): short `M` gets
+/// the flat tiles as there, then 64×128 for outputs of at least 128 channels and 6400 pixels (80 px and up), else
+/// 64×64. Measured on an RTX 4080 SUPER at folo-n / folo-s's shapes, batch 16 (`cargo bench -p folo-gpu --bench
+/// conv_model`, `FOLO_CONV_TUNE=1 FOLO_CONV_BIG=1`): 128×128 was never the fastest, and 64×64 beat it by 11–50% at
+/// 40 and 20 px and on stride-2 convs; 64×128 led 64×64 by 2–5% on the large outputs. The gradients keep
+/// [`pick_config`].
+pub fn pick_config_conv(m: usize, n: usize) -> CoopConfig {
+    if m <= 32 {
+        return pick_config(m, n, 1);
+    }
+    if m >= 128 && n >= 6400 { CoopConfig::C64X128 } else { CoopConfig::C64X64 }
+}
+
+/// [`pick_config_conv`] when it fits the device, else `None` (the caller's own pick then decides).
+pub(crate) fn conv_config(ctx: &GpuContext, m: usize, n: usize) -> Option<CoopConfig> {
+    Some(pick_config_conv(m, n)).filter(|&c| fits(ctx, c))
+}
+
 fn fits(ctx: &GpuContext, cfg: CoopConfig) -> bool {
     cfg.valid() && cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage
 }

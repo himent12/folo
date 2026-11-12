@@ -160,8 +160,8 @@ fn gemm_dims(d: &Conv2dDesc) -> (usize, usize, usize, usize) {
 
 /// The tile config the tensor-core forward conv picks for `d`.
 fn picked_config(d: &Conv2dDesc) -> CoopConfig {
-    let (m, n, _, batch) = gemm_dims(d);
-    coop::pick_config(m, n, batch)
+    let (m, n, _, _) = gemm_dims(d);
+    coop::pick_config_conv(m, n)
 }
 
 #[test]

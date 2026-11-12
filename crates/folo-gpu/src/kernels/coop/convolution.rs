@@ -4,7 +4,7 @@
 #[cfg(doc)]
 use super::matmul::gemm;
 use super::matmul::{base_spec, build, check_io, encode_gemm};
-use super::{CoopConfig, pick_config, resolve};
+use super::{CoopConfig, pick_config, pick_config_conv, resolve};
 use crate::DType;
 use crate::UnaryOp;
 use crate::context::GpuContext;
@@ -68,7 +68,7 @@ pub(crate) fn encode_conv(
     want_splits: Option<usize>,
 ) -> Result<bool> {
     let (oh, ow) = d.output()?;
-    let Some(cfg) = resolve(ctx, cfg, || pick_config(g.m, g.n, d.n * d.groups))? else { return Ok(false) };
+    let Some(cfg) = resolve(ctx, cfg, || pick_config_conv(g.m, g.n))? else { return Ok(false) };
     // Split K when the conv has few output tiles (as the regular kernels do; `crate::kernels::conv::split`):
     // f32 partial slabs without bias and activation, then one pass sums them into `y` with both.
     let (batch, out_elems) = (d.n * d.groups, d.n * d.c_out * oh * ow);

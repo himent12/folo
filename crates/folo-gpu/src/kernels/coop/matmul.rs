@@ -184,7 +184,8 @@ pub(crate) fn encode_gemm_cat(
     parts: u32,
     vec_b: bool,
 ) -> Result<bool> {
-    let Some(cfg) = resolve(ctx, None, || pick_config(d.m, d.n, d.batch.0))? else { return Ok(false) };
+    // Only the forward 1×1 conv over a concatenation runs here: the forward convs' tile pick.
+    let Some(cfg) = resolve(ctx, None, || super::pick_config_conv(d.m, d.n))? else { return Ok(false) };
     let vec_a = d.lda.is_multiple_of(4) && aligned4(&d.a) && d.k.is_multiple_of(4);
     let vec_c = d.ldc.is_multiple_of(4) && aligned4(&d.c) && d.n.is_multiple_of(4);
     let check = !d.m.is_multiple_of(cfg.bm as usize)
