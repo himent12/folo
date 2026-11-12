@@ -186,12 +186,14 @@ fn letterbox_on_device_is_exact() {
     let rect = LetterboxOptions { stride: Some(32), ..LetterboxOptions::default() };
     // (image sizes, options, target size)
     type Case<'a> = (&'a [(u32, u32)], &'a LetterboxOptions, u32);
-    let cases: [Case; 5] = [
+    // The last two are over 4 MiB, so their uploads go in runs (one image each, and three runs of two).
+    let cases: [Case; 6] = [
         (&[(640, 640)], &square, 640),
         (&[(301, 211)], &rect, 640),
         (&[(1920, 1080)], &rect, 640),
         (&[(1001, 333)], &square, 320),
         (&[(640, 480), (333, 777), (2000, 1500), (17, 9)], &square, 256),
+        (&[(640, 640); 6], &square, 640),
     ];
     // Twice: the second pass writes into the staging buffers the first one left mapped for reuse.
     for (k, (sizes, opts, s)) in cases.iter().chain(&cases).enumerate() {

@@ -554,11 +554,19 @@ pub fn letterbox_on_device_as(
     Ok(Tensor::letterbox_rgb8(&refs, &taps, &geoms, out, folo_data::PAD_VALUE, INV_255, dtype)?)
 }
 
-/// The `u8` images as `[H, W, 3]` tensors on `device`. On a folo-gpu device all of them share one upload: the
-/// pixels are copied in parallel straight into reused, mapped staging memory ([`folo_gpu::GpuContext::upload_with`])
-/// and each image is a view of the one device buffer (at a 4-byte aligned offset, which the letterbox kernel
-/// reads in place). A batch larger than the device's largest storage buffer is uploaded in several such runs,
-/// each as many images as fit. Elsewhere each image is uploaded on its own.
+/// Bytes above which a batch's upload is split into [`UPLOAD_RUNS`] runs of equal image counts.
+const PIPELINE_BYTES: usize = 4 << 20;
+/// Runs a large batch's upload is split into: each run's copy to the device is submitted as soon as its pixels
+/// are written, so it overlaps writing the next run (one run would wait for all of them); equal image counts keep
+/// the runs in one staging size class, and the context keeps four staging buffers mapped for reuse.
+const UPLOAD_RUNS: usize = 4;
+
+/// The `u8` images as `[H, W, 3]` tensors on `device`. On a folo-gpu device they share a few uploads: the pixels are
+/// copied in parallel straight into reused, mapped staging memory ([`folo_gpu::GpuContext::upload_with`]) and each
+/// image is a view of its run's device buffer (at a 4-byte aligned offset, which the letterbox kernel reads in
+/// place). A batch over [`PIPELINE_BYTES`] goes in [`UPLOAD_RUNS`] runs, so copying one overlaps writing the next;
+/// a run larger than the device's largest storage buffer is cut further, each piece as many images as fit.
+/// Elsewhere each image is uploaded on its own.
 fn upload_images(imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
     let Some(ctx) = folo_gpu::context_for(device) else {
         let host: Vec<Tensor> = imgs
@@ -569,6 +577,22 @@ fn upload_images(imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
     };
     let caps = ctx.caps();
     let limit = caps.max_buffer_size.min(caps.max_storage_buffer_binding_size) as usize;
+    let bytes: usize = imgs.iter().map(|im| im.data.len().next_multiple_of(4)).sum();
+    let per_run = if bytes > PIPELINE_BYTES { imgs.len().div_ceil(UPLOAD_RUNS) } else { imgs.len() };
+    let mut out = Vec::with_capacity(imgs.len());
+    for run in imgs.chunks(per_run.max(1)) {
+        out.extend(upload_limited(&ctx, run, device, limit)?);
+    }
+    Ok(out)
+}
+
+/// [`upload_images`]' runs of `imgs`, each under the device's buffer `limit`.
+fn upload_limited(
+    ctx: &folo_gpu::GpuContext,
+    imgs: &[Image],
+    device: Device,
+    limit: usize,
+) -> Result<Vec<Tensor>> {
     let mut out = Vec::with_capacity(imgs.len());
     let mut rest = imgs;
     while !rest.is_empty() {
@@ -579,7 +603,7 @@ fn upload_images(imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
             total += rest[n].data.len().next_multiple_of(4);
             n += 1;
         }
-        out.extend(upload_run(&ctx, &rest[..n], device)?);
+        out.extend(upload_run(ctx, &rest[..n], device)?);
         rest = &rest[n..];
     }
     Ok(out)
