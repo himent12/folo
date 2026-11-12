@@ -283,6 +283,11 @@ f32 holds its −10% in every window. **AMP does not clearly meet the −4% targ
 is GPU-bound (about 28 ms of GPU work against 13–20 ms of encode), so its 25–35% less host encode hardly shows; the
 f32 step also gained GPU time (no zero-filled new buffers, about 700 MB per step).
 
+The last review fix (a rollover hit leaves the cache before the eviction, b60d69bf, `pr1d-train/`) was measured in a
+window where the machine was saturated (CPU 91–100%, `main`'s own f32 rounds read 88–403 ms): the PR's f32 rounds
+read 43.0, 45.1 and 46.4 ms, as in the earlier windows, with 0 new bind groups and buffers per step; the AMP rounds of
+both binaries (28–60 ms) say nothing in that window.
+
 **Inference** (`pr1-infer/`, `gpu` bench forward + predict, folo-n and folo-s, f32 and f16 TC, 3 rounds, CPU 76–97%):
 nothing to change there (an inference forward already hit the cache on every call) and nothing lost. The GPU-bound
 batch-16 rows tie: folo-n f32 forward b16 8.23 → 8.23 ms (pipelined 7.76 → 7.77), folo-s f32 20.11 → 20.13
