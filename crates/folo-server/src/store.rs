@@ -241,6 +241,15 @@ pub fn check_run_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The name of a run created without one: `<dataset name>-<size>` (`shapes-n`), the dataset's name shortened so the
+/// whole stays within [`MAX_RUN_NAME_CHARS`] (a run's config read back can be sent as a new run again).
+pub fn default_run_name(dataset: &str, arch: folo_api::Arch) -> String {
+    let size = arch.as_str().trim_start_matches("folo-");
+    let room = MAX_RUN_NAME_CHARS.saturating_sub(size.chars().count() + 1);
+    let base: String = dataset.chars().take(room).collect();
+    format!("{}-{size}", base.trim_end())
+}
+
 /// An IO error on the weights file of model `id`: `model_not_found` when the file is gone, else `internal`.
 pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate::error::Error {
     if e.kind() == std::io::ErrorKind::NotFound {

@@ -390,7 +390,7 @@ impl Store for MockStore {
             ));
         }
         if config.name.trim().is_empty() {
-            config.name = format!("{}-{}", meta.name, &config.arch.as_str()[5..]);
+            config.name = crate::store::default_run_name(&meta.name, config.arch);
         }
         // Ids are allocated under the runs write lock so concurrent creates cannot pick the same one, and model
         // ids are checked against every model that exists or will exist when a run completes.

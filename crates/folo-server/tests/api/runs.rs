@@ -110,6 +110,21 @@ async fn runs_lifecycle() {
     let fits = json!({ "dataset_id": ds.datasets[0].id, "name": "é".repeat(64) });
     let fits: Run = ok(&app, post_json("/api/runs", fits)).await;
     assert_eq!(fits.name.chars().count(), 64);
+    // A name left empty is made from a dataset name of up to 64 characters and the size, cut to fit, so the config
+    // the run reports can be sent again as a new run.
+    let long: Dataset = ok(
+        &app,
+        post_json(
+            "/api/datasets/synthetic",
+            json!({ "name": "d".repeat(64), "images": 10, "classes": ["a"] }),
+        ),
+    )
+    .await;
+    let named: Run =
+        ok(&app, post_json("/api/runs", json!({ "dataset_id": long.id, "arch": "folo-n" }))).await;
+    assert_eq!(named.name, format!("{}-n", "d".repeat(62)));
+    let again: Run = ok(&app, post_json("/api/runs", serde_json::to_value(&named.config).unwrap())).await;
+    assert_eq!(again.name, named.name);
     // An optimizer this build does not know decodes (Optimizer::Unknown) but is refused, not trained with.
     let bad = json!({ "dataset_id": ds.datasets[0].id, "optimizer": "lion" });
     let e = err(&app, post_json("/api/runs", bad), StatusCode::BAD_REQUEST, "invalid_config").await;

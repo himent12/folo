@@ -36,7 +36,7 @@ impl RealStore {
         let (weights, target) = self.run_settings(&mut config)?;
         let ds = self.dataset_ref(&e);
         if config.name.trim().is_empty() {
-            config.name = format!("{}-{}", ds.name, config.arch.as_str().trim_start_matches("folo-"));
+            config.name = crate::store::default_run_name(&ds.name, config.arch);
         }
         let val_offset = if idx.splits.val == 0 { 0 } else { idx.splits.train };
         match target {

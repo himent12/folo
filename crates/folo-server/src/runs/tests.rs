@@ -355,3 +355,22 @@ fn a_cloud_run_followed_elsewhere_is_not_deleted() {
     runs.shutdown(None);
 }
 
+/// A run named past today's 64-character limit by an older version still resumes, its config sent back as it is.
+#[test]
+fn a_run_with_a_legacy_long_name_resumes() {
+    let dir = TestDir::new("runs-long-name");
+    let name = "n".repeat(80);
+    let config: TrainConfig =
+        serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1", "name": name })).unwrap();
+    let mut file = queued_file("run_long", config.clone());
+    file.dataset.path = dir.to_string_lossy().into_owned();
+    let run_dir = dir.join("run_long");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("run.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let fields = serde_json::to_value(&config).unwrap().as_object().unwrap().clone();
+    let (e, wanted) = runs.resume_config("run_long", &fields).unwrap();
+    assert_eq!(wanted.name, name);
+    assert_eq!(runs.restart(&e, wanted, None).unwrap().name, name);
+    runs.shutdown(None);
+}
