@@ -287,6 +287,58 @@ pub fn combine(
     ctx.dispatch(&k, &[part, terms, slot, misc, stats, total], &p, [1, 1, 1])
 }
 
+static CANDIDATES: KernelDef = KernelDef {
+    name: "det_candidates",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Static(include_str!("../shaders/det_candidates.wgsl")),
+};
+
+/// Words of one image's region in the output of [`multi_label_candidates`]: a count, then `cap` records.
+pub fn candidate_region_words(cap: usize) -> usize {
+    1 + CANDIDATE_RECORD_WORDS * cap
+}
+
+/// Words per record of [`multi_label_candidates`]: `(anchor, class, score bits)`.
+pub const CANDIDATE_RECORD_WORDS: usize = 3;
+
+/// The multi-label candidates of decoded detections: `decoded` is f32 `[B, 4 + nc, A]` (boxes, then class scores,
+/// channel-major), `out` u32 `[B, 1 + 3 · cap]`. Per image: the number of `(anchor, class)` pairs whose score is
+/// `> conf` (all of them, also past `cap`), then the first `cap` of them as `(anchor, class, score bits)` in
+/// arrival order (any order: the host sorts). The scores are copied, not recomputed, so they are the decoded
+/// values bit for bit. `out` is cleared first.
+#[allow(clippy::too_many_arguments)]
+pub fn multi_label_candidates(
+    ctx: &GpuContext,
+    decoded: &wgpu::Buffer,
+    out: &wgpu::Buffer,
+    batch: usize,
+    anchors: usize,
+    nc: usize,
+    cap: usize,
+    conf: f32,
+) -> Result<()> {
+    if anchors == 0 || nc == 0 || cap == 0 {
+        return Err(shape_err("multi_label_candidates: empty head or capacity"));
+    }
+    let overflow = || shape_err("multi_label_candidates: too large");
+    let ba = batch.checked_mul(anchors).ok_or_else(overflow)?;
+    let dec = ba.checked_mul(4 + nc).ok_or_else(overflow)?;
+    let words = batch.checked_mul(candidate_region_words(cap)).ok_or_else(overflow)?;
+    // Every index the shader forms must fit in u32.
+    if dec.max(words) > u32::MAX as usize {
+        return Err(overflow());
+    }
+    super::check_buf(decoded, dec, crate::DType::F32, "candidates decoded")?;
+    super::check_buf(out, words, crate::DType::F32, "candidates output")?;
+    if batch == 0 {
+        return Ok(());
+    }
+    ctx.clear(out, 4 * words as u64);
+    let k = ctx.kernel(&CANDIDATES, Spec::new())?;
+    let p = Params::new().uz(ba)?.uz(anchors)?.uz(nc)?.uz(cap)?.f(conf);
+    ctx.dispatch(&k, &[decoded, out], &p, ctx.grid_1d(ba as u64, 256)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
