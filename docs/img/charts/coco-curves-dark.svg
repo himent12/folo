@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 492" width="720" height="492" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 509" width="720" height="509" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
 <title id="t">COCO from scratch: validation mAP50-95 by epoch</title>
-<desc id="d">Line chart of validation mAP50-95 after each epoch for three training runs on COCO from random weights. folo-n, 50 epochs: 0.310 after 50 epochs. folo-n v2, paused at 62 of 300: 0.313 after 62 epochs. folo-s, 56 epochs: 0.412 after 56 epochs.</desc>
-<rect x="0.5" y="0.5" width="719" height="491" rx="8" fill="#0E1013" stroke="#242628"/>
+<desc id="d">Line chart of validation mAP50-95 after each epoch for three training runs on COCO from random weights. folo-n, 50 epochs: 0.310 after 50 epochs. folo-s, 56 epochs: 0.412 after 56 epochs. folo-n v2, paused at 62 of 300: 0.313 after 62 epochs.</desc>
+<rect x="0.5" y="0.5" width="719" height="508" rx="8" fill="#0E1013" stroke="#242628"/>
 <text x="28" y="43" font-size="17" font-weight="600" letter-spacing="-0.01em" fill="#EDEFF2">COCO from scratch: validation mAP50-95 by epoch</text>
 <text x="28" y="66" font-size="13" fill="#A1A7B0">The trainer's own validation after every epoch, 640 px, one GPU</text>
 <path d="M28 89L42 89" stroke="#5CC8FF" stroke-width="2" fill="none"/>
 <text x="48" y="93.5" font-size="12.5" fill="#A1A7B0">folo-n, 50 epochs</text>
 <path d="M171.88 89L185.88 89" stroke="#F2C14E" stroke-width="2" fill="none"/>
-<text x="191.88" y="93.5" font-size="12.5" fill="#A1A7B0">folo-n v2, paused at 62 of 300</text>
-<path d="M389.75 89L403.75 89" stroke="#E879F9" stroke-width="2" fill="none"/>
-<text x="409.75" y="93.5" font-size="12.5" fill="#A1A7B0">folo-s, 56 epochs</text>
+<text x="191.88" y="93.5" font-size="12.5" fill="#A1A7B0">folo-s, 56 epochs</text>
+<path d="M315.75 89L329.75 89" stroke="#E879F9" stroke-width="2" fill="none"/>
+<text x="335.75" y="93.5" font-size="12.5" fill="#A1A7B0">folo-n v2, paused at 62 of 300</text>
 <path d="M68 376.5L580 376.5" stroke="#303234" stroke-width="1" fill="none"/>
 <text x="58" y="380.5" font-size="11" text-anchor="end" fill="#80868F">0</text>
 <path d="M68 318.5L580 318.5" stroke="#1C1E21" stroke-width="1" fill="none"/>
@@ -29,15 +29,16 @@
 <text x="548" y="394" font-size="11" text-anchor="middle" fill="#80868F">60</text>
 <text x="324" y="414" font-size="12" text-anchor="middle" fill="#80868F">epoch</text>
 <path d="M76 374.67L84 359.53L92 338.91L100 316.37L108 298.4L116 284.88L124 274.43L132 267.55L140 262.47L148 258.77L156 255.88L164 253.57L172 251.26L180 249.12L188 247.1L196 244.73L204 242.53L212 240.45L220 238.49L228 236.18L236 233.87L244 231.61L252 229.07L260 227.22L268 225.43L276 223.58L284 221.85L292 220.12L300 218.38L308 216.82L316 215.32L324 213.82L332 212.6L340 211.51L348 210.35L356 209.02L364 207.75L372 206.48L380 205.38L388 204.05L396 203.48L404 202.44L412 201.22L420 200.24L428 199.49L436 198.8L444 197.87L452 197.47L460 197.18L468 196.89" stroke="#5CC8FF" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
-<path d="M76 374.67L84 359.3L92 339.43L100 317.53L108 298.75L116 285.4L124 274.72L132 267.72L140 263.56L148 260.44L156 257.67L164 255.13L172 252.99L180 250.85L188 248.89L196 246.52L204 244.5L212 242.42L220 240.16L228 238.03L236 235.89L244 233.92L252 231.61L260 229.53L268 227.8L276 225.84L284 224.1L292 222.31L300 220.46L308 218.84L316 217.57L324 216.42L332 215.2L340 214.05L348 213.18L356 211.97L364 210.93L372 209.77L380 208.85L388 207.52L396 206.6L404 205.67L412 204.8L420 203.94L428 203.36L436 202.84L444 202.03L452 201.22L460 200.82L468 200.24L476 199.66L484 199.26L492 198.74L500 198.33L508 197.87L516 197.35L524 197.18L532 196.48L540 196.25L548 195.68L556 195.27L564 194.92" stroke="#F2C14E" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
-<path d="M76 362.94L84 320.71L92 288.35L100 254.44L108 235.08L116 219.77L124 209.31L132 202.44L140 197.06L148 193.65L156 190.88L164 188.4L172 186.03L180 184.06L188 182.04L196 180.13L204 178.4L212 176.32L220 174.36L228 172.39L236 170.43L244 168.64L252 166.79L260 165.05L268 163.38L276 161.59L284 160.08L292 158.58L300 157.08L308 155.87L316 154.6L324 153.73L332 152.69L340 151.71L348 150.96L356 150.03L364 148.99L372 148.01L380 147.37L388 146.33L396 145.47L404 144.83L412 144.02L420 143.33L428 142.29L436 141.6L444 141.08L452 140.5L460 139.98L468 139.63L476 139.23L484 138.82L492 138.59L500 138.3L508 138.24L516 138.13" stroke="#E879F9" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M76 362.94L84 320.71L92 288.35L100 254.44L108 235.08L116 219.77L124 209.31L132 202.44L140 197.06L148 193.65L156 190.88L164 188.4L172 186.03L180 184.06L188 182.04L196 180.13L204 178.4L212 176.32L220 174.36L228 172.39L236 170.43L244 168.64L252 166.79L260 165.05L268 163.38L276 161.59L284 160.08L292 158.58L300 157.08L308 155.87L316 154.6L324 153.73L332 152.69L340 151.71L348 150.96L356 150.03L364 148.99L372 148.01L380 147.37L388 146.33L396 145.47L404 144.83L412 144.02L420 143.33L428 142.29L436 141.6L444 141.08L452 140.5L460 139.98L468 139.63L476 139.23L484 138.82L492 138.59L500 138.3L508 138.24L516 138.13" stroke="#F2C14E" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M76 374.67L84 359.3L92 339.43L100 317.53L108 298.75L116 285.4L124 274.72L132 267.72L140 263.56L148 260.44L156 257.67L164 255.13L172 252.99L180 250.85L188 248.89L196 246.52L204 244.5L212 242.42L220 240.16L228 238.03L236 235.89L244 233.92L252 231.61L260 229.53L268 227.8L276 225.84L284 224.1L292 222.31L300 220.46L308 218.84L316 217.57L324 216.42L332 215.2L340 214.05L348 213.18L356 211.97L364 210.93L372 209.77L380 208.85L388 207.52L396 206.6L404 205.67L412 204.8L420 203.94L428 203.36L436 202.84L444 202.03L452 201.22L460 200.82L468 200.24L476 199.66L484 199.26L492 198.74L500 198.33L508 197.87L516 197.35L524 197.18L532 196.48L540 196.25L548 195.68L556 195.27L564 194.92" stroke="#E879F9" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
 <circle cx="468" cy="196.89" r="5" fill="#5CC8FF" stroke="#0E1013" stroke-width="2"/>
 <text x="462" y="220.89" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.310</tspan><tspan fill="#A1A7B0">  folo-n</tspan></text>
-<circle cx="564" cy="194.92" r="5" fill="#F2C14E" stroke="#0E1013" stroke-width="2"/>
-<text x="576" y="199.32" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.313</tspan><tspan fill="#A1A7B0">  folo-n v2</tspan></text>
-<circle cx="516" cy="138.13" r="5" fill="#E879F9" stroke="#0E1013" stroke-width="2"/>
+<circle cx="516" cy="138.13" r="5" fill="#F2C14E" stroke="#0E1013" stroke-width="2"/>
 <text x="528" y="142.53" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.412</tspan><tspan fill="#A1A7B0">  folo-s</tspan></text>
+<circle cx="564" cy="194.92" r="5" fill="#E879F9" stroke="#0E1013" stroke-width="2"/>
+<text x="576" y="199.32" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.313</tspan><tspan fill="#A1A7B0">  folo-n v2</tspan></text>
 <path d="M28 428.5L692 428.5" stroke="#1C1E21" stroke-width="1" fill="none"/>
-<text x="28" y="452" font-size="12" fill="#80868F">Every epoch improved on the one before in all three runs: none had reached a plateau when it stopped.</text>
-<text x="28" y="469" font-size="12" fill="#80868F">Runs and commands: examples/coco/README.md.</text>
+<text x="28" y="452" font-size="12" fill="#80868F">Each run was still rising at its last epoch: v2 in mid-schedule, the other two at the end of their learning-rate</text>
+<text x="28" y="469" font-size="12" fill="#80868F">decay. The final weights score AP 0.314 (folo-n), 0.317 (folo-n v2) and 0.416 (folo-s) with pycocotools.</text>
+<text x="28" y="486" font-size="12" fill="#80868F">Runs and commands: examples/coco/README.md.</text>
 </svg>

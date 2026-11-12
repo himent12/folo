@@ -104,12 +104,14 @@ and use GitHub-hosted `macos-latest`; `FOLO_RELEASE_MACOS=false` skips them.
 - **Security.** A self-hosted runner executes the code of a pull request (tests, build scripts, npm lifecycle
   scripts) with the runner account's access to that machine, and its persistent target dir carries build output from
   one run to the next. That is acceptable for a private repository whose contributors already work on that machine.
-  It is not for a public one: **pull requests from forks must never reach a self-hosted runner.** The workflows
-  enforce the first line of that themselves: for a pull request from a fork every `runs-on` ignores the variables and
-  uses the hosted runner. Do not rely on that alone. Before a repository with these workflows goes public, delete
-  `RUNS_ON_LINUX` and `RUNS_ON_WINDOWS` (hosted runners take over for everything), or give the runner a dedicated
-  account or VM with no credentials and require approval for every outside contributor's workflow runs (Settings,
-  Actions, General). Keep dependencies pinned through `Cargo.lock` and `package-lock.json`,
+  It is not for a public one: **pull requests from forks must never reach a self-hosted runner.** For a pull
+  request from a fork every `runs-on` here ignores the variables and uses the hosted runner, but that is a
+  convenience, not a protection: a fork's pull request runs the fork's copy of the workflow files, and that copy can
+  name any runner registered to the repository. So before a repository with these workflows goes public, **remove
+  the self-hosted runners from it** (Settings, Actions, Runners) and delete `RUNS_ON_LINUX` and `RUNS_ON_WINDOWS`;
+  deleting the variables alone is not enough. If a public repository must keep one, put it in a dedicated account or
+  VM with no credentials and nothing worth keeping, and require approval for every outside contributor's workflow
+  runs (Settings, Actions, General). Keep dependencies pinned through `Cargo.lock` and `package-lock.json`,
   and review new dependencies in pull requests.
 - Status: `gh api repos/<owner>/<repo>/actions/runners -q '.runners[] | .name + " " + .status'`.
 - A Windows runner needs Git for Windows' `bin` and `usr\bin` on its PATH (actions such as `dtolnay/rust-toolchain`

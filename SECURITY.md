@@ -14,9 +14,9 @@ FOLO is a local tool first, and its defaults assume that:
 
 - **`folo serve` listens on loopback** (`127.0.0.1`) and, there, answers only requests whose `Host` is a loopback
   name, which stops a web page from reaching it through DNS rebinding. It has no user accounts. A server bound beyond
-  loopback (`--host 0.0.0.0`, a LAN address, a cloud worker) must be started with `--token`, and its traffic is plain
-  HTTP unless you put TLS in front of it ([docs/API.md, Conventions](docs/API.md#conventions),
-  [docs/CLOUD.md](docs/CLOUD.md)).
+  loopback (`--host 0.0.0.0`, a LAN address, a cloud worker) should be started with `--token`: without one FOLO
+  serves anyway and only logs a warning. Its traffic is plain HTTP unless you put TLS in front of it
+  ([docs/API.md, Conventions](docs/API.md#conventions), [docs/CLOUD.md](docs/CLOUD.md)).
 - **The server reads and writes files** for the person running it: it registers dataset folders by path, writes runs
   and models under its data dir and exports files. Anyone who can reach its API can do the same, so treat access to
   the port as access to that account's files.
@@ -24,8 +24,9 @@ FOLO is a local tool first, and its defaults assume that:
   `--confine` keeps file reads inside the data dir ([docs/MCP.md](docs/MCP.md)).
 - **Agent labeling and agent benchmark entries start `claude` or `codex` on the server's machine**, with tools,
   configuration files and sessions switched off, and send them your images ([docs/LABELING.md](docs/LABELING.md)).
-- **Cloud runs spend money** on the provider account whose key you connect. The key is stored in the data dir,
-  readable only by its owner, and is never returned by the API ([docs/CLOUD.md](docs/CLOUD.md)).
+- **Cloud runs spend money** on the provider account whose key you connect. The key is stored in the data dir
+  (mode 0600 on Unix; on Windows under the folder's own permissions, which for the default `~/.folo` are the user's
+  profile's) and is never returned by the API ([docs/CLOUD.md](docs/CLOUD.md)).
 - **`.folo` files are data**: a JSON header and raw tensors in a safetensors-compatible layout, with no code in them
   ([docs/FORMAT.md](docs/FORMAT.md)). Images and label files from an untrusted source go through the image decoders
   and the parsers; a crash or a hang on a crafted file is a bug worth reporting.

@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 623" width="720" height="623" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 640" width="720" height="640" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
 <title id="t">Inference speed: folo-n against yolo26n</title>
 <desc id="d">Grouped bars. Latency at batch 1 in milliseconds and throughput at batch 16 in images per second, on the GPU and the CPU, for folo-n and yolo26n. GPU forward: 1.14 ms against 4.95 ms. GPU end to end: 1.75 ms against 6.92 ms. CPU forward: 12.7 ms against 22.8 ms. CPU end to end: 13.1 ms against 24.8 ms. GPU forward, f32: 2081 against 1454 images per second. GPU forward, f16: 4159 against 2370 images per second. GPU end to end: 2155 against 615 images per second.</desc>
-<rect x="0.5" y="0.5" width="719" height="622" rx="8" fill="#FFFFFF" stroke="#E4E5E5"/>
+<rect x="0.5" y="0.5" width="719" height="639" rx="8" fill="#FFFFFF" stroke="#E4E5E5"/>
 <text x="28" y="43" font-size="17" font-weight="600" letter-spacing="-0.01em" fill="#0C0E12">Inference speed: folo-n against yolo26n</text>
-<text x="28" y="66" font-size="13" fill="#4F5661">RTX 4080 SUPER, Core i7-14700KF, 640×640 input, medians of alternated runs</text>
+<text x="28" y="66" font-size="13" fill="#4F5661">RTX 4080 SUPER, Core i7-14700KF, 640×640 input</text>
 <rect x="28" y="84" width="10" height="10" rx="2" fill="#0A8FD6"/>
 <text x="44" y="93.5" font-size="12.5" fill="#4F5661">folo-n</text>
 <rect x="100.5" y="84" width="10" height="10" rx="2" fill="#646B75"/>
@@ -54,7 +54,7 @@
 <text x="692" y="432" font-size="16" font-weight="600" text-anchor="end" fill="#0C0E12">1.4×</text>
 <text x="692" y="448" font-size="12" text-anchor="end" fill="#646B75">faster</text>
 <text x="28" y="482" font-size="13" font-weight="500" fill="#0C0E12">GPU forward, f16</text>
-<text x="28" y="499" font-size="12" fill="#646B75">FOLO on tensor cores</text>
+<text x="28" y="499" font-size="12" fill="#646B75">both f16, FOLO on tensor cores</text>
 <path d="M224 472h297.39a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-297.39z" fill="#0A8FD6"/>
 <text x="533.39" y="482.4" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">4159</tspan><tspan font-size="12" fill="#646B75"> img/s</tspan></text>
 <path d="M224 488h167.75a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-167.75z" fill="#646B75"/>
@@ -62,7 +62,7 @@
 <text x="692" y="484" font-size="16" font-weight="600" text-anchor="end" fill="#0C0E12">1.8×</text>
 <text x="692" y="500" font-size="12" text-anchor="end" fill="#646B75">faster</text>
 <text x="28" y="534" font-size="13" font-weight="500" fill="#0C0E12">GPU end to end</text>
-<text x="28" y="551" font-size="12" fill="#646B75">f16, decoded images in</text>
+<text x="28" y="551" font-size="12" fill="#646B75">both f16, decoded images in</text>
 <path d="M224 524h152.16a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-152.16z" fill="#0A8FD6"/>
 <text x="388.16" y="534.4" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">2155</tspan><tspan font-size="12" fill="#646B75"> img/s</tspan></text>
 <path d="M224 540h40.57a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-40.57z" fill="#646B75"/>
@@ -71,5 +71,6 @@
 <text x="692" y="552" font-size="12" text-anchor="end" fill="#646B75">faster</text>
 <path d="M223.5 412L223.5 560" stroke="#D8D8D9" stroke-width="1" fill="none"/>
 <path d="M28 576.5L692 576.5" stroke="#F1F1F1" stroke-width="1" fill="none"/>
-<text x="28" y="600" font-size="12" fill="#646B75">Medians of alternated runs, 2026-11-12. Method, noise and every configuration: docs/BENCHMARKS.md.</text>
+<text x="28" y="600" font-size="12" fill="#646B75">FOLO: medians of runs alternated with its previous build, 2026-11-12. YOLO26: its best configuration per</text>
+<text x="28" y="617" font-size="12" fill="#646B75">row, measured 2026-11-07 (whole trainer: the best of 3 runs). Method and noise: docs/BENCHMARKS.md.</text>
 </svg>

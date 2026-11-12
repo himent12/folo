@@ -34,8 +34,9 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 # Runners: repo variables RUNS_ON_LINUX / RUNS_ON_WINDOWS hold a JSON runs-on value for self-hosted runners; an
-# unset one means GitHub-hosted. A pull request from a fork always gets GitHub-hosted runners, whatever the variables
-# say: its code must never run on a self-hosted machine (docs/CI.md, Self-hosted runners).
+# unset one means GitHub-hosted. A pull request from a fork gets GitHub-hosted runners whatever the variables say.
+# That is no protection (a fork's copy of this file can name any registered runner): a public repository must not
+# have self-hosted runners registered at all (docs/CI.md, Self-hosted runners).
 jobs:
   rust:
     strategy:

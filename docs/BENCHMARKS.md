@@ -17,21 +17,24 @@ throughout.
 ## Summary
 
 On one machine (an RTX 4080 SUPER and an i7-14700KF), at 640×640 and against the incumbent's best configuration for
-each row, FOLO is faster on every row measured: 4× at batch-1 latency on the GPU, 1.4× to 3.5× at batch-16 throughput,
-1.8× to 1.9× on the CPU and 1.9× to 2.7× in training, with about a quarter less GPU memory. The table of record is
-[FOLO targets](#folo-targets).
+each row, folo-n is faster than yolo26n on every row measured: 4.0× to 5.2× at batch-1 latency on the GPU, 1.4× to
+3.5× at batch-16 throughput, 1.8× to 1.9× on the CPU and 1.9× to 2.7× in training, with about a quarter less GPU
+memory allocated. folo-s against yolo26s: 1.3× to 3.6×. The table of record is [FOLO targets](#folo-targets); FOLO's
+numbers are medians of runs alternated with its previous build (2026-11-12), the incumbent's were measured on
+2026-11-07.
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="img/charts/speed-by-size-dark.svg">
-    <img src="img/charts/speed-by-size-light.svg" alt="How many times faster FOLO is than the YOLO26 model of the same size, folo-n and folo-s. GPU forward at batch 1: 4.3 and 2.2 times in f32, 6.6 and 5.5 times in f16. GPU forward at batch 16: 1.4 and 1.3 times in f32, 1.8 and 1.6 times in f16. GPU end to end: 4.0 and 2.8 times at batch 1, 3.5 and 3.0 times at batch 16. CPU forward 1.8 and 1.5 times, CPU end to end 1.9 and 1.7 times. Training step: 1.9 and 1.5 times in f32, 2.4 and 1.6 times with mixed precision." width="720">
+    <img src="img/charts/speed-by-size-light.svg" alt="How many times faster FOLO is than the YOLO26 model of the same size, folo-n and folo-s. GPU forward at batch 1: 4.3 and 2.2 times in f32, 5.2 and 3.6 times with the fastest precision of each. GPU forward at batch 16: 1.4 and 1.3 times in f32, 1.8 and 1.6 times in f16. GPU end to end: 4.0 and 2.8 times at batch 1, 3.5 and 3.0 times at batch 16. CPU forward 1.8 and 1.5 times, CPU end to end 1.9 and 1.7 times. Training step: 1.9 and 1.5 times in f32, 2.4 and 1.6 times with mixed precision." width="720">
   </picture>
 </p>
 
 Accuracy is the other half. Trained from scratch on COCO alone for 56 to 62 epochs, FOLO's models are 0.06 to 0.09 AP
-behind the incumbent's published ones, which were pretrained on Objects365 and trained far longer; at an equal budget
-the two trainers learn equally well per epoch, and fine-tuned on four small datasets folo-n and yolo26n are level on
-three ([Accuracy](#accuracy)).
+behind the incumbent's published ones, which were pretrained on Objects365 and trained far longer; how much of the
+gap each of those accounts for is not known. On a COCO subset at an equal budget FOLO's trainer and Ultralytics' reach
+the same AP per epoch, and fine-tuned on four small datasets folo-n and yolo26n are level on three
+([Accuracy](#accuracy)).
 
 <p align="center">
   <picture>

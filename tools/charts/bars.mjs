@@ -17,13 +17,30 @@ const rangeText = ([lo, hi]) => `${lo.toFixed(3)} to ${hi.toFixed(3)}`;
 const colourOf = (key, t) => (key === 'reference' ? t.reference : t.series[Number(key.replace('series', ''))]);
 
 /**
- * `spec`: { title, subtitle, desc, series: [{ label, colour, strong }], panels: [{ title, hint, unit, notes,
- * refLine: { value, label }, rows: [{ label, detail, values, text, ranges, note, noteSub }] }], footer: [lines] }.
- * A series' `colour` is `series0`..`series5` or `reference`; `strong` series get the heavier value label.
+ * `spec`: { title, subtitle, desc, sharedScale, series: [{ label, colour, strong }], panels: [{ title, hint, unit,
+ * notes, refLine: { value, label }, rows: [{ label, detail, values, text, ranges, note, noteSub }] }], footer }.
+ * A series' `colour` is `series0`..`series5` or `reference`; `strong` series get the heavier value label. With
+ * `sharedScale` every panel uses one value axis (panels of one unit, so a bar's length means the same in each).
  */
 export function barsFigure(spec, t) {
   const out = [];
   let y = PAD;
+  // Text is not measured (lib.mjs, textWidth), so anything that could run into its neighbour fails here instead.
+  const fits = (what, width, room) => {
+    if (width > room) throw new Error(`${spec.title}: ${what} needs about ${Math.round(width)} px and has ${Math.round(room)}`);
+  };
+  const barX = PAD + LABEL_W;
+  const valueText = (panel, row, i) => `${row.text[i]}${panel.unit ? ` ${panel.unit}` : ''}${row.ranges ? `  ${rangeText(row.ranges[i])}` : ''}`;
+  /** Where a panel's bars may end, and its largest value. */
+  const extent = (panel) => {
+    const labelRoom = Math.max(...panel.rows.flatMap((row) => row.values.map((_, i) => textWidth(valueText(panel, row, i), VALUE_SIZE, 600)))) + 12;
+    return {
+      width: W - PAD - (panel.notes ? NOTE_W : 0) - barX - labelRoom,
+      top: Math.max(panel.refLine?.value ?? 0, ...panel.rows.flatMap((row) => row.values)),
+    };
+  };
+  const extents = spec.panels.map(extent);
+  const shared = spec.sharedScale ? Math.min(...extents.map((e) => e.width)) / Math.max(...extents.map((e) => e.top)) : null;
 
   out.push(text(PAD, y + 15, spec.title, { size: 17, weight: 600, fill: t.ink, tracking: '-0.01em' }));
   y += 26;
@@ -40,10 +57,10 @@ export function barsFigure(spec, t) {
     out.push(text(lx + 16, y + 9.5, s.label, { size: VALUE_SIZE, fill: t.ink2 }));
     lx += 16 + textWidth(s.label, VALUE_SIZE) + 22;
   }
+  fits('the legend', lx - 22, W - PAD);
   y += 10 + 18;
 
-  const barX = PAD + LABEL_W;
-  for (const panel of spec.panels) {
+  for (const [index, panel] of spec.panels.entries()) {
     out.push(line(PAD, y + 0.5, W - PAD, y + 0.5, t.grid));
     y += 22;
     out.push(
@@ -54,11 +71,8 @@ export function barsFigure(spec, t) {
     );
     y += 16;
 
-    const plotRight = W - PAD - (panel.notes ? NOTE_W : 0);
-    const valueText = (row, i) => `${row.text[i]}${panel.unit ? ` ${panel.unit}` : ''}${row.ranges ? `  ${rangeText(row.ranges[i])}` : ''}`;
-    const labelRoom = Math.max(...panel.rows.flatMap((row) => row.values.map((_, i) => textWidth(valueText(row, i), VALUE_SIZE, 600)))) + 12;
-    const top = Math.max(panel.refLine?.value ?? 0, ...panel.rows.flatMap((row) => row.values));
-    const scale = (plotRight - barX - labelRoom) / top;
+    fits(`the heading of "${panel.title}"`, textWidth(panel.title, 13, 600) + textWidth(`   ${panel.hint}`, 12), W - 2 * PAD);
+    const scale = shared ?? extents[index].width / extents[index].top;
     const x = (v) => barX + v * scale;
 
     const rowsTop = y;
@@ -67,6 +81,7 @@ export function barsFigure(spec, t) {
       out.push(line(x(panel.refLine.value) + 0.5, rowsTop + 2, x(panel.refLine.value) + 0.5, rowsBottom - 2, t.axis));
     }
     for (const row of panel.rows) {
+      fits(`the label "${row.label}"`, Math.max(textWidth(row.label, 13, 600), textWidth(row.detail ?? '', 12)), LABEL_W - 8);
       if (row.detail) {
         out.push(text(PAD, y + 22, row.label, { weight: 500, fill: t.ink }));
         out.push(text(PAD, y + 39, row.detail, { size: 12, fill: t.ink3 }));

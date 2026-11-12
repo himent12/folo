@@ -16,9 +16,9 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
 |---|---:|---:|
 | GPU forward, batch 1 (median) | **1.14 ms** | 4.95 ms |
 | GPU forward, batch 16 | **2081 img/s** | 1454 img/s (TF32) |
-| GPU end to end, batch 1 / batch 16 | **1.75 ms** / **2155 img/s** (f16, tensor cores) | 6.92 ms / 615 img/s (fp16) |
+| GPU end to end, batch 1 / batch 16 | **1.75 ms** (f32) / **2155 img/s** (f16 on tensor cores) | 6.92 ms / 615 img/s (fp16) |
 | Training step, batch 16, f32 / AMP | **380** / **594 img/s** | 202 (TF32) / 252 img/s |
-| Training step peak memory, f32 / AMP | **3467** / **2022 MiB** | 4517 / 2646 MiB |
+| Training step peak memory allocated, f32 / AMP | **3467** / **2022 MiB** | 4517 / 2646 MiB |
 | CPU forward, batch 1 | **12.7 ms** | 22.8 ms |
 | CPU end to end, batch 1 | **13.1 ms** | 24.8 ms |
 | COCO val2017 AP, from scratch (62 epochs) | 0.317 | 0.409 (Objects365 + 245 COCO epochs) |
@@ -134,7 +134,28 @@ fixes.
 - New crate `folo-bench` (conditions, plans, scoring): pure, deterministic for every thread count, each number
   tested against a hand-worked case.
 
-#### Engine hill-climb
+#### Engine: second optimisation round
+- Faster again, measured against the build before it with the two alternated run by run
+  ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#hill-climb-2-2026-11-12), notebooks in `docs/notes/hill/`; #181 to #207):
+  folo-n batch-1 GPU forward 2.13 → 1.14 ms in f32 and 1.85 → 0.95 ms in f16 on tensor cores, batch 16 1619 → 2081
+  img/s (f32) and 3081 → 4159 (tensor cores); the training step 333 → 380 img/s in f32 and 544 → 594 with `--amp`; a
+  whole `folo train` epoch 358 → 388 and 553 → 613 img/s; CPU forward at batch 1 15.2 → 12.7 ms. folo-s now beats
+  yolo26s at batch 16 too (819 and 1799 img/s; both were ties).
+- **`auto` picks MuSGD for every run** (rules 4 and 5, docs/MODEL.md §8.2): lr0 0.01, momentum 0.937, a bias warmup
+  from 0.1, and for runs from scratch step weights 0.5 / 0.5. On the COCO subset used to compare trainers it reaches
+  AP 0.123 where the rule before reached 0.076. MuSGD's Muon step runs in fused kernels, so its cost over SGD fell
+  from 23% of a step to under 1% with `--amp`. A resumed run keeps the rule it started with.
+- **Start-up**: `folo train` on COCO reaches its first optimizer step in 1.3 s with warm caches (was 36.5 s): the
+  dataset scan and the compiled pipelines are cached, and pipelines compile on worker threads from a recorded kernel
+  list. `folo val` on COCO val2017 takes 4.5 s (was 8.0 s).
+- **`--cache ram`** keeps decoded images in memory: 6.5× the loader's throughput on 1080p JPEGs.
+- Checkpoints are written on a writer thread; the epoch event still waits for the files.
+- CPU inference: 3×3 stride-1 convolutions run as Winograd F(2×2, 3×3) where that measured faster, conv weights are
+  read in place, and max pooling makes no index tensor in inference.
+- Slower: the very first mixed-precision epoch on a machine (no kernel list yet and a cold driver shader cache) takes
+  about 1.6 s longer (23 s instead of 21 s); every later run compiles in the background.
+
+#### Engine: first optimisation round
 - Faster everywhere the GPU is used, measured against the previous build on the same machine
   ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#hill-climb-2026-11-09), notebooks in `docs/notes/hill/`): folo-n
   batch-1 GPU forward 2.88 → 2.09 ms, end to end at batch 16 960 → 1898 img/s on tensor cores, the training step 242

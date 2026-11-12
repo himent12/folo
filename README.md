@@ -42,7 +42,7 @@ much noise to expect.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/img/charts/speed-training-dark.svg">
-    <img src="docs/img/charts/speed-training-light.svg" alt="Training speed, folo-n against yolo26n, at batch 16. Training step: 380 against 202 images per second in f32, 594 against 252 with mixed precision. Whole trainer: 388 against 199 in f32, 613 against 224 with mixed precision. Peak GPU memory of a training step: 3467 against 4517 MiB in f32, 2022 against 2646 MiB with mixed precision." width="720">
+    <img src="docs/img/charts/speed-training-light.svg" alt="Training speed, folo-n against yolo26n, at batch 16. Training step: 380 against 202 images per second in f32, 594 against 252 with mixed precision. Whole trainer: 388 against 199 in f32, 613 against 224 with mixed precision. Peak GPU memory allocated by a training step: 3467 against 4517 MiB in f32, 2022 against 2646 MiB with mixed precision." width="720">
   </picture>
 </p>
 
@@ -60,13 +60,14 @@ much noise to expect.
 | GPU end to end, batch 16, f16 (tensor cores) | **2155 img/s** | 615 img/s (fp16) | FOLO 3.5× faster |
 | Training step, batch 16 (forward, loss, backward, SGD) | **380 img/s** (f32) / **594 img/s** (AMP) | 202 img/s (fp32 with TF32) / 252 img/s (AMP) | FOLO 1.9× / 2.4× faster |
 | Whole trainer, sustained (data loader, mosaic, 8 workers) | **388 img/s** (f32) / **613 img/s** (AMP) | 199 / 224 img/s | FOLO 1.9× / 2.7× faster |
-| Training step peak GPU memory, batch 16 | **3467 MiB** (f32) / **2022 MiB** (AMP) | 4517 / 2646 MiB | FOLO uses 23% / 24% less |
+| Training step peak GPU memory allocated, batch 16 | **3467 MiB** (f32) / **2022 MiB** (AMP) | 4517 / 2646 MiB | FOLO allocates 23% / 24% less |
 
 </details>
 
-Measured on `main` on 2026-11-12, FOLO and the build before it alternated run by run on a quiet machine. folo-s beats
-yolo26s on every row measured for it as well ([the chart by model size](docs/BENCHMARKS.md#summary)); its whole-trainer
-row was not measured.
+FOLO's numbers were measured on `main` on 2026-11-12, alternated run by run with the build before it on a mostly
+quiet machine; yolo26n's on 2026-11-07, its best configuration for each row. folo-s beats yolo26s on every row
+measured for it as well ([the chart by model size](docs/BENCHMARKS.md#summary)); its whole-trainer row was not
+measured.
 
 ### Accuracy
 
@@ -77,8 +78,8 @@ yolo26n). That is not like for like, and a full COCO comparison at an equal budg
 been measured at an equal budget:
 
 - **Per epoch, the two trainers learn equally well.** On a 20,000-image COCO subset at 320 px, 20 epochs from scratch,
-  FOLO's trainer and Ultralytics' reach the same AP with the same optimizer (SGD 0.086 against 0.085, MuSGD
-  0.113–0.116 against 0.113), so the COCO gap is data and schedule, not the trainer.
+  FOLO's trainer with folo-n and Ultralytics' with YOLO11n reach the same AP with the same optimizer (SGD 0.086
+  against 0.085, MuSGD 0.113–0.116 against 0.113): no sign that FOLO's trainer is what causes the COCO gap.
 - **Fine-tuned on small datasets, folo-n and yolo26n are level on three of four.** Each starts from its own COCO
   weights and trains 100 epochs at its defaults; one scorer (pycocotools) grades both.
 
@@ -271,8 +272,9 @@ clap. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the full picture.
 
 What works today (v0.1):
 - folo-n/s/m/l/x, trained from scratch on CPU or GPU, with resume, EMA, mosaic and the usual augmentations. The
-  trainer's convergence test, a synthetic shapes dataset it must learn to a fixed mAP, passes at mAP50-95 0.934
-  against a bar of 0.75 ([examples/shapes](examples/shapes/README.md)).
+  trainer's convergence test, a synthetic shapes dataset it must learn to a fixed mAP
+  ([examples/shapes](examples/shapes/README.md)), passes at mAP50-95 0.934 against a bar of 0.75
+  ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#learning-2026-11-12)).
 - COCO-pretrained weights, each trained from scratch and scored with a pycocotools-exact evaluator
   ([examples/coco](examples/coco/README.md)). `folo weights pull <name>` downloads them over HTTPS:
 

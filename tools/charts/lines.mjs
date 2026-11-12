@@ -28,6 +28,7 @@ export function linesFigure(spec, t) {
     out.push(text(lx + 20, y + 9.5, s.label, { size: 12.5, fill: t.ink2 }));
     lx += 20 + textWidth(s.label, 12.5) + 22;
   });
+  if (lx - 22 > W - PAD) throw new Error(`${spec.title}: the legend does not fit`);
   y += 10 + 22;
 
   const x0 = PAD + LEFT;
@@ -60,8 +61,10 @@ export function linesFigure(spec, t) {
       [spec.yFormat(s.values.at(-1), true), { weight: 600, fill: t.ink }],
       [`  ${s.short}`, { fill: t.ink2 }],
     ];
-    if (s.labelAt === 'below') out.push(runs(ex - 6, ey + 24, parts, { size: 12.5 }));
-    else out.push(runs(ex + 12, ey + 4.4, parts, { size: 12.5 }));
+    const width = textWidth(parts.map((part) => part[0]).join(''), 12.5, 600);
+    const at = s.labelAt === 'below' ? ex - 6 : ex + 12;
+    if (at + width > W - PAD) throw new Error(`${spec.title}: the end label of "${s.label}" does not fit`);
+    out.push(runs(at, s.labelAt === 'below' ? ey + 24 : ey + 4.4, parts, { size: 12.5 }));
   });
   y += PLOT_H + 52;
 
