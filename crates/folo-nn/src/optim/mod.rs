@@ -541,7 +541,12 @@ pub struct AutoChoice {
 
 /// The current version of the `auto` rule (docs/MODEL.md §8.2). A run's settings record the rule it started with
 /// (`TrainConfig.auto_rule`), so a resume keeps it; settings written before the key existed mean rule 1.
-pub const AUTO_RULE: u32 = 4;
+pub const AUTO_RULE: u32 = 5;
+
+/// Rule 5's MuSGD step weights for a run from scratch (the `muon` / `sgd` defaults of Ultralytics' `MuSGD` class,
+/// which its trainer overrides to 0.2 / 1.0): on the COCO proxy folo-n trains to 0.1234 AP with them against 0.1135
+/// with 0.2 / 1.0; fine-tuning from pretrained weights (BCCD) is better with 0.2 / 1.0 (docs/hill/r2-learn.md).
+pub const AUTO_MUSGD_SCRATCH_WEIGHTS: MuSgdWeights = MuSgdWeights { muon: 0.5, sgd: 0.5 };
 
 /// Rule 4's momentum, the configured default (docs/MODEL.md §8.1; rules 1 to 3 use 0.9).
 pub const AUTO_MUSGD_MOMENTUM: f64 = 0.937;
@@ -565,7 +570,8 @@ pub fn auto_optimizer(
     auto_optimizer_rule(AUTO_RULE, n_train, batch, nbs, epochs, num_classes)
 }
 
-/// docs/MODEL.md §8.2 `auto` by rule version. Rule 4: MuSGD at `lr0 = 0.01`, momentum 0.937
+/// docs/MODEL.md §8.2 `auto` by rule version. Rules 5 and 4 resolve the same optimizer here (rule 5 also picks
+/// MuSGD's step weights, [`AUTO_MUSGD_SCRATCH_WEIGHTS`] from scratch, which the trainer applies). Rule 4: MuSGD at `lr0 = 0.01`, momentum 0.937
 /// ([`AUTO_MUSGD_MOMENTUM`]) and `warmup_bias_lr = 0.1` ([`AUTO_MUSGD_WARMUP_BIAS_LR`]) for every run. Rules 1 to 3:
 /// `iterations = ceil(n_train / max(batch, nbs)) · epochs`; above 10000, SGD at `lr0 = 0.01` (rules 1 and 2) or
 /// MuSGD at `lr0 = 0.01` (rule 3, the reference trainer's choice since Ultralytics 8.4), else AdamW at

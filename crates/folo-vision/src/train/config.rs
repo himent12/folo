@@ -107,8 +107,13 @@ pub struct TrainConfig {
     /// Missing in configs from before it: the §7 defaults.
     pub loss: LossConfig,
     /// MuSGD's step weights and class-branch LR factor (docs/MODEL.md §8.2); used only when the run resolves to
-    /// MuSGD. Missing in configs from before it: the §8.2 defaults.
+    /// MuSGD (under `auto` rule 5 the step weights are `auto`'s, see [`TrainConfig::resolve_optimizer`]). Missing in
+    /// configs from before it: the §8.2 defaults.
     pub musgd: MuSgdConfig,
+    /// Whether the run started from pretrained weights (transfer learning). Set by [`super::Trainer::new`] from
+    /// [`super::TrainOptions::weights`], whatever is given here, and stored with the run, so a resume resolves `auto`
+    /// as the run started. Missing in configs from before it: `false`.
+    pub transfer: bool,
 }
 
 /// `musgd.*` (docs/MODEL.md §8.2): `p −= muon · lr · O`, the SGD half of a conv weight at `sgd · lr`, and the
@@ -166,6 +171,7 @@ impl Default for TrainConfig {
             val_batch: 0,
             loss: LossConfig::default(),
             musgd: MuSgdConfig::default(),
+            transfer: false,
         }
     }
 }
@@ -203,6 +209,8 @@ pub struct ResolvedOptim {
     pub momentum: f64,
     /// `bias`-group LR at iteration 0.
     pub warmup_bias_lr: f64,
+    /// MuSGD's step weights (used only by MuSGD).
+    pub musgd: folo_nn::optim::MuSgdWeights,
 }
 
 impl TrainConfig {
@@ -362,8 +370,11 @@ impl TrainConfig {
         self.resolve_optimizer(n_train, num_classes).to_api(self, accumulate, spe as u64)
     }
 
-    /// The optimizer this config trains with on `n_train` images of `num_classes` classes (§8.2 `auto`).
+    /// The optimizer this config trains with on `n_train` images of `num_classes` classes (§8.2 `auto`). MuSGD's
+    /// step weights are `musgd.muon` / `musgd.sgd`, except under `auto` rule 5 for a run from scratch
+    /// (`transfer = false`): [`folo_nn::optim::AUTO_MUSGD_SCRATCH_WEIGHTS`].
     pub fn resolve_optimizer(&self, n_train: usize, num_classes: usize) -> ResolvedOptim {
+        let configured = folo_nn::optim::MuSgdWeights { muon: self.musgd.muon, sgd: self.musgd.sgd };
         match self.optimizer {
             OptimizerChoice::Auto => {
                 let a = auto_optimizer_rule(
@@ -374,11 +385,13 @@ impl TrainConfig {
                     self.epochs as usize,
                     num_classes,
                 );
+                let scratch = self.auto_rule >= 5 && !self.transfer;
                 ResolvedOptim {
                     kind: a.kind,
                     lr0: a.lr0,
                     momentum: a.momentum,
                     warmup_bias_lr: a.warmup_bias_lr,
+                    musgd: if scratch { folo_nn::optim::AUTO_MUSGD_SCRATCH_WEIGHTS } else { configured },
                 }
             }
             OptimizerChoice::Sgd | OptimizerChoice::Adamw | OptimizerChoice::Musgd => ResolvedOptim {
@@ -390,6 +403,7 @@ impl TrainConfig {
                 lr0: self.lr0,
                 momentum: self.momentum,
                 warmup_bias_lr: self.warmup_bias_lr,
+                musgd: configured,
             },
         }
     }
@@ -468,6 +482,7 @@ impl ResolvedOptim {
             lr0: f(o, "lr0")?,
             momentum: f(o, "momentum")?,
             warmup_bias_lr: f(o, "warmup_bias_lr")?,
+            musgd: train.resolve_optimizer(0, 1).musgd,
         };
         let accumulate = n("accumulate")? as usize;
         let mut r = resolved.to_api(&train, accumulate, n("steps_per_epoch")?);
@@ -535,6 +550,27 @@ mod tests {
         }
         assert!(TrainConfig { auto_rule: 0, ..cfg.clone() }.validate().is_err());
         assert!(TrainConfig { auto_rule: AUTO_RULE + 1, ..cfg }.validate().is_err());
+    }
+
+    /// `auto` rule 5 picks MuSGD's step weights: 0.5 / 0.5 from scratch, `musgd.*` (0.2 / 1.0) for a run that starts
+    /// from weights and for any explicit `musgd` or older rule; `transfer` is missing (false) in older configs.
+    #[test]
+    fn auto_rule_5_musgd_weights() {
+        use folo_nn::optim::{AUTO_MUSGD_SCRATCH_WEIGHTS, MuSgdWeights};
+        let cfg = TrainConfig { epochs: 30, batch: 16, ..TrainConfig::default() };
+        assert_eq!(cfg.auto_rule, 5);
+        assert_eq!(cfg.resolve_optimizer(2000, 80).musgd, AUTO_MUSGD_SCRATCH_WEIGHTS);
+        let tuned = TrainConfig { transfer: true, ..cfg.clone() };
+        assert_eq!(tuned.resolve_optimizer(2000, 80).musgd, MuSgdWeights::default());
+        let rule4 = TrainConfig { auto_rule: 4, ..cfg.clone() };
+        assert_eq!(rule4.resolve_optimizer(2000, 80).musgd, MuSgdWeights::default());
+        assert_eq!(rule4.resolve_optimizer(2000, 80).kind, cfg.resolve_optimizer(2000, 80).kind);
+        let mut explicit = TrainConfig { optimizer: OptimizerChoice::Musgd, ..cfg.clone() };
+        explicit.musgd.muon = 0.3;
+        assert_eq!(explicit.resolve_optimizer(2000, 80).musgd, MuSgdWeights { muon: 0.3, sgd: 1.0 });
+        let mut old = serde_json::to_value(&tuned).unwrap();
+        old.as_object_mut().unwrap().remove("transfer");
+        assert!(!serde_json::from_value::<TrainConfig>(old).unwrap().transfer);
     }
 
     /// `warmup_floor`: 0 by default, so `warmup_epochs` alone sets the warmup (a 205-image fine-tune, 4 steps per

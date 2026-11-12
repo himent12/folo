@@ -639,7 +639,11 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   run that trained under an older `auto` rule than a new run takes (`auto_rule`, rule 1 when absent) ends with
   `--set auto_rule=N`, so a long run made before rule 3 repeats with SGD, not MuSGD, and a short one made before
   rule 4 with AdamW; a run made before `warmup_floor` existed (no `warmup_floor`) ends with
-  `--set warmup_floor=100`, the warmup floor it trained with. A run whose optimizer this
+  `--set warmup_floor=100`, the warmup floor it trained with; an `auto` rule-5 run that trained from pretrained
+  weights (`transfer`) but whose command has no `--weights` (a run continued from an imported checkpoint) ends with
+  `--set auto_rule=4` (and `--set musgd.muon=.. --set musgd.sgd=..` when its weights were not the defaults), which
+  resolves the same optimizer with the MuSGD step weights it used (docs/MODEL.md §8.2).
+  A run whose optimizer this
   server does not know (made by a newer FOLO) gets `400 invalid_config` instead of a command that would train `auto`. `cli` is quoted for PowerShell,
   as Studio shows commands: arguments with spaces or shell characters are single-quoted, a quote inside doubled
   (`'O''Brien'`, also for the typographic quotes PowerShell reads as quotes); POSIX shells read the same words

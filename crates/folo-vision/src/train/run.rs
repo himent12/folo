@@ -80,7 +80,7 @@ impl Trainer {
             LogLevel::Info,
             format!(
                 "{} ({} params, {} classes) on {}: {} train / {} val images at {}px, batch {} × accumulate {}, {} {} \
-                 lr0 {} momentum {}, {} batches = {} optimizer steps per epoch, warmup {} steps",
+                 lr0 {} momentum {}{}, {} batches = {} optimizer steps per epoch, warmup {} steps",
                 self.model.arch(),
                 self.model.num_parameters(),
                 self.data.classes.len(),
@@ -94,6 +94,11 @@ impl Trainer {
                 self.resolved.kind.as_str(),
                 self.resolved.lr0,
                 self.resolved.momentum,
+                if self.resolved.kind == folo_nn::optim::OptimKind::MuSgd {
+                    format!(" muon {} sgd {}", self.resolved.musgd.muon, self.resolved.musgd.sgd)
+                } else {
+                    String::new()
+                },
                 self.nb,
                 c.steps_per_epoch,
                 c.warmup_iters
