@@ -176,7 +176,7 @@ describe('New run › Run on', () => {
     await onRunPod();
     vi.spyOn(api, 'createRun').mockRejectedValueOnce(new ApiError(400, 'invalid_config', '`compute.max_hours` must be from 0.25 to 720 hours, not 3'));
     target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-    expect(text(await until(() => target.querySelector('#hours-error'), 'the error'))).toBe('Compute.max_hours must be from 0.25 to 720 hours, not 3.');
+    expect(text(await until(() => target.querySelector('#hours-error'), 'the error'))).toBe('compute.max_hours must be from 0.25 to 720 hours, not 3.');
   });
 
   it('copies a cloud run with its connection, GPU and limit; one whose GPU is gone trains here, saying why', async () => {

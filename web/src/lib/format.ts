@@ -165,12 +165,14 @@ export function deviceName(label: string): string {
 /**
  * A server message or hint as a sentence: a capital first letter and a closing full stop ("device gpu:3 is not
  * available" → "Device gpu:3 is not available."). `plain` also drops the backticks around identifiers, for places
- * that cannot set them in mono (toasts, field messages).
+ * that cannot set them in mono (toasts, field messages). A message that starts with an identifier keeps its case
+ * ("`claude` printed no result" → "claude printed no result.", never "Claude"): it is a name, not a word.
  */
 export function sentence(s: string, plain = false): string {
-  const t = (plain ? s.replace(/`([^`]*)`/g, '$1') : s).trim();
+  const raw = s.trim();
+  const t = plain ? raw.replace(/`([^`]*)`/g, '$1') : raw;
   if (!t) return t;
-  const cap = t[0]!.toUpperCase() + t.slice(1);
+  const cap = raw.startsWith('`') ? t : t[0]!.toUpperCase() + t.slice(1);
   return /[.!?]$/.test(cap) ? cap : `${cap}.`;
 }
 

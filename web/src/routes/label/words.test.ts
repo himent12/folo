@@ -62,7 +62,7 @@ describe('askOutcome', () => {
     expect(askOutcome(run('failed', '`claude` printed no result', 'Run `claude -p hi`.'), img('pending'))).toEqual({
       tone: 'error',
       title: 'Claude Code could not label it again',
-      detail: 'Claude printed no result. Run claude -p hi.',
+      detail: 'claude printed no result. Run claude -p hi.',
     });
     expect(askOutcome(run('completed'), img('failed', 0, 'the reply left this image out'))).toMatchObject({ tone: 'error', detail: 'The reply left this image out.' });
     expect(askOutcome(run('completed'), img('labeled', 2))).toEqual({ tone: 'success', title: 'New boxes', detail: '2 boxes, drawn by the agent' });

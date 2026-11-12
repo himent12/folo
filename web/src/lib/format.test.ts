@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, atBestF1, bytes, compact, conf, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, timeOfDay, usd, usdRange } from './format';
+import { ago, atBestF1, bytes, compact, conf, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
@@ -124,5 +124,14 @@ describe('money and time limits (cloud compute)', () => {
     expect(timeOfDay(new Date(2026, 10, 8, 14, 32).toISOString(), now)).toBe('14:32');
     expect(timeOfDay(new Date(2026, 10, 9, 2, 5).toISOString(), now)).toBe('Nov 9, 02:05');
     expect(timeOfDay(null, now)).toBe('—');
+  });
+});
+
+describe('sentence', () => {
+  it('capitalises and closes a message, but never an identifier it starts with', () => {
+    expect(sentence('device gpu:3 is not available')).toBe('Device gpu:3 is not available.');
+    expect(sentence('`claude` printed no result')).toBe('`claude` printed no result.');
+    expect(sentence('`claude` printed no result', true)).toBe('claude printed no result.');
+    expect(sentence('run `folo serve` first', true)).toBe('Run folo serve first.');
   });
 });
