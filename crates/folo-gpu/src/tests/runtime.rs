@@ -77,16 +77,26 @@ fn a_cleared_pool_forgets_its_old_high_water_mark() {
         pool.give(b, 2048);
     }
     // A training step's worth (8 KiB live at once) stays cached although the cap is 1 KiB.
-    assert_eq!(pool.stats().cached_bytes, 8192);
+    assert_eq!((pool.stats().cached_bytes, pool.stats().need_bytes), (8192, 8192));
     pool.clear();
-    assert_eq!(pool.stats().cached_bytes, 0);
-    // After the clear the cap follows the new high-water mark (2 KiB), not the old 8 KiB: a 1 KiB buffer freed
-    // after a cached 2 KiB one evicts it (with the old mark both would stay, 3 KiB).
+    // The clear forgets the need with the cached buffers.
+    assert_eq!((pool.stats().cached_bytes, pool.stats().need_bytes), (0, 0));
+    // After the clear the cap follows the new high-water mark (2 KiB), not the old 8 KiB: once the 2 KiB class has
+    // left the need (two windows of 1 KiB requests), a 1 KiB buffer freed after a cached 2 KiB one evicts it (with the
+    // old mark both would stay, 3 KiB).
     let b = pool.take(ctx.wgpu_device(), 2048, usage);
     pool.give(b, 2048);
-    let b = pool.take(ctx.wgpu_device(), 1024, usage);
-    pool.give(b, 1024);
+    for _ in 0..2 * crate::pool::NEED_WINDOW {
+        let b = pool.take(ctx.wgpu_device(), 1024, usage);
+        pool.give(b, 1024);
+    }
     assert_eq!(pool.stats().cached_bytes, 1024, "{:?}", pool.stats());
+    // A buffer still lent out at the clear stays in the need, and only it.
+    let held = pool.take(ctx.wgpu_device(), 4096, usage);
+    assert_eq!(pool.stats().need_bytes, 1024 + 4096);
+    pool.clear();
+    assert_eq!((pool.stats().cached_bytes, pool.stats().need_bytes), (0, 4096), "{:?}", pool.stats());
+    pool.give(held, 4096);
 }
 
 #[test]
@@ -104,9 +114,12 @@ fn pool_evicts_least_recently_freed_and_caches_up_to_the_high_water_mark() {
     pool.give(b, 2048);
     pool.give(c, 1536);
     assert_eq!(pool.stats().cached_bytes, 4608);
-    // A 3 KiB buffer pushes out the two least recently freed (1 KiB, then 2 KiB).
-    let d = pool.take(ctx.wgpu_device(), 3072, usage);
-    pool.give(d, 3072);
+    // Once the first three classes have left the need (two windows of 3 KiB requests), a 3 KiB buffer pushes out the
+    // two least recently freed (1 KiB, then 2 KiB).
+    for _ in 0..2 * crate::pool::NEED_WINDOW + 1 {
+        let d = pool.take(ctx.wgpu_device(), 3072, usage);
+        pool.give(d, 3072);
+    }
     assert_eq!(pool.stats().cached_bytes, 1536 + 3072);
     let before = pool.stats();
     let _ = pool.take(ctx.wgpu_device(), 1536, usage);

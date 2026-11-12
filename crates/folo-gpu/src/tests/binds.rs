@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use super::gpu;
 use crate::context::binds::{BindCache, GENERATION};
 use crate::pipeline::{Access, Kernel, KernelDef, Params, Source, Spec};
-use crate::pool::{BufferPool, Retired};
+use crate::pool::{BufferPool, NEED_WINDOW, Retired};
 use crate::{DType, GpuContext, GpuTensor};
 
 /// `X[i] += pf(1)` for `i < pu(0)`.
@@ -146,8 +146,11 @@ fn sync_drops_the_entries_of_evicted_buffers() {
     ctx.trim_pool();
     assert_eq!(ctx.bind_cache_len(), 1, "a is lent out, not dropped");
     drop(a);
-    // Freeing a 1 KiB buffer while `a` is cached exceeds the 1 KiB high-water mark: `a` is evicted.
-    drop(ctx.alloc(1024).unwrap());
+    // Freeing a 1 KiB buffer while `a` is cached exceeds the 1 KiB high-water mark once the 256-byte class has left
+    // the need (two windows of 1 KiB requests): `a` is evicted.
+    for _ in 0..2 * NEED_WINDOW {
+        drop(ctx.alloc(1024).unwrap());
+    }
     assert_eq!(ctx.bind_cache_len(), 1, "no dispatch or submission since");
     ctx.sync().unwrap();
     assert_eq!((ctx.bind_cache_len(), ctx.bind_index_size()), (0, (0, 0)));
@@ -188,9 +191,14 @@ fn pool_reports_the_buffers_it_lets_go() {
     assert!(pool.owns(id_a), "cached");
     assert!(matches!(pool.take_retired(), Retired::None));
     assert!(!flag.load(Ordering::Relaxed));
-    // A 2 KiB buffer freed while the 1 KiB one is cached evicts it (cap and high-water mark: 2 KiB).
-    let x = pool.take(ctx.wgpu_device(), 2048, usage);
+    // Once two need windows of 2 KiB requests have passed, a 2 KiB buffer freed while the 1 KiB one is cached evicts
+    // it (cap and high-water mark: 2 KiB).
+    let mut x = pool.take(ctx.wgpu_device(), 2048, usage);
     let id_x = crate::context::buffer_id(&x);
+    for _ in 0..2 * NEED_WINDOW {
+        pool.give(x, 2048);
+        x = pool.take(ctx.wgpu_device(), 2048, usage);
+    }
     pool.give(x, 2048);
     assert!(flag.load(Ordering::Relaxed));
     match pool.take_retired() {

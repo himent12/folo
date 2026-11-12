@@ -43,16 +43,40 @@ The kernel layer sees neither a `GpuTensor` nor a folo-core tensor: both front e
 
 ### Buffer pool
 
-`ctx.alloc(bytes)` rounds the request up to a size class and takes the most recently freed buffer of that class,
-or creates one. Size classes are quarter steps between powers of two, with a 256-byte floor (…, 1 MiB, 1.25 MiB,
-1.5 MiB, 1.75 MiB, 2 MiB, …), so at most 25% of a buffer is slack. A dropped `GpuBuffer` goes back to its free
-list. The free lists hold at most the larger of 2 GiB and the high-water mark of live bytes, so a training step
-whose working set is bigger than 2 GiB still reuses every buffer on the next step (as PyTorch's caching allocator
-does); when a returned buffer does not fit, the least recently freed buffers are evicted first. `trim_pool()`
-empties the lists and `pool_stats()` reports hits, misses and bytes. With a fixed 2 GiB cap that dropped the
-buffer being returned, batch-16 training thrashed the driver allocator (171 GB allocated in one benchmark run,
-batch-1 inference after it 3.5x slower). `PoolStats::peak_live_bytes` is the largest `live_bytes` seen, PyTorch's
-`max_memory_allocated` counterpart (in size-class bytes); `ctx.reset_peak_memory()` restarts it.
+`ctx.alloc(bytes)` rounds the request up to a size class and takes the oldest free buffer of that class (the one
+the pool created first), or creates one. Size classes are quarter steps between powers of two, with a 256-byte floor
+(…, 1 MiB, 1.25 MiB, 1.5 MiB, 1.75 MiB, 2 MiB, …), so at most 25% of a buffer is slack. A dropped `GpuBuffer` goes
+back to its free list.
+
+Oldest first makes the choice depend only on which buffers are free, not on the order they came back in. A training
+step frees its tensors in another order than it allocated them (autograd's traversal, gradients in a hash map), and
+with the most recently freed buffer handed out the same request got a different buffer every step, so most of the
+step's bind groups missed the cache (below). Now the free set at the start of every step is the same, so every
+request gets the same buffer as in the step before, as long as the program allocates and frees the same way.
+
+The free lists hold at most the largest of 2 GiB, the high-water mark of live bytes, and the *need* of the recent
+requests less the live bytes, so a training step whose working set is bigger than 2 GiB still reuses its buffers
+on the next step (as PyTorch's caching allocator does), as long as the step requests every size class at least once
+per two windows (below) and its need fits within twice the live high-water mark (a folo-n step: about 1300 requests,
+need 1.2× the high-water mark); otherwise some buffers are evicted and created again. The need is the sum over size classes of the class size
+times the most buffers of that class lent out at once, over the last two windows of 4096 requests (about three
+folo-n training steps): what the pool must hold to serve them without creating a buffer. It is more than the live
+high-water mark when classes peak at different times (a folo-n b16 f32 step: 4.1 GiB for 3.4 GiB live), and with
+the cap at the high-water mark the pool evicted and created again 57 buffers per f32 step (46 with AMP in a process
+of its own); wgpu zero-fills a new buffer, so that cost GPU time as well as bind groups. Classes no longer requested
+(after validation, a last partial batch) leave the need after two windows, and the need counts for at most twice the
+live high-water mark. The cap is enforced on every free, on every allocation miss (before the new buffer is
+created) and when a need window rolls over; what does not fit is evicted, least recently freed first. With `M` the configured cap (2 GiB) and `H` the
+high-water mark, the pool therefore holds (live plus cached) at most `max(live + max(M, H), min(need, 2H)) ≤
+2·max(M, H)` at any time, never more than a cache capped at `max(M, H)` on top of the live bytes could hold.
+`trim_pool()` empties the lists and `pool_stats()` reports hits, misses and bytes. With a fixed 2 GiB cap that
+dropped the buffer being returned, batch-16 training thrashed the driver allocator (171 GB allocated in one
+benchmark run, batch-1 inference after it 3.5x slower). `PoolStats::peak_live_bytes` is the largest `live_bytes`
+seen, PyTorch's `max_memory_allocated` counterpart (in size-class bytes), `peak_held_bytes` the largest live plus
+cached bytes (the device memory the pool held) and `need_bytes` the current need; `ctx.reset_peak_memory()`
+restarts the peaks. `ctx.device_memory()` returns `(allocated, reserved)` bytes from wgpu's allocator (the live
+allocations, and the memory blocks they are carved from, which is what the driver has given the process), or `None`
+where wgpu cannot report it.
 
 The high-water mark is what lets a training loop keep its working set, and it is also why a long-lived process must
 give the pool back between jobs: after a run the free lists hold up to the run's peak (about 7 GB for a folo-n
@@ -88,10 +112,10 @@ bind groups created (the backend benchmark prints them per pass).
 **Bind-group cache.** The parameter block is bound with a dynamic offset (its slot in the arena chunk), so a bind
 group depends only on the kernel's layout, the arena chunk and the storage buffers, and the context keeps the bind
 groups it made, keyed by those (`context/binds.rs`; creating one costs 3–4 µs of host time). An inference forward
-meets the same combinations on every call and creates no bind group after its first calls. A training step reuses
-only some (about 27% of a folo-n b16 f32 step's dispatches, 56% with AMP): the pool's buffers do not come back in
-the same order every step. So a miss is kept cheap (an FxHash-style key and a set insert) and a combination is
-cached only on its second sighting; one seen once is just remembered in a bounded set of recent keys (a forward
+meets the same combinations on every call and creates no bind group after its first calls, and so does a training
+step at a fixed batch shape since the pool hands out the same buffers every step (folo-n b16: no new bind group per
+step in f32 or AMP; before, only 23–40% of a step's dispatches reused one). A miss is kept cheap (an FxHash-style
+key and a set insert) and a combination is cached only on its second sighting; one seen once is just remembered in a bounded set of recent keys (a forward
 hits from its third call on). A cached bind group keeps its buffers alive, so only buffers the pool owns (created
 and not yet let go of) and the context's dummy buffer are cached; a raw buffer passed to a kernel, or a traced
 buffer replayed after the pool dropped it, never is. The pool records every buffer it lets go of (evicted, or
