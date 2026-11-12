@@ -101,7 +101,13 @@ export default function Overview() {
   const ranking = computed(() => {
     const runMap = runById.get();
     const dsMap = dsById.get();
-    return rankByContext(models.data ?? [], (m) => scoreContext(m, runMap, dsMap), (m) => m.metrics?.map50_95, (m) => m.created);
+    return rankByContext(
+      models.data ?? [],
+      (m) => scoreContext(m, runMap, dsMap),
+      (m) => m.metrics?.map50_95,
+      (m) => m.created,
+      (m) => m.name,
+    );
   });
   const topModels = computed(() => ranking.get().groups.slice(0, 6).map((g) => ({ m: g.items[0]!, ctx: g.ctx })));
   const unranked = computed(() => ranking.get().unranked.length + Math.max(0, ranking.get().groups.length - 6));
