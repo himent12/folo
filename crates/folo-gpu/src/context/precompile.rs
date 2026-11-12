@@ -34,6 +34,17 @@ pub(crate) struct Precompile {
     taken: AtomicU64,
 }
 
+impl Drop for Precompile {
+    /// The context is gone: its recordings are written one last time and retired here, so the saver thread, which
+    /// may hold the last reference to one, never writes it later (into a folder that may be gone by then).
+    fn drop(&mut self) {
+        let recs = self.recordings.get_mut().unwrap_or_else(|e| e.into_inner());
+        for r in recs.drain(..) {
+            r.retire();
+        }
+    }
+}
+
 /// One kernel handed to the workers.
 #[derive(Default)]
 struct Slot {
