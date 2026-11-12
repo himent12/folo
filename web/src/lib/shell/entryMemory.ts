@@ -31,6 +31,8 @@ type Kept = { y?: number; state?: Record<string, unknown>; server?: string };
 
 let kept = new Map<number, Kept>();
 let restoring: { until: number; frame: number } | null = null;
+/** The entry Back / Forward or a reload brought back to a position kept for it (null after a new navigation). */
+let returned: number | null = null;
 /** The path of the screen on display (App's: not the URL's route while the next screen's chunk loads). */
 let shownPath = (): string | null => router.route.path;
 
@@ -67,6 +69,15 @@ const entry = (pos: number): Kept => {
   if (!k) kept.set(pos, (k = {}));
   return k;
 };
+
+/**
+ * True when the entry on display was come back to (Back, Forward, a reload) with a scroll position kept for it: that
+ * position is the page's, over a part of it the URL names (Settings' `?section=` jumps and holds only on a new
+ * navigation), for as long as the app stays on that entry, after the restore has let go too.
+ */
+export function returnedToPosition(): boolean {
+  return returned !== null && returned === router.entry;
+}
 
 /** True while a Back / Forward is bringing the page back to its position (routeFocus then leaves the scroll alone). */
 export function restoringScroll(): boolean {
@@ -120,13 +131,16 @@ function onEntry(e: EntryChange) {
     cancelAnimationFrame(restoring.frame);
     restoring = null;
   }
+  returned = null;
   if (!e.traverse) {
     // A new entry at a place an old one had (after going back): it starts with nothing kept.
     kept.delete(e.to);
     return;
   }
   // The URL is the entry's already; the router's route follows once its listeners have heard of the move.
-  restore(kept.get(e.to)?.y ?? 0, parse(location.hash).path);
+  const y = kept.get(e.to)?.y ?? 0;
+  if (y > 0) returned = e.to;
+  restore(y, parse(location.hash).path);
 }
 
 /**
@@ -153,6 +167,7 @@ export function installEntryMemory(shown: () => string | null = () => router.rou
   window.addEventListener('pagehide', persist);
   // A reload: the entry's position, as Back would.
   const y = kept.get(router.entry)?.y;
+  returned = y ? router.entry : null;
   if (y) restore(y, router.location.path);
   return () => {
     stopRestoring();

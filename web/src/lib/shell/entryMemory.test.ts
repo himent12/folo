@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { router } from '$lib/router';
 import { tabHistory, type TabHistory } from '$lib/tabHistory.testing';
-import { entryState, installEntryMemory, restoringScroll } from './entryMemory';
+import { entryState, installEntryMemory, restoringScroll, returnedToPosition } from './entryMemory';
 import { focusRoute } from './routeFocus';
 
 describe('entryMemory', () => {
@@ -169,5 +169,32 @@ describe('entryMemory', () => {
     reload([[at + 1, { y: 300, state: [] }], [at, { y: 640 }], [at + 2, null]]);
     await frames(40);
     expect(window.scrollY).toBe(640);
+  });
+
+  // review studio-2 R5: what a page that lands on a part of itself (Settings' ?section=) asks before it jumps there.
+  it('says when the entry on display was come back to with a position kept for it, after the restore too', async () => {
+    router.go('/settings?section=units');
+    expect(returnedToPosition()).toBe(false);
+    scroll(2000);
+    router.go('/runs');
+    tab.back();
+    await settle();
+    expect(returnedToPosition()).toBe(true);
+    await frames(40);
+    expect([restoringScroll(), returnedToPosition()]).toEqual([false, true]);
+    // A new navigation: nothing kept is the page's.
+    router.go('/settings?section=about');
+    expect(returnedToPosition()).toBe(false);
+    // Back to an entry kept at the top is not one either; a reload of a scrolled one is.
+    scroll(0);
+    router.go('/runs');
+    tab.back();
+    await settle();
+    expect(returnedToPosition()).toBe(false);
+    scroll(900);
+    uninstall();
+    sessionStorage.setItem('folo.entries', JSON.stringify([[router.entry, { y: 900 }]]));
+    uninstall = installEntryMemory();
+    expect(returnedToPosition()).toBe(true);
   });
 });
