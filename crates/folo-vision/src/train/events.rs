@@ -55,6 +55,15 @@ pub(crate) struct Emitter {
     last_step: Option<Instant>,
     /// The run's length, `(epochs, steps_per_epoch)`, carried by every `status` event.
     length: (u32, u64),
+    /// While a checkpoint write runs (`train/writer/`): the events emitted meanwhile, in order, delivered after
+    /// the epoch event that waits for the write.
+    held: Option<Vec<Held>>,
+}
+
+/// An event held back by [`Emitter::hold`].
+enum Held {
+    Emit(RunEvent),
+    Step(RunEvent, bool),
 }
 
 impl Emitter {
@@ -64,7 +73,32 @@ impl Emitter {
         step_interval: Duration,
         length: (u32, u64),
     ) -> Self {
-        Emitter { sink, file, step_interval, last_step: None, length }
+        Emitter { sink, file, step_interval, last_step: None, length, held: None }
+    }
+
+    /// Holds every event from now on until [`Emitter::release`] (a checkpoint write is running).
+    pub(crate) fn hold(&mut self) {
+        self.held.get_or_insert_with(Vec::new);
+    }
+
+    /// Emits `first` (the epoch event the held ones waited for), then the held events in order, and stops holding.
+    pub(crate) fn release(&mut self, first: Option<RunEvent>) {
+        let held = self.held.take().unwrap_or_default();
+        if let Some(e) = first {
+            self.emit(e);
+        }
+        for h in held {
+            match h {
+                Held::Emit(e) => self.emit(e),
+                Held::Step(e, force) => self.step(e, force),
+            }
+        }
+    }
+
+    /// Stops holding and drops the held events (the write they waited for failed, so the run fails at that
+    /// epoch's end).
+    pub(crate) fn release_dropping(&mut self) {
+        self.held = None;
     }
 
     fn write(&mut self, e: &RunEvent) {
@@ -78,6 +112,10 @@ impl Emitter {
 
     /// Emit a non-step event (and flush the metrics file, so readers see whole epochs).
     pub(crate) fn emit(&mut self, e: RunEvent) {
+        if let Some(h) = &mut self.held {
+            h.push(Held::Emit(e));
+            return;
+        }
         self.write(&e);
         if let Some(f) = &mut self.file {
             let _ = f.flush();
@@ -89,6 +127,10 @@ impl Emitter {
 
     /// Emit a step: always to the metrics file, to the sink at most once per interval unless `force`.
     pub(crate) fn step(&mut self, e: RunEvent, force: bool) {
+        if let Some(h) = &mut self.held {
+            h.push(Held::Step(e, force));
+            return;
+        }
         self.write(&e);
         let now = Instant::now();
         let due = force || self.last_step.is_none_or(|t| now.duration_since(t) >= self.step_interval);

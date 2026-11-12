@@ -1,5 +1,5 @@
-//! Checkpoints: the epoch's `weights/last.folo` / `best.folo` and samples, [`Trainer::save_checkpoint`] (the
-//! complete FORMAT.md training state) and the batched device-to-host download it writes from.
+//! Checkpoints: [`Trainer::save_checkpoint`] (the complete FORMAT.md training state), the host snapshot of it the
+//! epoch's files are written from (`train/writer/`), and the batched device-to-host download behind both.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -7,67 +7,27 @@ use std::path::Path;
 use folo_core::Device;
 use folo_core::rng::Rng;
 use folo_nn::EmaState;
-use folo_nn::io::{CheckpointParts, Metrics, RngState};
+use folo_nn::io::{CheckpointParts, FileContents, Metrics, RngState};
 
 use super::{
-    AMP_KEY, CLOSE_MOSAIC_KEY, NONFINITE_STREAK_KEY, TRAIN_IMAGES_KEY, TrainSummary, Trainer, f32_decimal,
-    rfc3339_now,
+    AMP_KEY, CLOSE_MOSAIC_KEY, NONFINITE_STREAK_KEY, TRAIN_IMAGES_KEY, Trainer, f32_decimal, rfc3339_now,
 };
 use crate::error::{Error, Result};
-use crate::val::ValSample;
 
 impl Trainer {
-    /// `weights/last.folo` (and `best.folo` when `improved`) and the epoch's samples.
-    pub(super) fn write_epoch_files(
-        &mut self,
-        e: u32,
-        improved: bool,
-        samples: &[ValSample],
-        summary: &mut TrainSummary,
-    ) -> Result<()> {
-        let Some(dir) = &self.opts_dir else { return Ok(()) };
-        let weights = dir.join("weights");
-        let last = weights.join("last.folo");
-        self.save_checkpoint(&last)?;
-        self.last_saved = Some((last.clone(), self.epoch));
-        if improved {
-            let best = weights.join("best.folo");
-            let (tmp, mut f) = folo_nn::io::safetensors::create_temp_beside(&best)?;
-            // The file is closed before the rename (on wasm `File` has nothing to close, hence the allow).
-            #[cfg_attr(target_arch = "wasm32", allow(clippy::drop_non_drop))]
-            let copied = std::fs::File::open(&last)
-                .and_then(|mut src| std::io::copy(&mut src, &mut f))
-                .and_then(|_| f.sync_all())
-                .and_then(|_| {
-                    drop(f);
-                    std::fs::rename(&tmp, &best)
-                });
-            if let Err(err) = copied {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(Error::io(&best, err));
-            }
-            summary.best_weights = Some(best);
-        }
-        summary.last = Some(last);
-        let sdir = dir.join("samples");
-        std::fs::create_dir_all(&sdir).map_err(|err| Error::io(&sdir, err))?;
-        let p = sdir.join(format!("epoch_{:03}.json", e + 1));
-        let names = &self.data.classes;
-        let body = serde_json::json!({
-            "epoch": e + 1,
-            "classes": names,
-            "samples": samples,
-        });
-        std::fs::write(&p, serde_json::to_string(&body).expect("samples serialise"))
-            .map_err(|err| Error::io(&p, err))
-    }
-
     /// Write the complete training state (FORMAT.md checkpoint) to `path`, atomically.
     ///
     /// Only possible at an epoch boundary (FORMAT.md v1 stores no loader position or pending gradients): before
     /// the first epoch, between epochs, or after `run` returned at one. A trainer stopped or failed inside an
     /// epoch refuses.
     pub fn save_checkpoint(&self, path: impl AsRef<Path>) -> Result<()> {
+        let (map, tensors) = self.checkpoint_snapshot()?;
+        Ok(folo_nn::io::safetensors::write_file(path.as_ref(), Some(&map), &tensors)?)
+    }
+
+    /// The complete training state as [`Trainer::save_checkpoint`] writes it, with every tensor on the host: what
+    /// the checkpoint writer thread is handed (`train/writer/`). Only at an epoch boundary.
+    pub(super) fn checkpoint_snapshot(&self) -> Result<FileContents> {
         if !self.at_boundary {
             return Err(Error::Config(format!(
                 "a checkpoint can only be written at an epoch boundary; this run stopped inside epoch {}",
@@ -107,8 +67,17 @@ impl Trainer {
             train_config: &train,
         };
         let (map, mut tensors) = folo_nn::io::checkpoint_contents(&meta, &parts)?;
+        // Tensors already on the host are the live ones (a CPU run's weights, BatchNorm statistics, optimizer
+        // state): the writer thread writes the snapshot while the next epoch updates them in place, so they are
+        // copied. Device tensors become new host copies in the download.
+        for (_, t) in tensors.iter_mut().filter(|(_, t)| t.device().is_cpu()) {
+            *t = folo_core::Tensor::from_storage(
+                folo_core::Storage::Cpu(t.to_cpu_storage()?),
+                t.shape().clone(),
+            )?;
+        }
         download_all(&mut tensors)?;
-        Ok(folo_nn::io::safetensors::write_file(path.as_ref(), Some(&map), &tensors)?)
+        Ok((map, tensors))
     }
 }
 

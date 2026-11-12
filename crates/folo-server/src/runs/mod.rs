@@ -227,6 +227,20 @@ impl EpochHold {
     }
 }
 
+/// The trainer's side of an [`EpochHold`]: a boundary pauses only while the hold is on, so a run nobody holds
+/// keeps writing its checkpoint while the next epoch trains.
+struct HoldHook(Arc<EpochHold>);
+
+impl folo_vision::train::EpochHook for HoldHook {
+    fn pauses(&mut self, _epoch: u32) -> bool {
+        *self.0.on.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn pause(&mut self, _epoch: u32, stop: &AtomicBool) {
+        self.0.wait(stop);
+    }
+}
+
 /// folo-data's format of an API format.
 pub fn data_format(f: DatasetFormat) -> folo_data::Format {
     match f {

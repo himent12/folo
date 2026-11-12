@@ -54,7 +54,8 @@ pub struct Epoch {
     pub train_loss: Loss,
     /// Validation metrics.
     pub val: ValMetrics,
-    /// Wall time of the epoch including validation.
+    /// Wall time of the epoch including validation and its checkpoint's snapshot (and a wait for the previous
+    /// epoch's checkpoint write, if it is still running; docs/API.md).
     pub duration_s: f64,
 }
 

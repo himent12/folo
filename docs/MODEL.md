@@ -773,7 +773,13 @@ while validation and the checkpoints run and the next epoch's first step does no
 epoch or once a stop is requested; if it cannot start, a warning is logged and the epoch starts its loader itself).
 Its batches are the same whenever it starts (everything is seeded by the epoch and the sample position). When the
 run ends (finished, stopped, stopped early or failed) a loader started for an epoch that will not train is dropped,
-joining its workers and the feeder.
+joining its workers and the feeder. The epoch's checkpoint is snapshotted on the training thread (every tensor
+downloaded to the host) and its files (`weights/last.folo`, `best.folo` when it improved, the samples) are written by a
+writer thread, each to a temporary name, synced and renamed, while the next epoch trains; the `epoch` event and every
+event after it wait until the files are on disk (docs/API.md), and the next epoch's end, a stop, a failure and the
+end of the run wait for the write (one at a time; a wait at the next epoch's end counts in that epoch's
+`duration_s`). A write that fails fails the run without that epoch's event. A trainer dropped with a write in
+flight (a panic) waits for it without delivering any event.
 
 **On a GPU** (`--device gpu:0`, or `auto` with an adapter) the same loop runs with everything on the device: the model,
 the EMA, the optimizer state and the accumulation buffers live there; the loader delivers `u8` pixels and a feeder

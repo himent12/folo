@@ -9,7 +9,12 @@ use super::*;
 use crate::error::Error;
 
 /// A trainer on 8 synthetic 64 px training images (2 batches of 4), on the CPU.
-fn micro(epochs: u32, patience: u32, opts: TrainOptions) -> Trainer {
+pub(super) fn micro(epochs: u32, patience: u32, opts: TrainOptions) -> Trainer {
+    micro_on("cpu", epochs, patience, opts)
+}
+
+/// [`micro`] on `device`.
+pub(super) fn micro_on(device: &str, epochs: u32, patience: u32, opts: TrainOptions) -> Trainer {
     use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
     let shapes = SyntheticConfig {
         images: 10,
@@ -30,7 +35,7 @@ fn micro(epochs: u32, patience: u32, opts: TrainOptions) -> Trainer {
         patience,
         batch: 4,
         imgsz: 64,
-        device: "cpu".into(),
+        device: device.into(),
         optimizer: OptimizerChoice::Adamw,
         lr0: 0.002,
         warmup_epochs: 0.0,

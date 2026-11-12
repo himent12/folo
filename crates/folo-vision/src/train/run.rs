@@ -37,7 +37,15 @@ impl Trainer {
             )));
         }
         self.emitter.status(RunStatus::Running, None);
-        let r = self.run_inner().map_err(|e| self.explain_device_loss(e));
+        let r = self.run_inner();
+        // A run that failed or stopped inside an epoch still delivers the previous epoch's event once its files are
+        // written (a failed write fails the run).
+        let written = self.settle_write();
+        let r = match (r, written) {
+            (Ok(s), Ok(())) => Ok(s),
+            (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+        }
+        .map_err(|e| self.explain_device_loss(e));
         // A next epoch started before the run ended (finished, stopped, stopped early or failed) is dropped, which
         // stops and joins its loader workers and feeder: nothing keeps decoding or staging once `run` returns.
         self.prefetched = None;
@@ -58,7 +66,8 @@ impl Trainer {
     }
 
     /// A lost GPU device (driver reset, TDR) fails the run with a message that says so and names the checkpoint to
-    /// resume from. Checkpoints are written only at epoch boundaries, so the last one written stays intact.
+    /// resume from. Checkpoints are written only at epoch boundaries (from a host snapshot, so a write in flight
+    /// finishes), and the last one written stays intact.
     fn explain_device_loss(&self, e: Error) -> Error {
         if !device_lost(&e) {
             return e;
@@ -194,13 +203,26 @@ impl Trainer {
             }
             self.epoch = e + 1;
             self.at_boundary = true;
-            self.write_epoch_files(e, improved, &val.samples, &mut summary)?;
+            // The checkpoint's snapshot is taken here; its files are written while the next epoch trains, and the
+            // epoch event is delivered once they are on disk (`train/writer/`). The epoch's time ends with the
+            // snapshot, and includes the wait for the previous epoch's write if it is still running.
+            let files = self.epoch_files(e, improved, &val.samples)?;
             let duration_s = t0.elapsed().as_secs_f64();
             let batches = clock.wall[0] + clock.wall[1] - batches_before;
             clock.ended_epoch(val.seconds, (duration_s - batches - val.seconds).max(0.0));
             let ep = folo_api::Epoch { epoch: e + 1, train_loss, val: metrics, duration_s };
             summary.epochs.push(ep.clone());
-            self.emitter.emit(RunEvent::Epoch(ep));
+            self.write_epoch_files(files, RunEvent::Epoch(ep))?;
+            // Only a pause waits for the write (and delivers the epoch event first).
+            if let Some(mut hook) = self.after_epoch.take() {
+                let written = if hook.pauses(self.epoch) {
+                    self.settle_write().map(|()| hook.pause(self.epoch, &self.stop))
+                } else {
+                    Ok(())
+                };
+                self.after_epoch = Some(hook);
+                written?;
+            }
             if stop {
                 self.emitter.log(
                     LogLevel::Info,
@@ -214,6 +236,7 @@ impl Trainer {
                 break;
             }
         }
+        self.settle_write()?;
         if stopped {
             self.emitter.log(LogLevel::Info, format!("stopped after {} completed epochs", self.epoch));
             summary.status = RunStatus::Stopped;

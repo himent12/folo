@@ -47,6 +47,7 @@ mod run;
 mod setup;
 #[cfg(test)]
 mod tests;
+mod writer;
 
 pub use config::{
     MuSgdConfig, OptimizerChoice, ResolvedOptim, TrainConfig, default_workers, f32_decimal, resolve_device,
@@ -132,6 +133,22 @@ pub struct TrainOptions {
     /// checked against the available memory when the run starts). Batches are the same either way, so it is a
     /// setting of this process, not of the run (a resume may pass another).
     pub cache: folo_data::CacheMode,
+    /// Test support: pauses the run at chosen epoch boundaries ([`EpochHook`]; folo-server's tests pause a run there
+    /// to stop it between two epochs). Blocking in the event sink does not pause at the boundary: the epoch event is
+    /// delivered when the checkpoint write is done, while the next epoch trains (`train/writer/`).
+    #[doc(hidden)]
+    pub after_epoch: Option<Box<dyn EpochHook>>,
+}
+
+/// [`TrainOptions::after_epoch`]: test support, called on the training thread at every epoch boundary.
+#[doc(hidden)]
+pub trait EpochHook: Send {
+    /// Whether the run pauses after epoch `epoch` (1-based). Asked once the epoch's checkpoint write started; a
+    /// boundary without a pause does not wait for that write.
+    fn pauses(&mut self, epoch: u32) -> bool;
+    /// The pause, when [`EpochHook::pauses`] asked for one: called once the epoch's files are written and its
+    /// `epoch` event delivered, with the run's stop flag. The next epoch starts when it returns.
+    fn pause(&mut self, epoch: u32, stop: &AtomicBool);
 }
 
 impl Default for TrainOptions {
@@ -143,6 +160,7 @@ impl Default for TrainOptions {
             stop: Arc::new(AtomicBool::new(false)),
             weights: None,
             cache: folo_data::CacheMode::None,
+            after_epoch: None,
         }
     }
 }
@@ -221,6 +239,10 @@ pub struct Trainer {
     /// The next epoch's batches, started when the previous epoch took its last batch, so that the loader works
     /// while validation and the checkpoints run (the epoch it belongs to, and its source).
     prefetched: Option<(u32, BatchSource)>,
+    /// The last epoch's files being written on the writer thread, and its epoch event (`train/writer/`).
+    pending_write: Option<writer::PendingWrite>,
+    /// [`TrainOptions::after_epoch`].
+    after_epoch: Option<Box<dyn EpochHook>>,
 }
 
 /// A started epoch's batches: the loader's, staged by the feeder thread on a folo-gpu device.

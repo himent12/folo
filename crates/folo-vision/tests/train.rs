@@ -87,6 +87,19 @@ fn options(dir: Option<&Path>) -> (TrainOptions, Log) {
     (opts, log)
 }
 
+/// Stops the run at the boundary after epoch `.0` ([`TrainOptions::after_epoch`]).
+struct StopAfter(u32);
+
+impl folo_vision::train::EpochHook for StopAfter {
+    fn pauses(&mut self, epoch: u32) -> bool {
+        epoch == self.0
+    }
+
+    fn pause(&mut self, _: u32, stop: &std::sync::atomic::AtomicBool) {
+        stop.store(true, Ordering::Relaxed);
+    }
+}
+
 fn epochs_of(log: &Log) -> Vec<folo_api::Epoch> {
     log.lock()
         .unwrap()
@@ -183,19 +196,10 @@ fn micro_run_learns_checkpoints_and_resumes_bit_exactly() {
     let meta: &Metadata = file.metadata();
     assert!(meta.metrics.is_some());
 
-    // B: the same run, stopped after epoch 1, then resumed from its last.folo.
-    let (opts, log_b) = options(Some(&dir_b));
-    let stop = opts.stop.clone();
-    let sink_log = log_b.clone();
-    let opts = TrainOptions {
-        events: Some(Box::new(move |e| {
-            if matches!(e, RunEvent::Epoch(_)) {
-                stop.store(true, Ordering::Relaxed);
-            }
-            sink_log.lock().unwrap().push(e.clone());
-        })),
-        ..opts
-    };
+    // B: the same run, stopped after epoch 1 (at the boundary: its event arrives once its files are written,
+    // possibly after epoch 2 began), then resumed from its last.folo.
+    let (opts, _log_b) = options(Some(&dir_b));
+    let opts = TrainOptions { after_epoch: Some(Box::new(StopAfter(1))), ..opts };
     let sum_b1 = Trainer::new(resume_config(), data(&ds), opts).unwrap().run().unwrap();
     assert_eq!((sum_b1.status, sum_b1.epochs_completed), (RunStatus::Stopped, 1));
     let (opts, log_b2) = options(Some(&dir_b));
