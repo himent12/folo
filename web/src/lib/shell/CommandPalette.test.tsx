@@ -185,6 +185,15 @@ describe('CommandPalette: Settings and touch (shell F14, F17)', () => {
     expect(go).toHaveBeenCalledWith('/settings?section=cloud');
   });
 
+  it('offers no Cloud section on a server without cloud compute', async () => {
+    hub.api = new MockApi('cloud-off', 0);
+    await openWith('settings', '[id="pi-settings-connection"]');
+    // Wait until the system answer is in: the sections then settle.
+    await vi.waitFor(async () => expect((await hub.api.system()).features).not.toContain('cloud'));
+    flushSync();
+    expect(document.querySelector('[id="pi-settings-cloud"]')).toBeNull();
+  });
+
   it('shows no key hints, footer or sidebar action on a touch-only device', async () => {
     const real = window.matchMedia;
     vi.spyOn(window, 'matchMedia').mockImplementation((q: string) => ({ ...real.call(window, q), matches: q.includes('hover: none') }) as MediaQueryList);

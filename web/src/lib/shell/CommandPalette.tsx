@@ -16,6 +16,7 @@ import Target from '$icons/target';
 import X from '$icons/x';
 import { bindable, computed, css, Dynamic, effect, For, Index, signal } from 'fw';
 import { hub } from '$lib/api/index';
+import { hasCloud } from '$lib/cloud';
 import type { Bench, BenchLoop, Dataset, LabelJob, Model, Run, RunStatus } from '$lib/api/types';
 import { failureCause } from '$lib/oom';
 import { prefs } from '$lib/prefs';
@@ -93,6 +94,8 @@ export default function CommandPalette(props: CommandPaletteProps) {
   /** Labeling jobs, and the benchmarks' self-improvement loops, on servers that have them (none listed otherwise). */
   const labelJobs = signal<LabelJob[]>([]);
   const loops = signal<BenchLoop[]>([]);
+  /** The server has cloud compute (`features`: `cloud`): only then is Settings' Cloud section there to open. */
+  const cloud = signal(false);
   /** The items chosen last (ids), read on open: with no query they head the list, under Recent. */
   const recent = signal<string[]>([]);
 
@@ -123,6 +126,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
         () => (benches.set([]), benchesOk.set(false), loops.set([])),
       );
       api.labelJobs().then((j) => labelJobs.set(j), () => labelJobs.set([]));
+      api.system().then((s) => cloud.set(hasCloud(s)), () => cloud.set(false));
     } else if (!open.get() && el.open) el.close();
   });
 
@@ -184,7 +188,8 @@ export default function CommandPalette(props: CommandPaletteProps) {
           ]),
     ];
     // Settings' sections, by name and by what they hold ("cloud", "theme", "server URL"): for a query only.
-    const settings: Item[] = SETTINGS_SECTIONS.filter((x) => !(touchOnly && x.id === 'shortcuts')).map((x) => ({
+    // Cloud only where Settings has it (a server with the cloud feature).
+    const settings: Item[] = SETTINGS_SECTIONS.filter((x) => !(touchOnly && x.id === 'shortcuts') && (x.id !== 'cloud' || cloud.get())).map((x) => ({
       id: `settings-${x.id}`,
       group: 'Settings',
       label: x.label,
