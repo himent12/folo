@@ -302,8 +302,9 @@ convs reading concatenations in place #185, ...); this lane's own share is in th
 | folo-n f16 TC forward b1 median | 2.85 ms (2.62–3.30) | 1.23 ms (1.14–1.75) | −57% | not worse |
 | folo-s f16 TC forward b1 median | 3.37 ms (3.08–3.60) | 1.95 ms (1.94–2.19) | −42% | not worse |
 
-Every target of the lane is met. Accuracy: COCO val2017 with folo-n, f32 0.44945 / 0.30999 and `--half
---tensor-cores` 0.44943 / 0.30995 (mAP50 / mAP50-95; 647b981f 0.44945 / 0.30999 and 0.44944 / 0.31003).
+Every target of the lane is met. Accuracy, measured on the PR 3 build 149534cf (#199 + #202 kernels, before the
+rebase onto later main; `val_tiles.txt`), not re-run on c2c7dfcc: COCO val2017 with folo-n, f32 0.44945 / 0.30999
+and `--half --tensor-cores` 0.44943 / 0.30995 (mAP50 / mAP50-95; 647b981f 0.44945 / 0.30999 and 0.44944 / 0.31003).
 
 ## Leftovers (by expected gain)
 
@@ -314,8 +315,8 @@ Every target of the lane is met. Accuracy: COCO val2017 with folo-n, f32 0.44945
 2. **Tensor-core split-K threshold by `K`**: on tensor cores a chunk of ≤ 4 `BK = 32` tiles does not pay. With
    PR 3's smaller tiles fewer convs split at all; a coop-specific `MIN_CHUNK_TILES` (about 18) needs a quiet,
    repeated sweep (worth ≤ 2% of the f16 batch-16 forward).
-3. **The f32 GEMM kernel itself.** The 128×128×8 f32 tile reaches 21–26 TFLOPS on the 80 px and larger convs
-   (31 on a 4096³ GEMM); the f32 forward is still ~80% GEMM. Register-blocking or a 128×64 / 64×128 f32 tile with
+3. **The f32 GEMM kernel itself.** The 128×128×8 f32 tile reaches 21–23 TFLOPS on the 80 px convs (up to 26 on
+   a plain GEMM of the same size, 31 on a 4096³ GEMM); the f32 forward is still ~80% GEMM. Register-blocking or a 128×64 / 64×128 f32 tile with
    BK 16 retuned on conv shapes is the next lever for the f32 rows.
 4. **The flat tensor-core tiles** for `M ≤ 32` are not always best (n bottleneck 64 → 32 @ 40: 43.1 µs as 32×128,
    39.3 as 64×64): small, folo-n only.
