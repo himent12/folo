@@ -462,3 +462,36 @@ fn the_palette_highlight_stays_on_its_row_while_a_run_before_it_is_deleted() {
         assert_eq!(p.shown.get(p.selected), Some(&row), "still on the same run");
     });
 }
+
+#[test]
+fn a_toast_leaves_on_the_clock_but_not_while_hovered() {
+    use std::time::Duration;
+    let (mut app, window) = open();
+    // The frozen demo keeps toasts up for screenshots; these two leave as a live app's do. The
+    // second is under the pointer.
+    let held = drive(&mut app, window, |this, _, cx| {
+        this.frozen = false;
+        this.toast(crate::ui::Tone::Info, "plain", None, cx);
+        this.toast(crate::ui::Tone::Info, "hovered", None, cx);
+        this.frozen = true;
+        let held = this.toasts.last().unwrap().id;
+        this.toast_hover = Some(held);
+        held
+    });
+    let titles = |app: &mut HeadlessApp| {
+        drive(app, window, |this, _, _| this.toasts.iter().map(|t| t.title.to_string()).collect::<Vec<_>>())
+    };
+    let ttl = super::overlay_state::toast_ttl(false);
+    app.advance_clock(ttl - Duration::from_millis(1));
+    assert_eq!(titles(&mut app), ["plain", "hovered"]);
+    app.advance_clock(Duration::from_millis(1));
+    assert_eq!(titles(&mut app), ["hovered"], "the plain one left at its time");
+    app.advance_clock(Duration::from_secs(10));
+    assert_eq!(titles(&mut app), ["hovered"], "hovered, it stays");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.toast_hover, Some(held));
+        this.toast_hover = None;
+    });
+    app.advance_clock(Duration::from_millis(800));
+    assert!(titles(&mut app).is_empty(), "left once the pointer did");
+}
