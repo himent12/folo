@@ -375,6 +375,8 @@ impl Trainer {
             last_saved: None,
             scaler,
             prefetched: None,
+            pending_write: None,
+            after_epoch: opts.after_epoch,
         })
     }
 }

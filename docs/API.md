@@ -587,7 +587,12 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "val": { "map50": 0.82, "map50_95": 0.61, "precision": 0.84, "recall": 0.77,
            "per_class": [{ "class": 0, "map50": 0.85, "map50_95": 0.64, "precision": 0.86, "recall": 0.80 }],
            "best_f1_conf": 0.312 | null },   // precision / recall are at this confidence (Operating point, above)
-  "duration_s": 31.2 }
+  "duration_s": 31.2 }   // training + validation + the checkpoint's snapshot (its files are written while the
+                         // next epoch trains)
+// When the Epoch event arrives, that epoch's weights/last.folo (and best.folo when it improved) and
+// samples/epoch_NNN.json are on disk. The trainer writes them on a writer thread and holds the events of the next
+// epoch behind the Epoch event until they are, so the order of events is that of the run; a write that fails fails
+// the run with no Epoch event for that epoch.
 ```
 
 ## Inference
@@ -723,8 +728,8 @@ What real mode measures, in `<data dir>/throughput.json` (rewritten atomically; 
 counts all of them:
 - **Training**: every validated epoch of a run after the first of its session (the first, of a new or a resumed
   run, compiles pipelines) whose last batch was finite (only then does its final `step` event cover the epoch). The rate is the epoch's last `step` event's `imgs_per_s` (its images over its training
-  time; loader waits included, validation excluded); the rest of `Epoch.duration_s` (validation and checkpoint
-  writes) gives the validation rate; the first epoch's extra time over the second gives `startup_s`;
+  time; loader waits included, validation excluded); the rest of `Epoch.duration_s` (validation and the
+  checkpoint's snapshot) gives the validation rate; the first epoch's extra time over the second gives `startup_s`;
   `peak_vram_bytes` is the GPU buffer pool's peak since the run started (inference served meanwhile counts too).
 - **Inference**: every `/api/predict` call's `timing` (`total_ms`, image decode included, and `inference_ms`),
   except a model's first after it is loaded and calls that overlap a run (one queued or training when the call

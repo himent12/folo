@@ -135,15 +135,12 @@ fn build(
         val: Arc::new(ds.split(Split::Val).clone()),
         classes: ds.classes.clone(),
     };
-    let (sink, hold, stop) = (e.clone(), hold.clone(), e.stop.clone());
+    let (sink, hold) = (e.clone(), hold.clone());
     let opts = TrainOptions {
         run_dir: Some(e.dir.clone()),
-        events: Some(Box::new(move |ev: &RunEvent| {
-            sink.on_event(ev);
-            if matches!(ev, RunEvent::Epoch(_)) {
-                hold.wait(&stop);
-            }
-        })),
+        events: Some(Box::new(move |ev: &RunEvent| sink.on_event(ev))),
+        // At the epoch boundary, after the epoch's event (its files written).
+        after_epoch: Some(Box::new(move |stop| hold.wait(stop))),
         stop: e.stop.clone(),
         weights,
         ..TrainOptions::default()

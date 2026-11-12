@@ -125,6 +125,8 @@ impl Trainer {
             clock.wall[phase] += batch_start.elapsed().as_secs_f64();
             clock.step[phase] += received.elapsed().as_secs_f64();
             batch_start = Instant::now();
+            // The previous epoch's event, once its files are written.
+            self.poll_write()?;
             if finite {
                 let elapsed = epoch_start.elapsed().as_secs_f64().max(1e-9);
                 let step = folo_api::Step {

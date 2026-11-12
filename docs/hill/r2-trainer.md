@@ -317,3 +317,52 @@ the three in every round. The cold target (<= 8 s) holds with a list.
   over the cores, and the training thread's remaining time is 0.001-0.02 s on a warm start. It would also need the
   specialisation constants as pipeline-overridable constants, which cannot size workgroup arrays on every backend
   (GPU.md).
+
+## PR 5: per-epoch checkpoint writes off the training thread
+
+### Where the time was
+At every epoch end the training thread downloaded the checkpoint (21-42 ms after round 1's batching) and then wrote
+`last.folo` (folo-n: 42 MB, fsynced), copied it to `best.folo` when the epoch improved, and wrote the samples: 30-110
+ms normally, up to 10 s when the disk is busy (round 1), all before the next epoch's first step. The epoch event
+promises (docs/API.md) that the files are on disk when it arrives, so the write could not simply move.
+
+### What changed
+- folo-vision `train/writer.rs`: the training thread takes the snapshot (`Trainer::checkpoint_snapshot`, the bytes
+  `save_checkpoint` writes, every tensor on the host) and a writer thread writes the files (each to a temporary
+  name, synced, renamed: a crash or stop mid-write leaves the previous checkpoint intact). One write at a time: the
+  next epoch's end waits for the previous write. Tensors already on the host (a CPU run's weights, BatchNorm
+  statistics, optimizer state) are copied into the snapshot: written as they were, the next epoch's in-place updates
+  raced the writer (`micro_run_learns_checkpoints_and_resumes_bit_exactly` caught a different `running_mean` once;
+  `the_snapshot_does_not_change_when_training_goes_on` now fails deterministically without the copy).
+- Events stay on the training thread (`EventSink` is documented as called there): while a write runs, the emitter
+  holds every event (the next epoch's steps and logs, in order); at each step the training thread checks the writer
+  and, once it is done, delivers the epoch event and then the held events. A stop, a failure and the end of the run
+  wait for the write first. A write that fails fails the run as if at the epoch's end: no epoch event, the held events
+  dropped, `status: failed`.
+- `Epoch.duration_s` now ends with the snapshot (training + validation + snapshot; docs/API.md).
+- folo-server's test support paused a run by blocking in the event sink at the epoch event; the event now arrives
+  while the next epoch trains (on a tiny set, only at its end), so two cloud tests stopped a run one epoch late. The
+  pause moved to a hidden `TrainOptions::after_epoch` hook the trainer calls at the epoch boundary, after the write is
+  settled and the event delivered (folo-server `runs/train.rs`, a neighbour's file: three lines).
+
+### Results
+Slow disk (a temporary build, not committed, that sleeps 1 s in every checkpoint write, `FOLO_TMP_WRITE_DELAY_MS`,
+and with `FOLO_TMP_SYNC=1` writes inline as main does; row-10 set, 4 epochs, `--batch 16 --imgsz 640 --workers 8
+--close-mosaic 0 --device gpu:0`, 3 rounds alternated, process wall):
+
+| | process wall, median (range) |
+|---|---|
+| no delay | 6.81 s (6.74-7.09) |
+| 1 s per write, written inline (main's behaviour) | 10.92 s (10.83-11.03): +4.1 s, one per epoch |
+| 1 s per write, writer thread (PR) | **7.83 s** (7.70-8.33): +1.0 s, only the last write, waited at the run's end |
+
+The step loop no longer waits for a write that is shorter than the next epoch (a write longer than an epoch makes the
+next epoch's end wait for the rest: one write at a time).
+
+Row 10 not worse (`ab.py train --bin main=<083df7df> --bin new=<PR> --rounds 3 -- ... --epochs 2`, the
+FOLO cache shared and warm, 3.0-12.0 other cores): epoch-2 sustained main **372.0 img/s** (332.9-372.2), PR **373.3**
+(369.1-382.6): a tie.
+
+Same checkpoints: two runs of main and one of the PR (row 10, 2 epochs, default seed): every tensor of `last.folo` and
+`best.folo` byte-identical across all three, and `samples/epoch_002.json` identical; the headers differ only in
+`folo.created` and the run name inside `folo.train` (the runs had different names).
