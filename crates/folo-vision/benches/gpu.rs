@@ -11,8 +11,8 @@
 //! Per scale, 80 classes, 640×640, untrained (seed-0) weights, inference in f32 and f16 (half precision: f16
 //! weights and activations, f32 accumulation; the input is f16 too, and the predictor letterboxes into f16):
 //! - **forward**: the fused model (`fuse()`: Conv+BN folded, Conv + bias + SiLU in one kernel), eval mode,
-//!   `no_grad`, input already on the GPU. Latency: every call synchronised, at least 25 warm-up calls and half a
-//!   second of them (the first calls after the idle second before each section are slower, likely while the GPU's
+//!   `no_grad`, input already on the GPU. Latency: every call synchronised, at least 25 warm-up calls and a second
+//!   of them (the first calls after the idle second before each section are slower, likely while the GPU's
 //!   clocks ramp back up), median / p90 of
 //!   100 (batch 1) or 30 (batch 16). Throughput: the same calls back to back with one synchronise at the end.
 //! - **predict (end to end)**: `folo_vision::predict::Predictor` (`predict` for batch 1, `predict_batch` for
@@ -64,10 +64,10 @@ fn stats(mut t: Vec<Duration>) -> Stats {
 }
 
 /// Back-to-back calls before a latency measurement, at least: after the second of idling that precedes every
-/// section, the first 150-300 ms of calls were slower in most traces, likely while the GPU's clocks ramp back up
-/// (docs/hill/r2-gpu-dispatch.md, Pool PR 2); measured inside that stretch, a batch-1 row read anything from 1.7 to
-/// 6 ms by run.
-const LATENCY_WARM: Duration = Duration::from_millis(500);
+/// section, the GPU may have dropped its clocks, and in clock-sampled traces they took up to about 450 ms of work to
+/// come back, with batch-1 calls 3-9x slower meanwhile (docs/hill/r2-gpu-dispatch.md, Pool PR 2); measured inside
+/// that stretch, a batch-1 row read anything from 1.7 to 6 ms by run.
+const LATENCY_WARM: Duration = Duration::from_secs(1);
 
 /// Every call synchronised, after `warm` calls and at least [`LATENCY_WARM`] of them.
 fn latency(dev: Device, warm: usize, iters: usize, mut f: impl FnMut()) -> Stats {

@@ -324,34 +324,42 @@ Raw runs: `D:/folo-data/runs-hill2/gpu-pool/lat/`.
   stays at P8 (210 MHz graphics, 405 MHz memory: 912 of 1038 samples) and a f32 call takes 16.3 ms at the median.
   With a 30 ms sleep after each call (not a fixed 33 fps schedule; `gap30.txt`, 150 calls per setting) a f32 call
   took 5.78 ms p50 / 15.70 ms p90 with spin 0 and 10.36 / 15.69 with the 2 ms spin: the spin did not help at
-  spaced-out calls (a worse median) in that run. The P8 state with spaced-out calls is measured; the ramp itself
-  was not clock-sampled, so clock ramp-up is the likely but not proven cause of the slow b1 rounds of the `gpu`
-  bench, which idles a second before every section, warmed up for 25 calls (~40 ms) and then measured 100 calls
-  (~150 ms): inside the slow stretch, where the "1.7 or 6 ms by round" would come from. The ramp is to be re-run
-  with the clocks sampled. NVIDIA's driver power management decides the clocks; FOLO cannot set them through
+  spaced-out calls (a worse median) in that run. The ramp re-run with the clocks sampled (`v2-r1.txt`,
+  `v2-r2.txt`, the fixed bench) ties the slow stretch to the clock: f16 TC r1 sat at 210–255 MHz (P5/P8) for the
+  first ~400 ms with calls at 7.6–9.0 ms, and the first bucket at 2550 MHz (450 ms) brought them to 1.0–1.4 ms;
+  f32 r2 sat at 795–855 MHz for ~400 ms with calls at 3.9–4.2 ms, then 1.3–1.5 ms at 2550–2745 MHz; f32 r1 stayed
+  at 2550 MHz through the idle seconds (no slow start beyond 2.15 ms) and its calls went 1.55 → 1.17 ms exactly
+  when the clock stepped 2550 → 2730 MHz. In the fourth trace (f16 TC r2) the GPU read 73% utilisation and P0
+  during our idle seconds: another process ran on it outside the lock, and every call took ~3 ms throughout (the
+  next bullet). So the slow b1 rounds of the `gpu` bench, which idles a second before every section, warmed up for
+  25 calls (~40 ms) and then measured 100 calls (~150 ms), come from the clocks when the GPU had dropped them,
+  and from other processes on the GPU otherwise. NVIDIA's driver power management decides the clocks; FOLO cannot set them through
   Vulkan (NVML's locked clocks need admin rights). A machine that serves spaced-out streams should use the driver's
   "Prefer maximum performance" mode for the process. This is not ours, and it is not fixed here.
 - **Other load (the machine's).** Encode time doubles when the CPU is busy with other lanes (0.55 → 1.2–1.45 ms
   p50 in the same binary across windows), and in one run the wait alone reached 3–3.7 ms for a tenth of the calls
   while `nvidia-smi` read 95% utilisation against our usual 70–80% (another process on the GPU).
-- **Thread wake-up (ours).** The wait blocked in the driver, and in about half the calls the thread ended the wait on
-  another logical processor than the one it started the call on (525 of 1000: calls whose thread changed processor
-  between the start of the call and the end of the wait, which is what the bench counted then; to be re-measured
-  around the wait alone), regularly an E-core, with cold caches for the next encode.
+- **Thread wake-up (ours).** The wait blocked in the driver, and the thread often woke on another logical processor:
+  measured right before and right after `synchronize` (`v2-r*.txt`, 1000 calls per setting), 463–763 of 1000 calls
+  changed processor across the wait, regularly onto an E-core (16–27 on this i7-14700KF; 112–351 calls touched
+  one), with cold caches for the next encode. (The first runs counted changes between the start of the call and
+  the end of the wait: 525 of 1000.)
 
 **What.**
 - `wait_idle` (behind `sync()` and every readback) first polls the device without blocking (`PollType::Poll`) until
   the queue is empty, for up to 2 ms (`GpuContext::set_wait_spin`, `FOLO_GPU_WAIT_SPIN_US`; 0 restores the old
   wait), then blocks as before. The poll is loss-aware like every other (a lost device ends it with `DeviceLost`).
-  Calls whose thread changed processor between the start of the call and the end of the wait drop from ~500 to
-  ~160 of 1000 (counted around the whole call; to be re-measured around the wait alone).
-- The `gpu` bench's latency rows warm up for at least 25 calls *and* half a second of back-to-back calls, so they
+  Calls whose thread changes processor across the wait drop from 463–763 to 27–269 of 1000 (`v2-r*.txt`: f32
+  757 → 269 and 645 → 106, f16 TC 463 → 27 and 763 → 96).
+- The `gpu` bench's latency rows warm up for at least 25 calls *and* a second of back-to-back calls (half a second in
+  the A/B below; raised to a second after the clock-sampled traces showed up to ~450 ms of ramp), so they
   measure the steady state (the clocks are up), as a long Ultralytics run does. This changes the measurement, not
   FOLO: rows before and after this PR are not comparable without it, so the A/B below uses this bench on both sides
   and toggles only the spin.
 
-**Numbers.** In-process (`gpu_latency`, spins interleaved in blocks of 50 calls, 600–1500 calls per setting, 7
-runs over three windows, CPU busy with other lanes throughout), total per synchronised call, spin 0 → 2 ms:
+**Numbers.** In-process (`gpu_latency`, spins interleaved in blocks of 50 calls, 600–1500 calls per setting, 9
+runs over four windows; v2 = the bench after review: starting setting rotated per cycle, processor read around the
+wait, CPU busy with other lanes throughout), total per synchronised call, spin 0 → 2 ms:
 
 | run | f32 p50 | f32 p90 | f32 p99 | f16 TC p50 | f16 TC p90 | f16 TC p99 |
 |---|---|---|---|---|---|---|
@@ -362,8 +370,10 @@ runs over three windows, CPU busy with other lanes throughout), total per synchr
 | final-r1 | 1.27 → 1.21 | 1.98 → 1.84 | 3.12 → 2.35 | 1.38 → 1.14 | 1.99 → 1.76 | 2.71 → 2.27 |
 | final-r2 | 1.27 → 1.20 | 1.68 → 1.48 | 2.18 → 1.92 | 1.68 → 1.55 | 2.31 → 2.08 | 4.47 → 3.58 |
 | final-r3 | 1.79 → 1.63 | 2.71 → 2.08 | 18.38 → 4.17 | 1.78 → 1.54 | 2.16 → 1.94 | 5.19 → 2.92 |
+| v2-r1 | 1.73 → 1.59 | 2.57 → 2.50 | 3.00 → 2.95 | 1.17 → 1.02 | 1.62 → 1.44 | 2.09 → 1.91 |
+| v2-r2 (another process on the GPU) | 1.91 → 1.81 | 2.35 → 2.42 | 3.58 → 3.49 | 1.85 → 1.77 | 2.89 → 2.74 | 3.41 → 3.36 |
 
-The median drops 4–14% (f32) and 7–17% (f16 TC) in every run, the tails more; the wait phase itself hardly moves
+The median drops 4–14% (f32) and 4–17% (f16 TC) in every run, p99 in all but one (spin-r1 f32); the wait phase itself hardly moves
 (it is GPU time), the encode of the next call gets faster (the thread keeps its core).
 
 `gpu` bench, forward + predict, folo-n, 6 rounds alternated (`pr2-infer/` rounds 1–3 and `pr2-infer-b/` as 4–6,
@@ -382,17 +392,23 @@ default; `main` 647b981f with its own (old) bench from the first 3 rounds for re
 
 The f16 TC forward b1 row is the one exception, and it is an unresolved regression in these rows (1.25 → 1.50
 ms, p90 1.72 → 1.97, 6 rounds). The interleaved in-process runs above, which see the same machine state for both
-settings, favour the spin in all seven runs, and this row's per-run medians (0.89–1.85 ms with the spin, 1.12–3.55
+settings, favour the spin in all nine runs, and this row's per-run medians (0.89–1.85 ms with the spin, 1.12–3.55
 without) and its pipelined row, which the spin cannot touch (one wait after 100 calls; 0.77–1.92 ms), swing
 widely, which suggests machine load. But round 1 got slower synchronised (1.12 → 1.51) while its pipelined row
 improved (1.19 → 1.09), which load alone does not explain, so it is not settled.
 
 Targets (`gpu` bench rows, steady state): folo-n f32 forward b1 1.44 ms median (≤ 1.6) with p90 1.73 (≤ 2.2): met;
 f16 TC forward b1 ≤ 1.3: met by the in-process medians in quiet windows (0.97–1.14 ms) but not by the `gpu` bench
-row in these busy windows (1.50); e2e b1 ≤ 2.2: met (f32 2.17, f16 TC 1.86). Cold, right after two idle seconds, the
-first 150–300 ms of calls were slower in three of four traces (2.75–3.9 ms at first) and these targets are not met
-there; the fourth trace (f16 TC r2) did not slow down. Calls spaced out in time stay at 6–16 ms at the median
+row in these busy windows (1.50); e2e b1 ≤ 2.2: met (f32 2.17, f16 TC 1.86). Cold, right after two idle seconds, none
+of them is met while the clocks are down (3.9–9 ms for the first ~400 ms in the clock-sampled traces whose GPU had
+dropped its clocks), and not while another process shares the GPU (~3 ms throughout in v2-r2 f16 TC). Calls spaced out in time stay at 6–16 ms at the median
 (P8 measured with a 200 ms sleep after each call) unless the driver keeps the clocks up.
+
+**Training step** (the spin also covers its waits: the loss readback, the AMP overflow flag). Same binary, spin off
+against on, folo-n b16, a busy machine (CPU 76–100%; built before #198, so the pool still churned): f32, 5 rounds
+(`pr2-train-f32/`): 48.30 ms (47.17–50.05) → 46.72 (45.30–92.14), the spin ahead in rounds 2–4 and two rounds of
+either side dragged by other load (p90 103–191 ms); 3 rounds of both precisions (`pr2-train/`): f32 49.39 → 59.81
+and AMP 32.98 → 29.87 ms, with rounds from 48 to 66 ms on both sides. No sign of a cost to training; no gain claimed.
 
 **Negative / not done.** Keeping the readback's staging buffer mapped is not possible in WebGPU (a buffer must be
 unmapped before the GPU copies into it). The submit phase is 0.08–0.2 ms and does not sleep; nothing to win there.
