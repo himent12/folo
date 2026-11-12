@@ -1,5 +1,6 @@
 import Activity from '$icons/activity';
 import Box from '$icons/box';
+import CircleStop from '$icons/circle-stop';
 import GitCompare from '$icons/git-compare-arrows';
 import Plus from '$icons/plus';
 import ScanSearch from '$icons/scan-search';
@@ -41,12 +42,13 @@ import { FROM_SCRATCH, origin } from '$lib/lineage';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import SortHeader from '$lib/ui/SortHeader';
 import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
-import { moveQueued, queueItems, REMOVE_LABEL, removeDescription, removeQueued, removeTitle } from './run/queueActions';
+import { moveQueued, queueItems, REMOVE_LABEL, removedToast, removeDescription, removeQueued, removeTitle } from './run/queueActions';
 import Dialog from '$lib/ui/Dialog';
 import NoValue from '$lib/ui/NoValue';
 import { DialogStatus } from '$lib/ui/feedback';
 import { toast } from '$lib/ui/toast';
 import DeleteRun from './run/DeleteRun';
+import StopRun from './run/StopRun';
 import RunRows from './runs/RunRows';
 import { groups, readState, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
 import { exactTime, tickingNow } from './runs/when';
@@ -95,13 +97,22 @@ export default function Runs() {
     });
   }
   /**
-   * A row's ⋯: a waiting run's queue actions; an ended run's Open model and Try in Playground (with a model) and Delete
-   * run, the destructive one last, as on its own page. A training run has none (its page has Stop).
+   * A row's ⋯: a waiting run's queue actions (without queue control: Open run and Remove from queue); a training run's
+   * Open run and Stop (behind its confirm, as on its page); an
+   * ended run's Open model and Try in Playground (with a model) and Delete run, the destructive one last, as on its own
+   * page.
    */
   const rowItems = (r: Run): MenuItem[] => {
     const at = placeOf(r);
     if (at !== null) return queueItems(at, waiting.get(), training.get(), (req) => move(r, req), () => removing.set(r));
-    if (ACTIVE.includes(r.status)) return [];
+    if (ACTIVE.includes(r.status)) {
+      const out: MenuItem[] = [{ label: 'Open run', icon: Activity, href: href(`/runs/${r.id}`) }];
+      // As the run page's header: a training run, and a cloud run in its hand-over (its instance costs from the launch).
+      if (r.status === 'running' || (r.cloud && r.status === 'queued')) out.push({ label: 'Stop', icon: CircleStop, danger: true, onclick: () => stopping.set(r) });
+      // A waiting run on a server without queue control: no moves, but it can leave the queue, as on its page.
+      else if (r.status === 'queued') out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: () => removing.set(r) });
+      return out;
+    }
     const out: MenuItem[] = [];
     if (r.model_id) {
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${r.model_id}`) });
@@ -112,6 +123,8 @@ export default function Runs() {
   };
   /** The run Delete run asks about (the same confirm as on its page). */
   const deleting = signal<Run | null>(null);
+  /** The training run Stop asks about (the confirm of its page, ./run/StopRun). */
+  const stopping = signal<Run | null>(null);
 
   /** The waiting run Remove from queue asks about (the same confirm as on its own page). */
   const removing = signal<Run | null>(null);
@@ -126,7 +139,7 @@ export default function Runs() {
       await removeQueued(r);
       removing.set(null);
       // page-level: the confirm closed on the line above.
-      toast.success(`Removed ${r.name} from the queue`);
+      removedToast(r);
       void runs.refresh();
     } catch (e) {
       removeStatus.error(e, `Could not remove ${r.name} from the queue`);
@@ -575,6 +588,7 @@ export default function Runs() {
           </>
         )}
       />{' '}
+      <StopRun run={stopping.get()} onclose={() => stopping.set(null)} onstopped={() => void runs.refresh()} />
       <DeleteRun
         run={deleting.get()}
         onclose={() => deleting.set(null)}

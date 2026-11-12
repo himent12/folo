@@ -74,6 +74,17 @@ export const removeDescription = (run: Pick<Run, 'started'>) =>
     ? 'It stops waiting and keeps what it trained so far. You can resume it later.'
     : 'It has not started yet, so nothing is lost: it leaves the queue and the runs list. You can start it again from New run.';
 
+/**
+ * The toast key of a run's place in the queue: "Queued q-two" (New run) and "Removed q-two from the queue" report on
+ * the same thing, so the second takes the first one's place instead of showing beside it.
+ */
+export const queueToastKey = (id: string) => `run-queue:${id}`;
+
+/** The toast once a waiting run was taken out of the queue. */
+export function removedToast(run: Pick<Run, 'id' | 'name'>): void {
+  toast.success(`Removed ${run.name} from the queue`, undefined, undefined, { key: queueToastKey(run.id) });
+}
+
 /** Removes a waiting run from the queue: deleted when it never started (null), stopped otherwise (the stopped run). */
 export async function removeQueued(run: Pick<Run, 'id' | 'started'>): Promise<Run | null> {
   if (run.started) return hub.api.stopRun(run.id);

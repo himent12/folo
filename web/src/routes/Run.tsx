@@ -55,7 +55,7 @@ import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
 import RunMetrics from './run/RunMetrics';
 import Samples from './run/Samples';
-import { moveQueued, queueItems, queueWait, REMOVE_LABEL, removeDescription, removeQueued, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
+import { moveQueued, queueItems, queueWait, REMOVE_LABEL, removedToast, removeDescription, removeQueued, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
 import { WarningsLog } from './run/warningsLog';
 import { beforeTraining, phaseTitle, phaseWhat, providerName } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
@@ -67,6 +67,7 @@ import WaitingPanels from './run/WaitingPanels';
 import { exactTime } from './runs/when';
 import DeleteRun from './run/DeleteRun';
 import { goneEvalOn } from './run/goneEvalOn';
+import { stopDescription, stoppedToast } from './run/StopRun';
 
 type Section = 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
 const NO_CLASSES: string[] = [];
@@ -308,7 +309,7 @@ export default function Run() {
         // A run that never started is deleted (it leaves the list); a resumed one stops with what it trained.
         const r = await removeQueued(cur);
         stopOpen.set(false);
-        toast.success(`Removed ${cur.name} from the queue`);
+        removedToast(cur);
         if (r) live.run = r;
         else router.go('/runs');
         return;
@@ -317,11 +318,7 @@ export default function Run() {
       live.run = r;
       stopOpen.set(false);
       // The checkpoint is the last finished epoch's: none before the first one ends.
-      const done = untrack(() => epochsDone.get());
-      toast.info(
-        `Stopping ${r.name}`,
-        r.cloud && r.epoch === 0 ? 'Its instance is released; nothing had trained yet.' : done ? `The checkpoint from epoch ${done} is kept.` : 'No epoch had finished, so nothing is saved.',
-      );
+      stoppedToast(r, untrack(() => epochsDone.get()));
     } catch (e) {
       stopStatus.error(e, removing.peek() ? 'Could not remove the run from the queue' : 'Could not stop the run');
     } finally {
@@ -703,17 +700,7 @@ export default function Run() {
           <Dialog
             bind:open={stopOpen}
             title={removing.get() ? removeTitle(R().name) : `Stop ${R().name}?`}
-            description={
-              removing.get()
-                ? removeDescription(R())
-                : handover.get()
-                  ? 'Its instance is released now; nothing has trained yet.'
-                  : epochsDone.get() === 0
-                    ? `Training stops after the current step. No epoch has finished yet, so nothing is saved${cloud.get() ? ' and the instance is released' : ''}.`
-                    : cloud.get()
-                      ? 'Training stops after the current step. The last checkpoint is copied here, saved as a model, and the instance released.'
-                      : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'
-            }
+            description={removing.get() ? removeDescription(R()) : stopDescription(R(), epochsDone.get())}
             size="sm"
             status={stopStatus}
             footer={() => (

@@ -39,6 +39,7 @@ import { MAX_RUN_NAME, nameHint, runName, uniqueName } from './runnew/name';
 import WhyLine from './runnew/WhyLine';
 import { START_KEYS, startKeys } from './runnew/startKeys';
 import { aheadLine, aheadOf, startedToast } from './runnew/queue';
+import { queueToastKey } from './run/queueActions';
 import { isPublished, otherSizeChoices, scoreContextOf, startHintOf } from './runnew/weights';
 import { sampleImagesOf, trainSizesOf } from './runnew/trainImages';
 import DatasetSection from './runnew/DatasetSection';
@@ -541,7 +542,8 @@ export default function RunNew() {
       const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
       // page-level: the sheet is closed (above).
       const t = startedToast(run, before);
-      toast.success(t.title, `${t.place ? `${t.place} · ` : ''}${run.epochs} epochs of ${run.config.arch} on ${dataset.get()?.name}${where}.`);
+      // Keyed by the run's place in the queue: a later "Removed … from the queue" takes its place (run/queueActions).
+      toast.success(t.title, `${t.place ? `${t.place} · ` : ''}${run.epochs} epochs of ${run.config.arch} on ${dataset.get()?.name}${where}.`, undefined, { key: queueToastKey(run.id) });
       router.go(`/runs/${run.id}`);
     } catch (err) {
       if (err instanceof ApiError && (err.code === 'device_not_found' || (err.code === 'not_implemented' && device.get().startsWith('gpu:')))) {

@@ -276,6 +276,21 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     expect(items).toEqual(['Open model', 'Try in Playground', 'Delete run']);
   });
 
+  it('gives the training run a ⋯ too: Open run, and Stop behind its confirm (v-data-runs N10a)', async () => {
+    const api = new MockApi('normal', 0);
+    await open(Runs, '/runs', api);
+    await loaded();
+    const running = (await api.runs()).find((r) => r.status === 'running')!;
+    target.querySelector<HTMLButtonElement>(`tr[data-id="${running.id}"] td.act button`)!.click();
+    flushSync();
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    expect(items.map((e) => e.textContent?.trim())).toEqual(['Open run', 'Stop']);
+    expect(items[0]!.getAttribute('href')).toBe(`#/runs/${running.id}`);
+    items[1]!.click();
+    flushSync();
+    expect(document.querySelector('dialog[open]')?.textContent).toContain(`Stop ${running.name}?`);
+  });
+
   it("gives a resumed run's training time, without the night it sat stopped", async () => {
     const api = new MockApi('normal', 0);
     const runs = await api.runs();
