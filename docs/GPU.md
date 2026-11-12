@@ -274,8 +274,9 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   address of its window's top-left element, so each gathered element costs one division by the constant
   `KH·KW`, a bit test and an add instead of rebuilding the row and column and four bounds checks (both
   generators; larger windows keep the bounds-checked gather). That made the batch-16 forward GEMM time 4–5.5%
-  shorter on tensor cores and the f32 forward 2–3% faster (docs/hill/r2-gpu-gemm.md). No im2col buffer is ever
-  written.
+  shorter on tensor cores and the f32 forward's median throughput 1.8–2.7% higher (docs/hill/r2-gpu-gemm.md).
+  The gather's `k < K` test is compiled out only when M, N and K are all tile multiples. No im2col buffer is
+  ever written.
 - **Forward split-K** (`kernels::conv::split`, both generators). folo's 3×3 convs at 40 and 20 px have few output
   tiles but a long `K` (64–256 workgroups at batch 16 for 80 SMs, `K` up to 4608), and at batch 1 every layer
   below 160 px has only a handful. When a forward implicit-GEMM conv has fewer than 320 workgroups and at least 18

@@ -10,6 +10,7 @@ mod backend_net;
 mod binds;
 mod conv;
 mod coop;
+mod coop_conv;
 mod elementwise;
 mod f16;
 mod gemm;

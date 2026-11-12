@@ -2,12 +2,13 @@
 //! layers at 40 and 20 px (few output tiles, large `K`) and the stride-2 downsamples.
 //!
 //! `cargo bench -p folo-gpu --bench conv_model` (`FOLO_BENCH_PRECISION=f32,f16tc`, default `f32`; `f16tc` needs
-//! `FOLO_GPU_TENSOR_CORES=1`). `FOLO_CONV_TUNE=1` also times every regular tile config with 1–8 split-K chunks
-//! per case (on tensor cores: every tensor-core tile config, then the picked one with 1–8 chunks),
-//! `FOLO_CONV_GEMM=1` the plain GEMM of the same size, and `FOLO_CONV_BIG=1` adds folo-s's layers at 80 px and
-//! above. Each
-//! row is the best of three timed runs of back-to-back dispatches, and `x` is how often the layer occurs in the
-//! forward, so the last line is roughly what these layers cost per forward.
+//! `FOLO_GPU_TENSOR_CORES=1`). The `FOLO_CONV_*` switches are tested for presence, so any value (even `0`) turns
+//! them on. `FOLO_CONV_TUNE` also times every regular tile config with 1–8 split-K chunks per case; on tensor
+//! cores it times every tensor-core tile config instead (these explicit-config rows keep the automatic split-K
+//! choice), then the picked config with 1–8 chunks. `FOLO_CONV_GEMM` times the plain GEMM of the same size
+//! (skipped on tensor cores), and `FOLO_CONV_BIG` adds folo-s's layers at 80 px and above. Each row is the best of
+//! three timed runs of back-to-back dispatches, and `x` is how often the layer occurs in the forward, so the last
+//! line is roughly what these layers cost per forward.
 
 use std::time::Instant;
 
