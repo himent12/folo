@@ -9,6 +9,7 @@ use folo_data::{
     Result, Sample, Split,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn rect_dataset(n: usize) -> Arc<dyn Dataset> {
     let samples = (0..n).map(|k| random_rect_sample(k as u64, 90 + (k as u32 % 5) * 13, 70, 4)).collect();
@@ -230,6 +231,49 @@ fn ram_cache_gives_the_uncached_batches() {
             let meta = &collect(&cached, 0)[0].meta[0];
             assert_eq!(meta.orig_size, [200, 120]);
             assert_eq!(meta.ratio, [64.0 / 200.0, 38.0 / 120.0]);
+        }
+    }
+}
+
+/// Wraps a dataset and counts its loads.
+struct Counting {
+    inner: Arc<dyn Dataset>,
+    gets: AtomicUsize,
+}
+
+impl Dataset for Counting {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+    fn get(&self, index: usize) -> Result<Sample> {
+        self.gets.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(index)
+    }
+    fn boxes(&self, index: usize) -> &[BBox] {
+        self.inner.boxes(index)
+    }
+    fn class_names(&self) -> &[String] {
+        self.inner.class_names()
+    }
+    fn split(&self) -> Split {
+        Split::Train
+    }
+}
+
+/// `--cache ram` loads each image once: after the first epoch, another loads nothing from the dataset, while the
+/// uncached loader loads every image again.
+#[test]
+fn ram_cache_loads_each_image_once() {
+    for cache in [CacheMode::Ram, CacheMode::None] {
+        let ds = Arc::new(Counting { inner: rect_dataset(10), gets: AtomicUsize::new(0) });
+        let loader = DataLoader::new(ds.clone(), LoaderConfig { cache, ..cfg(3) }).unwrap();
+        collect(&loader, 0);
+        assert!(ds.gets.swap(0, Ordering::SeqCst) >= 10, "{cache:?}: every image loaded in the first epoch");
+        collect(&loader, 1);
+        let again = ds.gets.load(Ordering::SeqCst);
+        match cache {
+            CacheMode::Ram => assert_eq!(again, 0, "the second epoch comes from the cache"),
+            CacheMode::None => assert!(again >= 10, "{again} loads in the second epoch"),
         }
     }
 }

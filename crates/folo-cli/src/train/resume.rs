@@ -174,8 +174,8 @@ pub(super) fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Resu
             )
             .hint(format!(
                 "leave {flag} out to resume the run as it was started (only --workers, --device, --data, \
-                 --format, --project and --json-events may change), or start a new run from its weights with --model \
-                 <run>/weights/best.folo"
+                 --format, --cache, --project and --json-events may change), or start a new run from its weights \
+                 with --model <run>/weights/best.folo"
             )));
         }
     }
