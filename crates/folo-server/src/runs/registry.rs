@@ -13,6 +13,7 @@ use crate::throughput::Throughput;
 
 use super::entry::INTERRUPTED;
 use super::history::reconcile;
+use super::queue::followed_elsewhere;
 use super::{Queue, RunEntry, RunFile, Runs};
 
 impl Runs {
@@ -196,15 +197,20 @@ impl Runs {
         q.runs.iter().position(|e| e.id == id).map(|i| i as u32 + 1)
     }
 
-    /// Deletes a finished run and its folder, or a run waiting in the queue that never started (it leaves the
-    /// queue). A run that trains, stops, is being started or waits to resume is `409 run_active`.
+    /// Deletes a finished run and its folder, or a local run waiting in this server's queue that never started (it
+    /// leaves the queue). A run that trains, stops, is being started or waits to resume is `409 run_active`, and so
+    /// is every active cloud run: its instance may be starting, here or for another process on this data dir.
     pub fn delete(&self, id: &str) -> Result<PathBuf> {
         // Lock order: registry, then the run's state, then the queue (as the worker and `stop` take them).
         let mut list = self.list.write().unwrap();
         let e = list.iter().find(|e| e.id == id).cloned().ok_or_else(|| Error::not_found("run", id))?;
         let mut st = e.state.lock().unwrap();
         let r = &st.file.run;
-        let never_started = r.status == RunStatus::Queued && r.started.is_none() && !st.claimed;
+        let cloud = r.config.compute.is_some();
+        if cloud && r.status.is_active() && !st.claimed {
+            return Err(followed_elsewhere(id));
+        }
+        let never_started = !cloud && r.status == RunStatus::Queued && r.started.is_none() && !st.claimed;
         if (r.status.is_active() && !never_started) || st.claimed {
             return Err(Error::conflict("run_active", format!("run '{id}' is still active"))
                 .hint(format!("stop it first (POST /api/runs/{id}/stop)")));

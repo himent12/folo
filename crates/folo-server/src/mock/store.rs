@@ -503,9 +503,10 @@ impl Store for MockStore {
 
     fn delete_run(&self, id: &str) -> Result<()> {
         let (run, _) = self.run(id)?;
-        // A run waiting in the queue that never started leaves it (as in real mode); any other active run stays.
+        // A local run waiting in the queue that never started leaves it (as in real mode); any other active run stays.
         let api = run.to_api();
-        let never_started = api.status == folo_api::RunStatus::Queued && api.started.is_none();
+        let never_started =
+            api.status == folo_api::RunStatus::Queued && api.started.is_none() && api.config.compute.is_none();
         if run.is_active() && !never_started {
             return Err(Error::conflict("run_active", format!("run '{id}' is still active"))
                 .hint(format!("stop it first: POST /api/runs/{id}/stop")));

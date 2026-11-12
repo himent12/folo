@@ -59,15 +59,10 @@ fn a_step_cursor_never_skips_a_step() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A create or resume that passed `check_open` before the shutdown and reaches `enqueue` after it: the run is
-/// marked stopped instead of queued, and no worker starts.
-#[test]
-fn enqueue_after_shutdown_refuses_and_stops_the_run() {
-    let dir = TestDir::new("runs-late");
-    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
-    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
+/// The record of run `id` queued with `config` that never started.
+fn queued_file(id: &str, config: TrainConfig) -> RunFile {
     let run = Run {
-        id: "run_late".into(),
+        id: id.into(),
         name: config.name.clone(),
         status: RunStatus::Queued,
         epochs: config.epochs,
@@ -96,7 +91,17 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         format: DatasetFormat::Yolo,
         classes: vec![],
     };
-    let file = RunFile { run, dataset, weights: None, val_offset: 0, epochs_done: 0, last_metrics: None };
+    RunFile { run, dataset, weights: None, val_offset: 0, epochs_done: 0, last_metrics: None }
+}
+
+/// A create or resume that passed `check_open` before the shutdown and reaches `enqueue` after it: the run is
+/// marked stopped instead of queued, and no worker starts.
+#[test]
+fn enqueue_after_shutdown_refuses_and_stops_the_run() {
+    let dir = TestDir::new("runs-late");
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
+    let file = queued_file("run_late", config);
     std::fs::create_dir_all(dir.join("run_late")).unwrap();
     let entry = Arc::new(RunEntry::new("run_late".into(), dir.join("run_late"), file));
     runs.list.write().unwrap().push(entry.clone());
@@ -328,3 +333,25 @@ fn an_epoch_is_one_log_line() {
             .unwrap();
     assert_eq!(super::entry::epoch_line(&e, 5), "epoch 3/5: loss 3.214, mAP50-95 0.073, 15.2 s");
 }
+
+/// A cloud run another process follows (`queued`, never started, so not claimed here): deleting it is `409
+/// run_active` and its folder stays; only a local run that never started may be deleted while it waits.
+#[test]
+fn a_cloud_run_followed_elsewhere_is_not_deleted() {
+    let dir = TestDir::new("runs-delete-cloud");
+    let config: TrainConfig = serde_json::from_str(
+        r#"{"dataset_id":"ds_1","name":"c","compute":{"connection_id":"cc_1","offer_id":"o"}}"#,
+    )
+    .unwrap();
+    let run_dir = dir.join("run_c");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("run.json"), serde_json::to_vec(&queued_file("run_c", config)).unwrap())
+        .unwrap();
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let e = runs.delete("run_c").unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::CONFLICT, "run_active"));
+    assert!(e.body.message.contains("another FOLO process"), "{}", e.body.message);
+    assert!(run_dir.join("run.json").is_file() && runs.get("run_c").is_ok());
+    runs.shutdown(None);
+}
+

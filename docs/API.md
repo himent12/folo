@@ -421,8 +421,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     mode: runs created through the API share one training slot the same way (the seeded looping run `run_3c02` is
     outside the queue).
 - `DELETE /api/runs/{id}` → `204` (`409 run_active` while `running` or `stopping`, or `queued` after it had started: a
-  resumed run waiting to continue). A run waiting in the queue that never started leaves the queue and is deleted (the
-  runs behind it move up; Remove from queue in Studio and FOLO Desktop). Real mode removes the run folder, its weights included, so its
+  resumed run waiting to continue; and for every active cloud run, `queued` while its instance starts included, and
+  for any cloud run another FOLO process on the data dir follows). A local run waiting in the queue that never
+  started leaves the queue and is deleted (the runs behind it move up; Remove from queue in Studio and FOLO Desktop). Real mode removes the run folder, its weights included, so its
   models disappear too.
 - `GET /api/runs/{id}/metrics?every=1` → `{ "steps": [Step], "epochs": [Epoch] }` (full history, for charts on page
   load; `every=N` keeps every N-th step plus the latest one, to thin long runs). `after_step=<n>` keeps the steps
