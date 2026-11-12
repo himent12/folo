@@ -27,16 +27,21 @@ pub(crate) fn max_pool2d(
 ) -> (Vec<f32>, Vec<i64>) {
     let mut out = alloc_uninit(np * oh * ow);
     let mut idx = vec![0i64; np * oh * ow];
-    if out.is_empty() || h * w == 0 {
+    if h * w == 0 {
+        // Every window is padding alone.
+        out.fill(f32::NEG_INFINITY);
+        return (out, idx);
+    }
+    if out.is_empty() {
         return (out, idx);
     }
     let [kh, kw] = p.kernel;
     let [sh, sw] = p.stride;
     let [ph, pw] = p.padding;
-    // Window ranges along each axis (clipped to the input; padding never wins).
+    // Window ranges along each axis (clipped to the input; padding never wins). `o * s + k <= n + 2 * pad`
+    // (the output size), so nothing overflows, also for a window wider than `isize::MAX`.
     let range = |o: usize, s: usize, pad: usize, k: usize, n: usize| {
-        let a = (o * s) as isize - pad as isize;
-        a.max(0) as usize..((a + k as isize).min(n as isize)).max(0) as usize
+        (o * s).saturating_sub(pad)..(o * s + k).saturating_sub(pad).min(n)
     };
     let xs: Vec<_> = (0..ow).map(|ox| range(ox, sw, pw, kw, w)).collect();
     let ys: Vec<_> = (0..oh).map(|oy| range(oy, sh, ph, kh, h)).collect();
@@ -85,21 +90,29 @@ pub(crate) fn max_pool2d(
 /// never beats anything, and a `-inf` start is replaced by the first real element unless every real element
 /// is `-inf` too, the same bits. With every window the same width, each pass is a select over whole rows that
 /// the compiler vectorises. Planes are grouped into tasks of about [`POOL_TASK`] outputs.
+///
+/// A padded extent more than [`PAD_SLACK`] past twice the input's (a window far larger than the plane), or an
+/// empty plane, runs [`max_pool2d`] instead and drops the indices: its clipped windows never visit the padding.
 pub(crate) fn max_pool2d_values(
     x: &[f32],
     (np, h, w): Planes,
     p: &Pool2dParams,
     [oh, ow]: [usize; 2],
 ) -> Vec<f32> {
-    let mut out = alloc_uninit(np * oh * ow);
-    if out.is_empty() {
-        return out;
+    if np * oh * ow == 0 {
+        return alloc_uninit(0);
     }
     let [kh, kw] = p.kernel;
     let [sh, sw] = p.stride;
     let [ph, pw] = p.padding;
-    // Padded extents covering every window ((o - 1) * s + k <= n + 2 * pad).
-    let (hp, wp) = ((oh - 1) * sh + kh, (ow - 1) * sw + kw);
+    // Padded extents covering every window ((o - 1) * s + k <= n + 2 * pad; `oh, ow >= 1` here).
+    let extent = |o: usize, s: usize, k: usize| (o - 1).checked_mul(s)?.checked_add(k);
+    let bound = |n: usize| n.saturating_mul(2).saturating_add(PAD_SLACK);
+    let (hp, wp) = match (extent(oh, sh, kh), extent(ow, sw, kw)) {
+        (Some(hp), Some(wp)) if h != 0 && w != 0 && hp <= bound(h) && wp <= bound(w) => (hp, wp),
+        _ => return max_pool2d(x, (np, h, w), p, [oh, ow]).0,
+    };
+    let mut out = alloc_uninit(np * oh * ow);
     // One step of the scan: `a` replaces `b` if it beats it (`b` is never the empty start here).
     #[inline(always)]
     fn step(b: &mut f32, a: f32) {
@@ -152,6 +165,10 @@ pub(crate) fn max_pool2d_values(
 
 /// Outputs per task of [`max_pool2d_values`] (a few microseconds of work).
 const POOL_TASK: usize = 1 << 12;
+
+/// How far [`max_pool2d_values`]'s padded rows and columns may exceed twice the input's before it falls back to
+/// the clipped scan (every detector pool pads by at most a few elements).
+const PAD_SLACK: usize = 16;
 
 pub(crate) fn max_pool2d_backward(g: &[f32], idx: &[i64], (np, h, w): Planes, ohw: usize) -> Vec<f32> {
     let mut gx = alloc_zeroed(np * h * w);
@@ -402,6 +419,36 @@ mod tests {
                 let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
                 assert_eq!(bits(&fast), bits(&v), "{np}x{h}x{w} {p:?}");
             }
+        }
+    }
+
+    /// Windows far larger than the plane (up to `usize::MAX` wide, padding half of it) and empty planes: both
+    /// paths give the direct scan's values without materialising the padding, and write every output.
+    #[test]
+    fn max_pool_with_huge_windows_or_empty_planes() {
+        let big = |k: usize| Pool2dParams { kernel: [k, 1], stride: [1, 1], padding: [k / 2, 0] };
+        let cases = [
+            ((1, 1, 1), big(isize::MAX as usize)),
+            ((1, 1, 1), big(usize::MAX)),
+            ((2, 3, 4), Pool2dParams { kernel: [41, 5], stride: [7, 1], padding: [20, 2] }),
+            ((2, 0, 3), Pool2dParams { kernel: [2, 1], stride: [1, 1], padding: [1, 0] }),
+            ((2, 3, 0), Pool2dParams { kernel: [1, 4], stride: [1, 2], padding: [0, 2] }),
+        ];
+        for ((np, h, w), p) in cases {
+            let x: Vec<f32> = (0..np * h * w).map(|i| (i * 7 % 5) as f32 - 1.5).collect();
+            let ohw = p.output_hw(h, w).unwrap();
+            let (v, ix) = max_pool2d(&x, (np, h, w), &p, ohw);
+            let fast = max_pool2d_values(&x, (np, h, w), &p, ohw);
+            // A 1x1 plane under a window too wide to scan directly is its own maximum.
+            let (wv, wix) = if p.kernel[0] > 1 << 20 {
+                (x.clone(), vec![0; np])
+            } else {
+                direct(&x, (np, h, w), &p, ohw)
+            };
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&v), bits(&wv), "{np}x{h}x{w} {p:?}");
+            assert_eq!(bits(&fast), bits(&wv), "{np}x{h}x{w} {p:?}");
+            assert_eq!(ix, wix, "{np}x{h}x{w} {p:?}");
         }
     }
 }

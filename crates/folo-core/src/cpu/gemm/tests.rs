@@ -51,6 +51,15 @@ fn rejects_overflowing_ldc() {
     gemm(3, 1, 1, &Strided::lhs(&a, 0, 0, 0), &Strided::rhs(&b, 0, 0, 0), &mut c, 1 << 63, false, false);
 }
 
+/// A's extent is checked without overflow before its rows are read in place: a row stride that wraps
+/// `offset + (m - 1) * so + k` round to a small number panics instead of reading out of bounds.
+#[test]
+#[should_panic(expected = "A buffer too small")]
+fn rejects_overflowing_a_row_stride() {
+    let mut c = [0f32; 2];
+    sgemm(2, 1, 2, &[1.0], usize::MAX, 1, &[1.0, 1.0], 1, 1, &mut c, 1);
+}
+
 #[test]
 fn generic_kernel_matches() {
     let kc = 9;
@@ -111,7 +120,10 @@ fn kernel_epilogue_is_bitwise_the_row_pass() {
 #[test]
 fn a_in_place_is_bitwise_the_packed_path() {
     let bias = data(64, 9);
-    for &(m, n, k) in &[(13, 37, 5), (6, 16, 256), (13, 37, 300), (64, 50, 600), (8, 8, 4096)] {
+    // The last two split K, so K parts start A at a nonzero k0.
+    let split = [(16, 16, 4096), (8, 64, 4096)];
+    assert!(split.iter().all(|&(m, n, k)| super::blocked::k_split_parts(m, n, k) > 1));
+    for &(m, n, k) in [(13, 37, 5), (6, 16, 256), (13, 37, 300), (64, 50, 600)].iter().chain(&split) {
         let a = data(m * k, 1);
         let at: Vec<f32> = (0..k * m).map(|idx| a[(idx % m) * k + idx / m]).collect();
         let b = data(k * n, 2);

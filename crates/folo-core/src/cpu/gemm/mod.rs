@@ -75,13 +75,19 @@ pub(super) struct ARows<'a> {
 impl<'a> ARows<'a> {
     /// `a`'s rows in place, if it has them and its packed form would fit one K super-block ([`PACK_BUDGET`]
     /// floats: every conv weight), checked to hold `m x k` elements.
+    ///
+    /// # Panics
+    /// If `data` is too short for `m` rows of `k` elements, or that extent overflows `usize` (the packing path
+    /// would fail its slice bounds check there too): the kernels read these rows through raw pointers.
     pub(super) fn of<A: Operand>(a: &'a A, m: usize, k: usize) -> Option<Self> {
         let (data, offset, so) = a.rows_in_place()?;
-        if m.div_ceil(MR) * MR * k > PACK_BUDGET {
+        if (m.div_ceil(MR) * MR).checked_mul(k).is_none_or(|v| v > PACK_BUDGET) {
             // Larger than one packed super-block: packing is a small part of such a GEMM, and done in parallel.
             return None;
         }
-        assert!(m == 0 || k == 0 || offset + (m - 1) * so + k <= data.len(), "gemm: A buffer too small");
+        // One past the last element read: `offset + (m - 1) * so + k`.
+        let end = (m.saturating_sub(1).checked_mul(so)).and_then(|v| v.checked_add(offset)?.checked_add(k));
+        assert!(m == 0 || k == 0 || end.is_some_and(|e| e <= data.len()), "gemm: A buffer too small");
         Some(ARows { data, offset, so })
     }
 

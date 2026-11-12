@@ -50,7 +50,8 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
   separable (row pass, then column pass; same first-maximum argmax as a direct scan); when nothing is recorded
   (`no_grad`, or an input that does not require grad) it makes no index tensor (`Backend::max_pool2d_values`,
-  on the CPU a select over `-inf`-padded rows, the same bits). A batched `matmul` splits the pool between its
+  on the CPU a select over `-inf`-padded rows, the same bits; a window far wider than the plane takes the clipped
+  indexed scan instead). A batched `matmul` splits the pool between its
   matrices. A batch of several images
   splits the pool between them: only as many images run at once (`lanes`) as their shifted-rows copies or unfolded
   gradients fit in 16 MiB, each lane taking its images one after another, and each image's GEMMs get

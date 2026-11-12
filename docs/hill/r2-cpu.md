@@ -13,17 +13,30 @@ other lanes' builds, benches and training runs.
 - `tools/bench-ab.ps1` alternates the binaries run by run at High priority, inside the shared `cpu` lock
   (`D:/folo-build/hill/lock.sh acquire cpu cpu`), 3 rounds unless stated. A copy of it (`ab2.ps1`, not committed)
   takes per-run environment variables (`label=exe|K=V,K=V`), for sweeping knobs inside one binary.
-- Benches: `cargo bench -p folo-vision --bench cpu_e2e` (`FOLO_BENCH_ITERS=60`; `FOLO_BENCH_SCALE=s|m`;
-  `FOLO_BENCH_BATCH=16` for `predict_batch`), `--bench train_step` (folo-n, 320 px, batch 16),
+- Benches: `cargo bench -p folo-vision --bench cpu_e2e`, `--bench train_step` (folo-n, 320 px, batch 16),
   `cargo bench -p folo-core --bench gemm`. Rows below are medians of the rounds' medians, ranges in brackets.
+- The PR 1 table's runs, each `bash D:/folo-build/hill2-cpu-bin/ab.sh 3 <threads> <affinity> <env>
+  "base=base-<bench>.exe;pr1=pr1-<bench>.exe"` (threads 0 = all 28; raw logs in the same folder):
+
+  | rows | bench | threads, affinity | env | log |
+  |---|---|---|---|---|
+  | folo-n forward, e2e | `cpu_e2e` | 28 | `FOLO_BENCH_ITERS=60` | `pr1_n28.txt` |
+  | folo-n forward, 8 P-cores | `cpu_e2e` | 8, `5555` | `FOLO_BENCH_ITERS=60` | `pr1_n8.txt` |
+  | folo-s forward, e2e | `cpu_e2e` | 28 | `FOLO_BENCH_SCALE=s`, `FOLO_BENCH_ITERS=40` | `pr1_s28.txt` |
+  | folo-m forward, e2e | `cpu_e2e` | 28 | `FOLO_BENCH_SCALE=m`, `FOLO_BENCH_ITERS=20` | `pr1_m28.txt` |
+  | `predict_batch` 16 | `cpu_e2e` | 28 | `FOLO_BENCH_BATCH=16`, `FOLO_BENCH_ITERS=40` | `pr1_b16.txt` |
+  | train step | `train_step` | 28 | none (defaults) | `pr1_train.txt` |
+
+  The square-sgemm numbers (`--bench gemm`) and the steps on the way are observations from runs whose output
+  was not saved to a file.
 - "busy" is the CPU time of every other process over the run's wall time, in cores. **The machine was never
-  quiet: 8–20 cores busy elsewhere in every run**, 11–16 in most. The 8-pinned-P-core rows (`-Threads 8
-  -Affinity 5555`) were the noisiest (17–20 busy), so the claims use 28-thread rows.
+  quiet: 6–21 cores busy elsewhere in every A/B and sweep run**, 11–16 in most. The 8-pinned-P-core rows
+  (`-Threads 8 -Affinity 5555`) were the noisiest (17–20 busy), so the claims use 28-thread rows.
 
 ### Profiling
 
 samply records nothing on this machine, so, as in round 1, an op timer was patched in for the profile runs and
-never committed: a guard on the CPU backend methods (conv label, flops), sub-phase guards inside the conv forward
+never committed (`prof.patch`, `prof2.patch` in `D:/folo-build/hill2-cpu-bin`): a guard on the CPU backend methods (conv label, flops), sub-phase guards inside the conv forward
 (shifted-rows copy, A packing, the tile loop), and a per-task record (thread index, start, end) inside every GEMM
 tile loop, printed by a temporary `FOLO_PROF=1` section of `cpu_e2e`. Findings on `main`, folo-n, 640², batch 1:
 
@@ -67,7 +80,10 @@ Tests: `a_in_place_is_bitwise_the_packed_path` (gemm_ex and gemm_rows, row-major
 blocks, K over one block, the K split, 1 and 8 threads, with and without bias + SiLU),
 `a_rows_kernels_are_bitwise_the_packed_kernel` (portable and AVX2 kernels, ragged rows, epilogue),
 `max_pool_values_are_the_indexed_values_bit_for_bit` (±0 ties, NaN payloads, `-inf` windows, planes smaller
-than the window, strides 1–3, paddings).
+than the window, strides 1–3, paddings), `max_pool_with_huge_windows_or_empty_planes` (windows up to `usize::MAX`
+wide fall back to the clipped scan instead of padding rows that long; empty planes give `-inf` on both paths),
+`max_pool_makes_indices_only_when_recorded` (a counting backend: indices only when the result is recorded),
+`rejects_overflowing_a_row_stride` (A's extent is checked without overflow before its rows are read in place).
 
 | A/B, 28 threads, 3 rounds alternated | `main` | PR 1 | |
 |---|---|---|---|
@@ -94,7 +110,9 @@ values-only max pool (a scalar flag scan, planes in 8K-output tasks) made the po
 
 ## Negative results
 
-All in one binary with temporary environment knobs, alternated, folo-n forward b1 at 28 threads (11–17 busy):
+All in one binary with temporary environment knobs, uncommitted like the op timer (the tiling knobs are in
+`prof.patch`, the head overlap and its thread budget in `overlap-budget.patch`, both in
+`D:/folo-build/hill2-cpu-bin`), alternated, folo-n forward b1 at 28 threads (11–17 busy):
 
 | knob | forward b1 |
 |---|---|
@@ -112,7 +130,7 @@ All in one binary with temporary environment knobs, alternated, folo-n forward b
   has made its feature (`rayon::join` of the P3 branches with layers 17–22, then P4 with 20–22): 14.71 vs 14.68
   ms, a tie. The overlap happens, but the neck's convs, the critical path, then share the pool (down3 0.28 → 1.08
   ms). Giving the P3 / P4 branches a thread budget (a thread-local cap on the tiling of the kernels they start:
-  P3 box 2–12, cls 1–4) made it worse: 15.34–17.85 ms against 14.86. Patch kept in the lane's bin folder.
+  P3 box 2–12, cls 1–4) made it worse: 15.34–17.85 ms against 14.86.
 - **Shifted-rows copy in parallel from 8K / 16K / 32K floats** instead of 64K: 15.50 / 14.94 / 15.81 ms against
   15.01, a tie.
 - Not tried: pinning workers to P-cores first. Every pool smaller than 28 threads lost under this load, and a

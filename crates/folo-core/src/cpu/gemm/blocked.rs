@@ -199,7 +199,7 @@ pub(crate) fn gemm_ex<A: Operand, B: Operand>(
 
 /// Number of K parts for a GEMM whose C is too small to keep every thread busy with tiles but whose K is long
 /// (conv weight gradients: K = N·OH·OW), or 1. A function of the shape only, for reproducibility.
-fn k_split_parts(m: usize, n: usize, k: usize) -> usize {
+pub(super) fn k_split_parts(m: usize, n: usize, k: usize) -> usize {
     if k < 8 * KC || 2 * m * n * k < PAR_FLOPS {
         return 1;
     }
