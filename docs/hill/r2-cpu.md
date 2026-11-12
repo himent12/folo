@@ -160,7 +160,7 @@ Changes, in folo-nn's `train_cpu` (`crates/folo-nn/src/layers/batchnorm.rs`):
   cancels when that value is extreme (a 1000×1000 plane of 0.1 with 10⁶ first: variance 1000007 against
   999999) and lost small terms of the mean (`[1e16, −1e16, 1, 1]`: 0 against 0.5); review caught it. Test
   `one_pass_statistics_match_two_pass_reference` checks the mean bit for bit against the old formula and the
-  variance within 2 f32 ulp of a two-pass f64 reference: means 10⁴ and 10⁷ times the spread (the second fails
+  variance within a relative 2·ε (f32; 2 to 4 ulp) of a two-pass f64 reference: means 10⁴ and 10⁷ times the spread (the second fails
   `Σv² − n·mean²`, asserted), a constant channel, 1×1 planes, one outlier per plane, both review cases,
   infinities and NaNs.
 - **AVX2 for the per-plane loops** (`with_avx2`): the same loop bodies compiled under

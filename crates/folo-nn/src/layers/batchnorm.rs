@@ -737,11 +737,12 @@ mod tests {
                 train_cpu::<ACT_NONE>(&x, &Tensor::ones([1]), &Tensor::zeros([1]), BN_EPS).unwrap();
             (m.to_vec::<f32>().unwrap()[0], v.to_vec::<f32>().unwrap()[0])
         };
-        let mut data = vec![0.1f32; 200 * 200];
+        // At this size the first draft (sums shifted by the plane's first value) was 132 f32 ulp off.
+        let mut data = vec![0.1f32; 1000 * 1000];
         data[0] = 1.0e6;
-        let (n, k, r) = (40_000f64, 1.0e6f64, 0.1f32 as f64);
+        let (n, k, r) = (1.0e6f64, 1.0e6f64, 0.1f32 as f64);
         let want = (k - r) * (k - r) * (n - 1.0) / (n * n);
-        let (_, v) = stats([1, 1, 200, 200], data);
+        let (_, v) = stats([1, 1, 1000, 1000], data);
         assert!((v as f64 - want).abs() <= f32::EPSILON as f64 * want, "var {v} vs {want}");
         assert_eq!(stats([1, 1, 2, 2], vec![1.0e16, -1.0e16, 1.0, 1.0]).0, 0.5);
         let (m, v) = stats([1, 1, 1, 2], vec![0.0, f32::INFINITY]);
