@@ -386,8 +386,9 @@ order per element; the existing bitwise conv tests passed). `conv_infer -- k3s2`
 
 Bands make each task's GEMM narrow (one or two output rows: few column panels, a ragged last panel, the
 weights re-read per band), which costs more than the copy saves, and the whole-image copy already runs in
-parallel. On one pinned P-core (2 rounds, 21–24 cores busy elsewhere, log `b1_k3s2_1.txt`, noisy) 16→32 at 320²
-gained (41–57 → 55–68 GF/s) and so did 128→256 at 40² (81–84 → 90–96); the others tied or swung both ways. A 4x
+parallel. On one pinned P-core (2 rounds, 21–24 cores busy elsewhere, log `b1_k3s2_1.txt`, noisy) bands (`band`) gained
+on 16→32 at 320² (41–57 → 55–63 GF/s) and 128→256 at 40² (81–84 → 90–96); with a 4x band budget (`band4`)
+62–68 and 76–91; the others tied or swung both ways. A 4x
 larger band budget with one band per thread, once at 28 threads, gave the same picture (16→32 479 GF/s, the rest
 402–579 against 466–731 whole; that run's output was not saved). The one conv bands win at 28 threads saves
 ~0.06 ms: not worth the code.
