@@ -21,6 +21,9 @@ pub(super) struct RegistryFile {
     /// server has loaded references the id.
     #[serde(default)]
     pub tombstones: Vec<Tombstone>,
+    /// Read from the object form, whose tombstones are inside `datasets.json` (see [`write_registry`]).
+    #[serde(skip)]
+    pub object: bool,
 }
 
 /// Which of the two files a write gives an id to (a registration, or a tombstone): that file is written first, so a
@@ -95,9 +98,9 @@ pub(super) fn read_registry(dir: &Path) -> Result<RegistryFile> {
     let mut file = match read_text(&path)? {
         None => RegistryFile::default(),
         Some(text) if text.trim_start().starts_with('[') => {
-            RegistryFile { datasets: parse(&path, &text)?, tombstones: Vec::new() }
+            RegistryFile { datasets: parse(&path, &text)?, ..RegistryFile::default() }
         }
-        Some(text) => parse(&path, &text)?,
+        Some(text) => RegistryFile { object: true, ..parse(&path, &text)? },
     };
     let path = tombstones_path(dir);
     if let Some(text) = read_text(&path)? {
@@ -108,7 +111,7 @@ pub(super) fn read_registry(dir: &Path) -> Result<RegistryFile> {
         }
     }
     // A registration wins over a tombstone of its id (a crash between the two writes, see `Gains`).
-    let RegistryFile { datasets, tombstones } = &mut file;
+    let RegistryFile { datasets, tombstones, .. } = &mut file;
     tombstones.retain(|t| !datasets.iter().any(|r| r.id == t.id));
     Ok(file)
 }
@@ -129,18 +132,29 @@ fn parse<T: serde::de::DeserializeOwned>(path: &Path, text: &str) -> Result<T> {
     })
 }
 
-/// Writes both files atomically, the one that `gains` an id first.
+/// Writes both files atomically, the one that `gains` an id first. A registry read from the object form has the
+/// only copy of its tombstones in the `datasets.json` the list replaces, so the tombstones are written first then,
+/// whatever the write gains: until the list replaces it, the object still holds every id it held.
 pub(super) fn write_registry(dir: &Path, file: &RegistryFile, gains: Gains) -> Result<()> {
+    write_with(dir, file, gains, &mut write_atomic)
+}
+
+/// [`write_registry`], each file written by `write` (tests make one fail).
+pub(super) fn write_with(
+    dir: &Path,
+    file: &RegistryFile,
+    gains: Gains,
+    write: &mut dyn FnMut(&Path, &[u8]) -> std::io::Result<()>,
+) -> Result<()> {
     let datasets = (registry_path(dir), serde_json::to_vec_pretty(&file.datasets));
     let tombstones = (tombstones_path(dir), serde_json::to_vec_pretty(&file.tombstones));
     let order = match gains {
-        Gains::Registration => [datasets, tombstones],
-        Gains::Tombstone => [tombstones, datasets],
+        Gains::Registration if !file.object => [datasets, tombstones],
+        _ => [tombstones, datasets],
     };
     for (path, bytes) in order {
         let bytes = bytes.expect("registrations serialize");
-        write_atomic(&path, &bytes)
-            .map_err(|e| Error::internal(format!("writing {}: {e}", path.display())))?;
+        write(&path, &bytes).map_err(|e| Error::internal(format!("writing {}: {e}", path.display())))?;
     }
     Ok(())
 }

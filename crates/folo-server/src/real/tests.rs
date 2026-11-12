@@ -321,3 +321,55 @@ fn the_registry_stays_the_list_older_builds_read() {
     assert_eq!(std::fs::read_to_string(&removed_path).unwrap().trim(), "[]");
 }
 
+/// Review R3: the object form's tombstones have their only copy in the `datasets.json` the list replaces, so its
+/// first write back saves them to `datasets.removed.json` before the list, also for a write that gains a
+/// registration: an unrelated registration keeps the tombstone a run references, also when the list write fails.
+#[test]
+fn the_object_registrys_tombstones_are_saved_before_its_list() {
+    use super::registry::{Gains, read_registry, write_with};
+    let t = TestDir::new("real-registry-object");
+    let home = t.join("home");
+    let store = RealStore::open(home.clone());
+    let b = synthetic(&store, "b");
+    run_on(&store, &b.id, "on-b");
+    store.delete_dataset(&b.id).unwrap();
+    drop(store);
+    let (list_path, removed_path) = (home.join("datasets.json"), home.join("datasets.removed.json"));
+    let removed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&removed_path).unwrap()).unwrap();
+    let object = serde_json::json!({ "datasets": [], "tombstones": removed }).to_string();
+    let write_object = || {
+        std::fs::write(&list_path, &object).unwrap();
+        let _ = std::fs::remove_file(&removed_path);
+    };
+    let kept = || {
+        let text = std::fs::read_to_string(&removed_path).unwrap_or_default();
+        let removed: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap_or_default();
+        removed.iter().map(|t| t["id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
+
+    // The list write fails: the tombstone is in its own file already, the object unchanged.
+    write_object();
+    let mut file = read_registry(&home).unwrap();
+    let c = serde_json::json!({
+        "id": "ds_c", "name": "c", "path": t.join("c"), "format": "yolo", "created": "2026-11-11T00:00:00Z"
+    });
+    file.datasets.push(serde_json::from_value(c).unwrap());
+    let mut write = |p: &Path, bytes: &[u8]| match p == list_path {
+        true => Err(std::io::Error::other("refused")),
+        false => crate::index::write_atomic(p, bytes),
+    };
+    write_with(&home, &file, Gains::Registration, &mut write).unwrap_err();
+    assert_eq!(kept(), [b.id.as_str()]);
+    assert_eq!(std::fs::read_to_string(&list_path).unwrap(), object);
+
+    // An unrelated registration through the store: the list written, the tombstone kept, its id still B's.
+    write_object();
+    let store = RealStore::open(home.clone());
+    let c = synthetic(&store, "c");
+    assert_eq!(kept(), [b.id.as_str()]);
+    let list: Vec<super::Registration> =
+        serde_json::from_str(&std::fs::read_to_string(&list_path).unwrap()).unwrap();
+    assert_eq!(list.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [c.id.as_str()]);
+    assert_eq!(register(&store, Path::new(&b.path)).id, b.id);
+}
