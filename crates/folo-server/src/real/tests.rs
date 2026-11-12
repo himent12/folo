@@ -136,6 +136,94 @@ fn files_are_judged_by_descriptions_as_they_read_now() {
     assert!(!Path::new(&a.path).exists());
 }
 
+/// Review R1: dataset B's `images` is a junction (a directory symlink off Windows) into generated A's, so B reads A's
+/// images through it, and A's files are kept.
+#[test]
+fn files_are_kept_while_a_link_in_another_dataset_leads_into_them() {
+    let t = TestDir::new("real-delete-link");
+    let store = RealStore::open(t.join("home"));
+    let a = synthetic(&store, "a");
+    let folder = Path::new(&a.path).to_path_buf();
+    let b = t.join("b");
+    std::fs::create_dir_all(b.join("labels")).unwrap();
+    std::fs::copy(folder.join("data.yaml"), b.join("data.yaml")).unwrap();
+    for split in std::fs::read_dir(folder.join("labels")).unwrap() {
+        let split = split.unwrap().path();
+        let to = b.join("labels").join(split.file_name().unwrap());
+        std::fs::create_dir_all(&to).unwrap();
+        for f in std::fs::read_dir(&split).unwrap() {
+            let f = f.unwrap().path();
+            std::fs::copy(&f, to.join(f.file_name().unwrap())).unwrap();
+        }
+    }
+    if let Err(why) = dir_link(&folder.join("images"), &b.join("images")) {
+        eprintln!("skipped: could not link a folder ({why})");
+        return;
+    }
+    let on_a = register(&store, &b.join("data.yaml"));
+    assert!(on_a.splits.train > 0, "B reads A's images through its link");
+    let e = store.delete_dataset_files(&a.id).unwrap_err();
+    assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "dataset_in_use"), "{}", e.body.message);
+    assert!(e.body.message.contains(&on_a.name), "{}", e.body.message);
+    assert!(folder.join("images").is_dir() && store.entry(&a.id).is_ok());
+}
+
+/// A link at `link` to the folder `target`: a junction on Windows (`mklink /J`, which needs no privilege), a
+/// symlink elsewhere.
+fn dir_link(target: &Path, link: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let win = |p: &Path| folo_data::paths::shown(p).replace('/', "\\");
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &win(link), &win(target)])
+            .output()
+            .map_err(|e| e.to_string())?;
+        out.status
+            .success()
+            .then_some(())
+            .ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(target, link).map_err(|e| e.to_string())
+}
+
+/// Review R2: another dataset whose description cannot be read now (it no longer parses; on Windows, also held open
+/// by another program) might read the folder, so the files are kept and nothing is unregistered. Unregistering that
+/// dataset still works, and then the files go.
+#[test]
+fn files_are_kept_while_another_dataset_cannot_be_checked() {
+    let t = TestDir::new("real-delete-unchecked");
+    let store = RealStore::open(t.join("home"));
+    let a = synthetic(&store, "a");
+    let c = t.join("c");
+    let cfg = folo_data::synthetic::SyntheticConfig { images: 4, imgsz: 64, seed: 4, ..Default::default() };
+    folo_data::synthetic::write_yolo(&cfg, &c, folo_data::ImageFormat::Png).unwrap();
+    let yaml = c.join("data.yaml");
+    let other = register(&store, &yaml);
+    let refused = || {
+        let e = store.delete_dataset_files(&a.id).unwrap_err();
+        assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "dataset_in_use"), "{}", e.body.message);
+        assert!(e.body.message.contains(&other.name), "{}", e.body.message);
+        assert!(e.body.message.contains("could not be checked"), "{}", e.body.message);
+        assert!(Path::new(&a.path).join("images").is_dir() && store.entry(&a.id).is_ok());
+    };
+    #[cfg(windows)]
+    let good = std::fs::read_to_string(&yaml).unwrap();
+    std::fs::write(&yaml, "train: [images/train\n").unwrap();
+    refused();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::write(&yaml, &good).unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&yaml).unwrap();
+        refused();
+        drop(held);
+    }
+    store.delete_dataset(&other.id).unwrap();
+    store.delete_dataset_files(&a.id).unwrap();
+    assert!(!Path::new(&a.path).exists());
+}
+
 /// Registration and run admission wait while a deletion of dataset files holds the lease.
 #[test]
 fn registering_and_creating_runs_wait_for_a_deletion() {
@@ -231,4 +319,57 @@ fn the_registry_stays_the_list_older_builds_read() {
         serde_json::from_str(&std::fs::read_to_string(&list_path).unwrap()).unwrap();
     assert_eq!(as_older.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["ds_main", b.id.as_str()]);
     assert_eq!(std::fs::read_to_string(&removed_path).unwrap().trim(), "[]");
+}
+
+/// Review R3: the object form's tombstones have their only copy in the `datasets.json` the list replaces, so its
+/// first write back saves them to `datasets.removed.json` before the list, also for a write that gains a
+/// registration: an unrelated registration keeps the tombstone a run references, also when the list write fails.
+#[test]
+fn the_object_registrys_tombstones_are_saved_before_its_list() {
+    use super::registry::{Gains, read_registry, write_with};
+    let t = TestDir::new("real-registry-object");
+    let home = t.join("home");
+    let store = RealStore::open(home.clone());
+    let b = synthetic(&store, "b");
+    run_on(&store, &b.id, "on-b");
+    store.delete_dataset(&b.id).unwrap();
+    drop(store);
+    let (list_path, removed_path) = (home.join("datasets.json"), home.join("datasets.removed.json"));
+    let removed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&removed_path).unwrap()).unwrap();
+    let object = serde_json::json!({ "datasets": [], "tombstones": removed }).to_string();
+    let write_object = || {
+        std::fs::write(&list_path, &object).unwrap();
+        let _ = std::fs::remove_file(&removed_path);
+    };
+    let kept = || {
+        let text = std::fs::read_to_string(&removed_path).unwrap_or_default();
+        let removed: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap_or_default();
+        removed.iter().map(|t| t["id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
+
+    // The list write fails: the tombstone is in its own file already, the object unchanged.
+    write_object();
+    let mut file = read_registry(&home).unwrap();
+    let c = serde_json::json!({
+        "id": "ds_c", "name": "c", "path": t.join("c"), "format": "yolo", "created": "2026-11-11T00:00:00Z"
+    });
+    file.datasets.push(serde_json::from_value(c).unwrap());
+    let mut write = |p: &Path, bytes: &[u8]| match p == list_path {
+        true => Err(std::io::Error::other("refused")),
+        false => crate::index::write_atomic(p, bytes),
+    };
+    write_with(&home, &file, Gains::Registration, &mut write).unwrap_err();
+    assert_eq!(kept(), [b.id.as_str()]);
+    assert_eq!(std::fs::read_to_string(&list_path).unwrap(), object);
+
+    // An unrelated registration through the store: the list written, the tombstone kept, its id still B's.
+    write_object();
+    let store = RealStore::open(home.clone());
+    let c = synthetic(&store, "c");
+    assert_eq!(kept(), [b.id.as_str()]);
+    let list: Vec<super::Registration> =
+        serde_json::from_str(&std::fs::read_to_string(&list_path).unwrap()).unwrap();
+    assert_eq!(list.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [c.id.as_str()]);
+    assert_eq!(register(&store, Path::new(&b.path)).id, b.id);
 }

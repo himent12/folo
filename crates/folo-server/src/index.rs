@@ -283,16 +283,48 @@ fn watch_dirs(base: &Path, ds: &folo_data::LoadedDataset) -> Vec<PathBuf> {
     dirs
 }
 
-/// The folders the dataset at `path` reads its images and labels from (those an [`Index`] of it watches: its own
-/// folder, its root and split sources), found without reading the images; only its own folder when it cannot be
-/// read.
-pub fn reads(path: &str, format: DatasetFormat) -> Vec<PathBuf> {
+/// The paths the dataset at `path` reads its images and labels from (its own folder, its root and every source:
+/// split folders and lists, the folders of its images and labels), each resolved through links before any is
+/// dropped for lying inside another, so a folder that is a junction or symlink shows where it leads. Found without
+/// reading the images. An error when they cannot all be known: the description cannot be read, or one of them
+/// cannot be resolved or (a folder) listed. A link to a single file is not followed beyond the folder holding it.
+pub fn reads(path: &str, format: DatasetFormat) -> std::result::Result<Vec<PathBuf>, String> {
     let p = absolute(Path::new(path));
     let base = if p.is_file() { p.parent().unwrap_or(&p).to_path_buf() } else { p.clone() };
     let opts = folo_data::OpenOptions { format: data_format(format), verify_images: false };
-    match folo_data::open_with(&p, &opts) {
-        Ok(ds) => watch_dirs(&base, &ds),
-        Err(_) => vec![base],
+    let ds = folo_data::open_with(&p, &opts).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for s in [base, ds.root].into_iter().chain(ds.sources) {
+        let s = lexical(&s);
+        out.push(resolved(&s).map_err(|e| format!("{}: {e}", folo_data::paths::shown(&s)))?);
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// `p` canonical (links followed); a path that does not exist yet is its nearest existing parent's canonical form
+/// with the rest appended. A folder must be listable.
+fn resolved(p: &Path) -> std::io::Result<PathBuf> {
+    let mut at = p;
+    let mut rest = Vec::new();
+    loop {
+        match std::fs::canonicalize(at) {
+            Ok(c) => {
+                if rest.is_empty() && c.is_dir() {
+                    std::fs::read_dir(&c)?;
+                }
+                return Ok(rest.iter().rev().fold(c, |c, r| c.join(r)));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match (at.file_name(), at.parent()) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name);
+                    at = parent;
+                }
+                _ => return Err(e),
+            },
+            Err(e) => return Err(e),
+        }
     }
 }
 
