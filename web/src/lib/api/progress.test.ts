@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { progressText, runProgress, stepsPerEpoch } from './progress';
+import { etaSettled, progressText, runProgress, stepsPerEpoch } from './progress';
 import type { Step } from './types';
 
 const step = (step: number, epoch: number) => ({ step, epoch }) as Step;
@@ -40,5 +40,21 @@ describe('progressText', () => {
     expect(at(4548)).toBe('37%');
     expect(at(4560)).toBe('38%');
     expect(progressText({ step: 12000, epoch: 100, epochs: 100, steps_per_epoch: 120, status: 'completed' })).toBe('100%');
+  });
+});
+
+describe('etaSettled', () => {
+  const run = { status: 'running' as const, epochs: 5, steps_per_epoch: 12 };
+  it('waits for the first epoch, whose time left swings with the start', () => {
+    expect(etaSettled({ ...run, epoch: 0, step: 0 })).toBe(false);
+    expect(etaSettled({ ...run, epoch: 1, step: 11 })).toBe(false);
+    expect(etaSettled({ ...run, epoch: 1, step: 12 })).toBe(true);
+    expect(etaSettled({ ...run, epoch: 2, step: 13 })).toBe(true);
+    // Steps per epoch not known yet: the epoch count says it.
+    expect(etaSettled({ ...run, steps_per_epoch: 0, epoch: 1, step: 30 })).toBe(false);
+  });
+  it('settles halfway through a one-epoch run', () => {
+    expect(etaSettled({ ...run, epochs: 1, epoch: 1, step: 5 })).toBe(false);
+    expect(etaSettled({ ...run, epochs: 1, epoch: 1, step: 6 })).toBe(true);
   });
 });

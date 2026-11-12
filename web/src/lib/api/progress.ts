@@ -33,6 +33,20 @@ export function progressText(run: Pick<Run, 'step' | 'epoch' | 'epochs' | 'steps
 }
 
 /**
+ * Whether a run's time left has settled enough to show: once its first epoch's steps are done (halfway through a
+ * one-epoch run). The first epoch carries the start (loading the data, compiling the GPU pipelines), so an estimate made
+ * during it swings by minutes; until then every screen says "estimating time left…" (the run page, Overview's Training
+ * card, the sidebar's live card), so no two disagree.
+ */
+export function etaSettled(run: Pick<Run, 'step' | 'epoch' | 'epochs' | 'steps_per_epoch' | 'status'>): boolean {
+  if (run.epoch > 1 || (run.steps_per_epoch > 0 && run.step >= run.steps_per_epoch)) return true;
+  return run.epochs === 1 && runProgress(run) >= 0.5;
+}
+
+/** What a live run says about its time left: "3m left", or "estimating time left…" until it has settled. */
+export const ETA_PENDING = 'estimating time left…';
+
+/**
  * The epochs at the end of a run with mosaic off: `min(close_mosaic, floor(epochs / 2))`, so at least half of a short
  * run keeps mosaic (docs/MODEL.md §8.6; folo-data `close_mosaic_epochs`, which the trainer applies itself).
  */

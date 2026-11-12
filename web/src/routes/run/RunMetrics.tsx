@@ -29,7 +29,7 @@ import LineChart, { type Marker, type Series } from '$lib/charts/LineChart';
 import { runHorizon } from '$lib/charts/horizon';
 import type { AppendLog } from '$lib/api/appendLog';
 import type { Epoch, Run, Step } from '$lib/api/types';
-import { runProgress } from '$lib/api/progress';
+import { etaSettled, runProgress } from '$lib/api/progress';
 import { effectiveCloseMosaic, warmupEpochs } from './resolved';
 import { conf, metric, num } from '$lib/format';
 import Segmented from '$lib/ui/Segmented';
@@ -215,8 +215,9 @@ export default function RunMetrics(props: RunMetricsProps) {
   });
   // While the run trains, "So far" grows in steps (./metricSeries liveHorizon), so the axis holds still.
   // The first epoch carries the start (loading, compiling the GPU pipelines): its time left swings by minutes. The ETA
-  // shows once an epoch has finished, or halfway through a one-epoch run.
-  const etaReady = computed(() => !!lastEpoch.get() || (props.run.epochs === 1 && observed.get() >= 0.5));
+  // shows once an epoch has finished, or halfway through a one-epoch run: the rule Overview and the sidebar use too
+  // (lib/api/progress etaSettled), with this page's history as well.
+  const etaReady = computed(() => !!lastEpoch.get() || etaSettled(props.run) || (props.run.epochs === 1 && observed.get() >= 0.5));
   const xDomain = computed(() => (live.get() ? liveHorizon : runHorizon)(observed.get(), props.run.epochs, horizon.get()), {
     equals: (a, b) => a[0] === b[0] && a[1] === b[1],
   });

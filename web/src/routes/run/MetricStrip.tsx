@@ -5,7 +5,7 @@
 import { bindable, css, For } from 'fw';
 import { tooltip } from '$lib/ui/tooltip';
 import type { Run } from '$lib/api/types';
-import { progressText } from '$lib/api/progress';
+import { ETA_PENDING, progressText } from '$lib/api/progress';
 import { duration, eta } from '$lib/format';
 import Meta from '$lib/ui/Meta';
 import { failedEpoch } from './failure';
@@ -122,7 +122,7 @@ export default function MetricStrip(props: MetricStripProps) {
           ) : props.live ? (
             <Meta line>
               <span>{progressText(props.run)}</span>
-              <span>{props.run.eta_s !== null && props.etaReady ? `${eta(props.run.eta_s)} left` : 'estimating time left…'}</span>
+              <span>{props.run.eta_s !== null && props.etaReady ? `${eta(props.run.eta_s)} left` : ETA_PENDING}</span>
             </Meta>
           ) : props.elapsed !== null ? (
             `${duration(props.elapsed)} total`

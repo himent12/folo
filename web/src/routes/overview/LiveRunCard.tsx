@@ -8,7 +8,7 @@ import { BestPulse } from '$lib/charts/bestPulse';
 import { unitDomain, unitZoomed, UNIT_ZOOM_NOTE } from '$lib/charts/domain';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
-import { progressText, runProgress } from '$lib/api/progress';
+import { ETA_PENDING, etaSettled, progressText, runProgress } from '$lib/api/progress';
 import { lr, metric, num } from '$lib/format';
 import { etaText, lastKnown, Now } from '$lib/api/freshness';
 import StatusBadge, { statusWord } from '$lib/ui/StatusBadge';
@@ -150,12 +150,13 @@ export default function LiveRunCard(props: LiveRunCardProps) {
       <div class="body">
         <div class="stats">
           <div class="epoch">
-            <Stat label="Epoch" value={num(r().epoch)} unit={`/ ${r().epochs}`} size="lg" />{' '}
+            {/* "Epoch 3 of 10", as the run page and the sidebar say it. */}
+            <Stat label="Epoch" value={num(r().epoch)} unit={`of ${r().epochs}`} size="lg" />{' '}
             {/* Lime is "now": a last known progress is drawn in ink. */}
             <Progress value={progress.get()} size="sm" label="Training progress" tone={live.lost !== null ? 'neutral' : 'accent'} />{' '}
             <p class="eta num">
               <span>{progressText(r())}</span>{' '}
-              <span>{etaText(r().eta_s, live.lost, now.current)}</span>
+              <span>{etaSettled(r()) ? etaText(r().eta_s, live.lost, now.current) : ETA_PENDING}</span>
             </p>
           </div>{' '}
           <div class="grid">
