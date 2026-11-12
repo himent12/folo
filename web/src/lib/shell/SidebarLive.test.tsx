@@ -4,6 +4,7 @@
 import { flush } from 'fw';
 import { render } from '../../../framework/testing';
 import { afterEach, describe, expect, it } from 'vitest';
+import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Run } from '$lib/api/types';
 import SidebarLive from './SidebarLive';
@@ -34,5 +35,29 @@ describe('SidebarLive', () => {
     flush();
     expect(card()).toContain('Epoch 2 of 5');
     expect(card()).toContain('3m left');
+  });
+
+  it('says nothing of the run training on a server just switched to: it did not start then (review R4)', async () => {
+    const [any] = await new MockApi('normal', 0).runs();
+    const run = (id: string) => ({ ...any!, id, name: id, status: 'running', cloud: undefined }) as Run;
+    watched.runs = [run('on-a')];
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <SidebarLive collapsed={false} />, target);
+    flush();
+    const said = () => target.querySelector('[aria-live]')!.textContent;
+    expect(target.textContent).toContain('on-a');
+
+    hub.epoch++;
+    flush();
+    expect(target.querySelector('.card')).toBeNull();
+    watched.runs = [run('on-b')];
+    flush();
+    expect(target.textContent).toContain('on-b');
+    expect(said()).toBe('');
+    // A run that starts on it afterwards is news.
+    watched.runs = [run('next-on-b')];
+    flush();
+    expect(said()).toBe('next-on-b started training');
   });
 });

@@ -3,6 +3,7 @@
 // tall enough for it; a new navigation keeps nothing; a value a screen keeps with its entry comes back with it.
 import { signal } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { hub } from '$lib/api/index';
 import { router } from '$lib/router';
 import { tabHistory, type TabHistory } from '$lib/tabHistory.testing';
 import { entryState, installEntryMemory, restoringScroll } from './entryMemory';
@@ -120,6 +121,21 @@ describe('entryMemory', () => {
     await settle();
     await frames(40);
     expect(window.scrollY).toBe(0);
+  });
+
+  it('keeps no screen value from another server: its ids are not the one in use (review R4)', async () => {
+    hub.mode = 'live';
+    router.go('/runs');
+    const picked = entryState<string[]>('runs.compare');
+    picked.set(['run_1', 'run_2']);
+    expect(picked.get()).toEqual(['run_1', 'run_2']);
+    const url = vi.spyOn(hub, 'serverUrl', 'get').mockReturnValue('http://other:7878');
+    expect(picked.get()).toBeUndefined();
+    picked.set(['run_9']);
+    url.mockRestore();
+    expect(picked.get()).toBeUndefined();
+    hub.mode = 'mock';
+    expect(picked.get()).toBeUndefined();
   });
 
   it('keeps a screen value with its entry', async () => {

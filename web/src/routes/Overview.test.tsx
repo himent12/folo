@@ -1,15 +1,17 @@
 // @vitest-environment happy-dom
 // Overview against the mock server: it reads the run list the sidebar reads (shell/runList), so the Training card
 // never says "Nothing is training" beside the sidebar's "Training" (shell F13), and Best models catches up when a run
-// ends (runs F4).
+// ends (runs F4). That list is the server's in use: after a switch, nothing of the server before shows (review R4).
 import { flush } from 'fw';
 import { render } from '../../framework/testing';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Run } from '$lib/api/types';
 import { parse, router } from '$lib/router';
+import RunWatch from '$lib/shell/RunWatch.tsx';
+import SidebarLive from '$lib/shell/SidebarLive';
 import { watched } from '$lib/shell/runList';
 import Overview from './Overview';
 
@@ -113,6 +115,54 @@ describe('Overview', () => {
     expect(text()).toContain('Could not check what is training');
     expect(text()).not.toContain('Could not load this');
     expect(target.querySelector('#best-models .unranked')!.textContent).toMatch(/not ranked: could not load runs\.$/);
+  });
+
+  it("after a switch to another server, shows that server's failure, never the runs of the one before (review R4)", async () => {
+    // Server A: the shell watches its list, with a run training, and the sidebar shows it.
+    const runs = await idleRuns();
+    const run = { ...runs.find((r) => r.status === 'completed')!, name: 'only-on-server-a', status: 'running' as const };
+    const a = new MockApi('normal', 0);
+    a.runs = async () => runs.map((r) => (r.id === run.id ? run : r));
+    hub.api = a;
+    hub.mode = 'mock';
+    const shell = document.body.appendChild(document.createElement('div'));
+    const view = render(
+      () => (
+        <>
+          <RunWatch />
+          <SidebarLive collapsed={false} />
+        </>
+      ),
+      shell,
+    );
+    onTestFinished(() => {
+      view.unmount();
+      shell.remove();
+    });
+    await vi.waitFor(() => {
+      flush();
+      expect(shell.textContent).toContain(run.name);
+    });
+
+    // Settings saves server B, which answers its health check but not its run list.
+    const b = new MockApi('normal', 0);
+    b.runs = () => Promise.reject(new ApiError(500, 'internal', 'the run index could not be read'));
+    hub.api = b;
+    hub.epoch++;
+    flush();
+    expect(watched.runs).toBeUndefined();
+    expect(shell.textContent).not.toContain(run.name);
+    open(b);
+    await vi.waitFor(() => {
+      flush();
+      expect(target.textContent).toContain('Could not load recent runs');
+    });
+    await vi.waitFor(() => {
+      flush();
+      expect(target.textContent).toContain('Could not check what is training');
+    });
+    expect(target.textContent).not.toContain(run.name);
+    expect(shell.textContent).not.toContain(run.name);
   });
 
   it('with no dataset left, its actions open Add dataset rather than a New run that cannot start', async () => {

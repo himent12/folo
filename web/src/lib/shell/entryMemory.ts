@@ -10,10 +10,13 @@
 // - `entryState(key)`: any small value a screen wants back with its entry (typed list filters, a selection), the same
 //   way: `const picked = entryState<string[]>('runs.compare')`, then `picked.get()` when the screen mounts and
 //   `picked.set(ids)` when it changes. It belongs to the entry the screen is on at that moment; a new entry starts
-//   without it, Back / Forward give it back. State that should survive a shared link belongs in the URL query instead.
+//   without it, Back / Forward give it back. It is about the server it was kept under (ids, filters of its lists): after
+//   a switch to another server or the mock, the entry has none. State that should survive a shared link belongs in the
+//   URL query instead.
 //
 // Both live in memory and in sessionStorage (written when the tab is hidden or closed), so a reload keeps them.
 
+import { hub } from '$lib/api/index';
 import { parse, router, type EntryChange } from '$lib/router';
 
 const KEY = 'folo.entries';
@@ -23,7 +26,8 @@ export const RESTORE_MS = 3000;
 /** Once there, how long the page's height must stay put before the restore lets go (data still arriving moves it). */
 const SETTLE_MS = 400;
 
-type Kept = { y?: number; state?: Record<string, unknown> };
+/** `server`: the one `state` was kept under (see `server()`). */
+type Kept = { y?: number; state?: Record<string, unknown>; server?: string };
 
 let kept = new Map<number, Kept>();
 let restoring: { until: number; frame: number } | null = null;
@@ -149,12 +153,21 @@ export function installEntryMemory(shown: () => string | null = () => router.rou
   };
 }
 
+/** The server in use, as entry state names it (a reload keeps it: not the hub's epoch). */
+const server = () => (hub.mode === 'mock' ? 'mock' : hub.serverUrl);
+
 /** A value kept with the current history entry (see the top of this file). */
 export function entryState<T>(key: string): { get(): T | undefined; set(v: T | undefined): void } {
   return {
-    get: () => kept.get(router.entry)?.state?.[key] as T | undefined,
+    get: () => {
+      const k = kept.get(router.entry);
+      return k?.server === server() ? (k.state?.[key] as T | undefined) : undefined;
+    },
     set: (v) => {
       const k = entry(router.entry);
+      const at = server();
+      // Another server's values are not kept alongside this one's.
+      if (k.server !== at) (k.server = at), (k.state = undefined);
       k.state = { ...k.state, [key]: v };
       if (v === undefined) delete k.state[key];
     },
