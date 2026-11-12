@@ -309,14 +309,12 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     s.push_str("@group(0) @binding(3) var<storage, read> BIAS: array<T>;\n");
     let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> C: array<{}>;", wgsl_ty(c_f16, vc));
     let _ = writeln!(s, "var<workgroup> As: array<array<vec4<f32>, {bm4}>, {}>;", 2 * bk);
-    // The weight gradient pads each B row by one vec4: its stores go down short runs of rows (see
-    // `wgrad_b_units`), which would otherwise all hit the same banks.
-    let _ = writeln!(
-        s,
-        "var<workgroup> Bs: array<array<vec4<f32>, {}>, {}>;",
-        bn4 + u32::from(mode == 3),
-        2 * bk
-    );
+    // `WG_PAD`: the weight gradient pads each B row by one vec4 (`2 · BK · 16` bytes, which
+    // `TileConfig::workgroup_bytes` leaves out, so the caller sets it only where that still fits): its stores go
+    // down short runs of rows (see `wgrad_b_units`), which would otherwise all hit the same banks.
+    let wg_pad = mode == 3 && spec.get_bool("WG_PAD");
+    let _ =
+        writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {}>, {}>;", bn4 + u32::from(wg_pad), 2 * bk);
     let _ = writeln!(s, "@compute @workgroup_size({wgx}, {wgy}, 1)");
     s.push_str(
         "fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid3: vec3<u32>) {\n",

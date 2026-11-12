@@ -34,6 +34,8 @@ mod weight_grad;
 pub use forward::{conv2d, conv2d_with_config};
 pub use input_grad::conv2d_backward_input;
 pub(crate) use input_grad::{PHASE_PIXEL, Phase};
+#[cfg(test)]
+pub(crate) use weight_grad::{LAST_ROUTE, WgradRoute};
 pub use weight_grad::{conv2d_backward_weight, conv2d_backward_weight_as};
 pub(crate) use weight_grad::{weight_grad_dims, weight_grad_spec, wgrad_b_load, wgrad_b_units};
 

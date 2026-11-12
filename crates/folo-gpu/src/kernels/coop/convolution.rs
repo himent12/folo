@@ -248,6 +248,8 @@ pub(crate) fn encode_conv_backward_weight(
         .bool("SPLIT", splits > 1);
     let spec = crate::kernels::conv::weight_grad_spec(with_window(spec, d), d, oh, ow);
     let Some(kernel) = build(ctx, spec) else { return Ok(false) };
+    #[cfg(test)]
+    crate::kernels::conv::LAST_ROUTE.set(Some((true, (cfg.bm, cfg.bn), splits)));
     let p = gemm_params(g)?
         .at(24)
         .uz(d.h)?

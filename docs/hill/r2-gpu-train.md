@@ -9,7 +9,14 @@ Baseline: `main` 647b981f.
 - **Profile** (`FOLO_GPU_PROFILE=1`, docs/GPU.md "Profiling"): GPU time per kernel label and phase. Timestamps
   serialise kernels, so profiled wall times are not the real ones; per-label times swing by about ±15 % between
   runs on the shared GPU, so a kernel change is judged on the group totals of several runs, and claimed only
-  through the end-to-end A/B.
+  through the end-to-end A/B. Script: `D:/folo-build/hill2-gpu-train/bin/prof.sh <tag> <bins...>`
+  (`FOLO_GPU_PROFILE=1 FOLO_GPU_TENSOR_CORES=1 FOLO_BENCH_SECTIONS=train FOLO_BENCH_SCALES=n`, the f32 and the AMP
+  step of each binary in turn), output `D:/folo-data/runs-hill2/gpu-train/prof-<tag>-<bin>.txt`.
+- **Binaries** (`D:/folo-build/hill2-gpu-train/bin/<name>.exe`, the `folo-vision` `gpu` bench): `base` = main
+  647b981f; `c1` = the whole warp along `k`; `c2` = runs of 8; `c3` = runs of 16 / 8 plus the stem tile (with a
+  `FOLO_WG_RUN` override of the run length, since removed, which gave the runs-of-4 and runs-of-8 rows below);
+  `wg` = this branch at 5af98913 (the PR's first commit). Profiles: `prof-w1-*` (`base`, `c1`), `prof-w2-*`
+  (`base`, `c2`), `prof-w3-*` (`base`, `c3`, and `r4` / `r8` = `c3` with runs of 4 / 8).
 - **A/B**: `cargo bench -p folo-vision --bench gpu` (`FOLO_GPU_TENSOR_CORES=1 FOLO_BENCH_SECTIONS=train
   FOLO_BENCH_SCALES=n`, plus `FOLO_BENCH_CLIP=1` / `FOLO_BENCH_OPTIM=musgd` where stated), one binary per side
   (`base` = main 647b981f, built from this worktree before any change), run alternately in one GPU-lock hold
@@ -43,12 +50,14 @@ kw)]`) was loaded with neighbouring invocations on neighbouring columns `j`, whi
 sectors. 1×1 layers' weight gradients ran at 2-5 TFLOPS (e.g. 48→64 at 160×160: 2.5 GFLOP in 0.77 ms).
 
 **Change.** Both generators (regular and tensor-core) load the `B` tile in runs: neighbouring invocations take
-`run` neighbouring pixels of one column, then the next columns (`conv::wgrad_b_units`; run 16 in the regular
-generator where the tile is that deep, 8 on tensor cores). The pixel `(n, oh, ow)` of each run is decoded once
-per load, the tap per element. The k-major workgroup tile is padded so the stores of a run hit distinct banks.
-The stem shape (`C_out ≤ 16`, `N ≤ 32`: folo's 3→16 stem, `N = 27`) takes a 16×32 regular tile with 32
-invocations, also under AMP (the narrowest tensor-core tile is 16×256, 89 % padding), split-K into up to 1024
-chunks.
+`run` neighbouring pixels of one column, then the next columns (`conv::wgrad_b_units`; run `min(bk, 16)` in the
+regular generator, so 8 on the `LARGE` tile, whose depth is 8, and 8 on tensor cores). The pixel `(n, oh, ow)` of
+each run is decoded once per load, the tap per element. The k-major workgroup tile is padded so the stores of a run
+hit distinct banks (in the regular generator only when the padded tile still fits the device's workgroup memory,
+`WG_PAD`, which every weight-gradient tile does in the 4080's 48 KiB; the tensor-core tile always has its padding).
+The stem shape (per group `C_out/groups ≤ 16` and `C_in/groups·KH·KW ≤ 32`: folo's 3→16 stem, `N = 27`) takes a
+16×32 regular tile with 32 invocations, also under AMP (the narrowest tensor-core tile is 16×256, 89 % padding),
+split-K into up to 1024 chunks.
 
 **Tried on the way** (profiled, alternated with main):
 
@@ -57,8 +66,8 @@ chunks.
 | main | 11.8-12.0 (+0.9 reduce) | 7.0-9.0 (+0.8) | |
 | whole warp along `k` (32 / `bk` lanes per column) | 11.5 | 11.0 | tensor cores **3x slower** on 3×3 layers (4-way bank conflicts on the f16 tile stores) |
 | runs of 8, padded tile | 10.9 | 6.5 | |
-| runs of 16 (f32) / 8 (f16) + stem tile (shipped) | 10.8 (+1.2 reduce) | 5.8 + 0.4 stem | stem f32 0.83 → 0.35 ms, AMP 0.70 → 0.31 + 0.13 reduce |
-| runs of 4 / 8 everywhere | 10.6-11.2 | 5.2-5.4 | inside the noise of the shipped variant |
+| runs of 16 (f32) / 8 (f16) + stem tile (shipped) | 10.8 (+1.2 reduce) | 5.8 + 0.4 stem | stem f32 0.83 → 0.35 ms, AMP 0.70 → 0.41 + 0.13 reduce (`prof-w3-c3`) |
+| runs of 4 / 8 everywhere | 10.6-11.2 | 5.2-5.4 | inside the noise of the shipped variant; AMP stem 0.35 / 0.31 + 0.13 reduce (`prof-w3-r4` / `-r8`) |
 
 **A/B** (end to end, folo-n b16 640, base = main, alternated; ms per step, median of the run's 10 steps and,
 in brackets, its fastest step). The host was 33-100 % busy with other lanes' builds and jobs during both holds

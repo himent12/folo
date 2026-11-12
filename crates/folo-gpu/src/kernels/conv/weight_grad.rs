@@ -36,6 +36,28 @@ pub(crate) fn stem_shaped(m: usize, n: usize) -> bool {
     m <= 16 && n <= 32
 }
 
+/// Whether the regular weight-gradient kernel with tile `cfg` pads its `B` tile rows by one vec4 (`WG_PAD`, against
+/// bank conflicts in its stores): only when the padded tile still fits `limit` bytes of workgroup memory. The
+/// tile choice and [`gemm::check_config`] count the unpadded tile, which stays the fallback.
+pub(crate) fn wgrad_pad(cfg: TileConfig, limit: u32) -> bool {
+    cfg.workgroup_bytes() + wgrad_pad_bytes(cfg) <= limit
+}
+
+/// Workgroup memory the `WG_PAD` row padding adds: one vec4 of f32 per row of both `B` tiles.
+fn wgrad_pad_bytes(cfg: TileConfig) -> u32 {
+    2 * cfg.bk * 16
+}
+
+/// A GEMM weight gradient's route, for tests: tensor cores, the tile's `(BM, BN)` and the split-K chunk count.
+#[cfg(test)]
+pub(crate) type WgradRoute = Option<(bool, (u32, u32), usize)>;
+
+#[cfg(test)]
+thread_local! {
+    /// The route of this thread's last GEMM weight gradient.
+    pub(crate) static LAST_ROUTE: std::cell::Cell<WgradRoute> = const { std::cell::Cell::new(None) };
+}
+
 /// Largest `KH · KW` the direct depthwise weight-gradient kernel unrolls; bigger kernels use the GEMM path.
 const MAX_DEPTHWISE_TAPS: usize = 49;
 /// Upper bound for split-K partial slabs, in f32 elements (64 MiB).
@@ -240,6 +262,7 @@ pub fn conv2d_backward_weight_as(
     }
     let cfg = pick_config_weight_grad(ctx, cout_g, ncols);
     gemm::check_config(ctx, cfg)?;
+    let pad = wgrad_pad(cfg, ctx.caps().max_workgroup_storage);
     let bk = cfg.bk as usize;
     // Split K when the weight alone has too few tiles: aim for ~512 workgroups, each at least 16 K tiles deep.
     let tiles = cout_g.div_ceil(cfg.bm as usize) * ncols.div_ceil(cfg.bn as usize) * d.groups;
@@ -252,6 +275,8 @@ pub fn conv2d_backward_weight_as(
         .min(65535 / d.groups);
     let ks = np.div_ceil(want.max(1)).next_multiple_of(bk);
     let splits = np.div_ceil(ks);
+    #[cfg(test)]
+    LAST_ROUTE.set(Some((false, (cfg.bm, cfg.bn), splits)));
     // The kernel writes `C` as f32 for partial slabs and for an f32 result of f16 inputs.
     let c_f32 = splits > 1 || out == DType::F32;
     let tmp = if splits > 1 { Some(ctx.alloc(DType::F32.bytes(prod(&[splits, wn])?))?) } else { None };
@@ -267,6 +292,7 @@ pub fn conv2d_backward_weight_as(
         .bool("TRANS_B", false)
         .bool("CHECK", check)
         .u32("CONV_MODE", 3)
+        .bool("WG_PAD", pad)
         .bool("SPLIT", splits > 1)
         .bool("OUT_F32", c_f32 && dt == DType::F16);
     let kernel = ctx.kernel(&GEMM, weight_grad_spec(conv_spec(spec, d), d, oh, ow))?;
@@ -292,4 +318,44 @@ pub fn conv2d_backward_weight_as(
         finish(t, splits)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernels::gemm::gen_gemm;
+
+    /// Workgroup bytes a generated GEMM shader declares (its `var<workgroup>` arrays of arrays of `vec4<f32>`).
+    fn declared_workgroup_bytes(wgsl: &str) -> u32 {
+        wgsl.lines()
+            .filter_map(|l| l.strip_prefix("var<workgroup> "))
+            .map(|l| {
+                let dims = l.split_once("vec4<f32>, ").expect("vec4 tile").1;
+                let (inner, rest) = dims.split_once(">, ").expect("inner length");
+                let outer = rest.split_once('>').expect("outer length").0;
+                16 * inner.parse::<u32>().unwrap() * outer.parse::<u32>().unwrap()
+            })
+            .sum()
+    }
+
+    /// The mode-3 shader never declares more workgroup memory than the limit its tile was validated against:
+    /// `WG_PAD` is on only where the padded tile fits, and the generator adds exactly [`wgrad_pad_bytes`].
+    #[test]
+    fn weight_grad_pad_fits_the_validated_limit() {
+        let tiles = [TileConfig::LARGE, TileConfig::MEDIUM, TileConfig::SMALL, TileConfig::ROWS32, STEM];
+        for limit in [16384, 32768, 49152] {
+            for cfg in tiles.into_iter().filter(|c| c.workgroup_bytes() <= limit) {
+                let pad = wgrad_pad(cfg, limit);
+                let g = GemmDesc::new(cfg.bm as usize, cfg.bn as usize, 4096, false, false, 1);
+                let spec = base_spec(&g, cfg).u32("CONV_MODE", 3).bool("SPLIT", true).bool("WG_PAD", pad);
+                let bytes = declared_workgroup_bytes(&gen_gemm(&spec));
+                assert_eq!(bytes, cfg.workgroup_bytes() + u32::from(pad) * wgrad_pad_bytes(cfg), "{cfg:?}");
+                assert!(bytes <= limit, "{cfg:?}: {bytes} B of workgroup memory over {limit}");
+            }
+        }
+        // f32 x [1, 8, 8, 8], w [32, 8, 3, 3] on a 16 KiB device: SMALL is exactly 16 KiB unpadded.
+        assert_eq!(TileConfig::SMALL.workgroup_bytes(), 16384);
+        assert!(!wgrad_pad(TileConfig::SMALL, 16384));
+        assert!(wgrad_pad(TileConfig::SMALL, 32768));
+    }
 }
