@@ -78,3 +78,25 @@ export function sortRuns(runs: readonly Run[], by: SortKey, dir: Dir, now = Date
     .sort((a, b) => (a.k === null ? (b.k === null ? a.i - b.i : 1) : b.k === null ? -1 : (a.k - b.k) * sign || a.i - b.i))
     .map((x) => x.r);
 }
+
+/**
+ * The list's query when it was left for a run's page, with that page's place in the tab's history (router.entry):
+ * Escape on the run page (shell/shortcuts) opens a bare `/runs` as a new entry rather than going Back, and that entry
+ * shows the list as it was left there, ticks included, as Back would (shell F3).
+ */
+let leftFor: { entry: number; query: string } | null = null;
+
+/** The list was left for the page at history place `entry` (a run's), its query `query`. */
+export function leftForRun(entry: number, query: string): void {
+  leftFor = { entry, query };
+}
+
+/**
+ * The query to show the list with when it opens at history place `entry` with `query`: the one it was left with, when
+ * this is a bare `/runs` opened right after that run's page; null otherwise. Asked once per opening.
+ */
+export function returnQuery(entry: number, query: URLSearchParams): string | null {
+  const l = leftFor;
+  leftFor = null;
+  return l && l.query && !query.toString() && entry === l.entry + 1 ? l.query : null;
+}

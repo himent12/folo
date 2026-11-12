@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Run } from '$lib/api/types';
-import { DEFAULT_STATE, readState, sortRuns, writeState } from './listState';
+import { DEFAULT_STATE, leftForRun, readState, returnQuery, sortRuns, writeState } from './listState';
 
 const run = (id: string, o: Partial<Run> = {}) =>
   ({ id, status: 'completed', created: '2026-11-11T10:00:00Z', started: null, finished: null, best: null, epoch: 0, epochs: 5, step: 0, steps_per_epoch: 0, ...o }) as Run;
@@ -29,5 +29,18 @@ describe('sortRuns', () => {
     expect(sortRuns(runs, 'map', 'desc').map((r) => r.id)).toEqual(['c', 'a', 'b']);
     expect(sortRuns(runs, 'map', 'asc').map((r) => r.id)).toEqual(['a', 'c', 'b']);
     expect(sortRuns(runs, 'created', 'asc').map((r) => r.id)).toEqual(['c', 'b', 'a']);
+  });
+});
+
+describe('returning from a run', () => {
+  it('shows the list as it was left only on a bare /runs opened right after the run page, once', () => {
+    leftForRun(4, 'sel=run_a,run_b');
+    expect(returnQuery(5, new URLSearchParams())).toBe('sel=run_a,run_b');
+    expect(returnQuery(5, new URLSearchParams())).toBeNull();
+    // A link with its own state, or a visit two pages later, is not a return.
+    leftForRun(4, 'sel=run_a,run_b');
+    expect(returnQuery(5, new URLSearchParams('q=bccd'))).toBeNull();
+    leftForRun(4, 'sel=run_a,run_b');
+    expect(returnQuery(6, new URLSearchParams())).toBeNull();
   });
 });

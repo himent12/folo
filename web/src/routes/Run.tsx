@@ -5,6 +5,7 @@
 // looked for in new lines only (run/warningsLog, the Svelte page scanned the whole log on every step), and the parts
 // that depend on the run's settings (Config, lineage, the dataset, the menus) get values that keep their identity
 // while only its progress moves, so a step re-renders the progress and nothing else.
+import ArrowLeft from '$icons/arrow-left';
 import Box from '$icons/box';
 import ChevronsUp from '$icons/chevrons-up';
 import GitCompare from '$icons/git-compare-arrows';
@@ -456,7 +457,8 @@ export default function Run() {
   return (
     <>
       {live.error && !run.get() ? (
-        <Page title="Run">
+        // The way back is the header's action, as on the other detail pages (Model, Dataset, Benchmark).
+        <Page title="Run" actions={() => <Button icon={ArrowLeft} href={href('/runs')}>All runs</Button>}>
           <ErrorState error={live.error} title="Could not load this run" retry={() => live.retry()} />
         </Page>
       ) : !run.get() ? (

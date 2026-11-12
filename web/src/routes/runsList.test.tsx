@@ -266,6 +266,26 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     go.mockRestore();
   });
 
+  it('keeps the runs ticked for Compare across a run opened and left with Escape (a bare /runs right after it)', async () => {
+    const api = new MockApi('normal', 0);
+    const ids = (await api.runs()).slice(0, 2).map((r) => r.id);
+    await open(Runs, `/runs?sel=${ids.join(',')}`, api);
+    await loaded();
+    // Enter on a row opens the run (a new entry); the App swaps the list for the run page.
+    router.go(`/runs/${ids[0]}`);
+    unmount(c!);
+    // Escape there opens /runs (shell/shortcuts backPath), the next entry.
+    router.go('/runs');
+    const P = Runs;
+    c = render(() => <P />, target);
+    await loaded();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(location.hash).toBe(`#/runs?sel=${ids.join(',')}`);
+      expect(target.querySelectorAll('td.check input:checked')).toHaveLength(2);
+    });
+  });
+
   it('gives a finished run its model, the Playground and Delete run in its ⋯', async () => {
     await open(Runs, '/runs', new MockApi('normal', 0));
     await loaded();

@@ -7,7 +7,7 @@ import ScanSearch from '$icons/scan-search';
 import Search from '$icons/search';
 import Trash from '$icons/trash-2';
 import X from '$icons/x';
-import { computed, css, effect, For, signal, untrack } from 'fw';
+import { computed, css, effect, For, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { modelsResource } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
@@ -50,7 +50,7 @@ import { toast } from '$lib/ui/toast';
 import DeleteRun from './run/DeleteRun';
 import StopRun from './run/StopRun';
 import RunRows from './runs/RunRows';
-import { groups, readState, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
+import { groups, leftForRun, readState, returnQuery, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
 import { exactTime, tickingNow } from './runs/when';
 
 /** Columns of the desktop table (for state rows that span it). */
@@ -151,7 +151,11 @@ export default function Runs() {
   // Filter, search, sort and the runs ticked for Compare live in the URL's query (./runs/listState), replaced as they
   // change, so Back from a run shows the list as it was left. A deep link's `?status=` is a filter only when it names
   // one (`?status=stopped` is a status, not a filter).
-  const start = untrack(() => readState(router.route.query));
+  // Escape on a run's page (or the nav) right after it opens a bare /runs: the list as it was left there (./runs/listState).
+  const back = untrack(() => returnQuery(router.entry, router.route.query));
+  if (back !== null) router.go(`/runs?${back}`, { replace: true });
+  const startQuery = back !== null ? new URLSearchParams(back) : untrack(() => router.route.query);
+  const start = readState(startQuery);
   const filter = signal<Filter>(start.filter);
   const query = signal(start.q);
   const sortKey = signal<SortKey>(start.sort);
@@ -159,7 +163,11 @@ export default function Runs() {
   const selected = signal<string[]>(start.sel);
   // Queries compare in the one form writeState gives (a URL's own spelling may differ: `%2C` for the ids' commas).
   const norm = (q: URLSearchParams) => writeState(readState(q));
-  let written = untrack(() => norm(router.route.query));
+  let written = norm(startQuery);
+  // Left for a run's page: remembered for the return.
+  onCleanup(() => {
+    if (router.location.name === 'run') leftForRun(router.entry, written);
+  });
   effect(() => {
     const next = writeState({ filter: filter.get(), q: query.get(), sort: sortKey.get(), dir: sortDir.get(), sel: selected.get() });
     if (next === written || untrack(() => router.route.name) !== 'runs') return;
