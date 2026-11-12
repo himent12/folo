@@ -16,9 +16,7 @@ export default function ConnectionStatus(props: { collapsed: boolean }) {
       : hub.mode === 'live'
         ? `folo serve ${hub.version ?? ''} at ${hub.serverUrl}`
         : hub.mode === 'mock'
-          ? hub.reason === 'unreachable'
-            ? `No server at ${hub.serverUrl}; showing the built-in demo data`
-            : 'Built-in demo data (?mock=1)'
+          ? 'Built-in demo data (?mock=1)'
           : 'Looking for folo serve…',
   );
 

@@ -85,6 +85,11 @@ class Toasts {
     return this.show({ tone: 'error', title, detail: errorDetail(err), ...opts });
   }
 
+  /** Takes back the toast of an action (`key`) that has since gone through, with nothing new to say about it. */
+  clear(key: string) {
+    for (const t of this.items) if (t.key === key) this.dismiss(t.id);
+  }
+
   dismiss(id: number) {
     clearTimeout(this.#timers.get(id));
     this.#timers.delete(id);

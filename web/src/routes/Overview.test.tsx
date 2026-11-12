@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
-import type { Run } from '$lib/api/types';
+import type { Run, SystemInfo } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import RunWatch from '$lib/shell/RunWatch.tsx';
 import SidebarLive from '$lib/shell/SidebarLive';
@@ -205,13 +205,17 @@ describe('Overview', () => {
     const [bench] = await api.benches();
     api.labelJobs = async () => [{ ...job!, status: 'running', run: { ...job!.run!, finished: null, total: 40, done: 12 } }];
     api.benches = async () => [{ ...bench!, active: true }];
+    // v-shell N12: the benchmark's row says how far its entry is, as the labeling row does.
+    const [entry] = await api.benchEntries(bench!.id);
+    api.benchEntries = async () => [{ ...entry!, name: 'folo-n-best', status: 'running', progress: { done: 1479, total: 3219, condition: null, severity: null } }];
     open(api);
     const strip = await vi.waitFor(() => {
       flush();
       const el = target.querySelector('.activity');
-      if (!el?.textContent?.includes(bench!.name)) throw new Error('still waiting for the strip');
+      if (!el?.textContent?.includes('folo-n-best · 45%')) throw new Error('still waiting for the strip');
       return el;
     });
+    expect(strip.textContent).toContain(bench!.name);
     expect(strip.textContent).toContain(job!.name);
     expect(strip.textContent).toContain('12 of 40 images');
     expect(strip.querySelector('a')!.getAttribute('href')).toBe(`#/datasets/label/${job!.id}`);
@@ -226,6 +230,27 @@ describe('Overview', () => {
     await Promise.all(answers);
     flush();
     expect(target.querySelector('.activity')).toBeNull();
+  });
+
+  // v-shell N11: a server just started answers /api/system seconds late, and the line popped in under the buttons.
+  it('keeps the labeling line in its place while the server says what it has', async () => {
+    const api = new MockApi('empty', 0);
+    let answer!: () => void;
+    const system = api.system.bind(api);
+    api.system = () => new Promise<SystemInfo>((ok) => (answer = () => void system().then(ok)));
+    open(api);
+    const line = await vi.waitFor(() => {
+      flush();
+      const p = target.querySelector<HTMLElement>('.onboard .ob-alt');
+      if (!p) throw new Error('still waiting for the first-run card');
+      return p;
+    });
+    expect([line.classList.contains('held'), line.getAttribute('aria-hidden'), line.querySelector('a')]).toEqual([true, 'true', null]);
+    answer();
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.onboard .ob-alt:not(.held) a')?.textContent).toBe('Label them with an agent');
+    });
   });
 
   it('points people with unlabeled images to Label images from the first step', async () => {

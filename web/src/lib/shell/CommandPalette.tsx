@@ -409,6 +409,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
         restore = null;
       }}
       onpointerdown={backdrop.onpointerdown}
+      onmousedown={backdrop.onmousedown}
       onclick={backdrop.onclick}
     >
       <div class="box">

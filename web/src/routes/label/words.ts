@@ -78,8 +78,8 @@ export function usageFacts(u: LabelUsage): string[] {
  */
 export function askOutcome(run: LabelRun, img: LabelImage | undefined): { tone: 'success' | 'info' | 'error'; title: string; detail?: string } | null {
   const failed = `${AGENT_NAME[run.agent]} could not label it again`;
-  // The status line sets no code: the server's words as plain sentences.
-  const said = (...parts: (string | null | undefined)[]) => parts.flatMap((p) => (p ? [sentence(p, true)] : [])).join(' ') || undefined;
+  // The server's words as sentences, a command kept as code (the status line sets it in mono: ui/DialogStatus).
+  const said = (...parts: (string | null | undefined)[]) => parts.flatMap((p) => (p ? [sentence(p)] : [])).join(' ') || undefined;
   if (run.outcome === 'failed') return { tone: 'error', title: failed, detail: said(run.error, run.hint) };
   if (run.outcome === 'stopped') return { tone: 'info', title: 'The run was stopped', detail: 'The image keeps the boxes it had.' };
   if (!img || img.status === 'labeling') return null;

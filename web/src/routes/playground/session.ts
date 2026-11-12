@@ -3,7 +3,8 @@
 // in memory (an uploaded file cannot go anywhere else); what can be named is also in the URL (`?model=…&dataset=…&
 // image=…&split=…&at=…&conf=…&iou=…&max=…`), so a link or a reload restores a dataset image and the thresholds. What
 // the URL names wins over what is in memory, field by field, and over what is shown when the URL changes while the
-// page is open (./keepSession).
+// page is open (./keepSession). It belongs to the server it was made against (`hub.server`): another server, or the
+// mock for a live one, starts without it.
 
 import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Prediction, Split } from '$lib/api/types';
@@ -27,12 +28,12 @@ export interface Session {
   hidden: number[];
 }
 
-let kept: Session | null = null;
+let kept: { server: string; session: Session } | null = null;
 
-/** The tab's session, if the Playground has been open in it. */
+/** The tab's session, if the Playground has been open in it against the server in use. */
 export const session = {
-  get: (): Session | null => kept,
-  set: (s: Session | null) => void (kept = s),
+  get: (): Session | null => (kept?.server === hub.server ? kept.session : null),
+  set: (s: Session | null) => void (kept = s && { server: hub.server, session: s }),
 };
 
 /** A source as the session keeps it. */

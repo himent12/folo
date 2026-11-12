@@ -7,6 +7,7 @@ import WifiOff from '$icons/wifi-off';
 import RefreshCwOff from '$icons/refresh-cw-off';
 import { computed, css, For, Key, signal } from 'fw';
 import { runProgress } from '$lib/api/progress';
+import { readDatasets } from '$lib/api/datasetReads';
 import { hub } from '$lib/api/index';
 import { modelsResource } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
@@ -24,6 +25,7 @@ import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
 import { watched } from '$lib/shell/runList';
+import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -35,6 +37,7 @@ import TableState from '$lib/ui/TableState';
 import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
+import { PROBLEM_LABEL } from './datasets/problem';
 import LiveRunCard from './overview/LiveRunCard';
 import { slotRun } from './overview/slot';
 import AlsoRunning from './overview/AlsoRunning';
@@ -51,11 +54,9 @@ export default function Overview() {
   const runs = new Resource((s) => hub.api.runs(s), { poll: 5000 });
   // Kept current as runs end or go (lib/api/models), as on every screen that lists models.
   const models = modelsResource();
-  // The list endpoint has no stats; fetch each dataset for its class balance.
-  const datasets = new Resource(async (s) => {
-    const list = await hub.api.datasets(s);
-    return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
-  });
+  // The list endpoint has no stats; each dataset is read for its class balance (a missing folder is marked, and not
+  // asked about again on every visit: lib/api/datasetReads).
+  const datasets = new Resource(readDatasets);
   // Which optional features the server has (labeling, benchmarks): what else Overview can point to.
   const system = new Resource((s) => hub.api.system(s));
   // The run list the sidebar's live card reads (the shell polls it every 2 s, shell/RunWatch) while it is current, so the
@@ -100,7 +101,13 @@ export default function Overview() {
   const ranking = computed(() => {
     const runMap = runById.get();
     const dsMap = dsById.get();
-    return rankByContext(models.data ?? [], (m) => scoreContext(m, runMap, dsMap), (m) => m.metrics?.map50_95, (m) => m.created);
+    return rankByContext(
+      models.data ?? [],
+      (m) => scoreContext(m, runMap, dsMap),
+      (m) => m.metrics?.map50_95,
+      (m) => m.created,
+      (m) => m.name,
+    );
   });
   const topModels = computed(() => ranking.get().groups.slice(0, 6).map((g) => ({ m: g.items[0]!, ctx: g.ctx })));
   const unranked = computed(() => ranking.get().unranked.length + Math.max(0, ranking.get().groups.length - 6));
@@ -149,6 +156,12 @@ export default function Overview() {
                     <a class="ob-link" href={href('/datasets/label')}>
                       Label them with an agent
                     </a>
+                  </p>
+                ) : !system.data && !system.error ? (
+                  // Until the server says what it has (a server just started takes seconds to), the line keeps its place,
+                  // so it never pops in under the buttons (v-shell N11); a real server always has labeling.
+                  <p class="ob-alt held" aria-hidden="true">
+                    Have images but no labels? <span class="ob-link">Label them with an agent</span>
                   </p>
                 ) : null}
               </li>{' '}
@@ -544,11 +557,16 @@ export default function Overview() {
                           <a href={href(`/datasets/${d().id}`)}>
                             <span class="d-row">
                               <span class="d-name truncate">{d().name}</span>{' '}
+                              {/* A folder gone since it was registered: the Datasets list's word in place of its counts. */}
                               <span class="d-nums num">
-                                <Meta line>
-                                  <span>{`${compact(total(d()))} ${total(d()) === 1 ? 'image' : 'images'}`}</span>
-                                  <span>{count(d().classes.length, 'class')}</span>
-                                </Meta>
+                                {d().problem ? (
+                                  <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge>
+                                ) : (
+                                  <Meta line>
+                                    <span>{`${compact(total(d()))} ${total(d()) === 1 ? 'image' : 'images'}`}</span>
+                                    <span>{count(d().classes.length, 'class')}</span>
+                                  </Meta>
+                                )}
                               </span>
                             </span>
                           </a>{' '}
@@ -648,6 +666,9 @@ css`
     grid-column: 2;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
+  }
+  .ob-alt.held {
+    visibility: hidden;
   }
   .ob-link {
     color: var(--text-primary);

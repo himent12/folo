@@ -13,7 +13,7 @@ import Square from '$icons/square';
 import { bindable, computed, createUniqueId, css, effect, For, Index, signal } from 'fw';
 import type { LabelAgent, LabelJob } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
-import { duration, num } from '$lib/format';
+import { duration, num, sentence } from '$lib/format';
 import { AGENT_NAME, INSTRUCTIONS_MAX } from '$lib/label';
 import Button from '$lib/ui/Button';
 import CodeText from '$lib/ui/CodeText';
@@ -133,11 +133,11 @@ export default function AgentPanel(props: AgentPanelProps) {
             {failed.get() && run.get() ? (
               <>
                 <Callout tone="danger" icon={CircleAlert} title={`${AGENT_NAME[run.get()!.agent]} stopped`} role="alert" label="Last run failed">
-                  <CodeText text={run.get()!.error ?? 'The agent kept failing.'} />
+                  <CodeText text={sentence(run.get()!.error ?? 'The agent kept failing.')} />
                 </Callout>
                 {run.get()!.hint ? (
                   <p class="note">
-                    <CodeText text={run.get()!.hint!} />
+                    <CodeText text={sentence(run.get()!.hint!)} />
                   </p>
                 ) : null}
               </>

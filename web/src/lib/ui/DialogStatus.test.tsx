@@ -39,4 +39,17 @@ describe('DialogStatus', () => {
     }
     expect(errors).toEqual([]);
   });
+
+  // v-models-label N5: the editor's line dropped the code of "Run `claude -p hi` in a terminal".
+  it('sets a command in the detail as code', () => {
+    const status = new DialogStatus();
+    target = document.createElement('div');
+    c = render(() => <DialogStatusRegion status={status} />, target);
+    status.error(new Error('unused'), 'Claude Code could not label it again');
+    status.show('error', 'Claude Code could not label it again', '`claude` printed no result. Run `claude -p hi` in a terminal.');
+    flush();
+    const detail = target.querySelector('.detail')!;
+    expect(detail.textContent).toBe('claude printed no result. Run claude -p hi in a terminal.');
+    expect([...detail.querySelectorAll('code')].map((x) => x.textContent)).toEqual(['claude', 'claude -p hi']);
+  });
 });

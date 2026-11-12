@@ -7,6 +7,8 @@ import { ApiError } from '$lib/api/client';
 import { MockApi, type Scenario } from '$lib/api/mock';
 import { resetWasmProbe } from '$lib/inference/browser';
 import { prefs } from '$lib/prefs';
+import { betterModel } from '$lib/scoreSummary';
+import { toast } from '$lib/ui/toast';
 import { parse, router } from '$lib/router';
 import Playground from './Playground';
 import { URL_DELAY_MS } from './playground/keepSession';
@@ -391,5 +393,50 @@ describe('Playground: the model caption', () => {
     c = mount(Playground, { target });
     const meta = await until(() => target.querySelector('#model-meta'), 'the caption');
     expect(meta.textContent).toBe('Not evaluated');
+  });
+});
+
+describe('Playground: which model it opens on', () => {
+  const open = async (api: MockApi, link: string) => {
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse(link);
+    c = mount(Playground, { target });
+    return until(() => target.querySelector<HTMLSelectElement>('select')?.value, 'a model');
+  };
+
+  // v-desktop N8: Studio opened on the first group's model (a newest checkpoint at 0.000) where Desktop opens on the best.
+  it('opens on the best model by the rule Desktop and Overview use, not the first listed', async () => {
+    const api = new MockApi('normal', 0);
+    const models = api.models.bind(api);
+    // The models of the dataset listed first (by name) learned nothing: the picker's first group is at 0.000.
+    api.models = async () => (await models()).map((m) => (m.name.startsWith('fasteners') && m.metrics ? { ...m, metrics: { ...m.metrics, map50_95: 0 } } : m));
+    const best = [...(await api.models())].sort(betterModel)[0]!;
+    expect(best.name).not.toMatch(/^fasteners/);
+    expect(await open(api, '#/playground')).toBe(best.id);
+  });
+
+  // v-models-label N6: a link to a deleted model showed another one without a word.
+  it('says which model it shows when the link names one that is gone', async () => {
+    toast.items = [];
+    const api = new MockApi('normal', 0);
+    const shown = await open(api, '#/playground?model=m_gone&conf=0.4');
+    const name = (await api.models()).find((m) => m.id === shown)!.name;
+    await until(() => toast.items.length, 'the note');
+    expect(toast.items.map((t) => [t.title, t.detail])).toEqual([['The linked model was not found', `It was deleted or the link is wrong. Showing ${name} instead.`]]);
+    toast.items = [];
+  });
+
+  // v-models-label N2: "Unsupported image" stayed 20 s over the results of the images that followed.
+  it('takes back an image error once the next image is accepted', async () => {
+    toast.items = [];
+    // What the Playground says of a file it cannot open (setFile), then a sample image taken.
+    toast.error(new Error('fake.jpg could not be opened'), 'Unsupported image', { key: 'image' });
+    toast.info('Something else');
+    await run('normal', 'm_shapes_s');
+    expect(toast.items.map((t) => t.title)).toEqual(['Something else']);
+    toast.items = [];
   });
 });

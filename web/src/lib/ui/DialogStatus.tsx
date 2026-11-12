@@ -11,6 +11,7 @@ import Info from '$icons/info';
 import X from '$icons/x';
 import { css, Dynamic, Show } from 'fw';
 import Button from './Button';
+import CodeText from './CodeText';
 import type { DialogStatus, Notice } from './feedback';
 
 export default function DialogStatusRegion(props: { status: DialogStatus; class?: string }) {
@@ -42,7 +43,12 @@ export default function DialogStatusRegion(props: { status: DialogStatus; class?
       </span>
       <div class="text">
         <p class="title">{n.title}</p>
-        {n.detail ? <p class="detail">{n.detail}</p> : null}
+        {/* A detail may name a command in backticks, as the server writes one: set in mono (ui/CodeText). */}
+        {n.detail ? (
+          <p class="detail">
+            <CodeText text={n.detail} />
+          </p>
+        ) : null}
       </div>
       <Button variant="ghost" size="sm" icon={X} aria-label="Dismiss" onclick={dismiss} />
     </div>

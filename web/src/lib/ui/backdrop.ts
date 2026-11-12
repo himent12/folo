@@ -3,7 +3,8 @@
 // close), and not the second click of a double-click on the button that opened it: that press lands on the backdrop
 // right after opening, and would close the dialog before the person saw it (runs F5). Only that press is let through:
 // the first one after a dialog a pointer opened, soon after and where the opening press was. A dialog opened from the
-// keyboard or by code closes on the first press outside.
+// keyboard or by code closes on the first press outside. That same press selects no text either: landing on the
+// dialog's title, a double-click's second press would select a word of it (v-data-runs N5).
 
 /** How long after opening a press where the opening one was is taken for the rest of its double-click. */
 export const OPEN_GRACE_MS = 500;
@@ -24,15 +25,17 @@ function listen() {
 }
 
 /**
- * The backdrop handlers for `dialog()`: put `onpointerdown` and `onclick` on the <dialog>, and call `opened()` when it is
- * shown. `close` runs for a press that started and ended on the backdrop, unless it continues the double-click that
- * opened the dialog.
+ * The backdrop handlers for `dialog()`: put `onpointerdown`, `onmousedown` and `onclick` on the <dialog>, and call
+ * `opened()` when it is shown. `close` runs for a press that started and ended on the backdrop, unless it continues the
+ * double-click that opened the dialog; that press does nothing else either (no text selected, no focus moved).
  */
 export function backdropClose(dialog: () => HTMLDialogElement, close: () => void) {
   listen();
   /** The press that opened the dialog (when a pointer did), until the next press. */
   let opener: { x: number; y: number; at: number } | null = null;
   let down = false;
+  /** The press under way continues the opening double-click. */
+  let continuing = false;
   return {
     opened() {
       const now = performance.now();
@@ -42,7 +45,13 @@ export function backdropClose(dialog: () => HTMLDialogElement, close: () => void
       const o = opener;
       opener = null;
       const continues = !!o && performance.now() - o.at < OPEN_GRACE_MS && Math.hypot(e.clientX - o.x, e.clientY - o.y) <= DOUBLE_CLICK_SLOP_PX;
+      continuing = continues;
       down = e.target === dialog() && !continues;
+    },
+    // After `onpointerdown` for the same press: a mouse's selection (a word on a double-click) starts here.
+    onmousedown(e: MouseEvent) {
+      if (continuing) e.preventDefault();
+      continuing = false;
     },
     onclick(e: MouseEvent) {
       if (e.target === dialog() && down) close();

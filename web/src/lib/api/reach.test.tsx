@@ -4,10 +4,10 @@
 import { createRoot, flush } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ConnectionStatus from '$lib/shell/ConnectionStatus';
-import OfflineNotice from '$lib/shell/OfflineNotice';
+import Topbar from '$lib/shell/Topbar';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { render } from '../../../framework/testing';
-import { hub } from './index';
+import { CONNECT_TIMEOUT, hub, SLOW_CONNECT } from './index';
 import { PROBE_DELAYS, Reach } from './reach';
 import { Resource } from './resource';
 import type { Dataset } from './types';
@@ -136,14 +136,15 @@ describe('hub.offline with the server', () => {
       () => (
         <>
           <ConnectionStatus collapsed={false} />
-          <OfflineNotice />
+          <Topbar onsearch={() => {}} />
           <StatusBadge run={{ status: 'running' }} plain />
           <StatusBadge run={{ status: 'completed' }} plain />
         </>
       ),
       shell,
     );
-    const said = () => [shell.querySelector('.conn .label')!.textContent!.trim(), shell.querySelector('[role=status]')!.textContent!.trim()];
+    // The word is in the top bar, whose height is fixed: it never covers the page (v-shell N5). Phones say "Offline".
+    const said = () => [shell.querySelector('.conn .label')!.textContent!.trim(), shell.querySelector('.topbar [role=status] .long')?.textContent?.trim() ?? ''];
     const held = () => [...shell.querySelectorAll('.badge')].map((b) => b.classList.contains('held'));
     expect(said()).toEqual(['Connected', '']);
     expect(held()).toEqual([false, false]);
@@ -175,5 +176,103 @@ describe('hub.offline with the server', () => {
     expect(held()).toEqual([false, false]);
     stop();
     view.unmount();
+  });
+});
+
+describe('the first connect (v-shell N1, v-models-label N1)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+  const healthy = () => Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+  /** Answers after `ms`, or rejects as fetch does when the request's signal aborts first. */
+  const after = (ms: number, init: RequestInit | undefined, answer: () => Response) =>
+    new Promise<Response>((ok, no) => {
+      const t = setTimeout(() => ok(answer()), ms);
+      init?.signal?.addEventListener('abort', () => {
+        clearTimeout(t);
+        no(new DOMException('aborted', 'AbortError'));
+      });
+    });
+
+  it('waits out a slow first answer as offline, never as demo data, and goes live when it comes', async () => {
+    let health = 0;
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      if (!url.endsWith('/api/health')) return Promise.reject(new TypeError('Failed to fetch'));
+      health++;
+      return after(SLOW_CONNECT + 4000, init, healthy);
+    });
+    const shell = document.createElement('div');
+    const view = render(() => <ConnectionStatus collapsed={false} />, shell);
+    const label = () => shell.querySelector('.conn .label')!.textContent!.trim();
+    const connected = hub.connect();
+    flush();
+    expect([hub.mode, hub.offline, label()]).toEqual(['connecting', false, 'Connecting…']);
+    await vi.advanceTimersByTimeAsync(SLOW_CONNECT);
+    await connected;
+    flush();
+    // Slow: offline, still waiting on that same answer (no second request), and nothing of the mock.
+    expect([hub.mode, hub.offline, label(), health]).toEqual(['connecting', true, 'Server offline', 1]);
+    await vi.advanceTimersByTimeAsync(4000);
+    flush();
+    expect([hub.mode, hub.offline, label(), health, hub.api.mock]).toEqual(['live', false, 'Connected', 1, false]);
+    view.unmount();
+  });
+
+  it('asks again while nothing answers (or a dev proxy answers 500), and goes live with the first answer', async () => {
+    let health = 0;
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (!url.endsWith('/api/health')) throw new TypeError('Failed to fetch');
+      health++;
+      if (health === 1) throw new TypeError('Failed to fetch');
+      // Vite's proxy with nothing behind it answers 500 with an empty body: not a FOLO server.
+      if (health === 2) return new Response('', { status: 500 });
+      return healthy();
+    });
+    await hub.connect();
+    expect([hub.mode, hub.offline, health]).toEqual(['connecting', true, 1]);
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect([hub.mode, hub.offline, health]).toEqual(['connecting', true, 2]);
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[1]!);
+    expect([hub.mode, hub.offline, health]).toEqual(['live', false, 3]);
+    // Live, it does not poll.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(health).toBe(3);
+  });
+
+  it('gives a check that hangs CONNECT_TIMEOUT, then asks again; a reconnect supersedes the waiting one', async () => {
+    let health = 0;
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      health++;
+      return health === 1 ? after(10 * CONNECT_TIMEOUT, init, healthy) : Promise.resolve(healthy());
+    });
+    // AbortSignal.timeout runs on real timers: let it be one the fake clock drives.
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      const c = new AbortController();
+      setTimeout(() => c.abort(new DOMException('timed out', 'TimeoutError')), ms);
+      return c.signal;
+    });
+    const connected = hub.connect();
+    await vi.advanceTimersByTimeAsync(SLOW_CONNECT);
+    await connected;
+    expect([hub.offline, health]).toEqual([true, 1]);
+    await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT - SLOW_CONNECT);
+    expect([hub.mode, health]).toEqual(['connecting', 1]);
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect([hub.mode, hub.offline, health]).toEqual(['live', false, 2]);
+    vi.restoreAllMocks();
+
+    // Down again from the start: Reconnect starts over, and the older connect's next check never goes out.
+    health = 0;
+    vi.stubGlobal('fetch', async () => {
+      health++;
+      throw new TypeError('Failed to fetch');
+    });
+    await hub.connect();
+    await hub.connect();
+    expect([hub.mode, hub.offline, health]).toEqual(['connecting', true, 2]);
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect(health).toBe(3);
   });
 });

@@ -6,7 +6,7 @@ import CircleSlash from '$icons/circle-slash';
 import Monitor from '$icons/monitor';
 import Moon from '$icons/moon';
 import Sun from '$icons/sun';
-import { computed, css, Dynamic, effect, For, Index, signal } from 'fw';
+import { computed, css, Dynamic, effect, For, Index, onCleanup, signal } from 'fw';
 import pkg from '../../package.json';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
@@ -15,6 +15,7 @@ import { bytes } from '$lib/format';
 import { prefs, type ThemePref, type Units } from '$lib/prefs';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
+import { landOn } from '$lib/shell/routeFocus';
 import { showShortcuts } from '$lib/shell/shortcuts';
 import { fadeScroll } from '$lib/ui/fadeScroll';
 import Button from '$lib/ui/Button';
@@ -51,6 +52,8 @@ const themes: { value: ThemePref; label: string; icon: IconType }[] = [
   { value: 'system', label: 'System', icon: Monitor },
 ];
 const sample = 5_600_000_000;
+/** How long a section opened from the URL is held at the top while the page above it loads. */
+const HOLD_MS = 3000;
 
 export default function Settings() {
   setCrumbs({ label: 'Settings' });
@@ -176,7 +179,9 @@ export default function Settings() {
     spy();
   }
 
-  // `#/settings?section=system`: the page opens on that section (once it exists: System waits for the server).
+  // `#/settings?section=system`: the page opens on that section (once it exists: System waits for the server). Its
+  // heading is the page's landing (shell/routeFocus), so the route focus of a page opened from elsewhere (the
+  // palette's "Units" on Runs) keeps to it instead of taking the page back to its top (v-shell N6).
   const asked = computed(() => (router.route.name === 'settings' ? router.route.query.get('section') : null));
   let opened: string | null = null;
   effect(() => {
@@ -185,8 +190,36 @@ export default function Settings() {
     if (!a) opened = null;
     if (!a || a === opened || !sections.get().some((s) => s.id === a)) return;
     opened = a;
-    requestAnimationFrame(() => goTo(a));
+    const heading = document.getElementById(`${a}-title`) ?? document.getElementById(a);
+    if (heading) {
+      if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
+      landOn(heading);
+    }
+    requestAnimationFrame(() => (goTo(a), hold(a)));
   });
+  /**
+   * Keeps a section the URL opened at the top while what is above it loads and moves it down (the Cloud panel and its
+   * connections answer after the page has shown), until the person scrolls (`chosen` released) or HOLD_MS pass.
+   */
+  let unhold = () => {};
+  function hold(id: string) {
+    unhold();
+    const el = document.getElementById(id);
+    const col = el?.parentElement;
+    if (!el || !col || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (chosen === id) el.scrollIntoView({ block: 'start' });
+      else unhold();
+    });
+    ro.observe(col);
+    const t = setTimeout(() => unhold(), HOLD_MS);
+    unhold = () => {
+      ro.disconnect();
+      clearTimeout(t);
+      unhold = () => {};
+    };
+  }
+  onCleanup(() => unhold());
 
   const units = signal<Units>(prefs.units);
 

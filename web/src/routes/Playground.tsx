@@ -9,7 +9,7 @@ import type { MockApi } from '$lib/api/mock';
 import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model, PredictInput, Prediction, Run } from '$lib/api/types';
-import { modelChoices, scoreContext } from '$lib/scoreSummary';
+import { betterModel, modelChoices, scoreContext } from '$lib/scoreSummary';
 import { media } from '$lib/design/tokens';
 import { filterDetections } from '$lib/detect/nms';
 import { BrowserEngine, hasWebGpu, NO_WASM, probeWasm, servedBy, wasmFromSystem, type Backend } from '$lib/inference/browser';
@@ -117,13 +117,12 @@ export default function Playground() {
     return modelChoices(models.data, (m) => scoreContext(m, runById, dsById));
   });
   const ranked = computed(() => choices.get().map((c) => c.model));
+  /** What the page opens on: the best model (lib/scoreSummary `betterModel`, Desktop's rule), not the newest. */
+  const best = computed(() => [...ranked.get()].sort(betterModel)[0] ?? null);
   const queryModel = computed(() => router.route.query.get('model'));
   const pickedModel = signal<string | null>(null);
-  const model = computed((): Model | null => {
-    const list = ranked.get();
-    const want = pickedModel.get() ?? queryModel.get();
-    return list.find((m) => m.id === want) ?? list[0] ?? null;
-  });
+  const wanted = computed(() => pickedModel.get() ?? queryModel.get());
+  const model = computed((): Model | null => ranked.get().find((m) => m.id === wanted.get()) ?? best.get());
   const modelId = computed(() => model.get()?.id ?? null);
   /** The chosen model's score and what it is on, under the select: "mAP50-95 0.606 · shapes-hard, validation split". */
   const pickedMeta = computed(() => choices.get().find((c) => c.model.id === modelId.get())?.meta ?? null);
@@ -132,7 +131,7 @@ export default function Playground() {
     pickedModel.set(id);
     router.go(playgroundPath({ model: id, source: source.peek(), conf: conf.peek(), iou: iou.peek(), maxDet: maxDet.peek() }), { replace: true });
   }
-  followVanished(() => model.get(), () => ranked.get(), chooseModel);
+  followVanished(() => model.get(), () => ranked.get(), () => wanted.get(), chooseModel);
 
   effect(() => {
     const s = source.get();
@@ -167,6 +166,7 @@ export default function Playground() {
 
   function setSource(s: Source) {
     decodeSeq++;
+    toast.clear('image');
     const old = source.peek();
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
     source.set(s);
@@ -184,7 +184,8 @@ export default function Playground() {
     const t = await takeImage(file, name);
     if (!live()) return;
     if ('error' in t) {
-      toast.error(new Error(t.error), 'Unsupported image');
+      // Until the next image is taken (setSource): it goes then, not 20 s later over the results.
+      toast.error(new Error(t.error), 'Unsupported image', { key: 'image' });
       return;
     }
     setSource({ kind: 'file', file: t.file, name, url: URL.createObjectURL(t.file), width: t.width, height: t.height });
