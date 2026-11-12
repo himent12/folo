@@ -185,8 +185,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   job's export, an upload); any other is `400 invalid_query`, and nothing is unregistered or deleted. It is `409
   run_active` while any run on this server is queued, running or stopping, whatever dataset it trains on. It is `409
   dataset_in_use` while another registered dataset, or a run of an unregistered dataset that keeps its id, reads
-  images or labels in that folder by its description as it reads at that moment (its root and split sources), and
-  registering a dataset or creating or resuming a run waits until the checks and the deletion are done. Mock mode keeps
+  images or labels in that folder by its description as it reads at that moment (its root, split sources and the
+  folders of its images and labels), and also while what one of them reads cannot be checked (its description
+  cannot be read or parsed, or one of those folders cannot be listed or resolved): the message names that dataset,
+  nothing is unregistered or deleted, and unregistering without `files=true` still works. The check covers the
+  folders of other registrations and retained runs, resolved through directory links (a folder of another dataset
+  that is a junction or symlink into this one counts), but not a link to a single image file from elsewhere.
+  Registering a dataset or creating or resuming a run waits until the checks and the deletion are done. Mock mode keeps
   the ids of unregistered datasets in memory the same way (for as long as it runs); there a generated set goes with
   `files=true` (also `409 run_active` while a run created through the API is active) and a folder registered from
   disk is refused.

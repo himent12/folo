@@ -7,7 +7,7 @@ use std::path::Path;
 use axum::http::StatusCode;
 
 use crate::error::{Error, Result};
-use crate::index::{absolute, reads};
+use crate::index::reads;
 
 use super::RealStore;
 use super::registry::read_registry;
@@ -18,8 +18,10 @@ impl RealStore {
     /// on this server is queued, running or stopping, whatever dataset it names (`409 run_active`: no trainer reads
     /// files then); and while another registered dataset, or a run of an unregistered dataset that keeps its id,
     /// reads images or labels in that folder (`409 dataset_in_use`), judged by its description as it reads now (the
-    /// folders its root and split sources name, not a cached index). The checks and the deletion hold
-    /// [`RealStore::files`] exclusively, so no dataset is registered and no run created or resumed in between.
+    /// folders its root and sources name, resolved through links, not a cached index), or when what one of them
+    /// reads cannot be checked (also `409 dataset_in_use`: nothing is deleted on a guess). The checks and the
+    /// deletion hold [`RealStore::files`] exclusively, so no dataset is registered and no run created or resumed in
+    /// between.
     pub(super) fn delete_own_dataset(&self, id: &str) -> Result<()> {
         let _files = self.files.write().unwrap_or_else(|p| p.into_inner());
         let reg = self.entry(id)?.reg();
@@ -48,14 +50,22 @@ impl RealStore {
             .hint("wait for it to end, or stop it first"));
         }
         let in_use = |m: String| Error::conflict("dataset_in_use", m);
+        // Whether the dataset `name` at `path` reads files in the folder; refused when that cannot be told.
+        let reads_folder = |name: &str, path: &str, format| match reads(path, format) {
+            Ok(paths) => Ok(paths.iter().any(|p| overlaps(p, &folder))),
+            Err(e) => Err(in_use(format!(
+                "the files of {name} could not be checked ({e}), so they may be in that folder"
+            ))
+            .hint(format!("fix {name} first, or unregister this dataset without files=true"))),
+        };
         let others: Vec<_> =
             self.entries.read().unwrap().iter().filter(|e| e.reg().id != id).cloned().collect();
-        let readers: Vec<String> = others
-            .iter()
-            .map(|e| e.reg())
-            .filter(|r| reads(&r.path, r.format).iter().any(|p| overlaps(p, &folder)))
-            .map(|r| r.name)
-            .collect();
+        let mut readers = Vec::new();
+        for r in others.iter().map(|e| e.reg()) {
+            if reads_folder(&r.name, &r.path, r.format)? {
+                readers.push(r.name);
+            }
+        }
         if !readers.is_empty() {
             return Err(in_use(format!("{} also read files in that folder", readers.join(", ")))
                 .hint("remove those datasets first, or unregister this one without files=true"));
@@ -65,7 +75,7 @@ impl RealStore {
             read_registry(&self.data_dir)?.tombstones.into_iter().map(|t| t.id).collect();
         for e in &runs {
             let ds = e.dataset();
-            if kept.contains(&ds.id) && reads(&ds.path, ds.format).iter().any(|p| overlaps(p, &folder)) {
+            if kept.contains(&ds.id) && reads_folder(&ds.name, &ds.path, ds.format)? {
                 return Err(in_use(format!(
                     "run {} of the unregistered dataset {} reads files in that folder",
                     e.run().name,
@@ -82,8 +92,7 @@ impl RealStore {
     }
 }
 
-/// `p` and the canonical `folder` overlap: one holds the other. `p` is compared canonical when it exists.
+/// The resolved `p` and the canonical `folder` overlap: one holds the other.
 fn overlaps(p: &Path, folder: &Path) -> bool {
-    let p = std::fs::canonicalize(p).unwrap_or_else(|_| absolute(p));
-    p.starts_with(folder) || folder.starts_with(&p)
+    p.starts_with(folder) || folder.starts_with(p)
 }
