@@ -49,6 +49,9 @@ const KINDS: [&str; 2] = [coco::KIND, probe::KIND];
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Cache files not written for this long are deleted when the next one is written.
 const MAX_AGE: Duration = Duration::from_secs(60 * 86_400);
+/// The most the cache folder's files may take together: past it, the least recently written are deleted when the
+/// next one is written (COCO train + val take 30 MB).
+pub const MAX_TOTAL: u64 = 2 << 30;
 /// A file modified less than this long before it is scanned is not cached: a write within the same timestamp
 /// tick could change it without changing its length or modification time.
 const SETTLE: Duration = Duration::from_secs(2);
@@ -269,9 +272,13 @@ pub(crate) fn read(dir: &Path, kind: &str, key: &str) -> Option<Vec<u8>> {
 }
 
 /// Writes `payload` as the cache file of `kind` for `key` (atomically: a temporary file renamed over the old one)
-/// and deletes cache files that have not been written for [`MAX_AGE`]. Errors are ignored: a cache that cannot
-/// be written only means the next open does the work again.
+/// and prunes the folder ([`prune`]). A file that would be larger than [`MAX_CACHE_FILE`] (it could never be read)
+/// is not written. Errors are ignored: a cache that cannot be written only means the next open does the work
+/// again.
 pub(crate) fn write(dir: &Path, kind: &str, key: &str, payload: &[u8]) {
+    if payload.len() as u64 + (key.len() + kind.len() + 64) as u64 > MAX_CACHE_FILE {
+        return;
+    }
     let mut e = Enc::default();
     e.0.extend_from_slice(MAGIC);
     e.u32(FORMAT);
@@ -294,27 +301,41 @@ pub(crate) fn write(dir: &Path, kind: &str, key: &str, payload: &[u8]) {
         let _ = std::fs::remove_file(&tmp);
         return;
     }
-    prune(dir);
+    prune(dir, &path);
 }
 
-/// Deletes cache files (and temporary files left by a killed writer) older than [`MAX_AGE`]. Only files named as
-/// this module names them ([`is_cache_name`]) are ever deleted, so a folder shared with other files keeps them.
-fn prune(dir: &Path) {
+/// Deletes cache files (and temporary files left by a killed writer) older than [`MAX_AGE`], then, while the rest
+/// take more than [`MAX_TOTAL`] together, the least recently written ones (never `keep`, the file just written).
+/// Only files named as this module names them ([`is_cache_name`]) are ever deleted or counted, so a folder shared
+/// with other files keeps them.
+fn prune(dir: &Path, keep: &Path) {
+    prune_to(dir, keep, MAX_TOTAL);
+}
+
+fn prune_to(dir: &Path, keep: &Path, max_total: u64) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let now = SystemTime::now();
+    let mut files = Vec::new();
     for e in rd.flatten() {
         if !e.file_name().to_str().is_some_and(is_cache_name) {
             continue;
         }
-        let old = e
-            .metadata()
-            .ok()
-            .filter(|m| m.is_file())
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| now.duration_since(t).ok())
-            .is_some_and(|age| age > MAX_AGE);
-        if old {
+        let Some(m) = e.metadata().ok().filter(|m| m.is_file()) else { continue };
+        let modified = m.modified().unwrap_or(now);
+        if now.duration_since(modified).is_ok_and(|age| age > MAX_AGE) {
             let _ = std::fs::remove_file(e.path());
+        } else {
+            files.push((modified, m.len(), e.path()));
+        }
+    }
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    files.sort();
+    for (_, len, path) in files {
+        if total <= max_total {
+            break;
+        }
+        if path != keep && std::fs::remove_file(&path).is_ok() {
+            total -= len;
         }
     }
 }
@@ -342,3 +363,30 @@ fn is_cache_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+    use folo_test_support::TestDir;
+
+    #[test]
+    fn the_least_recently_written_go_first_past_the_total() {
+        let dir = TestDir::new("scan-prune-total");
+        let name = |i: u64| dir.join(format!("dir-{i:016x}.bin"));
+        let now = SystemTime::now();
+        for i in 0..4u64 {
+            std::fs::write(name(i), vec![0u8; 100]).unwrap();
+            let f = std::fs::File::options().write(true).open(name(i)).unwrap();
+            f.set_modified(now - Duration::from_secs(3600 * (4 - i))).unwrap();
+        }
+        std::fs::write(dir.join("other.bin"), vec![0u8; 1000]).unwrap();
+        // 400 bytes of cache files, at most 300: one goes, the oldest but `keep`, never another tool's file.
+        prune_to(&dir, &name(0), 300);
+        let left = || (0..4).map(|i| name(i).exists()).collect::<Vec<_>>();
+        assert_eq!(left(), [true, false, true, true]);
+        // At most 150: oldest first until under it.
+        prune_to(&dir, &name(3), 150);
+        assert_eq!(left(), [false, false, false, true]);
+        assert!(dir.join("other.bin").exists());
+    }
+}

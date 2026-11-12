@@ -32,8 +32,10 @@ Every command keeps two caches under `$FOLO_CACHE_DIR`, else `<FOLO_HOME or ~/.f
 (`gpu/`, docs/GPU.md Pipeline cache) and dataset scans (`scan/`, docs/DATA.md Scan cache). They only make a second
 start faster (COCO `folo train` reaches its first step in seconds instead of a minute) and do not change a result
 as long as every change to a dataset file changes its length or modification time (the dataset is the one found
-when the open starts); a missing, corrupt or stale entry is rebuilt silently. `FOLO_NO_CACHE=1` turns both off; deleting the folder is
-always safe.
+when the open starts); a missing, corrupt or stale entry is rebuilt silently. Both are bounded: the GPU cache is one file per adapter, at most 256 MB (a larger one is neither written
+nor loaded); the scan cache keeps one file per large folder or COCO annotation set (each at most 1 GiB, COCO
+train + val take 30 MB) and at most 2 GiB in all, deleting the least recently written past that and anything not
+written for 60 days. `FOLO_NO_CACHE=1` turns both off; deleting the folder is always safe.
 
 ### `--json`
 A global flag. With it, **stdout carries only JSON, one object per line** (JSON Lines), and all human text (progress,

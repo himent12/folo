@@ -198,7 +198,7 @@ fn prune_deletes_only_old_cache_files() {
         set_mtime(&p, SystemTime::now() - MAX_AGE - Duration::from_secs(60));
     }
     std::fs::write(cache.join("dir-fedcba9876543210.bin"), "new").unwrap();
-    prune(&cache);
+    prune(&cache, &cache.join("dir-fedcba9876543210.bin"));
     let mut left: Vec<String> =
         std::fs::read_dir(&*cache).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     left.sort();

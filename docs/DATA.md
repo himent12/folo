@@ -85,7 +85,9 @@ gone when its header is probed is reported as missing, as without the cache. Eve
 whole (its length, at most 1 GiB and matching its header, then magic, format version, its key and an FNV-1a
 checksum of its contents) and ignored when anything is off; writes are atomic (a temporary file
 `.<name>.<pid>-<n>.tmp` + rename), and cache files (`dir-<16 hex>.bin`, `coco-<16 hex>.bin` and those temporary
-files, never any other file of the folder) not written for 60 days are deleted when the next one is written. Only folders holding at least `SCAN_CACHE_MIN_FILES` (256) files of a dataset
+files, never any other file of the folder) not written for 60 days are deleted when the next one is written, and so
+are the least recently written ones while the folder's cache files take more than 2 GiB together (`MAX_TOTAL`; a
+single file over 1 GiB is never written). Only folders holding at least `SCAN_CACHE_MIN_FILES` (256) files of a dataset
 are listed and cached, and COCO sets with at least that many images. With a read guard installed nothing is listed
 or cached. COCO train + val on the dev machine: 51 s cold, 0.3 s warm (docs/hill/r2-trainer.md).
 
