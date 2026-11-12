@@ -504,9 +504,15 @@ fn amp_without_tensor_cores_is_not_supported() {
 }
 
 /// `gpu_train.rs`'s tiny run (16 images at 128 px, batch 4, AdamW, no warmup or augmentation, 10 epochs) with
-/// mixed precision against the same run in f32: the loss falls as far (the last three epochs within 15% of f32's).
+/// mixed precision against the same run in f32: the loss falls as far (the last three epochs within 30% of f32's).
 /// The first steps overflow at the initial scale 2^16 and are skipped while it backs off (a run of thousands of
 /// steps does not notice; on this 40-step one it shows as a one-epoch delay), so the curves are compared at the end.
+///
+/// Bound: 40 AdamW steps at batch 4 are chaotic, so any change of rounding order (another kernel, another split)
+/// moves both curves. Over seeds 0–5 the AMP / f32 tail ratio was 0.97–1.16 at c0464b29 and 0.91–1.19 with the
+/// forward split-K of #186 (mean 1.08, standard deviation 0.08 over the 12 runs; seed 5 already exceeded the old
+/// 1.15 at c0464b29), while one step's AMP gradient is 6.2–6.3% from f32 either way. An AMP run that does not
+/// learn ends near twice the f32 tail.
 #[test]
 fn tiny_amp_run_learns() {
     let (_, _g) = gpu_tc!();
@@ -534,7 +540,7 @@ fn tiny_amp_run_learns() {
     let tail = |l: &[f32]| l[l.len() - 3..].iter().sum::<f32>() / 3.0;
     let scaler = t.loss_scaler().unwrap();
     eprintln!("loss scale {} after {} skipped steps: amp {losses:?}", scaler.scale(), scaler.skipped_steps());
-    assert!(tail(&losses) <= 1.15 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
+    assert!(tail(&losses) <= 1.3 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
     assert!(tail(&losses) < 0.7 * losses.iter().fold(0f32, |m, &l| m.max(l)), "the loss falls: {losses:?}");
     assert!(scaler.skipped_steps() < 20 && scaler.scale() >= 1.0, "{scaler:?}");
 }
@@ -590,7 +596,7 @@ fn amp_trains_the_dual_head() {
     eprintln!("o2o losses: amp {losses:?}, f32 {f32_losses:?}");
     assert!(losses.iter().all(|l| l.is_finite()), "{losses:?}");
     let tail = |l: &[f32]| l[l.len() - 2..].iter().sum::<f32>() / 2.0;
-    assert!(tail(&losses) <= 1.15 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
+    assert!(tail(&losses) <= 1.3 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
     let scaler = t.loss_scaler().unwrap();
     assert!(scaler.skipped_steps() < 20 && scaler.scale() >= 1.0, "{scaler:?}");
     let last = TestFile::new("amp-o2o", "last.folo");
