@@ -110,6 +110,16 @@ pub fn suggested_name(dataset: &str, arch: Arch, n: usize) -> String {
     format!("{dataset}-{}-{n}", arch.as_str().trim_start_matches("folo-"))
 }
 
+/// [`suggested_name`] numbered one past the run count, or the next number no run of `runs` is
+/// called: after a delete the count alone names a run that exists, and with no rename a second run
+/// (and its models) would keep that name.
+pub fn free_run_name(dataset: &str, arch: Arch, runs: &[Run]) -> String {
+    (runs.len() + 1..)
+        .map(|n| suggested_name(dataset, arch, n))
+        .find(|name| !runs.iter().any(|r| r.name == *name))
+        .expect("one of len + 1 names is free")
+}
+
 pub struct NewRunForm {
     pub name: Entity<TextInput>,
     /// The name the form suggested while the field still holds it: it follows the dataset and the
@@ -294,6 +304,22 @@ mod form_tests {
         assert_eq!(suggested_name("shapes-ux", crate::api::Arch::S, 4), "shapes-ux-s-4");
         assert_eq!(suggested_name("shapes-ux", crate::api::Arch::N, 4), "shapes-ux-n-4");
         assert_eq!(suggested_name("bccd", crate::api::Arch::X, 12), "bccd-x-12");
+    }
+
+    #[test]
+    fn the_suggested_run_name_is_never_one_a_run_has() {
+        use crate::api::{Arch, Backend, Run};
+        let base = crate::api::mock::MockBackend::new(4200, true).runs().unwrap().remove(0);
+        let runs = |names: &[&str]| -> Vec<Run> {
+            names.iter().map(|n| Run { name: n.to_string(), ..base.clone() }).collect()
+        };
+        // Five runs left after -4 was deleted: the count says -6, which a run has.
+        let left = runs(&["a", "b", "shapes-v-n-5", "shapes-v-n-6", "c"]);
+        assert_eq!(super::free_run_name("shapes-v", Arch::N, &left), "shapes-v-n-7");
+        // Free at the count: the count.
+        assert_eq!(super::free_run_name("shapes-v", Arch::N, &runs(&["shapes-v-n-5"])), "shapes-v-n-2");
+        assert_eq!(super::free_run_name("shapes-v", Arch::S, &left), "shapes-v-s-6");
+        assert_eq!(super::free_run_name("shapes-v", Arch::S, &[]), "shapes-v-s-1");
     }
 
     #[test]
