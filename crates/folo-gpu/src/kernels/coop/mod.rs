@@ -131,7 +131,7 @@ pub fn pick_config(m: usize, n: usize, batch: usize) -> CoopConfig {
 /// (`cargo bench -p folo-gpu --bench conv_model`, `FOLO_CONV_TUNE=1 FOLO_CONV_BIG=1`): 128×128 was never the
 /// fastest; 64×64 took 14–63% less time than it at 40 and 20 px and on the stride-2 convs, and 64×128 2.8–5.3%
 /// less than 64×64 on the three large outputs the sweep has. Not measured: folo-m / l's wider layers on their own,
-/// grouped convs, non-640 inputs. The gradients keep [`pick_config`].
+/// grouped convs, non-640 inputs. Plain GEMMs and the conv input gradients keep [`pick_config`].
 pub fn pick_config_conv(m: usize, n: usize) -> CoopConfig {
     if m <= 32 {
         return pick_config(m, n, 1);
