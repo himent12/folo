@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
 // Back / Forward return to where the user was (shell F3): the scroll of each history entry, applied once the screen is
 // tall enough for it; a new navigation keeps nothing; a value a screen keeps with its entry comes back with it.
+import { signal } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { router } from '$lib/router';
 import { tabHistory, type TabHistory } from '$lib/tabHistory.testing';
 import { entryState, installEntryMemory, restoringScroll } from './entryMemory';
+import { focusRoute } from './routeFocus';
 
 describe('entryMemory', () => {
   let tab: TabHistory;
@@ -62,6 +64,37 @@ describe('entryMemory', () => {
     await settle();
     await frames(40);
     expect(window.scrollY).toBe(700);
+  });
+
+  it("waits for the entry's own screen while the one before is held on display, and route focus keeps it (review R3)", async () => {
+    router.go('/runs');
+    scroll(600);
+    router.go('/datasets/ds_1');
+    scroll(0);
+
+    // Back to Runs, whose chunk is loading: App holds the (tall, still) dataset page on display meanwhile.
+    const loading = signal(true);
+    const release = router.holdWhile(() => loading.get());
+    tab.back();
+    await settle();
+    expect(router.route.path).toBe('/datasets/ds_1');
+    await frames(60);
+    expect([restoringScroll(), window.scrollY]).toEqual([true, 0]);
+
+    // The chunk is there: Runs shows, short at first, then with its rows.
+    loading.set(false);
+    height = 900;
+    expect(router.route.path).toBe('/runs');
+    await frames(2);
+    height = 5000;
+    await frames(2);
+    expect(window.scrollY).toBe(600);
+    // App focuses the new screen's heading a frame later: that does not send it back to the top.
+    focusRoute(document.body);
+    expect(window.scrollY).toBe(600);
+    await frames(40);
+    expect([restoringScroll(), window.scrollY]).toEqual([false, 600]);
+    release();
   });
 
   it('gives way to the user, and starts a new entry at a place an old one had with nothing kept', async () => {

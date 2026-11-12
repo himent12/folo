@@ -3,8 +3,10 @@
 // - Scroll: the page's scroll position is recorded per entry (`router.entry`, the entry's place in the tab's history)
 //   as the user scrolls. A new navigation starts at the top (routeFocus); Back / Forward to an entry scrolls it back to
 //   where it was once the screen is tall enough for it, that is once its data has rendered (a list, a detail page, the
-//   dataset's virtualised grid, whose height is set by its image count). A press, a wheel turn or a key during that wait
-//   leaves the page where the user puts it. A reload restores the entry's position the same way.
+//   dataset's virtualised grid, whose height is set by its image count). That wait starts once the entry's own screen is
+//   on display: while its chunk loads, App keeps the screen before, whose height says nothing about it. A press, a
+//   wheel turn or a key during that wait leaves the page where the user puts it. A reload restores the entry's position
+//   the same way.
 // - `entryState(key)`: any small value a screen wants back with its entry (typed list filters, a selection), the same
 //   way: `const picked = entryState<string[]>('runs.compare')`, then `picked.get()` when the screen mounts and
 //   `picked.set(ids)` when it changes. It belongs to the entry the screen is on at that moment; a new entry starts
@@ -12,10 +14,11 @@
 //
 // Both live in memory and in sessionStorage (written when the tab is hidden or closed), so a reload keeps them.
 
-import { router, type EntryChange } from '$lib/router';
+import { parse, router, type EntryChange } from '$lib/router';
 
 const KEY = 'folo.entries';
-/** How long a restore waits for the screen to be tall enough before it settles for the nearest position. */
+/** How long a restore waits, once the screen is on display, for it to be tall enough before it settles for the nearest
+ * position. */
 export const RESTORE_MS = 3000;
 /** Once there, how long the page's height must stay put before the restore lets go (data still arriving moves it). */
 const SETTLE_MS = 400;
@@ -24,6 +27,8 @@ type Kept = { y?: number; state?: Record<string, unknown> };
 
 let kept = new Map<number, Kept>();
 let restoring: { until: number; frame: number } | null = null;
+/** The path of the screen on display (App's: not the URL's route while the next screen's chunk loads). */
+let shownPath = (): string | null => router.route.path;
 
 function load() {
   try {
@@ -61,22 +66,30 @@ function stopRestoring() {
 }
 
 /**
- * Scrolls to `y` as soon as the page is tall enough, and holds it there until the page's height has settled (up to
- * RESTORE_MS in all; then the nearest position it allows).
+ * Once the screen of `path` is on display, scrolls to `y` as soon as the page is tall enough, and holds it there until
+ * the page's height has settled (up to RESTORE_MS in all; then the nearest position it allows).
  */
-function restore(y: number) {
+function restore(y: number, path: string) {
   stopRestoring();
   if (y <= 0) {
     window.scrollTo(0, 0);
     return;
   }
-  const r = { until: performance.now() + RESTORE_MS, frame: 0 };
+  const r = { until: 0, frame: 0 };
   restoring = r;
   let height = -1;
   let steady = 0;
   const step = () => {
     if (restoring !== r) return;
     const now = performance.now();
+    if (!r.until) {
+      // The screen before is still on display (the entry's chunk is loading): nothing to measure yet.
+      if (shownPath() !== path) {
+        r.frame = requestAnimationFrame(step);
+        return;
+      }
+      r.until = now + RESTORE_MS;
+    }
     const h = document.documentElement.scrollHeight;
     if (h !== height) (height = h), (steady = now);
     const max = Math.max(0, h - window.innerHeight);
@@ -97,15 +110,18 @@ function onEntry(e: EntryChange) {
     kept.delete(e.to);
     return;
   }
-  restore(kept.get(e.to)?.y ?? 0);
+  // The URL is the entry's already; the router's route follows once its listeners have heard of the move.
+  restore(kept.get(e.to)?.y ?? 0, parse(location.hash).path);
 }
 
 /**
  * Starts recording and restoring the scroll per history entry (App, once). Takes over from the browser's own scroll
- * restoration, which runs before a hash route's screen has rendered and so always lands at the top.
+ * restoration, which runs before a hash route's screen has rendered and so always lands at the top. `shown`: the path
+ * of the screen on display, null before the first (default: the route on display).
  */
-export function installEntryMemory(): () => void {
+export function installEntryMemory(shown: () => string | null = () => router.route.path): () => void {
   load();
+  shownPath = shown;
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   const onScroll = () => {
     if (!restoring) entry(router.entry).y = window.scrollY;
@@ -122,7 +138,7 @@ export function installEntryMemory(): () => void {
   window.addEventListener('pagehide', persist);
   // A reload: the entry's position, as Back would.
   const y = kept.get(router.entry)?.y;
-  if (y) restore(y);
+  if (y) restore(y, router.location.path);
   return () => {
     stopRestoring();
     offEntry();

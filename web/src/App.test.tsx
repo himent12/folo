@@ -6,6 +6,7 @@ import { render, type Rendered } from '../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
+import { restoringScroll } from '$lib/shell/entryMemory';
 import App from './App';
 import { Screens, type ScreenModule, type ScreenName } from './routes';
 
@@ -161,5 +162,38 @@ describe('a screen whose chunk fails to load', () => {
     await until(() => main().querySelector('[role="alert"]'), 'the error');
     expect(router.route.name).toBe('model');
     expect(main().querySelector('.fake')).toBeNull();
+  });
+});
+
+describe('the scroll an entry kept, when its screen waits for its chunk', () => {
+  it('is brought back once the screen shows, and its focus does not send it to the top (review R3)', async () => {
+    vi.useFakeTimers();
+    try {
+      // A reload on Runs, scrolled to 600; the layout is tall from the start (the shell while Runs's chunk loads).
+      let y = 0;
+      vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => y);
+      vi.spyOn(window, 'scrollTo').mockImplementation(((_x: number, to: number) => {
+        y = to;
+      }) as typeof window.scrollTo);
+      vi.spyOn(document.documentElement, 'scrollHeight', 'get').mockImplementation(() => 5000);
+      router.route = parse('#/runs');
+      sessionStorage.setItem('folo.entries', JSON.stringify([[router.entry, { y: 600 }]]));
+      const runs = deferred<ScreenModule>();
+      const screens = new Screens((name) => (name === 'runs' ? () => runs.promise : undefined));
+      c = render(() => <App screens={screens} />, target);
+      await vi.advanceTimersByTimeAsync(1000);
+      flush();
+      expect(main().textContent).toBe('');
+      expect(restoringScroll()).toBe(true);
+
+      runs.resolve(screen('the runs'));
+      await vi.advanceTimersByTimeAsync(1000);
+      flush();
+      expect(main().textContent).toBe('the runs');
+      expect([restoringScroll(), y]).toEqual([false, 600]);
+    } finally {
+      sessionStorage.clear();
+      vi.useRealTimers();
+    }
   });
 });
