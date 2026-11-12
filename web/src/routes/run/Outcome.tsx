@@ -29,7 +29,7 @@ import Ident from '$lib/ui/Ident';
 import type { IconType } from '$lib/ui/types';
 import Callout from './Callout';
 import { failedEpoch, failedTitle, failureSummary } from './failure';
-import { plain, scheduleTitle, shortCause, suggestedEpochs } from './warnings';
+import { LEARNED_MAP, plain, scheduleTitle, shortCause, suggestedEpochs } from './warnings';
 
 export interface OutcomeProps {
   run: Run;
@@ -99,15 +99,17 @@ export default function Outcome(props: OutcomeProps) {
   /** A fix with what it costs: "Retry with batch 8 · ~13.6 GiB". */
   const fixLabel = (f: OomFix) => (f.vram !== undefined ? `${f.label} · ~${bytes(f.vram, prefs.units)}` : f.label);
   const driver = computed(() => (oom.get() ? oomDetail(props.run.error) : null));
-  /** The epochs that clear the warning (⌈200 / steps per epoch⌉): its action opens New run with them filled in. */
-  const suggested = computed(() => suggestedEpochs(warnings()));
+  /** A clearly longer run that clears the warning (./warnings suggestedEpochs): its action opens New run with it. */
+  const suggested = computed(() => suggestedEpochs(warnings(), props.run.config.epochs));
+  /** It scored well despite the warning: the warning advises more epochs instead of saying it could not learn. */
+  const learned = computed(() => (props.run.best?.map50_95 ?? 0) >= LEARNED_MAP);
   /**
    * The trainer's schedule warning as a callout line, "Too short to learn: 125 optimizer steps": the second line of the
    * run's outcome callout once there is one, else a callout of its own.
    */
   const short = computed(() => {
     const w = warnings();
-    return w.length ? { icon: TriangleAlert, tone: 'warning' as const, title: scheduleTitle(w), msg: shortCause(w) } : undefined;
+    return w.length ? { icon: TriangleAlert, tone: 'warning' as const, title: scheduleTitle(w, learned.get()), msg: shortCause(w) } : undefined;
   });
   /** The other fixes behind the disclosure: those that may fit. */
   const others = computed(() => fixes.get()?.slice(1).filter((f) => f.fits !== false) ?? []);
@@ -127,7 +129,7 @@ export default function Outcome(props: OutcomeProps) {
   );
   const why = () => (
     <For each={warnings()} key={(w) => w}>
-      {(w) => <p class="why">{plain(w())}</p>}
+      {(w) => <p class="why">{plain(w(), learned.get())}</p>}
     </For>
   );
 
