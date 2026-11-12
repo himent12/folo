@@ -111,3 +111,6 @@ pub fn max_pool2d(
     ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(n as u64, 256)?)?;
     Ok((oh, ow))
 }
+
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&MAXPOOL];

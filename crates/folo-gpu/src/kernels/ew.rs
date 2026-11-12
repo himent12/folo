@@ -442,3 +442,6 @@ pub fn elementwise(
     bufs.push(out);
     ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(units as u64, 256)?)
 }
+
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&EW1, &EW2, &EW3];

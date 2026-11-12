@@ -57,6 +57,8 @@ pub fn pipeline_cache_dir() -> Option<PathBuf> {
 pub fn save_pipeline_caches() {
     #[cfg(not(target_arch = "wasm32"))]
     crate::pipeline::trace::report();
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::kernel_list::save_all();
     let open: Vec<Arc<DiskCache>> = {
         let mut v = OPEN.lock().unwrap_or_else(|p| p.into_inner());
         v.retain(|w| w.strong_count() > 0);
@@ -110,13 +112,24 @@ pub(crate) fn checksum(data: &[u8]) -> u64 {
 
 /// The file's payload when its header matches `identity` and its checksum is right.
 pub(crate) fn decode<'a>(file: &'a [u8], identity: &str) -> Option<&'a [u8]> {
+    decode_as(MAGIC, FORMAT, file, identity)
+}
+
+/// [`decode`] for a file of another kind (`magic`, `format`): the kernel lists of `crate::kernel_list` use the
+/// same header.
+pub(crate) fn decode_as<'a>(
+    magic: &[u8; 8],
+    format: u32,
+    file: &'a [u8],
+    identity: &str,
+) -> Option<&'a [u8]> {
     let mut r = file;
     let mut take = |n: usize| -> Option<&'a [u8]> {
         let (a, b) = r.split_at_checked(n)?;
         r = b;
         Some(a)
     };
-    if take(8)? != MAGIC || u32::from_le_bytes(take(4)?.try_into().ok()?) != FORMAT {
+    if take(8)? != magic || u32::from_le_bytes(take(4)?.try_into().ok()?) != format {
         return None;
     }
     let id_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
@@ -142,9 +155,14 @@ pub(crate) fn decode_for_test(file: &[u8]) -> bool {
 
 /// A cache file holding `payload`.
 pub(crate) fn encode(payload: &[u8], identity: &str) -> Vec<u8> {
+    encode_as(MAGIC, FORMAT, payload, identity)
+}
+
+/// [`encode`] for a file of another kind (see [`decode_as`]).
+pub(crate) fn encode_as(magic: &[u8; 8], format: u32, payload: &[u8], identity: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + identity.len() + 32);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&FORMAT.to_le_bytes());
+    out.extend_from_slice(magic);
+    out.extend_from_slice(&format.to_le_bytes());
     out.extend_from_slice(&(identity.len() as u32).to_le_bytes());
     out.extend_from_slice(identity.as_bytes());
     out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
@@ -178,7 +196,7 @@ fn is_tmp_of(name: &str, file: &str) -> bool {
 }
 
 /// Deletes the temporary files of `path` older than [`STALE_TMP`] (a killed writer's).
-fn remove_stale_tmp(path: &Path) {
+pub(crate) fn remove_stale_tmp(path: &Path) {
     let (Some(dir), Some(file)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return };
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let now = SystemTime::now();

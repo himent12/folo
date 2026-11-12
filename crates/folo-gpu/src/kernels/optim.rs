@@ -96,6 +96,24 @@ fn many_def(kind: u32, j: usize) -> &'static KernelDef {
     })
 }
 
+/// The multi-tensor kernel recorded as `name` with `spec` (the precompile registry, `kernels::find_def`): the
+/// [`many_def`] its call site picked, read back from the constants that call site sets. `None` for other names
+/// and for constants no call site sets.
+pub(crate) fn many_def_for(name: &str, spec: &Spec) -> Option<&'static KernelDef> {
+    let j = spec.get_u32("J", 0) as usize;
+    if !(1..=MANY).contains(&j) {
+        return None;
+    }
+    let kind = match name {
+        "optim_many" => Some(spec.get_u32("NS", 3)).filter(|&ns| ns <= 2)?,
+        "unscale_check_many" => 3,
+        "norm_partials_many" => 4 + spec.get_u32("OP", 0).min(1),
+        "scale_many" => 6,
+        _ => return None,
+    };
+    Some(many_def(kind, j))
+}
+
 /// Params of the multi-tensor kernels: the update's own words from 0 (as `shaders/optim.wgsl`), then the first
 /// workgroup of tensor `j` at `16 + j` and its element count at `32 + j`.
 fn many_params(mut p: Params, ns: &[usize]) -> Result<(Params, u64)> {
@@ -603,3 +621,6 @@ pub fn optimizer_step(
     let (d0, d1) = (s0.unwrap_or(ctx.dummy()), s1.unwrap_or(ctx.dummy()));
     ctx.dispatch(&k, &[p, g, d0, d1], &p_, ctx.grid_1d(n as u64, 256)?)
 }
+
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&OPTIM, &UNSCALE];

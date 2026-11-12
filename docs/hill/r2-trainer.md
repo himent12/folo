@@ -198,3 +198,78 @@ stop working or store the unresized image, two loaders admitted against the same
 2. **Parallel pipeline precompile**: write the `(kernel, spec)` list a run compiled next to the pipeline cache and
    compile it on all cores when the next context starts, so the ~1.1 s of naga parsing (and any driver compile)
    overlaps the dataset open instead of the first steps. Needs a name → `KernelDef` table.
+
+# Second wave (lane `trainer2`)
+
+Same machine and method as above. Every A/B below alternates the binaries run by run inside one GPU-lock hold:
+`647b981f` (the baseline, `D:/folo-build/hill2-base`), `ed265317` (the main this wave branched from) and the PR's
+build. Load: the bench scripts sample the machine's CPU load before every run (`warm_start.sh`, a 1 s snapshot, so
+noisy) or the cores other processes used (`ab.py`).
+
+## PR 4: parallel pipeline precompile
+
+### Where the time was
+After PR 1 a warm start still compiled every pipeline on the training thread as the first step met it: 0.8-1.3 s
+(f32) and 1.3-2.2 s (AMP) in this wave's runs, most of it WGSL parsing (`create_shader_module`), which no cache
+stores. With the NVIDIA driver's cache cold (a new driver, a new machine, or simply new shader code) the first AMP
+epoch compiled for 30 s, one kernel after the other.
+
+### What changed
+- folo-gpu `kernel_list.rs` + `context/precompile.rs`: `GpuContext::precompile(kind, shape)` records the kernels a
+  context first uses (name + spec, in order) beside the pipeline cache and, at the next call with the same kind and
+  shape, compiles that list on one worker thread per core. A thread that needs a kernel takes it ready, waits for
+  the worker compiling it, or compiles it itself if no worker started it. No list for the shape: the newest list
+  of the same kind (most kernels are shared). Same header and checksum as the pipeline cache, but the identity
+  leaves out the driver (a list names kernels, not compiled code). Bounds: 4096 kernels, 1 MB, 64 lists per folder.
+  Written only when the run used a kernel the file lacks (a run stopped early keeps the longer list).
+- `kernels::find_def`: every kernel module lists its definitions (`DEFS`), plus the per-layout optimizer kernels, so
+  a recorded name finds its definition again. `gpu_train` / `gpu_amp` assert that every kernel a GPU run and its
+  validation used is in that registry (`GpuContext::kernels_without_registry`).
+- Callers: the trainer (`train <arch> <f32|amp> head <head> <optimizer> nc <n>`, shape `imgsz <n> batch <n>`: tile
+  sizes and bounds checks follow the shapes, see a list's lines), `folo predict` / `folo val` (`<command> <arch>
+  <precision> nc <n>` with their imgsz / batch / head options) and `folo serve`'s model loads.
+- `FOLO_GPU_TRACE_COMPILE=1` prints a second line: the time the threads that needed kernels spent getting them.
+
+### Results
+Warm start, one row-10 epoch (`OUT=D:/folo-data/runs-hill2/trainer2/ws-f32 bench/trainer/warm_start.sh train
+base=<647b981f> main=<ed265317> new=<PR>`, and `AMP=--amp OUT=.../ws-amp`; 3 rounds, every binary with its own warm
+cache folder; 647b981f has no compile timer):
+
+| | 647b981f | ed265317 | PR |
+|---|---|---|---|
+| f32: compile on the training thread, per round | not timed | 1.30 / 0.93 / 0.82 s | **0.240 / 0.001 / 0.001 s** |
+| f32: epoch 1 `duration_s`, median (range) | 4.37 s (3.45-10.92) | 2.92 s (2.52-3.72) | **2.03 s** (1.94-2.82) |
+| AMP: compile on the training thread | not timed | 1.87 / 1.28 / 2.19 s | **0.008 / 0.020 / 0.018 s** |
+| AMP: epoch 1, median (range) | 2.78 s (1.97-3.58) | 3.24 s (2.65-3.90) | **2.32 s** (1.26-2.33) |
+
+(The PR's first f32 round waited 0.24 s for 5 kernels still on a worker; the AMP rows' remaining ~10 ms are the 3
+tensor-core self-test kernels the context compiles when it is created, before any run could start a precompile.)
+
+First-ever start, AMP (`OUT=.../cold-amp bench/trainer/cold_start.sh --amp`, 3 rounds): every run gets an empty
+NVIDIA shader cache through `__GL_SHADER_DISK_CACHE_PATH` (its Vulkan driver honours it; a copy of the exe at a new
+path or with bytes appended does not make the driver cache cold, it is keyed by shader code):
+
+| | compile on the training thread | epoch 1 | process wall |
+|---|---|---|---|
+| ed265317, first-ever | 30.8 / 30.1 / 29.9 s | 30.8 s (30.5-34.0) | 32.2 s (32.2-36.0) |
+| PR, first-ever (no list yet) | 28.3 / 31.3 / 27.4 s | 28.9 s (27.8-32.0) | 30.3 s |
+| PR, driver and pipeline caches cold, list kept | **3.25 / 3.20 / 2.81 s** | **3.89 s** (3.48-4.16) | **5.40 s** (5.05-5.67) |
+
+The workers' compile time summed over threads was 60-69 s there (the driver compiles in parallel, ~20x). A truly
+first-ever run (no list at all) is unchanged: nothing says which kernels it will need before it meets them (see
+leftovers).
+
+`folo predict` of one image, process start to exit, warm caches (`ROUNDS=5 OUT=.../ws-predict warm_start.sh predict
+...`, `D:/folo-weights/folo-n-coco.folo`, 33 pipelines): **647b981f 0.84 s (0.69-0.85), ed265317 0.66 s
+(0.59-0.82), PR 0.47 s (0.46-0.52)**; the PR's predict spends 0.000-0.011 s on its kernels.
+
+Row 10 not worse (`ab.py train --bin main=<ed265317> --bin new=<PR> --rounds 3 -- --data D:/folo-bench/data --model
+folo-n --epochs 2 --batch 16 --imgsz 640 --workers 8 --close-mosaic 0 --device gpu:0`, `FOLO_CACHE_DIR` warm): epoch-2
+sustained main **344.1 img/s** (340.2-349.5), PR **339.1** (324.2-358.1): a tie (others 6.7-7.2 vs 7.9-12.0 cores).
+Epoch-1 training img/s: 197.5 → 297.1.
+
+### Negative results
+- Parsing each WGSL module once (shared naga IR) was not needed: on the workers the ~1.1-1.4 s of parsing is spread
+  over the cores, and the training thread's remaining time is 0.001-0.02 s on a warm start. It would also need the
+  specialisation constants as pipeline-overridable constants, which cannot size workgroup arrays on every backend
+  (GPU.md).

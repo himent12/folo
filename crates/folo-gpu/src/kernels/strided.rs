@@ -845,6 +845,9 @@ fn check_buf_elems(buf: &wgpu::Buffer, elems: usize, elem: Elem, what: &str) -> 
     Ok(())
 }
 
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&MOVE, &SCATTER, &FILL, &CAST, &SCATTER_ADD];
+
 #[cfg(test)]
 mod tests {
     use super::*;

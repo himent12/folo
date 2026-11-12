@@ -339,6 +339,10 @@ pub fn multi_label_candidates(
     ctx.dispatch(&k, &[decoded, out], &p, ctx.grid_1d(ba as u64, 256)?)
 }
 
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] =
+    &[&DECODE, &TOPK, &OWNER, &TARGETS, &BCE_FWD, &BCE_BWD, &BOX, &COMBINE, &CANDIDATES];
+
 #[cfg(test)]
 mod tests {
     use super::*;

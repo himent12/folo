@@ -87,7 +87,7 @@ fn gen_split_finish(spec: &Spec) -> String {
     s
 }
 
-static SPLIT_FINISH: KernelDef = KernelDef {
+pub(super) static SPLIT_FINISH: KernelDef = KernelDef {
     name: "conv_split_finish",
     storage: &[Access::Read, Access::Read, Access::ReadWrite],
     source: Source::Generated(gen_split_finish),

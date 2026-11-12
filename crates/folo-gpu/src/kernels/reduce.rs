@@ -305,3 +305,6 @@ pub fn topk(
     let p = Params::new().uz(rows)?.uz(d)?.uz(k)?;
     ctx.dispatch(&kern, &[x, values, indices], &p, ctx.grid_1d(rows as u64, 64)?)
 }
+
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&ROWS, &COLS, &SOFTMAX, &ARG, &SOFTMAX_COLS, &TOPK];

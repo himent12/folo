@@ -178,10 +178,33 @@ that cache file older than an hour (a killed writer's) are deleted when a contex
 the cache ever fails a run. `GpuContext::pipeline_cache_loaded()` says whether a context started from a valid
 file. Effect on the dev machine: docs/hill/r2-trainer.md.
 
+**Parallel precompile.** Neither cache removes the compile from the first step: the step still meets its ~200
+kernels one at a time and compiles each (WGSL parsing in naga, about 1 s in all, which no cache stores, plus the
+driver's compile when its cache is cold: 30 s for a first AMP run). `GpuContext::precompile(kind, shape)` records,
+in the same folder, the kernels a context first uses from then on (name and spec, in order of first use) as
+`kernels-<backend>-<vendor>-<device>-<kind hash>-<shape hash>.list` (`kernel_list.rs`), and at the next call with the
+same kind and shape compiles that list on worker threads, one per core, while the caller goes on. A thread that
+needs a kernel takes it ready, waits for the worker compiling it, or compiles it itself when no worker has started
+it, so a list is only ever a hint. `folo train` (and the server's runs) pass `train <arch> <f32|amp> head <head>
+<optimizer> nc <classes>` and `imgsz <n> batch <n>` (tile sizes and bounds checks follow the shapes); `folo
+predict`, `folo val` and `folo serve` pass `<command> <arch> <precision> nc <classes>` and the options that change
+their kernels. With no list for its shape, a run compiles the most recently written list of its kind (most kernels
+are shared). A list has the pipeline cache's header, but its identity is folo-gpu's version, the adapter and the kind,
+not the driver (a list names kernels, not compiled code, and a driver update is when it helps most); a file whose
+header or checksum is wrong, or over 1 MB, is ignored; a line naming a kernel this build does not have, or that is
+malformed, is skipped (a kernel is found by name in `kernels::find_def`, every module's `DEFS`); a kernel that
+fails or panics on a worker is compiled again by the thread that needs it, which reports the error. A list holds
+at most 4096 kernels, is written (atomically, by a saver thread a second after the last new kernel, by
+`save_pipeline_caches()` and when the context is dropped) only when the run used a kernel the file does not have, so a
+run stopped early keeps the longer list, and a folder keeps the 64 most recently written lists. Native only.
+
 To see what compilation costs, set `FOLO_GPU_TRACE_COMPILE=1` (read once per process; native only): every
 `Kernel::compile` adds its `create_shader_module` time (WGSL parsing and validation in naga) and its total time to
 process-wide totals, printed to stderr as `folo-gpu: compiled N pipelines, module X s, total Y s` every 25
-pipelines and once more from `save_pipeline_caches()` (so `folo` prints the run's totals when a command ends).
+pipelines and once more from `save_pipeline_caches()` (so `folo` prints the run's totals when a command ends). The
+compile totals include the precompile workers' compiles (CPU time summed over threads); a second line, `folo-gpu: N
+first uses, X s on the requesting threads (R precompiled, W waited for a precompile worker, C compiled on demand)`,
+is what the threads that needed the kernels (the training thread) spent.
 
 ### In the browser
 

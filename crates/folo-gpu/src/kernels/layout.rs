@@ -206,6 +206,9 @@ pub fn cast(ctx: &GpuContext, x: &wgpu::Buffer, y: &wgpu::Buffer, n: usize, to_f
     ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(n.div_ceil(2) as u64, 256)?)
 }
 
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&PERMUTE, &TRANSPOSE, &UPSAMPLE, &CAST, &COPY_ROWS];
+
 #[cfg(test)]
 mod tests {
     use super::*;

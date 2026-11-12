@@ -937,3 +937,6 @@ fn gemm_impl(
     ];
     ctx.dispatch(&k, &[a, b, bias_buf, c], &gemm_params(d)?, groups)
 }
+
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&GEMM, &GEMM_CAT];

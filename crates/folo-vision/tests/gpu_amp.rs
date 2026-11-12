@@ -535,6 +535,8 @@ fn tiny_amp_run_learns() {
     eprintln!("f32 losses {f32_losses:?}");
     let mut t = Trainer::new(cfg, data(), TrainOptions::default()).unwrap();
     let s = t.run().unwrap();
+    // Every kernel of the mixed-precision steps (tensor-core ones too) can be named in a kernel list.
+    assert_eq!(folo_gpu::GpuContext::shared().unwrap().kernels_without_registry(), Vec::<String>::new());
     let losses: Vec<f32> = s.epochs.iter().map(|e| e.train_loss.total).collect();
     assert!(losses.iter().all(|l| l.is_finite()), "{losses:?}");
     let tail = |l: &[f32]| l[l.len() - 3..].iter().sum::<f32>() / 3.0;

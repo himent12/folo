@@ -120,13 +120,8 @@ impl GpuContext {
         if let Some(k) = self.inner.kernels.lock().expect("kernel lock").get(&key) {
             return Ok(k.clone());
         }
-        // Compile outside the lock: pipeline creation can take tens of milliseconds.
-        let disk = self.inner.pipeline_cache.as_deref();
-        let kernel = Arc::new(Kernel::compile(&self.inner.device, def, &key.spec, disk.map(|d| &d.cache))?);
-        if let Some(d) = disk {
-            d.compiled();
-        }
-        Ok(self.inner.kernels.lock().expect("kernel lock").entry(key).or_insert(kernel).clone())
+        // Precompiled, or compiled here outside the lock (pipeline creation can take tens of milliseconds).
+        self.first_use(def, key)
     }
 
     /// Encodes one dispatch of `kernel` with `buffers` bound at `@binding(1..)` and `params` at `@binding(0)`.

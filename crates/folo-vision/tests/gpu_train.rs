@@ -87,6 +87,9 @@ fn tiny_gpu_run_learns() {
     assert!(tail < 0.6 * losses[0], "the loss falls: {losses:?}");
     assert!(s.epochs.iter().all(|e| e.val.map50.is_finite()));
     assert!(t.nonfinite_streak() == 0);
+    // Every kernel the steps and validation used can be named in a kernel list and precompiled next time.
+    let ctx = folo_gpu::GpuContext::shared().unwrap();
+    assert_eq!(ctx.kernels_without_registry(), Vec::<String>::new());
 
     // The checkpoint reloads on the CPU.
     let last = TestFile::new("gpu-train", "last.folo");

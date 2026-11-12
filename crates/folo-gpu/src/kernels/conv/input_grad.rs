@@ -51,7 +51,7 @@ fn gen_phase_pack(_: &Spec) -> String {
         .into()
 }
 
-static PHASE_PACK: KernelDef = KernelDef {
+pub(super) static PHASE_PACK: KernelDef = KernelDef {
     name: "conv2d_phase_pack",
     storage: &[Access::Read, Access::ReadWrite],
     source: Source::Generated(gen_phase_pack),

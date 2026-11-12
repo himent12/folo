@@ -42,6 +42,10 @@ pub(crate) use weight_grad::{LAST_ROUTE, WgradRoute};
 pub use weight_grad::{conv2d_backward_weight, conv2d_backward_weight_as};
 pub(crate) use weight_grad::{weight_grad_dims, weight_grad_spec, wgrad_b_load, wgrad_b_units};
 
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&crate::pipeline::KernelDef] =
+    &[&depthwise::DEPTHWISE, &depthwise::DEPTHWISE_GRAD, &input_grad::PHASE_PACK, &split::SPLIT_FINISH];
+
 use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;

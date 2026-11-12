@@ -23,8 +23,44 @@ pub mod reduce;
 pub mod strided;
 pub mod vision;
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use crate::DType;
 use crate::error::{GpuError, Result};
+use crate::pipeline::{KernelDef, Spec};
+
+/// The kernel named `name` as compiled with `spec`, for [`crate::precompile`], which records kernels by name and
+/// compiles them again in a later process: every fixed definition (each module's `DEFS`), and the multi-tensor
+/// optimizer kernels built per layout. `None` for a name this build does not have (a list from another build).
+pub(crate) fn find_def(name: &str, spec: &Spec) -> Option<&'static KernelDef> {
+    static TABLE: OnceLock<HashMap<&'static str, &'static KernelDef>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| all_defs().map(|d| (d.name, d)).collect());
+    table.get(name).copied().or_else(|| optim::many_def_for(name, spec))
+}
+
+/// Every fixed kernel definition.
+pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
+    [
+        conv::DEFS,
+        coop::DEFS,
+        detect::DEFS,
+        elementwise::DEFS,
+        ew::DEFS,
+        gemm::DEFS,
+        layout::DEFS,
+        norm::DEFS,
+        optim::DEFS,
+        pool_grad::DEFS,
+        pooling::DEFS,
+        reduce::DEFS,
+        strided::DEFS,
+        vision::DEFS,
+    ]
+    .into_iter()
+    .flatten()
+    .copied()
+}
 
 /// `E` / `V4` / `OUT` aliases: element type of a storage array and conversions to and from `vec4<f32>`.
 pub(crate) fn vec_prelude(vec: bool) -> &'static str {
