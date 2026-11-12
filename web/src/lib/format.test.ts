@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, atBestF1, bytes, compact, conf, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
+import { ago, atBestF1, bytes, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
@@ -133,5 +133,16 @@ describe('sentence', () => {
     expect(sentence('`claude` printed no result')).toBe('`claude` printed no result.');
     expect(sentence('`claude` printed no result', true)).toBe('claude printed no result.');
     expect(sentence('run `folo serve` first', true)).toBe('Run folo serve first.');
+  });
+});
+
+describe('count', () => {
+  it('says one of a thing in the singular', () => {
+    expect(count(1, 'class')).toBe('1 class');
+    expect(count(2, 'class')).toBe('2 classes');
+    expect(count(0, 'image')).toBe('0 images');
+    expect(count(2400, 'image')).toBe('2,400 images');
+    expect(count(1, 'box')).toBe('1 box');
+    expect(count(3, 'box')).toBe('3 boxes');
   });
 });

@@ -11,7 +11,7 @@ import Upload from '$icons/upload';
 import { computed, createRoot, css, effect, getOwner, Key, MediaQuery, onCleanup, signal, type Signal } from 'fw';
 import type { LabelImage } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
-import { num } from '$lib/format';
+import { count, num } from '$lib/format';
 import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
@@ -108,7 +108,7 @@ export default function ImagesArea(props: ImagesAreaProps) {
   const label = (i: number) => {
     const img = shown.get()[i];
     return img
-      ? `${img.file}, ${img.status === 'labeled' ? `${img.boxes.length} ${img.boxes.length === 1 ? 'box' : 'boxes'}${img.reviewed ? ', reviewed' : ''}` : img.status}`
+      ? `${img.file}, ${img.status === 'labeled' ? `${count(img.boxes.length, 'box')}${img.reviewed ? ', reviewed' : ''}` : img.status}`
       : 'Image';
   };
 

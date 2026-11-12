@@ -16,12 +16,11 @@ import { computed, css, Dynamic, For, signal } from 'fw';
 import type { Dataset, DatasetStats, IssueCounts, IssueSeverity } from '$lib/api/types';
 import Histogram from '$lib/charts/Histogram.tsx';
 import { classInk } from '$lib/design/classInk';
-import { num } from '$lib/format';
+import { count, num } from '$lib/format';
 import { href } from '$lib/router';
 import InfoButton from '$lib/ui/InfoButton';
 import Panel from '$lib/ui/Panel';
 import IssueList from './IssueList';
-import { count } from './count';
 import { swatchStyle } from './swatch';
 import { countBinLabel, findingLabel, healthChecks, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
@@ -71,7 +70,7 @@ export default function StatsTab(props: StatsTabProps) {
   });
   const share = (x: number) => (props.stats.boxes ? (x / props.stats.boxes) * 100 : 0);
   const perLast = computed(() => props.stats.boxes_per_image_hist.counts.length - 1);
-  const classCount = computed(() => `${props.dataset.classes.length} ${props.dataset.classes.length === 1 ? 'class' : 'classes'}`);
+  const classCount = computed(() => count(props.dataset.classes.length, 'class'));
   const pct = (x: number) => (images.get() ? `${((x / images.get()) * 100).toFixed(1)}% of images` : '');
 
   // A count is said once on a page (DESIGN_DIRECTION §2.23): once Health lists the empty images or the broken labels, the

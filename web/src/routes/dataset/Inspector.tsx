@@ -14,7 +14,7 @@ import { computed, css, cubicOut, effect, fly, Key, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Box, DatasetImage as ImageInfo } from '$lib/api/types';
 import DatasetImage from '$lib/detect/DatasetImage';
-import { num } from '$lib/format';
+import { count, num } from '$lib/format';
 import Button from '$lib/ui/Button';
 import { DialogStatus } from '$lib/ui/feedback';
 import Kbd from '$lib/ui/Kbd';
@@ -23,7 +23,6 @@ import Spinner from '$lib/ui/Spinner';
 import { tooltip } from '$lib/ui/tooltip';
 import type { ImagePager } from './pager';
 import { stem } from './imagePath';
-import { count } from './count';
 import InspectorRail from './InspectorRail';
 
 export interface InspectorProps {

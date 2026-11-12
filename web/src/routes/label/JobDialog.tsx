@@ -20,6 +20,7 @@ import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import TextArea from '$lib/ui/TextArea';
 import { toast } from '$lib/ui/toast';
+import { count } from '$lib/format';
 import { leftOutText } from './words';
 
 export interface JobDialogProps {
@@ -118,7 +119,7 @@ export default function JobDialog(props: JobDialogProps) {
         created = true;
         // The dialog closes first: what was made is said over the job's page it opens.
         open.set(false);
-        toast.success('Labeling job created', `${made.name} · ${made.classes.length} ${made.classes.length === 1 ? 'class' : 'classes'}`);
+        toast.success('Labeling job created', `${made.name} · ${count(made.classes.length, 'class')}`);
         router.go(`/datasets/label/${made.id}`);
       }
     } catch (err) {

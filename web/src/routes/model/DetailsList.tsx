@@ -6,7 +6,7 @@ import type { Evaluation } from '$lib/api/evaluation';
 import { e2eMs } from '$lib/benchmarks';
 import { classInk } from '$lib/design/classInk';
 import { splitWord, type EvalSource } from '$lib/evaluated';
-import { bytes, compact, date, num } from '$lib/format';
+import { bytes, compact, count, date, num } from '$lib/format';
 import { latencyMs, latencyRange, measuredLatency } from '$lib/throughput';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
@@ -188,7 +188,7 @@ export default function DetailsList(props: DetailsListProps) {
           {props.unevaluated ? null : (
             <span class="num" class:faint={!!src().datasetName}>
               {src().split ? `${splitWord(src().split!)} split` : 'split not reported'}
-              {props.ev ? `, ${num(props.ev.images)} ${props.ev.images === 1 ? 'image' : 'images'}` : ''}
+              {props.ev ? `, ${count(props.ev.images, 'image')}` : ''}
             </span>
           )}
         </dd>

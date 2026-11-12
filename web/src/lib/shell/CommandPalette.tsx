@@ -30,6 +30,7 @@ import { backdropClose } from '$lib/ui/backdrop';
 import Meta from '$lib/ui/Meta';
 import { statusWord } from '$lib/ui/StatusBadge';
 import type { IconType } from '$lib/ui/types';
+import { count } from '$lib/format';
 import { highlight, rank } from './commands';
 import { mainNav, settingsNav } from './nav';
 import { pageCommandList, recentIds, rememberRecent } from './pageCommands';
@@ -232,7 +233,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
       group: 'Labeling jobs',
       label: x.name,
       match: x.classes,
-      hint: [x.status === 'idle' ? `${x.counts.labeled.toLocaleString('en-US')} of ${x.counts.images.toLocaleString('en-US')} images labeled` : 'Labeling', `${x.classes.length} ${x.classes.length === 1 ? 'class' : 'classes'}`],
+      hint: [x.status === 'idle' ? `${x.counts.labeled.toLocaleString('en-US')} of ${x.counts.images.toLocaleString('en-US')} images labeled` : 'Labeling', count(x.classes.length, 'class')],
       icon: Tags,
       run: go(`/datasets/label/${x.id}`),
     }));

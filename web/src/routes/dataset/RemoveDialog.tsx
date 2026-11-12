@@ -17,7 +17,7 @@ import Dialog from '$lib/ui/Dialog';
 import { DialogStatus } from '$lib/ui/feedback';
 import Switch from '$lib/ui/Switch';
 import { toast } from '$lib/ui/toast';
-import { count } from './count';
+import { count } from '$lib/format';
 import { datasetsChanged } from '../datasets/changes';
 
 export interface RemoveDialogProps {
@@ -39,16 +39,15 @@ export function writtenByServer(path: string, dataDir: string | null | undefined
 const ACTIVE: ReadonlySet<Run['status']> = new Set(['queued', 'running', 'stopping']);
 
 /** "1 run" / "3 runs". */
-const runs = (n: number) => `${n} ${n === 1 ? 'run' : 'runs'}`;
 
 /** What removing a dataset means for the runs that used it, in a sentence or two; null when no run used it. */
 export function runsImpact(used: readonly Pick<Run, 'name' | 'status'>[]): { lost: string; active: string | null } | null {
   if (!used.length) return null;
   const active = used.filter((r) => ACTIVE.has(r.status));
   return {
-    lost: `${used.length === 1 ? '1 run trained' : `${runs(used.length)} trained`} on it. ${used.length === 1 ? 'It keeps its' : 'They keep their'} metrics and models, but ${used.length === 1 ? 'its' : 'their'} sample images will not show until the folder is registered again.`,
+    lost: `${used.length === 1 ? '1 run trained' : `${count(used.length, 'run')} trained`} on it. ${used.length === 1 ? 'It keeps its' : 'They keep their'} metrics and models, but ${used.length === 1 ? 'its' : 'their'} sample images will not show until the folder is registered again.`,
     active: active.length
-      ? `${active.length === 1 ? `${active[0]!.name} is` : `${runs(active.length)} are`} training or queued on it now: ${active.length === 1 ? 'it carries' : 'they carry'} on.`
+      ? `${active.length === 1 ? `${active[0]!.name} is` : `${count(active.length, 'run')} are`} training or queued on it now: ${active.length === 1 ? 'it carries' : 'they carry'} on.`
       : null,
   };
 }

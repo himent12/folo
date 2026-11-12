@@ -7,7 +7,7 @@ import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import ClassStrip from '$lib/detect/ClassStrip';
-import { ago, num } from '$lib/format';
+import { ago, count, num } from '$lib/format';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
@@ -26,7 +26,6 @@ import Meta from '$lib/ui/Meta';
 import { rowNav } from '$lib/ui/rowNav';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import { imageCount } from './dataset/health';
-import { count } from './dataset/count';
 import { datasetChanges } from './datasets/changes';
 import { datasetProblem, PROBLEM_LABEL, type ListedDataset } from './datasets/problem';
 

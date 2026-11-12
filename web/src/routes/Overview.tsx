@@ -13,7 +13,7 @@ import { Resource } from '$lib/api/resource';
 import type { Dataset, Run } from '$lib/api/types';
 import RunSpark from '$lib/charts/RunSpark';
 import ClassStrip from '$lib/detect/ClassStrip';
-import { ago, bytes, compact, metric } from '$lib/format';
+import { ago, bytes, compact, count, metric } from '$lib/format';
 import { rankByContext, scoreContext, scoreTag } from '$lib/scoreSummary';
 import { balanced } from '$lib/ui/balancedGrid';
 import { failureCause } from '$lib/oom';
@@ -44,7 +44,6 @@ import { hasFeature } from '$lib/api/queue';
 import { LABEL_FEATURE } from '$lib/label';
 
 const total = (d: Dataset) => d.splits.train + d.splits.val + d.splits.test;
-const classCount = (n: number) => `${n} ${n === 1 ? 'class' : 'classes'}`;
 
 export default function Overview() {
   setCrumbs({ label: 'Overview' });
@@ -460,7 +459,7 @@ export default function Overview() {
                                     <span class="m-sub num">
                                       <Meta line>
                                         <Ident value={t().m.arch} />
-                                        <span>{classCount(t().m.classes.length)}</span>
+                                        <span>{count(t().m.classes.length, 'class')}</span>
                                         <span>{bytes(t().m.bytes, prefs.units)}</span>
                                       </Meta>
                                     </span>
@@ -486,7 +485,7 @@ export default function Overview() {
                     {unranked.get() ? (
                       // Imported and published weights (and any model whose split is unknown) are not ranked against these.
                       <p class="unranked" class:alone={!topModels.get().length}>
-                        {unranked.get()} {unranked.get() === 1 ? 'model' : 'models'} not ranked: {unrankedWhy.get()}.
+                        {count(unranked.get(), 'model')} not ranked: {unrankedWhy.get()}.
                       </p>
                     ) : null}
                   </>
@@ -548,7 +547,7 @@ export default function Overview() {
                               <span class="d-nums num">
                                 <Meta line>
                                   <span>{`${compact(total(d()))} ${total(d()) === 1 ? 'image' : 'images'}`}</span>
-                                  <span>{classCount(d().classes.length)}</span>
+                                  <span>{count(d().classes.length, 'class')}</span>
                                 </Meta>
                               </span>
                             </span>

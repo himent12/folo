@@ -6,6 +6,7 @@ import { computed, css } from 'fw';
 import DatasetImage from '$lib/detect/DatasetImage';
 import TileGrid, { dominantAspect, type Density } from '$lib/ui/TileGrid';
 import type { DatasetImage as ImageInfo } from '$lib/api/types';
+import { count } from '$lib/format';
 import type { ImagePager } from './pager';
 
 export interface ImageGridProps {
@@ -31,7 +32,7 @@ export default function ImageGrid(props: ImageGridProps) {
 
   function label(i: number) {
     const img = props.pager.get(i);
-    return img ? `${stem(img.file)}, ${img.split}, ${img.boxes.length} ${img.boxes.length === 1 ? 'box' : 'boxes'}` : 'Loading image';
+    return img ? `${stem(img.file)}, ${img.split}, ${count(img.boxes.length, 'box')}` : 'Loading image';
   }
 
   function open(i: number) {

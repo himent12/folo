@@ -5,7 +5,7 @@ import { bindable, css, For, Index } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset } from '$lib/api/types';
 import ClassStrip from '$lib/detect/ClassStrip';
-import { compact, num } from '$lib/format';
+import { compact, count, num } from '$lib/format';
 import Panel from '$lib/ui/Panel';
 import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
@@ -13,7 +13,6 @@ import Meta from '$lib/ui/Meta';
 import { balanced } from '$lib/ui/balancedGrid';
 import type { FormErrors } from './jump';
 
-const classes = (n: number) => `${n} ${n === 1 ? 'class' : 'classes'}`;
 
 export interface DatasetSectionProps {
   datasets: Resource<Dataset[]>;
@@ -47,7 +46,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
                 <Meta>
                   <span>{num(props.dataset.splits.train)} train</span>
                   <span>{num(props.dataset.splits.val)} val</span>
-                  <span>{classes(props.dataset.classes.length)}</span>
+                  <span>{count(props.dataset.classes.length, 'class')}</span>
                   <span>{props.dataset.format}</span>
                 </Meta>
               </p>
@@ -86,7 +85,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
                         <Meta>
                           <span>{compact(d().splits.train)} train</span>
                           <span>{compact(d().splits.val)} val</span>
-                          <span>{classes(d().classes.length)}</span>
+                          <span>{count(d().classes.length, 'class')}</span>
                         </Meta>
                       </span>
                     </label>

@@ -7,7 +7,7 @@ import { hub } from '$lib/api/index';
 import type { LiveLabelJob } from '$lib/api/liveLabel';
 import type { LabelImagesAdded, SkippedImage } from '$lib/api/types';
 import { UploadIncomplete, type UploadProgress } from '$lib/api/upload';
-import { num } from '$lib/format';
+import { count } from '$lib/format';
 
 /**
  * Why a folder added nothing, in one line from what the server skipped: its one reason (no images there, not an image
@@ -20,7 +20,7 @@ export function whyNothingAdded(skipped: readonly SkippedImage[]): string {
   if (skipped.length === 1) return `${cap(first.reason)}.`;
   const reasons = new Map<string, number>();
   for (const s of skipped) reasons.set(s.reason, (reasons.get(s.reason) ?? 0) + 1);
-  return `${[...reasons].map(([r, n]) => `${num(n)} ${n === 1 ? 'file' : 'files'}: ${r}`).join('; ')}.`;
+  return `${[...reasons].map(([r, n]) => `${count(n, 'file')}: ${r}`).join('; ')}.`;
 }
 
 export class Uploads {
