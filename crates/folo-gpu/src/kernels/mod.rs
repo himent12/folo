@@ -6,6 +6,7 @@
 //! (NCHW for images, `[out, in/groups, kh, kw]` for conv weights). Buffers may be larger than the operand
 //! (pool size classes); kernels never touch the slack.
 
+pub(crate) mod bounds;
 pub mod conv;
 pub mod coop;
 pub mod detect;
@@ -32,11 +33,16 @@ use crate::pipeline::{KernelDef, Spec};
 
 /// The kernel named `name` as compiled with `spec`, for [`crate::precompile`], which records kernels by name and
 /// compiles them again in a later process: every fixed definition (each module's `DEFS`), and the multi-tensor
-/// optimizer kernels built per layout. `None` for a name this build does not have (a list from another build).
+/// optimizer and Muon kernels built per layout. `None` for a name this build does not have (a list from another
+/// build). What a list may ask a found kernel for is [`bounds::precompilable`].
 pub(crate) fn find_def(name: &str, spec: &Spec) -> Option<&'static KernelDef> {
     static TABLE: OnceLock<HashMap<&'static str, &'static KernelDef>> = OnceLock::new();
     let table = TABLE.get_or_init(|| all_defs().map(|d| (d.name, d)).collect());
-    table.get(name).copied().or_else(|| optim::many_def_for(name, spec))
+    table
+        .get(name)
+        .copied()
+        .or_else(|| optim::many_def_for(name, spec))
+        .or_else(|| muon::many_def_for(name, spec))
 }
 
 /// Every fixed kernel definition.
@@ -49,6 +55,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         ew::DEFS,
         gemm::DEFS,
         layout::DEFS,
+        muon::DEFS,
         norm::DEFS,
         optim::DEFS,
         pool_grad::DEFS,

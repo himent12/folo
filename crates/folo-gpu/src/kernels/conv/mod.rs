@@ -46,6 +46,21 @@ pub(crate) use weight_grad::{weight_grad_dims, weight_grad_spec, wgrad_b_load, w
 pub(crate) static DEFS: &[&crate::pipeline::KernelDef] =
     &[&depthwise::DEPTHWISE, &depthwise::DEPTHWISE_GRAD, &input_grad::PHASE_PACK, &split::SPLIT_FINISH];
 
+/// Whether a kernel list may ask for the direct depthwise forward with `spec` (`kernels::bounds`).
+pub(crate) fn depthwise_fits(spec: &Spec) -> bool {
+    depthwise::forward_fits(spec)
+}
+
+/// Whether a kernel list may ask for the direct depthwise gradients with `spec` (`kernels::bounds`).
+pub(crate) fn depthwise_grad_fits(spec: &Spec) -> bool {
+    depthwise::grad_fits(spec, weight_grad::MAX_DEPTHWISE_TAPS)
+}
+
+/// Whether a kernel list may ask for the split-K finish with `spec` (`kernels::bounds`).
+pub(crate) fn split_fits(spec: &Spec) -> bool {
+    split::finish_fits(spec)
+}
+
 use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;

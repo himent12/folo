@@ -175,9 +175,12 @@ impl Spec {
     }
 
     /// The spec [`Spec::encode_fields`] wrote as `fields`; `None` for anything malformed (a constant name that is
-    /// not a WGSL identifier, a bad value). `intern` gives each name its `'static` form (or refuses it).
+    /// not a WGSL identifier, a bad value, an integer constant larger in magnitude than `max_int`). `intern` gives
+    /// each name its `'static` form (or refuses it).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn decode_fields<'a>(
         mut fields: impl Iterator<Item = &'a str>,
+        max_int: u32,
         mut intern: impl FnMut(&str) -> Option<&'static str>,
     ) -> Option<Self> {
         let (f16, coop) = match fields.next()? {
@@ -196,8 +199,8 @@ impl Spec {
             }
             let (t, x) = v.split_at_checked(1)?;
             let val = match t {
-                "u" => SpecVal::U32(x.parse().ok()?),
-                "i" => SpecVal::I32(x.parse().ok()?),
+                "u" => SpecVal::U32(x.parse().ok().filter(|&v: &u32| v <= max_int)?),
+                "i" => SpecVal::I32(x.parse().ok().filter(|&v: &i32| v.unsigned_abs() <= max_int)?),
                 "b" => SpecVal::Bool(match x {
                     "0" => false,
                     "1" => true,
@@ -212,6 +215,7 @@ impl Spec {
     }
 
     /// Whether the cooperative-matrix variant is requested.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn is_coop(&self) -> bool {
         self.coop
     }
@@ -248,7 +252,6 @@ pub(crate) struct KernelKey {
 }
 
 /// A compiled pipeline and its bind group layout.
-#[derive(Clone)]
 pub(crate) struct Kernel {
     pub name: &'static str,
     /// The specialisation constants, for profiles ([`Spec::describe`]).
@@ -256,6 +259,23 @@ pub(crate) struct Kernel {
     pub pipeline: wgpu::ComputePipeline,
     pub layout: wgpu::BindGroupLayout,
     pub storage: &'static [Access],
+    /// The context's recording generation this kernel was last offered to the kernel lists being recorded at
+    /// (`GpuContext::precompile`): a use at another generation records it in the newer recordings.
+    pub recorded: std::sync::atomic::AtomicU64,
+}
+
+impl Clone for Kernel {
+    fn clone(&self) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        Self {
+            name: self.name,
+            spec: self.spec.clone(),
+            pipeline: self.pipeline.clone(),
+            layout: self.layout.clone(),
+            storage: self.storage,
+            recorded: AtomicU64::new(self.recorded.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 /// Full WGSL for `def` specialised with `spec` (exposed for tests and debugging).
@@ -423,7 +443,14 @@ impl Kernel {
         if let (Some(t0), Some(m)) = (t0, module_time) {
             trace::add(t0, m);
         }
-        Ok(Self { name: def.name, spec: spec.describe(), pipeline, layout, storage: def.storage })
+        Ok(Self {
+            name: def.name,
+            spec: spec.describe(),
+            pipeline,
+            layout,
+            storage: def.storage,
+            recorded: Default::default(),
+        })
     }
 }
 

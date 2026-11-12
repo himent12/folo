@@ -12,16 +12,20 @@
 //! driver), the payload length and a checksum; a file
 //! whose header does not match, whose checksum is wrong or that is larger than [`MAX_FILE`] is ignored. The payload
 //! is text, one kernel per line (`name flags NAME=<type><value> ...`); a line this build cannot use (a malformed
-//! one, or a kernel this build does not have) is skipped. A list is only ever a hint: a missing, stale or corrupt
-//! one means compiling lazily, as without it.
+//! one, a kernel this build does not have, or constants no call site sets: `kernels::bounds`) is skipped. A list
+//! is only ever a hint: a missing, stale or corrupt one means compiling lazily, as without it.
 //!
 //! Writes are atomic (`pipeline_cache::write_atomic`). A folder holding more than [`MAX_LISTS`] lists loses the
 //! least recently written ones when a list is written.
+// Precompile and kernel lists are native only (no threads in the browser); in wasm32 builds most of this is unused.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports, unused_variables))]
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::kernels::bounds::{MAX_INT, precompilable};
 use crate::pipeline::{KernelKey, Spec};
 use crate::pipeline_cache::{checksum, decode_as, encode_as, remove_stale_tmp, write_atomic};
 
@@ -103,13 +107,15 @@ fn encode_line(key: &KernelKey, out: &mut String) {
     out.push('\n');
 }
 
-/// The kernel of one list line, when the line is well formed and this build has the kernel.
+/// The kernel of one list line, when the line is well formed, this build has the kernel and its constants are
+/// ones a call site sets (`kernels::bounds`: every integer at most [`MAX_INT`] in magnitude, and the kernel's own
+/// bounds where its source grows with a constant).
 fn decode_line(line: &str) -> Option<KernelKey> {
     let mut fields = line.split(' ');
     let name = fields.next()?;
-    let spec = Spec::decode_fields(fields, intern)?;
+    let spec = Spec::decode_fields(fields, MAX_INT, intern)?;
     let def = crate::kernels::find_def(name, &spec)?;
-    Some(KernelKey { name: def.name, spec })
+    precompilable(def.name, &spec).then_some(KernelKey { name: def.name, spec })
 }
 
 /// The list file's text for `keys` (at most [`MAX_ENTRIES`], and cut so the file stays under [`MAX_FILE`]).
@@ -189,10 +195,12 @@ fn prune(dir: &Path, keep: usize) {
     }
 }
 
-/// One recording in a context (a kind and shape): the kernels first used since [`crate::GpuContext::precompile`]
-/// started it, in order, and the set its file holds. It is written when it holds a kernel the file does not have (so a run that stopped
-/// early, using fewer kernels than the list, keeps the longer list), by a saver thread once compilation has been
-/// quiet for a second, by [`crate::save_pipeline_caches`], and when the context is dropped.
+/// One recording in a context (a kind and shape): the kernels used since [`crate::GpuContext::precompile`]
+/// started it, in order of their first use in it (also kernels the context had compiled before), and the set its
+/// file holds. It is written when it holds a kernel the file does not have (so a run that stopped early, using
+/// fewer kernels than the list, keeps the longer list): by the process's one saver thread once no kernel was
+/// added for a second (so 1-2 s after the last one), by [`crate::save_pipeline_caches`], and when the context
+/// drops it (with the context, or as one of more than `MAX_RECORDINGS` in a context).
 pub(crate) struct Recording {
     pub tag: String,
     path: PathBuf,
@@ -200,6 +208,8 @@ pub(crate) struct Recording {
     state: Mutex<RecState>,
     /// Serialises writes (the saver thread, [`save_all`] and drop).
     writing: Mutex<()>,
+    /// `RecState::changes` at the saver's last look.
+    looked: AtomicU64,
 }
 
 #[derive(Default)]
@@ -213,8 +223,21 @@ struct RecState {
     changes: u64,
 }
 
-/// Every live recording, for [`save_all`].
-static OPEN: Mutex<Vec<Weak<Recording>>> = Mutex::new(Vec::new());
+/// Every live recording of the process, and whether the saver thread runs.
+struct Open {
+    recs: Vec<Weak<Recording>>,
+    saver: bool,
+}
+
+static OPEN: Mutex<Open> = Mutex::new(Open { recs: Vec::new(), saver: false });
+
+impl Open {
+    /// The live recordings (the dead ones are forgotten).
+    fn live(&mut self) -> Vec<Arc<Recording>> {
+        self.recs.retain(|w| w.strong_count() > 0);
+        self.recs.iter().filter_map(Weak::upgrade).collect()
+    }
+}
 
 impl Recording {
     /// A recording for `tag` written to `path`, starting from the kernels `on_disk` that file holds.
@@ -225,22 +248,25 @@ impl Recording {
             identity,
             state: Mutex::new(RecState { on_disk: on_disk.iter().cloned().collect(), ..RecState::default() }),
             writing: Mutex::new(()),
+            looked: AtomicU64::new(0),
         });
         let mut open = OPEN.lock().unwrap_or_else(|p| p.into_inner());
-        open.retain(|w| w.strong_count() > 0);
-        open.push(Arc::downgrade(&rec));
-        drop(open);
+        open.recs.retain(|w| w.strong_count() > 0);
+        open.recs.push(Arc::downgrade(&rec));
         #[cfg(not(target_arch = "wasm32"))]
-        spawn_saver(Arc::downgrade(&rec));
+        if !open.saver {
+            open.saver = spawn_saver();
+        }
         rec
     }
 
-    /// Notes the first use of `key` in the context.
+    /// Notes a use of `key`: the first one in this recording adds it.
     pub fn used(&self, key: &KernelKey) {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if s.used.len() >= MAX_ENTRIES || !s.seen.insert(key.clone()) {
+        if s.used.len() >= MAX_ENTRIES || s.seen.contains(key) {
             return;
         }
+        s.seen.insert(key.clone());
         s.used.push(key.clone());
         if !s.on_disk.contains(key) {
             s.new += 1;
@@ -248,8 +274,13 @@ impl Recording {
         s.changes += 1;
     }
 
-    fn changes(&self) -> u64 {
-        self.state.lock().unwrap_or_else(|p| p.into_inner()).changes
+    /// For the saver: writes the list when no kernel was added since its last look.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn look(&self) {
+        let n = self.state.lock().unwrap_or_else(|p| p.into_inner()).changes;
+        if self.looked.swap(n, Ordering::Relaxed) == n {
+            self.save();
+        }
     }
 
     /// Writes the list when it holds a kernel the file does not have. Errors are ignored (the list is a hint).
@@ -274,6 +305,12 @@ impl Recording {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The kernels recorded so far, in order (tests).
+    #[cfg(test)]
+    pub fn keys(&self) -> Vec<KernelKey> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).used.clone()
+    }
 }
 
 impl Drop for Recording {
@@ -285,31 +322,33 @@ impl Drop for Recording {
 /// Writes every live recording that has kernels its file does not have (`folo` calls this through
 /// [`crate::save_pipeline_caches`] when a command ends).
 pub(crate) fn save_all() {
-    let open: Vec<Arc<Recording>> = {
-        let mut v = OPEN.lock().unwrap_or_else(|p| p.into_inner());
-        v.retain(|w| w.strong_count() > 0);
-        v.iter().filter_map(Weak::upgrade).collect()
-    };
+    let open = OPEN.lock().unwrap_or_else(|p| p.into_inner()).live();
     for r in open {
         r.save();
     }
 }
 
-/// Writes the recording once no kernel was added for a second; ends when the recording is dropped.
+/// Starts the process's saver thread: once a second it writes each live recording to which no kernel was added
+/// since the second before; it ends when no recording is left (the next [`Recording::open`] starts another).
+/// Whether it started.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_saver(rec: Weak<Recording>) {
-    let _ = std::thread::Builder::new().name("folo-gpu-kernel-list".into()).spawn(move || {
-        let mut seen = 0;
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-            let Some(r) = rec.upgrade() else { return };
-            let n = r.changes();
-            if n == seen {
-                r.save();
+fn spawn_saver() -> bool {
+    let run = || loop {
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let live = {
+            let mut open = OPEN.lock().unwrap_or_else(|p| p.into_inner());
+            let live = open.live();
+            if live.is_empty() {
+                open.saver = false;
+                return;
             }
-            seen = n;
+            live
+        };
+        for r in &live {
+            r.look();
         }
-    });
+    };
+    std::thread::Builder::new().name("folo-gpu-kernel-lists".into()).spawn(run).is_ok()
 }
 
 #[cfg(test)]
@@ -348,14 +387,58 @@ mod tests {
         assert_eq!(names, ["gemm BM=64", "unary OP=-2", "optim_many MODE=1 J=3 NS=2"]);
     }
 
+    /// A valid list may still name constants no call site sets: every integer is bounded, and every kernel whose
+    /// source grows with a constant is bounded to what its call sites set, before anything is generated.
+    #[test]
+    fn constants_no_call_site_sets_are_skipped() {
+        let text = "conv_split_finish - S=u4294967295\nconv_split_finish - S=u9\nconv_split_finish - S=u4\n\
+                    unary - OP=u65537\nunary - OP=i-65537\nunary - OP=u65536\n\
+                    gemm - BM=u4294967295 BN=u64\ngemm_cat - CAT=u100000\ngemm_cat - CAT=u3\n\
+                    coop_gemm hc BK=u65536\nconv2d_depthwise - KH=u65536 KW=u65536\n\
+                    conv2d_depthwise - KH=u5 KW=u5 SW=u1 DH=u1 DW=u1\nconv2d_depthwise_grad - KH=u9 KW=u9 MODE=u1\n\
+                    ew1 - KIND=u1 RANK=u60000\nmove - EB=u0 MODE=u0 RANK=u2\nscatter - EB=u4 RANK=u8\n\
+                    tal_topk - K=u65536 WG=u128\ndet_box - R=u16 K=u10 MODE=u0\n\
+                    muon_gather - J=u4294967295 NESTEROV=b1\nmuon_gather - J=u17 NESTEROV=b1\n\
+                    muon_gather - J=u3 NESTEROV=b1\nmuon_apply - J=u16\nmuon_gemm - MODE=u7\nmuon_norm -\n\
+                    optim_many - J=u4294967295 NS=u1\n";
+        let file = encode_as(MAGIC, FORMAT, text.as_bytes(), "id");
+        let got = decode(&file, "id").unwrap();
+        let names: Vec<String> = got.iter().map(|k| format!("{} {}", k.name, k.spec.describe())).collect();
+        assert_eq!(
+            names,
+            [
+                "conv_split_finish S=4",
+                "unary OP=65536",
+                "gemm_cat CAT=3",
+                "conv2d_depthwise KH=5 KW=5 SW=1 DH=1 DW=1",
+                "scatter EB=4 RANK=8",
+                "det_box R=16 K=10 MODE=0",
+                "muon_gather J=3 NESTEROV=1",
+                "muon_apply J=16",
+                "muon_norm ",
+            ]
+        );
+    }
+
     #[test]
     fn every_kernel_name_is_unique() {
         let mut names = HashSet::new();
         for d in crate::kernels::all_defs() {
             assert!(names.insert(d.name), "two kernels named {}", d.name);
         }
-        for many in ["optim_many", "unscale_check_many", "norm_partials_many", "scale_many"] {
+        for many in [
+            "optim_many",
+            "unscale_check_many",
+            "norm_partials_many",
+            "scale_many",
+            "muon_gather",
+            "muon_apply",
+        ] {
             assert!(!names.contains(many), "{many} is built per layout");
+        }
+        for (name, n) in [("muon_gather", 2 * 3 + 3), ("muon_apply", 3 + 2)] {
+            let def = crate::kernels::find_def(name, &Spec::new().u32("J", 3)).unwrap();
+            assert_eq!((def.name, def.storage.len()), (name, n), "{name}: three matrices");
         }
     }
 

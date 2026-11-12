@@ -117,8 +117,13 @@ impl GpuContext {
     /// Compiles (or fetches from the cache) the pipeline for `def` specialised with `spec`.
     pub(crate) fn kernel(&self, def: &'static KernelDef, spec: Spec) -> Result<Arc<Kernel>> {
         let key = KernelKey { name: def.name, spec };
-        if let Some(k) = self.inner.kernels.lock().expect("kernel lock").get(&key) {
-            return Ok(k.clone());
+        let hit = self.inner.kernels.lock().expect("kernel lock").get(&key).cloned();
+        if let Some(k) = hit {
+            // A recording opened since this kernel's last use: it joins the recordings (`GpuContext::precompile`).
+            if !self.recorded(&k) {
+                self.record_use(&key, &k);
+            }
+            return Ok(k);
         }
         // Precompiled, or compiled here outside the lock (pipeline creation can take tens of milliseconds).
         self.first_use(def, key)

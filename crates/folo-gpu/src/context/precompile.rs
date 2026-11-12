@@ -3,22 +3,33 @@
 //! goes on (opening a dataset, building the model, filling the loader). A thread that needs a kernel takes it
 //! ready, waits for the worker compiling it, or compiles it itself when no worker has started it yet, so a
 //! missing, stale or corrupt list only ever means compiling lazily, as without it.
+// Precompile and kernel lists are native only (no threads in the browser); in wasm32 builds most of this is unused.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports, unused_variables))]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 
 use super::{GpuContext, Inner};
 use crate::error::Result;
 use crate::kernel_list::{self, Recording};
+use crate::kernels::bounds::precompilable;
 use crate::pipeline::{Kernel, KernelDef, KernelKey};
+
+/// Recordings a context keeps (the most recently asked for; an older one is written and dropped). A training run
+/// has one; `folo serve` one per model, precision and class count.
+const MAX_RECORDINGS: usize = 16;
 
 /// A context's precompile state: the kernels workers were asked to compile that no thread has taken yet, and the
 /// recordings of the tags [`GpuContext::precompile`] started.
 #[derive(Default)]
 pub(crate) struct Precompile {
     slots: Mutex<HashMap<KernelKey, Arc<Slot>>>,
+    /// The live recordings, least recently asked for first.
     recordings: Mutex<Vec<Arc<Recording>>>,
+    /// Bumped (under the `recordings` lock) whenever a recording opens: a kernel whose `Kernel::recorded` is not
+    /// this was not yet offered to every live recording, so its next use is ([`GpuContext::record_use`]).
+    generation: AtomicU64,
     /// First uses served by a worker's pipeline.
     taken: AtomicU64,
 }
@@ -27,7 +38,11 @@ pub(crate) struct Precompile {
 #[derive(Default)]
 struct Slot {
     state: Mutex<SlotState>,
+    /// Signalled on every change of `state` that ends a wait (to `Claimed` or `Done`).
     done: Condvar,
+    /// Threads waiting on `done` (tests).
+    #[cfg(test)]
+    waiters: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -69,32 +84,64 @@ impl Slot {
             match &*s {
                 SlotState::Queued => {
                     *s = SlotState::Claimed;
+                    drop(s);
+                    // Ends a `wait_settled` too: no worker will touch the slot now.
+                    self.done.notify_all();
                     return (None, false);
                 }
                 SlotState::Running => {
                     waited = true;
-                    s = self.done.wait(s).unwrap_or_else(|p| p.into_inner());
+                    s = self.wait(s);
                 }
                 SlotState::Claimed => return (None, waited),
                 SlotState::Done(k) => return (k.clone(), waited),
             }
         }
     }
+
+    /// Waits until no worker will touch the slot any more: it is done, or a requesting thread claimed it.
+    fn wait_settled(&self) {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        while matches!(*s, SlotState::Queued | SlotState::Running) {
+            s = self.wait(s);
+        }
+    }
+
+    fn wait<'a>(&self, s: MutexGuard<'a, SlotState>) -> MutexGuard<'a, SlotState> {
+        #[cfg(test)]
+        self.waiters.fetch_add(1, Ordering::SeqCst);
+        let s = self.done.wait(s).unwrap_or_else(|p| p.into_inner());
+        #[cfg(test)]
+        self.waiters.fetch_sub(1, Ordering::SeqCst);
+        s
+    }
+
+    /// Whether a worker finished it.
+    fn is_done(&self) -> bool {
+        matches!(*self.state.lock().unwrap_or_else(|p| p.into_inner()), SlotState::Done(_))
+    }
 }
 
 impl GpuContext {
-    /// Starts recording the kernels this context compiles from now on as a run of `kind` at `shape`, and compiles
-    /// on worker threads (one per core) the kernels an earlier process recorded for the same kind and shape on this
+    /// Starts recording the kernels this context uses from now on as a run of `kind` at `shape`, and compiles on
+    /// worker threads (one per core) the kernels an earlier process recorded for the same kind and shape on this
     /// adapter, in the order that process first used them, so the first steps of a run find their pipelines ready.
     /// With no list for `shape`, the most recently written list of `kind` is compiled instead (most kernels are
     /// shared). `kind` names what decides most kernels (`folo train` passes the command, model, precision, head,
-    /// optimizer and class count), `shape` what decides the rest (image size and batch). Returns how many kernels
-    /// went to the workers.
+    /// optimizer and class count), `shape` what decides the rest (image size and batch); `folo serve` passes an
+    /// empty shape, so one list per kind serves every image size, batch and head it is asked for. Returns how many
+    /// kernels went to the workers.
+    ///
+    /// A recording holds every kernel the context uses while it is open, in order of first use in it, also
+    /// kernels the context compiled before it opened (a dispatch pays one relaxed load and compare for that). A
+    /// context keeps the 16 most recently asked for recordings; an older one is written and dropped (asking for it
+    /// again starts it again from its file).
     ///
     /// Needs the pipeline cache folder ([`crate::set_pipeline_cache_dir`]): without one nothing is recorded or
     /// compiled ahead. A list is a hint: a kernel no worker has started when it is needed is compiled by the
     /// thread that needs it, and one a worker failed to build is compiled again there (which reports the error).
-    /// A second call with the same kind and shape does nothing. Not available in the browser (no threads).
+    /// A list entry whose constants no call site sets is skipped (`kernels::bounds`). A second call with the same
+    /// kind and shape (while its recording is kept) does nothing. Not available in the browser (no threads).
     pub fn precompile(&self, kind: &str, shape: &str) -> usize {
         #[cfg(target_arch = "wasm32")]
         {
@@ -113,13 +160,20 @@ impl GpuContext {
         let path = kernel_list::path_for(dir, &info, kind, shape);
         let identity = kernel_list::identity_for(&info, kind);
         let p = &self.inner.precompile;
+        // Recordings beyond `MAX_RECORDINGS`: dropped, and so written, once the lock is released.
+        let evicted: Vec<Arc<Recording>>;
         let list = {
             let mut recs = p.recordings.lock().unwrap_or_else(|e| e.into_inner());
-            if recs.iter().any(|r| r.tag == tag) {
+            if let Some(i) = recs.iter().position(|r| r.tag == tag) {
+                let r = recs.remove(i);
+                recs.push(r);
                 return 0;
             }
             let own = kernel_list::read(&path, &identity);
             recs.push(Recording::open(&tag, path.clone(), identity.clone(), &own));
+            p.generation.fetch_add(1, Ordering::Relaxed);
+            let over = recs.len().saturating_sub(MAX_RECORDINGS);
+            evicted = recs.drain(..over).collect();
             if own.is_empty() {
                 kernel_list::neighbours(dir, &info, kind, &path)
                     .iter()
@@ -139,6 +193,9 @@ impl GpuContext {
                     continue;
                 }
                 let Some(def) = crate::kernels::find_def(k.name, &k.spec) else { continue };
+                if !precompilable(def.name, &k.spec) {
+                    continue;
+                }
                 let slot = Arc::new(Slot::default());
                 slots.insert(k.clone(), slot.clone());
                 jobs.push((k, def, slot));
@@ -149,6 +206,10 @@ impl GpuContext {
         if n > 0 {
             spawn_workers(Arc::downgrade(&self.inner), Arc::new(jobs));
         }
+        // Written here rather than by whichever thread drops the last reference (the saver may hold one).
+        for r in evicted {
+            r.save();
+        }
         n
     }
 
@@ -158,7 +219,7 @@ impl GpuContext {
     }
 
     /// The first use of `key` in this context (its pipeline was not in the context's map): the precompiled
-    /// pipeline, else one compiled here; then it joins the map and every recording.
+    /// pipeline, else one compiled here; then it joins the map and the live recordings.
     pub(super) fn first_use(&self, def: &'static KernelDef, key: KernelKey) -> Result<Arc<Kernel>> {
         #[cfg(not(target_arch = "wasm32"))]
         let t0 = crate::pipeline::trace::start();
@@ -185,20 +246,10 @@ impl GpuContext {
                 k
             }
         };
-        let (kernel, new) = {
-            let mut map = self.inner.kernels.lock().expect("kernel lock");
-            match map.get(&key) {
-                Some(k) => (k.clone(), false),
-                None => {
-                    map.insert(key.clone(), kernel.clone());
-                    (kernel, true)
-                }
-            }
-        };
-        if new {
-            for r in self.inner.precompile.recordings.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-                r.used(&key);
-            }
+        let kernel =
+            self.inner.kernels.lock().expect("kernel lock").entry(key.clone()).or_insert(kernel).clone();
+        if !self.recorded(&kernel) {
+            self.record_use(&key, &kernel);
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(t0) = t0 {
@@ -211,6 +262,48 @@ impl GpuContext {
             crate::pipeline::trace::first_use(t0, how);
         }
         Ok(kernel)
+    }
+
+    /// Whether `kernel` was offered to the recordings at the current generation (the dispatch fast path: two
+    /// relaxed loads).
+    #[inline]
+    pub(super) fn recorded(&self, kernel: &Kernel) -> bool {
+        kernel.recorded.load(Ordering::Relaxed) == self.inner.precompile.generation.load(Ordering::Relaxed)
+    }
+
+    /// A use of `kernel` (as `key`) at another recording generation than the one it was last offered to the
+    /// recordings at: every live recording adds it (one that holds it already skips it), and the kernel takes the
+    /// generation, so its next uses stay on the fast path until another recording opens.
+    pub(super) fn record_use(&self, key: &KernelKey, kernel: &Kernel) {
+        let p = &self.inner.precompile;
+        let recs = p.recordings.lock().unwrap_or_else(|e| e.into_inner());
+        for r in recs.iter() {
+            r.used(key);
+        }
+        kernel.recorded.store(p.generation.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    /// Drops the pipelines precompile workers finished that no thread has taken (a list of another shape names
+    /// kernels this run never uses); kernels still queued or compiling stay, and whoever needs one later
+    /// compiles it ([`GpuContext::release_memory`]).
+    pub(super) fn drop_finished_precompiles(&self) {
+        self.inner.precompile.slots.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, s| !s.is_done());
+    }
+
+    /// The kernels the live recording for `kind` and `shape` holds, by name, in order (tests).
+    #[cfg(test)]
+    pub(crate) fn recorded_kernels(&self, kind: &str, shape: &str) -> Vec<&'static str> {
+        let tag = format!("{kind} | {shape}");
+        let recs = self.inner.precompile.recordings.lock().unwrap_or_else(|e| e.into_inner());
+        recs.iter()
+            .find(|r| r.tag == tag)
+            .map_or_else(Vec::new, |r| r.keys().iter().map(|k| k.name).collect())
+    }
+
+    /// Precompiled pipelines no thread has taken yet, finished or not (tests).
+    #[cfg(test)]
+    pub(crate) fn precompile_slots(&self) -> usize {
+        self.inner.precompile.slots.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// The list file of the recording for `kind` and `shape`, once [`GpuContext::precompile`] started one (tests).
@@ -227,10 +320,7 @@ impl GpuContext {
         let slots: Vec<Arc<Slot>> =
             self.inner.precompile.slots.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
         for slot in slots {
-            let mut s = slot.state.lock().unwrap_or_else(|e| e.into_inner());
-            while matches!(*s, SlotState::Queued | SlotState::Running) {
-                s = slot.done.wait(s).unwrap_or_else(|e| e.into_inner());
-            }
+            slot.wait_settled();
         }
     }
 
@@ -250,15 +340,17 @@ impl GpuContext {
     }
 
     /// The names of kernels first used in this context that a list could not name again (no entry in
-    /// `kernels::find_def`, or another definition under that name), for tests that every kernel can be precompiled.
+    /// `kernels::find_def`, another definition under that name, or constants outside `kernels::bounds`), for tests
+    /// that every kernel can be precompiled.
     #[doc(hidden)]
     pub fn kernels_without_registry(&self) -> Vec<String> {
         let map = self.inner.kernels.lock().expect("kernel lock");
         let mut out: Vec<String> = map
             .iter()
             .filter(|(k, kernel)| {
-                crate::kernels::find_def(k.name, &k.spec)
-                    .is_none_or(|d| d.name != k.name || d.storage != kernel.storage)
+                crate::kernels::find_def(k.name, &k.spec).is_none_or(|d| {
+                    d.name != k.name || d.storage != kernel.storage || !precompilable(d.name, &k.spec)
+                })
             })
             .map(|(k, _)| k.name.to_string())
             .collect();
@@ -321,5 +413,58 @@ fn spawn_workers(inner: Weak<Inner>, jobs: Arc<Vec<(KernelKey, &'static KernelDe
             }
             return;
         }
+    }
+}
+
+/// The slot hand-off between a worker, the thread that needs the kernel and `precompile_wait`, step by step: each
+/// test parks a thread in a wait, then makes the transition that must wake it.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Runs `f` on a new thread once it is parked on `slot`'s condition variable, then `wake`, and returns what
+    /// `f` returned (failing instead of hanging when `wake` does not wake it).
+    fn parked<T: Send + 'static>(
+        slot: &Arc<Slot>,
+        f: impl FnOnce(&Slot) -> T + Send + 'static,
+        wake: impl FnOnce(&Slot),
+    ) -> T {
+        let (tx, rx) = mpsc::channel();
+        let s = slot.clone();
+        let t = std::thread::spawn(move || tx.send(f(&s)).unwrap());
+        while slot.waiters.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        wake(slot);
+        let got = rx.recv_timeout(Duration::from_secs(30)).expect("the waiting thread was woken");
+        t.join().unwrap();
+        got
+    }
+
+    #[test]
+    fn a_taker_waits_for_the_running_worker() {
+        let slot = Arc::new(Slot::default());
+        assert!(slot.start(), "a worker starts a queued slot");
+        let (k, waited) = parked(&slot, Slot::take, |s| s.finish(None));
+        assert!(k.is_none() && waited, "the worker's (failed) result, after waiting");
+        assert!(!slot.start(), "a finished slot does not start again");
+    }
+
+    #[test]
+    fn a_claim_wakes_precompile_wait() {
+        let slot = Arc::new(Slot::default());
+        parked(&slot, Slot::wait_settled, |s| assert!(!s.take().1, "claimed without waiting"));
+        assert!(!slot.start(), "no worker compiles a claimed slot");
+        assert!(matches!(slot.take(), (None, false)), "a claimed slot stays the claimer's");
+    }
+
+    #[test]
+    fn precompile_wait_waits_for_the_worker() {
+        let slot = Arc::new(Slot::default());
+        assert!(slot.start());
+        parked(&slot, Slot::wait_settled, |s| s.finish(None));
+        assert!(slot.is_done());
     }
 }

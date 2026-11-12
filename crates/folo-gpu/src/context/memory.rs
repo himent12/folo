@@ -44,8 +44,11 @@ impl GpuContext {
     /// For a long-lived process between jobs (`folo serve` after a training run, or once inference has been idle):
     /// the pool otherwise keeps up to the job's high-water mark of buffers, gigabytes after a training run, which
     /// other processes on the same GPU then have to page around. Buffers still in use stay; a dropped buffer still
-    /// read by encoded work is freed only once that work is done (wgpu keeps it alive until then).
+    /// read by encoded work is freed only once that work is done (wgpu keeps it alive until then). Pipelines
+    /// precompile workers finished that no thread has taken ([`GpuContext::precompile`]: a list of another shape
+    /// names kernels this process never used) are dropped too; ones still queued or compiling stay.
     pub fn release_memory(&self) -> Result<u64> {
+        self.drop_finished_precompiles();
         let released = {
             // The batch lock first (the order `alloc` inside an encode takes them in), so nothing encodes between
             // the trim and the submission below.

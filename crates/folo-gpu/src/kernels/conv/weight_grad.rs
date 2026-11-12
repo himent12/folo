@@ -59,7 +59,7 @@ thread_local! {
 }
 
 /// Largest `KH · KW` the direct depthwise weight-gradient kernel unrolls; bigger kernels use the GEMM path.
-const MAX_DEPTHWISE_TAPS: usize = 49;
+pub(super) const MAX_DEPTHWISE_TAPS: usize = 49;
 /// Upper bound for split-K partial slabs, in f32 elements (64 MiB).
 const MAX_PARTIAL_ELEMS: usize = 16 << 20;
 

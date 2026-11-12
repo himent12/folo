@@ -181,6 +181,36 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
     s
 }
 
+/// Largest `KH · KW` of a [`DEPTHWISE`] kernel a kernel list may ask for (`kernels::bounds`): the forward unrolls
+/// every tap, so its source grows with the kernel. 32×32 covers the largest depthwise kernels in use (31×31);
+/// a larger one still compiles when a run asks for it.
+const MAX_LISTED_TAPS: u64 = 1024;
+/// Largest number of unrolled tap statements ([`gen_depthwise`]: `KH · (span + DW_VX · KW)`) a list may ask for.
+const MAX_LISTED_LINES: u64 = 1 << 16;
+
+/// Whether a kernel list may ask for [`DEPTHWISE`] with `spec` (`kernels::bounds`): non-zero sizes, at most
+/// [`MAX_LISTED_TAPS`] taps and [`MAX_LISTED_LINES`] unrolled statements.
+pub(super) fn forward_fits(spec: &Spec) -> bool {
+    let g = |name: &str| u64::from(spec.get_u32(name, 1));
+    let (kh, kw, sw, dh, dw) = (g("KH"), g("KW"), g("SW"), g("DH"), g("DW"));
+    if [kh, kw, sw, dh, dw].contains(&0) {
+        return false;
+    }
+    let span = (u64::from(DW_VX) - 1) * sw + (kw - 1) * dw + 1;
+    kh * kw <= MAX_LISTED_TAPS && kh * (span + u64::from(DW_VX) * kw) <= MAX_LISTED_LINES
+}
+
+/// Whether a kernel list may ask for [`DEPTHWISE_GRAD`] with `spec`: `MODE` 0 (loops, any kernel) or `MODE` 1
+/// (every tap unrolled) with the taps its call site allows (`max_taps`).
+pub(super) fn grad_fits(spec: &Spec, max_taps: usize) -> bool {
+    let taps = spec.get_u32("KH", 1) as usize * spec.get_u32("KW", 1) as usize;
+    match spec.get_u32("MODE", 0) {
+        0 => true,
+        1 => (1..=max_taps).contains(&taps),
+        _ => false,
+    }
+}
+
 pub(super) static DEPTHWISE_GRAD: KernelDef = KernelDef {
     name: "conv2d_depthwise_grad",
     storage: &[Access::Read, Access::Read, Access::ReadWrite],

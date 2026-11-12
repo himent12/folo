@@ -216,19 +216,28 @@ epoch compiled for 30 s, one kernel after the other.
 
 ### What changed
 - folo-gpu `kernel_list.rs` + `context/precompile.rs`: `GpuContext::precompile(kind, shape)` records the kernels a
-  context first uses (name + spec, in order) beside the pipeline cache and, at the next call with the same kind and
-  shape, compiles that list on one worker thread per core. A thread that needs a kernel takes it ready, waits for
+  context uses while the recording is open (name + spec, in order of first use; also kernels the context compiled
+  before, through a per-context recording generation checked on the dispatch path) beside the pipeline cache and,
+  at the next call with the same kind and shape, compiles that list on one worker thread per core. A thread that needs a kernel takes it ready, waits for
   the worker compiling it, or compiles it itself if no worker started it. No list for the shape: the newest list
   of the same kind (most kernels are shared). Same header and checksum as the pipeline cache, but the identity
-  leaves out the driver (a list names kernels, not compiled code). Bounds: 4096 kernels, 1 MB, 64 lists per folder.
-  Written only when the run used a kernel the file lacks (a run stopped early keeps the longer list).
-- `kernels::find_def`: every kernel module lists its definitions (`DEFS`), plus the per-layout optimizer kernels, so
-  a recorded name finds its definition again. `gpu_train` / `gpu_amp` assert that every kernel a GPU run and its
-  validation used is in that registry (`GpuContext::kernels_without_registry`).
+  leaves out the driver (a list names kernels, not compiled code). Bounds: 4096 kernels, 1 MB, 64 lists per folder,
+  16 recordings per context (`folo serve`); every integer constant at most 65536 in magnitude, and per kernel the
+  constants its call sites set wherever a generator's output grows with one (`kernels::bounds`: a valid list naming
+  `conv_split_finish` with `S = 4294967295` would otherwise allocate without bound). Written only when the run used a
+  kernel the file lacks (a run stopped early keeps the longer list), by one saver thread per process 1-2 s after the
+  last new kernel. `release_memory` drops finished pipelines no thread took.
+- `kernels::find_def`: every kernel module lists its definitions (`DEFS`), plus the per-layout optimizer and Muon
+  kernels, so a recorded name finds its definition again. `gpu_train` / `gpu_amp` (AdamW) and folo-nn's
+  `training_steps_on_gpu_match_cpu` (SGD, AdamW, MuSGD) assert that every kernel the GPU steps used is in that
+  registry and within its bounds (`GpuContext::kernels_without_registry`).
 - Callers: the trainer (`train <arch> <f32|amp> head <head> <optimizer> nc <n>`, shape `imgsz <n> batch <n>`: tile
   sizes and bounds checks follow the shapes, see a list's lines), `folo predict` / `folo val` (`<command> <arch>
-  <precision> nc <n>` with their imgsz / batch / head options) and `folo serve`'s model loads.
+  <precision> nc <n>` with their imgsz / batch / head options) and `folo serve`'s model loads (an empty shape: one
+  list per model kind for all image sizes, batches and heads).
 - `FOLO_GPU_TRACE_COMPILE=1` prints a second line: the time the threads that needed kernels spent getting them.
+- The bench scripts (`warm_start.sh`, `cold_start.sh`) keep every run's output in `$OUT` and print a run that failed,
+  timed out or lacks its epoch record or compile line as FAILED rather than as a sample.
 
 ### Results
 Warm start, one row-10 epoch (`OUT=D:/folo-data/runs-hill2/trainer2/ws-f32 bench/trainer/warm_start.sh train

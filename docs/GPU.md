@@ -181,22 +181,42 @@ file. Effect on the dev machine: docs/hill/r2-trainer.md.
 **Parallel precompile.** Neither cache removes the compile from the first step: the step still meets its ~200
 kernels one at a time and compiles each (WGSL parsing in naga, about 1 s in all, which no cache stores, plus the
 driver's compile when its cache is cold: 30 s for a first AMP run). `GpuContext::precompile(kind, shape)` records,
-in the same folder, the kernels a context first uses from then on (name and spec, in order of first use) as
+in the same folder, the kernels a context uses from then on (name and spec, in order of first use) as
 `kernels-<backend>-<vendor>-<device>-<kind hash>-<shape hash>.list` (`kernel_list.rs`), and at the next call with the
 same kind and shape compiles that list on worker threads, one per core, while the caller goes on. A thread that
 needs a kernel takes it ready, waits for the worker compiling it, or compiles it itself when no worker has started
 it, so a list is only ever a hint. `folo train` (and the server's runs) pass `train <arch> <f32|amp> head <head>
 <optimizer> nc <classes>` and `imgsz <n> batch <n>` (tile sizes and bounds checks follow the shapes); `folo
-predict`, `folo val` and `folo serve` pass `<command> <arch> <precision> nc <classes>` and the options that change
-their kernels. With no list for its shape, a run compiles the most recently written list of its kind (most kernels
-are shared). A list has the pipeline cache's header, but its identity is folo-gpu's version, the adapter and the kind,
-not the driver (a list names kernels, not compiled code, and a driver update is when it helps most); a file whose
-header or checksum is wrong, or over 1 MB, is ignored; a line naming a kernel this build does not have, or that is
-malformed, is skipped (a kernel is found by name in `kernels::find_def`, every module's `DEFS`); a kernel that
-fails or panics on a worker is compiled again by the thread that needs it, which reports the error. A list holds
-at most 4096 kernels, is written (atomically, by a saver thread a second after the last new kernel, by
-`save_pipeline_caches()` and when the context is dropped) only when the run used a kernel the file does not have, so a
-run stopped early keeps the longer list, and a folder keeps the 64 most recently written lists. Native only.
+predict` and `folo val` pass `<command> <arch> <precision> nc <classes>` and the options that change their kernels
+(image size, batch, head). `folo serve` passes `serve <arch> <precision> nc <classes>` and an empty shape: one list
+per model kind serves every image size, batch and head its requests use, and grows with them. With no list for its
+shape, a run compiles the most recently written valid list of its kind (most kernels are shared).
+
+A recording holds every kernel the context uses while it is open, also ones the context compiled before it opened
+(one process training two shapes records the shared kernels in both lists): opening a recording bumps a
+per-context generation, and a dispatch whose kernel was last offered to the recordings at another generation (one
+relaxed load and compare on the dispatch path) offers it to every live recording, which skips kernels it holds. A
+context keeps the 16 most recently asked for recordings; an older one is written and dropped (asking for it again
+starts it again from its file), so a long-lived `folo serve` holds at most 16. One saver thread per process writes
+a recording to which no kernel was added for a second, so 1-2 s after its last new kernel (the thread ends when no
+recording is left); `save_pipeline_caches()` and dropping the context write them too. A list is written only when
+the run used a kernel the file does not have, so a run stopped early keeps the longer list; it holds at most 4096
+kernels, and a folder keeps the 64 most recently written lists.
+
+A list has the pipeline cache's header, but its identity is folo-gpu's version, the adapter and the kind, not the
+driver (a list names kernels, not compiled code, and a driver update is when it helps most); a file whose header or
+checksum is wrong, or over 1 MB, is ignored. A checksum-valid list can still name what no call site asks for, so a
+line is skipped when it is malformed, names a kernel this build does not have (a kernel is found by name in
+`kernels::find_def`: every module's `DEFS`, and the optimizer and Muon kernels built per layout), has an integer
+constant larger in magnitude than 65536 (call sites stay far below: the largest are spatial sizes, at most the image
+size), or has constants outside the kernel's own bound (`kernels::bounds::precompilable`) where its source or
+unrolled loops grow with a constant: the split-K finish's `S` (at most 8), the GEMMs' tile configuration (a valid
+`TileConfig` / `CoopConfig`) and `CAT` (at most 4), the elementwise and strided kernels' `RANK` (at most 8) and
+`EB`, the multi-tensor kernels' `J` (at most 16), the direct depthwise kernels' taps (forward at most 32x32, weight
+gradient at most 49), the assigner's `K`, `WG` and `R`. A kernel outside a bound still compiles when a run asks for
+it. A kernel that fails or panics on a worker is compiled again by the thread that needs it, which reports the
+error. `GpuContext::release_memory` drops the pipelines workers finished that no thread took (a list of another
+shape names kernels this run never uses); ones still queued or compiling stay. Native only.
 
 To see what compilation costs, set `FOLO_GPU_TRACE_COMPILE=1` (read once per process; native only): every
 `Kernel::compile` adds its `create_shader_module` time (WGSL parsing and validation in naga) and its total time to

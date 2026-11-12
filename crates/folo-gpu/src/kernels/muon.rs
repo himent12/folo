@@ -281,6 +281,14 @@ fn many_def(name: &'static str, j: usize) -> &'static KernelDef {
     })
 }
 
+/// The per-layout kernel recorded as `name` with `spec` (the precompile registry, `kernels::find_def`): the
+/// [`many_def`] its call site picked, read back from `J`. `None` for other names and for a `J` no call site sets.
+pub(crate) fn many_def_for(name: &str, spec: &Spec) -> Option<&'static KernelDef> {
+    let j = spec.get_u32("J", 0) as usize;
+    let name = ["muon_gather", "muon_apply"].into_iter().find(|n| *n == name)?;
+    (1..=MANY).contains(&j).then(|| many_def(name, j))
+}
+
 /// The multi-tensor prologue: chunk-local matrix `t` of this workgroup, its element `e` and the table offset `q`
 /// of its matrix (`pu(0)` is the chunk's first matrix).
 fn many_prologue(s: &mut String, j: usize) {
@@ -426,6 +434,10 @@ static GROUPED: KernelDef = KernelDef {
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],
     source: Source::Generated(gen_grouped),
 };
+
+/// This module's fixed kernels, for the precompile registry (`kernels::find_def`; the gather and the update are
+/// built per layout, [`many_def_for`]).
+pub(crate) static DEFS: &[&KernelDef] = &[&NORM, &DIVIDE, &GROUPED];
 
 /// The grouped GEMM of one Newton–Schulz stage (`MODE` 0: `A = X·Xᵀ`, 1: `Bm = b·A + c·(A·A)`, 2:
 /// `X' = a·X + Bm·X`): bindings `P`, `Q`, `R` (the epilogue's addend), `C`, `TBL`. A workgroup computes one 64×64
