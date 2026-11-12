@@ -10,15 +10,15 @@ use folo_core::rng::Rng;
 use folo_data::{DataLoader, LoaderConfig};
 use folo_nn::io::{BestState, ModelConfig, ModelFile};
 use folo_nn::optim::{
-    AdamW, GradAccumulator, MuSgd, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
+    AdamW, GradAccumulator, MuSgd, MuSgdWeights, OptimKind, Optimizer, Sgd, StandardGroups,
+    effective_weight_decay,
 };
 use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module};
 
 use super::events::Emitter;
 use super::{
-    AMP_KEY, CLOSE_MOSAIC_KEY, MUSGD_CLS_LR_FACTOR, NONFINITE_STREAK_KEY, ResumeOverrides, SHORT_RUN_STEPS,
-    TRAIN_IMAGES_KEY, TrainConfig, TrainData, TrainOptions, Trainer, amp_support, can_place, place_model,
-    resolve_device,
+    AMP_KEY, CLOSE_MOSAIC_KEY, NONFINITE_STREAK_KEY, ResumeOverrides, SHORT_RUN_STEPS, TRAIN_IMAGES_KEY,
+    TrainConfig, TrainData, TrainOptions, Trainer, amp_support, can_place, place_model, resolve_device,
 };
 use crate::error::{Error, Result};
 use crate::loss::LossConfig;
@@ -277,22 +277,25 @@ impl Trainer {
                 Box::new(AdamW::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
             }
             // MODEL.md §8.2: the head's class branches (o2m and o2o) train at 3x the LR.
-            OptimKind::MuSgd => Box::new(MuSgd::new(std_groups.into_boosted_groups(
-                resolved.lr0,
-                resolved.momentum,
-                wd,
-                |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
-                MUSGD_CLS_LR_FACTOR,
-            ))?),
+            OptimKind::MuSgd => Box::new(MuSgd::with_weights(
+                std_groups.into_boosted_groups(
+                    resolved.lr0,
+                    resolved.momentum,
+                    wd,
+                    |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
+                    cfg.musgd.cls_lr,
+                ),
+                MuSgdWeights { muon: cfg.musgd.muon, sgd: cfg.musgd.sgd },
+            )?),
         };
         let nb = n_train.div_ceil(cfg.batch);
         let spe = nb.div_ceil(accumulate);
-        let sched = LrSchedule::new(
+        let sched = LrSchedule::with_warmup_iters(
             if cfg.cos_lr { DecayKind::Cosine } else { DecayKind::Linear },
             cfg.epochs as u64,
             spe as u64,
             cfg.lrf,
-            cfg.warmup_epochs,
+            cfg.warmup_iters(spe as u64),
             resolved.warmup_bias_lr,
             cfg.warmup_momentum,
         )?;

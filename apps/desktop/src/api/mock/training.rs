@@ -254,10 +254,11 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
     let batch = config.batch.max(1);
     let accumulate = ((nbs as f64 / batch as f64).round() as u32).max(1);
     let batches = train_images.div_ceil(batch as u64).max(1);
-    let (optimizer, lr0) = match config.optimizer {
-        Optimizer::Sgd => (ResolvedOptimizer::Sgd, config.lr0 as f64),
-        Optimizer::Adamw => (ResolvedOptimizer::Adamw, config.lr0 as f64),
-        Optimizer::Musgd => (ResolvedOptimizer::Musgd, config.lr0 as f64),
+    // A chosen optimizer keeps the configured momentum 0.937 and bias warmup 0.1; `auto` sets its own.
+    let (optimizer, lr0, momentum, warmup_bias_lr) = match config.optimizer {
+        Optimizer::Sgd => (ResolvedOptimizer::Sgd, config.lr0 as f64, 0.937, 0.1),
+        Optimizer::Adamw => (ResolvedOptimizer::Adamw, config.lr0 as f64, 0.937, 0.1),
+        Optimizer::Musgd => (ResolvedOptimizer::Musgd, config.lr0 as f64, 0.937, 0.1),
         // The engine's own rule (docs/MODEL.md §8.2); the real server refuses an unknown optimizer.
         Optimizer::Auto | Optimizer::Unknown => {
             let a = folo_nn::optim::auto_optimizer(
@@ -272,15 +273,12 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
                 folo_nn::optim::OptimKind::AdamW => ResolvedOptimizer::Adamw,
                 folo_nn::optim::OptimKind::MuSgd => ResolvedOptimizer::Musgd,
             };
-            (kind, a.lr0)
+            (kind, a.lr0, a.momentum, a.warmup_bias_lr)
         }
     };
-    let auto = config.optimizer == Optimizer::Auto;
-    // Auto's momentum (AdamW β1) is 0.9; a chosen optimizer keeps the configured 0.937.
-    let momentum = if auto { 0.9 } else { 0.937 };
-    // Warmup in optimizer steps: the trainer's own rule (docs/MODEL.md §8.4).
+    // Warmup in optimizer steps: the trainer's own rule (docs/MODEL.md §8.4; new runs have no warmup floor).
     let spe = batches.div_ceil(accumulate as u64);
-    let warmup_iters = folo_nn::warmup_iters(3.0, config.epochs as u64, spe);
+    let warmup_iters = folo_nn::warmup_iters_floor(3.0, config.epochs as u64, spe, 0);
     ResolvedTrain {
         optimizer,
         lr0,
@@ -296,7 +294,7 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
         warmup_iters,
         warmup_epochs: 3.0,
         warmup_momentum: 0.8,
-        warmup_bias_lr: if auto { 0.0 } else { 0.1 },
+        warmup_bias_lr,
         // The trainer's cap: at most half the run.
         close_mosaic: Some(config.augment.close_mosaic.min(config.epochs / 2)),
     }

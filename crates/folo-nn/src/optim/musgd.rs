@@ -6,7 +6,12 @@ use std::collections::HashMap;
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Device, Tensor};
 
-use super::{GradSource, OptimKind, Optimizer, ParamGroup, Sgd, take_state};
+use serde::{Deserialize, Serialize};
+
+use super::{
+    GradSource, OptimContract, OptimKind, Optimizer, ParamGroup, Sgd, apply_group_contract, group_contract,
+    take_state,
+};
 use crate::{Error, Result};
 
 /// Weight of the Muon update: `p −= MUON_SCALE · lr · O`.
@@ -32,7 +37,7 @@ pub fn is_muon_group(name: &str) -> bool {
 /// m = μ · m + (1 − μ) · g                       (muon_buffer, starts at zero)
 /// u = μ · m + (1 − μ) · g                       (Nesterov; plain: u = m)
 /// O = NS5(u as [rows, cols]) · sqrt(max(1, d₋₂ / d₋₁))
-/// p = p − 0.2 · lr · O
+/// p = p − 0.2 · lr · O                         (0.2: MuSgdWeights::muon)
 /// ```
 /// where the matrix is `u.flatten(1)` (a conv weight `[c_out, c_in·k·k]`), `d₋₂ / d₋₁` are the parameter's last
 /// two dimensions (1 for a square kernel) and `NS5` is [`orthogonalize`]. The SGD update then reads the
@@ -40,15 +45,57 @@ pub fn is_muon_group(name: &str) -> bool {
 pub struct MuSgd {
     sgd: Sgd,
     muon: Vec<Vec<Option<Tensor>>>,
+    weights: MuSgdWeights,
+}
+
+/// The two factors of a [`MuSgd`] step on a Muon parameter: `p −= muon · lr · O`, then the SGD update at
+/// `sgd · lr` (other parameters take SGD at `lr`). The default is Ultralytics 8.4's trainer (`muon = 0.2`,
+/// `sgd = 1.0`); YOLO26's published COCO run used 0.528 and 0.674 (`muon_w`, `sgd_w` of its `train_args`).
+/// Other weights are saved in a checkpoint's `folo.optim` as `"musgd": {"muon": .., "sgd": ..}` (docs/FORMAT.md).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MuSgdWeights {
+    /// Weight of the orthogonalised update.
+    pub muon: f64,
+    /// Weight of the SGD update of a Muon parameter.
+    pub sgd: f64,
+}
+
+impl Default for MuSgdWeights {
+    fn default() -> Self {
+        MuSgdWeights { muon: MUON_SCALE, sgd: 1.0 }
+    }
+}
+
+impl MuSgdWeights {
+    /// An error unless both weights are finite and non-negative.
+    pub fn validate(&self) -> Result<()> {
+        if [self.muon, self.sgd].iter().all(|w| w.is_finite() && *w >= 0.0) {
+            Ok(())
+        } else {
+            Err(Error::Invalid(format!("musgd: weights must be finite and >= 0, got {self:?}")))
+        }
+    }
 }
 
 impl MuSgd {
-    /// An optimizer over `groups` (no parameter in two groups; all `F32`).
+    /// An optimizer over `groups` (no parameter in two groups; all `F32`) with the default [`MuSgdWeights`].
     pub fn new(groups: Vec<ParamGroup>) -> Result<Self> {
+        Self::with_weights(groups, MuSgdWeights::default())
+    }
+
+    /// [`MuSgd::new`] with other step weights (finite, non-negative).
+    pub fn with_weights(groups: Vec<ParamGroup>, weights: MuSgdWeights) -> Result<Self> {
+        weights.validate()?;
         let muon = groups.iter().map(|g| vec![None; g.params.len()]).collect();
-        let mut s = MuSgd { sgd: Sgd::new(groups)?, muon };
+        let mut s = MuSgd { sgd: Sgd::new(groups)?, muon, weights };
         s.ensure_buffers()?;
         Ok(s)
+    }
+
+    /// The step weights.
+    pub fn weights(&self) -> MuSgdWeights {
+        self.weights
     }
 
     fn uses_muon(g: &ParamGroup, p: &Tensor) -> bool {
@@ -107,7 +154,7 @@ impl MuSgd {
                 bs.iter().map(|b| b.mul_scalar(1.0)).collect::<folo_core::Result<Vec<_>>>()?
             };
             let os = orthogonalize_many(&us)?;
-            let lr = (MUON_SCALE * g.lr) as f32;
+            let lr = (self.weights.muon * g.lr) as f32;
             let or: Vec<&Tensor> = os.iter().collect();
             axpby_many(&ps, &or, 1.0, -lr)?;
         }
@@ -229,11 +276,43 @@ impl Optimizer for MuSgd {
     fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
         self.ensure_buffers()?;
         self.muon_step(grads)?;
-        self.sgd.step(grads)
+        if self.weights.sgd == 1.0 {
+            return self.sgd.step(grads);
+        }
+        // The SGD half of a Muon group runs at `sgd · lr`; the groups' own LRs are put back afterwards.
+        let lrs: Vec<f64> = self.sgd.groups().iter().map(|g| g.lr).collect();
+        for g in self.sgd.groups_mut() {
+            if is_muon_group(&g.name) {
+                g.lr *= self.weights.sgd;
+            }
+        }
+        let r = self.sgd.step(grads);
+        for (g, lr) in self.sgd.groups_mut().iter_mut().zip(lrs) {
+            g.lr = lr;
+        }
+        r
     }
 
     fn step_count(&self) -> u64 {
         self.sgd.step_count()
+    }
+
+    fn contract(&self) -> OptimContract {
+        let mut c = group_contract(self);
+        c.musgd = (self.weights != MuSgdWeights::default()).then_some(self.weights);
+        c
+    }
+
+    /// Also adopts the contract's step weights when it has them. A contract without `musgd` (the default weights,
+    /// or a file written before the key) keeps the weights this optimizer was built with: [`MuSgd::new`]'s defaults,
+    /// or what the caller passed to [`MuSgd::with_weights`] (the trainer passes its `TrainConfig.musgd`, which is
+    /// how files that recorded custom weights only in `folo.train` resume with them).
+    fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
+        let weights = c.musgd.unwrap_or(self.weights);
+        weights.validate().map_err(|e| Error::Load(format!("folo.optim: {e}")))?;
+        apply_group_contract(self, c)?;
+        self.weights = weights;
+        Ok(())
     }
 
     fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {

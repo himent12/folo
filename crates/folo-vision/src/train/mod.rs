@@ -48,7 +48,9 @@ mod setup;
 #[cfg(test)]
 mod tests;
 
-pub use config::{OptimizerChoice, ResolvedOptim, TrainConfig, default_workers, f32_decimal, resolve_device};
+pub use config::{
+    MuSgdConfig, OptimizerChoice, ResolvedOptim, TrainConfig, default_workers, f32_decimal, resolve_device,
+};
 pub use device::{amp_available, amp_not_supported, amp_support, can_place, place_model};
 pub use events::{EventSink, channel_sink, event_record, rfc3339_now};
 pub use run::update_best;

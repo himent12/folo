@@ -333,7 +333,8 @@ policy stays as it is.
 ### Learning gates
 
 The shapes gate (docs/MODEL.md §10.6: folo-n, 320 px, 30 epochs, batch 16, seed 0, `--device gpu:0`) with the
-merged `folo` (`auto` → AdamW lr0 0.00125, unchanged by the new `auto` rules for 4 classes): f32 final mAP50 0.980 /
+merged `folo` (`auto` → AdamW lr0 0.00125, unchanged by `auto` rules 2 and 3 for 4 classes; rule 4 picks MuSGD
+here and measured 0.985 / 0.926, docs/MODEL.md §10.6): f32 final mAP50 0.980 /
 mAP50-95 **0.892** (reference 0.898), gate first met at epoch 9, 90 s wall; `--amp` 0.979 / **0.895** (reference
 0.899), first met at epoch 9, 6 steps skipped for overflow in epoch 1, 100 s wall (`main`: 182 / 200 s). Both are
 within 0.01 of the reference, with no non-finite batch. The merged kernels add in other orders, so a run follows a
@@ -426,7 +427,8 @@ scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed 
   implemented in folo-nn (docs/MODEL.md §8.2) and `auto`'s long-run choice. +0.031 AP over SGD on the proxy (ten
   times the seed noise), level with the reference's own MuSGD, at about 17% more step time; it passes SGD's 20-epoch
   AP at about epoch 13. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3
-  ships momentum 0.9 and warmup_bias_lr 0 (the proxy's 6,260 iterations and the shapes gate resolve AdamW). **The
+  shipped momentum 0.9 and warmup_bias_lr 0 (the proxy's 6,260 iterations and the shapes gate resolved AdamW).
+  Rule 4 (docs/MODEL.md §8.2) now picks MuSGD at momentum 0.937 and warmup_bias_lr 0.1 for every run. **The
   shipped rule-3 recipe has since run once at full scale** (2026-11-11): the folo-s COCO run above resolved `auto` to
   MuSGD (103,544 optimizer steps > 10,000; lr0 0.01, momentum 0.9, warmup_bias_lr 0), trained 56 epochs under AMP
   without a non-finite batch (44 of 103,544 steps skipped for gradient overflow) and reached AP 0.416. That shows the

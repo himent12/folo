@@ -174,9 +174,9 @@ async fn queue_moves_and_resolved_config() {
     let a_now = run(&a.id).await;
     assert_eq!(a_now.queue_position, None);
     let resolved = a_now.resolved.clone().expect("set once the trainer is built");
-    // 400 iterations is a short run: `auto` is AdamW with lr0 0.002 · 5 / (4 + 2 classes), β2 0.999.
-    assert_eq!(resolved.optimizer, ResolvedOptimizer::Adamw);
-    assert_eq!((resolved.lr0, resolved.betas), (0.001667, Some([0.9, 0.999])));
+    // `auto` rule 4: MuSGD at lr0 0.01 for any run length (no betas).
+    assert_eq!(resolved.optimizer, ResolvedOptimizer::Musgd);
+    assert_eq!((resolved.lr0, resolved.betas), (0.01, None));
     assert_eq!((resolved.batch, resolved.accumulate, resolved.nbs), (4, 16, 64));
     assert_eq!(resolved.optimizer_steps_per_epoch, 1, "3 batches of 4, accumulated over 16");
     // The trainer writes config.json once it runs, before its first epoch.

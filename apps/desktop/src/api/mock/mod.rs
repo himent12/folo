@@ -232,14 +232,16 @@ mod tests {
             head: Default::default(),
             compute: None,
         };
-        // Warmup in optimizer steps, as folo_nn computes it.
-        assert_eq!(resolve(&cfg(16, 30, Optimizer::Auto), 800, 3).warmup_iters, 100);
+        // Warmup in optimizer steps, as folo_nn computes it (3 epochs, no floor for new runs).
+        assert_eq!(resolve(&cfg(16, 30, Optimizer::Auto), 800, 3).warmup_iters, 39);
         assert_eq!(resolve(&cfg(16, 10, Optimizer::Auto), 800, 3).warmup_iters, 39);
         assert_eq!(resolve(&cfg(16, 1, Optimizer::Auto), 800, 3).warmup_iters, 0);
-        // Auto: AdamW at 0.01 / (4 + nc) for short runs, with β1 0.9; SGD past 10,000 iterations
-        // (the iteration count rounds batches up).
+        // Auto (rule 4): MuSGD at lr0 0.01, momentum 0.937, bias warmup 0.1, short or long; no betas.
         let short = resolve(&cfg(16, 100, Optimizer::Auto), 3200, 3);
-        assert_eq!((short.optimizer, short.lr0, short.momentum), (ResolvedOptimizer::Adamw, 0.001429, 0.9));
+        assert_eq!(
+            (short.optimizer, short.lr0, short.momentum, short.warmup_bias_lr, short.betas),
+            (ResolvedOptimizer::Musgd, 0.01, 0.937, 0.1, None)
+        );
         assert_eq!(resolve(&cfg(32, 527, Optimizer::Auto), 1200, 3).optimizer, ResolvedOptimizer::Musgd);
     }
 
