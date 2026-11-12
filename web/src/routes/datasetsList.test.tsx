@@ -10,7 +10,7 @@ import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
 import Dataset from './Dataset';
 import Datasets from './Datasets';
-import { datasetsChanged } from './datasets/changes';
+import { datasetsChanged, generationEnded, generationStarted, pendingGeneration } from './datasets/changes';
 
 let target: HTMLElement;
 let c: { unmount(): void } | undefined;
@@ -75,8 +75,36 @@ describe('a dataset whose folder is missing', () => {
       'the confirmation',
     );
     confirm.click();
-    await vi.waitFor(() => expect(go).toHaveBeenCalledWith('/datasets'));
+    await vi.waitFor(() => expect(go).toHaveBeenCalledWith('/datasets', { replace: true }));
     expect(del).toHaveBeenCalledWith('ds_shapes', { files: false });
+  });
+
+  it('is not asked about again on every visit, only on Retry and when the tab comes back (v-data-runs N6)', async () => {
+    const read = vi.mocked(hub.api.dataset);
+    const issues = vi.spyOn(hub.api, 'datasetIssues');
+    const asked = () => read.mock.calls.filter(([id]) => id === 'ds_shapes').length;
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('tr[aria-label="shapes"]')?.textContent?.includes('Folder missing'), 'the mark');
+    expect(asked()).toBe(1);
+    // Its page, then the list again: both say so from what the list found.
+    c!.unmount();
+    open(Dataset, '/datasets/ds_shapes');
+    await until(() => target.textContent?.includes('Put it back and press Retry'), 'the page');
+    c!.unmount();
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('tr[aria-label="shapes"]')?.textContent?.includes('Folder missing'), 'the mark again');
+    expect(asked()).toBe(1);
+    expect(issues.mock.calls.filter(([id]) => id === 'ds_shapes')).toHaveLength(0);
+    // Back in the tab: the folder may be back.
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.waitFor(() => expect(asked()).toBe(2));
+    // Retry on its page asks.
+    c!.unmount();
+    open(Dataset, '/datasets/ds_shapes');
+    const retry = await until(() => [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Retry'), 'Retry');
+    expect(asked()).toBe(2);
+    retry.click();
+    await vi.waitFor(() => expect(asked()).toBe(3));
   });
 });
 
@@ -90,5 +118,56 @@ describe('the Datasets list', () => {
     await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 1));
     document.dispatchEvent(new Event('visibilitychange'));
     await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 2));
+  });
+});
+
+describe('Add dataset from the URL', () => {
+  it('opens on ?add= followed while the list is open, and closing it takes ?add= out of the URL (v-shell N8)', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation((path: string) => {
+      router.route = parse(`#${path}`);
+    });
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    // The palette, Overview's onboarding or New run's empty state links here while the list is on display.
+    router.route = parse('#/datasets?add=synthetic');
+    const dialog = await until(() => document.querySelector<HTMLDialogElement>('dialog[open]'), 'the dialog');
+    expect(dialog.textContent).toContain('Generate');
+    [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Cancel')!.click();
+    await until(() => go.mock.calls.length > 0, 'the URL change');
+    expect(go).toHaveBeenLastCalledWith('/datasets', { replace: true });
+    flushSync();
+    expect(document.querySelector('dialog[open]')).toBeNull();
+  });
+});
+
+describe('a sample set generating across a reload', () => {
+  it('has the list read itself again until the new dataset is there, then stops (datasets F10)', async () => {
+    const before = await hub.api.datasets();
+    generationStarted({ name: 'shapes-synth', since: Date.now(), ids: before.map((d) => d.id) });
+    const list = vi.spyOn(hub.api, 'datasets');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    try {
+      open(Datasets, '/datasets');
+      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      const calls = list.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(3000);
+      await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 1));
+      // It lands (numbered, as the server names a taken name).
+      await hub.api.createSyntheticDataset({ name: 'shapes-synth', images: 10, classes: ['circle'], imgsz: 64, seed: 0 });
+      const shown = () => [...target.querySelectorAll('tr[aria-label]')].some((r) => !before.some((d) => d.name === r.getAttribute('aria-label')));
+      for (let i = 0; i < 40 && !shown(); i++) {
+        await vi.advanceTimersByTimeAsync(100);
+        flushSync();
+      }
+      expect(shown()).toBe(true);
+      expect(pendingGeneration()).toBeNull();
+      const after = list.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(list.mock.calls.length).toBe(after);
+    } finally {
+      vi.useRealTimers();
+      generationEnded();
+    }
   });
 });

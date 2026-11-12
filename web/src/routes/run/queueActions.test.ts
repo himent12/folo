@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { queueItems, queueWait, REMOVE_LABEL, removeDescription } from './queueActions';
+import { toast } from '$lib/ui/toast';
+import { queueItems, queueToastKey, queueWait, REMOVE_LABEL, removedToast, removeDescription } from './queueActions';
 
 const labels = (...a: Parameters<typeof queueItems>) => queueItems(...a).map((i) => i.label);
 const noop = () => {};
@@ -41,5 +42,15 @@ describe('removeDescription: what Remove from queue does', () => {
   it('deletes a run that never started, and keeps what a resumed run trained', () => {
     expect(removeDescription({ started: null })).toMatch(/nothing is lost: it leaves the queue and the runs list/);
     expect(removeDescription({ started: '2026-11-07T06:00:03Z' })).toMatch(/keeps what it trained so far/);
+  });
+});
+
+describe('removedToast', () => {
+  it('takes the place of the "Queued" toast of the same run, not of another run’s (v-data-runs N10b)', () => {
+    for (const t of toast.items) toast.dismiss(t.id);
+    toast.success('Queued q-two', '1st in queue', undefined, { key: queueToastKey('run_q2') });
+    toast.success('Queued q-three', '2nd in queue', undefined, { key: queueToastKey('run_q3') });
+    removedToast({ id: 'run_q2', name: 'q-two' });
+    expect(toast.items.map((t) => t.title)).toEqual(['Queued q-three', 'Removed q-two from the queue']);
   });
 });

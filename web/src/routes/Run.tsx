@@ -5,6 +5,7 @@
 // looked for in new lines only (run/warningsLog, the Svelte page scanned the whole log on every step), and the parts
 // that depend on the run's settings (Config, lineage, the dataset, the menus) get values that keep their identity
 // while only its progress moves, so a step re-renders the progress and nothing else.
+import ArrowLeft from '$icons/arrow-left';
 import Box from '$icons/box';
 import ChevronsUp from '$icons/chevrons-up';
 import GitCompare from '$icons/git-compare-arrows';
@@ -55,7 +56,7 @@ import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
 import RunMetrics from './run/RunMetrics';
 import Samples from './run/Samples';
-import { moveQueued, queueItems, queueWait, REMOVE_LABEL, removeDescription, removeQueued, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
+import { moveQueued, queueItems, queueWait, REMOVE_LABEL, removedToast, removeDescription, removeQueued, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
 import { WarningsLog } from './run/warningsLog';
 import { beforeTraining, phaseTitle, phaseWhat, providerName } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
@@ -66,6 +67,8 @@ import RunSkeleton from './run/RunSkeleton';
 import WaitingPanels from './run/WaitingPanels';
 import { exactTime } from './runs/when';
 import DeleteRun from './run/DeleteRun';
+import { goneEvalOn } from './run/goneEvalOn';
+import { stopDescription, stoppedToast } from './run/StopRun';
 
 type Section = 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
 const NO_CLASSES: string[] = [];
@@ -102,7 +105,12 @@ export default function Run() {
   const classes = computed(() => dataset.get()?.classes ?? (recorded.get()?.classes.length ? recorded.get()!.classes : modelClasses.get()) ?? NO_CLASSES);
   // A dataset with no validation images trains and validates on its training split (docs/API.md, Split fallback): the
   // page says so once, as the Model page does, and its titles name that split rather than "Validation".
-  const evalOn = computed(() => runEvalSource(dataset.get()));
+  // Once the dataset is removed, the trainer's log says which split the epochs were scored on (./run/goneEvalOn).
+  const evalOn = computed(() => {
+    if (!datasetGone.get()) return runEvalSource(dataset.get());
+    void live.version;
+    return goneEvalOn(datasetName.get() ?? null, live.logs);
+  });
   const splitNotice = computed(() => (evalOn.get() ? fallbackNotice(evalOn.get()!) : null));
 
   const crumbName = computed(() => run.get()?.name ?? id.get());
@@ -116,7 +124,10 @@ export default function Run() {
     return live.steps.length;
   });
   const queuedOnly = computed(() => status.get() === 'queued' && stepCount.get() === 0);
-  /** The run loaded but its history (metrics) did not: its panels say so with Retry instead of "after the first epoch". */
+  /**
+   * The run loaded but its history (metrics) did not: the metrics panel says so with the one Retry, the panels derived
+   * from them (samples, per class) say they wait for it, and the log, a request of its own, shows what it got.
+   */
   const historyError = computed(() => (run.get() ? live.error : undefined));
   const retryHistory = () => live.retry();
 
@@ -250,6 +261,13 @@ export default function Run() {
     void live.version;
     return live.epochs.length;
   });
+  /**
+   * It ended without a training step (interrupted before it started, failed before its first one, its dataset's folder
+   * gone): the metrics say so in one line, and there are no samples or per-class results to wait for.
+   */
+  const neverTrained = computed(
+    () => !active.get() && !live.loading && historyError.get() === undefined && stepCount.get() === 0 && epochsDone.get() === 0 && (run.get()?.step ?? 0) === 0,
+  );
   // How long it took, as the Runs list says: from start to end, less the time it sat stopped before a resume.
   const elapsed = computed(() => {
     const r = run.get();
@@ -266,7 +284,7 @@ export default function Run() {
   // Below 960 px one section shows at a time. A queued run has nothing to sample yet, so it opens on its Config (the
   // dependency and start estimate are in the banner above); once picked, the choice holds.
   const picked = signal<Section | null>(null);
-  const section = computed<Section>(() => picked.get() ?? (queuedOnly.get() ? 'config' : 'samples'));
+  const section = computed<Section>(() => picked.get() ?? (queuedOnly.get() ? 'config' : neverTrained.get() ? 'logs' : 'samples'));
   const models = modelsResource();
   /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
   const stacked = new MediaQuery(media.upToLaptop, false);
@@ -292,20 +310,16 @@ export default function Run() {
         // A run that never started is deleted (it leaves the list); a resumed one stops with what it trained.
         const r = await removeQueued(cur);
         stopOpen.set(false);
-        toast.success(`Removed ${cur.name} from the queue`);
+        removedToast(cur);
         if (r) live.run = r;
-        else router.go('/runs');
+        else router.go('/runs', { replace: true });
         return;
       }
       const r = await hub.api.stopRun(cur.id);
       live.run = r;
       stopOpen.set(false);
       // The checkpoint is the last finished epoch's: none before the first one ends.
-      const done = untrack(() => epochsDone.get());
-      toast.info(
-        `Stopping ${r.name}`,
-        r.cloud && r.epoch === 0 ? 'Its instance is released; nothing had trained yet.' : done ? `The checkpoint from epoch ${done} is kept.` : 'No epoch had finished, so nothing is saved.',
-      );
+      stoppedToast(r, untrack(() => epochsDone.get()));
     } catch (e) {
       stopStatus.error(e, removing.peek() ? 'Could not remove the run from the queue' : 'Could not stop the run');
     } finally {
@@ -443,7 +457,8 @@ export default function Run() {
   return (
     <>
       {live.error && !run.get() ? (
-        <Page title="Run">
+        // The way back is the header's action, as on the other detail pages (Model, Dataset, Benchmark).
+        <Page title="Run" actions={() => <Button icon={ArrowLeft} href={href('/runs')}>All runs</Button>}>
           <ErrorState error={live.error} title="Could not load this run" retry={() => live.retry()} />
         </Page>
       ) : !run.get() ? (
@@ -600,6 +615,7 @@ export default function Run() {
                   evalOn={evalOn.get()}
                   error={historyError.get()}
                   retry={retryHistory}
+                  never={neverTrained.get()}
                 />
 
                 {/* Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right,
@@ -613,8 +629,12 @@ export default function Run() {
                     value={section.get()}
                     onchange={(v) => picked.set(v)}
                     tabs={[
-                      { value: 'samples', label: 'Samples' },
-                      { value: 'classes', label: 'Classes' },
+                      ...(neverTrained.get()
+                        ? []
+                        : [
+                            { value: 'samples' as const, label: 'Samples' },
+                            { value: 'classes' as const, label: 'Classes' },
+                          ]),
                       { value: 'logs', label: 'Logs' },
                       ...(isCloud.get() ? [{ value: 'cloud' as const, label: 'Cloud' }] : []),
                       { value: 'config', label: 'Config' },
@@ -624,31 +644,36 @@ export default function Run() {
                 <div
                   class="detail"
                   class:cloud={isCloud.get()}
+                  class:never={neverTrained.get()}
                   data-show={section.get()}
                   id="run-sec-panel"
                   role={stacked.current ? 'tabpanel' : undefined}
                   aria-labelledby={stacked.current ? `run-sec-${section.get()}` : undefined}
                 >
                   <div class="main-col">
-                    <div class="part" data-part="samples">
-                      <Samples
-                        runId={R().id}
-                        classes={classes.get()}
-                        datasetGone={datasetGone.get()}
-                        epochsDone={epochsDone.get()}
-                        title={`${scoresTitle(evalOn.get())} samples`}
-                        error={historyError.get()}
-                        retry={retryHistory}
-                      />
-                    </div>
+                    {/* A run that never trained has no samples or per-class results: the log and Config are its row. */}
+                    {!neverTrained.get() ? (
+                      <div class="part" data-part="samples">
+                        <Samples
+                          runId={R().id}
+                          classes={classes.get()}
+                          datasetGone={datasetGone.get()}
+                          epochsDone={epochsDone.get()}
+                          title={`${scoresTitle(evalOn.get())} samples`}
+                          unavailable={historyError.get() !== undefined}
+                        />
+                      </div>
+                    ) : null}
                     <div class="part" data-part="logs">
-                      <Logs log={live.logsLog} version={live.version} live={active.get()} error={historyError.get()} retry={retryHistory} />
+                      <Logs log={live.logsLog} version={live.version} live={active.get()} />
                     </div>
                   </div>
                   <aside class="rail" aria-label="Per-class results and config">
-                    <div class="part" data-part="classes">
-                      <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact error={historyError.get()} retry={retryHistory} />
-                    </div>
+                    {!neverTrained.get() ? (
+                      <div class="part" data-part="classes">
+                        <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} />
+                      </div>
+                    ) : null}
                     {cloud.get() ? (
                       <div class="part" data-part="cloud">
                         <CloudPanel cloud={cloud.get()!} provider={provider.get()} />
@@ -677,17 +702,7 @@ export default function Run() {
           <Dialog
             bind:open={stopOpen}
             title={removing.get() ? removeTitle(R().name) : `Stop ${R().name}?`}
-            description={
-              removing.get()
-                ? removeDescription(R())
-                : handover.get()
-                  ? 'Its instance is released now; nothing has trained yet.'
-                  : epochsDone.get() === 0
-                    ? `Training stops after the current step. No epoch has finished yet, so nothing is saved${cloud.get() ? ' and the instance is released' : ''}.`
-                    : cloud.get()
-                      ? 'Training stops after the current step. The last checkpoint is copied here, saved as a model, and the instance released.'
-                      : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'
-            }
+            description={removing.get() ? removeDescription(R()) : stopDescription(R(), epochsDone.get())}
             size="sm"
             status={stopStatus}
             footer={() => (
@@ -699,7 +714,7 @@ export default function Run() {
               </>
             )}
           />
-          <DeleteRun run={deleteOpen.get() ? R() : null} onclose={() => deleteOpen.set(false)} ondeleted={() => router.go('/runs')} />
+          <DeleteRun run={deleteOpen.get() ? R() : null} onclose={() => deleteOpen.set(false)} ondeleted={() => router.go('/runs', { replace: true })} />
         </>
       )}
     </>
@@ -837,6 +852,22 @@ css`
     }
     .detail.cloud [data-part='logs'] {
       grid-row: span 2;
+    }
+    /* A run that never trained: no samples / per-class row, so the log and Config (a cloud run's Cloud panel above
+       Config) are the rows. */
+    .detail.never {
+      grid-template-rows: minmax(0, 1fr);
+    }
+    .detail.never .main-col,
+    .detail.never .rail {
+      grid-row: 1 / 2;
+    }
+    .detail.cloud.never {
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+    .detail.cloud.never .main-col,
+    .detail.cloud.never .rail {
+      grid-row: 1 / 3;
     }
   }
   .phone-pick {

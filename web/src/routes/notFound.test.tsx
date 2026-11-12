@@ -51,6 +51,9 @@ describe('not found', () => {
     expect(target.textContent).not.toContain('Check the run id');
     expect(target.querySelectorAll('.err')).toHaveLength(1);
     expect(buttons('All runs')).toHaveLength(1);
+    // In the header, as on the other detail pages (shell F7), not under the message.
+    expect(target.querySelector('.page > header a[href="#/runs"]')?.textContent?.trim()).toBe('All runs');
+    expect(target.querySelector('.err a, .err button')).toBeNull();
   });
 
   it('a dataset whose folder is gone says the folder is missing and offers to remove it, not that it was deleted', async () => {

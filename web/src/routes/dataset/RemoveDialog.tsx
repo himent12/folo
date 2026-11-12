@@ -81,7 +81,7 @@ export default function RemoveDialog(props: RemoveDialogProps) {
       datasetsChanged();
       open.set(false);
       toast.success('Dataset removed', gone ? `${d.name} and its ${images()} were deleted.` : `${d.name} is no longer registered. Files on disk were not touched.`);
-      router.go('/datasets');
+      router.go('/datasets', { replace: true });
     } catch (e) {
       status.error(e, 'Could not remove the dataset');
     } finally {

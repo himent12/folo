@@ -100,6 +100,7 @@ fn queued_file(id: &str, config: TrainConfig) -> RunFile {
         epochs_done: 0,
         last_metrics: None,
         resumed_at: None,
+        alive_at: None,
     }
 }
 
@@ -223,6 +224,7 @@ fn listed_queue_positions_are_one_snapshot() {
             epochs_done: 0,
             last_metrics: None,
             resumed_at: None,
+            alive_at: None,
         };
         std::fs::create_dir_all(dir.join(id)).unwrap();
         let entry = Arc::new(RunEntry::new(id.clone(), dir.join(id), file));
@@ -438,4 +440,73 @@ fn a_run_with_a_legacy_long_name_resumes() {
     assert_eq!(wanted.name, name);
     assert_eq!(runs.restart(&e, wanted, None).unwrap().name, name);
     runs.shutdown(None);
+}
+
+/// A run the server was killed under ends when it last trained, not when the server starts again: at `alive_at`,
+/// which a training run keeps up to date; in a `run.json` from before it, at the newest of its files; at a resume it
+/// waited after without training again. Its resume then leaves the time the server was down out of training time.
+#[test]
+fn a_run_left_training_ends_when_it_last_trained() {
+    let dir = TestDir::new("runs-killed");
+    let open = || Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let runs = open();
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"k"}"#).unwrap();
+    let dataset = DatasetRef {
+        id: "ds_1".into(),
+        name: "d".into(),
+        path: "nowhere".into(),
+        format: DatasetFormat::Yolo,
+        classes: vec![],
+    };
+    let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+    let t = unix_now().floor();
+    let running = |alive: Option<f64>, resumed: Option<f64>| {
+        let mut st = e.state.lock().unwrap();
+        st.file.run.status = RunStatus::Running;
+        st.file.run.started = Some(rfc3339(t - 1000.0));
+        st.file.run.finished = None;
+        st.file.alive_at = alive;
+        st.file.resumed_at = resumed;
+        e.persist(&st);
+    };
+    let after_restart = || {
+        let run = open().get(e.id()).unwrap().run();
+        assert_eq!((run.status, run.error_code.as_deref()), (RunStatus::Stopped, Some("interrupted")));
+        run
+    };
+
+    // A step keeps `alive_at` (persisted at most every ALIVE_EVERY_S) for a kill to find.
+    running(None, None);
+    let step: Step = serde_json::from_str(
+        r#"{"epoch":1,"step":1,"loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1}"#,
+    )
+    .unwrap();
+    e.on_event(&RunEvent::Step(step));
+    let alive = e.state.lock().unwrap().file.alive_at.expect("alive_at set by a step");
+    assert!((alive - t).abs() <= 2.0, "alive_at {alive}, now {t}");
+
+    // Killed 900 s after it started, down until now: it ended then, and trained 100 s.
+    running(Some(t - 900.0), None);
+    assert_eq!(after_restart().finished.as_deref(), Some(rfc3339(t - 900.0).as_str()));
+
+    // A run.json from before `alive_at`: the newest of its files (all written 700 s ago, here).
+    running(None, None);
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(t - 700.0);
+    for f in ["run.json", "log.jsonl"] {
+        std::fs::File::options().write(true).open(e.dir.join(f)).unwrap().set_modified(then).unwrap();
+    }
+    assert_eq!(after_restart().finished.as_deref(), Some(rfc3339(t - 700.0).as_str()));
+
+    // Resumed 300 s ago and killed while it waited: it ended at that resume, and resuming it now leaves the 300 s
+    // out (with the 100 s from its first end to that resume, recorded then).
+    running(Some(t - 400.0), Some(t - 300.0));
+    e.state.lock().unwrap().file.run.paused_s = Some(100.0);
+    e.persist(&e.state.lock().unwrap());
+    let runs = open();
+    let e2 = runs.get(e.id()).unwrap();
+    assert_eq!(e2.run().finished.as_deref(), Some(rfc3339(t - 300.0).as_str()));
+    runs.restart(&e2, config, None).unwrap();
+    let paused = e2.run().paused_s.unwrap();
+    assert!((paused - 400.0).abs() <= 2.0, "paused_s {paused}, want about 400");
+    let _ = std::fs::remove_dir_all(&dir);
 }

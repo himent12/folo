@@ -1,12 +1,13 @@
 import Activity from '$icons/activity';
 import Box from '$icons/box';
+import CircleStop from '$icons/circle-stop';
 import GitCompare from '$icons/git-compare-arrows';
 import Plus from '$icons/plus';
 import ScanSearch from '$icons/scan-search';
 import Search from '$icons/search';
 import Trash from '$icons/trash-2';
 import X from '$icons/x';
-import { computed, css, effect, For, signal, untrack } from 'fw';
+import { computed, css, effect, For, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { modelsResource } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
@@ -41,14 +42,15 @@ import { FROM_SCRATCH, origin } from '$lib/lineage';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import SortHeader from '$lib/ui/SortHeader';
 import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
-import { moveQueued, queueItems, REMOVE_LABEL, removeDescription, removeQueued, removeTitle } from './run/queueActions';
+import { moveQueued, queueItems, REMOVE_LABEL, removedToast, removeDescription, removeQueued, removeTitle } from './run/queueActions';
 import Dialog from '$lib/ui/Dialog';
 import NoValue from '$lib/ui/NoValue';
 import { DialogStatus } from '$lib/ui/feedback';
 import { toast } from '$lib/ui/toast';
 import DeleteRun from './run/DeleteRun';
+import StopRun from './run/StopRun';
 import RunRows from './runs/RunRows';
-import { groups, readState, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
+import { groups, leftForRun, readState, returnQuery, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
 import { exactTime, tickingNow } from './runs/when';
 
 /** Columns of the desktop table (for state rows that span it). */
@@ -95,13 +97,22 @@ export default function Runs() {
     });
   }
   /**
-   * A row's ⋯: a waiting run's queue actions; an ended run's Open model and Try in Playground (with a model) and Delete
-   * run, the destructive one last, as on its own page. A training run has none (its page has Stop).
+   * A row's ⋯: a waiting run's queue actions (without queue control: Open run and Remove from queue); a training run's
+   * Open run and Stop (behind its confirm, as on its page); an
+   * ended run's Open model and Try in Playground (with a model) and Delete run, the destructive one last, as on its own
+   * page.
    */
   const rowItems = (r: Run): MenuItem[] => {
     const at = placeOf(r);
     if (at !== null) return queueItems(at, waiting.get(), training.get(), (req) => move(r, req), () => removing.set(r));
-    if (ACTIVE.includes(r.status)) return [];
+    if (ACTIVE.includes(r.status)) {
+      const out: MenuItem[] = [{ label: 'Open run', icon: Activity, href: href(`/runs/${r.id}`) }];
+      // As the run page's header: a training run, and a cloud run in its hand-over (its instance costs from the launch).
+      if (r.status === 'running' || (r.cloud && r.status === 'queued')) out.push({ label: 'Stop', icon: CircleStop, danger: true, onclick: () => stopping.set(r) });
+      // A waiting run on a server without queue control: no moves, but it can leave the queue, as on its page.
+      else if (r.status === 'queued') out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: () => removing.set(r) });
+      return out;
+    }
     const out: MenuItem[] = [];
     if (r.model_id) {
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${r.model_id}`) });
@@ -112,6 +123,8 @@ export default function Runs() {
   };
   /** The run Delete run asks about (the same confirm as on its page). */
   const deleting = signal<Run | null>(null);
+  /** The training run Stop asks about (the confirm of its page, ./run/StopRun). */
+  const stopping = signal<Run | null>(null);
 
   /** The waiting run Remove from queue asks about (the same confirm as on its own page). */
   const removing = signal<Run | null>(null);
@@ -126,7 +139,7 @@ export default function Runs() {
       await removeQueued(r);
       removing.set(null);
       // page-level: the confirm closed on the line above.
-      toast.success(`Removed ${r.name} from the queue`);
+      removedToast(r);
       void runs.refresh();
     } catch (e) {
       removeStatus.error(e, `Could not remove ${r.name} from the queue`);
@@ -138,7 +151,11 @@ export default function Runs() {
   // Filter, search, sort and the runs ticked for Compare live in the URL's query (./runs/listState), replaced as they
   // change, so Back from a run shows the list as it was left. A deep link's `?status=` is a filter only when it names
   // one (`?status=stopped` is a status, not a filter).
-  const start = untrack(() => readState(router.route.query));
+  // Escape on a run's page (or the nav) right after it opens a bare /runs: the list as it was left there (./runs/listState).
+  const back = untrack(() => returnQuery(router.entry, router.route.query));
+  if (back !== null) router.go(`/runs?${back}`, { replace: true });
+  const startQuery = back !== null ? new URLSearchParams(back) : untrack(() => router.route.query);
+  const start = readState(startQuery);
   const filter = signal<Filter>(start.filter);
   const query = signal(start.q);
   const sortKey = signal<SortKey>(start.sort);
@@ -146,7 +163,11 @@ export default function Runs() {
   const selected = signal<string[]>(start.sel);
   // Queries compare in the one form writeState gives (a URL's own spelling may differ: `%2C` for the ids' commas).
   const norm = (q: URLSearchParams) => writeState(readState(q));
-  let written = untrack(() => norm(router.route.query));
+  let written = norm(startQuery);
+  // Left for a run's page: remembered for the return.
+  onCleanup(() => {
+    if (router.location.name === 'run') leftForRun(router.entry, written);
+  });
   effect(() => {
     const next = writeState({ filter: filter.get(), q: query.get(), sort: sortKey.get(), dir: sortDir.get(), sel: selected.get() });
     if (next === written || untrack(() => router.route.name) !== 'runs') return;
@@ -575,6 +596,7 @@ export default function Runs() {
           </>
         )}
       />{' '}
+      <StopRun run={stopping.get()} onclose={() => stopping.set(null)} onstopped={() => void runs.refresh()} />
       <DeleteRun
         run={deleting.get()}
         onclose={() => deleting.set(null)}

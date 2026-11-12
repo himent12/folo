@@ -26,12 +26,14 @@ import Meta from '$lib/ui/Meta';
 import { rowNav } from '$lib/ui/rowNav';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import { imageCount } from './dataset/health';
-import { datasetChanges } from './datasets/changes';
-import { datasetProblem, PROBLEM_LABEL, type ListedDataset } from './datasets/problem';
+import { datasetChanges, generationEnded, landed, pendingGeneration } from './datasets/changes';
+import { datasetProblem, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
 /** Columns of the desktop table (for state rows that span it), the empty last one included. */
 const COLS = 10;
+/** How often the list reads itself again while a sample set this tab asked for still generates. */
+const GENERATION_POLL_MS = 3000;
 
 export default function Datasets() {
   setCrumbs({ label: 'Datasets' });
@@ -40,30 +42,72 @@ export default function Datasets() {
 
   // The list endpoint has no stats; fetch each dataset for its class balance and box count (and to learn which ones
   // cannot be read: a folder that was moved is marked, not shown as if nothing were wrong).
+  // A dataset whose folder was found missing is not read again on every visit (./datasets/problem readDataset): only
+  // when the list may have changed (`again`, below).
+  let again = false;
   const datasets = new Resource(async (s) => {
-    const list = await hub.api.datasets(s);
-    return Promise.all(list.map((d): Promise<ListedDataset> => hub.api.dataset(d.id, s).catch((e) => ({ ...d, problem: datasetProblem(e) }))));
+    const api = hub.api;
+    const fresh = again;
+    again = false;
+    const list = await api.datasets(s);
+    return Promise.all(
+      list.map((d): Promise<ListedDataset> => readDataset(api, d.id, () => api.dataset(d.id, s), fresh).catch((e) => ({ ...d, problem: datasetProblem(e) }))),
+    );
   });
+  const reread = () => {
+    again = true;
+    void datasets.refresh();
+  };
   // The list goes stale otherwise: read it again after a dataset action in this tab, and when the tab comes back (one
   // added in another tab, by an agent, or a folder moved meanwhile).
   const seen = datasetChanges.peek();
   effect(() => {
-    if (datasetChanges.get() !== seen) untrack(() => void datasets.refresh());
+    if (datasetChanges.get() !== seen) untrack(reread);
+  });
+  // A sample set this tab asked for before a reload is still generating: read the list every few seconds until it is
+  // there (./datasets/changes).
+  effect(() => {
+    const list = datasets.data;
+    const g = untrack(() => pendingGeneration());
+    if (!g || !list) return;
+    if (landed(g, list)) return void generationEnded();
+    // A read that finds nothing new keeps the same list (Resource), so this runs on its own clock until one does.
+    const t = setInterval(() => {
+      if (pendingGeneration()) void datasets.refresh();
+      else clearInterval(t);
+    }, GENERATION_POLL_MS);
+    return () => clearInterval(t);
   });
   effect(() => {
-    const back = () => document.visibilityState === 'visible' && !datasets.loading && void datasets.refresh();
+    const back = () => document.visibilityState === 'visible' && !datasets.loading && reread();
     document.addEventListener('visibilitychange', back);
     return () => document.removeEventListener('visibilitychange', back);
   });
 
-  // `#/datasets?add=folder|synthetic` opens the dialog (used by the onboarding on an empty Overview).
-  const addParam = untrack(() => router.route.query.get('add'));
-  const adding = signal(addParam === 'folder' || addParam === 'synthetic');
-  const addMode = signal<'folder' | 'synthetic'>(addParam === 'synthetic' ? 'synthetic' : 'folder');
+  // `#/datasets?add=folder|synthetic` opens the dialog (the onboarding on an empty Overview, New run's empty state), also
+  // when it is followed here, in place. Closing the dialog takes `?add=` out of the URL, so a reload does not open it
+  // again.
+  const addParam = computed(() => (router.route.name === 'datasets' ? router.route.query.get('add') : null));
+  const asked = (p: string | null): p is 'folder' | 'synthetic' => p === 'folder' || p === 'synthetic';
+  const first = untrack(() => addParam.get());
+  const adding = signal(asked(first));
+  const addMode = signal<'folder' | 'synthetic'>(first === 'synthetic' ? 'synthetic' : 'folder');
   function add(m: 'folder' | 'synthetic') {
     addMode.set(m);
     adding.set(true);
   }
+  effect(() => {
+    const p = addParam.get();
+    if (asked(p)) untrack(() => add(p));
+  });
+  effect(() => {
+    if (adding.get()) return;
+    const q = untrack(() => router.route.query);
+    if (untrack(() => router.route.name) !== 'datasets' || !q.has('add')) return;
+    const rest = new URLSearchParams(q);
+    rest.delete('add');
+    untrack(() => router.go(`/datasets${rest.toString() ? `?${rest}` : ''}`, { replace: true }));
+  });
 
   const query = signal('');
   // The toolbar's filter, at its left as on Runs and Models (one shape for the three list toolbars): by format.

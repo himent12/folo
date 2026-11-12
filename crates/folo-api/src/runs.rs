@@ -203,7 +203,8 @@ pub struct Run {
     pub created: String,
     /// When training started, if it has.
     pub started: Option<String>,
-    /// When it reached `stopped`, `completed` or `failed`.
+    /// When it reached `stopped`, `completed` or `failed`; for a run whose server was killed under it (`stopped`,
+    /// `interrupted`), when it last trained (about 10 s at most before that).
     pub finished: Option<String>,
     /// Seconds a resumed run spent not training since `started`: from each end (stop, failure) until it trained
     /// again, summed over its resumes. Its training time is `finished` (or now, while it trains) minus `started`

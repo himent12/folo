@@ -266,6 +266,26 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     go.mockRestore();
   });
 
+  it('keeps the runs ticked for Compare across a run opened and left with Escape (a bare /runs right after it)', async () => {
+    const api = new MockApi('normal', 0);
+    const ids = (await api.runs()).slice(0, 2).map((r) => r.id);
+    await open(Runs, `/runs?sel=${ids.join(',')}`, api);
+    await loaded();
+    // Enter on a row opens the run (a new entry); the App swaps the list for the run page.
+    router.go(`/runs/${ids[0]}`);
+    unmount(c!);
+    // Escape there opens /runs (shell/shortcuts backPath), the next entry.
+    router.go('/runs');
+    const P = Runs;
+    c = render(() => <P />, target);
+    await loaded();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(location.hash).toBe(`#/runs?sel=${ids.join(',')}`);
+      expect(target.querySelectorAll('td.check input:checked')).toHaveLength(2);
+    });
+  });
+
   it('gives a finished run its model, the Playground and Delete run in its ⋯', async () => {
     await open(Runs, '/runs', new MockApi('normal', 0));
     await loaded();
@@ -274,6 +294,21 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     flushSync();
     const items = [...document.querySelectorAll('[role="menuitem"]')].map((e) => e.textContent?.trim());
     expect(items).toEqual(['Open model', 'Try in Playground', 'Delete run']);
+  });
+
+  it('gives the training run a ⋯ too: Open run, and Stop behind its confirm (v-data-runs N10a)', async () => {
+    const api = new MockApi('normal', 0);
+    await open(Runs, '/runs', api);
+    await loaded();
+    const running = (await api.runs()).find((r) => r.status === 'running')!;
+    target.querySelector<HTMLButtonElement>(`tr[data-id="${running.id}"] td.act button`)!.click();
+    flushSync();
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    expect(items.map((e) => e.textContent?.trim())).toEqual(['Open run', 'Stop']);
+    expect(items[0]!.getAttribute('href')).toBe(`#/runs/${running.id}`);
+    items[1]!.click();
+    flushSync();
+    expect(document.querySelector('dialog[open]')?.textContent).toContain(`Stop ${running.name}?`);
   });
 
   it("gives a resumed run's training time, without the night it sat stopped", async () => {

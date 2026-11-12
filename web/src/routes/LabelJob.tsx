@@ -170,7 +170,7 @@ export default function LabelJob() {
       await hub.api.deleteLabelJob(cur.id);
       deleteOpen.set(false);
       toast.success(`Deleted ${cur.name}`, 'Images from folders and datasets made from it were not touched.');
-      router.go('/datasets/label');
+      router.go('/datasets/label', { replace: true });
     } catch (e) {
       deleteStatus.error(e, 'Could not delete the job');
     } finally {

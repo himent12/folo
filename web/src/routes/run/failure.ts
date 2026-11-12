@@ -21,14 +21,15 @@ export function failedTitle(run: Pick<Run, 'epoch' | 'step' | 'steps_per_epoch'>
 
 /**
  * What went wrong, in a sentence, for the codes a training run fails with; null for any other (the server's message
- * is then the cause). `dataset` is the dataset's name.
+ * is then the cause). `dataset` is the dataset's name; `trained`: it failed after its first step (one that failed
+ * before is "Failed before training started", so its cause never says "during training").
  */
-export function failureSummary(code: string | undefined, dataset: string): string | null {
+export function failureSummary(code: string | undefined, dataset: string, trained = true): string | null {
   switch (code) {
     case 'data_error':
-      return `Files of dataset ${dataset} went missing or changed during training.`;
+      return trained ? `Files of dataset ${dataset} went missing or changed during training.` : `The files of dataset ${dataset} are missing or could not be read.`;
     case 'io_error':
-      return 'Reading or writing a file failed during training.';
+      return trained ? 'Reading or writing a file failed during training.' : 'Reading or writing a file failed.';
     case 'training_failed':
       return 'Training diverged or produced no usable batch.';
     case 'not_supported':

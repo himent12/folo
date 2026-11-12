@@ -173,7 +173,7 @@ export default function BenchLoop() {
       removing.set(false);
       // page-level: its confirm dialog has closed on the line above.
       toast.success(`Deleted ${l.name}`, 'Its datasets, runs, models and entries stay.');
-      router.go(`/benchmarks/${bid}?tab=loops`);
+      router.go(`/benchmarks/${bid}?tab=loops`, { replace: true });
     } catch (e) {
       removeStatus.error(e, 'Could not delete the loop');
     } finally {

@@ -168,7 +168,7 @@ describe('Outcome', () => {
   const SHORT =
     'this run takes only 125 optimizer steps (5 epochs × 25: 800 training images, batch 32); a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP near 0. Train for at least 8 epochs, add images, or start from pretrained weights';
   const WARMUP = "warmup takes 75 of the run's 125 optimizer steps, so the learning rate reaches lr0 only in the second half of the run; lower warmup_epochs (now 3) or train for more epochs";
-  const short = (status: Run['status']) => ({ ...failed(''), status, error: status === 'failed' ? 'dataset folder is gone' : null, epochs: 5, config: { ...config, epochs: 5 }, model_id: 'm_1' });
+  const short = (status: Run['status']) => ({ ...failed(''), status, error: status === 'failed' ? 'dataset folder is gone' : null, epochs: 5, config: { ...config, epochs: 5 }, model_id: 'm_1', best: { epoch: 5, map50_95: 0.012 } });
 
   it('joins a completed run that was too short to learn into one callout: outcome, then the warning, its fix and Why?', () => {
     const r = render(short('completed'), vi.fn(), [SHORT, WARMUP]);
@@ -179,17 +179,27 @@ describe('Outcome', () => {
     expect(titles).toEqual(['Completed in 16m 00s', 'Too short to learn:']);
     expect(c.querySelector('.c-also .c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
     // The fix leads; the model's hand-off stays beside it; the reasons behind Why?.
-    expect(r.labels).toEqual(['Train 8 epochs', 'Open model', 'Try in Playground', 'Why?']);
-    expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&epochs=8');
+    expect(r.labels).toEqual(['Train 10 epochs', 'Open model', 'Try in Playground', 'Why?']);
+    expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&epochs=10');
     expect(r.buttons[1]?.getAttribute('href')).toBe('#/models/m_1');
     expect(r.buttons[2]?.getAttribute('href')).toBe('#/playground?model=m_1');
     expect(c.querySelector('.c-detail')?.textContent ?? '').not.toMatch(/lr0|warmup_epochs/);
     r.done();
   });
 
+  it('does not call a short run that scored well too short to learn, and suggests a round, clearly longer run (v-data-runs N4)', () => {
+    const run: Run = { ...short('completed'), epochs: 15, config: { ...config, epochs: 15 }, best: { epoch: 15, map50_95: 0.545 } };
+    const fifteen = SHORT.replace('125 optimizer steps (5 epochs × 25', '195 optimizer steps (15 epochs × 13').replace('at least 8 epochs', 'at least 16 epochs');
+    const r = render(run, vi.fn(), [fifteen]);
+    expect(r.target.querySelector('.c-also .c-title')?.textContent).toBe('More epochs would likely improve this:');
+    expect(r.labels[0]).toBe('Train 30 epochs');
+    expect(r.target.querySelector('.c-detail')?.textContent ?? '').not.toMatch(/mAP near 0|learn anything/);
+    r.done();
+  });
+
   it('keeps the same one-callout pattern for a stopped or failed short run; a failure keeps the fix under Details', () => {
     for (const [status, labels] of [
-      ['stopped', ['Train 8 epochs', 'Resume', 'Open model', 'Try in Playground', 'Why?']],
+      ['stopped', ['Train 10 epochs', 'Resume', 'Open model', 'Try in Playground', 'Why?']],
       ['failed', ['Resume', 'Details']],
     ] as const) {
       const r = render(short(status), vi.fn(), [SHORT]);
@@ -198,6 +208,16 @@ describe('Outcome', () => {
       expect(r.labels).toEqual(labels);
       r.done();
     }
+  });
+
+  it("gives a failure's raw message a labelled box of its own, and the schedule warning a section of its own (v-data-runs N8)", () => {
+    const r = render({ ...short('failed'), error_code: 'data_error', error: 'io error at D:/x.jpg: not found' }, vi.fn(), [SHORT]);
+    const detail = r.target.querySelector('.c-detail')!;
+    expect([...detail.querySelectorAll('.d-head')].map((h) => h.textContent)).toEqual(['Error message', 'Too short to learn']);
+    expect(detail.querySelector('.d-head + code.raw')?.textContent).toBe('io error at D:/x.jpg: not found');
+    // The warning's reasons follow its own heading, never the error message.
+    expect(detail.querySelector('.d-head + code.raw + .alts + .d-head + .why')).not.toBeNull();
+    r.done();
   });
 
   it('hands a completed run on to its model and the Playground, the Playground left out only at mAP exactly 0', () => {
@@ -252,7 +272,7 @@ describe('Outcome', () => {
     expect(r.target.querySelectorAll('.callout')).toHaveLength(1);
     expect(note.querySelector('.c-title')?.textContent).toBe('Too short to learn:');
     expect(note.querySelector('.c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
-    expect(r.labels).toEqual(['Train 8 epochs', 'Why?']);
+    expect(r.labels).toEqual(['Train 10 epochs', 'Why?']);
     r.done();
   });
 });
