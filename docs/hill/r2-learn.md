@@ -44,8 +44,12 @@ not speed measurements.
 | mus-m937w0-s0 | r2a | 0 | momentum 0.937, warmup_bias_lr 0 | 0.1048 | 0.175 | 0.050 | 0.158 | 0.224 |
 | mus-m09w01-s0 | r2a | 0 | momentum 0.9, warmup_bias_lr 0.1 | 0.1139 | 0.188 | 0.060 | 0.171 | 0.265 |
 | mus-m09w01-s1 | r2a | 1 | the same | 0.1091 | 0.180 | 0.055 | 0.167 | 0.236 |
+| mus-m09w01-s2 | r2a | 2 | the same | 0.1123 | 0.185 | 0.056 | 0.171 | 0.245 |
 
-(The rest of the proxy screens, the o2o runs and seed 2 are added below as they finish.)
+**Bias warmup, three seeds per side:** MuSGD at momentum 0.9 with `warmup_bias_lr = 0` (what `auto` rule 3 resolves to)
+0.1027 / 0.1010 / 0.1027, mean 0.1021; with 0.1: 0.1139 / 0.1091 / 0.1123, mean **0.1118**: +0.0097 AP (+9.5%),
+every seed of one side above every seed of the other. Momentum 0.937 against 0.9: one seed per side at each bias
+warmup (0.1048 vs 0.1027 at 0, 0.1133 vs 0.1139 at 0.1), not distinguishable.
 
 ### Fine-tune on BCCD (test AP of best.folo, benchmark scorer)
 
@@ -56,7 +60,7 @@ not speed measurements.
 | ft-nbs16 | 0 | `nbs=16` (no accumulation: 13 steps per epoch, warmup 100 steps = 8 epochs) | 0.6069 | | 0.898 |
 | ft-wf0 | 0 1 2 | `warmup_floor=0` (warmup 12 steps = 3 epochs, as Ultralytics 8.4) | 0.6143 0.6211 0.6225 | 0.619 | 0.897 |
 | ft-wf0lr2 | 0 1 | floor 0, AdamW lr0 0.002 (round 1's AdamW floor 0.002) | 0.6049 0.6151 | 0.610 | 0.889 |
-| ft-wf0we1 | 0 | floor 0, `warmup_epochs=1` | 0.6109 | | 0.891 |
+| ft-wf0we1 | 0 | floor 0, `warmup_epochs=1` | 0.6109 | | 0.890 |
 | ft-musgd | 0 | `--optimizer musgd --lr0 0.01` (momentum 0.937, warmup_bias_lr 0.1), floor 100 | 0.6209 | | 0.901 |
 | ft-wf0mus | 0 1 2 | MuSGD lr0 0.01, momentum 0.937, warmup_bias_lr 0.1, floor 0 | 0.6294 0.6223 0.6235 | **0.625** | 0.910 |
 | ft-muslr005 | 0 | the same at lr0 0.005 | 0.6079 | | 0.893 |
@@ -64,6 +68,18 @@ not speed measurements.
 | ft-musy26w | 0 | the same with YOLO26's published MuSGD weights (muon 0.528, sgd 0.674, cls_lr 2.737) | 0.6085 | | 0.893 |
 | ft-musm09 / ft-r4 | 0 1 2 | MuSGD lr0 0.01, momentum 0.9, warmup_bias_lr 0.1, floor 0 (`auto` rule 4 draft) | 0.6231 0.6158 0.6269 | 0.622 | 0.906 |
 | yolo26n (published) | 0 1 2 | Ultralytics defaults from yolo26n.pt | 0.6212 0.6339 0.6235 | 0.626 | 0.911 |
+
+### Fine-tune on the other three sets (rule 4's settings: MuSGD lr0 0.01, momentum 0.937, warmup_bias_lr 0.1, floor 0)
+
+| dataset | main (published, seeds 0 1 2) | rule 4 (this PC, seeds 0 1 2) | mean main → rule 4 | yolo26n (published) |
+|---|---|---|---|---:|
+| medical-pills (val) | 0.8011 0.8049 0.8067 | 0.8080 0.8089 0.8052 | 0.8042 → **0.8074** | 0.8027 |
+| signature (val) | 0.9921 0.9874 0.9881 | 0.9873 0.9909 0.9874 | 0.9892 → 0.9885 | 0.9818 |
+| brain-tumor (val) | 0.4393 0.4563 0.4605 | 0.4649 0.4369 0.4470 | 0.4520 → 0.4496 | 0.4355 |
+
+AP50: pills 0.998 on every rule-4 seed (main 0.995), signature 1.000 for every run of both (saturated, 35 images),
+brain-tumor 0.619 (main 0.613). Pills a little better, signature and brain-tumor level (differences of 0.001 and
+0.002, inside seed ranges of 0.004 and 0.03): no loss on the other three sets.
 
 ### Shapes gate (seed 0)
 
@@ -74,3 +90,69 @@ not speed measurements.
 | shapes-r5 | MuSGD lr0 0.01, momentum 0.937, warmup_bias_lr 0.1, floor 0 (= rule 4) | 0.985 | **0.926** | epoch 8 |
 
 No run had a non-finite batch.
+
+## Commands
+
+Every run is one line of `D:/folo-data/runs-hill2/learn/bin/queue.txt`, run by `runner.sh` as
+`bash <wrapper> <binary> <name> <seed> [flags]` (wrappers above; `logs/<name>.log` has the output, `logs/runner.out`
+the order). Flags per row:
+
+| rows | flags |
+|---|---|
+| mus-r3 | `--optimizer musgd --set momentum=0.9 --set warmup_bias_lr=0` |
+| mus-937 | `--optimizer musgd` (momentum 0.937 and warmup_bias_lr 0.1 are the config defaults) |
+| mus-m937w0 | `--optimizer musgd --set warmup_bias_lr=0` |
+| mus-m09w01 | `--optimizer musgd --set momentum=0.9` |
+| ft-main | none (`ft.sh` with `folo-main.exe`) |
+| ft-nbs16 | `--set nbs=16` |
+| ft-wf0 | `--set warmup_floor=0` |
+| ft-wf0lr2 | `--set warmup_floor=0 --optimizer adamw --lr0 0.002 --set momentum=0.9 --set warmup_bias_lr=0` |
+| ft-wf0we1 | `--set warmup_floor=0 --set warmup_epochs=1` |
+| ft-musgd | `--optimizer musgd --lr0 0.01` (floor 100: binary r2a, whose default floor is still 100) |
+| ft-wf0mus | `--set warmup_floor=0 --optimizer musgd --lr0 0.01` |
+| ft-muslr005 / ft-muslr02 | `--set warmup_floor=0 --optimizer musgd --lr0 0.005` / `--lr0 0.02` |
+| ft-musy26w | `--set warmup_floor=0 --optimizer musgd --lr0 0.01 --set musgd.muon=0.528 --set musgd.sgd=0.674 --set musgd.cls_lr=2.737` |
+| ft-musm09 | `--set warmup_floor=0 --optimizer musgd --lr0 0.01 --set momentum=0.9` |
+| ft-r4 | none, binary r4 (its rule-4 draft: MuSGD momentum 0.9, floor 0), the same settings as ft-musm09 (seed 0 bit-identical) |
+| ft-r5 | `--optimizer musgd --lr0 0.01 --set momentum=0.937`, binary r4 (floor 0): the shipped rule's settings |
+| shapes-main / shapes-mus / shapes-r5 | none / `--optimizer musgd --set momentum=0.9 --set warmup_floor=0` / `--optimizer musgd --lr0 0.01 --set momentum=0.937` (r4) |
+
+(`bin/chain1.sh` and `chain2.sh` were the first queues and were stopped after `mus-937-s0`; none of their later lines
+ran as written there.)
+
+## Shipped (PR #188)
+
+- **`auto` rule 4**: MuSGD at lr0 0.01, momentum 0.937, warmup_bias_lr 0.1 for every run. Rule 3 (and Ultralytics
+  8.4.198) picks AdamW at or below 10,000 iterations and zeroes the bias warmup LR. On the proxy the bias warmup is
+  worth +9.5% to MuSGD (three seeds per side); MuSGD beats `auto`'s AdamW on the proxy (round 1: 0.0747 vs about
+  0.112), on the shapes gate (0.892 vs 0.926 mAP50-95, one seed) and fine-tuning BCCD (0.607 vs 0.625, three seeds),
+  and is level or better on the other three fine-tuning sets.
+- **`warmup_floor` default 0**: the 100-iteration floor (dropped by Ultralytics 8.4) made a 205-image fine-tune warm
+  up for 25 of its 100 epochs; without it BCCD gains 0.013 AP with AdamW (three seeds). Old configs keep 100.
+- Opt-in, defaults unchanged: `musgd.{muon,sgd,cls_lr}` (YOLO26's published weights lost on BCCD, one seed) and
+  `o2o_attached_epochs`.
+
+## Targets
+
+- **Proxy P1, +5% over main's recipe and over Ultralytics' rows**: over main's recipe (`auto` → AdamW, 0.0747) rule
+  4 is about +50%; over Ultralytics' best row (MuSGD 0.1133) it is level, not +5% (0.1118 at momentum 0.9, three seeds;
+  rule 4's own seeds below). Not met against Ultralytics' MuSGD row.
+- **BCCD ≥ yolo26n (0.626)**: 0.625 (0.6251 vs 0.6262): level, not above. Not met by its letter.
+
+## Negative results
+
+- AdamW lr0 0.002 on a fine-tune (round 1's open "floor 0.002"): BCCD 0.605 / 0.615 against 0.614 / 0.621 at
+  `auto`'s 0.00143 (two seeds, floor 0). Not shipped.
+- MuSGD lr0 0.005 or 0.02 on BCCD (0.608, 0.607), YOLO26's published MuSGD weights (0.609), a 1-epoch warmup (0.611),
+  `nbs=16` (0.607): all below MuSGD lr0 0.01 / floor 0 (0.622–0.629), one seed each.
+- ProgLoss and STAL (YOLO26): FOLO already has both (the o2m/o2o loss-weight decay of MODEL.md §6.6 and the 16 px
+  candidate enlargement of §7.3); nothing to add.
+
+## Leftovers
+
+- The proxy screens queued on rule 4 (`loss.tal.topk=13`, `loss.cls_gain=1.0`, `--cos-lr`, MuSGD weights 0.5 / 0.5)
+  and the o2o runs (`--head o2o`, detached vs `o2o_attached_epochs=20`): results below as they finish.
+- The Studio and Desktop offline estimates (`web/src/routes/runnew/estimate.ts`, `web/src/lib/api/mock/runs.ts`,
+  `web/src/routes/run/resolved.ts`, `apps/desktop/src/api/mock/training.rs`) still mirror rule 3 and the 100-step
+  floor; other lanes own them.
+- Full-scale COCO under rule 4 (the folo-s run used rule 3: momentum 0.9, bias warmup 0).
