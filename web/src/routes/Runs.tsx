@@ -8,6 +8,7 @@ import Trash from '$icons/trash-2';
 import X from '$icons/x';
 import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
+import { modelsResource } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Model, QueueRequest, Run } from '$lib/api/types';
 import { runDatasetLabel } from '$lib/runDataset';
@@ -65,7 +66,7 @@ export default function Runs() {
   /** A run's dataset by name (lib/runDataset), the one it recorded while the datasets load; marked once it was removed. */
   const datasetName = (r: Run) => runDatasetLabel(r, datasets.data ? dsName.get() : undefined, !!datasets.error) ?? r.dataset?.name ?? '';
   // Only to name the model a run was fine-tuned from; the list renders without it.
-  const models = new Resource((s) => hub.api.models(s));
+  const models = modelsResource();
   const modelById = computed(() => new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
 
   // Queue control (servers that list `queue_control`): a waiting run's row says its place and has a ⋯ menu with
@@ -576,7 +577,6 @@ export default function Runs() {
       />{' '}
       <DeleteRun
         run={deleting.get()}
-        models={models.data}
         onclose={() => deleting.set(null)}
         ondeleted={(r) => {
           selected.set(selected.peek().filter((id) => id !== r.id));

@@ -21,6 +21,7 @@ import CloudUpload from '$icons/cloud-upload';
 import { computed, css, effect, MediaQuery, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { LiveRun } from '$lib/api/live';
+import { modelsResource } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
 import type { QueueRequest } from '$lib/api/types';
@@ -279,7 +280,7 @@ export default function Run() {
   // dependency and start estimate are in the banner above); once picked, the choice holds.
   const picked = signal<Section | null>(null);
   const section = computed<Section>(() => picked.get() ?? (queuedOnly.get() ? 'config' : 'samples'));
-  const models = new Resource((s) => hub.api.models(s));
+  const models = modelsResource();
   /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
   const stacked = new MediaQuery(media.upToLaptop, false);
   const phone = new MediaQuery(media.phone, false);
@@ -711,7 +712,7 @@ export default function Run() {
               </>
             )}
           />
-          <DeleteRun run={deleteOpen.get() ? R() : null} models={models.data} onclose={() => deleteOpen.set(false)} ondeleted={() => router.go('/runs')} />
+          <DeleteRun run={deleteOpen.get() ? R() : null} onclose={() => deleteOpen.set(false)} ondeleted={() => router.go('/runs')} />
         </>
       )}
     </>
