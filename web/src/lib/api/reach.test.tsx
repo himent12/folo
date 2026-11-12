@@ -65,6 +65,23 @@ describe('Reach', () => {
     expect(probes).toBe(1);
   });
 
+  it('drops a suspicion when anything answers while its probe is out (review R1)', async () => {
+    let reject!: (e: Error) => void;
+    const reach = new Reach();
+    reach.reset(() => new Promise((_, no) => (reject = no)));
+    reach.failed();
+    // A newer request (or the reopened stream) answered: the probe that ends in a timeout afterwards proves nothing.
+    reach.ok();
+    reject(new Error('timed out'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect([reach.offline, reach.back]).toEqual([false, 0]);
+    // The next failure is a suspicion of its own, with a probe of its own.
+    reach.failed();
+    reject(new Error('down'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reach.offline).toBe(true);
+  });
+
   it('has nothing to probe without a server (the mock), and a new server forgets the outage', async () => {
     const reach = new Reach();
     reach.failed();
@@ -84,6 +101,23 @@ describe('hub.offline with the server', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+
+  it('stays online when the health probe gets an HTTP error: the server answered (review R2)', async () => {
+    let health = 0;
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (!url.endsWith('/api/health')) throw new TypeError('Failed to fetch');
+      // The connect's check answers; the probe's gets a 500, then a 200 that is not JSON.
+      if (health++ === 0) return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+      return health === 2 ? Response.json({ error: { code: 'internal', message: 'boom' } }, { status: 500 }) : new Response('<html>');
+    });
+    await hub.connect();
+    await expect(hub.api.datasets()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([health, hub.offline]).toEqual([2, false]);
+    await expect(hub.api.datasets()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([health, hub.offline]).toEqual([3, false]);
   });
 
   it('turns on when requests stop reaching it, the shell says so, and a failed list refetches by itself when it is back', async () => {
