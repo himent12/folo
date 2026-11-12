@@ -116,7 +116,10 @@ export default function Run() {
     return live.steps.length;
   });
   const queuedOnly = computed(() => status.get() === 'queued' && stepCount.get() === 0);
-  /** The run loaded but its history (metrics) did not: its panels say so with Retry instead of "after the first epoch". */
+  /**
+   * The run loaded but its history (metrics) did not: the metrics panel says so with the one Retry, the panels derived
+   * from them (samples, per class) say they wait for it, and the log, a request of its own, shows what it got.
+   */
   const historyError = computed(() => (run.get() ? live.error : undefined));
   const retryHistory = () => live.retry();
 
@@ -637,17 +640,16 @@ export default function Run() {
                         datasetGone={datasetGone.get()}
                         epochsDone={epochsDone.get()}
                         title={`${scoresTitle(evalOn.get())} samples`}
-                        error={historyError.get()}
-                        retry={retryHistory}
+                        unavailable={historyError.get() !== undefined}
                       />
                     </div>
                     <div class="part" data-part="logs">
-                      <Logs log={live.logsLog} version={live.version} live={active.get()} error={historyError.get()} retry={retryHistory} />
+                      <Logs log={live.logsLog} version={live.version} live={active.get()} />
                     </div>
                   </div>
                   <aside class="rail" aria-label="Per-class results and config">
                     <div class="part" data-part="classes">
-                      <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact error={historyError.get()} retry={retryHistory} />
+                      <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} />
                     </div>
                     {cloud.get() ? (
                       <div class="part" data-part="cloud">

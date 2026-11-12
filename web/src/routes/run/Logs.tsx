@@ -27,7 +27,6 @@ import type { AppendLog, LogCursor } from '$lib/api/appendLog';
 import type { LogLevel, LogLine } from '$lib/api/types';
 import { clock } from '$lib/format';
 import Button from '$lib/ui/Button';
-import ErrorState from '$lib/ui/ErrorState';
 import Panel from '$lib/ui/Panel';
 import Segmented from '$lib/ui/Segmented';
 import { tooltip } from '$lib/ui/tooltip';
@@ -38,9 +37,6 @@ export interface LogsProps {
   log: AppendLog<LogLine>;
   version: number;
   live: boolean;
-  /** The run's history (its log with it) failed to load: an error with Retry, not "No log lines yet". */
-  error?: unknown;
-  retry?: () => void;
 }
 
 const order: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -267,11 +263,7 @@ export default function Logs(props: LogsProps) {
   // No lines at all (a queued run): the state-height rule, the header and one compact line; nothing to filter yet.
   return (
     <Panel title="Logs" meta={total() ? String(total()) : undefined} pad="none" id="logs" actions={total() ? levels : undefined}>
-      {total() === 0 && props.error !== undefined ? (
-        <div class="failed">
-          <ErrorState error={props.error} title="Could not load the log" retry={props.retry} compact />
-        </div>
-      ) : total() === 0 ? (
+      {total() === 0 ? (
         <p class="none">No log lines yet.</p>
       ) : (
         <div class="wrap">
@@ -405,9 +397,6 @@ css`
   .none {
     padding: 0 var(--space-4) var(--space-4);
     color: var(--text-tertiary);
-  }
-  .failed {
-    padding: 0 var(--space-4) var(--space-4);
   }
   .empty {
     padding: var(--space-4);

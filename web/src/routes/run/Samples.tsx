@@ -25,9 +25,9 @@ export interface SamplesProps {
   epochsDone: number;
   /** "Validation samples", or the split they are really from ("Training-split samples", lib/evaluated `scoresTitle`). */
   title?: string;
-  /** The run's history failed to load (so `epochsDone` is unknown): an error with Retry, not "appear after…". */
-  error?: unknown;
-  retry?: () => void;
+  /** The run's history failed to load (so `epochsDone` is unknown): one quiet line, not "appear after…"; the metrics
+   * panel has the error and its Retry. */
+  unavailable?: boolean;
   /** The run's dataset was removed: its images are gone, and the tiles say so (nothing to retry). */
   datasetGone?: boolean;
 }
@@ -137,8 +137,8 @@ export default function Samples(props: SamplesProps) {
             </div>
           </div>
         ) : null}
-        {props.error !== undefined ? (
-          <ErrorState error={props.error} title="Could not load the samples" retry={props.retry} compact />
+        {props.unavailable ? (
+          <p class="none">Samples show once the run's metrics load.</p>
         ) : props.epochsDone === 0 ? (
           <p class="none">Samples appear after the first validation pass.</p>
         ) : samples.error && !samples.data && props.datasetGone ? (
