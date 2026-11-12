@@ -27,7 +27,7 @@ import { rowNav } from '$lib/ui/rowNav';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import { imageCount } from './dataset/health';
 import { datasetChanges } from './datasets/changes';
-import { datasetProblem, PROBLEM_LABEL, type ListedDataset } from './datasets/problem';
+import { datasetProblem, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
 /** Columns of the desktop table (for state rows that span it), the empty last one included. */
@@ -40,18 +40,30 @@ export default function Datasets() {
 
   // The list endpoint has no stats; fetch each dataset for its class balance and box count (and to learn which ones
   // cannot be read: a folder that was moved is marked, not shown as if nothing were wrong).
+  // A dataset whose folder was found missing is not read again on every visit (./datasets/problem readDataset): only
+  // when the list may have changed (`again`, below).
+  let again = false;
   const datasets = new Resource(async (s) => {
-    const list = await hub.api.datasets(s);
-    return Promise.all(list.map((d): Promise<ListedDataset> => hub.api.dataset(d.id, s).catch((e) => ({ ...d, problem: datasetProblem(e) }))));
+    const api = hub.api;
+    const fresh = again;
+    again = false;
+    const list = await api.datasets(s);
+    return Promise.all(
+      list.map((d): Promise<ListedDataset> => readDataset(api, d.id, () => api.dataset(d.id, s), fresh).catch((e) => ({ ...d, problem: datasetProblem(e) }))),
+    );
   });
+  const reread = () => {
+    again = true;
+    void datasets.refresh();
+  };
   // The list goes stale otherwise: read it again after a dataset action in this tab, and when the tab comes back (one
   // added in another tab, by an agent, or a folder moved meanwhile).
   const seen = datasetChanges.peek();
   effect(() => {
-    if (datasetChanges.get() !== seen) untrack(() => void datasets.refresh());
+    if (datasetChanges.get() !== seen) untrack(reread);
   });
   effect(() => {
-    const back = () => document.visibilityState === 'visible' && !datasets.loading && void datasets.refresh();
+    const back = () => document.visibilityState === 'visible' && !datasets.loading && reread();
     document.addEventListener('visibilitychange', back);
     return () => document.removeEventListener('visibilitychange', back);
   });

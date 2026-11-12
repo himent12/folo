@@ -78,6 +78,34 @@ describe('a dataset whose folder is missing', () => {
     await vi.waitFor(() => expect(go).toHaveBeenCalledWith('/datasets', { replace: true }));
     expect(del).toHaveBeenCalledWith('ds_shapes', { files: false });
   });
+
+  it('is not asked about again on every visit, only on Retry and when the tab comes back (v-data-runs N6)', async () => {
+    const read = vi.mocked(hub.api.dataset);
+    const issues = vi.spyOn(hub.api, 'datasetIssues');
+    const asked = () => read.mock.calls.filter(([id]) => id === 'ds_shapes').length;
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('tr[aria-label="shapes"]')?.textContent?.includes('Folder missing'), 'the mark');
+    expect(asked()).toBe(1);
+    // Its page, then the list again: both say so from what the list found.
+    c!.unmount();
+    open(Dataset, '/datasets/ds_shapes');
+    await until(() => target.textContent?.includes('Put it back and press Retry'), 'the page');
+    c!.unmount();
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('tr[aria-label="shapes"]')?.textContent?.includes('Folder missing'), 'the mark again');
+    expect(asked()).toBe(1);
+    expect(issues.mock.calls.filter(([id]) => id === 'ds_shapes')).toHaveLength(0);
+    // Back in the tab: the folder may be back.
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.waitFor(() => expect(asked()).toBe(2));
+    // Retry on its page asks.
+    c!.unmount();
+    open(Dataset, '/datasets/ds_shapes');
+    const retry = await until(() => [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Retry'), 'Retry');
+    expect(asked()).toBe(2);
+    retry.click();
+    await vi.waitFor(() => expect(asked()).toBe(3));
+  });
 });
 
 describe('the Datasets list', () => {

@@ -34,6 +34,7 @@ import ToggleButton from '$lib/ui/ToggleButton';
 import ClassPicker from './dataset/ClassPicker';
 import DisplayMenu from './dataset/DisplayMenu';
 import { findingCount, findingLabel, healthChecks, imageCount, noTraining } from './dataset/health';
+import { missingError, readDataset } from './datasets/problem';
 import ImageGrid from './dataset/ImageGrid';
 import Inspector from './dataset/Inspector';
 import RemoveDialog from './dataset/RemoveDialog';
@@ -61,7 +62,19 @@ export default function Dataset() {
   const clsParam = computed(() => router.route.query.get('class'));
   const imageParam = computed(() => router.route.query.get('image'));
 
-  const ds = new Resource((s) => hub.api.dataset(id.get(), s));
+  // A folder found missing is not asked about again on every visit, only on Retry (./datasets/problem readDataset).
+  let again = false;
+  const ds = new Resource((s) => {
+    const api = hub.api;
+    const key = id.get();
+    const fresh = again;
+    again = false;
+    return readDataset(api, key, () => api.dataset(key, s), fresh);
+  });
+  const retry = () => {
+    again = true;
+    void ds.refresh();
+  };
   const d = () => ds.data;
   /** The dataset could not be read: what went wrong. */
   const failure = computed(() => (ds.error && !d() ? ds.error : undefined));
@@ -174,7 +187,8 @@ export default function Dataset() {
     return dd ? imageCount(dd) : 0;
   });
   // The check's counts by severity (servers before them send none; a failure only leaves them out).
-  const check = new Resource((s) => hub.api.datasetIssues(id.get(), { limit: 0 }, s));
+  // Not for a dataset that cannot be read: its check would fail the same way.
+  const check = new Resource((s) => (failure.get() || missingError(hub.api, id.get()) !== undefined ? Promise.resolve(null) : hub.api.datasetIssues(id.get(), { limit: 0 }, s)));
   const counts = computed(() => check.data?.counts);
   const findings = computed(() => {
     const dd = d();
@@ -244,7 +258,7 @@ export default function Dataset() {
               error={failure.get()}
               title="Folder missing"
               hint="It was moved, renamed or deleted. Put it back and press Retry, or remove the dataset from FOLO: its files are never deleted."
-              retry={() => ds.refresh()}
+              retry={retry}
               actions={
                 listed.data ? (
                   <Button size="sm" icon={Trash} onclick={() => confirmDelete.set(true)}>
@@ -259,7 +273,7 @@ export default function Dataset() {
             <ErrorState
               error={failure.get()}
               title="Could not load this dataset"
-              retry={() => ds.refresh()}
+              retry={retry}
               actions={
                 listed.data ? (
                   <Button size="sm" icon={Trash} onclick={() => confirmDelete.set(true)}>
