@@ -6,13 +6,15 @@ use std::sync::OnceLock;
 #[cfg(target_arch = "x86_64")]
 use super::kernel::store_block_avx2;
 use super::kernel::store_block_generic;
-use super::{KC, MR, NR};
+use super::{KC, MR, NR, RegEpi};
 
 /// Micro-kernel over an A read in place: `C[0..mr, 0..nr] (+)= A * B_panel` where row `i` of A is the `kc`
-/// floats at `a[i]` (rows past `mr` repeat row 0 and are not stored).
-type ARowsKernel = unsafe fn(usize, &[*const f32; MR], *const f32, *mut f32, usize, usize, usize, bool);
+/// floats at `a[i]` (rows past `mr` repeat row 0 and are not stored), then the epilogue. The same FMAs in the
+/// same order as the packed-panel kernel, so the same results.
+pub(super) type ARowsKernel =
+    unsafe fn(usize, &[*const f32; MR], *const f32, *mut f32, usize, usize, usize, bool, Option<&RegEpi>);
 
-fn arows_kernel() -> ARowsKernel {
+pub(super) fn arows_kernel() -> ARowsKernel {
     static K: OnceLock<ARowsKernel> = OnceLock::new();
     *K.get_or_init(|| {
         #[cfg(target_arch = "x86_64")]
@@ -31,7 +33,7 @@ fn arows_kernel() -> ARowsKernel {
 /// Every `a[i]` points to `kc` floats, `b` to `kc * NR` floats, and `c` to an `mr x nr` block with row stride
 /// `ldc` that nobody else accesses concurrently.
 #[allow(clippy::too_many_arguments)]
-unsafe fn arows_kernel_generic(
+pub(super) unsafe fn arows_kernel_generic(
     kc: usize,
     a: &[*const f32; MR],
     b: *const f32,
@@ -40,6 +42,7 @@ unsafe fn arows_kernel_generic(
     mr: usize,
     nr: usize,
     acc_c: bool,
+    epi: Option<&RegEpi>,
 ) {
     // SAFETY: guaranteed by the caller.
     let b = unsafe { std::slice::from_raw_parts(b, kc * NR) };
@@ -55,7 +58,7 @@ unsafe fn arows_kernel_generic(
         }
     }
     // SAFETY: the caller owns the mr x nr block at `c`.
-    unsafe { store_block_generic(&mut acc, c, ldc, mr, nr, acc_c, None) }
+    unsafe { store_block_generic(&mut acc, c, ldc, mr, nr, acc_c, epi) }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -69,9 +72,10 @@ unsafe fn arows_kernel_avx2_entry(
     mr: usize,
     nr: usize,
     acc: bool,
+    epi: Option<&RegEpi>,
 ) {
     // SAFETY: only selected after runtime detection of avx2 and fma; pointer contract forwarded.
-    unsafe { arows_kernel_avx2(kc, a, b, c, ldc, mr, nr, acc) }
+    unsafe { arows_kernel_avx2(kc, a, b, c, ldc, mr, nr, acc, epi) }
 }
 
 /// AVX2/FMA [`ARowsKernel`]: `kernel_avx2` with the six A values of each K step broadcast from six rows.
@@ -90,6 +94,7 @@ unsafe fn arows_kernel_avx2(
     mr: usize,
     nr: usize,
     acc: bool,
+    epi: Option<&RegEpi>,
 ) {
     use std::arch::x86_64::*;
     let mut c00 = _mm256_setzero_ps();
@@ -132,7 +137,7 @@ unsafe fn arows_kernel_avx2(
             bp = bp.add(NR);
         }
         let rows = [[c00, c01], [c10, c11], [c20, c21], [c30, c31], [c40, c41], [c50, c51]];
-        store_block_avx2(&rows, c, ldc, mr, nr, acc, None);
+        store_block_avx2(&rows, c, ldc, mr, nr, acc, epi);
     }
 }
 
@@ -190,7 +195,17 @@ pub(crate) fn gemm_arows(
                 // SAFETY: `bp` holds kc * NR floats, every row `kc` floats from `rows[r]`, and the C block
                 // [i..i+mr, j..j+nr] is inside `c` (asserted above), which this call borrows mutably.
                 unsafe {
-                    kern(kc, &rows, bp.as_ptr(), c.as_mut_ptr().add(i * ldc + j), ldc, mr, NR.min(n - j), acc)
+                    kern(
+                        kc,
+                        &rows,
+                        bp.as_ptr(),
+                        c.as_mut_ptr().add(i * ldc + j),
+                        ldc,
+                        mr,
+                        NR.min(n - j),
+                        acc,
+                        None,
+                    )
                 };
                 i += MR;
             }

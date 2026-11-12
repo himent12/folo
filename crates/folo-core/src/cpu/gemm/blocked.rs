@@ -5,8 +5,9 @@ use std::cell::RefCell;
 
 use rayon::prelude::*;
 
+use super::arows::arows_kernel;
 use super::kernel::kernel;
-use super::{BiasAct, KC, MR, NR, Operand, PACK_BUDGET, PAR_FLOPS};
+use super::{ARows, BiasAct, KC, MR, NR, Operand, PACK_BUDGET, PAR_FLOPS};
 use crate::cpu::elementwise::SendPtr;
 
 thread_local! {
@@ -198,7 +199,7 @@ pub(crate) fn gemm_ex<A: Operand, B: Operand>(
 
 /// Number of K parts for a GEMM whose C is too small to keep every thread busy with tiles but whose K is long
 /// (conv weight gradients: K = N·OH·OW), or 1. A function of the shape only, for reproducibility.
-fn k_split_parts(m: usize, n: usize, k: usize) -> usize {
+pub(super) fn k_split_parts(m: usize, n: usize, k: usize) -> usize {
     if k < 8 * KC || 2 * m * n * k < PAR_FLOPS {
         return 1;
     }
@@ -236,18 +237,20 @@ fn gemm_blocked<A: Operand, B: Operand>(
     threads: usize,
     epi: Option<BiasAct<'_>>,
 ) {
-    let kern = kernel();
+    let (kern, akern) = (kernel(), arows_kernel());
     let k = krange.len();
+    // A read in place (a row-major A: a conv's weights) is never packed.
+    let ain = ARows::of(a, m, krange.end);
     let pm = m.div_ceil(MR);
     let reg = epi.filter(BiasAct::in_kernel);
-    // K super-block: as many KC blocks of packed A as fit the pack budget.
+    // K super-block: as many KC blocks of packed A as fit the pack budget (all of K for A in place).
     let blocks_fit = (PACK_BUDGET / (pm * MR * KC)).max(1);
-    let ks = (blocks_fit * KC).min(k.div_ceil(KC) * KC);
+    let ks = if ain.is_some() { k } else { (blocks_fit * KC).min(k.div_ceil(KC) * KC) };
     let g = plan_tiles(m, n, k, threads);
     let (tm, tn) = g.tiles();
     let parallel = threads > 1 && tm * tn > 1;
     let cptr = SendPtr(c.as_mut_ptr());
-    let a_len = pm * MR * ks;
+    let a_len = if ain.is_some() { 0 } else { pm * MR * ks };
     with_scratch(a_len + 16, |abuf| {
         let pa_all = aligned(abuf, a_len);
         let mut s0 = krange.start;
@@ -255,17 +258,19 @@ fn gemm_blocked<A: Operand, B: Operand>(
             let ksz = ks.min(krange.end - s0);
             let last = s0 + ksz == krange.end;
             let first = s0 == krange.start;
-            let pa = &mut pa_all[..pm * MR * ksz];
-            let pack_a = |(p, dst): (usize, &mut [f32])| {
-                a.pack(p * MR, MR.min(m - p * MR), s0, ksz, MR, dst);
-            };
-            pack_lhs_panels(pa, MR * ksz, parallel, pack_a);
+            let pa = &mut pa_all[..a_len.min(pm * MR * ksz)];
+            if ain.is_none() {
+                let pack_a = |(p, dst): (usize, &mut [f32])| {
+                    a.pack(p * MR, MR.min(m - p * MR), s0, ksz, MR, dst);
+                };
+                pack_lhs_panels(pa, MR * ksz, parallel, pack_a);
+            }
             let pa = &*pa;
             let tile = |t: usize| {
                 let (ti, tj) = (t / tn, t % tn);
                 let (i0, i1) = (ti * g.mc, ((ti + 1) * g.mc).min(m));
                 let (j0, j1) = (tj * g.nc, ((tj + 1) * g.nc).min(n));
-                let cp = &cptr;
+                let (cp, ain) = (&cptr, &ain);
                 let panels = (j1 - j0).div_ceil(NR);
                 let b_len = panels * NR * KC.min(ksz);
                 with_scratch(b_len + 16, |bbuf| {
@@ -283,24 +288,41 @@ fn gemm_blocked<A: Operand, B: Operand>(
                             let mut i = i0;
                             while i < i1 {
                                 let mr = MR.min(i1 - i);
-                                let apanel = &pa[(i / MR) * MR * ksz + kb * MR..];
-                                debug_assert!(apanel.len() >= kc * MR);
                                 let re = reg.filter(|_| finished).map(|e| e.kernel_rows(i, mr));
-                                // SAFETY: the panels hold kc*MR / kc*NR floats (packed above); the C block
+                                let cblock = cp.0.wrapping_add(i * ldc + j);
+                                // SAFETY: the panels hold kc*MR / kc*NR floats (packed above), or A's rows
+                                // i..i + mr hold K elements s0 + kb..s0 + kb + kc in place; the C block
                                 // [i..i+mr, j..j+nr] lies inside `c` (asserted by `gemm_ex`) and belongs to
                                 // this tile only, so no other task touches it.
                                 unsafe {
-                                    kern(
-                                        kc,
-                                        apanel.as_ptr(),
-                                        bpanel.as_ptr(),
-                                        cp.0.add(i * ldc + j),
-                                        ldc,
-                                        mr,
-                                        nr,
-                                        acc,
-                                        re.as_ref(),
-                                    )
+                                    if let Some(ar) = ain {
+                                        let ap = ar.panel(i, mr, s0 + kb);
+                                        akern(
+                                            kc,
+                                            &ap,
+                                            bpanel.as_ptr(),
+                                            cblock,
+                                            ldc,
+                                            mr,
+                                            nr,
+                                            acc,
+                                            re.as_ref(),
+                                        );
+                                    } else {
+                                        let apanel = &pa[(i / MR) * MR * ksz + kb * MR..];
+                                        debug_assert!(apanel.len() >= kc * MR);
+                                        kern(
+                                            kc,
+                                            apanel.as_ptr(),
+                                            bpanel.as_ptr(),
+                                            cblock,
+                                            ldc,
+                                            mr,
+                                            nr,
+                                            acc,
+                                            re.as_ref(),
+                                        );
+                                    }
                                 };
                                 i += MR;
                             }

@@ -1,9 +1,12 @@
 //! Autograd semantics and the backend registry contract.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use folo_core::backend::{Backend, View, available_devices, register_backend};
-use folo_core::{CpuStorage, DType, Device, DeviceStorage, Error, Layout, Result, Storage, Tensor, no_grad};
+use folo_core::{
+    CpuStorage, DType, Device, DeviceStorage, Error, Layout, Pool2dParams, Result, Storage, Tensor, no_grad,
+};
 
 #[test]
 fn grads_for_leaves_only() -> Result<()> {
@@ -273,5 +276,109 @@ fn sigmoid_tail_and_pow_subnormal_base() -> Result<()> {
     let b = Tensor::zeros([1]).requires_grad_();
     let g = a.pow(&b)?.sum_all()?.backward()?.get(&b).unwrap().item::<f32>()?;
     assert!((g - (1e-40f64).ln() as f32).abs() < 1e-2, "{g}");
+    Ok(())
+}
+
+/// A device backend that pools on the host and counts which entry point [`Tensor::max_pool2d`] called.
+#[derive(Default)]
+struct PoolCounter {
+    indexed: AtomicUsize,
+    values: AtomicUsize,
+}
+
+impl PoolCounter {
+    fn counts(&self) -> (usize, usize) {
+        (self.indexed.load(Ordering::Relaxed), self.values.load(Ordering::Relaxed))
+    }
+}
+
+impl Backend for PoolCounter {
+    fn name(&self) -> &'static str {
+        "pool-counter"
+    }
+    fn full(&self, device: Device, dtype: DType, len: usize, value: f64) -> Result<Storage> {
+        FakeGpu.full(device, dtype, len, value)
+    }
+    fn upload(&self, device: Device, data: &CpuStorage) -> Result<Storage> {
+        FakeGpu.upload(device, data)
+    }
+    fn download(&self, src: View<'_>) -> Result<CpuStorage> {
+        FakeGpu.download(src)
+    }
+    fn copy_strided(&self, src: View<'_>) -> Result<Storage> {
+        FakeGpu.copy_strided(src)
+    }
+    fn copy_into(&self, dst: &mut Storage, l: &Layout, src: View<'_>) -> Result<()> {
+        FakeGpu.copy_into(dst, l, src)
+    }
+    fn cast(&self, src: View<'_>, dtype: DType) -> Result<Storage> {
+        FakeGpu.cast(src, dtype)
+    }
+    fn max_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<(Storage, Storage)> {
+        self.indexed.fetch_add(1, Ordering::Relaxed);
+        let host = Storage::Cpu(FakeGpu.host(&x).clone());
+        let (v, i) = folo_core::backend::backend(Device::Cpu)?.max_pool2d(View::new(&host, x.layout), p)?;
+        let up = |s: Storage| match s {
+            Storage::Cpu(c) => self.upload(x.storage.device(), &c),
+            Storage::Device(_) => unreachable!(),
+        };
+        Ok((up(v)?, up(i)?))
+    }
+    fn max_pool2d_values(&self, x: View<'_>, p: &Pool2dParams) -> Result<Storage> {
+        self.values.fetch_add(1, Ordering::Relaxed);
+        let host = Storage::Cpu(FakeGpu.host(&x).clone());
+        match folo_core::backend::backend(Device::Cpu)?.max_pool2d_values(View::new(&host, x.layout), p)? {
+            Storage::Cpu(c) => self.upload(x.storage.device(), &c),
+            Storage::Device(_) => unreachable!(),
+        }
+    }
+}
+
+/// Max pooling makes indices exactly when the result is recorded (grad enabled and an input that requires
+/// grad), and the values alone otherwise; the values are the same bits either way, and gradients still flow.
+#[test]
+fn max_pool_makes_indices_only_when_recorded() -> Result<()> {
+    let dev = Device::Gpu(8);
+    let counter = Arc::new(PoolCounter::default());
+    register_backend(dev, counter.clone())?;
+    let data: Vec<f32> = (0..2 * 3 * 7 * 6).map(|i| ((i * 2654435761usize) % 97) as f32 - 48.0).collect();
+    let x = Tensor::from_vec(data.clone(), [2, 3, 7, 6])?;
+    let bits =
+        |t: &Tensor| -> Result<Vec<u32>> { Ok(t.to_vec::<f32>()?.iter().map(|v| v.to_bits()).collect()) };
+
+    // Recorded: the indexed entry point, and a backward node.
+    // A separate tensor: the grad flag lives in the shared handle, so a clone of `x` would carry it too.
+    let leaf = Tensor::from_vec(data, [2, 3, 7, 6])?.requires_grad_();
+    let recorded = leaf.to_device(dev)?.max_pool2d(3, 2, 1)?;
+    assert_eq!(counter.counts(), (1, 0));
+    assert_eq!(recorded.grad_fn_name(), Some("max_pool2d"));
+    // Grad mode off, or an input that does not require grad: the values alone, no node.
+    let plain = {
+        let _g = no_grad();
+        leaf.to_device(dev)?.max_pool2d(3, 2, 1)?
+    };
+    assert_eq!(counter.counts(), (1, 1));
+    let untracked = x.to_device(dev)?.max_pool2d(3, 2, 1)?;
+    assert_eq!(counter.counts(), (1, 2));
+    for t in [&plain, &untracked] {
+        assert!(t.is_leaf() && !t.requires_grad());
+        assert_eq!(bits(t)?, bits(&recorded)?);
+    }
+
+    // The same split on the CPU, and the recorded result still differentiates: with non-overlapping windows,
+    // each window's maximum gets a gradient of 1 and everything else 0.
+    let y = leaf.max_pool2d(2, 2, 0)?;
+    assert_eq!(y.grad_fn_name(), Some("max_pool2d"));
+    assert_eq!(bits(&x.max_pool2d(2, 2, 0)?)?, bits(&y)?);
+    let g = y.sum_all()?.backward()?.get(&leaf).unwrap().to_vec::<f32>()?;
+    let xs = x.to_vec::<f32>()?;
+    let ys = y.to_vec::<f32>()?;
+    let (oh, ow) = (3, 3);
+    for (o, &v) in ys.iter().enumerate() {
+        let (pl, oy, ox) = (o / (oh * ow), o / ow % oh, o % ow);
+        let window: Vec<usize> = (0..4).map(|t| pl * 42 + (2 * oy + t / 2) * 6 + 2 * ox + t % 2).collect();
+        let first = *window.iter().find(|&&i| xs[i] == v).unwrap();
+        assert!(window.iter().all(|&i| g[i] == if i == first { 1.0 } else { 0.0 }), "window {o}");
+    }
     Ok(())
 }

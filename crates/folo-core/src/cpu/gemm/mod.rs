@@ -55,6 +55,53 @@ pub trait Operand: Sync {
             self.pack(o0 + j, NR.min(w - j), k0, kc, NR, &mut dst[q * NR * kc..(q + 1) * NR * kc]);
         }
     }
+
+    /// For an A operand whose K run of each row is contiguous: `Some((data, offset, so))`, where element
+    /// `(o, kk)` is `data[offset + o * so + kk]`. The drivers then read A's rows in place through row pointers
+    /// instead of packing it first (a serial pass before every GEMM of a conv forward, on the calling thread).
+    fn rows_in_place(&self) -> Option<(&[f32], usize, usize)> {
+        None
+    }
+}
+
+/// A's rows read in place (see [`Operand::rows_in_place`]): element `(o, kk)` is `data[offset + o * so + kk]`.
+#[derive(Clone, Copy)]
+pub(super) struct ARows<'a> {
+    data: &'a [f32],
+    offset: usize,
+    so: usize,
+}
+
+impl<'a> ARows<'a> {
+    /// `a`'s rows in place, if it has them and its packed form would fit one K super-block ([`PACK_BUDGET`]
+    /// floats: every conv weight), checked to hold `m x k` elements.
+    ///
+    /// # Panics
+    /// If `data` is too short for `m` rows of `k` elements, or that extent overflows `usize` (the packing path
+    /// would fail its slice bounds check there too): the kernels read these rows through raw pointers.
+    pub(super) fn of<A: Operand>(a: &'a A, m: usize, k: usize) -> Option<Self> {
+        let (data, offset, so) = a.rows_in_place()?;
+        if (m.div_ceil(MR) * MR).checked_mul(k).is_none_or(|v| v > PACK_BUDGET) {
+            // Larger than one packed super-block: packing is a small part of such a GEMM, and done in parallel.
+            return None;
+        }
+        // One past the last element read: `offset + (m - 1) * so + k`.
+        let end = (m.saturating_sub(1).checked_mul(so)).and_then(|v| v.checked_add(offset)?.checked_add(k));
+        assert!(m == 0 || k == 0 || end.is_some_and(|e| e <= data.len()), "gemm: A buffer too small");
+        Some(ARows { data, offset, so })
+    }
+
+    /// Pointers to K element `k0` of the `mr` rows from `i` (`mr <= MR`, rows `i..i + mr` inside A, and at
+    /// least `k0 + kc <= k` read from each); rows past `mr` repeat row `i`, as the kernels compute but never
+    /// store them.
+    #[inline]
+    pub(super) fn panel(&self, i: usize, mr: usize, k0: usize) -> [*const f32; MR] {
+        let base = self.data.as_ptr();
+        // SAFETY: `of` checked that every row `< m` holds `k` floats from `offset + row * so`.
+        std::array::from_fn(|r| unsafe {
+            base.add(self.offset + (i + if r < mr { r } else { 0 }) * self.so + k0)
+        })
+    }
 }
 
 /// [`Operand::pack_panels`] for an operand whose K row `kk` is the contiguous slice `row(kk)` of its `w` outer
@@ -147,6 +194,10 @@ impl Operand for Strided<'_> {
         }
         let base = self.offset + o0 + k0 * self.sk;
         pack_rows_into_panels(w, kc, dst, |kk| &self.data[base + kk * self.sk..base + kk * self.sk + w]);
+    }
+
+    fn rows_in_place(&self) -> Option<(&[f32], usize, usize)> {
+        (self.sk == 1).then_some((self.data, self.offset, self.so))
     }
 }
 

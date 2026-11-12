@@ -338,16 +338,19 @@ impl Backend for CpuBackend {
             }
         }
         let (oa, ob) = (batch_offsets(la), batch_offsets(lb));
-        let flops = 2 * m * n * k;
-        let one = |(i, c): (usize, &mut [f32]), parallel: bool| {
+        let one = |(i, c): (usize, &mut [f32]), threads: usize| {
             let lhs = gemm::Strided::lhs(ad, oa[i], rsa, csa);
             let rhs = gemm::Strided::rhs(bd, ob[i], rsb, csb);
-            gemm::gemm(m, n, k, &lhs, &rhs, c, n, false, parallel);
+            gemm::gemm_ex(m, n, k, &lhs, &rhs, c, n, false, threads, None);
         };
-        if batch > 1 && flops < (1 << 24) {
-            out.par_chunks_mut(m * n).enumerate().for_each(|x| one(x, false));
+        // The matrices side by side, the pool split between them (an attention block's two heads: two
+        // single-thread GEMMs of 10 MFLOP otherwise). Results do not depend on the split.
+        let threads = rayon::current_num_threads();
+        if batch > 1 {
+            let share = (threads / batch).max(1);
+            out.par_chunks_mut(m * n).enumerate().for_each(|x| one(x, share));
         } else {
-            out.chunks_mut(m * n).enumerate().for_each(|x| one(x, true));
+            one((0, &mut out), threads);
         }
         Ok(f32_storage(out))
     }
@@ -463,6 +466,13 @@ impl Backend for CpuBackend {
         let ohw = p.output_hw(h, w).expect("max_pool2d: output size validated by the caller");
         let (v, i) = pool::max_pool2d(&xd, (n * c, h, w), p, ohw);
         Ok((f32_storage(v), Storage::Cpu(CpuStorage::I64(i))))
+    }
+
+    fn max_pool2d_values(&self, x: View<'_>, p: &Pool2dParams) -> Result<Storage> {
+        let (n, c, h, w) = nchw(x.shape());
+        let xd = contiguous_f32(&x, "max_pool2d")?;
+        let ohw = p.output_hw(h, w).expect("max_pool2d: output size validated by the caller");
+        Ok(f32_storage(pool::max_pool2d_values(&xd, (n * c, h, w), p, ohw)))
     }
 
     fn max_pool2d_backward(
