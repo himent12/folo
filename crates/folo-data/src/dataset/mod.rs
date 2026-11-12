@@ -388,8 +388,17 @@ pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
                     jsons: vec![(coco::guess_split(path), path.to_path_buf())],
                 })
             }
+            // Said in the words people pick the format with ("YOLO", "COCO"), not the enum's.
+            (Format::Yolo, Some("json")) => Err(DataError::Format(format!(
+                "{} is a COCO .json file, not YOLO: read it as COCO (or detect the format)",
+                crate::paths::shown(path),
+            ))),
+            (Format::Coco, Some("yaml" | "yml")) => Err(DataError::Format(format!(
+                "{} is a YOLO data.yaml, not COCO: read it as YOLO (or detect the format)",
+                crate::paths::shown(path),
+            ))),
             _ => Err(DataError::Format(format!(
-                "{} is not a data.yaml or a COCO .json file (format {format:?})",
+                "{} is not a data.yaml or a COCO .json file",
                 crate::paths::shown(path),
             ))),
         };
