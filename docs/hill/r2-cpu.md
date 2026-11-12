@@ -180,8 +180,14 @@ Changes, in folo-nn's `train_cpu` (`crates/folo-nn/src/layers/batchnorm.rs`):
 On one core with 27 cores busy elsewhere, forward + loss went from 689 to 612 ms and backward from 1296 to 1285
 ms. Log: `pr2_train.txt` (`ab.sh 5 0 "" "" 'main=...pr1-train_step.exe;pr2=...pr2-train_step.exe'`); the `main`
 binary is PR 1's head, whose train-step code is `main`'s. These numbers are of the first draft of the
-statistics (shifted sums, one loop per plane); the block design above, which loops twice over each block in
-L1, was not re-measured.
+statistics (shifted sums, one loop per plane). The block design above (two loops over each block in L1), the
+one merged, measured again the same way (log `pr2b_train.txt`, 12–15 cores busy elsewhere):
+
+| folo-n train step, 320 px b16, 28 threads, 5 rounds alternated | `main` | PR 2 (block statistics) |
+|---|---|---|
+| forward + loss | 80.9–83.4 ms (median 81.4) | **74.6–76.5 ms (75.8), −7%** |
+| backward | 167.5–175.1 ms | 171.2–175.8 ms (tie) |
+| total | 249.8–258.1 ms (median 256.9) | 247.9–253.9 ms (250.9), −2.3% (tie) |
 
 ### Negative results (PR 2)
 
