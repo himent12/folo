@@ -106,10 +106,15 @@ fn device_memory(adapter: &wgpu::Adapter) -> u64 {
 
 impl std::fmt::Display for AdapterSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The memory size where the backend tells it (Vulkan); nothing said where it cannot (0).
+        let memory = match self.memory_bytes {
+            0 => String::new(),
+            b => format!("memory {:.1} GiB; ", b as f64 / (1u64 << 30) as f64),
+        };
         write!(
             f,
-            "[{}] {} ({}, {}) driver {} {}; shader-f16 {}; tensor cores {}; max buffer {} MiB, storage binding {} MiB, \
-             workgroup storage {} KiB, {} invocations/workgroup, subgroup {}..{}",
+            "[{}] {} ({}, {}) driver {} {}; {memory}shader-f16 {}; tensor cores {}; max buffer {} MiB, storage binding \
+             {} MiB, workgroup storage {} KiB, {} invocations/workgroup, subgroup {}..{}",
             self.index,
             self.name,
             self.backend,
@@ -430,5 +435,36 @@ impl GpuContext {
                 Ok(ctx)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdapterSummary;
+
+    /// `folo doctor` prints each adapter's memory size when the backend reports one, and nothing about it otherwise.
+    #[test]
+    fn an_adapter_line_names_its_memory_when_known() {
+        let mut a = AdapterSummary {
+            index: 0,
+            name: "NVIDIA GeForce RTX 4080 SUPER".into(),
+            vendor: 0x10de,
+            device: 0x2702,
+            device_type: "DiscreteGpu".into(),
+            backend: "Vulkan".into(),
+            driver: "NVIDIA".into(),
+            driver_info: "591.44".into(),
+            shader_f16: true,
+            tensor_cores: true,
+            memory_bytes: 16_869_490_688,
+            max_buffer_size: 1 << 32,
+            max_storage_buffer_binding_size: 1 << 31,
+            max_compute_workgroup_storage_size: 49_152,
+            max_compute_invocations_per_workgroup: 1024,
+            subgroup_size: (32, 32),
+        };
+        assert!(a.to_string().contains("driver NVIDIA 591.44; memory 15.7 GiB; shader-f16 yes"), "{a}");
+        a.memory_bytes = 0;
+        assert!(!a.to_string().contains("memory"), "{a}");
     }
 }

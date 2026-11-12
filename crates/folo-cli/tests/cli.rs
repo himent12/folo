@@ -40,6 +40,7 @@ fn doctor_json() {
     assert_eq!(v["gpu_detection"], "wgpu");
     for g in v["gpus"].as_array().unwrap() {
         assert!(g["name"].is_string() && g["backend"].is_string() && g["shader_f16"].is_boolean(), "{g}");
+        assert!(g["memory_bytes"].is_u64(), "{g}");
     }
     assert!(v["gpu_selected"].is_object());
     // The same `capabilities` as `/api/system`: available iff no reason.
