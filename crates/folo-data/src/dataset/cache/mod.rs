@@ -334,8 +334,14 @@ fn prune_to(dir: &Path, keep: &Path, max_total: u64) {
         if total <= max_total {
             break;
         }
-        if path != keep && std::fs::remove_file(&path).is_ok() {
-            total -= len;
+        if path == keep {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            // Gone either way: another process pruning at the same time may have deleted it first.
+            Ok(()) => total -= len,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => total -= len,
+            Err(_) => {}
         }
     }
 }
