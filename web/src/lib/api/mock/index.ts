@@ -1,4 +1,4 @@
-// In-browser mock of the whole API (docs/API.md), used with `?mock=1` or when the server is unreachable.
+// In-browser mock of the whole API (docs/API.md), used only when asked for with `?mock=1`.
 // Deterministic: everything derives from ids and the clock, so screenshots are comparable between rounds.
 //
 // Scenarios (`?scenario=`): `normal` (default), `empty` (nothing registered yet), `error` (every call fails),
