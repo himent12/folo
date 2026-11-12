@@ -261,8 +261,8 @@ fn check_train_count(n: usize, x: &Tensor) -> Result<()> {
     Ok(())
 }
 
-/// Train-mode BatchNorm followed by activation `ACT` on the CPU: per-channel statistics in `f64` (two
-/// passes), then the output `act(z)`, `z = (x − mean) · inv · γ + β`, with a hand-written backward:
+/// Train-mode BatchNorm followed by activation `ACT` on the CPU: per-channel statistics in `f64` (one pass,
+/// Chan's combination of per-plane moments), then the output `act(z)`, `z = (x − mean) · inv · γ + β`, with a hand-written backward:
 /// `dx = γ · inv / n · (n · g' − Σg' − x̂ · Σ(g' · x̂))`, `dγ = Σ(g' · x̂)`, `dβ = Σg'`, where
 /// `g' = g · act'(z)` (`z` recomputed from `x`), `x̂ = (x − mean) · inv` and `inv = 1 / sqrt(var + eps)`.
 /// The activation and its gradient run inside the BatchNorm passes, bit for bit the BatchNorm followed by the
@@ -277,34 +277,21 @@ fn train_cpu<const ACT: u8>(
     let (nb, c, h, w) = x.dims4()?;
     let hw = h * w;
     let n = (nb * hw) as f64;
-    // Per-channel sums of per-plane partial sums, planes added in image order (deterministic for any thread
-    // count). Planes are the parallel unit, so a layer with few channels still uses every thread.
-    let per_channel = move |plane: &[(f64, f64)]| -> Vec<(f64, f64)> {
-        (0..c)
-            .map(|ch| (0..nb).map(|b| plane[b * c + ch]).fold((0.0, 0.0), |a, v| (a.0 + v.0, a.1 + v.1)))
-            .collect()
-    };
+    // One pass over x: each plane's count, mean and sum of squared deviations (shifted sums, `plane_moments`),
+    // combined per channel in image order with Chan's formula (deterministic for any thread count). Planes are
+    // the parallel unit, so a layer with few channels still uses every thread.
     let (mean, inv, var) = x.with_f32_slice(|xs| {
-        let sums: Vec<(f64, f64)> = if hw == 0 {
-            vec![(0.0, 0.0); nb * c]
+        let planes: Vec<Moments> = if hw == 0 {
+            vec![Moments::default(); nb * c]
         } else {
-            xs.par_chunks(hw).map(|p| (sum_f64(p, |v| v as f64), 0.0)).collect()
+            xs.par_chunks(hw).map(|p| with_avx2(|| plane_moments(p))).collect()
         };
-        let mean: Vec<f64> = per_channel(&sums).iter().map(|s| s.0 / n).collect();
-        let sq: Vec<(f64, f64)> = if hw == 0 {
-            sums
-        } else {
-            xs.par_chunks(hw)
-                .enumerate()
-                .map(|(p, xp)| {
-                    let m = mean[p % c];
-                    (sum_f64(xp, |v| (v as f64 - m) * (v as f64 - m)), 0.0)
-                })
-                .collect()
-        };
-        let var: Vec<f64> = per_channel(&sq).iter().map(|s| s.0 / n).collect();
+        let stats: Vec<Moments> = (0..c)
+            .map(|ch| (0..nb).map(|b| planes[b * c + ch]).fold(Moments::default(), Moments::merge))
+            .collect();
+        let var: Vec<f64> = stats.iter().map(|m| if m.n > 0.0 { m.m2 / m.n } else { 0.0 }).collect();
         let inv: Vec<f32> = var.iter().map(|v| (1.0 / (v + eps).sqrt()) as f32).collect();
-        let mean: Vec<f32> = mean.iter().map(|&m| m as f32).collect();
+        let mean: Vec<f32> = stats.iter().map(|m| m.mean as f32).collect();
         (mean, inv, var.iter().map(|&v| v as f32).collect::<Vec<f32>>())
     })?;
     let g = gamma.to_vec::<f32>()?;
@@ -317,9 +304,11 @@ fn train_cpu<const ACT: u8>(
             y.par_chunks_mut(hw).zip(xs.par_chunks(hw)).enumerate().for_each(|(p, (o, xp))| {
                 let ch = p % c;
                 let (m, s, b) = (mean[ch], scale[ch], bv[ch]);
-                for (o, &v) in o.iter_mut().zip(xp) {
-                    *o = act_fwd::<ACT>((v - m) * s + b);
-                }
+                with_avx2(|| {
+                    for (o, &v) in o.iter_mut().zip(xp) {
+                        *o = act_fwd::<ACT>((v - m) * s + b);
+                    }
+                });
             });
         }
         y
@@ -333,13 +322,20 @@ fn train_cpu<const ACT: u8>(
         ACT_RELU => "batch_norm2d_relu",
         _ => "batch_norm2d",
     };
+    // Per-channel sums of per-plane partial sums, planes added in image order.
+    let per_channel = move |plane: &[(f64, f64)]| -> Vec<(f64, f64)> {
+        (0..c)
+            .map(|ch| (0..nb).map(|b| plane[b * c + ch]).fold((0.0, 0.0), |a, v| (a.0 + v.0, a.1 + v.1)))
+            .collect()
+    };
     let y = Tensor::custom_op(name, &[x, gamma, beta], y, move |gy| {
         let gy = gy.contiguous()?;
         let (dx, dg, db) = gy.with_f32_slice(|gs| {
             xd.with_f32_slice(|xs| {
                 // Every element is written below. With an activation, the first pass stores each plane's
                 // `g' = g · act'(z)` here (one vectorised f32 loop) and sums it while it is in cache; the
-                // second pass turns it into dx in place.
+                // second pass turns it into dx in place. (Recomputing `g'` in the second pass instead of storing
+                // it measured slower: the pass is compute-bound, not memory-bound.)
                 let mut dx = folo_core::cpu::take_buffer(xs.len());
                 let planes: Vec<(f64, f64)> = if hw == 0 {
                     vec![(0.0, 0.0); nb * c]
@@ -351,15 +347,17 @@ fn train_cpu<const ACT: u8>(
                         .map(|(p, ((o, gp), xp))| {
                             let ch = p % c;
                             let (m, i, s, b) = (mean[ch], inv[ch], scale[ch], bv[ch]);
-                            let gp = if ACT == ACT_NONE {
-                                gp
-                            } else {
-                                for ((o, &gv), &v) in o.iter_mut().zip(gp).zip(xp) {
-                                    *o = act_bwd::<ACT>((v - m) * s + b, gv);
-                                }
-                                &*o
-                            };
-                            sum2_f64(gp, xp, |g, v| (g as f64, g as f64 * ((v - m) * i) as f64))
+                            with_avx2(|| {
+                                let gp = if ACT == ACT_NONE {
+                                    gp
+                                } else {
+                                    for ((o, &gv), &v) in o.iter_mut().zip(gp).zip(xp) {
+                                        *o = act_bwd::<ACT>((v - m) * s + b, gv);
+                                    }
+                                    &*o
+                                };
+                                sum2_f64(gp, xp, |g, v| (g as f64, g as f64 * ((v - m) * i) as f64))
+                            })
                         })
                         .collect()
                 };
@@ -371,15 +369,17 @@ fn train_cpu<const ACT: u8>(
                         let k = g[ch] * i / n as f32;
                         let (sg, sgx) = (sums[ch].0 as f32, sums[ch].1 as f32);
                         let r = p * hw..(p + 1) * hw;
-                        if ACT == ACT_NONE {
-                            for ((o, &gv), &v) in o.iter_mut().zip(&gs[r.clone()]).zip(&xs[r]) {
-                                *o = k * (n as f32 * gv - sg - (v - m) * i * sgx);
+                        with_avx2(|| {
+                            if ACT == ACT_NONE {
+                                for ((o, &gv), &v) in o.iter_mut().zip(&gs[r.clone()]).zip(&xs[r]) {
+                                    *o = k * (n as f32 * gv - sg - (v - m) * i * sgx);
+                                }
+                            } else {
+                                for (o, &v) in o.iter_mut().zip(&xs[r]) {
+                                    *o = k * (n as f32 * *o - sg - (v - m) * i * sgx);
+                                }
                             }
-                        } else {
-                            for (o, &v) in o.iter_mut().zip(&xs[r]) {
-                                *o = k * (n as f32 * *o - sg - (v - m) * i * sgx);
-                            }
-                        }
+                        });
                     });
                 }
                 let dg: Vec<f32> = sums.iter().map(|s| s.1 as f32).collect();
@@ -396,18 +396,73 @@ fn train_cpu<const ACT: u8>(
     Ok((y, mean_t, var_t))
 }
 
-/// `sum(f(v))` in `f64` with 8 independent accumulators, so the loop vectorises.
-#[inline]
-fn sum_f64(xs: &[f32], f: impl Fn(f32) -> f64) -> f64 {
-    let mut acc = [0f64; 8];
-    let (chunks, rest) = xs.as_chunks::<8>();
-    for ch in chunks {
-        for i in 0..8 {
-            acc[i] += f(ch[i]);
+/// `f()` compiled for AVX2 when the CPU has it (detected at run time; the build targets baseline x86-64, whose
+/// SSE2 loops are half as wide), else as is. Bit for bit the same result either way: the same IEEE operations
+/// lane by lane, and Rust never fuses a multiply and an add on its own (FMA is not enabled here).
+#[inline(always)]
+fn with_avx2<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2")]
+        unsafe fn run<R>(f: impl FnOnce() -> R) -> R {
+            f()
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU supports AVX2 (detected above).
+            return unsafe { run(f) };
         }
     }
-    let tail: f64 = rest.iter().map(|&v| f(v)).sum();
-    acc.iter().sum::<f64>() + tail
+    f()
+}
+
+/// Count, mean and sum of squared deviations of some values (`f64`), as [`plane_moments`] makes them and
+/// [`Moments::merge`] combines them.
+#[derive(Clone, Copy, Debug, Default)]
+struct Moments {
+    n: f64,
+    mean: f64,
+    m2: f64,
+}
+
+impl Moments {
+    /// Chan's parallel combination of two sets' moments: exact in exact arithmetic, and without the
+    /// cancellation of `Σv² − n·mean²` in floating point.
+    fn merge(a: Moments, b: Moments) -> Moments {
+        if b.n == 0.0 {
+            return a;
+        }
+        if a.n == 0.0 {
+            return b;
+        }
+        let n = a.n + b.n;
+        let d = b.mean - a.mean;
+        Moments { n, mean: a.mean + d * (b.n / n), m2: a.m2 + b.m2 + d * d * (a.n * b.n / n) }
+    }
+}
+
+/// The moments of one plane in one pass: sums of `v − K` and `(v − K)²` around its first value `K` (exact
+/// differences and squares in `f64`, so the shift only keeps the sums small), 4 accumulator pairs.
+#[inline]
+fn plane_moments(p: &[f32]) -> Moments {
+    let Some(&k) = p.first() else { return Moments::default() };
+    let k = k as f64;
+    let (mut s1, mut s2) = ([0f64; 4], [0f64; 4]);
+    let (chunks, rest) = p.as_chunks::<4>();
+    for ch in chunks {
+        for i in 0..4 {
+            let d = ch[i] as f64 - k;
+            s1[i] += d;
+            s2[i] += d * d;
+        }
+    }
+    let (mut t1, mut t2) = (s1.iter().sum::<f64>(), s2.iter().sum::<f64>());
+    for &v in rest {
+        let d = v as f64 - k;
+        t1 += d;
+        t2 += d * d;
+    }
+    let n = p.len() as f64;
+    Moments { n, mean: k + t1 / n, m2: (t2 - t1 * t1 / n).max(0.0) }
 }
 
 /// The two sums `(sum f(a, b).0, sum f(a, b).1)` in `f64` with 4 independent accumulator pairs.
@@ -548,7 +603,7 @@ mod tests {
     fn fused_activation_is_bitwise_bn_then_act() {
         let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
         for act in [Activation::Silu, Activation::Relu] {
-            for dims in [[3, 4, 5, 6], [2, 3, 1, 13], [4, 2, 8, 8]] {
+            for dims in [[3, 4, 5, 6], [2, 3, 1, 13], [4, 2, 8, 8], [2, 3, 33, 17]] {
                 let mut rng = Rng::seed(11);
                 let x = Tensor::randn(dims, 0.3, 1.5, &mut rng).requires_grad_();
                 let w = Tensor::randn(dims, 0.0, 1.0, &mut rng);
@@ -569,6 +624,46 @@ mod tests {
                     (bits(&y), grads, bits(&bn.running_mean), bits(&bn.running_var))
                 };
                 assert_eq!(run(true), run(false), "{act:?} {dims:?}");
+            }
+        }
+    }
+
+    /// The one-pass statistics (per-plane shifted moments, Chan's combination) match a two-pass `f64`
+    /// reference to f32 precision, also where `Σv² − n·mean²` would cancel: a mean 10⁴ times the standard
+    /// deviation, a constant channel, single-element planes and one outlier per plane.
+    #[test]
+    fn one_pass_statistics_match_two_pass_reference() {
+        type Case = ([usize; 4], fn(usize) -> f32);
+        let cases: [Case; 4] = [
+            ([3, 2, 7, 9], |i| 1.0e4 + ((i * 7919) % 101) as f32 * 1e-2),
+            ([2, 3, 4, 4], |i| if i % 48 < 16 { 3.25 } else { ((i * 31) % 17) as f32 - 8.0 }),
+            ([5, 2, 1, 1], |i| (i as f32 * 0.37).sin() * 100.0),
+            ([2, 2, 30, 30], |i| if i % 900 == 0 { 1.0e6 } else { (i % 13) as f32 * 0.1 }),
+        ];
+        for (dims, f) in cases {
+            let [nb, c, h, w] = dims;
+            let data: Vec<f32> = (0..nb * c * h * w).map(f).collect();
+            let x = Tensor::from_vec(data.clone(), dims).unwrap();
+            let (g, b) = (Tensor::ones([c]), Tensor::zeros([c]));
+            let (_, mean, var) = train_cpu::<ACT_NONE>(&x, &g, &b, BN_EPS).unwrap();
+            let (mean, var) = (mean.to_vec::<f32>().unwrap(), var.to_vec::<f32>().unwrap());
+            for ch in 0..c {
+                let vals: Vec<f64> = (0..nb)
+                    .flat_map(|i| {
+                        data[(i * c + ch) * h * w..(i * c + ch + 1) * h * w].iter().map(|&v| v as f64)
+                    })
+                    .collect();
+                let n = vals.len() as f64;
+                let m = vals.iter().sum::<f64>() / n;
+                let v = vals.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / n;
+                let close =
+                    |got: f32, want: f64| (got as f64 - want).abs() <= 2.0 * f32::EPSILON as f64 * want.abs();
+                assert!(close(mean[ch], m), "{dims:?} ch {ch}: mean {} vs {m}", mean[ch]);
+                assert!(
+                    close(var[ch], v) || (v == 0.0 && var[ch] == 0.0),
+                    "{dims:?} ch {ch}: var {} vs {v}",
+                    var[ch]
+                );
             }
         }
     }

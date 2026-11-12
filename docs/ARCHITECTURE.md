@@ -63,8 +63,10 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   shifted rows as A, read in place by a 6x16 micro-kernel through six row pointers (`gemm_arows`), and the output
   gradient transposed once per image into packed B panels (zeros in the dropped columns); K is cut into parts
   and the rows into tiles by shape alone, partials added in order. Other convs pack the unfolded input as they
-  go. folo-nn's train-mode BatchNorm on the CPU applies SiLU / ReLU in its own passes (forward and backward),
-  bit for bit BatchNorm then `Tensor::silu` / `relu` (`cpu::silu` / `cpu::silu_backward` are the shared formulas). `f32` buffers from 16 KiB
+  go. folo-nn's train-mode BatchNorm on the CPU takes its statistics in one pass over x (per-plane shifted
+  moments in `f64`, combined per channel with Chan's formula) and applies SiLU / ReLU in its own passes (forward and backward),
+  bit for bit BatchNorm then `Tensor::silu` / `relu` (`cpu::silu` / `cpu::silu_backward` are the shared formulas);
+  its per-plane loops run as AVX2 when the CPU has it (the same loops compiled under `target_feature`, bit for bit). `f32` buffers from 16 KiB
   are recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one
   to custom ops) so training and inference loops do not pay page faults every step. `cpu::in_pool` runs a closure on
   a worker of a dedicated rayon pool (so the per-thread state cannot reach other jobs of the global pool) with the

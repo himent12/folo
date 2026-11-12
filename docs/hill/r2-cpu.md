@@ -136,6 +136,60 @@ All in one binary with temporary environment knobs, uncommitted like the op time
 - Not tried: pinning workers to P-cores first. Every pool smaller than 28 threads lost under this load, and a
   pinned 8-thread pool was the noisiest configuration measured.
 
+## 2. CPU training: BatchNorm statistics in one pass (PR 2)
+
+**Profile of the train step** (folo-n, 320 px, batch 16; the op timer of PR 1 plus guards on the conv input
+and weight gradients and on folo-nn's train-mode BatchNorm, `prof3.patch`). At 28 threads (257 ms a step,
+12 cores busy elsewhere): BatchNorm forward 29 ms and backward 34 ms (64 M activations a step), weight
+gradients 66 ms (25 of them pointwise), input gradients 41 ms (15 of them strided), forward convs 37 ms,
+`cat` copies 9 ms, adds 8 ms. On one core (1215 ms): BatchNorm 335 ms (28%), about 11 cycles per element in
+the forward. The build targets baseline x86-64, so its loops ran as 4-lane SSE2. At 28 threads the backward
+streams 6 floats per element at ~60 GB/s: memory-bound.
+
+Changes, in folo-nn's `train_cpu` (`crates/folo-nn/src/layers/batchnorm.rs`):
+
+- **One pass for the statistics.** Each plane's count, mean and sum of squared deviations come from one read
+  (sums of `v − K` and `(v − K)²` around the plane's first value, exact differences and squares in `f64`).
+  They are combined per channel in image order with Chan's formula, so the forward reads x twice instead of three
+  times. Not bit for bit the old two-pass sums. The f64 results differ in the last bits, and the f32 mean and
+  variance round to the same values except at rare ties. Test `one_pass_statistics_match_two_pass_reference`
+  checks mean and variance within 2 f32 ulp of a two-pass f64 reference: a mean 10⁴ times the spread, a
+  constant channel, 1×1 planes, one outlier per plane.
+- **AVX2 for the per-plane loops** (`with_avx2`): the same loop bodies compiled under
+  `#[target_feature(enable = "avx2")]`, chosen at run time. The same IEEE operations lane by lane, and Rust
+  never fuses a multiply and an add without being asked, so the result is bit for bit the SSE2 one.
+  `fused_activation_is_bitwise_bn_then_act` (now with a 33×17 plane) still holds bit for bit.
+
+| folo-n train step, 320 px b16, 28 threads, 5 rounds alternated (9–15 busy) | `main` (62f80c4a) | PR 2 |
+|---|---|---|
+| forward + loss | 80.0–85.6 ms (median 84.4) | **76.3–77.8 ms (76.8), −9%** |
+| backward | 170.2–178.7 ms | 173.3–183.6 ms (tie) |
+| total | 251.5–265.4 ms (median 263.9) | **251.0–262.8 ms (256.0), −3.0%** |
+
+On one core with 27 cores busy elsewhere, forward + loss went from 689 to 612 ms and backward from 1296 to 1285
+ms. Log: `pr2_train.txt` (`ab.sh 5 0 "" "" 'main=...pr1-train_step.exe;pr2=...pr2-train_step.exe'`); the `main`
+binary is PR 1's head, whose train-step code is `main`'s.
+
+### Negative results (PR 2)
+
+- **The backward without the stored `g'`**: both passes recompute `g' = g · act'(z)` from g and x a block at a
+  time (one write of the tensor less, bit for bit the same sums): backward 171–177 → 186–201 ms. The passes
+  are compute-bound once `act'` runs twice, as in round 1. Reverted.
+- **Strided-conv input gradients by stride phases** (each input phase a stride-1 GEMM over a padded copy of the
+  output gradient, read in place, with no unfolded gradient and no col2im; `phases-dx.patch`). Same flops,
+  within the f32 summation bound, and it passed the reference tests. `cargo bench -p folo-core --bench conv`,
+  2 rounds at 28 threads, input gradient ms:
+
+  | shape (batch 8) | `main` | phases | phases, weights built once, rows written once |
+  |---|---|---|---|
+  | 64→128 3×3 s2 at 80² | 2.38–2.46 | 2.78–2.78 | 2.93–3.08 |
+  | 16→32 3×3 s2 at 160² (down2) | 1.25–1.26 | 1.09–1.15 | 1.03–1.06 |
+  | 3→16 3×3 s2 at 320² (stem) | 1.31–1.35 | 1.03–1.06 | 1.15–1.17 |
+
+  On one core it was faster everywhere but the inference stem (64→128: 26.3 → 20.5 ms). At 28 threads it wins
+  only where the input has few channels; folo-n's strided convs mostly have 64 or more. Train step 258–268 ms
+  against 258–262 without it. Dropped.
+
 ## Leftovers (by expected gain)
 
 - **3×3 stride-1 convs** are 37% of the forward's flops (2.39 of 6.48 GFLOP); Winograd F(2×2, 3×3) would cut
@@ -145,5 +199,9 @@ All in one binary with temporary environment knobs, uncommitted like the op time
 - The shifted-rows copy (1.3 ms of the 28-thread forward) could be written by the conv that produces the input
   (a padded output layout), the head's depthwise convs scale poorly (0.26 ms at 28 threads for 0.5 ms at one),
   and softmax over the PSA's 800 rows of 400 is 0.17 ms.
+- **Training on the CPU**: the weight gradients (66 ms of the 28-thread step; pointwise ones at 31–83 GF/s for
+  64→32 at 20² and 128→64 at 10²), and BatchNorm's backward (34 ms, memory-bound). Folding the statistics into
+  the producing conv's epilogue would remove another read of every BatchNorm input. The stride-phase input
+  gradient could be kept for convs with few input channels (down2: −0.2 ms a step).
 - On a quiet machine the scheduling questions (fewer threads for small layers, P-cores first, the head beside
   the neck) may come out differently; under the load of this session none won.
