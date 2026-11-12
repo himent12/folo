@@ -278,9 +278,7 @@ impl FoloApp {
             prompt: Some("Open image".into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(p) = paths.into_iter().next()
-            {
+            if let Some(p) = super::actions::picked(&this, rx.await, cx) {
                 this.update(cx, |this, cx| {
                     this.route = Route::Playground;
                     this.play_file(p, cx);

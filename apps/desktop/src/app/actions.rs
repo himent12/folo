@@ -132,9 +132,7 @@ impl FoloApp {
             prompt: Some("Add dataset".into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(p) = paths.into_iter().next()
-            {
+            if let Some(p) = picked(&this, rx.await, cx) {
                 this.update(cx, |this, cx| {
                     let path = p.to_string_lossy().to_string();
                     let folder = p.file_name().map_or(path.clone(), |n| n.to_string_lossy().to_string());
@@ -482,6 +480,26 @@ impl FoloApp {
                 Err(e) => this.toast(Tone::Danger, "Export failed", Some(e.message.into()), cx),
             },
         );
+    }
+}
+
+/// The first path a file dialog answered with; `None` when it was cancelled. A dialog that could
+/// not open (off screen they are refused: `FOLO_UI_OFFSCREEN=1`) says why in a toast.
+pub(super) fn picked(
+    this: &folo_ui::WeakEntity<FoloApp>,
+    answer: Result<anyhow::Result<Option<Vec<std::path::PathBuf>>>, folo_ui::oneshot::Canceled>,
+    cx: &mut folo_ui::AsyncApp,
+) -> Option<std::path::PathBuf> {
+    match answer {
+        Ok(Ok(paths)) => paths?.into_iter().next(),
+        Ok(Err(e)) => {
+            this.update(cx, |this, cx| {
+                this.toast(Tone::Danger, "The file dialog didn't open", Some(e.to_string().into()), cx)
+            })
+            .ok();
+            None
+        }
+        Err(_) => None,
     }
 }
 

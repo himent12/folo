@@ -115,3 +115,68 @@ pub fn dialog(
         format!("{ran} task(s), {frames} frame(s)"),
     );
 }
+
+/// Off screen (`--offscreen-dialog`, only on a private desktop): both file dialogs answer with an
+/// error at once and show nothing (a dialog of a window that is never active has no owner, and
+/// opened centred on the primary display), and a visible window of the process that appears on a
+/// display is moved off every display.
+pub fn refused_dialogs(checks: &mut Checks, platform: &Rc<WindowsPlatform>) {
+    // SAFETY: a plain query.
+    let main_thread = unsafe { GetCurrentThreadId() };
+    let mut paths = platform.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: None,
+    });
+    let mut new_path = platform.prompt_for_new_path(std::path::Path::new("C:\\"), Some("x.txt"));
+    let mut answers = (None, None);
+    pump_until(Duration::from_secs(2), || {
+        if let Ok(Some(r)) = paths.try_recv() {
+            answers.0 = Some(r.is_err());
+        }
+        if let Ok(Some(r)) = new_path.try_recv() {
+            answers.1 = Some(r.is_err());
+        }
+        answers.0.is_some() && answers.1.is_some()
+    });
+    // Give a dialog that was opened anyway the time to show.
+    pump_until(Duration::from_millis(500), || false);
+    let shown = find_dialog(main_thread);
+    checks.check(
+        "off screen, both file dialogs are refused and nothing shows",
+        answers == (Some(true), Some(true)) && shown.is_none(),
+        format!("errors {answers:?}, dialog {shown:?}"),
+    );
+
+    // A stray window: visible, on the primary display (whose top left is (0, 0)).
+    // SAFETY: a plain STATIC popup of ours, destroyed below.
+    let stray = unsafe {
+        CreateWindowExW(
+            WS_EX_NOACTIVATE,
+            ::windows::core::w!("STATIC"),
+            ::windows::core::w!("stray"),
+            WS_POPUP | WS_VISIBLE,
+            100,
+            100,
+            300,
+            200,
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    let parked =
+        stray.as_ref().is_ok_and(|&h| pump_until(Duration::from_secs(2), || off_every_monitor(rect(h))));
+    let r = stray.as_ref().map(|&h| rect(h)).unwrap_or_default();
+    checks.check(
+        "off screen, a window that shows on a display is moved off every display",
+        parked,
+        format!("({}, {}) - ({}, {})", r.left, r.top, r.right, r.bottom),
+    );
+    if let Ok(h) = stray {
+        // SAFETY: our own window, on its thread.
+        let _ = unsafe { DestroyWindow(h) };
+    }
+}

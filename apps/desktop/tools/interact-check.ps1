@@ -9,7 +9,8 @@
 #
 # Off screen (FOLO_UI_OFFSCREEN=1) the window is outside every display and never activated; nothing
 # touches the cursor, the keyboard or the clipboard of the person at the PC. -Sandbox runs the same on a
-# private desktop (sandbox-run.ps1). The file dialog step runs there; the clipboard steps (copy and
+# private desktop (sandbox-run.ps1). The file dialog step runs there (with a launch off screen there
+# too: Ctrl+O must open no dialog); the clipboard steps (copy and
 # paste) run only with -Clipboard as well, because the clipboard is not private: the private desktop
 # shares it with you. Without -Clipboard nothing in this script opens the clipboard.
 #
@@ -57,10 +58,10 @@ $script:p = $null
 $script:h = [IntPtr]::Zero
 $script:s = 1.5
 $script:launches = 0
-function Launch([string[]]$appArgs) {
+function Launch([string[]]$appArgs, [switch]$Offscreen) {
     Stop-Folo $script:p
     $envs = @{ FOLO_DESKTOP_STATE = "$Out\desktop.json" }
-    if (-not $InSandbox) { $envs.FOLO_UI_OFFSCREEN = "1" }
+    if (-not $InSandbox -or $Offscreen) { $envs.FOLO_UI_OFFSCREEN = "1" }
     $script:launches++
     $script:mask = $null
     $script:p = Start-Folo $Exe $appArgs $envs "$Out\app-$($script:launches).stderr.txt"
@@ -145,10 +146,10 @@ function MatchStep([string]$name, [string]$scenario, [string]$label, [int]$w = 1
         Pass $name $ok "= --shot $scenario ${w}x${hh}: $detail"
     } finally { $want.Dispose(); $got.Dispose() }
 }
+# Off screen: no window of the app's process on any display (a dialog is a window of its own), none
+# in the foreground.
 function Guard {
-    $r = [FoloDrive]::Rect($script:h)
-    if (-not $InSandbox -and -not [FoloDrive]::OffEveryMonitor($r)) { Stop-Folo $script:p; throw "the window is on a display: $([FoloDrive]::Str($r))" }
-    if (-not $InSandbox -and [FoloDrive]::GetForegroundWindow() -eq $script:h) { Stop-Folo $script:p; throw "the window took the foreground" }
+    if (-not $InSandbox) { Assert-FoloOffscreen $script:p }
 }
 
 # Sidebar rows (logical y) at 1280x800.
@@ -426,6 +427,14 @@ try {
             Key 0x4B "ctrl"; Settle 500
             Pass "and still takes keys (Ctrl+K opens the palette)" (-not (Same $plain (Snap))) ""
         }
+        # Off screen the dialog is refused: one with no owner opened centred on the primary display.
+        Launch @("--scenario", "overview", "--width", "1280", "--height", "800") -Offscreen
+        Learn
+        $plain = Snap
+        Key 0x4F "ctrl"; Settle 1000
+        $dialogs = @([FoloDrive]::List([uint32]$script:p.Id) | Where-Object { $_ -notmatch " FOLO::Window " })
+        $on = [FoloDrive]::OnDisplay([uint32]$script:p.Id)
+        Pass "off screen, Ctrl+O opens no dialog and says why" ($dialogs.Count -eq 0 -and $on.Count -eq 0 -and -not (Same $plain (Snap))) "$($dialogs + $on)"
     }
 
     # ---------- close: WM_CLOSE ends the app cleanly
