@@ -53,8 +53,8 @@ render, layout or paint.
 
 ## Build, test, bench
 
-From `apps/desktop` (the crate is a member of that workspace). On the dev machine, set `CARGO_TARGET_DIR` and
-`FOLO_TEST_TMP` off C: first (`AGENTS.md`).
+From `apps/desktop` (the crate is a member of that workspace). `CARGO_TARGET_DIR` and `FOLO_TEST_TMP` move the
+build output and the tests' temporary files to another disk when the system one is short of space (`AGENTS.md`).
 
 ```
 cargo build -p folo-ui
@@ -71,7 +71,7 @@ Features:
 - `portable-text`: the cosmic-text text backend (`text/portable`). Always on off Windows. On Windows it is
   opt-in; the deterministic text tests use it, since it gives the same layout and masks on every OS.
 - `winit`: the winit + softbuffer backend (`platform/winit`, with arboard and rfd). Always on off Windows. On
-  Windows it lets that backend's shared code build and run on the dev machine (`FOLO_UI_PLATFORM=winit`).
+  Windows it lets that backend's shared code build and run on a Windows machine (`FOLO_UI_PLATFORM=winit`).
 - `test-support`: exposes `FixedTextSystem` (`text/types.rs`), a fake text backend with fixed metrics, to other
   crates. Unit tests inside the crate get it through `cfg(test)`.
 

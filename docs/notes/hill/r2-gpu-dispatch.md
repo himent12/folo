@@ -1,7 +1,7 @@
 # Hill-climb 2: GPU dispatch cost (lane `gpu-dispatch`)
 
 Goal: cheaper and fewer dispatches in the batch-1 forward, which is host-bound (folo-n f16 tensor cores: about
-0.8 ms of GPU work in a 1.65 ms call, 117 dispatches at 8–19 µs of host time each; docs/hill/gpu-infer.md).
+0.8 ms of GPU work in a 1.65 ms call, 117 dispatches at 8–19 µs of host time each; docs/notes/hill/gpu-infer.md).
 Baseline `main` 647b981f, RTX 4080 SUPER, 640×640.
 
 ## Method

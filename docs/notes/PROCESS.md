@@ -1,5 +1,9 @@
 # Agent process: implement → PR → review → fix → merge
 
+How the maintainers' own agents work. It is specific to their setup (the T3 Code orchestration tools, a Windows
+machine with its build output on D:, the two models named below); a contributor needs only
+[AGENTS.md](../../AGENTS.md) and [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
 Every engine change follows this loop. The orchestrator thread starts implementer agents; implementers drive their
 own review loop; the orchestrator merges.
 

@@ -52,7 +52,7 @@ same change. `README.md` is how to build, test and run it.
   our own window class and message loop, custom title bar through `WM_NCCALCSIZE` / `WM_NCHITTEST`, IME,
   clipboard, file dialogs, per-monitor DPI. Presents with `SetDIBitsToDevice` of the damage rectangles.
 - **Linux and macOS backend is winit 0.30 + softbuffer** (plus arboard for the clipboard and rfd for file
-  dialogs). It also compiles on Windows (feature `winit`) so its shared code runs on the dev machine.
+  dialogs). It also compiles on Windows (feature `winit`) so its shared code runs on a Windows development machine too.
 - **Commodity crates do commodity jobs:** taffy (flexbox maths), resvg/usvg (SVG icons, as GPUI), tiny-skia
   (comes with resvg), lyon `=1.0.19` (path tessellation and dashing, the versions GPUI 0.2.2 uses, so a path
   covers the same samples), cosmic-text, winit, softbuffer, arboard, rfd, image, async-task, smallvec.
@@ -227,7 +227,7 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
   per-sample clip and overlap counts); their coverage is cached by geometry. Clip edges follow the
   top-left rule too. `ui/PARITY.md` lists every rule and what still differs.
 - Caches are bounded in bytes and drop what recent frames did not use. Memory is a goal, not an afterthought.
-- Targets on the dev machine (i7-14700KF), release build: a full 1920x1200 frame of a busy screen in under
+- Targets on our test machine (an i7-14700KF), release build: a full 1920x1200 frame of a busy screen in under
   4 ms; a frame that changes one small region in under 0.3 ms including binning and hashing.
 
 ## Text contract
@@ -293,7 +293,7 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
 - **Pixels.** Every `--scenario` rendered headless at the GPUI captures' sizes and scale (1280 x 800 for all,
   960 x 620 and 1680 x 1050 for the densest, at 1.5) is compared with GPUI 0.2.2's captures, region by
   region: boxes, colours and text at the same pixels. The GPUI captures and the comparison were made outside
-  the repo, on the dev PC. `apps/desktop/tools/shoot-all.ps1` renders the 98 shots and `tools/parity.py`
+  the repo, on our test machine. `apps/desktop/tools/shoot-all.ps1` renders the 98 shots and `tools/parity.py`
   compares the trees (`ui/PARITY.md`: how, every rule, and every residual difference with its cause). Result,
   as the percentage of pixels whose largest channel difference exceeds 8 of 255: worst pair 0.0040 %, median
   0 %, mean 0.0001 %; 71 of 98 pairs have no such pixel, and 62 none above 2 levels. Against GPUI captures

@@ -55,11 +55,11 @@ produces plain buffers that the trainer wraps in tensors.
 them (same classes, entries and order) and the others empty, without reading or probing their images and labels.
 COCO files of the other splits are still read for their categories (every file counts for the class ids); a YOLO
 dataset without class names (counted from all labels then) is opened whole. `folo val` uses it, so COCO val2017
-opens without checking train2017's 118 287 images (the probe of a file not opened before costs about 6 ms on the dev
-machine, 0.35 ms each at 28 threads: 40-50 s for train2017).
+opens without checking train2017's 118 287 images (the probe of a file not opened before costs about 6 ms on our test
+machine (an i7-14700KF), 0.35 ms each at 28 threads: 40-50 s for train2017).
 
 ### Scan cache
-Opening a large dataset costs a header probe per image (COCO train2017: 30-80 s on the dev machine when the files
+Opening a large dataset costs a header probe per image (COCO train2017: 30-80 s on our test machine when the files
 were not opened since boot) and, for COCO, a parse of the JSON (5-8 s for train2017's 448 MB). With
 `folo_data::set_scan_cache_dir(Some(dir))` (`folo` sets `<FOLO_HOME>/cache/scan`, docs/CLI.md Caches; off by default)
 an open keeps what it learnt in `dir` and the next one reuses it (`dataset/cache/`):
@@ -89,7 +89,7 @@ files, never any other file of the folder) not written for 60 days are deleted w
 are the least recently written ones while the folder's cache files take more than 2 GiB together (`MAX_TOTAL`; a
 single file over 1 GiB is never written). Only folders holding at least `SCAN_CACHE_MIN_FILES` (256) files of a dataset
 are listed and cached, and COCO sets with at least that many images. With a read guard installed nothing is listed
-or cached. COCO train + val on the dev machine: 51 s cold, 0.3 s warm (docs/hill/r2-trainer.md).
+or cached. COCO train + val on our test machine: 51 s cold, 0.3 s warm (docs/notes/hill/r2-trainer.md).
 
 `LoadedDataset::sources` lists every file and folder a dataset was read from (description files, split folders and
 image lists, folders of every candidate image and label, split paths that do not exist yet), so callers such as

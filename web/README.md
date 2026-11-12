@@ -39,19 +39,20 @@ start `folo serve`, or open `http://localhost:5173/?mock=1`.
 
 ## Screenshot parity and performance
 
-Studio moved from Svelte 5 to fw with every screen and state pixel-identical (CHANGELOG, "Studio on fw"). The
-same tools keep later changes honest: shoot every state, compare it with a stored shoot, and measure against another
-version's build.
+Studio moved from Svelte 5 to fw with every screen and state pixel-identical (CHANGELOG, "Studio on fw"); the DOM
+of that comparison differed only where the Svelte app had bugs (its palette kept a page's commands after leaving it)
+or was not deterministic (the Overview's live numbers, the phone label grid). The same tools keep later changes
+honest: shoot every state, compare it with a stored shoot, and measure against another version's build.
 
 ```sh
-node scripts/parity.mjs --run --only runs     # shoot the app (exact mode) and diff with the stored baseline shoot
-node scripts/parity.mjs --run --baseline <dir> --out <dir>   # against another stored shoot (a folder of --exact shots)
+node scripts/shoot.mjs --exact --prod --out <dir>            # a stored shoot of this version, to compare with later
+node scripts/parity.mjs --run --baseline <dir> --only runs   # shoot the app (exact mode) and diff with a stored shoot
+node scripts/parity.mjs --run --baseline <dir> --out <dir>   # all states, results in --out
 node scripts/parity.mjs --run --self          # shoot it twice: the determinism check
 node scripts/parity.mjs <dirA> <dirB>         # compare two shot folders
-node scripts/shoot.mjs --exact --prod --out <dir>            # a stored shoot of this version, to compare with later
 node scripts/perf.mjs --runs 5                # load, memory and CPU of this version
 node scripts/perf.mjs --ref origin/main       # against another git ref (its web/ built in a temporary worktree)
-node scripts/perf.mjs --baseline-dist <dir>   # against a stored build (e.g. D:/folo-build/ui-fast-runtime/legacy-dist)
+node scripts/perf.mjs --baseline-dist <dir>   # against a stored build (another version's dist/)
 ```
 
 - `shoot.mjs --exact` (what parity uses) makes a shot reproducible to the pixel: the clock paused as for `--qa`,
@@ -63,9 +64,8 @@ node scripts/perf.mjs --baseline-dist <dir>   # against a stored build (e.g. D:/
 - `parity.mjs` reports per shot: identical, N differing pixels + bounding box, size mismatch, or missing (a setup that
   timed out); `parity.md`, `parity.json` and `diff/<shot>.png` (magenta over a dimmed copy) in the out dir, with the
   first difference of the two DOM dumps. A state that differs is shot again (`--retries 1`) and passes if any of its
-  shots matches. The default baseline is `D:/folo-build/ui-fast-runtime/baseline`, the Svelte app's last shoot, whose
-  DOM differs from fw's only where the Svelte app had bugs (its palette kept a page's commands after leaving it) or was
-  not deterministic (the Overview's live numbers, the phone label grid). Exit 1 on any difference.
+  shots matches. Pass `--baseline <dir>` (a folder of `shoot.mjs --exact` shots) or `--self`: the built-in default
+  is the maintainers' stored shoot of the last Svelte build, which is not in the repository. Exit 1 on any difference.
 - `perf.mjs` measures the production build (built into `<out>/.dist`, `vite preview`, Chrome + CDP): the bundle, cold
   loads of the main screens (FCP, content shown, script/task/layout/style time, long tasks, heap after GC, nodes,
   listeners), hash navigation cycles (with the heap growth), 15 s live on the Run page and Overview (busy %, rAF/s),

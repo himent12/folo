@@ -27,7 +27,7 @@ export interface NavGroup {
 }
 
 // Every docs/*.md and examples/*/README.md must appear here; the build fails otherwise, so a new doc is never left
-// out of the site by accident.
+// out of the site by accident. The engineering notes under docs/notes are not pages: links to them go to GitHub.
 export const NAV: NavGroup[] = [
   {
     title: 'Get started',
@@ -67,13 +67,8 @@ export const NAV: NavGroup[] = [
       { src: 'docs/ARCHITECTURE.md', label: 'Architecture' },
       { src: 'docs/BENCHMARKS.md', label: 'Speed benchmarks' },
       { src: 'docs/ROADMAP.md', label: 'Roadmap' },
-      { src: 'docs/PROCESS.md', label: 'Process' },
       { src: 'docs/RELEASE.md', label: 'Releasing' },
       { src: 'docs/CI.md', label: 'CI' },
-      { src: 'docs/BOAT.md', label: 'boat.dev sandboxes' },
-      { src: 'docs/DOGFOOD-1.md', label: 'Dogfood report 1' },
-      { src: 'docs/DOGFOOD-2.md', label: 'Dogfood report 2' },
-      { src: 'docs/DOGFOOD-3.md', label: 'Dogfood report 3' },
     ],
   },
 ];

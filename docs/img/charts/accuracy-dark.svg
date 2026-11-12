@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 605" width="720" height="605" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Accuracy: FOLO against YOLO26</title>
+<desc id="d">Grouped bars of AP. On COCO val2017, FOLO trained from scratch is behind the published YOLO26 models. Fine-tuned on four small datasets, folo-n and yolo26n are level on three and yolo26n is ahead on one. Nano: 0.317 against 0.409. Small: 0.416 against 0.480. Blood cells (BCCD): 0.607 against 0.626. Brain tumours (MRI): 0.452 against 0.436. Signatures: 0.989 against 0.982. Medical pills: 0.804 against 0.803.</desc>
+<rect x="0.5" y="0.5" width="719" height="604" rx="8" fill="#0E1013" stroke="#242628"/>
+<text x="28" y="43" font-size="17" font-weight="600" letter-spacing="-0.01em" fill="#EDEFF2">Accuracy: FOLO against YOLO26</text>
+<text x="28" y="66" font-size="13" fill="#A1A7B0">COCO AP (pycocotools), one scorer for both sides</text>
+<rect x="28" y="84" width="10" height="10" rx="2" fill="#5CC8FF"/>
+<text x="44" y="93.5" font-size="12.5" fill="#A1A7B0">FOLO</text>
+<rect x="100" y="84" width="10" height="10" rx="2" fill="#646A73"/>
+<text x="116" y="93.5" font-size="12.5" fill="#A1A7B0">Ultralytics YOLO26</text>
+<path d="M28 112.5L692 112.5" stroke="#1C1E21" stroke-width="1" fill="none"/>
+<text x="28" y="138" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">COCO val2017</tspan><tspan font-size="12" fill="#80868F">   AP, higher is better. Not like for like: see below</tspan></text>
+<text x="28" y="172" font-size="13" font-weight="500" fill="#EDEFF2">Nano</text>
+<text x="28" y="189" font-size="12" fill="#80868F">folo-n: 62 epochs from scratch</text>
+<path d="M224 162h218.53a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-218.53z" fill="#5CC8FF"/>
+<text x="454.53" y="172.4" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.317</tspan></text>
+<path d="M224 178h283.11a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-283.11z" fill="#646A73"/>
+<text x="519.11" y="188.4" font-size="12.5" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.409</tspan></text>
+<text x="692" y="174" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">−0.092</text>
+<text x="692" y="190" font-size="12" text-anchor="end" fill="#80868F">AP</text>
+<text x="28" y="224" font-size="13" font-weight="500" fill="#EDEFF2">Small</text>
+<text x="28" y="241" font-size="12" fill="#80868F">folo-s: 56 epochs from scratch</text>
+<path d="M224 214h288.03a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-288.03z" fill="#5CC8FF"/>
+<text x="524.03" y="224.4" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.416</tspan></text>
+<path d="M224 230h332.96a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-332.96z" fill="#646A73"/>
+<text x="568.96" y="240.4" font-size="12.5" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.480</tspan></text>
+<text x="692" y="226" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">−0.064</text>
+<text x="692" y="242" font-size="12" text-anchor="end" fill="#80868F">AP</text>
+<path d="M223.5 154L223.5 250" stroke="#303234" stroke-width="1" fill="none"/>
+<path d="M28 266.5L692 266.5" stroke="#1C1E21" stroke-width="1" fill="none"/>
+<text x="28" y="292" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">Fine-tuned on small datasets</tspan><tspan font-size="12" fill="#80868F">   folo-n and yolo26n: AP, mean and range of 3 seeds</tspan></text>
+<text x="28" y="326" font-size="13" font-weight="500" fill="#EDEFF2">Blood cells (BCCD)</text>
+<text x="28" y="343" font-size="12" fill="#80868F">205 training images</text>
+<path d="M224 316h143.36a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-143.36z" fill="#5CC8FF"/>
+<text x="379.36" y="326.4" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.607</tspan><tspan font-size="12" fill="#80868F">  0.606 to 0.607</tspan></text>
+<path d="M224 332h147.97a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-147.97z" fill="#646A73"/>
+<text x="383.97" y="342.4" font-size="12.5" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.626</tspan><tspan font-size="12" fill="#80868F">  0.621 to 0.634</tspan></text>
+<text x="692" y="328" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">−0.020</text>
+<text x="692" y="344" font-size="12" text-anchor="end" fill="#80868F">behind</text>
+<text x="28" y="378" font-size="13" font-weight="500" fill="#EDEFF2">Brain tumours (MRI)</text>
+<text x="28" y="395" font-size="12" fill="#80868F">893 training images</text>
+<path d="M224 368h105.73a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-105.73z" fill="#5CC8FF"/>
+<text x="341.73" y="378.4" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.452</tspan><tspan font-size="12" fill="#80868F">  0.439 to 0.460</tspan></text>
+<path d="M224 384h101.85a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-101.85z" fill="#646A73"/>
+<text x="337.85" y="394.4" font-size="12.5" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.436</tspan><tspan font-size="12" fill="#80868F">  0.413 to 0.459</tspan></text>
+<text x="692" y="380" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">+0.017</text>
+<text x="692" y="396" font-size="12" text-anchor="end" fill="#80868F">level</text>
+<text x="28" y="430" font-size="13" font-weight="500" fill="#EDEFF2">Signatures</text>
+<text x="28" y="447" font-size="12" fill="#80868F">143 training images</text>
+<path d="M224 420h236.09a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-236.09z" fill="#5CC8FF"/>
+<text x="472.09" y="430.4" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.989</tspan><tspan font-size="12" fill="#80868F">  0.987 to 0.992</tspan></text>
+<path d="M224 436h234.39a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-234.39z" fill="#646A73"/>
+<text x="470.39" y="446.4" font-size="12.5" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.982</tspan><tspan font-size="12" fill="#80868F">  0.975 to 0.987</tspan></text>
+<text x="692" y="432" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">+0.007</text>
+<text x="692" y="448" font-size="12" text-anchor="end" fill="#80868F">level</text>
+<text x="28" y="482" font-size="13" font-weight="500" fill="#EDEFF2">Medical pills</text>
+<text x="28" y="499" font-size="12" fill="#80868F">92 training images</text>
+<path d="M224 472h191.18a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-191.18z" fill="#5CC8FF"/>
+<text x="427.18" y="482.4" font-size="12.5" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.804</tspan><tspan font-size="12" fill="#80868F">  0.801 to 0.807</tspan></text>
+<path d="M224 488h190.94a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-190.94z" fill="#646A73"/>
+<text x="426.94" y="498.4" font-size="12.5" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.803</tspan><tspan font-size="12" fill="#80868F">  0.800 to 0.806</tspan></text>
+<text x="692" y="484" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">+0.002</text>
+<text x="692" y="500" font-size="12" text-anchor="end" fill="#80868F">level</text>
+<path d="M223.5 308L223.5 508" stroke="#303234" stroke-width="1" fill="none"/>
+<path d="M28 524.5L692 524.5" stroke="#1C1E21" stroke-width="1" fill="none"/>
+<text x="28" y="548" font-size="12" fill="#80868F">COCO: FOLO trained from scratch for 56 to 62 epochs. The YOLO26 numbers are the published ones, from models</text>
+<text x="28" y="565" font-size="12" fill="#80868F">pretrained on Objects365 and trained for far longer. Fine-tuning: each from its own COCO weights, at its</text>
+<text x="28" y="582" font-size="12" fill="#80868F">defaults, 100 epochs. &quot;level&quot;: inside the spread of the seeds. Details: docs/BENCHMARKS.md, Accuracy.</text>
+</svg>

@@ -59,6 +59,10 @@ with a pre-release suffix (`0.2.0-rc.1`) makes a pre-release.
    latest release" ticked; [Weights releases](#weights-releases) says why the flag matters). Only now do
    `releases/latest/download/...` and the install scripts (`scripts/install.sh`, `scripts/install.ps1`) see it.
    Check with a fresh install: `sh scripts/install.sh --dir /tmp/folo-check && /tmp/folo-check/folo --version`.
+   Users install with `curl -fsSL https://github.com/himent12/folo/releases/latest/download/install.sh | sh`
+   (Linux) or `irm https://github.com/himent12/folo/releases/latest/download/install.ps1 | iex` (Windows
+   PowerShell); no account is needed. The scripts' token path (`GH_TOKEN`, `GITHUB_TOKEN`, else a logged-in `gh`)
+   is for private forks and mirrors.
 
 Re-running the workflow for a tag whose draft already exists replaces that draft's assets (and removes any asset
 the run did not build, so a draft never mixes commits); it refuses to touch a release that is already published. To abandon a draft, delete it and the tag
@@ -101,17 +105,16 @@ release goes out with whatever desktop build succeeded.
 
 ## Runners
 The Linux and Windows jobs use the runners of `ci.yml` (docs/CI.md): the repository variables `RUNS_ON_LINUX` and
-`RUNS_ON_WINDOWS` (JSON `runs-on` values) select self-hosted runners. Windows is set, to the dev PC; Linux is unset.
+`RUNS_ON_WINDOWS` (JSON `runs-on` values) select self-hosted runners.
 When a variable is unset the jobs run on GitHub-hosted runners: `ubuntu-22.04` for the Linux CLI build and
 the Linux install test, `ubuntu-latest` for the other Linux jobs, `windows-latest` for Windows. The `plan` job
 writes the chosen `runs-on` into each CLI matrix entry, and its summary lists them.
 
 - **macOS has no self-hosted runner**: the macOS build always runs on GitHub-hosted `macos-latest`. Set
   `FOLO_RELEASE_MACOS` to `false` (`gh variable set FOLO_RELEASE_MACOS --body false`) whenever hosted runners are
-  unavailable, so tag builds and dispatches skip it instead of queueing a job GitHub refuses to start. **GitHub-hosted
-  billing (currently blocked: "recent account payments have failed or your spending limit needs to be increased")
-  must be fixed before macOS release builds can run**; until then releases ship without the macOS archive, so
-  `scripts/install.sh` fails on macOS and macOS users build from source.
+  unavailable, so tag builds and dispatches skip it instead of queueing a job GitHub refuses to start (for example
+  when the account's billing blocks hosted runners). A release built that way ships without the macOS archive, so
+  `scripts/install.sh` fails on macOS for it and macOS users build from source.
 - **Clean builds.** Every release build starts from an empty `CARGO_TARGET_DIR` in `$RUNNER_TEMP` (the runner
   deletes it after the job), on hosted and self-hosted runners alike, and there is no `rust-cache`. Release builds
   are rare and their binaries ship, so they never reuse CI's persistent target dirs: nothing stale (an older
@@ -130,11 +133,11 @@ writes the chosen `runs-on` into each CLI matrix entry, and its summary lists th
   found`` on every start on older systems. Two checks hold the line: the `cli` job fails when `objdump -T` shows any
   symbol version above 2.35 (weak ones included), and `install-test` runs the installed binary in `ubuntu:22.04` and
   fails if `folo --version` writes anything to stderr.
-- **Windows retries.** The Windows `cargo build` steps run through `tools/ci-retry.sh`, which retries once on the
-  self-hosted dev PC when rustc crashes (docs/CI.md, Unstable self-hosted Windows host).
+- **Windows retries.** The Windows `cargo build` steps run through `tools/ci-retry.sh`, which retries once on
+  the maintainers' self-hosted Windows runner when rustc crashes (docs/CI.md, Unstable self-hosted Windows host).
 - **Isolation.** The CLI smoke test and the install test use a throwaway `FOLO_HOME` in `$RUNNER_TEMP`, so they
-  never read the runner account's own `~/.folo` (on the dev PC, the developer's). The `release` job runs with a
-  `contents: write` token on the Linux runner; if that is ever a self-hosted one, docs/CI.md, Security, applies.
+  never read the runner account's own `~/.folo` (on a self-hosted runner, a person's own). The `release` job runs
+  with a `contents: write` token on the Linux runner; if that is ever a self-hosted one, docs/CI.md, Self-hosted runners, applies.
 
 Each CLI build is smoke-tested before packaging: `folo --version`; `folo doctor --json` must report the embedded
 Studio (`web_source: embedded`) with folo-wasm in it (`web_folo_wasm: true`); `folo serve --mock --port 0` must
@@ -149,14 +152,15 @@ at the newest published release. Every archive has a `<asset>.sha256` (`<hex>  <
 Pretrained weights are releases of their own, tagged `weights-v<n>` and made by hand, not by the workflow (the recipes
 are in examples/coco/README.md, Publish): the `.folo` files and a `SHA256SUMS` (`sha256sum` output) listing them, plus
 an entry per file in `folo_api::weights::PUBLISHED`, which is what `folo weights pull <name>` and `folo weights list`
-read. Create them with `--latest=false` (`gh release create weights-v3 --latest=false ...`, or
-`gh release edit weights-v3 --latest=false` after the fact): otherwise GitHub marks the newest published release
-*Latest*, and `releases/latest/download/...`, the install scripts and `gh release download --pattern install.sh`
-look for FOLO's binaries in the weights release. A published weights release downloads over plain HTTPS
-(`https://github.com/<repo>/releases/download/<tag>/<file>`), which `folo weights pull` tries first; while the
-repository is private that answers `404` and the pull goes through `gh` (docs/CLI.md, Weights). Do not replace a
-published file: caches keep the copy they have (`pull` skips a cached name without `--force`), so a new result is a
-new name.
+read. A weights release must be created with `--latest=false` (`gh release create weights-vN --latest=false ...`,
+or `gh release edit weights-vN --latest=false` after the fact) so that `releases/latest`, which the install scripts
+use, keeps pointing at the newest FOLO version: otherwise GitHub marks the newest published release *Latest*, and
+`releases/latest/download/...`, the install scripts and `gh release download --pattern install.sh` look for FOLO's
+binaries in the weights release. A published weights release downloads over plain HTTPS
+(`https://github.com/<repo>/releases/download/<tag>/<file>`), which is how `folo weights pull` gets it, with no
+account; `gh` is only its fallback for a private fork or mirror that answers `404` (docs/CLI.md, Weights). Do not
+replace a published file: caches keep the copy they have (`pull` skips a cached name without `--force`), so a new
+result is a new name.
 
 | tag | names | published |
 |---|---|---|
@@ -166,11 +170,9 @@ new name.
 
 All three carry `--latest=false`.
 
-**Known issue: "latest" is a weights release.** The app release `v0.1.0` is still a draft, and no published release
-is marked latest, so GitHub picks one: today that is `weights-v2`. Until an app release is published and marked
-latest, `releases/latest/download/...` and `install.sh` without `--version` do not find the binaries. The fix
-is one flag for whoever publishes `v0.1.0`: `gh release edit v0.1.0 --draft=false --latest` (publish it with
-`--latest`).
+**If "latest" is a weights release.** When no published release is marked latest, GitHub picks one, which can be
+a weights release. Then `releases/latest/download/...` and `install.sh` without `--version` do not find the
+binaries. The fix is one flag on the newest FOLO release: `gh release edit v0.2.0 --latest`.
 
 ## Building a release binary locally
 ```sh

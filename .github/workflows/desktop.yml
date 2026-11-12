@@ -36,7 +36,7 @@ jobs:
   desktop:
     name: desktop (windows)
     # Where it ships: the Win32 backend and DirectWrite text are built and tested here.
-    runs-on: ${{ fromJSON(vars.RUNS_ON_WINDOWS || '"windows-latest"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.head.repo.fork && vars.RUNS_ON_WINDOWS) || '"windows-latest"') }}
     timeout-minutes: 30
     defaults:
       run:
@@ -102,7 +102,7 @@ jobs:
     # The winit + softbuffer backend and cosmic-text are plain dependencies here, and every test is headless (no
     # display). No system package is needed to build: wayland and Xlib are loaded at run time (their `dlopen`
     # features), and the one C dependency (ring) needs only the C compiler the runner has.
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.head.repo.fork && vars.RUNS_ON_LINUX) || '"ubuntu-latest"') }}
     timeout-minutes: 30
     defaults:
       run:

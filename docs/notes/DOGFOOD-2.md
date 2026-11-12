@@ -187,7 +187,7 @@ or inconsistent. The IDs group findings by surface:
 #### M1. `folo_info` in proxy mode reports the wrong data dir (annoying)
 - **Repro:** `folo serve --data-dir D:/folo-dogfood2/studio-data`, then
   `folo mcp --server http://127.0.0.1:7878`, then `folo_info`.
-- **Happened:** `"mode": "proxy", "data_dir": "C:\\Users\\himent\\.folo"`. That is the MCP process's own default,
+- **Happened:** `"mode": "proxy", "data_dir": "C:\\Users\\me\\.folo"`. That is the MCP process's own default,
   with backslashes, and it is not where the runs are.
 - **Expected:** the server's data dir (add it to `/api/system` or `/api/health`), or `null` in proxy mode.
 - **Why it matters:** an agent that builds paths from it (`exports/…`) looks in the wrong place.

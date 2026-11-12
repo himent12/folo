@@ -545,18 +545,18 @@ pub const AUTO_RULE: u32 = 5;
 
 /// Rule 5's MuSGD step weights for a run from scratch (the `muon` / `sgd` defaults of Ultralytics' `MuSGD` class,
 /// which its trainer overrides to 0.2 / 1.0): on the COCO proxy folo-n trains to 0.1234 AP with them against 0.1135
-/// with 0.2 / 1.0; fine-tuning from pretrained weights (BCCD) is better with 0.2 / 1.0 (docs/hill/r2-learn.md).
+/// with 0.2 / 1.0; fine-tuning from pretrained weights (BCCD) is better with 0.2 / 1.0 (docs/notes/hill/r2-learn.md).
 pub const AUTO_MUSGD_SCRATCH_WEIGHTS: MuSgdWeights = MuSgdWeights { muon: 0.5, sgd: 0.5 };
 
 /// Rule 4's momentum, the configured default (docs/MODEL.md §8.1; rules 1 to 3 use 0.9).
 pub const AUTO_MUSGD_MOMENTUM: f64 = 0.937;
 
 /// Rule 4's bias-group warmup start: the configured default (docs/MODEL.md §8.1), no longer zeroed. On the COCO
-/// proxy MuSGD reaches 0.113 AP with it and 0.103 with 0 (docs/hill/r2-learn.md).
+/// proxy MuSGD reaches 0.113 AP with it and 0.103 with 0 (docs/notes/hill/r2-learn.md).
 pub const AUTO_MUSGD_WARMUP_BIAS_LR: f64 = 0.1;
 
 /// Rule 2's floor on the AdamW `lr0`: the reference's fit `0.002 · 5 / (4 + nc)` falls below it from 7 classes on
-/// (0.000119 for 80 classes), where it trains from scratch about 5x slower than SGD (docs/hill/learn.md).
+/// (0.000119 for 80 classes), where it trains from scratch about 5x slower than SGD (docs/notes/hill/learn.md).
 pub const AUTO_ADAMW_MIN_LR0: f64 = 0.001;
 
 /// docs/MODEL.md §8.2 `auto`, the current rule ([`AUTO_RULE`]); see [`auto_optimizer_rule`].

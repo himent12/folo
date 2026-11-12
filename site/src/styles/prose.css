@@ -201,6 +201,39 @@
   margin-bottom: var(--space-6);
 }
 
+/* An image drawn once per theme (a <picture> in the Markdown, scripts/links.ts): the one for the theme in use. These
+   are charts and logos that bring their own surface, so they take no frame. */
+.prose img.theme-light,
+.prose img.theme-dark {
+  border: 0;
+  border-radius: 0;
+  background: none;
+  max-width: 100%;
+  height: auto;
+}
+
+img.theme-light {
+  display: none;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) img.theme-light {
+    display: inline;
+  }
+
+  :root:not([data-theme='dark']) img.theme-dark {
+    display: none;
+  }
+}
+
+:root[data-theme='light'] img.theme-light {
+  display: inline;
+}
+
+:root[data-theme='light'] img.theme-dark {
+  display: none;
+}
+
 /* Code blocks */
 .code {
   position: relative;

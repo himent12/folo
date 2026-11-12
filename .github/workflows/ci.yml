@@ -34,7 +34,8 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 # Runners: repo variables RUNS_ON_LINUX / RUNS_ON_WINDOWS hold a JSON runs-on value for self-hosted runners; an
-# unset one means GitHub-hosted. Linux is GitHub-hosted (RUNS_ON_LINUX unset) and Windows is the dev PC (docs/CI.md).
+# unset one means GitHub-hosted. A pull request from a fork always gets GitHub-hosted runners, whatever the variables
+# say: its code must never run on a self-hosted machine (docs/CI.md, Self-hosted runners).
 jobs:
   rust:
     strategy:
@@ -42,9 +43,9 @@ jobs:
       matrix:
         include:
           - os: linux
-            runs-on: ${{ vars.RUNS_ON_LINUX || '"ubuntu-latest"' }}
+            runs-on: ${{ (!github.event.pull_request.head.repo.fork && vars.RUNS_ON_LINUX) || '"ubuntu-latest"' }}
           - os: windows
-            runs-on: ${{ vars.RUNS_ON_WINDOWS || '"windows-latest"' }}
+            runs-on: ${{ (!github.event.pull_request.head.repo.fork && vars.RUNS_ON_WINDOWS) || '"windows-latest"' }}
     name: rust (${{ matrix.os }})
     runs-on: ${{ fromJSON(matrix.runs-on) }}
     timeout-minutes: 30
@@ -100,7 +101,7 @@ jobs:
           fi
           echo "FOLO_ONNX_PYTHON=$venv/bin/python" >> "$GITHUB_ENV"
           echo "FOLO_ONNX_REQUIRED=1" >> "$GITHUB_ENV"
-      # The self-hosted Windows host (the dev PC) has an unstable CPU that occasionally crashes rustc
+      # The maintainers' self-hosted Windows host has an unstable CPU that occasionally crashes rustc
       # (0xc0000005 / 0xc000001d / 0xc0000409); docs/CI.md. tools/ci-retry.sh retries a step once there, and only when
       # its output shows one of those crash codes: compile errors and failing or flaky tests are never retried.
       - name: clippy

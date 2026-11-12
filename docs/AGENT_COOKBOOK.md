@@ -5,10 +5,12 @@ the **CLI with `--json`** (docs/CLI.md). Tool calls are written `→ tool { argu
 of the result after `←`; every result also has a one-line text summary. Errors are `isError` results whose text is
 `{ "code", "message", "hint" }` (MCP) or the last stdout line `{"error":{...}}` plus a non-zero exit code (CLI).
 
-Setup: `folo mcp --data-dir D:/folo-data` ([README, "Use FOLO from an agent"](../README.md#use-folo-from-an-agent)). That is the real engine:
-training, `val`, `predict` and `export` run in the `folo mcp` process, and runs persist under
-`D:/folo-data/runs/`. Add `--device cpu` to keep inference off the GPU, `--mock` to try the tools on simulated
-data, or `--server http://127.0.0.1:7878` to share runs with FOLO Studio.
+Setup: `folo mcp` ([README, "Use FOLO from an agent"](../README.md#use-folo-from-an-agent)). That is the real engine:
+training, `val`, `predict` and `export` run in the `folo mcp` process, and runs persist under `~/.folo/runs/` (the
+data dir; `--data-dir` picks another). Add `--device cpu` to keep inference off the GPU, `--mock` to try the tools on
+simulated data, or `--server http://127.0.0.1:7878` to share runs with FOLO Studio. The examples use a dataset at
+`/data/cats` and images under `/data/photos`; tool arguments take absolute paths or paths relative to the data dir
+(`~` is not expanded).
 
 ## 1. Train a detector on a folder of images
 The folder must be a labelled dataset: YOLO (`images/` + `labels/`, or a `data.yaml`) or COCO (an instances
@@ -16,7 +18,7 @@ The folder must be a labelled dataset: YOLO (`images/` + `labels/`, or a `data.y
 
 ```
 → folo_info {}                                    ← devices.gpus, scales (params, GFLOPs at 640 / 320)
-→ register_dataset { "path": "D:/data/cats", "name": "cats" }
+→ register_dataset { "path": "/data/cats", "name": "cats" }
                                                   ← { "id": "ds_8f21", "classes": ["cat", "dog"], "splits": {...} }
 → get_dataset { "dataset_id": "ds_8f21" }         ← stats (class counts, box sizes), issue_counts, issues (recipe 3)
 → train { "dataset_id": "ds_8f21", "arch": "folo-s", "epochs": 50, "imgsz": 640, "device": "auto" }
@@ -30,7 +32,7 @@ mAP curves read `folo://runs/run_4c1a/epochs` (about 1 KB per epoch), not `/metr
 Arguments a tool does not know are rejected (`lr` → "did you mean `lr0`?"), so a typo never trains with defaults;
 calling `register_dataset` again on the same folder returns the dataset it already is. When the status is
 `completed`, `model_id` names the best weights (`m_4c1a`; `m_4c1a-last` is the last epoch). The prompt
-`train_on_folder { "folder_path": "D:/data/cats" }` returns these steps as instructions.
+`train_on_folder { "folder_path": "/data/cats" }` returns these steps as instructions.
 
 Stop and resume: `stop_run { "run_id": "run_4c1a" }` stops after the current batch (status `stopping`, then
 `stopped`, the last epoch's checkpoint kept). `train { "resume_run_id": "run_4c1a" }` continues the same run from
@@ -40,13 +42,13 @@ after a run **completed**, start a new run with `"weights": "m_4c1a"`.
 
 CLI:
 ```sh
-folo train --data D:/data/cats --model folo-s --epochs 50 --imgsz 640 --json --json-events epoch > train.jsonl
+folo train --data /data/cats --model folo-s --epochs 50 --imgsz 640 --json --json-events epoch > train.jsonl
 # one {"event":"status"|"epoch"|"log",...} record per event (drop --json-events epoch for per-batch "step"s), then
 # {"event":"done","status":"completed","run_dir":"runs/cats-s","best":{"epoch":41,"map50_95":0.62},
 #  "weights":{"best":"runs/cats-s/weights/best.folo","last":".../last.folo"}}
 folo stop runs/cats-s                                      # from another process: stop after the current batch
 folo train --resume runs/cats-s/weights/last.folo --json   # after a stop, Ctrl+C or a killed process
-folo train --model runs/cats-s/weights/best.folo --data D:/data/cats --epochs 20 --json   # after it completed
+folo train --model runs/cats-s/weights/best.folo --data /data/cats --epochs 20 --json   # after it completed
 ```
 
 ## 2. Evaluate and compare two runs
@@ -68,8 +70,8 @@ models on the same split, thresholds (`conf` 0.001 and `iou` 0.7 by default, the
 
 CLI:
 ```sh
-folo val --model runs/cats-s/weights/best.folo --data D:/data/cats --split test --json > a.json
-folo val --model runs/cats-n/weights/best.folo --data D:/data/cats --split test --json > b.json
+folo val --model runs/cats-s/weights/best.folo --data /data/cats --split test --json > a.json
+folo val --model runs/cats-n/weights/best.folo --data /data/cats --split test --json > b.json
 jq -s 'map({model, map50, map50_95, precision, recall})' a.json b.json
 ```
 
@@ -95,20 +97,20 @@ and the next `get_dataset` re-indexes them.
 
 CLI (every issue, not just 50, with a suggested fix for each):
 ```sh
-folo dataset check D:/data/cats --fix-dry-run --json   # exit 0 when clean, 1 with errors or warnings
-folo dataset check D:/data/cats --json --min-severity warning   # leave the background-image infos out
+folo dataset check /data/cats --fix-dry-run --json   # exit 0 when clean, 1 with errors or warnings
+folo dataset check /data/cats --json --min-severity warning   # leave the background-image infos out
 # {"clean":false,"counts":{"error":3,"warning":12,"info":40,"by_kind":{...}},
 #  "issues":[{"kind","severity","file","line","message","fix"}, ...]}
-folo dataset stats D:/data/cats --json                 # the same stats object as get_dataset
+folo dataset stats /data/cats --json                 # the same stats object as get_dataset
 ```
 
 ## 4. Export and run inference
 ```
 → export { "model_id": "m_4c1a", "format": "folo-f16" }
-    ← { "path": "D:/folo-data/exports/cats-s-best-f16.folo", "bytes": 18874368 }
-→ predict { "model_id": "m_4c1a", "image_path": "D:/photos/garden.jpg", "conf": 0.25 }
+    ← { "path": "/home/me/.folo/exports/cats-s-best-f16.folo", "bytes": 18874368 }
+→ predict { "model_id": "m_4c1a", "image_path": "/data/photos/garden.jpg", "conf": 0.25 }
     ← { image: { width, height }, boxes: [{ class, name, score, x1, y1, x2, y2 }], timing: { ..., total_ms }, device }
-→ predict_batch { "model_id": "m_4c1a", "glob": "D:/photos/*.jpg" }
+→ predict_batch { "model_id": "m_4c1a", "glob": "/data/photos/*.jpg" }
     ← { processed, failed, boxes_total, per_class_counts, timing, details_uri: "folo://predictions/pb_1" }
 ```
 
@@ -122,8 +124,8 @@ CLI:
 ```sh
 folo export --model runs/cats-s/weights/best.folo --json   # {"path":"runs/cats-s/weights/best-f16.folo","bytes",...}
                                                            # (never overwrites: a second export is best-f16-2.folo)
-folo predict --model runs/cats-s/weights/best-f16.folo D:/photos --conf 0.25 --save annotated --json
-# {"event":"prediction","file":"D:/photos/garden.jpg","image":{...},"boxes":[...],"timing":{...},"saved":"..."}
+folo predict --model runs/cats-s/weights/best-f16.folo /data/photos --conf 0.25 --save annotated --json
+# {"event":"prediction","file":"/data/photos/garden.jpg","image":{...},"boxes":[...],"timing":{...},"saved":"..."}
 # ... one per image, then {"event":"done","images":12,"failed":0,"boxes":31,"mean_timing":{...}}
 ```
 
@@ -145,11 +147,11 @@ def folo(*args):
         raise RuntimeError(f"folo {args[0]} exited {p.returncode}: {err.get('code')}: {err.get('message')}")
     return records
 
-done = folo("train", "--data", "D:/data/cats", "--model", "folo-n", "--epochs", "20", "--imgsz", "320")[-1]
+done = folo("train", "--data", "/data/cats", "--model", "folo-n", "--epochs", "20", "--imgsz", "320")[-1]
 best = done["weights"]["best"]
-[report] = folo("val", "--model", best, "--data", "D:/data/cats")
+[report] = folo("val", "--model", best, "--data", "/data/cats")
 print(f"mAP50-95 {report['map50_95']:.3f} on {report['images']} images")
-for r in folo("predict", "--model", best, "D:/photos"):
+for r in folo("predict", "--model", best, "/data/photos"):
     if r.get("event") == "prediction":
         print(r["file"], [(b["name"], round(b["score"], 2)) for b in r["boxes"]])
 ```
@@ -168,11 +170,11 @@ Point the agent at a running server instead of an embedded store, so its runs sh
 going after the agent disconnects:
 
 ```sh
-folo serve --data-dir D:/folo-data          # Studio on http://127.0.0.1:7878
+folo serve                                  # Studio on http://127.0.0.1:7878, data dir ~/.folo
 folo mcp --server http://127.0.0.1:7878     # the MCP server the agent starts (same tools)
 ```
 
 Every recipe above works unchanged; `folo_info` reports `"mode": "proxy"`. Run subscriptions are polled once per
 second through the HTTP API. The same data dir also works the other way round: runs an embedded `folo mcp`
-trained are listed by a later `folo serve --data-dir D:/folo-data` (only one process should use a data dir at a
+trained are listed by a later `folo serve` on the same data dir (only one process should use a data dir at a
 time).

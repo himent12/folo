@@ -1,8 +1,8 @@
 # folo-ui: what FOLO Desktop costs, against the GPUI app
 
-Measured 2026-11-11 on the dev PC for the pull request that replaces GPUI 0.2.2 with folo-ui. "folo-ui" is
+Measured 2026-11-11 on our test machine for the pull request that replaces GPUI 0.2.2 with folo-ui. "folo-ui" is
 `desktop/fw-finish` at its final head (the merged `desktop/framework` with the review fixes, plus the finish);
-"GPUI" is the reference build `D:/folo-build/dfw-baseline/bin/folo-desktop-gpui.exe` (`origin/main` at
+"GPUI" is a reference build of the GPUI app, `folo-desktop-gpui.exe` (`origin/main` at
 `ee846c88` with the baseline's off-screen and trace patch, rendering untouched).
 
 ## The machine and the load
@@ -23,7 +23,7 @@ From `apps/desktop`, PowerShell, with a release build of each:
 # Runtime: start-up, memory, CPU and GPU (about three and a half minutes a run; alternate the builds)
 foreach ($i in 1..3) {
     tools\perf.ps1 -Exe <folo-ui exe> -Label folo-ui-$i -Out perf\folo-ui-$i.json
-    tools\perf.ps1 -Exe D:\folo-build\dfw-baseline\bin\folo-desktop-gpui.exe -Label gpui-$i -Out perf\gpui-$i.json
+    tools\perf.ps1 -Exe <GPUI exe> -Label gpui-$i -Out perf\gpui-$i.json
 }
 # Frames (bash; build with --features bench-alloc for the allocation counts)
 bash tools/bench-frames.sh <exe built with bench-alloc>

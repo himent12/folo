@@ -113,9 +113,9 @@ bind groups created (the backend benchmark prints them per pass).
 (`ctx.set_wait_spin(d)`, or `FOLO_GPU_WAIT_SPIN_US=n` for contexts created afterwards; 0 blocks at once), and
 only then blocks in the driver. `ctx.work_stats()` counts the waits that ended while polling (`spin_waits`) and
 those that blocked (`blocked_waits`: no spin, or the GPU was still busy when it ran out). A blocked thread is woken
-some time after the GPU finishes, and in 46–76% of the synchronised batch-1 forwards on the dev machine the thread
-woke on another logical processor than the one it waited on (often an E-core), with cold caches for the next call's
-encoding; polling cut that to 3–27%. In nine interleaved in-process runs, polling made folo-n b1 synchronised calls
+some time after the GPU finishes, and in 46–76% of the synchronised batch-1 forwards on our test machine (an RTX
+4080 SUPER and an i7-14700KF) the thread woke on another logical processor than the one it waited on (often an
+E-core), with cold caches for the next call's encoding; polling cut that to 3–27%. In nine interleaved in-process runs, polling made folo-n b1 synchronised calls
 4–14% (f32) and 4–17% (f16 on tensor cores) faster at the median, and their p99 lower in all but one; a wait
 longer than the spin costs at most 2 ms of one core before it blocks as before. `cargo bench -p folo-vision
 --bench gpu_latency` splits synchronised b1 calls into encode, submit and wait per call, compares spins in one
@@ -159,7 +159,7 @@ The interval was 1024 until the training-step profile showed the GPU idle for mo
 submission time: a step's 1300 dispatches went out in 3 submissions, so the GPU waited for each one to be built
 whole. Submitting every 64 lets the GPU run one batch while the host encodes the next: the folo-n training step
 went from 295 to 366 img/s with AMP (median of 3 alternated rounds) and from 231 / 245 to 259 / 277 img/s in f32
-(the undisturbed rounds; docs/hill/gpu-train.md). 32 to 128 perform alike; 16 is slower again (every submission
+(the undisturbed rounds; docs/notes/hill/gpu-train.md). 32 to 128 perform alike; 16 is slower again (every submission
 costs host time) and 256 gives back half the gain.
 
 ### Profiling
@@ -203,7 +203,7 @@ and dropping the context or calling `save_pipeline_caches()` (`folo` does when a
 a cache that would be written larger than 256 MB is not written (the previous file stays), temporary files of
 that cache file older than an hour (a killed writer's) are deleted when a context opens the cache, and no error of
 the cache ever fails a run. `GpuContext::pipeline_cache_loaded()` says whether a context started from a valid
-file. Effect on the dev machine: docs/hill/r2-trainer.md.
+file. Effect on our test machine: docs/notes/hill/r2-trainer.md.
 
 **Parallel precompile.** Neither cache removes the compile from the first step: the step still meets its ~200
 kernels one at a time and compiles each (WGSL parsing in naga, about 1 s in all, which no cache stores, plus the
@@ -211,7 +211,7 @@ driver's compile when its cache is cold: 30 s for a first AMP run). `GpuContext:
 in the same folder, the kernels a context uses from then on (name and spec, in order of first use) as
 `kernels-<backend>-<vendor>-<device>-<kind hash>-<shape hash>.list` (`kernel_list.rs`), and at the next call with the
 same kind and shape compiles that list on worker threads (half the cores, at most 12; `FOLO_GPU_PRECOMPILE_THREADS=n`
-sets the count: more workers contend in the driver, see docs/hill/r2-trainer.md) while the caller goes on. A thread that
+sets the count: more workers contend in the driver, see docs/notes/hill/r2-trainer.md) while the caller goes on. A thread that
 needs a kernel takes it ready, waits for the worker compiling it, or compiles it itself when no worker has started
 it, so a list is only ever a hint. `folo train` (and the server's runs) pass `train <arch> <f32|amp> head <head>
 <optimizer> nc <classes>` and `imgsz <n> batch <n>` (tile sizes and bounds checks follow the shapes); `folo
@@ -369,7 +369,7 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   address of its window's top-left element, so each gathered element costs one division by the constant
   `KH·KW`, a bit test and an add instead of rebuilding the row and column and four bounds checks (both
   generators; larger windows keep the bounds-checked gather). That made the batch-16 forward GEMM time 4–5.5%
-  shorter on tensor cores and the f32 forward's median throughput 1.8–2.7% higher (docs/hill/r2-gpu-gemm.md).
+  shorter on tensor cores and the f32 forward's median throughput 1.8–2.7% higher (docs/notes/hill/r2-gpu-gemm.md).
   The gather's `k < K` test is compiled out only when M, N and K are all tile multiples. No im2col buffer is
   ever written.
 - **Forward split-K** (`kernels::conv::split`, both generators). folo's 3×3 convs at 40 and 20 px have few output
@@ -514,7 +514,7 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   the flat tiles for `M ≤ 32` as above, 64×128 for outputs of at least 128 channels per group and 6400 pixels
   (80 px and up), 64×64 otherwise. On folo-n / folo-s's convs at batch 16, 128×128 was never the fastest and 64×64
   took 14–63% less time than it at 40 and 20 px and on the stride-2 convs; the switch raised folo-s's batch-16
-  f16 tensor-core forward throughput by 25% (pipelined; batch-1 GPU time unchanged; docs/hill/r2-gpu-gemm.md,
+  f16 tensor-core forward throughput by 25% (pipelined; batch-1 GPU time unchanged; docs/notes/hill/r2-gpu-gemm.md,
   PR 3). 45 KiB of workgroup memory at 128×128.
 - **Accuracy.** Products of f16 values are exact in f32, so the only difference from the regular f16 kernels is
   the f32 summation order. `src/tests/coop.rs` checks the kernels against the f64 CPU on the same f16 inputs with a
@@ -722,7 +722,7 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   again once the GPU is done with it; the last few (`STAGING_KEEP` = 4) stay mapped for the next upload of the same
   size class, and `release_memory` drops them. Against `upload` (`Queue::write_buffer`: a fresh wgpu staging
   allocation and a serial copy per call) the predictor's batch-16 upload went from about 12 ms to 3 ms
-  (docs/hill/gpu-infer.md).
+  (docs/notes/hill/gpu-infer.md).
 
 ### Benchmark: a YOLOv8n-shaped network
 
@@ -753,15 +753,15 @@ of batch-1 inference.
 
 `cargo bench -p folo-vision --bench gpu` runs the real detector (fused inference forward, end-to-end predict,
 training step, peak memory); its numbers and the comparison with Ultralytics are in
-[BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640 on `main` after the second hill-climb
+[BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640 on `main` after the second optimization round
 (2026-11-12, BENCHMARKS.md, Hill-climb 2): 1.14 ms batch-1 forward and 2081 img/s at batch 16 in f32 (0.95 ms / 4159
 img/s in f16 on tensor cores), 1.75 ms / 1469 img/s end to end through the predictor at batch 1 / 16 in f32 (1.56 ms
 / 2155 img/s on tensor cores), a 380 img/s training step at batch 16 with a 3.4 GiB peak, and 594 img/s with mixed
 precision (`--amp`) at 2.0 GiB. The fused kernels' effect on the training step:
 the SGD update went from 62 ms (about ten elementwise dispatches and copies per parameter) to 5 ms with the fused
-update kernel, and to about 2 ms with the multi-tensor one. The training-step hill-climb (submission every 64
+update kernel, and to about 2 ms with the multi-tensor one. The training-step optimization round (submission every 64
 dispatches, constant-size weight gradients, stride-phase input gradients, multi-tensor updates, weight-gradient
-tiles by shape; docs/hill/gpu-train.md) took the folo-n step from 226 to 307 img/s in f32 and 292 to 502 with AMP,
+tiles by shape; docs/notes/hill/gpu-train.md) took the folo-n step from 226 to 307 img/s in f32 and 292 to 502 with AMP,
 and folo-s from 105 to 140 / 167 to 246, on a host shared with other jobs (alternated A/B, medians of 3 rounds).
 
 ## Known limitations / follow-ups

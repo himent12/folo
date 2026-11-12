@@ -5,8 +5,8 @@
 scraping. It exposes the same operations as the CLI and `docs/API.md`, with the same error codes.
 
 ```jsonc
-// e.g. .mcp.json / claude_desktop_config.json
-{ "mcpServers": { "folo": { "command": "folo", "args": ["mcp", "--data-dir", "D:/folo-data"] } } }
+// e.g. .mcp.json / claude_desktop_config.json (data dir: ~/.folo; add "--data-dir", "<dir>" to the args for another)
+{ "mcpServers": { "folo": { "command": "folo", "args": ["mcp"] } } }
 ```
 
 `folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878 [--token SECRET]]

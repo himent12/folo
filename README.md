@@ -20,106 +20,126 @@ plus training, evaluation and export. You drive it from one `folo` binary, an HT
 - **Runs in the browser.** The same detector compiles to wasm and runs on WebGPU in the page (about 14 ms for folo-n
   at 640 in Chrome).
 
-> **Status: early (v0.1).** The detector trains and infers on CPU and GPU, and it passes its convergence gate.
-> COCO-pretrained weights are published as GitHub releases: `folo-s-coco`, val2017 AP 0.416 after 56 epochs from
-> scratch, and for folo-n `folo-n-coco` (AP 0.314 after 50 epochs) and the interim `folo-n-coco-v2` (AP 0.317 at
-> epoch 62 of a paused 300-epoch run). The repository is
-> private for now, so `folo weights pull` still needs access to it (through `gh`); once it is public, it needs nothing.
-> See [Project status](#project-status).
+> **Status: early (v0.1).** The detector trains and runs on CPU and GPU, and COCO-pretrained weights are published
+> (`folo weights pull folo-s-coco`). It is faster than the incumbent on every row below and not yet as accurate on
+> COCO; interfaces may still change. See [Project status](#project-status).
 
 ## Why FOLO: the numbers
 
 folo-n against Ultralytics **yolo26n** (8.4.198, torch 2.11 + CUDA 12.8) on the same machine: an RTX 4080 SUPER and an
-i7-14700KF, both at 640×640. FOLO computes in strict f32 (no TF32, no tensor cores) unless a row says f16 or AMP, and does about 19% more FLOPs per
-image (6.54 vs 5.5 GFLOPs). Every number here comes from [docs/BENCHMARKS.md](docs/BENCHMARKS.md), which also covers
-the method, the raw JSON and how much noise to expect.
+i7-14700KF, both at 640×640. FOLO computes in strict f32 (no TF32, no tensor cores) unless a row says f16 or AMP, and
+does about 19% more FLOPs per image (6.54 against 5.5 GFLOPs). Each yolo26n bar is its best configuration for that
+row. Every number comes from [docs/BENCHMARKS.md](docs/BENCHMARKS.md), which has the method, the raw results and how
+much noise to expect.
 
-| metric | folo-n | yolo26n (best config) | |
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/img/charts/speed-inference-dark.svg">
+    <img src="docs/img/charts/speed-inference-light.svg" alt="Inference speed, folo-n against yolo26n. Latency at batch 1: GPU forward 1.14 ms against 4.95 ms, GPU end to end 1.75 ms against 6.92 ms, CPU forward 12.7 ms against 22.8 ms, CPU end to end 13.1 ms against 24.8 ms. Throughput at batch 16: GPU forward in f32 2081 against 1454 images per second, in f16 4159 against 2370, GPU end to end 2155 against 615." width="720">
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/img/charts/speed-training-dark.svg">
+    <img src="docs/img/charts/speed-training-light.svg" alt="Training speed, folo-n against yolo26n, at batch 16. Training step: 380 against 202 images per second in f32, 594 against 252 with mixed precision. Whole trainer: 388 against 199 in f32, 613 against 224 with mixed precision. Peak GPU memory of a training step: 3467 against 4517 MiB in f32, 2022 against 2646 MiB with mixed precision." width="720">
+  </picture>
+</p>
+
+<details>
+<summary>The same numbers as a table</summary>
+
+| metric | folo-n | yolo26n (best configuration) | |
 |---|---:|---:|---|
-| GPU forward, batch 1, f32 (median latency) | **1.14 ms** | 4.95 ms (6.04 ms default) | FOLO 4.3× faster |
-| GPU forward, batch 16, f32 (throughput) | **2081 img/s** | 1454 img/s (TF32) | FOLO 43% faster |
-| GPU forward, batch 16, f16 (tensor cores) | **4159 img/s** | 2370 img/s (fp16) | FOLO 1.75× faster |
-| Training step, batch 16 (fwd + loss + bwd + SGD) | **380 img/s** (f32) / **594 img/s** (AMP) | 202 img/s (fp32 with TF32) / 252 img/s (AMP) | FOLO 1.9× / 2.4× faster |
-| Trainer, sustained (data loader, mosaic, 8 workers) | **388 img/s** (f32) / **613 img/s** (AMP) | 199 / 224 img/s | FOLO 1.9× / 2.7× faster |
-| Training step peak GPU memory, batch 16, f32 | **3467 MiB** | 4517 MiB (2646 MiB AMP) | FOLO uses 23% less in f32 |
-| GPU end to end, batch 1 (decoded image in, boxes out) | **1.75 ms** (f32) | 6.92 ms | FOLO 4.0× faster |
-| GPU end to end, batch 16 | **2155 img/s** (f16, tensor cores) / 1469 (f32) | 615 img/s (fp16) / 536 (fp32) | FOLO 3.5× faster |
+| GPU forward, batch 1, f32 (median latency) | **1.14 ms** | 4.95 ms (6.04 ms at its defaults) | FOLO 4.3× faster |
+| GPU end to end, batch 1 (decoded image in, boxes out) | **1.75 ms** | 6.92 ms | FOLO 4.0× faster |
 | CPU forward, batch 1, f32 | **12.7 ms** (28 threads) | 22.8 ms (8 threads) | FOLO 1.8× faster |
 | CPU end to end, batch 1 | **13.1 ms** (28 threads) | 24.8 ms | FOLO 1.9× faster |
+| GPU forward, batch 16, f32 (throughput) | **2081 img/s** | 1454 img/s (TF32) | FOLO 1.4× faster |
+| GPU forward, batch 16, f16 (tensor cores) | **4159 img/s** | 2370 img/s (fp16) | FOLO 1.8× faster |
+| GPU end to end, batch 16, f16 (tensor cores) | **2155 img/s** | 615 img/s (fp16) | FOLO 3.5× faster |
+| Training step, batch 16 (forward, loss, backward, SGD) | **380 img/s** (f32) / **594 img/s** (AMP) | 202 img/s (fp32 with TF32) / 252 img/s (AMP) | FOLO 1.9× / 2.4× faster |
+| Whole trainer, sustained (data loader, mosaic, 8 workers) | **388 img/s** (f32) / **613 img/s** (AMP) | 199 / 224 img/s | FOLO 1.9× / 2.7× faster |
+| Training step peak GPU memory, batch 16 | **3467 MiB** (f32) / **2022 MiB** (AMP) | 4517 / 2646 MiB | FOLO uses 23% / 24% less |
 
-Accuracy is a separate question: on COCO val2017, folo-n reaches AP 0.317 after 62 epochs from scratch (a 300-epoch
-run, paused there; 0.314 for the finished 50-epoch run), against
-0.409 published for yolo26n, which was pretrained on Objects365 and then trained 245 epochs on COCO; folo-s reaches
-AP 0.416 after 56 epochs from scratch, against 0.480 for yolo26s
-([examples/coco](examples/coco/README.md), docs/BENCHMARKS.md, Accuracy). Trained the same way on the same images (a
-20,000-image COCO proxy at 320 px, 20 epochs, from scratch), FOLO's trainer and Ultralytics' land level with each
-other per epoch (SGD 0.086 vs 0.085 AP, MuSGD 0.113–0.116 vs 0.113, both optimizers chosen explicitly), so the gap is
-data and schedule, not the trainer; full COCO at an equal budget has not been run. The folo-s run is the first full
-COCO run of `auto`'s MuSGD recipe (rule 3 then: momentum 0.9, warmup_bias_lr 0); it shows the recipe works, not how
-much it gains over SGD there. `auto` now uses rule 5 (MuSGD for every run, momentum 0.937, bias warmup from 0.1, step
-weights 0.5 / 0.5 from scratch), which trains the COCO proxy to 0.123 AP against rule 3's 0.076; a full COCO run under
-it has not been made yet.
+</details>
 
-These are `main`'s numbers after the second hill-climb (2026-11-12, quiet machine, alternated with the build before
-it; docs/BENCHMARKS.md, Hill-climb 2). folo-s now beats yolo26s on every row measured for it as well, batch-16 forward included (its trainer row was not
-measured). One
-thing got slower: the very first AMP epoch on a machine, before FOLO has a kernel list there and while the driver has
-never compiled FOLO's kernels, takes about 1.6 s longer (23 s instead of 21 s); every later run compiles in the
-background.
+Measured on `main` on 2026-11-12, FOLO and the build before it alternated run by run on a quiet machine. folo-s beats
+yolo26s on every row measured for it as well ([the chart by model size](docs/BENCHMARKS.md#summary)); its whole-trainer
+row was not measured.
 
-With the whole trainer (data loader, augmentation, validation), folo-n trains the shapes gate set (2,000 images
-at 320 px, 30 epochs) to mAP50 0.980 in **169 s on the GPU**, 25.6× faster than
-on the CPU ([examples/shapes](examples/shapes/README.md)).
+### Accuracy
+
+Speed only counts at comparable accuracy, and on COCO FOLO is not there yet. Trained from scratch on COCO alone,
+folo-n reaches AP 0.317 on val2017 after 62 epochs and folo-s 0.416 after 56. Ultralytics publishes 0.409 for yolo26n
+and 0.480 for yolo26s, from models pretrained on Objects365 and then trained on COCO for far longer (245 epochs for
+yolo26n). That is not like for like, and a full COCO comparison at an equal budget has not been run. Two things have
+been measured at an equal budget:
+
+- **Per epoch, the two trainers learn equally well.** On a 20,000-image COCO subset at 320 px, 20 epochs from scratch,
+  FOLO's trainer and Ultralytics' reach the same AP with the same optimizer (SGD 0.086 against 0.085, MuSGD
+  0.113–0.116 against 0.113), so the COCO gap is data and schedule, not the trainer.
+- **Fine-tuned on small datasets, folo-n and yolo26n are level on three of four.** Each starts from its own COCO
+  weights and trains 100 epochs at its defaults; one scorer (pycocotools) grades both.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/img/charts/accuracy-dark.svg">
+    <img src="docs/img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.317 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained from scratch for 56 to 62 epochs, the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
+  </picture>
+</p>
+
+The runs, the per-epoch curves and the published weights are in [examples/coco](examples/coco/README.md); the
+fine-tuning harness is [bench/finetune](bench/finetune/README.md).
 
 ## Quickstart
 
 ### Install
 
 Releases ship `folo` for x86_64 Windows and Linux (glibc 2.35 or newer) with Studio built in, so `folo serve` works
-anywhere, plus FOLO Desktop for Windows, the browser module (`folo-wasm.tar.gz`) and the install scripts. You need a
-GPU with Vulkan, DX12 or Metal for training at speed; without one, `--device auto` falls back to the CPU, which is
-much slower. The repository is private, so downloads need a logged-in [`gh`](https://cli.github.com) (or a token in
-`GH_TOKEN` / `GITHUB_TOKEN`):
+anywhere, plus FOLO Desktop for Windows and the browser module (`folo-wasm.tar.gz`). You need a GPU with Vulkan, DX12
+or Metal to train at speed; without one, `--device auto` falls back to the CPU, which is much slower.
 
 ```sh
-gh release download --repo himent12/folo --pattern install.sh      # Linux: the latest release's install script
-sh install.sh                                                       # folo into ~/.local/bin
+curl -fsSL https://github.com/himent12/folo/releases/latest/download/install.sh | sh      # Linux: folo into ~/.local/bin
 ```
 
 ```powershell
-gh release download --repo himent12/folo --pattern install.ps1     # Windows
-powershell -ExecutionPolicy Bypass -File install.ps1                # into %LOCALAPPDATA%\Programs\folo\bin, added to PATH
-powershell -ExecutionPolicy Bypass -File install.ps1 -Desktop       # also FOLO Desktop
+irm https://github.com/himent12/folo/releases/latest/download/install.ps1 | iex            # Windows: folo, added to PATH
 ```
 
-The scripts download the archive for your platform, check its SHA-256 and install `folo` (and `folo-desktop`).
-The same scripts are in a checkout as `scripts/install.sh` and `scripts\install.ps1`. Options: `--version` /
-`-Version` (a tag such as `v0.1.0`; default the latest release), `--dir` / `-InstallDir`, `--repo` / `-Repo` and
-`--base-url` / `-BaseUrl`, or the environment variables `FOLO_VERSION`, `FOLO_INSTALL_DIR`, `FOLO_REPO` and
-`FOLO_BASE_URL`. To install by hand, download `folo-<target>.zip` / `.tar.gz` and its `.sha256` from the release
-and put the binary on your `PATH`. There is no macOS build yet: on a Mac, build from source.
+The scripts download the archive for your platform, check its SHA-256 and install `folo`. For FOLO Desktop as well,
+save `install.ps1` and run `powershell -ExecutionPolicy Bypass -File install.ps1 -Desktop`. Both scripts are in a
+checkout too (`scripts/install.sh`, `scripts\install.ps1`) and take a version, a folder and a mirror
+([docs/RELEASE.md](docs/RELEASE.md)). To install by hand, download `folo-<target>.zip` / `.tar.gz` and its `.sha256`
+from the [release](https://github.com/himent12/folo/releases) and put the binary on your `PATH`. There is no macOS
+build yet: on a Mac, build from source.
 
 ### First model
 
 ```sh
 folo doctor                                                         # the GPU FOLO picks
 folo dataset synth datasets/shapes --images 1000 --imgsz 320        # a labelled YOLO dataset, ~1 s
-folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30   # ~2 min on the GPU
+folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30   # ~1.5 min on the GPU
 folo predict --model runs/shapes-n/weights/best.folo datasets/shapes/images/val --save runs/shapes-n/pred
-folo serve --mock                                                   # Studio on http://127.0.0.1:7878, demo data
 ```
 
 `train` prints one row per epoch and writes `runs/shapes-n/`: `weights/best.folo`, `weights/last.folo` and
-`metrics.jsonl`. On the dev machine this run ended at mAP50 0.955 / mAP50-95 0.823 after 83 s. `predict --save`
+`metrics.jsonl`. On an RTX 4080 SUPER this run ended at mAP50 0.955 / mAP50-95 0.823 after 83 s. `predict --save`
 writes copies of the images with the boxes drawn on them.
 
-To see real runs in Studio, drop `--mock`. `folo serve` keeps datasets, runs and models in its data dir
-(`--data-dir`, default `~/.folo`), and lists every `.folo` file under `<data dir>/models/` as a model. To try your
-model in the Playground, copy it there: `mkdir -p ~/.folo/models && cp runs/shapes-n/weights/best.folo
-~/.folo/models/shapes-n.folo`.
+To look at it in Studio, start the server and open `http://127.0.0.1:7878`:
 
-**[docs/QUICKSTART.md](docs/QUICKSTART.md)** goes further: training on your own YOLO or COCO folder, fine-tuning,
-evaluation, export, and running a model in the browser.
+```sh
+mkdir -p ~/.folo/models && cp runs/shapes-n/weights/best.folo ~/.folo/models/shapes-n.folo
+folo serve                                                          # or `folo serve --mock` for demo data
+```
+
+`folo serve` keeps datasets, runs and models in its data dir (`--data-dir`, default `~/.folo`) and lists every `.folo`
+file under `<data dir>/models/` as a model, so the copy above puts your model in the Playground.
+
+**[docs/QUICKSTART.md](docs/QUICKSTART.md)** goes further: training on your own YOLO or COCO folder, fine-tuning from
+the COCO weights, evaluation, export, and running a model in the browser.
 
 ### Build from source
 
@@ -141,7 +161,8 @@ in-browser module.
 
 ![FOLO Studio: a live training run](docs/img/studio-run-live.webp)
 
-`folo serve` hosts Studio at `http://127.0.0.1:7878` (our own UI framework and design system). It has these screens:
+`folo serve` hosts Studio at `http://127.0.0.1:7878` (our own UI framework and design system). Next to an overview
+and the settings, it has these screens:
 - **Datasets**: register a YOLO or COCO folder or generate a synthetic one, browse the images with their boxes, and
   see class and box-size statistics and label issues. No labels yet? **Label images** hands a set of unlabeled
   images to Claude Code or Codex on your machine, shows you every box for review and correction, and makes the
@@ -149,13 +170,13 @@ in-browser module.
 - **Runs**: start a training run, follow it live (metrics over SSE, validation samples, per-class mAP, logs), stop
   or resume it, and compare runs. **Run on** trains it on a GPU rented from RunPod for the length of the run, or on
   another FOLO server of yours, with the price before it starts and the cost while it runs
+  ([docs/CLOUD.md](docs/CLOUD.md)).
+- **Models**: evaluation results, per-class metrics, and export.
 - **Benchmarks**: freeze a set of your labeled images into a benchmark with a plan of hard conditions (haze, low
   light, blur, distance, ...), and run any vision model on it: a FOLO model, Claude Code or Codex looking at the
   images, or predictions from a model that runs anywhere else. Every entry gets a score from five axes (accuracy,
   robustness, self-labeling, calibration, localization) and the charts behind it, and a self-improvement loop
   tests whether a model's own labels can train its successor ([docs/BENCH.md](docs/BENCH.md)).
-  ([docs/CLOUD.md](docs/CLOUD.md)).
-- **Models**: evaluation results, per-class metrics, and export.
 - **Playground**: run a model on any image, on the server or **in the browser** (WebGPU or the wasm CPU). The
   in-browser backends need the wasm module (`sh scripts/build-wasm.sh`) built before Studio. Thresholds re-filter
   instantly.
@@ -171,10 +192,11 @@ in-browser module.
 ![FOLO Desktop: a live training run](docs/img/desktop-run-live.webp)
 
 The same screens, built natively in Rust on folo-ui, its own UI framework (rendered on the CPU, so the GPU stays free
-for training and inference). It also has a command palette, keyboard navigation, and dark and light themes. It talks to a local `folo serve` over the same
-HTTP API. If no server answers on `$FOLO_SERVER` (default `http://127.0.0.1:7878`), it starts a local `folo serve`
-for you, empty until you add datasets and runs (its data dir is `$FOLO_HOME` or `~/.folo`). `--server` points it at
-another server, and `--mock` (or Settings › Connection) shows the built-in demo data.
+for training and inference). It also has a command palette, keyboard navigation, and dark and light themes. It talks
+to a local `folo serve` over the same HTTP API. If no server answers on `$FOLO_SERVER` (default
+`http://127.0.0.1:7878`), it starts a local `folo serve` for you, empty until you add datasets and runs (its data dir
+is `$FOLO_HOME` or `~/.folo`). `--server` points it at another server, and `--mock` (or Settings › Connection) shows
+the built-in demo data.
 
 ```powershell
 cd apps/desktop
@@ -190,33 +212,34 @@ Desktop is its own cargo workspace (the app and folo-ui), so the engine's builds
 ## Use FOLO from an agent
 
 **MCP.** `folo mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio (MCP 2026-07-28
-and 2025-11-25). It has 22 tools: build, register and check datasets, train (here or on a cloud GPU), follow, stop, reorder and
-resume runs, evaluate, predict, export, compare runs, and look after cloud connections and instances. It also has `folo://` resources (dataset images, live run status and metrics,
-validation sample grids, the docs) and two prompts. It runs the real engine on `--data-dir`.
+and 2025-11-25). It has 22 tools: build, register and check datasets, train (here or on a cloud GPU), follow, stop,
+reorder and resume runs, evaluate, predict, export, compare runs, and look after cloud connections and instances. It
+also has `folo://` resources (dataset images, live run status and metrics, validation sample grids, the docs) and two
+prompts. It runs the real engine on its data dir (`--data-dir`, default `~/.folo`).
 
 ```sh
-claude mcp add folo -- folo mcp --data-dir D:/folo-data                 # Claude Code
-codex mcp add folo -- folo mcp --data-dir D:/folo-data                  # Codex
+claude mcp add folo -- folo mcp                 # Claude Code
+codex mcp add folo -- folo mcp                  # Codex
 ```
 
 Or in `.mcp.json` (`claude_desktop_config.json` for Claude Desktop):
 
 ```json
-{ "mcpServers": { "folo": { "command": "folo", "args": ["mcp", "--data-dir", "D:/folo-data"] } } }
+{ "mcpServers": { "folo": { "command": "folo", "args": ["mcp"] } } }
 ```
 
 From a checkout without an installed `folo`, use `"command": "cargo", "args": ["run", "-q", "--release", "-p",
-"folo-cli", "--", "mcp", "--data-dir", "D:/folo-data"]`. These flags change how it runs:
-- `--device auto|cpu|gpu:<n>`: where inference and `val` run.
+"folo-cli", "--", "mcp"]`. These flags change how it runs:
+- `--device auto|cpu|gpu:<n>`: where inference and `val` run (`--tensor-cores` for f16 on tensor cores).
 - `--mock`: simulated data and runs, to try the tools.
 - `--read-only`: only tools that don't change state.
 - `--confine`: only read files inside `--data-dir`.
-- `--server http://127.0.0.1:7878`: share runs with a running `folo serve` and Studio.
+- `--server http://127.0.0.1:7878`: share runs with a running `folo serve` and Studio (`--token` when it needs one).
 
 **CLI with `--json`.** Every command takes `--json`: stdout is then JSON Lines only, and human text goes to stderr.
 Failures end with `{"error":{"code","message","hint"}}` and a stable exit code (0 ok, 1 runtime error, 2 usage,
-3 not found, 4 not implemented). `folo describe --json` prints every command, argument and default, plus every MCP
-tool's schemas.
+3 not found, 4 not implemented or not supported on this machine). `folo describe --json` prints every command,
+argument and default, plus every MCP tool's schemas.
 
 ```sh
 folo train --data datasets/shapes --model folo-n --epochs 30 --json   # {"event":"epoch",...} per epoch, then {"event":"done",...}
@@ -247,29 +270,32 @@ clap. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the full picture.
 ## Project status
 
 What works today (v0.1):
-- folo-n/s/m/l/x, trained from scratch on CPU or GPU, with resume, EMA, mosaic and the usual augmentations. On the
-  shapes gate it reaches mAP50 0.980 / mAP50-95 0.896 ([examples/shapes](examples/shapes/README.md)).
-- COCO-pretrained weights: `folo-n-coco`, folo-n trained from scratch on COCO for 50 epochs, val2017 AP 0.314 /
-  AP50 0.455 (pycocotools-exact, [examples/coco](examples/coco/README.md)), in the published release `weights-v1`.
-  `folo-n-coco-v2` (release `weights-v2`) is the interim result of a 300-epoch run paused at epoch 62: AP 0.317 /
-  AP50 0.458. `folo-s-coco` (release `weights-v3`) is folo-s trained from scratch on COCO for 56 epochs on a rented
-  GPU: AP 0.416 / AP50 0.580, 0.05–0.06 AP behind the published YOLO11s / YOLO26s. `folo weights pull <name>`
-  downloads them over plain HTTPS; while the repository is private, that is refused and it falls back to a
-  logged-in `gh`.
+- folo-n/s/m/l/x, trained from scratch on CPU or GPU, with resume, EMA, mosaic and the usual augmentations. The
+  trainer's convergence test, a synthetic shapes dataset it must learn to a fixed mAP, passes at mAP50-95 0.934
+  against a bar of 0.75 ([examples/shapes](examples/shapes/README.md)).
+- COCO-pretrained weights, each trained from scratch and scored with a pycocotools-exact evaluator
+  ([examples/coco](examples/coco/README.md)). `folo weights pull <name>` downloads them over HTTPS:
+
+  | name | model | val2017 AP / AP50 | training |
+  |---|---|---|---|
+  | `folo-s-coco` | folo-s | 0.416 / 0.580 | 56 epochs |
+  | `folo-n-coco-v2` | folo-n | 0.317 / 0.458 | epoch 62 of a 300-epoch run that is paused |
+  | `folo-n-coco` | folo-n | 0.314 / 0.455 | 50 epochs |
+
 - YOLO and COCO datasets: reading, stats, checks and conversion. mAP that matches pycocotools.
 - `val`, `predict` and export to `.folo` (f32 or f16, a safetensors-compatible format) and ONNX (opset 17, f32 or
   f16, optional in-graph decode and dynamic shapes; parity-tested in onnxruntime).
 - f16 on the GPU: `--half` inference (on tensor cores with `--tensor-cores`) and mixed-precision training (`--amp`),
   plus the NMS-free one-to-one head (`--head o2o`).
-- `folo serve` (Studio and the HTTP API), `folo mcp`, in-browser inference, and the 0.1.0 release: Windows and
-  Linux binaries with Studio embedded, FOLO Desktop for Windows, the browser module and install scripts
-  ([CHANGELOG.md](CHANGELOG.md)).
+- `folo serve` (Studio and the HTTP API), `folo mcp`, in-browser inference, labeling with coding agents, training on
+  rented GPUs, vision benchmarks, and the 0.1.0 release: Windows and Linux binaries with Studio embedded, FOLO
+  Desktop for Windows, the browser module and install scripts ([CHANGELOG.md](CHANGELOG.md)).
 
 Not yet:
-- a public repository (the weights releases are published, but downloading them needs access to the repository until
-  it is public), or a COCO comparison with the incumbent at equal budget;
-- `folo bench`;
-- a macOS build (it needs GitHub-hosted runners, which are unavailable for now).
+- COCO accuracy level with the incumbent, or a COCO comparison at an equal budget ([Accuracy](#accuracy));
+- `folo bench`, the speed benchmark as a command: it exists but answers "not implemented" (the numbers above come
+  from `cargo bench`, docs/BENCHMARKS.md; it is not Studio's Benchmarks screen);
+- a macOS build.
 
 The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -285,7 +311,7 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 | [AGENT_COOKBOOK](docs/AGENT_COOKBOOK.md) | Recipes for agents, as MCP tool calls and as `--json` commands |
 | [MCP](docs/MCP.md) | The `folo mcp` contract: tools, resources, prompts, errors |
 | [API](docs/API.md) | The HTTP + SSE API behind Studio and Desktop |
-| [BENCHMARKS](docs/BENCHMARKS.md) | FOLO vs Ultralytics on the dev machine: method, numbers, targets |
+| [BENCHMARKS](docs/BENCHMARKS.md) | FOLO against Ultralytics on one machine: method, numbers, accuracy |
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | The crates and how they fit together |
 | [MODEL](docs/MODEL.md) | The detector, loss and training recipe (normative spec) |
 | [DATA](docs/DATA.md) | Dataset formats, augmentation, the data loader |
@@ -295,13 +321,22 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 | [FORMAT](docs/FORMAT.md) | The `.folo` weights and checkpoint format |
 | [METRICS](docs/METRICS.md) | How mAP, precision and recall are computed |
 | [ROADMAP](docs/ROADMAP.md) | What is done, in progress and next |
-| [CHANGELOG](CHANGELOG.md) · [RELEASE](docs/RELEASE.md) · [CI](docs/CI.md) · [PROCESS](docs/PROCESS.md) · [AGENTS](AGENTS.md) | What each release changed, releases, CI runners, how changes land, rules for contributors |
+| [CHANGELOG](CHANGELOG.md) · [RELEASE](docs/RELEASE.md) · [CI](docs/CI.md) | What each release changed, how releases are cut, what CI checks |
 
-Examples: [shapes](examples/shapes/README.md) (the convergence gate, on CPU and GPU) and
-[coco](examples/coco/README.md) (folo-n pretrained from scratch on COCO 2017).
+Examples: [shapes](examples/shapes/README.md) (the convergence test, on CPU and GPU) and
+[coco](examples/coco/README.md) (folo-n and folo-s pretrained from scratch on COCO 2017).
 
 To read these as a website with search: `cd site && npm ci && npm run dev` ([site/README.md](site/README.md)).
 
+## Contributing
+
+Issues and pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) has the build, the checks a change must pass
+and the conventions, and [SECURITY.md](SECURITY.md) says how to report a vulnerability.
+
+FOLO is written almost entirely by AI coding agents, each change a reviewed pull request: [AGENTS.md](AGENTS.md)
+holds the rules they (and you) follow, and [docs/notes](docs/notes/README.md) keeps their engineering notebooks, the
+measurements behind the optimisations and the negative results.
+
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.

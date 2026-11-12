@@ -247,8 +247,9 @@ API clients.
   home line, COCO's 20 GB would be an hour or more of a rented GPU waiting. A worker cannot fetch a public dataset
   itself yet. For the folo-s COCO weights (examples/coco, 2026-11-11) the pod was therefore set up by hand: COCO
   straight from cocodataset.org (three minutes in a datacentre) and `folo train` on the pod.
-- A RunPod worker installs the release of this server's version. Until that release is published (or for a
-  private repository), give the connection a worker download URL; FOLO says so before it rents anything.
+- A RunPod worker installs the release of this server's version. When that version has no published release (a
+  development build) or comes from a private fork, give the connection a worker download URL; FOLO says so before
+  it rents anything.
 
 ## Checking a provider against the real service
 The provider's tests run against a fixture of its API. Two things check it against the service itself:

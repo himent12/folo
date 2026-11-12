@@ -1,0 +1,87 @@
+{
+  "$comment": "The numbers behind the charts in docs/img/charts, each copied from the document named in its `source`. Change a number there first, then here, then run `node tools/charts/render.mjs`. Values are [FOLO, the Ultralytics model of the same size] unless a key says otherwise.",
+
+  "machine": "RTX 4080 SUPER, Core i7-14700KF, 640×640 input, medians of alternated runs",
+
+  "inference": {
+    "source": "docs/BENCHMARKS.md, FOLO targets, rows 1, 3, 4, 5, 6, 7 and 8 (folo-n, measured 2026-11-12)",
+    "latency": [
+      { "label": "GPU forward", "detail": "f32, input already on the GPU", "values": [1.14, 4.95], "text": ["1.14", "4.95"] },
+      { "label": "GPU end to end", "detail": "decoded image in, boxes out", "values": [1.75, 6.92], "text": ["1.75", "6.92"] },
+      { "label": "CPU forward", "detail": "f32, best thread count of each", "values": [12.74, 22.8], "text": ["12.7", "22.8"] },
+      { "label": "CPU end to end", "detail": "decoded image in, boxes out", "values": [13.12, 24.8], "text": ["13.1", "24.8"] }
+    ],
+    "throughput": [
+      { "label": "GPU forward, f32", "detail": "yolo26n with TF32 convolutions", "values": [2081, 1454], "text": ["2081", "1454"] },
+      { "label": "GPU forward, f16", "detail": "FOLO on tensor cores", "values": [4159, 2370], "text": ["4159", "2370"] },
+      { "label": "GPU end to end", "detail": "f16, decoded images in", "values": [2155, 615], "text": ["2155", "615"] }
+    ]
+  },
+
+  "training": {
+    "source": "docs/BENCHMARKS.md, FOLO targets, rows 9, 10 and 11 (folo-n, measured 2026-11-12)",
+    "throughput": [
+      { "label": "Training step, f32", "detail": "forward, loss, backward, SGD", "values": [380, 202], "text": ["380", "202"] },
+      { "label": "Training step, AMP", "detail": "the same in mixed precision", "values": [594, 252], "text": ["594", "252"] },
+      { "label": "Whole trainer, f32", "detail": "data loader, mosaic, 8 workers", "values": [388, 199], "text": ["388", "199"] },
+      { "label": "Whole trainer, AMP", "detail": "sustained over an epoch", "values": [613, 224], "text": ["613", "224"] }
+    ],
+    "memory": [
+      { "label": "Training step, f32", "detail": "peak allocated", "values": [3467, 4517], "text": ["3467", "4517"] },
+      { "label": "Training step, AMP", "detail": "peak allocated", "values": [2022, 2646], "text": ["2022", "2646"] }
+    ]
+  },
+
+  "by_size": {
+    "source": "docs/BENCHMARKS.md, FOLO targets, rows 1 to 9: each pair is [FOLO, the YOLO26 bar], for folo-n against yolo26n and folo-s against yolo26s",
+    "rows": [
+      { "label": "GPU forward, batch 1", "detail": "f32", "better": "lower", "n": [1.14, 4.95], "s": [2.24, 4.87] },
+      { "label": "GPU forward, batch 1", "detail": "f16, FOLO on tensor cores", "better": "lower", "n": [0.95, 6.25], "s": [1.36, 7.47] },
+      { "label": "GPU forward, batch 16", "detail": "f32", "better": "higher", "n": [2081, 1454], "s": [819, 627] },
+      { "label": "GPU forward, batch 16", "detail": "f16, FOLO on tensor cores", "better": "higher", "n": [4159, 2370], "s": [1799, 1159] },
+      { "label": "GPU end to end, batch 1", "detail": "f32", "better": "lower", "n": [1.75, 6.92], "s": [3.04, 8.59] },
+      { "label": "GPU end to end, batch 16", "detail": "f16, FOLO on tensor cores", "better": "higher", "n": [2155, 615], "s": [1337, 446] },
+      { "label": "CPU forward, batch 1", "detail": "f32", "better": "lower", "n": [12.74, 22.8], "s": [29.2, 42.5] },
+      { "label": "CPU end to end, batch 1", "detail": "f32", "better": "lower", "n": [13.12, 24.8], "s": [29.7, 51.1] },
+      { "label": "Training step, batch 16", "detail": "f32", "better": "higher", "n": [380, 202], "s": [162, 105] },
+      { "label": "Training step, batch 16", "detail": "AMP", "better": "higher", "n": [594, 252], "s": [299, 188] }
+    ]
+  },
+
+  "accuracy": {
+    "coco": {
+      "source": "docs/BENCHMARKS.md, Accuracy (COCO val2017 AP; the YOLO26 numbers are Ultralytics' published ones)",
+      "rows": [
+        { "label": "Nano", "detail": "folo-n: 62 epochs from scratch", "values": [0.317, 0.409], "text": ["0.317", "0.409"], "delta": "−0.092" },
+        { "label": "Small", "detail": "folo-s: 56 epochs from scratch", "values": [0.416, 0.48], "text": ["0.416", "0.480"], "delta": "−0.064" }
+      ]
+    },
+    "finetune": {
+      "source": "docs/BENCHMARKS.md, Fine-tuning on small datasets (folo-n against yolo26n: mean AP of seeds 0 to 2, min to max, and the reading of each row)",
+      "rows": [
+        { "label": "Blood cells (BCCD)", "detail": "205 training images", "values": [0.607, 0.626], "text": ["0.607", "0.626"], "ranges": [[0.606, 0.607], [0.621, 0.634]], "delta": "−0.020", "verdict": "behind" },
+        { "label": "Brain tumours (MRI)", "detail": "893 training images", "values": [0.452, 0.436], "text": ["0.452", "0.436"], "ranges": [[0.439, 0.46], [0.413, 0.459]], "delta": "+0.017", "verdict": "level" },
+        { "label": "Signatures", "detail": "143 training images", "values": [0.989, 0.982], "text": ["0.989", "0.982"], "ranges": [[0.987, 0.992], [0.975, 0.987]], "delta": "+0.007", "verdict": "level" },
+        { "label": "Medical pills", "detail": "92 training images", "values": [0.804, 0.803], "text": ["0.804", "0.803"], "ranges": [[0.801, 0.807], [0.8, 0.806]], "delta": "+0.002", "verdict": "level" }
+      ]
+    }
+  },
+
+  "coco_curves": {
+    "source": "metrics.jsonl of the three runs in examples/coco/README.md: validation mAP50-95 after each epoch (the trainer's own validation, the numbers of the Curve tables there)",
+    "series": [
+      {
+        "label": "folo-n, 50 epochs",
+        "values": [0.0023, 0.0285, 0.0642, 0.1032, 0.1343, 0.1577, 0.1758, 0.1877, 0.1965, 0.2029, 0.2079, 0.2119, 0.2159, 0.2196, 0.2231, 0.2272, 0.231, 0.2346, 0.238, 0.242, 0.246, 0.2499, 0.2543, 0.2575, 0.2606, 0.2638, 0.2668, 0.2698, 0.2728, 0.2755, 0.2781, 0.2807, 0.2828, 0.2847, 0.2867, 0.289, 0.2912, 0.2934, 0.2953, 0.2976, 0.2986, 0.3004, 0.3025, 0.3042, 0.3055, 0.3067, 0.3083, 0.309, 0.3095, 0.31]
+      },
+      {
+        "label": "folo-n v2, paused at 62 of 300",
+        "values": [0.0023, 0.0289, 0.0633, 0.1012, 0.1337, 0.1568, 0.1753, 0.1874, 0.1946, 0.2, 0.2048, 0.2092, 0.2129, 0.2166, 0.22, 0.2241, 0.2276, 0.2312, 0.2351, 0.2388, 0.2425, 0.2459, 0.2499, 0.2535, 0.2565, 0.2599, 0.2629, 0.266, 0.2692, 0.272, 0.2742, 0.2762, 0.2783, 0.2803, 0.2818, 0.2839, 0.2857, 0.2877, 0.2893, 0.2916, 0.2932, 0.2948, 0.2963, 0.2978, 0.2988, 0.2997, 0.3011, 0.3025, 0.3032, 0.3042, 0.3052, 0.3059, 0.3068, 0.3075, 0.3083, 0.3092, 0.3095, 0.3107, 0.3111, 0.3121, 0.3128, 0.3134]
+      },
+      {
+        "label": "folo-s, 56 epochs",
+        "values": [0.0226, 0.0957, 0.1517, 0.2104, 0.2439, 0.2704, 0.2885, 0.3004, 0.3097, 0.3156, 0.3204, 0.3247, 0.3288, 0.3322, 0.3357, 0.339, 0.342, 0.3456, 0.349, 0.3524, 0.3558, 0.3589, 0.3621, 0.3651, 0.368, 0.3711, 0.3737, 0.3763, 0.3789, 0.381, 0.3832, 0.3847, 0.3865, 0.3882, 0.3895, 0.3911, 0.3929, 0.3946, 0.3957, 0.3975, 0.399, 0.4001, 0.4015, 0.4027, 0.4045, 0.4057, 0.4066, 0.4076, 0.4085, 0.4091, 0.4098, 0.4105, 0.4109, 0.4114, 0.4115, 0.4117]
+      }
+    ]
+  }
+}

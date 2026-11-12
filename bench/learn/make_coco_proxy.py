@@ -1,4 +1,4 @@
-"""Build the COCO proxy set of docs/hill/learn.md: a fixed, seeded subset of COCO 2017 that FOLO and Ultralytics
+"""Build the COCO proxy set of docs/notes/hill/learn.md: a fixed, seeded subset of COCO 2017 that FOLO and Ultralytics
 both read (COCO JSON for FOLO and pycocotools, YOLO txt labels for Ultralytics, the same image files).
 
     python bench/learn/make_coco_proxy.py --coco D:/folo-data/coco --out D:/folo-data/runs-hill/learn/mini320 \
