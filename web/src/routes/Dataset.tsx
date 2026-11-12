@@ -15,6 +15,7 @@ import { ago, compact, count, num } from '$lib/format';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import { entryState } from '$lib/shell/entryMemory';
 import Button from '$lib/ui/Button';
 import Gate from '$lib/ui/Gate';
 import EmptyState from '$lib/ui/EmptyState';
@@ -94,14 +95,11 @@ export default function Dataset() {
   // History: opening an image, and the first filter on an unfiltered view, add an entry, so Back closes the image or
   // undoes the filter instead of leaving the dataset; everything else (stepping through images, changing a filter, a
   // tab) replaces the entry. A change that comes back to the view an entry was added from goes Back to it, so Close
-  // and Back agree and no entry is left over. `pushedFrom` holds those views (path and query), innermost last;
-  // arriving at one (Back, or that change) drops it.
-  const pushedFrom: string[] = [];
+  // and Back agree and no entry is left over. Each entry this page added keeps the view (path and query) it was added
+  // from with it (lib/shell/entryMemory), so Forward to it and a reload of it know that view as well as Back does. An
+  // entry reached otherwise (a link, a pasted URL) has none: its changes replace it.
+  const from = entryState<string>('dataset.from');
   const view = (path: string, q: URLSearchParams | string) => `${path}?${q}`;
-  const here = computed(() => view(router.route.path, router.route.query));
-  effect(() => {
-    if (pushedFrom.at(-1) === here.get()) pushedFrom.pop();
-  });
 
   /** Changes query params (null removes one): `push` adds a history entry, anything else replaces this one. */
   function setQuery(patch: Record<string, string | null>, push = false) {
@@ -116,9 +114,10 @@ export default function Dataset() {
     const at = router.route.path;
     const path = `/datasets/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`;
     if (push) {
-      pushedFrom.push(view(at, before));
+      const was = router.entry;
       router.go(path);
-    } else if (pushedFrom.at(-1) === view(at, s)) history.back();
+      if (router.entry !== was) from.set(view(at, before));
+    } else if (from.get() === view(at, s)) history.back();
     else router.go(path, { replace: true });
   }
 
