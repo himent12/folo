@@ -284,11 +284,41 @@ D:/folo-data/coco`, val2017): f32 mAP50 0.44945 / mAP50-95 0.30999 (main: the sa
 0.44943 / 0.30995 (main 0.44944 / 0.31003). Largest gap 0.00008 (bound 0.002). Output: `val_tiles.txt`
 (build 149534cf); main's from `val.txt` (the PR 1 run).
 
+## Final: merged `main` against 647b981f
+
+`gpu` forward (`FOLO_GPU_TENSOR_CORES=1 FOLO_BENCH_SECTIONS=forward FOLO_BENCH_PRECISION=f32,f16tc`), the 647b981f
+build from the start of the lane against main c2c7dfcc (#202 merged), alternated, 3 rounds, GPU 0–7% before every
+run, 2026-11-12 (`ab/final`). These rows include every lane's merges since 647b981f (bind-group cache #182,
+convs reading concatenations in place #185, ...); this lane's own share is in the PR A/Bs above.
+
+| row | 647b981f | main c2c7dfcc | | target |
+|---|---|---|---|---|
+| folo-n f32 forward b16 pipelined | 1660 img/s (1658–1667) | **2107 img/s** (2102–2112) | +27% | ≥ 1850 |
+| folo-s f32 forward b16 pipelined | 671 img/s (647–671) | **830 img/s** (810–831) | +24% | ≥ 740 (yolo26s 627) |
+| folo-n f16 TC forward b16 pipelined | 3057 img/s (2734–3086) | **4168 img/s** (3999–4179) | +36% | ≥ 3300 |
+| folo-s f16 TC forward b16 pipelined | 1242 img/s (990–1251) | **1822 img/s** (1810–1824) | +47% | ≥ 1350 (yolo26s 1159) |
+| folo-n f32 forward b1 median | 2.62 ms (2.53–2.94) | 1.85 ms (1.40–1.87) | −29% | not worse |
+| folo-s f32 forward b1 median | 4.38 ms (4.27–5.29) | 2.55 ms (2.39–4.41) | −42% | not worse |
+| folo-n f16 TC forward b1 median | 2.85 ms (2.62–3.30) | 1.23 ms (1.14–1.75) | −57% | not worse |
+| folo-s f16 TC forward b1 median | 3.37 ms (3.08–3.60) | 1.95 ms (1.94–2.19) | −42% | not worse |
+
+Every target of the lane is met. Accuracy: COCO val2017 with folo-n, f32 0.44945 / 0.30999 and `--half
+--tensor-cores` 0.44943 / 0.30995 (mAP50 / mAP50-95; 647b981f 0.44945 / 0.30999 and 0.44944 / 0.31003).
+
 ## Leftovers (by expected gain)
 
-1. **Tensor-core split threshold by `K`**: on tensor cores, a chunk of ≤ 4 `BK = 32` tiles does not pay. A
-   coop-specific `MIN_CHUNK_TILES` (about 18) would keep the gains on the long-`K` heads and drop the small
-   losses; needs a quiet, repeated sweep (worth ≤ 2% of the f16 batch-16 forward).
+1. **Tensor-core tiles for wider layers and other inputs.** `pick_config_conv` was swept on folo-n / folo-s's
+   shapes at 640 px; folo-m's whole model gains 18% at batch 16, but its 256–768-channel layers on their own,
+   folo-l, grouped convs and 1080p inputs were not swept. A sweep (`conv_model` with more cases) could find a
+   case where 128×128 or a 128×64 tile wins back.
+2. **Tensor-core split-K threshold by `K`**: on tensor cores a chunk of ≤ 4 `BK = 32` tiles does not pay. With
+   PR 3's smaller tiles fewer convs split at all; a coop-specific `MIN_CHUNK_TILES` (about 18) needs a quiet,
+   repeated sweep (worth ≤ 2% of the f16 batch-16 forward).
+3. **The f32 GEMM kernel itself.** The 128×128×8 f32 tile reaches 21–26 TFLOPS on the 80 px and larger convs
+   (31 on a 4096³ GEMM); the f32 forward is still ~80% GEMM. Register-blocking or a 128×64 / 64×128 f32 tile with
+   BK 16 retuned on conv shapes is the next lever for the f32 rows.
+4. **The flat tensor-core tiles** for `M ≤ 32` are not always best (n bottleneck 64 → 32 @ 40: 43.1 µs as 32×128,
+   39.3 as 64×64): small, folo-n only.
 
 ## Negative results
 
