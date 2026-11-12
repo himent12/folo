@@ -230,9 +230,9 @@ impl CocoEval {
         self.num_images += 1;
         self.num_crowd += truths.iter().filter(|t| t.iscrowd).count() as u64;
         for t in truths.iter().filter(|t| !t.iscrowd) {
-            for a in 0..NA {
+            for (a, n) in self.npig[t.class as usize].iter_mut().enumerate() {
                 if in_range(t.area, a) {
-                    self.npig[t.class as usize][a] += 1;
+                    *n += 1;
                 }
             }
         }
