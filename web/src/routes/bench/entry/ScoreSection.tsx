@@ -322,7 +322,7 @@ css`
   /* Phones: the axis and what it asks over a line of its bar, weight and points; the number behind it under them. */
   @media (max-width: 767px) {
     .r {
-      grid-template-columns: minmax(0, 1fr) 72px 48px;
+      grid-template-columns: minmax(0, 1fr) 96px 48px;
       row-gap: var(--space-2);
     }
     .r.head {
