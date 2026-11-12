@@ -5,7 +5,8 @@
  * add one with Add box. Save (the hand-drawn labels replace the image's; none is a background image; an image not
  * labeled yet can be saved as it is) or Discard; leaving unsaved changes asks first, whichever way (J / K, Close, a
  * link, Back), and closing the tab warns. J / K step through the images in the current filter. "Looks right" (Enter)
- * marks labels nobody changed as reviewed and opens the next image to review; saved boxes are reviewed too. "Ask the agent again"
+ * marks labels nobody changed as reviewed and opens the next image to review; saved boxes are reviewed too, so with
+ * unsaved changes Enter saves them and opens the next image to review (Ctrl+S / ⌘S saves and stays). "Ask the agent again"
  * runs the agent on this image alone with a note; "Remove image" takes it out of the job. An image the agent has right
  * now cannot be edited, and says so; one that waits for its turn in a run can, and then leaves the run. Its keys work
  * while it is the topmost dialog (shell/pageCommands `dialogKey`), also after a button that had focus turned disabled.
@@ -208,6 +209,14 @@ export default function Editor(props: EditorProps) {
     }
   }
 
+  /** Enter with unsaved changes: saves them (which marks the image reviewed) and opens the next image to review. */
+  async function saveAndNext() {
+    const cur = img.peek();
+    if (!cur) return;
+    const next = nextToReview(cur.id);
+    if ((await save()) && shownId === cur.id && next) props.onnavigate(next);
+  }
+
   // ---------- leaving with changes ----------
   /**
    * Where to go once unsaved changes are answered: another image, or away (null); or a navigation the router holds
@@ -253,6 +262,13 @@ export default function Editor(props: EditorProps) {
     // A button that turns disabled under focus (Save once saved, Discard, Ask, Next on the last image) drops focus to
     // the page's body, where no key reaches the dialog: with no other dialog open, the editor takes focus back.
     const dropped = !!dialog?.open && e.target === document.body && [...document.querySelectorAll('dialog[open]')].every((d) => d === dialog);
+    // Ctrl+S (⌘S) saves from anywhere in the editor, a field included, and is never the browser's Save page.
+    const inEditor = dropped || (!!dialog?.open && e.target instanceof Node && dialog.contains(e.target));
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 's' && inEditor && !e.defaultPrevented) {
+      e.preventDefault();
+      if (savable.peek() && !locked.peek()) void save();
+      return;
+    }
     if (dropped ? e.defaultPrevented || e.metaKey || e.ctrlKey : !dialogKey(e, dialog)) return;
     if (dropped) dialog!.focus();
     const k = e.key;
@@ -262,10 +278,13 @@ export default function Editor(props: EditorProps) {
     else if (k === 'j' || k === 'J') step(1);
     else if (k === 'k' || k === 'K') step(-1);
     else if (/^[1-9]$/.test(k)) setClass(Number(k) - 1);
-    // Enter on a control is that control's; anywhere else in the editor it is "Looks right".
+    // Enter on a control is that control's; anywhere else in the editor it is "Looks right", or with changes, Save and
+    // on to the next image to review.
     else if (k === 'Enter') {
-      if (!reviewable.peek() || (e.target instanceof Element && e.target.closest('button, a, select, input, textarea'))) return;
-      void review(true);
+      if (e.target instanceof Element && e.target.closest('button, a, select, input, textarea')) return;
+      if (reviewable.peek()) void review(true);
+      else if (dirty.peek() && !locked.peek()) void saveAndNext();
+      else return;
     }
     else if (k === 'Delete' || k === 'Backspace') removeBox();
     else return;
@@ -369,6 +388,11 @@ export default function Editor(props: EditorProps) {
             {dirty.get() ? (
               <p class="state" data-gate-why>
                 Unsaved changes
+                {touch.current ? null : (
+                  <>
+                    . <Kbd keys="Enter" subtle /> saves them and opens the next image to review.
+                  </>
+                )}
               </p>
             ) : savable.get() && !locked.get() ? (
               <p class="state">Save keeps it as labeled by hand, {draft.get().length ? 'with these boxes' : 'with no boxes: a background image'}.</p>

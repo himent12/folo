@@ -364,6 +364,35 @@ describe('the labeling editor: reviewing', () => {
   });
 });
 
+describe('the labeling editor: saving from the keyboard (v-models-label N3)', () => {
+  it('saves with Ctrl+S and stays, never the browser’s Save page', async () => {
+    await openEditor('23', 'lb_51d0');
+    const sent = vi.spyOn(hub.api, 'updateLabelImage');
+    // Nothing to save: the key is still the editor's.
+    expect(key('s', { ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(sent).not.toHaveBeenCalled();
+    click(inEditor('Add box'));
+    expect(footer()).toMatch(/Unsaved changes\. .* saves them and opens the next image to review\./);
+    expect(key('s', { metaKey: true }).defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(footer()).toMatch(/^Reviewed\./);
+    });
+    expect(router.route.query.get('image')).toBe('23');
+  });
+
+  it('saves with Enter when there are changes, and opens the next image to review', async () => {
+    await openEditor('23', 'lb_51d0');
+    click(inEditor('Add box'));
+    expect(key('Enter').defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(router.route.query.get('image')).toBe('24'));
+    const page = await hub.api.labelImages('lb_51d0', { limit: 24 });
+    expect(page.images[22]).toMatchObject({ id: '23', source: 'manual', reviewed: true });
+    expect(page.images[22]!.boxes.length).toBeGreaterThan(0);
+  });
+});
+
 describe('the labeling editor: a linked image the job does not have', () => {
   it('closes instead of opening empty, and says why', async () => {
     // `?image=` of an image removed since (a shared link, another tab, the agent's own removal): the editor opened as an

@@ -290,6 +290,8 @@ describe('the job page', () => {
     await page('/datasets/label/lb_9e44');
     expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/Claude Code stopped.*Not logged in/);
     expect(text()).toMatch(/Sign in to Claude Code/);
+    // v-models-label N5: the fix reads as a sentence and its command is code.
+    expect(document.querySelector('.note code')?.textContent).toBe('claude');
     expect(button('Try again')?.className).toMatch(/primary/);
   });
 
