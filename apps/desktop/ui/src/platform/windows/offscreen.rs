@@ -7,11 +7,12 @@
 //! size loop driven by the real mouse never starts.
 //!
 //! No other window of the process may reach a display either. The file dialogs and the shell's
-//! launches are refused (`REFUSED`): a dialog's owner is the active window, and an off-screen window is
-//! never active, so the dialog had none and Windows centred it on the primary display at its
-//! remembered size (1200 x 720), on the screen of whoever uses the PC; Explorer and the browser open
-//! windows of other processes there. Anything else that shows a window (a library's dialog, another
-//! thread's) is moved off the displays as soon as it shows or moves (`Parker`), and named on stderr.
+//! launches are refused by the gate every backend shares (`platform/services.rs`): a dialog's owner is
+//! the active window, and an off-screen window is never active, so the dialog had none and Windows
+//! centred it on the primary display at its remembered size (1200 x 720), on the screen of whoever uses
+//! the PC; Explorer and the browser open windows of other processes there. Anything else that shows a
+//! window (a library's dialog, another thread's) is moved off the displays as soon as it shows or moves
+//! (`Parker`), and named on stderr.
 
 use super::window::{OFFSCREEN_ORIGIN, WindowInner};
 use ::windows::Win32::Foundation::{HWND, RECT};
@@ -20,10 +21,6 @@ use ::windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadI
 use ::windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use ::windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use ::windows::Win32::UI::WindowsAndMessaging::*;
-
-/// Why a file dialog, `open_url` or `reveal_path` did nothing off screen.
-pub(crate) const REFUSED: &str =
-    "FOLO_UI_OFFSCREEN=1: file dialogs, Explorer and the browser stay closed (they would open on a display)";
 
 /// Moves `hwnd` to the off-screen origin, keeping its size, when it is a top-level window that any
 /// display shows a part of; true if it moved it. Without activating it or changing the z-order, and

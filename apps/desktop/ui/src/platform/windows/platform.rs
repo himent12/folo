@@ -8,6 +8,7 @@ use super::pacer::Pacer;
 use super::util::*;
 use super::window::{WindowsWindow, module_handle};
 use super::{WM_FOLO_CALL, WM_FOLO_MAIN_TASKS, WM_FOLO_QUIT, clipboard, offscreen, shell};
+use crate::platform::services::{Launcher, Services};
 use crate::*;
 use ::windows::Win32::Foundation::*;
 use ::windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
@@ -77,6 +78,8 @@ pub struct WindowsPlatform {
     shared: Rc<Shared>,
     text_system: Arc<dyn PlatformTextSystem>,
     quit_callbacks: RefCell<Vec<Box<dyn FnMut()>>>,
+    /// The file dialogs, the browser and Explorer, closed off screen.
+    services: Services,
     /// Off screen: keeps every other window of the process off the displays.
     _parker: Option<offscreen::Parker>,
 }
@@ -105,7 +108,8 @@ impl WindowsPlatform {
             traced: Cell::new(false),
         });
         let _parker = if offscreen() { offscreen::Parker::install() } else { None };
-        Ok(Self { shared, text_system, quit_callbacks: RefCell::new(Vec::new()), _parker })
+        let services = Services::new(offscreen(), Box::new(Win32Launcher(shared.clone())));
+        Ok(Self { shared, text_system, quit_callbacks: RefCell::new(Vec::new()), services, _parker })
     }
 
     /// Called once the message loop has ended (after `quit`, or when the last window closed).
@@ -123,6 +127,13 @@ impl WindowsPlatform {
         let window = WindowsWindow::new(params, self.shared.clone())?;
         self.shared.windows.borrow_mut().push(window.hwnd().0 as isize);
         Ok(window)
+    }
+
+    /// Puts `launcher` behind the gate in place of the shell's, closed when `offscreen` (tests launch
+    /// nothing real); the gate's state as the platform built it is returned.
+    #[cfg(test)]
+    pub(crate) fn launch_with(&mut self, offscreen: bool, launcher: Box<dyn Launcher>) -> bool {
+        std::mem::replace(&mut self.services, Services::new(offscreen, launcher)).offscreen()
     }
 
     /// The windows opened so far (tests reach a core window's HWND through it).
@@ -198,36 +209,14 @@ impl Platform for WindowsPlatform {
     }
 
     fn open_url(&self, url: &str) {
-        if url.is_empty() {
-            return;
-        }
-        if offscreen() {
-            eprintln!("folo-ui: not opening {url}: {}", offscreen::REFUSED);
-            return;
-        }
-        let url = url.to_string();
-        std::thread::spawn(move || {
-            let _ = shell::open_target(&url);
-        });
+        self.services.open_url(url);
     }
 
     fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
-        let (tx, rx) = oneshot::channel();
-        if offscreen() {
-            let _ = tx.send(Err(anyhow::anyhow!(offscreen::REFUSED)));
-            return rx;
-        }
-        let owner = self.shared.active_window();
-        super::post_call(
-            self.shared.message_window(),
-            Box::new(move || {
-                let _ = tx.send(shell::file_open_dialog(&options, owner));
-            }),
-        );
-        rx
+        self.services.prompt_for_paths(options)
     }
 
     fn prompt_for_new_path(
@@ -235,46 +224,11 @@ impl Platform for WindowsPlatform {
         directory: &Path,
         suggested_name: Option<&str>,
     ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
-        let (tx, rx) = oneshot::channel();
-        if offscreen() {
-            let _ = tx.send(Err(anyhow::anyhow!(offscreen::REFUSED)));
-            return rx;
-        }
-        let owner = self.shared.active_window();
-        let (directory, name) = (directory.to_path_buf(), suggested_name.map(str::to_string));
-        super::post_call(
-            self.shared.message_window(),
-            Box::new(move || {
-                let _ = tx.send(shell::file_save_dialog(&directory, name.as_deref(), owner));
-            }),
-        );
-        rx
+        self.services.prompt_for_new_path(directory, suggested_name)
     }
 
     fn reveal_path(&self, path: &Path) {
-        if path.as_os_str().is_empty() {
-            return;
-        }
-        if offscreen() {
-            eprintln!("folo-ui: not showing {} in Explorer: {}", path.display(), offscreen::REFUSED);
-            return;
-        }
-        let path = path.to_path_buf();
-        std::thread::spawn(move || {
-            // The shell's folder and selection calls need COM on this thread.
-            // SAFETY: COM set-up and tear-down around the call, on this thread.
-            unsafe {
-                let ok = ::windows::Win32::System::Com::CoInitializeEx(
-                    None,
-                    ::windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
-                )
-                .is_ok();
-                let _ = shell::reveal_in_explorer(&path);
-                if ok {
-                    ::windows::Win32::System::Com::CoUninitialize();
-                }
-            }
-        });
+        self.services.reveal_path(path);
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
@@ -293,6 +247,69 @@ impl Platform for WindowsPlatform {
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         clipboard::read_from_clipboard(self.shared.message_window())
+    }
+}
+
+/// The shell's launches and the common file dialogs (behind `Services`' off-screen gate).
+struct Win32Launcher(Rc<Shared>);
+
+impl Launcher for Win32Launcher {
+    fn open_url(&self, url: &str) {
+        let url = url.to_string();
+        std::thread::spawn(move || {
+            let _ = shell::open_target(&url);
+        });
+    }
+
+    fn prompt_for_paths(
+        &self,
+        options: PathPromptOptions,
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+        let (tx, rx) = oneshot::channel();
+        let owner = self.0.active_window();
+        super::post_call(
+            self.0.message_window(),
+            Box::new(move || {
+                let _ = tx.send(shell::file_open_dialog(&options, owner));
+            }),
+        );
+        rx
+    }
+
+    fn prompt_for_new_path(
+        &self,
+        directory: &Path,
+        suggested_name: Option<&str>,
+    ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+        let (tx, rx) = oneshot::channel();
+        let owner = self.0.active_window();
+        let (directory, name) = (directory.to_path_buf(), suggested_name.map(str::to_string));
+        super::post_call(
+            self.0.message_window(),
+            Box::new(move || {
+                let _ = tx.send(shell::file_save_dialog(&directory, name.as_deref(), owner));
+            }),
+        );
+        rx
+    }
+
+    fn reveal_path(&self, path: &Path) {
+        let path = path.to_path_buf();
+        std::thread::spawn(move || {
+            // The shell's folder and selection calls need COM on this thread.
+            // SAFETY: COM set-up and tear-down around the call, on this thread.
+            unsafe {
+                let ok = ::windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    ::windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                )
+                .is_ok();
+                let _ = shell::reveal_in_explorer(&path);
+                if ok {
+                    ::windows::Win32::System::Com::CoUninitialize();
+                }
+            }
+        });
     }
 }
 

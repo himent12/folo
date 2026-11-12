@@ -20,6 +20,7 @@ pub use dispatcher::{MAX_BACKGROUND_THREADS, WinitDispatcher};
 pub use display::WinitDisplay;
 pub use window::WinitWindow;
 
+use crate::platform::services::Services;
 use crate::{
     ClipboardItem, CursorStyle, PathPromptOptions, Platform, PlatformDispatcher, PlatformDisplay,
     PlatformTextSystem, PlatformWindow, WindowAppearance, WindowParams, oneshot,
@@ -114,6 +115,8 @@ impl Shared {
 pub struct WinitPlatform {
     shared: Rc<Shared>,
     text_system: Arc<dyn PlatformTextSystem>,
+    /// The file dialogs, the browser and the file manager, closed off screen.
+    services: Services,
 }
 
 impl WinitPlatform {
@@ -126,6 +129,7 @@ impl WinitPlatform {
         let dispatcher = Arc::new(WinitDispatcher::new(Box::new(move || {
             proxy.lock().send_event(UserEvent::Wake).is_ok()
         })));
+        let offscreen = offscreen_requested();
         Ok(Self {
             shared: Rc::new(Shared {
                 active_loop: Cell::new(std::ptr::null()),
@@ -134,10 +138,11 @@ impl WinitPlatform {
                 dispatcher,
                 cursor: Cell::new(CursorStyle::Arrow),
                 clipboard: RefCell::new(system::Clipboard::default()),
-                offscreen: offscreen_requested(),
+                offscreen,
                 quit: Cell::new(false),
             }),
             text_system,
+            services: Services::new(offscreen, Box::new(system::Launch)),
         })
     }
 
@@ -241,14 +246,14 @@ impl Platform for WinitPlatform {
     }
 
     fn open_url(&self, url: &str) {
-        system::spawn_detached(system::open_url_command(url));
+        self.services.open_url(url);
     }
 
     fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
-        system::prompt_for_paths(options)
+        self.services.prompt_for_paths(options)
     }
 
     fn prompt_for_new_path(
@@ -256,11 +261,11 @@ impl Platform for WinitPlatform {
         directory: &Path,
         suggested_name: Option<&str>,
     ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
-        system::prompt_for_new_path(directory, suggested_name)
+        self.services.prompt_for_new_path(directory, suggested_name)
     }
 
     fn reveal_path(&self, path: &Path) {
-        system::spawn_detached(system::reveal_path_command(path));
+        self.services.reveal_path(path);
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {

@@ -104,8 +104,9 @@ or takes focus.
 
 Off screen (`FOLO_UI_OFFSCREEN=1`) the app opens no file dialog, Explorer or browser: Add dataset, Open image
 and Ctrl O answer with a toast ("The file dialog didn't open"), Show in Explorer, Show in folder and links
-do nothing but say so on stderr, and any other window of the process that reaches a display is moved off
-it (folo-ui's README, `FOLO_UI_OFFSCREEN`). On a private desktop without it the dialogs are real, but
+do nothing but say so on stderr, on either backend (Win32, or winit with `FOLO_UI_PLATFORM=winit`); on
+Win32 any other window of the process that reaches a display is moved off it too (folo-ui's README,
+`FOLO_UI_OFFSCREEN`, says what each backend guarantees). On a private desktop without it the dialogs are real, but
 never click Show in Explorer, Show in folder or a link there: Explorer and the browser already running
 on your desktop take the request and open their window on your screen.
 

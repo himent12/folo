@@ -497,3 +497,34 @@ fn park_moves_a_window_on_a_display_off_every_display() {
         destroy(hwnd);
     }
 }
+
+/// The backend's file dialogs, Explorer and browser go through the shared off-screen gate, built from
+/// `FOLO_UI_OFFSCREEN`: closed, nothing reaches the shell (a recorder stands in for it, so nothing real
+/// is launched either way).
+#[test]
+fn off_screen_the_backend_launches_no_dialog_explorer_or_browser() {
+    use crate::platform::services::{Recorder, call_each};
+    let mut platform = WindowsPlatform::new(Arc::new(FixedTextSystem::new())).expect("the Win32 platform");
+    let recorder = Recorder::default();
+    let built = platform.launch_with(true, Box::new(recorder.clone()));
+    assert_eq!(built, super::offscreen(), "the gate follows FOLO_UI_OFFSCREEN");
+    let p: &dyn Platform = &platform;
+    let refused = call_each(
+        |u| p.open_url(u),
+        |path| p.reveal_path(path),
+        |o| p.prompt_for_paths(o),
+        |d, n| p.prompt_for_new_path(d, n),
+    );
+    assert_eq!(refused, (true, true), "both dialogs answer with the refusal");
+    assert!(recorder.0.borrow().is_empty(), "launched: {:?}", recorder.0.borrow());
+    // Open, the same calls reach it.
+    platform.launch_with(false, Box::new(recorder.clone()));
+    let p: &dyn Platform = &platform;
+    call_each(
+        |u| p.open_url(u),
+        |path| p.reveal_path(path),
+        |o| p.prompt_for_paths(o),
+        |d, n| p.prompt_for_new_path(d, n),
+    );
+    assert_eq!(recorder.0.borrow().len(), 4);
+}

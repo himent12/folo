@@ -7,6 +7,7 @@ mod clipboard;
 mod framebuffer;
 pub mod oneshot;
 mod options;
+pub(crate) mod services;
 
 pub mod headless;
 #[cfg(windows)]
