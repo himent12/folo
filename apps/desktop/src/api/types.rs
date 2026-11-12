@@ -13,8 +13,9 @@ pub use folo_api::{
     Arch, Augment, BBox, BestEpoch, ClassMetrics, CpuInfo, Dataset, DatasetFormat, DatasetStats, Epoch,
     ExportResult, GpuBackend, GpuInfo, Health, Histogram, ImageInfo, ImagePage, ImageSize, IssueCounts,
     IssuePage, LogLevel, LogLine, Loss, MemoryInfo, Model, ModelEval, ModelMetrics, Optimizer, PrCurve,
-    PredictResponse, RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, RunStatus, Sample, ScoredBox,
-    Split, Splits, StatusEvent, Step, SyntheticDataset, SystemInfo, Timing, TrainConfig, ValMetrics,
+    PredictResponse, RegisterDataset, Run, RunDataset, RunEvent, RunMetrics, RunSamples, RunStatus, Sample,
+    ScoredBox, Split, Splits, StatusEvent, Step, SyntheticDataset, SystemInfo, Timing, TrainConfig,
+    ValMetrics,
 };
 pub use folo_api::{
     BENCH_SEVERITIES, Bench, BenchAccuracy, BenchAxis, BenchBest, BenchCalibration, BenchCalibrationBin,

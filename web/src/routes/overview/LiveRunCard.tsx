@@ -27,7 +27,7 @@ import Meta from '$lib/ui/Meta';
 export interface LiveRunCardProps {
   run: Run;
   dataset?: Dataset | null;
-  /** The dataset as people know it (./datasetLabel): undefined while loading (a placeholder), null to leave it out. */
+  /** The dataset as people know it (lib/runDataset): undefined while loading (a placeholder), null to leave it out. */
   datasetName?: string | null;
   lost?: number | null;
 }

@@ -89,13 +89,13 @@ describe('Overview', () => {
     expect(recent().textContent).not.toMatch(/ds_/);
     expect(recent().querySelector('.ds .sk')).not.toBeNull();
 
-    // The datasets arrive without the first run's: it was deleted.
+    // The datasets arrive without the first run's: it was removed, and goes by the name the run recorded.
     const all = await new MockApi('normal', 0).datasets();
-    const gone = runs.find((r) => r.status === 'completed')!.config.dataset_id;
-    answer(all.filter((d) => d.id !== gone));
+    const done = runs.find((r) => r.status === 'completed')!;
+    answer(all.filter((d) => d.id !== done.config.dataset_id));
     await vi.waitFor(() => {
       flush();
-      expect(recent().textContent).toContain('deleted dataset');
+      expect(recent().textContent).toContain(`${done.dataset!.name} (removed)`);
     });
     expect(recent().textContent).not.toMatch(/ds_/);
   });

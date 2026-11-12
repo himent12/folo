@@ -161,10 +161,7 @@ impl FoloApp {
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let ds = self
-                    .store
-                    .dataset_summary(&r.config.dataset_id)
-                    .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+                let ds = self.store.run_dataset_name(r);
                 let dur = duration_of(r, now).map_or("–".into(), time::duration);
                 let created_at = time::parse(&r.created);
                 let created = created_at.map_or(String::new(), |c| time::ago(c, now));

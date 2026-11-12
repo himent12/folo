@@ -169,9 +169,7 @@ impl FoloApp {
                             .as_ref()
                             .and_then(|r| self.store.run(r))
                             .map(|r| {
-                                self.store
-                                    .dataset_summary(&r.config.dataset_id)
-                                    .map_or(r.config.dataset_id.clone(), |d| d.name.clone())
+                                self.store.run_dataset_name(r)
                             })
                             .map_or_else(
                                 // Published weights say what they are (`about`), not "unknown".

@@ -19,6 +19,7 @@ import { balanced } from '$lib/ui/balancedGrid';
 import { failureCause } from '$lib/oom';
 import { tooltip } from '$lib/ui/tooltip';
 import { prefs } from '$lib/prefs';
+import { runDatasetLabel } from '$lib/runDataset';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
@@ -36,7 +37,6 @@ import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
 import LiveRunCard from './overview/LiveRunCard';
 import { slotRun } from './overview/slot';
-import { datasetLabel } from './overview/datasetLabel';
 import AlsoRunning from './overview/AlsoRunning';
 import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
@@ -92,8 +92,8 @@ export default function Overview() {
     void datasets.refresh();
   }
   const dsById = computed(() => new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
-  // A run's dataset by name, a placeholder while the datasets load, "deleted dataset" once they did without it.
-  const dsLabel = (r: Run) => datasetLabel(r.config.dataset_id, datasets.data ? dsById.get() : undefined, !!datasets.error);
+  // A run's dataset by name, a placeholder while the datasets load, the name it recorded once it was removed.
+  const dsLabel = (r: Run) => runDatasetLabel(r, datasets.data ? dsById.get() : undefined, !!datasets.error);
   const runById = computed(() => new Map<string, Run>((runList.get() ?? []).map((r) => [r.id, r])));
   // A score ranks only against scores on the same dataset and split (lib/scoreSummary): the best of each comparable
   // group, its dataset named above it and any split but validation tagged beside the score. Imported and published

@@ -141,6 +141,21 @@ impl Store {
         self.datasets.ready()?.iter().find(|d| d.id == id)
     }
 
+    /// How a run names its dataset: the registered name; once the datasets are in without it (it was
+    /// removed), the name recorded with the run (`Run.dataset`) marked "(removed)", as Studio does. The
+    /// raw id only for a run from a server that recorded no name.
+    pub fn run_dataset_name(&self, r: &Run) -> String {
+        if let Some(d) = self.dataset_summary(&r.config.dataset_id) {
+            return d.name.clone();
+        }
+        match (&r.dataset, self.datasets.ready().is_some()) {
+            (Some(d), true) => format!("{} (removed)", d.name),
+            (Some(d), false) => d.name.clone(),
+            (None, true) => "removed dataset".into(),
+            (None, false) => r.config.dataset_id.clone(),
+        }
+    }
+
     /// The server stopped answering (the last `/system` refresh couldn't connect).
     pub fn unreachable(&self) -> bool {
         matches!(&self.health, Load::Failed(e) if e.code == "server_unreachable")
@@ -181,5 +196,25 @@ mod tests {
         store.note_reachability(None);
         store.note_reachability(Some(&ApiError::new("http_error", "folo serve answered HTTP 500")));
         assert!(store.health.ready().is_some());
+    }
+
+    #[test]
+    fn a_run_names_its_removed_dataset_by_the_name_it_recorded_never_by_id() {
+        let api = Arc::new(MockBackend::new(4200, true));
+        let mut store = Store::new(api.clone());
+        let mut run = api.runs().unwrap().into_iter().next().unwrap();
+        let datasets = api.datasets().unwrap();
+        let name = datasets.iter().find(|d| d.id == run.config.dataset_id).unwrap().name.clone();
+        run.dataset = Some(RunDataset { name: name.clone(), classes: Vec::new() });
+        // Before the datasets load: the recorded name.
+        assert_eq!(store.run_dataset_name(&run), name);
+        store.datasets = Load::Ready(datasets.clone());
+        assert_eq!(store.run_dataset_name(&run), name);
+        // Removed: the recorded name, marked; an older server's run without one is not shown as an id.
+        store.datasets =
+            Load::Ready(datasets.into_iter().filter(|d| d.id != run.config.dataset_id).collect());
+        assert_eq!(store.run_dataset_name(&run), format!("{name} (removed)"));
+        run.dataset = None;
+        assert_eq!(store.run_dataset_name(&run), "removed dataset");
     }
 }

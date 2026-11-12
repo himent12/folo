@@ -10,6 +10,7 @@ import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Model, QueueRequest, Run } from '$lib/api/types';
+import { runDatasetLabel } from '$lib/runDataset';
 import RunSpark from '$lib/charts/RunSpark';
 import { ago, duration, metric } from '$lib/format';
 import { failureCause } from '$lib/oom';
@@ -60,7 +61,9 @@ export default function Runs() {
 
   const runs = new Resource((s) => hub.api.runs(s), { poll: 3000 });
   const datasets = new Resource((s) => hub.api.datasets(s));
-  const dsName = computed(() => new Map((datasets.data ?? []).map((d) => [d.id, d.name])));
+  const dsName = computed(() => new Map((datasets.data ?? []).map((d) => [d.id, d])));
+  /** A run's dataset by name (lib/runDataset), the one it recorded while the datasets load; marked once it was removed. */
+  const datasetName = (r: Run) => runDatasetLabel(r, datasets.data ? dsName.get() : undefined, !!datasets.error) ?? r.dataset?.name ?? '';
   // Only to name the model a run was fine-tuned from; the list renders without it.
   const models = new Resource((s) => hub.api.models(s));
   const modelById = computed(() => new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
@@ -204,7 +207,7 @@ export default function Runs() {
         if (!groups[filter.get()].includes(r.status)) return false;
         const q = query.get().trim().toLowerCase();
         if (!q) return true;
-        return `${r.name} ${r.config.arch} ${dsName.get().get(r.config.dataset_id) ?? r.dataset?.name ?? ''} ${r.id}`.toLowerCase().includes(q);
+        return `${r.name} ${r.config.arch} ${datasetName(r)} ${r.id}`.toLowerCase().includes(q);
       }),
       sortKey.get(),
       sortDir.get(),
@@ -450,7 +453,7 @@ export default function Runs() {
                             {/* Whole items wrap: the name's column is what the fixed ones leave, and a fact is never cut. */}
                             <span class="sub ctx">
                               <Meta>
-                                <span>{dsName.get().get(r().config.dataset_id) ?? r().dataset?.name ?? r().config.dataset_id}</span>
+                                <span>{datasetName(r())}</span>
                                 <Ident value={r().config.arch} />
                                 <span>
                                   from <Lineage origin={from.get()} link={false} scratch="scratch" />
@@ -461,7 +464,7 @@ export default function Runs() {
                           <td use:tooltip={failureCause(r())}>
                             <StatusBadge run={r()} plain />
                           </td>
-                          <td class="hide-xl muted">{dsName.get().get(r().config.dataset_id) ?? r().dataset?.name ?? r().config.dataset_id}</td>
+                          <td class="hide-xl muted">{datasetName(r())}</td>
                           <td class="hide-xl">
                             <Ident value={r().config.arch} class="muted" />
                           </td>
@@ -538,7 +541,7 @@ export default function Runs() {
             menuSlot={menuSlot.get()}
             items={rowItems}
             placeOf={placeOf}
-            datasetName={(r) => dsName.get().get(r.config.dataset_id) ?? r.dataset?.name ?? r.config.dataset_id}
+            datasetName={datasetName}
             now={now.get()}
           />
         </Panel>{' '}

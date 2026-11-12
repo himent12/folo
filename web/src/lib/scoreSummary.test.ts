@@ -13,6 +13,7 @@ const runs = new Map(
     ['r_gone', 'ds_deleted'],
   ].map(([id, dataset_id]) => [id!, { config: { dataset_id } } as never]),
 );
+runs.set('r_removed', { config: { dataset_id: 'ds_removed' }, dataset: { name: 'bolts', classes: [] } } as never);
 
 function model(id: string, run_id: string | null, map: number | null, extra: Partial<Model> = {}): Model {
   return {
@@ -43,8 +44,11 @@ describe('scoreContext', () => {
     expect(ctx(model('c', null, 0.7)).split).toBeNull();
     expect(ctx(model('c', null, 0.7)).kind).toBe('imported');
     expect(ctx(model('d', null, 0.3, { source: 'published' })).kind).toBe('published');
-    expect(ctx(model('e', 'r_gone', 0.5))).toEqual({ kind: 'run', datasetId: 'ds_deleted', datasetName: 'ds_deleted', split: null });
+    expect(ctx(model('e', 'r_gone', 0.5))).toEqual({ kind: 'run', datasetId: 'ds_deleted', datasetName: null, split: null });
     expect(ctx(model('f', 'r_unknown', 0.5))).toEqual({ kind: 'run', datasetId: null, datasetName: null, split: null });
+  });
+  it('names a removed dataset as its run recorded it, never by its id', () => {
+    expect(ctx(model('g', 'r_removed', 0.5))).toEqual({ kind: 'run', datasetId: 'ds_removed', datasetName: 'bolts', split: null });
   });
 });
 

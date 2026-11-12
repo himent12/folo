@@ -139,10 +139,7 @@ impl FoloApp {
                         // dataset, then the e2e tag for an end-to-end run.
                         // The e2e tag rides its architecture, as in the Runs and Models lists; the
                         // dataset after them gives way first.
-                        let ds_name = self
-                            .store
-                            .dataset_summary(&r.config.dataset_id)
-                            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+                        let ds_name = self.store.run_dataset_name(&r);
                         let meta = |w: f32| {
                             div().w(px(w)).flex_none().child(meta_row(
                                 ty::SM,

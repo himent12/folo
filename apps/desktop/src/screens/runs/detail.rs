@@ -77,10 +77,7 @@ impl FoloApp {
             self.ensure_samples(id, cx);
         }
         let now = self.store.api.now();
-        let ds_name = self
-            .store
-            .dataset_summary(&r.config.dataset_id)
-            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+        let ds_name = self.store.run_dataset_name(&r);
         // The subtitle leads with the architecture and its e2e tag, as every list does.
         let subtitle = self.run_subtitle(&t, &r, ty::BASE, t.text_secondary, "hdr");
 

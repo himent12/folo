@@ -27,14 +27,16 @@ export interface ScoreContext {
  */
 export function scoreContext(
   m: Pick<Model, 'run_id' | 'source'>,
-  runs: ReadonlyMap<string, Pick<Run, 'config'>>,
+  runs: ReadonlyMap<string, Pick<Run, 'config' | 'dataset'>>,
   datasets: ReadonlyMap<string, Pick<Dataset, 'id' | 'name' | 'splits'>>,
 ): ScoreContext {
   if (m.source === 'published') return { kind: 'published', datasetId: null, datasetName: null, split: null };
   if (!m.run_id) return { kind: 'imported', datasetId: null, datasetName: null, split: null };
-  const dsId = runs.get(m.run_id)?.config.dataset_id ?? null;
+  const run = runs.get(m.run_id);
+  const dsId = run?.config.dataset_id ?? null;
   const ds = dsId ? datasets.get(dsId) : undefined;
-  if (!ds) return { kind: 'run', datasetId: dsId, datasetName: dsId, split: null };
+  // A removed dataset goes by the name its run recorded (Run.dataset), never by its id.
+  if (!ds) return { kind: 'run', datasetId: dsId, datasetName: run?.dataset?.name ?? null, split: null };
   return { kind: 'run', datasetId: ds.id, datasetName: ds.name, split: ds.splits.val === 0 ? 'train' : 'val' };
 }
 

@@ -9,10 +9,7 @@ impl FoloApp {
     /// A run's identity line, "folo-m · shapes-hard": architecture, then dataset, the one order every
     /// surface uses (the hero, Recent runs, the run page, focus tips).
     pub fn run_meta(&self, r: &Run) -> String {
-        let ds = self
-            .store
-            .dataset_summary(&r.config.dataset_id)
-            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+        let ds = self.store.run_dataset_name(r);
         format!("{} · {ds}", r.config.arch.as_str())
     }
 
@@ -39,10 +36,7 @@ impl FoloApp {
         color: folo_ui::Hsla,
         id: &str,
     ) -> folo_ui::Div {
-        let ds = self
-            .store
-            .dataset_summary(&r.config.dataset_id)
-            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+        let ds = self.store.run_dataset_name(r);
         // A cloud run's device is where it rents it ("RunPod · RTX 4090").
         let device = match &r.cloud {
             Some(c) => self.cloud_device(r, c),

@@ -274,4 +274,16 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     const items = [...document.querySelectorAll('[role="menuitem"]')].map((e) => e.textContent?.trim());
     expect(items).toEqual(['Open model', 'Try in Playground', 'Delete run']);
   });
+
+  it('names a removed dataset as the run recorded it, marked, never by its id', async () => {
+    const api = new MockApi('normal', 0);
+    const done = (await api.runs()).find((r) => r.status === 'completed' && r.dataset)!;
+    await api.deleteDataset(done.config.dataset_id);
+    await open(Runs, '/runs', api);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelector(`tr[data-id="${done.id}"]`)?.textContent).toContain(`${done.dataset!.name} (removed)`);
+    });
+    expect(target.querySelector('table.runs tbody')!.textContent).not.toMatch(/ds_/);
+  });
 });
