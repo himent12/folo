@@ -112,6 +112,13 @@ class Hub {
   get serverUrl() {
     return prefs.serverUrl || (typeof location === 'undefined' ? '' : location.origin);
   }
+  /**
+   * Which server the data comes from, as state kept across pages names it (a draft, a session, a history entry):
+   * `mock` or the server's address. Known from the start, while connecting too; a reload keeps it.
+   */
+  get server(): string {
+    return forcedMock || this.mode === 'mock' ? 'mock' : this.serverUrl;
+  }
 
   #attempt = 0;
   #ctrl: AbortController | null = null;

@@ -17,7 +17,10 @@ function memory(): Storage {
   };
 }
 
+const SERVER = 'http://127.0.0.1:7878';
+
 const draft: Draft = {
+  server: SERVER,
   query: '',
   datasetId: 'ds_shapes',
   arch: 'folo-s',
@@ -46,7 +49,16 @@ describe('New run draft', () => {
   it('reads back a draft as it was saved', () => {
     const store = memory();
     saveDraft(draft, () => store);
-    expect(readDraft(() => store)).toEqual(draft);
+    expect(readDraft(SERVER, () => store)).toEqual(draft);
+  });
+
+  it('drops a draft made against another server, or the mock, and removes it', () => {
+    for (const other of ['http://127.0.0.1:7979', 'mock']) {
+      const store = memory();
+      saveDraft(draft, () => store);
+      expect(readDraft(other, () => store)).toBeNull();
+      expect(store.getItem(KEY)).toBeNull();
+    }
   });
 
   // review R4: valid JSON of another shape was taken for a draft, and the form threw on it.
@@ -64,20 +76,21 @@ describe('New run draft', () => {
     ['cloud without its target', (d) => ({ ...d, cloud: { ...d.cloud, target: 1 } })],
     ['not an object', () => [1, 2]],
     ['null', () => null],
+    ['no server', ({ server: _, ...d }) => d],
   ])('drops a draft with %s, and removes it', (_, change) => {
     const store = memory();
     store.setItem(KEY, JSON.stringify(change(draft)));
-    expect(readDraft(() => store)).toBeNull();
+    expect(readDraft(SERVER, () => store)).toBeNull();
     expect(store.getItem(KEY)).toBeNull();
   });
 
   it('drops a draft that is not JSON, and storage that cannot be read', () => {
     const store = memory();
     store.setItem(KEY, '{');
-    expect(readDraft(() => store)).toBeNull();
+    expect(readDraft(SERVER, () => store)).toBeNull();
     expect(store.getItem(KEY)).toBeNull();
     expect(
-      readDraft(() => {
+      readDraft(SERVER, () => {
         throw new Error('blocked');
       }),
     ).toBeNull();

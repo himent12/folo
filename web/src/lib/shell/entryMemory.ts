@@ -165,7 +165,7 @@ export function installEntryMemory(shown: () => string | null = () => router.rou
 }
 
 /** The server in use, as entry state names it (a reload keeps it: not the hub's epoch). */
-const server = () => (hub.mode === 'mock' ? 'mock' : hub.serverUrl);
+const server = () => hub.server;
 
 /** A value kept with the current history entry (see the top of this file). */
 export function entryState<T>(key: string): { get(): T | undefined; set(v: T | undefined): void } {

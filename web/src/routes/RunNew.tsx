@@ -62,7 +62,7 @@ export default function RunNew() {
   // The tab's draft (runnew/draft): whole when it was made under this link (Back, a reload), else under the fields this
   // link sets. A copy of a run (?from=) sets them all, so it starts from the run, not the draft.
   const query = q.toString();
-  const stored = readDraft();
+  const stored = readDraft(hub.server);
   const own = stored?.query === query ? stored : null;
   const draft = own ?? (fromId ? null : stored);
 
@@ -198,6 +198,7 @@ export default function RunNew() {
   let started = false;
   effect(() => {
     const d: Draft = {
+      server: hub.server,
       query,
       datasetId: datasetId.get(),
       arch: arch.get(),

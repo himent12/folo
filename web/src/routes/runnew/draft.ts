@@ -3,7 +3,9 @@
 //
 // The draft remembers the link it was made under (`query`). Opening that same link again (Back, a reload) restores
 // the draft whole, since it already holds what the link set plus the edits since. A different link (`?dataset=`,
-// `?from=` a run, `?imgsz=`) wins for the fields it sets; the draft fills in the rest.
+// `?from=` a run, `?imgsz=`) wins for the fields it sets; the draft fills in the rest. It also remembers the server
+// it was made against (`server`, as `hub.server` names it): against another one, or the mock for a live one, its
+// datasets, weights and cloud offers mean nothing, so it is dropped.
 
 import type { Arch, Augment, Optimizer } from '$lib/api/types';
 
@@ -21,6 +23,8 @@ export interface CloudDraft {
 }
 
 export interface Draft {
+  /** The server the draft was made against (`hub.server`). */
+  server: string;
   /** The link the draft was made under (the route's query, as a string). */
   query: string;
   datasetId: string;
@@ -73,7 +77,7 @@ function isCloud(c: unknown): c is CloudDraft {
 export function isDraft(d: unknown): d is Draft {
   return (
     isObject(d) &&
-    strings(d, ['query', 'datasetId', 'batch', 'imgsz', 'device', 'weights', 'name']) &&
+    strings(d, ['server', 'query', 'datasetId', 'batch', 'imgsz', 'device', 'weights', 'name']) &&
     flags(d, ['imgszChosen', 'amp', 'e2e', 'nameEdited', 'closeEdited', 'advancedOpen', 'augOpen']) &&
     ARCHS.includes(d.arch as string) &&
     OPTIMIZERS.includes(d.optimizer as string) &&
@@ -84,10 +88,11 @@ export function isDraft(d: unknown): d is Draft {
 }
 
 /**
- * The tab's draft, or null (none, unreadable, or storage off). A draft from another version of the form (or
- * hand-edited) is dropped whole rather than half applied, and removed, so the form opens with its defaults.
+ * The tab's draft made against `server`, or null (none, unreadable, or storage off). A draft from another version of
+ * the form (or hand-edited), or made against another server, is dropped whole rather than half applied, and removed,
+ * so the form opens with its defaults.
  */
-export function readDraft(store: () => Storage = () => sessionStorage): Draft | null {
+export function readDraft(server: string, store: () => Storage = () => sessionStorage): Draft | null {
   let raw: string | null;
   try {
     raw = store().getItem(KEY);
@@ -97,7 +102,7 @@ export function readDraft(store: () => Storage = () => sessionStorage): Draft | 
   if (!raw) return null;
   try {
     const d: unknown = JSON.parse(raw);
-    if (isDraft(d)) return d;
+    if (isDraft(d) && d.server === server) return d;
   } catch {
     // Not JSON: dropped as below.
   }
