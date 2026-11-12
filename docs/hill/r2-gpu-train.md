@@ -215,7 +215,7 @@ A/Bs above.
 Method: folo-n / folo-s, batch 16, 640 px, `ab.sh fin-n|fin-clip|fin-mu 3 base main3` and `ab.sh fin-s1|s2|s3 1
 base main3`, the bench at High priority. `main3` is the bench built at 56a2ba38. Raw outputs are under
 `D:/folo-data/runs-hill2/gpu-train/ab-fin-*/` (lines of an earlier, interrupted attempt with `main2` are in the
-same summaries). Host load was 31-97 %. Figures are img/s, median of 3 rounds (range).
+same summaries). Host load was 31-100 %. Figures are img/s, median of 3 rounds (range).
 
 | row | 647b981f | main 56a2ba38 | change |
 |---|---|---|---|
@@ -230,11 +230,16 @@ same summaries). Host load was 31-97 %. Figures are img/s, median of 3 rounds (r
 | peak memory, folo-n f32 / AMP (MuSGD) | 3467 / 2022 (3478 / 2033) MiB | the same | |
 | peak memory, folo-s f32 / AMP | 6520 / 3713 MiB | the same | |
 
-Disturbed runs, kept in the ranges:
-- base round 3 of f32 MuSGD (64 % foreign GPU load);
-- main3 round 3 of AMP MuSGD (64 %);
-- base round 1 of folo-s f32 (15 %);
-- main3 round 2 of folo-s AMP (230).
+Runs with foreign GPU load before them (`gpu load before train`), kept in the ranges:
+- base f32 MuSGD round 3 (64 %);
+- base AMP MuSGD round 3 (25 %);
+- main3 AMP MuSGD round 1 (16 %) and round 3 (64 %);
+- base folo-s f32 round 1 (15 %);
+- base folo-s AMP round 2 (60 %).
+
+The MuSGD medians (411 / 510) come from contended runs, so the +24 % is a noisy observation. The cleaner
+comparisons are PR 2's A/B and the alternated overhead table below. main3's folo-s AMP round 2 (230) dropped
+without visible GPU load.
 
 **MuSGD's overhead over SGD.** Measured on the same binary, alternated SGD / MuSGD (`ovh.sh main3 3 main3`,
 host 0-94 %):
