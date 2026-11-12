@@ -60,7 +60,21 @@ chunks.
 | runs of 16 (f32) / 8 (f16) + stem tile (shipped) | 10.8 (+1.2 reduce) | 5.8 + 0.4 stem | stem f32 0.83 → 0.35 ms, AMP 0.70 → 0.31 + 0.13 reduce |
 | runs of 4 / 8 everywhere | 10.6-11.2 | 5.2-5.4 | inside the noise of the shipped variant |
 
-**A/B** (end to end): TODO
+**A/B** (end to end, folo-n b16 640, base = main, alternated; ms per step, median of the run's 10 steps and,
+in brackets, its fastest step). The host was 33-100 % busy with other lanes' builds and jobs during both holds
+and one run saw 84 % foreign GPU load, so the medians swing by up to 2x; the fastest-step column is the steadier
+read.
+
+| hold, host load | | f32 base | f32 new | AMP base | AMP new |
+|---|---|---|---|---|---|
+| 1 (33-71 %) | r1 | 48.4 (47.8) | 54.0 (49.8) | 48.3 (33.7) | 36.2 (32.5) |
+| | r2 | 55.8 (49.5) | 53.0 (48.6) | 59.5 (41.3) | 34.3 (28.3) |
+| | r3 | 51.6 (48.4) | 48.8 (47.6) | 37.3 (32.7) | 31.8 (28.4) |
+| 2 (68-100 %) | r1 | 59.3 (49.3) | 46.0 (45.9) | 31.9 (29.4) | 29.7 (28.5) |
+| | r2 | 81.7 (50.0) | 58.8 (49.4) | 31.6 (28.8) | 40.9 (27.8) |
+| | r3 | 74.4 (48.6) | 56.9 (52.5) | 31.3 (30.6) | 90.6 (49.5) |
+
+TODO: a third hold with the bench at High priority.
 
 ## Negative results
 
