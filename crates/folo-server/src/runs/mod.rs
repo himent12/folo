@@ -31,7 +31,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use folo_api::{DatasetFormat, ModelMetrics, Run, RunEvent, RunStatus, Step};
 use serde::{Deserialize, Serialize};
@@ -88,8 +88,10 @@ struct RunFile {
     /// ([`add_paused`]); until then the API record counts the wait so far ([`RunFile::shown`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resumed_at: Option<f64>,
-    /// When the run last trained (Unix seconds; at most [`ALIVE_EVERY_S`] behind while it trains): a run a previous
-    /// process left training ended then, not when the server started again ([`history::reconcile`]).
+    /// When the run last reported (Unix seconds): every event of its trainer (step, epoch, log line, status) sets it,
+    /// and `run.json` gets it with those that are written anyway and otherwise at most [`ALIVE_EVERY`] apart. A run a
+    /// previous process left training ended then, not when the server started again ([`history::reconcile`]); one
+    /// killed during a long phase that reports nothing (a long validation pass) ends at its last report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     alive_at: Option<f64>,
 }
@@ -107,8 +109,9 @@ impl RunFile {
     }
 }
 
-/// How often a training run's `alive_at` is written to `run.json`, at most.
-const ALIVE_EVERY_S: f64 = 10.0;
+/// How often a training run's `alive_at` is written to `run.json` while it reports, at most (by the monotonic clock,
+/// so a wall clock set back does not hold the writes off).
+const ALIVE_EVERY: Duration = Duration::from_secs(10);
 
 /// Adds `secs` (whole seconds, as `started` and `finished` are) to the time run `r` spent not training.
 fn add_paused(r: &mut Run, secs: f64) {
@@ -128,6 +131,8 @@ struct RunState {
     deleted: bool,
     /// The server's shutdown stopped the run (not a client): it ends `stopped` with error code `interrupted`.
     interrupted: bool,
+    /// When an event last wrote `run.json` with `alive_at` ([`RunEntry::alive`]).
+    alive_written: Option<Instant>,
 }
 
 /// One run.

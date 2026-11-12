@@ -1,6 +1,6 @@
 use super::*;
 use axum::http::StatusCode;
-use folo_api::{Epoch, StatusEvent, TrainConfig};
+use folo_api::{Epoch, LogLevel, LogLine, StatusEvent, TrainConfig};
 use folo_test_support::TestDir;
 
 use super::history::read_metrics;
@@ -509,7 +509,7 @@ fn a_run_left_training_ends_when_it_last_trained() {
         run
     };
 
-    // A step keeps `alive_at` (persisted at most every ALIVE_EVERY_S) for a kill to find.
+    // A step keeps `alive_at` (written at most every ALIVE_EVERY) for a kill to find.
     running(None, None);
     let step: Step = serde_json::from_str(
         r#"{"epoch":1,"step":1,"loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1}"#,
@@ -518,6 +518,32 @@ fn a_run_left_training_ends_when_it_last_trained() {
     e.on_event(&RunEvent::Step(step));
     let alive = e.state.lock().unwrap().file.alive_at.expect("alive_at set by a step");
     assert!((alive - t).abs() <= 2.0, "alive_at {alive}, now {t}");
+
+    // So does a phase that sends no steps, only log lines: written once the last write is ALIVE_EVERY old by the
+    // monotonic clock, also after the wall clock was set back (`alive_at` an hour ahead of now); sooner than that, a
+    // report sets it in memory only.
+    let on_disk = || {
+        let f: RunFile = serde_json::from_slice(&std::fs::read(e.dir.join("run.json")).unwrap()).unwrap();
+        f.alive_at.unwrap()
+    };
+    let near_now = |at: f64| assert!((at - t).abs() <= 2.0, "alive_at {at}, now {t}");
+    let log = RunEvent::Log(LogLine { t: now(), level: LogLevel::Info, message: "validating".into() });
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.alive_at = Some(t + 3600.0);
+        e.persist(&st);
+        st.alive_written = std::time::Instant::now().checked_sub(ALIVE_EVERY);
+    }
+    e.on_event(&log);
+    near_now(on_disk());
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.alive_at = Some(t - 50.0);
+        e.persist(&st);
+    }
+    e.on_event(&log);
+    assert_eq!(on_disk(), t - 50.0);
+    near_now(e.state.lock().unwrap().file.alive_at.unwrap());
 
     // Killed 900 s after it started, down until now: it ended then, and trained 100 s.
     running(Some(t - 900.0), None);

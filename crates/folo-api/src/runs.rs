@@ -204,7 +204,9 @@ pub struct Run {
     /// When training started, if it has.
     pub started: Option<String>,
     /// When it reached `stopped`, `completed` or `failed`; for a run whose server was killed under it (`stopped`,
-    /// `interrupted`), when it last trained (about 10 s at most before that).
+    /// `interrupted`), when it last reported (a step, an epoch, a log line; recorded at least every 10 s while those
+    /// come): a run killed during a long phase that reports nothing (a long validation pass) ends at its last
+    /// report, before that phase.
     pub finished: Option<String>,
     /// Seconds a resumed run spent not training since `started`: from each end (stop, failure) until it trained
     /// again, summed over its resumes; while it waits in the queue after a resume, the wait so far is included (and
