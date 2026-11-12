@@ -160,7 +160,7 @@ the order). Flags per row:
 | auto-main / auto-r4 | none (`p1.sh` with `folo-main.exe` / `folo-r4f.exe`, the PR #188 build: `auto` rule 4) |
 | r4-w55 / r4-cls1 / r4-topk13 / r4-cos | `--set musgd.muon=0.5 --set musgd.sgd=0.5` / `--set loss.cls_gain=1.0` / `--set loss.tal.topk=13` / `--cos-lr` (r4f) |
 | ft-w55 / ft-cls1, shapes-w55 / shapes-cls1 | the same flags with `ft.sh` / `shapes.sh` (r4f) |
-| o2o-det / o2o-att20 | `p1o.sh` (adds `--head o2o`): `--optimizer musgd` / and `--set o2o_attached_epochs=20` (r2b) |
+| o2o-det / o2o-att10 / o2o-att20 | `p1o.sh` (adds `--head o2o`): `--optimizer musgd` / and `--set o2o_attached_epochs=10` / `=20` (r2b) |
 | shapes-main / shapes-mus / shapes-r5 | none / `--optimizer musgd --set momentum=0.9 --set warmup_floor=0` / `--optimizer musgd --lr0 0.01 --set momentum=0.937` (r4) |
 
 (`bin/chain1.sh` and `chain2.sh` were the first queues and were stopped after `mus-937-s0`; none of their later lines
@@ -187,9 +187,11 @@ ran as written there.)
 
 ## Targets
 
-- **Proxy P1, +5% over main's recipe and over Ultralytics' rows** (three seeds per side): rule 5's `auto` 0.1234
-  against main's `auto` 0.0757 (**+63%**), Ultralytics' `auto` 0.0166, SGD 0.0853 and MuSGD 0.1133 (**+8.9%** over its
-  best row). **Met.** (Rule 4 alone: 0.1135, level with Ultralytics' MuSGD.)
+- **Proxy P1, +5% over main's recipe and over Ultralytics' rows**: rule 5's `auto` 0.1234 against main's `auto`
+  0.0757 (**+63%**; three seeds per side), and against Ultralytics 8.4.198's round-1 rows on the same images, one seed
+  each: `auto` 0.0166, SGD 0.0853 and MuSGD 0.1133 (**+8.9%** over its best row). **Met against main** (replicated)
+  **and above the Ultralytics rows** (+8.9%, about four times FOLO's own seed spread of 0.002, but the reference rows
+  are single runs, not replicated here). (Rule 4 alone: 0.1135, level with Ultralytics' MuSGD.)
 - **BCCD ≥ yolo26n (0.626)**: 0.625 (0.6251 vs 0.6262): level, not above. Not met by its letter.
 
 ## Negative results

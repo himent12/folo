@@ -659,7 +659,7 @@ is rule 5 with `musgd.*` for every run.
 
 Why the step weights (docs/hill/r2-learn.md): from scratch 0.5 / 0.5 trains folo-n on the COCO proxy to AP 0.1234
 against 0.1135 with 0.2 / 1.0 (three seeds each, every seed above every other; Ultralytics 8.4.198's own MuSGD on
-the same images: 0.1133), and the shapes gate to mAP50-95 0.934 against 0.926 (one seed); fine-tuning
+the same images, one run in round 1: 0.1133), and the shapes gate to mAP50-95 0.934 against 0.926 (one seed); fine-tuning
 `folo-n-coco-v2` on BCCD it does worse (test AP 0.616 against 0.625, three seeds), so fine-tunes keep 0.2 / 1.0.
 
 Why (docs/hill/r2-learn.md; three seeds per side unless marked "one seed"): the reference trainer (Ultralytics

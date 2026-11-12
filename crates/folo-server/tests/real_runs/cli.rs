@@ -62,3 +62,30 @@ async fn old_runs_repeat_with_their_recipe() {
     let c: CliCommand = ok(&app, get("/api/runs/run_cloud/cli")).await;
     assert_eq!(sets(&c), ["auto_rule=1"], "{}", c.cli);
 }
+
+/// An `auto` rule-5 run that trained as a transfer run but whose command has no `--weights` (continued from an
+/// imported checkpoint) repeats with `--set auto_rule=4`: the same optimizer with the MuSGD step weights it used, not
+/// rule 5's from-scratch ones; a rule-5 run from scratch gets no `--set`.
+#[tokio::test(flavor = "multi_thread")]
+async fn transfer_runs_without_weights_keep_their_musgd_weights() {
+    let t = TestDir::new("runs-cli-transfer");
+    let home = t.join("home");
+    let data = t.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    for (id, transfer) in [("run_tuned", true), ("run_scratch", false)] {
+        let dir = home.join("runs").join(id);
+        write_run(&dir, id, &data);
+        let train = json!({ "dataset_id": "ds_legacy", "epochs": 3, "auto_rule": 5, "warmup_floor": 0,
+                            "transfer": transfer });
+        std::fs::write(dir.join("config.json"), json!({ "train": train }).to_string()).unwrap();
+    }
+    let s = store(&home);
+    let app = app(&s);
+    let sets = |c: &CliCommand| -> Vec<String> {
+        c.argv.windows(2).filter(|w| w[0] == "--set").map(|w| w[1].clone()).collect()
+    };
+    let c: CliCommand = ok(&app, get("/api/runs/run_tuned/cli")).await;
+    assert_eq!(sets(&c), ["auto_rule=4"], "{}", c.cli);
+    let c: CliCommand = ok(&app, get("/api/runs/run_scratch/cli")).await;
+    assert!(sets(&c).is_empty(), "{}", c.cli);
+}
