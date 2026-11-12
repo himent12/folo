@@ -157,8 +157,8 @@ model size.
 
 **Measured 2026-11-12 on `main` after [hill-climb 2](#hill-climb-2-2026-11-12)** (a37f7f23: PRs #181–#205; row 10
 also on e4fa2b43, with #206) against `main` before that climb (647b981f), the two binaries alternated run by run,
-3–8 rounds: each cell is the median of the rounds (min–max), then 647b981f's median in the same session. Load: 0–1%
-GPU from other processes in the quiet rounds, up to 21% bursts in two of the eight inference rounds; about one other
+3–8 rounds: each cell is the median of the rounds (min–max), then 647b981f's median in the same session. Load: 0–4%
+GPU from other processes, with 15–21% bursts in two of the eight inference rounds; about one other
 CPU core busy during the folo-n and folo-m CPU rows, up to 4.5 for folo-s; per section in
 [Hill-climb 2](#hill-climb-2-2026-11-12) and [hill/r2-fold-in.md](hill/r2-fold-in.md). Inside ±10% of the bar is a
 tie. The 2026-11-09 table (the first hill-climb's build against c50211ba) is in [Hill-climb](#hill-climb-2026-11-09).
@@ -170,7 +170,7 @@ tie. The 2026-11-09 table (the first hill-climb's build against c50211ba) is in 
 | 3 | GPU forward throughput, batch 16, f32 | **1454 img/s** (TF32 convs); 1334 img/s strict fp32 | f32 | **2081 img/s** (2048–2098; 647b981f 1619): beats TF32 by 43% | **819 img/s** (743–826; 647b981f 624): yolo26s 627, beats by 31% (was a tie) |
 | 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **4159 img/s** on tensor cores (3127–4187; 647b981f 3081): beats, 1.75x | **1799 img/s** on tensor cores (1730–1825; 647b981f 1237): yolo26s 1159, beats 1.55x (was a tie) |
 | 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **1.75 ms** f32 (1.69–2.05; 647b981f 2.92); **1.56 ms** on tensor cores (647b981f 2.52): beats, 4.0–4.6x | **3.04 ms** f32 (2.82–5.65; 647b981f 4.90); **2.12 ms** on tensor cores (647b981f 2.80): yolo26s 8.59, beats |
-| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **2156 img/s** on tensor cores (1724–2312; 647b981f 1839); f32 1469 (647b981f 1189): beats, 3.5x | **1337 img/s** on tensor cores (1279–1348; 647b981f 979); f32 699 (647b981f 580): yolo26s 446, beats, 3.0x |
+| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **2155 img/s** on tensor cores (1724–2312; 647b981f 1840); f32 1469 (647b981f 1189): beats, 3.5x | **1337 img/s** on tensor cores (1279–1348; 647b981f 979); f32 699 (647b981f 580): yolo26s 446, beats, 3.0x |
 | 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **12.74 ms** at 28 threads (12.63–12.75; 647b981f 15.23): beats, 1.8x | folo-s **29.2 ms** (27.9–29.6; 647b981f 33.3): yolo26s 42.5, beats; folo-m **68.9 ms** (68.7–70.3; 647b981f 77.7): yolo26m 106.6, beats (28 threads) |
 | 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | **13.12 ms** at 28 threads (13.12–13.14; 647b981f 15.90): beats, 1.9x. The NMS-free head does not change it ([NMS-free head](#nms-free-head-o2o)) | folo-s **29.7 ms** (28.0–30.1; 647b981f 33.4): yolo26s 51.1, beats; folo-m **68.8 ms** (68.3–70.3; 647b981f 79.7): yolo26m 107.8, beats |
 | 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **380 img/s** f32 (375–380; 647b981f 333), **594 img/s AMP** (591–609; 647b981f 544): beats, 1.9x / 2.4x. With the trainer's gradient clipping (`FOLO_BENCH_CLIP=1`) 376 / 613 (647b981f 345 / 526); with MuSGD 366 / 592 (647b981f 316 / 443) | **162 img/s** f32 (162–162; 647b981f 151), **299 img/s AMP** (299–300; 647b981f 276): yolo26s 105 / 188, beats. With clipping 161 / 296 (647b981f 150 / 268) |
@@ -202,7 +202,7 @@ batch-1 rows are steady state too; the earlier tables of this page used 25 warm-
 ### GPU inference (2026-11-12)
 
 `FOLO_GPU_TENSOR_CORES=1 FOLO_BENCH_SECTIONS=forward,predict cargo bench -p folo-vision --bench gpu`, 8 rounds from
-two sessions (0–1% GPU from other processes in six rounds, 15–21% bursts in two; 1.0–13.9 other CPU cores):
+two sessions (0–4% GPU from other processes, with 15–21% bursts in two rounds; 1.0–13.9 other CPU cores):
 
 | row | folo-n 647b981f | folo-n `main` | folo-s 647b981f | folo-s `main` |
 |---|---|---|---|---|
@@ -212,11 +212,11 @@ two sessions (0–1% GPU from other processes in six rounds, 15–21% bursts in 
 | f32 e2e b16 | 1189 img/s (1094–1233) | **1469 img/s** (1440–1500) | 580 img/s (560–584) | **699 img/s** (681–713) |
 | f16 forward b1 | 2.16 ms (2.05–3.47) | **1.15 ms** (1.11–1.33) | 3.80 ms (3.63–5.29) | **2.14 ms** (2.10–2.53) |
 | f16 forward b16 | 1953 img/s (1852–2020) | **2339 img/s** (2297–2413) | 804 img/s (724–807) | **934 img/s** (908–935) |
-| f16 e2e b1 / b16 | 2.95 ms / 1405 img/s | **1.69 ms / 1600 img/s** | 4.37 ms / 681 img/s | **2.84 ms / 767 img/s** |
+| f16 e2e b1 / b16 | 2.95 ms / 1405 img/s | **1.69 ms / 1601 img/s** | 4.37 ms / 681 img/s | **2.84 ms / 767 img/s** |
 | f16 tensor cores forward b1 (p90) | 1.85 ms (1.59–2.37), p90 2.00 | **0.95 ms** (0.87–1.55), p90 1.07 | 2.18 ms (2.12–4.02) | **1.36 ms** (1.35–1.44) |
 | f16 tensor cores forward b16 | 3081 img/s (2729–3112) | **4159 img/s** (3127–4187) | 1237 img/s (1147–1250) | **1799 img/s** (1730–1825) |
 | f16 tensor cores e2e b1 | 2.52 ms (2.14–3.49) | **1.56 ms** (1.41–2.48) | 2.80 ms (2.72–3.91) | **2.12 ms** (1.91–2.60) |
-| f16 tensor cores e2e b16 | 1839 img/s (1584–1916) | **2156 img/s** (1724–2312) | 979 img/s (941–990) | **1337 img/s** (1279–1348) |
+| f16 tensor cores e2e b16 | 1840 img/s (1584–1916) | **2155 img/s** (1724–2312) | 979 img/s (941–990) | **1337 img/s** (1279–1348) |
 | upload + letterbox b16 (f32) | 2.5–2.9 ms | 2.4–2.7 ms, tie | | |
 
 Where it comes from:
@@ -232,7 +232,7 @@ Where it comes from:
   +25%, folo-m +18%).
 - folo-s f32 and f16 tensor cores at batch 16 now beat the yolo26s bars by 31% and 55%; both were ties.
 - The folo-n f16 tensor-core batch-16 forward of `main` read 4149–4187 img/s in one session and 3127–3886 in the
-  other, with no other process on the GPU: GPU clock state. folo-s f32 batch 16 is bimodal on both builds (one
+  other, the slower one the quieter (0–1% other GPU); the clocks were not logged, so the cause is not known. folo-s f32 batch 16 is bimodal on both builds (one
   647b981f round at 197 img/s; rounds with a p90 of 120–180 ms on both).
 
 **Accuracy**: `folo val` of `folo-n-coco` on val2017, f32: mAP50 0.44944638 → 0.4494464, mAP50-95 0.30999148 →
@@ -294,7 +294,8 @@ busy swung both binaries between rounds (f32 131–384 img/s); their best rounds
 | `folo val` on COCO val2017 (5000 images), process wall | 8.0 s (6.9–9.7) | **4.5 s** (4.4–5.7) | #187 (device-side multi-label candidates), #185, #186 |
 | loader on 1080p JPEGs, 16 workers, full train transform | 174 samples/s (156–193); `main` without the cache 185 | **1206** (1185–1337) with `--cache ram` | #190 |
 
-The first-ever AMP epoch (a new machine or a driver update, before any kernel list exists) is 1.6 s slower in all
+The first-ever AMP epoch (a machine's first run: an empty driver cache and no kernel list yet; a driver update alone
+keeps the list and gets the 3.5 s row) is 1.6 s slower in all
 six rounds, also with `--optimizer adamw` on both builds (21.66 → 23.11 s), so it is compilation of the kernel
 variants the climb added, not MuSGD; every later run compiles from the list on the workers (3.5 s) or finds the
 pipelines cached (2.3 s). `folo val`'s AP: see [GPU inference](#gpu-inference-2026-11-12).
@@ -310,7 +311,7 @@ threads, 3 rounds (train step 5), in a quiet window: 0.7–1.3 other cores (folo
 | forward b1 | 15.23 ms (15.14–15.38) | **12.74 ms** (12.63–12.75), −16% | 33.27 ms | **29.24 ms**, −12% | 77.74 ms | **68.94 ms**, −11% |
 | e2e b1, 640×640 | 15.90 ms (15.53–16.18) | **13.12 ms** (13.12–13.14), −17% | 33.44 ms | **29.66 ms**, −11% | 79.66 ms | **68.75 ms**, −14% |
 | e2e b1, 1280×720 | 12.36 ms | **10.30 ms** | 23.25 ms | **21.08 ms** | 54.30 ms | **47.69 ms** |
-| `predict_batch` 16 | 152.1 ms (140.4–154.8), 105 img/s | 143.6 ms (140.0–147.6), 111 img/s, tie | | | | |
+| `predict_batch` 16 | 152.1 ms (140.4–154.8), 105 img/s | 143.6 ms (140.0–147.6), 111 img/s, −6% (ranges overlap) | | | | |
 | train step (folo-n, 320 px, b16) | 246.9 ms (245.0–250.1) | 238.8 ms (235.5–238.9), −3.3%; forward + loss 79.4 → 70.4 ms | | | | |
 
 Where it comes from: conv forwards that read the weights in place instead of packing them on one thread, max pooling
@@ -353,7 +354,7 @@ on BCCD); one precompile worker per core (driver contention).
 
 Where a number here differs from the lane's by more than noise:
 - **CPU, folo-n forward b1** (cpu2: 12.33 ms, 15.81 → 12.33 against 647b981f): 12.74 ms here with about one core
-  busy, a tie with the claim, but 14.0–14.2 ms in three runs with 2–13 cores busy; the gain against 647b981f is −16%
+  busy (+3.3%, at the edge of the tie band), and 14.0–14.2 ms in two earlier sessions with 1.5–9.1 cores busy; the gain against 647b981f is −16%
   here, not −22%. folo-s: −12% here (33.27 → 29.24) against −20% claimed (34.30 → 27.34). folo-m agrees (68.94 vs
   68.39 ms).
 - **The wait spin** (gpu-dispatch): its unresolved f16 tensor-core batch-1 regression (1.25 → 1.50 ms) does not
@@ -368,13 +369,15 @@ Where a number here differs from the lane's by more than noise:
 Everything else agrees within noise or measures better here: gpu-gemm's final forward table (folo-n f32 b16 2107 vs
 2081 img/s here, f16 tensor cores 4168 vs 4159; folo-s 830 vs 819 and 1822 vs 1799), gpu-pool's 0 new bind groups
 and buffers per step, the warm COCO start (3.5 s under heavy load in the notebook, 1.28 s here), `folo val` (6.7 s,
-4.5 s here), `--cache ram` (6x, 6.5x here), the warm first-epoch compile and the cold epoch with a kernel list.
+4.5 s here), `--cache ram` (6x, 6.5x here), the compile left on the training thread, warm (0.001–0.011 s) and
+with an empty driver cache and a kernel list (2.93–3.00 s here, 3.73–5.20 s under load in the notebook).
 
 ### Rows worse than 647b981f
 
 - **A first-ever AMP epoch** with an empty driver shader cache and no kernel list: +1.6 s (+7.5%; +6.7% with AdamW
   on both). The climb added kernel variants in #184, #186, #199 and #202 (and #191's Muon kernels under MuSGD); not
-  bisected. Only the first run on a machine or after a driver update pays it.
+  bisected. Only a run with no kernel list yet and a cold driver cache (a machine's first) pays it; after a driver
+  update the list is kept and the epoch takes 3.5 s.
 - **`folo val`'s AP in the 7th digit** (#186's summation order), not an accuracy loss.
 
 Nothing else measured is slower than 647b981f.
@@ -944,9 +947,9 @@ save). The 640 px training step above is where AMP pays.
 **Verdict** (`main` after the second hill-climb, [Hill-climb 2](#hill-climb-2-2026-11-12); the tables above in this
 section are the earlier rounds that got there). folo-n beats yolo26n on every GPU row: batch-1 forward 1.14 vs 4.95
 ms (f32) and 0.95 vs 6.25 ms (f16 on tensor cores), batch-16 forward 2081 vs 1454 img/s (f32 against TF32
-convolutions) and 4159 vs 2370 (f16), end to end 1.75 vs 6.92 ms at batch 1 and 2156 vs 615 img/s at batch 16, the
+convolutions) and 4159 vs 2370 (f16), end to end 1.75 vs 6.92 ms at batch 1 and 2155 vs 615 img/s at batch 16, the
 training step 380 vs 202 img/s (f32) and 594 vs 252 (AMP), the trainer's sustained rate 388 vs 199 / 613 vs 224
-img/s, and training memory (3.5 vs 4.4 GiB; 2.0 vs 2.6 GiB with AMP), while doing 19% more FLOPs. folo-s beats
+img/s, and training memory (3.4 vs 4.4 GiB; 2.0 vs 2.6 GiB with AMP), while doing 19% more FLOPs. folo-s beats
 yolo26s on every row too: batch-1 forward 2.24 vs 4.87 ms (1.36 vs 7.47 on tensor cores), batch-16 forward 819 vs 627
 img/s (f32) and 1799 vs 1159 (f16 on tensor cores), end to end 3.04 vs 8.59 ms and 1337 vs 446 img/s, the training
 step 162 vs 105 and 299 vs 188 img/s.
@@ -1262,7 +1265,7 @@ the pipeline cache, MuSGD's step cost, split-K, `--cache ram`, the COCO header c
    per core, a tie under load), stride-2 convs as four phase convs with Winograd F(2, 2) (about 1.4x fewer
    multiplies), the head's depthwise convs; CPU training: weight gradients (66 ms of the step) and BatchNorm's
    backward (34 ms, memory-bound) ([hill/r2-cpu.md](hill/r2-cpu.md)).
-5. **A first-ever start** (a new machine or driver, no kernel list yet): 21–23 s (AMP) / 14 s (f32) of serial driver
+5. **A first-ever start** (a machine's first run: no kernel list yet, a cold driver cache): 21–23 s (AMP) / 14 s (f32) of serial driver
    compilation on the training thread, 1.6 s more than 647b981f for AMP ([Hill-climb 2](#rows-worse-than-647b981f)).
    Deferred dispatch encoding in folo-gpu `context/`, so the precompile workers compile what the first epoch meets in
    parallel; the tensor-core self-test kernels on the workers too ([hill/r2-trainer.md](hill/r2-trainer.md)).

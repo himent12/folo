@@ -161,6 +161,12 @@ pub(super) fn epoch_line(e: u32, epochs: u32, ep: &Epoch) -> String {
 
 pub(super) fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
     let c = &f.run.config;
+    // What the run trains with, as the trainer's first log line says: its resolution, or the one a new run gets
+    // (`steps_per_epoch` batches of `batch` images; the class count of its dataset).
+    let r = f.run.resolved.clone().unwrap_or_else(|| {
+        let classes = f.run.dataset.as_ref().map_or(1, |d| d.classes.len().max(1));
+        resolve(c, f.run.steps_per_epoch * c.batch.max(1) as u64, classes)
+    });
     let mut logs = vec![
         (
             0,
@@ -194,7 +200,20 @@ pub(super) fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
         (
             4,
             LogLevel::Info,
-            "optimizer: AdamW(lr=0.01, wd=5e-4), cosine schedule, warmup 3 epochs".to_string(),
+            format!(
+                "optimizer: {}(lr={}, wd={}){}, {} schedule, warmup {} steps",
+                match r.optimizer {
+                    ResolvedOptimizer::Sgd => "SGD",
+                    ResolvedOptimizer::Adamw => "AdamW",
+                    ResolvedOptimizer::Musgd => "MuSGD",
+                    _ => "unknown",
+                },
+                r.lr0,
+                r.weight_decay,
+                if c.optimizer == Optimizer::Auto { " (auto)" } else { "" },
+                if r.cos_lr { "cosine" } else { "linear" },
+                r.warmup_iters
+            ),
         ),
     ];
     if f.run.status == RunStatus::Failed {

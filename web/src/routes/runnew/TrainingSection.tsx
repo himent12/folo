@@ -406,7 +406,7 @@ export default function TrainingSection(props: TrainingSectionProps) {
           <Field label="Optimizer" for="opt">
             <Select id="opt" bind:value={optimizer} options={(['auto', 'sgd', 'adamw', 'musgd'] as const).map((value) => ({ value, label: optimizerLabel(value) }))} />
           </Field>
-          <Field label="Initial learning rate" for="lr0" error={props.errors.lr0} hint="Warmup 3 epochs, then cosine to 1%.">
+          <Field label="Initial learning rate" for="lr0" error={props.errors.lr0} hint="Warmup 3 epochs, then linear to 1%.">
             <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!props.errors.lr0} />
           </Field>
           <Field label="Seed" for="seed" hint="Same seed, same run." error={props.errors.seed}>

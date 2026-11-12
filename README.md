@@ -43,7 +43,7 @@ the method, the raw JSON and how much noise to expect.
 | Trainer, sustained (data loader, mosaic, 8 workers) | **388 img/s** (f32) / **613 img/s** (AMP) | 199 / 224 img/s | FOLO 1.9× / 2.7× faster |
 | Training step peak GPU memory, batch 16, f32 | **3467 MiB** | 4517 MiB (2646 MiB AMP) | FOLO uses 23% less in f32 |
 | GPU end to end, batch 1 (decoded image in, boxes out) | **1.75 ms** (f32) | 6.92 ms | FOLO 4.0× faster |
-| GPU end to end, batch 16 | **2156 img/s** (f16, tensor cores) / 1469 (f32) | 615 img/s (fp16) / 536 (fp32) | FOLO 3.5× faster |
+| GPU end to end, batch 16 | **2155 img/s** (f16, tensor cores) / 1469 (f32) | 615 img/s (fp16) / 536 (fp32) | FOLO 3.5× faster |
 | CPU forward, batch 1, f32 | **12.7 ms** (28 threads) | 22.8 ms (8 threads) | FOLO 1.8× faster |
 | CPU end to end, batch 1 | **13.1 ms** (28 threads) | 24.8 ms | FOLO 1.9× faster |
 
@@ -61,9 +61,11 @@ weights 0.5 / 0.5 from scratch), which trains the COCO proxy to 0.123 AP against
 it has not been made yet.
 
 These are `main`'s numbers after the second hill-climb (2026-11-12, quiet machine, alternated with the build before
-it; docs/BENCHMARKS.md, Hill-climb 2). folo-s now beats yolo26s on every row as well, batch-16 forward included. One
-thing got slower: the very first AMP epoch on a machine whose driver has never compiled FOLO's kernels takes about
-1.6 s longer (23 s instead of 21 s); every later run compiles in the background.
+it; docs/BENCHMARKS.md, Hill-climb 2). folo-s now beats yolo26s on every row measured for it as well, batch-16 forward included (its trainer row was not
+measured). One
+thing got slower: the very first AMP epoch on a machine, before FOLO has a kernel list there and while the driver has
+never compiled FOLO's kernels, takes about 1.6 s longer (23 s instead of 21 s); every later run compiles in the
+background.
 
 With the whole trainer (data loader, augmentation, validation), folo-n trains the shapes gate set (2,000 images
 at 320 px, 30 epochs) to mAP50 0.980 in **169 s on the GPU**, 25.6× faster than

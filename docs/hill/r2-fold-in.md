@@ -52,8 +52,8 @@ where a number differs from a lane's own. The results are folded into docs/BENCH
 ## GPU inference (rows 1–6)
 
 `FOLO_GPU_TENSOR_CORES=1 FOLO_BENCH_SECTIONS=forward,predict` (folo-n and folo-s; f32, f16, f16 on tensor cores),
-8 rounds pooled from two sessions: `infer/` (5 rounds, 07:39–07:50; 0–2% other GPU in rounds 1, 3 and 5, bursts of
-15–21% from short-lived processes in rounds 2 and 4; 1.4–13.9 other cores) and `infer-q/` (3 rounds, 09:02–09:08;
+8 rounds pooled from two sessions: `infer/` (5 rounds, 07:39–07:50; peaks of 1–4% other GPU, except bursts of 15–17%
+in both runs of round 2 and 21% in `base` round 4 from short-lived processes; 1.4–13.9 other cores) and `infer-q/` (3 rounds, 09:02–09:08;
 0–1% other GPU, 1.0–2.0 other cores). Summary: `infer-pooled.txt` (`bin/summ.py infer,infer-q base new`).
 
 | row | folo-n 647b981f | folo-n `main` | folo-s 647b981f | folo-s `main` |
@@ -65,19 +65,20 @@ where a number differs from a lane's own. The results are folded into docs/BENCH
 | f16 forward b1 | 2.16 ms (2.05–3.47) | **1.15 ms** (1.11–1.33) | 3.80 ms (3.63–5.29) | **2.14 ms** (2.10–2.53) |
 | f16 forward b16, pipelined | 1953 img/s (1852–2020) | **2339 img/s** (2297–2413) | 804 img/s (724–807) | **934 img/s** (908–935) |
 | f16 e2e b1 | 2.95 ms (2.59–4.81) | **1.69 ms** (1.66–2.43) | 4.37 ms (4.27–9.35) | **2.84 ms** (2.72–5.55) |
-| f16 e2e b16 | 1405 img/s (1226–1444) | **1600 img/s** (1530–1655) | 681 img/s (648–688) | **767 img/s** (653–779) |
+| f16 e2e b16 | 1405 img/s (1226–1444) | **1601 img/s** (1530–1655) | 681 img/s (648–688) | **767 img/s** (653–779) |
 | f16 tensor cores forward b1, median (p90) | 1.85 ms (1.59–2.37), p90 2.00 | **0.95 ms** (0.87–1.55), p90 1.07 | 2.18 ms (2.12–4.02), p90 2.25 | **1.36 ms** (1.35–1.44), p90 1.40 |
 | f16 tensor cores forward b16, pipelined | 3081 img/s (2729–3112) | **4159 img/s** (3127–4187) | 1237 img/s (1147–1250) | **1799 img/s** (1730–1825) |
 | f16 tensor cores e2e b1 | 2.52 ms (2.14–3.49), p90 2.74 | **1.56 ms** (1.41–2.48), p90 1.66 | 2.80 ms (2.72–3.91) | **2.12 ms** (1.91–2.60) |
-| f16 tensor cores e2e b16 | 1839 img/s (1584–1916) | **2156 img/s** (1724–2312) | 979 img/s (941–990) | **1337 img/s** (1279–1348) |
+| f16 tensor cores e2e b16 | 1840 img/s (1584–1916) | **2155 img/s** (1724–2312) | 979 img/s (941–990) | **1337 img/s** (1279–1348) |
 | upload + letterbox b16 (f32) | 2.5–2.9 ms | 2.4–2.7 ms, tie | | |
 | new bind groups per forward call | one per dispatch (no cache) | 0.0 | | |
 
 - Every row is faster on `main`. The batch-1 rows of `main` hold their range (1.13–1.33 ms for folo-n f32 over 8
   rounds; 647b981f 2.07–3.04).
-- The folo-n f16 tensor-core batch-16 forward of `main` read 4149–4187 img/s in all five rounds of `infer/` and
-  3127–3886 in the three of `infer-q/`, with no other process on the GPU in either: the GPU's own clock state, not
-  load; the pooled median is 4159. 647b981f moved less (2729–3112).
+- The folo-n f16 tensor-core batch-16 forward of `main` read 4149–4187 img/s in all five rounds of `infer/` (one with
+  a 17% burst from another process) and 3127–3886 in the three rounds of `infer-q/` (0–1% other GPU, about one other
+  core). The load samples do not explain it (the slower rounds were the quiet ones); the clocks were not logged, so
+  the cause is not known. The pooled median is 4159; 647b981f moved less (2729–3112).
 - folo-s f32 batch 16 is bimodal in both builds, as the 2026-11-09 fold-in saw for folo-s f16: one round of
   647b981f read 197 img/s pipelined and both builds have rounds whose p90 is 120–180 ms. The medians are unaffected.
 
@@ -95,11 +96,14 @@ where a number differs from a lane's own. The results are folded into docs/BENCH
 | f16 tensor cores forward b1 | 0.96 ms (0.93–2.07), p90 1.06 | **0.90 ms** (0.88–0.92), p90 0.98 |
 | f32 e2e b1 | 1.79 ms (1.77–3.70) | **1.73 ms** (1.72–1.73) |
 | f16 tensor cores e2e b1 | 1.63 ms (1.59–3.47) | **1.57 ms** (1.52–1.58) |
-| f32 / f16 tensor cores forward b16 | 7.85 / 4.15 ms | 7.82 / 4.32 ms, ties |
+| f32 forward b16 | 7.85 ms (7.80–14.70) | 7.82 ms (7.75–7.86), tie |
+| f16 tensor cores forward b16 | 4.15 ms (4.02–8.26) | 4.32 ms (4.00–4.92), +4%; pipelined 4027 → 3860 img/s |
 
 The spin is 4–6% faster at batch 1 here and steadier (narrower ranges); the f16 tensor-core regression lane
 gpu-dispatch left unresolved (1.25 → 1.50 ms) does not reproduce. Its larger gains in the lane's table (end to end
-−15% / −31%) came from a busy CPU, where the blocked thread woke on another core.
+−15% / −31%) came from a busy CPU, where the blocked thread woke on another core. The f16 tensor-core batch-16
+median is 4% slower with the spin, with overlapping ranges (one spin-0 round at 8.26 ms); the pooled A/B above against
+647b981f, which includes the spin, has this row at 4159 img/s against 3081.
 
 **Accuracy** (`val/`, below): f32 AP moves in the 7th digit since #186.
 
@@ -172,7 +176,7 @@ rounds in a quiet window, 08:42–08:51, load not recorded per run):
 
 | | 647b981f | `main` | log |
 |---|---|---|---|
-| f32 warm: epoch 1 (`duration_s`) | 2.67 s (2.60–3.36) | **1.89 s** (1.84–1.99) | `ws-f32/` |
+| f32 warm: epoch 1 (`duration_s`) | 2.67 s (2.59–3.36) | **1.89 s** (1.84–1.99) | `ws-f32/` |
 | f32 warm: compile on the training thread | not timed (no timer in 647b981f) | **0.001 s** (194 of 194 pipelines precompiled) | `ws-f32/` |
 | AMP warm: epoch 1 | 3.88 s (3.07–7.11) | **2.27 s** (2.12–3.33) | `ws-amp/` |
 | AMP warm: compile on the training thread | not timed | **0.008–0.011 s** (215 of 218 precompiled; 3 tensor-core self-test kernels compile with the context) | `ws-amp/` |
@@ -183,7 +187,8 @@ rounds in a quiet window, 08:42–08:51, load not recorded per run):
 | AMP, driver and pipeline caches cold, kernel list kept | | **3.48 s** (3.46–3.51); 2.93–3.00 s on the training thread | `cold-ampb/` |
 | `folo predict` of one image, process wall (5 rounds) | 0.48 s (0.45–0.65) | **0.37 s** (0.36–0.98) | `ws-predict/` |
 
-A first-ever AMP run (a new machine or driver, no kernel list) is about 1.6 s slower on `main` in all six rounds,
+A first-ever AMP run (no kernel list yet and a cold driver cache: a machine's first run; after a driver update the
+list is kept and the 3.5 s row applies) is about 1.6 s slower on `main` in all six rounds,
 with either optimizer, so it is the compilation of more kernel variants, not MuSGD: `main` compiles 203 pipelines
 for this AdamW AMP epoch (218 with MuSGD); 647b981f has no counter. Earlier, noisier runs of the same
 (`cold-f32/`, `cold-amp/`) read 18.5 → 24.3 s (f32) and 24.7 → 25.5 s (AMP) with overlapping ranges.
@@ -194,7 +199,7 @@ D:/folo-data/coco --device gpu:0`, 3 rounds, `val/`, 4.2–9.3 other cores):
 | | 647b981f | `main` |
 |---|---|---|
 | process wall | 8.0 s (6.9–9.7) | **4.5 s** (4.4–5.7) |
-| evaluation (`seconds`) | 6.21 s (5.69–6.97) | **4.13 s** (4.02–4.63) |
+| evaluation (`seconds`) | 6.21 s (5.69–6.97) | **4.13 s** (4.02–4.62) |
 | mAP50 / mAP50-95 (every run) | 0.44944638 / 0.30999148 | 0.4494464 / 0.30999136 |
 
 Not identical: mAP50-95 −1.2·10⁻⁷, mAP50 +2·10⁻⁸. `folo` built at d3032648 (#186, split-K for forward convs) gives
@@ -217,13 +222,15 @@ rounds (train step 5), quiet window 09:00–09:02 (`cpu/n28c.txt`, `s28c`, `m28c
 | forward b1 | 15.23 ms (15.14–15.38) | **12.74** (12.63–12.75), −16% | 33.27 (32.30–34.70) | **29.24** (27.89–29.60), −12% | 77.74 (76.76–78.30) | **68.94** (68.73–70.34), −11% |
 | e2e b1, 640×640 | 15.90 (15.53–16.18) | **13.12** (13.12–13.14), −17% | 33.44 (33.32–36.03) | **29.66** (27.97–30.05), −11% | 79.66 (79.34–80.13) | **68.75** (68.30–70.26), −14% |
 | e2e b1, 1280×720 | 12.36 (12.12–12.82) | **10.30** (10.19–10.84) | 23.25 (23.24–25.93) | **21.08** (20.23–21.44) | 54.30 (53.87–55.19) | **47.69** (47.04–48.15) |
-| `predict_batch` 16 (0.6–5.6 busy) | 152.1 ms (140.4–154.8), 105 img/s | 143.6 (140.0–147.6), 111 img/s: tie, ranges overlap | | | | |
+| `predict_batch` 16 (0.6–5.6 busy) | 152.1 ms (140.4–154.8), 105 img/s | 143.6 (140.0–147.6), 111 img/s: −6%, ranges overlap | | | | |
 | train step, 320 px b16 (5 rounds, 3.1–4.8 busy) | 246.9 ms (245.0–250.1) | 238.8 (235.5–238.9), −3.3% | | | | |
 | of which forward + loss / backward | 79.4 / 166.9 ms | 70.4 / 167.0 ms | | | | |
 
-Earlier runs under more load (`cpu/n28.txt` 8–13 busy, `n28b` 2–9, `s28`, `m28`, `b16`, `b16b`, `train`, `trainb`)
-gave the same direction with slower absolute numbers: folo-n forward 16.9–17.4 → 14.0–14.2 ms, folo-s 35.8 → 29.4,
-folo-m 87.2 → 77.0, `predict_batch` 162.6 → 148.5–151.2, train step 254–261 → 243–244. The 8-pinned-P-core rows of
+Earlier sessions (`cpu/n28.txt` 1.5–2.9 other cores busy, `n28b` 2.1–9.1, `s28` 2.8–6.1, `m28` 4.1–7.1, `b16` 5.9–13.0,
+`b16b` 7.3–8.8, `train` 4.4–9.7, `trainb` 7.4–11.0) gave the same direction with slower absolute numbers on both
+builds: folo-n forward 16.9–17.4 → 14.0–14.2 ms, folo-s 35.8 → 29.4, folo-m 87.2 → 77.0, `predict_batch` 162.6 →
+148.5–151.2, train step 254–261 → 243–244. The recorded load does not explain all of it: `n28.txt`, with 1.5–2.9 cores
+busy, read 14.15 ms for `main` where `n28c.txt`, with 0.9–1.1, read 12.74. The 8-pinned-P-core rows of
 the 2026-11-09 fold-in were not re-run.
 
 ## Learning (quoted, not re-run)
@@ -238,7 +245,8 @@ SGD 0.0853; shapes gate mAP50-95 0.892 → **0.934** (one seed; bar 0.75); BCCD 
 
 Where a number here differs from the lane's by more than noise:
 - **cpu2, folo-n CPU forward b1**: 12.33 ms claimed (PR 3, 2–6 cores busy); 12.74 here with about one core busy
-  (+3%, a tie), but 14.0–14.2 ms in the three runs with 2–13 cores busy. The gain against 647b981f is −16% here
+  (+3.3%, just outside the ±3% tie band), and 14.0–14.2 ms in two earlier sessions with 1.5–9.1 cores busy. The gain
+  against 647b981f is −16% here
   (15.23 → 12.74) against −22% in the notebook (15.81 → 12.33); folo-s −12% here against −20% (34.30 → 27.34; this
   machine's 647b981f read 33.27, its merged 29.24). folo-m agrees (68.94 vs 68.39).
 - **gpu-dispatch, the wait spin**: the f16 tensor-core batch-1 regression (1.25 → 1.50 ms, "unresolved") does not
@@ -252,12 +260,14 @@ Where a number here differs from the lane's by more than noise:
 - Everything else matches within noise or is better here: gpu-gemm's final forward table (folo-n f32 b16 2107 vs
   2081 img/s here, f16 tensor cores 4168 vs 4159, folo-s 830 vs 819 and 1822 vs 1799); gpu-pool's 0 new bind groups
   and buffers per step; the trainer's warm start (3.5 s claimed under heavy load, 1.28 s here), `folo val` (6.7 s,
-  4.5 s here) and `--cache ram` (6x, 6.5x here); trainer2's warm first-epoch compile (0.001–0.02 s) and cold
-  epoch with a list (3.7–5.2 s, 3.5 s here).
+  4.5 s here) and `--cache ram` (6x, 6.5x here); trainer2's warm first-epoch compile on the training thread
+  (0.001–0.02 s; 0.001–0.011 s here) and, with an empty driver cache and the kernel list kept, the compile left on
+  the training thread (3.73–5.20 s under load; 2.93–3.00 s here).
 
 ## Rows worse than 647b981f
 
-- **A first-ever AMP epoch** (cold NVIDIA shader cache, no kernel list: a new machine, a driver update): +1.6 s
+- **A first-ever AMP epoch** (cold NVIDIA shader cache and no kernel list yet: a machine's first run; a driver update
+  alone keeps the list, whose identity leaves the driver out, and gets the 3.5 s case): +1.6 s
   (21.3 → 22.9 s, +7.5%), also with AdamW on both builds (+6.7%). More pipeline variants to compile (or slower
   ones): the climb added kernel variants in #184 (stem weight-gradient tile), #186 (split-K and its finish kernel),
   #199 (the tap-mask gather) and #202 (64×64 / 64×128 tensor-core tiles), and #191's Muon kernels under MuSGD; not
@@ -281,8 +291,8 @@ Every cell's log, under `D:/folo-data/runs-hill2/foldin/`:
 | training step, MuSGD; MuSGD overhead; MuSGD counters | `train-musgd/{base,new}-r1..3.txt` |
 | row 10 | `row10-f32-d/`, `row10-amp-d/` (`{base,new,head}-r0..4.log` and `.metrics.jsonl`), `row10-f32-d.json`, `row10-amp-d.json`; loaded windows `row10-f32/`, `row10-f32b/`, `row10-amp/`, `row10-f32-c/`, `row10-amp-c/` |
 | COCO start-up, warm / cold | `startup-warm/`, `startup-cold/` |
-| first epoch, warm, and `folo predict` | `ws-f32/log-*.txt`, `ws-amp/log-*.txt`, `ws-predict/log-*.txt` (the summary lines are in this notebook; each log has its run's output) |
-| first epoch, cold driver cache | `cold-f32b/log-1..9.txt`, `cold-ampb/log-1..9.txt`, `cold-amp-adamw/log-1..9.txt`; noisier `cold-f32/`, `cold-amp/` |
+| first epoch, warm, and `folo predict` | `ws-stdout.txt` (the script's summary lines: epoch 1, process wall, compile timers), `ws-f32/log-*.txt`, `ws-amp/log-*.txt`, `ws-predict/log-*.txt` (each run's own output) |
+| first epoch, cold driver cache | `cold-stdout.txt` (the summary lines), `cold-f32b/log-1..9.txt`, `cold-ampb/log-1..9.txt`, `cold-amp-adamw/log-1..9.txt`; noisier `cold-f32/`, `cold-amp/` |
 | `folo val` | `val/` (`*.log`), `val.json`; #186 attribution `val-186/`, `val-186.json` |
 | `--cache ram` | `cacheram/{base,new,ram}-r1..3.txt` |
 | CPU rows | `cpu/n28c.txt`, `s28c.txt`, `m28c.txt`, `b16c.txt`, `trainc.txt`; loaded runs `cpu/n28.txt`, `n28b.txt`, `s28.txt`, `m28.txt`, `b16.txt`, `b16b.txt`, `train.txt`, `trainb.txt` |
