@@ -9,9 +9,9 @@ import CircleCheck from '$icons/circle-check';
 import CircleAlert from '$icons/circle-alert';
 import Info from '$icons/info';
 import X from '$icons/x';
-import { css, Dynamic, Key } from 'fw';
+import { css, Dynamic, Show } from 'fw';
 import Button from './Button';
-import type { DialogStatus } from './feedback';
+import type { DialogStatus, Notice } from './feedback';
 
 export default function DialogStatusRegion(props: { status: DialogStatus; class?: string }) {
   const icons = { success: CircleCheck, error: CircleAlert, info: Info };
@@ -31,28 +31,39 @@ export default function DialogStatusRegion(props: { status: DialogStatus; class?
     from = null;
   }
 
-  const notice = () => {
-    const n = () => props.status.notice!;
-    return (
-      <Key when={n().id}>
-        <div class={`notice ${n().tone}`} data-notice>
-          <span class="icon">
-            <Dynamic component={icons[n().tone]} size={16} strokeWidth={1.75} aria-hidden="true" />
-          </span>
-          <div class="text">
-            <p class="title">{n().title}</p>
-            {n().detail ? <p class="detail">{n().detail}</p> : null}
-          </div>
-          <Button variant="ghost" size="sm" icon={X} aria-label="Dismiss" onclick={dismiss} />
-        </div>
-      </Key>
-    );
+  // Each notice is drawn from the value it had when shown (Show keyed: a new notice is a new one), never by reading
+  // `status.notice` again inside it: once a notice had replaced one of another tone (a copied path, then a failed
+  // copy), clearing it (Dismiss, the dialog closing) ran the notice's own bindings before its branch was removed, and
+  // they read null ("Cannot read properties of null (reading 'tone')").
+  const notice = (n: Notice) => (
+    <div class={`notice ${n.tone}`} data-notice>
+      <span class="icon">
+        <Dynamic component={icons[n.tone]} size={16} strokeWidth={1.75} aria-hidden="true" />
+      </span>
+      <div class="text">
+        <p class="title">{n.title}</p>
+        {n.detail ? <p class="detail">{n.detail}</p> : null}
+      </div>
+      <Button variant="ghost" size="sm" icon={X} aria-label="Dismiss" onclick={dismiss} />
+    </div>
+  );
+  const shown = (error: boolean) => {
+    const n = props.status.notice;
+    return n && (n.tone === 'error') === error ? n : null;
   };
 
   return (
     <div class={`dialog-status ${props.class ?? ''}`} class:on={!!props.status.notice} ref={(e) => (el = e)} onfocusin={onfocusin}>
-      <div role="status">{props.status.notice && props.status.notice.tone !== 'error' ? notice() : null}</div>
-      <div role="alert">{props.status.notice?.tone === 'error' ? notice() : null}</div>
+      <div role="status">
+        <Show when={shown(false)} keyed>
+          {(n) => notice(n())}
+        </Show>
+      </div>
+      <div role="alert">
+        <Show when={shown(true)} keyed>
+          {(n) => notice(n())}
+        </Show>
+      </div>
     </div>
   );
 }
