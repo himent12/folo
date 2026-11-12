@@ -223,7 +223,7 @@ fn pool_reports_the_buffers_it_lets_go() {
 fn bind_cache_is_bounded() {
     let ctx = gpu!();
     let dev = ctx.wgpu_device();
-    let k = Kernel::compile(dev, &THREE, &Spec::new()).unwrap();
+    let k = Kernel::compile(dev, &THREE, &Spec::new(), None).unwrap();
     let uniform = buffer(dev, wgpu::BufferUsages::UNIFORM);
     let bufs: Vec<_> = (0..24).map(|_| buffer(dev, wgpu::BufferUsages::STORAGE)).collect();
     // Combination `i` (distinct for i < 24^3).
@@ -287,7 +287,7 @@ fn bind_cache_is_bounded() {
 fn the_reverse_index_stays_bounded() {
     let ctx = gpu!();
     let dev = ctx.wgpu_device();
-    let k = Kernel::compile(dev, &THREE, &Spec::new()).unwrap();
+    let k = Kernel::compile(dev, &THREE, &Spec::new(), None).unwrap();
     let uniform = buffer(dev, wgpu::BufferUsages::UNIFORM);
     let keep = buffer(dev, wgpu::BufferUsages::STORAGE);
     let out = buffer(dev, wgpu::BufferUsages::STORAGE);
