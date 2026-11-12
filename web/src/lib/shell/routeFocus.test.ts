@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it } from 'vitest';
-import { focusRoute, holdRouteFocus, isNewPage, routeFocusTarget } from './routeFocus';
+import { focusRoute, holdRouteFocus, isNewPage, landOn, routeFocusTarget } from './routeFocus';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -26,6 +26,26 @@ describe('route focus', () => {
     expect(routeFocusTarget(m)).toBe(h1);
     expect(focusRoute(m)).toBe(h1);
     expect(document.activeElement).toBe(h1);
+  });
+
+  it('lands on the part the URL asks for (landOn), leaving the scroll where the page put it', () => {
+    const m = main('<h1 tabindex="-1" data-route-focus>Settings</h1><section><h2 id="units-title" tabindex="-1">Units</h2></section>');
+    const units = m.querySelector<HTMLElement>('#units-title')!;
+    landOn(units);
+    let top = 0;
+    const real = window.scrollTo;
+    window.scrollTo = (() => void top++) as typeof window.scrollTo;
+    try {
+      expect(focusRoute(m)).toBe(units);
+      expect(document.activeElement).toBe(units);
+      expect(top).toBe(0);
+      // Another part marked later is the one landing: one mark at a time.
+      const h1 = m.querySelector<HTMLElement>('h1')!;
+      landOn(h1);
+      expect(units.hasAttribute('data-route-landing')).toBe(false);
+    } finally {
+      window.scrollTo = real;
+    }
   });
 
   it('falls back to the main region while the page has no heading yet', () => {

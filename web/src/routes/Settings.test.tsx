@@ -6,6 +6,7 @@ import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { prefs } from '$lib/prefs';
 import { parse, router } from '$lib/router';
+import { focusRoute } from '$lib/shell/routeFocus';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { render } from '../../framework/testing';
 import Settings from './Settings';
@@ -154,6 +155,23 @@ describe('Settings', () => {
       HTMLElement.prototype.scrollIntoView = real;
       focus.mockRestore();
     }
+  });
+
+  // v-shell N6: the palette's "Units" from Runs opened Settings at the top: the new page's route focus (App, a frame
+  // after the page renders) went to the title and scrolled to the top after the section's own jump.
+  it('lands on the section ?section= names when it is opened as a new page', async () => {
+    hub.api = new MockApi('normal', 0);
+    const top = vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    router.route = parse('#/settings?section=units');
+    c = mount(Settings, { target });
+    flushSync();
+    const heading = target.querySelector<HTMLElement>('#units-title')!;
+    expect(heading.hasAttribute('data-route-landing')).toBe(true);
+    // What App does for a new page.
+    expect(focusRoute(target)).toBe(heading);
+    expect(document.activeElement).toBe(heading);
+    expect(top).not.toHaveBeenCalled();
+    top.mockRestore();
   });
 
   it('says which theme is current in its own card and in its radio’s name', () => {
