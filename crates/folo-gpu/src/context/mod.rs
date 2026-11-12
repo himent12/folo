@@ -74,6 +74,11 @@ pub const ENV_FLUSH_EVERY: &str = "FOLO_GPU_FLUSH_EVERY";
 pub const DEFAULT_FLUSH_INTERVAL: u32 = 64;
 /// Largest flush interval.
 pub const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
+/// Environment variable that overrides the wait spin ([`GpuContext::set_wait_spin`]) of contexts created
+/// afterwards, in microseconds (`FOLO_GPU_WAIT_SPIN_US=0` blocks at once).
+pub const ENV_WAIT_SPIN_US: &str = "FOLO_GPU_WAIT_SPIN_US";
+/// How long a wait polls the device before it blocks, by default.
+pub const DEFAULT_WAIT_SPIN: std::time::Duration = std::time::Duration::from_millis(2);
 /// Dispatches before the first submission after the device was idle (or the flush interval, when that is smaller).
 /// The limit then doubles with every submission up to the flush interval, so the GPU starts on the head of a pass
 /// while the host still encodes the rest (a synchronised batch-1 forward otherwise spends a third of its latency
@@ -248,6 +253,8 @@ struct Inner {
     staging: Arc<Mutex<StagingFree>>,
     /// Dispatches after which the open batch is submitted on its own ([`GpuContext::set_flush_interval`]).
     flush_every: AtomicU32,
+    /// How long a wait polls the device before it blocks, in nanoseconds ([`GpuContext::set_wait_spin`]).
+    wait_spin_ns: AtomicU64,
     /// Per-kernel timestamp queries (`FOLO_GPU_PROFILE=1`, see [`crate::profile`]).
     profiler: Option<Mutex<Profiler>>,
     /// Compiled pipelines kept on disk between processes ([`crate::pipeline_cache`]).
@@ -451,6 +458,17 @@ impl GpuContext {
     /// The current flush interval ([`GpuContext::set_flush_interval`]).
     pub fn flush_interval(&self) -> u32 {
         self.inner.flush_every.load(Ordering::Relaxed)
+    }
+
+    /// How long a wait for the GPU ([`GpuContext::sync`], a readback) polls the device before it blocks in the
+    /// driver (the default is [`DEFAULT_WAIT_SPIN`], or [`ENV_WAIT_SPIN_US`]); zero blocks at once.
+    pub fn set_wait_spin(&self, spin: std::time::Duration) {
+        self.inner.wait_spin_ns.store(spin.as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+    }
+
+    /// The current wait spin ([`GpuContext::set_wait_spin`]).
+    pub fn wait_spin(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.inner.wait_spin_ns.load(Ordering::Relaxed))
     }
 
     /// Dispatch and submission counters (benchmarks use the difference across a pass).

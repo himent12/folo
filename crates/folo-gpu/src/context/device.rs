@@ -419,6 +419,13 @@ impl GpuContext {
                         .unwrap_or(DEFAULT_FLUSH_INTERVAL)
                         .clamp(1, MAX_DISPATCHES_PER_BATCH),
                 ),
+                wait_spin_ns: AtomicU64::new(
+                    std::env::var(super::ENV_WAIT_SPIN_US)
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(|us| us.saturating_mul(1000))
+                        .unwrap_or(super::DEFAULT_WAIT_SPIN.as_nanos() as u64),
+                ),
                 profiler,
                 pipeline_cache,
                 cache_dir: options.pipeline_cache_dir.clone(),

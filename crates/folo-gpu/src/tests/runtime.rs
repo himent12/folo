@@ -358,3 +358,33 @@ fn profiling_context_survives_device_loss() {
     assert!(is_lost(ctx.sync()), "and a later one, on the same batch lock");
     let _ = ctx.profile_take();
 }
+
+/// Waits with every spin budget give the right results: none (block at once), shorter than the work (spin, then
+/// block), and far longer than the work, where the wait must end as soon as the queue is empty, not when the budget
+/// runs out.
+#[test]
+fn waits_spin_then_block() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::new().unwrap();
+    assert_eq!(ctx.wait_spin(), crate::context::DEFAULT_WAIT_SPIN);
+    let one = GpuTensor::from_slice(&ctx, &[1.0], &[1]).unwrap();
+    for (spin, adds) in [(0, 300), (20, 3000), (5_000_000, 50)] {
+        ctx.set_wait_spin(std::time::Duration::from_micros(spin));
+        let mut t = GpuTensor::from_slice(&ctx, &vec![0.5f32; 4096], &[4096]).unwrap();
+        for _ in 0..adds {
+            t = t.add(&one).unwrap();
+        }
+        let start = std::time::Instant::now();
+        ctx.sync().unwrap();
+        let waited = start.elapsed();
+        assert!(t.to_vec().unwrap().iter().all(|&v| v == 0.5 + adds as f32), "spin {spin} us");
+        if spin == 5_000_000 {
+            assert!(
+                waited < std::time::Duration::from_secs(2),
+                "a 5 s spin ended when the queue emptied: {waited:?}"
+            );
+        }
+    }
+    ctx.destroy_device();
+    assert!(matches!(ctx.sync(), Err(crate::GpuError::DeviceLost(_))), "a lost device ends the spin");
+}
