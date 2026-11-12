@@ -193,8 +193,9 @@ keeps one, as the YOLO reader drops duplicate label lines.
   loader starts, `ram_cache_bytes` (every image's resized size from the dataset's probed sizes, 3 bytes a pixel,
   plus its boxes and its entry) is reserved against `RAM_CACHE_SHARE` (80%) of the memory available to the
   process, and the loader is refused with the numbers when it does not fit. Available is the system's available
-  memory and, in a Linux container with a memory limit, at most what its cgroup has left (the limit less the
-  cgroup's usage, not counting its inactive file cache). The reservation is process-wide and held until the
+  memory and, on Linux, at most what the tightest memory limit among the process's cgroups and their ancestors
+  has left (a container, a systemd scope, cgroup v2 or v1: the limit less the usage, not counting the inactive file
+  cache; read from `/proc/self/cgroup`). The reservation is process-wide and held until the
   loader is dropped, so two loaders created before either has filled are not both admitted against the same
   memory (a filled cache counts twice, in its reservation and in the memory it took: a further one is refused
   rather than risked). An image that cannot be read is not cached (the loader substitutes as without a cache).

@@ -95,28 +95,70 @@ pub fn ram_cache_bytes(ds: &dyn Dataset, imgsz: u32) -> u64 {
         .sum()
 }
 
-/// Memory this process can still take, in bytes: what the system has available, and in a Linux container with
-/// a memory limit no more than its cgroup has left (the limit less the cgroup's usage, its reclaimable inactive
-/// file cache not counted, as `docker stats` counts it).
+/// Memory this process can still take, in bytes: what the system has available, and on Linux no more than the
+/// tightest memory limit of its cgroups ([`cgroup_free`]: a container, a systemd scope, any ancestor).
 fn available_memory() -> u64 {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
     let host = sys.available_memory();
-    match sys.cgroup_limits() {
-        Some(cg) => host.min(cg.free_memory.saturating_add(cgroup_inactive_file())),
-        None => host,
-    }
+    #[cfg(target_os = "linux")]
+    let host = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|text| cgroup_free(&text, std::path::Path::new("/sys/fs/cgroup")))
+        .map_or(host, |cg| host.min(cg));
+    host
 }
 
-/// The cgroup's inactive file cache in bytes (cgroup v2, else v1), 0 when unknown.
-fn cgroup_inactive_file() -> u64 {
-    [
-        ("/sys/fs/cgroup/memory.stat", "inactive_file"),
-        ("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"),
-    ]
-    .iter()
-    .find_map(|(path, key)| stat_value(&std::fs::read_to_string(path).ok()?, key))
-    .unwrap_or(0)
+/// What the memory limits of the process's cgroups still allow, the tightest of them, given `/proc/self/cgroup`'s
+/// text and the cgroup mount `root`: for the process's own cgroup and every ancestor up to the root, of both
+/// hierarchies, the limit less the usage, the reclaimable inactive file cache not counted as used (as
+/// `docker stats` counts it). cgroup v2: `memory.max` / `memory.current` / `inactive_file`; v1 (the `memory`
+/// controller under `root/memory`): `memory.limit_in_bytes` / `memory.usage_in_bytes` / `total_inactive_file`.
+/// `None` when no cgroup on the way has a limit.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn cgroup_free(proc_cgroup: &str, root: &std::path::Path) -> Option<u64> {
+    let mut tightest: Option<u64> = None;
+    for line in proc_cgroup.lines() {
+        let mut parts = line.splitn(3, ':');
+        let (Some(_), Some(controllers), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let (base, v2) = if controllers.is_empty() {
+            (root.to_path_buf(), true)
+        } else if controllers.split(',').any(|c| c == "memory") {
+            (root.join("memory"), false)
+        } else {
+            continue;
+        };
+        let mut dir = base.join(path.trim_start_matches('/'));
+        loop {
+            if let Some(free) = cgroup_free_at(&dir, v2) {
+                tightest = Some(tightest.map_or(free, |t| t.min(free)));
+            }
+            if dir == base || !dir.pop() || !dir.starts_with(&base) {
+                break;
+            }
+        }
+    }
+    tightest
+}
+
+/// What the memory limit of the cgroup at `dir` still allows (see [`cgroup_free`]); `None` without a limit.
+fn cgroup_free_at(dir: &std::path::Path, v2: bool) -> Option<u64> {
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+    let number = |name: &str| read(name)?.trim().parse::<u64>().ok();
+    let (limit, usage, inactive) = if v2 {
+        (number("memory.max")?, number("memory.current")?, "inactive_file")
+    } else {
+        // v1 reports "no limit" as a huge number (the largest page-aligned i64).
+        (
+            number("memory.limit_in_bytes").filter(|&l| l < 1 << 62)?,
+            number("memory.usage_in_bytes")?,
+            "total_inactive_file",
+        )
+    };
+    let reclaimable = read("memory.stat").and_then(|s| stat_value(&s, inactive)).unwrap_or(0);
+    Some(limit.saturating_sub(usage.saturating_sub(reclaimable)))
 }
 
 /// The value of `key` in a cgroup `memory.stat` (`key value` lines).
@@ -196,6 +238,9 @@ mod tests {
             let (s, o) = cache.get(i, || ds.get(i)).unwrap();
             assert_eq!(([s.image.width, s.image.height], o), (size, orig), "image {i}");
             assert_eq!(s, resize_long_side(ds.get(i).unwrap(), 64));
+            // What the slot holds, not only what `get` returns: the resized sample (the memory estimate's size).
+            let kept = cache.slots[i].get().expect("filled");
+            assert_eq!((&kept.0, kept.1), (&s, orig), "image {i} is stored resized");
             let (again, o) = cache.get(i, || panic!("image {i} loaded twice")).unwrap();
             assert_eq!((again, o), (s, orig));
         }
@@ -212,6 +257,36 @@ mod tests {
         let c = Reservation::take(&POOL, 500, free).unwrap();
         drop((b, c));
         assert_eq!(POOL.load(Ordering::SeqCst), 0);
+    }
+
+    /// The tightest limit of the process's cgroup and its ancestors, v2 and v1, unlimited levels skipped.
+    #[test]
+    fn cgroup_limits_of_the_cgroup_and_its_ancestors() {
+        let root = folo_test_support::TestDir::new("data-cgroup");
+        let write = |rel: &str, name: &str, text: &str| {
+            let d = root.join(rel);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(name), text).unwrap();
+        };
+        // v2: the scope is unlimited, its slice allows 1000 - (900 - 300 inactive) = 400, the root has no files.
+        write("user.slice/run.scope", "memory.max", "max\n");
+        write("user.slice/run.scope", "memory.current", "10\n");
+        write("user.slice", "memory.max", "1000\n");
+        write("user.slice", "memory.current", "900\n");
+        write("user.slice", "memory.stat", "active_file 5\ninactive_file 300\n");
+        assert_eq!(cgroup_free("0::/user.slice/run.scope\n", &root), Some(400));
+        // A tighter scope wins.
+        write("user.slice/run.scope", "memory.max", "50\n");
+        assert_eq!(cgroup_free("0::/user.slice/run.scope\n", &root), Some(40));
+        // v1 memory controller; "no limit" is a huge number.
+        write("memory/docker/abc", "memory.limit_in_bytes", "2000\n");
+        write("memory/docker/abc", "memory.usage_in_bytes", "500\n");
+        write("memory/docker", "memory.limit_in_bytes", "9223372036854771712\n");
+        write("memory/docker", "memory.usage_in_bytes", "1\n");
+        assert_eq!(cgroup_free("12:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n", &root), Some(1500));
+        // No limit anywhere.
+        assert_eq!(cgroup_free("0::/\n", &root), None);
+        assert_eq!(cgroup_free("", &root), None);
     }
 
     #[test]
