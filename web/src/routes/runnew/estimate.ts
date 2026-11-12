@@ -105,15 +105,12 @@ export interface Warmup {
 export const WARMUP_EPOCHS = 3;
 
 /**
- * docs/MODEL.md §8.4 (`folo_nn::sched::warmup_iters`): `W = 0` when `warmup_epochs <= 0`, else
- * `min(max(round(warmup_epochs · spe), F), max(epochs − 1, 0) · spe)` with the floor `F = min(100, floor(0.3 · T))`
- * and `T = epochs · spe`. The floor never takes more than 30% of a short run.
+ * docs/MODEL.md §8.4 (`folo_nn::sched::warmup_iters_floor` with a new run's `warmup_floor` 0): `W = 0` when
+ * `warmup_epochs <= 0`, else `min(round(warmup_epochs · spe), max(epochs − 1, 0) · spe)`.
  */
 export function warmupIters(warmupEpochs: number, epochs: number, spe: number): number {
   if (!(warmupEpochs > 0)) return 0;
-  const total = epochs * spe;
-  const floor = Math.min(100, Math.floor((total * 3) / 10));
-  return Math.min(Math.max(Math.round(warmupEpochs * spe), floor), Math.max(epochs - 1, 0) * spe);
+  return Math.min(Math.round(warmupEpochs * spe), Math.max(epochs - 1, 0) * spe);
 }
 
 /**

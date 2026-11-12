@@ -13,7 +13,7 @@ use crate::model::HeadMode;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OptimizerChoice {
-    /// AdamW for short runs (≤ 10000 iterations), MuSGD otherwise (`auto_rule` 3; SGD before), with the LR of §8.2.
+    /// MuSGD at lr0 0.01 for every run (`auto_rule` 5 and 4; rules 1 to 3 picked AdamW for short runs), §8.2.
     #[default]
     Auto,
     /// SGD with Nesterov momentum.
@@ -51,9 +51,10 @@ pub struct TrainConfig {
     pub device: String,
     /// Optimizer.
     pub optimizer: OptimizerChoice,
-    /// Version of the `auto` rule (MODEL.md §8.2): 3, the current one, picks MuSGD for long runs; 2 picks SGD there
-    /// and floors the AdamW `lr0` at 0.001 (as 3 does); 1 is the reference fit without the floor, with SGD. Missing
-    /// in configs from before it: 1, so a run resumes with the rule it started with.
+    /// Version of the `auto` rule (MODEL.md §8.2): 5, the current one, is 4 (MuSGD for every run, momentum 0.937,
+    /// bias warmup from 0.1) with MuSGD step weights 0.5 / 0.5 from scratch; 3 picks MuSGD for long runs and AdamW
+    /// (`lr0` floored at 0.001) for short ones; 2 picks SGD for long runs; 1 is the reference fit without the floor,
+    /// with SGD. Missing in configs from before it: 1, so a run resumes with the rule it started with.
     #[serde(default = "legacy_auto_rule")]
     pub auto_rule: u32,
     /// Base LR (ignored by `auto`).

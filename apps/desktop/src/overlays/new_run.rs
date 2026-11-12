@@ -241,7 +241,7 @@ impl FoloApp {
         // rows, so the Schedule's controls are in view without scrolling.
         let short = window.viewport_size().height < px(700.);
         // What Auto resolves to for this dataset, batch and length (the engine's own rule, docs/MODEL.md §8.2:
-        // MuSGD at 0.01 past 10,000 optimizer steps of a 64-image nominal batch, else AdamW at its fitted rate), so
+        // rule 5 picks MuSGD at 0.01 for every run; older rules picked by run length), so
         // the form can say which, and that the rate field is then unused. Written as every rate is (1.11×10⁻³).
         let auto_pick = ds.as_ref().filter(|_| opt == 0).map(|d| {
             let a = folo_nn::optim::auto_optimizer(
@@ -667,7 +667,7 @@ impl FoloApp {
                                 (0, Some((kind, _))) => {
                                     format!("Auto: {kind} for this run, at its own learning rate")
                                 }
-                                (0, None) => "Auto: MuSGD for long runs, else AdamW".to_string(),
+                                (0, None) => "Auto: MuSGD for every run, at its own learning rate".to_string(),
                                 (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
                                 (2, _) => "AdamW with weight decay".to_string(),
                                 _ => "MuSGD: SGD plus a Muon update on conv weights".to_string(),

@@ -621,7 +621,7 @@ css`
     display: block;
     font-size: var(--type-sm-size);
   }
-  /* What a short value means ("Auto": AdamW for short runs, else SGD), under the value it explains. */
+  /* What a short value means ("Auto": MuSGD for every run), under the value it explains. */
   .v-about {
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);

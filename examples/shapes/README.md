@@ -12,8 +12,8 @@ cargo run --release -p folo-data --example shapes -- D:/folo-data/shapes-smoke
 #    `cargo folo dataset synth D:/folo-data/shapes-alt --images 2200 --val-frac 0.090909 --imgsz 320 \
 #      --classes circle,square,triangle,star` is close, but its generator defaults keep 5 % empty images.
 
-# 2. Train (MODEL.md's run; `auto` picks AdamW at lr0 0.00125, 125 batches = 32 optimizer steps per epoch,
-#    100 warmup steps, mosaic off for the last 5 epochs).
+# 2. Train (MODEL.md's run; `auto` picks MuSGD at lr0 0.01, 125 batches = 32 optimizer steps per epoch,
+#    96 warmup steps (3 epochs), mosaic off for the last 5 epochs).
 cargo folo train --data D:/folo-data/shapes-smoke --arch folo-n --imgsz 320 --epochs 30 --batch 16 \
   --close-mosaic 5 --seed 0 --project runs --name smoke-cpu
 #    add --json for one JSON record per event on stdout (metrics.jsonl in the run folder has every step).
@@ -29,7 +29,8 @@ cargo folo export --model runs/smoke-cpu/weights/best.folo --format folo-f16
 
 ## Result (CPU)
 
-Measured 2026-11-08 on the dev machine (28 threads, Windows), commit of PR #33, `--device cpu`: 30 epochs in
+Measured 2026-11-08 on the dev machine (28 threads, Windows), commit of PR #33, `--device cpu`, when `auto` still
+picked AdamW at lr0 0.00125 with a 100-step warmup here (docs/MODEL.md §10.6 has the current rule's run): 30 epochs in
 72 min (4326 s; 16–18 img/s training when the machine was otherwise idle, slower while other builds shared it). No
 non-finite batch. **Pass**: the gate (mAP50 ≥ 0.90, mAP50-95 ≥ 0.75) was first met at epoch 9 (0.936 / 0.772).
 The reference (Ultralytics YOLO11n, MODEL.md §10.6) reached 0.854 / 0.904 / 0.933 / 0.948 mAP50 at epochs

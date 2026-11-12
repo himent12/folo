@@ -302,37 +302,27 @@ export const optimizerSteps = (images: number, batch: number) =>
   Math.max(1, Math.ceil(Math.ceil(images / Math.max(1, batch)) / accumulate(batch)));
 
 /**
- * Warmup in optimizer steps (folo_nn::warmup_iters, 3 epochs): at least min(100, 30 % of the run), at most every
- * epoch but the last.
+ * Warmup in optimizer steps (folo_nn::warmup_iters_floor with a new run's `warmup_floor` 0, 3 epochs): `warmup_epochs`
+ * epochs of steps, at most every epoch but the last.
  */
 export function warmupIters(epochs: number, stepsPerEpoch: number, warmupEpochs = 3): number {
-  const total = epochs * stepsPerEpoch;
-  const floor = Math.min(100, Math.floor(0.3 * total));
-  return Math.min(Math.max(Math.round(warmupEpochs * stepsPerEpoch), floor), Math.max(epochs - 1, 0) * stepsPerEpoch);
+  return Math.min(Math.round(warmupEpochs * stepsPerEpoch), Math.max(epochs - 1, 0) * stepsPerEpoch);
 }
 
 /**
  * `Run.resolved` as the real trainer resolves `config` on `images` training images of `classes` classes (folo-vision
- * `TrainConfig::resolved_train`, docs/MODEL.md §8.2): `auto` is SGD at 0.01 above 10000 iterations (`ceil(images /
- * max(batch, 64)) · epochs`), else AdamW at `round(0.002 · 5 / (4 + classes), 6)`, both with momentum 0.9 and no
- * warmup bias LR; a named optimizer keeps `lr0` and the recipe's momentum 0.937. `stepsPerEpoch` is the run's own
- * count, so the two never disagree.
+ * `TrainConfig::resolved_train`, docs/MODEL.md §8.2): `auto` (rule 5) is MuSGD at 0.01 for every run, with momentum
+ * 0.937 and warmup bias LR 0.1; a named optimizer keeps `lr0` and the same momentum and bias LR. `stepsPerEpoch` is
+ * the run's own count, so the two never disagree.
  */
 export function resolveTrain(c: TrainConfig, images: number, classes: number, stepsPerEpoch: number): ResolvedTrain {
   const nbs = 64;
   const acc = accumulate(c.batch);
-  let kind: ResolvedTrain['optimizer'];
-  let lr0 = c.lr0;
-  let momentum = 0.937;
-  let warmupBias = 0.1;
-  if (c.optimizer === 'auto') {
-    const iterations = Math.ceil(images / Math.max(c.batch, nbs, 1)) * c.epochs;
-    // docs/MODEL.md §8.2, `auto_rule` 3: MuSGD for long runs, AdamW at the reference fit floored at 0.001.
-    kind = iterations > 10_000 ? 'musgd' : 'adamw';
-    lr0 = kind === 'musgd' ? 0.01 : Math.max(Math.round(((0.002 * 5) / (4 + classes)) * 1e6) / 1e6, 0.001);
-    momentum = 0.9;
-    warmupBias = 0;
-  } else kind = c.optimizer;
+  // docs/MODEL.md §8.2, `auto_rule` 5: MuSGD at 0.01 for every run (its step weights are not part of `resolved`).
+  const kind: ResolvedTrain['optimizer'] = c.optimizer === 'auto' ? 'musgd' : c.optimizer;
+  const lr0 = c.optimizer === 'auto' ? 0.01 : c.lr0;
+  const momentum = 0.937;
+  const warmupBias = 0.1;
   return {
     optimizer: kind,
     lr0,

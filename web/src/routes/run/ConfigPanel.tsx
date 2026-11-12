@@ -41,7 +41,7 @@ type Row = [string, Setting];
 const id = (value: string): Setting => ({ value, ident: true });
 const plain = (value: string): Setting => ({ value });
 
-/** A value too long to sit beside its label in a narrow column ("Auto (AdamW for short runs, else SGD)"): in a
+/** A value too long to sit beside its label in a narrow column ("Auto (MuSGD for every run)"): in a
  *  column under 360 px it takes the full width under the label instead of wrapping to a right-aligned second line. */
 const isLong = (v: Setting) => v.value.length + (v.note ? v.note.length + 1 : 0) > 32;
 
@@ -268,7 +268,7 @@ css`
   dt {
     color: var(--text-tertiary);
   }
-  /* What a short value means ("Auto": AdamW for short runs, else SGD), under its label at 12 px: a value cell holds one
+  /* What a short value means ("Auto": MuSGD for every run), under its label at 12 px: a value cell holds one
      short value and an explanation goes under the label, so every value stays on its row's right edge. */
   dt .sub {
     display: block;

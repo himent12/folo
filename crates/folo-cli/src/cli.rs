@@ -160,7 +160,7 @@ pub struct DoctorArgs {
 /// Optimizer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OptimizerArg {
-    /// MuSGD for long runs, AdamW for short ones (docs/MODEL.md §8.2).
+    /// MuSGD at lr0 0.01 for every run (`auto` rule 5, docs/MODEL.md §8.2).
     Auto,
     /// SGD with Nesterov momentum.
     Sgd,

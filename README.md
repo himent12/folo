@@ -36,16 +36,16 @@ the method, the raw JSON and how much noise to expect.
 
 | metric | folo-n | yolo26n (best config) | |
 |---|---:|---:|---|
-| GPU forward, batch 1, f32 (median latency) | **2.09 ms** | 4.95 ms (6.04 ms default) | FOLO 2.4× faster |
-| GPU forward, batch 16, f32 (throughput) | **1648 img/s** | 1454 img/s (TF32) | FOLO 13% faster |
-| GPU forward, batch 16, f16 (tensor cores) | **3078 img/s** | 2370 img/s (fp16) | FOLO 30% faster |
-| Training step, batch 16 (fwd + loss + bwd + SGD) | **327 img/s** (f32) / **537 img/s** (AMP) | 202 img/s (fp32 with TF32) / 252 img/s (AMP) | FOLO 1.6× / 2.1× faster |
-| Trainer, sustained (data loader, mosaic, 8 workers) | **347 img/s** (f32) / **500 img/s** (AMP) | 199 / 224 img/s | FOLO 1.7× / 2.2× faster |
+| GPU forward, batch 1, f32 (median latency) | **1.14 ms** | 4.95 ms (6.04 ms default) | FOLO 4.3× faster |
+| GPU forward, batch 16, f32 (throughput) | **2081 img/s** | 1454 img/s (TF32) | FOLO 43% faster |
+| GPU forward, batch 16, f16 (tensor cores) | **4159 img/s** | 2370 img/s (fp16) | FOLO 1.75× faster |
+| Training step, batch 16 (fwd + loss + bwd + SGD) | **380 img/s** (f32) / **594 img/s** (AMP) | 202 img/s (fp32 with TF32) / 252 img/s (AMP) | FOLO 1.9× / 2.4× faster |
+| Trainer, sustained (data loader, mosaic, 8 workers) | **388 img/s** (f32) / **613 img/s** (AMP) | 199 / 224 img/s | FOLO 1.9× / 2.7× faster |
 | Training step peak GPU memory, batch 16, f32 | **3467 MiB** | 4517 MiB (2646 MiB AMP) | FOLO uses 23% less in f32 |
-| GPU end to end, batch 1 (decoded image in, boxes out) | **2.63 ms** (f32) | 6.92 ms | FOLO 2.6× faster |
-| GPU end to end, batch 16 | **1898 img/s** (f16, tensor cores) / 1239 (f32) | 615 img/s (fp16) / 536 (fp32) | FOLO 3.1× faster |
-| CPU forward, batch 1, f32 | **18.3 ms** (28 threads) | 22.8 ms (8 threads) | FOLO 1.25× faster |
-| CPU end to end, batch 1 | **18.6 ms** (28 threads) | 24.8 ms | FOLO 1.33× faster |
+| GPU end to end, batch 1 (decoded image in, boxes out) | **1.75 ms** (f32) | 6.92 ms | FOLO 4.0× faster |
+| GPU end to end, batch 16 | **2155 img/s** (f16, tensor cores) / 1469 (f32) | 615 img/s (fp16) / 536 (fp32) | FOLO 3.5× faster |
+| CPU forward, batch 1, f32 | **12.7 ms** (28 threads) | 22.8 ms (8 threads) | FOLO 1.8× faster |
+| CPU end to end, batch 1 | **13.1 ms** (28 threads) | 24.8 ms | FOLO 1.9× faster |
 
 Accuracy is a separate question: on COCO val2017, folo-n reaches AP 0.317 after 62 epochs from scratch (a 300-epoch
 run, paused there; 0.314 for the finished 50-epoch run), against
@@ -55,12 +55,17 @@ AP 0.416 after 56 epochs from scratch, against 0.480 for yolo26s
 20,000-image COCO proxy at 320 px, 20 epochs, from scratch), FOLO's trainer and Ultralytics' land level with each
 other per epoch (SGD 0.086 vs 0.085 AP, MuSGD 0.113–0.116 vs 0.113, both optimizers chosen explicitly), so the gap is
 data and schedule, not the trainer; full COCO at an equal budget has not been run. The folo-s run is the first full
-COCO run of `auto`'s MuSGD recipe for long runs (rule 3: momentum 0.9, warmup_bias_lr 0; the proxy runs used 0.937
-and 0.1, which `auto` rule 4 now uses for every run); it shows the recipe works, not how much it gains over SGD there.
+COCO run of `auto`'s MuSGD recipe (rule 3 then: momentum 0.9, warmup_bias_lr 0); it shows the recipe works, not how
+much it gains over SGD there. `auto` now uses rule 5 (MuSGD for every run, momentum 0.937, bias warmup from 0.1, step
+weights 0.5 / 0.5 from scratch), which trains the COCO proxy to 0.123 AP against rule 3's 0.076; a full COCO run under
+it has not been made yet.
 
-These are the hill-climb build's numbers (2026-11-09, quiet machine, alternated with the earlier build). FOLO is not
-ahead everywhere: folo-s ties yolo26s on batch-16 forward throughput, and CPU batch-1 latency did not move in the
-hill-climb.
+These are `main`'s numbers after the second hill-climb (2026-11-12, quiet machine, alternated with the build before
+it; docs/BENCHMARKS.md, Hill-climb 2). folo-s now beats yolo26s on every row measured for it as well, batch-16 forward included (its trainer row was not
+measured). One
+thing got slower: the very first AMP epoch on a machine, before FOLO has a kernel list there and while the driver has
+never compiled FOLO's kernels, takes about 1.6 s longer (23 s instead of 21 s); every later run compiles in the
+background.
 
 With the whole trainer (data loader, augmentation, validation), folo-n trains the shapes gate set (2,000 images
 at 320 px, 30 epochs) to mAP50 0.980 in **169 s on the GPU**, 25.6× faster than
