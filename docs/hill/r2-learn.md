@@ -211,9 +211,9 @@ so these are other rounding trajectories of the same recipe.
   nothing. `loss.cls_gain=1.0`: +4.5% on the proxy (three seeds) but level on the shapes gate and −0.006 on BCCD:
   not a default; a class-count effect (80 classes) is the likely reading and needs full COCO to tell.
 - Mosaic on BCCD (rule-5 build, seeds 0 and 1; test AP 0.6172 / 0.6268 at the default `close_mosaic` 10):
-  `--close-mosaic` 3, 20 or 50 give bit-identical results, because the best checkpoint is from epoch 37 / 26, before
-  mosaic closes in any of them (the closing epochs never decide the score); `--set augment.mosaic=0` 0.6196 / 0.6256,
-  level. A fine-tune peaks around epoch 17–37 of 100 and holds there, whatever the mosaic schedule.
+  `--close-mosaic` 3 and 50 (seeds 0 and 1) and 20 (seed 0 only) give bit-identical results, because the best
+  checkpoint is from epoch 37 / 26, before mosaic closes in any of them (the closing epochs never decide the score);
+  `--set augment.mosaic=0` 0.6196 / 0.6256, level.
 - ProgLoss and STAL (YOLO26): FOLO already has both (the o2m/o2o loss-weight decay of MODEL.md §6.6 and the 16 px
   candidate enlargement of §7.3); nothing to add.
 
@@ -228,8 +228,9 @@ so these are other rounding trajectories of the same recipe.
 - Full-scale COCO under rule 5 (the folo-s run used rule 3: momentum 0.9, bias warmup 0, weights 0.2 / 1.0).
 - EMA for short fine-tunes (item 4): with 400 optimizer steps the EMA decay `0.9999 · (1 − e^{−t/2000})` ends at
   0.18, so BCCD's validated weights are nearly the live model; a shorter `tau` needs a config key (none today).
-- BCCD stays level with yolo26n (0.625 vs 0.626): its fine-tunes peak by epoch 17–37 and the remaining 60+ epochs add
-  nothing; what is left is the pretrained weights (folo-n-coco-v2, COCO AP 0.317, vs yolo26n's 0.409).
+- BCCD stays level with yolo26n (0.625 vs 0.626). Most of its fine-tunes reach their best validation epoch by about
+  epoch 40 (some later: 58, 65, 74), and no recipe change tried here moved the three-seed mean further. A hypothesis,
+  not measured: the pretrained weights are what is left (folo-n-coco-v2, COCO AP 0.317, against yolo26n's 0.409).
 - `GET /api/runs/{id}/cli` replays `musgd.*` values through the CLI's JSON parsing without `float_roundtrip`, so an
   unusual value can differ in its last bit; a non-default `musgd.cls_lr` is not replayed (before #194 too).
 
