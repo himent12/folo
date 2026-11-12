@@ -386,9 +386,11 @@ order per element; the existing bitwise conv tests passed). `conv_infer -- k3s2`
 
 Bands make each task's GEMM narrow (one or two output rows: few column panels, a ragged last panel, the
 weights re-read per band), which costs more than the copy saves, and the whole-image copy already runs in
-parallel. On one pinned P-core (23 cores busy elsewhere, log `b1_k3s2_1.txt`) only 16→32 at 320² gained
-(41–57 → 55–68 GF/s); a 4x larger band budget or one band per thread changed nothing at 28 threads. Kept as a
-candidate for that one conv (−0.06 ms) only: not worth its code.
+parallel. On one pinned P-core (2 rounds, 21–24 cores busy elsewhere, log `b1_k3s2_1.txt`, noisy) 16→32 at 320²
+gained (41–57 → 55–68 GF/s) and so did 128→256 at 40² (81–84 → 90–96); the others tied or swung both ways. A 4x
+larger band budget with one band per thread, once at 28 threads, gave the same picture (16→32 479 GF/s, the rest
+402–579 against 466–731 whole; that run's output was not saved). The one conv bands win at 28 threads saves
+~0.06 ms: not worth the code.
 
 **Winograd F(4x4, 3x3)** (`f43.patch`: the driver of PR 3 generic over the tile size, `M + 2 = 6` transform
 rows, 36 GEMMs, the weights cached under their own key; F(2x2, 3x3) bit for bit unchanged). Correct against the
@@ -398,14 +400,14 @@ deterministic across thread counts). Its error is larger: 6–12 · 2^-23 · Σ|
 `f43_errors.txt`; the direct conv's own bound is K = 9C times Σ|terms|).
 
 - One pinned P-core (`f43_prof.txt`, a temporary phase timer): 1.1–1.9x faster than F(2x2, 3x3) (64→64 at 80²
-  1.93–1.98 against 2.93–3.09 ms; GEMMs 1.03–1.06 against 1.93–1.99), the input transform now as large as half
-  the GEMMs.
+  1.93–1.98 against 2.93–3.09 ms; GEMMs 1.03–1.06 against 1.93–1.99), its input transform now 32–51% of its time
+  (as long as 0.6x the GEMMs on 64→64 at 80², 1.4x on 16→8 at 160²).
 - Per layer at 28 threads (`f43_k3s1_28.txt`, 12 cores busy elsewhere): F(4x4) 3–33% faster on 64→64 at 80²
   (1294 against 1004–1015 GF/s), 16→8 at 160², the 20x20 convs and 128→64 at 40²; 2–11% slower on 32→32,
   32→64 and 64→32 at 40² (100 tiles for 28 threads).
-- Whole forward, F(4x4) where it won per layer, against `main` (3 rounds alternated, 10–16 cores busy elsewhere;
-  `f43_n28.txt`, `f43_s28.txt`, `f43_m28.txt`): folo-n 14.85 → 14.63 ms, folo-s 31.72 → 31.81, folo-m 78.71 →
-  78.32: ties. Larger tile blocks (so the 2.25x larger transformed weights are re-read by fewer blocks: a 4x and
+- Whole forward, F(4x4) where it won per layer, against `main` (3 rounds alternated, 10–17 cores busy elsewhere;
+  `f43_n28.txt`, `f43_s28.txt`, `f43_m28.txt`): folo-n 14.85 (14.59–15.56) → 14.63 (14.08–14.66) ms, folo-s
+  31.72 (31.65–32.68) → 31.81 (31.39–32.08), folo-m 78.71 (78.67–82.58) → 78.32 (77.76–78.49): ties. Larger tile blocks (so the 2.25x larger transformed weights are re-read by fewer blocks: a 4x and
   a 16x L2 budget) did not change folo-m (`f43k_m28.txt`: 77.71 `main`, 76.34–76.87). Under this load the
   per-layer gain does not reach the forward; on a quiet machine (PR 3's 2–6 busy cores) it might.
 
@@ -415,7 +417,7 @@ deterministic across thread counts). Its error is larger: 6–12 · 2^-23 · Σ|
   timed alone, `conv_infer`, log `w6_groups.txt`): those at 40² and 20² run at 50–300 GF/s, waiting on the pool
   more than computing.
 - **Winograd F(4x4, 3x3)** on a quiet machine (above, `f43.patch`): 1.1–1.9x per core over F(2x2, 3x3), a tie
-  in the forward under 10–16 busy cores; its input transform (~40% of its time on one core) is the next cost.
+  in the forward under 10–17 busy cores; its input transform (32–51% of its time on one core) is the next cost.
 - Stride-2 convs (2.8 ms of convs timed alone): bands did not help (above); the remaining idea is fewer flops
   (a stride-2 3x3 conv is four stride-1 convs over the input's phases with 2x2, 2x1, 1x2 and 1x1 kernels, which
   Winograd F(2, 2) would cut by ~1.4x).
