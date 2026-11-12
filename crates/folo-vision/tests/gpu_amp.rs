@@ -568,6 +568,12 @@ fn edit_amp(path: &std::path::Path, edit: impl FnOnce(&mut folo_nn::AmpContract)
 /// their losses in f32. The losses stay finite and track the same run in f32 (the reported total is a weighted sum
 /// whose weights move to the one-to-one loss, so it need not fall every epoch), the loss scaler keeps working, and
 /// the checkpoint holds an `o2o` model that predicts with its one-to-one head.
+///
+/// Bound: as for `tiny_amp_run_learns`, 24 AdamW steps at batch 4 are chaotic in the rounding order. Over seeds
+/// 0–5 the AMP / f32 ratio of the last two epochs was 1.00–1.22 at c0464b29 (seed 5 already over the old 1.15) and
+/// 0.93–1.25 on ed265317 (after #186's forward split-K; seeds 1 and 5 over 1.15): mean 1.08, standard deviation
+/// 0.10 over the 12 runs, each run bit-for-bit repeatable. 1.3 is about mean + 2 σ. It guards against a diverging
+/// or much slower AMP run, not small accuracy losses (the gradient-level tests above bound those).
 #[test]
 fn amp_trains_the_dual_head() {
     use folo_vision::model::{FoloModel, HeadMode};
@@ -596,7 +602,7 @@ fn amp_trains_the_dual_head() {
     eprintln!("o2o losses: amp {losses:?}, f32 {f32_losses:?}");
     assert!(losses.iter().all(|l| l.is_finite()), "{losses:?}");
     let tail = |l: &[f32]| l[l.len() - 2..].iter().sum::<f32>() / 2.0;
-    assert!(tail(&losses) <= 1.15 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
+    assert!(tail(&losses) <= 1.3 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
     let scaler = t.loss_scaler().unwrap();
     assert!(scaler.skipped_steps() < 20 && scaler.scale() >= 1.0, "{scaler:?}");
     let last = TestFile::new("amp-o2o", "last.folo");
