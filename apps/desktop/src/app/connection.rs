@@ -87,6 +87,8 @@ impl FoloApp {
                 *e = None;
             }
         }
+        // Back: read the lists now (the server may have restarted on another data dir).
+        self.refresh_lists(cx);
         cx.notify();
     }
 

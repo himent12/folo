@@ -43,8 +43,8 @@ try {
     [DfwWin]::GetWindowRect($h, [ref]$wr) | Out-Null
     if (-not [DfwWin]::OffEveryMonitor($wr)) { throw "window of $Scenario is on a display: $([DfwWin]::Str($wr))" }
     Start-Sleep -Milliseconds $DelayMs
-    [DfwWin]::GetWindowRect($h, [ref]$wr) | Out-Null
-    if (-not [DfwWin]::OffEveryMonitor($wr)) { throw "window of $Scenario moved onto a display: $([DfwWin]::Str($wr))" }
+    $on = [DfwWin]::OnDisplay([uint32]$p.Id)
+    if ($on.Count -gt 0) { throw "a window of $Scenario is on a display: $($on -join ' | ')" }
     $r = New-Object DfwWin+RECT
     [DfwWin]::GetClientRect($h, [ref]$r) | Out-Null
     $w = $r.Right - $r.Left; $hh = $r.Bottom - $r.Top

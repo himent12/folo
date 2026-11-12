@@ -176,7 +176,7 @@ pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'stati
 pub enum DeleteTarget {
     /// A run that is not active: its folder, weights and models go.
     Run(String),
-    /// A dataset: unregistered, its files stay.
+    /// A dataset: unregistered, its files stay (unless `delete_files`, for one the server wrote).
     Dataset(String),
 }
 
@@ -281,6 +281,9 @@ pub struct FoloApp {
     pub switch_seen: RefCell<HashMap<String, (bool, Option<std::time::Instant>)>>,
     /// The last input came from the keyboard, so focus rings are shown.
     pub kb: bool,
+    /// The pointer moved since the last key: a keyboard focus tip (an image tile's) gives way to the
+    /// pointer's own tooltips instead of standing beside them.
+    pub pointer_moved: bool,
     pub page_scroll: ScrollHandle,
     /// A scroll thumb being dragged: its container, the pointer's start y and the start offset.
     pub scroll_drag: Option<(ScrollHandle, Pixels, Pixels)>,
@@ -416,6 +419,9 @@ pub struct FoloApp {
     pub narrow: bool,
     pub confirm_stop: Option<String>,
     pub confirm_delete: Option<DeleteTarget>,
+    /// Remove a dataset with its files (`?files=true`): asked in its confirmation, off each time
+    /// it opens, offered only for a dataset the server wrote.
+    pub delete_files: bool,
     /// The server's estimate for the New run form's config, keyed by that config (servers with
     /// `run_estimate`); the last good answer stands while a changed config is out.
     pub nr_estimate: Option<(String, Load<crate::api::RunEstimate>)>,
@@ -519,6 +525,7 @@ impl FoloApp {
             focus: RefCell::new(HashMap::new()),
             switch_seen: RefCell::new(HashMap::new()),
             kb: false,
+            pointer_moved: false,
             page_scroll: ScrollHandle::new(),
             scroll_drag: None,
             play_side_scroll: ScrollHandle::new(),
@@ -601,6 +608,7 @@ impl FoloApp {
             narrow: false,
             confirm_stop: None,
             confirm_delete: None,
+            delete_files: false,
             nr_estimate: None,
             nr_estimate_last: None,
             throughput: Load::Idle,

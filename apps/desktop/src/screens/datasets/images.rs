@@ -210,9 +210,8 @@ impl FoloApp {
                 )))
                 .into_any_element();
         }
-        let tile = self.ds_tile;
+        let cols = self.grid_cols();
         let width = f32::from(self.grid_width.get());
-        let cols = (((width + GAP) / (tile + GAP)).floor() as usize).max(1);
         let rows = count.div_ceil(cols);
         let cell_w = (width - GAP * (cols as f32 - 1.)) / cols as f32;
         let row_h = cell_w * 0.75 + GAP + 1.;
@@ -286,9 +285,10 @@ impl FoloApp {
                         let el = div()
                             .id(SharedString::from(key.clone()))
                             // Everything it holds, by class, on hover and keyboard focus (labels a
-                            // tile can't fit, a tiny box's class included).
+                            // tile can't fit, a tiny box's class included). The focus tip is the
+                            // keyboard's: not after a click, and gone once the pointer moves on.
                             .tooltip(crate::controls::tip(all.clone(), Some("Enter opens")))
-                            .when(focused, |d| {
+                            .when(focused && this.kb && !this.pointer_moved, |d| {
                                 d.child(crate::controls::focus_tip(&t, all.clone(), row_h - GAP))
                             })
                             .group(SharedString::from(key.clone()))
@@ -432,5 +432,13 @@ impl FoloApp {
                     .child(grid),
             )
             .into_any_element()
+    }
+}
+
+impl FoloApp {
+    /// Columns of the dataset's image grid at its last laid-out width.
+    pub(crate) fn grid_cols(&self) -> usize {
+        let width = f32::from(self.grid_width.get());
+        (((width + GAP) / (self.ds_tile + GAP)).floor() as usize).max(1)
     }
 }

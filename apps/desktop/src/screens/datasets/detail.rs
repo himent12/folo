@@ -112,7 +112,7 @@ impl FoloApp {
         let delete = self
             .button(
                 "ds-delete",
-                "Delete",
+                "Remove from FOLO",
                 Btn::Secondary,
                 Some("icons/trash-2.svg"),
                 window,

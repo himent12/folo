@@ -10,6 +10,10 @@ impl FoloApp {
     // ---------- sliders ----------
 
     pub fn on_drag_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.pointer_moved {
+            self.pointer_moved = true;
+            cx.notify();
+        }
         // A scroll thumb being dragged: move the content by the thumb's travel ratio.
         if let Some((handle, y0, off0)) = self.scroll_drag.as_ref() {
             if let Some(g) = crate::ui::ThumbGeo::of(handle) {

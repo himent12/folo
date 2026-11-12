@@ -228,10 +228,9 @@ impl FoloApp {
             | Route::Settings => {
                 vec![]
             }
-            Route::Dataset(id) => vec![
-                ("Datasets".into(), Some(Route::Datasets)),
-                (self.store.dataset_summary(id).map_or(id.clone(), |d| d.name.clone()).into(), None),
-            ],
+            Route::Dataset(id) => {
+                vec![("Datasets".into(), Some(Route::Datasets)), (self.store.dataset_name(id).into(), None)]
+            }
             Route::Run(id) => vec![
                 ("Runs".into(), Some(Route::Runs)),
                 (self.store.run(id).map_or(id.clone(), |r| r.name.clone()).into(), None),

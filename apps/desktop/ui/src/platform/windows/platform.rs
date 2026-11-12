@@ -7,7 +7,7 @@ use super::display::WindowsDisplay;
 use super::pacer::Pacer;
 use super::util::*;
 use super::window::{WindowsWindow, module_handle};
-use super::{WM_FOLO_CALL, WM_FOLO_MAIN_TASKS, WM_FOLO_QUIT, clipboard, shell};
+use super::{WM_FOLO_CALL, WM_FOLO_MAIN_TASKS, WM_FOLO_QUIT, clipboard, offscreen, shell};
 use crate::*;
 use ::windows::Win32::Foundation::*;
 use ::windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
@@ -77,6 +77,8 @@ pub struct WindowsPlatform {
     shared: Rc<Shared>,
     text_system: Arc<dyn PlatformTextSystem>,
     quit_callbacks: RefCell<Vec<Box<dyn FnMut()>>>,
+    /// Off screen: keeps every other window of the process off the displays.
+    _parker: Option<offscreen::Parker>,
 }
 
 impl WindowsPlatform {
@@ -102,7 +104,8 @@ impl WindowsPlatform {
             drop_helper: OnceCell::new(),
             traced: Cell::new(false),
         });
-        Ok(Self { shared, text_system, quit_callbacks: RefCell::new(Vec::new()) })
+        let _parker = if offscreen() { offscreen::Parker::install() } else { None };
+        Ok(Self { shared, text_system, quit_callbacks: RefCell::new(Vec::new()), _parker })
     }
 
     /// Called once the message loop has ended (after `quit`, or when the last window closed).
@@ -198,6 +201,10 @@ impl Platform for WindowsPlatform {
         if url.is_empty() {
             return;
         }
+        if offscreen() {
+            eprintln!("folo-ui: not opening {url}: {}", offscreen::REFUSED);
+            return;
+        }
         let url = url.to_string();
         std::thread::spawn(move || {
             let _ = shell::open_target(&url);
@@ -209,6 +216,10 @@ impl Platform for WindowsPlatform {
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
+        if offscreen() {
+            let _ = tx.send(Err(anyhow::anyhow!(offscreen::REFUSED)));
+            return rx;
+        }
         let owner = self.shared.active_window();
         super::post_call(
             self.shared.message_window(),
@@ -225,6 +236,10 @@ impl Platform for WindowsPlatform {
         suggested_name: Option<&str>,
     ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
         let (tx, rx) = oneshot::channel();
+        if offscreen() {
+            let _ = tx.send(Err(anyhow::anyhow!(offscreen::REFUSED)));
+            return rx;
+        }
         let owner = self.shared.active_window();
         let (directory, name) = (directory.to_path_buf(), suggested_name.map(str::to_string));
         super::post_call(
@@ -238,6 +253,10 @@ impl Platform for WindowsPlatform {
 
     fn reveal_path(&self, path: &Path) {
         if path.as_os_str().is_empty() {
+            return;
+        }
+        if offscreen() {
+            eprintln!("folo-ui: not showing {} in Explorer: {}", path.display(), offscreen::REFUSED);
             return;
         }
         let path = path.to_path_buf();

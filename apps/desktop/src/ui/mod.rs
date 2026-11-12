@@ -33,5 +33,5 @@ pub use scroll::{ThumbGeo, paint_thumb, scroll_edges};
 pub use status::{Tone, badge, dot, e2e_tag, status_badge, status_dot, status_label};
 pub use surface::{chart_section, empty_state, panel, panel_header, progress, select_bar, skeleton, vline};
 pub use text::{
-    Ellipsis, StyledExt, caption, icon, inline_link, kbd, meta_row, overline, rich, shortcut, text,
+    Ellipsis, StyledExt, caption, icon, inline_link, kbd, meta_row, overline, path_text, rich, shortcut, text,
 };

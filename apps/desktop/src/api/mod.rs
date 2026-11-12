@@ -106,8 +106,9 @@ pub trait Backend: Send + Sync + 'static {
     /// stopping, or queued after it had started): its folder and weights, so its models go too. A
     /// queued run that never started leaves the queue and is deleted (Remove from queue).
     fn delete_run(&self, id: &str) -> ApiResult<()>;
-    /// Unregisters a dataset (`DELETE /api/datasets/{id}`); its files are never deleted.
-    fn delete_dataset(&self, id: &str) -> ApiResult<()>;
+    /// Unregisters a dataset (`DELETE /api/datasets/{id}`); its files stay, unless `files` (`?files=true`)
+    /// for a dataset the server wrote into its data dir (a generated set), which deletes its folder too.
+    fn delete_dataset(&self, id: &str, files: bool) -> ApiResult<()>;
     /// The `folo train` command that trains a run's config on the server's machine
     /// (`GET /api/runs/{id}/cli`, servers with `run_cli`).
     fn run_cli(&self, _id: &str) -> ApiResult<CliCommand> {

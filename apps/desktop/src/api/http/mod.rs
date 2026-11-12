@@ -109,8 +109,8 @@ impl Backend for HttpBackend {
         self.delete(&format!("/runs/{}", seg(id)))
     }
 
-    fn delete_dataset(&self, id: &str) -> ApiResult<()> {
-        self.delete(&format!("/datasets/{}", seg(id)))
+    fn delete_dataset(&self, id: &str, files: bool) -> ApiResult<()> {
+        self.delete(&format!("/datasets/{}{}", seg(id), if files { "?files=true" } else { "" }))
     }
 
     fn run_cli(&self, id: &str) -> ApiResult<CliCommand> {

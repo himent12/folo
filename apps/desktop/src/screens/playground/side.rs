@@ -359,24 +359,25 @@ impl FoloApp {
                         div()
                             .flex()
                             .justify_between()
-                            .items_baseline()
+                            .items_start()
                             .gap(px(8.))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .flex()
-                                    .items_baseline()
-                                    .gap(px(6.))
+                                    .flex_col()
+                                    .gap(px(2.))
                                     // Where the number comes from: the built-in demo simulates it; a
                                     // server or this app times one image (not sustained throughput).
                                     .child(
                                         text(ty::SM, t.text_secondary)
                                             .font_weight(FontWeight::MEDIUM)
-                                            .flex_none()
                                             .child(if simulated { "Simulated latency" } else { "Latency" }),
                                     )
-                                    .child(text(ty::SM, t.text_tertiary).tnum().min_w_0().ellipsis().child(
+                                    // Under the label, whole: beside it a local GPU's name left no room
+                                    // ("RTX 4080 SUPER in this app · o…").
+                                    .child(text(ty::SM, t.text_tertiary).tnum().whitespace_normal().child(
                                         // The demo has no device of its own to name.
                                         if simulated {
                                             "one image".to_string()

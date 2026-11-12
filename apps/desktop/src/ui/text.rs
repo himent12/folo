@@ -161,3 +161,60 @@ pub fn kbd(t: &Theme, key: impl Into<SharedString>) -> Div {
 pub fn shortcut(t: &Theme, keys: &[&str]) -> Div {
     div().flex().items_center().gap(px(3.)).children(keys.iter().map(|k| kbd(t, k.to_string())))
 }
+
+/// A file path in Geist Mono, on lines of its own `width` px wide, each ending right after a
+/// separator ("D:\data\" / "shapes"): the text wrapper would break before a separator, mid-path
+/// ("D:\data" / "\shapes"). Only a folder name wider than a whole line wraps inside.
+pub fn path_text(window: &mut folo_ui::Window, s: TypeStep, color: Hsla, path: &str, width: f32) -> Div {
+    let lines = path_lines(path, width, |p| crate::charts::mono_width(window, p, s.size) / px(1.));
+    div().w_full().min_w_0().flex().flex_col().children(
+        lines
+            .into_iter()
+            .map(|l| text(s, color).font_family(crate::theme::MONO).whitespace_normal().child(l)),
+    )
+}
+
+/// `path` cut into lines no wider than `width` (`width_of` measures a piece), each ending after a
+/// separator; a segment wider than `width` gets a line of its own.
+pub fn path_lines(path: &str, width: f32, mut width_of: impl FnMut(&str) -> f32) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for (i, c) in path.char_indices() {
+        if matches!(c, '\\' | '/') {
+            segments.push(&path[start..=i]);
+            start = i + 1;
+        }
+    }
+    if start < path.len() {
+        segments.push(&path[start..]);
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for seg in segments {
+        match lines.last_mut() {
+            Some(line) if width_of(&format!("{line}{seg}")) <= width => line.push_str(seg),
+            _ => lines.push(seg.to_string()),
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::path_lines;
+
+    #[test]
+    fn a_path_wraps_after_a_separator_never_inside_a_name() {
+        // 1 px per character, lines of 24.
+        let lines = |p: &str| path_lines(p, 24., |s| s.chars().count() as f32);
+        assert_eq!(
+            lines(r"D:\folo-ux\data2-v-desktop-e2e\datasets\shapes"),
+            [r"D:\folo-ux\", r"data2-v-desktop-e2e\", r"datasets\shapes"]
+        );
+        assert_eq!(lines("/srv/folo/datasets/x"), ["/srv/folo/datasets/x"]);
+        // A name longer than a line gets one of its own (and wraps inside only there).
+        assert_eq!(
+            lines(r"D:\a-very-long-folder-name-indeed\x"),
+            [r"D:\", r"a-very-long-folder-name-indeed\", "x"]
+        );
+    }
+}

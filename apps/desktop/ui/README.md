@@ -87,6 +87,10 @@ Examples (Windows, off screen, never focused, driven by posted window messages, 
 
 ```
 cargo run -p folo-ui --release --example win_smoke [-- --quick]            # the Win32 backend
+# on a private desktop only (they show windows, or would if off screen failed):
+..\tools\sandbox-run.ps1 -Exe <target>\release\examples\win_smoke.exe -ExeArgs "--dialog" -Env @{ FOLO_SMOKE_SANDBOX = "1" }
+#   --dialog: the modal file dialog keeps tasks and frames running; --offscreen-dialog: off screen
+#   the dialogs are refused and a stray window is moved off the displays
 cargo run -p folo-ui --example winit_smoke --features winit,portable-text   # the winit backend
 cargo run -p folo-ui --example text_probe -- <lines.txt> <out-dir> [scale]  # DirectWrite layout and masks
 ```
@@ -106,7 +110,7 @@ The winit backend's shared code (events, keys, the custom caption, presenting) a
 
 | Variable | Effect |
 | --- | --- |
-| `FOLO_UI_OFFSCREEN=1` | windows open outside every display, are never activated and take no focus (no taskbar button on Windows): real-window checks on a machine someone is using |
+| `FOLO_UI_OFFSCREEN=1` | windows open outside every display, are never activated and take no focus (no taskbar button on Windows): real-window checks on a machine someone is using. On Windows nothing else of the process shows either: the file dialogs answer with an error (one with no active window to own it opened centred on the primary display), `open_url` and `reveal_path` do nothing, and any other window of the process that shows on a display is moved off it (named on stderr) |
 | `FOLO_UI_TRACE=1` | prints `first-render <ms>`, `first-present <ms>` and `first-frame <ms>` to stderr (ms since the process was created) |
 | `FOLO_UI_TRACE=frames` | prints one line per frame: the time of each phase (build, layout, prepaint, paint, raster, present) and the primitive and hitbox counts |
 | `FOLO_UI_PLATFORM=winit` | on Windows, with the `winit` feature, use the winit backend instead of Win32 |

@@ -206,8 +206,12 @@ impl FoloApp {
             RunStatus::Stopping => {}
         }
         // Delete leads the actions (the way forward stays last): a run still active says why not.
-        let delete = if r.status.is_active() {
-            self.button_disabled(
+        // One waiting in the queue has Remove from queue instead (which deletes it): no dead Delete.
+        let waiting = r.status == RunStatus::Queued && r.cloud.is_none();
+        let delete = if waiting {
+            None
+        } else if r.status.is_active() {
+            Some(self.button_disabled(
                 "run-delete",
                 "Delete",
                 Btn::Secondary,
@@ -215,10 +219,10 @@ impl FoloApp {
                 "Stop it first: an active run can't be deleted",
                 window,
                 cx,
-            )
+            ))
         } else {
             let target = DeleteTarget::Run(r.id.clone());
-            self.button(
+            Some(self.button(
                 "run-delete",
                 "Delete",
                 Btn::Secondary,
@@ -226,9 +230,11 @@ impl FoloApp {
                 window,
                 cx,
                 act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
-            )
+            ))
         };
-        actions.insert(0, delete.into_any_element());
+        if let Some(delete) = delete {
+            actions.insert(0, delete.into_any_element());
+        }
         let title = div()
             .flex()
             .items_center()

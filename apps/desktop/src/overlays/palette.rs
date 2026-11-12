@@ -118,10 +118,14 @@ impl FoloApp {
                 _ => None,
             };
         if let Some((name, target, detail)) = page_delete {
+            let title = match target {
+                crate::app::DeleteTarget::Run(_) => format!("Delete {name}"),
+                crate::app::DeleteTarget::Dataset(_) => format!("Remove {name} from FOLO"),
+            };
             items.push(PaletteItem {
                 group: "Actions",
                 icon: "icons/trash-2.svg",
-                title: format!("Delete {name}"),
+                title,
                 detail: detail.into(),
                 keys: &[],
                 action: act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),

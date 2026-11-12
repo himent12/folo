@@ -102,6 +102,13 @@ in their default mode: `window-check.ps1` without `-Sandbox` moves the real curs
 and those two in their `-Sandbox` / `-Offscreen` modes, never shows a window on your desktop, moves the cursor
 or takes focus.
 
+Off screen (`FOLO_UI_OFFSCREEN=1`) the app opens no file dialog, Explorer or browser: Add dataset, Open image
+and Ctrl O answer with a toast ("The file dialog didn't open"), Show in Explorer, Show in folder and links
+do nothing but say so on stderr, and any other window of the process that reaches a display is moved off
+it (folo-ui's README, `FOLO_UI_OFFSCREEN`). On a private desktop without it the dialogs are real, but
+never click Show in Explorer, Show in folder or a link there: Explorer and the browser already running
+on your desktop take the request and open their window on your screen.
+
 - `shoot.ps1`: one headless screenshot (`folo-desktop --scenario … --shot`; Screenshots, below).
 - `shoot-all.ps1`: every review scenario headless, in parallel (98 PNGs in a few seconds on a release build),
   as `<Dir>\<W>x<H>\<scenario>.png`: all scenarios at 1280 x 800, the densest at 960 x 620 and 1680 x 1050.
@@ -116,7 +123,8 @@ or takes focus.
 - `interact-check.ps1`: drives the real window with window messages only, off screen (default) or on a
   private desktop (`-Sandbox`, which adds the file dialog): its captures equal the headless shot of the
   same scenario, and hover, clicks, the palette and its text field, Tab and F6 focus, wheel scrolling, a
-  slider, a select, tooltips, the New run dialog, a toast, the theme toggle and resizing behave. PASS / FAIL
+  slider, a select, tooltips, the New run dialog, a toast, the theme toggle and resizing behave (with
+  `-Sandbox` also the file dialog, and that off screen Ctrl O opens none). PASS / FAIL
   per step, exit 1 on a failure. Copy and paste run only with `-Sandbox -Clipboard`, off by default:
   `-Clipboard` replaces what is on your clipboard with test text and does not put it back (a private desktop
   shares your clipboard); run it when you have nothing on the clipboard you need. Without `-Clipboard` it
@@ -129,12 +137,17 @@ or takes focus.
 - `window-check.ps1`: the whole window chrome (Window check, below); `-Sandbox` on a private desktop.
 - `drive.ps1`: the window-message driver the checks dot-source: posted mouse and non-client messages, keys
   with their modifiers in the UI thread's key state, a sync, PrintWindow captures. Nothing in it moves the
-  cursor, activates a window or injects real input.
+  cursor, activates a window or injects real input. `[FoloDrive]::Find` returns the app's window by its
+  class (`FOLO::Window`), never another window of the process; `[FoloDrive]::OnDisplay(pid)` lists every
+  visible window of the process that a display shows a part of, and `Assert-FoloOffscreen $p` kills the
+  app and throws when that list is not empty or the app took the foreground. Guard with it after every
+  step that could open something: a check of the app's window alone misses a dialog, which is a window
+  of its own (a file dialog once stayed on the owner's screen for minutes that way).
 - `sandbox-run.ps1`: runs a command or an exe on a private Win32 desktop that is never shown, inside a job
   object that kills what it started; output in a log printed at the end, exit code the command's (124 on a
   timeout). The checks' `-Sandbox` modes and `win_smoke`'s sandbox checks use it.
-- `win.ps1`: the Win32 helpers the capture and perf tools dot-source (find a process's window, rectangles,
-  launch with extra environment, the DIB capture).
+- `win.ps1`: the Win32 helpers the capture and perf tools dot-source (find the app's window by class,
+  every window of a process on a display, rectangles, launch with extra environment, the DIB capture).
 - `perf.ps1`: start-up, memory, CPU and GPU numbers of a build, off screen, as JSON (`ui/PERF.md` has them for
   this build and GPUI's).
 - `bench-frames.sh` (bash): the frame bench (`--bench-frames`: the time and allocations of each frame phase)

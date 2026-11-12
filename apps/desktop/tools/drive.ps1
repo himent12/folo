@@ -63,12 +63,14 @@ public static class FoloDrive {
 
     public static IntPtr Pt(int x, int y) { return (IntPtr)(((y & 0xFFFF) << 16) | (x & 0xFFFF)); }
 
-    // The visible top-level window of a process with the largest client area (IntPtr.Zero if none).
+    // The app's window: the process's visible top-level FOLO::Window with the largest client area
+    // (IntPtr.Zero if none). By class, so a dialog or any other window of the process is never taken
+    // for it (a 1200 x 720 file dialog once was, once the app's window was smaller).
     public static IntPtr Find(uint pid) {
         IntPtr best = IntPtr.Zero; long bestArea = -1;
         EnumWindows((h, l) => {
             uint p; GetWindowThreadProcessId(h, out p);
-            if (p == pid && IsWindowVisible(h)) {
+            if (p == pid && IsWindowVisible(h) && ClassOf(h) == "FOLO::Window") {
                 RECT r; GetClientRect(h, out r);
                 long a = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
                 if (a > bestArea) { bestArea = a; best = h; }
@@ -90,6 +92,19 @@ public static class FoloDrive {
             }
             return true;
         }, IntPtr.Zero);
+        return l;
+    }
+    public static string ClassOf(IntPtr h) { var c = new StringBuilder(256); GetClassNameW(h, c, 256); return c.ToString(); }
+    // Every visible top-level window of a process (the app's, a dialog, anything) that a display shows a
+    // part of, as List prints them: empty when nothing of the process can be seen. The guards check
+    // this, never only the app's window.
+    public static List<string> OnDisplay(uint pid) {
+        var l = new List<string>();
+        foreach (var line in List(pid)) {
+            IntPtr h = (IntPtr)long.Parse(line.Split(' ')[0]);
+            RECT r; GetWindowRect(h, out r);
+            if (r.Right > r.Left && r.Bottom > r.Top && !OffEveryMonitor(r)) l.Add(line);
+        }
         return l;
     }
     public static List<RECT> Monitors() {
@@ -378,6 +393,21 @@ function Wait-FoloWindow($p, [int]$TimeoutS = 25) {
         Start-Sleep -Milliseconds 50
     }
     [IntPtr]::Zero
+}
+
+# Off screen, nothing of the process may show: kills it and throws, naming every visible window of
+# it that a display shows a part of (not only the app's window: a dialog is a window of its own), or
+# that took the foreground. Call it after every step that could open something.
+function Assert-FoloOffscreen($p) {
+    $on = [FoloDrive]::OnDisplay([uint32]$p.Id)
+    $fg = [FoloDrive]::GetForegroundWindow()
+    $fgPid = [uint32]0
+    [FoloDrive]::GetWindowThreadProcessId($fg, [ref]$fgPid) | Out-Null
+    if ($on.Count -gt 0 -or $fgPid -eq $p.Id) {
+        Stop-Folo $p
+        if ($on.Count -gt 0) { throw "ON A DISPLAY, killed: $($on -join ' | ')" }
+        throw "TOOK THE FOREGROUND, killed: $fg"
+    }
 }
 
 # Waits up to $TimeoutS for a process we started to exit; true if it did.

@@ -14,7 +14,7 @@ use crate::ui::*;
 
 use super::forms::{
     ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, auto_close_mosaic, batch_index, carry_over,
-    parse_epochs, parse_lr, suggested_name,
+    free_run_name, parse_epochs, parse_lr,
 };
 use super::{FoloApp, Route, RunFilter};
 
@@ -129,10 +129,10 @@ impl FoloApp {
             return;
         };
         let (ds_id, ds_name) = (ds.id.clone(), ds.name.clone());
-        let n = self.store.runs.ready().map_or(0, |r| r.len()) + 1;
         // The last started run's choices, else the defaults (s, 640 px, 100 epochs).
         let (arch, imgsz, epochs) = self.new_run_last.unwrap_or((1, 2, 100.0));
-        let suggested = suggested_name(&ds_name, ARCHS[arch], n);
+        let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
+        let suggested = free_run_name(&ds_name, ARCHS[arch], runs);
         let name = cx.new(|cx| {
             let mut i = TextInput::new("run name", cx);
             i.set_text(suggested.clone(), cx);
@@ -286,10 +286,10 @@ impl FoloApp {
 
     /// Suggests the name again for the form's dataset and architecture, unless it was typed.
     pub fn resuggest_run_name(&mut self, cx: &mut Context<Self>) {
-        let n = self.store.runs.ready().map_or(0, |r| r.len()) + 1;
         let Some(f) = self.new_run.as_mut() else { return };
         let Some(ds) = self.store.dataset_summary(&f.dataset) else { return };
-        let name = suggested_name(&ds.name, ARCHS[f.arch], n);
+        let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
+        let name = free_run_name(&ds.name, ARCHS[f.arch], runs);
         if f.name_suggested.as_ref().is_none_or(|s| *s == name) {
             return;
         }

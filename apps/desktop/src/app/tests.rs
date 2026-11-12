@@ -495,3 +495,145 @@ fn a_toast_leaves_on_the_clock_but_not_while_hovered() {
     app.advance_clock(Duration::from_millis(800));
     assert!(titles(&mut app).is_empty(), "left once the pointer did");
 }
+
+#[test]
+fn lists_changed_elsewhere_show_at_the_next_refresh() {
+    use super::{DeleteTarget, Route};
+    use crate::api::Backend;
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let (id, run) = drive(&mut app, window, |this, _, _| {
+        let runs = this.store.runs.ready().unwrap();
+        let run = runs.iter().find(|r| this.store.dataset_summary(&r.config.dataset_id).is_some()).unwrap();
+        (run.config.dataset_id.clone(), run.clone())
+    });
+    // Removed elsewhere (Studio, the CLI): gone at the next refresh, and its runs say so.
+    api.delete_dataset(&id, false).unwrap();
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset_summary(&id).is_none());
+        assert!(
+            this.store.run_dataset_name(&run).contains("removed"),
+            "{}",
+            this.store.run_dataset_name(&run)
+        );
+    });
+    // Its folder registered again: listed, and "(removed)" goes.
+    api.restore(&id);
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset_summary(&id).is_some());
+        assert!(!this.store.run_dataset_name(&run).contains("removed"));
+    });
+    // Deleted here, then registered again elsewhere: no longer treated as deleted (its page opens).
+    drive(&mut app, window, |this, w, cx| {
+        this.ask_delete(DeleteTarget::Dataset(id.clone()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    api.restore(&id);
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.store.dataset_summary(&id).is_some());
+        this.navigate(Route::Dataset(id.clone()), w, cx);
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| assert_eq!(this.route, Route::Dataset(id.clone())));
+}
+
+#[test]
+fn a_generated_dataset_can_be_removed_with_its_files_as_in_studio() {
+    use super::DeleteTarget;
+    let (mut app, window) = open();
+    let id = drive(&mut app, window, |this, _, _| {
+        let runs = this.store.runs.ready().unwrap();
+        let ds = this.store.datasets.ready().unwrap();
+        let idle =
+            ds.iter().find(|d| !runs.iter().any(|r| r.config.dataset_id == d.id && r.status.is_active()));
+        let id = idle.expect("a dataset no run is using").id.clone();
+        // The demo has no data dir: its datasets are folders of the person's own, never offered.
+        assert!(!this.dataset_files_deletable(&id));
+        // A server's own: under <data dir>/datasets.
+        this.store.data_dir = Some("D:/srv/folo".into());
+        let d = this.store.datasets.ready_mut().unwrap().iter_mut().find(|d| d.id == id).unwrap();
+        d.path = r"D:\srv\folo\datasets\shapes".into();
+        assert!(this.dataset_files_deletable(&id));
+        id
+    });
+    // Asked for: the call carries ?files=true (the demo refuses it, which says it got there).
+    drive(&mut app, window, |this, w, cx| {
+        this.ask_delete(DeleteTarget::Dataset(id.clone()), w, cx);
+        assert!(!this.delete_files, "off each time it opens");
+        this.delete_files = true;
+        this.delete_confirmed(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        let t = this.toasts.last().unwrap();
+        assert!(t.title.starts_with("Couldn't remove"), "{}", t.title);
+        assert!(this.store.dataset_summary(&id).is_some());
+    });
+    // Not asked: unregistered, in Studio's words.
+    drive(&mut app, window, |this, w, cx| {
+        this.ask_delete(DeleteTarget::Dataset(id.clone()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        let t = this.toasts.last().unwrap();
+        assert_eq!(t.title.as_ref(), "Dataset removed");
+        assert!(
+            t.body
+                .as_ref()
+                .is_some_and(|b| b.ends_with("is no longer registered. Files on disk were not touched."))
+        );
+        assert!(this.store.dataset_summary(&id).is_none());
+    });
+}
+
+#[test]
+fn a_run_that_ends_shows_its_model_and_end_at_once() {
+    use crate::api::RunStatus;
+    let (mut app, window) = open();
+    // As the live stream leaves it: the status says completed, the list doesn't know the rest yet.
+    let id = drive(&mut app, window, |this, _, _| {
+        let runs = this.store.runs.ready_mut().unwrap();
+        let r = runs.iter_mut().find(|r| r.status == RunStatus::Completed && r.model_id.is_some()).unwrap();
+        r.model_id = None;
+        r.finished = None;
+        r.id.clone()
+    });
+    drive(&mut app, window, |this, _, cx| this.run_ended(&id, RunStatus::Completed, cx));
+    drive(&mut app, window, |this, _, _| {
+        let r = this.store.run(&id).unwrap();
+        assert!(r.model_id.is_some(), "Open model and Try in Playground show now");
+        assert!(r.finished.is_some(), "its duration stops counting now");
+        assert!(this.toasts.iter().any(|t| t.title.ends_with("finished")));
+    });
+}
+
+#[test]
+fn closing_the_inspector_lands_on_the_image_it_showed_last() {
+    use super::Route;
+    let (mut app, window) = open();
+    let ds = drive(&mut app, window, |this, w, cx| {
+        let ds = this.store.datasets.ready().unwrap()[0].id.clone();
+        this.navigate(Route::Dataset(ds.clone()), w, cx);
+        ds
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, cx| this.ensure_dataset(&ds, cx));
+    // Opened on the first tile (focused by its click), then walked on to the 24th image.
+    drive(&mut app, window, |this, w, cx| {
+        let first = this.filtered_image(&ds, 0).unwrap().id.clone();
+        let fh = this.fh(format!("tile-{first}"), cx);
+        w.focus(&fh);
+        this.open_inspector(ds.clone(), 0, w, cx);
+        for _ in 0..23 {
+            this.step_inspector(1, cx);
+        }
+    });
+    drive(&mut app, window, |this, w, cx| {
+        let shown = this.filtered_image(&ds, 23).unwrap().id.clone();
+        this.close_inspector(w, cx);
+        assert!(this.fh(format!("tile-{shown}"), cx).is_focused(w), "focus is on the image shown last");
+    });
+}

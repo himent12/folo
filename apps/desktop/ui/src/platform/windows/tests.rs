@@ -9,6 +9,7 @@ use crate::*;
 use ::windows::Win32::Foundation::*;
 use ::windows::Win32::UI::Input::KeyboardAndMouse::*;
 use ::windows::Win32::UI::WindowsAndMessaging::*;
+use ::windows::core::w;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -450,4 +451,49 @@ fn typed_text_is_windows_translation() {
 
     destroy(hwnd);
     drop(app);
+}
+
+/// Off screen, a window of the process that reaches a display is moved off every display: the
+/// file dialog that had no owner opened centred on the primary display, on the screen of whoever was
+/// using the PC. Checked on a hidden window (never shown), where the parking hook's own move happens.
+#[test]
+fn park_moves_a_window_on_a_display_off_every_display() {
+    let make = |x: i32, y: i32, style: WINDOW_STYLE, parent: Option<HWND>| {
+        // SAFETY: a plain hidden STATIC window (no WS_VISIBLE), destroyed below.
+        unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!(""),
+                style,
+                x,
+                y,
+                300,
+                200,
+                parent,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("a hidden window")
+    };
+    // The primary display's top left is (0, 0).
+    let (x, y) = (100, 100);
+    let on_screen = make(x, y, WS_POPUP, None);
+    assert!(super::offscreen::on_a_display(&super::offscreen::window_rect(on_screen)), "starts on a display");
+    assert!(super::offscreen::park(on_screen), "parked");
+    let r = super::offscreen::window_rect(on_screen);
+    assert!(!super::offscreen::on_a_display(&r), "now off every display: {r:?}");
+    assert_eq!((r.right - r.left, r.bottom - r.top), (300, 200), "same size");
+    // SAFETY: a plain query.
+    assert!(!unsafe { IsWindowVisible(on_screen) }.as_bool(), "still hidden");
+    assert!(!super::offscreen::park(on_screen), "a parked window stays where it is");
+    // A child moves with its parent: left alone.
+    let parent = make(x, y, WS_POPUP, None);
+    let child = make(10, 10, WS_CHILD, Some(parent));
+    assert!(!super::offscreen::park(child));
+    for hwnd in [child, parent, on_screen] {
+        destroy(hwnd);
+    }
 }
