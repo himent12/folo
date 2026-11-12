@@ -59,6 +59,8 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let phase = mode == 2 && spec.get_bool("PHASE");
     let split = spec.get_bool("SPLIT");
     let bias = spec.get_u32("BIAS_KIND", 0);
+    // `CAT` > 1: `B` is that many row blocks in separate buffers (`crate::kernels::gemm_cat`).
+    let cat = spec.get_u32("CAT", 1);
     let ct = if spec.get_bool("OUT_F16") { "f16" } else { "f32" };
     let (a_len, b_len) = (bm * sa, bk * sb);
 
@@ -81,6 +83,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let _ = writeln!(s, "@group(0) @binding(2) var<storage, read> MB: array<{}>;", vty(vb && !conv, "f16"));
     s.push_str("@group(0) @binding(3) var<storage, read> MBIAS: array<CT>;\n");
     let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> MC: array<{}>;", vty(vc, "CT"));
+    if cat > 1 {
+        s.push_str(&crate::kernels::gemm_cat::cat_source(cat, "MB", &vty(vb, "f16"), vb));
+    }
     for b in 0..2 {
         let _ = writeln!(s, "var<workgroup> As{b}: array<f16, {a_len}>;");
         let _ = writeln!(s, "var<workgroup> Bs{b}: array<f16, {b_len}>;");
@@ -298,10 +303,15 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                     (format!("offB + (n0 + {o}) * ldb + k0 + {i}"), format!("n0 + {o} < N && k0 + {i} < K"))
                 }
             };
+            let fetch = match (cat > 1, vb) {
+                (true, true) => format!("cat_b(k0 + {o}, n0 / 4u + {i}, b1)"),
+                (true, false) => format!("cat_b(k0 + {o}, n0 + {i}, b1)"),
+                (false, _) => format!("MB[{idx}]"),
+            };
             if check {
-                format!("    if ({cond}) {{ rb{u} = MB[{idx}]; }} else {{ rb{u} = {b_reg}(0.0); }}\n")
+                format!("    if ({cond}) {{ rb{u} = {fetch}; }} else {{ rb{u} = {b_reg}(0.0); }}\n")
             } else {
-                format!("    rb{u} = MB[{idx}];\n")
+                format!("    rb{u} = {fetch};\n")
             }
         };
         load.push_str(&pb.guarded(body));
@@ -493,5 +503,20 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
 pub(crate) static COOP: KernelDef = KernelDef {
     name: "coop_gemm",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_coop),
+};
+
+/// [`COOP`] with `B` in up to [`crate::kernels::gemm_cat::MAX_CAT_PARTS`] buffers (`CAT`).
+pub(crate) static COOP_CAT: KernelDef = KernelDef {
+    name: "coop_gemm_cat",
+    storage: &[
+        Access::Read,
+        Access::Read,
+        Access::Read,
+        Access::ReadWrite,
+        Access::Read,
+        Access::Read,
+        Access::Read,
+    ],
     source: Source::Generated(gen_coop),
 };

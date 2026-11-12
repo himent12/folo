@@ -256,8 +256,13 @@ impl Tensor {
     pub fn max_pool2d_with(&self, p: &Pool2dParams) -> Result<Tensor> {
         let [oh, ow] = self.check_pool("max_pool2d", p)?;
         let b = self.backend()?;
-        let (vs, is) = self.with_view(|v| b.max_pool2d(v, p))?;
         let (n, c) = (self.dims()[0], self.dims()[1]);
+        if !crate::is_grad_enabled() || !self.requires_grad() {
+            // Nothing is recorded: the values alone (the same values, no index tensor).
+            let vs = self.with_view(|v| b.max_pool2d_values(v, p))?;
+            return Tensor::wrap(vs, Shape::new(&[n, c, oh, ow]), "max_pool2d");
+        }
+        let (vs, is) = self.with_view(|v| b.max_pool2d(v, p))?;
         let out = Tensor::wrap(vs, Shape::new(&[n, c, oh, ow]), "max_pool2d")?;
         let idx = Tensor::wrap(is, Shape::new(&[n, c, oh, ow]), "max_pool2d")?;
         let (in_shape, p) = (self.shape().clone(), *p);

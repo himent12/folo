@@ -12,6 +12,7 @@ pub mod detect;
 pub mod elementwise;
 pub mod ew;
 pub mod gemm;
+pub mod gemm_cat;
 pub mod layout;
 pub mod norm;
 pub mod optim;

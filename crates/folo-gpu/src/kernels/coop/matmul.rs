@@ -167,3 +167,54 @@ pub(crate) fn encode_gemm(
     ctx.dispatch(&k, &[a, b, bias, c], &gemm_params(d)?, groups)?;
     Ok(true)
 }
+
+/// [`encode_gemm`] with `B` read in place from row blocks in separate buffers (`crate::kernels::gemm_cat`): `b0` is
+/// part 0, `rest` the other part bindings (the dummy where unused), `p` the full parameter block with the part
+/// table, `parts` the number of parts, `vec_b` whether every part allows `vec4` loads. `C` and the bias are f16.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_gemm_cat(
+    ctx: &GpuContext,
+    d: &GemmDesc,
+    a: &wgpu::Buffer,
+    b0: &wgpu::Buffer,
+    bias: &wgpu::Buffer,
+    c: &wgpu::Buffer,
+    rest: &[&wgpu::Buffer],
+    p: &crate::pipeline::Params,
+    parts: u32,
+    vec_b: bool,
+) -> Result<bool> {
+    let Some(cfg) = resolve(ctx, None, || pick_config(d.m, d.n, d.batch.0))? else { return Ok(false) };
+    let vec_a = d.lda.is_multiple_of(4) && aligned4(&d.a) && d.k.is_multiple_of(4);
+    let vec_c = d.ldc.is_multiple_of(4) && aligned4(&d.c) && d.n.is_multiple_of(4);
+    let check = !d.m.is_multiple_of(cfg.bm as usize)
+        || !d.n.is_multiple_of(cfg.bn as usize)
+        || !d.k.is_multiple_of(cfg.bk as usize);
+    let spec = base_spec(d, DType::F16, cfg)
+        .bool("VEC_A", vec_a)
+        .bool("VEC_B", vec_b)
+        .bool("VEC_C", vec_c)
+        .bool("TRANS_A", false)
+        .bool("TRANS_B", false)
+        .bool("CHECK", check)
+        .u32("CONV_MODE", 0)
+        .u32("CAT", parts);
+    let k = match ctx.kernel(&super::shader::COOP_CAT, spec) {
+        Ok(k) => k,
+        Err(e) => {
+            ctx.disable_tensor_cores(format!("a tensor-core kernel failed to build ({e})"));
+            return Ok(false);
+        }
+    };
+    let groups = [
+        u32::try_from(d.n.div_ceil(cfg.bn as usize))
+            .map_err(|_| GpuError::Limit("gemm N too large".into()))?,
+        u32::try_from(d.m.div_ceil(cfg.bm as usize))
+            .map_err(|_| GpuError::Limit("gemm M too large".into()))?,
+        u32::try_from(d.batch.0).map_err(|_| GpuError::Limit("gemm batch too large".into()))?,
+    ];
+    let mut all = vec![a, b0, bias, c];
+    all.extend_from_slice(rest);
+    ctx.dispatch(&k, &all, p, groups)?;
+    Ok(true)
+}

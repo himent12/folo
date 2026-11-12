@@ -38,6 +38,8 @@ use folo_core::{
 };
 
 use self::convert::{Core, elem, strided_of};
+#[cfg(test)]
+pub(crate) use self::encode::conv_input;
 use crate::context::GpuContext;
 use crate::error::GpuError;
 use crate::kernels::strided;
@@ -205,6 +207,16 @@ pub fn dense_buffer(t: &folo_core::Tensor) -> Option<wgpu::Buffer> {
         Storage::Device(ds) => ds.downcast_ref::<GpuStorage>().map(|s| s.buf.raw().clone()),
         Storage::Cpu(_) => None,
     })
+}
+
+/// The wgpu buffer behind any GPU tensor (whatever its layout), for tests that trace which operations touch it.
+#[cfg(test)]
+pub(crate) fn storage_buffer(t: &folo_core::Tensor) -> wgpu::Buffer {
+    t.with_view(|v| match v.storage {
+        Storage::Device(ds) => ds.downcast_ref::<GpuStorage>().map(|s| s.buf.raw().clone()),
+        Storage::Cpu(_) => None,
+    })
+    .expect("a GPU tensor")
 }
 
 /// Whether a folo-core error is this backend reporting a lost device ([`GpuError::DeviceLost`]): the GPU was reset
