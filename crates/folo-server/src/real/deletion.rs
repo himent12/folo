@@ -8,7 +8,6 @@ use axum::http::StatusCode;
 
 use crate::error::{Error, Result};
 use crate::index::{absolute, reads};
-use crate::store::Store;
 
 use super::RealStore;
 use super::registry::read_registry;
@@ -75,7 +74,7 @@ impl RealStore {
                 .hint("delete that run first, or unregister this dataset without files=true"));
             }
         }
-        self.delete_dataset(id)?;
+        self.unregister(id)?;
         std::fs::remove_dir_all(&folder).map_err(|e| {
             let folder = folo_data::paths::shown(&folder);
             Error::internal(format!("{} was unregistered, but deleting '{folder}' failed: {e}", reg.name))

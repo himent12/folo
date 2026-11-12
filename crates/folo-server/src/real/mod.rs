@@ -157,7 +157,8 @@ impl Entry {
 pub struct RealStore {
     data_dir: PathBuf,
     entries: RwLock<Vec<Arc<Entry>>>,
-    /// Held shared while a dataset is registered and while a run is created or resumed, exclusively while
+    /// Held shared while a dataset is registered and while a run is created or resumed, exclusively while a dataset
+    /// is unregistered (so a run being admitted is in the run registry before tombstones are pruned) and while
     /// `DELETE /api/datasets/{id}?files=true` checks that nothing reads the folder and deletes it.
     files: RwLock<()>,
     recheck_every: Duration,

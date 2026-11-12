@@ -174,12 +174,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   line up). Mock images are immutable and sent with a long `Cache-Control`; real ones with `no-cache`.
 - `DELETE /api/datasets/{id}` → `204` (unregisters; its files stay, unless `?files=true`, below). Runs that used the dataset keep their
   metrics and models; their sample images (`/images` of this id) are gone with it. Real mode keeps the unregistered
-  dataset's identity (its canonical path and format) and id in the registry as a tombstone while any run on disk
+  dataset's identity (its canonical path and format) and id as a tombstone while a run the server has loaded
   references the id: registering that identity again gets the same id back, and those runs find their dataset again
   (also for a dataset registered by an older version, once this one unregisters it). A dataset registered as new
-  gets a fresh id that no registered dataset, tombstone or run on disk has, so an id is never handed to another
-  dataset while a run names it; a tombstone is dropped once no run references its id (registering that
-  dataset again then gives it a fresh id). `?files=true` also deletes the dataset's folder, only for a dataset this
+  gets a fresh id that no registered dataset, tombstone or loaded run has, so an id is never handed to another
+  dataset while a run names it. Unregistering waits for a run being created or resumed, so that run counts. A
+  tombstone is dropped lazily: at the next registry write (registering or unregistering a dataset), when no run the
+  server has loaded references its id then (registering that dataset again afterwards gives it a fresh id). `?files=true` also deletes the dataset's folder, only for a dataset this
   server wrote into its data dir (the folder right under `<data dir>/datasets`: a generated sample set, a labeling
   job's export, an upload); any other is `400 invalid_query`, and nothing is unregistered or deleted. It is `409
   run_active` while any run on this server is queued, running or stopping, whatever dataset it trains on. It is `409

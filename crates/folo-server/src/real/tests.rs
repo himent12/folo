@@ -1,7 +1,7 @@
 //! Dataset ids across unregistering (tombstones) and deleting a dataset's files while something reads them.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use folo_api::{Dataset, DatasetFormat, RegisterDataset, SyntheticDataset, TrainConfig};
@@ -157,4 +157,32 @@ fn registering_and_creating_runs_wait_for_a_deletion() {
     drop(lease);
     assert!(registering.join().unwrap().starts_with("ds_"));
     assert_eq!(creating.join().unwrap(), "dataset_not_found");
+}
+
+/// The reviewer's R2 interleaving: a run admitted (under the shared lease, as `start_run` holds it) while the dataset
+/// is unregistered. The unregister waits for the admission, so the run is in the registry when the tombstones are
+/// pruned, and the dataset registered again gets its id back.
+#[test]
+fn unregistering_waits_for_a_run_being_admitted() {
+    let t = TestDir::new("real-unregister-admission");
+    let store = Arc::new(RealStore::open(t.join("home")));
+    let a = synthetic(&store, "a");
+    let admitting = store.files.read().unwrap();
+    let e = store.entry(&a.id).unwrap();
+    let started = Arc::new(Barrier::new(2));
+    let (s, b, id) = (store.clone(), started.clone(), a.id.clone());
+    let unregistering = std::thread::spawn(move || {
+        b.wait();
+        s.delete_dataset(&id).unwrap();
+    });
+    started.wait();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!unregistering.is_finished(), "unregistering did not wait for the admission");
+    let config: TrainConfig =
+        serde_json::from_value(serde_json::json!({ "dataset_id": a.id, "name": "admitted" })).unwrap();
+    store.runs.register(config, store.dataset_ref(&e), None, None, 0, "cpu".into(), None).unwrap();
+    drop(admitting);
+    unregistering.join().unwrap();
+    assert!(store.entry(&a.id).is_err());
+    assert_eq!(register(&store, Path::new(&a.path)).id, a.id);
 }
