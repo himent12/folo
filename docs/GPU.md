@@ -312,7 +312,8 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   when `OH·OW` is a multiple of 4) and applies the bias and activation, rounding to f16 for an f16 output. The
   slabs come from the buffer pool (at most 64 MiB). `ConvPlan::splits` forces a chunk count (tests, tuning);
   `cargo bench -p folo-gpu --bench conv_model` times folo-n / folo-s's weakest forward convs, and with
-  `FOLO_CONV_TUNE=1` every tile config at 1–8 chunks. 1×1 stride-1 convs (the pointwise GEMM) and depthwise
+  `FOLO_CONV_TUNE=1` every regular tile config at 1–8 chunks (on tensor cores: every tensor-core config, then the
+  picked one at 1–8 chunks). 1×1 stride-1 convs (the pointwise GEMM) and depthwise
   convs are not split; a strided 1×1 conv is implicit GEMM and is.
 - `CONV_MODE = 2` is the input gradient as a transposed conv: each thread owns one input pixel and, for
   `k = (c_out, kh, kw)`, reads the output-gradient pixel `((ih + PH - kh·DH) / SH, (iw + PW - kw·DW) / SW)` when
@@ -435,7 +436,8 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   access, so each subgroup stores one fragment at a time into its own 1 KiB f32 scratch slice, and its 32 lanes
   apply `alpha`, bias and activation to 8 elements each and store them with bounds checks. Configs: 128×128 (4×2
   fragments per subgroup), 64×128, 64×64, 32×128 for `M ≤ 32` and 16×256 for `M ≤ 16` (folo-n's 16- and 32-channel
-  early layers); `coop::pick_config` picks by `M` and occupancy for plain GEMMs and the conv gradients. The forward
+  early layers); `coop::pick_config` picks by `M` and occupancy for plain GEMMs and the conv input gradients (the weight
+  gradients have their own `pick_config_weight_grad`). The forward
   convs (implicit GEMM, the 1×1 GEMM and the concatenation GEMM, routed or through `coop::conv2d` without a
   config) pick through `coop::pick_config_conv` instead:
   the flat tiles for `M ≤ 32` as above, 64×128 for outputs of at least 128 channels per group and 6400 pixels
