@@ -34,6 +34,16 @@ static THREE: KernelDef = KernelDef {
     )),
 };
 
+/// `X[pu(0)] = pf(1)`: each dispatch leaves its own parameters at its own place.
+static SET_AT: KernelDef = KernelDef {
+    name: "test_set_at",
+    storage: &[Access::ReadWrite],
+    source: Source::Static(concat!(
+        "@group(0) @binding(1) var<storage, read_write> X: array<f32>;\n",
+        "@compute @workgroup_size(1) fn main() { X[pu(0u)] = pf(1u); }\n",
+    )),
+};
+
 /// A context of its own, so other tests' dispatches do not move its counters.
 fn private() -> Option<GpuContext> {
     match GpuContext::new() {
@@ -74,18 +84,21 @@ fn reused_bind_groups_read_their_own_parameters() {
     assert_eq!((got[49], got[50]), (2.5, 0.0));
     assert_eq!(ctx.work_stats().bind_groups - before, 3, "another buffer, another bind group");
     assert_eq!(ctx.bind_cache_len(), 1, "seen once: not cached");
-    // A batch of 1024 dispatches fills four uniform chunks: two bind groups per chunk (first and second sighting),
-    // each slot its own value, so a bind group of the wrong chunk would add another dispatch's value. The batch
-    // limit doubles up to the flush interval after a wait (64 + 128 + ... + 1024 at most), so 3100 dispatches hold
-    // at least one full batch. The sum stays below 2^24, exact in f32.
+    // A batch of 1024 dispatches fills four uniform chunks: two bind groups per chunk (first and second sighting).
+    // Dispatch `i` writes `i` into element `i`, so a bind group of the wrong chunk (or a wrong slot) shows as a wrong
+    // value at a known place, not just a wrong total. The batch limit doubles up to the flush interval after a wait
+    // (64 + 128 + ... + 1024 at most), so 3100 dispatches hold at least one full batch.
     ctx.set_flush_interval(1024);
-    let c = GpuTensor::zeros(&ctx, &[64], DType::F32).unwrap();
+    let set = ctx.kernel(&SET_AT, Spec::new()).unwrap();
+    let c = GpuTensor::zeros(&ctx, &[3100], DType::F32).unwrap();
     ctx.sync().unwrap();
     let before = ctx.work_stats().bind_groups;
-    for i in 1..=3100u32 {
-        ctx.dispatch(&k, &[c.raw()], &Params::new().u(64).f(i as f32), [1, 1, 1]).unwrap();
+    for i in 0..3100u32 {
+        ctx.dispatch(&set, &[c.raw()], &Params::new().u(i).f(i as f32), [1, 1, 1]).unwrap();
     }
-    assert_eq!(c.to_vec().unwrap(), vec![(3100 * 3101 / 2) as f32; 64]);
+    let got = c.to_vec().unwrap();
+    let bad = got.iter().enumerate().position(|(i, &v)| v != i as f32);
+    assert!(bad.is_none(), "element {bad:?} holds another dispatch's parameters");
     assert_eq!(ctx.work_stats().bind_groups - before, 8);
 }
 

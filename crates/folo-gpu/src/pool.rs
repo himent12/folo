@@ -269,10 +269,10 @@ impl std::fmt::Debug for GpuBuffer {
 
 impl Drop for GpuBuffer {
     fn drop(&mut self) {
-        if let Some(buf) = self.buf.take()
-            && let Ok(mut pool) = self.pool.lock()
-        {
-            pool.give(buf, self.class);
+        // A poisoned pool still takes the buffer back: giving it is what retires it (reports its release to the
+        // bind-group cache), and a buffer dropped silently could stay pinned by a cached bind group.
+        if let Some(buf) = self.buf.take() {
+            self.pool.lock().unwrap_or_else(|p| p.into_inner()).give(buf, self.class);
         }
     }
 }
