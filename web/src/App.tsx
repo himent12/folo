@@ -50,7 +50,7 @@ export default function App(props: AppProps) {
 
   onMount(() => {
     void hub.connect();
-    const forget = installEntryMemory();
+    const forget = installEntryMemory(() => screen.peek().path);
     const uninstall = installShortcuts({
       palette: () => paletteOpen.set(!paletteOpen.peek()),
       shortcuts: () => shortcutsOpen.set(true),

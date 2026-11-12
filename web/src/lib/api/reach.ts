@@ -11,7 +11,8 @@ export interface Reachability {
   failed(): void;
 }
 
-/** A health check of the server in use (resolves when it answers). */
+/** A health check of the server in use: resolves when it answers at all (any HTTP status, any body), rejects only when
+ * nothing answered. */
 export type Probe = (signal: AbortSignal) => Promise<unknown>;
 
 /** Waits between probes while offline: soon at first, then every 5 s. */
@@ -49,9 +50,10 @@ export class Reach implements Reachability {
   }
 
   ok(): void {
-    if (!this.#offline.peek()) return;
+    // An answer settles any suspicion: a probe still out is moot, whatever it ends with.
     this.#gen++;
     this.#probing = false;
+    if (!this.#offline.peek()) return;
     this.#attempt = 0;
     clearTimeout(this.#timer);
     this.#timer = undefined;

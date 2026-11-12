@@ -10,7 +10,7 @@
 
 import { computed, signal } from 'fw';
 import { prefs } from '$lib/prefs';
-import { HttpApi, type Api } from './client';
+import { ApiError, HttpApi, type Api } from './client';
 import { Reach } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
@@ -125,7 +125,13 @@ class Hub {
       const h = await http.health(AbortSignal.any([ctrl.signal, AbortSignal.timeout(2500)]));
       if (attempt !== this.#attempt) return;
       this.api = http;
-      this.#reach.reset((s) => http.health(s));
+      // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached nothing
+      // fails the probe.
+      this.#reach.reset((s) =>
+        http.health(s).catch((e: unknown) => {
+          if (!(e instanceof ApiError) || e.status === 0) throw e;
+        }),
+      );
       this.version = h.version;
       this.reason = null;
       this.mode = 'live';

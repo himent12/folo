@@ -22,8 +22,10 @@ export default function RunWatch(): JSX.Element {
   });
   effect(() => {
     const next = runs.data;
-    if (!next) return;
     untrack(() => {
+      // None yet from the server in use (a reconnect drops the last one's): nothing to show for it either.
+      watched.runs = next;
+      if (!next) return;
       for (const e of runEnds(prev, next)) {
         const route = router.route;
         if (route.name === 'run' && route.params.id === e.run.id) continue;
@@ -31,7 +33,6 @@ export default function RunWatch(): JSX.Element {
         toast.show({ ...runEndMessage(e), action: { label: 'Open run', run: () => router.go(`/runs/${id}`) } });
       }
       prev = next;
-      watched.runs = next;
     });
   });
   effect(() => {

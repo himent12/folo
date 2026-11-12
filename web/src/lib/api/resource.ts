@@ -8,7 +8,9 @@
 //   reads `data` recomputes, and a changed list keeps its unchanged items (keyed rows stay as they are).
 //
 // Reactive async data for components. Create inside a component's body: the fetcher re-runs whenever a reactive value
-// it reads synchronously changes (route params, filters) and when the API hub reconnects. When the server answers
+// it reads synchronously changes (route params, filters) and when the API hub reconnects. A reconnect (`hub.epoch`: the
+// server in use may be another one, or the mock) drops what the last server sent: until the new one answers there is
+// no data, and if it fails, its error. When the server answers
 // again after an outage (`hub.back`), a Resource that failed retries by itself and one holding data refreshes quietly.
 
 import { effect, signal, untrack } from 'fw';
@@ -74,12 +76,22 @@ export class Resource<T> {
   #fetcher: (signal: AbortSignal) => Promise<T>;
   #ctrl: AbortController | null = null;
   #seq = 0;
+  /** The hub epoch of the last fetch (see above). */
+  #epoch: number | null = null;
 
   constructor(fetcher: (signal: AbortSignal) => Promise<T>, opts: ResourceOptions = {}) {
     this.#fetcher = fetcher;
     effect(() => {
       if (hub.mode === 'connecting') return;
-      void hub.epoch;
+      const epoch = hub.epoch;
+      if (epoch !== this.#epoch) {
+        this.#epoch = epoch;
+        untrack(() => {
+          this.data = undefined;
+          this.stale = undefined;
+          this.updated = null;
+        });
+      }
       const ctrl = new AbortController();
       // Reactive reads inside the fetcher (before its first await) are tracked by this effect.
       const promise = together(() => fetcher(ctrl.signal)).value;

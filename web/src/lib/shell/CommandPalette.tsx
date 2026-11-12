@@ -100,6 +100,8 @@ export default function CommandPalette(props: CommandPaletteProps) {
   /** The items chosen last (ids), read on open: with no query they head the list, under Recent. */
   const recent = signal<string[]>([]);
 
+  /** The hub epoch the lists above were fetched under. */
+  let listed: number | null = null;
   // A press outside the box closes it, unless it is the second click of the double-click that opened it (ui/backdrop).
   const backdrop = backdropClose(() => el, () => el.close());
   // Focus returns to the opener on close; a command that navigates then hands it to the new page (App).
@@ -114,20 +116,39 @@ export default function CommandPalette(props: CommandPaletteProps) {
       recent.set(recentIds());
       queueMicrotask(() => input.peek()?.focus());
       const api = hub.api;
-      api.runs().then((r) => runs.set(r), () => {});
-      api.datasets().then((d) => datasets.set(d), () => {});
-      api.models().then((m) => models.set(m), () => {});
+      // What the lists hold came from the server in use at the last opening: another one's (a reconnect since) goes,
+      // and so does an answer that arrives after the next reconnect.
+      const epoch = hub.epoch;
+      if (epoch !== listed) {
+        listed = epoch;
+        runs.set([]);
+        datasets.set([]);
+        models.set([]);
+        benches.set([]);
+        benchesOk.set(false);
+        labelJobs.set([]);
+        loops.set([]);
+        cloud.set(false);
+      }
+      const mine =
+        <A extends unknown[]>(f: (...a: A) => void) =>
+        (...a: A) => {
+          if (hub.epoch === epoch) f(...a);
+        };
+      api.runs().then(mine((r) => runs.set(r)), () => {});
+      api.datasets().then(mine((d) => datasets.set(d)), () => {});
+      api.models().then(mine((m) => models.set(m)), () => {});
       api.benches().then(
-        (b) => {
+        mine((b) => {
           benches.set(b);
           benchesOk.set(true);
           // Loops live under their benchmark: one request each (a server has a few benchmarks).
-          Promise.all(b.map((x) => api.benchLoops(x.id).catch(() => [] as BenchLoop[]))).then((l) => loops.set(l.flat()));
-        },
-        () => (benches.set([]), benchesOk.set(false), loops.set([])),
+          Promise.all(b.map((x) => api.benchLoops(x.id).catch(() => [] as BenchLoop[]))).then(mine((l) => loops.set(l.flat())));
+        }),
+        mine(() => (benches.set([]), benchesOk.set(false), loops.set([]))),
       );
-      api.labelJobs().then((j) => labelJobs.set(j), () => labelJobs.set([]));
-      api.system().then((s) => cloud.set(hasCloud(s)), () => cloud.set(false));
+      api.labelJobs().then(mine((j) => labelJobs.set(j)), mine(() => labelJobs.set([])));
+      api.system().then(mine((s) => cloud.set(hasCloud(s))), mine(() => cloud.set(false)));
     } else if (!open.get() && el.open) el.close();
   });
 

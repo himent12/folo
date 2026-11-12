@@ -41,7 +41,8 @@ export default function SidebarLive(props: { collapsed: boolean }) {
   effect(() => {
     const id = live.get()?.id ?? null;
     const name = live.get()?.name;
-    if (!watched.runs) return;
+    // No list (yet) from the server in use: its first is where things stand there, not a run that started.
+    if (!watched.runs) return void (seen = undefined);
     if (seen !== undefined && id && id !== seen) said.set(`${name} started training`);
     seen = id;
   });
