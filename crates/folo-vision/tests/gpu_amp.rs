@@ -596,7 +596,7 @@ fn amp_trains_the_dual_head() {
     eprintln!("o2o losses: amp {losses:?}, f32 {f32_losses:?}");
     assert!(losses.iter().all(|l| l.is_finite()), "{losses:?}");
     let tail = |l: &[f32]| l[l.len() - 2..].iter().sum::<f32>() / 2.0;
-    assert!(tail(&losses) <= 1.3 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
+    assert!(tail(&losses) <= 1.15 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
     let scaler = t.loss_scaler().unwrap();
     assert!(scaler.skipped_steps() < 20 && scaler.scale() >= 1.0, "{scaler:?}");
     let last = TestFile::new("amp-o2o", "last.folo");

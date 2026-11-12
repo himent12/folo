@@ -899,4 +899,24 @@ fn coop_conv_reads_parts_and_slices_in_place() {
         conv::conv2d_input(&ctx, &d, (gx.raw(), at), gw.raw(), Some(gb.raw()), gy.raw(), None).unwrap();
         assert_within(&gy.to_vec().unwrap(), &want, &tol, &format!("coop conv on a slice k{k}"));
     }
+    // A channel slice into a conv that splits K (64 -> 40 channels at 10 px, K = 576: 2 chunks), no bias: the
+    // partial slabs read B at the slice's offset and image stride.
+    let d = cdesc(2, 64, 10, 10, 40, 1, Window2d::square(3, 1, 1));
+    let hw = 100;
+    let x = f16_round(&rng.vec(2 * 64 * hw, -1.0, 1.0));
+    let wt = f16_round(&rng.vec(40 * 64 * 9, -1.0, 1.0));
+    let want = cpu_conv(&d, &x, &wt, None, false);
+    let sums = cpu_conv(&d, &x, &wt, None, true);
+    let tol: Vec<f64> =
+        want.iter().zip(&sums).map(|(&y, &s)| bound(y, s as f64, 64 * 9, 0.0, DType::F16)).collect();
+    let gx = upload(&ctx, &embed(&x, 2, 64, hw, 96, 16, &mut rng), DType::F16);
+    let gw = upload(&ctx, &wt, DType::F16);
+    let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F16).unwrap();
+    let at = conv::ConvInput { offset: 16 * hw, n_stride: 96 * hw };
+    let chunks = traced_splits(&ctx, || {
+        conv::conv2d_input(&ctx, &d, (gx.raw(), at), gw.raw(), None, gy.raw(), None).unwrap();
+    });
+    assert_eq!(chunks, planned_splits(&d, None, None));
+    assert!(chunks > 1, "the slice case must split K, ran {chunks} chunk(s)");
+    assert_within(&gy.to_vec().unwrap(), &want, &tol, "coop split-K conv on a slice");
 }
