@@ -391,6 +391,11 @@ pub trait Backend: Send + Sync + 'static {
     fn max_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<(Storage, Storage)> {
         unsupported!(self, "max_pool2d")
     }
+    /// [`Backend::max_pool2d`]'s values alone, for a result nobody differentiates (no grad mode, or an input
+    /// that does not require grad): no indices are made. The default runs `max_pool2d` and drops them.
+    fn max_pool2d_values(&self, x: View<'_>, p: &Pool2dParams) -> Result<Storage> {
+        self.max_pool2d(x, p).map(|(v, _)| v)
+    }
     /// Scatter `grad` back to the positions in `indices` (from [`Backend::max_pool2d`] with window `p`),
     /// summing collisions. `p` lets a backend gather instead of scatter (each input element visits only the
     /// windows that cover it); the CPU backend scatters and ignores it.

@@ -103,3 +103,82 @@ fn kernel_epilogue_is_bitwise_the_row_pass() {
         }
     }
 }
+
+/// A row-major A is read in place through row pointers ([`Operand::rows_in_place`]) instead of packed: the same
+/// FMAs in the same order, so the same bits as the packed path (here forced by storing A column-major), with and
+/// without the in-kernel epilogue, for ragged row and column blocks, K over one `KC` block, the K split, and
+/// any thread budget; and the same for [`gemm_rows`], whose B is read through row pointers too.
+#[test]
+fn a_in_place_is_bitwise_the_packed_path() {
+    let bias = data(64, 9);
+    for &(m, n, k) in &[(13, 37, 5), (6, 16, 256), (13, 37, 300), (64, 50, 600), (8, 8, 4096)] {
+        let a = data(m * k, 1);
+        let at: Vec<f32> = (0..k * m).map(|idx| a[(idx % m) * k + idx / m]).collect();
+        let b = data(k * n, 2);
+        let (rowmaj, colmaj) = (Strided::lhs(&a, 0, k, 1), Strided::lhs(&at, 0, 1, m));
+        assert!(rowmaj.rows_in_place().is_some() && colmaj.rows_in_place().is_none());
+        for act in [None, Some(UnaryOp::Silu)] {
+            let epi = BiasAct { bias: Some(&bias[..m]), act };
+            for threads in [1, 8] {
+                let (mut c1, mut c2) = (vec![0f32; m * n], vec![0f32; m * n]);
+                let rhs = Strided::rhs(&b, 0, n, 1);
+                gemm_ex(m, n, k, &rowmaj, &rhs, &mut c1, n, false, threads, Some(epi));
+                gemm_ex(m, n, k, &colmaj, &rhs, &mut c2, n, false, threads, Some(epi));
+                let same = c1.iter().zip(&c2).all(|(x, y)| x.to_bits() == y.to_bits());
+                assert!(same, "gemm_ex {m}x{n}x{k} act {act:?} threads {threads}");
+                let rows: Vec<*const f32> = (0..k).map(|p| b[p * n..].as_ptr()).collect();
+                let bp = RowPtrs { rows: &rows, n };
+                let map = ColumnMap { wp: n, ow: n };
+                let (mut r1, mut r2) = (vec![0f32; m * n], vec![0f32; m * n]);
+                gemm_rows(m, k, &rowmaj, &bp, &mut r1, map, threads, Some(epi));
+                gemm_rows(m, k, &colmaj, &bp, &mut r2, map, threads, Some(epi));
+                let same = r1.iter().zip(&r2).all(|(x, y)| x.to_bits() == y.to_bits());
+                assert!(same, "gemm_rows {m}x{n}x{k} act {act:?} threads {threads}");
+            }
+        }
+    }
+}
+
+/// The in-place-A micro-kernels (portable and dispatched; A rows through pointers, B packed or through row
+/// pointers) give the packed-panel kernel's bits, epilogue and ragged rows included.
+#[test]
+fn a_rows_kernels_are_bitwise_the_packed_kernel() {
+    use super::arows::{arows_kernel, arows_kernel_generic};
+    use super::rows::{RowsAKernel, rows_a_kernel, rows_a_kernel_generic};
+    let kc = 41;
+    let arows = data(MR * kc, 11);
+    let b = data(kc * NR, 12);
+    let bias = [0.5f32, -1.0, 0.0, 2.0, -0.25, 1.0];
+    let brows: Vec<*const f32> = (0..kc).map(|p| b[p * NR..].as_ptr()).collect();
+    let pairs: [(Kernel, RowsAKernel, super::arows::ARowsKernel); 2] = [
+        (kernel_generic, rows_a_kernel_generic, arows_kernel_generic),
+        (kernel(), rows_a_kernel(), arows_kernel()),
+    ];
+    for (kern, rakern, akern) in pairs {
+        for mr in [MR, 4, 1] {
+            // The packed panel of rows 0..mr (zeros past them); the row pointers repeat row 0 past them.
+            let mut pa = vec![0f32; kc * MR];
+            for p in 0..kc {
+                for i in 0..mr {
+                    pa[p * MR + i] = arows[i * kc + p];
+                }
+            }
+            let ap: [*const f32; MR] =
+                std::array::from_fn(|i| arows[if i < mr { i } else { 0 } * kc..].as_ptr());
+            for silu in [false, true] {
+                let re = RegEpi { bias, silu };
+                let prior = data(MR * NR, 13);
+                let (mut want, mut got_r, mut got_a) = (prior.clone(), prior.clone(), prior.clone());
+                // SAFETY: the panels, row pointers and blocks are sized as the kernels require.
+                unsafe {
+                    kern(kc, pa.as_ptr(), b.as_ptr(), want.as_mut_ptr(), NR, mr, NR, true, Some(&re));
+                    rakern(kc, &ap, brows.as_ptr(), 0, got_r.as_mut_ptr(), NR, mr, true, Some(&re));
+                    akern(kc, &ap, b.as_ptr(), got_a.as_mut_ptr(), NR, mr, NR, true, Some(&re));
+                }
+                let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&got_r), bits(&want), "rows-A kernel, mr {mr}, silu {silu}");
+                assert_eq!(bits(&got_a), bits(&want), "A-rows kernel, mr {mr}, silu {silu}");
+            }
+        }
+    }
+}

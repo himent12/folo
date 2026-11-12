@@ -31,7 +31,9 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   chosen at runtime, tile- or K-split parallelism) backs `matmul` and conv2d. Each GEMM task packs the B panels of
   its own columns into an L2-sized buffer one `KC` block at a time, reading row-contiguous operands row by row so
   the prefetcher can follow (column tiles first, rows only when there are too few columns, about three tasks per
-  thread and none under ~1 MFLOP). conv2d (any kernel, stride, padding or
+  thread and none under ~1 MFLOP). A row-major A whose packed form fits one K super-block (16 MiB: every conv
+  weight) is not packed at all: the micro-kernels broadcast its six rows through row pointers, the same FMAs in
+  the same order (bit for bit the packed path), so a conv forward has no serial packing pass. conv2d (any kernel, stride, padding or
   dilation, not depthwise) never builds an im2col matrix: the input is copied once, zero-padded and split into its
   stride phases, so every `(channel, ky, kx)` row of B is a contiguous run of that copy, read in place by a variant
   of the micro-kernel through a row-pointer table (a few dropped columns per output row; planes are spaced an odd
@@ -46,7 +48,10 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
   `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
   (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
-  separable (row pass, then column pass; same first-maximum argmax as a direct scan). A batch of several images
+  separable (row pass, then column pass; same first-maximum argmax as a direct scan); when nothing is recorded
+  (`no_grad`, or an input that does not require grad) it makes no index tensor (`Backend::max_pool2d_values`,
+  on the CPU a select over `-inf`-padded rows, the same bits). A batched `matmul` splits the pool between its
+  matrices. A batch of several images
   splits the pool between them: only as many images run at once (`lanes`) as their shifted-rows copies or unfolded
   gradients fit in 16 MiB, each lane taking its images one after another, and each image's GEMMs get
   `threads / lanes` threads (work stealing spreads the tiles); the weight gradient makes its images' operands in

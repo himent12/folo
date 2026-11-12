@@ -78,6 +78,81 @@ pub(crate) fn max_pool2d(
     (out, idx)
 }
 
+/// [`max_pool2d`]'s values alone (inference: nobody differentiates the result), bit for bit.
+///
+/// The same two passes, over rows padded with `-inf`: a window's first element (padding or not) starts its
+/// running best, and each next one replaces it under [`beats`]. Padding then never changes a value: `-inf`
+/// never beats anything, and a `-inf` start is replaced by the first real element unless every real element
+/// is `-inf` too, the same bits. With every window the same width, each pass is a select over whole rows that
+/// the compiler vectorises. Planes are grouped into tasks of about [`POOL_TASK`] outputs.
+pub(crate) fn max_pool2d_values(
+    x: &[f32],
+    (np, h, w): Planes,
+    p: &Pool2dParams,
+    [oh, ow]: [usize; 2],
+) -> Vec<f32> {
+    let mut out = alloc_uninit(np * oh * ow);
+    if out.is_empty() {
+        return out;
+    }
+    let [kh, kw] = p.kernel;
+    let [sh, sw] = p.stride;
+    let [ph, pw] = p.padding;
+    // Padded extents covering every window ((o - 1) * s + k <= n + 2 * pad).
+    let (hp, wp) = ((oh - 1) * sh + kh, (ow - 1) * sw + kw);
+    // One step of the scan: `a` replaces `b` if it beats it (`b` is never the empty start here).
+    #[inline(always)]
+    fn step(b: &mut f32, a: f32) {
+        if a > *b || a.is_nan() && !b.is_nan() {
+            *b = a;
+        }
+    }
+    let work = |(row, rv): &mut (Vec<f32>, Vec<f32>), (pl, o): (usize, &mut [f32])| {
+        let xp = &x[pl * h * w..(pl + 1) * h * w];
+        // The padding columns stay `-inf`; every row overwrites the same real columns.
+        row.clear();
+        row.resize(wp, f32::NEG_INFINITY);
+        // Row results of every padded row (padding rows are all `-inf`).
+        rv.clear();
+        rv.resize(hp * ow, f32::NEG_INFINITY);
+        for yy in 0..h.min(hp.saturating_sub(ph)) {
+            let n = w.min(wp.saturating_sub(pw));
+            row[pw..pw + n].copy_from_slice(&xp[yy * w..yy * w + n]);
+            let r = &mut rv[(yy + ph) * ow..(yy + ph + 1) * ow];
+            for (ox, b) in r.iter_mut().enumerate() {
+                *b = row[ox * sw];
+            }
+            for t in 1..kw {
+                for (ox, b) in r.iter_mut().enumerate() {
+                    step(b, row[ox * sw + t]);
+                }
+            }
+        }
+        for (oy, orow) in o.chunks_exact_mut(ow).enumerate() {
+            orow.copy_from_slice(&rv[oy * sh * ow..(oy * sh + 1) * ow]);
+            for t in 1..kh {
+                let src = &rv[(oy * sh + t) * ow..(oy * sh + t + 1) * ow];
+                for (b, &a) in orow.iter_mut().zip(src) {
+                    step(b, a);
+                }
+            }
+        }
+    };
+    let per_task = (POOL_TASK / (oh * ow)).max(1);
+    out.par_chunks_mut(per_task * oh * ow).enumerate().for_each_init(
+        || (Vec::new(), Vec::new()),
+        |scratch, (t, chunk)| {
+            for (c, o) in chunk.chunks_exact_mut(oh * ow).enumerate() {
+                work(scratch, (t * per_task + c, o));
+            }
+        },
+    );
+    out
+}
+
+/// Outputs per task of [`max_pool2d_values`] (a few microseconds of work).
+const POOL_TASK: usize = 1 << 12;
+
 pub(crate) fn max_pool2d_backward(g: &[f32], idx: &[i64], (np, h, w): Planes, ohw: usize) -> Vec<f32> {
     let mut gx = alloc_zeroed(np * h * w);
     if gx.is_empty() {
@@ -296,6 +371,36 @@ mod tests {
             assert_eq!(ix, wix, "{p:?}");
             for (a, b) in v.iter().zip(&wv) {
                 assert!(a == b || a.is_nan() && b.is_nan(), "{p:?}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn max_pool_values_are_the_indexed_values_bit_for_bit() {
+        // Ties between -0.0 and +0.0, NaNs with distinct payloads, -inf (whole windows of it), and planes
+        // narrower or shorter than the window.
+        let special =
+            [0.0f32, -0.0, f32::NEG_INFINITY, f32::from_bits(0x7fc0_0001), f32::from_bits(0xffc0_0002)];
+        for (np, h, w) in [(3, 11, 9), (2, 2, 3), (5, 1, 1), (17, 20, 20)] {
+            let x: Vec<f32> = (0..np * h * w)
+                .map(|i| match (i * 2654435761) % 11 {
+                    k @ 0..=4 => special[k],
+                    k => (k as f32 - 7.0) * 0.5,
+                })
+                .collect();
+            for (k, s, pad) in [
+                ([5, 5], [1, 1], [2, 2]),
+                ([3, 2], [2, 1], [1, 1]),
+                ([2, 3], [2, 3], [0, 1]),
+                ([1, 1], [1, 1], [0, 0]),
+                ([3, 3], [3, 2], [1, 0]),
+            ] {
+                let p = Pool2dParams { kernel: k, stride: s, padding: pad };
+                let Some(ohw) = p.output_hw(h, w) else { continue };
+                let (v, _) = max_pool2d(&x, (np, h, w), &p, ohw);
+                let fast = max_pool2d_values(&x, (np, h, w), &p, ohw);
+                let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&fast), bits(&v), "{np}x{h}x{w} {p:?}");
             }
         }
     }

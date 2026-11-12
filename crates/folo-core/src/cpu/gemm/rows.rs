@@ -5,11 +5,12 @@ use std::sync::OnceLock;
 
 use rayon::prelude::*;
 
+use super::arows::arows_kernel;
 use super::blocked::{aligned, pack_lhs_panels, plan_tiles, with_scratch};
 #[cfg(target_arch = "x86_64")]
 use super::kernel::store_block_avx2;
 use super::kernel::{kernel, store_block_generic};
-use super::{BiasAct, KC, MR, NR, Operand, PACK_BUDGET, PAR_FLOPS, RegEpi};
+use super::{ARows, BiasAct, KC, MR, NR, Operand, PACK_BUDGET, PAR_FLOPS, RegEpi};
 use crate::cpu::elementwise::SendPtr;
 
 /// Micro-kernel over a B read in place: `C[0..mr, 0..NR] (+)= A_panel * B` where row `p` of B is the `NR`
@@ -28,6 +29,146 @@ fn rows_kernel() -> RowsKernel {
         }
         rows_kernel_generic as RowsKernel
     })
+}
+
+/// [`RowsKernel`] with A read in place too: row `i` of A is the `kc` floats at `a[i]` (rows past `mr` repeat
+/// row 0 and are not stored). The same FMAs in the same order as [`RowsKernel`], so the same results.
+pub(super) type RowsAKernel = unsafe fn(
+    usize,
+    &[*const f32; MR],
+    *const *const f32,
+    usize,
+    *mut f32,
+    usize,
+    usize,
+    bool,
+    Option<&RegEpi>,
+);
+
+pub(super) fn rows_a_kernel() -> RowsAKernel {
+    static K: OnceLock<RowsAKernel> = OnceLock::new();
+    *K.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+                return rows_a_kernel_avx2_entry as RowsAKernel;
+            }
+        }
+        rows_a_kernel_generic as RowsAKernel
+    })
+}
+
+/// Portable [`RowsAKernel`].
+///
+/// # Safety
+/// Every `a[i]` points to `kc` floats; otherwise as [`rows_kernel_generic`].
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn rows_a_kernel_generic(
+    kc: usize,
+    a: &[*const f32; MR],
+    rows: *const *const f32,
+    j: usize,
+    c: *mut f32,
+    ldc: usize,
+    mr: usize,
+    acc_c: bool,
+    epi: Option<&RegEpi>,
+) {
+    let mut acc = [[0f32; NR]; MR];
+    for p in 0..kc {
+        // SAFETY: guaranteed by the caller.
+        let bv = unsafe { std::slice::from_raw_parts((*rows.add(p)).add(j), NR) };
+        for i in 0..MR {
+            // SAFETY: guaranteed by the caller.
+            let av = unsafe { *a[i].add(p) };
+            for jj in 0..NR {
+                acc[i][jj] += av * bv[jj];
+            }
+        }
+    }
+    // SAFETY: the caller owns the mr x NR block at `c`.
+    unsafe { store_block_generic(&mut acc, c, ldc, mr, NR, acc_c, epi) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn rows_a_kernel_avx2_entry(
+    kc: usize,
+    a: &[*const f32; MR],
+    rows: *const *const f32,
+    j: usize,
+    c: *mut f32,
+    ldc: usize,
+    mr: usize,
+    acc: bool,
+    epi: Option<&RegEpi>,
+) {
+    // SAFETY: only selected after runtime detection of avx2 and fma; pointer contract forwarded.
+    unsafe { rows_a_kernel_avx2(kc, a, rows, j, c, ldc, mr, acc, epi) }
+}
+
+/// AVX2/FMA 6x16 [`RowsAKernel`]: [`rows_kernel_avx2`] with the six A values of each K step broadcast from six
+/// rows instead of a packed panel.
+///
+/// # Safety
+/// As [`rows_a_kernel_generic`], and the CPU supports AVX2 and FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn rows_a_kernel_avx2(
+    kc: usize,
+    a: &[*const f32; MR],
+    rows: *const *const f32,
+    j: usize,
+    c: *mut f32,
+    ldc: usize,
+    mr: usize,
+    acc: bool,
+    epi: Option<&RegEpi>,
+) {
+    use std::arch::x86_64::*;
+    let mut c00 = _mm256_setzero_ps();
+    let mut c01 = _mm256_setzero_ps();
+    let mut c10 = _mm256_setzero_ps();
+    let mut c11 = _mm256_setzero_ps();
+    let mut c20 = _mm256_setzero_ps();
+    let mut c21 = _mm256_setzero_ps();
+    let mut c30 = _mm256_setzero_ps();
+    let mut c31 = _mm256_setzero_ps();
+    let mut c40 = _mm256_setzero_ps();
+    let mut c41 = _mm256_setzero_ps();
+    let mut c50 = _mm256_setzero_ps();
+    let mut c51 = _mm256_setzero_ps();
+    let [a0p, a1p, a2p, a3p, a4p, a5p] = *a;
+    // SAFETY: the caller guarantees kc floats at every `a[i]`, kc row pointers each readable for j + NR floats,
+    // and owns the block at `c`.
+    unsafe {
+        for p in 0..kc {
+            let bp = (*rows.add(p)).add(j);
+            let b0 = _mm256_loadu_ps(bp);
+            let b1 = _mm256_loadu_ps(bp.add(8));
+            let a0 = _mm256_broadcast_ss(&*a0p.add(p));
+            c00 = _mm256_fmadd_ps(a0, b0, c00);
+            c01 = _mm256_fmadd_ps(a0, b1, c01);
+            let a1 = _mm256_broadcast_ss(&*a1p.add(p));
+            c10 = _mm256_fmadd_ps(a1, b0, c10);
+            c11 = _mm256_fmadd_ps(a1, b1, c11);
+            let a2 = _mm256_broadcast_ss(&*a2p.add(p));
+            c20 = _mm256_fmadd_ps(a2, b0, c20);
+            c21 = _mm256_fmadd_ps(a2, b1, c21);
+            let a3 = _mm256_broadcast_ss(&*a3p.add(p));
+            c30 = _mm256_fmadd_ps(a3, b0, c30);
+            c31 = _mm256_fmadd_ps(a3, b1, c31);
+            let a4 = _mm256_broadcast_ss(&*a4p.add(p));
+            c40 = _mm256_fmadd_ps(a4, b0, c40);
+            c41 = _mm256_fmadd_ps(a4, b1, c41);
+            let a5 = _mm256_broadcast_ss(&*a5p.add(p));
+            c50 = _mm256_fmadd_ps(a5, b0, c50);
+            c51 = _mm256_fmadd_ps(a5, b1, c51);
+        }
+        let rows = [[c00, c01], [c10, c11], [c20, c21], [c30, c31], [c40, c41], [c50, c51]];
+        store_block_avx2(&rows, c, ldc, mr, NR, acc, epi);
+    }
 }
 
 /// Portable [`RowsKernel`].
@@ -201,17 +342,19 @@ pub(crate) fn gemm_rows<A: Operand>(
         return;
     }
     let threads = if 2 * m * n * k < PAR_FLOPS { 1 } else { threads };
-    let kern = kernel();
-    let rkern = rows_kernel();
+    let (kern, rkern) = (kernel(), rows_kernel());
+    let (akern, rakern) = (arows_kernel(), rows_a_kernel());
+    // A read in place (a conv's weights) is never packed: one K super-block.
+    let ain = ARows::of(a, m, k);
     let pm = m.div_ceil(MR);
     let reg = epi.filter(BiasAct::in_kernel);
     let blocks_fit = (PACK_BUDGET / (pm * MR * KC)).max(1);
-    let ks = (blocks_fit * KC).min(k.div_ceil(KC) * KC);
+    let ks = if ain.is_some() { k } else { (blocks_fit * KC).min(k.div_ceil(KC) * KC) };
     let g = plan_tiles(m, n, k, threads);
     let (tm, tn) = g.tiles();
     let parallel = threads > 1 && tm * tn > 1;
     let optr = SendPtr(out.as_mut_ptr());
-    let a_len = pm * MR * ks;
+    let a_len = if ain.is_some() { 0 } else { pm * MR * ks };
     // The C tiles of one K super-block live in task-local buffers between super-blocks only when K needs
     // more than one; then they are kept in `cbuf` (one per tile).
     let multi = k > ks;
@@ -223,11 +366,13 @@ pub(crate) fn gemm_rows<A: Operand>(
         while s0 < k {
             let ksz = ks.min(k - s0);
             let (first, last) = (s0 == 0, s0 + ksz == k);
-            let pa = &mut pa_all[..pm * MR * ksz];
-            let pack_a = |(p, dst): (usize, &mut [f32])| {
-                a.pack(p * MR, MR.min(m - p * MR), s0, ksz, MR, dst);
-            };
-            pack_lhs_panels(pa, MR * ksz, parallel, pack_a);
+            let pa = &mut pa_all[..a_len.min(pm * MR * ksz)];
+            if ain.is_none() {
+                let pack_a = |(p, dst): (usize, &mut [f32])| {
+                    a.pack(p * MR, MR.min(m - p * MR), s0, ksz, MR, dst);
+                };
+                pack_lhs_panels(pa, MR * ksz, parallel, pack_a);
+            }
             let pa = &*pa;
             let tile = |t: usize| {
                 let (ti, tj) = (t / tn, t % tn);
@@ -235,7 +380,7 @@ pub(crate) fn gemm_rows<A: Operand>(
                 let (j0, j1) = (tj * g.nc, ((tj + 1) * g.nc).min(n));
                 let (th, tw) = (i1 - i0, j1 - j0);
                 // Whole-value uses, so the closure captures the `Sync` wrappers rather than their raw fields.
-                let (b, optr, cbase) = (b, &optr, &cbase);
+                let (b, optr, cbase, ain) = (b, &optr, &cbase, &ain);
                 // `ct` is this tile's C block (row stride `ldc`); only this task touches it.
                 let run = |ct: *mut f32, ldc: usize| {
                     let mut edge = [0f32; KC * NR];
@@ -260,19 +405,50 @@ pub(crate) fn gemm_rows<A: Operand>(
                             let mut i = i0;
                             while i < i1 {
                                 let mr = MR.min(i1 - i);
-                                let apanel = &pa[(i / MR) * MR * ksz + kb * MR..];
-                                debug_assert!(apanel.len() >= kc * MR);
                                 let re = reg.filter(|_| finished).map(|e| e.kernel_rows(i, mr));
                                 let re = re.as_ref();
-                                // SAFETY: `apanel` holds kc * MR floats; full panels read rows[p] + j..j + NR,
-                                // inside each row (j + NR <= n); the ragged one reads `edge`; the C block
-                                // [i..i + mr, j..j + NR] is inside this task's own tile.
+                                // SAFETY: full panels read rows[p] + j..j + NR, inside each row (j + NR <= n);
+                                // the ragged one reads `edge`; the C block [i..i + mr, j..j + NR] is inside
+                                // this task's own tile.
                                 unsafe {
                                     let cp = ct.add((i - i0) * ldc + (j - j0));
-                                    if nr == NR {
-                                        rkern(kc, apanel.as_ptr(), rows.as_ptr(), j, cp, ldc, mr, acc, re);
+                                    if let Some(ar) = ain {
+                                        // The rows i..i + mr of A hold K elements s0 + kb..s0 + kb + kc.
+                                        let ap = ar.panel(i, mr, s0 + kb);
+                                        if nr == NR {
+                                            rakern(kc, &ap, rows.as_ptr(), j, cp, ldc, mr, acc, re);
+                                        } else {
+                                            akern(kc, &ap, edge.as_ptr(), cp, ldc, mr, nr, acc, re);
+                                        }
                                     } else {
-                                        kern(kc, apanel.as_ptr(), edge.as_ptr(), cp, ldc, mr, nr, acc, re);
+                                        // `apanel` holds kc * MR floats.
+                                        let apanel = &pa[(i / MR) * MR * ksz + kb * MR..];
+                                        debug_assert!(apanel.len() >= kc * MR);
+                                        if nr == NR {
+                                            rkern(
+                                                kc,
+                                                apanel.as_ptr(),
+                                                rows.as_ptr(),
+                                                j,
+                                                cp,
+                                                ldc,
+                                                mr,
+                                                acc,
+                                                re,
+                                            );
+                                        } else {
+                                            kern(
+                                                kc,
+                                                apanel.as_ptr(),
+                                                edge.as_ptr(),
+                                                cp,
+                                                ldc,
+                                                mr,
+                                                nr,
+                                                acc,
+                                                re,
+                                            );
+                                        }
                                     }
                                 }
                                 i += MR;
