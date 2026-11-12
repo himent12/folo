@@ -4,6 +4,7 @@ mod copy;
 mod elementwise;
 mod fused;
 mod inplace;
+mod muon;
 mod nn;
 mod overload;
 mod reduce;

@@ -24,7 +24,7 @@ are normative, this one is the map.
   `Optimizer::to_device` moves the optimizer's parameters and state (SGD momentum buffers, AdamW moments),
   `GradAccumulator::to_device` its buffers and `ModelEma::to_device` the averaged model (`ModelEma::new` also moves
   its copy to the source's device). A whole training setup can therefore be built on the CPU and moved, even
-  mid-run (tested against an all-CPU run in `tests/gpu.rs`).
+  mid-run (tested against an all-CPU run in `tests/gpu/main.rs`).
 
 ## Layers
 | layer | notes |

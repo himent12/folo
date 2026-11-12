@@ -714,9 +714,12 @@ checkpoint's `folo.optim` (FORMAT.md), so a resume continues with them; YOLO26's
 (docs/hill/r2-learn.md). Same
 `lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the Newton–Schulz iteration in `f32` (the
 reference: `bfloat16`); matrices are batched by column count with zero-padded rows, which changes no value. On a
-GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels, the iteration batched
-matmuls. Tests: `crates/folo-nn/tests/optim.rs` (two steps against an `f64` re-implementation of the reference,
-Newton–Schulz against `f64`), `tests/gpu.rs` (GPU against CPU), `tests/folo_io.rs` (bit-exact resume).
+GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels, and the rest of the
+Muon step is one fused call for all matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, the
+normalisation, each Newton–Schulz step as three grouped GEMMs over every matrix at once with no zero padding, and
+`p −= 0.2 · lr · O`); only the summation order of the products and of the norm differs from the tensor ops. Tests: `crates/folo-nn/tests/optim.rs` (two steps against an `f64` re-implementation of the reference,
+Newton–Schulz against `f64`), `tests/gpu/` (GPU against CPU; the fused kernels against the tensor ops on wide,
+tall, multi-tile and single-row matrices, zero, near-zero, NaN and empty ones), `tests/folo_io.rs` (bit-exact resume).
 
 ### 8.3 Batches, accumulation and the step loop
 **Batches.** At the start of epoch `e` (0-based), the training indices `0 .. N_train` are shuffled with a permutation

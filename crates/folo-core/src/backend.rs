@@ -603,6 +603,18 @@ pub trait Backend: Send + Sync + 'static {
         unsupported!(self, "scale_many")
     }
 
+    /// MuSGD's Muon update of many matrices in one call (folo-nn's `MuSgd`): for each item, the matrix
+    /// `u = nesterov ? (g · (1 − μ)) · 1 + m · μ : m` (`rows × cols`, from its momentum buffer and gradient),
+    /// orthogonalised as `folo_nn::optim::orthogonalize` does it (divided by its Frobenius norm plus `eps`,
+    /// transposed so that rows ≤ cols, `steps` quintic Newton–Schulz steps with `coeffs`, transposed back), times
+    /// its `scale` (when not 1), then `param = param · 1 + O · (−lr)` in place. The parameters hold their
+    /// `rows · cols` elements contiguously from element 0 and are no other item's storage. Reached through
+    /// `Tensor::muon_step_many_`. `Error::NotSupported`, with no parameter written, declines the call (also where
+    /// a backend cannot take these matrices on this device), and the caller uses tensor ops.
+    fn muon_step_many(&self, items: &mut [MuonItem<'_>], settings: &MuonSettings) -> Result<()> {
+        unsupported!(self, "muon_step_many")
+    }
+
     // ----- Detector pre- and post-processing (optional; callers fall back to host code) -----
 
     /// Letterbox `U8` RGB images (`images[i]` is `[H_i, W_i, 3]`) onto one `[B, 3, OH, OW]` canvas of `dtype`
@@ -738,6 +750,40 @@ pub struct OptimItem<'a> {
     pub grad: View<'a>,
     /// Its state buffers, as for [`Backend::optimizer_step`].
     pub state: Vec<&'a mut Storage>,
+}
+
+/// One matrix of [`Backend::muon_step_many`].
+#[derive(Debug)]
+pub struct MuonItem<'a> {
+    /// The parameter, updated in place.
+    pub param: &'a mut Storage,
+    /// The Muon momentum buffer (`rows · cols` `F32` elements, already updated this step).
+    pub momentum: View<'a>,
+    /// The gradient (`rows · cols` `F32` elements).
+    pub grad: View<'a>,
+    /// Rows of the matrix (the parameter's first dimension).
+    pub rows: usize,
+    /// Columns (the product of its other dimensions).
+    pub cols: usize,
+    /// Factor of the orthogonalised direction.
+    pub scale: f32,
+}
+
+/// The settings of [`Backend::muon_step_many`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MuonSettings {
+    /// `μ`.
+    pub momentum: f32,
+    /// Nesterov: `u = (g · (1 − μ)) · 1 + m · μ`; else `u = m`.
+    pub nesterov: bool,
+    /// The Newton–Schulz coefficients `(a, b, c)`: `X ← a·X + (b·A + c·A·A)·X`, `A = X·Xᵀ`.
+    pub coeffs: (f32, f32, f32),
+    /// Newton–Schulz steps.
+    pub steps: usize,
+    /// Added to the Frobenius norm before the division.
+    pub eps: f32,
+    /// The learning rate of the update (MuSGD's `0.2 · lr`).
+    pub lr: f32,
 }
 
 /// The running statistics [`Backend::batch_norm_act`] updates in place.
