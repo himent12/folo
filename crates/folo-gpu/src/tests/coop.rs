@@ -587,27 +587,42 @@ fn cpu_conv_grads(d: &Conv2dDesc, x: &[f32], w: &[f32], g: &[f32]) -> ConvGrads 
 /// Both gradients of the f16 conv `d` (input gradient f16; weight gradient as `w_out`) against the f64 reference,
 /// on tensor cores and on the regular kernels, each with an f32 and an f16 weight gradient.
 fn run_conv_grads(ctx: &GpuContext, d: &Conv2dDesc, seed: u64) {
+    conv_grads(ctx, d, seed, false);
+}
+
+/// Both gradients of the f16 conv `d` with tensor cores on, then off, and the weight gradient as f32 and as f16,
+/// against [`cpu_conv_grads`]; returns the weight gradients' routes ([`conv::LAST_ROUTE`]) in that order. `exact`: small integers
+/// (`-2..=2`) instead of `[-1, 1)`, so every sum is exact in f32 and the bounds drop to the output rounding
+/// (`k = 1`); a dropped split-K chunk, off by its partial sum, then fails however long the reduction.
+fn conv_grads(ctx: &GpuContext, d: &Conv2dDesc, seed: u64, exact: bool) -> Vec<conv::WgradRoute> {
     let mut rng = Rng::new(seed);
+    let mut draw = |n: usize| {
+        let v = rng.vec(n, -1.0, 1.0);
+        if exact { v.iter().map(|v| (v * 2.49).round()).collect() } else { f16_round(&v) }
+    };
     let (oh, ow) = d.output().unwrap();
     let (kh, kw) = d.win.kernel;
-    let x = f16_round(&rng.vec(d.n * d.c_in * d.h * d.w, -1.0, 1.0));
-    let w = f16_round(&rng.vec(d.c_out * (d.c_in / d.groups) * kh * kw, -1.0, 1.0));
-    let g = f16_round(&rng.vec(d.n * d.c_out * oh * ow, -1.0, 1.0));
+    let x = draw(d.n * d.c_in * d.h * d.w);
+    let w = draw(d.c_out * (d.c_in / d.groups) * kh * kw);
+    let g = draw(d.n * d.c_out * oh * ow);
     let (want_x, want_w, sum_x, sum_w) = cpu_conv_grads(d, &x, &w, &g);
     let (gx, gw, gg) =
         (upload(ctx, &x, DType::F16), upload(ctx, &w, DType::F16), upload(ctx, &g, DType::F16));
     let ident = |d: &Conv2dDesc| Conv2dDesc { act: UnaryOp::Identity, ..d.clone() };
-    let kx = d.c_out / d.groups * kh * kw;
+    let kx = if exact { 1 } else { d.c_out / d.groups * kh * kw };
     let tol_x: Vec<f64> =
         want_x.iter().zip(&sum_x).map(|(&y, &s)| bound(y, s as f64, kx, 0.0, DType::F16)).collect();
-    let kw_ = d.n * oh * ow;
+    let kw_ = if exact { 1 } else { d.n * oh * ow };
+    let mut routes = Vec::new();
     for tc in [true, false] {
         ctx.set_tensor_cores(tc);
         for w_out in [DType::F32, DType::F16] {
             let dx = GpuTensor::empty(ctx, &[x.len()], DType::F16).unwrap();
             let dw = GpuTensor::empty(ctx, &[w.len()], w_out).unwrap();
             conv::conv2d_backward_input(ctx, d, gg.raw(), gw.raw(), dx.raw()).unwrap();
+            conv::LAST_ROUTE.set(None);
             conv::conv2d_backward_weight_as(ctx, d, gx.raw(), gg.raw(), dw.raw(), w_out).unwrap();
+            routes.push(conv::LAST_ROUTE.take());
             assert_eq!(ctx.tensor_cores(), tc, "{}", ctx.tensor_cores_status());
             let tol_w: Vec<f64> =
                 want_w.iter().zip(&sum_w).map(|(&y, &s)| bound(y, s as f64, kw_, 0.0, w_out)).collect();
@@ -621,6 +636,7 @@ fn run_conv_grads(ctx: &GpuContext, d: &Conv2dDesc, seed: u64) {
             );
         }
     }
+    routes
 }
 
 #[test]
@@ -661,6 +677,34 @@ fn coop_conv_gradients() {
     ];
     for (i, d) in cases.iter().enumerate() {
         run_conv_grads(&ctx, d, 100 + i as u64);
+    }
+    ctx.set_tensor_cores(true);
+}
+
+/// The stem's weight gradient (3 → 16, 3×3 s2) on the regular kernels' 16×32 tile, with tensor cores on too:
+/// `N·OH·OW = 4·80·80 = 25600`, dozens of split-K chunks, exact sums so a dropped chunk fails.
+#[test]
+fn coop_conv_weight_gradient_stem_split_k() {
+    let (ctx, _g) = coop!();
+    let d = cdesc(4, 3, 160, 160, 16, 1, Window2d::square(3, 2, 1));
+    for route in conv_grads(&ctx, &d, 200, true) {
+        assert!(matches!(route, Some((false, (16, 32), s)) if s >= 40), "stem route {route:?}");
+    }
+    ctx.set_tensor_cores(true);
+}
+
+/// A narrow weight (4 → 8, 3×3) over a long reduction (`N·OH·OW = 6·160·160 = 153600`) on tensor cores: hundreds
+/// of split-K chunks, exact sums so a dropped chunk fails.
+#[test]
+fn coop_conv_weight_gradient_long_split_k() {
+    let (ctx, _g) = coop!();
+    let d = cdesc(6, 4, 160, 160, 8, 1, Window2d::square(3, 1, 1));
+    let routes = conv_grads(&ctx, &d, 201, true);
+    for route in &routes[..2] {
+        assert!(matches!(route, Some((true, _, s)) if *s >= 200), "tensor-core route {route:?}");
+    }
+    for route in &routes[2..] {
+        assert!(matches!(route, Some((false, _, s)) if *s >= 200), "regular route {route:?}");
     }
     ctx.set_tensor_cores(true);
 }

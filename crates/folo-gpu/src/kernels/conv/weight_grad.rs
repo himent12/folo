@@ -16,6 +16,7 @@ use crate::pipeline::{Params, Spec};
 /// which always ended at the 64×64 tile with 4×4 outputs per thread here.
 pub(crate) fn pick_config_weight_grad(ctx: &GpuContext, m: usize, n: usize) -> TileConfig {
     let cfg = match m {
+        0..=16 if n <= 32 => STEM,
         _ if n < 128 => TileConfig::SMALL,
         // Weight gradients with at most 32 output channels.
         0..=32 => TileConfig::ROWS32,
@@ -23,6 +24,38 @@ pub(crate) fn pick_config_weight_grad(ctx: &GpuContext, m: usize, n: usize) -> T
         _ => TileConfig::MEDIUM,
     };
     if cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage { cfg } else { TileConfig::SMALL }
+}
+
+/// 16×32 tiles, depth 32, 4×4 per thread, 32 threads: the stem (3→16, `N = 27`), whose 1.6 M-deep reduction
+/// split-K spreads over thousands of workgroups; a wider tile would be mostly padding.
+const STEM: TileConfig = TileConfig { bm: 16, bn: 32, bk: 32, tm: 4, tn: 4 };
+
+/// Whether the weight gradient of an `m × n` weight takes the regular kernels' [`STEM`] tile even on tensor
+/// cores (their narrowest tile is 16×256, 89 % padding at `N = 27`).
+pub(crate) fn stem_shaped(m: usize, n: usize) -> bool {
+    m <= 16 && n <= 32
+}
+
+/// Whether the regular weight-gradient kernel with tile `cfg` pads its `B` tile rows by one vec4 (`WG_PAD`, against
+/// bank conflicts in its stores): only when the padded tile still fits `limit` bytes of workgroup memory. The
+/// tile choice and [`gemm::check_config`] count the unpadded tile, which stays the fallback.
+pub(crate) fn wgrad_pad(cfg: TileConfig, limit: u32) -> bool {
+    cfg.workgroup_bytes() + wgrad_pad_bytes(cfg) <= limit
+}
+
+/// Workgroup memory the `WG_PAD` row padding adds: one vec4 of f32 per row of both `B` tiles.
+fn wgrad_pad_bytes(cfg: TileConfig) -> u32 {
+    2 * cfg.bk * 16
+}
+
+/// A GEMM weight gradient's route, for tests: tensor cores, the tile's `(BM, BN)` and the split-K chunk count.
+#[cfg(test)]
+pub(crate) type WgradRoute = Option<(bool, (u32, u32), usize)>;
+
+#[cfg(test)]
+thread_local! {
+    /// The route of this thread's last GEMM weight gradient.
+    pub(crate) static LAST_ROUTE: std::cell::Cell<WgradRoute> = const { std::cell::Cell::new(None) };
 }
 
 /// Largest `KH · KW` the direct depthwise weight-gradient kernel unrolls; bigger kernels use the GEMM path.
@@ -44,6 +77,96 @@ pub(crate) fn weight_grad_dims(spec: &Spec) -> String {
     } else {
         "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u); let OHOW = pu(31u);\n".into()
     }
+}
+
+/// One element of an invocation's share of a weight gradient's im2col B tile (`bk × bn`, `k`-major rows): row
+/// `kq · run + wl`, column `jj`, both WGSL `u32` expressions of `wl = tid % run` and `wq = tid / run` (`run`
+/// of the [`WgradPlan`]).
+pub(crate) struct WgradUnit {
+    /// The row's run index (a constant, or an expression of `wq`).
+    pub kq: String,
+    /// The column inside the tile.
+    pub jj: String,
+}
+
+/// An invocation's share of a weight gradient's B tile ([`wgrad_b_units`]).
+pub(crate) struct WgradPlan {
+    /// Consecutive pixels (`k`) of one column that neighbouring invocations load.
+    pub run: u32,
+    /// The elements, in register order.
+    pub units: Vec<WgradUnit>,
+}
+
+/// The weight gradient's B-tile plan for `threads` invocations: neighbouring invocations take `run`
+/// neighbouring pixels of one column, then the next columns. Along `k = (n, oh, ow)` neighbours are neighbouring
+/// pixels of one image row (a coalesced gather); along `j = (ci, kh, kw)` they would sit a whole image plane
+/// apart, so a warp's load would touch one memory sector per invocation. Mixing a short run of pixels with
+/// several columns per warp, rather than a whole warp along `k`, keeps the stores into the k-major workgroup
+/// tile free of bank conflicts (see the generators' row padding).
+pub(crate) fn wgrad_b_units(threads: u32, bk: u32, bn: u32, run: u32) -> WgradPlan {
+    let r = run;
+    let lanes = threads / r;
+    assert!(threads.is_multiple_of(r) && bk.is_multiple_of(r), "weight-gradient B plan: {threads} / {bk}");
+    assert!((bk * bn).is_multiple_of(threads), "weight-gradient B plan: {bk}×{bn} over {threads}");
+    // Element `e = tid + u · threads` is (row = (e / r / bn) · r + e % r, column = (e / r) % bn), and
+    // `e / r = wq + u · lanes`.
+    let units = (0..bk * bn / threads)
+        .map(|u| {
+            if bn.is_multiple_of(lanes) {
+                let per = bn / lanes;
+                WgradUnit { kq: format!("{}u", u / per), jj: format!("(wq + {}u)", lanes * (u % per)) }
+            } else {
+                assert!(lanes.is_multiple_of(bn), "weight-gradient B plan: {lanes} lanes, {bn} columns");
+                WgradUnit { kq: format!("(wq / {bn}u + {}u)", lanes / bn * u), jj: format!("(wq % {bn}u)") }
+            }
+        })
+        .collect();
+    WgradPlan { run, units }
+}
+
+/// The WGSL of a weight gradient's B-tile load (from `buf`, converted by `cast`): each distinct run of `units` gets its
+/// pixel `(wn, wr)` decoded once, then each unit gathers the image element that pixel read through tap
+/// `j = (ci, kh, kw)` into `reg(u)` (zero outside the image or past `K` / `N`).
+pub(crate) fn wgrad_b_load(
+    plan: &WgradPlan,
+    buf: &str,
+    reg: impl Fn(usize) -> String,
+    cast: &str,
+    zero: &str,
+) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    let mut runs: Vec<&str> = Vec::new();
+    let run = plan.run;
+    for (u, w) in plan.units.iter().enumerate() {
+        let q = match runs.iter().position(|k| *k == w.kq) {
+            Some(q) => q,
+            None => {
+                runs.push(&w.kq);
+                let q = runs.len() - 1;
+                let _ = writeln!(
+                    s,
+                    "    let wk{q} = k0 + {} * {run}u + wl; let wkok{q} = wk{q} < K; let wn{q} = wk{q} / OHOW;\n\
+                     \x20   let wr{q} = wk{q} % OHOW; let wb{q} = offB + wn{q} * SBN;\n\
+                     \x20   let wih{q} = i32((wr{q} / OW) * SH) - PH; let wiw{q} = i32((wr{q} % OW) * SW) - PW;",
+                    w.kq
+                );
+                q
+            }
+        };
+        let _ = writeln!(
+            s,
+            "    {{ let j = n0 + {}; let ci = j / (KH * KW); let r = j % (KH * KW);\n\
+             \x20     let ih = wih{q} + i32((r / KW) * DH); let iw = wiw{q} + i32((r % KW) * DW);\n\
+             \x20     if (wkok{q} && j < N && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
+             \x20       {} = {cast}({buf}[wb{q} + (ci * IH + u32(ih)) * IW + u32(iw)]);\n\
+             \x20     }} else {{ {} = {zero}; }} }}",
+            w.jj,
+            reg(u),
+            reg(u)
+        );
+    }
+    s
 }
 
 /// Gradient of [`conv2d`](crate::kernels::conv::conv2d) with respect to its weight, written as `d.dtype`: [`conv2d_backward_weight_as`].
@@ -131,18 +254,29 @@ pub fn conv2d_backward_weight_as(
     g.b = BatchStrides { offset: 0, outer: 0, inner: cin_g * d.h * d.w };
     g.c = BatchStrides { offset: 0, outer: 0, inner: cout_g * ncols };
     g.dtype = dt;
-    if coop_grad(ctx, d) && coop::encode_conv_backward_weight(ctx, d, &g, out, grad, x, gw)? {
+    if coop_grad(ctx, d)
+        && !stem_shaped(cout_g, ncols)
+        && coop::encode_conv_backward_weight(ctx, d, &g, out, grad, x, gw)?
+    {
         return Ok(());
     }
     let cfg = pick_config_weight_grad(ctx, cout_g, ncols);
     gemm::check_config(ctx, cfg)?;
+    let pad = wgrad_pad(cfg, ctx.caps().max_workgroup_storage);
     let bk = cfg.bk as usize;
     // Split K when the weight alone has too few tiles: aim for ~512 workgroups, each at least 16 K tiles deep.
     let tiles = cout_g.div_ceil(cfg.bm as usize) * ncols.div_ceil(cfg.bn as usize) * d.groups;
-    let want =
-        512usize.div_ceil(tiles).min(np.div_ceil(16 * bk)).min(MAX_PARTIAL_ELEMS / wn).min(65535 / d.groups);
+    // (per 256 invocations: narrower workgroups get proportionally more)
+    let want = (512 * 256 / cfg.threads() as usize)
+        .min(1024)
+        .div_ceil(tiles)
+        .min(np.div_ceil(16 * bk))
+        .min(MAX_PARTIAL_ELEMS / wn)
+        .min(65535 / d.groups);
     let ks = np.div_ceil(want.max(1)).next_multiple_of(bk);
     let splits = np.div_ceil(ks);
+    #[cfg(test)]
+    LAST_ROUTE.set(Some((false, (cfg.bm, cfg.bn), splits)));
     // The kernel writes `C` as f32 for partial slabs and for an f32 result of f16 inputs.
     let c_f32 = splits > 1 || out == DType::F32;
     let tmp = if splits > 1 { Some(ctx.alloc(DType::F32.bytes(prod(&[splits, wn])?))?) } else { None };
@@ -158,6 +292,7 @@ pub fn conv2d_backward_weight_as(
         .bool("TRANS_B", false)
         .bool("CHECK", check)
         .u32("CONV_MODE", 3)
+        .bool("WG_PAD", pad)
         .bool("SPLIT", splits > 1)
         .bool("OUT_F32", c_f32 && dt == DType::F16);
     let kernel = ctx.kernel(&GEMM, weight_grad_spec(conv_spec(spec, d), d, oh, ow))?;
@@ -183,4 +318,44 @@ pub fn conv2d_backward_weight_as(
         finish(t, splits)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernels::gemm::gen_gemm;
+
+    /// Workgroup bytes a generated GEMM shader declares (its `var<workgroup>` arrays of arrays of `vec4<f32>`).
+    fn declared_workgroup_bytes(wgsl: &str) -> u32 {
+        wgsl.lines()
+            .filter_map(|l| l.strip_prefix("var<workgroup> "))
+            .map(|l| {
+                let dims = l.split_once("vec4<f32>, ").expect("vec4 tile").1;
+                let (inner, rest) = dims.split_once(">, ").expect("inner length");
+                let outer = rest.split_once('>').expect("outer length").0;
+                16 * inner.parse::<u32>().unwrap() * outer.parse::<u32>().unwrap()
+            })
+            .sum()
+    }
+
+    /// The mode-3 shader never declares more workgroup memory than the limit its tile was validated against:
+    /// `WG_PAD` is on only where the padded tile fits, and the generator adds exactly [`wgrad_pad_bytes`].
+    #[test]
+    fn weight_grad_pad_fits_the_validated_limit() {
+        let tiles = [TileConfig::LARGE, TileConfig::MEDIUM, TileConfig::SMALL, TileConfig::ROWS32, STEM];
+        for limit in [16384, 32768, 49152] {
+            for cfg in tiles.into_iter().filter(|c| c.workgroup_bytes() <= limit) {
+                let pad = wgrad_pad(cfg, limit);
+                let g = GemmDesc::new(cfg.bm as usize, cfg.bn as usize, 4096, false, false, 1);
+                let spec = base_spec(&g, cfg).u32("CONV_MODE", 3).bool("SPLIT", true).bool("WG_PAD", pad);
+                let bytes = declared_workgroup_bytes(&gen_gemm(&spec));
+                assert_eq!(bytes, cfg.workgroup_bytes() + u32::from(pad) * wgrad_pad_bytes(cfg), "{cfg:?}");
+                assert!(bytes <= limit, "{cfg:?}: {bytes} B of workgroup memory over {limit}");
+            }
+        }
+        // f32 x [1, 8, 8, 8], w [32, 8, 3, 3] on a 16 KiB device: SMALL is exactly 16 KiB unpadded.
+        assert_eq!(TileConfig::SMALL.workgroup_bytes(), 16384);
+        assert!(!wgrad_pad(TileConfig::SMALL, 16384));
+        assert!(wgrad_pad(TileConfig::SMALL, 32768));
+    }
 }
