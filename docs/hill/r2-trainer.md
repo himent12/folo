@@ -107,6 +107,52 @@ What this says:
 - Epoch-1 times are inside the noise between all three (the epoch is 5-7 s with validation; the compile is 1-2 s
   of it): no slower on a cold cache.
 
+**Row 10 not worse** (`bench/trainer/ab.py train ... --epochs 2 --batch 16 --imgsz 640 --workers 8 --close-mosaic 0
+--device gpu:0`, f32, 3 rounds alternated, 15-25 other cores busy): epoch-2 sustained median main **312.9 img/s**
+(162.1-337.7), PR **309.8** (143.3-321.1): a tie.
+
+Review: 3 Sol reviewers, one Opus fixer, 3 re-review rounds (merged as #183, 4dfdaf1d). What mattered: lexical cache
+keys aliasing symlinked folders, a prune that could delete other files in the cache folder, cache files read whole
+before any check, test subprocesses writing into `~/.folo/cache`, a GPU test that could not see lost reuse, and the
+start-up script timing the first batch instead of the first optimizer step (rerun above). Merged with `--admin`:
+`tiny_amp_run_learns` fails identically on main d3032648 (another lane's merge), Linux CI refused for billing.
+
+## PR 2: validation downloads only the multi-label candidate pairs
+
+### Where the time was
+Round 1 left `folo val`'s scoring thread as the limit: every batch of 32 downloaded the decoded head `[B, A, 4 + nc]`
+(32 x 8400 x 84 f32 = 90 MB) for multi-label NMS at conf 0.001.
+
+### What changed
+- folo-gpu `kernels::detect::multi_label_candidates` (`shaders/det_candidates.wgsl`): one thread per (image, anchor)
+  over the decoded `[B, 4 + nc, A]` (the dense storage behind `decoded_on_device()`'s transposed view), counts its
+  classes with a score `> conf`, reserves them with one atomic add into the image's counter and writes
+  `(anchor, class, score bits)` up to a capacity; the count keeps going, so the host sees an overflow. The scores are
+  copied, not recomputed.
+- folo-vision `val.rs`: a batch downloads the pairs and the boxes `[B, 4, A]`; `nms::non_max_suppression_pairs` sorts
+  the pairs back to `(anchor, class)` order and runs the same `finish` as `non_max_suppression_rows`. The capacity
+  follows the most pairs an image had (+25%, at least 16 Ki) but never past half the decode (then that batch uses the
+  full decode); an image with more pairs than room downloads its whole decode. Only with a positive normal `conf`.
+- folo-cli tests: the three stop / resume tests train 1000-epoch runs that `train_until_stopped` always stops after an
+  epoch (with a 120 s deadline), so they no longer race the trainer's speed.
+
+### Results
+`bench/trainer/ab.py val --bin base=D:/folo-build/hill2-base/release/folo.exe --bin new=<PR folo.exe> --rounds 3 --
+--model D:/folo-weights/folo-n-coco.folo --data D:/folo-data/coco --device gpu:0`, run twice (6 rounds), alternated in
+one GPU-lock hold, 16-21 other cores busy:
+
+| | main 647b981f | PR |
+|---|---|---|
+| process wall, median (range) | 8.8 s (8.1-10.4) | **6.7 s** (6.2-8.0; one first run 11.8) |
+| evaluation (`seconds`) | 7.3 s (6.7-8.7) | **5.2 s** (4.8-6.0; first run 9.4) |
+| mAP50 / mAP50-95 | 0.44944638 / 0.30999148 | **0.44944638 / 0.30999148**, every run |
+
+Per run (wall / evaluation / other cores), base then new: 9.79 / 7.46 / 20.6 and 11.81 / 9.37 / 17.1; 8.13 / 6.74 /
+16.3 and 6.57 / 5.09 / 17.4; 8.39 / 6.95 / 16.8 and 6.37 / 4.83 / 18.2; 8.68 / 7.21 / 16.3 and 6.24 / 4.86 / 16.2;
+10.37 / 8.75 / 18.5 and 7.97 / 6.04 / 21.4; 8.96 / 7.45 / 17.7 and 6.81 / 5.40 / 19.3. The `<= 6.5 s` wall target is
+missed by 0.2 s at the median on this loaded machine; the evaluation itself is 29% faster. What remains is the forward
+passes, the loader and host NMS.
+
 ## Leftovers
 
 1. **Parallel pipeline precompile**: write the `(kernel, spec)` list a run compiled next to the pipeline cache and
