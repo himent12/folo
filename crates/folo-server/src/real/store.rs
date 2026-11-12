@@ -30,9 +30,7 @@ use crate::throughput::{EstimateInput, InferKey, InferSample};
 use crate::uploads::Uploads;
 use crate::util::slug;
 
-use super::datasets::index_path;
 use super::models::cli_weights;
-use super::registry::{Tombstone, read_registry};
 use super::training::{run_cloud, upload_fingerprint};
 use super::{MAX_SYNTHETIC_IMAGES, RealStore, SHUTDOWN_WAIT, State};
 
@@ -246,30 +244,9 @@ impl Store for RealStore {
     }
 
     fn delete_dataset(&self, id: &str) -> Result<()> {
-        let mut list = self.entries.write().unwrap();
-        let mut file = read_registry(&self.data_dir)?;
-        let entry = list.iter().find(|e| e.reg.lock().unwrap().id == id).cloned();
-        let Some(reg) =
-            entry.as_ref().map(|e| e.reg()).or_else(|| file.datasets.iter().find(|r| r.id == id).cloned())
-        else {
-            return Err(Error::not_found("dataset", id));
-        };
-        // Its tombstone keeps the id for it while runs reference it (`crate::real::registry`).
-        file.datasets.retain(|r| r.id != id);
-        file.tombstones.retain(|t| t.id != id);
-        file.tombstones.push(Tombstone::of(&reg, crate::util::rfc3339(crate::util::unix_now())));
-        self.save_registry(&mut file)?;
-        list.retain(|e| e.reg.lock().unwrap().id != id);
-        // Caches are ours to delete; the dataset's own files never are. Marking the entry deleted first (under the
-        // lock cache writers hold) keeps in-flight indexers and thumbnails from writing them back.
-        let _deleted = entry.as_ref().map(|e| {
-            let mut d = e.deleted.lock().unwrap();
-            *d = true;
-            d
-        });
-        let _ = std::fs::remove_file(index_path(&self.data_dir, id));
-        let _ = std::fs::remove_dir_all(self.thumbs_dir(id));
-        Ok(())
+        // Exclusive (briefly), so no run is admitted for the dataset while its identity changes (`RealStore::files`).
+        let _files = self.files.write().unwrap_or_else(|p| p.into_inner());
+        self.unregister(id)
     }
 
     fn delete_dataset_files(&self, id: &str) -> Result<()> {

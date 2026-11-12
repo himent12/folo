@@ -179,8 +179,8 @@ async fn registry_and_index_cache_survive_restarts_and_track_changes() {
     assert!(cache.is_file(), "the index is cached");
     let registry: Value =
         serde_json::from_slice(&std::fs::read(home.join("datasets.json")).unwrap()).unwrap();
-    assert_eq!(registry["datasets"][0]["id"], ds.id.as_str());
-    assert_eq!(registry["datasets"][0]["name"], "mine");
+    assert_eq!(registry[0]["id"], ds.id.as_str());
+    assert_eq!(registry[0]["name"], "mine");
     drop(app1);
 
     // Unchanged files: the restart loads the cache instead of rebuilding it.
@@ -590,9 +590,9 @@ async fn a_registry_from_before_tombstones_loads_and_reconnects() {
     let app = restart(&home);
     let (status, _, _) = send(&app, delete("/api/datasets/ds_0bad")).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let registry: Value =
-        serde_json::from_slice(&std::fs::read(home.join("datasets.json")).unwrap()).unwrap();
-    assert_eq!(registry["tombstones"][0]["id"], "ds_0bad");
+    let removed: Value =
+        serde_json::from_slice(&std::fs::read(home.join("datasets.removed.json")).unwrap()).unwrap();
+    assert_eq!(removed[0]["id"], "ds_0bad");
     let back: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data }))).await;
     assert_eq!(back.id, "ds_0bad");
 }

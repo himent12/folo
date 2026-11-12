@@ -21,10 +21,10 @@ fixes.
   and every list say "shapes (removed)" instead of an id or "deleted dataset".
 - **Datasets**: a folder that was moved is marked "Folder missing" with Remove from FOLO, never as deleted; pasted
   paths in quotes are taken and relative ones refused (datasets and labeling); default names are tidy and unique;
-  removing a generated sample set can delete its images too (`?files=true`, refused while another dataset or a run
-  reads them); a dataset registered again while runs use it gets its id back, and an id never moves to another
-  dataset (tombstones in `datasets.json`); a folder of unlabeled images points to
-  Label images; health guidance and counts that are true ("1 class").
+  removing a generated sample set can delete its images too (`?files=true`, refused while any run is active or another
+  dataset reads them); a dataset registered again while runs use it gets its id back, and an id never moves to another
+  dataset (tombstones in `datasets.removed.json`, so `datasets.json` stays the list older versions read); a folder of
+  unlabeled images points to Label images; health guidance and counts that are true ("1 class").
 - **Not found and errors**: one not-found state for every deleted run, model, dataset, benchmark and labeling job;
   error states name what could not be loaded; a real offline state that recovers by itself, its notice in the top bar;
   Studio no longer falls back to demo data by itself: a server that is slow to answer or not there shows "Server

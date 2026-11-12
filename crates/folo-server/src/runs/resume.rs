@@ -135,7 +135,7 @@ impl Runs {
         e.stop.store(false, Ordering::Relaxed);
         e.persist(&st);
         e.send(RunEvent::Status(status_event(&st.file.run)));
-        let run = st.file.run.clone();
+        let run = st.file.shown();
         drop(st);
         e.log(
             LogLevel::Info,

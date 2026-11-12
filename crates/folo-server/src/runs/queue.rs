@@ -51,7 +51,7 @@ impl Runs {
         }
         let training = self.active.lock().unwrap().is_some();
         drop(q);
-        let mut run = st.file.run.clone();
+        let mut run = st.file.shown();
         run.queue_position = Some(to as u32 + 1);
         drop(st);
         if mv == QueueMove::Start {
@@ -307,7 +307,7 @@ impl Runs {
                     Self::notify_queue(&q);
                 }
                 e.finish(&mut st, RunStatus::Stopped, None);
-                let run = st.file.run.clone();
+                let run = st.file.shown();
                 drop(st);
                 e.log(LogLevel::Info, "stopped before it started");
                 Ok(run)
@@ -317,7 +317,7 @@ impl Runs {
                 st.file.run.status = RunStatus::Stopping;
                 e.persist(&st);
                 e.send(RunEvent::Status(status_event(&st.file.run)));
-                let run = st.file.run.clone();
+                let run = st.file.shown();
                 drop(st);
                 let message = match run.cloud.as_ref().map(|c| c.phase) {
                     Some(p) if cloud && p < CloudPhase::Training => "stop requested; releasing the instance",
@@ -331,7 +331,7 @@ impl Runs {
                 e.log(LogLevel::Info, message);
                 Ok(run)
             }
-            RunStatus::Stopping => Ok(st.file.run.clone()),
+            RunStatus::Stopping => Ok(st.file.shown()),
             s => Err(Error::run_not_active(id, serde_json::to_value(s).unwrap().as_str().unwrap_or(""))),
         }
     }

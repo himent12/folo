@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use folo_api::{
     BestEpoch, LogLevel, LogLine, ModelMetrics, Run, RunCloud, RunDataset, RunEvent, RunStatus, StatusEvent,
@@ -10,11 +11,11 @@ use folo_api::{
 use tokio::sync::broadcast;
 
 use crate::index::write_atomic;
-use crate::util::unix_now;
+use crate::util::{parse_rfc3339, unix_now};
 
 use super::{
-    ALIVE_EVERY_S, DatasetRef, EVENT_BUFFER, RunEntry, RunFile, RunState, TAIL_STEPS, add_paused,
-    append_line, now,
+    ALIVE_EVERY, DatasetRef, EVENT_BUFFER, RunEntry, RunFile, RunState, TAIL_STEPS, add_paused, append_line,
+    now,
 };
 
 impl RunEntry {
@@ -36,6 +37,7 @@ impl RunEntry {
                 outcome: None,
                 deleted: false,
                 interrupted: false,
+                alive_written: None,
             }),
             tx,
             stop: Arc::new(AtomicBool::new(false)),
@@ -45,7 +47,7 @@ impl RunEntry {
 
     /// The API record.
     pub fn run(&self) -> Run {
-        self.state.lock().unwrap().file.run.clone()
+        self.state.lock().unwrap().file.shown()
     }
 
     /// The dataset it trains on.
@@ -118,7 +120,13 @@ impl RunEntry {
         r.eta_s = None;
         // An active run has no end yet, except one a previous process left training: it ended when it last trained
         // (`history::reconcile`).
-        r.finished = Some(r.finished.take().unwrap_or_else(now));
+        let finished = r.finished.take().unwrap_or_else(now);
+        // A resumed run that ends before it trained again: its wait is not training either, and a next resume counts
+        // from this end.
+        if let Some(at) = st.file.resumed_at.take() {
+            add_paused(r, parse_rfc3339(&finished).unwrap_or(at) - at);
+        }
+        r.finished = Some(finished);
         // A failed run names the epoch it failed in (the one its steps were in); any other the last one it finished.
         r.epoch =
             if status == RunStatus::Failed { r.epoch.max(st.file.epochs_done) } else { st.file.epochs_done };
@@ -155,10 +163,10 @@ impl RunEntry {
                         return;
                     }
                     r.status = RunStatus::Running;
-                    file.alive_at = Some(unix_now().floor());
-                    self.persist(&st);
+                    self.alive(&mut st, true);
                 } else {
                     st.outcome = Some((s.status, s.error.clone(), s.error_code.clone()));
+                    self.alive(&mut st, false);
                     return;
                 }
             }
@@ -173,17 +181,11 @@ impl RunEntry {
                 if st.tail.len() < TAIL_STEPS {
                     st.tail.push(*s);
                 }
-                // Where it ended if the process dies before the epoch does (`history::reconcile`).
-                let at = unix_now().floor();
-                if st.file.alive_at.is_none_or(|a| at - a >= ALIVE_EVERY_S) {
-                    st.file.alive_at = Some(at);
-                    self.persist(&st);
-                }
+                self.alive(&mut st, false);
             }
             RunEvent::Epoch(e) => {
                 st.tail.clear();
                 st.file.epochs_done = e.epoch;
-                st.file.alive_at = Some(unix_now().floor());
                 let v = &e.val;
                 st.file.last_metrics = Some(model_metrics(v));
                 let r = &mut st.file.run;
@@ -195,9 +197,12 @@ impl RunEntry {
                 if r.cloud.is_none() {
                     line = Some(epoch_line(e, r.epochs));
                 }
-                self.persist(&st);
+                self.alive(&mut st, true);
             }
-            RunEvent::Log(l) => self.write_log(l),
+            RunEvent::Log(l) => {
+                self.write_log(l);
+                self.alive(&mut st, false);
+            }
             // The trainer never sends these: the queue does (`Runs::notify_queue`), and only cloud runs have
             // `cloud` events.
             RunEvent::Queue(_) | RunEvent::Cloud(_) => {}
@@ -207,6 +212,16 @@ impl RunEntry {
         drop(st);
         if let Some(line) = line {
             self.log(LogLevel::Info, line);
+        }
+    }
+
+    /// The run reported now: where it ended if the process dies before it reports again (`history::reconcile`).
+    /// Writes `run.json` when `persist`, or when an event last wrote it [`ALIVE_EVERY`] ago or more.
+    fn alive(&self, st: &mut RunState, persist: bool) {
+        st.file.alive_at = Some(unix_now().floor());
+        if persist || st.alive_written.is_none_or(|t| t.elapsed() >= ALIVE_EVERY) {
+            self.persist(st);
+            st.alive_written = Some(Instant::now());
         }
     }
 

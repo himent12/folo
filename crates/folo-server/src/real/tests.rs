@@ -1,7 +1,7 @@
 //! Dataset ids across unregistering (tombstones) and deleting a dataset's files while something reads them.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use folo_api::{Dataset, DatasetFormat, RegisterDataset, SyntheticDataset, TrainConfig};
@@ -101,6 +101,41 @@ fn files_are_not_deleted_while_something_reads_them() {
     assert!(!folder.exists());
 }
 
+/// The reviewer's second case: a dataset whose description pointed elsewhere when it was indexed, then was changed
+/// to point into the folder, reads it now (its cached index still says otherwise); and any active run, on whatever
+/// dataset, keeps every folder.
+#[test]
+fn files_are_judged_by_descriptions_as_they_read_now() {
+    let t = TestDir::new("real-delete-changed");
+    let store = RealStore::open(t.join("home"));
+    let a = synthetic(&store, "a");
+    let yaml = std::fs::read_to_string(Path::new(&a.path).join("data.yaml")).unwrap();
+    let c = t.join("c");
+    let cfg = folo_data::synthetic::SyntheticConfig { images: 4, imgsz: 64, seed: 3, ..Default::default() };
+    folo_data::synthetic::write_yolo(&cfg, &c, folo_data::ImageFormat::Png).unwrap();
+    let b = t.join("b");
+    std::fs::create_dir_all(&b).unwrap();
+    let points_to = |p: &Path| {
+        std::fs::write(b.join("data.yaml"), format!("path: '{}'\n{yaml}", p.display())).unwrap();
+    };
+    points_to(&c);
+    let on_c = register(&store, &b.join("data.yaml"));
+    points_to(Path::new(&a.path));
+    let e = store.delete_dataset_files(&a.id).unwrap_err();
+    assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "dataset_in_use"), "{}", e.body.message);
+    assert!(e.body.message.contains(&on_c.name), "{}", e.body.message);
+    points_to(&c);
+
+    // A queued run on another dataset altogether.
+    let run = run_on(&store, &on_c.id, "elsewhere");
+    let e = store.delete_dataset_files(&a.id).unwrap_err();
+    assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "run_active"), "{}", e.body.message);
+    assert!(Path::new(&a.path).join("images").is_dir() && store.entry(&a.id).is_ok());
+    store.runs.stop(&run).unwrap();
+    store.delete_dataset_files(&a.id).unwrap();
+    assert!(!Path::new(&a.path).exists());
+}
+
 /// Registration and run admission wait while a deletion of dataset files holds the lease.
 #[test]
 fn registering_and_creating_runs_wait_for_a_deletion() {
@@ -122,4 +157,78 @@ fn registering_and_creating_runs_wait_for_a_deletion() {
     drop(lease);
     assert!(registering.join().unwrap().starts_with("ds_"));
     assert_eq!(creating.join().unwrap(), "dataset_not_found");
+}
+
+/// The reviewer's R2 interleaving: a run admitted (under the shared lease, as `start_run` holds it) while the dataset
+/// is unregistered. The unregister waits for the admission, so the run is in the registry when the tombstones are
+/// pruned, and the dataset registered again gets its id back.
+#[test]
+fn unregistering_waits_for_a_run_being_admitted() {
+    let t = TestDir::new("real-unregister-admission");
+    let store = Arc::new(RealStore::open(t.join("home")));
+    let a = synthetic(&store, "a");
+    let admitting = store.files.read().unwrap();
+    let e = store.entry(&a.id).unwrap();
+    let started = Arc::new(Barrier::new(2));
+    let (s, b, id) = (store.clone(), started.clone(), a.id.clone());
+    let unregistering = std::thread::spawn(move || {
+        b.wait();
+        s.delete_dataset(&id).unwrap();
+    });
+    started.wait();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!unregistering.is_finished(), "unregistering did not wait for the admission");
+    let config: TrainConfig =
+        serde_json::from_value(serde_json::json!({ "dataset_id": a.id, "name": "admitted" })).unwrap();
+    store.runs.register(config, store.dataset_ref(&e), None, None, 0, "cpu".into(), None).unwrap();
+    drop(admitting);
+    unregistering.join().unwrap();
+    assert!(store.entry(&a.id).is_err());
+    assert_eq!(register(&store, Path::new(&a.path)).id, a.id);
+}
+
+/// `datasets.json` stays the plain list every version reads (an older build sees the datasets this one wrote), the
+/// tombstones live in `datasets.removed.json` (none when it is missing), and the object form this version's
+/// pre-release builds wrote is read, then written as a list at the next write.
+#[test]
+fn the_registry_stays_the_list_older_builds_read() {
+    let t = TestDir::new("real-registry-format");
+    let home = t.join("home");
+    let data = t.join("shapes");
+    let cfg = folo_data::synthetic::SyntheticConfig { images: 4, imgsz: 64, seed: 9, ..Default::default() };
+    folo_data::synthetic::write_yolo(&cfg, &data, folo_data::ImageFormat::Png).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let old = serde_json::json!([{
+        "id": "ds_main", "name": "shapes", "path": data, "format": "yolo", "created": "2026-11-01T00:00:00Z"
+    }]);
+    let (list_path, removed_path) = (home.join("datasets.json"), home.join("datasets.removed.json"));
+    std::fs::write(&list_path, old.to_string()).unwrap();
+    let ids =
+        |store: &RealStore| store.list_datasets().unwrap().into_iter().map(|d| d.id).collect::<Vec<_>>();
+    // An older build's data dir (no tombstone file) opens with its dataset.
+    let store = RealStore::open(home.clone());
+    assert_eq!(ids(&store), ["ds_main"]);
+    // This build's writes: still a list, read as an older build reads it; the tombstone in its own file.
+    let b = synthetic(&store, "b");
+    run_on(&store, &b.id, "on-b");
+    store.delete_dataset(&b.id).unwrap();
+    let as_older: Vec<super::Registration> =
+        serde_json::from_str(&std::fs::read_to_string(&list_path).unwrap()).unwrap();
+    assert_eq!(as_older.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["ds_main"]);
+    let removed: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(&removed_path).unwrap()).unwrap();
+    assert_eq!(removed.iter().map(|t| t["id"].as_str().unwrap()).collect::<Vec<_>>(), [b.id.as_str()]);
+    drop(store);
+
+    // The object form, its tombstone inside: read, the id kept for its dataset, and rewritten as a list.
+    std::fs::remove_file(&removed_path).unwrap();
+    let object = serde_json::json!({ "datasets": old, "tombstones": removed });
+    std::fs::write(&list_path, object.to_string()).unwrap();
+    let store = RealStore::open(home.clone());
+    assert_eq!(ids(&store), ["ds_main"]);
+    assert_eq!(register(&store, Path::new(&b.path)).id, b.id);
+    let as_older: Vec<super::Registration> =
+        serde_json::from_str(&std::fs::read_to_string(&list_path).unwrap()).unwrap();
+    assert_eq!(as_older.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["ds_main", b.id.as_str()]);
+    assert_eq!(std::fs::read_to_string(&removed_path).unwrap().trim(), "[]");
 }

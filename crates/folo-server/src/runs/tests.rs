@@ -1,6 +1,6 @@
 use super::*;
 use axum::http::StatusCode;
-use folo_api::{Epoch, StatusEvent, TrainConfig};
+use folo_api::{Epoch, LogLevel, LogLine, StatusEvent, TrainConfig};
 use folo_test_support::TestDir;
 
 use super::history::read_metrics;
@@ -399,8 +399,39 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
     runs.restart(&e, config.clone(), None).unwrap();
     e.state.lock().unwrap().file.resumed_at = Some(t - 500.0);
     ended(Some(t - 40_000.0), t - 100.0);
-    runs.restart(&e, config, None).unwrap();
+    runs.restart(&e, config.clone(), None).unwrap();
     near(paused(), 36_060.0 + 50.0 + 500.0, 4.0);
+
+    // The reviewer's case: trained 60 s, stopped, resumed an hour later behind a long run (moved back by hand), and
+    // stopped while it still waited. Training time, as the API defines it, is 60 s while it waits, once it is
+    // stopped there (the wait is settled into `paused_s`), and after the next resume until it trains.
+    let training = || {
+        let r = e.run();
+        let secs = |s: &Option<String>| s.as_deref().and_then(crate::util::parse_rfc3339);
+        secs(&r.finished).unwrap_or_else(|| unix_now().floor())
+            - secs(&r.started).unwrap()
+            - r.paused_s.unwrap()
+    };
+    let sixty = |got: f64| {
+        let late = 2.0 * (unix_now().floor() - t) + 1.0;
+        assert!((60.0 - late..=60.0 + late).contains(&got), "trained {got} s, want 60");
+    };
+    ended(Some(t - 7200.0), t - 7140.0);
+    e.state.lock().unwrap().file.run.paused_s = None;
+    runs.restart(&e, config.clone(), None).unwrap();
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.run.paused_s = Some(3540.0);
+        st.file.resumed_at = Some(t - 3600.0);
+    }
+    sixty(training());
+    runs.stop(e.id()).unwrap();
+    assert_eq!(e.run().status, RunStatus::Stopped);
+    assert_eq!(e.state.lock().unwrap().file.resumed_at, None, "the wait is settled");
+    sixty(training());
+    near(paused(), 7140.0, 2.0);
+    runs.restart(&e, config, None).unwrap();
+    sixty(training());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -478,7 +509,7 @@ fn a_run_left_training_ends_when_it_last_trained() {
         run
     };
 
-    // A step keeps `alive_at` (persisted at most every ALIVE_EVERY_S) for a kill to find.
+    // A step keeps `alive_at` (written at most every ALIVE_EVERY) for a kill to find.
     running(None, None);
     let step: Step = serde_json::from_str(
         r#"{"epoch":1,"step":1,"loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1}"#,
@@ -487,6 +518,32 @@ fn a_run_left_training_ends_when_it_last_trained() {
     e.on_event(&RunEvent::Step(step));
     let alive = e.state.lock().unwrap().file.alive_at.expect("alive_at set by a step");
     assert!((alive - t).abs() <= 2.0, "alive_at {alive}, now {t}");
+
+    // So does a phase that sends no steps, only log lines: written once the last write is ALIVE_EVERY old by the
+    // monotonic clock, also after the wall clock was set back (`alive_at` an hour ahead of now); sooner than that, a
+    // report sets it in memory only.
+    let on_disk = || {
+        let f: RunFile = serde_json::from_slice(&std::fs::read(e.dir.join("run.json")).unwrap()).unwrap();
+        f.alive_at.unwrap()
+    };
+    let near_now = |at: f64| assert!((at - t).abs() <= 2.0, "alive_at {at}, now {t}");
+    let log = RunEvent::Log(LogLine { t: now(), level: LogLevel::Info, message: "validating".into() });
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.alive_at = Some(t + 3600.0);
+        e.persist(&st);
+        st.alive_written = std::time::Instant::now().checked_sub(ALIVE_EVERY);
+    }
+    e.on_event(&log);
+    near_now(on_disk());
+    {
+        let mut st = e.state.lock().unwrap();
+        st.file.alive_at = Some(t - 50.0);
+        e.persist(&st);
+    }
+    e.on_event(&log);
+    assert_eq!(on_disk(), t - 50.0);
+    near_now(e.state.lock().unwrap().file.alive_at.unwrap());
 
     // Killed 900 s after it started, down until now: it ended then, and trained 100 s.
     running(Some(t - 900.0), None);

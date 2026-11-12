@@ -167,7 +167,7 @@ impl Runs {
             .iter()
             .zip(&states)
             .map(|(e, st)| {
-                let mut r = st.file.run.clone();
+                let mut r = st.file.shown();
                 r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
                 r
             })
@@ -185,7 +185,7 @@ impl Runs {
     /// before it can report `running`, and a stop removes it from the queue under its state lock.
     pub(super) fn record(&self, e: &RunEntry) -> Run {
         let st = e.state.lock().unwrap();
-        let mut r = st.file.run.clone();
+        let mut r = st.file.shown();
         let q = self.queue.lock().unwrap();
         r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
         r

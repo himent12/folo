@@ -55,7 +55,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 403 | `forbidden_host` | any request to a server on loopback whose `Host` is not a loopback name nor an `--allow-host` one (see Conventions); the hint names `--allow-host` and `--token` |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `no_matching_dataset` (`/eval` of a model no registered dataset has the classes of), `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `dataset_in_use`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; deleting a dataset's files while another dataset or a run reads them; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
+| 409 | `run_active`, `run_not_active`, `dataset_in_use`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; deleting a dataset's files while a run is active or another dataset reads them; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job, new benchmark entries and parts of an open one, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights`, `invalid_upload`, `cloud_auth_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read; an uploaded archive that is not a readable tar or holds something unsafe; credentials a cloud provider rejects |
@@ -174,21 +174,22 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   line up). Mock images are immutable and sent with a long `Cache-Control`; real ones with `no-cache`.
 - `DELETE /api/datasets/{id}` → `204` (unregisters; its files stay, unless `?files=true`, below). Runs that used the dataset keep their
   metrics and models; their sample images (`/images` of this id) are gone with it. Real mode keeps the unregistered
-  dataset's identity (its canonical path and format) and id in the registry as a tombstone while any run on disk
+  dataset's identity (its canonical path and format) and id as a tombstone while a run the server has loaded
   references the id: registering that identity again gets the same id back, and those runs find their dataset again
   (also for a dataset registered by an older version, once this one unregisters it). A dataset registered as new
-  gets a fresh id that no registered dataset, tombstone or run on disk has, so an id is never handed to another
-  dataset while a run names it; a tombstone is dropped once no run references its id (registering that
-  dataset again then gives it a fresh id). `?files=true` also deletes the dataset's folder, for a dataset this server
-  wrote into its data dir (the folder right under `<data dir>/datasets`: a generated sample set, a labeling job's
-  export, an upload); a dataset anywhere else is `400 invalid_query` (nothing is unregistered or deleted). It is
-  `409 dataset_in_use` while another registered dataset, or a run of an unregistered dataset that keeps its id,
-  reads images or labels in that folder (by the canonical paths of the folders its index reads: its root and split
-  sources, not only where its `data.yaml` lies), and `409 run_active` while a queued, running or stopping run reads
-  them (by the dataset path the run recorded, whatever id it names). Registering a dataset and creating or resuming a
-  run wait while those checks and the deletion run, so none slips in between. Mock mode keeps the ids of
-  unregistered datasets in memory the same way (for as long as it runs); there a generated set goes with
-  `files=true` and a folder registered from disk is refused.
+  gets a fresh id that no registered dataset, tombstone or loaded run has, so an id is never handed to another
+  dataset while a run names it. Unregistering waits for a run being created or resumed, so that run counts. A
+  tombstone is dropped lazily: at the next registry write (registering or unregistering a dataset), when no run the
+  server has loaded references its id then (registering that dataset again afterwards gives it a fresh id). `?files=true` also deletes the dataset's folder, only for a dataset this
+  server wrote into its data dir (the folder right under `<data dir>/datasets`: a generated sample set, a labeling
+  job's export, an upload); any other is `400 invalid_query`, and nothing is unregistered or deleted. It is `409
+  run_active` while any run on this server is queued, running or stopping, whatever dataset it trains on. It is `409
+  dataset_in_use` while another registered dataset, or a run of an unregistered dataset that keeps its id, reads
+  images or labels in that folder by its description as it reads at that moment (its root and split sources), and
+  registering a dataset or creating or resuming a run waits until the checks and the deletion are done. Mock mode keeps
+  the ids of unregistered datasets in memory the same way (for as long as it runs); there a generated set goes with
+  `files=true` (also `409 run_active` while a run created through the API is active) and a folder registered from
+  disk is refused.
 
 ```jsonc
 // Dataset
@@ -519,11 +520,15 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   //   older servers), next to "error" (the message); the final `status` event carries it too. A `stopped` run has
   //   "interrupted" when the server stopped or restarted while it trained or waited (not a client's stop)
   "started": "..." | null, "finished": null | "...",
-  // "finished" of a run "interrupted" by a server that was killed (not stopped) is when it last trained, at most
-  //   about 10 s off, not when the server started again: the time it was down is not training time
+  // "finished" of a run "interrupted" by a server that was killed (not stopped) is when it last reported (a step, an
+  //   epoch, a log line; recorded at least every 10 s while those come), not when the server started again: the time
+  //   it was down is not training time. A run killed during a long phase that reports nothing (a long validation
+  //   pass) ends at its last report, before that phase
   // + "paused_s": 52800.0 for a resumed run: the seconds it spent not training since "started", from each end (stop,
-  //   failure) until it trained again; its training time is "finished" (or now, while it trains) minus "started"
-  //   minus "paused_s". Absent for a run never resumed and from older servers
+  //   failure) until it trained again; while it waits in the queue after a resume, the wait so far is included (and
+  //   a resumed run stopped there keeps it). Its training time is "finished" (or now, while it is active) minus
+  //   "started" minus "paused_s", which does not grow while it waits. Absent for a run never resumed and from older
+  //   servers
   "epoch": 12,             // epoch in progress, 1-based (0 before the first step); once ended, the last epoch it
                            // finished (completed, stopped) or the one it failed in (failed)
   "epochs": 100,
@@ -1299,15 +1304,19 @@ mostly shown) for the others.
 
 ## Real mode
 `folo serve` without `--mock` keeps its state in the data dir (`--data-dir`, default `$FOLO_HOME` or `~/.folo`):
-- `datasets.json`: the registry (`id`, `name`, `path`, `format`, `created`, and a snapshot of `classes` and
-  `splits`), rewritten atomically (temporary file + rename) on every change, so registrations survive restarts.
-  A malformed registry is never overwritten: registering and unregistering fail with `500 internal` until it is
-  fixed.
+- `datasets.json`: the registry, a plain list of registrations (`id`, `name`, `path`, `format`, `created`, and a
+  snapshot of `classes` and `splits`), as every version writes it, so an older build opening the data dir lists
+  the same datasets. `datasets.removed.json`: the tombstones of unregistered datasets (`DELETE
+  /api/datasets/{id}`, above); a missing file has none. Both are rewritten atomically (temporary file + rename) on
+  every change, the one that gains an id first (a crash between the two leaves the id in both, and the
+  registration counts). A `datasets.json` holding an object with `datasets` and `tombstones` (written by pre-release
+  builds of this version for a few hours) is read, and written as a list at the next change. A malformed file is
+  never overwritten: registering and unregistering fail with `500 internal` until it is fixed.
 - `cache/datasets/<id>.json`: each dataset's index (images, sizes, boxes, stats, issues) plus a fingerprint of the files it
   was built from (relative path, size and modification time of every file under the dataset folder and under
   everything outside it that folo-data read: split folders and image lists a `data.yaml` points to, folders of
   every candidate image and label, also skipped ones, and split paths or a `path:` that do not exist yet; the data dir's own `cache/`, `label/`, `bench/` and
-  `datasets.json` are left out, so a data dir inside a dataset folder does not invalidate it). On start the
+  `datasets.json` / `datasets.removed.json` are left out, so a data dir inside a dataset folder does not invalidate it). On start the
   registry is listed immediately and every dataset is checked on a background thread: a fresh cache is loaded, a
   stale or missing one rebuilt; requests for a dataset that is still being indexed wait for it. While running,
   `GET /api/datasets/{id}` and image listings re-check the fingerprint at most every 5 s and re-index when files

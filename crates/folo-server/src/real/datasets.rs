@@ -15,7 +15,9 @@ use crate::runs::DatasetRef;
 use crate::store::Store;
 use crate::util::{claim_dir, fnv1a, rfc3339, unique_id, unix_now};
 
-use super::registry::{RegistryFile, read_registry, registry_path, write_registry};
+use super::registry::{
+    Gains, RegistryFile, Tombstone, read_registry, registry_path, tombstones_path, write_registry,
+};
 use super::{Entry, RealStore, Registration, State};
 
 impl RealStore {
@@ -82,7 +84,7 @@ impl RealStore {
             for x in file.datasets.iter_mut().filter(|x| x.id == r.id) {
                 *x = r.clone();
             }
-            if let Err(err) = write_registry(&self.data_dir, &file) {
+            if let Err(err) = write_registry(&self.data_dir, &file, Gains::Registration) {
                 tracing::warn!("{err}");
             }
         }
@@ -165,7 +167,7 @@ impl RealStore {
             splits: idx.splits,
         };
         file.datasets.push(reg.clone());
-        self.save_registry(&mut file)?;
+        self.save_registry(&mut file, Gains::Registration)?;
         let out = Self::meta(&reg, Some(&idx));
         let entry = Arc::new(Entry::new(reg, State::Ready(idx.clone())));
         save_index(&self.data_dir, &entry, &idx);
@@ -179,10 +181,40 @@ impl RealStore {
     }
 
     /// Writes the registry, without the tombstones whose id no run references any more.
-    pub(super) fn save_registry(&self, file: &mut RegistryFile) -> Result<()> {
+    pub(super) fn save_registry(&self, file: &mut RegistryFile, gains: Gains) -> Result<()> {
         let used = self.run_dataset_ids();
         file.prune(&|id| used.contains(id));
-        write_registry(&self.data_dir, file)
+        write_registry(&self.data_dir, file, gains)
+    }
+
+    /// Unregisters dataset `id`, keeping its tombstone while runs reference it. The caller holds [`RealStore::files`]
+    /// exclusively: a run admitted under the shared lease is in the run registry before the tombstones are pruned, so
+    /// it never names an id whose identity was dropped.
+    pub(super) fn unregister(&self, id: &str) -> Result<()> {
+        let mut list = self.entries.write().unwrap();
+        let mut file = read_registry(&self.data_dir)?;
+        let entry = list.iter().find(|e| e.reg.lock().unwrap().id == id).cloned();
+        let Some(reg) =
+            entry.as_ref().map(|e| e.reg()).or_else(|| file.datasets.iter().find(|r| r.id == id).cloned())
+        else {
+            return Err(Error::not_found("dataset", id));
+        };
+        // Its tombstone keeps the id for it while runs reference it (`crate::real::registry`).
+        file.datasets.retain(|r| r.id != id);
+        file.tombstones.retain(|t| t.id != id);
+        file.tombstones.push(Tombstone::of(&reg, rfc3339(unix_now())));
+        self.save_registry(&mut file, Gains::Tombstone)?;
+        list.retain(|e| e.reg.lock().unwrap().id != id);
+        // Caches are ours to delete; the dataset's own files never are. Marking the entry deleted first (under the
+        // lock cache writers hold) keeps in-flight indexers and thumbnails from writing them back.
+        let _deleted = entry.as_ref().map(|e| {
+            let mut d = e.deleted.lock().unwrap();
+            *d = true;
+            d
+        });
+        let _ = std::fs::remove_file(index_path(&self.data_dir, id));
+        let _ = std::fs::remove_dir_all(self.thumbs_dir(id));
+        Ok(())
     }
 
     pub(super) fn thumbs_dir(&self, id: &str) -> PathBuf {
@@ -221,7 +253,7 @@ fn folder_gone(err: Error, reg: &Registration) -> Error {
 /// The server's own files in the data dir, left out of dataset fingerprints (the data dir may sit inside a
 /// registered dataset folder; caching an index must not make it stale).
 fn own_state(dir: &Path) -> Vec<PathBuf> {
-    vec![dir.join("cache"), dir.join("label"), dir.join("bench"), registry_path(dir)]
+    vec![dir.join("cache"), dir.join("label"), dir.join("bench"), registry_path(dir), tombstones_path(dir)]
 }
 
 pub(super) fn index_path(dir: &Path, id: &str) -> PathBuf {

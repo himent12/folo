@@ -3,9 +3,9 @@
 //! ([`crate::engine`]).
 //!
 //! Layout of the data dir:
-//! - `datasets.json`: the registry (id, name, path, format, created, plus a snapshot of classes and splits) and the
-//!   tombstones of unregistered datasets whose id runs still reference ([`registry`]), written atomically (temporary
-//!   file + rename) on every change.
+//! - `datasets.json`: the registry (id, name, path, format, created, plus a snapshot of classes and splits), a plain
+//!   list as every version writes it, and `datasets.removed.json`: the tombstones of unregistered datasets whose id
+//!   runs still reference ([`registry`]); both written atomically (temporary file + rename) on every change.
 //! - `cache/datasets/<id>.json`: the dataset's [`Index`] (images, boxes, stats) and the
 //!   [`Fingerprint`](crate::index::Fingerprint) of the files it was built from. On start every registered
 //!   dataset is checked on a background thread: a fresh cache is loaded, a stale or missing one is rebuilt.
@@ -157,7 +157,8 @@ impl Entry {
 pub struct RealStore {
     data_dir: PathBuf,
     entries: RwLock<Vec<Arc<Entry>>>,
-    /// Held shared while a dataset is registered and while a run is created or resumed, exclusively while
+    /// Held shared while a dataset is registered and while a run is created or resumed, exclusively while a dataset
+    /// is unregistered (so a run being admitted is in the run registry before tombstones are pruned) and while
     /// `DELETE /api/datasets/{id}?files=true` checks that nothing reads the folder and deletes it.
     files: RwLock<()>,
     recheck_every: Duration,

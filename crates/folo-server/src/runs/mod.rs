@@ -31,14 +31,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use folo_api::{DatasetFormat, ModelMetrics, Run, RunEvent, RunStatus, Step};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::throughput::{Throughput, TrainKey};
-use crate::util::{rfc3339, unix_now};
+use crate::util::{parse_rfc3339, rfc3339, unix_now};
 
 pub(crate) use entry::Ended;
 pub use entry::run_model_id;
@@ -83,18 +83,35 @@ struct RunFile {
     /// Validation metrics of the last validated epoch (those of `weights/last.folo`).
     #[serde(default)]
     last_metrics: Option<ModelMetrics>,
-    /// When the run was last resumed (Unix seconds), while it has not trained since: the wait until it does is added
-    /// to `Run.paused_s` then ([`add_paused`]).
+    /// When the run was last resumed (Unix seconds), while it has not trained since: the wait until it trains, or
+    /// until it ends without training (stopped in the queue, the server's stop), is added to `Run.paused_s` then
+    /// ([`add_paused`]); until then the API record counts the wait so far ([`RunFile::shown`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resumed_at: Option<f64>,
-    /// When the run last trained (Unix seconds; at most [`ALIVE_EVERY_S`] behind while it trains): a run a previous
-    /// process left training ended then, not when the server started again ([`history::reconcile`]).
+    /// When the run last reported (Unix seconds): every event of its trainer (step, epoch, log line, status) sets it,
+    /// and `run.json` gets it with those that are written anyway and otherwise at most [`ALIVE_EVERY`] apart. A run a
+    /// previous process left training ended then, not when the server started again ([`history::reconcile`]); one
+    /// killed during a long phase that reports nothing (a long validation pass) ends at its last report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     alive_at: Option<f64>,
 }
 
-/// How often a training run's `alive_at` is written to `run.json`, at most.
-const ALIVE_EVERY_S: f64 = 10.0;
+impl RunFile {
+    /// The API record. While the run waits after a resume, `paused_s` includes the wait so far, so the training
+    /// time it gives (`Run.paused_s`) stays where it was until the run trains again.
+    fn shown(&self) -> Run {
+        let mut r = self.run.clone();
+        if let Some(at) = self.resumed_at {
+            let end = r.finished.as_deref().and_then(parse_rfc3339).unwrap_or_else(|| unix_now().floor());
+            add_paused(&mut r, end - at);
+        }
+        r
+    }
+}
+
+/// How often a training run's `alive_at` is written to `run.json` while it reports, at most (by the monotonic clock,
+/// so a wall clock set back does not hold the writes off).
+const ALIVE_EVERY: Duration = Duration::from_secs(10);
 
 /// Adds `secs` (whole seconds, as `started` and `finished` are) to the time run `r` spent not training.
 fn add_paused(r: &mut Run, secs: f64) {
@@ -114,6 +131,8 @@ struct RunState {
     deleted: bool,
     /// The server's shutdown stopped the run (not a client): it ends `stopped` with error code `interrupted`.
     interrupted: bool,
+    /// When an event last wrote `run.json` with `alive_at` ([`RunEntry::alive`]).
+    alive_written: Option<Instant>,
 }
 
 /// One run.
