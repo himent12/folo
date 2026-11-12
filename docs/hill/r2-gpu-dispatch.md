@@ -110,8 +110,92 @@ of 1109 / 556 of 1275 create one), because the pool's buffers do not come back i
 every miss paid for an entry (buffer clones, index pushes) while generation rollovers rebuilt the index and dropped
 4096 bind groups at a time. The fix is implemented: second-sight admission (a miss caches nothing unless its key
 missed before), the FxHash-style hasher, an exact index that shrinks with the cache, pool-owned buffers only, and
-the sweep on submission. Its measurement is pending.
+the sweep on submission.
+
+After the fix (`pr1-train4/`: 4 rounds, `main`, cache on and cache off in one binary via `FOLO_GPU_NO_BIND_CACHE=1`
+alternated, folo-n b16, CPU 56–100%) training is a tie:
+
+| | main | cache on | cache off |
+|---|---|---|---|
+| f32 step | 49.81 ms (49.33–50.19) | 49.48 (47.87–79.46) | 50.48 (48.21–51.34) |
+| f32 optimizer phase, host encode | 1.30 (1.00–1.70) | 1.50 (1.00–2.10) | 1.50 (1.00–2.20) |
+| AMP step | 30.10 ms (29.71–30.66) | 30.10 (28.34–35.52) | 29.84 (29.46–31.68) |
+| AMP optimizer phase, host encode | 3.10 (2.00–3.20) | 2.35 (1.90–3.40) | 2.50 (2.00–3.50) |
+
+An earlier 3-round run (`pr1-train3/`, CPU 82–100%) had AMP steps of 46–77 ms with the cache on, but `main` and
+cache-off also had 52–69 ms rounds there, an instrumented run (temporary timers around rollovers, sweeps and slow
+lookups) found no cache work above 0.2 ms, and the clean run above does not reproduce it: machine noise. A training
+step still creates about 850 (f32) / 760 (AMP) bind groups, and the f32 step allocates 55 new pool buffers per step
+(AMP none): see Leftovers.
+
+The in-process toggle after the fix (`pr1-dispatch-ab2.txt`, 12 rounds, CPU busier than the first run): folo-n f32
+encode −13%, pipelined −12%; folo-n f16 TC encode −19%, synchronised call −18%, pipelined −20%; folo-s f32 encode
++15%, calls ±1% (a tie within the ranges); folo-s f16 TC encode −12%, synchronised call −16%, pipelined +12%.
+
+## PR 2: convs read concatenations and channel slices in place (#185, merged 4cfdb648)
+
+**What.** Every `forward_cat` of the detector (C3k2, C3k, SPPF, C2PSA, the neck's Concat + C3k2) is a 1×1 conv over
+a channel concatenation. The GPU backend's `conv2d_act_cat` now runs it as one GEMM whose `B` rows come from up to
+four part buffers (`kernels/gemm_cat.rs`, `CAT` in the GEMM and tensor-core generators), and a non-depthwise conv
+reads a channel-slice input (`narrow` along dim 1) through the GEMM's `B` offset and image stride instead of
+gathering it. Inference only (a recorded forward keeps `cat` then the conv). Review found an empty-batch panic, a
+bias extent check that ignored batch strides, no check of the device's storage-binding limit, empty parts and
+output aliasing not handled, and routing tests that could not prove the path taken; all fixed before merge (the
+tests now trace the dispatches, and `crates/folo-vision/tests/gpu_in_place.rs` checks that a fused folo-n forward
+at batch 1 encodes no copy).
+
+**Op counts** (`gpu_profile` trace, folo-n): 165 → 117 operations per forward; at b1 the 48 buffer copies are gone,
+at b16 42 `scatter` → 6 and 13 `move` → 1 (0.92 of 8.47 ms replayed GPU time in f32, 0.34 of 4.51 ms in f16 TC).
+
+**A/B against `main` 647b981f** (`gpu` bench, forward + predict, 3 rounds alternated, GPU 0–5% before each run,
+CPU 10–100%; `pr2-infer/`, binaries `base-gpu` / `new2-gpu`). Pipelined rows (calls back to back, one wait):
+
+| row | main | PR 2 | |
+|---|---|---|---|
+| folo-n f32 forward b1 | 2.25 ms (2.05–3.02) | 1.63 (1.55–1.71) | −28% |
+| folo-n f32 forward b16 | 10.03 ms (9.68–10.74) | 7.98 (7.94–8.89) | −20% |
+| folo-n f16 TC forward b1 | 3.12 ms (2.07–3.21) | 1.28 (0.99–1.51) | −59% |
+| folo-n f16 TC forward b16 | 5.19 ms (5.11–7.11) | 4.53 (4.43–4.70) | −13% |
+| folo-s f32 forward b1 | 3.69 ms (3.66–3.95) | 3.33 (3.30–3.35) | −10% |
+| folo-s f32 forward b16 | 24.04 ms (23.96–37.10) | 20.33 (20.16–24.17) | −15% |
+| folo-s f16 TC forward b16 | 13.07 ms (13.06–13.21) | 11.57 (11.50–11.60) | −11% |
+
+End to end: folo-n f32 e2e b16 18.28 → 13.00 ms (875 → 1231 img/s), f16 TC e2e b16 12.92 → 9.27 ms, folo-s f32 e2e
+b16 31.21 → 25.64 ms. The spread across rounds reached 20–55% on some rows (contention), but the direction held in
+every round of every row except folo-s f32 b16 round 3. A later run against `main` with this PR merged
+(`pr3-infer/`, binary `main185-gpu`) read folo-n f32 b1 pipelined 1.56 ms, b16 7.96 ms, f16 TC b16 4.44 ms.
+
+**Accuracy** (`folo val --model D:/folo-weights/folo-n-coco.folo --data D:/folo-data/coco`, val2017, 5000 images,
+a build with this PR and the residual change below): f32 mAP50 0.44944638 / mAP50-95 0.30999148, identical to
+`main`; `--half` 0.44942 / 0.31000 against `main`'s 0.44944 / 0.31003 (`val.txt`).
 
 ## Negative results
 
-## Leftovers
+- **Residual adds in the conv epilogue** (item 2, branch `gpu/fused-residual`, not merged).
+  `Backend::conv2d_act_add`, `ConvBnAct::forward_add`, `RESID` in the GEMM / tensor-core epilogues (a fifth
+  binding read like a conv input); Bottleneck and PSABlock route their residuals through it, 13 of the 14
+  elementwise adds of a folo-n forward go (104 operations per forward). Tests passed, f32 matches conv + add to an
+  ulp (bit for bit where the driver does not contract `act(v) + r` into an FMA). Against `main` with PR 2 merged
+  (`pr3-infer/`, 3 rounds): replayed GPU time −1–2% (the adds were only 0.1–0.2 ms of a b16 forward), wall clock
+  a tie or worse: folo-n f32 b16 pipelined 7.96 → 8.04 ms, f16 TC b16 pipelined 4.44 → 4.79 ms, b1 0.95 → 1.23 ms,
+  folo-s within ±3% (an earlier window read f16 TC b16 4.53 → 4.41). Not a clear win, so not shipped; the 13
+  dispatches it removes are worth ~0.05–0.1 ms of host time at b1 at most.
+- **Pipelined image upload** (item 4, branch `gpu/upload-pipeline`, not merged): a predict batch over 4 MiB uploaded
+  in four runs of equal image counts, each run's copy submitted as soon as it is written so it overlaps writing the
+  next. `pr4-predict/` (3 rounds against `main`): upload + letterbox b16 went 2.6–3.0 → 3.2–3.3 ms and e2e b16 +2–4%
+  (f32) / tie (f16 TC). The fill is already parallel and memory-bound; four flushes and maps cost more than the
+  overlap saves.
+- **Sweeping the whole bind cache on every pool eviction** (PR 1's first version): see Training above.
+
+## Leftovers (by expected gain)
+
+1. **Bimodal batch-1 latency** (item 4, not started): synchronised b1 rows of the same binary still swing 2× between
+   rounds on this machine (e.g. folo-n f32 forward b1 1.97–9.43 ms); pipelined rows do not. Needs a quiet machine
+   and GPU clock logging (`nvidia-smi -q -d CLOCK`) around idle gaps to confirm or rule out clock ramp-down.
+2. **Training bind-group reuse**: only ~23% (f32) / ~40% (AMP) of a step's dispatches hit the cache, because the
+   pool's buffers come back in a different order each step; and the f32 step creates 55 new pool buffers per step
+   (evict + reallocate churn). Making the free order deterministic (autograd's traversal) or pinning a step's
+   buffers would turn both into hits.
+3. **Residual add fusion** (negative result above): worth retrying only if a GEMM epilogue change makes the extra
+   load free in the tensor-core kernel (the f16 TC rows were the ones that lost).
+4. **Concatenations with more than four parts or 3×3 consumers** read in place: none in the current detector.
