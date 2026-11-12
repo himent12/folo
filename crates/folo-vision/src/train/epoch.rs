@@ -261,11 +261,22 @@ pub(super) struct Clock {
     pub(super) wall: [f64; 2],
     /// Time from receiving each batch to the end of its step: what the batches cost when the loader keeps up.
     pub(super) step: [f64; 2],
-    pub(super) val_count: usize,
-    pub(super) val_time: f64,
+    /// Seconds of a validation, from the recent epochs ([`Clock::ended_epoch`]): it grows as the model learns (more
+    /// detections to match and draw), so the mean since the start trails it.
+    pub(super) val: Option<f64>,
+    /// The same for an epoch's work besides its batches and validation (starting the loader, writing checkpoints and
+    /// samples): on a small dataset more than half of each epoch.
+    pub(super) other: Option<f64>,
 }
 
 impl Clock {
+    /// Records a finished epoch's validation and other seconds, the newest with half the weight.
+    pub(super) fn ended_epoch(&mut self, val: f64, other: f64) {
+        let lean = |old: Option<f64>, new: f64| Some(old.map_or(new, |o| (o + new) / 2.0));
+        self.val = lean(self.val, val);
+        self.other = lean(self.other, other);
+    }
+
     /// Expected seconds per batch in `phase`: its measured wall time once it has run. Before the closed phase
     /// starts, the mosaic phase's step time, since without mosaic the loader keeps up and the step sets the pace;
     /// before any batch, 0.
@@ -284,7 +295,8 @@ impl Clock {
 
 /// Remaining seconds of a run after batch `k` (0-based) of epoch `e` (0-based) of `epochs`, with `nb` batches per
 /// epoch and `phase(epoch)` its [`Clock`] phase: each batch left at its phase's [`Clock::per_batch`], plus the
-/// validations left at their mean (a tenth of an epoch before the first).
+/// validations and each epoch's other work left at their recent time (a validation is a tenth of an epoch before the
+/// first).
 pub(super) fn eta_s(
     clock: &Clock,
     nb: usize,
@@ -295,10 +307,7 @@ pub(super) fn eta_s(
 ) -> f64 {
     let train = (nb - k - 1) as f64 * clock.per_batch(phase(e))
         + (e + 1..epochs).map(|ep| nb as f64 * clock.per_batch(phase(ep))).sum::<f64>();
-    let per_val = if clock.val_count > 0 {
-        clock.val_time / clock.val_count as f64
-    } else {
-        0.1 * clock.per_batch(phase(e)) * nb as f64
-    };
-    train + (epochs - e) as f64 * per_val
+    let per_val = clock.val.unwrap_or_else(|| 0.1 * clock.per_batch(phase(e)) * nb as f64);
+    let per_other = clock.other.unwrap_or(0.0);
+    train + (epochs - e) as f64 * (per_val + per_other)
 }

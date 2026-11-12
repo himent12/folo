@@ -701,8 +701,11 @@ counts all of them:
 - **ETA of running runs**: `Run.eta_s` (and `Step.eta_s`) is the run's own measured rate, per mosaic phase: the
   batches left in mosaic epochs at the run's mean mosaic batch time, loader waits included; those in close-mosaic
   epochs at their own mean once they have started, before that at the mosaic batches' step time without the loader
-  waits (without mosaic the loader keeps up); plus the validations left at their mean. On 1080p JPEGs a mosaic
-  epoch of folo-n took 24 s and a close-mosaic one 10 s, so one rate for both is off by up to 2x.
+  waits (without mosaic the loader keeps up); plus, for each epoch left, a validation and the epoch's other work
+  (starting the loader, writing checkpoints and samples) at their recent time, the latest epoch weighing half. On
+  1080p JPEGs a mosaic epoch of folo-n took 24 s and a close-mosaic one 10 s, so one rate for both is off by up to 2x;
+  on a small dataset the other work was more than half of each epoch and validation grows as the model starts to
+  detect, so leaving the first out or taking the mean since the start said about half the time left.
 
 The mock (`folo serve --mock`) has measured rows on its GPU for folo-n and folo-s at 640 (f32, from its runs), a
 folo-n 320 px amp probe and folo-n 640 predictions; everything else is the reference, so both sources show. Its

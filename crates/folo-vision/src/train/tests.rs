@@ -118,14 +118,14 @@ fn download_all_keeps_every_byte() {
     }
 }
 
-/// The ETA counts the loader's wait, and does not charge the mosaic-free epochs at mosaic speed.
+/// The ETA counts the loader's wait and each epoch's work besides its batches and validation, and does not charge the
+/// mosaic-free epochs at mosaic speed.
 #[test]
 fn eta_by_mosaic_phase() {
     // 10 epochs of 100 batches, the last 2 without mosaic. After epoch 0: 0.2 s per batch of wall time, of
     // which 0.08 s is the step (the rest is waiting for the loader), and a 1 s validation.
     let mut c = Clock { batches: [100, 0], wall: [20.0, 0.0], step: [8.0, 0.0], ..Clock::default() };
-    c.val_count = 1;
-    c.val_time = 1.0;
+    c.ended_epoch(1.0, 0.0);
     let phase = |ep: u32| usize::from(ep >= 8);
     let eta = eta_s(&c, 100, 1, 0, 10, phase);
     // Epoch 1's 99 batches and epochs 2..8 at 0.2 s, epochs 8 and 9 at the step time, 9 validations.
@@ -137,6 +137,14 @@ fn eta_by_mosaic_phase() {
     c.step[1] = 4.0;
     let eta = eta_s(&c, 100, 8, 49, 10, phase);
     let want = 50.0 * 0.1 + 100.0 * 0.1 + 2.0;
+    assert!((eta - want).abs() < 1e-9, "{eta} vs {want}");
+    // Starting the loader and writing checkpoints and samples (0 s, then 1 s, then 2 s an epoch) counts for each epoch
+    // left too. It and validation lean on the latest epochs (they grow as the model learns): validation 1, 1, 3 s → 2 s,
+    // the other work 0, 1, 2 s → 1.25 s.
+    c.ended_epoch(1.0, 1.0);
+    c.ended_epoch(3.0, 2.0);
+    let eta = eta_s(&c, 100, 8, 49, 10, phase);
+    let want = 50.0 * 0.1 + 100.0 * 0.1 + 2.0 * (2.0 + 1.25);
     assert!((eta - want).abs() < 1e-9, "{eta} vs {want}");
     // No mosaic at all (phase 1 throughout), and nothing measured yet.
     let c = Clock::default();
