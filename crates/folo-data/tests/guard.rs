@@ -49,7 +49,11 @@ fn refused_reads_are_reported_and_not_descended() {
     let big = tmp("cache");
     let cache = tmp("cache-dir");
     for i in 0..folo_data::SCAN_CACHE_MIN_FILES + 4 {
-        image(&big.join(format!("images/train/{i}.png")));
+        let p = big.join(format!("images/train/{i}.png"));
+        image(&p);
+        // An hour old: old enough to cache, so only the guard keeps the cache out.
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
     }
     std::fs::create_dir_all(big.join("labels/train")).unwrap();
     folo_data::set_scan_cache_dir(Some(cache.to_path_buf()));
