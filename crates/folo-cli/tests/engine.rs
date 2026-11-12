@@ -524,8 +524,10 @@ fn format_picks_the_labels_and_resume_keeps_it() {
         "64",
         "--batch",
         "4",
+        // Far more epochs than the three stops let through: a stop lands a batch or an epoch after it is asked for
+        // (an epoch here is mostly validation and checkpoint writing), and a run that ends first reads `completed`.
         "--epochs",
-        "6",
+        "30",
         "--project",
         s(&project),
         "--name",
