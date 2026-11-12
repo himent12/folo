@@ -492,6 +492,8 @@ fn coop_conv_variants() {
         let rect = Window2d { kernel: (1, 3), stride: (2, 1), padding: (0, 1), dilation: (1, 1) };
         run_conv(&ctx, &cdesc(2, 5, 7, 8, 12, 1, rect), true, out, None, 10);
         run_conv(&ctx, &cdesc(2, 16, 10, 10, 32, 2, s1), true, out, None, 11);
+        // A 7x7 stride-2 stem: 49 taps, more than the 32-bit tap mask holds (the bounds-checked gather).
+        run_conv(&ctx, &cdesc(1, 3, 17, 17, 8, 1, Window2d::square(7, 2, 3)), true, out, None, 13);
     }
     // Depthwise (the head's and the attention's DWConv) keeps its direct kernel with tensor cores on.
     run_conv(&ctx, &cdesc(2, 32, 10, 10, 32, 32, s1), true, DType::F16, None, 12);
