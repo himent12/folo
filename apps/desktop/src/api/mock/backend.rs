@@ -99,12 +99,14 @@ impl Backend for MockBackend {
         if self.empty {
             return Ok(Vec::new());
         }
-        Ok(self
+        let list = self
             .datasets
             .iter()
             .filter(|d| !self.is_removed(&d.ds.id))
             .map(|d| Dataset { stats: None, ..d.ds.clone() })
-            .collect())
+            .collect();
+        self.hold_point("datasets");
+        Ok(list)
     }
 
     fn dataset(&self, id: &str) -> ApiResult<Dataset> {
@@ -180,12 +182,14 @@ impl Backend for MockBackend {
         if self.empty {
             return Ok(Vec::new());
         }
-        Ok(self
+        let list = self
             .models
             .iter()
             .filter(|m| !m.run_id.as_ref().is_some_and(|r| self.is_removed(r)))
             .cloned()
-            .collect())
+            .collect();
+        self.hold_point("models");
+        Ok(list)
     }
 
     fn model_eval(&self, id: &str) -> ApiResult<ModelEval> {
@@ -211,7 +215,9 @@ impl Backend for MockBackend {
         if self.empty {
             return Ok(Vec::new());
         }
-        Ok(self.runs.lock().unwrap().iter().map(Self::snapshot).collect())
+        let list = self.runs.lock().unwrap().iter().map(Self::snapshot).collect();
+        self.hold_point("runs");
+        Ok(list)
     }
 
     fn run(&self, id: &str) -> ApiResult<Run> {
@@ -649,7 +655,7 @@ impl Backend for MockBackend {
 
     fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse> {
         let r = self.predict_for(req);
-        self.maybe_answer_late();
+        self.hold_point("predict");
         r
     }
 

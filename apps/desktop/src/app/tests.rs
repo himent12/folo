@@ -263,39 +263,6 @@ fn another_device_keeps_the_boxes_up_until_it_answers() {
 }
 
 #[test]
-fn deleting_the_playground_models_run_drops_its_late_answer_and_predicts_with_the_next() {
-    use super::DeleteTarget;
-    let api = Arc::new(MockBackend::new(4200, true));
-    let (mut app, window) = open_with(api.clone());
-    // Playground on the best model, an image on stage, its boxes in.
-    let (first, run) = drive(&mut app, window, |this, _, cx| {
-        this.play_dataset_image("ds_3b91", "img_03417", cx);
-        let first = this.play_model.clone().expect("the best model is picked");
-        let run = this.store.models.ready().unwrap().iter().find(|m| m.id == first).unwrap().run_id.clone();
-        (first, run.expect("made by a run"))
-    });
-    assert!(drive(&mut app, window, |this, _, _| this.play_pred.ready().is_some()));
-    // Asked again (the result kept up meanwhile), on a slow device: while it runs, the model's run
-    // is deleted, and its answer only comes once the model list is in again.
-    api.answer_next_predict_late();
-    drive(&mut app, window, |this, w, cx| {
-        this.play_pred_dim = true;
-        this.run_predict(cx);
-        this.ask_delete(DeleteTarget::Run(run.clone()), w, cx);
-        this.delete_confirmed(cx);
-    });
-    drive(&mut app, window, |this, _, _| {
-        let next = this.play_model.clone().expect("another model is picked");
-        assert_ne!(next, first);
-        // The image on stage is predicted with it, and nothing of the deleted model's is shown.
-        let shown = this.play_pred.ready().map(|p| p.model_id.clone());
-        assert_eq!(shown.as_deref(), Some(next.as_str()));
-        assert_eq!(this.play_pred_for.as_ref().map(|(_, m)| m), Some(&next));
-        assert!(!this.play_pred_pending && !this.play_pred_dim);
-    });
-}
-
-#[test]
 fn new_run_opens_on_the_last_started_choices() {
     let (mut app, window) = open();
     drive(&mut app, window, |this, w, cx| {

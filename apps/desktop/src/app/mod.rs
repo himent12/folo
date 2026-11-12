@@ -9,6 +9,9 @@ mod descriptions;
 mod drag;
 mod focus;
 mod forms;
+#[cfg(test)]
+mod list_tests;
+mod lists;
 mod navigation;
 mod new_run;
 mod overlay_state;
@@ -495,6 +498,8 @@ pub struct FoloApp {
     backend_gen: u64,
     /// Bumped on every connection attempt; only the latest one may install its result.
     connect_seq: u64,
+    /// The order of the dataset, model and run lists' answers: older ones are dropped.
+    list_tickets: lists::ListTickets,
     /// The latest request per (run, "metrics" | "logs"); older responses are dropped.
     history_tickets: HashMap<(String, &'static str), u64>,
     history_seq: u64,
@@ -647,6 +652,7 @@ impl FoloApp {
             sub_attempt: HashMap::new(),
             backend_gen: 0,
             connect_seq: 0,
+            list_tickets: Default::default(),
             history_tickets: HashMap::new(),
             history_seq: 0,
             _tasks: Vec::new(),

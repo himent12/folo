@@ -11,6 +11,7 @@ use crate::api::*;
 use crate::store::*;
 use crate::ui::*;
 
+use super::lists::List;
 use super::{FoloApp, Route};
 
 impl FoloApp {
@@ -53,41 +54,15 @@ impl FoloApp {
     pub fn ensure_core(&mut self, cx: &mut Context<Self>) {
         if self.store.runs.needs_fetch() {
             self.store.runs = Load::Loading;
-            self.fetch(
-                cx,
-                |api| api.runs(),
-                |this, r, cx| {
-                    this.store.runs = r.map(newest_first_runs).into();
-                    this.store.sync_run_list();
-                    this.subscribe_active(cx);
-                },
-            );
+            self.fetch_list(List::Runs, cx);
         }
         if self.store.datasets.needs_fetch() {
             self.store.datasets = Load::Loading;
-            self.fetch(cx, |api| api.datasets(), |this, r, _| this.store.datasets = r.into());
+            self.fetch_list(List::Datasets, cx);
         }
         if self.store.models.needs_fetch() {
             self.store.models = Load::Loading;
-            self.fetch(
-                cx,
-                |api| api.models(),
-                |this, r, cx| {
-                    this.store.models = r
-                        .map(|mut m| {
-                            m.sort_by(|a, b| b.created.cmp(&a.created));
-                            m
-                        })
-                        .into();
-                    // Playground starts on the best model (not the newest checkpoint, which may
-                    // have learned nothing yet), and so does it again after its model was
-                    // deleted: an image already on stage is predicted with it.
-                    if this.play_model.is_none() {
-                        this.play_model = this.store.best_model(None).map(|m| m.id.clone());
-                        this.run_predict(cx);
-                    }
-                },
-            );
+            self.fetch_list(List::Models, cx);
         }
         if self.store.system.needs_fetch() {
             self.store.system = Load::Loading;
@@ -366,48 +341,20 @@ impl FoloApp {
         .detach();
     }
 
-    /// Reload the dataset and model lists in place (no loading state), as the run list is: added or
-    /// removed elsewhere (Studio, the CLI, another data dir behind the same server), they show here
-    /// too, and a run's "(removed)" goes once its dataset is listed again. A list that failed is
-    /// fetched again from scratch.
+    /// Reload the dataset, model and run lists in place (no loading state): added or removed
+    /// elsewhere (Studio, the CLI, another data dir behind the same server), they show here too, and a
+    /// run's "(removed)" goes once its dataset is listed again. A list that failed is fetched again from
+    /// scratch.
     pub fn refresh_lists(&mut self, cx: &mut Context<Self>) {
         if matches!(self.store.datasets, Load::Failed(_)) {
             self.store.datasets = Load::Idle;
         } else if matches!(self.store.datasets, Load::Ready(_)) {
-            self.fetch(
-                cx,
-                |api| api.datasets(),
-                |this, r, _| {
-                    if let Ok(list) = r
-                        && this.store.datasets.ready() != Some(&list)
-                    {
-                        // Listed again (its folder registered again): no longer deleted here.
-                        for d in &list {
-                            this.deleted.remove(&d.id);
-                        }
-                        this.store.datasets = Load::Ready(list);
-                        // An open select may list them: its highlight is an index into the list.
-                        this.menu_open = None;
-                    }
-                },
-            );
+            self.fetch_list(List::Datasets, cx);
         }
         if matches!(self.store.models, Load::Failed(_)) {
             self.store.models = Load::Idle;
         } else if matches!(self.store.models, Load::Ready(_)) {
-            self.fetch(
-                cx,
-                |api| api.models(),
-                |this, r, _| {
-                    if let Ok(mut models) = r {
-                        models.sort_by(|a, b| b.created.cmp(&a.created));
-                        if this.store.models.ready() != Some(&models) {
-                            this.store.models = Load::Ready(models);
-                            this.menu_open = None;
-                        }
-                    }
-                },
-            );
+            self.fetch_list(List::Models, cx);
         }
         if matches!(self.store.runs, Load::Ready(_)) {
             self.refresh_runs(cx);
@@ -442,17 +389,7 @@ impl FoloApp {
 
     /// Reload the run list in place (no loading state) and subscribe to whatever is active.
     pub fn refresh_runs(&mut self, cx: &mut Context<Self>) {
-        self.fetch(
-            cx,
-            |api| api.runs(),
-            |this, r, cx| {
-                if let Ok(runs) = r {
-                    this.store.runs = Load::Ready(newest_first_runs(runs));
-                    this.store.sync_run_list();
-                    this.subscribe_active(cx);
-                }
-            },
-        );
+        self.fetch_list(List::Runs, cx);
     }
 
     /// Drain live events ~10× a second and refresh slow-moving data every few seconds.
@@ -531,10 +468,4 @@ impl FoloApp {
         });
         self._tasks.push(task);
     }
-}
-
-/// Runs newest first (the server already sends them so; the mock and refreshes may not).
-fn newest_first_runs(mut runs: Vec<Run>) -> Vec<Run> {
-    runs.sort_by(|a, b| b.created.cmp(&a.created));
-    runs
 }

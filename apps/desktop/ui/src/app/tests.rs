@@ -340,6 +340,32 @@ fn a_task_woken_after_the_app_is_gone_does_not_panic() {
     assert!(result.borrow().as_ref().is_none_or(|r| r.is_err()));
 }
 
+/// A job the test holds back stays out while everything else, a later job's result included, is pumped.
+#[test]
+fn run_until_held_pumps_everything_but_the_jobs_held_back() {
+    let mut app = app();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let order = Rc::new(RefCell::new(Vec::new()));
+    let (o1, o2) = (order.clone(), order.clone());
+    app.update(|cx| {
+        cx.spawn(async move |cx| {
+            cx.background_executor().spawn(async move { gate.recv().ok() }).await;
+            o1.borrow_mut().push("held");
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            cx.background_executor().spawn(async {}).await;
+            o2.borrow_mut().push("later");
+        })
+        .detach();
+    });
+    app.run_until_held(1);
+    assert_eq!(*order.borrow(), ["later"]);
+    release.send(()).unwrap();
+    app.run_until_idle();
+    assert_eq!(*order.borrow(), ["later", "held"]);
+}
+
 #[test]
 #[should_panic(expected = "still running")]
 fn run_until_idle_fails_loudly_on_a_stuck_background_job() {

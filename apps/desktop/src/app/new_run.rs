@@ -468,6 +468,7 @@ impl FoloApp {
                         if let Some(runs) = this.store.runs.ready_mut() {
                             runs.insert(0, run);
                         }
+                        this.changed_here(super::lists::List::Runs, cx);
                         this.subscribe_active(cx);
                         let run = this.store.run(&id).cloned();
                         let cloud = run.as_ref().and_then(|r| Some(this.cloud_device(r, r.cloud.as_ref()?)));
