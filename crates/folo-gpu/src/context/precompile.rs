@@ -160,8 +160,6 @@ impl GpuContext {
         let path = kernel_list::path_for(dir, &info, kind, shape);
         let identity = kernel_list::identity_for(&info, kind);
         let p = &self.inner.precompile;
-        // Recordings beyond `MAX_RECORDINGS`: dropped, and so written, once the lock is released.
-        let evicted: Vec<Arc<Recording>>;
         let list = {
             let mut recs = p.recordings.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(i) = recs.iter().position(|r| r.tag == tag) {
@@ -172,8 +170,12 @@ impl GpuContext {
             let own = kernel_list::read(&path, &identity);
             recs.push(Recording::open(&tag, path.clone(), identity.clone(), &own));
             p.generation.fetch_add(1, Ordering::Relaxed);
+            // Recordings beyond `MAX_RECORDINGS` are written one last time and retired under this lock, so a
+            // reopening of the same list (which takes it) reads their file and is never overwritten by them.
             let over = recs.len().saturating_sub(MAX_RECORDINGS);
-            evicted = recs.drain(..over).collect();
+            for r in recs.drain(..over) {
+                r.retire();
+            }
             if own.is_empty() {
                 kernel_list::neighbours(dir, &info, kind, &path)
                     .iter()
@@ -205,10 +207,6 @@ impl GpuContext {
         let n = jobs.len();
         if n > 0 {
             spawn_workers(Arc::downgrade(&self.inner), Arc::new(jobs));
-        }
-        // Written here rather than by whichever thread drops the last reference (the saver may hold one).
-        for r in evicted {
-            r.save();
         }
         n
     }

@@ -221,6 +221,8 @@ struct RecState {
     new: usize,
     /// Kernels added in all (the saver writes once this stops changing).
     changes: u64,
+    /// Written for the last time ([`Recording::retire`]): records and writes nothing more.
+    retired: bool,
 }
 
 /// Every live recording of the process, and whether the saver thread runs.
@@ -263,7 +265,7 @@ impl Recording {
     /// Notes a use of `key`: the first one in this recording adds it.
     pub fn used(&self, key: &KernelKey) {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if s.used.len() >= MAX_ENTRIES || s.seen.contains(key) {
+        if s.retired || s.used.len() >= MAX_ENTRIES || s.seen.contains(key) {
             return;
         }
         s.seen.insert(key.clone());
@@ -281,6 +283,16 @@ impl Recording {
         if self.looked.swap(n, Ordering::Relaxed) == n {
             self.save();
         }
+    }
+
+    /// Writes what the file lacks one last time; afterwards the recording records and writes nothing, so a holder
+    /// of a reference (the saver thread, a drop) can never write an older list over the file of a recording that
+    /// reopened the same path. Its context calls it under the lock that reopening takes.
+    pub fn retire(&self) {
+        self.save();
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.retired = true;
+        s.new = 0;
     }
 
     /// Writes the list when it holds a kernel the file does not have. Errors are ignored (the list is a hint).
@@ -440,6 +452,22 @@ mod tests {
             let def = crate::kernels::find_def(name, &Spec::new().u32("J", 3)).unwrap();
             assert_eq!((def.name, def.storage.len()), (name, n), "{name}: three matrices");
         }
+    }
+
+    #[test]
+    fn a_retired_recording_never_writes_again() {
+        let dir = folo_test_support::TestDir::new("gpu-kernel-list-retire");
+        let path = dir.join(format!("{PREFIX}r{SUFFIX}"));
+        let rec = Recording::open("t", path.clone(), "id".into(), &[]);
+        rec.used(&key("gemm", Spec::new().u32("BM", 64)));
+        rec.retire();
+        assert_eq!(read(&path, "id").len(), 1, "retiring writes what the file lacks");
+        // A recording that reopened the path owns the file now: the retired one adds and writes nothing.
+        std::fs::remove_file(&path).unwrap();
+        rec.used(&key("unary", Spec::new().u32("OP", 1)));
+        rec.save();
+        drop(rec);
+        assert!(!path.exists(), "a retired recording wrote its list again");
     }
 
     #[test]
