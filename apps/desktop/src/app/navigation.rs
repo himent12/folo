@@ -20,6 +20,15 @@ pub(super) fn deleted_route(deleted: &super::deleted::Deleted, route: &Route) ->
     deleted.get(id).map(|name| (name.clone(), list))
 }
 
+/// What a link to `name`, gone, says: a dataset "was removed" (unregistered; its files may well be
+/// there), a run or a model "was deleted".
+pub(super) fn gone_title(name: &str, route: &Route) -> String {
+    match route {
+        Route::Dataset(_) => format!("{name} was removed"),
+        _ => format!("{name} was deleted"),
+    }
+}
+
 impl FoloApp {
     // ---------- navigation ----------
 
@@ -27,7 +36,7 @@ impl FoloApp {
         // A link to something deleted since it was made opens the list, and says why.
         let route = match deleted_route(&self.deleted, &route) {
             Some((name, list)) => {
-                self.toast(Tone::Neutral, format!("{name} was deleted"), None, cx);
+                self.toast(Tone::Neutral, gone_title(&name, &route), None, cx);
                 list
             }
             None => route,

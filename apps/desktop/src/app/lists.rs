@@ -132,9 +132,13 @@ impl FoloApp {
         }
     }
 
-    fn install_datasets(&mut self, list: Vec<Dataset>, _cx: &mut Context<Self>) {
+    fn install_datasets(&mut self, list: Vec<Dataset>, cx: &mut Context<Self>) {
         if self.store.datasets.ready() == Some(&list) {
             return;
+        }
+        let gone = gone_from(self.store.datasets.ready(), &list, |d| (&d.id, &d.name));
+        for (id, name) in gone {
+            self.removed_elsewhere(&id, name, cx);
         }
         // Listed again (its folder registered again, after this answer's fetch was asked for): no
         // longer deleted here.
@@ -149,13 +153,9 @@ impl FoloApp {
     fn install_models(&mut self, mut models: Vec<Model>, cx: &mut Context<Self>) {
         models.sort_by(|a, b| b.created.cmp(&a.created));
         if self.store.models.ready() != Some(&models) {
-            // A model gone from the list (its run deleted elsewhere) is remembered by its name.
-            let gone: Vec<(String, String)> = (self.store.models.ready().into_iter().flatten())
-                .filter(|m| !models.iter().any(|n| n.id == m.id))
-                .map(|m| (m.id.clone(), m.name.clone()))
-                .collect();
-            for (id, name) in gone {
-                self.deleted.insert(id, name);
+            // A model gone from the list (its run deleted elsewhere).
+            for (id, name) in gone_from(self.store.models.ready(), &models, |m| (&m.id, &m.name)) {
+                self.removed_elsewhere(&id, name, cx);
             }
             self.store.models = Load::Ready(models);
             self.menu_open = None;
@@ -165,10 +165,51 @@ impl FoloApp {
     }
 
     fn install_runs(&mut self, runs: Vec<Run>, cx: &mut Context<Self>) {
+        for (id, name) in gone_from(self.store.runs.ready(), &runs, |r| (&r.id, &r.name)) {
+            self.removed_elsewhere(&id, name, cx);
+        }
         self.store.runs = Load::Ready(newest_first_runs(runs));
         self.store.sync_run_list();
         self.subscribe_active(cx);
     }
+}
+
+impl FoloApp {
+    /// `id` (called `name`) is no longer listed, though nothing here deleted it (Studio, the CLI,
+    /// another Desktop did): it is remembered as deleted, what was read of it is dropped, and its page,
+    /// if open, gives way to its list and says so, as a deletion here does.
+    fn removed_elsewhere(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
+        self.deleted.insert(id.to_string(), name);
+        self.store.dataset.remove(id);
+        self.store.images.remove(id);
+        self.store.issues.remove(id);
+        self.store.evals.remove(id);
+        self.store.run_data.remove(id);
+        self.store.samples.remove(id);
+        self.store.logs.remove(id);
+        if self.inspector.as_ref().is_some_and(|i| i.dataset == id) {
+            self.inspector = None;
+        }
+        if let Some((name, list)) = super::navigation::deleted_route(&self.deleted, &self.route) {
+            let title = super::navigation::gone_title(&name, &self.route);
+            self.toast(crate::ui::Tone::Neutral, title, None, cx);
+            self.route_pending = Some(list);
+        }
+    }
+}
+
+/// What `old` listed that `new` doesn't, as (id, name).
+fn gone_from<T>(
+    old: Option<&Vec<T>>,
+    new: &[T],
+    key: impl Fn(&T) -> (&String, &String),
+) -> Vec<(String, String)> {
+    let Some(old) = old else { return Vec::new() };
+    old.iter()
+        .map(&key)
+        .filter(|(id, _)| !new.iter().any(|n| key(n).0 == *id))
+        .map(|(id, name)| (id.clone(), name.clone()))
+        .collect()
 }
 
 /// Runs newest first (the server already sends them so; the mock and refreshes may not).

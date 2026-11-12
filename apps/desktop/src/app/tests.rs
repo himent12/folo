@@ -230,7 +230,7 @@ fn an_earlier_toasts_open_goes_to_the_list_once_its_dataset_is_deleted() {
     app.frame(window.into());
     drive(&mut app, window, |this, w, cx| {
         assert_eq!(this.route, Route::Datasets);
-        let said = format!("{name} was deleted");
+        let said = format!("{name} was removed");
         assert!(this.toasts.iter().any(|t| t.title == said.as_str()), "{said}");
         // Nor does Back lead there.
         this.back(w, cx);

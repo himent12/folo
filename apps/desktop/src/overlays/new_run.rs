@@ -41,6 +41,7 @@ impl FoloApp {
         let datasets = self.store.datasets.ready().cloned().unwrap_or_default();
         let ds = self.nr_dataset().cloned();
         let ds_gone = self.nr_dataset_gone();
+        let gone_name = self.nr_gone_name();
         let f = self.new_run.as_ref().unwrap();
         let ds_i = datasets.iter().position(|d| d.id == f.dataset);
         let (arch, epochs, batch, imgsz, device, opt, lr0, mosaic, mixup, fliplr) =
@@ -429,7 +430,7 @@ impl FoloApp {
                             .when(ds_gone, |d| {
                                 d.child(
                                     text(ty::SM, t.danger_text)
-                                        .child("That dataset was deleted. Pick another."),
+                                        .child(format!("{} was removed. Pick another.", gone_name)),
                                 )
                             })
                     }),

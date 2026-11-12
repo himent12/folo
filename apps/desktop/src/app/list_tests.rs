@@ -243,3 +243,92 @@ fn a_playground_model_deleted_here_with_a_model_reload_out_is_replaced_at_once()
     });
     assert_eq!(after, (Some(next.clone()), Some(next.clone()), Some(next), false, 1));
 }
+
+#[test]
+fn a_cached_dataset_page_removed_elsewhere_says_so_and_never_trains_on_another() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let (id, name) = drive(&mut app, window, |this, w, cx| {
+        let ds = this.store.datasets.ready().unwrap()[0].clone();
+        this.navigate(Route::Dataset(ds.id.clone()), w, cx);
+        (ds.id, ds.name)
+    });
+    // Its page is read (detail and images cached), then it is removed through the API.
+    app.frame(window.into());
+    app.run_until_idle();
+    assert!(drive(&mut app, window, |this, _, _| this
+        .store
+        .dataset
+        .get(&id)
+        .is_some_and(|d| d.ready().is_some())));
+    api.delete_dataset(&id, false).unwrap();
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.route, Route::Datasets, "its page gave way to the list");
+        let said = format!("{name} was removed");
+        assert!(this.toasts.iter().any(|t| t.title == said.as_str()), "{said}");
+        assert!(!this.store.dataset.contains_key(&id), "what was read of it is dropped");
+    });
+    // The page's Train on this dataset, from before (a stale action): New run opens on it, says it was
+    // removed, and starts nothing until another is picked; it never picks one itself.
+    drive(&mut app, window, |this, w, cx| this.open_new_run(Some(&id), w, cx));
+    let runs_before = api.runs().unwrap().len();
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.nr_dataset_gone());
+        assert_eq!(this.nr_gone_name(), name);
+        assert!(this.nr_dataset().is_none() && this.form_config(cx).is_none());
+        this.submit_new_run(w, cx);
+    });
+    assert_eq!(api.runs().unwrap().len(), runs_before, "nothing was started");
+}
+
+#[test]
+fn a_run_or_model_page_removed_elsewhere_gives_way_to_its_list() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let (model, model_name) = drive(&mut app, window, |this, w, cx| {
+        let m = this
+            .store
+            .models
+            .ready()
+            .unwrap()
+            .iter()
+            .find(|m| m.run_id.as_deref() == Some("run_52e8"))
+            .unwrap();
+        let (id, name) = (m.id.clone(), m.name.clone());
+        this.navigate(Route::Model(id.clone()), w, cx);
+        (id, name)
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    // Its run is deleted through the API: the model page goes at the next refresh, and says so.
+    api.delete_run("run_52e8").unwrap();
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.route, Route::Models);
+        let said = format!("{model_name} was deleted");
+        assert!(this.toasts.iter().any(|t| t.title == said.as_str()), "{said}");
+        assert!(!this.store.evals.contains_key(&model));
+        // The run's page, from an older link: its list, saying so.
+        this.navigate(Route::Run("run_52e8".into()), w, cx);
+        assert_eq!(this.route, Route::Runs);
+    });
+    // A run page open while its run is deleted elsewhere.
+    let run = drive(&mut app, window, |this, w, cx| {
+        let r = this.store.runs.ready().unwrap().iter().find(|r| !r.status.is_active()).unwrap().clone();
+        this.navigate(Route::Run(r.id.clone()), w, cx);
+        r
+    });
+    app.frame(window.into());
+    api.delete_run(&run.id).unwrap();
+    drive(&mut app, window, |this, _, cx| this.refresh_lists(cx));
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.route, Route::Runs);
+        assert!(!this.store.run_data.contains_key(&run.id));
+        let said = format!("{} was deleted", run.name);
+        assert!(this.toasts.iter().any(|t| t.title == said.as_str()), "{said}");
+    });
+}
