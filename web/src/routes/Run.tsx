@@ -66,6 +66,7 @@ import RunSkeleton from './run/RunSkeleton';
 import WaitingPanels from './run/WaitingPanels';
 import { exactTime } from './runs/when';
 import DeleteRun from './run/DeleteRun';
+import { goneEvalOn } from './run/goneEvalOn';
 
 type Section = 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
 const NO_CLASSES: string[] = [];
@@ -102,7 +103,12 @@ export default function Run() {
   const classes = computed(() => dataset.get()?.classes ?? (recorded.get()?.classes.length ? recorded.get()!.classes : modelClasses.get()) ?? NO_CLASSES);
   // A dataset with no validation images trains and validates on its training split (docs/API.md, Split fallback): the
   // page says so once, as the Model page does, and its titles name that split rather than "Validation".
-  const evalOn = computed(() => runEvalSource(dataset.get()));
+  // Once the dataset is removed, the trainer's log says which split the epochs were scored on (./run/goneEvalOn).
+  const evalOn = computed(() => {
+    if (!datasetGone.get()) return runEvalSource(dataset.get());
+    void live.version;
+    return goneEvalOn(datasetName.get() ?? null, live.logs);
+  });
   const splitNotice = computed(() => (evalOn.get() ? fallbackNotice(evalOn.get()!) : null));
 
   const crumbName = computed(() => run.get()?.name ?? id.get());

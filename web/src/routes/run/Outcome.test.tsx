@@ -210,6 +210,16 @@ describe('Outcome', () => {
     }
   });
 
+  it("gives a failure's raw message a labelled box of its own, and the schedule warning a section of its own (v-data-runs N8)", () => {
+    const r = render({ ...short('failed'), error_code: 'data_error', error: 'io error at D:/x.jpg: not found' }, vi.fn(), [SHORT]);
+    const detail = r.target.querySelector('.c-detail')!;
+    expect([...detail.querySelectorAll('.d-head')].map((h) => h.textContent)).toEqual(['Error message', 'Too short to learn']);
+    expect(detail.querySelector('.d-head + code.raw')?.textContent).toBe('io error at D:/x.jpg: not found');
+    // The warning's reasons follow its own heading, never the error message.
+    expect(detail.querySelector('.d-head + code.raw + .alts + .d-head + .why')).not.toBeNull();
+    r.done();
+  });
+
   it('hands a completed run on to its model and the Playground, the Playground left out only at mAP exactly 0', () => {
     const done = (map50_95: number): Run => ({ ...short('completed'), best: { epoch: 5, map50_95 } });
     let r = render(done(0.073));

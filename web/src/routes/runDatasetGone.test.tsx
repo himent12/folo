@@ -44,5 +44,9 @@ describe('a run whose dataset was removed', () => {
     expect([...target.querySelectorAll('#samples button')].some((b) => b.textContent?.trim() === 'Retry')).toBe(false);
     const names = [...target.querySelectorAll('#per-class tbody tr')].map((r) => r.querySelector('td')?.textContent?.trim());
     expect(names.sort()).toEqual(['circle', 'square', 'triangle']);
+    // Its panels keep the split the log says it validated on (v-data-runs N7), not "Evaluation".
+    expect(target.querySelector('#samples')?.textContent).toContain('Validation samples');
+    expect(target.querySelector('.metrics')?.textContent).toContain('Validation mAP50-95');
+    expect(target.textContent).not.toContain('Evaluation');
   });
 });

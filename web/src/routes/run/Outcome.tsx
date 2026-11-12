@@ -254,15 +254,27 @@ export default function Outcome(props: OutcomeProps) {
             </>
           )}
           more={() => (
+            // The server's own message in a labelled box of its own, then the way on; the schedule warning, which is not
+            // why it failed, is a section of its own under its name, never beside the message.
             <>
-              {summary.get() && props.run.error ? <code class="mono">{props.run.error}</code> : null}
+              {summary.get() && props.run.error ? (
+                <>
+                  <p class="d-head first">Error message</p>
+                  <code class="mono raw">{props.run.error}</code>
+                </>
+              ) : null}
               <div class="alts cta-row">
                 <Button size="sm" icon={RotateCcw} href={href(retryPath(props.run.id))}>
                   New run like this
                 </Button>
-                {short.get() ? scheduleFix() : null}
               </div>
-              {short.get() ? why() : null}
+              {short.get() ? (
+                <>
+                  <p class="d-head">{short.get()!.title.replace(/:$/, '')}</p>
+                  {why()}
+                  <div class="alts cta-row">{scheduleFix()}</div>
+                </>
+              ) : null}
             </>
           )}
         >
@@ -364,6 +376,17 @@ css`
     display: block;
     overflow-wrap: anywhere;
     color: var(--text-secondary);
+  }
+  .d-head.first {
+    margin-top: 0;
+  }
+  /* A failure's raw message: a box of its own, apart from the advice. */
+  .raw {
+    margin-top: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-inset);
+    border: 1px solid var(--line-panel);
+    border-radius: var(--radius-sm);
   }
   /* The engine's sentences at a readable measure. */
   .why {
