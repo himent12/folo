@@ -128,6 +128,10 @@ pub struct TrainOptions {
     /// Start from these weights (transfer learning: matching tensors load, the class outputs are re-initialised
     /// when the class list differs). Ignored by [`Trainer::resume`].
     pub weights: Option<PathBuf>,
+    /// How the training loader keeps images between epochs (`--cache ram`: decoded and resized in memory,
+    /// checked against the available memory when the run starts). Batches are the same either way, so it is a
+    /// setting of this process, not of the run (a resume may pass another).
+    pub cache: folo_data::CacheMode,
 }
 
 impl Default for TrainOptions {
@@ -138,6 +142,7 @@ impl Default for TrainOptions {
             step_interval: Duration::from_millis(100),
             stop: Arc::new(AtomicBool::new(false)),
             weights: None,
+            cache: folo_data::CacheMode::None,
         }
     }
 }

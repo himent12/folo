@@ -312,6 +312,7 @@ impl Trainer {
                 epochs: cfg.epochs,
                 prefetch_batches: 2,
                 u8_images: folo_gpu::context_for(device).is_some(),
+                cache: opts.cache,
             },
         )?;
         let acc = GradAccumulator::new(&model.parameters());

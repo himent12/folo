@@ -6,11 +6,11 @@
 //! identical for any number of workers. In-flight work is bounded by a window of positions plus a bounded batch
 //! channel; dropping the epoch iterator stops and joins all threads.
 
-use crate::augment::{AugmentConfig, TrainTransform, Transformed};
+use crate::augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
 use crate::dataset::{Dataset, Issue, IssueKind};
 use crate::error::{DataError, Result};
-use crate::image::Sample;
 use crate::par;
+use crate::ram_cache::{CacheMode, RamCache};
 use crate::rng::Rng;
 use crossbeam_channel::{Receiver, bounded, unbounded};
 use std::collections::{BTreeMap, HashMap};
@@ -44,6 +44,9 @@ pub struct LoaderConfig {
     /// Deliver the pixels as `u8` ([`Batch::images_u8`], a quarter of the bytes, for uploading to a GPU that
     /// converts them) instead of `f32` in `0..1` ([`Batch::images`]).
     pub u8_images: bool,
+    /// Keep images between epochs ([`CacheMode::Ram`]: decoded and resized, `--cache ram`). Batches are the same
+    /// either way.
+    pub cache: CacheMode,
 }
 
 impl Default for LoaderConfig {
@@ -59,6 +62,7 @@ impl Default for LoaderConfig {
             epochs: 0,
             prefetch_batches: 2,
             u8_images: false,
+            cache: CacheMode::None,
         }
     }
 }
@@ -143,6 +147,8 @@ struct Shared {
     ds: Arc<dyn Dataset>,
     cfg: LoaderConfig,
     failures: Mutex<BTreeMap<usize, String>>,
+    /// With [`CacheMode::Ram`].
+    ram: Option<RamCache>,
 }
 
 /// Maximum consecutive substitutes tried for an unreadable image.
@@ -150,13 +156,21 @@ const MAX_SUBSTITUTES: usize = 64;
 
 impl Shared {
     /// Loads sample `i`; if it cannot be read, records the failure and deterministically tries `i + 1`, `i + 2`, ...
-    fn fetch(&self, i: usize) -> Result<(usize, Sample)> {
+    fn fetch(&self, i: usize) -> Result<Fetched> {
         let n = self.ds.len();
         let mut last = None;
         for k in 0..MAX_SUBSTITUTES.min(n) {
             let j = (i + k) % n;
-            match self.ds.get(j) {
-                Ok(s) => return Ok((j, s)),
+            let got = match &self.ram {
+                Some(c) => c.get(j, || self.ds.get(j)).map(|(sample, orig_size)| Fetched {
+                    index: j,
+                    sample,
+                    orig_size,
+                }),
+                None => self.ds.get(j).map(|s| Fetched::decoded(j, s)),
+            };
+            match got {
+                Ok(f) => return Ok(f),
                 Err(e) => {
                     self.failures
                         .lock()
@@ -211,7 +225,11 @@ impl DataLoader {
         if ds.is_empty() {
             return Err(DataError::Config("dataset is empty".into()));
         }
-        Ok(DataLoader { shared: Arc::new(Shared { ds, cfg, failures: Mutex::new(BTreeMap::new()) }) })
+        let ram = match cfg.cache {
+            CacheMode::Ram => Some(RamCache::new(&*ds, cfg.imgsz)?),
+            CacheMode::None => None,
+        };
+        Ok(DataLoader { shared: Arc::new(Shared { ds, cfg, failures: Mutex::new(BTreeMap::new()), ram }) })
     }
 
     /// The configuration.

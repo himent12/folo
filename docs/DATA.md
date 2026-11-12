@@ -183,7 +183,16 @@ keeps one, as the YOLO reader drops duplicate label lines.
 
 ## DataLoader and determinism
 - `LoaderConfig { batch_size, imgsz, workers, shuffle, drop_last, seed, augment, epochs, prefetch_batches,
-  u8_images }`. `workers` defaults to the logical CPU count, at most 16.
+  u8_images, cache }`. `workers` defaults to the logical CPU count, at most 16.
+- `cache: CacheMode::Ram` (`folo train --cache ram`) keeps every image decoded and resized to long side `imgsz`
+  (what `resize_long_side` makes of it) in memory, filled the first time a worker loads it, so later epochs skip
+  the decode and the resize (for 1080p JPEGs about 89% of a mosaic sample). The transform gets the decoded size
+  with the sample (`Fetched::orig_size`): its own resize of a cached image is a row copy, and the letterbox
+  geometry (`ratio`, `orig_size`) is computed from the original size, so **batches are identical with and without
+  the cache** (pixels, targets and meta; tested for mosaic + mixup, plain letterbox and validation). Before the
+  loader starts, `ram_cache_bytes` (every image's resized size from the dataset's probed sizes, 3 bytes a pixel)
+  is compared with `RAM_CACHE_SHARE` (80%) of the available memory, and the loader is refused with the numbers
+  when it does not fit. An image that cannot be read is not cached (the loader substitutes as without a cache).
 - Batches: `images` is `n * 3 * s * s` `f32` in `0..1` (`NCHW`, RGB), or, with `u8_images`, `images_u8` holds the same
   pixels as `u8` (`value / 255` is the float; a quarter of the bytes, for a GPU that converts them itself, as the
   trainer and validation do on a GPU) and `images` is empty. `shape = [n, 3, s, s]`, `targets` rows are

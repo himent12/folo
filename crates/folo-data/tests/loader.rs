@@ -5,8 +5,8 @@ mod common;
 use common::*;
 use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
 use folo_data::{
-    AugmentConfig, BBox, Batch, DataError, DataLoader, Dataset, InMemoryDataset, LoaderConfig, Result,
-    Sample, Split,
+    AugmentConfig, BBox, Batch, CacheMode, DataError, DataLoader, Dataset, InMemoryDataset, LoaderConfig,
+    Result, Sample, Split,
 };
 use std::sync::Arc;
 
@@ -195,4 +195,52 @@ fn invalid_configs_are_rejected() {
     let empty: Arc<dyn Dataset> =
         Arc::new(InMemoryDataset { samples: vec![], classes: vec![], split: Split::Val });
     assert!(DataLoader::new(empty, cfg(1)).is_err());
+}
+
+/// `--cache ram` gives the batches of the uncached loader, pixel for pixel, box for box and with the same meta
+/// (original size, letterbox ratio and pad), for mosaic + mixup, plain letterboxed samples and validation, with
+/// images larger and smaller than `imgsz`, from the first (filling) epoch on.
+#[test]
+fn ram_cache_gives_the_uncached_batches() {
+    let samples = (0..11)
+        .map(|k| {
+            let (w, h) = [(200, 120), (50, 90), (64, 64), (130, 31), (33, 200)][k % 5];
+            random_rect_sample(k as u64, w, h, 4)
+        })
+        .collect();
+    let ds: Arc<dyn Dataset> = Arc::new(InMemoryDataset {
+        samples,
+        classes: (0..4).map(|c| c.to_string()).collect(),
+        split: Split::Train,
+    });
+    let configs = [
+        cfg(3),
+        LoaderConfig { augment: Some(AugmentConfig { mosaic: 0.0, ..AugmentConfig::default() }), ..cfg(2) },
+        LoaderConfig { augment: None, shuffle: false, ..cfg(2) },
+    ];
+    for c in configs {
+        let plain = DataLoader::new(ds.clone(), c.clone()).unwrap();
+        let cached =
+            DataLoader::new(ds.clone(), LoaderConfig { cache: CacheMode::Ram, ..c.clone() }).unwrap();
+        for epoch in [0, 1, 1] {
+            let (a, b) = (collect(&plain, epoch), collect(&cached, epoch));
+            assert_eq!(a, b, "{:?}, epoch {epoch}", c.augment.map(|a| a.mosaic));
+        }
+        if c.augment.is_none() {
+            let meta = &collect(&cached, 0)[0].meta[0];
+            assert_eq!(meta.orig_size, [200, 120]);
+            assert_eq!(meta.ratio, [64.0 / 200.0, 38.0 / 120.0]);
+        }
+    }
+}
+
+#[test]
+fn ram_cache_refuses_what_does_not_fit() {
+    let big = (0..3).map(|k| random_rect_sample(k, 64, 64, 1)).collect();
+    let ds: Arc<dyn Dataset> =
+        Arc::new(InMemoryDataset { samples: big, classes: vec!["a".into()], split: Split::Train });
+    // A 2^20-pixel side: each image needs 3 TiB resized.
+    let c = LoaderConfig { imgsz: 1 << 20, cache: CacheMode::Ram, ..cfg(1) };
+    let e = DataLoader::new(ds, c).err().expect("refused");
+    assert!(e.to_string().contains("--cache ram needs"), "{e}");
 }

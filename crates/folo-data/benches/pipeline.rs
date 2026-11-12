@@ -9,6 +9,8 @@
 //! - `--batches N`: stop each measured epoch after N batches (default: the whole epoch).
 //! - `--rounds N`: measured epochs per worker count; the median and the range are printed (default 3).
 //! - `--no-stages` / `--no-val`: skip the single-thread stage table / the validation loader table.
+//! - `--cache ram`: the training loader with `CacheMode::Ram` (its warm-up epoch is a whole epoch, which fills
+//!   the cache; the measured epochs then read from it).
 //!
 //! Prints single-thread stage timings (decode, resize, letterbox, mosaic, affine, HSV, flip, collate) and
 //! end-to-end `DataLoader` images/s for the full training transform (decode + mosaic + affine + HSV + flip +
@@ -17,7 +19,7 @@
 use folo_data::augment::{flip_lr, mosaic4, random_affine, random_hsv, resize_long_side};
 use folo_data::synthetic::{SyntheticConfig, write_yolo};
 use folo_data::{
-    AugmentConfig, DataLoader, Dataset, ImageFormat, LetterboxOptions, LoaderConfig, Rng, Split,
+    AugmentConfig, CacheMode, DataLoader, Dataset, ImageFormat, LetterboxOptions, LoaderConfig, Rng, Split,
     letterbox_sample, open,
 };
 use std::hint::black_box;
@@ -47,6 +49,7 @@ struct Args {
     rounds: usize,
     stages: bool,
     val: bool,
+    cache: CacheMode,
 }
 
 fn parse_args() -> Args {
@@ -73,6 +76,7 @@ fn parse_args() -> Args {
         rounds: value("--rounds").and_then(|v| v.parse().ok()).unwrap_or(3).max(1),
         stages: !flag("--no-stages"),
         val: !flag("--no-val"),
+        cache: if value("--cache").as_deref() == Some("ram") { CacheMode::Ram } else { CacheMode::None },
     }
 }
 
@@ -191,11 +195,13 @@ fn main() -> folo_data::Result<()> {
                 workers,
                 seed: 0,
                 u8_images: true,
+                cache: args.cache,
                 ..LoaderConfig::default()
             },
         )?;
-        // Warm-up (page cache, allocator), then the measured epochs.
-        epoch_rate(&loader, 0, args.batches.min(8))?;
+        // Warm-up (page cache, allocator; a whole epoch fills a RAM cache), then the measured epochs.
+        let warm = if args.cache == CacheMode::Ram { usize::MAX } else { args.batches.min(8) };
+        epoch_rate(&loader, 0, warm)?;
         let mut rates = Vec::new();
         for e in 0..args.rounds {
             rates.push(epoch_rate(&loader, 1 + e as u32, args.batches)?);
