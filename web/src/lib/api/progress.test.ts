@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { etaSettled, progressText, runProgress, stepsPerEpoch } from './progress';
+import { etaSettled, progressText, runProgress, stepsPerEpoch, trainingSeconds } from './progress';
 import type { Step } from './types';
 
 const step = (step: number, epoch: number) => ({ step, epoch }) as Step;
@@ -56,5 +56,20 @@ describe('etaSettled', () => {
   it('settles halfway through a one-epoch run', () => {
     expect(etaSettled({ ...run, epochs: 1, epoch: 1, step: 5 })).toBe(false);
     expect(etaSettled({ ...run, epochs: 1, epoch: 1, step: 6 })).toBe(true);
+  });
+});
+
+describe('trainingSeconds', () => {
+  it('measures from start to end, or to now while it trains', () => {
+    expect(trainingSeconds({ started: '2026-11-11T10:00:00Z', finished: '2026-11-11T10:01:30Z' })).toBe(90);
+    expect(trainingSeconds({ started: '2026-11-11T10:00:00Z', finished: null }, Date.parse('2026-11-11T10:00:10Z'))).toBe(10);
+    expect(trainingSeconds({ started: null, finished: null })).toBeNull();
+  });
+
+  it('leaves out the time a resumed run sat stopped, which the server records with the run', () => {
+    // Trained 10 min, stopped overnight (14 h), resumed and trained 20 min more.
+    const r = { started: '2026-11-10T18:00:00Z', finished: '2026-11-11T08:30:00Z', paused_s: 14 * 3600 };
+    expect(trainingSeconds(r)).toBe(30 * 60);
+    expect(trainingSeconds({ ...r, finished: null }, Date.parse('2026-11-11T08:20:00Z'))).toBe(20 * 60);
   });
 });

@@ -22,6 +22,7 @@ import { computed, css, effect, MediaQuery, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { LiveRun } from '$lib/api/live';
 import { modelsResource } from '$lib/api/models';
+import { trainingSeconds } from '$lib/api/progress';
 import { Resource } from '$lib/api/resource';
 import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
 import type { QueueRequest } from '$lib/api/types';
@@ -63,7 +64,6 @@ import { isOom } from '$lib/oom';
 import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import RunSkeleton from './run/RunSkeleton';
 import WaitingPanels from './run/WaitingPanels';
-import { wasResumed } from './run/resumes';
 import { exactTime } from './runs/when';
 import DeleteRun from './run/DeleteRun';
 
@@ -250,23 +250,10 @@ export default function Run() {
     void live.version;
     return live.epochs.length;
   });
-  // How long it took: from start to end, as the Runs list says; a run resumed after a stop counts its epochs' training
-  // time instead, not the hours it sat stopped (the log says when it resumed, ./run/resumes).
+  // How long it took, as the Runs list says: from start to end, less the time it sat stopped before a resume.
   const elapsed = computed(() => {
     const r = run.get();
-    if (!r?.started) return null;
-    if (!active.get() && resumed.get()) {
-      void live.version;
-      const trained = live.epochs.reduce((a, e) => a + e.duration_s, 0);
-      if (trained > 0) return trained;
-    }
-    return ((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000;
-  });
-  /** Its log says it was resumed (read once it has ended: a live run's duration is its wall time so far). */
-  const resumed = computed(() => {
-    if (active.get()) return false;
-    void live.version;
-    return wasResumed(live.logs);
+    return r ? trainingSeconds(r) : null;
   });
   // The trainer's "too short to learn" warnings, from the log (./run/warnings): one callout, never a toast. Read from
   // the lines added since the last update only (./run/warningsLog).

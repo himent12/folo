@@ -26,7 +26,7 @@ import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
 import Segmented from '$lib/ui/Segmented';
-import { runProgress } from '$lib/api/progress';
+import { runProgress, trainingSeconds } from '$lib/api/progress';
 import { rowNav } from '$lib/ui/rowNav';
 import Skeleton from '$lib/ui/Skeleton';
 import StatusBadge from '$lib/ui/StatusBadge';
@@ -48,7 +48,7 @@ import { DialogStatus } from '$lib/ui/feedback';
 import { toast } from '$lib/ui/toast';
 import DeleteRun from './run/DeleteRun';
 import RunRows from './runs/RunRows';
-import { groups, readState, sortRuns, trainingSeconds, writeState, type Filter, type SortKey } from './runs/listState';
+import { groups, readState, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
 import { exactTime, tickingNow } from './runs/when';
 
 /** Columns of the desktop table (for state rows that span it). */

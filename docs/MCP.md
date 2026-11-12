@@ -80,7 +80,7 @@ in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the
 ## Results and errors
 Every tool declares an `inputSchema` and an `outputSchema`. The schemas are generated from the same Rust types as the
 HTTP API (`schemars`), so `folo describe --json` prints identical schemas, and docs/API.md is the source of field
-meanings. They are compacted for `tools/list` (about 63 KB for all 22 tools; a test keeps it under 64 KiB): no `$schema`,
+meanings. They are compacted for `tools/list` (about 64 KB for all 22 tools; a test keeps it under 68 KiB): no `$schema`,
 no numeric `format` annotations, no `minimum: 0` of unsigned types (also optional ones), defaults without f32 noise
 (`0.01`, not `0.009999999776482582`); output schemas also leave out defaults and the field descriptions of the shared
 types, in `$defs` and when the result is one (`Run`, `TrainConfig`, `Epoch`, `Dataset`, `CloudInstance`, ...;

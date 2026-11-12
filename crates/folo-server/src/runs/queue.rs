@@ -146,6 +146,7 @@ impl Runs {
             created: now(),
             started: None,
             finished: None,
+            paused_s: None,
             epoch: 0,
             step: 0,
             steps_per_epoch: 0,
@@ -161,7 +162,15 @@ impl Runs {
             // Filled in from `dataset` by `RunEntry::new`.
             dataset: None,
         };
-        let file = RunFile { run, dataset, weights, val_offset, epochs_done: 0, last_metrics: None };
+        let file = RunFile {
+            run,
+            dataset,
+            weights,
+            val_offset,
+            epochs_done: 0,
+            last_metrics: None,
+            resumed_at: None,
+        };
         let entry = Arc::new(RunEntry::new(id, dir, file));
         {
             let mut st = entry.state.lock().unwrap();

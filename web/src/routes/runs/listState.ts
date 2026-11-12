@@ -2,7 +2,7 @@
 // Back from a run, a reload or a shared link shows the list as it was left: `?status=failed&q=bccd&sort=map&dir=asc
 // &sel=run_a,run_b`. Defaults are left out of the URL (newest first, every status, nothing typed or ticked).
 
-import { runProgress } from '$lib/api/progress';
+import { runProgress, trainingSeconds } from '$lib/api/progress';
 import type { Run, RunStatus } from '$lib/api/types';
 
 export type Filter = 'all' | 'active' | 'completed' | 'failed';
@@ -54,12 +54,6 @@ export function writeState(s: ListState): string {
   if (s.sel.length) q.set('sel', s.sel.join(','));
   // Commas in run ids lists read better unescaped.
   return q.toString().replaceAll('%2C', ',');
-}
-
-/** Seconds a run has trained (or waited to finish): from its start to its end, or to `now` while it is active. */
-export function trainingSeconds(r: Pick<Run, 'started' | 'finished'>, now = Date.now()): number | null {
-  if (!r.started) return null;
-  return Math.max(0, ((r.finished ? Date.parse(r.finished) : now) - Date.parse(r.started)) / 1000);
 }
 
 /** The value a run sorts by; null sorts last in either direction (a run with no score yet, one that never started). */

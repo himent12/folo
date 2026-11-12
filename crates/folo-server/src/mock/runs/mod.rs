@@ -357,6 +357,7 @@ impl SimRun {
             created: rfc3339(snap.created),
             started: snap.started.map(rfc3339),
             finished: snap.finished.map(rfc3339),
+            paused_s: None,
             epoch: snap.step.div_ceil(self.spe) as u32,
             epochs: self.config.epochs,
             step: snap.step,

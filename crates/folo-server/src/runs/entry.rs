@@ -10,8 +10,11 @@ use folo_api::{
 use tokio::sync::broadcast;
 
 use crate::index::write_atomic;
+use crate::util::unix_now;
 
-use super::{DatasetRef, EVENT_BUFFER, RunEntry, RunFile, RunState, TAIL_STEPS, append_line, now};
+use super::{
+    DatasetRef, EVENT_BUFFER, RunEntry, RunFile, RunState, TAIL_STEPS, add_paused, append_line, now,
+};
 
 impl RunEntry {
     pub(super) fn new(id: String, dir: PathBuf, mut file: RunFile) -> RunEntry {
@@ -135,10 +138,14 @@ impl RunEntry {
         let mut line = None;
         match ev {
             RunEvent::Status(s) => {
-                let r = &mut st.file.run;
+                let file = &mut st.file;
+                let r = &mut file.run;
                 if s.status == RunStatus::Running {
                     if r.started.is_none() {
                         r.started = Some(now());
+                    } else if let Some(at) = file.resumed_at.take() {
+                        // Training again after a resume: its wait in the queue was not training either.
+                        add_paused(r, unix_now().floor() - at);
                     }
                     // A stop requested before training began: the trainer stops right away.
                     if r.status == RunStatus::Stopping {

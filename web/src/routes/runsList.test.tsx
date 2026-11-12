@@ -10,6 +10,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { render } from '../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { duration } from '$lib/format';
 import { parse, router } from '$lib/router';
 import { page as pageMeta } from '$lib/shell/crumbs';
 import Runs from './Runs';
@@ -273,6 +274,20 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     flushSync();
     const items = [...document.querySelectorAll('[role="menuitem"]')].map((e) => e.textContent?.trim());
     expect(items).toEqual(['Open model', 'Try in Playground', 'Delete run']);
+  });
+
+  it("gives a resumed run's training time, without the night it sat stopped", async () => {
+    const api = new MockApi('normal', 0);
+    const runs = await api.runs();
+    const done = runs.find((r) => r.status === 'completed')!;
+    const resumed = { ...done, started: '2026-11-10T18:00:00Z', finished: '2026-11-11T08:30:00Z', paused_s: 14 * 3600 };
+    vi.spyOn(api, 'runs').mockResolvedValue(runs.map((r) => (r.id === done.id ? resumed : r)));
+    await open(Runs, '/runs', api);
+    await vi.waitFor(() => {
+      flushSync();
+      const cells = [...target.querySelectorAll(`tr[data-id="${done.id}"] td`)].map((td) => td.textContent?.trim());
+      expect(cells).toContain(duration(30 * 60));
+    });
   });
 
   it('names a removed dataset as the run recorded it, marked, never by its id', async () => {
