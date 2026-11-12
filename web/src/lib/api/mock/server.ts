@@ -362,8 +362,10 @@ export class MockServer {
     return p;
   }
 
-  deleteDataset(id: string): Promise<void> {
+  deleteDataset(id: string, opts: { files?: boolean } = {}): Promise<void> {
     return this.call(() => {
+      // As folo serve --mock: no data dir, so no folder is ever this server's to delete.
+      if (opts.files) throw new ApiError(400, 'invalid_query', "this dataset's folder is not one this server wrote; its files are never deleted");
       this.spec(id);
       this.state.datasets = this.state.datasets.filter((d) => d.id !== id);
     });

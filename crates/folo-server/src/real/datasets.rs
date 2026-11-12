@@ -163,6 +163,58 @@ impl RealStore {
         Ok(out)
     }
 
+    /// `DELETE /api/datasets/{id}?files=true`: unregisters the dataset and deletes the folder it was written
+    /// to, the one right under `<data dir>/datasets` (whatever inside it was registered). Refused for a dataset
+    /// anywhere else, while another registered dataset reads files there, and while a run trains on it.
+    pub(super) fn delete_own_dataset(&self, id: &str) -> Result<()> {
+        let reg = self.entry(id)?.reg();
+        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_query", m);
+        let own = std::fs::canonicalize(self.data_dir.join("datasets")).ok();
+        let at = std::fs::canonicalize(&reg.path).ok();
+        let folder = match (&own, &at) {
+            (Some(own), Some(at)) => {
+                at.strip_prefix(own).ok().and_then(|r| r.components().next()).map(|c| own.join(c))
+            }
+            _ => None,
+        };
+        let Some(folder) = folder else {
+            let path = folo_data::paths::shown(&reg.path);
+            return Err(bad(format!(
+                "'{path}' is not a folder FOLO wrote into its data dir; its files are never deleted"
+            ))
+            .hint("unregister it without files=true"));
+        };
+        let others: Vec<String> = self
+            .entries
+            .read()
+            .unwrap()
+            .iter()
+            .map(|e| e.reg())
+            .filter(|r| r.id != id && std::fs::canonicalize(&r.path).is_ok_and(|p| p.starts_with(&folder)))
+            .map(|r| r.name)
+            .collect();
+        if !others.is_empty() {
+            return Err(bad(format!("{} also read the files in that folder", others.join(", ")))
+                .hint("remove those datasets first, or unregister this one without files=true"));
+        }
+        // A run training or queued on it reads those files: it would fail.
+        if let Some(r) =
+            self.list_runs()?.into_iter().find(|r| r.config.dataset_id == id && r.status.is_active())
+        {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "run_active",
+                format!("run {} is training or queued on it", r.name),
+            )
+            .hint("wait for it, or stop it first"));
+        }
+        self.delete_dataset(id)?;
+        std::fs::remove_dir_all(&folder).map_err(|e| {
+            let folder = folo_data::paths::shown(&folder);
+            Error::internal(format!("{} was unregistered, but deleting '{folder}' failed: {e}", reg.name))
+        })
+    }
+
     pub(super) fn thumbs_dir(&self, id: &str) -> PathBuf {
         self.data_dir.join("cache").join("thumbs").join(id)
     }

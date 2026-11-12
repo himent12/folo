@@ -267,6 +267,10 @@ impl Store for RealStore {
         Ok(())
     }
 
+    fn delete_dataset_files(&self, id: &str) -> Result<()> {
+        self.delete_own_dataset(id)
+    }
+
     fn list_models(&self) -> Result<Vec<Model>> {
         Ok(self.all_models().into_iter().map(|m| m.model).collect())
     }

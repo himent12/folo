@@ -174,7 +174,11 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `DELETE /api/datasets/{id}` → `204` (unregisters; never deletes files). Runs that used the dataset keep their
   metrics and models; their sample images (`/images` of this id) are gone with it. A dataset's id derives from its
   folder (canonical path) and format, so registering the same folder again gives it the same id back (unless another
-  dataset has taken it meanwhile), and those runs find it again.
+  dataset has taken it meanwhile), and those runs find it again. `?files=true` also deletes the dataset's folder, for
+  a dataset this server wrote into its data dir (the folder right under `<data dir>/datasets`: a generated sample
+  set, a labeling job's export, an upload); a dataset anywhere else is `400 invalid_query` (nothing is unregistered
+  or deleted), so is one whose folder another registered dataset reads, and a run queued or training on it is `409
+  run_active`. In mock mode a generated set goes with `files=true` and a folder registered from disk is refused.
 
 ```jsonc
 // Dataset
@@ -1272,7 +1276,7 @@ mostly shown) for the others.
   unregisters it.
 - `cache/thumbs/<id>/`: thumbnails, keyed by the image's path, size, modification time and the requested side.
 - `datasets/<name>/`: synthetic datasets and the datasets made from labeling jobs. `DELETE /api/datasets/{id}`
-  removes the dataset's caches, never its files.
+  removes the dataset's caches, and its files only with `?files=true`.
 - `label/<job id>/`: one folder per labeling job: `job.json` (the job, its images and their boxes, rewritten
   atomically after every change; during an agent run at most every 5 seconds and when it ends, so a crash can
   lose the labels of the run's last few seconds), `images/` (uploaded files; folder imports stay where they are)

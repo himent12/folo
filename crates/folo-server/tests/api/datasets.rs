@@ -221,3 +221,21 @@ async fn malformed_registry_is_never_overwritten() {
     assert_eq!(std::fs::read_to_string(root.join("datasets.json")).unwrap(), "{ not json");
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[tokio::test]
+async fn mock_mode_deletes_a_generated_set_with_files_but_never_a_folder() {
+    let dir = TestDir::new("mock-delete-files");
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    std::fs::create_dir_all(dir.join("labels")).unwrap();
+    let (server, _) = mock();
+    let app = server.router();
+    let body = json!({ "name": "tiny", "images": 10, "imgsz": 64 });
+    let made: Dataset = ok(&app, post_json("/api/datasets/synthetic", body)).await;
+    let disk: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": dir.to_str().unwrap() }))).await;
+    let del =
+        |id: &str| Request::delete(format!("/api/datasets/{id}?files=true")).body(Body::empty()).unwrap();
+    err(&app, del(&disk.id), StatusCode::BAD_REQUEST, "invalid_query").await;
+    assert!(dir.join("images").is_dir());
+    let (status, _, _) = send(&app, del(&made.id)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}

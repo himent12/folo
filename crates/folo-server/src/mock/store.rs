@@ -295,6 +295,16 @@ impl Store for MockStore {
         self.dataset(id)?.image(image_id, thumb)
     }
 
+    fn delete_dataset_files(&self, id: &str) -> Result<()> {
+        // Mock mode writes no files: a generated set (made in memory) goes like any other; a folder on disk is
+        // never this server's to delete.
+        if matches!(&*self.dataset(id)?, DatasetEntry::Disk(..)) {
+            let m = "a folder registered from disk is not one this server wrote; its files are never deleted";
+            return Err(Error::new(StatusCode::BAD_REQUEST, "invalid_query", m.to_string()));
+        }
+        self.delete_dataset(id)
+    }
+
     fn delete_dataset(&self, id: &str) -> Result<()> {
         let mut ds = self.datasets.write().unwrap();
         let before = ds.len();

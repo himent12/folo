@@ -1,11 +1,13 @@
 /**
  * "Remove from FOLO": unregisters a dataset (its files stay on disk), saying first what that means for the runs that
  * trained on it: they keep their metrics and models, their sample images go with the dataset (until the folder is
- * registered again, which gives it its id back), and a run training or queued on it now carries on.
+ * registered again, which gives it its id back), and a run training or queued on it now carries on. A dataset FOLO
+ * wrote into its own data dir (a generated sample set: a folder people rarely open, up to a gigabyte) can go with its
+ * files, when no run is using it.
  */
 import TriangleAlert from '$icons/triangle-alert';
 import Trash from '$icons/trash-2';
-import { bindable, computed, css, signal } from 'fw';
+import { bindable, computed, css, effect, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Run } from '$lib/api/types';
@@ -13,12 +15,25 @@ import { router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import { DialogStatus } from '$lib/ui/feedback';
+import Switch from '$lib/ui/Switch';
 import { toast } from '$lib/ui/toast';
+import { count } from './count';
 import { datasetsChanged } from '../datasets/changes';
 
 export interface RemoveDialogProps {
   open?: boolean;
-  dataset: Pick<Dataset, 'id' | 'name' | 'path'>;
+  dataset: Pick<Dataset, 'id' | 'name' | 'path'> & Partial<Pick<Dataset, 'splits'>>;
+}
+
+/** A path with `/` separators and no trailing one, compared ignoring case when it is a Windows one. */
+const norm = (p: string) => {
+  const s = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  return /^[A-Za-z]:/.test(s) ? s.toLowerCase() : s;
+};
+
+/** True when `path` is inside `<dataDir>/datasets/`, where the server writes the datasets it makes. */
+export function writtenByServer(path: string, dataDir: string | null | undefined): boolean {
+  return !!dataDir && norm(path).startsWith(`${norm(dataDir)}/datasets/`);
 }
 
 const ACTIVE: ReadonlySet<Run['status']> = new Set(['queued', 'running', 'stopping']);
@@ -46,15 +61,27 @@ export default function RemoveDialog(props: RemoveDialogProps) {
   /** The runs that trained on the dataset, read each time the dialog opens (a run may have started since). */
   const used = new Resource(async (s) => (open.get() ? (await hub.api.runs(s)).filter((r) => r.config.dataset_id === props.dataset.id) : null));
   const impact = computed(() => (used.data ? runsImpact(used.data) : null));
+  /** The server's data dir, to tell a dataset it wrote (its files can go too) from a folder of the person's own. */
+  const system = new Resource(async (s) => (open.get() ? hub.api.system(s) : null));
+  /** Its files can go with it: the server wrote them, and no run is using them now (the server checks both too). */
+  const canDeleteFiles = computed(() => writtenByServer(props.dataset.path, system.data?.data_dir) && !!used.data && !impact.get()?.active);
+  const withFiles = signal(false);
+  // Each time it opens, the files stay unless asked again.
+  effect(() => {
+    if (open.get()) untrack(() => withFiles.set(false));
+  });
+  const files = () => withFiles.get() && canDeleteFiles.get();
+  const images = () => (props.dataset.splits ? count(props.dataset.splits.train + props.dataset.splits.val + props.dataset.splits.test, 'generated image') : 'generated images');
 
   async function remove() {
     const d = props.dataset;
     deleting.set(true);
     try {
-      await hub.api.deleteDataset(d.id);
+      const gone = files();
+      await hub.api.deleteDataset(d.id, { files: gone });
       datasetsChanged();
       open.set(false);
-      toast.success('Dataset removed', `${d.name} is no longer registered. Files on disk were not touched.`);
+      toast.success('Dataset removed', gone ? `${d.name} and its ${images()} were deleted.` : `${d.name} is no longer registered. Files on disk were not touched.`);
       router.go('/datasets');
     } catch (e) {
       status.error(e, 'Could not remove the dataset');
@@ -73,16 +100,27 @@ export default function RemoveDialog(props: RemoveDialogProps) {
         <>
           <Button onclick={() => open.set(false)}>Cancel</Button>
           <Button variant="destructive" icon={Trash} loading={deleting.get()} onclick={remove}>
-            Remove from FOLO
+            {files() ? 'Remove and delete files' : 'Remove from FOLO'}
           </Button>
         </>
       )}
     >
       <div class="confirm">
-        <p>
-          <b>{props.dataset.name}</b> will be unregistered. The files in <span class="mono">{props.dataset.path}</span> stay on disk.
-        </p>
+        {files() ? (
+          <p>
+            <b>{props.dataset.name}</b> will be unregistered, and its folder <span class="mono">{props.dataset.path}</span> deleted.
+          </p>
+        ) : (
+          <p>
+            <b>{props.dataset.name}</b> will be unregistered. The files in <span class="mono">{props.dataset.path}</span> stay on disk.
+          </p>
+        )}
         {impact.get() ? <p>{impact.get()!.lost}</p> : null}
+        {canDeleteFiles.get() ? (
+          <div class="files">
+            <Switch bind:checked={withFiles} label={`Also delete the ${images()}`} hint="FOLO made them in its own data folder. This cannot be undone." />
+          </div>
+        ) : null}
         {impact.get()?.active ? (
           <p class="active">
             <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
@@ -107,6 +145,9 @@ css`
   .confirm .mono {
     color: var(--text-primary);
     overflow-wrap: anywhere;
+  }
+  .files {
+    padding-top: var(--space-1);
   }
   .active {
     display: flex;

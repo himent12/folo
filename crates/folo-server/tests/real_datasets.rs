@@ -530,3 +530,27 @@ async fn a_sample_set_has_few_tiny_boxes() {
         assert!(share < 0.09, "{imgsz} px: {:.1}% tiny boxes", share * 100.0);
     }
 }
+
+/// `DELETE ?files=true` deletes the folder of a dataset FOLO wrote into its data dir, and never a folder elsewhere.
+#[tokio::test]
+async fn generated_datasets_can_go_with_their_files() {
+    let t = TestDir::new("real-delete-files");
+    let (home, outside) = (t.join("home"), t.join("mine"));
+    write_shapes(&outside, 4);
+    let app = app(&home);
+    let body = json!({ "name": "shapes-synth", "images": 10, "imgsz": 64 });
+    let made: Dataset = ok(&app, post_json("/api/datasets/synthetic", body)).await;
+    let mine: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": outside }))).await;
+    let uri = |d: &Dataset| format!("/api/datasets/{}?files=true", d.id);
+    let e = err(&app, delete(&uri(&mine)), StatusCode::BAD_REQUEST, "invalid_query").await;
+    assert!(e.message.contains("not a folder FOLO wrote"), "{}", e.message);
+    assert!(outside.join("data.yaml").is_file(), "files elsewhere are never deleted");
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert_eq!(list.datasets.len(), 2, "a refused deletion unregisters nothing");
+    assert!(Path::new(&made.path).is_dir());
+    let (status, _, _) = send(&app, delete(&uri(&made))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!Path::new(&made.path).exists(), "the generated images are gone");
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert_eq!(list.datasets.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), [mine.id.as_str()]);
+}
