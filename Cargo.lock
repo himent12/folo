@@ -748,6 +748,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sysinfo",
  "tar",
  "thiserror",
  "walkdir",

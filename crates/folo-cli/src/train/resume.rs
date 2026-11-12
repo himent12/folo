@@ -104,6 +104,7 @@ pub(super) fn resume(
         run_dir: Some(run_dir.clone()),
         events: Some(progress_sink(out, args.json_events, epochs, nb)),
         stop,
+        cache: args.cache.into(),
         ..TrainOptions::default()
     };
     let overrides = ResumeOverrides {
@@ -117,7 +118,7 @@ pub(super) fn resume(
 
 /// Flags a resume may change: where and how fast it runs, where its data is, and how it reports.
 const RESUME_MAY_CHANGE: &[&str] =
-    &["resume", "data", "format", "workers", "device", "json_events", "project"];
+    &["resume", "data", "format", "workers", "device", "json_events", "project", "cache"];
 
 /// With `--resume`, every other flag given on the command line must repeat the run's stored setting (as MCP
 /// and `POST /api/runs` require): a changed one is `invalid_config`, naming the flag and both values.
@@ -173,8 +174,8 @@ pub(super) fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Resu
             )
             .hint(format!(
                 "leave {flag} out to resume the run as it was started (only --workers, --device, --data, \
-                 --format, --project and --json-events may change), or start a new run from its weights with --model \
-                 <run>/weights/best.folo"
+                 --format, --cache, --project and --json-events may change), or start a new run from its weights \
+                 with --model <run>/weights/best.folo"
             )));
         }
     }

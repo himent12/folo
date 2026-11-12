@@ -63,13 +63,14 @@ mod loader;
 pub mod pack;
 pub mod par;
 pub mod paths;
+mod ram_cache;
 pub mod resize;
 mod rng;
 mod stats;
 pub mod synthetic;
 pub mod warp;
 
-pub use augment::{AugmentConfig, TrainTransform, Transformed};
+pub use augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
 pub use bbox::BBox;
 pub use dataset::cache::{MIN_FILES as SCAN_CACHE_MIN_FILES, scan_cache_dir, set_scan_cache_dir};
 pub use dataset::{
@@ -85,5 +86,6 @@ pub use image::{
 };
 pub use letterbox::{Letterbox, LetterboxOptions, PAD_VALUE, letterbox, letterbox_sample};
 pub use loader::{Batch, DataLoader, EpochIter, ImageMeta, LoaderConfig, Throughput};
+pub use ram_cache::{CacheMode, RAM_CACHE_SHARE, ram_cache_bytes};
 pub use rng::{Rng, mix_seed, splitmix64};
 pub use stats::{BOX_SIZE_EDGES, BOXES_PER_IMAGE_EDGES, DatasetStats, Histogram};

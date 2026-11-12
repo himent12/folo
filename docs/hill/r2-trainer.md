@@ -153,8 +153,48 @@ Per run (wall / evaluation / other cores), base then new: 9.79 / 7.46 / 20.6 and
 missed by 0.2 s at the median on this loaded machine; the evaluation itself is 29% faster. What remains is the forward
 passes, the loader and host NMS.
 
+## PR 3: `--cache ram`
+
+### Where the time was
+Round 1: for 1920x1080 JPEGs, decode (12 ms) and resize (5 ms) per image, four per mosaic sample, are ~89% of a
+sample; the loader made 83-140 samples/s, below the step.
+
+### What changed
+- folo-data `ram_cache.rs`: `CacheMode::Ram` keeps every training image as `resize_long_side` made it, plus its decoded
+  size, filled the first time a worker loads it. The transform takes a `Fetched { index, sample, orig_size }`: the
+  mosaic's resize of a cached image is the identity, and the letterbox path letterboxes the cached pixels (a resize to
+  the same size copies rows) but maps the normalised boxes and reports `orig_size` / `ratio` / `pad` with the original
+  size's geometry. Batches are identical with and without the cache (pixels, targets, meta).
+- The first version mapped boxes through the resized image's geometry: same pixels, targets off by float rounding
+  (`ram_cache_gives_the_uncached_batches` caught it).
+- The size is checked up front against 80% of the memory available to the process: the host's available memory and,
+  on Linux, the tightest limit among the process's cgroups and their ancestors (found through `/proc/self/mountinfo`,
+  so co-mounted v1 controllers and mounted subtrees resolve), less what other live RAM caches reserved.
+- `folo train --cache none|ram`; a resume may change it.
+
+### Results
+`cargo bench -p folo-data --bench pipeline -- --data D:/folo-data/runs-hill2/trainer/synth1080/data.yaml --workers 16
+--rounds 2 --no-stages --no-val [--cache ram]`, the set made with `folo dataset synth
+D:/folo-data/runs-hill2/trainer/synth1080 --images 600 --imgsz 1920 --vary-aspect --image-format jpeg --val-frac 0.1
+--seed 7` (~400 KB JPEGs, long side 1920), full train transform, 16 workers, under the CPU lock, alternated:
+
+| round | no cache | `--cache ram` |
+|---|---|---|
+| 1 | 134.9 samples/s (118.9-134.9) | **801.9** (799.0-801.9) |
+| 2 | 116.1 (49.9-116.1) | **717.7** (639.3-717.7) |
+
+About **6x** after the cache is filled (the filling epoch runs at the uncached speed). Off by default: training
+without `--cache` is unchanged.
+
+Review: 2 Sol reviewers, an Opus fixer, then two rounds fixed by me; what mattered: the memory budget ignoring
+cgroup limits (container, then nested scopes, then co-mounted / subtree mounts), tests that could not see the cache
+stop working or store the unresized image, two loaders admitted against the same memory.
+
 ## Leftovers
 
-1. **Parallel pipeline precompile**: write the `(kernel, spec)` list a run compiled next to the pipeline cache and
+1. **Per-epoch checkpoint writes off the training thread** (item 4 of the brief, not done: three PRs merged).
+   The epoch event promises `last.folo` / `best.folo` on disk; moving the write needs the event to wait for it or a
+   new event, a server / Studio contract change.
+2. **Parallel pipeline precompile**: write the `(kernel, spec)` list a run compiled next to the pipeline cache and
    compile it on all cores when the next context starts, so the ~1.1 s of naga parsing (and any driver compile)
    overlaps the dataset open instead of the first steps. Needs a name → `KernelDef` table.

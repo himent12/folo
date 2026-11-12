@@ -116,6 +116,25 @@ pub struct StopArgs {
     pub run_dir: PathBuf,
 }
 
+/// `folo train --cache`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum CacheArg {
+    /// Decode every image every epoch.
+    #[default]
+    None,
+    /// Decoded and resized images in memory.
+    Ram,
+}
+
+impl From<CacheArg> for folo_data::CacheMode {
+    fn from(c: CacheArg) -> Self {
+        match c {
+            CacheArg::None => folo_data::CacheMode::None,
+            CacheArg::Ram => folo_data::CacheMode::Ram,
+        }
+    }
+}
+
 /// Which `folo train --json` records to print.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum JsonEvents {
@@ -185,6 +204,10 @@ pub struct TrainArgs {
     /// Data loader worker threads [default: min(cores, 16)].
     #[arg(long)]
     pub workers: Option<usize>,
+    /// Keep the training images between epochs: `ram` decodes each once and keeps it resized in memory (faster
+    /// epochs for large JPEGs; refused up front when it does not fit). The batches are the same either way.
+    #[arg(long, value_enum, default_value_t = CacheArg::None)]
+    pub cache: CacheArg,
     /// Optimizer.
     #[arg(long, value_enum, default_value_t = OptimizerArg::Auto)]
     pub optimizer: OptimizerArg,
@@ -247,9 +270,9 @@ pub struct TrainArgs {
     #[arg(long, default_value = "runs")]
     pub project: PathBuf,
     /// Continue an interrupted run from its checkpoint (runs/<name>/weights/last.folo). The run's stored settings
-    /// are used: only --workers, --device, --data, --format, --project and --json-events may differ, other flags must match or
-    /// be left out. A run that completed cannot be resumed; start a new run with --model <run>/weights/best.folo
-    /// instead.
+    /// are used: only --workers, --device, --data, --format, --cache, --project and --json-events may differ, other
+    /// flags must match or be left out. A run that completed cannot be resumed; start a new run with --model
+    /// <run>/weights/best.folo instead.
     #[arg(long)]
     pub resume: Option<PathBuf>,
     /// Which records --json prints: all, or epoch (no per-batch step records).
