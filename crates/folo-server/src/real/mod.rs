@@ -3,8 +3,9 @@
 //! ([`crate::engine`]).
 //!
 //! Layout of the data dir:
-//! - `datasets.json`: the registry (id, name, path, format, created, plus a snapshot of classes and splits), written
-//!   atomically (temporary file + rename) on every change.
+//! - `datasets.json`: the registry (id, name, path, format, created, plus a snapshot of classes and splits) and the
+//!   tombstones of unregistered datasets whose id runs still reference ([`registry`]), written atomically (temporary
+//!   file + rename) on every change.
 //! - `cache/datasets/<id>.json`: the dataset's [`Index`] (images, boxes, stats) and the
 //!   [`Fingerprint`](crate::index::Fingerprint) of the files it was built from. On start every registered
 //!   dataset is checked on a background thread: a fresh cache is loaded, a stale or missing one is rebuilt.
@@ -24,9 +25,10 @@
 //! - `label/<id>/`: labeling jobs ([`crate::label`]); `bench/<id>/`: vision benchmarks ([`crate::bench`]).
 
 mod datasets;
-pub(crate) use datasets::dataset_seed;
+mod deletion;
 mod gpu_idle;
 mod models;
+mod registry;
 mod store;
 mod training;
 mod uploads;
@@ -49,8 +51,9 @@ use crate::models::Models;
 use crate::runs::Runs;
 use crate::throughput::Throughput;
 use crate::uploads::Uploads;
-use datasets::{load_or_build, read_registry};
+use datasets::load_or_build;
 use gpu_idle::{GpuIdle, spawn_idle_sweeper};
+use registry::read_registry;
 
 /// How often a dataset's files are re-checked for changes (on `GET /api/datasets/{id}` and image listings).
 pub const RECHECK_EVERY: Duration = Duration::from_secs(5);
@@ -154,6 +157,9 @@ impl Entry {
 pub struct RealStore {
     data_dir: PathBuf,
     entries: RwLock<Vec<Arc<Entry>>>,
+    /// Held shared while a dataset is registered and while a run is created or resumed, exclusively while
+    /// `DELETE /api/datasets/{id}?files=true` checks that nothing reads the folder and deletes it.
+    files: RwLock<()>,
     recheck_every: Duration,
     runs: Arc<Runs>,
     models: Models,
@@ -185,7 +191,7 @@ impl RealStore {
         providers: Vec<Arc<dyn folo_cloud::Provider>>,
         tuning: cloud::Tuning,
     ) -> RealStore {
-        let regs = read_registry(&data_dir).unwrap_or_else(|e| {
+        let regs = read_registry(&data_dir).map(|f| f.datasets).unwrap_or_else(|e| {
             tracing::error!("{e}; registering and unregistering datasets is disabled until it is fixed");
             Vec::new()
         });
@@ -230,6 +236,7 @@ impl RealStore {
         RealStore {
             data_dir,
             entries: RwLock::new(entries),
+            files: RwLock::new(()),
             recheck_every: RECHECK_EVERY,
             runs,
             models,
@@ -337,3 +344,6 @@ impl Drop for RealStore {
         self.runs.shutdown(None);
     }
 }
+
+#[cfg(test)]
+mod tests;

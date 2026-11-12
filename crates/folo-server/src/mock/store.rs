@@ -217,11 +217,20 @@ impl Store for MockStore {
         if let Some(d) = same(&list) {
             return Ok(d);
         }
-        // As in real mode: the same folder registered again gets the same id.
-        let canonical = want.unwrap_or_else(|| Path::new(&req.path).to_path_buf());
-        let id = unique_id("ds", crate::real::dataset_seed(&canonical, index.format), |id| {
-            list.iter().any(|d| d.meta().id == id)
+        // As in real mode: the same folder registered again gets its id back; another gets an id never used.
+        let mut retired = self.retired.write().unwrap();
+        let back = retired.iter().position(|(path, format, id)| {
+            path.is_some()
+                && *path == want
+                && *format == index.format
+                && !list.iter().any(|d| d.meta().id == *id)
         });
+        let id = match back {
+            Some(i) => retired.remove(i).2,
+            None => unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
+                list.iter().any(|d| d.meta().id == id) || retired.iter().any(|r| r.2 == id)
+            }),
+        };
         let name = req.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
             default_name(Path::new(&req.path), |n| list.iter().any(|d| d.meta().name.eq_ignore_ascii_case(n)))
         });
@@ -272,7 +281,10 @@ impl Store for MockStore {
             0,
         );
         let mut list = self.datasets.write().unwrap();
-        ds.meta.id = unique_id("ds", seed, |id| list.iter().any(|d| d.meta().id == id));
+        let retired = self.retired.read().unwrap();
+        ds.meta.id = unique_id("ds", seed, |id| {
+            list.iter().any(|d| d.meta().id == id) || retired.iter().any(|r| r.2 == id)
+        });
         let entry = Arc::new(DatasetEntry::Proc(ds));
         let out = entry.with_stats();
         list.push(entry);
@@ -307,9 +319,14 @@ impl Store for MockStore {
 
     fn delete_dataset(&self, id: &str) -> Result<()> {
         let mut ds = self.datasets.write().unwrap();
-        let before = ds.len();
-        ds.retain(|d| d.meta().id != id);
-        if ds.len() == before { Err(Error::not_found("dataset", id)) } else { Ok(()) }
+        let i = ds.iter().position(|d| d.meta().id == id).ok_or_else(|| Error::not_found("dataset", id))?;
+        let gone = ds.remove(i);
+        let path = match &*gone {
+            DatasetEntry::Disk(meta, _) => std::fs::canonicalize(&meta.path).ok(),
+            DatasetEntry::Proc(_) => None,
+        };
+        self.retired.write().unwrap().push((path, gone.meta().format, id.to_string()));
+        Ok(())
     }
 
     fn list_models(&self) -> Result<Vec<Model>> {
@@ -505,8 +522,9 @@ impl Store for MockStore {
         let (run, _) = self.run(id)?;
         // A local run waiting in the queue that never started leaves it (as in real mode); any other active run stays.
         let api = run.to_api();
-        let never_started =
-            api.status == folo_api::RunStatus::Queued && api.started.is_none() && api.config.compute.is_none();
+        let never_started = api.status == folo_api::RunStatus::Queued
+            && api.started.is_none()
+            && api.config.compute.is_none();
         if run.is_active() && !never_started {
             return Err(Error::conflict("run_active", format!("run '{id}' is still active"))
                 .hint(format!("stop it first: POST /api/runs/{id}/stop")));

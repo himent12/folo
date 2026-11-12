@@ -38,6 +38,9 @@ const DEVICE: &str = "NVIDIA GeForce RTX 4080 SUPER (vulkan)";
 /// The mock store. See the module docs.
 pub struct MockStore {
     datasets: RwLock<Vec<Arc<DatasetEntry>>>,
+    /// Unregistered datasets (canonical path for one from disk, format, id), as real mode's tombstones: the same
+    /// folder registered again gets its id back, and no other dataset ever gets it.
+    retired: RwLock<Vec<(Option<std::path::PathBuf>, folo_api::DatasetFormat, String)>>,
     models: RwLock<Vec<StaticModel>>,
     runs: RwLock<Vec<(Arc<SimRun>, Arc<DatasetEntry>)>>,
     /// The runs created through the API, in queue order: they share one training slot ([`runs::reschedule`]).

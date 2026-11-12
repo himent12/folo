@@ -63,6 +63,19 @@ async fn err(app: &Router, req: Request<Body>, status: StatusCode, code: &str) -
     e.error
 }
 
+/// A finished run of dataset `ds` in the data dir at `home`, as the server writes it (read on the next start).
+fn write_run(home: &Path, id: &str, ds: &Dataset) {
+    let dir = home.join("runs").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = json!({
+        "run": { "id": id, "name": id, "status": "completed", "config": { "dataset_id": ds.id },
+                 "created": "2026-11-01T00:00:00Z", "epoch": 1, "epochs": 1, "step": 1, "steps_per_epoch": 1,
+                 "device": "cpu" },
+        "dataset": { "id": ds.id, "name": ds.name, "path": ds.path, "format": ds.format },
+    });
+    std::fs::write(dir.join("run.json"), run.to_string()).unwrap();
+}
+
 /// A small synthetic YOLO dataset written with folo-data.
 fn write_shapes(dir: &Path, images: usize) {
     let cfg = folo_data::synthetic::SyntheticConfig { images, imgsz: 64, seed: 5, ..Default::default() };
@@ -166,8 +179,8 @@ async fn registry_and_index_cache_survive_restarts_and_track_changes() {
     assert!(cache.is_file(), "the index is cached");
     let registry: Value =
         serde_json::from_slice(&std::fs::read(home.join("datasets.json")).unwrap()).unwrap();
-    assert_eq!(registry[0]["id"], ds.id.as_str());
-    assert_eq!(registry[0]["name"], "mine");
+    assert_eq!(registry["datasets"][0]["id"], ds.id.as_str());
+    assert_eq!(registry["datasets"][0]["name"], "mine");
     drop(app1);
 
     // Unchanged files: the restart loads the cache instead of rebuilding it.
@@ -476,7 +489,10 @@ async fn registering_a_folder_again_returns_the_same_dataset() {
     assert_eq!(again.id, ids[0].id);
     let list: DatasetList = ok(&a, get("/api/datasets")).await;
     assert_eq!(list.datasets.len(), 1);
-    // Unregistered and registered again, the folder gets its id back (the runs that used it find it again).
+    // Unregistered and registered again, the folder gets its id back while a run uses it (that run finds it again).
+    drop(a);
+    write_run(&home, "run_0001", &again);
+    let a = restart(&home);
     let (status, _, _) = send(&a, delete(&format!("/api/datasets/{}", again.id))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let back: Dataset =
@@ -553,4 +569,30 @@ async fn generated_datasets_can_go_with_their_files() {
     assert!(!Path::new(&made.path).exists(), "the generated images are gone");
     let list: DatasetList = ok(&app, get("/api/datasets")).await;
     assert_eq!(list.datasets.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), [mine.id.as_str()]);
+}
+
+/// A registry file written before tombstones (a plain list) loads; a dataset it holds, unregistered by this version
+/// while a run uses it, gets its id back when its folder is registered again.
+#[tokio::test]
+async fn a_registry_from_before_tombstones_loads_and_reconnects() {
+    let t = TestDir::new("real-legacy-registry");
+    let (home, data) = (t.join("home"), t.join("shapes"));
+    write_shapes(&data, 6);
+    std::fs::create_dir_all(&home).unwrap();
+    let legacy = json!([{ "id": "ds_0bad", "name": "old", "path": data, "format": "yolo",
+                          "created": "2026-10-01T00:00:00Z" }]);
+    std::fs::write(home.join("datasets.json"), legacy.to_string()).unwrap();
+    let app = app(&home);
+    let ds: Dataset = ok(&app, get("/api/datasets/ds_0bad")).await;
+    assert_eq!((ds.name.as_str(), ds.splits.train + ds.splits.val), ("old", 6));
+    drop(app);
+    write_run(&home, "run_0002", &ds);
+    let app = restart(&home);
+    let (status, _, _) = send(&app, delete("/api/datasets/ds_0bad")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let registry: Value =
+        serde_json::from_slice(&std::fs::read(home.join("datasets.json")).unwrap()).unwrap();
+    assert_eq!(registry["tombstones"][0]["id"], "ds_0bad");
+    let back: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data }))).await;
+    assert_eq!(back.id, "ds_0bad");
 }

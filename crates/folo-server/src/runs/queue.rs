@@ -111,7 +111,7 @@ impl Runs {
     /// Creates a run's folder and record and adds it to the registry; a cloud run (`cloud`) is claimed before
     /// anything can see it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn register(
+    pub(crate) fn register(
         &self,
         config: TrainConfig,
         dataset: DatasetRef,

@@ -30,8 +30,9 @@ use crate::throughput::{EstimateInput, InferKey, InferSample};
 use crate::uploads::Uploads;
 use crate::util::slug;
 
-use super::datasets::{index_path, read_registry, write_registry};
+use super::datasets::index_path;
 use super::models::cli_weights;
+use super::registry::{Tombstone, read_registry};
 use super::training::{run_cloud, upload_fingerprint};
 use super::{MAX_SYNTHETIC_IMAGES, RealStore, SHUTDOWN_WAIT, State};
 
@@ -246,14 +247,18 @@ impl Store for RealStore {
 
     fn delete_dataset(&self, id: &str) -> Result<()> {
         let mut list = self.entries.write().unwrap();
-        let mut regs = read_registry(&self.data_dir)?;
-        let found = list.iter().any(|e| e.reg.lock().unwrap().id == id) || regs.iter().any(|r| r.id == id);
-        if !found {
-            return Err(Error::not_found("dataset", id));
-        }
-        regs.retain(|r| r.id != id);
-        write_registry(&self.data_dir, &regs)?;
+        let mut file = read_registry(&self.data_dir)?;
         let entry = list.iter().find(|e| e.reg.lock().unwrap().id == id).cloned();
+        let Some(reg) =
+            entry.as_ref().map(|e| e.reg()).or_else(|| file.datasets.iter().find(|r| r.id == id).cloned())
+        else {
+            return Err(Error::not_found("dataset", id));
+        };
+        // Its tombstone keeps the id for it while runs reference it (`crate::real::registry`).
+        file.datasets.retain(|r| r.id != id);
+        file.tombstones.retain(|t| t.id != id);
+        file.tombstones.push(Tombstone::of(&reg, crate::util::rfc3339(crate::util::unix_now())));
+        self.save_registry(&mut file)?;
         list.retain(|e| e.reg.lock().unwrap().id != id);
         // Caches are ours to delete; the dataset's own files never are. Marking the entry deleted first (under the
         // lock cache writers hold) keeps in-flight indexers and thumbnails from writing them back.
@@ -335,6 +340,8 @@ impl Store for RealStore {
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
+        // Shared with registration; a deletion of dataset files waits for it (see `RealStore::files`).
+        let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
         let (entry, wanted) = self.runs.resume_config(id, fields)?;
         let Some(compute) = wanted.compute.clone() else { return self.runs.resume(&entry, wanted) };
         cloud::check_device(&wanted)?;

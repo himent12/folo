@@ -55,7 +55,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 403 | `forbidden_host` | any request to a server on loopback whose `Host` is not a loopback name nor an `--allow-host` one (see Conventions); the hint names `--allow-host` and `--token` |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `no_matching_dataset` (`/eval` of a model no registered dataset has the classes of), `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
+| 409 | `run_active`, `run_not_active`, `dataset_in_use`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; deleting a dataset's files while another dataset or a run reads them; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job, new benchmark entries and parts of an open one, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights`, `invalid_upload`, `cloud_auth_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read; an uploaded archive that is not a readable tar or holds something unsafe; credentials a cloud provider rejects |
@@ -173,13 +173,22 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   returns a JPEG whose long side is 256 (clamped to 16..2048, never upscaled; EXIF orientation applied, so boxes
   line up). Mock images are immutable and sent with a long `Cache-Control`; real ones with `no-cache`.
 - `DELETE /api/datasets/{id}` → `204` (unregisters; its files stay, unless `?files=true`, below). Runs that used the dataset keep their
-  metrics and models; their sample images (`/images` of this id) are gone with it. A dataset's id derives from its
-  folder (canonical path) and format, so registering the same folder again gives it the same id back (unless another
-  dataset has taken it meanwhile), and those runs find it again. `?files=true` also deletes the dataset's folder, for
-  a dataset this server wrote into its data dir (the folder right under `<data dir>/datasets`: a generated sample
-  set, a labeling job's export, an upload); a dataset anywhere else is `400 invalid_query` (nothing is unregistered
-  or deleted), so is one whose folder another registered dataset reads, and a run queued or training on it is `409
-  run_active`. In mock mode a generated set goes with `files=true` and a folder registered from disk is refused.
+  metrics and models; their sample images (`/images` of this id) are gone with it. Real mode keeps the unregistered
+  dataset's identity (its canonical path and format) and id in the registry as a tombstone while any run on disk
+  references the id: registering that identity again gets the same id back, and those runs find their dataset again
+  (also for a dataset registered by an older version, once this one unregisters it). A dataset registered as new
+  gets a fresh id that no registered dataset, tombstone or run on disk has, so an id is never handed to another
+  dataset while a run names it; a tombstone is dropped once no run references its id (registering that
+  dataset again then gives it a fresh id). `?files=true` also deletes the dataset's folder, for a dataset this server
+  wrote into its data dir (the folder right under `<data dir>/datasets`: a generated sample set, a labeling job's
+  export, an upload); a dataset anywhere else is `400 invalid_query` (nothing is unregistered or deleted). It is
+  `409 dataset_in_use` while another registered dataset, or a run of an unregistered dataset that keeps its id,
+  reads images or labels in that folder (by the canonical paths of the folders its index reads: its root and split
+  sources, not only where its `data.yaml` lies), and `409 run_active` while a queued, running or stopping run reads
+  them (by the dataset path the run recorded, whatever id it names). Registering a dataset and creating or resuming a
+  run wait while those checks and the deletion run, so none slips in between. Mock mode keeps the ids of
+  unregistered datasets in memory the same way (for as long as it runs); there a generated set goes with
+  `files=true` and a folder registered from disk is refused.
 
 ```jsonc
 // Dataset
