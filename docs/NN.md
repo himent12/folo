@@ -77,7 +77,7 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 - `Optimizer::contract()` / `apply_contract()` / `state_tensors()` / `load_state()` are the `folo.optim` contract
   and `optim.*` tensors of FORMAT.md. `MuSgd::with_weights(groups, MuSgdWeights { muon, sgd })` sets MuSGD's step
   weights (MODEL.md §8.2; default 0.2 / 1.0); weights other than the defaults are part of its contract (`musgd`),
-  and `apply_contract` adopts the file's (the defaults when it has none).
+  and `apply_contract` adopts the file's (when it has none, the optimizer keeps the weights it was built with).
 
 ## Mixed precision (`folo_nn::amp`)
 - `GradScaler`: dynamic loss scaling as `torch.cuda.amp.GradScaler` (docs/MODEL.md §8.8): `scale()` (initially

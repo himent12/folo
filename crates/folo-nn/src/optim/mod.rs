@@ -287,7 +287,7 @@ pub struct OptimContract {
     /// Completed optimizer steps; equals `optim.__step`.
     pub step: u64,
     /// MuSGD's step weights. Written only when they differ from [`MuSgdWeights::default`], so a file with the
-    /// default weights reads as before; absent means the defaults.
+    /// default weights reads as before; absent, `apply_contract` keeps the weights the optimizer was built with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub musgd: Option<MuSgdWeights>,
 }

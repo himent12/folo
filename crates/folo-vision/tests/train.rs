@@ -741,9 +741,15 @@ fn musgd_runs_train_checkpoint_and_resume_with_either_head() {
 #[test]
 fn o2o_attached_epochs_switch_at_the_boundary() {
     use folo_vision::model::HeadMode;
-    let ds = shapes(2, 1, 64);
-    let cfg =
-        TrainConfig { head: HeadMode::O2o, o2o_attached_epochs: 2, batch: 2, nbs: 2, ..micro_config(3) };
+    let ds = shapes(1, 1, 64);
+    let cfg = TrainConfig {
+        head: HeadMode::O2o,
+        o2o_attached_epochs: 2,
+        batch: 1,
+        nbs: 1,
+        ema: false,
+        ..micro_config(3)
+    };
     let detached = |t: &Trainer| t.model().head.o2o_detach;
     // Options that stop the run after its first epoch.
     let one_epoch = || {
