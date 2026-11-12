@@ -55,8 +55,9 @@ try {
     const mode = await page.evaluate(() => document.querySelector('.conn')?.textContent?.trim());
     if (!mode?.startsWith('Connected')) problems.push(`${path}: not connected to the server (status: ${mode})`);
     const errs = await page.locator('[role=alert]').allTextContents();
-    // A failed run's banner is an alert by design.
-    for (const e of errs.filter((t) => !/^\s*Failed at epoch/.test(t))) problems.push(`${path}: alert: ${e.replace(/\s+/g, ' ').trim().slice(0, 160)}`);
+    // A failed run's banner is an alert by design; an empty one is a live region waiting for a message (a dialog's
+    // status region is always in the DOM, so its first message is announced: ui/DialogStatus).
+    for (const e of errs.filter((t) => t.trim() && !/^\s*Failed at epoch/.test(t))) problems.push(`${path}: alert: ${e.replace(/\s+/g, ' ').trim().slice(0, 160)}`);
     if (shots) await page.screenshot({ path: resolve(shots, `${path.replace(/[^\w]+/g, '_') || 'root'}.png`), fullPage: true });
     await page.close();
   }
