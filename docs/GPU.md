@@ -127,10 +127,11 @@ the RTX 4080 SUPER sits in P8 (210 MHz graphics, 405 MHz memory): with a 200 ms 
 forward, 912 of 1038 `nvidia-smi` samples read P8 and a forward took 16 ms at the median. With a 30 ms sleep after
 each call (not a fixed 33 fps schedule) it took 5.8 ms p50 / 15.7 ms p90 without the wait spin and 10.4 / 15.7 with
 the 2 ms spin: the spin did not help there (a worse median, in one run of 150 calls per setting). Right after two
-idle seconds the clocks come back only after a few hundred milliseconds of work: in clock-sampled traces the GPU sat
-at 210–255 MHz (f16 on tensor cores) or 795–855 MHz (f32) for about 400 ms, with folo-n b1 forwards at 7.6–9.0 ms
-and 3.9–4.2 ms, and the first sample at 2550 MHz brought them to 1.0–1.5 ms. When the GPU had kept its clocks
-through the idle seconds there was no slow start. On a machine that serves spaced-out streams, NVIDIA's
+idle seconds the clocks need a few hundred milliseconds of work to come back: in the two clock-sampled traces where
+the GPU had dropped them (210–255 MHz and 795–855 MHz while idle), folo-n b1 forwards took 7.6–9.0 ms and 3.9–4.2
+ms for the first 250–300 ms, then 1.0–1.6 ms; `nvidia-smi` reported the higher clock 150–200 ms after the latency
+had recovered (its readings lag). When the GPU had kept its clocks through the idle seconds there was no slow
+start. On a machine that serves spaced-out streams, NVIDIA's
 "Prefer maximum performance" power setting (per application, in the NVIDIA Control Panel) keeps the clocks up. The
 latency rows of the folo-vision `gpu` bench warm up for at least a second of back-to-back calls for this
 reason.

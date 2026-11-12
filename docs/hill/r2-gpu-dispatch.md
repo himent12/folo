@@ -325,11 +325,15 @@ Raw runs: `D:/folo-data/runs-hill2/gpu-pool/lat/`.
   With a 30 ms sleep after each call (not a fixed 33 fps schedule; `gap30.txt`, 150 calls per setting) a f32 call
   took 5.78 ms p50 / 15.70 ms p90 with spin 0 and 10.36 / 15.69 with the 2 ms spin: the spin did not help at
   spaced-out calls (a worse median) in that run. The ramp re-run with the clocks sampled (`v2-r1.txt`,
-  `v2-r2.txt`, the fixed bench) ties the slow stretch to the clock: f16 TC r1 sat at 210–255 MHz (P5/P8) for the
-  first ~400 ms with calls at 7.6–9.0 ms, and the first bucket at 2550 MHz (450 ms) brought them to 1.0–1.4 ms;
-  f32 r2 sat at 795–855 MHz for ~400 ms with calls at 3.9–4.2 ms, then 1.3–1.5 ms at 2550–2745 MHz; f32 r1 stayed
-  at 2550 MHz through the idle seconds (no slow start beyond 2.15 ms) and its calls went 1.55 → 1.17 ms exactly
-  when the clock stepped 2550 → 2730 MHz. In the fourth trace (f16 TC r2) the GPU read 73% utilisation and P0
+  `v2-r2.txt`, the fixed bench; latency medians and `nvidia-smi` clock readings per 50 ms, two separate
+  timelines): in the two traces where the GPU had dropped its clocks while idle, the first calls were 3–9× slower:
+  f16 TC r1 read 210–255 MHz (P5/P8) and calls took 7.6–9.0 ms for the first 300 ms, then 1.0–1.5 ms, while the
+  reported clock stayed at 255 MHz until 400 ms and read 2550 MHz from 450 ms; f32 r2 read 795–855 MHz, calls took
+  3.9–4.2 ms for the first 250 ms, then 1.3–1.6 ms, while the reported clock read 855 MHz until 400 ms. So the
+  reported clock rises 150–200 ms after the latency recovers (`nvidia-smi` reports with a lag), and the two do not
+  line up to the bucket. f32 r1 kept 2550 MHz through the idle seconds and had no slow start (2.15 ms in the first
+  bucket, 1.5–1.6 ms after); its clock read 2730 MHz from 550 ms and its calls dropped to 1.17 ms only at 800–850
+  ms, not aligned either. In the fourth trace (f16 TC r2) the GPU read 73% utilisation and P0
   during our idle seconds: another process ran on it outside the lock, and every call took ~3 ms throughout (the
   next bullet). So the slow b1 rounds of the `gpu` bench, which idles a second before every section, warmed up for
   25 calls (~40 ms) and then measured 100 calls (~150 ms), come from the clocks when the GPU had dropped them,
@@ -341,8 +345,8 @@ Raw runs: `D:/folo-data/runs-hill2/gpu-pool/lat/`.
   while `nvidia-smi` read 95% utilisation against our usual 70–80% (another process on the GPU).
 - **Thread wake-up (ours).** The wait blocked in the driver, and the thread often woke on another logical processor:
   measured right before and right after `synchronize` (`v2-r*.txt`, 1000 calls per setting), 463–763 of 1000 calls
-  changed processor across the wait, regularly onto an E-core (16–27 on this i7-14700KF; 112–351 calls touched
-  one), with cold caches for the next encode. (The first runs counted changes between the start of the call and
+  changed processor across the wait, regularly onto an E-core (16–27 on this i7-14700KF; 112–911 calls per
+  setting touched one), with cold caches for the next encode. (The first runs counted changes between the start of the call and
   the end of the wait: 525 of 1000.)
 
 **What.**
@@ -400,15 +404,15 @@ improved (1.19 → 1.09), which load alone does not explain, so it is not settle
 Targets (`gpu` bench rows, steady state): folo-n f32 forward b1 1.44 ms median (≤ 1.6) with p90 1.73 (≤ 2.2): met;
 f16 TC forward b1 ≤ 1.3: met by the in-process medians in quiet windows (0.97–1.14 ms) but not by the `gpu` bench
 row in these busy windows (1.50); e2e b1 ≤ 2.2: met (f32 2.17, f16 TC 1.86). Cold, right after two idle seconds, none
-of them is met while the clocks are down (3.9–9 ms for the first ~400 ms in the clock-sampled traces whose GPU had
-dropped its clocks), and not while another process shares the GPU (~3 ms throughout in v2-r2 f16 TC). Calls spaced out in time stay at 6–16 ms at the median
+of them is met while the clocks are down (3.9–9 ms for the first 250–300 ms in the clock-sampled traces whose GPU
+had dropped its clocks), and not while another process shares the GPU (~3 ms throughout in v2-r2 f16 TC). Calls spaced out in time stay at 6–16 ms at the median
 (P8 measured with a 200 ms sleep after each call) unless the driver keeps the clocks up.
 
 **Training step** (the spin also covers its waits: the loss readback, the AMP overflow flag). Same binary, spin off
-against on, folo-n b16, a busy machine (CPU 76–100%; built before #198, so the pool still churned): f32, 5 rounds
-(`pr2-train-f32/`): 48.30 ms (47.17–50.05) → 46.72 (45.30–92.14), the spin ahead in rounds 2–4 and two rounds of
+against on, folo-n b16, built before #198 (the pool still churned): f32, 5 rounds (`pr2-train-f32/`, CPU 11–100%
+before the runs): 48.30 ms (47.17–50.05) → 46.72 (45.30–92.14), the spin ahead in rounds 2–4 and two rounds of
 either side dragged by other load (p90 103–191 ms); 3 rounds of both precisions (`pr2-train/`): f32 49.39 → 59.81
-and AMP 32.98 → 29.87 ms, with rounds from 48 to 66 ms on both sides. No sign of a cost to training; no gain claimed.
+and AMP 32.98 → 29.87 ms (CPU 76–97%), with rounds from 48 to 66 ms on both sides. No sign of a cost to training; no gain claimed.
 
 **Negative / not done.** Keeping the readback's staging buffer mapped is not possible in WebGPU (a buffer must be
 unmapped before the GPU copies into it). The submit phase is 0.08–0.2 ms and does not sleep; nothing to win there.
