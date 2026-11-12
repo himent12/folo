@@ -342,6 +342,11 @@ cores busy elsewhere), folo-s 33.5 → 31.9 (−4.8%; 10.0–12.8 busy) and folo
 log; that binary had the rule behind environment knobs): under load less of the per-layer gain reaches the
 forward.
 
+After the review fixes (per-row writes into `V`, the cache checked against the view's storage, at most 4096
+channels), the fixed head (`pr1b`) against the first one (`pr1`), 3 rounds, 14–16 cores busy elsewhere (logs
+`pr1b_n28.txt`, `pr1b_m28.txt`): folo-n forward 15.10 (`base`) / 14.06 / **14.09** ms, folo-m 86.57 / 81.34 /
+**79.90** ms: the fixes cost nothing.
+
 ### Negative results (PR 3)
 
 (Measured with the knob binaries of "Method": `FOLO_WINO_2P`, `FOLO_WINO_TB`, `FOLO_WINOGRAD`; raw output not
