@@ -28,17 +28,24 @@ export interface SampleInspectorProps {
   datasetGone?: boolean;
 }
 
-/** File names asked for, by dataset and image id (the request, so a second open asks nothing). */
-const names = new Map<string, Promise<string | null>>();
+/**
+ * File names asked for, per API instance (another server, or the demo, has other datasets under the same ids: as
+ * lib/api/metricsCache), by dataset and image id (the request, so a second open asks nothing).
+ */
+const caches = new WeakMap<object, Map<string, Promise<string | null>>>();
 
 /** The file's base name of a dataset image, or null when the dataset cannot say. */
 export function imageFileName(datasetId: string, imageId: string): Promise<string | null> {
+  const api = hub.api;
+  let names = caches.get(api);
+  if (!names) caches.set(api, (names = new Map()));
   const key = `${datasetId}/${imageId}`;
   let p = names.get(key);
   if (!p) {
     const at = Number(imageId.replace(/^\D+/, ''));
+    const cache = names;
     p = Number.isFinite(at)
-      ? hub.api.datasetImages(datasetId, { offset: at, limit: 1 }).then(
+      ? api.datasetImages(datasetId, { offset: at, limit: 1 }).then(
           (r) => {
             const img = r.images[0];
             return img && img.id === imageId ? (img.file.split(/[\\/]/).pop() ?? img.file) : null;
@@ -46,8 +53,8 @@ export function imageFileName(datasetId: string, imageId: string): Promise<strin
           () => null,
         )
       : Promise.resolve(null);
-    names.set(key, p);
-    p.then((n) => n === null && names.delete(key));
+    cache.set(key, p);
+    p.then((n) => n === null && cache.delete(key));
   }
   return p;
 }

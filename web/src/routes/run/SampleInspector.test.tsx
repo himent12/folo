@@ -5,7 +5,7 @@ import { render } from '../../../framework/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
-import SampleInspector from './SampleInspector';
+import SampleInspector, { imageFileName } from './SampleInspector';
 
 let target: HTMLElement;
 afterEach(() => target?.remove());
@@ -61,5 +61,21 @@ describe('the sample inspector', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
     expect(index.get()).toBe(0);
     c.unmount();
+  });
+});
+
+describe('imageFileName', () => {
+  it('asks each server once, never answering for one with another’s name (a switch of server)', async () => {
+    const a = new MockApi('normal', 0);
+    const b = new MockApi('normal', 0);
+    const ask = (api: MockApi, file: string) => vi.spyOn(api, 'datasetImages').mockResolvedValue({ total: 1, images: [{ id: 'img_3', file, split: 'val', width: 64, height: 64, boxes: [] }] });
+    const fromA = ask(a, 'D:/a/one.jpg');
+    const fromB = ask(b, 'E:/b/other.jpg');
+    hub.api = a;
+    expect(await imageFileName('ds_x', 'img_3')).toBe('one.jpg');
+    expect(await imageFileName('ds_x', 'img_3')).toBe('one.jpg');
+    hub.api = b;
+    expect(await imageFileName('ds_x', 'img_3')).toBe('other.jpg');
+    expect([fromA.mock.calls.length, fromB.mock.calls.length]).toEqual([1, 1]);
   });
 });
