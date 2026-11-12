@@ -56,14 +56,30 @@ export default function Datasets() {
     return () => document.removeEventListener('visibilitychange', back);
   });
 
-  // `#/datasets?add=folder|synthetic` opens the dialog (used by the onboarding on an empty Overview).
-  const addParam = untrack(() => router.route.query.get('add'));
-  const adding = signal(addParam === 'folder' || addParam === 'synthetic');
-  const addMode = signal<'folder' | 'synthetic'>(addParam === 'synthetic' ? 'synthetic' : 'folder');
+  // `#/datasets?add=folder|synthetic` opens the dialog (the onboarding on an empty Overview, New run's empty state), also
+  // when it is followed here, in place. Closing the dialog takes `?add=` out of the URL, so a reload does not open it
+  // again.
+  const addParam = computed(() => (router.route.name === 'datasets' ? router.route.query.get('add') : null));
+  const asked = (p: string | null): p is 'folder' | 'synthetic' => p === 'folder' || p === 'synthetic';
+  const first = untrack(() => addParam.get());
+  const adding = signal(asked(first));
+  const addMode = signal<'folder' | 'synthetic'>(first === 'synthetic' ? 'synthetic' : 'folder');
   function add(m: 'folder' | 'synthetic') {
     addMode.set(m);
     adding.set(true);
   }
+  effect(() => {
+    const p = addParam.get();
+    if (asked(p)) untrack(() => add(p));
+  });
+  effect(() => {
+    if (adding.get()) return;
+    const q = untrack(() => router.route.query);
+    if (untrack(() => router.route.name) !== 'datasets' || !q.has('add')) return;
+    const rest = new URLSearchParams(q);
+    rest.delete('add');
+    untrack(() => router.go(`/datasets${rest.toString() ? `?${rest}` : ''}`, { replace: true }));
+  });
 
   const query = signal('');
   // The toolbar's filter, at its left as on Runs and Models (one shape for the three list toolbars): by format.

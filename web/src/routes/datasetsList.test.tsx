@@ -92,3 +92,23 @@ describe('the Datasets list', () => {
     await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 2));
   });
 });
+
+describe('Add dataset from the URL', () => {
+  it('opens on ?add= followed while the list is open, and closing it takes ?add= out of the URL (v-shell N8)', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation((path: string) => {
+      router.route = parse(`#${path}`);
+    });
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    // The palette, Overview's onboarding or New run's empty state links here while the list is on display.
+    router.route = parse('#/datasets?add=synthetic');
+    const dialog = await until(() => document.querySelector<HTMLDialogElement>('dialog[open]'), 'the dialog');
+    expect(dialog.textContent).toContain('Generate');
+    [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Cancel')!.click();
+    await until(() => go.mock.calls.length > 0, 'the URL change');
+    expect(go).toHaveBeenLastCalledWith('/datasets', { replace: true });
+    flushSync();
+    expect(document.querySelector('dialog[open]')).toBeNull();
+  });
+});
