@@ -29,9 +29,12 @@
 mod depthwise;
 mod forward;
 mod input_grad;
+pub(crate) mod split;
 mod weight_grad;
 
-pub use forward::{ConvInput, ConvPart, conv2d, conv2d_cat, conv2d_input, conv2d_with_config};
+pub use forward::{
+    ConvInput, ConvPart, ConvPlan, conv2d, conv2d_cat, conv2d_input, conv2d_with_config, conv2d_with_plan,
+};
 pub use input_grad::conv2d_backward_input;
 pub(crate) use input_grad::{PHASE_PIXEL, Phase};
 pub use weight_grad::{conv2d_backward_weight, conv2d_backward_weight_as};

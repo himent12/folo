@@ -6,10 +6,11 @@ use super::matmul::gemm;
 use super::matmul::{base_spec, build, check_io, encode_gemm};
 use super::{CoopConfig, pick_config, resolve};
 use crate::DType;
+use crate::UnaryOp;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
-use crate::kernels::conv::Conv2dDesc;
-use crate::kernels::gemm::{GemmDesc, gemm_params};
+use crate::kernels::conv::{Conv2dDesc, split};
+use crate::kernels::gemm::{GemmBias, GemmDesc, gemm_params};
 use crate::pipeline::Spec;
 
 /// Tensor-core conv2d: `y = act(conv2d(x, weight) + bias)` with f16 `x` and `weight` (`d.dtype` must be
@@ -41,7 +42,7 @@ pub fn conv2d(
     let built = if d.is_pointwise() {
         encode_gemm(ctx, &g, out, weight, x, bias, y, cfg)?
     } else {
-        encode_conv(ctx, d, &g, out, x, weight, bias, y, cfg)?
+        encode_conv(ctx, d, &g, out, x, weight, bias, y, cfg, None)?
     };
     if !built {
         return Err(GpuError::Unsupported("tensor cores (a tensor-core kernel failed to build)"));
@@ -50,8 +51,9 @@ pub fn conv2d(
 }
 
 /// The implicit-GEMM conv on tensor cores for a validated, non-depthwise, non-pointwise f16 conv `d` whose GEMM
-/// view is `g` (as built by [`crate::kernels::conv::conv2d`]). Returns `false` (nothing encoded) when the kernel failed to
-/// build.
+/// view is `g` (as built by [`crate::kernels::conv::conv2d`]), split along `K` when it has few output tiles
+/// (`want_splits` forces the number of chunks, as [`crate::kernels::conv::ConvPlan::splits`]). Returns `false`
+/// (nothing encoded) when the kernel failed to build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_conv(
     ctx: &GpuContext,
@@ -63,25 +65,46 @@ pub(crate) fn encode_conv(
     bias: &wgpu::Buffer,
     y: &wgpu::Buffer,
     cfg: Option<CoopConfig>,
+    want_splits: Option<usize>,
 ) -> Result<bool> {
     let (oh, ow) = d.output()?;
     let Some(cfg) = resolve(ctx, cfg, || pick_config(g.m, g.n, d.n * d.groups))? else { return Ok(false) };
+    // Split K when the conv has few output tiles (as the regular kernels do; `crate::kernels::conv::split`):
+    // f32 partial slabs without bias and activation, then one pass sums them into `y` with both.
+    let (batch, out_elems) = (d.n * d.groups, d.n * d.c_out * oh * ow);
+    let tiles = g.m.div_ceil(cfg.bm as usize) * g.n.div_ceil(cfg.bn as usize);
+    let (splits, chunk) = split::plan(cfg.bk as usize, g.k, tiles, batch, out_elems, want_splits);
+    let mut g = g.clone();
+    let has_bias = g.bias != GemmBias::None;
+    if splits > 1 {
+        g.bias = GemmBias::None;
+        g.act = UnaryOp::Identity;
+    }
     let check = !g.m.is_multiple_of(cfg.bm as usize)
         || !g.n.is_multiple_of(cfg.bn as usize)
         || !g.k.is_multiple_of(cfg.bk as usize);
-    let mut spec = base_spec(g, out, cfg)
+    let mut spec = base_spec(&g, if splits > 1 { DType::F32 } else { out }, cfg)
         .bool("VEC_A", g.k.is_multiple_of(4))
         .bool("VEC_B", false)
         .bool("VEC_C", g.n.is_multiple_of(4))
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
         .bool("CHECK", check)
-        .u32("CONV_MODE", 1);
+        .u32("CONV_MODE", 1)
+        .bool("SPLIT", splits > 1);
     spec = with_window(spec, d);
     let Some(kernel) = build(ctx, spec) else { return Ok(false) };
-    let p = gemm_params(g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
-    let groups = grid(g, cfg, d.n * d.groups)?;
-    ctx.dispatch(&kernel, &[weight, x, bias, y], &p, groups)?;
+    let p = gemm_params(&g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
+    let groups = grid(&g, cfg, batch * splits)?;
+    if splits == 1 {
+        ctx.dispatch(&kernel, &[weight, x, bias, y], &p, groups)?;
+        return Ok(true);
+    }
+    let part = ctx.alloc(DType::F32.bytes(crate::kernels::prod(&[splits, out_elems])?))?;
+    let p = p.uz(splits)?.uz(chunk)?.uz(out_elems)?;
+    ctx.dispatch(&kernel, &[weight, x, ctx.dummy(), part.raw()], &p, groups)?;
+    let f = split::Finish { splits, out_elems, plane: oh * ow, channels: d.c_out, act: d.act, out };
+    split::finish(ctx, &f, part.raw(), has_bias.then_some(bias), y)?;
     Ok(true)
 }
 
