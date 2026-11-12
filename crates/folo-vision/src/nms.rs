@@ -329,6 +329,25 @@ pub fn non_max_suppression_rows(rows: &[f32], num_classes: usize, cfg: &NmsConfi
     })
 }
 
+/// Multi-label [`non_max_suppression_rows`] from the `(anchor, class, score)` pairs whose score is `> conf`, in any
+/// order (what folo-gpu's `detect::multi_label_candidates` downloads instead of every anchor's scores), with the
+/// box of anchor `i` from `bbox_of(i)`. Given exactly the pairs above `conf` of the same scores, the result is that
+/// of [`non_max_suppression_rows`] (the pairs are put back in its `(anchor, class)` order). Needs `multi_label`.
+pub fn non_max_suppression_pairs(
+    mut pairs: Vec<(u32, u32, f32)>,
+    bbox_of: impl Fn(u32) -> Xyxy,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
+    debug_assert!(cfg.multi_label, "non_max_suppression_pairs is the multi-label path");
+    pairs.sort_unstable_by_key(|&(a, c, _)| (a, c));
+    let cands = pairs
+        .into_iter()
+        .filter(|&(_, c, s)| s > cfg.conf && class_allowed(cfg, c))
+        .map(|(idx, class, score)| Cand { score, idx, class })
+        .collect();
+    finish(cands, cfg, bbox_of)
+}
+
 /// The candidates of `anchors` score rows (row `a` is `data[a * stride + offset..][..num_classes]`), in anchor
 /// order: every class above `conf` with `multi_label`, else the anchor's best class (first on ties) if above.
 fn extract_candidates(

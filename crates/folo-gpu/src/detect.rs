@@ -22,7 +22,7 @@ use crate::context::GpuContext;
 use crate::kernels::detect::{self as k, DetectDesc};
 use crate::pool::GpuBuffer;
 
-pub use crate::kernels::detect::{MAX_REG_MAX, MAX_TOPK};
+pub use crate::kernels::detect::{CANDIDATE_RECORD_WORDS, MAX_REG_MAX, MAX_TOPK, candidate_region_words};
 
 /// Assigner settings (folo-vision's `TalConfig`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -378,4 +378,25 @@ pub fn detection_loss(
     ctx.copy(&stats_b, 0, &public_b, 0, 48);
     drop(asg);
     Ok(DeviceLoss { total, stats: public })
+}
+
+/// The multi-label candidates of a decoded head (validation's NMS input) on the device, so only they are
+/// downloaded: `decoded` is f32 `[B, 4 + nc, A]` (`x1, y1, x2, y2`, then the class scores, channel-major) on a
+/// folo-gpu device; the result is u32 `[B, 1 + 3 · cap]` ([`crate::kernels::detect::multi_label_candidates`]:
+/// per image the count of `(anchor, class)` pairs with a score `> conf`, then up to `cap` records `(anchor, class,
+/// score bits)` in any order). Nothing waits for the GPU.
+pub fn multi_label_candidates(decoded: &Tensor, conf: f32, cap: usize) -> Result<Tensor> {
+    let [b, rows, a] = *decoded.dims() else {
+        return Err(err(format!("candidates: decoded must be [B, 4 + nc, A], got {:?}", decoded.dims())));
+    };
+    if rows <= 4 || decoded.dtype() != DType::F32 {
+        return Err(err(format!("candidates: decoded must be f32 [B, 4 + nc, A], got {:?}", decoded.dims())));
+    }
+    let device = decoded.device();
+    let ctx = context_for(device).ok_or_else(|| err(format!("{device} is not a folo-gpu device")))?;
+    let bufs = Buffers { ctx, device };
+    let (_keep, dec) = dense(decoded)?;
+    let (out, out_b) = bufs.alloc(DType::U32, &[b, candidate_region_words(cap)], false)?;
+    k::multi_label_candidates(&bufs.ctx, &dec, &out_b, b, a, rows - 4, cap, conf).map_err(gpu)?;
+    Ok(out)
 }

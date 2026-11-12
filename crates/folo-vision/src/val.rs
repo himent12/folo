@@ -6,6 +6,7 @@
 //! to the original image), the fixed sample set of docs/API.md's `/samples`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use folo_core::{DType, Device, Tensor};
@@ -178,11 +179,13 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
     // run on a second thread while this one encodes the next batches' forward passes, so the GPU does not wait
     // for the host. Batches reach that thread in order, so the result is the serial one.
     let (tx, rx) = std::sync::mpsc::sync_channel::<Decoded>(1);
+    // The most candidate pairs an image had so far, for the capacity of the next batches' candidate buffers.
+    let most = AtomicUsize::new(0);
     let (ev, samples, kept) = std::thread::scope(|scope| -> Result<_> {
         // Owned here, so an early error return closes the channel and the scope can join the thread.
         let tx = tx;
         let post = scope.spawn(|| -> Result<Post> {
-            let mut post = Post { ev, samples, kept: Vec::new(), index: 0 };
+            let mut post = Post { ev, samples, kept: Vec::new(), index: 0, most: &most };
             for d in rx {
                 post.add(d, &*ds, cfg)?;
             }
@@ -200,6 +203,14 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
             let (nc, mode) = (output.num_classes, output.mode);
             let images = if output.box_raw.device().is_cpu() {
                 Outputs::Host(output.decode_images()?)
+            } else if mode == HeadMode::O2m && pairs_apply(&cfg.nms) && folo_gpu::detect::supported(device) {
+                // `[B, 4 + nc, A]`: the transpose of the `[B, A, 4 + nc]` view is the dense decode itself.
+                let decoded = output.decoded_on_device()?.transpose(1, 2)?;
+                let a = output.num_anchors();
+                let cap = pair_capacity(most.load(Ordering::Relaxed), a * nc);
+                let pairs = folo_gpu::detect::multi_label_candidates(&decoded, cfg.nms.conf, cap)?;
+                let boxes = decoded.narrow(1, 0, 4)?;
+                Outputs::Pairs { pairs, boxes, decoded, cap, anchors: a }
             } else {
                 // Encoded here, downloaded by the other thread (HeadOutput::decode_images' device path).
                 Outputs::Device(output.decoded_on_device()?, output.num_anchors())
@@ -231,18 +242,41 @@ enum Outputs {
     Host(Vec<(Vec<Xyxy>, Vec<f32>)>),
     /// [`crate::model::HeadOutput::decoded_on_device`] (not read back yet) and the anchor count.
     Device(Tensor, usize),
+    /// The multi-label candidate pairs of the one-to-many branch, found on the device
+    /// (`folo_gpu::detect::multi_label_candidates`, `[B, 1 + 3 · cap]`), the decoded boxes `[B, 4, A]`, and the
+    /// whole decode `[B, 4 + nc, A]` for an image with more than `cap` pairs. Not read back yet.
+    Pairs { pairs: Tensor, boxes: Tensor, decoded: Tensor, cap: usize, anchors: usize },
 }
 
+/// Whether validation's NMS can start from the device's candidate pairs: multi-label, and a threshold that is a
+/// normal float (a GPU may flush subnormal scores to zero, where the host compares them exactly).
+fn pairs_apply(nms: &NmsConfig) -> bool {
+    nms.multi_label && nms.conf >= f32::MIN_POSITIVE
+}
+
+/// Candidate pairs per image the next batch makes room for: a quarter more than the most seen so far, at least
+/// [`MIN_PAIRS`], whole KiB-multiples so the buffer sizes repeat, at most every pair. An image with more falls
+/// back to downloading its whole decode, so this only sets the readback size, never the result.
+fn pair_capacity(most: usize, all: usize) -> usize {
+    let want = (most + most / 4).max(MIN_PAIRS);
+    want.next_multiple_of(1024).min(all.max(1))
+}
+
+/// Smallest [`pair_capacity`]: what COCO val2017 needs for most images with `folo-n-coco` at conf 0.001.
+const MIN_PAIRS: usize = 16 * 1024;
+
 /// The host half of [`validate`]: post-processing, metrics, samples and kept detections, batch by batch in order.
-struct Post {
+struct Post<'a> {
     ev: Evaluator,
     samples: Vec<ValSample>,
     kept: Vec<(usize, Vec<Detection>)>,
     /// Images seen so far.
     index: usize,
+    /// The most candidate pairs an image had ([`pair_capacity`]).
+    most: &'a AtomicUsize,
 }
 
-impl Post {
+impl Post<'_> {
     fn add(&mut self, d: Decoded, ds: &dyn Dataset, cfg: &ValConfig) -> Result<()> {
         use rayon::prelude::*;
         let Decoded { images, nc, mode, truths, meta } = d;
@@ -259,6 +293,9 @@ impl Post {
                 } else {
                     crate::model::HeadOutput::split_decoded(&all, a, nc).into_par_iter().map(post).collect()
                 }
+            }
+            Outputs::Pairs { pairs, boxes, decoded, cap, anchors: a } => {
+                self.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &cfg.nms)?
             }
         };
         for (i, dets) in dets.into_iter().enumerate() {
@@ -291,6 +328,70 @@ impl Post {
             self.index += 1;
         }
         Ok(())
+    }
+}
+
+impl Post<'_> {
+    /// The detections of a batch from its device candidate pairs ([`Outputs::Pairs`]): exactly
+    /// [`crate::nms::non_max_suppression_rows`] of the decode, from a fraction of the readback.
+    #[allow(clippy::too_many_arguments)]
+    fn pairs_nms(
+        &self,
+        pairs: &Tensor,
+        boxes: &Tensor,
+        decoded: &Tensor,
+        cap: usize,
+        a: usize,
+        nc: usize,
+        nms: &NmsConfig,
+    ) -> Result<Vec<Vec<Detection>>> {
+        use rayon::prelude::*;
+        let words = pairs.to_vec::<u32>()?;
+        let boxes = boxes.to_vec::<f32>()?;
+        let region = folo_gpu::detect::candidate_region_words(cap);
+        let b = words.len() / region;
+        let counts: Vec<usize> = (0..b).map(|i| words[i * region] as usize).collect();
+        self.most.fetch_max(counts.iter().copied().max().unwrap_or(0), Ordering::Relaxed);
+        // Images with more pairs than room: their whole decode, as the full path downloads it.
+        let mut full: Vec<Option<Vec<f32>>> = vec![None; b];
+        for (i, &n) in counts.iter().enumerate() {
+            if n > a * nc {
+                return Err(folo_nn::Error::Invalid(format!(
+                    "candidates: {n} pairs for {a} anchors x {nc} classes"
+                ))
+                .into());
+            }
+            if n > cap {
+                full[i] = Some(decoded.narrow(0, i, 1)?.transpose(1, 2)?.to_vec::<f32>()?);
+            }
+        }
+        (0..b)
+            .into_par_iter()
+            .map(|i| {
+                if let Some(rows) = &full[i] {
+                    return Ok(crate::nms::non_max_suppression_rows(rows, nc, nms));
+                }
+                let n = counts[i];
+                let recs = &words[i * region + 1..][..folo_gpu::detect::CANDIDATE_RECORD_WORDS * n];
+                let mut list = Vec::with_capacity(n);
+                for w in recs.as_chunks::<3>().0 {
+                    if w[0] as usize >= a || w[1] as usize >= nc {
+                        return Err(folo_nn::Error::Invalid(format!(
+                            "candidates: pair ({}, {}) out of range",
+                            w[0], w[1]
+                        ))
+                        .into());
+                    }
+                    list.push((w[0], w[1], f32::from_bits(w[2])));
+                }
+                let bx = &boxes[i * 4 * a..(i + 1) * 4 * a];
+                let bbox = |j: u32| {
+                    let j = j as usize;
+                    Xyxy::new(bx[j], bx[a + j], bx[2 * a + j], bx[3 * a + j])
+                };
+                Ok(crate::nms::non_max_suppression_pairs(list, bbox, nms))
+            })
+            .collect()
     }
 }
 
@@ -343,6 +444,74 @@ mod tests {
             return eprintln!("note: skipping GPU test on software adapter {}", ctx.summary().name);
         }
         check_against_serial(folo_gpu::init().unwrap());
+    }
+
+    /// The device candidate pairs give exactly the full-row NMS: random decodes with scores at and around `conf`,
+    /// NaNs and many overlapping boxes, with room for every pair and with too little room (the full fallback).
+    #[test]
+    fn device_pairs_match_full_rows_nms() {
+        let ctx = match folo_gpu::GpuContext::shared() {
+            Ok(c) => c,
+            Err(e) => return eprintln!("note: skipping GPU test, no adapter: {e}"),
+        };
+        if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+            return eprintln!("note: skipping GPU test on software adapter {}", ctx.summary().name);
+        }
+        let device = folo_gpu::init().unwrap();
+        let (b, nc, a) = (3usize, 5usize, 700usize);
+        let conf = 0.25f32;
+        let mut rng = folo_data::Rng::new(11);
+        let mut host = vec![0f32; b * (4 + nc) * a];
+        for i in 0..b {
+            for j in 0..a {
+                let at = |r: usize| (i * (4 + nc) + r) * a + j;
+                let (x, y) = (rng.uniform(0.0, 60.0), rng.uniform(0.0, 60.0));
+                let (w, h) = (rng.uniform(1.0, 30.0), rng.uniform(1.0, 30.0));
+                host[at(0)] = x;
+                host[at(1)] = y;
+                host[at(2)] = x + w;
+                host[at(3)] = y + h;
+                for c in 0..nc {
+                    host[at(4 + c)] = match (j + c) % 23 {
+                        0 => conf,
+                        1 => f32::NAN,
+                        2 => f32::from_bits(conf.to_bits() + 1),
+                        _ => rng.uniform(0.0, 1.0),
+                    };
+                }
+            }
+        }
+        // Image 1 has few pairs, so a small capacity overflows images 0 and 2 only.
+        for j in 0..a {
+            for c in 0..nc {
+                let v = &mut host[(4 + nc + 4 + c) * a + j];
+                if j % 9 != 0 {
+                    *v = 0.0;
+                }
+            }
+        }
+        let decoded = Tensor::from_vec(host.clone(), [b, 4 + nc, a]).unwrap().to_device(device).unwrap();
+        let nms = NmsConfig { conf, max_det: 40, max_candidates: 900, ..NmsConfig::val() };
+        let want: Vec<Vec<Detection>> = (0..b)
+            .map(|i| {
+                let mut rows = Vec::with_capacity(a * (4 + nc));
+                for j in 0..a {
+                    rows.extend((0..4 + nc).map(|r| host[(i * (4 + nc) + r) * a + j]));
+                }
+                crate::nms::non_max_suppression_rows(&rows, nc, &nms)
+            })
+            .collect();
+        assert!(want.iter().all(|d| !d.is_empty()));
+        let most = AtomicUsize::new(0);
+        let post =
+            Post { ev: Evaluator::new(nc), samples: Vec::new(), kept: Vec::new(), index: 0, most: &most };
+        for cap in [a * nc, 200] {
+            let pairs = folo_gpu::detect::multi_label_candidates(&decoded, conf, cap).unwrap();
+            let boxes = decoded.narrow(1, 0, 4).unwrap();
+            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &nms).unwrap();
+            assert_eq!(got, want, "cap {cap}");
+        }
+        assert!(most.load(Ordering::Relaxed) > 200, "the small capacity overflowed");
     }
 
     fn check_against_serial(device: Device) {
