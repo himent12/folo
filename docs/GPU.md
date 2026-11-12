@@ -82,8 +82,17 @@ The batch is submitted when:
 - you call `ctx.flush()` (submit without waiting) or `ctx.sync()` (submit, wait, report errors).
 
 A forward pass is therefore a handful of submissions. Each dispatch's parameters take a 256-byte slot in a
-64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches and submissions
-(the backend benchmark prints them per pass).
+64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches, submissions and
+bind groups created (the backend benchmark prints them per pass).
+
+**Bind-group cache.** The parameter block is bound with a dynamic offset (its slot in the arena chunk), so a bind
+group depends only on the kernel's layout, the arena chunk and the storage buffers. The pool hands out the same
+buffers in the same order on every forward pass and training step, so the context keeps the bind groups it made,
+keyed by those (`context/binds.rs`), and a repeated pass creates none (creating one cost 3–4 µs of host time).
+A cached bind group keeps its buffers alive, so the pool records every buffer it lets go of (evicted, or dropped by
+`trim_pool()`), and the next dispatch drops the bind groups that hold one; `release_memory()` empties the cache.
+The cache holds at most two generations of 4096 bind groups: when the current one is full it becomes the old one
+and the previous old one is dropped, and an old entry used again moves back. `ctx.bind_cache_len()` is its size.
 
 The interval was 1024 until the training-step profile showed the GPU idle for most of the host's encoding and
 submission time: a step's 1300 dispatches went out in 3 submissions, so the GPU waited for each one to be built

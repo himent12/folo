@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use super::{Batch, GpuContext, TracedKind, TracedOp, UNIFORM_CHUNK, UniformChunk};
 use crate::error::{GpuError, Result};
 use crate::pipeline::{Kernel, KernelDef, KernelKey, Params, Spec, UNIFORM_SLOT};
+use crate::pool::Retired;
 
 impl GpuContext {
     /// Number of compiled pipelines in the cache.
@@ -157,6 +158,9 @@ impl GpuContext {
         });
         let mut guard = self.inner.batch.lock().expect("batch lock");
         let b = &mut *guard;
+        if self.inner.retired.load(Ordering::Relaxed) {
+            self.sweep_binds(b);
+        }
         if b.cursor + UNIFORM_SLOT > UNIFORM_CHUNK {
             b.chunk += 1;
             b.cursor = 0;
@@ -175,23 +179,11 @@ impl GpuContext {
         let slot = b.cursor;
         let chunk = &mut b.chunks[b.chunk];
         chunk.cpu[slot as usize..(slot + UNIFORM_SLOT) as usize].copy_from_slice(params.bytes());
-        let mut entries = Vec::with_capacity(buffers.len() + 1);
-        entries.push(wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: &chunk.buf,
-                offset: slot,
-                size: wgpu::BufferSize::new(UNIFORM_SLOT),
-            }),
-        });
-        for (i, buf) in buffers.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry { binding: i as u32 + 1, resource: buf.as_entire_binding() });
+        let mut created = false;
+        let bind = b.binds.get(&self.inner.device, &kernel.layout, &chunk.buf, buffers, &mut created);
+        if created {
+            self.inner.bind_groups.fetch_add(1, Ordering::Relaxed);
         }
-        let bind = self.inner.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &kernel.layout,
-            entries: &entries,
-        });
         b.cursor += UNIFORM_SLOT.max(self.inner.caps.uniform_align as u64);
         if b.pass.is_none() {
             let enc = self.encoder(b);
@@ -202,7 +194,7 @@ impl GpuContext {
         }
         let pass = b.pass.as_mut().expect("pass");
         pass.set_pipeline(&kernel.pipeline);
-        pass.set_bind_group(0, &bind, &[]);
+        pass.set_bind_group(0, &bind, &[slot as u32]);
         let mut prof = self.profiler();
         let q = prof.as_mut().map(|p| p.begin(kernel.name));
         if let (Some(p), Some(q)) = (&prof, q) {
@@ -216,6 +208,21 @@ impl GpuContext {
         self.inner.dispatches.fetch_add(1, Ordering::Relaxed);
         self.bump(b);
         Ok(())
+    }
+
+    /// Drops the cached bind groups that hold buffers the pool has let go of, so the driver can free them.
+    pub(super) fn sweep_binds(&self, b: &mut Batch) {
+        let retired = self.inner.pool.lock().expect("pool lock").take_retired();
+        match retired {
+            Retired::None => {}
+            Retired::Some(ids) => b.binds.retire(&ids),
+            Retired::All => b.binds.clear(),
+        }
+    }
+
+    /// Bind groups in the cache (for tests and benchmarks).
+    pub fn bind_cache_len(&self) -> usize {
+        self.inner.batch.lock().expect("batch lock").binds.len()
     }
 
     /// A 1-D launch of `threads` invocations with `wg` threads per workgroup, folded into x/y when it exceeds
