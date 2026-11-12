@@ -3,6 +3,7 @@
 // in words about the field, not as a format rule.
 import { flush } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { hub } from '$lib/api/index';
 import type { CloudField } from '$lib/api/types';
 import { render } from '../../../framework/testing';
 import { fieldMessage } from './ConnectDialog';
@@ -60,5 +61,24 @@ describe('ConnectionPanel', () => {
     expect(target.querySelector('.msg.error')).toBeNull();
     c.unmount();
     target.remove();
+  });
+
+  it('offers demo data while no server answers, as a choice that reloads with ?mock=1 (v-shell N1)', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    const assign = vi.fn();
+    vi.stubGlobal('location', { ...location, href: 'http://127.0.0.1:7878/#/settings', search: '', origin: 'http://127.0.0.1:7878', assign });
+    const target = document.createElement('div');
+    const c = render(() => <ConnectionPanel />, target);
+    const demo = () => [...target.querySelectorAll('button')].find((b) => b.textContent?.includes('Use demo data'));
+    expect(demo()).toBeUndefined();
+    await hub.connect();
+    flush();
+    // Offline, still connecting: the state says so, and nothing turned into demo data by itself.
+    expect([hub.mode, target.querySelector('.s-title')?.textContent]).toEqual(['connecting', 'Server offline']);
+    demo()!.click();
+    expect(assign).toHaveBeenCalledWith('http://127.0.0.1:7878/?mock=1#/settings');
+    c.unmount();
   });
 });

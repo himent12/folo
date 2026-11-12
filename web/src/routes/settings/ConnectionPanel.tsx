@@ -86,7 +86,14 @@ export default function ConnectionPanel() {
     await hub.connect();
     if (hub.mode === 'live') toast.success('Connected', `folo serve ${hub.version} at ${hub.serverUrl}`);
     else if (forced) toast.info('Saved', 'Demo data stays on while the address has ?mock=1.');
-    else toast.error(new Error(`Could not reach ${hub.serverUrl}; showing demo data.`), 'Saved, but not connected');
+    else toast.error(new Error(`No answer from ${hub.serverUrl} yet. Studio keeps trying.`), 'Saved, but not connected');
+  }
+
+  /** Demo data only when asked for: this page again with `?mock=1` (the screen kept). */
+  function useDemo() {
+    const to = new URL(location.href);
+    to.searchParams.set('mock', '1');
+    location.assign(to.href);
   }
 
   return (
@@ -126,15 +133,7 @@ export default function ConnectionPanel() {
               <>
                 {/* What it means for the user, in one line; why (the address, the endpoint) is in Technical details. */}
                 <p class="s-title">Using demo data</p>
-                <p class="s-desc">
-                  {hub.reason === 'forced' ? (
-                    'Sample runs, datasets and models.'
-                  ) : (
-                    <>
-                      No server answered. Start <span class="mono">folo serve</span> or enter its address below.
-                    </>
-                  )}
-                </p>
+                <p class="s-desc">Sample runs, datasets and models.</p>
               </>
             ) : (
               <>
@@ -198,15 +197,7 @@ export default function ConnectionPanel() {
               <>
                 <dt>Demo data</dt>
                 <dd>
-                  {hub.reason === 'forced' ? (
-                    <>
-                      On because the address has <span class="mono">?mock=1</span>; remove it to connect to a server.
-                    </>
-                  ) : (
-                    <>
-                      Shown because <span class="mono">{hub.serverUrl}</span> did not answer.
-                    </>
-                  )}
+                  On because the address has <span class="mono">?mock=1</span>; remove it to connect to a server.
                 </dd>
               </>
             ) : null}
@@ -224,6 +215,12 @@ export default function ConnectionPanel() {
         </details>
 
         <div class="row-actions">
+          {/* No server to show: sample data is a choice, never a fallback Studio makes by itself. */}
+          {hub.offline && hub.mode === 'connecting' ? (
+            <Button variant="ghost" icon={FlaskConical} onclick={useDemo}>
+              Use demo data
+            </Button>
+          ) : null}
           {/* The primary action only once there is something to save; reconnecting as is stays secondary. */}
           <Button variant={dirty.get() ? 'primary' : 'secondary'} disabled={invalid.get()} onclick={save}>
             {dirty.get() ? 'Save and reconnect' : 'Reconnect'}
@@ -382,7 +379,9 @@ css`
   }
   .row-actions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
+    gap: var(--space-2);
     padding-top: var(--space-3);
     border-top: 1px solid var(--line-subtle);
   }
