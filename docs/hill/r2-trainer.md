@@ -367,6 +367,10 @@ commit (3318daeb), before the review fixes:
 | 1 s per write, written inline (main's behaviour) | 10.92 s (10.83-11.03): +4.1 s, one per epoch |
 | 1 s per write, writer thread (PR) | **7.83 s** (7.70-8.33): +1.0 s, only the last write, waited at the run's end |
 
+Rerun on the final head (77ec1bd1 with `bench/trainer/slow_write.patch`, `OUT=D:/folo-data/runs-hill2/trainer2/slow-write
+ROUNDS=3 bench/trainer/slow_write.sh`, 3 rounds alternated): inline **10.71 s** (10.55-11.28), writer thread **7.49 s**
+(7.47-9.70), no delay **6.83 s** (6.38-6.83).
+
 The step loop no longer waits for a write that is shorter than the next epoch (a write longer than an epoch makes the
 next epoch's end wait for the rest: one write at a time).
 
