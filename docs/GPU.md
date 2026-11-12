@@ -128,9 +128,9 @@ forward, 912 of 1038 `nvidia-smi` samples read P8 and a forward took 16 ms at th
 each call (not a fixed 33 fps schedule) it took 5.8 ms p50 / 15.7 ms p90 without the wait spin and 10.4 / 15.7 with
 the 2 ms spin: the spin did not help there (a worse median, in one run of 150 calls per setting). Right after two
 idle seconds the clocks need a few hundred milliseconds of work to come back: in the two clock-sampled traces where
-the GPU had dropped them (210–255 MHz and 795–855 MHz while idle), folo-n b1 forwards took 7.6–9.0 ms and 3.9–4.2
-ms for the first 250–300 ms, then 1.0–1.6 ms; `nvidia-smi` reported the higher clock 150–200 ms after the latency
-had recovered (its readings lag). When the GPU had kept its clocks through the idle seconds there was no slow
+the first calls ran on low clocks (210–255 MHz and 795–855 MHz reported in their first buckets), folo-n b1
+forwards took 7.6–9.0 ms and 3.9–4.2 ms for the first 250–300 ms, then 0.9–1.6 ms over the next half second;
+`nvidia-smi` reported the higher clock 150–200 ms after the latency had recovered (presumably its readings lag). When the GPU had kept its clocks through the idle seconds there was no slow
 start. On a machine that serves spaced-out streams, NVIDIA's
 "Prefer maximum performance" power setting (per application, in the NVIDIA Control Panel) keeps the clocks up. The
 latency rows of the folo-vision `gpu` bench warm up for at least a second of back-to-back calls for this
