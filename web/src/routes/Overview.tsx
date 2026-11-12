@@ -157,6 +157,12 @@ export default function Overview() {
                       Label them with an agent
                     </a>
                   </p>
+                ) : !system.data && !system.error ? (
+                  // Until the server says what it has (a server just started takes seconds to), the line keeps its place,
+                  // so it never pops in under the buttons (v-shell N11); a real server always has labeling.
+                  <p class="ob-alt held" aria-hidden="true">
+                    Have images but no labels? <span class="ob-link">Label them with an agent</span>
+                  </p>
                 ) : null}
               </li>{' '}
               <li>
@@ -660,6 +666,9 @@ css`
     grid-column: 2;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
+  }
+  .ob-alt.held {
+    visibility: hidden;
   }
   .ob-link {
     color: var(--text-primary);
