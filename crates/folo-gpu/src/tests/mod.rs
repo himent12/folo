@@ -18,6 +18,7 @@ mod layout;
 mod muon;
 mod pipeline_cache;
 mod pool;
+mod precompile;
 mod reduce;
 mod runtime;
 

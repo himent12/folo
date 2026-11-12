@@ -4,6 +4,7 @@ mod batch;
 pub(crate) mod binds;
 mod device;
 mod memory;
+mod precompile;
 mod readback;
 mod trace;
 mod wait;
@@ -251,6 +252,11 @@ struct Inner {
     profiler: Option<Mutex<Profiler>>,
     /// Compiled pipelines kept on disk between processes ([`crate::pipeline_cache`]).
     pipeline_cache: Option<Arc<crate::pipeline_cache::DiskCache>>,
+    /// The pipeline cache folder, also where kernel lists live ([`GpuContext::precompile`]).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    cache_dir: Option<std::path::PathBuf>,
+    /// Kernels compiled ahead on worker threads and the kernel lists being recorded.
+    precompile: precompile::Precompile,
 }
 
 /// The idle staging buffers of [`GpuContext::upload_with`].

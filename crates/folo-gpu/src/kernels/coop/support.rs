@@ -95,7 +95,7 @@ pub(crate) fn experimental_opt_in() -> wgpu::ExperimentalFeatures {
     unsafe { wgpu::ExperimentalFeatures::enabled() }
 }
 
-static PROBE: KernelDef = KernelDef {
+pub(super) static PROBE: KernelDef = KernelDef {
     name: "coop_probe",
     storage: &[Access::Read, Access::Read, Access::ReadWrite],
     source: Source::Static(

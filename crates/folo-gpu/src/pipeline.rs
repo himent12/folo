@@ -154,6 +154,72 @@ impl Spec {
         parts.join(" ")
     }
 
+    /// The switches and constants as fields of a kernel list line (`crate::kernel_list`): `-`, `h` (f16), `c`
+    /// (coop) or `hc`, then ` NAME=u5`, ` NAME=i-3`, ` NAME=b1` or ` NAME=f<bits>` per constant.
+    pub(crate) fn encode_fields(&self, out: &mut String) {
+        use std::fmt::Write as _;
+        out.push_str(match (self.f16, self.coop) {
+            (false, false) => "-",
+            (true, false) => "h",
+            (false, true) => "c",
+            (true, true) => "hc",
+        });
+        for (name, v) in &self.vals {
+            let _ = match v {
+                SpecVal::U32(x) => write!(out, " {name}=u{x}"),
+                SpecVal::I32(x) => write!(out, " {name}=i{x}"),
+                SpecVal::Bool(x) => write!(out, " {name}=b{}", u8::from(*x)),
+                SpecVal::F32(b) => write!(out, " {name}=f{b}"),
+            };
+        }
+    }
+
+    /// The spec [`Spec::encode_fields`] wrote as `fields`; `None` for anything malformed (a constant name that is
+    /// not a WGSL identifier, a bad value, an integer constant larger in magnitude than `max_int`). `intern` gives
+    /// each name its `'static` form (or refuses it).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn decode_fields<'a>(
+        mut fields: impl Iterator<Item = &'a str>,
+        max_int: u32,
+        mut intern: impl FnMut(&str) -> Option<&'static str>,
+    ) -> Option<Self> {
+        let (f16, coop) = match fields.next()? {
+            "-" => (false, false),
+            "h" => (true, false),
+            "c" => (false, true),
+            "hc" => (true, true),
+            _ => return None,
+        };
+        let mut vals = Vec::new();
+        for f in fields {
+            let (name, v) = f.split_once('=')?;
+            let ident = name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            if !ident || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+                return None;
+            }
+            let (t, x) = v.split_at_checked(1)?;
+            let val = match t {
+                "u" => SpecVal::U32(x.parse().ok().filter(|&v: &u32| v <= max_int)?),
+                "i" => SpecVal::I32(x.parse().ok().filter(|&v: &i32| v.unsigned_abs() <= max_int)?),
+                "b" => SpecVal::Bool(match x {
+                    "0" => false,
+                    "1" => true,
+                    _ => return None,
+                }),
+                "f" => SpecVal::F32(x.parse().ok()?),
+                _ => return None,
+            };
+            vals.push((intern(name)?, val));
+        }
+        Some(Self { vals, f16, coop })
+    }
+
+    /// Whether the cooperative-matrix variant is requested.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn is_coop(&self) -> bool {
+        self.coop
+    }
+
     fn header(&self) -> String {
         let mut s = String::new();
         // Directives first: WGSL rejects `enable` after any declaration.
@@ -186,7 +252,6 @@ pub(crate) struct KernelKey {
 }
 
 /// A compiled pipeline and its bind group layout.
-#[derive(Clone)]
 pub(crate) struct Kernel {
     pub name: &'static str,
     /// The specialisation constants, for profiles ([`Spec::describe`]).
@@ -194,6 +259,23 @@ pub(crate) struct Kernel {
     pub pipeline: wgpu::ComputePipeline,
     pub layout: wgpu::BindGroupLayout,
     pub storage: &'static [Access],
+    /// The context's recording generation this kernel was last offered to the kernel lists being recorded at
+    /// (`GpuContext::precompile`): a use at another generation records it in the newer recordings.
+    pub recorded: std::sync::atomic::AtomicU64,
+}
+
+impl Clone for Kernel {
+    fn clone(&self) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        Self {
+            name: self.name,
+            spec: self.spec.clone(),
+            pipeline: self.pipeline.clone(),
+            layout: self.layout.clone(),
+            storage: self.storage,
+            recorded: AtomicU64::new(self.recorded.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 /// Full WGSL for `def` specialised with `spec` (exposed for tests and debugging).
@@ -222,6 +304,22 @@ pub(crate) mod trace {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     static MODULE_NS: AtomicU64 = AtomicU64::new(0);
     static TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+    /// First uses of a kernel in a context, by how the kernel was got, and the time the requesting threads spent.
+    static FIRST_READY: AtomicU64 = AtomicU64::new(0);
+    static FIRST_WAITED: AtomicU64 = AtomicU64::new(0);
+    static FIRST_COMPILED: AtomicU64 = AtomicU64::new(0);
+    static FIRST_NS: AtomicU64 = AtomicU64::new(0);
+
+    /// How the first use of a kernel in a context got its pipeline.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FirstUse {
+        /// A precompile worker had finished it.
+        Ready,
+        /// A precompile worker was compiling it; the requesting thread waited.
+        Waited,
+        /// The requesting thread compiled it.
+        Compiled,
+    }
 
     /// The start of a compile, when the timer is on.
     pub fn start() -> Option<Instant> {
@@ -238,6 +336,17 @@ pub(crate) mod trace {
         }
     }
 
+    /// Adds one first use that started at `t0` on the requesting thread.
+    pub fn first_use(t0: Instant, how: FirstUse) {
+        FIRST_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        match how {
+            FirstUse::Ready => &FIRST_READY,
+            FirstUse::Waited => &FIRST_WAITED,
+            FirstUse::Compiled => &FIRST_COMPILED,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Prints the totals so far, when the timer is on and has counted a compile.
     pub fn report() {
         let n = COUNT.load(Ordering::Relaxed);
@@ -247,6 +356,14 @@ pub(crate) mod trace {
                 "folo-gpu: compiled {n} pipelines, module {:.3} s, total {:.3} s",
                 s(&MODULE_NS),
                 s(&TOTAL_NS)
+            );
+            let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
+            let (r, w, c) = (n(&FIRST_READY), n(&FIRST_WAITED), n(&FIRST_COMPILED));
+            eprintln!(
+                "folo-gpu: {} first uses, {:.3} s on the requesting threads ({r} precompiled, {w} waited for a \
+                 precompile worker, {c} compiled on demand)",
+                r + w + c,
+                s(&FIRST_NS)
             );
         }
     }
@@ -326,7 +443,14 @@ impl Kernel {
         if let (Some(t0), Some(m)) = (t0, module_time) {
             trace::add(t0, m);
         }
-        Ok(Self { name: def.name, spec: spec.describe(), pipeline, layout, storage: def.storage })
+        Ok(Self {
+            name: def.name,
+            spec: spec.describe(),
+            pipeline,
+            layout,
+            storage: def.storage,
+            recorded: Default::default(),
+        })
     }
 }
 

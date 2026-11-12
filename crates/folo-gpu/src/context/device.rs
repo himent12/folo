@@ -421,6 +421,8 @@ impl GpuContext {
                 ),
                 profiler,
                 pipeline_cache,
+                cache_dir: options.pipeline_cache_dir.clone(),
+                precompile: Default::default(),
             }),
         };
         if std::env::var(super::ENV_NO_BIND_CACHE).is_ok_and(|v| v != "0" && !v.is_empty()) {

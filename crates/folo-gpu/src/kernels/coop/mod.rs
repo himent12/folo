@@ -39,6 +39,9 @@ pub(crate) use self::support::{
     FEATURES, adapter_supports, experimental_opt_in, self_test, unavailable_reason,
 };
 
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&crate::pipeline::KernelDef] = &[&shader::COOP, &shader::COOP_CAT, &support::PROBE];
+
 /// Invocations per workgroup.
 const THREADS: u32 = 256;
 /// Subgroups per workgroup (32-wide subgroups are required, see [`unavailable_reason`]).

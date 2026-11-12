@@ -34,6 +34,7 @@ pub mod loss;
 pub mod metrics;
 pub mod model;
 pub mod nms;
+pub mod precompile;
 pub mod predict;
 pub mod train;
 pub mod val;

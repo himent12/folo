@@ -278,13 +278,15 @@ pub fn gpu_pool() -> Option<folo_api::GpuPool> {
 /// ([`effective_precision`]: f16 only where the device computes in it).
 pub fn open_model(path: &Path, device: Device, precision: Precision) -> Result<FoloModel> {
     let file = read_model_file(path)?;
+    // The forward kernels an earlier server used with this model compile on every core while it loads.
+    let dtype = effective_precision(device, precision).dtype();
+    folo_vision::precompile::precompile_inference(&file, device, dtype, "serve", "");
     if precision == Precision::F32 {
         let mut model = FoloModel::from_file(&file, Purpose::Inference).map_err(nn_error)?.0;
         model.fuse().map_err(nn_error)?;
         return place_model(model, device).map_err(engine_error);
     }
     can_place(device).map_err(engine_error)?;
-    let dtype = effective_precision(device, precision).dtype();
     FoloModel::from_file_for_inference(&file, device, dtype).map_err(nn_error)
 }
 

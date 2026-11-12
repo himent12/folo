@@ -340,6 +340,9 @@ pub fn binary(
     Ok(oshape)
 }
 
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&UNARY, &BINARY, &BIAS_ACT];
+
 #[cfg(test)]
 mod tests {
     use super::*;

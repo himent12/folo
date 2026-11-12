@@ -249,6 +249,19 @@ impl Trainer {
         if cfg.amp {
             amp_support(device)?;
         }
+        let resolved = cfg.resolve_optimizer(n_train, nc);
+        // The kernels an earlier run of this kind used compile on every core while the model and loader are built.
+        crate::precompile::precompile(
+            device,
+            &format!(
+                "train {} {} head {} {} nc {nc}",
+                cfg.arch,
+                if cfg.amp { "amp" } else { "f32" },
+                cfg.head.as_str(),
+                resolved.kind.as_str()
+            ),
+            &format!("imgsz {} batch {}", cfg.imgsz, cfg.batch),
+        );
         let mut mconf = ModelConfig::new(cfg.scale()?, nc)?;
         mconf.head = cfg.head.as_str().into();
         let mut init = Rng::seed(cfg.seed);
@@ -267,7 +280,6 @@ impl Trainer {
         };
 
         let accumulate = cfg.accumulate();
-        let resolved = cfg.resolve_optimizer(n_train, nc);
         let wd = effective_weight_decay(cfg.weight_decay, cfg.batch, accumulate, cfg.nbs);
         let std_groups = StandardGroups::from_module(&model);
         let opt: Box<dyn Optimizer> = match resolved.kind {

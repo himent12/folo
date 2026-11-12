@@ -41,12 +41,15 @@ fn weights_error(command: &str, path: &Path, e: folo_nn::Error) -> CliError {
 /// Open weights for inference (EMA when present, fused) on `device`, in f16 with `half` where the device computes
 /// in it (an f16 export is uploaded as it is); otherwise in f32, with a note on stderr when `half` asked for f16.
 /// `tensor_cores` asks for the tensor-core f16 kernels (a note on stderr when they are unavailable or unused).
+/// The kernels an earlier `command` with this model and `shape` (the options that change them) used start compiling
+/// on every core while the weights load ([`folo_vision::precompile`]).
 fn open_model(
     command: &str,
     path: &Path,
     device: &str,
     half: bool,
     tensor_cores: bool,
+    shape: &str,
 ) -> Result<FoloModel, CliError> {
     let path = &crate::weights::resolve(path)?;
     if tensor_cores {
@@ -72,6 +75,7 @@ fn open_model(
         }
     }
     let file = ModelFile::open(path).map_err(|e| weights_error(command, path, e))?;
+    folo_vision::precompile::precompile_inference(&file, device, precision.dtype(), command, shape);
     FoloModel::from_file_for_inference(&file, device, precision.dtype()).map_err(|e| nn_error(command, e))
 }
 
@@ -81,7 +85,8 @@ fn precision_of(model: &FoloModel) -> Precision {
 }
 
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
-    let model = open_model("val", &args.model, &args.device, args.half, args.tensor_cores)?;
+    let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
+    let model = open_model("val", &args.model, &args.device, args.half, args.tensor_cores, &shape)?;
     let split = match args.split {
         SplitArg::Train => Split::Train,
         SplitArg::Val => Split::Val,
@@ -306,7 +311,8 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
-    let model = open_model("predict", &args.model, &args.device, args.half, args.tensor_cores)?;
+    let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
+    let model = open_model("predict", &args.model, &args.device, args.half, args.tensor_cores, &shape)?;
     let images = collect_images(&args.sources)?;
     let cfg = PredictConfig {
         imgsz: args.imgsz.unwrap_or(model.imgsz()),

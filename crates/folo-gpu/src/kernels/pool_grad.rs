@@ -402,3 +402,6 @@ pub fn upsample_nearest2d_backward(
     let half = dtype == DType::F16;
     launch(ctx, &POOL, 6, &[g, gx], total, (h, w, oh, ow), (sh, sw), (1, 1), (0, 0), half)
 }
+
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&POOL_IDX, &POOL_BW_IDX, &POOL];

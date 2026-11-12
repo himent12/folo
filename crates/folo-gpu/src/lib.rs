@@ -34,6 +34,7 @@ pub mod context;
 pub mod detect;
 pub mod dtype;
 pub mod error;
+mod kernel_list;
 pub mod kernels;
 pub(crate) mod pipeline;
 pub mod pipeline_cache;

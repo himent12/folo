@@ -19,8 +19,9 @@ one() { # name bin
     --json-events epoch 2>&1)
   local t1=$(date +%s.%N)
   trace=$(echo "$out" | grep '^folo-gpu: compiled' | tail -1 | sed 's/^folo-gpu: //')
+  first=$(echo "$out" | grep '^folo-gpu: .* first uses' | tail -1 | sed 's/^folo-gpu: //')
   dur=$(grep '"event":"epoch"' "$T/r/metrics.jsonl" | grep -o '"duration_s":[0-9.]*' | cut -d: -f2)
-  echo "amp=[$amp] $1: epoch1 ${dur}s wall $(awk "BEGIN{print $t1 - $t0}")s $trace"
+  echo "amp=[$amp] $1: epoch1 ${dur}s wall $(awk "BEGIN{print $t1 - $t0}")s $trace${first:+; $first}"
 }
 rm -rf -- "$C"
 one new-warmup "$NEW"

@@ -117,16 +117,16 @@ impl GpuContext {
     /// Compiles (or fetches from the cache) the pipeline for `def` specialised with `spec`.
     pub(crate) fn kernel(&self, def: &'static KernelDef, spec: Spec) -> Result<Arc<Kernel>> {
         let key = KernelKey { name: def.name, spec };
-        if let Some(k) = self.inner.kernels.lock().expect("kernel lock").get(&key) {
-            return Ok(k.clone());
+        let hit = self.inner.kernels.lock().expect("kernel lock").get(&key).cloned();
+        if let Some(k) = hit {
+            // A recording opened since this kernel's last use: it joins the recordings (`GpuContext::precompile`).
+            if !self.recorded(&k) {
+                self.record_use(&key, &k);
+            }
+            return Ok(k);
         }
-        // Compile outside the lock: pipeline creation can take tens of milliseconds.
-        let disk = self.inner.pipeline_cache.as_deref();
-        let kernel = Arc::new(Kernel::compile(&self.inner.device, def, &key.spec, disk.map(|d| &d.cache))?);
-        if let Some(d) = disk {
-            d.compiled();
-        }
-        Ok(self.inner.kernels.lock().expect("kernel lock").entry(key).or_insert(kernel).clone())
+        // Precompiled, or compiled here outside the lock (pipeline creation can take tens of milliseconds).
+        self.first_use(def, key)
     }
 
     /// Encodes one dispatch of `kernel` with `buffers` bound at `@binding(1..)` and `params` at `@binding(0)`.

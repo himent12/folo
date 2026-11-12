@@ -274,3 +274,6 @@ pub fn batch_norm_backward(
     let p = Params::new().uz(units)?.uz(d.c)?.uz(d.hw)?;
     ctx.dispatch(&k, &[x, g, coef.raw(), dx], &p, ctx.grid_1d(units as u64, 256)?)
 }
+
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&STATS, &FINALIZE, &APPLY, &BWD_REDUCE, &BWD_FINALIZE, &BWD_DX];

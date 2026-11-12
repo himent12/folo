@@ -148,6 +148,9 @@ pub fn detect_candidates(
     ctx.dispatch(&k, &[box_raw, cls_raw, anchors, out], &p, ctx.grid_1d(ba as u64, 256)?)
 }
 
+/// This module's kernels, for the precompile registry (`kernels::find_def`).
+pub(crate) static DEFS: &[&KernelDef] = &[&LETTERBOX, &DETECT];
+
 #[cfg(test)]
 mod tests {
     use super::prefilter_fits;

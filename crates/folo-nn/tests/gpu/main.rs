@@ -196,6 +196,10 @@ fn training_steps_on_gpu_match_cpu() {
             close(&g.tensor, &c.tensor, 2e-4, 2e-3, &format!("{what} ema {}", c.name));
         }
     }
+    // Every kernel of the three optimizers' GPU steps (MuSGD's fused Muon kernels too) can be named in a kernel
+    // list and precompiled by the next run (folo-gpu's `GpuContext::precompile`).
+    let ctx = folo_gpu::GpuContext::shared().unwrap();
+    assert_eq!(ctx.kernels_without_registry(), Vec::<String>::new());
 }
 
 /// An EMA built for a model that already lives on the GPU follows it there.

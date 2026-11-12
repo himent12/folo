@@ -29,11 +29,12 @@ also needs a built web app. Without the feature, `folo serve` serves `web/dist` 
 
 ### Caches
 Every command keeps two caches under `$FOLO_CACHE_DIR`, else `<FOLO_HOME or ~/.folo>/cache`: compiled GPU pipelines
-(`gpu/`, docs/GPU.md Pipeline cache) and dataset scans (`scan/`, docs/DATA.md Scan cache). They only make a second
+and the lists of kernels each kind of run used, which the next such run compiles on worker threads before its first
+step (`gpu/`, docs/GPU.md Pipeline cache) and dataset scans (`scan/`, docs/DATA.md Scan cache). They only make a second
 start faster (COCO `folo train` reaches its first step in seconds instead of a minute) and do not change a result
 as long as every change to a dataset file changes its length or modification time (the dataset is the one found
 when the open starts); a missing, corrupt or stale entry is rebuilt silently. Both are bounded: the GPU cache is one file per adapter, at most 256 MB (a larger one is neither written
-nor loaded); the scan cache keeps one file per large folder or COCO annotation set (each at most 1 GiB, COCO
+nor loaded), plus at most 64 kernel lists of at most 1 MB; the scan cache keeps one file per large folder or COCO annotation set (each at most 1 GiB, COCO
 train + val take 30 MB) and at most 2 GiB in all, deleting the least recently written past that and anything not
 written for 60 days. `FOLO_NO_CACHE=1` turns both off; deleting the folder is always safe.
 

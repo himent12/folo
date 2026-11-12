@@ -87,7 +87,13 @@ fn gen_split_finish(spec: &Spec) -> String {
     s
 }
 
-static SPLIT_FINISH: KernelDef = KernelDef {
+/// Whether a kernel list may ask for [`SPLIT_FINISH`] with `spec` (`kernels::bounds`): the slabs are unrolled, and
+/// [`plan`] makes at most [`MAX_SPLITS`].
+pub(super) fn finish_fits(spec: &Spec) -> bool {
+    (1..=MAX_SPLITS).contains(&(spec.get_u32("S", 2) as usize))
+}
+
+pub(super) static SPLIT_FINISH: KernelDef = KernelDef {
     name: "conv_split_finish",
     storage: &[Access::Read, Access::Read, Access::ReadWrite],
     source: Source::Generated(gen_split_finish),
