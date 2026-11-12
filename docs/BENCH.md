@@ -210,7 +210,7 @@ What it does not show: a loop is as honest as its benchmark is held out. If the 
 images, every generation inherits that.
 
 ## Two measured runs
-What the numbers look like, from `folo serve` on the dev machine (an RTX 4080 SUPER), November 2026.
+What the numbers look like, from `folo serve` on our test machine (an RTX 4080 SUPER and an i7-14700KF), November 2026.
 
 **COCO photos, a plan designed by an agent.** A benchmark of 300 val2017 images (2,163 boxes, 80 classes),
 described as "phone and security-camera photos of streets, kitchens and living rooms ... often cluttered and

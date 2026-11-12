@@ -49,7 +49,7 @@ Everything Studio does is the HTTP API ([API.md](API.md), Agent labeling):
 api=http://127.0.0.1:7878/api
 job=$(curl -s $api/label/jobs -H 'Content-Type: application/json' \
   -d '{"name": "street", "classes": ["car", "person"], "instructions": "Label every car and pedestrian.",
-       "path": "D:/photos/street"}' | jq -r .id)
+       "path": "/data/photos/street"}' | jq -r .id)
 curl -s $api/label/jobs/$job/start -H 'Content-Type: application/json' -d '{"agent": "claude"}'
 curl -sN $api/label/jobs/$job/events          # job / image / log events until you stop reading
 curl -s $api/label/jobs/$job                  # status "idle" once the run has ended; counts, usage, run.outcome

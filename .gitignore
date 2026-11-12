@@ -11,3 +11,4 @@
 .DS_Store
 __pycache__/
 /web/public/folo-wasm/
+/runs-bench

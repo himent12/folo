@@ -73,7 +73,7 @@ easier to test.
 orthogonalisation for every conv weight, a lot of new kernel surface for a gain reported mainly on long COCO runs)
 and had `auto` pick SGD with Nesterov momentum for long runs and AdamW with the reference's class-count-fitted LR for
 short runs and small datasets. MuSGD has since been implemented (§8.2) and measured: it beats both on every run
-length tried, fine-tunes included, so `auto` rule 4 picks it everywhere (docs/hill/learn.md, docs/hill/r2-learn.md).
+length tried, fine-tunes included, so `auto` rule 4 picks it everywhere (docs/notes/hill/learn.md, docs/notes/hill/r2-learn.md).
 
 **Tricks that pay for themselves:** mosaic (the biggest single gain on small datasets), closing mosaic for the last
 epochs (it removes the train/test distribution gap), EMA (smoother, better validation weights for one extra copy of the weights), LR and
@@ -657,19 +657,19 @@ with `musgd.muon` / `musgd.sgd` (default 0.2 / 1.0, the reference trainer's). Wh
 same. An explicit `sgd`/`adamw`/`musgd` uses `lr0`, `momentum`, `warmup_bias_lr` and `musgd.*` as given. Rule 4
 is rule 5 with `musgd.*` for every run.
 
-Why the step weights (docs/hill/r2-learn.md): from scratch 0.5 / 0.5 trains folo-n on the COCO proxy to AP 0.1234
+Why the step weights (docs/notes/hill/r2-learn.md): from scratch 0.5 / 0.5 trains folo-n on the COCO proxy to AP 0.1234
 against 0.1135 with 0.2 / 1.0 (three seeds each, every seed above every other; Ultralytics 8.4.198's own MuSGD on
 the same images, one run in round 1: 0.1133), and the shapes gate to mAP50-95 0.934 against 0.926 (one seed); fine-tuning
 `folo-n-coco-v2` on BCCD it does worse (test AP 0.616 against 0.625, three seeds), so fine-tunes keep 0.2 / 1.0.
 
-Why (docs/hill/r2-learn.md; three seeds per side unless marked "one seed"): the reference trainer (Ultralytics
+Why (docs/notes/hill/r2-learn.md; three seeds per side unless marked "one seed"): the reference trainer (Ultralytics
 8.4.198, and FOLO's rule 3) zeroes the bias warmup LR whenever `auto` chooses, which suits AdamW at `lr0 ≈ 0.001` but
 costs MuSGD about 10% on the COCO proxy (MuSGD at momentum 0.9: AP 0.1021 with `warmup_bias_lr = 0`, 0.1118 with
 0.1); and below 10,000 iterations it picks AdamW, which MuSGD beats in every short case measured: the COCO proxy
-(6,260 iterations from scratch, AP 0.0747 for AdamW, one seed, from docs/hill/learn.md, against 0.112), the shapes
+(6,260 iterations from scratch, AP 0.0747 for AdamW, one seed, from docs/notes/hill/learn.md, against 0.112), the shapes
 gate (§10.6, mAP50-95 0.892 against 0.926, one seed) and fine-tuning `folo-n-coco-v2` on BCCD (test AP 0.607
 against 0.625). On the other fine-tuning sets of docs/BENCHMARKS.md it is level: medical-pills 0.807 against
-0.804, signature 0.9885 against 0.9892 (a saturated set); brain-tumor: see docs/hill/r2-learn.md.
+0.804, signature 0.9885 against 0.9892 (a saturated set); brain-tumor: see docs/notes/hill/r2-learn.md.
 
 Rule 3: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: MuSGD with `lr0 = 0.01`,
 `momentum = 0.9`, as the reference trainer picks since Ultralytics 8.4. Otherwise: AdamW with
@@ -678,7 +678,7 @@ on, so 0.001 for `nc = 80`). In both cases `warmup_bias_lr = 0.0`.
 
 `TrainConfig.auto_rule` (current: 5) versions this rule: rules 5, 4 and 3 are the above; rule 2 picks SGD (`lr0 = 0.01`,
 `momentum = 0.9`) instead of MuSGD for long runs; rule 1 is rule 2 without the AdamW floor. On the COCO proxy of
-docs/hill/learn.md (20 epochs, SGD regime forced) MuSGD reaches 1.38x the AP of SGD (0.1143 vs 0.0830), as the
+docs/notes/hill/learn.md (20 epochs, SGD regime forced) MuSGD reaches 1.38x the AP of SGD (0.1143 vs 0.0830), as the
 reference's own MuSGD does. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1;
 rule 3 ships momentum 0.9 and warmup_bias_lr 0 (the proxy's 6,260 iterations and the shapes gate resolve AdamW). The
 shipped rule-3 recipe has run once at full scale: folo-s on COCO (examples/coco, folo-s; 56 epochs, 103,544
@@ -686,7 +686,7 @@ optimizer steps, AMP) resolved `auto` to MuSGD at lr0 0.01, momentum 0.9, warmup
 non-finite batch and reached val2017 AP 0.416. That shows the recipe works at scale; with no SGD twin at that scale
 it does not measure MuSGD's gain over SGD on full COCO. The 0.001 floor is FOLO's (rule 2 on). The reference trainer's fit alone (rule 1)
 gives 80 classes 0.000119, and a from-scratch run on a 20k-image COCO subset (20 epochs, 6,260 iterations) then
-reaches about a fifth of the AP of SGD on the same budget, in Ultralytics as in FOLO (docs/hill/learn.md). Rule 2
+reaches about a fifth of the AP of SGD on the same budget, in Ultralytics as in FOLO (docs/notes/hill/learn.md). Rule 2
 changes nothing below 6 classes. Settings saved before the key existed (a checkpoint's `folo.train`, a run's
 `config.json`) mean rule 1, so a run resumes with the rule it started with; `--set auto_rule=1` (or `2` to `4`;
 CLI) selects an older rule for a new run.
@@ -721,7 +721,7 @@ parameter runs at `sgd · lr`; `cls_lr = 3.0`), the reference trainer's (`auto` 
 scratch, above); other step weights are saved in the
 checkpoint's `folo.optim` (FORMAT.md), so a resume continues with them; YOLO26's published COCO run used 0.528 /
 0.674 / 2.737 (the `muon_w`, `sgd_w`, `cls_w` of `yolo26n.pt`'s `train_args`), which fine-tuned BCCD worse here
-(docs/hill/r2-learn.md). Same
+(docs/notes/hill/r2-learn.md). Same
 `lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the Newton–Schulz iteration in `f32` (the
 reference: `bfloat16`); matrices are batched by column count with zero-padded rows, which changes no value. On a
 GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels, and the rest of the
@@ -817,7 +817,7 @@ t >= W:  lr_g = target_g,  momentum = momentum
 dropped the older 100-iteration floor). Runs made before the key existed had a floor of 100 (their configs and
 checkpoints keep it, and a resume uses the stored `warmup_iters` anyway); with it a 205-image fine-tune (4 steps per
 epoch, 400 in all) spent 25 of its 100 epochs in warmup instead of 3, and fine-tuned BCCD about 0.013 AP worse
-(docs/hill/r2-learn.md). A floor is never more than 30% of the run, and `warmup_epochs · spe` is never cut below
+(docs/notes/hill/r2-learn.md). A floor is never more than 30% of the run, and `warmup_epochs · spe` is never cut below
 what it asks for (only by `(epochs − 1) · spe`). The trainer warns when the run is short anyway: a run from scratch with `T < 200`, or
 `W > T / 2` (`folo_vision::train::schedule_warnings`; `warn` log lines after the first one, and `warnings` in the
 run's `config.json`).
@@ -1059,7 +1059,7 @@ AGPL-3.0: never commit them, any derived file, or the conversion script; gate th
   default (so `auto` rule 5 chooses MuSGD at `lr0 = 0.01`, momentum 0.937, `warmup_bias_lr = 0.1` and step weights
   0.5 / 0.5; `nb = 125`, accumulate 4, `spe = 32`, warmup `W = 96` iterations: 3 epochs, no floor).
 - **Pass:** EMA-model validation mAP@0.5 ≥ 0.90 and mAP@0.5:0.95 ≥ 0.75 by epoch 30, with no non-finite loss.
-- Measured (seed 0, RTX 4080 SUPER, docs/hill/r2-learn.md): rule 5's settings give final mAP@0.5 0.988 and
+- Measured (seed 0, RTX 4080 SUPER, docs/notes/hill/r2-learn.md): rule 5's settings give final mAP@0.5 0.988 and
   mAP@0.5:0.95 0.934, the bar first met at epoch 8. Rule 4 (step weights 0.2 / 1.0) measured 0.985 / 0.926, first
   met at epoch 8; the `auto` of rule 3 (AdamW at `lr0 = 0.00125`, `warmup_bias_lr = 0`, `W = 100` with the old floor)
   0.980 / 0.892, first met at epoch 9.

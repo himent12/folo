@@ -1,13 +1,14 @@
 # AGENTS.md — how to work on FOLO
 
-FOLO is built almost entirely by AI agents coordinated from one orchestrator thread. These rules apply to every agent
-(human contributors too). Read this file, then `docs/ARCHITECTURE.md`, then the crate you are touching.
+FOLO is built almost entirely by AI coding agents, and every change lands as a reviewed pull request. These rules
+apply to every contributor, agent or human. Read this file, then `docs/ARCHITECTURE.md`, then the crate you are
+touching. `CONTRIBUTING.md` is the short version for a first pull request.
 
 ## What FOLO is
 A from-scratch, very fast vision framework in Rust (a YOLO-style object detector, plus training, evaluation and export)
 with two front ends sharing one design language: **FOLO Studio**, a web app (`web/`), and **FOLO Desktop**, a native
-app on its own UI framework, folo-ui (`apps/desktop/`), for datasets, training runs and live inference. It is meant to be pleasant for people and
-easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes).
+app on its own UI framework, folo-ui (`apps/desktop/`), for datasets, training runs and live inference. It is meant to
+be pleasant for people and easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes).
 
 ## Ground rules
 - **Rust stable, edition 2024.** `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` and
@@ -32,33 +33,42 @@ easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes)
   into a folder of modules named for what they hold (`runs.rs` → `runs/mod.rs` + `runs/queue.rs`, a route's parts in
   its folder, an integration test as `tests/api/main.rs` + topic files so it stays one binary), never by line count
   into `part2` or `misc`.
-- **No secrets in the repo, ever.** Keys live outside the repo (for example `~/.folo/boat.key`). Never print them.
+- **No secrets in the repo, ever.** Keys live outside the repo (for example under `~/.folo/`). Never print them.
 
-## Workflow (every change is a PR) — details in docs/PROCESS.md
-1. Work in your own git worktree on a branch named `<area>/<short-topic>` (e.g. `core/autograd`, `ui/run-view`).
+## Workflow (every change is a PR)
+1. Work on a branch named `<area>/<short-topic>` (e.g. `core/autograd`, `ui/run-view`), in your own git worktree when
+   several agents share a machine.
 2. Keep PRs focused and reviewable; a big feature can be a stack of PRs.
 3. Commit messages and PR titles: `area: imperative summary` (e.g. `core: add broadcasting binary ops`).
 4. Open the PR against `main` with a description: what, why, how it was tested, benchmark numbers if relevant.
-5. Review: a reviewer agent (GPT-6.1 Sol, high effort) reviews every PR for bugs; an implementer agent
-   (Claude Opus 5.5, high effort) fixes the findings. Repeat until the reviewer has no blocking findings.
-6. The orchestrator merges (squash) once CI is green and review is clean. Do not merge your own PR unless your task says so.
+5. Review: every PR is reviewed for bugs before it merges, and the findings are fixed or answered. Repeat until the
+   reviewer has no blocking findings.
+6. A maintainer merges (squash) once CI is green and review is clean. Do not merge your own PR unless your task says so.
 7. Rebase on `main` if you fall behind; never force-push someone else's branch.
 
-## Build hygiene on the dev machine
-- The C: drive is small. Put build output on D:: `export CARGO_TARGET_DIR=D:/folo-build/<branch-name-with-dashes>`
-  (PowerShell: `$env:CARGO_TARGET_DIR="D:\folo-build\<name>"`). Delete that directory when your PR is merged.
+The maintainers' agents run this loop with a fixed pair of models, one that implements and one that reviews:
+`docs/notes/PROCESS.md` has their exact procedure.
+
+## Tests and temp dirs
 - Tests put their scratch folders (`folo-*`) under `FOLO_TEST_TMP` when it is set, else the system temp dir, and
-  remove them when they finish, also when they fail (`folo_test_support::TestDir`). On the dev machine, keep them off
-  C: too: `export FOLO_TEST_TMP=D:/folo-build/test-tmp` (PowerShell: `$env:FOLO_TEST_TMP="D:\folo-build\test-tmp"`).
+  remove them when they finish, also when they fail (`folo_test_support::TestDir`).
   A new test that needs a folder takes a `TestDir` (or `TestFile`), and a process it spawns goes in a `ChildGuard`
   declared after that folder; `crates/folo-test-support/tests/hygiene.rs` fails on a direct `std::env::temp_dir()`.
   `bash tools/test-tmp.sh cargo test --workspace` runs the tests the way CI does and fails if they leave anything
   behind (docs/CI.md, Test temp dirs).
-- Many agents build at once: keep the default `jobs = 8` from `.cargo/config.toml`, and don't run more than one heavy
-  build at a time from one agent.
-- The GPU (RTX 4080 SUPER) is shared. GPU test runs should be short (< 2 min) unless your task says otherwise.
-- Offloading CPU-heavy work (Linux builds, long CPU benchmarks, dataset preprocessing) to boat.dev sandboxes is allowed:
-  see `docs/BOAT.md`.
+- Keep the default `jobs = 8` from `.cargo/config.toml`, and don't run more than one heavy build at a time from one
+  agent: several agents often build on one machine.
+- GPU test runs should be short (< 2 min) unless your task says otherwise: the GPU is usually shared.
+
+## On the maintainers' machine
+These apply to agents working on the maintainers' Windows machine (an RTX 4080 SUPER and an i7-14700KF, shared by
+many agents); skip them anywhere else.
+- The C: drive is small. Put build output on D:: `export CARGO_TARGET_DIR=D:/folo-build/<branch-name-with-dashes>`
+  (PowerShell: `$env:CARGO_TARGET_DIR="D:\folo-build\<name>"`). Delete that directory when your PR is merged.
+- Keep test scratch folders off C: too: `export FOLO_TEST_TMP=D:/folo-build/test-tmp`
+  (PowerShell: `$env:FOLO_TEST_TMP="D:\folo-build\test-tmp"`).
+- Offloading CPU-heavy work (Linux builds, long CPU benchmarks, dataset preprocessing) to boat.dev sandboxes is
+  allowed: see `docs/notes/BOAT.md`.
 
 ## Layout
 ```
@@ -66,7 +76,7 @@ crates/folo-core     tensors, dtypes, shapes, CPU kernels, autograd tape
 crates/folo-gpu      wgpu device, buffer pool, WGSL kernels; implements the core Backend trait
 crates/folo-nn       modules (Conv2d, BatchNorm2d, ...), init, optimizers, LR schedules, .folo weight files
 crates/folo-data     image IO, YOLO/COCO dataset formats, augmentation, batching data loader, synthetic datasets
-crates/folo-vision   FOLO detector (n/s/m/l), loss, task-aligned assigner, box ops, NMS, mAP, trainer, predictor
+crates/folo-vision   FOLO detector (n/s/m/l/x), loss, task-aligned assigner, box ops, NMS, mAP, trainer, predictor
 crates/folo-api      serde types of docs/API.md, shared by the server, the CLI and FOLO Desktop
 crates/folo-server   axum HTTP + SSE API used by Studio and by agents; serves the built web app
 crates/folo-client   blocking HTTP client of docs/API.md: `folo mcp --server`, cloud workers; transfers in parts
@@ -79,8 +89,12 @@ crates/folo-test-support  test-only helpers (a dev-dependency): TestDir / TestFi
 web/                 FOLO Studio (TypeScript + Vite on fw, our own UI framework in web/framework; custom design system, no UI kit)
 apps/desktop/        FOLO Desktop (Rust, its own cargo workspace: the app and ui/ = folo-ui, its UI framework;
                      talks to folo-server over docs/API.md)
+design/              the design system both apps share: tokens.json, fonts, the logo
 bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md
 bench/finetune/      fine-tuning accuracy: folo-n vs yolo26n on small public datasets, one pycocotools scorer
-docs/                QUICKSTART, ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, MCP, FORMAT (.folo), ROADMAP, BOAT,
-                     BENCHMARKS, WASM, CLOUD (training on rented or remote GPUs), ...; docs/img holds the README screenshots
+tools/               CI and development helpers; tools/charts draws the charts of the README and docs
+site/                the docs website, generated from docs/, README.md and the examples
+docs/                QUICKSTART, ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, MCP, FORMAT (.folo), ROADMAP,
+                     BENCHMARKS, WASM, CLOUD (training on rented or remote GPUs), ...; docs/img holds the README's
+                     screenshots and charts; docs/notes holds the engineering notebooks and the agents' process
 ```

@@ -163,8 +163,7 @@ costs at most 3e-8. Result: the largest difference in any scenario is **3.0e-8**
 `outside_area_range`, where the default is 0.07 off (as intended) and `coco_compatible` is again within 2e-8.
 `no_truths_at_all` checks the `-1` / empty convention from step 3. The `Evaluator` does not compute the area-split
 stats (`APs/m/l`) or AR; [`CocoEval`](#full-cocoeval-crowd-regions-area-buckets-ar) below does. Regenerate the
-fixtures with `D:/folo-venvs/parity/Scripts/python -I bench/parity/coco_reference.py` (a venv with `pycocotools` and
-`numpy`).
+fixtures with `python -I bench/parity/coco_reference.py` (a Python with `pycocotools` and `numpy`).
 
 ## Full COCOeval: crowd regions, area buckets, AR
 

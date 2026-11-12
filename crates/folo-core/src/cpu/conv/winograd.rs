@@ -53,7 +53,7 @@ pub(crate) fn winograd_shape(g: &ConvGeom) -> bool {
 /// where it measured faster, with at least 16 input and 8 output channels, and either 256 tiles (a 32x32 output)
 /// or `c * o >= 4096`. At 28 threads it ran 5-41% faster than the direct conv on folo-n's convs from 40x40 up and
 /// 11-29% on 12x12 to 24x24 outputs with 64 to 512 channels; folo-n's 20x20 64->64 convs tied, and 8 input
-/// channels at 160x160 tied or lost (docs/hill/r2-cpu.md, second wave). At most [`MAX_CHANNELS`] input plus
+/// channels at 160x160 tied or lost (docs/notes/hill/r2-cpu.md, second wave). At most [`MAX_CHANNELS`] input plus
 /// output channels, which bounds the per-thread scratch a block keeps.
 pub(crate) fn uses_winograd(g: &ConvGeom) -> bool {
     let tiles = g.oh.div_ceil(2) * g.ow.div_ceil(2);

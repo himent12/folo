@@ -1,6 +1,6 @@
 # Hill-climb 2: the GPU training step (lane `gpu-train`, branches `train/*`)
 
-Round 2 of docs/hill/gpu-train.md. Goal: a faster folo-n / folo-s training step (batch 16, 640 px, forward + loss
+Round 2 of docs/notes/hill/gpu-train.md. Goal: a faster folo-n / folo-s training step (batch 16, 640 px, forward + loss
 + backward + optimizer) on the RTX 4080 SUPER, without changing what is computed beyond summation order.
 Baseline: `main` 647b981f.
 
@@ -155,7 +155,7 @@ of one result copied every matrix; the shipped version writes the parameters fro
 
 The fused row comes from one hold under load (host 73-87 %), where the AMP overhead of the single rounds ranged from
 about −4 % to +5 %: MuSGD within 6 % of SGD in both precisions on the 640 px bench is what was observed there, not a
-bound. The "17 %" of docs/hill/learn.md was measured
+bound. The "17 %" of docs/notes/hill/learn.md was measured
 on the 320 px proxy, where the step is a quarter of the work and the Muon half (whose cost does not scale with the
 image size) weighs four times as much; the fused step's ~1.5 GPU-ms against main's 7.7 should take most of that
 back too (not measured at 320 px). Peak memory: 3478 / 2033 MiB, as main's MuSGD.

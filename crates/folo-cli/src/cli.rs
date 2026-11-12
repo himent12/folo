@@ -25,7 +25,7 @@ pub enum Command {
     Serve(ServeArgs),
     /// Print the CLI surface (commands, arguments, types, defaults, help) as JSON: all of it, or one command.
     Describe(DescribeArgs),
-    /// Check the environment: version, OS, CPU, memory, web app build.
+    /// Check the environment: version, OS, CPU, memory, GPU adapters and the one FOLO picks, web app build.
     Doctor(DoctorArgs),
     /// Train a detector.
     #[command(allow_negative_numbers = true)]
@@ -504,8 +504,8 @@ pub enum WeightsCommand {
     /// Published weights, whether each is downloaded, and its cache path ($FOLO_WEIGHTS_DIR or
     /// <FOLO_HOME or ~/.folo>/weights).
     List,
-    /// Download published weights from the repository's GitHub release (with the GitHub CLI `gh`) and verify their
-    /// SHA-256 against the release's SHA256SUMS.
+    /// Download published weights from the repository's GitHub release (over HTTPS; the GitHub CLI `gh`
+    /// only as a fallback when that is refused) and verify their SHA-256 against the release's SHA256SUMS.
     Pull(WeightsPullArgs),
 }
 

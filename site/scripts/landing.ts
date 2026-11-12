@@ -142,7 +142,8 @@ export function renderLanding(md: MarkdownIt, page: ParsedPage, slug: string): L
         .join('')}</ul>`
     : '';
 
-  // The numbers: the whole section (the comparison table and its caveats).
+  // The numbers: the whole section (the charts, the comparison table and accuracy), so its subsections are anchors too.
+  for (const t of numbers.tokens) if (t.type === 'heading_open' && attr(t, 'id')) anchors.add(attr(t, 'id'));
   const numbersHtml = section(numbers, 'l-numbers', `<div class="l-prose prose">${render(numbers.tokens)}</div>`, 'Benchmarks');
 
   // Quickstart: the whole section (install, a first model, building from source), so its subsections are anchors too.

@@ -2,8 +2,8 @@
 
 This walkthrough takes you from a fresh checkout to a trained detector: on synthetic data first, then on your own
 YOLO or COCO folder. After that it covers fine-tuning, evaluation, export, FOLO Studio, and running the model in a
-browser. Every command here was run on the dev machine (Windows 11, RTX 4080 SUPER); the timings come from it. For
-the full flag lists, see [CLI.md](CLI.md) or `folo describe --json`.
+browser. Every command here was run on our test machine (Windows 11, RTX 4080 SUPER, i7-14700KF); the timings come
+from it. For the full flag lists, see [CLI.md](CLI.md) or `folo describe --json`.
 
 ## 1. Get `folo`
 
@@ -25,11 +25,11 @@ command below works as `cargo folo` from the checkout. You can also put the buil
 `FOLO_GPU_BACKEND=vulkan,dx12,metal` ([GPU.md](GPU.md)).
 
 Or skip the build: releases ship `folo` for x86_64 Windows and Linux with Studio embedded (and FOLO Desktop for
-Windows). With a logged-in [`gh`](https://cli.github.com) (the repository is private):
-`gh release download --repo himent12/folo --pattern install.sh && sh install.sh` on Linux, or
-`gh release download --repo himent12/folo --pattern install.ps1` then
-`powershell -ExecutionPolicy Bypass -File install.ps1` on Windows (add `-Desktop` for FOLO Desktop). The commands
-below then work as plain `folo`. See the README's [Install](../README.md#install) and [RELEASE.md](RELEASE.md).
+Windows). On Linux:
+`curl -fsSL https://github.com/himent12/folo/releases/latest/download/install.sh | sh`. In PowerShell on Windows:
+`irm https://github.com/himent12/folo/releases/latest/download/install.ps1 | iex`. For FOLO Desktop too, download
+`install.ps1` and run `powershell -ExecutionPolicy Bypass -File install.ps1 -Desktop`. The commands below then work
+as plain `folo`. See the README's [Install](../README.md#install) and [RELEASE.md](RELEASE.md).
 
 ## 2. A first model on synthetic data
 
@@ -43,8 +43,8 @@ folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30
   in about 1 s. `--classes` takes up to 8 names, and `circle`, `square`, `triangle`, `star`, `ring`, `cross`,
   `hexagon` and `heart` each get their own shape.
 - `train` uses the GPU when it finds one. Each epoch shows a progress bar (losses, img/s, ETA) and then one row of
-  validation metrics. On the dev machine this run took 83 s and ended at **mAP50 0.955, mAP50-95 0.823** (two runs
-  a day apart, DOGFOOD-2 and -3, gave the same numbers; with the GPU shared with other jobs it took up to 139 s).
+  validation metrics. On our test machine this run took 83 s and ended at **mAP50 0.955, mAP50-95 0.823** (two runs
+  a day apart gave the same numbers; with the GPU shared with other jobs it took up to 139 s).
 
 The run folder is `runs/<dataset>-<size>/`, here `runs/shapes-n/`. If that folder already exists, a numeric suffix
 is added (`--project` and `--name` override both parts). It contains:
@@ -124,15 +124,17 @@ Things to know:
 - **Device**: `--device cpu` or `--device gpu:<n>` pins the device. `gpu:<n>` without a usable adapter fails with
   `device_not_found` (exit 3), and the hint lists the devices this machine has.
 - **Mixed precision**: `--amp` trains with f16 activations on the GPU's tensor cores and f32 master weights, about
-  1.25× (folo-n) to 1.6× (folo-s) faster per step with 40% less memory ([MODEL.md](MODEL.md) §8.8). On a machine
-  without tensor cores it fails with `not_supported` (exit 4) before anything is written.
+  1.6× (folo-n) to 1.85× (folo-s) faster per step with about 40% less memory ([MODEL.md](MODEL.md) §8.8). On a
+  machine without tensor cores it fails with `not_supported` (exit 4) before anything is written.
 - **NMS-free head**: `--head o2o` also trains a one-to-one head, so the model predicts end to end without NMS
   ([MODEL.md](MODEL.md) §6.6); `val`, `predict` and `export` use it automatically.
 - **Watching a run**: add `--json` and read stdout line by line. Each `epoch` record carries the validation metrics,
   and the run ends with a `done` record that names the weights.
 
 Two complete recipes with their results: [examples/shapes](../examples/shapes/README.md) (the convergence gate, CPU
-vs GPU) and [examples/coco](../examples/coco/README.md) (folo-n pretrained from scratch on COCO 2017).
+vs GPU) and [examples/coco](../examples/coco/README.md) (folo-n and folo-s pretrained from scratch on COCO 2017). The
+convergence gate is FOLO's convergence test: a synthetic shapes dataset that a correct trainer must learn to a fixed
+mAP bar.
 
 ## 5. Fine-tune
 
@@ -159,10 +161,8 @@ folo weights pull folo-n-coco-v2                                  # into ~/.folo
 folo train --data my-data --weights folo-n-coco-v2 --epochs 20    # takes the weights' architecture (folo-n)
 ```
 
-The weights are published GitHub releases, and `folo weights pull` downloads them over plain HTTPS. The repository is
-private for now: then that download is refused and the pull falls back to the GitHub CLI, so until the repository is
-public you need access to it and a logged-in [`gh`](https://cli.github.com) (`gh auth login`). Once it is public,
-the `folo` binary is all it takes. `train` never downloads by itself: without the pull it stops with
+The weights are published GitHub releases, and `folo weights pull` downloads them over HTTPS: the `folo` binary is
+all it takes. `train` never downloads by itself: without the pull it stops with
 `weights_not_found` and the hint to run `folo weights pull folo-n-coco-v2` first.
 
 Studio and MCP list downloaded published weights as models once pulled (`folo weights pull`), or you can copy a `.folo`
@@ -253,8 +253,9 @@ or, without WebGPU, on the wasm CPU (single-threaded, about 0.5 s) ([WASM.md](WA
 ## 9. From an agent
 
 Everything above is also available to agents in two ways:
-- **MCP**: `folo mcp --data-dir D:/folo-data`, with 22 tools, `folo://` resources and prompts. To register it:
-  `claude mcp add folo -- folo mcp --data-dir D:/folo-data`.
+- **MCP**: `folo mcp`, with 22 tools, `folo://` resources and prompts. It keeps its datasets and runs in the same
+  data dir as `folo serve` (`~/.folo` by default, `--data-dir` to change it). To register it:
+  `claude mcp add folo -- folo mcp`.
 - **CLI**: any command with `--json`. stdout then carries JSON Lines only, and the exit codes are stable.
 
 [AGENT_COOKBOOK.md](AGENT_COOKBOOK.md) has the recipes in both forms. [MCP.md](MCP.md) is the contract.

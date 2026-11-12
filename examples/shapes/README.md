@@ -1,27 +1,28 @@
 # Shapes: the convergence smoke test
 
-docs/MODEL.md §10.6 (the M2 gate): train folo-n from scratch on folo-data's synthetic shapes, 4 classes, 2000 train
-and 200 val images at 320×320, and reach **mAP@0.5 ≥ 0.90 and mAP@0.5:0.95 ≥ 0.75 by epoch 30** (EMA model) with no
+The shapes gate (docs/MODEL.md §10.6) is FOLO's convergence test: a synthetic shapes dataset that a correct trainer
+must learn to a fixed mAP bar. Train folo-n from scratch on folo-data's synthetic shapes, 4 classes, 2000 train and
+200 val images at 320×320, and reach **mAP@0.5 ≥ 0.90 and mAP@0.5:0.95 ≥ 0.75 by epoch 30** (EMA model) with no
 non-finite loss.
 
 ## Commands
 
 ```sh
 # 1. The dataset: circle / square / triangle / star, 1 to 8 objects per image, seed 0 (about 3 s, ~60 MB of JPEGs).
-cargo run --release -p folo-data --example shapes -- D:/folo-data/shapes-smoke
-#    `cargo folo dataset synth D:/folo-data/shapes-alt --images 2200 --val-frac 0.090909 --imgsz 320 \
+cargo run --release -p folo-data --example shapes -- datasets/shapes-smoke
+#    `cargo folo dataset synth datasets/shapes-alt --images 2200 --val-frac 0.090909 --imgsz 320 \
 #      --classes circle,square,triangle,star` is close, but its generator defaults keep 5 % empty images.
 
 # 2. Train (MODEL.md's run; `auto` picks MuSGD at lr0 0.01, 125 batches = 32 optimizer steps per epoch,
 #    96 warmup steps (3 epochs), mosaic off for the last 5 epochs).
-cargo folo train --data D:/folo-data/shapes-smoke --arch folo-n --imgsz 320 --epochs 30 --batch 16 \
+cargo folo train --data datasets/shapes-smoke --arch folo-n --imgsz 320 --epochs 30 --batch 16 \
   --close-mosaic 5 --seed 0 --project runs --name smoke-cpu
 #    add --json for one JSON record per event on stdout (metrics.jsonl in the run folder has every step).
 #    Interrupted? continue bit-exactly with:  cargo folo train --resume runs/smoke-cpu/weights/last.folo
 
 # 3. Evaluate, predict, export.
-cargo folo val --model runs/smoke-cpu/weights/best.folo --data D:/folo-data/shapes-smoke
-cargo folo predict --model runs/smoke-cpu/weights/best.folo D:/folo-data/shapes-smoke/images/val --save runs/smoke-cpu/pred
+cargo folo val --model runs/smoke-cpu/weights/best.folo --data datasets/shapes-smoke
+cargo folo predict --model runs/smoke-cpu/weights/best.folo datasets/shapes-smoke/images/val --save runs/smoke-cpu/pred
 cargo folo export --model runs/smoke-cpu/weights/best.folo --format folo-f16
 ```
 
@@ -29,9 +30,10 @@ cargo folo export --model runs/smoke-cpu/weights/best.folo --format folo-f16
 
 ## Result (CPU)
 
-Measured 2026-11-08 on the dev machine (28 threads, Windows), commit of PR #33, `--device cpu`, when `auto` still
-picked AdamW at lr0 0.00125 with a 100-step warmup here (docs/MODEL.md §10.6 has the current rule's run): 30 epochs in
-72 min (4326 s; 16–18 img/s training when the machine was otherwise idle, slower while other builds shared it). No
+Measured 2026-11-08 on our test machine (i7-14700KF, 28 threads, Windows; RTX 4080 SUPER), `--device cpu`, when
+`auto` still picked AdamW at lr0 0.00125 with a 100-step warmup here (docs/MODEL.md §10.6 has the current rule's run):
+30 epochs in 72 min (4326 s; 16–18 img/s training when the machine was otherwise idle, slower while other jobs shared
+it). No
 non-finite batch. **Pass**: the gate (mAP50 ≥ 0.90, mAP50-95 ≥ 0.75) was first met at epoch 9 (0.936 / 0.772).
 The reference (Ultralytics YOLO11n, MODEL.md §10.6) reached 0.854 / 0.904 / 0.933 / 0.948 mAP50 at epochs
 6 / 11 / 16 / 30; FOLO: 0.824 / 0.947 / 0.970 / 0.980. The loss drops visibly when mosaic closes (epoch 26).
@@ -86,11 +88,11 @@ image (preprocess 1.5, inference 30.6, postprocess 0.9).
 
 ## Result (GPU)
 
-Measured 2026-11-08 on the same machine (RTX 4080 SUPER, Vulkan), branch `train/gpu`, the same command with
-`--device gpu:0` (now also what `auto` picks):
+Measured 2026-11-08 on the same machine (RTX 4080 SUPER, Vulkan), with the GPU trainer of that date, the same command
+with `--device gpu:0` (now also what `auto` picks):
 
 ```sh
-cargo folo train --data D:/folo-data/shapes-smoke --arch folo-n --imgsz 320 --epochs 30 --batch 16 \
+cargo folo train --data datasets/shapes-smoke --arch folo-n --imgsz 320 --epochs 30 --batch 16 \
   --close-mosaic 5 --seed 0 --device gpu:0 --project runs --name smoke-gpu
 ```
 

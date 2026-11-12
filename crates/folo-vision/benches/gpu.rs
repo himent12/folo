@@ -65,7 +65,7 @@ fn stats(mut t: Vec<Duration>) -> Stats {
 
 /// Back-to-back calls before a latency measurement, at least: after the second of idling that precedes every
 /// section, the GPU may have dropped its clocks, and in clock-sampled traces they took up to about 450 ms of work to
-/// come back, with batch-1 calls 3-9x slower meanwhile (docs/hill/r2-gpu-dispatch.md, Pool PR 2); measured inside
+/// come back, with batch-1 calls 3-9x slower meanwhile (docs/notes/hill/r2-gpu-dispatch.md, Pool PR 2); measured inside
 /// that stretch, a batch-1 row read anything from 1.7 to 6 ms by run.
 const LATENCY_WARM: Duration = Duration::from_secs(1);
 

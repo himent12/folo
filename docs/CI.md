@@ -1,13 +1,14 @@
 # CI
 
-Five workflows check the code, one per part of the repo. A pull request runs only the ones whose files it touches
-(`paths` filters); every push to `main` runs all of them, so a filter that misses a dependency shows up there.
+Five workflows check the code, one per part of the repo (a sixth, `release.yml`, builds releases: docs/RELEASE.md).
+A pull request runs only the ones whose files it touches (`paths` filters); every push to `main` runs all of them, so
+a filter that misses a dependency shows up there.
 
 | workflow | runs for | what it does |
 |---|---|---|
 | `ci.yml` | everything except `web/`, `site/`, `design/`, `apps/desktop/`, `docs/img/` and the other workflows (plus the few files in those folders that a Rust test reads: the package versions and Studio's command-line fixtures) | `rust (linux)`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace` with the ONNX parity test required. `rust (windows)`: clippy and the tests on the runner with a GPU, so the GPU tests run there |
 | `web.yml` | `web/`, `design/` | `check`: `npm ci`, `npm run check`, `npm test`. `qa (1/3)` to `qa (3/3)`: `npm run qa`, the layout checks on the production build (blank sections, overflow, covered controls and cut selects at tablet and phone sizes, and Overview at 1280 px, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium), a third of the states each (`FOLO_QA_SHARD`) |
-| `site.yml` | every pull request (the Markdown links to files all over the repo; about 20 s) | `bash tools/file-size.sh` (no source file of 1000 lines or more, AGENTS.md), then the docs site: `npm ci && npm run check && npm run build` in `site/`, which fails on a broken link, anchor or image in the Markdown (site/README.md) |
+| `site.yml` | every pull request (the Markdown links to files all over the repo; about 20 s) | `bash tools/file-size.sh` (no source file of 1000 lines or more, AGENTS.md), `node tools/charts/render.mjs --check` (the committed charts match their data, docs/BENCHMARKS.md, Charts), then the docs site: `npm ci && npm run check && npm run build` in `site/`, which fails on a broken link, anchor or image in the Markdown (site/README.md) |
 | `wasm.yml` | `crates/folo-wasm/` and the crates it depends on, `Cargo.toml`, `Cargo.lock`, `scripts/build-wasm.sh` | the browser build: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and `scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock` (docs/WASM.md) |
 | `desktop.yml` | `apps/desktop/` (the app and folo-ui), `design/`, the crates the app builds and the root `Cargo.toml` they inherit from | FOLO Desktop and folo-ui (below). `desktop (windows)`: fmt, clippy and the tests of both, again for folo-ui with its portable-text and winit features, and the temp-dir hygiene test. `desktop (linux)`: clippy and the tests, a headless screenshot, and folo-ui type-checked for macOS |
 
@@ -36,8 +37,8 @@ bare `cargo test` there builds only the app.
   that folo-ui (the winit backend and cosmic-text on macOS, AppKit through objc2) type-checks and lints for macOS.
   It does not prove that it links or runs there: nothing is linked or run on macOS, and no macOS runner is used.
   The app crate is not checked for macOS: ring (the HTTP client's TLS) compiles C for the target in its build
-  script, so `cargo check -p folo-desktop --target aarch64-apple-darwin` needs a C compiler for macOS. On the
-  Windows dev PC it fails there (`failed to find tool "cc"`); a Linux runner has no macOS SDK either.
+  script, so `cargo check -p folo-desktop --target aarch64-apple-darwin` needs a C compiler for macOS. On
+  Windows it fails there (`failed to find tool "cc"`); a Linux runner has no macOS SDK either.
 
 ## Keeping CI fast
 - **Tests are quick or they are not in the suite.** A test trains the smallest model on a handful of small images
@@ -63,70 +64,67 @@ it first, since Windows cannot delete files a running process holds open. `crate
 fails on any `std::env::temp_dir()` in a crate's `src/` or `tests/` (and in `apps/desktop/src`, and folo-ui's `src/`,
 `tests/` and `examples/`), so a new test cannot
 bypass the guard by accident. (Before this, `cargo test --workspace` runs left `folo-*` folders behind; 3,209 of them,
-about 20 GB, once filled the dev PC's C: drive.)
+about 20 GB, once filled a system drive.)
 
 CI runs `cargo test` (the `rust` jobs) through `tools/test-tmp.sh`. The script points `FOLO_TEST_TMP` and
 the temp dir itself (`TMPDIR`, `TMP`, `TEMP`) at a new `$RUNNER_TEMP/test-tmp.XXXXXX`, one per run, so concurrent runs
-never share it. Test files therefore land on the runner's work drive (D: on the dev PC), not in the user's %TEMP%.
+never share it. Test files therefore land on the runner's work drive, not in the user's %TEMP%.
 After the run it fails the step, listing the entries, if any `folo-*` entry is left there. Because the temp dir is
 redirected too, the check also catches a binary that writes to the temp dir. Locally:
-`TEST_TMP=D:/folo-build/test-tmp bash tools/test-tmp.sh cargo test --workspace` (`TEST_TMP` is the parent folder).
+`TEST_TMP=/tmp/folo-test-tmp bash tools/test-tmp.sh cargo test --workspace` (`TEST_TMP` is the parent folder).
 `FOLO_TEST_TMP` must be an absolute path, since cargo runs each test binary in its own package folder.
 
 ## Runners
-Linux jobs run on GitHub-hosted runners: `ubuntu-latest`, except the release workflow's Linux CLI build and its
-Linux install test, which use `ubuntu-22.04` (docs/RELEASE.md, Runners). Windows jobs run on the dev PC, which
-has the GPU the GPU tests need. Two repository variables choose, each a JSON `runs-on` value for a self-hosted
-runner; an unset variable means GitHub-hosted (`ubuntu-latest` or `ubuntu-22.04`, `windows-latest`):
+Jobs run on GitHub-hosted runners unless a repository variable says otherwise: `ubuntu-latest` for Linux (the release
+workflow's Linux CLI build and its Linux install test use `ubuntu-22.04`, docs/RELEASE.md, Runners) and
+`windows-latest` for Windows. A hosted runner has no GPU, so the tests that need one skip there. Two repository
+variables move a platform to a self-hosted runner, each a JSON `runs-on` value:
 
-| variable | value | runner |
+| variable | example | effect |
 |---|---|---|
-| `RUNS_ON_LINUX` | unset | GitHub-hosted `ubuntu-latest` (`ubuntu-22.04` for the release CLI build and install test) |
-| `RUNS_ON_WINDOWS` | `["self-hosted","folo-win"]` | `folo-win-local`, `folo-win-local-2`: the dev PC, runners in `D:\gha\win`, `D:\gha\win2` (each with its own target dir `D:\gha\folo-target-<runner name>`) |
+| `RUNS_ON_LINUX` | `["self-hosted","linux"]` | the Linux jobs of every workflow run on that runner |
+| `RUNS_ON_WINDOWS` | `["self-hosted","folo-win"]` | the Windows jobs run on that runner; with a GPU there, the GPU tests run in CI |
 
-The repository is private, so GitHub-hosted jobs use the account's Actions minutes (Windows counts double, which
-is the other reason Windows stays on the dev PC). When the account's billing is blocked, GitHub refuses to start
-a hosted job: it fails within seconds with "recent account payments have failed or your spending limit needs to
-be increased", and nothing in the repository can fix that (GitHub, Settings, Billing & plans).
+The maintainers ran the Windows jobs this way, on a machine with an RTX 4080 SUPER, while the repository was private:
+that is where the GPU tests ran on every pull request. Set a variable with
+`gh variable set RUNS_ON_WINDOWS --body '["self-hosted","<label>"]'` and delete it to go back
+(`gh variable delete RUNS_ON_WINDOWS`).
 
-Hosted jobs cache their build with `Swatinem/rust-cache` and the npm cache of `actions/setup-node`. To move a
-platform to a self-hosted runner, set its variable (`gh variable set RUNS_ON_LINUX --body '["self-hosted","<label>"]'`);
-to move it back, delete the variable (`gh variable delete RUNS_ON_LINUX`). Self-hosted jobs keep a persistent
-`CARGO_TARGET_DIR` outside the checkout, so incremental builds stay warm. That folder only grows, so on a
-self-hosted Linux runner `rust (linux)` starts from an empty one when the runner has under 20 GB free.
-
-Until November 2026 the Linux jobs ran on boat.dev sandboxes registered as self-hosted runners. Each sandbox
-expired after 24 hours and took its runner offline, and jobs for an offline runner queue instead of failing (a
-pull request's checks once sat queued for an hour and a half), so they were removed.
+Hosted jobs cache their build with `Swatinem/rust-cache` and the npm cache of `actions/setup-node`. Self-hosted jobs
+keep a persistent `CARGO_TARGET_DIR` outside the checkout, so incremental builds stay warm. That folder only grows, so
+on a self-hosted Linux runner `rust (linux)` starts from an empty one when the runner has under 20 GB free.
 
 The same variables drive every workflow, `release.yml` included (its Linux and Windows jobs, including the CLI
 build matrix that its `plan` job writes). Release builds are the exception to the persistent target dir: they always start
 from an empty one in `$RUNNER_TEMP` so no stale artifact reaches a shipped binary, and they need no tools
 preinstalled beyond the basics listed in docs/RELEASE.md, Runners. macOS release builds have no self-hosted runner
-and use GitHub-hosted `macos-latest`; set `FOLO_RELEASE_MACOS=false` while hosted runners are unavailable (hosted
-billing must be fixed before macOS release builds can run).
+and use GitHub-hosted `macos-latest`; `FOLO_RELEASE_MACOS=false` skips them.
 
-## Operating the runners
-- Status: `gh api repos/himent12/folo/actions/runners -q '.runners[] | .name + " " + .status'`.
-- Windows (dev PC): start with `Start-Process D:\gha\win\run.cmd -WindowStyle Hidden`. After a reboot, start it again.
-  Prerequisite: Git for Windows' `bin` and `usr\bin` on the runner's PATH (actions such as `dtolnay/rust-toolchain`
-  run bash). It is set in `D:\gha\win\.env` (`PATH=...`), which the runner reads at start.
-- Linux: nothing to operate, the runners are GitHub's. A hosted job that fails in seconds with no steps was
-  refused by GitHub (billing, above), not broken by the change under test.
-- **Security.** Self-hosted runners execute code from PRs (tests, build scripts, npm lifecycle scripts) with the
-  runner account's access. The Windows runner uses the developer account, which can read `~/.folo/boat.key` and the
-  gh credentials. That is the same trust boundary FOLO's agents already work in, since they build and run the same
-  code as the same user on the same machine, so the runner adds no new principal. It still means: never enable these
-  runners for a public repository or for PRs from forks; keep dependencies pinned through Cargo.lock and
-  package-lock.json; and review new dependencies in PRs. If FOLO ever accepts outside contributions, move CI to a
-  dedicated account or VM with no developer credentials (or back to GitHub-hosted runners) first.
-- An offline self-hosted runner does not trigger the fallback: its jobs queue (up to 24 h). If the dev PC is off
-  for long, delete `RUNS_ON_WINDOWS` to run the Windows jobs on GitHub-hosted runners (which have no GPU).
+## Self-hosted runners
+- **Security.** A self-hosted runner executes the code of a pull request (tests, build scripts, npm lifecycle
+  scripts) with the runner account's access to that machine, and its persistent target dir carries build output from
+  one run to the next. That is acceptable for a private repository whose contributors already work on that machine.
+  It is not for a public one: **pull requests from forks must never reach a self-hosted runner.** For a pull
+  request from a fork every `runs-on` here ignores the variables and uses the hosted runner, but that is a
+  convenience, not a protection: a fork's pull request runs the fork's copy of the workflow files, and that copy can
+  name any runner registered to the repository. So before a repository with these workflows goes public, **remove
+  the self-hosted runners from it** (Settings, Actions, Runners) and delete `RUNS_ON_LINUX` and `RUNS_ON_WINDOWS`;
+  deleting the variables alone is not enough. If a public repository must keep one, put it in a dedicated account or
+  VM with no credentials and nothing worth keeping, and require approval for every outside contributor's workflow
+  runs (Settings, Actions, General). Keep dependencies pinned through `Cargo.lock` and `package-lock.json`,
+  and review new dependencies in pull requests.
+- Status: `gh api repos/<owner>/<repo>/actions/runners -q '.runners[] | .name + " " + .status'`.
+- A Windows runner needs Git for Windows' `bin` and `usr\bin` on its PATH (actions such as `dtolnay/rust-toolchain`
+  run bash); set it in the runner's `.env` file (`PATH=...`), which the runner reads at start. Start it again after a
+  reboot.
+- An offline self-hosted runner does not trigger the fallback: its jobs queue (up to 24 h). If the machine is off for
+  long, delete the variable so the jobs run on GitHub-hosted runners.
 
 ## Unstable self-hosted Windows host
-The dev PC (an i7-14700KF) occasionally crashes rustc or rustfmt under heavy parallel load (`STATUS_ACCESS_VIOLATION`
-0xc0000005, `STATUS_ILLEGAL_INSTRUCTION` 0xc000001d, `STATUS_STACK_BUFFER_OVERRUN` 0xc0000409), a pattern consistent
-with the Intel 13th/14th-gen instability issue. Until the host is fixed (BIOS / microcode update), the Windows steps in
-`ci.yml`, `desktop.yml` and `release.yml` (its Windows `cargo build` steps) run through `tools/ci-retry.sh`, which on
-self-hosted runners retries a step once **only when its output shows one of those crash codes**, and logs a warning.
-Compile errors and failing (including flaky) tests are never retried.
+The maintainers' self-hosted Windows machine (an i7-14700KF) occasionally crashes rustc or rustfmt under heavy
+parallel load (`STATUS_ACCESS_VIOLATION` 0xc0000005, `STATUS_ILLEGAL_INSTRUCTION` 0xc000001d,
+`STATUS_STACK_BUFFER_OVERRUN` 0xc0000409), a pattern consistent with the Intel 13th/14th-gen instability issue. The
+Windows steps in `ci.yml`, `desktop.yml` and `release.yml` (its Windows `cargo build` steps) therefore run through
+`tools/ci-retry.sh`, which on self-hosted runners retries a step once **only when its output shows one of those crash
+codes**, and logs a warning. Compile errors and failing (including flaky) tests are never retried, and on hosted
+runners nothing is.

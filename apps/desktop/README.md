@@ -11,7 +11,6 @@ build them. See `docs/ARCHITECTURE.md` (Front ends, folo-ui) and `docs/API.md` (
 ## Run
 
 ```powershell
-$env:CARGO_TARGET_DIR = "D:\folo-build\desktop"   # keep build output off C:
 cargo run                                          # connects to or starts folo serve (real store, bare)
 cargo run -- --server http://127.0.0.1:7878        # a specific server
 cargo run -- --mock                                # built-in demo data
@@ -19,6 +18,8 @@ cargo run -- --theme light
 cargo run -- --scenario run-live+hover             # a fixed, deterministic state (see below)
 cargo run -- --help                                # every option (`--version`: the version); prints and exits
 ```
+
+Build output goes to `target\` unless `CARGO_TARGET_DIR` names another folder; the tools below look there too.
 
 Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1–5` screens · `Ctrl 6` benchmarks · `Ctrl ,` settings ·
 `Ctrl Shift L` theme · `F11` full screen · `Alt ←` back · `Esc` close or go up · `Tab` / arrows move focus ·
@@ -143,7 +144,7 @@ on your desktop take the request and open their window on your screen.
   visible window of the process that a display shows a part of, and `Assert-FoloOffscreen $p` kills the
   app and throws when that list is not empty or the app took the foreground. Guard with it after every
   step that could open something: a check of the app's window alone misses a dialog, which is a window
-  of its own (a file dialog once stayed on the owner's screen for minutes that way).
+  of its own (a file dialog once stayed on the screen for minutes that way).
 - `sandbox-run.ps1`: runs a command or an exe on a private Win32 desktop that is never shown, inside a job
   object that kills what it started; output in a log printed at the end, exit code the command's (124 on a
   timeout). The checks' `-Sandbox` modes and `win_smoke`'s sandbox checks use it.
@@ -232,7 +233,7 @@ tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://12
 Shots are headless: the scripts run `folo-desktop --scenario … --shot <png>`, which renders on folo-ui's headless
 platform (no window, no cursor, no focus), settles animations on a fake clock and writes the frame; one takes
 well under a second. `-Width` / `-Height` are the window's logical size and `-Scale` its scale factor, 1.5 by
-default: the dev PC's display, at which every design review has been shot (the PNG is 1920 x 1200 at the default
+default: our test machine's display, at which every design review has been shot (the PNG is 1920 x 1200 at the default
 1280 x 800). `shoot.ps1` runs `$CARGO_TARGET_DIR/debug/folo-desktop.exe` and `shoot-all.ps1` the release build (the debug one
 if there is none) unless `-Exe` names another.
 
@@ -246,9 +247,9 @@ their data; an unreachable server shows the unreachable state. Always give `--se
 ### Window check
 
 ```powershell
-tools\window-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe -Sandbox          # private desktop, about a minute
-tools\interact-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe                  # off screen; -Sandbox -Clipboard adds copy and paste (overwrites your clipboard)
-tools\chrome-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe -Offscreen         # or -Sandbox
+tools\window-check.ps1 -Exe target\release\folo-desktop.exe -Sandbox          # private desktop, about a minute
+tools\interact-check.ps1 -Exe target\release\folo-desktop.exe                  # off screen; -Sandbox -Clipboard adds copy and paste (overwrites your clipboard)
+tools\chrome-check.ps1 -Exe target\release\folo-desktop.exe -Offscreen         # or -Sandbox
 ```
 
 `window-check.ps1` drives the window chrome and prints PASS or FAIL per step: the breadcrumbs and search field
@@ -276,7 +277,8 @@ answers over each caption area, the top edge and the page, and a non-client pres
 Minimize and Close, with any `--scenario` (an overlay open). It cannot drag. `interact-check.ps1` covers the
 page itself (Tools, above). All three find the window by its process and kill what they start by PID.
 
-`shots/` is gitignored. Design reviews score the shots against `REVIEW_RUBRIC.md`; `HILLCLIMB.md` logs each round.
+`shots/` is gitignored. `notes/REVIEW_RUBRIC.md` and `notes/HILLCLIMB.md` are the record of the design review rounds:
+the rubric each round's shots were scored against, and the log of each round.
 
 ## folo-ui
 

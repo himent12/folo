@@ -47,4 +47,11 @@ when you adapt another file.
 | `raster/sprite.rs` | `platform/windows/alpha_correction.hlsl` (glyph contrast and gamma correction) |
 | `elements/anchored.rs`, `elements/uniform_list.rs`, `elements/text.rs`, `elements/animation.rs` | `elements/anchored.rs`, `elements/uniform_list.rs`, `elements/text.rs`, `elements/animation.rs` (layout, measure and scroll rules) |
 
+The FOLO Desktop app (`apps/desktop/src/`, outside folo-ui) has one adapted file, which says so in its module
+docs:
+
+| FOLO Desktop file (`apps/desktop/src/`) | GPUI source (`crates/gpui/`) |
+| --- | --- |
+| `input.rs` | `examples/input.rs` (the single-line text input: IME, selection, clipboard, placeholder) |
+
 The Apache License 2.0 text is in the repository root, `LICENSE-APACHE`.

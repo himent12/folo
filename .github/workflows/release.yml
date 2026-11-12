@@ -62,7 +62,7 @@ env:
 
 jobs:
   plan:
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.head.repo.fork && vars.RUNS_ON_LINUX) || '"ubuntu-latest"') }}
     timeout-minutes: 10
     outputs:
       version: ${{ steps.plan.outputs.version }}
@@ -80,9 +80,10 @@ jobs:
           # Tag builds and dispatches (unless `macos` is off) include macOS; PRs never do. The repository variable
           # FOLO_RELEASE_MACOS=false skips it everywhere, e.g. while GitHub-hosted runners are unavailable.
           MACOS: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' && inputs.macos) && vars.FOLO_RELEASE_MACOS != 'false' }}
-          # JSON runs-on values for the matrix (empty: GitHub-hosted, see the fallbacks below).
-          RUNS_ON_LINUX: ${{ vars.RUNS_ON_LINUX }}
-          RUNS_ON_WINDOWS: ${{ vars.RUNS_ON_WINDOWS }}
+          # JSON runs-on values for the matrix (empty: GitHub-hosted, see the fallbacks below; always empty for a
+          # pull request from a fork, as in ci.yml).
+          RUNS_ON_LINUX: ${{ !github.event.pull_request.head.repo.fork && vars.RUNS_ON_LINUX || '' }}
+          RUNS_ON_WINDOWS: ${{ !github.event.pull_request.head.repo.fork && vars.RUNS_ON_WINDOWS || '' }}
         run: |
           set -euo pipefail
           # The single source of truth: [workspace.package] version in the root Cargo.toml.
@@ -123,7 +124,7 @@ jobs:
   # FOLO Studio with folo-wasm (docs/WASM.md) in it, so the embedded Playground can run models in the browser:
   # scripts/build-wasm.sh writes web/public/folo-wasm/ (SIMD128, wasm-opt -O3) and `vite build` copies it to dist/.
   web:
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.head.repo.fork && vars.RUNS_ON_LINUX) || '"ubuntu-latest"') }}
     timeout-minutes: 45
     env:
       # Pinned: binaryen's wasm-opt, verified against the release's published checksum.
@@ -332,7 +333,7 @@ jobs:
   # A separate job: a desktop failure never blocks the CLI release (the release job only requires `cli`).
   desktop:
     needs: plan
-    runs-on: ${{ fromJSON(vars.RUNS_ON_WINDOWS || '"windows-latest"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.head.repo.fork && vars.RUNS_ON_WINDOWS) || '"windows-latest"') }}
     timeout-minutes: 90
     defaults:
       run:
@@ -395,7 +396,7 @@ jobs:
     needs: [plan, cli, desktop]
     # Runs even when `desktop` failed; needs every required CLI build (optional legs use continue-on-error).
     if: ${{ !cancelled() && needs.cli.result == 'success' }}
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.head.repo.fork && vars.RUNS_ON_LINUX) || '"ubuntu-latest"') }}
     timeout-minutes: 15
     # One writer per release at a time, whatever the ref: a tag push and dispatches from different branches for the
     # same tag would otherwise edit, upload and prune the same draft at once and mix assets of different commits.
@@ -544,9 +545,9 @@ jobs:
       matrix:
         include:
           - os: linux
-            runs-on: ${{ vars.RUNS_ON_LINUX || '"ubuntu-22.04"' }}
+            runs-on: ${{ (!github.event.pull_request.head.repo.fork && vars.RUNS_ON_LINUX) || '"ubuntu-22.04"' }}
           - os: windows
-            runs-on: ${{ vars.RUNS_ON_WINDOWS || '"windows-latest"' }}
+            runs-on: ${{ (!github.event.pull_request.head.repo.fork && vars.RUNS_ON_WINDOWS) || '"windows-latest"' }}
     name: install-test (${{ matrix.os }})
     runs-on: ${{ fromJSON(matrix.runs-on) }}
     timeout-minutes: 20

@@ -10,7 +10,8 @@ pixel-identically to the Svelte app before that one was removed (CHANGELOG, "Stu
 - `runtime/` — the runtime, imported as `fw` (`fw/internal` is what compiled code calls).
 - `compiler/` — the Vite plugin: JSX transform (oxc-parser + magic-string, exact source maps), scoped CSS
   (postcss + postcss-selector-parser, mirrors Svelte 5's analyzer and transformer), `$icons/<name>` lucide modules
-  (from `icons/lucide.json`, vendored; `tools/icons.mjs --add` vendors a newly imported icon).
+  (from `icons/lucide.json`, vendored under Lucide's ISC license in `icons/LICENSE-lucide.txt`;
+  `tools/icons.mjs --add` vendors a newly imported icon).
 - `jsx.d.ts`, `icons.d.ts` — JSX types (Svelte 5's element attribute types, vendored in `vendor/`, plus fw's
   directives).
 - `testing.ts` — `render()` / `flush()` / `fromHTML()` for vitest + happy-dom.

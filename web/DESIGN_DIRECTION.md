@@ -145,7 +145,7 @@ under a coarse pointer (touch: 44 px targets, 16 px field text, the stricter cas
 keyboard sets `touch: false`. Each state gets the scene's own
 setup; the page clock is paused at the fixed time before the page loads, so a state never depends on how busy the
 machine is (in the shoot it keeps running in real time). Several states run at once (`FOLO_QA_JOBS`, default up to 8):
-about two minutes for some 360 states on the dev PC; `FOLO_QA_SHARD=2/3` checks every third state from the second
+about two minutes for some 360 states on our test machine; `FOLO_QA_SHARD=2/3` checks every third state from the second
 (CI's three `qa` jobs). It uses the
 installed Chrome, else Playwright's Chromium (`npx playwright-core install --only-shell chromium`;
 `FOLO_SHOOT_BROWSER=chromium` forces it, `chrome` refuses the fallback). Desktop and laptop are left to the shoot.

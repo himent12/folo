@@ -2,7 +2,7 @@
 
 How close `folo-desktop --shot` (headless, CPU renderer) is to the GPUI 0.2.2 app, what rule each part follows,
 and every pixel that still differs, with its cause. The reference is the GPUI build's off-screen captures
-(`D:/folo-build/dfw-baseline/shots/a`: 98 pairs, scale 1.5; its own run-to-run noise is at most 6 levels, in
+(kept outside the repository: 98 pairs, scale 1.5; its own run-to-run noise is at most 6 levels, in
 the breathing status dot and ±1 inside some thumbnails).
 
 ## Measuring
@@ -26,7 +26,7 @@ so a `--fail-pct` gate cannot pass on nothing.
 | final (`desktop/fw-finish`, merged) | 0.0040 | 0.0000 | 0.0001 | 71 | 0.0132 | 0.0000 | 62 | 102 |
 | final, against the recaptured reference | 0.0040 | 0.0000 | 0.0001 | 76 | 0.0179 | 0.0000 | 68 | 102 |
 
-The recaptured reference (`D:/folo-build/dfw-finish-shots/gpui-dib-all`, 2026-11-11) is the GPUI build captured
+The recaptured reference (2026-11-11, also outside the repository) is the GPUI build captured
 again with the fixed `capture.ps1` (U, below). Against it the six pairs whose only difference was the capture
 artifact are clean; one pair (`1280x800/toast`) picks up the breathing dot's phase instead (D, 9 levels), and the
 status dots of the others land at other phases (the worst % > 2 is a dot). Every final number above is for the

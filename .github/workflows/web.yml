@@ -15,7 +15,7 @@ concurrency:
 # Runners: see ci.yml. RUNS_ON_LINUX holds a JSON runs-on value; unset falls back to GitHub-hosted Linux.
 jobs:
   check:
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.head.repo.fork && vars.RUNS_ON_LINUX) || '"ubuntu-latest"') }}
     timeout-minutes: 15
     defaults:
       run:
@@ -39,7 +39,7 @@ jobs:
       matrix:
         shard: [1, 2, 3]
     name: qa (${{ matrix.shard }}/3)
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.head.repo.fork && vars.RUNS_ON_LINUX) || '"ubuntu-latest"') }}
     timeout-minutes: 15
     defaults:
       run:

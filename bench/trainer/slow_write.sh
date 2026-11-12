@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Slow-disk A/B of the checkpoint writer (docs/hill/r2-trainer.md, PR 5) on the row-10 set, 4 epochs: a build with
+# Slow-disk A/B of the checkpoint writer (docs/notes/hill/r2-trainer.md, PR 5) on the row-10 set, 4 epochs: a build with
 # bench/trainer/slow_write.patch applied, which reads two environment variables in train/writer:
 #   FOLO_TMP_WRITE_DELAY_MS=<ms>  sleep that long at the start of every epoch's checkpoint write (a slow disk)
 #   FOLO_TMP_SYNC=1               write on the training thread, as main did (the path taken when no thread starts)

@@ -173,11 +173,14 @@ function rewriteHtml(html: string, ctx: LinkContext, where: string): string {
       at = HTML_ATTR.lastIndex;
       const [whole, sp, name, eq, dq, sq, bare] = m;
       const lower = name.toLowerCase();
-      if (!eq || (lower !== 'href' && lower !== 'src')) {
+      const value = dq ?? sq ?? bare ?? '';
+      // A `srcset` naming one file (a <picture>'s <source>) is checked like `src`; one with several candidates or
+      // descriptors is left alone.
+      const single = lower === 'srcset' && !/[\s,]/.test(value.trim());
+      if (!eq || (lower !== 'href' && lower !== 'src' && !single)) {
         out += whole;
         continue;
       }
-      const value = dq ?? sq ?? bare ?? '';
       const quote = sq !== undefined ? "'" : '"';
       const url = lower === 'href' ? resolveHref(value, ctx, where) : (resolveImage(value, ctx, where)?.url ?? null);
       out += url === null ? whole : `${sp}${name}${eq}${quote}${url}${quote}`;
@@ -185,6 +188,16 @@ function rewriteHtml(html: string, ctx: LinkContext, where: string): string {
     return out + part.slice(at);
   });
 }
+
+/**
+ * `<picture>` with a dark `<source>` and a light `<img>` is how a Markdown file follows GitHub's theme. The site has
+ * its own theme switch, which a media query cannot see, so each such picture becomes two images, one per theme, and
+ * the stylesheet shows the one for the theme in use (`img.theme-light`, `img.theme-dark` in prose.css).
+ */
+const THEMED_PICTURE =
+  /<picture>\s*<source\s+media="\(prefers-color-scheme:\s*dark\)"\s+srcset="([^"\s]+)"\s*\/?>\s*<img\s+src="([^"]+)"([^>]*?)\s*\/?>\s*<\/picture>/g;
+const themedPictures = (html: string) =>
+  html.replace(THEMED_PICTURE, (_m, dark: string, light: string, rest: string) => `<img class="theme-light" src="${light}"${rest}><img class="theme-dark" src="${dark}"${rest}>`);
 
 const MENTION = /(?<![\w/.-])((?:docs\/[A-Z][A-Z0-9_-]*\.md)|(?:examples\/[a-z0-9_-]+\/README\.md))(#[a-z0-9_-]+)?(?![\w/-])/g;
 
@@ -198,7 +211,7 @@ function linkTokens(TokenCtor: new (type: string, tag: string, nesting: -1 | 0 |
 /** Rewrites links and images in place, and links plain mentions of other pages. */
 export function rewriteLinks(tokens: Token[], ctx: LinkContext): void {
   for (const block of tokens) {
-    if (block.type === 'html_block') block.content = rewriteHtml(block.content, ctx, lineOf(block));
+    if (block.type === 'html_block') block.content = rewriteHtml(themedPictures(block.content), ctx, lineOf(block));
     if (block.type !== 'inline' || !block.children) continue;
     const where = lineOf(block);
     const TokenCtor = block.constructor as new (type: string, tag: string, nesting: -1 | 0 | 1) => Token;

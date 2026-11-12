@@ -1,5 +1,5 @@
 //! Times opening a dataset (`folo_data::open_with`), for the scan cache's numbers (docs/DATA.md, Scan cache;
-//! docs/hill/r2-trainer.md).
+//! docs/notes/hill/r2-trainer.md).
 //!
 //! ```sh
 //! SCAN_CACHE=D:/scan-cache cargo run -p folo-data --release --example open_time -- D:/folo-data/coco [noverify]

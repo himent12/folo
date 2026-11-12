@@ -194,9 +194,9 @@ fn rule3_topk_keeps_best_aligned() {
     let a = assign(&scores, 1, &preds, &anchors, &[gt], &[0], &TalConfig::default());
     assert_eq!(a.num_fg, 10);
     assert!(!a.fg_mask[0] && !a.fg_mask[1] && a.fg_mask[2..].iter().all(|&f| f));
-    for i in 2..12 {
+    for (i, &score) in a.target_scores.iter().enumerate().take(12).skip(2) {
         let want = ((i + 1) as f64 / 12.0).sqrt() / 1.0f64.sqrt();
-        assert!(close(a.target_scores[i], want, 1e-6), "anchor {i}");
+        assert!(close(score, want, 1e-6), "anchor {i}");
     }
     // topk = 3 with equal scores: ties go to the lowest anchor indices.
     let a = assign(&[0.5; 12], 1, &preds, &anchors, &[gt], &[0], &with_topk(3));

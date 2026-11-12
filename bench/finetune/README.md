@@ -41,7 +41,7 @@ on. Counts are after the layout step (`datasets.json` has the per-class counts):
 Considered and left out: Ultralytics' `african-wildlife` (its source on Kaggle states no licence), Oxford-IIIT Pet
 and PASCAL VOC subsets (larger than "a few hundred images" without an arbitrary cut).
 
-`python bench/finetune/datasets.py fetch --root D:/folo-data/finetune` lays each one out as
+`python bench/finetune/datasets.py fetch --root datasets/finetune` lays each one out as
 `<root>/<name>/{data.yaml, images/<split>/, labels/<split>/, annotations/instances_<eval split>.json, meta.json}`:
 images byte for byte; YOLO labels rewritten from the parsed boxes (6 decimals; BCCD's VOC XML converted with the
 convention of Ultralytics' VOC.yaml, its 2 inverted boxes dropped; boxes are clipped to the image and exact
@@ -77,32 +77,33 @@ it differently). Nothing but the code and `datasets.json` is committed.
   `tool_reported` for reference and never compared.
 - **Training time** is the wall time of training (all epochs, with the per-epoch validation both tools run): FOLO
   from the run's `started` to `finished`, Ultralytics around `train()`.
-- **Hardware**: the real matrix runs on rented RunPod GPUs of one type (FOLO through its own cloud feature, one pod
-  per run; Ultralytics on one plain PyTorch pod). Nothing trains on the dev PC's GPU: smoke runs there train on
-  the CPU (`run_folo.py --device cpu`, `run_ultralytics.py --device cpu`; `--device` has no default in
-  `run_ultralytics.py` for that reason). Each result records the device it trained on.
+- **Hardware**: the matrix below ran on rented RunPod GPUs of one type (FOLO through its own cloud feature, one pod
+  per run; Ultralytics on one plain PyTorch pod). The harness runs anywhere `folo` does, on a local GPU or, for a
+  smoke run, on the CPU (`run_folo.py --device cpu`, `run_ultralytics.py --device cpu`). A local run needs an
+  explicit `--device` in both runners, so none lands on a GPU by default. Each result records the device it trained
+  on.
 
 ## Running it
 
 ```sh
 # datasets (any machine)
-python bench/finetune/datasets.py fetch --root D:/folo-data/finetune
+python bench/finetune/datasets.py fetch --root datasets/finetune
 
 # FOLO: a folo serve as the control plane of a RunPod connection (docs/CLOUD.md), one pod per run
 folo weights pull folo-n-coco-v2
-folo serve --port 7979 --data-dir D:/folo-data/runs-finetune/serve
-python bench/finetune/run_folo.py --server http://127.0.0.1:7979 --data-root D:/folo-data/finetune \
-    --work-dir D:/folo-data/runs-finetune/folo --results bench/finetune/results --folo folo \
+folo serve --port 7979 --data-dir runs/finetune/serve
+python bench/finetune/run_folo.py --server http://127.0.0.1:7979 --data-root datasets/finetune \
+    --work-dir runs/finetune/folo --results bench/finetune/results --folo folo \
     --compute <connection id>:<offer id> --max-hours 0.5 --parallel 3 --budget-usd 1.0
 # a CPU smoke run on that server instead (into a scratch results folder)
-python bench/finetune/run_folo.py ... --results D:/folo-verify/smoke --datasets medical-pills --seeds 0 \
+python bench/finetune/run_folo.py ... --results runs/finetune/smoke --datasets medical-pills --seeds 0 \
     --epochs 2 --imgsz 320 --device cpu --val-device cpu
 
 # Ultralytics: on a pod, with run_ultralytics_pod.sh next to this folder's .py files (WEIGHTS=yolo26s.pt: an s row)
 SEEDS=0,1,2 EPOCHS=100 SERVE_PORT=8888 bash run_ultralytics_pod.sh /workspace/finetune
 # or anywhere else; a CPU smoke run:
-python bench/finetune/run_ultralytics.py --data-root D:/folo-data/finetune --work-dir D:/folo-verify/smoke-ul \
-    --results D:/folo-verify/smoke --weights yolo26n.pt --datasets medical-pills --seeds 0 --epochs 2 \
+python bench/finetune/run_ultralytics.py --data-root datasets/finetune --work-dir runs/finetune/smoke-ul \
+    --results runs/finetune/smoke --weights yolo26n.pt --datasets medical-pills --seeds 0 --epochs 2 \
     --imgsz 320 --device cpu
 
 # the table

@@ -1,5 +1,5 @@
 # Alternate benchmark binaries run by run on Windows, at a process priority and CPU affinity, and report how many
-# cores the rest of the machine used during each run (docs/hill/cpu.md, docs/BENCHMARKS.md "Per-core efficiency").
+# cores the rest of the machine used during each run (docs/notes/hill/cpu.md, docs/BENCHMARKS.md "Per-core efficiency").
 #
 #   powershell -File tools/bench-ab.ps1 -Runs "base=D:\a\bench.exe;new=D:\b\bench.exe" -Rounds 3 `
 #       -Threads 8 -Affinity 5555 -Env "FOLO_BENCH_ITERS=60"

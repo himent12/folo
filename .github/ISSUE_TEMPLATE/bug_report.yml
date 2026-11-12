@@ -1,0 +1,40 @@
+name: Bug report
+description: Something FOLO did wrong, or a command, screen or API call that failed
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran or clicked, what you got, and what you expected. Paste the error with its code and hint (add `--json` to a command to get them).
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of commands that shows it. `folo dataset synth` makes a dataset in a second if you need one.
+      render: sh
+  - type: textarea
+    id: doctor
+    attributes:
+      label: folo doctor --json
+      description: The version, OS, CPU and GPU adapters.
+      render: json
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      multiple: true
+      options:
+        - CLI
+        - Training
+        - Inference or export
+        - Server or HTTP API
+        - MCP
+        - FOLO Studio
+        - FOLO Desktop
+        - In the browser (wasm)
+        - Docs

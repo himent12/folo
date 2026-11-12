@@ -68,7 +68,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
-  "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches", "queue_control", "weights_onnx"],
+  "data_dir"?: "/home/me/.folo", "features": ["export_onnx_switches", "queue_control", "weights_onnx"],
   "capabilities"?: Capabilities, "gpu_pool"?: { "device", "live_bytes", "cached_bytes", "peak_live_bytes" } }`
   (`util` in `0..1`; CPU utilisation is measured since the previous call. `data_dir` is the real server's
   `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
@@ -200,7 +200,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 
 ```jsonc
 // Dataset
-{ "id": "ds_8f2c", "name": "shapes", "path": "D:/data/shapes", "format": "yolo|coco",
+{ "id": "ds_8f2c", "name": "shapes", "path": "/data/shapes", "format": "yolo|coco",
   "classes": ["circle", "square", "triangle"], "created": "2026-11-08T06:00:00Z",
   "splits": { "train": 800, "val": 200, "test": 0 },
   "stats": {                                   // present on GET /api/datasets/{id} and on creation
@@ -646,13 +646,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 Speed measured on this server, so clients can show this machine's numbers instead of static ones, and say where each
 number comes from. Servers with these endpoints list `throughput`, `run_estimate` and `benchmark` in `/api/system`'s
 `features`. Every number carries a `source`: `measured` (this server: training runs, `/api/predict` calls, benchmark
-probes) or `reference` (docs/BENCHMARKS.md's FOLO measurements on the dev machine, an RTX 4080 SUPER and an
+probes) or `reference` (docs/BENCHMARKS.md's FOLO measurements on our test machine, an RTX 4080 SUPER and an
 i7-14700KF, scaled by compute to other sizes; `note` says which and how).
 
 - `GET /api/system/throughput` → `ThroughputTable`: `training` rows keyed by (`device`, `arch`, `imgsz`, `batch`,
   `amp`) and `inference` rows keyed by (`device`, `arch`, `imgsz`, `precision`, `tensor_cores`; `batch` is always 1).
   Every row has a flat `imgs_per_s` (training: the mosaic epochs' median, else the close-mosaic epochs'; inference:
-  `1000 / latency_ms`) and `measured_on`, the adapter or CPU the number was measured on (a reference's is the dev
+  `1000 / latency_ms`) and `measured_on`, the adapter or CPU the number was measured on (a reference's is our test
   machine's, whatever this server has; `device` is the device of this server the row is for). Measured rows come
   first, newest first; then a `reference` row for every arch at 640 and 320 px (batch 16), f32 and (GPU) amp / f16,
   on the server's `device: auto` device and on the CPU, unless a measured row of that very adapter or CPU (`device`
@@ -690,7 +690,7 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
     cloud config never uses this server's measurements: it is the reference (`source: reference`, `confidence:
     low`, `device` `cloud`, `device_name` the offer's GPU, `est_peak_vram_bytes` from the reference model), and
     `basis.note` says the reference machine may be faster or slower than that GPU. Errors as `POST /api/runs`.
-- `GET /api/runs/{id}/cli` → `{ "cli": "folo train --data D:/data/fasteners --weights folo-n-coco --head o2m --epochs 15
+- `GET /api/runs/{id}/cli` → `{ "cli": "folo train --data /data/fasteners --weights folo-n-coco --head o2m --epochs 15
   --amp", "argv": ["folo", "train", ...] }`: the CLI command of a run's config, built from the same `TrainConfig`
   mapping the server trains with (a test parses it with the real `folo` arguments and compares the configs).
   `--data` is the dataset's folder on the server's machine, with `--format yolo|coco` when it was registered with
@@ -816,7 +816,7 @@ exported more than once.
   Code `haiku` at `medium`, Codex its own default model at `low` (docs/LABELING.md has the measurements behind
   them).
 - `GET /api/label/jobs` → `{ "jobs": [LabelJob] }` (newest first)
-- `POST /api/label/jobs` body `{ "name", "classes": ["car", "person"], "instructions"?: "", "path"?: "D:/photos" }`
+- `POST /api/label/jobs` body `{ "name", "classes": ["car", "person"], "instructions"?: "", "path"?: "/data/photos" }`
   → `201 LabelJob`. `name` must not be blank (one line of at most 100 characters); `classes`: 1 to 80 distinct,
   non-blank names of at most 64 characters (no `,`, `:`, line breaks or other control characters; they are
   compared without case); `instructions`:
@@ -833,7 +833,7 @@ exported more than once.
 - `POST /api/label/jobs/{id}/images` → `{ "added": [LabelImage], "skipped": [{ "file", "reason" }], "job": LabelJob }`.
   Either `multipart/form-data` with one `image` file part per image (JPEG, PNG, BMP, WebP; up to 64 MiB per
   request, so a client sends a large set in several requests; the files are stored in the job's folder), or JSON
-  `{ "path": "D:/photos" }` for a folder on the server's machine (searched recursively, in path order; or one
+  `{ "path": "/data/photos" }` for a folder on the server's machine (searched recursively, in path order; or one
   image file), whose images are read in place, not copied. A file that is not a readable image, an upload with
   the bytes of an image the job already has, or a folder image it already has (the same file) is listed in
   `skipped` with the reason instead of failing the request; so is everything past the job's limit of 10000

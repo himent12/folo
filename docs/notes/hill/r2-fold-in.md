@@ -16,13 +16,13 @@ where a number differs from a lane's own. The results are folded into docs/BENCH
   the `gpu` bench file only (`crates/folo-vision/benches/gpu.rs`), none to library code:
   - the merged bench's latency warm-up (#203: at least 25 calls *and* a second of back-to-back calls before a
     synchronised latency row). 647b981f's bench warmed up for 25 calls (about 40 ms) after the idle second before
-    each section, so its batch-1 rows partly timed the GPU's clocks ramping back up (docs/hill/r2-gpu-dispatch.md,
+    each section, so its batch-1 rows partly timed the GPU's clocks ramping back up (docs/notes/hill/r2-gpu-dispatch.md,
     Pool PR 2). With the patch both builds' batch-1 rows are steady state;
   - a count of the pool buffers created per training step (`PoolStats::misses` over the 10 measured steps), which
     the merged bench prints.
 - Machine: as docs/BENCHMARKS.md, Machine (RTX 4080 SUPER, driver 621.01, i7-14700KF). The PC had rebooted at
   06:34. Lane trainer2 was still working (CPU builds, one GPU hold), CI ran `cargo test --workspace` twice on the
-  local runners, and the user had a game open for part of the morning: every run records the load it saw, and the
+  local runners, and a game was open for part of the morning: every run records the load it saw, and the
   sections that were loaded were run again later.
 
 ## Method
@@ -137,7 +137,7 @@ from the game in `base` round 2, 1.1–9.2 cores). img/s at the median step:
   run.
 - The AMP step runs after the f32 step in the same process, so the pool already holds the f32 step's buffers: 0 new
   buffers per AMP step on both builds here, where an AMP step in a process of its own churned 46 per step on
-  647b981f's pool (docs/hill/r2-gpu-dispatch.md, Pool PR 1).
+  647b981f's pool (docs/notes/hill/r2-gpu-dispatch.md, Pool PR 1).
 - The clipped folo-s AMP and the MuSGD rows of 647b981f have slow rounds (143, 72, 128, 237 img/s) that coincide
   with the game's load in `train-clip/base-r3` and `train-musgd/base-r2`; the medians are of the other rounds' level.
 
@@ -235,7 +235,7 @@ the 2026-11-09 fold-in were not re-run.
 
 ## Learning (quoted, not re-run)
 
-From docs/hill/r2-learn.md, Headline (three seeds per side unless noted): COCO proxy P1 (folo-n from scratch, 320 px,
+From docs/notes/hill/r2-learn.md, Headline (three seeds per side unless noted): COCO proxy P1 (folo-n from scratch, 320 px,
 20 epochs) AP 0.0757 (647b981f `auto`) → **0.1234** (`auto` rule 5), Ultralytics 8.4.198's single runs MuSGD 0.1133,
 SGD 0.0853; shapes gate mAP50-95 0.892 → **0.934** (one seed; bar 0.75); BCCD fine-tune test AP 0.607 → **0.625**
 (yolo26n 0.626); medical-pills / signature / brain-tumor 0.804 / 0.989 / 0.452 → 0.807 / 0.989 / 0.450 (yolo26n

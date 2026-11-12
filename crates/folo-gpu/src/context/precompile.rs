@@ -376,7 +376,7 @@ pub const ENV_PRECOMPILE_THREADS: &str = "FOLO_GPU_PRECOMPILE_THREADS";
 /// The most precompile workers by default. On the dev machine (28 threads, shared) a warm start's training thread
 /// waited 0.013-0.015 s with 12 workers in every round, but up to 0.77 s with 28 (pipeline creation contends in the
 /// driver: the workers' summed compile time grew from 2 s to 31 s), and 0.12-0.36 s with 6 or 3; with the driver's
-/// cache cold, 12 workers left 4.4-4.8 s on the training thread against 3.4-4.1 s with 28 (docs/hill/r2-trainer.md).
+/// cache cold, 12 workers left 4.4-4.8 s on the training thread against 3.4-4.1 s with 28 (docs/notes/hill/r2-trainer.md).
 pub const DEFAULT_MAX_PRECOMPILE_THREADS: usize = 12;
 
 /// Workers per list: [`ENV_PRECOMPILE_THREADS`], else half the cores up to [`DEFAULT_MAX_PRECOMPILE_THREADS`].
