@@ -43,8 +43,8 @@ impl Services {
         Services { offscreen, launcher }
     }
 
-    /// Whether the gate is closed.
-    #[cfg(test)]
+    /// Whether the gate is closed (the Win32 backend's test reads it).
+    #[cfg(all(test, windows))]
     pub(crate) fn offscreen(&self) -> bool {
         self.offscreen
     }
