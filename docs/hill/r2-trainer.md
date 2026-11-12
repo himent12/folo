@@ -381,3 +381,43 @@ FOLO cache shared and warm, 3.0-12.0 other cores): epoch-2 sustained main **372.
 Same checkpoints: two runs of main and one of the PR (row 10, 2 epochs, default seed): every tensor of `last.folo` and
 `best.folo` byte-identical across all three, and `samples/epoch_002.json` identical; the headers differ only in
 `folo.created` and the run name inside `folo.train` (the runs had different names).
+
+## Item 3: `folo val` on COCO (not done: the limit is the forward passes)
+
+Baseline (`ab.py val --bin base=<647b981f> --bin main=<d279a797> --rounds 3 -- --model D:/folo-weights/folo-n-coco.folo
+--data D:/folo-data/coco --device gpu:0`, 11-20 other cores busy): 647b981f wall 8.9 s (8.5-11.3), main d279a797 **7.0 s**
+(6.6-10.9). AP on main is 0.4494464 / 0.30999136; 647b981f gives 0.44944638 / 0.30999148: the forward kernels changed by
+other lanes moved it in the 7th digit, so "identical AP" for this item means identical to main.
+
+Where the time is (a temporary build, not committed, timing both threads of `validate_counted`; 3 runs in one GPU lock
+hold, `D:/folo-data/runs-hill2/trainer2/bin/folo-valtrace.exe`):
+
+| run | wall | evaluation | main thread: loader wait / encode / blocked on the channel | post thread: add (of which download, which waits for the GPU) |
+|---|---|---|---|---|
+| 1 | 5.1 s | 4.1 s | 0.016 / 2.87 / 1.20 s | 3.92 s (3.56 s) |
+| 2 | 7.2 s | 6.6 s | 0.015 / 3.25 / 3.35 s | 6.47 s (6.06 s) |
+| 3 | 7.4 s | 6.8 s | 0.018 / 3.03 / 3.76 s | 6.63 s (6.26 s) |
+
+The post thread is the critical path, and nearly all of it is the readback of the candidate pairs waiting for the
+GPU to finish the batch's forward pass (157 batches of 32: 23-40 ms each). Host NMS + metrics are ~0.3-0.4 s in all,
+the loader never makes the forward wait, and the main thread's 3 s of encoding is overlapped. The run-to-run spread
+(4.1 vs 6.8 s of evaluation) is GPU speed (clocks, other processes on the GPU), not host work. Run 1 met the 6.5 s
+target; under load the wall stays at 7 s. Nothing cheap is left in this lane's files: the forward kernels are lane
+gpu-gemm's; rectangular batches (Ultralytics' val `rect`) would cut ~25% of COCO's pixels but change AP; a larger val
+batch may pick other GEMM tiles (AP at the 7th digit) and is a user option.
+
+## Leftovers (second wave), largest expected gain first
+
+1. **First-ever start without a kernel list** (no list for the kind at all: a new machine, a new model, first AMP
+   run): still 26-40 s of serial driver compile on the training thread. A fix needs deferred dispatch encoding in
+   folo-gpu `context/` (gpu-pool's files): `kernel()` returns at once with the bind group layout (cheap), the module
+   and pipeline compile on the precompile workers, and the batch records dispatches and encodes them at submit, waiting
+   only for pipelines it needs; with ~20 parallel driver compiles that would be the 3-5 s the list-kept rows show.
+2. **Tensor-core self-test kernels** (3 pipelines compiled when an AMP context is created, before any run can start a
+   precompile): ~10 ms warm, part of the 3-5 s with a cold driver cache. Compile them on the workers in parallel.
+3. **Precompile contention**: under heavy machine load 12 workers still left 0.27-0.65 s on the training thread (pipeline
+   creation contends in the driver). Ideas: order the list so the first step's kernels come first and stop the
+   workers from racing ahead (a window of N kernels ahead of the training thread), or per-worker pipeline caches.
+4. **`folo val`**: the GPU forward (see Item 3).
+5. **Checkpoint writes**: one write at a time means a write longer than an epoch (huge models on slow disks) still makes
+   the next epoch's end wait; a second pending snapshot would cost another host copy of the training state.
