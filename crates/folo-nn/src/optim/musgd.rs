@@ -303,10 +303,12 @@ impl Optimizer for MuSgd {
         c
     }
 
-    /// Also adopts the contract's step weights; a contract without `musgd` (the default weights, or a file
-    /// written before the key) means [`MuSgdWeights::default`].
+    /// Also adopts the contract's step weights when it has them. A contract without `musgd` (the default weights,
+    /// or a file written before the key) keeps the weights this optimizer was built with: [`MuSgd::new`]'s defaults,
+    /// or what the caller passed to [`MuSgd::with_weights`] (the trainer passes its `TrainConfig.musgd`, which is
+    /// how files that recorded custom weights only in `folo.train` resume with them).
     fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
-        let weights = c.musgd.unwrap_or_default();
+        let weights = c.musgd.unwrap_or(self.weights);
         weights.validate().map_err(|e| Error::Load(format!("folo.optim: {e}")))?;
         apply_group_contract(self, c)?;
         self.weights = weights;

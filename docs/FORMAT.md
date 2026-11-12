@@ -107,8 +107,10 @@ separately.
 ```
 `musgd` holds MuSGD's step weights (docs/MODEL.md §8.2, `train.musgd.muon` / `train.musgd.sgd`): both finite and
 `>= 0`, and only on a `"musgd"` contract. It is written only when the weights differ from the defaults 0.2 / 1.0, so a
-checkpoint with the default weights is byte-for-byte what it was before the key existed; an absent `musgd` means
-0.2 / 1.0. Resuming adopts the file's weights, like the group hyperparameters. A reader that predates the key rejects a
+checkpoint with the default weights is byte-for-byte what it was before the key existed. Resuming adopts the file's
+weights when it has them, like the group hyperparameters; without the key the optimizer keeps the weights it was
+built with (the trainer builds it from `folo.train`'s `musgd`, so a file that recorded custom weights only there
+resumes with them; `MuSgd::new` means 0.2 / 1.0). A reader that predates the key rejects a
 file that has it (unknown field) rather than continuing with other weights.
 Every model parameter appears in exactly one group. `lr` is the group's base LR, before the scheduler multiplier.
 Loaders must reject a checkpoint whose optimizer type or parameter set does not match the model being resumed.

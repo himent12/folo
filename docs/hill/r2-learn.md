@@ -77,7 +77,7 @@ warmup (0.1048 vs 0.1027 at 0, 0.1133 vs 0.1139 at 0.1), not distinguishable.
 | signature (val) | 0.9921 0.9874 0.9881 | 0.9873 0.9909 0.9874 | 0.9892 → 0.9885 | 0.9818 |
 | brain-tumor (val) | 0.4393 0.4563 0.4605 | 0.4649 0.4369 0.4470 | 0.4520 → 0.4496 | 0.4355 |
 
-AP50: pills 0.998 on every rule-4 seed (main 0.995), signature 1.000 for every run of both (saturated, 35 images),
+AP50: pills 0.997–0.998 for the rule-4 seeds (mean 0.998; main 0.995), signature 1.000 for every run of both (saturated, 35 images),
 brain-tumor 0.619 (main 0.613). Pills a little better, signature and brain-tumor level (differences of 0.001 and
 0.002, inside seed ranges of 0.004 and 0.03): no loss on the other three sets.
 

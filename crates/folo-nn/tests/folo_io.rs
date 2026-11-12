@@ -471,14 +471,19 @@ fn musgd_weights_resume_through_the_checkpoint() {
     save(&d, &dpath);
     assert!(optim_json(&dpath).get("musgd").is_none());
 
-    // A contract without the key (written before it) means the defaults, also into a run made with others.
+    // A contract without the key (written before it) keeps the weights the optimizer was built with: the defaults
+    // for `MuSgd::new`, the trainer's `TrainConfig.musgd` (passed to `with_weights`) for a run that recorded custom
+    // weights only in `folo.train`.
     let mut optim = optim_json(&path);
     optim.as_object_mut().unwrap().remove("musgd");
     map.insert("folo.optim".into(), optim.to_string());
     let legacy = rewrite(&map, &tensors).unwrap();
     let mut c = new_run_with(OptimKind::MuSgd, 78, w);
     legacy.resume(&c.model, c.opt.as_mut(), Some(&mut c.ema), Some(classes(3))).unwrap();
-    assert_eq!(c.opt.contract().musgd, None);
+    assert_eq!(c.opt.contract().musgd, Some(w), "built with the trainer's weights: kept");
+    let mut c = new_run(OptimKind::MuSgd, 79);
+    legacy.resume(&c.model, c.opt.as_mut(), Some(&mut c.ema), Some(classes(3))).unwrap();
+    assert_eq!(c.opt.contract().musgd, None, "built with the defaults: the defaults");
 
     // `musgd` belongs to MuSGD contracts only, and its weights are checked.
     optim["type"] = "sgd".into();
