@@ -115,7 +115,11 @@ pub struct NewRunForm {
     /// The name the form suggested while the field still holds it: it follows the dataset and the
     /// architecture until the name is typed (then `None`).
     pub name_suggested: Option<String>,
-    pub dataset: usize,
+    /// The dataset's id: a deletion that shrinks the list doesn't move the choice to another one
+    /// (gone itself, the form asks for another, [`FoloApp::nr_dataset_gone`]).
+    ///
+    /// [`FoloApp::nr_dataset_gone`]: crate::app::FoloApp::nr_dataset_gone
+    pub dataset: String,
     pub arch: usize,
     pub epochs: f32,
     pub batch: usize,

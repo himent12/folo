@@ -164,6 +164,18 @@ impl FoloApp {
         .detach();
     }
 
+    /// The Playground's model is gone (its run was deleted): nothing it predicted is shown, and an
+    /// answer still out for it is dropped when it comes. The next model list picks another.
+    pub(super) fn drop_play_model(&mut self) {
+        self.play_model = None;
+        self.play_pred_seq += 1;
+        self.play_pred = Load::Idle;
+        self.play_pred_for = None;
+        self.play_pred_pending = false;
+        self.play_pred_dim = false;
+        self.play_hover = None;
+    }
+
     /// Predict again from scratch, showing "Detecting…" meanwhile (Retry, or another device). A plain
     /// rerun of the same image and model, an IoU change, keeps the old result up instead.
     pub fn rerun_predict(&mut self, cx: &mut Context<Self>) {

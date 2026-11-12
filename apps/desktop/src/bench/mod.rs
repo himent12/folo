@@ -12,7 +12,7 @@ mod run;
 mod state;
 mod stream;
 
-pub use create::SourcePick;
+pub use create::{SourceChoice, SourceId, SourcePick};
 pub use images::preview_severity;
 pub use run::model_fits;
 pub use state::{

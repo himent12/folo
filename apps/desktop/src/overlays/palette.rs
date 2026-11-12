@@ -208,6 +208,17 @@ impl FoloApp {
         let t = theme(cx);
         let items = self.filtered_palette();
         let n = items.len();
+        let rows: Vec<(&'static str, String)> = items.iter().map(|it| (it.group, it.title.clone())).collect();
+        if let Some(p) = self.palette.as_mut()
+            && p.shown != rows
+        {
+            if let Some(was) = p.shown.get(p.selected)
+                && let Some(now) = rows.iter().position(|r| r == was)
+            {
+                p.selected = now;
+            }
+            p.shown = rows;
+        }
         let p = self.palette.as_ref().unwrap();
         // With no query the list is every item (commands, datasets, runs, models); with one, matches.
         let searching = !p.query.trim().is_empty();

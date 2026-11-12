@@ -6,7 +6,7 @@ use folo_ui::{
 };
 
 use crate::app::{FoloApp, act};
-use crate::bench::{BENCH_SPLITS, SourcePick};
+use crate::bench::{BENCH_SPLITS, SourceChoice, SourceId, SourcePick};
 use crate::controls::Btn;
 use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
@@ -17,13 +17,17 @@ impl FoloApp {
         &self,
         key: &'static str,
         sources: &[SourcePick],
-        selected: usize,
+        choice: SourceChoice,
         window: &Window,
         cx: &mut Context<Self>,
-        pick: impl Fn(&mut Self, usize, &mut Context<Self>) + 'static,
+        pick: impl Fn(&mut Self, SourceId, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        let label: SharedString =
-            sources.get(selected).map_or_else(|| "No datasets".into(), |s| s.name().to_string().into());
+        let label: SharedString = match choice {
+            SourceChoice::At(i) => sources[i].name().to_string().into(),
+            SourceChoice::Missing => "No datasets".into(),
+            SourceChoice::Deleted => "Pick a source".into(),
+        };
+        let ids: Vec<SourceId> = sources.iter().map(SourcePick::id).collect();
         let options: Vec<(SharedString, Option<SharedString>)> = sources
             .iter()
             .map(|s| {
@@ -43,10 +47,15 @@ impl FoloApp {
             key,
             label,
             options,
-            selected,
+            // Deleted, none of them is the choice.
+            choice.index().unwrap_or(sources.len()),
             window,
             cx,
-            std::rc::Rc::new(move |this, i, _, cx| pick(this, i, cx)),
+            std::rc::Rc::new(move |this, i, _, cx| {
+                if let Some(id) = ids.get(i) {
+                    pick(this, id.clone(), cx)
+                }
+            }),
         )
     }
 
@@ -59,7 +68,8 @@ impl FoloApp {
         let t = *t;
         let sources = self.bench_sources();
         let Some(f) = self.bench.new_bench.as_ref() else { return div().into_any_element() };
-        let (dataset, split, submitting, error) = (f.dataset, f.split, f.submitting, f.error.clone());
+        let (split, submitting, error) = (f.split, f.submitting, f.error.clone());
+        let choice = self.source_choice(&sources, f.source.as_ref());
         let name_input = f.name.clone();
         let name_fh = name_input.read(cx).focus_handle(cx);
         let name_ring = self.ring(&name_fh, window);
@@ -77,10 +87,11 @@ impl FoloApp {
             .text_size(px(ty::SM.size))
             .when(name_ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
             .child(name_input);
-        let src_select = self.source_select("bench-new-ds", &sources, dataset, window, cx, |this, i, cx| {
-            this.pick_bench_source(Some(i), None, cx)
+        let src_select = self.source_select("bench-new-ds", &sources, choice, window, cx, |this, id, cx| {
+            this.pick_bench_source(Some(id), None, cx)
         });
-        let picked = sources.get(dataset);
+        let picked = choice.index().map(|i| &sources[i]);
+        let deleted = choice == SourceChoice::Deleted;
         let is_dataset = matches!(picked, Some(SourcePick::Dataset { .. }));
         // Each split with its image count (a no-break space: the control's quieter count style);
         // an empty one is there but off, with the reason.
@@ -115,6 +126,7 @@ impl FoloApp {
             }
             Some((_, 0)) => "This split has no images: pick another.".to_string(),
             Some((_, n)) => format!("{}, copied and frozen with their boxes.", counted(n, "image", "images")),
+            None if deleted => "That source was deleted. Pick another.".to_string(),
             None => "Add a dataset first: a benchmark copies its images.".to_string(),
         };
         let create = if submitting {
@@ -133,7 +145,9 @@ impl FoloApp {
                 "Create benchmark",
                 Btn::Primary,
                 Some("icons/plus.svg"),
-                if picked.is_none() {
+                if deleted {
+                    "Pick another source"
+                } else if picked.is_none() {
                     "Add a dataset first"
                 } else {
                     "This split has no images: pick another"

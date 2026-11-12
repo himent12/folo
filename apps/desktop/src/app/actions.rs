@@ -162,8 +162,10 @@ impl FoloApp {
 
     /// A new dataset from the server: list it where the server lists it and say so, with a way to
     /// open it.
-    fn dataset_added(&mut self, ds: crate::api::Dataset, verb: &str, cx: &mut Context<Self>) {
+    pub(super) fn dataset_added(&mut self, ds: crate::api::Dataset, verb: &str, cx: &mut Context<Self>) {
         let (id, name) = (ds.id.clone(), ds.name.clone());
+        // A folder registered again after its dataset was deleted can come back under its id.
+        self.deleted.remove(&id);
         let body = format!("{} · {}", counted(ds.splits.total(), "image", "images"), ds.classes.join(", "));
         // Registering a folder twice answers with the dataset it already is: say so, and leave
         // the list's order alone.
@@ -282,7 +284,7 @@ impl FoloApp {
                 Ok(()) => {
                     let body = match &target {
                         DeleteTarget::Run(id) => {
-                            this.forget_run(id);
+                            this.forget_run(id, cx);
                             None
                         }
                         DeleteTarget::Dataset(id) => {
@@ -301,8 +303,11 @@ impl FoloApp {
     }
 
     /// Drops a deleted run (and the models it made, fetched again) from what the app holds, and
-    /// leaves its page for the list.
-    fn forget_run(&mut self, id: &str) {
+    /// leaves its page (or one of its models') for the list.
+    fn forget_run(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(r) = self.store.run(id) {
+            self.deleted.insert(id.to_string(), r.name.clone());
+        }
         if let Some(runs) = self.store.runs.ready_mut() {
             runs.retain(|r| r.id != id);
         }
@@ -316,28 +321,47 @@ impl FoloApp {
             .into_iter()
             .flatten()
             .filter(|m| m.run_id.as_deref() == Some(id))
-            .map(|m| m.id.clone())
+            .map(|m| {
+                self.deleted.insert(m.id.clone(), m.name.clone());
+                m.id.clone()
+            })
             .collect();
         if self.play_model.as_ref().is_some_and(|m| made.contains(m)) {
-            self.play_model = None;
-            self.play_pred = Load::Idle;
+            self.drop_play_model();
         }
+        // Fetched again now, not on the next refresh: Playground picks its next model from it.
         self.store.models = Load::Idle;
-        if matches!(&self.route, Route::Run(r) if r == id) {
-            self.route_pending = Some(Route::Runs);
+        self.ensure_core(cx);
+        // An open select may list it, or its models: its highlight is an index into that list.
+        self.menu_open = None;
+        self.leave_deleted();
+    }
+
+    /// The open page of something just deleted gives way to its list (Back skips it too).
+    fn leave_deleted(&mut self) {
+        if let Some((_, list)) = super::navigation::deleted_route(&self.deleted, &self.route) {
+            self.route_pending = Some(list);
         }
     }
 
     /// Drops an unregistered dataset from what the app holds, and leaves its page for the list.
     fn forget_dataset(&mut self, id: &str) {
+        if let Some(d) = self.store.dataset_summary(id) {
+            self.deleted.insert(id.to_string(), d.name.clone());
+        }
+        if self.inspector.as_ref().is_some_and(|i| i.dataset == id) {
+            self.inspector = None;
+            self.inspector_return = None;
+        }
         if let Some(list) = self.store.datasets.ready_mut() {
             list.retain(|d| d.id != id);
         }
         self.store.dataset.remove(id);
         self.store.images.remove(id);
-        if matches!(&self.route, Route::Dataset(d) if d == id) {
-            self.route_pending = Some(Route::Datasets);
-        }
+        // An open select may list it (New run's datasets): its highlight is an index into the list.
+        // The forms hold their dataset by id, so the choice in them stays what it was.
+        self.menu_open = None;
+        self.leave_deleted();
     }
 
     /// Takes a run that never started out of the queue: the server deletes it (docs/API.md), so it
@@ -351,7 +375,7 @@ impl FoloApp {
             move |api| api.delete_run(&rid),
             move |this, r, cx| match r {
                 Ok(()) => {
-                    this.forget_run(&id);
+                    this.forget_run(&id, cx);
                     this.toast(
                         Tone::Neutral,
                         format!("Removed {name} from the queue"),

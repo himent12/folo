@@ -24,7 +24,42 @@ pub enum SourcePick {
     },
 }
 
+/// Which source a form picked, by kind and id: a deletion that shrinks the list doesn't move the
+/// choice to another source.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SourceId {
+    Dataset(String),
+    Job(String),
+}
+
+/// What a form's source choice is in the current [`FoloApp::bench_sources`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SourceChoice {
+    /// The source picked (nothing picked yet: the first) is at this index.
+    At(usize),
+    /// Nothing to pick from (or its list isn't in yet).
+    Missing,
+    /// The source picked was deleted while the form was open: it asks for another.
+    Deleted,
+}
+
+impl SourceChoice {
+    pub fn index(self) -> Option<usize> {
+        match self {
+            SourceChoice::At(i) => Some(i),
+            _ => None,
+        }
+    }
+}
+
 impl SourcePick {
+    pub fn id(&self) -> SourceId {
+        match self {
+            SourcePick::Dataset { id, .. } => SourceId::Dataset(id.clone()),
+            SourcePick::Job { id, .. } => SourceId::Job(id.clone()),
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             SourcePick::Dataset { name, .. } | SourcePick::Job { name, .. } => name,
@@ -84,11 +119,28 @@ impl FoloApp {
         datasets.chain(jobs).collect()
     }
 
+    /// Where a form's `picked` source is in `sources` (from [`Self::bench_sources`]): deleted when
+    /// the list it comes from is in without it.
+    pub fn source_choice(&self, sources: &[SourcePick], picked: Option<&SourceId>) -> SourceChoice {
+        let Some(id) = picked else {
+            return if sources.is_empty() { SourceChoice::Missing } else { SourceChoice::At(0) };
+        };
+        if let Some(i) = sources.iter().position(|s| s.id() == *id) {
+            return SourceChoice::At(i);
+        }
+        let listed = match id {
+            SourceId::Dataset(_) => self.store.datasets.ready().is_some(),
+            SourceId::Job(_) => self.bench.jobs.ready().is_some(),
+        };
+        if listed { SourceChoice::Deleted } else { SourceChoice::Missing }
+    }
+
     /// Opens the New benchmark form, named after the first source.
     pub fn open_new_bench(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_agents(cx);
         // The first source's validation split, or the first of its splits that has images.
         let first = self.bench_sources().into_iter().next();
+        let source = first.as_ref().map(SourcePick::id);
         let split = first.as_ref().map_or(0, |s| s.split_with_images(0));
         let name = first.map_or_else(|| "benchmark".to_string(), |s| s.suggested_name(BENCH_SPLITS[split]));
         let input = cx.new(|cx| {
@@ -100,29 +152,36 @@ impl FoloApp {
         self.bench.form_seq += 1;
         let seq = self.bench.form_seq;
         self.bench.new_bench =
-            Some(NewBenchForm { name: input, seq, dataset: 0, split, submitting: false, error: None });
+            Some(NewBenchForm { name: input, seq, source, split, submitting: false, error: None });
         window.focus(&fh);
         cx.notify();
     }
 
     /// Sets the New benchmark form's source and split, and its name when the name still follows them.
-    pub fn pick_bench_source(&mut self, source: Option<usize>, split: Option<usize>, cx: &mut Context<Self>) {
+    pub fn pick_bench_source(
+        &mut self,
+        source: Option<SourceId>,
+        split: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         let sources = self.bench_sources();
+        let Some(f) = self.bench.new_bench.as_ref() else { return };
+        let at = |id: Option<&SourceId>| self.source_choice(&sources, id).index().map(|i| &sources[i]);
+        let old = at(f.source.as_ref()).map(|x| x.suggested_name(BENCH_SPLITS[f.split]));
+        let source_changed = source.is_some();
+        let source = source.or_else(|| f.source.clone());
+        let next = at(source.as_ref()).cloned();
         let Some(f) = self.bench.new_bench.as_mut() else { return };
-        let suggested = |i: usize, s: usize| sources.get(i).map(|x| x.suggested_name(BENCH_SPLITS[s]));
-        let old = suggested(f.dataset, f.split);
-        f.dataset = source.unwrap_or(f.dataset);
+        f.source = source;
         f.split = split.unwrap_or(f.split).min(BENCH_SPLITS.len() - 1);
         // Another source: off a split it has no images in (the control disables those).
-        if source.is_some()
-            && let Some(s) = sources.get(f.dataset)
-        {
+        if source_changed && let Some(s) = &next {
             f.split = s.split_with_images(f.split);
         }
         f.error = None;
         let current = f.name.read(cx).text().to_string();
         if old.is_none_or(|o| o == current)
-            && let Some(next) = suggested(f.dataset, f.split)
+            && let Some(next) = next.map(|s| s.suggested_name(BENCH_SPLITS[f.split]))
         {
             f.name.update(cx, |input, cx| input.set_text(next, cx));
         }
@@ -132,6 +191,8 @@ impl FoloApp {
     /// Creates the benchmark the form describes (the default plan) and opens it.
     pub fn submit_new_bench(&mut self, cx: &mut Context<Self>) {
         let sources = self.bench_sources();
+        let picked = self.bench.new_bench.as_ref().and_then(|f| f.source.as_ref());
+        let choice = self.source_choice(&sources, picked);
         let Some(f) = self.bench.new_bench.as_mut() else { return };
         if f.submitting {
             return;
@@ -142,11 +203,19 @@ impl FoloApp {
             cx.notify();
             return;
         }
-        let Some(src) = sources.get(f.dataset) else {
-            f.error =
-                Some(ApiError::new("invalid_body", "Add a dataset first: a benchmark copies its images"));
-            cx.notify();
-            return;
+        let src = match choice {
+            SourceChoice::At(i) => &sources[i],
+            SourceChoice::Missing => {
+                f.error =
+                    Some(ApiError::new("invalid_body", "Add a dataset first: a benchmark copies its images"));
+                cx.notify();
+                return;
+            }
+            SourceChoice::Deleted => {
+                f.error = Some(ApiError::new("invalid_body", "That source was deleted: pick another"));
+                cx.notify();
+                return;
+            }
         };
         let split = BENCH_SPLITS[f.split];
         if src.images(split) == 0 {

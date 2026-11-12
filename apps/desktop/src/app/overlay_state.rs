@@ -103,6 +103,7 @@ impl FoloApp {
             if let Some(p) = this.palette.as_mut() {
                 p.query = q.to_string();
                 p.selected = 0;
+                p.shown.clear();
             }
             cx.notify();
         });
@@ -112,6 +113,7 @@ impl FoloApp {
             input,
             query: String::new(),
             selected: 0,
+            shown: Vec::new(),
             scroll: ScrollHandle::new(),
             _sub: sub,
         });

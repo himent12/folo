@@ -7,6 +7,35 @@ use crate::synth::{Rng, hash};
 use super::MockBackend;
 
 impl MockBackend {
+    /// The next prediction answers late, as a slow device does while the app moves on: it is made
+    /// at once (its model may be deleted meanwhile, as a predictor already loaded still answers),
+    /// then held until another prediction is asked for, or 2 s have passed.
+    #[cfg(test)]
+    pub fn answer_next_predict_late(&self) {
+        *self.late.0.lock().unwrap() = super::Late::Armed;
+    }
+
+    /// Holds a prediction made while [`Self::answer_next_predict_late`] is armed; a later one
+    /// releases it.
+    pub(super) fn maybe_answer_late(&self) {
+        use super::Late;
+        let (state, cv) = &self.late;
+        let mut s = state.lock().unwrap();
+        match *s {
+            Late::Armed => {
+                *s = Late::Waiting;
+                let wait = std::time::Duration::from_secs(2);
+                let (mut s, _) = cv.wait_timeout_while(s, wait, |s| *s == Late::Waiting).unwrap();
+                *s = Late::Off;
+            }
+            Late::Waiting => {
+                *s = Late::Off;
+                cv.notify_all();
+            }
+            Late::Off => {}
+        }
+    }
+
     /// [`Backend::model_eval`]'s answer.
     pub(super) fn eval_for(&self, id: &str) -> ApiResult<ModelEval> {
         self.check()?;

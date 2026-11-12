@@ -112,12 +112,13 @@ impl FoloApp {
         let compute_blocked = self.compute_blocked();
         // What the footer can honestly say. With the server's estimator: its answer for this
         // config; while a changed config is out, the last answer marked as updating (if it was for
-        // the same kind of device); nothing for an unparsed value or a rejected config. Servers
-        // without one: the app's own reference figures.
+        // the same kind of device); nothing for an unparsed value, a rejected config or a deleted
+        // dataset. Servers without one: the app's own reference figures.
         enum Est {
             Server(Box<crate::api::RunEstimate>, bool),
             Pending,
             Invalid,
+            NoDataset,
             Rejected(String),
             Local,
         }
@@ -125,7 +126,9 @@ impl FoloApp {
         let same_kind = |e: &crate::api::RunEstimate| {
             (e.device == "cpu") == cpu && (e.device == "cloud") == cloud.is_some()
         };
-        let est = if !self.store.features.iter().any(|f| f == "run_estimate") {
+        let est = if ds.is_none() {
+            Est::NoDataset
+        } else if !self.store.features.iter().any(|f| f == "run_estimate") {
             Est::Local
         } else if epochs_bad
             || lr_bad
@@ -183,6 +186,7 @@ impl FoloApp {
         let (headline, basis, note): (String, String, Option<String>) = match &est {
             Est::Invalid => ("No estimate while a value is invalid".into(), String::new(), None),
             Est::Pending => ("Estimating…".into(), String::new(), None),
+            Est::NoDataset => ("No estimate without a dataset".into(), String::new(), None),
             Est::Rejected(msg) => (
                 "No estimate for this config".into(),
                 "The server couldn't estimate it".into(),
@@ -301,6 +305,17 @@ impl FoloApp {
                 Btn::Primary,
                 Some(go_icon),
                 "Creating the run…",
+                window,
+                cx,
+            )
+        } else if ds.is_none() {
+            // Its dataset was deleted while the form was open.
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Pick a dataset first",
                 window,
                 cx,
             )

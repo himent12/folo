@@ -12,16 +12,19 @@ use crate::theme::{Mode, Theme};
 
 /// The app on the demo data (frozen: no live clock), its lists loaded.
 pub(crate) fn open() -> (HeadlessApp, WindowHandle<FoloApp>) {
+    open_with(Arc::new(MockBackend::new(4200, true)))
+}
+
+/// [`open`] on a demo backend the test keeps a hand on.
+pub(crate) fn open_with(api: Arc<MockBackend>) -> (HeadlessApp, WindowHandle<FoloApp>) {
     let mut app = HeadlessApp::new(HeadlessOptions::default());
     let window = app.update(|cx| {
         cx.set_global(Theme::new(Mode::Dark));
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1280.), px(800.)));
         let options =
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
-        cx.open_window(options, |window, cx| {
-            cx.new(|cx| FoloApp::new(Arc::new(MockBackend::new(4200, true)), true, window, cx))
-        })
-        .expect("open window")
+        cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api, true, window, cx)))
+            .expect("open window")
     });
     drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
     (app, window)
@@ -58,7 +61,7 @@ fn the_suggested_run_name_follows_the_choices_until_typed() {
     assert_eq!(run_name(&mut app, window), first.replace("-s-", "-n-"));
     // Another dataset: so does its name.
     drive(&mut app, window, |this, _, cx| {
-        this.new_run.as_mut().unwrap().dataset = 1;
+        this.new_run.as_mut().unwrap().dataset = this.store.datasets.ready().unwrap()[1].id.clone();
         this.resuggest_run_name(cx);
     });
     let other = run_name(&mut app, window);
@@ -168,11 +171,12 @@ fn deleting_a_run_or_a_dataset_leaves_its_page_for_the_list() {
         this.ask_delete(DeleteTarget::Run("run_52e8".into()), w, cx);
         this.delete_confirmed(cx);
     });
-    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    // Drawn: the page shown is the list.
+    app.frame(window.into());
     drive(&mut app, window, |this, _, _| {
         assert!(this.confirm_delete.is_none());
         assert!(this.store.run("run_52e8").is_none());
-        assert_eq!(this.route_pending, Some(Route::Runs));
+        assert_eq!(this.route, Route::Runs);
         let models = this.store.models.ready().unwrap();
         assert!(models.iter().all(|m| m.run_id.as_deref() != Some("run_52e8")), "its models went with it");
         assert!(this.toasts.iter().any(|t| t.title.starts_with("Deleted")));
@@ -188,14 +192,49 @@ fn deleting_a_run_or_a_dataset_leaves_its_page_for_the_list() {
     });
     // A dataset is unregistered.
     drive(&mut app, window, |this, w, cx| {
-        this.route_pending = None;
         this.navigate(Route::Dataset("ds_3b91".into()), w, cx);
         this.ask_delete(DeleteTarget::Dataset("ds_3b91".into()), w, cx);
         this.delete_confirmed(cx);
     });
+    app.frame(window.into());
     drive(&mut app, window, |this, _, _| {
         assert!(this.store.dataset_summary("ds_3b91").is_none());
-        assert_eq!(this.route_pending, Some(Route::Datasets));
+        assert_eq!(this.route, Route::Datasets);
+    });
+}
+
+#[test]
+fn an_earlier_toasts_open_goes_to_the_list_once_its_dataset_is_deleted() {
+    use super::{DeleteTarget, Route};
+    let (mut app, window) = open();
+    // A dataset's toast with Open (the demo lists it already: "… is already added").
+    let (id, name) = drive(&mut app, window, |this, _, cx| {
+        let ds = this.store.datasets.ready().unwrap()[0].clone();
+        let id_name = (ds.id.clone(), ds.name.clone());
+        this.dataset_added(ds, "Added", cx);
+        id_name
+    });
+    // Its page opened another way (the toast stays), and the dataset deleted from there.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Dataset(id.clone()), w, cx);
+        this.ask_delete(DeleteTarget::Dataset(id.clone()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    app.frame(window.into());
+    // The earlier toast's Open: the list, saying why, not the deleted dataset's page.
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.route, Route::Datasets);
+        let open = this.toasts.iter().find_map(|t| t.action.clone()).expect("the toast with Open");
+        (open.1)(this, w, cx);
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.route, Route::Datasets);
+        let said = format!("{name} was deleted");
+        assert!(this.toasts.iter().any(|t| t.title == said.as_str()), "{said}");
+        // Nor does Back lead there.
+        this.back(w, cx);
+        assert_ne!(this.route, Route::Dataset(id.clone()));
     });
 }
 
@@ -221,6 +260,39 @@ fn another_device_keeps_the_boxes_up_until_it_answers() {
     // Its answer (here the demo's refusal) replaces them, undimmed.
     app.run_until_idle();
     drive(&mut app, window, |this, _, _| assert!(!this.play_pred_dim && !this.play_pred_pending));
+}
+
+#[test]
+fn deleting_the_playground_models_run_drops_its_late_answer_and_predicts_with_the_next() {
+    use super::DeleteTarget;
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    // Playground on the best model, an image on stage, its boxes in.
+    let (first, run) = drive(&mut app, window, |this, _, cx| {
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+        let first = this.play_model.clone().expect("the best model is picked");
+        let run = this.store.models.ready().unwrap().iter().find(|m| m.id == first).unwrap().run_id.clone();
+        (first, run.expect("made by a run"))
+    });
+    assert!(drive(&mut app, window, |this, _, _| this.play_pred.ready().is_some()));
+    // Asked again (the result kept up meanwhile), on a slow device: while it runs, the model's run
+    // is deleted, and its answer only comes once the model list is in again.
+    api.answer_next_predict_late();
+    drive(&mut app, window, |this, w, cx| {
+        this.play_pred_dim = true;
+        this.run_predict(cx);
+        this.ask_delete(DeleteTarget::Run(run.clone()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        let next = this.play_model.clone().expect("another model is picked");
+        assert_ne!(next, first);
+        // The image on stage is predicted with it, and nothing of the deleted model's is shown.
+        let shown = this.play_pred.ready().map(|p| p.model_id.clone());
+        assert_eq!(shown.as_deref(), Some(next.as_str()));
+        assert_eq!(this.play_pred_for.as_ref().map(|(_, m)| m), Some(&next));
+        assert!(!this.play_pred_pending && !this.play_pred_dim);
+    });
 }
 
 #[test]
@@ -263,4 +335,163 @@ fn remove_from_queue_deletes_a_run_that_never_started() {
     assert!(!held);
     let api = drive(&mut app, window, |this, _, _| this.store.api.clone());
     assert!(api.runs().unwrap().iter().all(|r| r.id != id));
+}
+
+/// What the New run and New benchmark forms show as their dataset: (New run's, New benchmark's).
+fn form_datasets(this: &FoloApp) -> (Option<String>, Option<String>) {
+    let sources = this.bench_sources();
+    let picked = this.bench.new_bench.as_ref().and_then(|f| f.source.as_ref());
+    let bench = this.source_choice(&sources, picked).index().map(|i| sources[i].name().to_string());
+    (this.nr_dataset().map(|d| d.name.clone()), bench)
+}
+
+/// Confirms deleting dataset `id`, runs `then` before the server's answer is applied, then lets it
+/// be applied.
+fn delete_dataset_while(
+    app: &mut HeadlessApp,
+    window: WindowHandle<FoloApp>,
+    id: &str,
+    then: impl FnOnce(&mut FoloApp, &mut Window, &mut Context<FoloApp>),
+) {
+    let id = id.to_string();
+    app.update(|cx| {
+        window
+            .update(cx, |this, w, cx| {
+                this.ask_delete(super::DeleteTarget::Dataset(id), w, cx);
+                this.delete_confirmed(cx);
+                then(this, w, cx);
+            })
+            .unwrap()
+    });
+    app.run_until_idle();
+}
+
+#[test]
+fn an_open_form_keeps_its_dataset_while_another_is_deleted() {
+    use crate::bench::{SourceChoice, SourceId};
+    let (mut app, window) = open();
+    let ds: Vec<(String, String)> = drive(&mut app, window, |this, _, _| {
+        this.store.datasets.ready().unwrap().iter().map(|d| (d.id.clone(), d.name.clone())).collect()
+    });
+    assert!(ds.len() >= 3, "the demo has three datasets");
+    let (a, b, c) = (&ds[0], &ds[1], &ds[2]);
+    // A's deletion is out when New run and New benchmark open and B is picked in both.
+    drive(&mut app, window, |this, w, cx| {
+        this.open_new_run(None, w, cx);
+        this.open_new_bench(w, cx);
+    });
+    delete_dataset_while(&mut app, window, &a.0, |this, _, cx| {
+        // New run's dataset menu open on the row after A's.
+        (this.menu_open, this.menu_hl) = (Some("nr-dataset"), 1);
+        this.new_run.as_mut().unwrap().dataset = b.0.clone();
+        this.resuggest_run_name(cx);
+        this.pick_bench_source(Some(SourceId::Dataset(b.0.clone())), None, cx);
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.store.dataset_summary(&a.0).is_none(), "A is gone");
+        assert!(this.menu_open.is_none(), "the menu whose rows moved closed");
+        assert_eq!(form_datasets(this), (Some(b.1.clone()), Some(b.1.clone())), "both still say B");
+        assert_eq!(this.form_config(cx).map(|c| c.dataset_id), Some(b.0.clone()));
+        let name = this.new_run.as_ref().unwrap().name.read(cx).text().to_string();
+        assert!(name.starts_with(&b.1), "the suggested name names B: {name}");
+    });
+    // Now B itself is deleted: both forms say so, and neither sends anything until another is picked.
+    delete_dataset_while(&mut app, window, &b.0, |_, _, _| {});
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.nr_dataset_gone());
+        assert_eq!(form_datasets(this), (None, None));
+        assert!(this.form_config(cx).is_none());
+        let sources = this.bench_sources();
+        let picked = this.bench.new_bench.as_ref().and_then(|f| f.source.as_ref());
+        assert_eq!(this.source_choice(&sources, picked), SourceChoice::Deleted);
+        this.submit_new_run(w, cx);
+        this.submit_new_bench(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.new_run.as_ref().is_some_and(|f| !f.submitting), "nothing sent");
+        let error = this.bench.new_bench.as_ref().and_then(|f| f.error.as_ref()).map(|e| e.message.clone());
+        assert_eq!(error.as_deref(), Some("That source was deleted: pick another"));
+    });
+    // C, picked in both: that is what each sends.
+    let run_name = drive(&mut app, window, |this, w, cx| {
+        this.new_run.as_mut().unwrap().dataset = c.0.clone();
+        this.resuggest_run_name(cx);
+        this.pick_bench_source(Some(SourceId::Dataset(c.0.clone())), None, cx);
+        assert_eq!(form_datasets(this), (Some(c.1.clone()), Some(c.1.clone())));
+        let name = this.new_run.as_ref().unwrap().name.read(cx).text().to_string();
+        this.submit_new_run(w, cx);
+        this.submit_new_bench(cx);
+        name
+    });
+    let api = drive(&mut app, window, |this, _, _| {
+        assert!(this.new_run.is_none() && this.bench.new_bench.is_none(), "both sent");
+        this.store.api.clone()
+    });
+    let run = api.runs().unwrap().into_iter().find(|r| r.name == run_name).expect("created");
+    assert_eq!(run.config.dataset_id, c.0);
+    let bench = api.benches().unwrap().into_iter().find(|x| x.name.starts_with(&c.1)).expect("created");
+    assert!(
+        matches!(&bench.source, crate::api::BenchSource::Dataset { dataset_id, .. } if *dataset_id == c.0)
+    );
+}
+
+#[test]
+fn the_palette_highlight_stays_on_its_row_while_a_run_before_it_is_deleted() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| this.open_palette(w, cx));
+    app.frame(window.into());
+    // The row after the run about to be deleted is highlighted.
+    let row = drive(&mut app, window, |this, _, _| {
+        let name = this.store.run("run_52e8").unwrap().name.clone();
+        let p = this.palette.as_mut().unwrap();
+        let at = p.shown.iter().position(|r| *r == ("Runs", name.clone())).expect("listed");
+        p.selected = at + 1;
+        p.shown[at + 1].clone()
+    });
+    assert_eq!(row.0, "Runs", "a run listed after it");
+    app.frame(window.into());
+    // Its deletion (asked for before the palette opened) is answered.
+    drive(&mut app, window, |this, _, cx| {
+        this.confirm_delete = Some(super::DeleteTarget::Run("run_52e8".into()));
+        this.delete_confirmed(cx);
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let p = this.palette.as_ref().unwrap();
+        assert!(!p.shown.iter().any(|r| r.1 == "run_52e8"));
+        assert_eq!(p.shown.get(p.selected), Some(&row), "still on the same run");
+    });
+}
+
+#[test]
+fn a_toast_leaves_on_the_clock_but_not_while_hovered() {
+    use std::time::Duration;
+    let (mut app, window) = open();
+    // The frozen demo keeps toasts up for screenshots; these two leave as a live app's do. The
+    // second is under the pointer.
+    let held = drive(&mut app, window, |this, _, cx| {
+        this.frozen = false;
+        this.toast(crate::ui::Tone::Info, "plain", None, cx);
+        this.toast(crate::ui::Tone::Info, "hovered", None, cx);
+        this.frozen = true;
+        let held = this.toasts.last().unwrap().id;
+        this.toast_hover = Some(held);
+        held
+    });
+    let titles = |app: &mut HeadlessApp| {
+        drive(app, window, |this, _, _| this.toasts.iter().map(|t| t.title.to_string()).collect::<Vec<_>>())
+    };
+    let ttl = super::overlay_state::toast_ttl(false);
+    app.advance_clock(ttl - Duration::from_millis(1));
+    assert_eq!(titles(&mut app), ["plain", "hovered"]);
+    app.advance_clock(Duration::from_millis(1));
+    assert_eq!(titles(&mut app), ["hovered"], "the plain one left at its time");
+    app.advance_clock(Duration::from_secs(10));
+    assert_eq!(titles(&mut app), ["hovered"], "hovered, it stays");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.toast_hover, Some(held));
+        this.toast_hover = None;
+    });
+    app.advance_clock(Duration::from_millis(800));
+    assert!(titles(&mut app).is_empty(), "left once the pointer did");
 }
