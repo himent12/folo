@@ -566,9 +566,9 @@ describe('New run: a dataset that cannot be trained on (v-data-runs N3, N6; v-sh
 
   it('marks a missing folder, keeps Start off with the reason, and asks nothing more of it, also on the next visit', async () => {
     const read = vi.spyOn(api, 'dataset');
-    read.mockImplementation(async (id, sig) => {
+    read.mockImplementation(async (id: string) => {
       if (id === 'ds_shapes_hard') throw new ApiError(404, 'path_not_found', 'the folder of dataset shapes-hard is gone');
-      return MockApi.prototype.dataset.call(api, id, sig);
+      return MockApi.prototype.dataset.call(api, id);
     });
     const images = vi.spyOn(api, 'datasetImages');
     const estimate = vi.spyOn(api, 'estimateRun');
@@ -600,8 +600,8 @@ describe('New run: a dataset that cannot be trained on (v-data-runs N3, N6; v-sh
   it("says a draft's or a link's dataset was removed instead of switching to another in silence", async () => {
     const images = vi.spyOn(api, 'datasetImages');
     const estimate = vi.spyOn(api, 'estimateRun');
-    vi.spyOn(api, 'runs').mockImplementation(async (sig) => {
-      const list = await MockApi.prototype.runs.call(api, sig);
+    vi.spyOn(api, 'runs').mockImplementation(async () => {
+      const list = await MockApi.prototype.runs.call(api);
       return [{ ...list[0]!, config: { ...list[0]!.config, dataset_id: 'ds_gone' }, dataset: { name: 'shapes-five', classes: [] } }, ...list.slice(1)];
     });
     await open('?dataset=ds_gone');
