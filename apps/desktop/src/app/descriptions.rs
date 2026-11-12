@@ -37,12 +37,14 @@ impl FoloApp {
         id: &str,
     ) -> folo_ui::Div {
         let ds = self.store.run_dataset_name(r);
-        // A cloud run's device is where it rents it ("RunPod · RTX 4090").
-        let device = match &r.cloud {
-            Some(c) => self.cloud_device(r, c),
-            None => crate::ui::device_label(&r.device),
-        };
-        let mut rest = vec![ds, device];
+        let mut rest = vec![ds];
+        // A cloud run's device is where it rents it ("RunPod · RTX 4090"); a run here names the
+        // device it trains on once it has started (waiting in the queue, it has none yet).
+        match &r.cloud {
+            Some(c) => rest.push(self.cloud_device(r, c)),
+            None if r.started.is_some() => rest.push(crate::ui::device_label(&r.device)),
+            None => {}
+        }
         // Precision is part of what trains (the e2e tag names the head).
         if r.config.amp {
             rest.push("mixed precision".into());
