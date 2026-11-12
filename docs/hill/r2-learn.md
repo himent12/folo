@@ -185,6 +185,12 @@ ran as written there.)
   with the run). Proxy 0.1234 vs 0.1135 (three seeds each), shapes gate 0.934 vs 0.926 (one seed); fine-tunes resolve
   exactly as under rule 4, so their numbers above stand.
 
+**Check of the PR build** (`folo-r5.exe`, rule 5, no flags; one seed each): the proxy resolves `auto → musgd lr0 0.01
+momentum 0.937 muon 0.5 sgd 0.5` and scores 0.1242 (seed 0; the `r4-w55-s0` screen: 0.1248); BCCD (from
+`folo-n-coco-v2`) resolves `muon 0.2 sgd 1` and scores 0.6172 (seed 0; the same settings on the earlier binary:
+0.6294, rule-4 seeds over both momentums 0.616–0.629). The two binaries differ in main's GPU kernels (#184–#186),
+so these are other rounding trajectories of the same recipe.
+
 ## Targets
 
 - **Proxy P1, +5% over main's recipe and over Ultralytics' rows**: rule 5's `auto` 0.1234 against main's `auto`
