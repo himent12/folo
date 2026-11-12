@@ -310,10 +310,12 @@ export default function Runs() {
           {/* One table frame for every state: with no rows (empty, no match, an error) it drops its column heads and
               says so inside it, so no header row of eleven columns sits over a one-line message. */}
           <div class="scroll" class:state={!rowsOrLoading.get()}>
-            {/* Row checkboxes show on hover and focus, on selected rows, and on every row once one is selected (picking). */}
+            {/* Row checkboxes show on hover and focus, on selected rows, and on every row once one is selected (picking)
+                or two runs are listed (pickable: the header asks to select 2–4, as the benchmark's leaderboard does). */}
             <table
               class="table runs"
               class:picking={selected.get().length > 0}
+              class:pickable={shown.get().length >= 2}
               aria-label="Runs"
               aria-busy={!runs.data}
               use:rowNav={{ toggle: (row: HTMLElement) => toggle(row.dataset.id ?? '') }}
@@ -660,9 +662,9 @@ css`
     transition: opacity var(--dur-fast) var(--ease-standard);
   }
   /* Shown on the row under the pointer or the keyboard (so X is discoverable), on selected rows, and on every row once
-     any is selected. */
+     any is selected or two runs are listed to pick from. */
   .runs tbody tr:is(:hover, :focus-within, .on) .check input,
-  .runs.picking .check input,
+  .runs:is(.picking, .pickable) .check input,
   .runs .check input:focus-visible {
     opacity: 1;
   }

@@ -286,4 +286,15 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     });
     expect(target.querySelector('table.runs tbody')!.textContent).not.toMatch(/ds_/);
   });
+
+  it('shows the compare checkboxes without a hover once two runs are listed', async () => {
+    await open(Runs, '/runs', new MockApi('normal', 0));
+    await loaded();
+    expect(target.querySelector('table.runs')!.classList.contains('pickable')).toBe(true);
+    const [one] = await new MockApi('normal', 0).runs();
+    await open(Runs, `/runs?q=${encodeURIComponent(one!.id)}`, new MockApi('normal', 0));
+    await loaded();
+    expect(ids()).toHaveLength(1);
+    expect(target.querySelector('table.runs')!.classList.contains('pickable')).toBe(false);
+  });
 });
