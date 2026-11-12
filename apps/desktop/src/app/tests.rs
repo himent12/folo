@@ -171,11 +171,12 @@ fn deleting_a_run_or_a_dataset_leaves_its_page_for_the_list() {
         this.ask_delete(DeleteTarget::Run("run_52e8".into()), w, cx);
         this.delete_confirmed(cx);
     });
-    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    // Drawn: the page shown is the list.
+    app.frame(window.into());
     drive(&mut app, window, |this, _, _| {
         assert!(this.confirm_delete.is_none());
         assert!(this.store.run("run_52e8").is_none());
-        assert_eq!(this.route_pending, Some(Route::Runs));
+        assert_eq!(this.route, Route::Runs);
         let models = this.store.models.ready().unwrap();
         assert!(models.iter().all(|m| m.run_id.as_deref() != Some("run_52e8")), "its models went with it");
         assert!(this.toasts.iter().any(|t| t.title.starts_with("Deleted")));
@@ -191,14 +192,49 @@ fn deleting_a_run_or_a_dataset_leaves_its_page_for_the_list() {
     });
     // A dataset is unregistered.
     drive(&mut app, window, |this, w, cx| {
-        this.route_pending = None;
         this.navigate(Route::Dataset("ds_3b91".into()), w, cx);
         this.ask_delete(DeleteTarget::Dataset("ds_3b91".into()), w, cx);
         this.delete_confirmed(cx);
     });
+    app.frame(window.into());
     drive(&mut app, window, |this, _, _| {
         assert!(this.store.dataset_summary("ds_3b91").is_none());
-        assert_eq!(this.route_pending, Some(Route::Datasets));
+        assert_eq!(this.route, Route::Datasets);
+    });
+}
+
+#[test]
+fn an_earlier_toasts_open_goes_to_the_list_once_its_dataset_is_deleted() {
+    use super::{DeleteTarget, Route};
+    let (mut app, window) = open();
+    // A dataset's toast with Open (the demo lists it already: "… is already added").
+    let (id, name) = drive(&mut app, window, |this, _, cx| {
+        let ds = this.store.datasets.ready().unwrap()[0].clone();
+        let id_name = (ds.id.clone(), ds.name.clone());
+        this.dataset_added(ds, "Added", cx);
+        id_name
+    });
+    // Its page opened another way (the toast stays), and the dataset deleted from there.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Dataset(id.clone()), w, cx);
+        this.ask_delete(DeleteTarget::Dataset(id.clone()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    app.frame(window.into());
+    // The earlier toast's Open: the list, saying why, not the deleted dataset's page.
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.route, Route::Datasets);
+        let open = this.toasts.iter().find_map(|t| t.action.clone()).expect("the toast with Open");
+        (open.1)(this, w, cx);
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.route, Route::Datasets);
+        let said = format!("{name} was deleted");
+        assert!(this.toasts.iter().any(|t| t.title == said.as_str()), "{said}");
+        // Nor does Back lead there.
+        this.back(w, cx);
+        assert_ne!(this.route, Route::Dataset(id.clone()));
     });
 }
 
