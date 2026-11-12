@@ -11,8 +11,8 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use super::{Rng, f16_round, to_f16};
-use crate::kernels::conv::{self, Conv2dDesc};
+use super::{Rng, f16_round, to_f16, traced_splits};
+use crate::kernels::conv::{self, Conv2dDesc, split};
 use crate::kernels::coop::{self, CoopConfig};
 use crate::kernels::gemm::{self, BatchStrides, GemmBias, GemmDesc};
 use crate::kernels::pooling::Window2d;
@@ -395,6 +395,20 @@ fn run_conv(
     cfg: Option<CoopConfig>,
     seed: u64,
 ) {
+    run_conv_split(ctx, d, with_bias, out, cfg, seed, None);
+}
+
+/// [`run_conv`] with the routed conv split into `splits` K chunks (`None`: picked from the shape). Returns the
+/// chunks the routed and the explicit conv ran as (0: not run), after checking them against [`split::plan`].
+fn run_conv_split(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    with_bias: bool,
+    out: DType,
+    cfg: Option<CoopConfig>,
+    seed: u64,
+    splits: Option<usize>,
+) -> [usize; 2] {
     let mut rng = Rng::new(seed);
     let (kh, kw) = d.win.kernel;
     let x = f16_round(&rng.vec(d.n * d.c_in * d.h * d.w, -1.0, 1.0));
@@ -411,14 +425,26 @@ fn run_conv(
     let (gx, gw, gb) = (upload(ctx, &x, DType::F16), upload(ctx, &w, DType::F16), upload(ctx, &b, out));
     let gy = GpuTensor::empty(ctx, &[want.len()], out).unwrap();
     let bias = with_bias.then(|| gb.raw());
+    let mut chunks = [0; 2];
     if out == DType::F16 && cfg.is_none() {
-        conv::conv2d(ctx, d, gx.raw(), gw.raw(), bias, gy.raw()).unwrap();
+        let plan = conv::ConvPlan { tiles: None, splits };
+        chunks[0] = traced_splits(ctx, || {
+            conv::conv2d_with_plan(ctx, d, gx.raw(), gw.raw(), bias, gy.raw(), plan).unwrap();
+        });
         assert!(ctx.tensor_cores(), "{}", ctx.tensor_cores_status());
+        assert_eq!(
+            chunks[0],
+            planned_splits(d, None, splits),
+            "chunks of routed conv {d:?} splits {splits:?}"
+        );
         let routed = gy.to_vec().unwrap();
-        assert_within(&routed, &want, &tol, &format!("routed conv {d:?} bias={with_bias}"));
+        assert_within(&routed, &want, &tol, &format!("routed conv {d:?} bias={with_bias} splits {splits:?}"));
     }
     if !d.is_depthwise() {
-        coop::conv2d(ctx, d, out, gx.raw(), gw.raw(), bias, gy.raw(), cfg).unwrap();
+        chunks[1] = traced_splits(ctx, || {
+            coop::conv2d(ctx, d, out, gx.raw(), gw.raw(), bias, gy.raw(), cfg).unwrap();
+        });
+        assert_eq!(chunks[1], planned_splits(d, cfg, None), "chunks of coop conv {d:?} cfg {cfg:?}");
         let got = gy.to_vec().unwrap();
         assert_within(
             &got,
@@ -427,6 +453,21 @@ fn run_conv(
             &format!("coop conv {d:?} bias={with_bias} out {out:?} cfg {cfg:?}"),
         );
     }
+    chunks
+}
+
+/// The `K` chunks [`split::plan`] gives the tensor-core implicit GEMM of `d` with `cfg` (picked when `None`) and
+/// `want` chunks requested (1 for the other paths).
+fn planned_splits(d: &Conv2dDesc, cfg: Option<CoopConfig>, want: Option<usize>) -> usize {
+    if d.is_depthwise() || d.is_pointwise() {
+        return 1;
+    }
+    let (oh, ow) = d.output().unwrap();
+    let (m, n, batch) = (d.c_out / d.groups, oh * ow, d.n * d.groups);
+    let cfg = cfg.unwrap_or_else(|| coop::pick_config(m, n, batch));
+    let tiles = m.div_ceil(cfg.bm as usize) * n.div_ceil(cfg.bn as usize);
+    let k = d.c_in / d.groups * d.win.kernel.0 * d.win.kernel.1;
+    split::plan(cfg.bk as usize, k, tiles, batch, d.n * d.c_out * oh * ow, want).0
 }
 
 #[test]
@@ -454,6 +495,41 @@ fn coop_conv_variants() {
     }
     // Depthwise (the head's and the attention's DWConv) keeps its direct kernel with tensor cores on.
     run_conv(&ctx, &cdesc(2, 32, 10, 10, 32, 32, s1), true, DType::F16, None, 12);
+}
+
+#[test]
+fn coop_conv_split_k() {
+    let (ctx, _g) = coop!();
+    let s1 = Window2d::square(3, 1, 1);
+    let run =
+        |d: &Conv2dDesc, bias, out, seed, splits| run_conv_split(&ctx, d, bias, out, None, seed, splits);
+    // [routed, explicit] chunks per request (also checked against `split::plan`; pinned so a planner change shows
+    // up here). The explicit conv picks its own count; BK-32 rounding gives fewer than asked when `K` is short.
+    for (splits, chunks) in
+        [(2, [[2, 1], [2, 1], [2, 2]]), (3, [[2, 1], [3, 1], [3, 2]]), (8, [[2, 1], [5, 1], [6, 2]])]
+    {
+        let seed = 30 + splits as u64;
+        // An odd plane (scalar finish), K = 45 (no multiple of BK), stride 2, ragged M; groups; K = 576.
+        let got = [
+            run(&cdesc(2, 5, 13, 13, 7, 1, Window2d::square(3, 2, 1)), true, DType::F16, seed, Some(splits)),
+            run(&cdesc(2, 32, 8, 8, 40, 2, s1), false, DType::F16, seed + 10, Some(splits)),
+            run(&cdesc(1, 64, 10, 10, 130, 1, s1), true, DType::F16, seed + 20, Some(splits)),
+        ];
+        assert_eq!(got, chunks, "chunks for {splits} requested");
+    }
+    // A request of 8 that does give 8 chunks: K = 1152 is 36 BK-32 tiles, 8 chunks of 5 (the last one short); the
+    // explicit conv (one 64x64 tile) picks 4.
+    assert_eq!(run(&cdesc(1, 128, 6, 6, 40, 1, s1), true, DType::F16, 39, Some(8)), [8, 4]);
+    // K = 1 cannot split (the request is clamped).
+    assert_eq!(
+        run(&cdesc(2, 1, 9, 9, 4, 1, Window2d::square(1, 2, 0)), true, DType::F16, 40, Some(4)),
+        [1, 1]
+    );
+    // A 20 px layer with few tiles splits on its own (7 64x64 tiles, K = 576 in 2 chunks), also with an f32
+    // output (explicit conv only).
+    for (out, chunks) in [(DType::F16, [2, 2]), (DType::F32, [0, 2])] {
+        assert_eq!(run(&cdesc(1, 64, 20, 20, 64, 1, s1), true, out, 41, None), chunks);
+    }
 }
 
 #[test]
@@ -823,4 +899,24 @@ fn coop_conv_reads_parts_and_slices_in_place() {
         conv::conv2d_input(&ctx, &d, (gx.raw(), at), gw.raw(), Some(gb.raw()), gy.raw(), None).unwrap();
         assert_within(&gy.to_vec().unwrap(), &want, &tol, &format!("coop conv on a slice k{k}"));
     }
+    // A channel slice into a conv that splits K (64 -> 40 channels at 10 px, K = 576: 2 chunks), no bias: the
+    // partial slabs read B at the slice's offset and image stride.
+    let d = cdesc(2, 64, 10, 10, 40, 1, Window2d::square(3, 1, 1));
+    let hw = 100;
+    let x = f16_round(&rng.vec(2 * 64 * hw, -1.0, 1.0));
+    let wt = f16_round(&rng.vec(40 * 64 * 9, -1.0, 1.0));
+    let want = cpu_conv(&d, &x, &wt, None, false);
+    let sums = cpu_conv(&d, &x, &wt, None, true);
+    let tol: Vec<f64> =
+        want.iter().zip(&sums).map(|(&y, &s)| bound(y, s as f64, 64 * 9, 0.0, DType::F16)).collect();
+    let gx = upload(&ctx, &embed(&x, 2, 64, hw, 96, 16, &mut rng), DType::F16);
+    let gw = upload(&ctx, &wt, DType::F16);
+    let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F16).unwrap();
+    let at = conv::ConvInput { offset: 16 * hw, n_stride: 96 * hw };
+    let chunks = traced_splits(&ctx, || {
+        conv::conv2d_input(&ctx, &d, (gx.raw(), at), gw.raw(), None, gy.raw(), None).unwrap();
+    });
+    assert_eq!(chunks, planned_splits(&d, None, None));
+    assert!(chunks > 1, "the slice case must split K, ran {chunks} chunk(s)");
+    assert_within(&gy.to_vec().unwrap(), &want, &tol, "coop split-K conv on a slice");
 }

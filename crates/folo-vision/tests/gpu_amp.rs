@@ -504,9 +504,15 @@ fn amp_without_tensor_cores_is_not_supported() {
 }
 
 /// `gpu_train.rs`'s tiny run (16 images at 128 px, batch 4, AdamW, no warmup or augmentation, 10 epochs) with
-/// mixed precision against the same run in f32: the loss falls as far (the last three epochs within 15% of f32's).
+/// mixed precision against the same run in f32: the loss falls as far (the last three epochs within 30% of f32's).
 /// The first steps overflow at the initial scale 2^16 and are skipped while it backs off (a run of thousands of
 /// steps does not notice; on this 40-step one it shows as a one-epoch delay), so the curves are compared at the end.
+///
+/// Bound: 40 AdamW steps at batch 4 are chaotic, so any change of rounding order (another kernel, another split)
+/// moves both curves. Over seeds 0–5 the AMP / f32 tail ratio was 0.97–1.16 at c0464b29 and 0.91–1.19 with the
+/// forward split-K of #186 (mean 1.08, standard deviation 0.08 over the 12 runs; seed 5 already exceeded the old
+/// 1.15 at c0464b29), while one step's AMP gradient is 6.2–6.3% from f32 either way. An AMP run that does not
+/// learn ends near twice the f32 tail.
 #[test]
 fn tiny_amp_run_learns() {
     let (_, _g) = gpu_tc!();
@@ -534,7 +540,7 @@ fn tiny_amp_run_learns() {
     let tail = |l: &[f32]| l[l.len() - 3..].iter().sum::<f32>() / 3.0;
     let scaler = t.loss_scaler().unwrap();
     eprintln!("loss scale {} after {} skipped steps: amp {losses:?}", scaler.scale(), scaler.skipped_steps());
-    assert!(tail(&losses) <= 1.15 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
+    assert!(tail(&losses) <= 1.3 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
     assert!(tail(&losses) < 0.7 * losses.iter().fold(0f32, |m, &l| m.max(l)), "the loss falls: {losses:?}");
     assert!(scaler.skipped_steps() < 20 && scaler.scale() >= 1.0, "{scaler:?}");
 }
@@ -562,6 +568,13 @@ fn edit_amp(path: &std::path::Path, edit: impl FnOnce(&mut folo_nn::AmpContract)
 /// their losses in f32. The losses stay finite and track the same run in f32 (the reported total is a weighted sum
 /// whose weights move to the one-to-one loss, so it need not fall every epoch), the loss scaler keeps working, and
 /// the checkpoint holds an `o2o` model that predicts with its one-to-one head.
+///
+/// Bound: as for `tiny_amp_run_learns`, 24 AdamW steps at batch 4 are chaotic in the rounding order. Over seeds
+/// 0–5 the AMP / f32 ratio of the last two epochs was 1.00–1.22 at c0464b29 (seed 5 already over the old 1.15) and
+/// 0.93–1.25 on ed265317 (after #186's forward split-K; seeds 1 and 5 over 1.15): mean 1.08, standard deviation
+/// 0.10 over the 12 runs (seed 0 on ed265317 gave the same losses in three repeats). 1.3 is about mean + 2 σ: a
+/// coarse guard against a diverging or much slower AMP run. That the one-to-one branch trains under autocast is
+/// checked directly by `amp_o2o_branch_trains_under_autocast`, and no batch may be skipped as non-finite here.
 #[test]
 fn amp_trains_the_dual_head() {
     use folo_vision::model::{FoloModel, HeadMode};
@@ -583,18 +596,70 @@ fn amp_trains_the_dual_head() {
             .iter()
             .map(|e| e.train_loss.total)
             .collect();
-    let mut t = Trainer::new(cfg, data(), TrainOptions::default()).unwrap();
+    let log: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+    let mut t = Trainer::new(cfg, data(), stopping_opts(None, Some(log.clone()))).unwrap();
     assert!(t.model().has_o2o());
     let s = t.run().unwrap();
     let losses: Vec<f32> = s.epochs.iter().map(|e| e.train_loss.total).collect();
     eprintln!("o2o losses: amp {losses:?}, f32 {f32_losses:?}");
     assert!(losses.iter().all(|l| l.is_finite()), "{losses:?}");
+    // An epoch's loss averages its finite batches only: a skipped non-finite batch shows only in the log.
+    let skipped: Vec<String> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| if let RunEvent::Log(l) = e { Some(l.message.clone()) } else { None })
+        .filter(|m| m.contains("non-finite loss"))
+        .collect();
+    assert!(skipped.is_empty(), "{skipped:?}");
     let tail = |l: &[f32]| l[l.len() - 2..].iter().sum::<f32>() / 2.0;
-    assert!(tail(&losses) <= 1.15 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
+    assert!(tail(&losses) <= 1.3 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
     let scaler = t.loss_scaler().unwrap();
     assert!(scaler.skipped_steps() < 20 && scaler.scale() >= 1.0, "{scaler:?}");
     let last = TestFile::new("amp-o2o", "last.folo");
     t.save_checkpoint(&last).unwrap();
     let m = FoloModel::open(&last).unwrap();
     assert!(m.has_o2o() && m.head_mode() == HeadMode::O2o);
+}
+
+/// The one-to-one branch under autocast (docs/MODEL.md §6.6, §8.8): both branches come out in f16, and the
+/// one-to-one loss (in f32) trains `head.o2o.*` with finite, nonzero gradients and nothing else (its inputs are
+/// detached), as on the CPU in f32 (`tests/o2o.rs`).
+#[test]
+fn amp_o2o_branch_trains_under_autocast() {
+    use folo_vision::model::HeadMode;
+    use folo_vision::{ImageTargets, LossConfig, Xyxy, detection_loss};
+    let (dev, _g) = gpu_tc!();
+    let mut cfg = ModelConfig::new("n", 2).unwrap();
+    cfg.head = "o2o".into();
+    let mut m = FoloModel::new(cfg).unwrap();
+    m.to_device(dev).unwrap();
+    m.train();
+    let x = Tensor::rand_uniform([2, 3, 64, 64], 0.0, 1.0, &mut Rng::seed(4)).to_device(dev).unwrap();
+    let out = {
+        let _a = autocast();
+        m.forward(&x).unwrap()
+    };
+    assert_eq!(out.mode, HeadMode::O2m);
+    let (bo, co) = out.o2o.clone().expect("training output has the o2o branch");
+    for t in [&out.box_raw, &out.cls_raw, &bo, &co] {
+        assert_eq!(t.dtype(), DType::F16);
+    }
+    let targets = vec![
+        ImageTargets { boxes: vec![Xyxy::new(8.0, 8.0, 40.0, 44.0)], labels: vec![1] },
+        ImageTargets { boxes: vec![Xyxy::new(20.0, 4.0, 60.0, 30.0)], labels: vec![0] },
+    ];
+    let f32_ = |t: &Tensor| t.to_dtype(DType::F32).unwrap();
+    let lo = detection_loss(&f32_(&bo), &f32_(&co), &out.anchors, &targets, &LossConfig::o2o()).unwrap();
+    assert!(lo.total.to_vec::<f32>().unwrap()[0].is_finite());
+    let g = lo.total.backward().unwrap();
+    let named = |n: &str| m.named_tensors().into_iter().find(|t| t.name == n).unwrap().tensor;
+    let grad = |n: &str| g.get(&named(n)).map(|v| v.to_vec::<f32>().unwrap());
+    for n in ["head.o2o.box.p3.conv0.conv.weight", "head.o2o.cls.p5.out.bias"] {
+        let v = grad(n).unwrap_or_else(|| panic!("{n} got no gradient from the o2o loss"));
+        assert!(v.iter().all(|x| x.is_finite()) && v.iter().any(|x| *x != 0.0), "{n}: {v:?}");
+    }
+    for n in ["backbone.stem.conv.weight", "neck.out3.cv1.conv.weight", "head.box.p3.conv0.conv.weight"] {
+        assert!(grad(n).is_none_or(|v| v.iter().all(|x| *x == 0.0)), "{n} got a gradient from the o2o loss");
+    }
 }

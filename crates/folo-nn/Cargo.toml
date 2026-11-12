@@ -21,7 +21,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 folo-test-support.workspace = true
-# GPU tests (tests/gpu.rs) and benchmarks; they skip when there is no adapter.
+# GPU tests (tests/gpu/) and benchmarks; they skip when there is no adapter.
 folo-gpu.workspace = true
 
 [[bench]]

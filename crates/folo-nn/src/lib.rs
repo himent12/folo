@@ -63,4 +63,6 @@ pub use layers::{
     MaxPool2d, ModuleList, RunningStats, Sequential, Upsample, fuse_conv_bn,
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
-pub use sched::{DecayKind, LrSchedule, SchedContract, SchedUnit, warmup_iters};
+pub use sched::{
+    DecayKind, LrSchedule, SchedContract, SchedUnit, WARMUP_FLOOR, warmup_iters, warmup_iters_floor,
+};

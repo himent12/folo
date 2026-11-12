@@ -1,6 +1,7 @@
 //! [`GpuContext`]: adapter selection, device + queue, buffer pool, pipeline cache and command batching.
 
 mod batch;
+pub(crate) mod binds;
 mod device;
 mod memory;
 mod readback;
@@ -18,6 +19,11 @@ use crate::pool::BufferPool;
 use crate::profile::Profiler;
 
 pub use device::AdapterSummary;
+
+/// A stable id of a buffer for the bind-group cache (see `context/binds.rs`).
+pub(crate) fn buffer_id(buf: &wgpu::Buffer) -> u64 {
+    binds::id_of(buf)
+}
 
 /// Environment variable that picks the adapter: an index into [`GpuContext::enumerate`] or a case-insensitive
 /// substring of the adapter name (for example `FOLO_GPU_ADAPTER=4080` or `FOLO_GPU_ADAPTER=1`).
@@ -54,6 +60,9 @@ pub fn request_tensor_cores() -> bool {
     }
 }
 
+/// Environment variable that turns the bind-group cache off in contexts created afterwards
+/// (`FOLO_GPU_NO_BIND_CACHE=1`, for A/B runs; see [`GpuContext::set_bind_cache`]).
+pub const ENV_NO_BIND_CACHE: &str = "FOLO_GPU_NO_BIND_CACHE";
 /// Environment variable that overrides the flush interval ([`GpuContext::set_flush_interval`]) of contexts created
 /// afterwards, for experiments (`FOLO_GPU_FLUSH_EVERY=1024`).
 pub const ENV_FLUSH_EVERY: &str = "FOLO_GPU_FLUSH_EVERY";
@@ -92,6 +101,9 @@ pub struct GpuOptions {
     pub tensor_cores: bool,
     /// Time every kernel ([`crate::profile`]), when the adapter has timestamp queries inside passes.
     pub profile: bool,
+    /// Folder of the persistent pipeline cache ([`crate::pipeline_cache`]); `None` keeps it off. Defaults to
+    /// [`crate::set_pipeline_cache_dir`]'s folder.
+    pub pipeline_cache_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for GpuOptions {
@@ -103,6 +115,7 @@ impl Default for GpuOptions {
             enable_f16: true,
             tensor_cores: false,
             profile: false,
+            pipeline_cache_dir: crate::pipeline_cache::pipeline_cache_dir(),
         }
     }
 }
@@ -183,6 +196,8 @@ struct Batch {
     /// Index of the chunk being filled and the byte cursor in it.
     chunk: usize,
     cursor: u64,
+    /// Bind groups of earlier dispatches, for reuse.
+    binds: binds::BindCache,
 }
 
 impl Default for Batch {
@@ -195,6 +210,7 @@ impl Default for Batch {
             chunks: Vec::new(),
             chunk: 0,
             cursor: 0,
+            binds: binds::BindCache::default(),
         }
     }
 }
@@ -206,6 +222,8 @@ struct Inner {
     summary: AdapterSummary,
     caps: Capabilities,
     pool: Arc<Mutex<BufferPool>>,
+    /// The pool's [`BufferPool::retired_flag`]: set when the pool let a buffer go that cached bind groups may hold.
+    retired: Arc<AtomicBool>,
     kernels: Mutex<HashMap<KernelKey, Arc<Kernel>>>,
     batch: Mutex<Batch>,
     errors: Arc<Mutex<Vec<String>>>,
@@ -214,6 +232,7 @@ struct Inner {
     dummy: wgpu::Buffer,
     dispatches: AtomicU64,
     submissions: AtomicU64,
+    bind_groups: AtomicU64,
     /// Tensor-core kernels in use (only ever true when `caps.coop_f16`); cleared by
     /// [`GpuContext::set_tensor_cores`] or when a tensor-core kernel fails to build.
     tensor_cores: AtomicBool,
@@ -230,6 +249,8 @@ struct Inner {
     flush_every: AtomicU32,
     /// Per-kernel timestamp queries (`FOLO_GPU_PROFILE=1`, see [`crate::profile`]).
     profiler: Option<Mutex<Profiler>>,
+    /// Compiled pipelines kept on disk between processes ([`crate::pipeline_cache`]).
+    pipeline_cache: Option<Arc<crate::pipeline_cache::DiskCache>>,
 }
 
 /// The idle staging buffers of [`GpuContext::upload_with`].
@@ -285,6 +306,8 @@ pub struct WorkStats {
     pub dispatches: u64,
     /// Command buffers submitted to the queue.
     pub submissions: u64,
+    /// Bind groups created; the other dispatches reused a cached one (see [`GpuContext::bind_cache_len`]).
+    pub bind_groups: u64,
 }
 
 /// A wgpu device and queue plus FOLO's buffer pool, pipeline cache and command batch.
@@ -429,6 +452,7 @@ impl GpuContext {
         WorkStats {
             dispatches: self.inner.dispatches.load(Ordering::Relaxed),
             submissions: self.inner.submissions.load(Ordering::Relaxed),
+            bind_groups: self.inner.bind_groups.load(Ordering::Relaxed),
         }
     }
 

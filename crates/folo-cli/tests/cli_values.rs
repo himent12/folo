@@ -29,10 +29,8 @@ fn hsv_takes_the_comma_and_the_spaced_form() {
 #[test]
 fn hsv_needs_three_gains() {
     for hsv in ["0.1,0.2", "0.1,0.2,0.3,0.4"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_folo"))
-            .args(["train", "--json", "--data", "does-not-exist", "--hsv", hsv])
-            .output()
-            .unwrap();
+        let out =
+            folo_cmd().args(["train", "--json", "--data", "does-not-exist", "--hsv", hsv]).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{hsv}");
         let stdout = String::from_utf8(out.stdout).unwrap();
         assert!(stdout.contains("\"usage\"") && stdout.contains("three gains"), "{hsv}: {stdout}");
@@ -76,4 +74,11 @@ fn synth_classes_take_a_comma_list() {
     assert_eq!(classes(&["--classes", "a,b,c"]), ["a", "b", "c"]);
     assert_eq!(classes(&["--classes", "solo"]), ["solo"]);
     assert_eq!(classes(&[]), ["circle", "square", "triangle"]);
+}
+
+/// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
+fn folo_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
+    c.env("FOLO_NO_CACHE", "1");
+    c
 }

@@ -24,7 +24,7 @@ are normative, this one is the map.
   `Optimizer::to_device` moves the optimizer's parameters and state (SGD momentum buffers, AdamW moments),
   `GradAccumulator::to_device` its buffers and `ModelEma::to_device` the averaged model (`ModelEma::new` also moves
   its copy to the source's device). A whole training setup can therefore be built on the CPU and moved, even
-  mid-run (tested against an all-CPU run in `tests/gpu.rs`).
+  mid-run (tested against an all-CPU run in `tests/gpu/main.rs`).
 
 ## Layers
 | layer | notes |
@@ -75,7 +75,9 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   exactly when a gradient is); without, it is `amp::unscale_` (below).
 - Recipe helpers: `accumulate_steps(nbs, batch)`, `effective_weight_decay`, `auto_optimizer` (§8.2 `auto`).
 - `Optimizer::contract()` / `apply_contract()` / `state_tensors()` / `load_state()` are the `folo.optim` contract
-  and `optim.*` tensors of FORMAT.md.
+  and `optim.*` tensors of FORMAT.md. `MuSgd::with_weights(groups, MuSgdWeights { muon, sgd })` sets MuSGD's step
+  weights (MODEL.md §8.2; default 0.2 / 1.0); weights other than the defaults are part of its contract (`musgd`),
+  and `apply_contract` adopts the file's (when it has none, the optimizer keeps the weights it was built with).
 
 ## Mixed precision (`folo_nn::amp`)
 - `GradScaler`: dynamic loss scaling as `torch.cuda.amp.GradScaler` (docs/MODEL.md §8.8): `scale()` (initially
@@ -94,7 +96,9 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 
 ## Schedule and EMA
 - `LrSchedule::new(kind, epochs, steps_per_epoch, lrf, warmup_epochs, warmup_bias_lr, warmup_momentum)` computes
-  `W` with MODEL.md §8.4's formula. Each optimizer step: `sched.apply(&mut opt)` (LR and momentum of every group at
+  `W` with MODEL.md §8.4's formula at a floor of 100 (`warmup_iters`, the floor of runs made before
+  `warmup_floor`); `LrSchedule::with_warmup_iters` takes `W` as given, e.g. from `warmup_iters_floor(.., floor)`,
+  which the trainer calls with `TrainConfig.warmup_floor` (default 0: no floor). Each optimizer step: `sched.apply(&mut opt)` (LR and momentum of every group at
   iteration `t`; the `bias` group warms up from `warmup_bias_lr`), `opt.step(..)`, `sched.advance()`.
   `contract()` / `from_contract()` are `folo.sched`.
 - `ModelEma<M>` keeps a second instance of the model (eval mode, no grad, on the source's device) and updates every

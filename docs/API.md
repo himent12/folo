@@ -561,14 +561,14 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // ResolvedTrain: the settings the run trains with. `config` stays what was requested ("optimizer": "auto",
 // "lr0": 0.01); these are what that became (docs/MODEL.md §8.2, §8.4), as in the run folder's config.json.
 { "optimizer": "sgd|adamw|musgd", // never auto
-  "lr0": 0.001429,              // base LR of every parameter group: auto's pick, else config.lr0
+  "lr0": 0.01,                  // base LR of every parameter group: auto's pick, else config.lr0
   "lrf": 0.01, "cos_lr": false, // the last step runs at lr0 · lrf; linear or cosine decay
-  "momentum": 0.9,              // SGD momentum, or AdamW β1, after warmup
-  "betas": [0.9, 0.999] | null, // AdamW only
+  "momentum": 0.937,            // SGD / MuSGD momentum, or AdamW β1, after warmup
+  "betas": null,                // AdamW only: [β1, β2], e.g. [0.9, 0.999]
   "weight_decay": 0.0005,       // of the decay group, after the batch scaling weight_decay · batch · accumulate / nbs
   "batch": 16, "accumulate": 4, "nbs": 64,  // gradients of `accumulate` batches per optimizer step (≈ nbs images)
   "optimizer_steps_per_epoch": 13,
-  "warmup_iters": 100, "warmup_epochs": 3.0, "warmup_momentum": 0.8, "warmup_bias_lr": 0.0,
+  "warmup_iters": 39, "warmup_epochs": 3.0, "warmup_momentum": 0.8, "warmup_bias_lr": 0.1,
   "close_mosaic": 7 }           // close-mosaic epochs after the cap at half the run (docs/MODEL.md §8.4): mosaic is
                                // off for the last `close_mosaic` epochs; left out for runs older than the field
                                // whose config.json lacks `close_mosaic_epochs`
@@ -687,9 +687,17 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   one (so a folder holding both reads the same); `--weights` is the published name for published weights,
   else the `.folo` file the run started from (so no `--model`: the CLI takes the architecture from the weights,
   and `--head` is always given, since the CLI's default is the weights file's head); settings equal to the
-  defaults are left out, and a value starting with `-` is attached (`--name=--amp`). An `auto` run that trained under
-  an older `auto` rule than a new run takes (its `config.json` `train.auto_rule`, rule 1 when absent) ends with
-  `--set auto_rule=N`, so a long run made before rule 3 repeats with SGD, not MuSGD. A run whose optimizer this
+  defaults are left out, and a value starting with `-` is attached (`--name=--amp`). The recipe a run trained with is read
+  from its folder's `config.json` `train` object or, when the folder has none (a cloud run: the server mirrors its
+  history and copies its weights), from the `folo.train` of its `weights/last.folo` (else `best.folo`). An `auto`
+  run that trained under an older `auto` rule than a new run takes (`auto_rule`, rule 1 when absent) ends with
+  `--set auto_rule=N`, so a long run made before rule 3 repeats with SGD, not MuSGD, and a short one made before
+  rule 4 with AdamW; a run made before `warmup_floor` existed (no `warmup_floor`) ends with
+  `--set warmup_floor=100`, the warmup floor it trained with; an `auto` rule-5 run that trained from pretrained
+  weights (`transfer`) but whose command has no `--weights` (a run continued from an imported checkpoint) ends with
+  `--set auto_rule=4` (and `--set musgd.muon=.. --set musgd.sgd=..` when its weights were not the defaults), which
+  resolves the same optimizer with the MuSGD step weights it used (docs/MODEL.md §8.2).
+  A run whose optimizer this
   server does not know (made by a newer FOLO) gets `400 invalid_config` instead of a command that would train `auto`. `cli` is quoted for PowerShell,
   as Studio shows commands: arguments with spaces or shell characters are single-quoted, a quote inside doubled
   (`'O''Brien'`, also for the typographic quotes PowerShell reads as quotes); POSIX shells read the same words

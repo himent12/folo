@@ -310,6 +310,21 @@ fn sgd_ref(p: &mut [f64], s: &mut [f64], g: &[f64], lr: f64, wd: f64) {
 /// a Muon conv weight, a boosted `.cls` weight at 3x the LR, and a BatchNorm weight that only takes SGD.
 #[test]
 fn musgd_matches_reference_steps() {
+    musgd_reference_steps(MuSgdWeights::default());
+}
+
+/// The same with other step weights (the reference's `MuSGD(muon=0.5, sgd=0.5)`): the SGD factor scales only the
+/// Muon groups' SGD step, and the groups' LRs are left as the schedule set them.
+#[test]
+fn musgd_weights_match_reference_steps() {
+    musgd_reference_steps(MuSgdWeights { muon: 0.5, sgd: 0.5 });
+    let bad = MuSgdWeights { muon: f64::NAN, sgd: 1.0 };
+    assert!(
+        MuSgd::with_weights(vec![ParamGroup::new("decay", vec![("w".into(), param(&[1.0]))])], bad).is_err()
+    );
+}
+
+fn musgd_reference_steps(weights: MuSgdWeights) {
     let w = Tensor::from_slice(&[0.3f32, -0.2, 0.5, 0.1, 0.4, -0.6], [2, 3, 1, 1]).unwrap().requires_grad_();
     let h = Tensor::from_slice(&[0.2f32, -0.1, 0.3, 0.7], [2, 2, 1, 1]).unwrap().requires_grad_();
     let bn = param(&[1.0, 0.9]);
@@ -322,8 +337,8 @@ fn musgd_matches_reference_steps() {
             .weight_decay(wd),
         ParamGroup::new("bn", vec![("bn".into(), bn.clone())]).lr(lr).momentum(mu),
     ];
-    let mut opt = MuSgd::new(groups).unwrap();
-    assert_eq!(opt.kind(), OptimKind::MuSgd);
+    let mut opt = MuSgd::with_weights(groups, weights).unwrap();
+    assert_eq!((opt.kind(), opt.weights()), (OptimKind::MuSgd, weights));
     let gw = [[0.1f32, -0.3, 0.2, 0.05, 0.4, -0.1], [-0.2, 0.1, 0.3, 0.2, -0.05, 0.15]];
     let gh = [[0.3f32, 0.1, -0.2, 0.4], [0.1, -0.1, 0.2, 0.05]];
     let gb = [G1, G2];
@@ -340,9 +355,9 @@ fn musgd_matches_reference_steps() {
         let u: Vec<f64> = m.iter().zip(g).map(|(m, g)| mu * m + (1.0 - mu) * g).collect();
         let o = ns5_f64(&u, 2, u.len() / 2);
         for (p, o) in p.iter_mut().zip(&o) {
-            *p -= 0.2 * lr * o;
+            *p -= weights.muon * lr * o;
         }
-        sgd_ref(p, s, g, lr, wd);
+        sgd_ref(p, s, g, weights.sgd * lr, wd);
     };
     for k in 0..2 {
         let dot = |p: &Tensor, g: &[f32]| {

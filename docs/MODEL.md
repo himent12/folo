@@ -25,7 +25,7 @@ Conventions used throughout:
 | head | anchor-free, decoupled box/class branches, DFL box regression with `reg_max = 16`, one-to-many + NMS by default; `head = "o2o"` adds the NMS-free one-to-one branch (dual assignment, predicts without NMS, §6.6) |
 | assigner | task-aligned (TAL): `top_k = 10`, `alpha = 0.5`, `beta = 6.0`, CIoU overlaps, small-target box enlargement to 16 px, deterministic ties |
 | loss | `7.5 · CIoU + 0.5 · BCE + 1.5 · DFL`, each normalised by the target-score sum, times the batch size |
-| optimizer | `auto`: AdamW for short runs, SGD + Nesterov for long ones. No MuSGD |
+| optimizer | `auto`: MuSGD (SGD + Nesterov plus a Muon step on conv weights) for every run since rule 4; v1 picked AdamW for short runs, SGD for long ones (§8.2) |
 | schedule | linear LR decay to `lrf = 0.01`, 3 warmup epochs (bias LR 0.1 → lr0, momentum 0.8 → 0.937), nominal batch 64 via gradient accumulation |
 | EMA | `d = 0.9999 · (1 − exp(−updates / 2000))`, over parameters and BN running stats |
 | precision | f32 training (no AMP); f32 or f16 inference after Conv+BN fusion |
@@ -69,10 +69,11 @@ are broken by index and conflicts are resolved only among the ground truths that
 reference leaves ties to the GPU top-k, and resolves conflicts across all ground truths. Ours is deterministic and
 easier to test.
 
-**Optimizer: SGD and AdamW, no MuSGD.** MuSGD (YOLO26) needs a batched Newton–Schulz orthogonalisation in bf16 for
-every conv weight. That is a lot of new kernel surface for a gain reported mainly on long COCO runs. SGD with
-Nesterov momentum is the reference for long runs; AdamW with the reference's class-count-fitted LR trains short runs
-and small datasets more robustly. `auto` picks between them (§8.2).
+**Optimizer: SGD and AdamW in v1, MuSGD since.** v1 left out MuSGD (YOLO26: a batched Newton–Schulz
+orthogonalisation for every conv weight, a lot of new kernel surface for a gain reported mainly on long COCO runs)
+and had `auto` pick SGD with Nesterov momentum for long runs and AdamW with the reference's class-count-fitted LR for
+short runs and small datasets. MuSGD has since been implemented (§8.2) and measured: it beats both on every run
+length tried, fine-tunes included, so `auto` rule 4 picks it everywhere (docs/hill/learn.md, docs/hill/r2-learn.md).
 
 **Tricks that pay for themselves:** mosaic (the biggest single gain on small datasets), closing mosaic for the last
 epochs (it removes the train/test distribution gap), EMA (smoother, better validation weights for one extra copy of the weights), LR and
@@ -486,8 +487,10 @@ As in YOLOv10 / YOLO26's end-to-end mode. `head = "o2o"` models (`folo train --h
 both branches and are trained with dual assignment; `head = "o2m"` files (every v1 file) are unchanged.
 - A second copy of both branches, `head.o2o.box.L.*` and `head.o2o.cls.L.*`, with the same structure and priors
   (drawn after the o2m branch, §5). Its input features are detached (stop-gradient) during training, so only the
-  o2m branch trains the backbone and neck. Fine-tuning an `o2o` model from `o2m` weights copies the o2m head into the
-  o2o branch (as YOLOv10 initialises it).
+  o2m branch trains the backbone and neck. Opt-in: `TrainConfig.o2o_attached_epochs = N` leaves them attached for
+  the first `N` epochs, so the one-to-one loss trains the backbone and neck too (YOLO26's published run carries a
+  `detach_epoch = 10` that Ultralytics 8.4.198 does not have; default 0, always detached). Fine-tuning an `o2o` model
+  from `o2m` weights copies the o2m head into the o2o branch (as YOLOv10 initialises it).
 - Loss: `L = w_m · L_o2m + w_o · L_o2o`. `L_o2o` is §7 with `top_k = 7` and a second filter `top_k2 = 1` after
   conflict resolution: each ground truth keeps only its highest-metric positive (ties: smaller anchor); the anchors
   it drops become background, and its soft target (§7.3 step 5, over that single positive) is about its IoU.
@@ -622,14 +625,15 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `batch` | 16 | images per forward/backward |
 | `imgsz` | 640 | square, multiple of 32, at least 64 for training (so P5 is at least 2×2 and every BN channel sees several values) |
 | `nbs` | 64 | nominal batch: gradients accumulate over `accumulate = max(round(nbs / batch), 1)` batches |
-| `optimizer` | `auto` | `sgd`, `adamw` or `auto` (§8.2) |
+| `optimizer` | `auto` | `sgd`, `adamw`, `musgd` or `auto` (§8.2) |
 | `lr0` | 0.01 | base LR (ignored by `auto`) |
 | `lrf` | 0.01 | final LR = `lr0 · lrf` |
 | `momentum` | 0.937 | SGD momentum / AdamW β1 |
 | `weight_decay` | 0.0005 | scaled with the batch (§8.2) |
 | `warmup_epochs` | 3.0 | |
+| `warmup_floor` | 0 | warmup floor in iterations (§8.4); 100 in configs written before the key |
 | `warmup_momentum` | 0.8 | |
-| `warmup_bias_lr` | 0.1 | 0.0 when `auto` chooses |
+| `warmup_bias_lr` | 0.1 | 0.1 under `auto` rule 4; 0.0 when an older `auto` rule chooses |
 | `cos_lr` | false | linear decay by default |
 | `close_mosaic` | 10 | epochs at the end with mosaic off, at most half of the run (§8.6) |
 | `ema` | true | `false`: no EMA (§8.5) |
@@ -645,12 +649,34 @@ Three groups, assigned by tensor name:
 
 Effective weight decay: `wd = weight_decay · batch · accumulate / nbs`.
 
-`auto`: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: MuSGD (below) with
-`lr0 = 0.01`, `momentum = 0.9`, as the reference trainer picks since Ultralytics 8.4. Otherwise: AdamW with `lr0 = max(round(0.002 · 5 / (4 + nc), 6), 0.001)` and `β1 = 0.9` (e.g.
-0.00125 for `nc = 4`, 0.001 from `nc = 6` on, so 0.001 for `nc = 80`). In both cases `warmup_bias_lr = 0.0`. An
-explicit `sgd`/`adamw` uses `lr0`, `momentum` and `warmup_bias_lr` as given.
+`auto` (rule 5): MuSGD (below) with `lr0 = 0.01`, `momentum = 0.937` and `warmup_bias_lr = 0.1` for every run,
+short or long, from scratch or from pretrained weights; from scratch with the step weights `muon = sgd = 0.5`
+(`folo_nn::optim::AUTO_MUSGD_SCRATCH_WEIGHTS`, the defaults of Ultralytics' `MuSGD` class), from pretrained weights
+with `musgd.muon` / `musgd.sgd` (default 0.2 / 1.0, the reference trainer's). Whether a run starts from weights is
+`TrainConfig.transfer`, which the trainer sets from `--weights` and stores with the run, so a resume resolves the
+same. An explicit `sgd`/`adamw`/`musgd` uses `lr0`, `momentum`, `warmup_bias_lr` and `musgd.*` as given. Rule 4
+is rule 5 with `musgd.*` for every run.
 
-`TrainConfig.auto_rule` (current: 3) versions this rule: rule 3 is the above; rule 2 picks SGD (`lr0 = 0.01`,
+Why the step weights (docs/hill/r2-learn.md): from scratch 0.5 / 0.5 trains folo-n on the COCO proxy to AP 0.1234
+against 0.1135 with 0.2 / 1.0 (three seeds each, every seed above every other; Ultralytics 8.4.198's own MuSGD on
+the same images, one run in round 1: 0.1133), and the shapes gate to mAP50-95 0.934 against 0.926 (one seed); fine-tuning
+`folo-n-coco-v2` on BCCD it does worse (test AP 0.616 against 0.625, three seeds), so fine-tunes keep 0.2 / 1.0.
+
+Why (docs/hill/r2-learn.md; three seeds per side unless marked "one seed"): the reference trainer (Ultralytics
+8.4.198, and FOLO's rule 3) zeroes the bias warmup LR whenever `auto` chooses, which suits AdamW at `lr0 ≈ 0.001` but
+costs MuSGD about 10% on the COCO proxy (MuSGD at momentum 0.9: AP 0.1021 with `warmup_bias_lr = 0`, 0.1118 with
+0.1); and below 10,000 iterations it picks AdamW, which MuSGD beats in every short case measured: the COCO proxy
+(6,260 iterations from scratch, AP 0.0747 for AdamW, one seed, from docs/hill/learn.md, against 0.112), the shapes
+gate (§10.6, mAP50-95 0.892 against 0.926, one seed) and fine-tuning `folo-n-coco-v2` on BCCD (test AP 0.607
+against 0.625). On the other fine-tuning sets of docs/BENCHMARKS.md it is level: medical-pills 0.807 against
+0.804, signature 0.9885 against 0.9892 (a saturated set); brain-tumor: see docs/hill/r2-learn.md.
+
+Rule 3: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: MuSGD with `lr0 = 0.01`,
+`momentum = 0.9`, as the reference trainer picks since Ultralytics 8.4. Otherwise: AdamW with
+`lr0 = max(round(0.002 · 5 / (4 + nc), 6), 0.001)` and `β1 = 0.9` (e.g. 0.00125 for `nc = 4`, 0.001 from `nc = 6`
+on, so 0.001 for `nc = 80`). In both cases `warmup_bias_lr = 0.0`.
+
+`TrainConfig.auto_rule` (current: 5) versions this rule: rules 5, 4 and 3 are the above; rule 2 picks SGD (`lr0 = 0.01`,
 `momentum = 0.9`) instead of MuSGD for long runs; rule 1 is rule 2 without the AdamW floor. On the COCO proxy of
 docs/hill/learn.md (20 epochs, SGD regime forced) MuSGD reaches 1.38x the AP of SGD (0.1143 vs 0.0830), as the
 reference's own MuSGD does. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1;
@@ -662,8 +688,8 @@ it does not measure MuSGD's gain over SGD on full COCO. The 0.001 floor is FOLO'
 gives 80 classes 0.000119, and a from-scratch run on a 20k-image COCO subset (20 epochs, 6,260 iterations) then
 reaches about a fifth of the AP of SGD on the same budget, in Ultralytics as in FOLO (docs/hill/learn.md). Rule 2
 changes nothing below 6 classes. Settings saved before the key existed (a checkpoint's `folo.train`, a run's
-`config.json`) mean rule 1, so a run resumes with the rule it started with; `--set auto_rule=1` (or `2`, CLI)
-selects an older rule for a new run.
+`config.json`) mean rule 1, so a run resumes with the rule it started with; `--set auto_rule=1` (or `2` to `4`;
+CLI) selects an older rule for a new run.
 
 **SGD** (PyTorch semantics, Nesterov, no dampening), per parameter `p` with gradient `g`:
 ```
@@ -689,12 +715,21 @@ X = u as [d0, d1·d2·d3] / (‖u‖_F + 1e-7), transposed if it has more rows t
 5 times:  A = X·Xᵀ;  X = 3.4445·X + (−4.7750·A + 2.0315·A·A)·X      (then transposed back)
 p = p − 0.2 · lr · sqrt(max(1, d₋₂ / d₋₁)) · X        (the factor is 1 for square kernels)
 ```
-then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. Same
+then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. The two
+weights and the class-branch factor are `TrainConfig.musgd` (`muon = 0.2`, `sgd = 1.0`: the SGD half of a Muon
+parameter runs at `sgd · lr`; `cls_lr = 3.0`), the reference trainer's (`auto` rule 5 uses 0.5 / 0.5 for a run from
+scratch, above); other step weights are saved in the
+checkpoint's `folo.optim` (FORMAT.md), so a resume continues with them; YOLO26's published COCO run used 0.528 /
+0.674 / 2.737 (the `muon_w`, `sgd_w`, `cls_w` of `yolo26n.pt`'s `train_args`), which fine-tuned BCCD worse here
+(docs/hill/r2-learn.md). Same
 `lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the Newton–Schulz iteration in `f32` (the
 reference: `bfloat16`); matrices are batched by column count with zero-padded rows, which changes no value. On a
-GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels, the iteration batched
-matmuls. Tests: `crates/folo-nn/tests/optim.rs` (two steps against an `f64` re-implementation of the reference,
-Newton–Schulz against `f64`), `tests/gpu.rs` (GPU against CPU), `tests/folo_io.rs` (bit-exact resume).
+GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels, and the rest of the
+Muon step is one fused call for all matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, the
+normalisation, each Newton–Schulz step as three grouped GEMMs over every matrix at once with no zero padding, and
+`p −= 0.2 · lr · O`); only the summation order of the products and of the norm differs from the tensor ops. Tests: `crates/folo-nn/tests/optim.rs` (two steps against an `f64` re-implementation of the reference,
+Newton–Schulz against `f64`), `tests/gpu/` (GPU against CPU; the fused kernels against the tensor ops on wide,
+tall, multi-tile and single-row matrices, zero, near-zero, NaN and empty ones), `tests/folo_io.rs` (bit-exact resume).
 
 ### 8.3 Batches, accumulation and the step loop
 **Batches.** At the start of epoch `e` (0-based), the training indices `0 .. N_train` are shuffled with a permutation
@@ -746,7 +781,7 @@ thread stages the next batch in a mapped buffer while the current step runs, so 
 and a `u8 → f32 / 255` conversion on the device; the loss is folo-gpu's (§7.4); global-norm clipping computes the norm
 and the factor on the device. A step waits for the GPU twice, both after the loss: the reported items and the
 finiteness check of the running statistics (one readback for all of them). Validation uploads `u8` batches too and
-runs the predictor's forward + decode on the device (NMS on the host); the download, NMS and scoring of a batch run on a second thread while the next batches' forward passes run, with the same result as one after the other. The numbers are the same as on the CPU up to
+runs the predictor's forward + decode on the device (NMS on the host); with the one-to-many head, multi-label NMS (the default) and a positive normal `conf` (zero or a subnormal threshold uses the full decode, since a GPU may flush subnormal scores to zero) a device kernel (`folo_gpu::detect::multi_label_candidates`) also picks out the `(anchor, class, score)` pairs above `conf`, so a batch downloads those pairs and the boxes instead of every anchor's scores (an image with more pairs than the buffer holds downloads its whole decode; the buffer makes room for a quarter more than the most pairs an image had so far, and is never larger than half the decode: a batch whose pairs would not fit in that, e.g. many classes at a low `conf`, downloads its whole decode instead), with exactly the detections of the full decode; the download, NMS and scoring of a batch run on a second thread while the next batches' forward passes run, with the same result as one after the other. The numbers are the same as on the CPU up to
 float rounding (sums in other orders), so a run is reproducible on one device (a GPU resume is bit-exact) but not
 bit-identical across devices. If the GPU is lost mid-run (a driver reset / TDR), the run fails with `status: failed`
 and a message naming the lost device and the `--resume` command: checkpoints are written only at epoch boundaries, so
@@ -764,7 +799,7 @@ The schedule is a function of the iteration `t` (optimizer steps, FORMAT.md's `u
 ```
 warmup_iters W = 0                                                     if warmup_epochs <= 0
                = min(max(round(warmup_epochs · spe), F), max(epochs − 1, 0) · spe)     otherwise
-             F = min(100, floor(0.3 · T))                              the warmup floor
+             F = min(warmup_floor, floor(0.3 · T))                     the warmup floor (`warmup_floor`, default 0)
 lf(t) = (1 − t / max(T − 1, 1)) · (1 − lrf) + lrf                      linear (default)
 lf(t) = lrf + (1 − lrf) · (1 + cos(π · t / max(T − 1, 1))) / 2         cosine (`cos_lr`)
 target_g = lr0 · lf(t)                                                 every group
@@ -772,11 +807,12 @@ t <  W:  lr_g = interp(t, [0, W], [start_g, target_g]),   start_g = warmup_bias_
          momentum = interp(t, [0, W], [warmup_momentum, momentum])     (SGD μ, or AdamW β1)
 t >= W:  lr_g = target_g,  momentum = momentum
 ```
-The 100-iteration floor is the reference trainer's. A run of fewer than about 100 iterations (a small dataset: 160
-images at the nominal batch of 64 are 3 iterations per epoch) would spend all but its last epoch in warmup, so the
-floor never takes more than 30% of the run. From `T = 334` on, `F = 100` and the schedule is the reference one;
-the floor only ever shrinks, and `warmup_epochs · spe` is never cut below what it asks for (only by
-`(epochs − 1) · spe`). The trainer warns when the run is short anyway: a run from scratch with `T < 200`, or
+`warmup_floor` defaults to 0: the warmup is `warmup_epochs` of optimizer steps, as Ultralytics 8.4 counts it (it
+dropped the older 100-iteration floor). Runs made before the key existed had a floor of 100 (their configs and
+checkpoints keep it, and a resume uses the stored `warmup_iters` anyway); with it a 205-image fine-tune (4 steps per
+epoch, 400 in all) spent 25 of its 100 epochs in warmup instead of 3, and fine-tuned BCCD about 0.013 AP worse
+(docs/hill/r2-learn.md). A floor is never more than 30% of the run, and `warmup_epochs · spe` is never cut below
+what it asks for (only by `(epochs − 1) · spe`). The trainer warns when the run is short anyway: a run from scratch with `T < 200`, or
 `W > T / 2` (`folo_vision::train::schedule_warnings`; `warn` log lines after the first one, and `warnings` in the
 run's `config.json`).
 
@@ -977,12 +1013,14 @@ batch 2, in train mode so BN uses batch statistics).
 
 ### 10.4 Training-loop tests
 - Batching and schedule: for `N_train = 800`, `batch = 16`, `E = 30`: `nb = 50`, `accumulate = 4`,
-  `spe = 13` (the last window of each epoch has 2 batches), `T = 390`, `W = 100` (the 100 floor applies, since
-  `round(3 · 13) = 39`). Check the LR and momentum of every group at `t ∈ {0, 50, 99, 100, 389}`, that
-  `lf(0) = 1` and `lf(389) = lrf`, and that `warmup_epochs = 0` gives `W = 0`.
-- Short runs: the same data for `E = 10` (`T = 130`) gives `W = 39` (the floor is `floor(0.3 · 130) = 39`) and a
-  short-run warning; `E = 12` of `spe = 3` (`T = 36`) gives `W = 10`; `T = 333` has floor 99 and `T = 334` the full
-  100. `close_mosaic = 10` closes mosaic for 10 epochs of 20 or 30, 6 of 12, 4 of 8 and none of 1.
+  `spe = 13` (the last window of each epoch has 2 batches), `T = 390`, `W = 39` (`round(3 · 13)`; no floor by
+  default). With `warmup_floor = 100` (configs written before the key) the floor applies and `W = 100`; on that
+  schedule check the LR and momentum of every group at `t ∈ {0, 50, 99, 100, 389}`, that `lf(0) = 1` and
+  `lf(389) = lrf`, and that `warmup_epochs = 0` gives `W = 0`.
+- Short runs: the same data for `E = 10` (`T = 130`) gives `W = 39` and a short-run warning (with the 100 floor
+  too: it is cut to `floor(0.3 · 130) = 39`). With the 100 floor, `E = 12` of `spe = 3` (`T = 36`) gives `W = 10`
+  (no floor: 9), `T = 333` has floor 99 and `T = 334` the full 100. `close_mosaic = 10` closes mosaic for 10 epochs
+  of 20 or 30, 6 of 12, 4 of 8 and none of 1.
 - Accumulation never crosses an epoch boundary: after each epoch the gradient buffers are zero.
 - A forward that produces NaN in a BN layer (inject it), followed by a valid batch: the BN running statistics,
   the EMA and eval-mode outputs stay finite, and no `step` event carries a non-finite value.
@@ -991,7 +1029,8 @@ batch 2, in train mode so BN uses batch statistics).
   uninterrupted run.
 - Early stopping: with `patience = 2` and fitness `[0.1, 0.3, 0.2, 0.2]`, training stops after epoch 3
   (`best_epoch = 1`). A resume from the epoch-2 checkpoint stops at the same epoch.
-- `auto` picks AdamW at `lr0 = 0.00125` for `nc = 4`, 2000 images and 30 epochs.
+- `auto` (rule 4) picks MuSGD at `lr0 = 0.01`, momentum 0.937 and `warmup_bias_lr = 0.1` for the run above;
+  `auto_rule = 3` picks AdamW at `lr0 = 0.00125` for `nc = 4`, 2000 images and 30 epochs.
 - EMA: after one update `d = 0.9999 · (1 − e^{−1/2000}) ≈ 4.99825e-4`.
 - **Overfit** (`#[ignore]`, about 1–2 min on CPU): folo-n at 320 px, 8 synthetic images, augmentation off, AdamW
   `lr0 = 0.002`, 300 steps, batch 8, no accumulation. The total loss must fall below 25% of its first value, and
@@ -1010,12 +1049,16 @@ AGPL-3.0: never commit them, any derived file, or the conversion script; gate th
 - Dataset: folo-data's synthetic shapes, 4 classes (circle, square, triangle, star), 2000 train and 200 val images
   at 320×320, 1 to 8 objects per image, object size 6 to 35% of the image side, textured backgrounds, seed 0.
 - Run: `folo train --arch folo-n --imgsz 320 --epochs 30 --batch 16 --close-mosaic 5 --seed 0`, other settings at
-  default (so `auto` chooses AdamW at `lr0 = 0.00125`; `nb = 125`, accumulate 4, `spe = 32`, warmup `W = 100`
-  iterations).
+  default (so `auto` rule 4 chooses MuSGD at `lr0 = 0.01`, momentum 0.937, `warmup_bias_lr = 0.1`; `nb = 125`,
+  accumulate 4, `spe = 32`, warmup `W = 96` iterations: 3 epochs, no floor).
 - **Pass:** EMA-model validation mAP@0.5 ≥ 0.90 and mAP@0.5:0.95 ≥ 0.75 by epoch 30, with no non-finite loss.
-- Calibration: the reference implementation (Ultralytics 8.4 YOLO11n: the same topology, AdamW auto at 0.00125,
-  trained from scratch with this run configuration on a generator matching this description; its warmup is
-  375 batches ≈ 94 optimizer steps instead of 100, with an accumulation ramp) reached
+- Measured (seed 0, RTX 4080 SUPER, docs/hill/r2-learn.md): final mAP@0.5 0.985 and mAP@0.5:0.95 0.926, the bar
+  first met at epoch 8. The `auto` of rule 3 (AdamW at `lr0 = 0.00125`, `warmup_bias_lr = 0`, `W = 100` with the
+  old floor) measured 0.980 / 0.892, first met at epoch 9.
+- Calibration (historical: made when `auto` chose AdamW here): the reference implementation (Ultralytics 8.4
+  YOLO11n: the same topology, trained with AdamW, its `auto` at 0.00125, from scratch with this run configuration on
+  a generator matching this description; its warmup is 375 batches ≈ 94 optimizer steps instead of the 100 FOLO had
+  then, with an accumulation ramp) reached
   mAP@0.5 0.854 / 0.904 / 0.933 / 0.948 at epochs 6 / 11 / 16 / 30, and mAP@0.5:0.95 0.752 at epoch 9 and 0.873 at
   epoch 30. Its losses dropped visibly when mosaic closed at epoch 26. The pass bar leaves margin for generator and
   implementation differences. A FOLO run far below it points to a bug, not to tuning.

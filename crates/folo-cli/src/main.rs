@@ -47,7 +47,11 @@ fn main() -> std::process::ExitCode {
     };
     // `folo mcp`'s stdout belongs to the protocol, also with --json: its errors go to stderr only.
     let out = Out { json: cli.json && !matches!(cli.command, Command::Mcp(_)) };
-    match run(cli, out) {
+    init_caches();
+    let result = run(cli, out);
+    // The process-wide GPU context is never dropped: write the pipelines it compiled before exiting.
+    folo_gpu::save_pipeline_caches();
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             out.error(&e);
@@ -128,6 +132,21 @@ fn not_implemented(cmd: &str, waits_on: &str) -> CliError {
             "it waits on {waits_on}; see docs/ROADMAP.md. `folo describe --json` shows its planned arguments, and \
              `folo serve --mock` serves mock datasets, runs and predictions"
         ))
+}
+
+/// Turns on the on-disk caches every command shares: compiled GPU pipelines (`gpu/`) and dataset scans (`scan/`)
+/// under `$FOLO_CACHE_DIR`, else `<FOLO_HOME or ~/.folo>/cache`. `FOLO_NO_CACHE=1` leaves them off (docs/CLI.md,
+/// Caches).
+fn init_caches() {
+    if std::env::var_os("FOLO_NO_CACHE").is_some_and(|v| !v.is_empty() && v != "0") {
+        return;
+    }
+    let dir = match std::env::var_os("FOLO_CACHE_DIR") {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => folo_api::weights::home_dir().join("cache"),
+    };
+    folo_gpu::set_pipeline_cache_dir(Some(dir.join("gpu")));
+    folo_data::set_scan_cache_dir(Some(dir.join("scan")));
 }
 
 /// `$FOLO_HOME`, else `~/.folo`, else `./.folo`.

@@ -356,6 +356,14 @@ fn conv2d_backward_matches_naive_over_geometries() {
         (3, 64, 24, [9, 11], [1, 1], p([1, 1], [0, 0], [1, 1], 1), false),
         (2, 8, 36, [9, 8], [3, 3], p([1, 1], [1, 1], [1, 1], 2), false),
         (5, 24, 20, [30, 27], [3, 3], p([1, 1], [1, 1], [1, 1], 1), false),
+        // Strided input gradients: an input smaller than the stride, rectangular strides and kernels, padding
+        // wider than the kernel's half, input pixels no tap reaches (kernel 1 at stride 3), groups, and a
+        // folo-n-like 64 -> 64 3x3 stride 2 at 16x16.
+        (2, 3, 4, [1, 2], [3, 3], p([2, 2], [1, 1], [1, 1], 1), false),
+        (1, 4, 6, [11, 9], [3, 5], p([2, 3], [1, 2], [1, 1], 2), false),
+        (1, 3, 5, [9, 10], [3, 3], p([2, 2], [2, 2], [1, 1], 1), false),
+        (1, 2, 3, [8, 8], [1, 1], p([3, 3], [1, 1], [1, 1], 1), false),
+        (2, 64, 64, [16, 16], [3, 3], p([2, 2], [1, 1], [1, 1], 1), false),
     ];
     for (i, (n, c, o, hw, k, prm, _)) in cases.into_iter().enumerate() {
         let x = randn(&[n, c, hw[0], hw[1]], 500 + i as u64).requires_grad_();

@@ -2,6 +2,7 @@
 //! dataset, train over HTTP while reading the SSE stream, find the run's model, evaluate, export and predict with
 //! it, stop / resume / delete runs, and reload everything after a store restart.
 
+mod cli;
 mod hardware;
 mod harness;
 mod published;

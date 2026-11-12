@@ -146,8 +146,15 @@ impl Store for RealStore {
         };
         let ds = e.dataset();
         let cmd = crate::cli::train_command(&config, &ds.path, ds.format, weights.as_deref());
-        // An `auto` run repeats with the rule it trained with (made before rule 3: SGD, not MuSGD, for long runs).
-        Ok(crate::cli::with_auto_rule(cmd, &config, crate::cli::recorded_auto_rule(e.dir())))
+        // An `auto` run repeats with the rule it trained with (made before rule 3: SGD, not MuSGD, for long runs),
+        // and every run with its warmup floor (made before the key: 100 iterations).
+        let rule = crate::cli::recorded_auto_rule(e.dir());
+        let cmd = crate::cli::with_auto_rule(cmd, &config, rule);
+        // A transfer run whose command has no `--weights` keeps its MuSGD step weights (rule 5 vs 4, §8.2).
+        let (transfer, weights) =
+            (crate::cli::recorded_transfer(e.dir()), crate::cli::recorded_musgd_weights(e.dir()));
+        let cmd = crate::cli::with_transfer(cmd, &config, rule, transfer, weights);
+        Ok(crate::cli::with_warmup_floor(cmd, crate::cli::recorded_warmup_floor(e.dir())))
     }
 
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {

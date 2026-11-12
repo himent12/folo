@@ -17,9 +17,13 @@ impl GpuContext {
     }
 
     /// Drops every cached (free) buffer in the pool and lowers its cap back to the live bytes (wgpu frees the memory
-    /// at its next submission or poll; [`GpuContext::release_memory`] also makes it happen now).
+    /// at its next submission or poll; [`GpuContext::release_memory`] also makes it happen now). Cached bind groups
+    /// that hold those buffers are dropped too.
     pub fn trim_pool(&self) {
+        // The batch lock first, the order `alloc` inside an encode takes them in.
+        let mut b = self.inner.batch.lock().expect("batch lock");
         self.inner.pool.lock().expect("pool lock").clear();
+        self.sweep_binds(&mut b);
     }
 
     /// Gives the pool's cached buffers back to the driver now: [`GpuContext::trim_pool`], then submits the open
@@ -50,12 +54,21 @@ impl GpuContext {
                 free.bufs.drain(..).map(|b| b.size()).sum()
             };
             // The uniform arena too (recreated on the next dispatch): its 64 KiB chunks are allocated mid-job, and a
-            // live one keeps the driver allocator's whole memory block (up to 256 MiB) from being freed.
+            // live one keeps the driver allocator's whole memory block (up to 256 MiB) from being freed. Cached bind
+            // groups hold chunks and pool buffers alive, so they go as well.
             b.chunks.clear();
+            b.binds.clear();
+            self.inner.pool.lock().expect("pool lock").take_retired();
             released + staged
         };
         self.wait_idle()?;
         Ok(released)
+    }
+
+    /// Sets the pool's [`crate::pool::BufferPool::max_cached_bytes`] (for tests).
+    #[cfg(test)]
+    pub(crate) fn set_pool_cap(&self, bytes: u64) {
+        self.inner.pool.lock().expect("pool lock").max_cached_bytes = bytes;
     }
 
     /// Idle staging buffers of [`GpuContext::upload_with`] (for tests).

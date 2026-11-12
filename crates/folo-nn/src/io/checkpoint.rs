@@ -148,6 +148,15 @@ pub(crate) fn validate(file: &ModelFile) -> Result<CheckpointMeta> {
         )));
     }
     LrSchedule::from_contract(sched.clone()).map_err(|e| Error::Metadata(format!("folo.sched: {e}")))?;
+    if let Some(w) = &optim.musgd {
+        if optim.kind != OptimKind::MuSgd {
+            return Err(Error::Metadata(format!(
+                "folo.optim: `musgd` on a `{}` contract",
+                optim.kind.as_str()
+            )));
+        }
+        w.validate().map_err(|e| Error::Metadata(format!("folo.optim: {e}")))?;
+    }
 
     // Every model tensor is in exactly one group, and every group parameter is a model tensor.
     let model: BTreeSet<&str> = file.names(Namespace::Model).into_iter().collect();

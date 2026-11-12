@@ -82,8 +82,27 @@ The batch is submitted when:
 - you call `ctx.flush()` (submit without waiting) or `ctx.sync()` (submit, wait, report errors).
 
 A forward pass is therefore a handful of submissions. Each dispatch's parameters take a 256-byte slot in a
-64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches and submissions
-(the backend benchmark prints them per pass).
+64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches, submissions and
+bind groups created (the backend benchmark prints them per pass).
+
+**Bind-group cache.** The parameter block is bound with a dynamic offset (its slot in the arena chunk), so a bind
+group depends only on the kernel's layout, the arena chunk and the storage buffers, and the context keeps the bind
+groups it made, keyed by those (`context/binds.rs`; creating one costs 3–4 µs of host time). An inference forward
+meets the same combinations on every call and creates no bind group after its first calls. A training step reuses
+only some (about 27% of a folo-n b16 f32 step's dispatches, 56% with AMP): the pool's buffers do not come back in
+the same order every step. So a miss is kept cheap (an FxHash-style key and a set insert) and a combination is
+cached only on its second sighting; one seen once is just remembered in a bounded set of recent keys (a forward
+hits from its third call on). A cached bind group keeps its buffers alive, so only buffers the pool owns (created
+and not yet let go of) and the context's dummy buffer are cached; a raw buffer passed to a kernel, or a traced
+buffer replayed after the pool dropped it, never is. The pool records every buffer it lets go of (evicted, or
+dropped by `trim_pool()`), and the next dispatch or submission (so `flush()` and `sync()` too) drops the bind groups
+that hold one, found through an exact index from buffer to entries, which shrinks whenever an entry leaves; a
+training step retires buffers all the time, and sweeping the whole cache each time made the optimizer phase 4×
+slower. `release_memory()` empties the cache. The cache holds at most two generations of 4096 bind groups: when the
+current one is full it becomes the old one and the previous old one is dropped, and an old entry used again moves
+back. `ctx.bind_cache_len()` is its size; `ctx.set_bind_cache(false)` (or `FOLO_GPU_NO_BIND_CACHE=1` for contexts
+created afterwards) turns it off for A/B runs, and the `dispatch_ab` bench of folo-vision compares both in one
+process.
 
 The interval was 1024 until the training-step profile showed the GPU idle for most of the host's encoding and
 submission time: a step's 1300 dispatches went out in 3 submissions, so the GPU waited for each one to be built
@@ -118,6 +137,27 @@ declarations in front of the source, together with `alias T = f32|f16` and `enab
 can therefore size workgroup arrays, select code paths and compile bounds checks out. Pipelines are cached by
 `(kernel name, spec)`, and compilation happens on first use. Rendering constants as source text works the same
 on every backend, including browser WebGPU; pipeline-overridable constants cannot size arrays on every backend.
+
+Compiled pipelines also persist between processes (`pipeline_cache.rs`): once `set_pipeline_cache_dir(Some(dir))`
+names a folder (`folo` sets `<FOLO_HOME>/cache/gpu`, docs/CLI.md Caches; off by default, so tests write nothing),
+contexts created afterwards on an adapter with `wgpu::Features::PIPELINE_CACHE` (Vulkan; DX12, Metal and the browser
+have none, and nothing changes there) compile every pipeline through one `wgpu::PipelineCache` loaded from
+`<dir>/wgpu_pipeline_cache_vulkan_<vendor>_<device>.bin`. The file carries FOLO's header (magic, format, the
+folo-gpu version, the adapter's name and driver, the payload length and an FNV-1a checksum of the payload) in
+front of wgpu's data: a file from another driver, adapter or folo-gpu version, a torn or corrupt one, or one over
+256 MB is ignored and the cache starts empty, and wgpu and the driver validate their own headers again
+(`fallback: true`). A changed shader simply misses (pipelines are found by their code). A saver thread writes the
+file atomically (a temporary file `.<name>.<pid>-<n>.tmp` + rename) about a second after the last new pipeline,
+and dropping the context or calling `save_pipeline_caches()` (`folo` does when a command ends) writes what is left;
+a cache that would be written larger than 256 MB is not written (the previous file stays), temporary files of
+that cache file older than an hour (a killed writer's) are deleted when a context opens the cache, and no error of
+the cache ever fails a run. `GpuContext::pipeline_cache_loaded()` says whether a context started from a valid
+file. Effect on the dev machine: docs/hill/r2-trainer.md.
+
+To see what compilation costs, set `FOLO_GPU_TRACE_COMPILE=1` (read once per process; native only): every
+`Kernel::compile` adds its `create_shader_module` time (WGSL parsing and validation in naga) and its total time to
+process-wide totals, printed to stderr as `folo-gpu: compiled N pipelines, module X s, total Y s` every 25
+pipelines and once more from `save_pipeline_caches()` (so `folo` prints the run's totals when a command ends).
 
 ### In the browser
 
@@ -192,6 +232,7 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | pooling + gradients | `kernels::pool_grad::*` | f32 (max pooling with indices, its backward and the upsample backward also f16, summed in f32) | max pooling with indices and its gather backward, avg / adaptive avg pooling and backward, upsample backward |
 | conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight, conv2d_backward_weight_as}` | f32, f16 (f32 accumulation; the weight gradient also f16 → f32) | implicit GEMM (`CONV_MODE` 2 / 3) with split-K for the weight gradient, a transposed-A GEMM for 1×1 input gradients, direct depthwise kernels. f16 runs on tensor cores when they are on (1×1 input gradients as a GEMM over the once-transposed weight), else on the regular generator with f16 storage; split-K partials are f32 either way |
 | train-mode BatchNorm + activation | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | f32 or f16 data (`BnDesc::dtype`); parameters, statistics and sums f32 | NCHW, statistics over `N·H·W`. Forward: per-(channel, chunk) Welford partials merged with Chan's formula, a per-channel finalize (mean, `invstd`, the running-statistics update in place), then `act(x · scale + shift)`; backward: partial sums of `dz` and `dz · x̂` with the activation's derivative at the recomputed pre-activation, a finalize (`dγ`, `dβ`), then `dx`. Identity, SiLU or ReLU; 3 dispatches each way |
+| Muon (MuSGD) | `kernels::muon::muon_step_many` | f32 | MuSGD's Muon update of every matrix-shaped weight in `2 · ⌈n / 16⌉ + 3 · 5 + 2` dispatches per group of `n`: a multi-tensor gather (the Nesterov mix of momentum and gradient, each matrix oriented rows ≤ cols into one workspace, a partial sum of squares per 256 elements), the Frobenius norms from those partials (one workgroup per matrix) and the division over all elements, then per Newton–Schulz step three grouped GEMMs over all matrices (`A = X·Xᵀ`, `b·A + c·A·A`, `a·X + Bm·X`; each workgroup binary-searches its matrix and 64×64 tile in a table; `A` is symmetric bit for bit, so `A·A` reads `A` as its own transpose), and a multi-tensor `p = p · 1 + (X · scale) · (−lr)` back in each weight's layout. The workspaces (`X` twice, `A` and `Bm`, the partials, the table) of all matrices must fit one storage binding, so the matrices run in consecutive groups that each fit `min(max_buffer_size, max_storage_buffer_binding_size)` (and index in `u32`), the pipeline once per group; a device with fewer than 5 storage bindings per kernel (the gather of one matrix and the GEMMs take 5), or a matrix whose workspace alone is past the limit, declines the whole call before anything is written (`Error::NotSupported`), and MuSGD runs the tensor ops instead. Reached through `Backend::muon_step_many` |
 | optimizer updates | `kernels::optim::optimizer_step`, `optimizer_step_many` | f32 | in place, one thread per element: SGD (momentum, Nesterov, coupled decay), AdamW (decoupled decay, bias corrections), and `p = a·p + b·g` for EMAs and gradient accumulation, in the op order of folo-nn's CPU loops. `_many` updates up to 16 tensors with one update per dispatch: each workgroup finds its tensor in a table of first workgroups (uniforms 16..31, element counts at 32..47) and runs that tensor's copy of the update (a generated `switch` over per-tensor bindings, so the per-element arithmetic is the single kernel's, bit for bit); devices that bind fewer than `16 · (2 + states)` storage buffers fall back to one dispatch per tensor |
 | clipping reductions + scale | `kernels::optim::{norm_partials_many, scale_many}` | f32 | global-norm clipping over many gradient buffers, 16 per dispatch: one partial per 256 elements (a fixed tree in workgroup memory) of the largest `|x|` (NaN propagating) or of `((x · h) · h)²`, reduced by the caller; and `x = (x · f1) · f2` with device factors |
 | unscale + overflow check | `kernels::optim::unscale_check`, `unscale_check_many` | f32 | mixed precision's loss-scaler step: `x *= 1 / S` in place and an `atomicOr` into a shared `u32` flag when a result is inf or NaN (exponent bits all set); `_many` takes 16 gradient buffers per dispatch as above; one flag readback per optimizer step |
@@ -199,6 +240,7 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | detection loss | `kernels::detect::{bce_forward, bce_backward, box_terms, combine}` | f32 | §7.4: BCE over every logit against the dense targets, each element formed whole; CIoU + DFL per positive (softmax expectation, both terms and their hand-written backward in one thread); a one-workgroup fixed-order reduction to the reported items, the total and the backward scales. `exp`, `ln(1 + x)` and `atan` are written out in plain arithmetic (folo-core's `fast_exp`, an atanh series, Cephes `atanf`), since WGSL only promises an absolute error of 2^-21 for `log` near 1 |
 | letterbox | `kernels::vision::letterbox_rgb8` | u8 → f32, f16 (the f32 value rounded once) | one thread per canvas pixel: the padding grey, or the resized image sampled with folo-data's `ResizePlan` (integer box prefilter computed on the fly, then 11-bit fixed-point bilinear taps uploaded by the host), in integers, times `scale`: bit-exact with the CPU letterbox. Prefilter blocks whose sum could overflow u32 are refused (the caller letterboxes on the host) |
 | detection candidates | `kernels::vision::detect_candidates` | f32, f16 → u32 (decoded in f32) | one thread per (image, anchor): the first maximum of the `nc` sigmoid scores; above `conf`, the DFL softmax expectation of each side, the box around the anchor times the stride, and a 7-word record `(anchor, class, score, x1, y1, x2, y2)` appended with an atomic counter per image (the output is cleared first) |
+| multi-label candidates | `kernels::detect::multi_label_candidates` (`detect::multi_label_candidates` on tensors) | f32 → u32 | validation's NMS input: one thread per (image, anchor) over a decoded `[B, 4 + nc, A]`; counts its classes with a score `> conf`, reserves that many slots with one atomic add on its image's counter (one per anchor with a qualifying class), and writes `(anchor, class, score bits)` records up to a capacity (the count keeps going, so the host sees an overflow). Scores are copied, not recomputed, so the pairs are the decoded values bit for bit; `folo_vision::nms::non_max_suppression_pairs` sorts them back to `(anchor, class)` order |
 
 The f16 kernels need `shader-f16`; without it they return `GpuError::Unsupported`. Everything not listed as f16
 is f32-only. f16 is storage: every f16 kernel widens to f32 on load, computes and accumulates in f32, and rounds once
@@ -229,6 +271,19 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
 - `CONV_MODE = 1` turns the same generator into implicit-GEMM conv. The B tile is gathered straight from the NCHW
   image. Each thread keeps one output pixel for the whole K loop, so the per-element index math is a few
   divisions by constants. No im2col buffer is ever written.
+- **Forward split-K** (`kernels::conv::split`, both generators). folo's 3×3 convs at 40 and 20 px have few output
+  tiles but a long `K` (64–256 workgroups at batch 16 for 80 SMs, `K` up to 4608), and at batch 1 every layer
+  below 160 px has only a handful. When a forward implicit-GEMM conv has fewer than 320 workgroups and at least 18
+  `BK` tiles of `K`, `K` is split into up to 8 chunks, aiming at about 480 workgroups. The count is capped at one
+  chunk per 9 tiles of `K` (`splits <= k_tiles / 9`); that caps the count, not every chunk's length: the chunks
+  are one length, a multiple of `BK`, and the last one ends short (`K = 441` at `BK = 16`: 28 tiles, 3 chunks of
+  160, the last 121 long). Every chunk is a workgroup layer (`SPLIT = true`) that writes an f32 partial
+  slab of the whole output without bias or activation, and `conv_split_finish` sums the slabs (unrolled, `vec4`
+  when `OH·OW` is a multiple of 4) and applies the bias and activation, rounding to f16 for an f16 output. The
+  slabs come from the buffer pool (at most 64 MiB). `ConvPlan::splits` forces a chunk count (tests, tuning);
+  `cargo bench -p folo-gpu --bench conv_model` times folo-n / folo-s's weakest forward convs, and with
+  `FOLO_CONV_TUNE=1` every tile config at 1–8 chunks. 1×1 stride-1 convs (the pointwise GEMM) and depthwise
+  convs are not split; a strided 1×1 conv is implicit GEMM and is.
 - `CONV_MODE = 2` is the input gradient as a transposed conv: each thread owns one input pixel and, for
   `k = (c_out, kh, kw)`, reads the output-gradient pixel `((ih + PH - kh·DH) / SH, (iw + PW - kw·DW) / SW)` when
   the divisions are exact and in range (a strided conv leaves the rest zero). `A` is the weight permuted once to
@@ -290,8 +345,8 @@ Notes from the tuning runs:
 - **Padding the workgroup-tile rows** by one vec4 removes a 2-way bank conflict in the A scatter, but it was
   slightly slower overall and was dropped.
 - **DX12 (FXC)** reaches 9.7 / 15.4 / 20.9 / 25.2 TFLOPS on the same kernels.
-- **Not tried yet:** subgroup (warp) shuffles, split-K for skinny problems, and a persistent-kernel / stream-K
-  schedule. Cooperative matrices (tensor cores) are the next section; they are native-only (not in stable WebGPU).
+- **Not tried yet:** subgroup (warp) shuffles, split-K for skinny plain GEMMs (the forward convs have it, above),
+  and a persistent-kernel / stream-K schedule. Cooperative matrices (tensor cores) are the next section; they are native-only (not in stable WebGPU).
 
 ### Tensor cores (cooperative matrices)
 
@@ -532,7 +587,7 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
 - **Autograd** is folo-core's, unchanged: `src/tests/backend_net.rs` runs a small conv net (conv, BatchNorm from
   composite ops, SiLU, max pooling, upsample, concat) on both devices and compares every gradient, runs
   folo-core's finite-difference `grad_check` through the GPU, and checks that folo-nn's SGD and AdamW steps on GPU
-  parameters match the CPU. The fused ops are tested from folo-nn (`crates/folo-nn/tests/gpu.rs`: fused BatchNorm
+  parameters match the CPU. The fused ops are tested from folo-nn (`crates/folo-nn/tests/gpu/`: fused BatchNorm
   against composite ops and finite differences, Conv + BN + act inference parity, every optimizer variant, a moved
   training setup against the CPU) and folo-vision (`crates/folo-vision/tests/gpu.rs`: the detector's eval forward,
   a training step's loss and gradients, `.folo` loading onto the GPU).

@@ -131,6 +131,7 @@ fn start(
         events: Some(progress_sink(out, args.json_events, cfg.epochs, nb)),
         stop,
         weights,
+        cache: args.cache.into(),
         ..TrainOptions::default()
     };
     match Trainer::new(cfg, data, opts) {

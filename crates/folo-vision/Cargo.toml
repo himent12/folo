@@ -64,3 +64,7 @@ harness = false
 [[bench]]
 name = "cpu_e2e"
 harness = false
+
+[[bench]]
+name = "dispatch_ab"
+harness = false

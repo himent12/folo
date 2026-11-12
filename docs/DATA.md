@@ -58,6 +58,39 @@ dataset without class names (counted from all labels then) is opened whole. `fol
 opens without checking train2017's 118 287 images (the probe of a file not opened before costs about 6 ms on the dev
 machine, 0.35 ms each at 28 threads: 40-50 s for train2017).
 
+### Scan cache
+Opening a large dataset costs a header probe per image (COCO train2017: 30-80 s on the dev machine when the files
+were not opened since boot) and, for COCO, a parse of the JSON (5-8 s for train2017's 448 MB). With
+`folo_data::set_scan_cache_dir(Some(dir))` (`folo` sets `<FOLO_HOME>/cache/scan`, docs/CLI.md Caches; off by default)
+an open keeps what it learnt in `dir` and the next one reuses it (`dataset/cache/`):
+
+- **Per folder** (`dir-<hash>.bin`, keyed by the folder's canonical path, links resolved; a folder that cannot be
+  canonicalised or whose path is not UTF-8 is not cached): every image's probe result (its size, or
+  the codec's message when it cannot be decoded) and every YOLO label's parse (boxes and warnings, or why it is
+  broken, with the class count it was checked against), each with the file's length and modification time. One
+  directory read gives those for every file of the folder (free on Windows, where a `stat` opens the file), and a
+  file is reused only while both match. IO errors are never cached, and files modified in the last 2 s are not
+  cached (a same-tick rewrite could keep both).
+- **Per COCO annotation set** (`coco-<hash>.bin`, keyed by the JSON paths as given and canonical, and the wanted
+  splits): everything derived from the JSON files alone (classes, issues, each image's boxes), reused only while
+  every JSON file keeps its length and modification time. The image folder is still chosen and the images still
+  checked against the disk (through the per-folder entries) at every open.
+
+An open comes out exactly as without the cache (the same entries in the same order and the same issues and
+messages) as long as every change to a file changes its length or modification time: a file rewritten under an
+unchanged stamp is answered from the cache (tested, as are corrupt, truncated and stale cache files). The folder
+listing is a snapshot taken when the open starts, so a file changed or deleted while the open runs may be seen as
+it was then (without the cache an open is racy the same way; the dataset is the one at the open). A file listed but
+gone when its header is probed is reported as missing, as without the cache. Every cache file is checked as a
+whole (its length, at most 1 GiB and matching its header, then magic, format version, its key and an FNV-1a
+checksum of its contents) and ignored when anything is off; writes are atomic (a temporary file
+`.<name>.<pid>-<n>.tmp` + rename), and cache files (`dir-<16 hex>.bin`, `coco-<16 hex>.bin` and those temporary
+files, never any other file of the folder) not written for 60 days are deleted when the next one is written, and so
+are the least recently written ones while the folder's cache files take more than 2 GiB together (`MAX_TOTAL`; a
+single file over 1 GiB is never written). Only folders holding at least `SCAN_CACHE_MIN_FILES` (256) files of a dataset
+are listed and cached, and COCO sets with at least that many images. With a read guard installed nothing is listed
+or cached. COCO train + val on the dev machine: 51 s cold, 0.3 s warm (docs/hill/r2-trainer.md).
+
 `LoadedDataset::sources` lists every file and folder a dataset was read from (description files, split folders and
 image lists, folders of every candidate image and label, split paths that do not exist yet), so callers such as
 the server can detect changes.
@@ -150,7 +183,23 @@ keeps one, as the YOLO reader drops duplicate label lines.
 
 ## DataLoader and determinism
 - `LoaderConfig { batch_size, imgsz, workers, shuffle, drop_last, seed, augment, epochs, prefetch_batches,
-  u8_images }`. `workers` defaults to the logical CPU count, at most 16.
+  u8_images, cache }`. `workers` defaults to the logical CPU count, at most 16.
+- `cache: CacheMode::Ram` (`folo train --cache ram`) keeps every image decoded and resized to long side `imgsz`
+  (what `resize_long_side` makes of it) in memory, filled the first time a worker loads it, so later epochs skip
+  the decode and the resize (for 1080p JPEGs about 89% of a mosaic sample). The transform gets the decoded size
+  with the sample (`Fetched::orig_size`): its own resize of a cached image is a row copy, and the letterbox
+  geometry (`ratio`, `orig_size`) is computed from the original size, so **batches are identical with and without
+  the cache** (pixels, targets and meta; tested for mosaic + mixup, plain letterbox and validation). Before the
+  loader starts, `ram_cache_bytes` (every image's resized size from the dataset's probed sizes, 3 bytes a pixel,
+  plus its boxes and its entry) is reserved against `RAM_CACHE_SHARE` (80%) of the memory available to the
+  process, and the loader is refused with the numbers when it does not fit. Available is the system's available
+  memory and, on Linux, at most what the tightest memory limit among the process's cgroups and their ancestors
+  has left (a container, a systemd scope, cgroup v2 or v1: the limit less the usage, not counting the inactive file
+  cache; the process's cgroups from `/proc/self/cgroup`, located through the cgroup mounts in `/proc/self/mountinfo`,
+  so co-mounted v1 controllers and mounted subtrees resolve). The reservation is process-wide and held until the
+  loader is dropped, so two loaders created before either has filled are not both admitted against the same
+  memory (a filled cache counts twice, in its reservation and in the memory it took: a further one is refused
+  rather than risked). An image that cannot be read is not cached (the loader substitutes as without a cache).
 - Batches: `images` is `n * 3 * s * s` `f32` in `0..1` (`NCHW`, RGB), or, with `u8_images`, `images_u8` holds the same
   pixels as `u8` (`value / 255` is the float; a quarter of the bytes, for a GPU that converts them itself, as the
   trainer and validation do on a GPU) and `images` is empty. `shape = [n, 3, s, s]`, `targets` rows are

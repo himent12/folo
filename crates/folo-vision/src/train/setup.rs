@@ -16,9 +16,8 @@ use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module};
 
 use super::events::Emitter;
 use super::{
-    AMP_KEY, CLOSE_MOSAIC_KEY, MUSGD_CLS_LR_FACTOR, NONFINITE_STREAK_KEY, ResumeOverrides, SHORT_RUN_STEPS,
-    TRAIN_IMAGES_KEY, TrainConfig, TrainData, TrainOptions, Trainer, amp_support, can_place, place_model,
-    resolve_device,
+    AMP_KEY, CLOSE_MOSAIC_KEY, NONFINITE_STREAK_KEY, ResumeOverrides, SHORT_RUN_STEPS, TRAIN_IMAGES_KEY,
+    TrainConfig, TrainData, TrainOptions, Trainer, amp_support, can_place, place_model, resolve_device,
 };
 use crate::error::{Error, Result};
 use crate::loss::LossConfig;
@@ -76,6 +75,8 @@ impl Trainer {
     /// A new run of `cfg` on `data`.
     pub fn new(cfg: TrainConfig, data: TrainData, opts: TrainOptions) -> Result<Self> {
         let weights = opts.weights.clone();
+        // Stored with the run (`folo.train`), so a resume resolves `auto` as this run started (§8.2, rule 5).
+        let cfg = TrainConfig { transfer: weights.is_some(), ..cfg };
         let mut t = Self::build(cfg, data, opts)?;
         t.warnings = schedule_warnings(&t.cfg, &t.sched, t.data.train.len(), weights.is_none());
         if let Some(w) = weights {
@@ -277,22 +278,25 @@ impl Trainer {
                 Box::new(AdamW::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
             }
             // MODEL.md §8.2: the head's class branches (o2m and o2o) train at 3x the LR.
-            OptimKind::MuSgd => Box::new(MuSgd::new(std_groups.into_boosted_groups(
-                resolved.lr0,
-                resolved.momentum,
-                wd,
-                |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
-                MUSGD_CLS_LR_FACTOR,
-            ))?),
+            OptimKind::MuSgd => Box::new(MuSgd::with_weights(
+                std_groups.into_boosted_groups(
+                    resolved.lr0,
+                    resolved.momentum,
+                    wd,
+                    |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
+                    cfg.musgd.cls_lr,
+                ),
+                resolved.musgd,
+            )?),
         };
         let nb = n_train.div_ceil(cfg.batch);
         let spe = nb.div_ceil(accumulate);
-        let sched = LrSchedule::new(
+        let sched = LrSchedule::with_warmup_iters(
             if cfg.cos_lr { DecayKind::Cosine } else { DecayKind::Linear },
             cfg.epochs as u64,
             spe as u64,
             cfg.lrf,
-            cfg.warmup_epochs,
+            cfg.warmup_iters(spe as u64),
             resolved.warmup_bias_lr,
             cfg.warmup_momentum,
         )?;
@@ -309,6 +313,7 @@ impl Trainer {
                 epochs: cfg.epochs,
                 prefetch_batches: 2,
                 u8_images: folo_gpu::context_for(device).is_some(),
+                cache: opts.cache,
             },
         )?;
         let acc = GradAccumulator::new(&model.parameters());

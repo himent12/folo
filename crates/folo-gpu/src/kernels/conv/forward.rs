@@ -1,16 +1,17 @@
 //! The forward conv ([`conv2d`]): the direct depthwise kernel, tensor cores for f16, a GEMM for 1×1 convs and
-//! the implicit GEMM (`CONV_MODE` 1) for everything else.
+//! the implicit GEMM (`CONV_MODE` 1) for everything else, split along `K` when it has few output tiles
+//! ([`super::split`]).
 
-use super::Conv2dDesc;
 use super::depthwise::{DEPTHWISE, DW_VX};
-use crate::DType;
+use super::{Conv2dDesc, conv_spec, split};
 use crate::context::GpuContext;
 use crate::error::Result;
 use crate::error::shape_err;
-use crate::kernels::coop;
-use crate::kernels::gemm::{self, GEMM, TileConfig, base_spec, check_dtype, gemm_params};
+use crate::kernels::gemm::{self, GEMM, GemmBias, TileConfig, base_spec, check_dtype, gemm_params};
 use crate::kernels::gemm_cat::{CatPart, MAX_CAT_PARTS, gemm_cat};
+use crate::kernels::{coop, prod};
 use crate::pipeline::Params;
+use crate::{DType, UnaryOp};
 
 /// Where a forward conv reads its input in its buffer: from element `offset`, images `n_stride` elements apart,
 /// each image's `C_in·H·W` elements contiguous. A dense `[N, C, H, W]` tensor is `offset` 0, `n_stride` `C·H·W`;
@@ -60,8 +61,34 @@ pub fn conv2d_with_config(
     y: &wgpu::Buffer,
     cfg: Option<TileConfig>,
 ) -> Result<(usize, usize)> {
+    conv2d_with_plan(ctx, d, x, weight, bias, y, ConvPlan { tiles: cfg, splits: None })
+}
+
+/// How [`conv2d_with_plan`] runs a conv's GEMM: the regular kernels' tile config, and the split-K chunks on the
+/// regular kernels or, with `tiles` `None`, on tensor cores; `None` fields are picked from the shape.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConvPlan {
+    /// The regular kernels' GEMM tile config (`Some` also keeps an f16 conv off tensor cores; depthwise convs,
+    /// routed first, ignore it).
+    pub tiles: Option<TileConfig>,
+    /// `K` chunks of the implicit GEMM, on the regular kernels or on tensor cores (split-K; clamped to `1..=8` and
+    /// to what `K` allows). `Some(1)` turns split-K off. Only 1×1 stride-1 convs without padding (the pointwise
+    /// GEMM) and depthwise convs ignore it; a strided 1×1 conv is implicit GEMM and honours it.
+    pub splits: Option<usize>,
+}
+
+/// [`conv2d`] with an explicit [`ConvPlan`] (benchmarks and tests).
+pub fn conv2d_with_plan(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    x: &wgpu::Buffer,
+    weight: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    y: &wgpu::Buffer,
+    plan: ConvPlan,
+) -> Result<(usize, usize)> {
     let dense = ConvInput { offset: 0, n_stride: d.c_in * d.h * d.w };
-    conv2d_input(ctx, d, (x, dense), weight, bias, y, cfg)
+    conv2d_at(ctx, d, (x, dense), weight, bias, y, plan)
 }
 
 /// [`conv2d_with_config`] on an input read from `x` as `at` says (a channel slice read in place). Depthwise convs
@@ -75,6 +102,20 @@ pub fn conv2d_input(
     y: &wgpu::Buffer,
     cfg: Option<TileConfig>,
 ) -> Result<(usize, usize)> {
+    conv2d_at(ctx, d, (x, at), weight, bias, y, ConvPlan { tiles: cfg, splits: None })
+}
+
+/// The forward conv on an input at `at` in `x`, run as `plan` says.
+fn conv2d_at(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    (x, at): (&wgpu::Buffer, ConvInput),
+    weight: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    y: &wgpu::Buffer,
+    plan: ConvPlan,
+) -> Result<(usize, usize)> {
+    let cfg = plan.tiles;
     check_dtype(ctx, d.dtype, "conv2d")?;
     let (oh, ow) = d.check_input_buffers((x, at.offset, at.n_stride), weight, bias, y)?;
     if d.n * d.c_out * oh * ow == 0 {
@@ -122,7 +163,7 @@ pub fn conv2d_input(
         let done = if d.is_pointwise() {
             coop::encode_gemm(ctx, &g, DType::F16, weight, x, bias_buf, y, None)?
         } else {
-            coop::encode_conv(ctx, d, &g, DType::F16, x, weight, bias_buf, y, None)?
+            coop::encode_conv(ctx, d, &g, DType::F16, x, weight, bias_buf, y, None, plan.splits)?
         };
         if done {
             return Ok((oh, ow));
@@ -135,9 +176,19 @@ pub fn conv2d_input(
         return Ok((oh, ow));
     }
 
-    // Implicit GEMM.
+    // Implicit GEMM, split along K when it has few output tiles: every chunk then writes an f32 partial slab of
+    // the whole output (no bias, no activation), and one pass sums the slabs into `y` with the bias and
+    // activation.
     let cfg = cfg.unwrap_or_else(|| gemm::pick_config_conv(ctx, &g));
     gemm::check_config(ctx, cfg)?;
+    let (gx, gy, batch) =
+        (hw_out.div_ceil(cfg.bn as usize), cout_g.div_ceil(cfg.bm as usize), d.n * d.groups);
+    let out_elems = d.n * d.c_out * hw_out;
+    let (splits, chunk) = split::plan(cfg.bk as usize, k_dim, gx * gy, batch, out_elems, plan.splits);
+    if splits > 1 {
+        g.bias = GemmBias::None;
+        g.act = UnaryOp::Identity;
+    }
     let check = !g.m.is_multiple_of(cfg.bm as usize)
         || !g.n.is_multiple_of(cfg.bn as usize)
         || !g.k.is_multiple_of(cfg.bk as usize);
@@ -150,27 +201,21 @@ pub fn conv2d_input(
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
         .bool("CHECK", check)
-        .u32("CONV_MODE", 1);
-    let mut spec = spec;
-    for (name, v) in [
-        ("KH", kh as u32),
-        ("KW", kw as u32),
-        ("SH", d.win.stride.0 as u32),
-        ("SW", d.win.stride.1 as u32),
-        ("DH", d.win.dilation.0 as u32),
-        ("DW", d.win.dilation.1 as u32),
-    ] {
-        spec = spec.u32(name, v);
-    }
-    let spec = spec.i32("PH", d.win.padding.0 as i32).i32("PW", d.win.padding.1 as i32);
-    let kernel = ctx.kernel(&GEMM, spec)?;
+        .u32("CONV_MODE", 1)
+        .bool("SPLIT", splits > 1)
+        .bool("OUT_F32", splits > 1 && d.dtype == DType::F16);
+    let kernel = ctx.kernel(&GEMM, conv_spec(spec, d))?;
     let p = gemm_params(&g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
-    let groups = [
-        hw_out.div_ceil(cfg.bn as usize) as u32,
-        cout_g.div_ceil(cfg.bm as usize) as u32,
-        u32::try_from(d.n * d.groups).unwrap_or(u32::MAX),
-    ];
-    ctx.dispatch(&kernel, &[weight, x, bias.unwrap_or(ctx.dummy()), y], &p, groups)?;
+    let groups = [gx as u32, gy as u32, u32::try_from(batch * splits).unwrap_or(u32::MAX)];
+    if splits == 1 {
+        ctx.dispatch(&kernel, &[weight, x, bias.unwrap_or(ctx.dummy()), y], &p, groups)?;
+        return Ok((oh, ow));
+    }
+    let part = ctx.alloc(DType::F32.bytes(prod(&[splits, out_elems])?))?;
+    let p = p.uz(splits)?.uz(chunk)?.uz(out_elems)?;
+    ctx.dispatch(&kernel, &[weight, x, ctx.dummy(), part.raw()], &p, groups)?;
+    let f = split::Finish { splits, out_elems, plane: hw_out, channels: d.c_out, act: d.act, out: d.dtype };
+    split::finish(ctx, &f, part.raw(), bias, y)?;
     Ok((oh, ow))
 }
 

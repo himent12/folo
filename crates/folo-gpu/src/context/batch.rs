@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use super::{Batch, GpuContext, TracedKind, TracedOp, UNIFORM_CHUNK, UniformChunk};
 use crate::error::{GpuError, Result};
 use crate::pipeline::{Kernel, KernelDef, KernelKey, Params, Spec, UNIFORM_SLOT};
+use crate::pool::Retired;
 
 impl GpuContext {
     /// Number of compiled pipelines in the cache.
@@ -88,6 +89,10 @@ impl GpuContext {
 
     pub(super) fn submit(&self, b: &mut Batch) {
         b.pass = None;
+        // Here too, so `flush()` and `sync()` release retired buffers when no dispatch follows.
+        if self.inner.retired.load(Ordering::Relaxed) {
+            self.sweep_binds(b);
+        }
         let Some(mut enc) = b.encoder.take() else { return };
         let mut prof = self.profiler();
         let timed = prof.as_ref().and_then(|p| p.resolve(&mut enc));
@@ -116,7 +121,11 @@ impl GpuContext {
             return Ok(k.clone());
         }
         // Compile outside the lock: pipeline creation can take tens of milliseconds.
-        let kernel = Arc::new(Kernel::compile(&self.inner.device, def, &key.spec)?);
+        let disk = self.inner.pipeline_cache.as_deref();
+        let kernel = Arc::new(Kernel::compile(&self.inner.device, def, &key.spec, disk.map(|d| &d.cache))?);
+        if let Some(d) = disk {
+            d.compiled();
+        }
         Ok(self.inner.kernels.lock().expect("kernel lock").entry(key).or_insert(kernel).clone())
     }
 
@@ -157,6 +166,9 @@ impl GpuContext {
         });
         let mut guard = self.inner.batch.lock().expect("batch lock");
         let b = &mut *guard;
+        if self.inner.retired.load(Ordering::Relaxed) {
+            self.sweep_binds(b);
+        }
         if b.cursor + UNIFORM_SLOT > UNIFORM_CHUNK {
             b.chunk += 1;
             b.cursor = 0;
@@ -175,23 +187,18 @@ impl GpuContext {
         let slot = b.cursor;
         let chunk = &mut b.chunks[b.chunk];
         chunk.cpu[slot as usize..(slot + UNIFORM_SLOT) as usize].copy_from_slice(params.bytes());
-        let mut entries = Vec::with_capacity(buffers.len() + 1);
-        entries.push(wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: &chunk.buf,
-                offset: slot,
-                size: wgpu::BufferSize::new(UNIFORM_SLOT),
-            }),
-        });
-        for (i, buf) in buffers.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry { binding: i as u32 + 1, resource: buf.as_entire_binding() });
+        let mut created = false;
+        // Only buffers whose release the pool reports may be cached (see `binds.rs`). The batch lock is held: the
+        // order `alloc` takes them in.
+        let cacheable = |bufs: &[&wgpu::Buffer], ids: &[u64]| {
+            let pool = self.inner.pool.lock().expect("pool lock");
+            bufs.iter().zip(ids).all(|(&buf, &id)| pool.owns(id) || *buf == self.inner.dummy)
+        };
+        let bind =
+            b.binds.get(&self.inner.device, &kernel.layout, &chunk.buf, buffers, cacheable, &mut created);
+        if created {
+            self.inner.bind_groups.fetch_add(1, Ordering::Relaxed);
         }
-        let bind = self.inner.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &kernel.layout,
-            entries: &entries,
-        });
         b.cursor += UNIFORM_SLOT.max(self.inner.caps.uniform_align as u64);
         if b.pass.is_none() {
             let enc = self.encoder(b);
@@ -202,7 +209,7 @@ impl GpuContext {
         }
         let pass = b.pass.as_mut().expect("pass");
         pass.set_pipeline(&kernel.pipeline);
-        pass.set_bind_group(0, &bind, &[]);
+        pass.set_bind_group(0, &bind, &[slot as u32]);
         let mut prof = self.profiler();
         let q = prof.as_mut().map(|p| p.begin(kernel.name));
         if let (Some(p), Some(q)) = (&prof, q) {
@@ -216,6 +223,37 @@ impl GpuContext {
         self.inner.dispatches.fetch_add(1, Ordering::Relaxed);
         self.bump(b);
         Ok(())
+    }
+
+    /// Drops the cached bind groups that hold buffers the pool has let go of, so the driver can free them.
+    pub(super) fn sweep_binds(&self, b: &mut Batch) {
+        let retired = self.inner.pool.lock().expect("pool lock").take_retired();
+        match retired {
+            Retired::None => {}
+            Retired::Some(ids) => b.binds.retire(&ids),
+            Retired::All => b.binds.clear(),
+        }
+    }
+
+    /// Turns the bind-group cache off (every dispatch creates its bind group, as before the cache) or back on, for
+    /// A/B comparisons in one process. Turning it off empties it.
+    pub fn set_bind_cache(&self, on: bool) {
+        let mut b = self.inner.batch.lock().expect("batch lock");
+        b.binds.off = !on;
+        if !on {
+            b.binds.clear();
+        }
+    }
+
+    /// Bind groups in the cache (for tests and benchmarks).
+    pub fn bind_cache_len(&self) -> usize {
+        self.inner.batch.lock().expect("batch lock").binds.len()
+    }
+
+    /// The bind cache's reverse index: buffers listed and keys in all (for tests).
+    #[cfg(test)]
+    pub(crate) fn bind_index_size(&self) -> (usize, usize) {
+        self.inner.batch.lock().expect("batch lock").binds.index_size()
     }
 
     /// A 1-D launch of `threads` invocations with `wg` threads per workgroup, folded into x/y when it exceeds

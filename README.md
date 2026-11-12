@@ -56,7 +56,7 @@ AP 0.416 after 56 epochs from scratch, against 0.480 for yolo26s
 other per epoch (SGD 0.086 vs 0.085 AP, MuSGD 0.113–0.116 vs 0.113, both optimizers chosen explicitly), so the gap is
 data and schedule, not the trainer; full COCO at an equal budget has not been run. The folo-s run is the first full
 COCO run of `auto`'s MuSGD recipe for long runs (rule 3: momentum 0.9, warmup_bias_lr 0; the proxy runs used 0.937
-and 0.1); it shows the recipe works, not how much it gains over SGD there.
+and 0.1, which `auto` rule 4 now uses for every run); it shows the recipe works, not how much it gains over SGD there.
 
 These are the hill-climb build's numbers (2026-11-09, quiet machine, alternated with the earlier build). FOLO is not
 ahead everywhere: folo-s ties yolo26s on batch-16 forward throughput, and CPU batch-1 latency did not move in the

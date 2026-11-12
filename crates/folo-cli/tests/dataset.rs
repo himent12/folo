@@ -7,7 +7,7 @@ use folo_test_support::TestDir;
 use serde_json::Value;
 
 fn folo(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_folo")).args(args).output().unwrap();
+    let out = folo_cmd().args(args).output().unwrap();
     (
         out.status.code().unwrap(),
         String::from_utf8(out.stdout).unwrap(),
@@ -217,4 +217,11 @@ fn dataset_errors_use_stable_codes() {
     assert!(!out.exists(), "nothing is written on a usage error");
     let (code, _, _) = folo(&["dataset", "convert", s(&empty), s(&out)]);
     assert_eq!(code, 2, "--to is required");
+}
+
+/// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
+fn folo_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
+    c.env("FOLO_NO_CACHE", "1");
+    c
 }

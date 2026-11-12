@@ -244,8 +244,8 @@ fn micro_run_learns_checkpoints_and_resumes_bit_exactly() {
     let _ = std::fs::remove_dir_all(&dir_b);
 }
 
-/// docs/MODEL.md §10.4: N = 800, batch 16, 30 epochs → nb 50, accumulate 4, spe 13, T 390, W 100; and `auto`
-/// picks AdamW at `round(0.002 · 5 / (4 + nc), 6)`. The same data for 10 epochs is a short run: W 39, a warning.
+/// docs/MODEL.md §10.4: N = 800, batch 16, 30 epochs → nb 50, accumulate 4, spe 13, T 390, W 39 (100 with the
+/// pre-rule-4 floor); and `auto` picks MuSGD (rule 4). The same data for 10 epochs is a short run: W 39, a warning.
 #[test]
 fn schedule_numbers_match_the_spec() {
     let img = folo_data::Image::new(64, 64, [0; 3]);
@@ -257,7 +257,10 @@ fn schedule_numbers_match_the_spec() {
     let t = Trainer::new(cfg.clone(), data.clone(), TrainOptions::default()).unwrap();
     assert_eq!((t.batches_per_epoch(), t.accumulate()), (50, 4));
     let c = t.schedule().contract();
-    assert_eq!((c.steps_per_epoch, t.schedule().total_iters(), c.warmup_iters), (13, 390, 100));
+    assert_eq!((c.steps_per_epoch, t.schedule().total_iters(), c.warmup_iters), (13, 390, 39));
+    let floored =
+        Trainer::new(TrainConfig { warmup_floor: 100, ..cfg.clone() }, data.clone(), TrainOptions::default());
+    assert_eq!(floored.unwrap().schedule().contract().warmup_iters, 100);
     assert!(t.warnings().is_empty(), "{:?}", t.warnings());
     assert_eq!(t.config().augment.close_mosaic_epochs(30), 10);
 
@@ -271,14 +274,14 @@ fn schedule_numbers_match_the_spec() {
     let o = t.optimizer();
     assert_eq!(
         (o.kind, o.lr0, o.momentum, o.warmup_bias_lr),
-        (folo_nn::optim::OptimKind::AdamW, 0.00125, 0.9, 0.0)
+        (folo_nn::optim::OptimKind::MuSgd, 0.01, 0.937, 0.1)
     );
 
-    let smoke = TrainConfig { epochs: 30, batch: 16, ..TrainConfig::default() };
+    let smoke = TrainConfig { epochs: 30, batch: 16, auto_rule: 3, ..TrainConfig::default() };
     let r = smoke.resolve_optimizer(2000, 4);
-    assert_eq!((r.kind, r.lr0), (folo_nn::optim::OptimKind::AdamW, 0.00125));
+    assert_eq!((r.kind, r.lr0), (folo_nn::optim::OptimKind::AdamW, 0.00125), "rule 3: AdamW for a short run");
     let long = TrainConfig { epochs: 300, ..TrainConfig::default() };
-    // Long runs: MuSGD under `auto` rule 3, SGD under the rules before it.
+    // Long runs: MuSGD under `auto` rules 3 and 4, SGD under the rules before.
     assert_eq!(long.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::MuSgd);
     let rule2 = TrainConfig { auto_rule: 2, ..long };
     assert_eq!(rule2.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::Sgd);
@@ -730,4 +733,91 @@ fn musgd_runs_train_checkpoint_and_resume_with_either_head() {
         assert!(pred.detections.windows(2).all(|w| w[0].score >= w[1].score));
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `o2o_attached_epochs` in the trainer (docs/MODEL.md §6.6): with 2 of 3 epochs attached, run one epoch at a time
+/// through checkpoints, the one-to-one branch reads attached features in epochs 1 and 2 (also in epoch 2, the
+/// first epoch of a resumed run, whose model starts detached) and detached ones in epoch 3.
+#[test]
+fn o2o_attached_epochs_switch_at_the_boundary() {
+    use folo_vision::model::HeadMode;
+    let ds = shapes(1, 1, 64);
+    let cfg = TrainConfig {
+        head: HeadMode::O2o,
+        o2o_attached_epochs: 2,
+        batch: 1,
+        nbs: 1,
+        ema: false,
+        ..micro_config(3)
+    };
+    let detached = |t: &Trainer| t.model().head.o2o_detach;
+    // Options that stop the run after its first epoch.
+    let one_epoch = || {
+        let (opts, _) = options(None);
+        let stop = opts.stop.clone();
+        let events: folo_vision::train::EventSink = Box::new(move |e| {
+            if matches!(e, RunEvent::Epoch(_)) {
+                stop.store(true, Ordering::Relaxed);
+            }
+        });
+        TrainOptions { events: Some(events), ..opts }
+    };
+    let ckpt = TestFile::new("train-o2o-attached", "last.folo");
+    let mut t = Trainer::new(cfg, data(&ds), one_epoch()).unwrap();
+    assert_eq!(t.run().unwrap().epochs_completed, 1);
+    assert!(!detached(&t), "epoch 1 of 2 attached");
+    t.save_checkpoint(&ckpt).unwrap();
+    let mut t = Trainer::resume(&ckpt, data(&ds), one_epoch(), ResumeOverrides::default()).unwrap();
+    assert!(detached(&t), "a resumed model starts with the default");
+    assert_eq!(t.run().unwrap().epochs_completed, 2);
+    assert!(!detached(&t), "epoch 2, the resumed run's first, is still attached");
+    t.save_checkpoint(&ckpt).unwrap();
+    let mut t = Trainer::resume(&ckpt, data(&ds), options(None).0, ResumeOverrides::default()).unwrap();
+    assert_eq!(t.run().unwrap().epochs_completed, 3);
+    assert!(detached(&t), "epoch 3 is past the 2 attached epochs");
+}
+
+/// `auto` rule 5 (docs/MODEL.md §8.2): MuSGD with the scratch step weights 0.5 / 0.5 for a run from scratch, the
+/// configured 0.2 / 1.0 for one that starts from weights (`transfer`, which the trainer sets from
+/// `TrainOptions::weights` whatever the config says, and which a resume keeps). Checked on the optimizer itself
+/// (its `folo.optim` contract in each checkpoint, which carries the weights only when they are not 0.2 / 1.0), also
+/// after a resume of each; no training needed.
+#[test]
+fn auto_musgd_weights_follow_transfer_and_survive_resume() {
+    use folo_nn::optim::{AUTO_MUSGD_SCRATCH_WEIGHTS, MuSgdWeights, OptimKind};
+    // The `musgd` weights of a checkpoint's `folo.optim`, `None` when the key is absent (0.2 / 1.0).
+    let saved = |path: &Path| -> Option<MuSgdWeights> {
+        let header = folo_nn::io::safetensors::Container::read_header(path).unwrap();
+        let optim: serde_json::Value = serde_json::from_str(&header.metadata.unwrap()["folo.optim"]).unwrap();
+        optim.get("musgd").map(|m| serde_json::from_value(m.clone()).unwrap())
+    };
+    let resume =
+        |p: &Path| Trainer::resume(p, data(&shapes(2, 1, 64)), options(None).0, ResumeOverrides::default());
+    let ds = shapes(2, 1, 64);
+    let cfg = TrainConfig { optimizer: OptimizerChoice::Auto, transfer: true, ..micro_config(2) };
+    let scratch = Trainer::new(cfg.clone(), data(&ds), options(None).0).unwrap();
+    assert!(!scratch.config().transfer, "no weights: from scratch, whatever the config said");
+    let o = scratch.optimizer();
+    assert_eq!((o.kind, o.musgd), (OptimKind::MuSgd, AUTO_MUSGD_SCRATCH_WEIGHTS));
+    let start = TestFile::new("train-auto-transfer", "start.folo");
+    scratch.save_checkpoint(&start).unwrap();
+    assert_eq!(saved(&start), Some(AUTO_MUSGD_SCRATCH_WEIGHTS), "the optimizer itself runs 0.5 / 0.5");
+    let again = resume(&start).unwrap();
+    assert!(!again.config().transfer);
+    let again_ckpt = TestFile::new("train-auto-transfer", "again.folo");
+    again.save_checkpoint(&again_ckpt).unwrap();
+    assert_eq!(saved(&again_ckpt), Some(AUTO_MUSGD_SCRATCH_WEIGHTS), "a resumed run from scratch keeps them");
+
+    let opts = TrainOptions { weights: Some(start.path().to_path_buf()), ..options(None).0 };
+    let tuned = Trainer::new(TrainConfig { transfer: false, ..cfg }, data(&ds), opts).unwrap();
+    assert!(tuned.config().transfer);
+    assert_eq!(tuned.optimizer().musgd, MuSgdWeights::default());
+    let ckpt = TestFile::new("train-auto-transfer", "last.folo");
+    tuned.save_checkpoint(&ckpt).unwrap();
+    assert_eq!(saved(&ckpt), None, "the optimizer itself runs 0.2 / 1.0");
+    let resumed = resume(&ckpt).unwrap();
+    assert!(resumed.config().transfer, "a resumed fine-tune stays one");
+    let resumed_ckpt = TestFile::new("train-auto-transfer", "resumed.folo");
+    resumed.save_checkpoint(&resumed_ckpt).unwrap();
+    assert_eq!(saved(&resumed_ckpt), None, "and keeps 0.2 / 1.0");
 }

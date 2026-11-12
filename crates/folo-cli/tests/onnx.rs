@@ -163,7 +163,7 @@ fn reference_k(
 /// Starts `folo export --format onnx` of `model` to `out` on its own thread; the handle gives the export record.
 /// The exports run while the next models and references are computed.
 fn export(model: &Path, out: &Path, flags: &[&str]) -> JoinHandle<Value> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_folo"));
+    let mut cmd = folo_cmd();
     cmd.args(["export", "--json", "--format", "onnx", "--model", s(model), "--output", s(out)]).args(flags);
     let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
     std::thread::spawn(move || {
@@ -358,4 +358,11 @@ fn onnx_matches_folo_in_onnxruntime() {
     let checked: usize = checkers.into_iter().map(joined).sum();
     assert_eq!(checked, 17);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
+fn folo_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
+    c.env("FOLO_NO_CACHE", "1");
+    c
 }

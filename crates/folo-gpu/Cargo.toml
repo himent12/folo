@@ -28,6 +28,7 @@ wgpu = { workspace = true, features = ["fragile-send-sync-non-atomic-wasm"] }
 
 [dev-dependencies]
 folo-nn.workspace = true
+folo-test-support.workspace = true
 
 [[bench]]
 name = "gemm"
@@ -35,6 +36,10 @@ harness = false
 
 [[bench]]
 name = "conv"
+harness = false
+
+[[bench]]
+name = "conv_model"
 harness = false
 
 [[bench]]

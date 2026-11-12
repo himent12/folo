@@ -6,8 +6,8 @@
 //! checks. The pipeline cache in [`crate::GpuContext`] is keyed by `(kernel name, spec)`.
 //!
 //! Every kernel sees the same bind group layout shape: `@binding(0)` is a 256-byte uniform parameter block
-//! ([`Params`], read with `pu(i)` / `pf(i)` / `pi(i)` from [`PRELUDE`]) and `@binding(1..)` are the storage
-//! buffers in [`KernelDef::storage`] order.
+//! ([`Params`], read with `pu(i)` / `pf(i)` / `pi(i)` from [`PRELUDE`], bound at a dynamic offset) and
+//! `@binding(1..)` are the storage buffers in [`KernelDef::storage`] order.
 
 use crate::error::{GpuError, Result};
 
@@ -205,8 +205,63 @@ pub(crate) fn render(def: &KernelDef, spec: &Spec) -> String {
     format!("{}{}{}", spec.header(), PRELUDE, body)
 }
 
+/// The opt-in compile timer: with `FOLO_GPU_TRACE_COMPILE=1` (read once), every [`Kernel::compile`] adds its
+/// `create_shader_module` time (WGSL parsing and validation) and its total time to process-wide totals, printed to
+/// stderr every [`trace::EVERY`] pipelines and by [`crate::save_pipeline_caches`] (docs/GPU.md, Pipeline cache).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod trace {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// The environment variable that turns the timer on.
+    pub const ENV: &str = "FOLO_GPU_TRACE_COMPILE";
+    /// Pipelines between two reports.
+    pub const EVERY: u64 = 25;
+    static ON: OnceLock<bool> = OnceLock::new();
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static MODULE_NS: AtomicU64 = AtomicU64::new(0);
+    static TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+
+    /// The start of a compile, when the timer is on.
+    pub fn start() -> Option<Instant> {
+        ON.get_or_init(|| std::env::var(ENV).is_ok_and(|v| v == "1")).then(Instant::now)
+    }
+
+    /// Adds one compile that started at `t0` and spent `module` in `create_shader_module`.
+    pub fn add(t0: Instant, module: Duration) {
+        let total = t0.elapsed();
+        MODULE_NS.fetch_add(module.as_nanos() as u64, Ordering::Relaxed);
+        TOTAL_NS.fetch_add(total.as_nanos() as u64, Ordering::Relaxed);
+        if (COUNT.fetch_add(1, Ordering::Relaxed) + 1).is_multiple_of(EVERY) {
+            report();
+        }
+    }
+
+    /// Prints the totals so far, when the timer is on and has counted a compile.
+    pub fn report() {
+        let n = COUNT.load(Ordering::Relaxed);
+        if ON.get().copied().unwrap_or(false) && n > 0 {
+            let s = |a: &AtomicU64| a.load(Ordering::Relaxed) as f64 * 1e-9;
+            eprintln!(
+                "folo-gpu: compiled {n} pipelines, module {:.3} s, total {:.3} s",
+                s(&MODULE_NS),
+                s(&TOTAL_NS)
+            );
+        }
+    }
+}
+
 impl Kernel {
-    pub fn compile(device: &wgpu::Device, def: &'static KernelDef, spec: &Spec) -> Result<Self> {
+    /// Compiles `def` specialised with `spec`, through the persistent pipeline cache when there is one.
+    pub fn compile(
+        device: &wgpu::Device,
+        def: &'static KernelDef,
+        spec: &Spec,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Result<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let t0 = trace::start();
         let src = render(def, spec);
         // Natively, compile errors are caught in an error scope. In the browser the scope's result arrives
         // asynchronously and nothing may block for it, so errors go to the device's uncaptured-error sink
@@ -217,12 +272,15 @@ impl Kernel {
             label: Some(def.name),
             source: wgpu::ShaderSource::Wgsl(src.into()),
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        let module_time = t0.map(|t| t.elapsed());
         let mut entries = vec![wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
+                // The slot in the uniform chunk, so one bind group serves every dispatch on the same buffers.
+                has_dynamic_offset: true,
                 min_binding_size: wgpu::BufferSize::new(UNIFORM_SLOT),
             },
             count: None,
@@ -258,11 +316,15 @@ impl Kernel {
                 // Kernels initialise the workgroup memory they read.
                 zero_initialize_workgroup_memory: false,
             },
-            cache: None,
+            cache,
         });
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(GpuError::Wgpu(format!("compiling kernel {} ({spec:?}): {err}", def.name)));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(t0), Some(m)) = (t0, module_time) {
+            trace::add(t0, m);
         }
         Ok(Self { name: def.name, spec: spec.describe(), pipeline, layout, storage: def.storage })
     }

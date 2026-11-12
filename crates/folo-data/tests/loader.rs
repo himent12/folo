@@ -5,10 +5,11 @@ mod common;
 use common::*;
 use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
 use folo_data::{
-    AugmentConfig, BBox, Batch, DataError, DataLoader, Dataset, InMemoryDataset, LoaderConfig, Result,
-    Sample, Split,
+    AugmentConfig, BBox, Batch, CacheMode, DataError, DataLoader, Dataset, InMemoryDataset, LoaderConfig,
+    Result, Sample, Split,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn rect_dataset(n: usize) -> Arc<dyn Dataset> {
     let samples = (0..n).map(|k| random_rect_sample(k as u64, 90 + (k as u32 % 5) * 13, 70, 4)).collect();
@@ -195,4 +196,95 @@ fn invalid_configs_are_rejected() {
     let empty: Arc<dyn Dataset> =
         Arc::new(InMemoryDataset { samples: vec![], classes: vec![], split: Split::Val });
     assert!(DataLoader::new(empty, cfg(1)).is_err());
+}
+
+/// `--cache ram` gives the batches of the uncached loader, pixel for pixel, box for box and with the same meta
+/// (original size, letterbox ratio and pad), for mosaic + mixup, plain letterboxed samples and validation, with
+/// images larger and smaller than `imgsz`, from the first (filling) epoch on.
+#[test]
+fn ram_cache_gives_the_uncached_batches() {
+    let samples = (0..11)
+        .map(|k| {
+            let (w, h) = [(200, 120), (50, 90), (64, 64), (130, 31), (33, 200)][k % 5];
+            random_rect_sample(k as u64, w, h, 4)
+        })
+        .collect();
+    let ds: Arc<dyn Dataset> = Arc::new(InMemoryDataset {
+        samples,
+        classes: (0..4).map(|c| c.to_string()).collect(),
+        split: Split::Train,
+    });
+    let configs = [
+        cfg(3),
+        LoaderConfig { augment: Some(AugmentConfig { mosaic: 0.0, ..AugmentConfig::default() }), ..cfg(2) },
+        LoaderConfig { augment: None, shuffle: false, ..cfg(2) },
+    ];
+    for c in configs {
+        let plain = DataLoader::new(ds.clone(), c.clone()).unwrap();
+        let cached =
+            DataLoader::new(ds.clone(), LoaderConfig { cache: CacheMode::Ram, ..c.clone() }).unwrap();
+        for epoch in [0, 1, 1] {
+            let (a, b) = (collect(&plain, epoch), collect(&cached, epoch));
+            assert_eq!(a, b, "{:?}, epoch {epoch}", c.augment.map(|a| a.mosaic));
+        }
+        if c.augment.is_none() {
+            let meta = &collect(&cached, 0)[0].meta[0];
+            assert_eq!(meta.orig_size, [200, 120]);
+            assert_eq!(meta.ratio, [64.0 / 200.0, 38.0 / 120.0]);
+        }
+    }
+}
+
+/// Wraps a dataset and counts its loads.
+struct Counting {
+    inner: Arc<dyn Dataset>,
+    gets: AtomicUsize,
+}
+
+impl Dataset for Counting {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+    fn get(&self, index: usize) -> Result<Sample> {
+        self.gets.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(index)
+    }
+    fn boxes(&self, index: usize) -> &[BBox] {
+        self.inner.boxes(index)
+    }
+    fn class_names(&self) -> &[String] {
+        self.inner.class_names()
+    }
+    fn split(&self) -> Split {
+        Split::Train
+    }
+}
+
+/// `--cache ram` loads each image once: after the first epoch, another loads nothing from the dataset, while the
+/// uncached loader loads every image again.
+#[test]
+fn ram_cache_loads_each_image_once() {
+    for cache in [CacheMode::Ram, CacheMode::None] {
+        let ds = Arc::new(Counting { inner: rect_dataset(10), gets: AtomicUsize::new(0) });
+        let loader = DataLoader::new(ds.clone(), LoaderConfig { cache, ..cfg(3) }).unwrap();
+        collect(&loader, 0);
+        assert!(ds.gets.swap(0, Ordering::SeqCst) >= 10, "{cache:?}: every image loaded in the first epoch");
+        collect(&loader, 1);
+        let again = ds.gets.load(Ordering::SeqCst);
+        match cache {
+            CacheMode::Ram => assert_eq!(again, 0, "the second epoch comes from the cache"),
+            CacheMode::None => assert!(again >= 10, "{again} loads in the second epoch"),
+        }
+    }
+}
+
+#[test]
+fn ram_cache_refuses_what_does_not_fit() {
+    let big = (0..3).map(|k| random_rect_sample(k, 64, 64, 1)).collect();
+    let ds: Arc<dyn Dataset> =
+        Arc::new(InMemoryDataset { samples: big, classes: vec!["a".into()], split: Split::Train });
+    // A 2^20-pixel side: each image needs 3 TiB resized.
+    let c = LoaderConfig { imgsz: 1 << 20, cache: CacheMode::Ram, ..cfg(1) };
+    let e = DataLoader::new(ds, c).err().expect("refused");
+    assert!(e.to_string().contains("--cache ram needs"), "{e}");
 }

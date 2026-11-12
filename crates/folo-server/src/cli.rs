@@ -117,13 +117,28 @@ pub fn check_optimizer(config: &TrainConfig) -> crate::error::Result<()> {
     .hint("use the CLI of the FOLO version that made the run, or start a new run with --optimizer auto, sgd, adamw or musgd"))
 }
 
-/// The `auto` rule (`TrainConfig.auto_rule`, docs/MODEL.md §8.2) a run trained with, from the `config.json` the
-/// trainer wrote into its folder: its `train.auto_rule`, or rule 1 when the key is absent (written before it
-/// existed). `None` when the run has no `config.json` (it never started, and starts with the current rule).
+/// The trainer config a run trained with (the `train` object of the `config.json` the trainer wrote into its
+/// folder), or, when the folder has no `config.json`, the `folo.train` of its checkpoint (`weights/last.folo`, else
+/// `weights/best.folo`; only the file's header is read). A cloud run's folder has no `config.json`: the server
+/// mirrors its history and copies its weights (docs/CLOUD.md). `None` when the run has neither (it never started,
+/// and starts with the current defaults).
+fn recorded_train(run_dir: &std::path::Path) -> Option<serde_json::Value> {
+    if let Ok(bytes) = std::fs::read(run_dir.join("config.json")) {
+        let mut v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        return Some(v.get_mut("train")?.take());
+    }
+    ["last.folo", "best.folo"].iter().find_map(|f| {
+        let header =
+            folo_nn::io::safetensors::Container::read_header(&run_dir.join("weights").join(f)).ok()?;
+        serde_json::from_str(header.metadata?.get("folo.train")?).ok()
+    })
+}
+
+/// The `auto` rule (`TrainConfig.auto_rule`, docs/MODEL.md §8.2) a run trained with ([`recorded_train`]): its
+/// `auto_rule`, or rule 1 when the key is absent (written before it existed). `None` when nothing records the run's
+/// config (it never started, and starts with the current rule).
 pub fn recorded_auto_rule(run_dir: &std::path::Path) -> Option<u32> {
-    let bytes = std::fs::read(run_dir.join("config.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let train = v.get("train")?;
+    let train = recorded_train(run_dir)?;
     Some(train.get("auto_rule").and_then(serde_json::Value::as_u64).map_or(1, |r| r as u32))
 }
 
@@ -137,6 +152,74 @@ pub fn with_auto_rule(mut cmd: CliCommand, config: &TrainConfig, rule: Option<u3
         && r != current
     {
         cmd.argv.extend(["--set".to_string(), format!("auto_rule={r}")]);
+        cmd.cli = shell_join(&cmd.argv);
+    }
+    cmd
+}
+
+/// The warmup floor (`TrainConfig.warmup_floor`, docs/MODEL.md §8.4) a run trained with ([`recorded_train`]): its
+/// `warmup_floor`, or 100 when the key is absent (written before it existed). `None` when nothing records the run's
+/// config (it starts with the current default).
+pub fn recorded_warmup_floor(run_dir: &std::path::Path) -> Option<u64> {
+    let train = recorded_train(run_dir)?;
+    Some(train.get("warmup_floor").and_then(serde_json::Value::as_u64).unwrap_or(folo_nn::WARMUP_FLOOR))
+}
+
+/// `cmd` with `--set warmup_floor=N` when the run trained with another floor than a new run takes, so the command
+/// warms up as the run did (runs made before the key: 100 iterations).
+pub fn with_warmup_floor(mut cmd: CliCommand, floor: Option<u64>) -> CliCommand {
+    if let Some(f) = floor
+        && f != folo_vision::TrainConfig::default().warmup_floor
+    {
+        cmd.argv.extend(["--set".to_string(), format!("warmup_floor={f}")]);
+        cmd.cli = shell_join(&cmd.argv);
+    }
+    cmd
+}
+
+/// Whether a run started from pretrained weights (`TrainConfig.transfer`, docs/MODEL.md §8.2) ([`recorded_train`]):
+/// `false` when the key is absent (written before it existed). `None` when nothing records the run's config.
+pub fn recorded_transfer(run_dir: &std::path::Path) -> Option<bool> {
+    let train = recorded_train(run_dir)?;
+    Some(train.get("transfer").and_then(serde_json::Value::as_bool).unwrap_or(false))
+}
+
+/// The MuSGD step weights a run's config records (`musgd.muon`, `musgd.sgd`; [`recorded_train`]), the defaults
+/// 0.2 / 1.0 when absent. `None` when nothing records the run's config.
+pub fn recorded_musgd_weights(run_dir: &std::path::Path) -> Option<folo_nn::optim::MuSgdWeights> {
+    let train = recorded_train(run_dir)?;
+    let d = folo_nn::optim::MuSgdWeights::default();
+    let w = |k: &str, d: f64| {
+        train.get("musgd").and_then(|m| m.get(k)).and_then(serde_json::Value::as_f64).unwrap_or(d)
+    };
+    Some(folo_nn::optim::MuSgdWeights { muon: w("muon", d.muon), sgd: w("sgd", d.sgd) })
+}
+
+/// `cmd` with `--set auto_rule=4` for an `auto` run under the current rule that trained as a transfer run
+/// (`transfer`) while the command has no `--weights` (e.g. a run continued from an imported checkpoint): the command
+/// would train from scratch, which rule 5 resolves to other MuSGD step weights; rule 4 resolves the same optimizer
+/// with `musgd.*`, so the run's own `musgd` weights (`weights`) follow when they are not the defaults. Runs under
+/// older rules already carry their rule.
+pub fn with_transfer(
+    mut cmd: CliCommand,
+    config: &TrainConfig,
+    rule: Option<u32>,
+    transfer: Option<bool>,
+    weights: Option<folo_nn::optim::MuSgdWeights>,
+) -> CliCommand {
+    let current = folo_vision::TrainConfig::default().auto_rule;
+    if config.optimizer == Optimizer::Auto
+        && transfer == Some(true)
+        && rule.unwrap_or(current) == current
+        && current >= 5
+        && !cmd.argv.iter().any(|a| a == "--weights" || a.starts_with("--weights="))
+    {
+        cmd.argv.extend(["--set".to_string(), "auto_rule=4".to_string()]);
+        if let Some(w) = weights.filter(|w| *w != folo_nn::optim::MuSgdWeights::default()) {
+            for (k, v) in [("muon", w.muon), ("sgd", w.sgd)] {
+                cmd.argv.extend(["--set".to_string(), format!("musgd.{k}={v}")]);
+            }
+        }
         cmd.cli = shell_join(&cmd.argv);
     }
     cmd
@@ -221,6 +304,47 @@ mod tests {
         c.optimizer = Optimizer::Sgd;
         let sgd = train_command(&c, "D:/coco", DatasetFormat::Coco, None);
         assert_eq!(with_auto_rule(sgd.clone(), &c, Some(1)).cli, sgd.cli, "an explicit optimizer");
+    }
+
+    /// A run made before `warmup_floor` (100 iterations then) repeats with `--set warmup_floor=100`; a run with
+    /// the current default, or that never started, gets no `--set`.
+    #[test]
+    fn runs_repeat_with_their_warmup_floor() {
+        use folo_test_support::TestDir;
+        let dir = TestDir::new("cli-warmup-floor");
+        let write = |v: serde_json::Value| std::fs::write(dir.join("config.json"), v.to_string()).unwrap();
+        assert_eq!(recorded_warmup_floor(&dir), None, "no config.json");
+        write(serde_json::json!({ "train": { "epochs": 100 } }));
+        assert_eq!(recorded_warmup_floor(&dir), Some(100), "written before the key");
+        let c: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
+        let base = || train_command(&c, "D:/bccd", DatasetFormat::Yolo, None);
+        let cmd = with_warmup_floor(base(), Some(100));
+        assert_eq!(cmd.argv[cmd.argv.len() - 2..], ["--set", "warmup_floor=100"]);
+        let current = folo_vision::TrainConfig::default().warmup_floor;
+        assert_eq!(with_warmup_floor(base(), Some(current)).cli, base().cli);
+        assert_eq!(with_warmup_floor(base(), None).cli, base().cli);
+    }
+
+    /// A run folder without `config.json` (a cloud run's) reads the recipe from `weights/last.folo`, else
+    /// `weights/best.folo`; a `config.json` wins over both.
+    #[test]
+    fn recipe_falls_back_to_the_checkpoint() {
+        use folo_test_support::TestDir;
+        let dir = TestDir::new("cli-recipe-checkpoint");
+        std::fs::create_dir_all(dir.join("weights")).unwrap();
+        let checkpoint = |file: &str, train: serde_json::Value| {
+            let meta = std::collections::BTreeMap::from([("folo.train".to_string(), train.to_string())]);
+            let t = folo_core::Tensor::from_vec(vec![0f32], [1]).unwrap();
+            let path = dir.join("weights").join(file);
+            folo_nn::io::safetensors::write_file(&path, Some(&meta), &[("w".into(), t)]).unwrap();
+        };
+        checkpoint("best.folo", serde_json::json!({ "auto_rule": 2 }));
+        assert_eq!((recorded_auto_rule(&dir), recorded_warmup_floor(&dir)), (Some(2), Some(100)));
+        checkpoint("last.folo", serde_json::json!({ "auto_rule": 4, "warmup_floor": 0 }));
+        assert_eq!((recorded_auto_rule(&dir), recorded_warmup_floor(&dir)), (Some(4), Some(0)));
+        let config = serde_json::json!({ "train": { "auto_rule": 3, "warmup_floor": 50 } });
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        assert_eq!((recorded_auto_rule(&dir), recorded_warmup_floor(&dir)), (Some(3), Some(50)));
     }
 
     /// A run whose optimizer this build does not know gets no command (one without `--optimizer` would train

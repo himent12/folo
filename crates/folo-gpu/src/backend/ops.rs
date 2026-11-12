@@ -2,8 +2,8 @@
 //! the ops without an f16 kernel.
 
 use folo_core::backend::{
-    Backend, BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, NormReduce, OptimItem, OptimStep,
-    Pool2dParams, ReduceOp, RunningUpdate, UnaryOp, View,
+    Backend, BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, MuonItem, MuonSettings, NormReduce,
+    OptimItem, OptimStep, Pool2dParams, ReduceOp, RunningUpdate, UnaryOp, View,
 };
 use folo_core::{CpuStorage, DType as CoreDType, Device, Error, Layout, Result, Shape, Storage};
 
@@ -18,6 +18,7 @@ use crate::kernels::conv;
 use crate::kernels::ew::EwOp;
 use crate::kernels::gemm_cat::{CAT_STORAGE_BUFFERS, MAX_CAT_PARTS};
 use crate::kernels::layout;
+use crate::kernels::muon;
 use crate::kernels::norm::{self, BnRunning};
 use crate::kernels::optim;
 use crate::kernels::pool_grad;
@@ -764,6 +765,39 @@ impl Backend for GpuBackend {
         let bufs =
             xs.iter().zip(ns).map(|(x, &n)| Ok((self.storage_buf(x)?, n))).collect::<Result<Vec<_>>>()?;
         optim::scale_many(&self.ctx, &bufs, d1.raw(), d2.raw()).core()
+    }
+
+    fn muon_step_many(&self, items: &mut [MuonItem<'_>], s: &MuonSettings) -> Result<()> {
+        let _p = profile::scope(|| "muon_many".to_string());
+        let dense = items
+            .iter()
+            .map(|it| Ok((self.dense(&it.momentum)?, self.dense(&it.grad)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let mut mats = Vec::with_capacity(items.len());
+        for (it, (m, g)) in items.iter().zip(&dense) {
+            mats.push(muon::MuonMatrix {
+                p: self.storage_buf(it.param)?,
+                m: m.raw(),
+                g: g.raw(),
+                rows: it.rows,
+                cols: it.cols,
+                scale: it.scale,
+            });
+        }
+        let settings = muon::MuonSettings {
+            momentum: s.momentum,
+            nesterov: s.nesterov,
+            coeffs: s.coeffs,
+            steps: s.steps,
+            eps: s.eps,
+            lr: s.lr,
+        };
+        // Declined (nothing written) where the device's bindings are too few or too small: tensor ops instead.
+        if muon::muon_step_many(&self.ctx, &mats, &settings).core()? {
+            Ok(())
+        } else {
+            Err(Error::NotSupported { op: "muon_step_many", backend: BACKEND_NAME })
+        }
     }
 
     fn unscale_check(&self, x: &mut Storage, n: usize, factor: f32, flag: &mut Storage) -> Result<()> {

@@ -235,6 +235,32 @@ fn o2o_branch_is_detached_from_backbone_and_neck() {
     assert!(!grad_nonzero(&g, &named("head.o2o.box.p3.conv0.conv.weight")));
 }
 
+/// `o2o_detach = false` (the trainer's `o2o_attached_epochs`): the one-to-one loss reaches the backbone and neck
+/// too, but still not the one-to-many branch.
+#[test]
+fn attached_o2o_branch_trains_the_backbone() {
+    let mut m = FoloModel::new(config("n", 2, "o2o")).unwrap();
+    m.head.o2o_detach = false;
+    m.train();
+    let x = Tensor::rand_uniform([2, 3, 64, 64], 0.0, 1.0, &mut Rng::seed(4));
+    let out = m.forward(&x).unwrap();
+    let (bo, co) = out.o2o.clone().unwrap();
+    let targets = vec![
+        ImageTargets { boxes: vec![Xyxy::new(8.0, 8.0, 40.0, 44.0)], labels: vec![1] },
+        ImageTargets { boxes: vec![Xyxy::new(20.0, 4.0, 60.0, 30.0)], labels: vec![0] },
+    ];
+    let g = detection_loss(&bo, &co, &out.anchors, &targets, &LossConfig::o2o())
+        .unwrap()
+        .total
+        .backward()
+        .unwrap();
+    let named = |n: &str| m.named_tensors().into_iter().find(|t| t.name == n).unwrap().tensor;
+    for n in ["backbone.stem.conv.weight", "neck.out3.cv1.conv.weight", "head.o2o.box.p3.conv0.conv.weight"] {
+        assert!(grad_nonzero(&g, &named(n)), "{n} got no gradient from the attached o2o loss");
+    }
+    assert!(!grad_nonzero(&g, &named("head.box.p3.conv0.conv.weight")));
+}
+
 // ---- tensor names, initialisation, inference switch ------------------------------------------------------------
 
 /// MODEL.md §5's reservation: an `o2o` model is the `o2m` model's tensors, in the same order and drawn from the
