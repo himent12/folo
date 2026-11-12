@@ -473,7 +473,7 @@ impl Tensor {
     /// Run `f` with a backend [`View`] of this tensor (holds a read lock for the duration).
     pub fn with_view<R>(&self, f: impl FnOnce(View<'_>) -> R) -> R {
         let s = self.0.storage.read();
-        f(View::new(&s, &self.0.layout))
+        f(View::of_cell(&s, &self.0.layout, self.0.storage.derived()))
     }
 
     /// The elements in row-major order as host data (downloads from a device).

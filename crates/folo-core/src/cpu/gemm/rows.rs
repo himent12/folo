@@ -507,3 +507,63 @@ pub(crate) fn gemm_rows<A: Operand>(
     });
     crate::cpu::recycle(cbuf);
 }
+
+/// `C = A * B` on the calling thread, for the small GEMMs of a Winograd tile block: A is row-major `m x k` (row
+/// `i` is the `k` floats from `a[i * lda]`), B's `k` rows are read in place through `rows` (each `n` floats, `n` a
+/// multiple of `NR`), and C is row-major `m x n` with row stride `ldc`, overwritten. No epilogue. K runs in `KC`
+/// blocks; each B micro-panel (`kc x NR`) stays in L1 while every row panel of A passes it.
+///
+/// # Safety
+/// Every pointer in `rows` is readable for `n` floats.
+///
+/// # Panics
+/// If `n` is not a multiple of `NR`, `rows` is not `k` long, or `a` / `c` are too short.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn gemm_rows_serial(
+    m: usize,
+    k: usize,
+    a: &[f32],
+    lda: usize,
+    rows: &[*const f32],
+    n: usize,
+    c: &mut [f32],
+    ldc: usize,
+) {
+    assert!(n.is_multiple_of(NR) && rows.len() == k && ldc >= n, "gemm_rows_serial: bad geometry");
+    assert!(
+        m == 0 || ((m - 1) * lda + k <= a.len() && (m - 1) * ldc + n <= c.len()),
+        "gemm_rows_serial: short"
+    );
+    if m == 0 || n == 0 {
+        return;
+    }
+    if k == 0 {
+        (0..m).for_each(|i| c[i * ldc..i * ldc + n].fill(0.0));
+        return;
+    }
+    let rakern = rows_a_kernel();
+    let (ap, cp) = (a.as_ptr(), c.as_mut_ptr());
+    let mut kb = 0;
+    while kb < k {
+        let kc = KC.min(k - kb);
+        let brows = &rows[kb..kb + kc];
+        let mut j = 0;
+        while j < n {
+            let mut i = 0;
+            while i < m {
+                let mr = MR.min(m - i);
+                // SAFETY: rows i..i + mr of A hold k floats from i * lda (asserted), rows past mr repeat row i;
+                // each B row is readable for n floats (the caller's contract), j + NR <= n; the C block
+                // [i..i + mr, j..j + NR] is inside `c` (asserted).
+                unsafe {
+                    let apan: [*const f32; MR] =
+                        std::array::from_fn(|r| ap.add((i + if r < mr { r } else { 0 }) * lda + kb));
+                    rakern(kc, &apan, brows.as_ptr(), j, cp.add(i * ldc + j), ldc, mr, kb != 0, None);
+                }
+                i += MR;
+            }
+            j += NR;
+        }
+        kb += KC;
+    }
+}

@@ -225,3 +225,148 @@ one merged, measured again the same way (log `pr2b_train.txt`, 12–15 cores bus
   gradient could be kept for convs with few input channels (down2: −0.2 ms a step).
 - On a quiet machine the scheduling questions (fewer threads for small layers, P-cores first, the head beside
   the neck) may come out differently; under the load of this session none won.
+
+# Second wave (lane `cpu2`, 2026-11-12)
+
+Goal: folo-n CPU forward b1 14.7 → ≤ 12.5 ms, folo-s and folo-m −12%, by fewer flops and faster kernels (lane
+`cpu` above showed the forward is bound by the CPU time it needs, not by scheduling).
+
+## Method
+
+- Three builds of the same bench sources: `main` at 647b981f (`D:/folo-wt/hill2-base`, label `m647`), the `main`
+  this lane branched from (ed265317, private worktree `D:/folo-wt/hill2-cpu2-base`, label `base`) and the branch,
+  copied to `D:/folo-build/hill2-cpu2-bin/<label>-<bench>.exe`.
+- `ab.sh` and `ab2.ps1` there are lane `cpu`'s scripts (`tools/bench-ab.ps1` with per-run environment variables),
+  holding the `cpu` lock; `summ.py` there prints each row's median and range per label from a log. Every A/B
+  table below names its log in that folder. Rows are medians of the rounds' medians, ranges in brackets, 28
+  threads, "busy" as above (cores used by other processes).
+- Per-layer numbers: `conv_infer` (GF/s at 28 threads). **Not reproducible from the committed code**: the
+  per-layer table, the single-core phase timings and the `tb` / two-pass sweeps below came from temporary knobs
+  that are not in the code. The binaries with the knobs are kept: `D:/folo-build/hill2-cpu2-bin/w4-conv_infer.exe`
+  and `w6-conv_infer.exe`, environment `FOLO_WINOGRAD=0|1` (direct / forced Winograd), `FOLO_WINO_2P=N` (two
+  passes when blocks · N ≤ threads; w6), `FOLO_WINO_TB=n` (forced block size; w4, w6) and `FOLO_WINO_SMALL=x`
+  (the `c · o` threshold; `w6-cpu_e2e.exe`). The per-layer runs were
+  `bash D:/folo-build/hill2-cpu2-bin/ab.sh 2 0 "" "FOLO_BENCH_BUDGET_MS=300" "<label>=<exe>|<env>;..." k3s1` (and
+  group `wide`, which w6 has with the extra folo-s / folo-m shapes); their raw output was not saved
+  (`w6_groups.txt`, the per-group run, is). The single-core phase probe was a temporary timer, not kept.
+
+## 3. Winograd F(2x2, 3x3) for 3x3 stride-1 inference convs (PR 3)
+
+The inference conv (`Backend::conv2d_act` / `conv2d_act_cat`, which never record a gradient: fused models, and
+eval-mode blocks under `no_grad`) runs a dense 3x3 stride-1 conv as Winograd F(2x2, 3x3)
+(`crates/folo-core/src/cpu/conv/winograd.rs`): 16 multiplies per 2x2 output tile and channel pair instead of 36.
+
+- **Weights** `U = G g Gᵀ` (`[16][O][C]`, in f64, rounded once) are made on the first call and kept with the
+  weight tensor's storage (`StorageCell::derived`, reached through `View::derived`, keyed by type, purpose and
+  layout). Every write lock of the storage (`copy_from`, `update_f32`, optimizer steps, `to_dtype_`, ...) clears
+  them; they are made only under the read lock, so a value can never outlive the data it came from. A fused model
+  transforms each weight once; an unfused eval model (BatchNorm folded per call) transforms per call (about 1–2%
+  of the conv).
+- **Blocks.** An image's tiles are cut into blocks of `tb` tiles (a multiple of 16, at most 128, small enough
+  for `V` and `M` to stay in ~1 MiB of L2 and to give every thread a block). A block transforms its input patches
+  into `V` (`16 x C x tb`; each input row deinterleaved once into (even, odd) pairs, row and column transforms
+  vectorised across tiles), runs the 16 GEMMs `M[ξ] = U[ξ] · V[ξ]` on its own thread through the row-pointer
+  AVX2 micro-kernel (`gemm_rows_serial`: A and B both read in place, one `KC` block at a time), and transforms `M`
+  into its 2x2 output tiles, then bias and activation (the same `BiasAct::apply` as the direct path).
+- **Small images** (fewer than half as many blocks as threads: a 20x20 output has 100 tiles, 7 blocks) run in two
+  passes instead, so more tasks than blocks share the work without repeating any: every block's input transform,
+  split by input channels, into one `V`; then the GEMMs and output transforms, split by output channels.
+- **Which convs**: at least 16 input and 8 output channels, at most 4096 input plus output channels (a block's
+  per-thread scratch, `16 · (c + o) · tb` floats kept between calls, stays within 4 MiB) and either 256 tiles (a
+  32x32 output) or `c · o >= 4096`. The autograd conv (`conv2d_with`, the training forward) and the stride-1 input gradient (which
+  runs the forward kernel) keep the direct conv, so training is unchanged.
+- **Numerics.** Not bit for bit the direct conv. Error bound per output, before bias and activation (derived in
+  the module doc of `winograd.rs`): `(C + 8) · 2⁻²³ · 9 · Σ_c D_c · G_c`, with `D_c` the sum of |inputs| over
+  the output's tile's 4x4 input patch in channel c (padding 0) and `G_c` the sum of |weights| of its 3x3 kernel
+  from channel c; the bias add adds `2⁻²³ · |bias|`. An earlier version of this PR claimed `2 · 2⁻²³ · Σ|terms|`
+  with no factor of C; that is wrong (review): with all-constant inputs (1.0) and weights (0.1) over 512
+  channels at 4x4 (no padding) every product has one sign, and the f64 sum 460.8000069 came out 460.7989197, an
+  error of 1.09·10⁻³ = 19.8 · 2⁻²³ · Σ|terms| (the direct conv: 21.3). That is 0.43% of the direct conv's own
+  bound `K · 2⁻²³ · Σ|terms|` (K = 9C = 4608) and 2.6·10⁻⁴ of the new bound. On the test cases (pseudo-random
+  data, 1 to 300 channels, no epilogue) the largest error was 0.36–2.55 · 2⁻²³ · Σ|terms| (direct conv 0–1.81
+  on the same cases; the larger Winograd ratios are on 1–3 channel cases with few terms), 1.4·10⁻⁴–0.14 of the
+  direct conv's bound and at most 1.4·10⁻³ of the new one. Tests: `winograd_matches_reference` (f64 reference
+  within the bound, plus the activation's error only when one is applied, every epilogue; odd and even output
+  sizes, 1x1 / 1x2 / 2x2 images, no and 3-pixel padding, 1 to 300 channels, a 300-pixel-wide row, a batch, and
+  the all-constant 512-channel case), `winograd_is_deterministic` (1, 3 and 28 threads, and each image of a
+  batch alone: the same bits), `cpu/winograd_tests.rs` (counting the transforms and Winograd forwards on the
+  test's thread: the inference conv takes Winograd and the autograd conv does not; one transform for repeated
+  calls, a new one after `copy_from`, `update_f32` and `sub_assign`; two narrowed halves of one storage each
+  transform once; a view whose `storage` field was pointed at another storage neither uses nor fills the first
+  storage's transform).
+- **COCO val2017, folo-n-coco, `folo val --device cpu`**: mAP50-95 0.30999154 → 0.30999145, mAP50 0.44944698 →
+  0.44944635 (logs `D:/folo-data/runs-hill2/cpu2/val_*.json`): changes below 10⁻⁶.
+
+Single core (`RAYON_NUM_THREADS=1`, phases timed by a temporary probe that was not kept), 64→64 at 80x80: input transform 0.74 ms
+with a scalar gather → 0.42 ms deinterleaved, GEMMs 1.6–1.8 ms (116–129 GF/s of GEMM flops), output transform
+0.18–0.23, about 2.5 ms against the direct conv's ~5.4 ms on a loaded core. 128→64 at 40x40: 1.17 ms (direct
+~2.6).
+
+Per layer, 28 threads, GF/s of direct-conv flops (`w6-conv_infer.exe` with the knobs of "Method", 2 rounds
+each, 13 cores busy elsewhere, raw output not saved; the folo-n rows are `k3s1`, the wider ones are folo-s /
+folo-m shapes of its group `wide`):
+
+| conv | direct | Winograd (one pass) | Winograd, two passes when blocks · 2 ≤ threads |
+|---|---|---|---|
+| 16→8 at 160² | 326–334 | 343–371 | (one pass) |
+| 16→32 at 80² | 419–426 | 495–498 | (one pass) |
+| 32→16 at 80² | 404–411 | 525–530 | (one pass) |
+| 64→64 at 80² | 772–773 | 1083–1099 | (one pass) |
+| 32→32 at 40² | 312–319 | 413–417 | (one pass) |
+| 128→64 at 40² | 675–684 | 956–980 | (one pass) |
+| 64→64 at 20² | 324–326 | 201–213 | 336–341 |
+| 256→64 at 20² | 542–554 | 319–321 | 638–645 |
+| 128→128 at 20² | 522–534 | 330–331 | 681–684 |
+| 512→64 at 20² | 618–635 | 347–359 | 741–770 |
+| 128→128 at 24² | 651–666 | 463–464 | 820–836 |
+| 64→64 at 24² | 374–382 | 269–310 | 436–439 |
+| 64→64 at 12² | 158–161 | 77–78 | 170–187 |
+
+Forward A/B of the merged rule (logs `pr1_n28.txt`, `pr1_s28.txt`, `pr1_m28.txt`, `pr1_b16.txt`,
+`pr1_train5.txt`; 3 rounds alternated, `FOLO_BENCH_ITERS` 60 / 30 / 12 / 8 for n / s / m / batch 16; 2–6 cores
+busy elsewhere, the quietest session of the climb):
+
+| 28 threads | `main` 647b981f | `main` ed265317 | PR 3 | vs ed265317 |
+|---|---|---|---|---|
+| folo-n forward b1 | 15.81 ms (15.51–16.16) | 13.51 (13.36–13.66) | **12.33** (12.25–12.70) | −8.7% |
+| folo-n e2e 640×640 | 16.76 (16.35–16.88) | 14.13 (13.81–14.34) | **13.17** (13.05–13.67) | −6.8% |
+| folo-n e2e 1280×720 | 12.90 (12.18–12.91) | 10.78 (10.32–10.91) | **10.00** (9.83–10.80) | −7.2% |
+| folo-s forward b1 | 34.30 (33.32–36.20) | 29.05 (27.57–29.52) | **27.34** (27.21–28.04) | −5.9% |
+| folo-m forward b1 | 79.41 (76.78–79.72) | 76.86 (73.93–77.37) | **68.39** (67.56–68.64) | −11.0% |
+| folo-n `predict_batch` 16 | 149.7 (145.1–158.8) | 150.7 (147.5–153.1) | 145.8 (145.5–153.5) | tie (−3%) |
+| folo-n train step 320 px b16 (5 rounds, 2–9 busy) | | 245.4 (212.9–248.5) | 247.5 (217.8–248.2) | tie (+0.9%) |
+
+Earlier the same day, under more load, the same comparison measured folo-n 15.17 → 14.66 ms (−3.4%; 13.7–15.3
+cores busy elsewhere), folo-s 33.5 → 31.9 (−4.8%; 10.0–12.8 busy) and folo-m 77.9 → 72.9 (−6.5%; 5.5–10.0 busy)
+(logs `w6_n28.txt`, `w6_s28.txt`, `w6_m28.txt`, label `base` against `s4k`, busy ranges over all labels of each
+log; that binary had the rule behind environment knobs): under load less of the per-layer gain reaches the
+forward.
+
+After the review fixes (per-row writes into `V`, the cache checked against the view's storage, at most 4096
+channels), the fixed head (`pr1b`) against the first one (`pr1`), 3 rounds (logs `pr1b_n28.txt`, 13.4–16.5
+cores busy elsewhere, and `pr1b_m28.txt`, 10.1–11.0): folo-n forward 15.10 (`base`) / 14.06 / **14.09** ms, folo-m 86.57 / 81.34 /
+**79.90** ms: the fixes cost nothing.
+
+### Negative results (PR 3)
+
+(Measured with the knob binaries of "Method": `FOLO_WINO_2P`, `FOLO_WINO_TB`, `FOLO_WINOGRAD`; raw output not
+saved.)
+
+- **Two passes for every image with fewer blocks than threads** (40x40 outputs: 25 blocks of 16 tiles): 32→32 at
+  40² 413 → 298–304 GF/s, 64→64 at 40² 784 → 670–686, worse than one pass and, for 32→32, than the direct conv;
+  hence two passes only from `blocks · 2 ≤ threads`.
+- **Smaller or larger blocks** (`tb` forced to 16 / 32 / 48 for every layer at 28 threads): no layer faster than
+  the per-layer choice; 64→64 at 80² 1091–1147 GF/s at 16 tiles and 931 at 48, against 1090–1100 by the rule (that
+  run got ~14.7 cores: the layer is bound by the CPU it gets, not by load balance).
+- **8 input channels** (8→16 at 160²): 324–348 GF/s against 347–361 direct; kept direct.
+- **The weight transform per call** (before the cache): 0.08 ms for 64→64 and 0.18 ms for 128→64 on one thread,
+  serial: a quarter of a 28-thread layer.
+
+## Leftovers (second wave, by expected gain)
+
+- **Pointwise convs** are the largest conv group of the folo-n forward at 28 threads (4.9 ms of 12.4 ms of convs
+  timed alone, `conv_infer`, log `w6_groups.txt`): those at 40² and 20² run at 50–300 GF/s, waiting on the pool
+  more than computing.
+- **Winograd F(4x4, 3x3)**: 2.25 multiplies per output against F(2x2, 3x3)'s 4 (1.8x fewer GEMM flops, less
+  transform data per output); larger rounding error (transform constants up to 8), to be checked against AP.
+- Stride-2 convs (2.8 ms of convs timed alone) and the depthwise convs and shifted-rows copy, as above.
