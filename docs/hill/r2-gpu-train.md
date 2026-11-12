@@ -83,7 +83,19 @@ read.
 | | r2 | 81.7 (50.0) | 58.8 (49.4) | 31.6 (28.8) | 40.9 (27.8) |
 | | r3 | 74.4 (48.6) | 56.9 (52.5) | 31.3 (30.6) | 90.6 (49.5) |
 
-TODO: a third hold with the bench at High priority.
+Hold 3, each bench process at High priority (`ab.sh` sets it), host 2-57 %, GPU 0 % before nearly every run
+(`ab-wg3/`), img/s at the median of each run:
+
+| round | f32 base | f32 new | AMP base | AMP new |
+|---|---|---|---|---|
+| 1 | 331 | 342 | 547 | 584 |
+| 2 | 334 | 353 | 492 | 596 |
+| 3 | 332 | 348 | 573 | 562 |
+| 4 | 337 | 349 | 538 | 560 |
+| **median (range)** | **333 (331-337)** | **348.5 (342-353), +4.6 %** | **542.5 (492-573)** | **573 (560-596), +5.6 %** |
+
+f32 wins every round; AMP three of four. Peak memory unchanged (3467 / 2022 MiB, the bench's own line). This is
+the PR's claim; holds 1-2 only say the direction under heavy contention.
 
 ## Negative results
 
