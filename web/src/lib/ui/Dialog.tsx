@@ -89,6 +89,7 @@ export default function Dialog(props: DialogProps) {
         if (p.onbeforeclose && !p.onbeforeclose()) e.preventDefault();
       }}
       onpointerdown={backdrop.onpointerdown}
+      onmousedown={backdrop.onmousedown}
       onclick={backdrop.onclick}
     >
       <div class="frame">

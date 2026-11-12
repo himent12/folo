@@ -46,6 +46,23 @@ describe('backdropClose', () => {
     expect(closed).toBe(1);
   });
 
+  // v-data-runs N5: the second press of the double-click on Stop landed on the dialog's title and selected "Stop".
+  it('selects nothing with the rest of the opening double-click, and leaves later presses alone', () => {
+    const mousedown = () => {
+      const e = new MouseEvent('mousedown', { cancelable: true, detail: 2 });
+      b.onmousedown(e);
+      return e.defaultPrevented;
+    };
+    pagePress(100, 100);
+    b.opened();
+    vi.advanceTimersByTime(120);
+    b.onpointerdown({ target: inside, clientX: 102, clientY: 101 } as unknown as PointerEvent);
+    expect(mousedown()).toBe(true);
+    vi.advanceTimersByTime(OPEN_GRACE_MS);
+    b.onpointerdown({ target: inside, clientX: 102, clientY: 101 } as unknown as PointerEvent);
+    expect(mousedown()).toBe(false);
+  });
+
   it('closes on the first press outside when the keyboard or code opened it (Ctrl+K)', () => {
     // A click long before does not make this opening a pointer's.
     pagePress(100, 100);
