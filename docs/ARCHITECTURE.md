@@ -110,7 +110,11 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   `conv2d_with` and `matmul` of tensors on a backend that computes in f16 run in f16 (`F32` operands cast by
   recorded casts; a conv uses f16 copies of its weight and bias but is recorded against the f32 ones, and its
   backward writes the weight gradient straight to f32 with `Backend::conv2d_backward_weight_as`), and softmax runs
-  in f32. Everything downstream runs in the dtype it receives; the fused train-mode BatchNorm takes f16 data with
+  in f32. The f16 copy of a dense device weight is cached on its storage with the storage version it was cast
+  at (`Tensor::autocast_f16`), so it is cast again only after the weight changed; folo-nn's optimizers recast the
+  copies of every parameter they updated right after their step in multi-tensor casts
+  (`Tensor::refresh_autocast_f16`, `Backend::cast_f16_many`; new storages, so a graph holding the old copy keeps
+  it). Everything downstream runs in the dtype it receives; the fused train-mode BatchNorm takes f16 data with
   f32 parameters and statistics. `Tensor::unscale_check_` (a `Backend::unscale_check` hook) is the loss scaler's
   fused unscale and overflow flag.
 - Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests. `Rng::ALGO`

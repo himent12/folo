@@ -852,3 +852,98 @@ fn device_clip_survives_huge_finite_gradients() {
         assert!((n - 10.0).abs() < 1e-3, "clipped to norm 10, got {v:?}");
     }
 }
+
+/// A window's first pass overwrites the reused accumulation buffers in multi-tensor dispatches (`Axpby` with
+/// `a = 0`): bit for bit the gradients, even when the previous window left infinities and NaNs in them (an
+/// overflowed mixed-precision window), over more parameters than one dispatch takes.
+#[test]
+fn accumulator_first_pass_overwrites_stale_buffers() {
+    let dev = gpu!();
+    let rng = &mut Rng::seed(21);
+    let params: Vec<Tensor> = (0..20)
+        .map(|i| Tensor::randn([3 + i, 5], 0.0, 1.0, rng).to_device(dev).unwrap().requires_grad_())
+        .collect();
+    let grads_of = |gs: &[Tensor]| {
+        let mut loss = Tensor::zeros_with([], folo_core::DType::F32, dev).unwrap();
+        for (p, g) in params.iter().zip(gs) {
+            loss = loss.add(&p.mul(g).unwrap().sum_all().unwrap()).unwrap();
+        }
+        loss.backward().unwrap()
+    };
+    let window = |rng: &mut Rng| -> Vec<Tensor> {
+        params
+            .iter()
+            .map(|p| Tensor::randn(p.shape().clone(), 0.0, 2.0, rng).to_device(dev).unwrap())
+            .collect()
+    };
+    let mut acc = GradAccumulator::new(&params);
+    acc.add(&grads_of(&window(rng))).unwrap();
+    // Poison every buffer as an overflowed window would.
+    for (i, p) in params.iter().enumerate() {
+        let b = acc.grad(p).unwrap();
+        let bad = [f32::INFINITY, f32::NAN, f32::NEG_INFINITY][i % 3];
+        let _g = no_grad();
+        b.copy_from(&Tensor::full(b.shape().clone(), bad).to_device(dev).unwrap()).unwrap();
+    }
+    acc.zero();
+    let gs = window(rng);
+    acc.add(&grads_of(&gs)).unwrap();
+    for (p, g) in params.iter().zip(&gs) {
+        assert_eq!(acc.grad(p).unwrap().to_vec::<f32>().unwrap(), g.to_vec::<f32>().unwrap());
+    }
+}
+
+/// Autocast's cached f16 weight copies never go stale: after an optimizer step (which recasts them all in
+/// multi-tensor dispatches, more weights than one dispatch takes) and after a direct in-place write (cast again on
+/// the next use), an autocast conv equals the same conv with weights that never had a copy, bit for bit.
+#[test]
+fn autocast_f16_weight_copies_follow_their_weights() {
+    let dev = gpu!();
+    if !folo_core::backend::backend(dev).unwrap().computes_f16() {
+        return;
+    }
+    let rng = &mut Rng::seed(31);
+    let x = Tensor::randn([2, 4, 9, 9], 0.0, 1.0, rng).to_device(dev).unwrap();
+    let ws: Vec<Tensor> = (0..20)
+        .map(|i| Tensor::randn([3 + i % 5, 4, 3, 3], 0.0, 0.3, rng).to_device(dev).unwrap().requires_grad_())
+        .collect();
+    let convs = |ws: &[Tensor]| -> Vec<Vec<u16>> {
+        let _a = folo_core::autocast();
+        let _g = no_grad();
+        ws.iter()
+            .map(|w| {
+                let y = x.conv2d(w, None, 1, 1, 1, 1).unwrap();
+                y.to_vec::<folo_core::f16>().unwrap().iter().map(|h| h.to_bits()).collect()
+            })
+            .collect()
+    };
+    // Weights that never had an f16 copy: fresh storages with the same values.
+    let fresh =
+        |ws: &[Tensor]| -> Vec<Tensor> { ws.iter().map(|w| w.detach().mul_scalar(1.0).unwrap()).collect() };
+    assert_eq!(convs(&ws), convs(&fresh(&ws)), "first use");
+    let mut opt = Sgd::new(vec![
+        ParamGroup::new("decay", ws.iter().enumerate().map(|(i, w)| (format!("w{i}"), w.clone())).collect())
+            .lr(0.1)
+            .momentum(0.9),
+    ])
+    .unwrap();
+    for step in 0..2 {
+        let loss = {
+            let _a = folo_core::autocast();
+            let mut l = Tensor::zeros_with([], folo_core::DType::F32, dev).unwrap();
+            for w in &ws {
+                let y = x.conv2d(w, None, 1, 1, 1, 1).unwrap().to_dtype(folo_core::DType::F32).unwrap();
+                l = l.add(&y.square().unwrap().mean_all().unwrap()).unwrap();
+            }
+            l
+        };
+        opt.step(&loss.backward().unwrap()).unwrap();
+        assert_eq!(convs(&ws), convs(&fresh(&ws)), "after step {step}");
+    }
+    // A write that is not an optimizer step: the copy is cast again on its next use.
+    {
+        let _g = no_grad();
+        ws[3].copy_from(&ws[3].mul_scalar(-2.0).unwrap()).unwrap();
+    }
+    assert_eq!(convs(&ws), convs(&fresh(&ws)), "after copy_from");
+}

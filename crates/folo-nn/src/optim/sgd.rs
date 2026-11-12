@@ -155,6 +155,7 @@ impl Optimizer for Sgd {
             let (lr, mu, wd) = (grp.lr as f32, grp.momentum as f32, grp.weight_decay as f32);
             update(p, g, bufs[gi][pi].as_ref(), lr, mu, wd, grp.nesterov)
         })?;
+        super::refresh_autocast_f16(&self.groups)?;
         self.step += 1;
         Ok(())
     }

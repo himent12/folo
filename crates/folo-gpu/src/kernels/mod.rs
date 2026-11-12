@@ -6,6 +6,7 @@
 //! (NCHW for images, `[out, in/groups, kh, kw]` for conv weights). Buffers may be larger than the operand
 //! (pool size classes); kernels never touch the slack.
 
+pub mod cast_many;
 pub mod conv;
 pub mod coop;
 pub mod detect;

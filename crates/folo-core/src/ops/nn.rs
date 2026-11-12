@@ -184,7 +184,7 @@ impl Tensor {
         let x = self.to_dtype(DType::F16)?;
         let (w16, b16) = {
             let _g = no_grad();
-            (weight.to_dtype(DType::F16)?, bias.map(|b| b.to_dtype(DType::F16)).transpose()?)
+            (weight.autocast_f16()?, bias.map(Tensor::autocast_f16).transpose()?)
         };
         let shape = x.check_conv2d(&w16, b16.as_ref(), p)?;
         let s = x.conv2d_kernel(&w16, b16.as_ref(), p)?;

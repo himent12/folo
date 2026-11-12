@@ -57,9 +57,32 @@ impl GradAccumulator {
             let none = vec![Vec::new(); bufs.len()];
             summed = Tensor::optimizer_step_many_(&bufs, &gs, &none, &OptimStep::Axpby { a: 1.0, b: 1.0 })?;
         }
-        for s in &mut self.slots {
+        // The first pass into reused buffers: every `buf = g` in one multi-tensor overwrite too (`a = 0` does not
+        // read the stale buffer), instead of a copy per parameter.
+        let mut copied = vec![false; self.slots.len()];
+        if self.slots.iter().any(|s| !s.valid && s.buf.is_some() && !s.param.device().is_cpu()) {
+            let (mut bufs, mut gs, mut at) = (Vec::new(), Vec::new(), Vec::new());
+            for (i, s) in self.slots.iter().enumerate().filter(|(_, s)| !s.valid) {
+                if let (Some(b), Some(g)) = (&s.buf, grads.get(&s.param)) {
+                    bufs.push(b);
+                    gs.push(g);
+                    at.push(i);
+                }
+            }
+            let none = vec![Vec::new(); bufs.len()];
+            if Tensor::optimizer_step_many_(&bufs, &gs, &none, &OptimStep::Axpby { a: 0.0, b: 1.0 })? {
+                for i in at {
+                    copied[i] = true;
+                }
+            }
+        }
+        for (s, copied) in self.slots.iter_mut().zip(copied) {
             let Some(g) = grads.get(&s.param) else { continue };
             if s.valid && summed {
+                continue;
+            }
+            if copied {
+                s.valid = true;
                 continue;
             }
             if s.valid {

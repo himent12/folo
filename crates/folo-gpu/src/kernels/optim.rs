@@ -173,7 +173,7 @@ fn gen_optim_many(spec: &Spec) -> String {
              \x20     let denom = sqrt(v) / pf(7u) + pf(8u);\n\
              \x20     p = p + (-pf(6u)) * (m / denom);\n"
         }
-        _ => "      p = p * pf(1u) + g * pf(2u);\n",
+        _ => "      if (FLAG) { p = g * pf(2u); } else { p = p * pf(1u) + g * pf(2u); }\n",
     };
     for t in 0..j {
         let _ = writeln!(
@@ -498,7 +498,8 @@ fn update_params(u: &OptimUpdate, momentum_buffer: bool) -> Result<(u32, bool, b
                 .f(eps);
             (2, decay.is_some(), false, p)
         }
-        OptimUpdate::Axpby { a, b } => (3, false, false, Params::new().u(0).f(a).f(b)),
+        // `a = 0` overwrites without reading the old value (a stale inf or NaN would survive `p · 0`).
+        OptimUpdate::Axpby { a, b } => (3, a == 0.0, false, Params::new().u(0).f(a).f(b)),
     })
 }
 
@@ -596,7 +597,7 @@ pub fn optimizer_step(
                 .f(eps);
             (2, decay.is_some(), false, p)
         }
-        OptimUpdate::Axpby { a, b } => (3, false, false, Params::new().uz(n)?.f(a).f(b)),
+        OptimUpdate::Axpby { a, b } => (3, a == 0.0, false, Params::new().uz(n)?.f(a).f(b)),
     };
     let k =
         ctx.kernel(&OPTIM, Spec::new().u32("MODE", mode).bool("FLAG", flag).bool("NESTEROV", nesterov))?;

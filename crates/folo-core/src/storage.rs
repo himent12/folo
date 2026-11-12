@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use half::f16;
 
@@ -228,6 +228,9 @@ pub(crate) struct StorageCell {
     version: AtomicU64,
     device: AtomicU64,
     dtype: AtomicU8,
+    /// Autocast's `F16` copy of this (`F32`) storage and the version it was cast at
+    /// (`Tensor::autocast_f16`); stale once the version moves on.
+    pub(crate) half: Mutex<Option<(u64, crate::Tensor)>>,
 }
 
 const DTYPES: [DType; 5] = [DType::F32, DType::F16, DType::U8, DType::U32, DType::I64];
@@ -255,7 +258,13 @@ impl StorageCell {
     pub fn new(s: Storage) -> Self {
         let device = AtomicU64::new(encode_device(s.device()));
         let dtype = AtomicU8::new(encode_dtype(s.dtype()));
-        StorageCell { data: RwLock::new(s), version: AtomicU64::new(0), device, dtype }
+        StorageCell {
+            data: RwLock::new(s),
+            version: AtomicU64::new(0),
+            device,
+            dtype,
+            half: Mutex::new(None),
+        }
     }
 
     /// The element type of the data.

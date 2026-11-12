@@ -662,6 +662,13 @@ fn cpu_fast(ts: &[&Tensor]) -> bool {
     ts.iter().all(|t| t.device().is_cpu() && t.dtype() == folo_core::DType::F32 && t.is_contiguous())
 }
 
+/// After a step: recast the autocast `F16` copies of the updated parameters that have one (mixed-precision
+/// training), all at once (`Tensor::refresh_autocast_f16`), so the next forward does not cast each weight.
+pub(crate) fn refresh_autocast_f16(groups: &[ParamGroup]) -> Result<()> {
+    let params: Vec<&Tensor> = groups.iter().flat_map(|g| g.params.iter().map(|(_, p)| p)).collect();
+    Ok(Tensor::refresh_autocast_f16(&params)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

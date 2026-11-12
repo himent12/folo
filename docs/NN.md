@@ -62,7 +62,9 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   elsewhere.
 - `GradAccumulator` sums gradients over a window of backward passes into private buffers (reused across windows),
   implements `GradSource` for the step, and does MODEL.md's global-norm clipping (`clip_grad_norm`). On the GPU a pass
-  adds with one multi-tensor `buf = buf + g` call (16 buffers per dispatch), and clipping stays on the device: the norm (in `f32`) and
+  adds with one multi-tensor `buf = buf + g` call (16 buffers per dispatch), and a window's first pass overwrites the
+  reused buffers the same way (`OptimStep::Axpby` with `a = 0`, which does not read the stale buffer, so an inf or
+  NaN left by an overflowed window cannot survive) instead of one copy per parameter, and clipping stays on the device: the norm (in `f32`) and
   the factor `max_norm / (n + 1e-6)` (or 1) are device scalars that scale every buffer, so no value is read back
   (`clip_grad_norm` then returns NaN instead of the norm). On the GPU the largest magnitude, the sum of squares and
   the scaling are multi-tensor calls (`Tensor::norm_partials_many`, `Tensor::scale_many_`: 16 buffers per
