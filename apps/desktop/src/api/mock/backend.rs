@@ -141,10 +141,12 @@ impl Backend for MockBackend {
             .filter(|im| q.class.is_none_or(|c| im.boxes.iter().any(|b| b.class == c)))
             .collect();
         let limit = if q.limit == 0 { 100 } else { q.limit };
-        Ok(ImagePage {
+        let page = ImagePage {
             total: matching.len() as u64,
             images: matching.into_iter().skip(q.offset as usize).take(limit as usize).cloned().collect(),
-        })
+        };
+        self.hold_point("images");
+        Ok(page)
     }
 
     fn image(&self, dataset_id: &str, image_id: &str, thumb: Option<u32>) -> ApiResult<ImageData> {

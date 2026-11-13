@@ -116,10 +116,15 @@ impl FoloApp {
             None => (total, "images"),
         };
         let loading = self.store.images.get(&id).is_none_or(|l| l.is_loading());
+        // A large list arrives a page at a time: the grid shows what came, and the count says
+        // how much of it is in (never "0 images" or a split's partial count as if final).
+        let more = self.images_pending(&id);
         let count_label = if loading {
-            // Not "0 images" while a large list is on its way: the header's count, as loading.
             let total = if self.ds_split.is_none() { ds.splits.total() } else { total as u64 };
             format!("Loading {} {of}…", int(total))
+        } else if more {
+            let loaded = self.store.images.get(&id).and_then(|l| l.ready()).map_or(0, |v| v.len());
+            format!("Loading… {} of {} images", int(loaded as u64), int(ds.splits.total()))
         } else if count == total {
             format!("{} {of}", int(total as u64))
         } else {
@@ -191,7 +196,7 @@ impl FoloApp {
                     .child(icon("icons/image.svg", 14., t.text_tertiary)),
             );
         self.ds_view_controls = Some(view_controls.into_any_element());
-        if loading {
+        if loading || (more && count == 0) {
             return div()
                 .flex()
                 .flex_col()

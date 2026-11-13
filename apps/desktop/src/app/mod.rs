@@ -307,6 +307,10 @@ pub struct FoloApp {
     pub ds_fill: bool,
     /// Per-class box counts of one split, keyed by (dataset, split, image count).
     pub ds_split_counts: RefCell<Option<SplitCounts>>,
+    /// Datasets whose image list is still arriving, a page at a time, with the generation of the
+    /// load (a later load replaces it; its pages are dropped).
+    pub images_more: HashMap<String, u64>,
+    pub images_seq: u64,
     pub ds_tile: f32,
     /// The grid tile under the pointer (it reveals every label, as a focused one does).
     pub ds_hover_tile: Option<String>,
@@ -552,6 +556,8 @@ impl FoloApp {
             // Whole images by default: a crop can hide the very boxes a dataset review is for.
             ds_fill: false,
             ds_split_counts: RefCell::new(None),
+            images_more: HashMap::new(),
+            images_seq: 0,
             ds_tile: 168.,
             ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),

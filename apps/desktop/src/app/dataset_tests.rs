@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use super::ServerMode;
+use super::data::IMAGE_PAGE;
 use super::tests::{drive, open_with};
 use crate::api::mock::MockBackend;
 use crate::api::{Split, SplitsExt};
@@ -21,6 +22,45 @@ fn a_dataset_page_holds_every_image_past_a_hundred_thousand() {
         assert_eq!(images.len() as u64, ds.splits.total(), "the grid lists every image");
         this.ds_split = Some(Split::Val);
         assert_eq!(this.filtered_indices("ds_8f2c").len() as u64, ds.splits.val, "the last ones too");
+    });
+}
+
+#[test]
+fn a_large_list_shows_its_first_page_while_the_rest_arrives() {
+    let api = Arc::new(MockBackend::new(4200, true).with_more_val_images("ds_8f2c", 25_000));
+    let (mut app, window) = open_with(api.clone());
+    let len = |this: &super::FoloApp| {
+        this.store.images.get("ds_8f2c").and_then(|l| l.ready()).map_or(0, |v| v.len())
+    };
+    // The first page lands; the second is held at the server.
+    let (first, second) = (api.hold("images"), api.hold("images"));
+    app.update(|cx| window.update(cx, |this, _, cx| this.ensure_dataset("ds_8f2c", cx)).unwrap());
+    app.run_until_held(1);
+    drop(first);
+    // Until the first page is applied and the second asked for (bounded by the condition, not
+    // a time: a call that never comes fails `run_until_held`).
+    while !second.is_held() {
+        app.run_until_held(1);
+    }
+    // (Plain updates while it is held: `drive` waits for every call.)
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                assert_eq!(len(this), IMAGE_PAGE as usize, "the grid has the first page");
+                assert!(this.images_pending("ds_8f2c"), "and knows more is coming");
+                // The list reloaded meanwhile (a change elsewhere): the old load's pages are
+                // dropped, never appended twice.
+                this.store.images.remove("ds_8f2c");
+                this.ensure_dataset("ds_8f2c", cx);
+            })
+            .unwrap()
+    });
+    drop(second);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        let total = this.store.dataset.get("ds_8f2c").and_then(|l| l.ready()).map(|d| d.splits.total());
+        assert_eq!(Some(len(this) as u64), total);
+        assert!(!this.images_pending("ds_8f2c"));
     });
 }
 
