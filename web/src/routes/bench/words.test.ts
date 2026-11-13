@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Bench, BenchCatalog, BenchEntry } from '$lib/api/types';
 import { catalog } from '$lib/api/mock/benchCatalog';
-import { contestantFacts, costFacts, coverageFacts, entryStatus, hintText, progressFacts, shortFingerprint, sourceKind } from './words';
+import { contestantFacts, costFacts, coverageFacts, entryStatus, hintText, progressFacts, shortFingerprint, sourceKind, unreviewedText } from './words';
 
 const bench = { images: 360, classes: ['a', 'b', 'c', 'd'], plan: catalog().default_plan } as unknown as Pick<Bench, 'images' | 'classes' | 'plan'>;
 const entry = (o: Partial<BenchEntry>) =>
@@ -81,5 +81,14 @@ describe('hintText', () => {
     expect(hintText('start the entry again once the server runs')).toBe('Start the entry again once the server runs.');
     expect(hintText(null)).toBeNull();
     expect(hintText('POST /api/bench/benchmarks/{id}/entries')).toBeNull();
+  });
+});
+
+describe('unreviewedText', () => {
+  it('says how many labeled images nobody checked, in the singular and the plural', () => {
+    expect(unreviewedText(12, 12)).toMatch(/^None of its 12 labeled images has been reviewed: their boxes become/);
+    expect(unreviewedText(1, 1)).toMatch(/^Its labeled image has not been reviewed: its boxes become/);
+    expect(unreviewedText(1, 8)).toMatch(/^1 of its 8 labeled images has not been reviewed: its boxes become/);
+    expect(unreviewedText(3, 8)).toMatch(/^3 of its 8 labeled images have not been reviewed: their boxes become/);
   });
 });

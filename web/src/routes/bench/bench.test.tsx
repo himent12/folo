@@ -119,6 +119,32 @@ describe('New benchmark', () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/5,000/);
   });
 
+  it("says how many of a labeling job's labeled images nobody reviewed before they become the truth (sweep 3)", async () => {
+    const [job] = (await hub.api.labelJobs()).filter((j) => j.counts.labeled > 0);
+    const page = await hub.api.labelImages(job!.id, { status: 'labeled', limit: 1000 });
+    const labeled = page.images.map((im, i) => ({ ...im, reviewed: i > 0 }));
+    hub.api.labelImages = async () => ({ total: labeled.length, images: labeled });
+    open(NewBenchDialog, { open: true });
+    await settle();
+    [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((r) => r.textContent?.includes('A labeling job'))!.click();
+    await settle();
+    const select = await until(() => document.querySelector<HTMLSelectElement>('dialog[open] select:not([id$="-ds"])'), 'the job picker');
+    select.value = job!.id;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+    const note = await until(() => document.querySelector('.note.warn[data-unreviewed]'), 'the unreviewed note');
+    expect(note.textContent).toContain(`1 of its ${labeled.length} labeled images has not been reviewed`);
+    expect(text()).not.toContain('as reviewed');
+    // Every image reviewed: no warning, the note on training instead.
+    labeled.forEach((im) => (im.reviewed = true));
+    [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((r) => r.textContent?.includes('A dataset split'))!.click();
+    await settle();
+    [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((r) => r.textContent?.includes('A labeling job'))!.click();
+    await settle();
+    expect(document.querySelector('.note.warn')).toBeNull();
+    expect(text()).toContain('a model trained on a dataset made from this job has seen them');
+  });
+
   it('creates it with the default plan and opens its page', async () => {
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     open(NewBenchDialog, { open: true });

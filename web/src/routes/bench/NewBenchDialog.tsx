@@ -25,7 +25,7 @@ import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import TextArea from '$lib/ui/TextArea';
 import { toast } from '$lib/ui/toast';
-import { imagesText } from './words';
+import { imagesText, unreviewedText } from './words';
 
 const FIX: Record<string, string> = { name: 'Fix the name first', description: 'Shorten the description first', max: 'Fix the image limit first' };
 
@@ -80,6 +80,19 @@ export default function NewBenchDialog(props: { open?: boolean }) {
 
   const dataset = computed(() => datasets.data?.find((d) => d.id === datasetId.get()));
   const job = computed(() => jobs.data?.find((j) => j.id === jobId.get()));
+  // How many of the job's labeled images no person has checked (`LabelImage.reviewed`): the boxes on them become the
+  // benchmark's truth as an agent drew them. Read a page of 1000 at a time; null until known, or for a dataset.
+  const unreviewed = new Resource(async (s) => {
+    const id = jobId.get();
+    if (kind.get() !== 'label_job' || !id) return null;
+    let n = 0;
+    for (let offset = 0; ; ) {
+      const page = await hub.api.labelImages(id, { status: 'labeled', offset, limit: 1000 }, s);
+      n += page.images.filter((i) => !i.reviewed).length;
+      offset += page.images.length;
+      if (!page.images.length || offset >= page.total) return n;
+    }
+  });
   /** Images the source holds (a split's, or a job's labeled ones). */
   const sourceImages = computed(() => (kind.get() === 'dataset' ? (dataset.get()?.splits[split.get()] ?? 0) : (job.get()?.counts.labeled ?? 0)));
   const max = computed(() => Number(maxText.get()));
@@ -259,7 +272,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
           <Field
             label="Labeling job"
             for={`${uid}-job`}
-            hint={job.get() ? `Its ${imagesText(job.get()!.counts.labeled)} with labels, boxes as reviewed; the others are left out.` : undefined}
+            hint={job.get() ? `Its ${imagesText(job.get()!.counts.labeled)} with labels; the others are left out.` : undefined}
           >
             <Select id={`${uid}-job`} bind:value={jobId} disabled={!jobs.data?.length} options={jobOptions.get()} />
           </Field>
@@ -271,6 +284,18 @@ export default function NewBenchDialog(props: { open?: boolean }) {
           <p class="note warn">
             <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
             <span>A model trained on {dataset.get()?.name ?? 'this dataset'}'s training split has seen these images: on them, a benchmark measures memory, not sight. Pick the validation or test split.</span>
+          </p>
+        ) : kind.get() === 'label_job' && job.get() && unreviewed.data ? (
+          <p class="note warn" data-unreviewed>
+            <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+            <span>
+              {unreviewedText(unreviewed.data, job.get()!.counts.labeled)}
+            </span>
+          </p>
+        ) : kind.get() === 'label_job' ? (
+          <p class="note">
+            <Info size={14} strokeWidth={1.75} aria-hidden="true" />
+            <span>Keep these images out of training: a model trained on a dataset made from this job has seen them.</span>
           </p>
         ) : (
           <p class="note">

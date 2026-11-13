@@ -273,6 +273,21 @@ export function hintText(hint: string | null | undefined): string | null {
 }
 
 /**
+ * A labeling job's labeled images no person has checked, said before they are frozen into a benchmark: their boxes
+ * become its truth as an agent drew them, so the benchmark would grade agreement with that agent.
+ */
+export function unreviewedText(unreviewed: number, labeled: number): string {
+  const which =
+    unreviewed < labeled
+      ? `${num(unreviewed)} of its ${num(labeled)} labeled images ${unreviewed === 1 ? 'has' : 'have'} not been reviewed`
+      : labeled === 1
+        ? 'Its labeled image has not been reviewed'
+        : `None of its ${num(labeled)} labeled images has been reviewed`;
+  const boxes = unreviewed === 1 ? 'its boxes become' : 'their boxes become';
+  return `${which}: ${boxes} this benchmark's truth as the agent drew them. Review them on the job's page first, or the benchmark grades agreement with the agent.`;
+}
+
+/**
  * Where a running entry is, in words: "Unchanged images" or "Haze, severity 3" (the catalog's name), and how far, as a
  * whole percent rounded down ("54%"). A queued entry: "Waiting for the GPU" (model entries run one at a time). An open
  * external entry: "Receiving predictions" and "1,200 of 6,000 records".
