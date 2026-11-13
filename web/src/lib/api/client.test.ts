@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { attachmentName, HttpApi, onnxFileName } from './client';
+import { attachmentName, f16FileName, HttpApi, onnxFileName } from './client';
 
 describe('HttpApi.predict', () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -68,7 +68,20 @@ describe('HttpApi: queue and ONNX (docs/API.md, #129)', () => {
     expect(f.size).toBe(4);
   });
 
+  it('downloads the f16 file under the server file name', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url);
+      return new Response(new Uint8Array(6), { status: 200, headers: { 'content-disposition': 'attachment; filename="fasteners-n-best-f16.folo"' } });
+    });
+    const f = await new HttpApi('http://h').f16File('m_1');
+    expect(urls[0]).toBe('http://h/api/models/m_1/weights?format=f16');
+    expect(f.name).toBe('fasteners-n-best-f16.folo');
+    expect(f.size).toBe(6);
+  });
+
   it('names files by the server rule', () => {
+    expect(f16FileName('fasteners n/best')).toBe('fasteners_n_best-f16.folo');
     expect(onnxFileName('fasteners n/best', false)).toBe('fasteners_n_best.onnx');
     expect(onnxFileName('shapes-s-best', true)).toBe('shapes-s-best-f16.onnx');
     expect(onnxFileName('shapes-s-best', false, true)).toBe('shapes-s-best-decoded.onnx');
