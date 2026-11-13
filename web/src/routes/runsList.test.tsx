@@ -337,6 +337,29 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     expect(target.querySelector('table.runs tbody')!.textContent).not.toMatch(/ds_/);
   });
 
+  it('reads the datasets again for a run on one made after the list loaded, never calling it removed (handover H1)', async () => {
+    const api = new MockApi('normal', 0);
+    const done = (await api.runs()).find((r) => r.status === 'completed' && r.dataset)!;
+    const all = api.datasets.bind(api);
+    let calls = 0;
+    // The first read predates the dataset (made in another tab, or by a benchmark loop); later ones have it.
+    vi.spyOn(api, 'datasets').mockImplementation(async (...a) => {
+      const list = await all(...a);
+      return calls++ === 0 ? list.filter((d) => d.id !== done.config.dataset_id) : list;
+    });
+    await open(Runs, '/runs', api);
+    const seen: string[] = [];
+    await vi.waitFor(() => {
+      flushSync();
+      const row = target.querySelector(`tr[data-id="${done.id}"]`)?.textContent ?? '';
+      seen.push(row);
+      if (calls < 2 || !row.includes(done.dataset!.name)) throw new Error('not read again yet');
+    });
+    flushSync();
+    expect(target.querySelector(`tr[data-id="${done.id}"]`)?.textContent).not.toContain('(removed)');
+    expect(seen.some((t) => t.includes('(removed)'))).toBe(false);
+  });
+
   it('shows the compare checkboxes without a hover once two runs are listed', async () => {
     await open(Runs, '/runs', new MockApi('normal', 0));
     await loaded();

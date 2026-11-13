@@ -49,6 +49,7 @@ import { DialogStatus } from '$lib/ui/feedback';
 import { toast } from '$lib/ui/toast';
 import DeleteRun from './run/DeleteRun';
 import StopRun from './run/StopRun';
+import { followNewDatasets } from './overview/newDatasets';
 import RunRows from './runs/RunRows';
 import { groups, leftForRun, readState, returnQuery, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
 import { exactTime, tickingNow } from './runs/when';
@@ -65,8 +66,12 @@ export default function Runs() {
   const runs = new Resource((s) => hub.api.runs(s), { poll: 3000 });
   const datasets = new Resource((s) => hub.api.datasets(s));
   const dsName = computed(() => new Map((datasets.data ?? []).map((d) => [d.id, d])));
+  // A run on a dataset made since the list loaded (another tab, a benchmark loop): the datasets are read again, and the
+  // run says the name it recorded meanwhile instead of "(removed)" (./overview/newDatasets, as Overview does).
+  const lookingUp = followNewDatasets(datasets, () => runs.data);
   /** A run's dataset by name (lib/runDataset), the one it recorded while the datasets load; marked once it was removed. */
-  const datasetName = (r: Run) => runDatasetLabel(r, datasets.data ? dsName.get() : undefined, !!datasets.error) ?? r.dataset?.name ?? '';
+  const datasetName = (r: Run) =>
+    (lookingUp(r.config.dataset_id) ? r.dataset?.name : runDatasetLabel(r, datasets.data ? dsName.get() : undefined, !!datasets.error)) ?? r.dataset?.name ?? '';
   // Only to name the model a run was fine-tuned from; the list renders without it.
   const models = modelsResource();
   const modelById = computed(() => new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
