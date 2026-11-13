@@ -202,26 +202,79 @@ fn a_cloud_run_the_instance_list_had_not_got_is_read_again_until_a_read_covers_i
         this.cloud.instances = Load::Ready(Vec::new());
         assert!(!this.instance_alive());
         assert!(this.instances_missing(), "the runs' instances are to be read");
-        // Meanwhile nothing confirms the release: its cost and Releasing stay provisional.
-        assert!(this.released_instance_unknown(&cloud(this)));
+        // Meanwhile nothing confirms the release: its cost and Releasing stay provisional, without
+        // an alarm while no read has failed.
+        assert!(this.released_instance_unverified(&cloud(this)));
+        assert!(!this.released_instance_unknown(&cloud(this)));
     });
     // That read fails: still missing, still provisional, read again at the next tick.
     api.fail_instances_once();
     drive(&mut app, window, |this, _, cx| this.refresh_instances(cx));
     drive(&mut app, window, |this, _, _| {
         assert!(this.instances_missing(), "a failed read covers nothing");
-        assert!(this.released_instance_unknown(&cloud(this)));
+        assert!(this.released_instance_unknown(&cloud(this)), "and it is said");
     });
     // The next one answers: the instance is there, alive, its termination unconfirmed.
     drive(&mut app, window, |this, _, cx| this.refresh_instances(cx));
     drive(&mut app, window, |this, _, _| {
         let i = this.released_instance(&cloud(this)).expect("found after a read that worked");
         assert!(i.status.is_alive());
-        assert!(!this.released_instance_unknown(&cloud(this)) && !this.instances_missing());
+        assert!(!this.released_instance_unverified(&cloud(this)) && !this.instances_missing());
         // An id a successful read covered but the ledger no longer keeps (ended over 7 days ago)
         // is final, not read again forever.
         this.cloud.instances = Load::Ready(Vec::new());
         assert!(!this.instances_missing());
-        assert!(!this.released_instance_unknown(&cloud(this)));
+        assert!(!this.released_instance_unverified(&cloud(this)));
+    });
+}
+
+#[test]
+fn an_instance_list_answer_older_than_the_one_shown_is_dropped() {
+    let api = Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble());
+    let (mut app, window) = open_with(api.clone());
+    // A first read is held out; a second one answers and is shown.
+    let held = api.hold("instances");
+    app.update(|cx| window.update(cx, |this, _, cx| this.refresh_instances(cx)).unwrap());
+    app.run_until_held(1);
+    held.wait_held();
+    app.update(|cx| window.update(cx, |this, _, cx| this.refresh_instances(cx)).unwrap());
+    app.run_until_held(1);
+    // What the newer answer showed, told apart from the older one's: emptied here.
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                assert!(this.cloud.instances.ready().is_some_and(|l| !l.is_empty()));
+                this.cloud.instances = Load::Ready(Vec::new());
+            })
+            .unwrap()
+    });
+    // The older answer lands last: dropped, not put back over the newer list.
+    drop(held);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.cloud.instances.ready().is_some_and(|l| l.is_empty()), "the older answer was installed");
+    });
+}
+
+#[test]
+fn a_released_run_reads_provisional_while_the_instance_list_loads() {
+    let (mut app, window) = open_with(Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble()));
+    drive(&mut app, window, |this, _, _| {
+        this.cloud.instances = Load::Loading;
+        let c = this
+            .store
+            .runs
+            .ready()
+            .unwrap()
+            .iter()
+            .find(|r| r.id == "run_c2e1")
+            .unwrap()
+            .cloud
+            .clone()
+            .unwrap();
+        assert!(this.released_instance_unverified(&c), "nothing confirms the release yet");
+        assert!(!this.released_instance_unknown(&c), "but no read failed: no alarm");
+        let usd = crate::ui::fmt_cost(c.cost_usd.unwrap());
+        assert_eq!(panel_cost(&c, None, true), format!("{usd} so far"));
     });
 }

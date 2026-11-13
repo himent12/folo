@@ -645,6 +645,7 @@ impl Backend for MockBackend {
             .collect();
         // Alive first, then the ended ones; newest first within each.
         list.sort_by(|a, b| b.status.is_alive().cmp(&a.status.is_alive()).then(b.created.cmp(&a.created)));
+        self.hold_point("instances");
         Ok(list)
     }
 

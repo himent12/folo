@@ -35,10 +35,11 @@ impl FoloApp {
         // confirmed the termination.
         let ledger = self.released_instance(c);
         let unconfirmed = ledger.is_some_and(|i| i.status.is_alive());
-        // The ledger couldn't be read: nothing confirms the release either.
+        // Nothing from the ledger confirms the release yet (loading, or a read failed: then said).
+        let unverified = self.released_instance_unverified(c);
         let unknown = self.released_instance_unknown(c);
         // Where it failed, and what it never reached, once released (not every phase done).
-        let phases = crate::cloud::phase_states(c, r, unconfirmed || unknown);
+        let phases = crate::cloud::phase_states(c, r, unconfirmed || unverified);
         let count = phases.len();
         let steps = phases.into_iter().enumerate().map(|(i, (p, state))| {
             use crate::cloud::PhaseState;
@@ -171,7 +172,7 @@ impl FoloApp {
         } else {
             value(line)
         };
-        let cost = crate::cloud::panel_cost(c, ledger, unknown);
+        let cost = crate::cloud::panel_cost(c, ledger, unverified);
         let limit = match c.deadline.as_deref().and_then(time::parse).filter(|_| !released) {
             Some(d) => format!("{} · stops by {}", fmt_hours(c.max_hours), time::local_deadline(d, now)),
             None => fmt_hours(c.max_hours),

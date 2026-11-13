@@ -32,9 +32,15 @@ pub struct CloudState {
     pub terminate: Option<Confirm>,
     /// Bumped on every opening of the Connect dialog: a late answer only touches its own dialog.
     pub connect_seq: u64,
-    /// Instance ids of cloud runs that a successful read of the instance list covered (the run was
-    /// known when it was asked): a row missing for one of these is gone from the ledger, not new.
+    /// Instance ids of cloud runs that the installed instance list covers (the run was known when
+    /// that read was asked): a row missing for one of these is gone from the ledger, not new.
     pub asked_for: HashSet<String>,
+    /// Instance-list reads asked for, and the newest whose answer is installed: an older answer
+    /// landing later is dropped, so it can't put back a list that lacks a newer instance.
+    pub instances_seq: u64,
+    pub instances_shown: u64,
+    /// The newest instance-list read that landed failed (the list shown may be out of date).
+    pub instances_failed: bool,
 }
 
 /// The Connect dialog.
@@ -222,16 +228,30 @@ impl FoloApp {
     pub fn refresh_instances(&mut self, cx: &mut Context<Self>) {
         // The cloud runs known now: an answer covers them (a run seen later isn't).
         let covered = self.run_instance_ids();
+        self.cloud.instances_seq += 1;
+        let seq = self.cloud.instances_seq;
         self.fetch(
             cx,
             |api| api.cloud_instances(),
             move |this, r, _| {
-                if r.is_ok() {
-                    this.cloud.asked_for.extend(covered);
+                // Older than the list shown: it may lack an instance the shown one has.
+                if seq <= this.cloud.instances_shown {
+                    return;
                 }
-                // A refresh that fails keeps the list there is.
-                if r.is_ok() || this.cloud.instances.ready().is_none() {
-                    this.cloud.instances = r.into();
+                match r {
+                    Ok(list) => {
+                        this.cloud.instances = Load::Ready(list);
+                        this.cloud.instances_shown = seq;
+                        this.cloud.asked_for = covered.into_iter().collect();
+                        this.cloud.instances_failed = false;
+                    }
+                    Err(e) => {
+                        this.cloud.instances_failed = true;
+                        // A refresh that fails keeps the list there is.
+                        if this.cloud.instances.ready().is_none() {
+                            this.cloud.instances = Load::Failed(e);
+                        }
+                    }
                 }
             },
         );
@@ -256,7 +276,14 @@ impl FoloApp {
     /// Forgets everything cloud (a new data source, or Retry).
     pub fn clear_cloud(&mut self) {
         let seq = self.cloud.connect_seq;
-        self.cloud = CloudState { connect_seq: seq, ..CloudState::default() };
+        // Instance reads still out are the old source's: they land older than anything new.
+        let reads = self.cloud.instances_seq;
+        self.cloud = CloudState {
+            connect_seq: seq,
+            instances_seq: reads,
+            instances_shown: reads,
+            ..CloudState::default()
+        };
     }
 
     /// Whether an instance may still cost money: the list then refreshes every 5 s.
@@ -283,17 +310,24 @@ impl FoloApp {
         self.cloud.instances.ready()?.iter().find(|i| &i.id == id)
     }
 
-    /// The ledger couldn't be read for a released run's instance, or hasn't been read since the run
-    /// was known (its row is missing and no successful read covered it): whether it is gone isn't
-    /// known.
-    pub fn released_instance_unknown(&self, c: &RunCloud) -> bool {
+    /// Nothing the ledger said confirms a released run's instance is gone or tells its cost: no list
+    /// yet (loading, or every read failed), or its row missing from one that didn't cover it (the
+    /// run was new). Its release and cost stay provisional until a read covers it.
+    pub fn released_instance_unverified(&self, c: &RunCloud) -> bool {
         let Some(id) = c.instance_id.as_ref().filter(|_| c.phase == CloudPhase::Released) else {
             return false;
         };
         match self.cloud.instances.ready() {
             Some(list) => !list.iter().any(|i| &i.id == id) && !self.cloud.asked_for.contains(id),
-            None => self.cloud.instances.error().is_some(),
+            None => true,
         }
+    }
+
+    /// [`Self::released_instance_unverified`] because a read failed (not while one is on its way):
+    /// the panel then says it couldn't check.
+    pub fn released_instance_unknown(&self, c: &RunCloud) -> bool {
+        self.released_instance_unverified(c)
+            && (self.cloud.instances_failed || self.cloud.instances.error().is_some())
     }
 
     /// A connection's offers, fetched once per connection (`refresh` asks the provider again).
