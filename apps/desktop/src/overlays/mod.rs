@@ -7,6 +7,7 @@ mod inspector;
 mod new_run;
 mod new_run_compute;
 mod new_run_footer;
+mod new_run_weights;
 mod palette;
 mod synth;
 mod toasts;

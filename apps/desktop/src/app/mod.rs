@@ -24,6 +24,7 @@ mod playground_tests;
 mod preferences;
 mod render;
 mod sidebar;
+mod start_from;
 #[cfg(test)]
 pub(crate) mod tests;
 mod titlebar;

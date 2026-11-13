@@ -1,0 +1,231 @@
+//! New run's Start from: the weights a run can fine-tune from, as Studio's field offers them (from
+//! scratch, the trained models of this size best first, those of the other sizes, published weights).
+
+use folo_ui::Context;
+
+use crate::api::{Model, ModelSource};
+use crate::ui::f3;
+
+use super::FoloApp;
+use super::forms::ARCHS;
+
+/// One Start from option: the weights' id (`None`: from scratch), its name, what it says beside it,
+/// and the architecture index picking it switches to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StartChoice {
+    pub id: Option<String>,
+    pub label: String,
+    pub detail: Option<String>,
+    pub arch: Option<usize>,
+}
+
+/// Weights a run can start from: not an export (fused for inference only).
+fn trainable(m: &Model) -> bool {
+    m.fused != Some(true)
+}
+
+fn arch_index(m: &Model) -> Option<usize> {
+    ARCHS.iter().position(|a| *a == m.arch)
+}
+
+fn score(m: &Model) -> f32 {
+    m.metrics.as_ref().map_or(-1., |s| s.map50_95)
+}
+
+/// The options in the field's order, for a form on architecture `arch`; `current` (the form's
+/// weights) is kept as an option when the server doesn't list it (a run prefilled from one that
+/// started from a file).
+pub fn start_choices(models: &[Model], arch: usize, current: Option<&str>) -> Vec<StartChoice> {
+    let mut out = vec![StartChoice { id: None, label: "From scratch".into(), detail: None, arch: None }];
+    let published = |m: &&Model| m.source == Some(ModelSource::Published);
+    let mut trained: Vec<&Model> = models.iter().filter(|m| trainable(m) && !published(m)).collect();
+    // This size first, then the others (picking one switches the size), each best first.
+    trained.sort_by(|a, b| {
+        (arch_index(a) != Some(arch)).cmp(&(arch_index(b) != Some(arch))).then(score(b).total_cmp(&score(a)))
+    });
+    for m in trained {
+        let other = arch_index(m).filter(|&i| i != arch);
+        let s = m.metrics.as_ref().map(|s| f3(s.map50_95));
+        let detail = match (other, s) {
+            (Some(i), Some(s)) => format!("{} · {s}", ARCHS[i].as_str()),
+            (Some(i), None) => ARCHS[i].as_str().to_string(),
+            (None, Some(s)) => s,
+            (None, None) => String::new(),
+        };
+        out.push(StartChoice {
+            id: Some(m.id.clone()),
+            label: m.name.clone(),
+            detail: (!detail.is_empty()).then_some(detail),
+            arch: arch_index(m),
+        });
+    }
+    for m in models.iter().filter(|m| trainable(m) && published(m)) {
+        out.push(StartChoice {
+            id: Some(m.id.clone()),
+            label: m.name.clone(),
+            detail: Some("published".into()),
+            arch: arch_index(m),
+        });
+    }
+    if let Some(w) = current.filter(|w| !out.iter().any(|c| c.id.as_deref() == Some(*w))) {
+        let file = w.rsplit(['/', '\\']).next().unwrap_or(w);
+        out.push(StartChoice {
+            id: Some(w.to_string()),
+            label: file.to_string(),
+            detail: Some("the earlier run's".into()),
+            arch: None,
+        });
+    }
+    out
+}
+
+/// The dataset published weights' description names, the usual way ("… on COCO train2017 …"):
+/// a capitalised word after "on", as Studio reads it (`web/src/lib/published.ts`).
+fn pretrained_on(about: &str) -> Option<&str> {
+    about.match_indices("on ").find_map(|(i, _)| {
+        let before_ok = i == 0 || about[..i].ends_with(' ');
+        let rest = &about[i + 3..];
+        let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).unwrap_or(rest.len());
+        let word = rest[..end].trim_end_matches('-');
+        (before_ok && word.starts_with(|c: char| c.is_ascii_uppercase())).then_some(word)
+    })
+}
+
+/// Published weights in plain words, as Studio says them: "Pretrained on COCO (80 classes) · good
+/// for fine-tuning" (the server's own description is provenance).
+fn published_summary(m: &Model) -> String {
+    let on = m
+        .about
+        .as_deref()
+        .and_then(pretrained_on)
+        .map_or("Pretrained".to_string(), |d| format!("Pretrained on {d}"));
+    let n = m.classes.len();
+    format!("{on} ({n} {}) · good for fine-tuning", if n == 1 { "class" } else { "classes" })
+}
+
+impl FoloApp {
+    /// Start from's options for the open New run form.
+    pub fn nr_start_choices(&self) -> Vec<StartChoice> {
+        let Some(f) = self.new_run.as_ref() else { return Vec::new() };
+        let models = self.store.models.ready().map(Vec::as_slice).unwrap_or_default();
+        start_choices(models, f.arch, f.weights.as_deref())
+    }
+
+    /// Picks a Start from option: its weights, and their size (a fine-tune trains the weights' own).
+    pub fn pick_start(&mut self, c: &StartChoice, cx: &mut Context<Self>) {
+        let Some(f) = self.new_run.as_mut() else { return };
+        f.weights = c.id.clone();
+        if let Some(a) = c.arch {
+            f.arch = a;
+        }
+        self.resuggest_run_name(cx);
+        cx.notify();
+    }
+
+    /// The architecture changed by hand: weights of another size can't start this run, so it
+    /// trains from scratch again (weights the server doesn't list stay as they were).
+    pub fn nr_arch_changed(&mut self, cx: &mut Context<Self>) {
+        let models = self.store.models.ready().map(Vec::as_slice).unwrap_or_default();
+        if let Some(f) = self.new_run.as_mut()
+            && let Some(w) = f.weights.as_deref()
+            && let Some(m) = models.iter().find(|m| m.id == w)
+            && arch_index(m) != Some(f.arch)
+        {
+            f.weights = None;
+        }
+        self.resuggest_run_name(cx);
+    }
+
+    /// Start from's hint: what the picked weights are, or why to pick some.
+    pub fn nr_start_hint(&self) -> String {
+        let Some(f) = self.new_run.as_ref() else { return String::new() };
+        let models = self.store.models.ready().map(Vec::as_slice).unwrap_or_default();
+        let Some(w) = f.weights.as_deref() else {
+            return "Trained weights learn a small dataset much faster".into();
+        };
+        let Some(m) = models.iter().find(|m| m.id == w) else { return format!("Weights {w}") };
+        if m.source == Some(ModelSource::Published) {
+            return published_summary(m);
+        }
+        let on = m.run_id.as_deref().and_then(|r| self.store.run(r)).map(|r| self.store.run_dataset_name(r));
+        match (m.metrics.as_ref(), on) {
+            (Some(s), Some(ds)) => format!("mAP50-95 {} on {ds}", f3(s.map50_95)),
+            (Some(s), None) => format!("mAP50-95 {}", f3(s.map50_95)),
+            (None, Some(ds)) => format!("Trained on {ds}"),
+            (None, None) => "Trained weights".into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{drive, open};
+    use crate::api::ModelSource;
+
+    #[test]
+    fn start_from_offers_this_size_first_then_others_then_published_and_sends_the_pick() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| {
+            // A published weights file among the demo's models (as `folo weights pull` lists one).
+            let models = this.store.models.ready_mut().unwrap();
+            let mut p = models[0].clone();
+            (p.id, p.name, p.source, p.about) = (
+                "folo-n-coco".into(),
+                "folo-n-coco".into(),
+                Some(ModelSource::Published),
+                Some("folo-n trained from scratch on COCO train2017 at 640 px".into()),
+            );
+            p.arch = crate::api::Arch::N;
+            models.push(p);
+            this.open_new_run(None, w, cx);
+        });
+        drive(&mut app, window, |this, _, cx| {
+            let arch = this.new_run.as_ref().unwrap().arch;
+            let choices = this.nr_start_choices();
+            assert_eq!(choices[0].label, "From scratch");
+            // This size's trained models before the other sizes', the published ones last.
+            let sizes: Vec<bool> = choices[1..]
+                .iter()
+                .filter(|c| c.detail.as_deref() != Some("published"))
+                .map(|c| c.arch == Some(arch))
+                .collect();
+            assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "{sizes:?}");
+            let published = choices.iter().position(|c| c.id.as_deref() == Some("folo-n-coco")).unwrap();
+            assert_eq!(published, choices.len() - 1);
+            // Picking it sends it and switches to its size.
+            let pick = choices[published].clone();
+            this.pick_start(&pick, cx);
+            let config = this.form_config(cx).unwrap();
+            assert_eq!((config.weights.as_deref(), config.arch), (Some("folo-n-coco"), crate::api::Arch::N));
+            let n = this.store.models.ready().unwrap().last().unwrap().classes.len();
+            assert_eq!(
+                this.nr_start_hint(),
+                format!("Pretrained on COCO ({n} classes) · good for fine-tuning")
+            );
+            // Another size by hand: those weights can't start it, so from scratch again.
+            this.new_run.as_mut().unwrap().arch = 1;
+            this.nr_arch_changed(cx);
+            assert_eq!(this.form_config(cx).unwrap().weights, None);
+        });
+    }
+
+    #[test]
+    fn a_dataset_with_no_training_image_keeps_new_run_from_starting() {
+        let (mut app, window) = open();
+        let api = drive(&mut app, window, |this, w, cx| {
+            let list = this.store.datasets.ready_mut().unwrap();
+            list[0].splits.train = 0;
+            let id = list[0].id.clone();
+            this.open_new_run(Some(&id), w, cx);
+            this.store.api.clone()
+        });
+        let runs = api.runs().unwrap().len();
+        drive(&mut app, window, |this, w, cx| {
+            let why = this.dataset_blocked().expect("blocked");
+            assert!(why.ends_with("has no training images. Pick another dataset."), "{why}");
+            this.submit_new_run(w, cx);
+            assert!(!this.new_run.as_ref().unwrap().submitting, "nothing is sent");
+        });
+        assert_eq!(api.runs().unwrap().len(), runs);
+    }
+}

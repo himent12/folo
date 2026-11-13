@@ -98,6 +98,7 @@ impl FoloApp {
             f.amp = config.amp;
             f.e2e = config.head == Head::O2o;
             f.note = note;
+            f.weights = config.weights.clone();
             f.base = Some(config.clone());
             // A cloud run's connection and offer, when they still exist (checked once the
             // connections and offers are in), and its time limit as it was.
@@ -282,6 +283,7 @@ impl FoloApp {
             close_mosaic: close as f32,
             scale: 0.5,
             note: None,
+            weights: None,
             base: None,
             epochs_input,
             lr_input,
@@ -348,7 +350,7 @@ impl FoloApp {
                 device: if compute.is_some() { "auto".into() } else { DEVICES[form.device].into() },
                 optimizer: OPTIMIZERS[form.optimizer],
                 lr0: form.lr0,
-                weights: None,
+                weights: form.weights.clone(),
                 augment: Augment {
                     mosaic: form.mosaic,
                     mixup: form.mixup,
@@ -364,6 +366,14 @@ impl FoloApp {
                 compute,
             },
         ))
+    }
+
+    /// Why New run can't train on its dataset: one with no training image (every image of the
+    /// folder failed to read), refused by the server only after Start otherwise.
+    pub fn dataset_blocked(&self) -> Option<String> {
+        let f = self.new_run.as_ref()?;
+        let ds = self.store.dataset_summary(&f.dataset)?;
+        (ds.splits.train == 0).then(|| format!("{} has no training images. Pick another dataset.", ds.name))
     }
 
     /// Why New run can't send its config yet because of its compute choice: a connection chosen
@@ -454,6 +464,7 @@ impl FoloApp {
     pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config = self.form_config(cx);
         let compute_blocked = self.compute_blocked().is_some();
+        let dataset_blocked = self.dataset_blocked().is_some();
         let Some(form) = self.new_run.as_mut() else { return };
         // Auto sets its own rate, so an unparsed rate entry doesn't block it.
         let lr_invalid = form.lr_invalid && form.optimizer != 0;
@@ -463,6 +474,7 @@ impl FoloApp {
             || form.close_invalid
             || form.optimizer_blocks().is_some()
             || compute_blocked
+            || dataset_blocked
         {
             return;
         }
