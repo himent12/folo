@@ -41,6 +41,8 @@ describe('rank', () => {
     expect(r('RUN_8F5B ')).toEqual(['run-a']);
     expect(r('8f5b')).toEqual(['run-a']);
     expect(r('ds_1d')).toEqual(['ds-b']);
+    // A whole id wins over a thing named like it (review of #223).
+    expect(rank([...withIds, { id: 'model-x', group: 'Models', label: 'run_8f5b', scoped: true }], 'run_8f5b').map((i) => i.id)).toEqual(['run-a', 'model-x']);
     // Three characters name no id: "7b0" is not every run whose id holds it.
     expect(r('8f5')).toEqual([]);
     expect(r('b01')).toEqual([]);

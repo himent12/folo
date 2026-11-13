@@ -84,7 +84,8 @@ export interface Rankable {
 export function idScore(query: string, id: string): number {
   const q = query.trim().toLowerCase();
   const t = id.toLowerCase();
-  if (q === t) return 1900;
+  // Above an exact name (2000): an id names one thing, a name may be another thing's id.
+  if (q === t) return 2100;
   return q.length >= 4 && (t.startsWith(q) || t.endsWith(q)) ? 1500 : -1;
 }
 
