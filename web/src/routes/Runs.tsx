@@ -482,7 +482,10 @@ export default function Runs() {
                             {/* Whole items wrap: the name's column is what the fixed ones leave, and a fact is never cut. */}
                             <span class="sub ctx">
                               <Meta>
-                                <span>{datasetName(r())}</span>
+                                {/* A free-text name, the one item that may cut itself (ui/Meta), whole in its tooltip. */}
+                                <span class="truncate" title={datasetName(r())}>
+                                  {datasetName(r())}
+                                </span>
                                 <Ident value={r().config.arch} />
                                 <span>
                                   from <Lineage origin={from.get()} link={false} scratch="scratch" />

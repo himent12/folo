@@ -323,8 +323,8 @@ export default function Datasets() {
                   <For each={shown.get()} key={(d) => d.id}>
                     {(d) => (
                       <tr class="link" data-row data-id={d().id} aria-label={d().name} onclick={() => router.go(`/datasets/${d().id}`)}>
-                        <td>
-                          <a class="name" href={href(`/datasets/${d().id}`)} onclick={(e) => e.stopPropagation()}>
+                        <td class="name-cell">
+                          <a class="name truncate" href={href(`/datasets/${d().id}`)} title={d().name} onclick={(e) => e.stopPropagation()}>
                             {d().name}
                           </a>
                         </td>
@@ -453,6 +453,13 @@ css`
   /* The path in its bounded column, cut with an ellipsis (the full path is in the title). */
   .path-cell {
     max-width: 0;
+  }
+  /* The name too: a 61-character one took 429 px and left the path 55 px, every row reading "…/da…". */
+  .name-cell {
+    max-width: 0;
+  }
+  .name-cell .name {
+    display: block;
   }
   /* From 1280 the class balance is bounded too (the empty last column takes the slack); below it, where that column
      hides, it is the flexible one. */

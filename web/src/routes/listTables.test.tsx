@@ -102,6 +102,24 @@ const LISTS: [string, Component<Record<string, never>>, string, string][] = [
   ['Models', Models, '/models', 'table.models'],
   ['Datasets', Datasets, '/datasets', 'table.ds'],
 ];
+const SOURCE: Record<string, string> = { Models: 'src/routes/Models.tsx', Datasets: 'src/routes/Datasets.tsx' };
+
+/**
+ * The bodies of the component's own rules (its css`` block, comments dropped) whose selector `el` matches as rendered.
+ * vitest hands the scoped stylesheets back empty, so a rule is checked by its text against the element it must reach.
+ */
+function ownRules(file: string, el: Element): string[] {
+  const src = readFileSync(resolve(process.cwd(), file), 'utf8');
+  const css = src.slice(src.lastIndexOf('css`')).replace(/\/\*[\s\S]*?\*\//g, '');
+  const matches = (sel: string) => {
+    try {
+      return el.matches(sel.trim());
+    } catch {
+      return false;
+    }
+  };
+  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, sel]) => sel!.split(',').some(matches)).map(([, , body]) => body!);
+}
 // Every column but the flexible ones carries its width on the header row, which loading and loaded share, so a column
 // sits at the same x in each (round 21: runs-empty and models-empty set their columns apart).
 const FLEX: Record<string, string[]> = { Models: ['Model'], Datasets: ['Class balance'] };
@@ -117,6 +135,20 @@ describe('list tables: one geometry in every state', () => {
       // Each keyboard row names its entity: the list resumes at it by id after Esc or Back (ui/rowNav, shell F6).
       expect([...loaded.querySelectorAll<HTMLElement>('tr[data-row]')].filter((r) => !r.dataset.id)).toEqual([]);
       expect(loose(loaded)).toEqual(FLEX[name]);
+      // A long name cuts itself, whole in its tooltip, instead of sizing its column (w2-verify-studio N4: a
+      // 61-character dataset name left the path 55 px, "…/da…" on every row; a 68-character model name pushed
+      // Started from and Created out of the frame).
+      for (const row of loaded.querySelectorAll<HTMLElement>('tr[data-row]')) {
+        const cell = row.querySelector('td.name-cell');
+        const link = cell?.querySelector('a.name.truncate');
+        expect(link?.getAttribute('title'), `the name of ${row.dataset.id}`).toBeTruthy();
+        // Whole in its tooltip: the name itself, first (a published model's description follows it).
+        expect(link!.getAttribute('title')!.startsWith(row.getAttribute('aria-label')!), `the tooltip of ${row.dataset.id}`).toBe(true);
+        // The cell is bounded, so the name cuts itself instead of sizing its column.
+        expect(ownRules(SOURCE[name]!, cell!).some((b) => /max-width:\s*0\s*;/.test(b)), `a bounded name cell in ${name}`).toBe(true);
+        // And the name is a block in it, or its ellipsis never applies and the text spills past the cell.
+        expect(ownRules(SOURCE[name]!, link!).some((b) => /display:\s*block\s*;/.test(b)), `a block name link in ${name}`).toBe(true);
+      }
 
       await open(page, path, new MockApi('loading'));
       const skeleton = target.querySelector<HTMLTableElement>(sel)!;
