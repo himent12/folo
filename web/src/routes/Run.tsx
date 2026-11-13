@@ -58,7 +58,7 @@ import RunMetrics from './run/RunMetrics';
 import Samples from './run/Samples';
 import { moveQueued, queueItems, queueWait, REMOVE_LABEL, removedToast, removeDescription, removeQueued, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
 import { WarningsLog } from './run/warningsLog';
-import { beforeTraining, phaseTitle, phaseWhat, providerName } from '$lib/cloud';
+import { beforeTraining, cloudGpu, phaseTitle, phaseWhat, providerName } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
 import CloudPanel from './run/CloudPanel';
 import { isOom } from '$lib/oom';
@@ -514,8 +514,8 @@ export default function Run() {
                 {config.get()!.head === 'o2o' ? <span class="cfg">{HEAD_LABEL.o2o}</span> : null}
                 {cloud.get() ? (
                   // Where a cloud run runs: its provider and GPU (the worker's own name for it once it trains).
-                  <span class="dev cloud">
-                    {provider.get()} · {R().device ? deviceName(R().device) : cloud.get()!.offer.gpu}
+                  <span class="truncate dev cloud" title={`${provider.get()} · ${cloudGpu({ device: R().device, cloud: cloud.get()! })}`}>
+                    {provider.get()} · {cloudGpu({ device: R().device, cloud: cloud.get()! })}
                   </span>
                 ) : (
                   <span class="truncate dev" title={R().device}>

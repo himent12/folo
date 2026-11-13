@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CloudOffer, RunCloud, RunStatus } from './api/types';
-import { article, beforeTraining, defaultMaxHours, inHandover, isAlive, limitText, menuOrder, phaseIndex, phaseLabel, phaseTitle, pickOffer, transferShare, transferText } from './cloud';
+import { article, beforeTraining, cloudGpu, defaultMaxHours, inHandover, isAlive, limitText, menuOrder, phaseIndex, phaseLabel, phaseTitle, pickOffer, providerName, transferShare, transferText } from './cloud';
 
 const GiB = 2 ** 30;
 const offer = (id: string, gpu: string, vram: number, price: number | null, availability: CloudOffer['availability'] = 'high'): CloudOffer => ({
@@ -66,6 +66,23 @@ describe('cloud phases', () => {
   it('reads a GPU name aloud for its article', () => {
     expect(['RTX 4090', 'A100 PCIe', 'H100 SXM', 'L40S', 'GeForce GTX', 'Tesla T4'].map(article)).toEqual(['an', 'an', 'an', 'an', 'a', 'a']);
   });
+});
+
+describe('a cloud run’s names', () => {
+  it('names the GPU once: the offer’s until the worker reports its device, never "<gpu> at <provider>"', () => {
+    const c = { offer: offer('o', 'NVIDIA GeForce RTX 4080 SUPER', 16, null) } as RunCloud;
+    expect(cloudGpu({ device: 'NVIDIA GeForce RTX 4080 SUPER at Remote FOLO server', cloud: c })).toBe('RTX 4080 SUPER');
+    expect(cloudGpu({ device: '', cloud: c })).toBe('RTX 4080 SUPER');
+    expect(cloudGpu({ device: 'NVIDIA GeForce RTX 4080 SUPER (vulkan)', cloud: c })).toBe('RTX 4080 SUPER');
+  });
+
+  it('names a known provider before the server’s list is in, never by its id', () => {
+    expect(providerName('remote', undefined)).toBe('Remote FOLO server');
+    expect(providerName('runpod', undefined)).toBe('RunPod');
+    expect(providerName('lab', undefined)).toBe('lab');
+    expect(providerName('remote', [{ id: 'remote', name: 'Your server' } as never])).toBe('Your server');
+  });
+
 });
 
 describe('offers', () => {

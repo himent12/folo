@@ -3,7 +3,7 @@
 // run and the run page say the same thing with the same numbers.
 
 import type { CloudAvailability, CloudInstanceStatus, CloudOffer, CloudPhase, CloudProvider, Run, RunCloud, SystemInfo, TransferProgress } from './api/types';
-import { bytes, hoursText, pct, pricePerHour, usd } from './format';
+import { bytes, deviceName, hoursText, pct, pricePerHour, usd } from './format';
 
 /**
  * Whether the server has cloud compute (`/api/system`'s `cloud` feature): without it no cloud control renders and no
@@ -67,8 +67,21 @@ export function article(name: string): 'a' | 'an' {
   return /^[aeiou]/i.test(name) ? 'an' : 'a';
 }
 
-/** A provider's display name ("RunPod") from its id, the id itself until the list is in. */
-export const providerName = (id: string, providers: readonly CloudProvider[] | undefined): string => providers?.find((p) => p.id === id)?.name ?? id;
+/** The names of the providers this Studio knows, until the server's list is in (so a page never flashes "remote"). */
+const KNOWN_PROVIDERS: Record<string, string> = { runpod: 'RunPod', remote: 'Remote FOLO server' };
+
+/** A provider's display name ("RunPod") from its id: the server's word, a known one until the list is in, else the id. */
+export const providerName = (id: string, providers: readonly CloudProvider[] | undefined): string =>
+  providers?.find((p) => p.id === id)?.name ?? KNOWN_PROVIDERS[id] ?? id;
+
+/**
+ * The GPU a cloud run's header names: the worker's device once it reported one, else the offer's GPU. Until then the
+ * server's `device` is "<gpu> at <provider>", and the header already says the provider.
+ */
+export function cloudGpu(run: Pick<Run, 'device'> & { cloud: RunCloud }): string {
+  const d = run.device;
+  return deviceName(!d || d.startsWith(`${run.cloud.offer.gpu} at `) ? run.cloud.offer.gpu : d);
+}
 
 /**
  * The waiting state's title while a cloud run is queued: the phase it is in ("Provisioning an RTX 4090 at RunPod",
