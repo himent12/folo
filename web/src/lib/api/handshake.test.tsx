@@ -9,7 +9,7 @@ import OfflineNotice from '$lib/shell/OfflineNotice';
 import ConnectionPanel from '../../routes/settings/ConnectionPanel';
 import { render } from '../../../framework/testing';
 import { ApiError } from './client';
-import { isHealth, NOT_FOLO, refusal } from './handshake';
+import { isHealth, NOT_FOLO, refusal, TOKEN_WALL } from './handshake';
 import { hub } from './index';
 import { PROBE_DELAYS } from './reach';
 
@@ -43,10 +43,15 @@ describe('the first handshake with an address that answers', () => {
     vi.useRealTimers();
   });
 
-  /** Connects with `answers` for the health checks in turn (the last one repeats); what the shell says. */
-  async function connectTo(answers: (() => Response | Promise<Response>)[]) {
+  /**
+   * Connects with `answers` for the health checks in turn (the last one repeats), and `runs` for the token check
+   * (`HEAD /api/runs`, in turn; nothing answers it by default); what the shell says.
+   */
+  async function connectTo(answers: (() => Response | Promise<Response>)[], runs: (() => Response)[] = []) {
     let health = 0;
-    vi.stubGlobal('fetch', async (url: string) => {
+    let wall = 0;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/runs') && init?.method === 'HEAD' && runs.length) return runs[Math.min(wall++, runs.length - 1)]!();
       if (!url.endsWith('/api/health')) throw new TypeError('Failed to fetch');
       return answers[Math.min(health++, answers.length - 1)]!();
     });
@@ -110,6 +115,27 @@ describe('the first handshake with an address that answers', () => {
       'Not connected',
     ]);
     expect(said.settings).toContain('This server asks for sign-in (401).');
+    c.unmount();
+  });
+
+  it('does not go live on a server that answers its health but wants a token, and goes live once it does not', async () => {
+    // `folo serve --token`: health is open, everything else is 401 (shell F1: "Connected", then 401 on every screen).
+    const wall = () => Response.json({ error: { code: 'unauthorized', message: 'this server needs a token', hint: null } }, { status: 401 });
+    const c = await connectTo([healthy], [wall, () => new Response(null, { status: 200 })]);
+    const url = hub.serverUrl;
+    expect(c.said()).toEqual({
+      mode: 'connecting',
+      label: 'Not connected',
+      footer: `${url}: ${TOKEN_WALL} Retrying…`,
+      notice: `${TOKEN_WALL} Retrying…`,
+      short: 'Not connected',
+      settings: `Not connected | ${url}: ${TOKEN_WALL} Retrying…`,
+    });
+    expect(hub.offline).toBe(true);
+    // Restarted without --token: the next check goes live.
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    const said = c.said();
+    expect([said.mode, said.label, hub.refused, hub.offline]).toEqual(['live', 'Connected', null, false]);
     c.unmount();
   });
 

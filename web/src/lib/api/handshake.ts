@@ -19,6 +19,23 @@ export function isHealth(h: unknown): h is Health {
 
 export const NOT_FOLO = 'This address answered, but not as a FOLO server.';
 
+/** A FOLO server started with `--token`: Studio has no token to send (docs/CLOUD.md, Securing a server). */
+export const TOKEN_WALL = "This server needs a token (folo serve --token), which Studio can't send.";
+
+/**
+ * Whether the FOLO server at `base` refuses Studio's requests for want of a token. `GET /api/health` is the one path
+ * `folo serve --token` leaves open, so its answer cannot tell; a `HEAD` of the runs list (what Studio polls anyway, without
+ * the body) can: `401` is the token wall. No answer is not a wall: the requests that follow will find the server gone.
+ */
+export async function tokenWall(base: string, signal: AbortSignal): Promise<boolean> {
+  try {
+    return (await fetch(`${base}/api/runs`, { method: 'HEAD', signal })).status === 401;
+  } catch (e) {
+    if (signal.aborted) throw e;
+    return false;
+  }
+}
+
 /**
  * What a failed health check got back from an address that answered but cannot be used, in words for the user; null
  * when nothing answered: no connection, a timeout, or a proxy with nothing behind it (Vite's dev proxy answers 500
@@ -27,6 +44,7 @@ export const NOT_FOLO = 'This address answered, but not as a FOLO server.';
 export function refusal(e: unknown): string | null {
   if (!(e instanceof ApiError) || e.status === 0) return null;
   if ((e.status === 500 && e.code === 'http_500') || (e.status >= 502 && e.status <= 504)) return null;
+  if (e.status === 401 && e.code === 'token_wall') return TOKEN_WALL;
   if (e.status === 401) return 'This server asks for sign-in (401).';
   if (e.status === 403) return 'This server refuses access (403).';
   return NOT_FOLO;
