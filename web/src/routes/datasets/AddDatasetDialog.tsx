@@ -19,7 +19,7 @@ import Segmented from '$lib/ui/Segmented';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
 import { noTraining } from '../dataset/health';
-import { datasetsChanged, generationEnded, generationStarted } from './changes';
+import { datasetsChanged, generationEnded, generationStarted, pageLeaving, whenStaying } from './changes';
 import { isUnlabeled } from './problem';
 import { cleanPath, isFullPath, NAME_RE, nameFromPath, suggestName, uniqueName } from './names';
 
@@ -176,13 +176,18 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     if (!valid.get() || busy.get()) return;
     const m = mode.get();
     const images = Math.round(sImages.get() ?? 0);
-    work.set({ what: m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${count(images, 'image')}`, since: Date.now() });
+    const what = m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${count(images, 'image')}`;
+    work.set({ what, since: Date.now() });
     const mine = { yes: true };
     attached = mine;
     const here = () => mine.yes && showing();
-    // A reload while it generates still waits for it (./changes pendingGeneration).
-    const gen = { server: hub.server, name: synthName.get(), since: Date.now(), ids: (props.known ?? fetched.peek() ?? []).map((d) => d.id) };
-    if (m === 'synthetic') generationStarted(gen);
+    // A reload while it generates, or reads a large folder, still waits for it (./changes pendingGeneration).
+    const ids = (props.known ?? fetched.peek() ?? []).map((d) => d.id);
+    const gen =
+      m === 'folder'
+        ? { server: hub.server, name: folderName.get(), since: Date.now(), ids, path: cleaned.get(), what }
+        : { server: hub.server, name: synthName.get(), since: Date.now(), ids, what };
+    generationStarted(gen);
     try {
       // Registering a folder that is already registered answers with that dataset (docs/API.md), not a copy.
       const before = m === 'folder' ? (props.known ?? fetched.peek() ?? (await hub.api.datasets().catch(() => []))) : [];
@@ -202,7 +207,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       const nt = noTraining(ds);
       const detail = nt ? `${ds.name} · ${nt.where}, none to train on` : `${ds.name} · ${count(ds.splits.train + ds.splits.val + ds.splits.test, 'image')}`;
       work.set(null);
-      if (m === 'synthetic') generationEnded(gen);
+      generationEnded(gen);
       if (!known) datasetsChanged();
       if (!here()) {
         // Dismissed while it ran (or gone, or opened anew): wherever the person is now, they stay there.
@@ -223,12 +228,18 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       else toast.success(title, detail);
       router.go(`/datasets/${ds.id}`);
     } catch (err) {
-      work.set(null);
-      if (m === 'synthetic') generationEnded(gen);
-      if (here()) error.set(err);
-      else if (showing()) status.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
-      // page-level: no opening of the dialog is on screen.
-      else toast.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
+      const failed = () => {
+        work.set(null);
+        generationEnded(gen);
+        if (here()) error.set(err);
+        else if (showing()) status.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
+        // page-level: no opening of the dialog is on screen.
+        else toast.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
+      };
+      // The page is going away (a reload while it works): the server goes on, and the next page waits for it. If it
+      // stays after all, the failure is said then.
+      if (pageLeaving()) whenStaying(failed);
+      else failed();
     }
   }
 

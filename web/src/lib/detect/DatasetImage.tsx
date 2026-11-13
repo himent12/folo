@@ -15,6 +15,11 @@ export interface DatasetImageProps {
   datasetId?: string;
   jobId?: string;
   imageId: string;
+  /**
+   * The dataset's revision (dataset/pager `revision`): a new one fetches the image again. Ids are positions, so after
+   * the folder changed the same id may name another file.
+   */
+  rev?: number;
   width: number;
   height: number;
   thumb?: number;
@@ -37,7 +42,7 @@ export interface DatasetImageProps {
 const NO_BOXES: ViewBox[] = [];
 
 export default function DatasetImage(props: DatasetImageProps) {
-  const [, rest] = splitProps(props, ['datasetId', 'jobId', 'imageId', 'thumb', 'boxes', 'truth']);
+  const [, rest] = splitProps(props, ['datasetId', 'jobId', 'imageId', 'rev', 'thumb', 'boxes', 'truth']);
 
   const src = signal<string | null>(null);
   const phase = signal<'loading' | 'ready' | 'error'>('loading');
@@ -69,9 +74,12 @@ export default function DatasetImage(props: DatasetImageProps) {
     const jobId = props.jobId;
     const imageId = props.imageId;
     const thumb = props.thumb;
+    const rev = props.rev;
     (jobId ? hub.api.labelImageUrl(jobId, imageId, thumb) : hub.api.imageUrl(props.datasetId ?? '', imageId, thumb)).then(
       (u: string) => {
-        if (live) src.set(u);
+        // A server URL under a new revision is a new URL, so the browser asks again (the server ignores the key); a
+        // blob or data URL (the mock) is its image already.
+        if (live) src.set(rev && !/^(blob|data):/.test(u) ? `${u}${u.includes('?') ? '&' : '?'}rev=${rev}` : u);
       },
       () => {
         if (live) phase.set('error');

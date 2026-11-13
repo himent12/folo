@@ -64,15 +64,20 @@ export default function Datasets() {
   effect(() => {
     if (datasetChanges.get() !== seen) untrack(reread);
   });
-  // A sample set this tab asked for of this server before a reload is still generating: read the list a few seconds
-  // after each read has settled (one slower than that is never cut short by the next), while the tab is shown, until
-  // it is there (./datasets/changes).
+  // A sample set this tab asked for of this server (or a folder it asked to register) is still on its way, also after
+  // a reload: the list says so, and reads itself a few seconds after each read has settled (one slower than that is
+  // never cut short by the next), while the tab is shown, until it is there (./datasets/changes).
+  const waiting = signal<{ what: string; since: number } | null>(null);
   effect(() => {
     const list = datasets.data;
     const server = untrack(() => hub.server);
     const g = untrack(() => pendingGeneration(server));
-    if (!g || !list) return;
-    if (landed(g, list)) return void generationEnded(g);
+    if (!g || !list || landed(g, list)) {
+      waiting.set(null);
+      if (g && list) generationEnded(g);
+      return;
+    }
+    waiting.set({ what: g.what ?? `Generating ${g.name}`, since: g.since });
     // A read that finds nothing new keeps the same list (Resource), so this runs on its own clock until one does.
     let live = true;
     let t: ReturnType<typeof setTimeout>;
@@ -80,7 +85,9 @@ export default function Datasets() {
       if (live) t = setTimeout(tick, GENERATION_POLL_MS);
     };
     const tick = () => {
-      if (!live || !pendingGeneration(server)) return;
+      if (!live || !pendingGeneration(server)) return void waiting.set(null);
+      // Its "started …" moves on with each read, even one that finds nothing new.
+      waiting.set((w) => w && { ...w });
       if (document.visibilityState !== 'visible' || datasets.loading || datasets.refreshing) return later();
       void datasets.refresh().finally(later);
     };
@@ -408,15 +415,25 @@ export default function Datasets() {
             </ul>
           ) : null}
         </Panel>{' '}
-        {datasets.data && shown.get().length ? (
+        {datasets.data && (shown.get().length || waiting.get()) ? (
           <p class="list-foot num">
             <Meta>
-              <span>
-                {shown.get().length < datasets.data.length ? `${shown.get().length} of ${datasets.data.length}` : shown.get().length}{' '}
-                {datasets.data.length === 1 ? 'dataset' : 'datasets'}
-              </span>{' '}
-              <span>{count(totals.get().images, 'image')}</span>{' '}
-              <span>{count(totals.get().boxes, 'box')}</span>
+              {shown.get().length ? (
+                <>
+                  <span>
+                    {shown.get().length < datasets.data.length ? `${shown.get().length} of ${datasets.data.length}` : shown.get().length}{' '}
+                    {datasets.data.length === 1 ? 'dataset' : 'datasets'}
+                  </span>{' '}
+                  <span>{count(totals.get().images, 'image')}</span>{' '}
+                  <span>{count(totals.get().boxes, 'box')}</span>
+                </>
+              ) : null}{' '}
+              {/* Said after a reload too: nothing else on screen tells that one is on its way (studio-data F1). */}
+              {waiting.get() ? (
+                <span class="waiting" role="status">
+                  {waiting.get()!.what}, started {ago(new Date(waiting.get()!.since).toISOString())}: it shows up here when it is done
+                </span>
+              ) : null}
             </Meta>
           </p>
         ) : null}

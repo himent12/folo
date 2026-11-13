@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
@@ -88,6 +88,21 @@ describe('DatasetImage', () => {
     expect(target.querySelector('.failed')).toBeNull();
     img.dispatchEvent(new Event('load'));
     await until(() => target.querySelector('.box'), 'the boxes');
+  });
+
+  it('fetches the image again under a new dataset revision (the same id may name another file now)', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = vi.fn(async () => '/api/datasets/ds/images/0?thumb=256');
+    hub.api = api;
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    const rev = signal(0);
+    c = fwRender(() => <DatasetImage datasetId="ds" imageId="0" rev={rev.get()} width={100} height={100} classes={['a']} />, target);
+    const src = () => target.querySelector('img')?.getAttribute('src');
+    expect(await until(src, 'the image')).toBe('/api/datasets/ds/images/0?thumb=256');
+    rev.set(2);
+    await until(() => src()?.endsWith('&rev=2'), 'the new revision');
+    expect(api.imageUrl).toHaveBeenCalledTimes(2);
   });
 
   it('says so when the image itself fails to load', async () => {

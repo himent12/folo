@@ -3,9 +3,10 @@
 import { flush as flushSync } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { hub } from '$lib/api/index';
+import { ApiError, hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
+import { toast } from '$lib/ui/toast';
 import Dataset from './Dataset';
 
 let target: HTMLElement;
@@ -55,6 +56,97 @@ describe('Dataset page', () => {
     const train = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Train on this dataset'))!;
     expect(train.disabled).toBe(true);
     expect(document.getElementById(train.getAttribute('aria-describedby')!)?.textContent).toBe('No training images in this dataset');
+  });
+
+  it('reads the dataset and its images again when the window comes back after the files changed', async () => {
+    const read = api.dataset.bind(api);
+    let train: number | null = null;
+    let answered = 0;
+    const one = vi.spyOn(api, 'dataset').mockImplementation(async (id: string) => {
+      const d = await read(id);
+      answered++;
+      return train === null ? d : { ...d, splits: { ...d.splits, train } };
+    });
+    const list = vi.spyOn(api, 'datasetImages');
+    open('/datasets/ds_shapes');
+    await until(() => target.querySelector('[data-i="0"]'), 'the grid');
+    const header = () => target.querySelector('header')?.textContent ?? '';
+    expect(header()).not.toContain('7 train');
+    const reads = list.mock.calls.length;
+
+    // Nothing changed: coming back reads the dataset, and the image list stays as it is.
+    window.dispatchEvent(new Event('focus'));
+    expect(one).toHaveBeenCalledTimes(2);
+    await until(() => answered === 2, 'the second answer');
+    await new Promise((r) => setTimeout(r));
+    flushSync();
+    expect(list.mock.calls.length).toBe(reads);
+
+    // Two images went (the folder changed on disk): the header says so, and the rows in view are read again.
+    train = 7;
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(one).toHaveBeenCalledTimes(3);
+    await until(() => header().includes('7 train'), 'the new count');
+    await until(() => list.mock.calls.length > reads, 'the image list read again');
+  });
+
+  it("reads the check after the dataset when the window comes back, so it never answers from the server's old index", async () => {
+    const read = api.dataset.bind(api);
+    let hold: Promise<void> | null = null;
+    vi.spyOn(api, 'dataset').mockImplementation(async (id: string) => {
+      if (hold) await hold;
+      return read(id);
+    });
+    const issues = vi.spyOn(api, 'datasetIssues');
+    open('/datasets/ds_shapes');
+    await until(() => target.querySelector('[data-i="0"]'), 'the grid');
+    await until(() => issues.mock.calls.length === 1, 'the first check');
+    let release!: () => void;
+    hold = new Promise<void>((r) => (release = r));
+    window.dispatchEvent(new Event('focus'));
+    await new Promise((r) => setTimeout(r));
+    expect(issues).toHaveBeenCalledTimes(1);
+    release();
+    await until(() => issues.mock.calls.length === 2, 'the check read again');
+  });
+
+  it('closes an open image that left the folder, saying so, when the window comes back', async () => {
+    const { total } = await api.datasetImages('ds_shapes', { offset: 0, limit: 1 });
+    const last = (await api.datasetImages('ds_shapes', { offset: total - 1, limit: 1 })).images[0]!;
+    const read = api.dataset.bind(api);
+    const list = api.datasetImages.bind(api);
+    let gone = false;
+    vi.spyOn(api, 'dataset').mockImplementation(async (id: string) => {
+      const d = await read(id);
+      return gone ? { ...d, splits: { ...d.splits, test: d.splits.test - 1 } } : d;
+    });
+    vi.spyOn(api, 'datasetImages').mockImplementation(async (id, q) => {
+      const page = await list(id, q);
+      return gone ? { total: page.total - 1, images: page.images.filter((im) => im.id !== last.id) } : page;
+    });
+    const info = vi.spyOn(toast, 'info');
+    open(`/datasets/ds_shapes?image=${last.id}`);
+    await until(() => document.querySelector('dialog.insp')?.textContent?.includes(last.file.split('/').pop()!), 'the image');
+    gone = true;
+    window.dispatchEvent(new Event('focus'));
+    await until(() => info.mock.calls.length > 0, 'the note');
+    expect(info).toHaveBeenCalledWith('Image not in this view', `${last.id} does not match the current filters, or is no longer in the folder.`);
+    await until(() => !decodeURIComponent(location.hash).includes('image='), 'the inspector closed');
+  });
+
+  it('says the folder is missing when it went while the page was open, instead of showing what it held', async () => {
+    const read = api.dataset.bind(api);
+    let gone = false;
+    vi.spyOn(api, 'dataset').mockImplementation(async (id: string) => {
+      if (gone) throw new ApiError(404, 'path_not_found', `the folder of dataset 'shapes' is gone`);
+      return read(id);
+    });
+    open('/datasets/ds_shapes');
+    await until(() => target.querySelector('[data-i="0"]'), 'the grid');
+    gone = true;
+    window.dispatchEvent(new Event('focus'));
+    await until(() => target.textContent?.includes('Folder missing'), 'the missing folder');
+    expect(target.querySelector('[data-i="0"]')).toBeNull();
   });
 
   it('offers Train as a link for a dataset that can train', async () => {

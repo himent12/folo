@@ -55,6 +55,7 @@ export default function ImageGrid(props: ImageGridProps) {
             <DatasetImage
               datasetId={props.pager.datasetId}
               imageId={im().id}
+              rev={props.pager.revisionOf(i())}
               width={im().width}
               height={im().height}
               thumb={256}
