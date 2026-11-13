@@ -17,6 +17,7 @@ mod gemm;
 mod layout;
 mod muon;
 mod pipeline_cache;
+mod plan;
 mod pool;
 mod precompile;
 mod reduce;

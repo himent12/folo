@@ -65,6 +65,7 @@ impl GpuContext {
         if len == 0 {
             return Ok(None);
         }
+        self.record_taint("a readback");
         if !offset.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT) {
             return Err(GpuError::Shape(format!("read offset {offset} is not 4-byte aligned")));
         }

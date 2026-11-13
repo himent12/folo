@@ -27,6 +27,7 @@
 mod convert;
 mod encode;
 mod ops;
+mod plan;
 mod sites;
 mod storage;
 pub use storage::poison_uninit;
@@ -42,6 +43,7 @@ use folo_core::{
 use self::convert::{Core, elem, strided_of};
 #[cfg(test)]
 pub(crate) use self::encode::conv_input;
+pub use self::plan::{ForwardPlans, Tensors};
 use crate::context::GpuContext;
 use crate::error::GpuError;
 use crate::kernels::strided;

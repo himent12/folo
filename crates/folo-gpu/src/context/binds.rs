@@ -268,7 +268,7 @@ fn key(layout: &wgpu::BindGroupLayout, uniform: &wgpu::Buffer, buffers: &[&wgpu:
 }
 
 /// A new bind group of `layout` (see [`BindCache::get`]).
-fn create(
+pub(super) fn create(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     uniform: &wgpu::Buffer,

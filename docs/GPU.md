@@ -155,6 +155,30 @@ back. `ctx.bind_cache_len()` is its size; `ctx.set_bind_cache(false)` (or `FOLO_
 created afterwards) turns it off for A/B runs, and the `dispatch_ab` bench of folo-vision compares both in one
 process.
 
+**Forward plans** (`context/plan.rs`, `backend/plan.rs`). An inference forward of one model on one input shape
+encodes the same dispatches on the same buffers every call, so `ForwardPlans::run` records the call once and
+replays it as a flat list: no tensor-op layer, no pool or bind-group lookups, no parameter packing. A recording
+notes every dispatch, copy and clear the context encodes and every buffer the pool hands out; it is refused if the
+call uploads or reads back. Each buffer then gets a role: the caller's input and the results (bound per replay,
+the results to fresh pool buffers, so a replay never writes a buffer a caller still holds), intermediates (taken
+out of the pool and owned by the plan), the caller's listed tensors and the dummy buffer (kept); any other buffer
+refuses the plan. Bind groups that bind neither input nor results are made once, the others per replay (and kept
+while the same buffers come back), and every parameter block has its own slot in one uniform buffer written once.
+A replay is encoded under one hold of the batch lock and keeps the batch's submission schedule. Replays are
+bit-identical to the normal call.
+
+Plans are keyed by the owner, the caller's key, the input's dims, dtype and buffer size, and the tensor-core
+switch; a key is recorded at its second sighting and replayed from the third. Before each replay the owner's
+tensors are checked against their `(TensorId, storage_version)` at recording, so any write, replacement, `to_device`
+or `to_dtype` retires the plan. No plan is made with gradients on, under autocast, while profiling or tracing, on a
+lost device, or for an input that is not dense. A context keeps at most `MAX_PLANS` (8) plans and `MAX_PLAN_BYTES`
+(1 GiB), least recently used first out, and a call whose plan would pin more than `MAX_PLAN_BYTES_EACH` (256 MiB)
+is not planned (folo-n and folo-s at batch 1 pin 23–102 MiB; at batch 16 a plan tied the normal call while
+pinning 316–617 MiB); `release_memory()` drops them all, a dropped owner drops its own, and
+`ctx.plan_stats()` reports how many and how many bytes. `DetectionModel` uses them for a fused eval-mode forward
+on a GPU under `no_grad` (`forward`, `Predictor`, `folo val`, the server); `model.set_forward_plans(false)`,
+`ctx.set_forward_plans(false)` or `FOLO_GPU_NO_PLAN=1` (contexts created afterwards) turn them off. <!-- GPUNUMBERS -->
+
 The interval was 1024 until the training-step profile showed the GPU idle for most of the host's encoding and
 submission time: a step's 1300 dispatches went out in 3 submissions, so the GPU waited for each one to be built
 whole. Submitting every 64 lets the GPU run one batch while the host encodes the next: the folo-n training step
@@ -172,9 +196,10 @@ waits at every submission, so a profiled run is slower end to end and the per-ke
 timestamps serialise kernels that would otherwise overlap). The folo-vision `gpu` benchmark prints a per-phase
 table of a profiled training step when the variable is set.
 
-**Dispatch trace.** `ctx.trace_begin()` / `trace_end()` record every dispatch and buffer copy encoded in between
+**Dispatch trace.** `ctx.trace_begin()` / `trace_end()` record every dispatch, buffer copy and clear encoded in between
 (`TracedOp`: kernel name, spec, workgroups, and what is needed to encode it again) and `ctx.replay(&op)` re-encodes
-one. `cargo bench -p folo-vision --bench gpu_profile` uses them on a fused forward: the host split of a
+one; `ctx.freeze(&ops)` makes the list ready to encode whole without the cache lookups (`ctx.replay_frozen`), on
+the buffers it was traced on (the `plan_gate` bench of folo-vision times both against the forward). `cargo bench -p folo-vision --bench gpu_profile` uses them on a fused forward: the host split of a
 synchronised call (encode, submit, wait), then every recorded dispatch replayed alone, summed per kernel and per
 kernel variant (`FOLO_BENCH_OPS=1` lists every dispatch). Host-side, a dispatch costs about 8–12 µs on this
 machine (bind group creation about 3–4 µs; the rest lands in wgpu's submission), so batch-1 forwards are

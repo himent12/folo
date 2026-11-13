@@ -80,3 +80,7 @@ harness = false
 [[bench]]
 name = "dispatch_ab"
 harness = false
+
+[[bench]]
+name = "plan_gate"
+harness = false

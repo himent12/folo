@@ -93,6 +93,11 @@ impl GpuContext {
         }
     }
 
+    /// Whether the device was lost.
+    pub(crate) fn is_lost(&self) -> bool {
+        self.inner.lost.lock().map_or(true, |l| l.is_some())
+    }
+
     /// Why the device was lost (wgpu's reason and message), if it was. Every wait then fails with
     /// [`GpuError::DeviceLost`].
     pub fn lost_reason(&self) -> Option<String> {
