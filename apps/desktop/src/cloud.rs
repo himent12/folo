@@ -32,6 +32,9 @@ pub struct CloudState {
     pub terminate: Option<Confirm>,
     /// Bumped on every opening of the Connect dialog: a late answer only touches its own dialog.
     pub connect_seq: u64,
+    /// Instance ids of cloud runs the instance list was asked again for, once each, because it
+    /// hadn't got them (a run created after the list was read, here or elsewhere).
+    pub asked_for: HashSet<String>,
 }
 
 /// The Connect dialog.
@@ -248,6 +251,25 @@ impl FoloApp {
     /// Whether an instance may still cost money: the list then refreshes every 5 s.
     pub fn instance_alive(&self) -> bool {
         self.cloud.instances.ready().is_some_and(|l| l.iter().any(|i| i.status.is_alive()))
+    }
+
+    /// Cloud runs' instance ids that the instance list hasn't got and wasn't asked again for:
+    /// read it again (once per id; the ledger drops instances that ended over 7 days ago, so a
+    /// missing old one isn't asked for forever). Each one returned is marked asked.
+    pub fn take_missing_instances(&mut self) -> bool {
+        let Some(list) = self.cloud.instances.ready() else { return false };
+        let missing: Vec<String> = self
+            .store
+            .runs
+            .ready()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.cloud.as_ref()?.instance_id.clone())
+            .filter(|id| !list.iter().any(|i| &i.id == id) && !self.cloud.asked_for.contains(id))
+            .collect();
+        let any = !missing.is_empty();
+        self.cloud.asked_for.extend(missing);
+        any
     }
 
     /// A released cloud run's instance in the ledger (`GET /api/cloud/instances`), which keeps its

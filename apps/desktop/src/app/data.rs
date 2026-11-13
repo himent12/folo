@@ -606,7 +606,10 @@ impl FoloApp {
                             this.refresh_lists(cx);
                         }
                         // A rented instance costs money: its row stays current while it lives.
-                        if tick.is_multiple_of(50) && this.instance_alive() {
+                        // So is one a cloud run has that the list hasn't got yet (a run started
+                        // elsewhere after it was read), whose termination may later fail.
+                        if tick.is_multiple_of(50) && (this.instance_alive() || this.take_missing_instances())
+                        {
                             this.refresh_instances(cx);
                         }
                         // A ledger that couldn't be read is asked again every 30 s: a released

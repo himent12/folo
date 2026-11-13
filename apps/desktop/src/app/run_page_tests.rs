@@ -177,3 +177,39 @@ fn a_cloud_run_whose_worker_is_silent_says_so_with_the_time() {
         assert_eq!(panel_warning(&c, true, true, since).unwrap().0, "icons/wifi-off.svg");
     });
 }
+
+#[test]
+fn a_cloud_run_the_instance_list_had_not_got_is_asked_for_once() {
+    let (mut app, window) = open_with(Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble()));
+    drive(&mut app, window, |this, _, cx| this.ensure_cloud(cx));
+    // The list as read before these runs existed (they started elsewhere afterwards): no live
+    // instance, so the 5 s refresh that follows live ones never fired for them.
+    drive(&mut app, window, |this, _, _| {
+        this.cloud.instances = Load::Ready(Vec::new());
+        assert!(!this.instance_alive());
+        let c = this.store.runs.ready().unwrap().iter().find(|r| r.id == "run_c2e1").unwrap().cloud.clone();
+        assert!(this.released_instance(&c.unwrap()).is_none(), "nothing to say yet");
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.take_missing_instances(), "the runs' instances are asked for");
+        this.refresh_instances(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        let c = this
+            .store
+            .runs
+            .ready()
+            .unwrap()
+            .iter()
+            .find(|r| r.id == "run_c2e1")
+            .unwrap()
+            .cloud
+            .clone()
+            .unwrap();
+        let i = this.released_instance(&c).expect("found after one read");
+        assert!(i.status.is_alive(), "and its termination is still unconfirmed");
+        // Once each: an id the list still hasn't got (ended over 7 days ago) isn't asked for forever.
+        this.cloud.instances = Load::Ready(Vec::new());
+        assert!(!this.take_missing_instances());
+    });
+}
