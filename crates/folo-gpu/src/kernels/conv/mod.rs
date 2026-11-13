@@ -29,6 +29,7 @@
 mod depthwise;
 mod forward;
 mod input_grad;
+mod sites;
 pub(crate) mod split;
 mod weight_grad;
 
@@ -37,6 +38,8 @@ pub use forward::{
 };
 pub use input_grad::conv2d_backward_input;
 pub(crate) use input_grad::{PHASE_PIXEL, Phase};
+pub use sites::conv2d_sites;
+pub(crate) use sites::{SITES_BINDING, SITES_LIVE, SITES_RETIRE, forward_column};
 #[cfg(test)]
 pub(crate) use weight_grad::{LAST_ROUTE, WgradRoute};
 pub use weight_grad::{conv2d_backward_weight, conv2d_backward_weight_as};
@@ -124,10 +127,22 @@ impl Conv2dDesc {
     /// (each image's `C_in·H·W` contiguous).
     pub(crate) fn check_input_buffers(
         &self,
-        (x, offset, n_stride): (&wgpu::Buffer, usize, usize),
+        input: (&wgpu::Buffer, usize, usize),
         weight: &wgpu::Buffer,
         bias: Option<&wgpu::Buffer>,
         y: &wgpu::Buffer,
+    ) -> Result<(usize, usize)> {
+        let (oh, ow) = self.check_operands(input, weight, bias)?;
+        check_buf(y, prod(&[self.n, self.c_out, oh, ow])?, self.dtype, "conv2d output")?;
+        Ok((oh, ow))
+    }
+
+    /// [`Conv2dDesc::check_input_buffers`] without the output.
+    pub(crate) fn check_operands(
+        &self,
+        (x, offset, n_stride): (&wgpu::Buffer, usize, usize),
+        weight: &wgpu::Buffer,
+        bias: Option<&wgpu::Buffer>,
     ) -> Result<(usize, usize)> {
         self.validate()?;
         let (oh, ow) = self.output()?;
@@ -153,7 +168,6 @@ impl Conv2dDesc {
             self.dtype,
             "conv2d weight",
         )?;
-        check_buf(y, prod(&[self.n, self.c_out, oh, ow])?, self.dtype, "conv2d output")?;
         if let Some(b) = bias {
             check_buf(b, self.c_out, self.dtype, "conv2d bias")?;
         }

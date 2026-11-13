@@ -31,6 +31,7 @@ use crate::error::{Result, shape_err};
 pub use self::convolution::conv2d;
 pub(crate) use self::convolution::{
     encode_conv, encode_conv_backward_input, encode_conv_backward_input_phase, encode_conv_backward_weight,
+    encode_conv_sites,
 };
 pub use self::matmul::gemm;
 pub(crate) use self::matmul::{encode_gemm, encode_gemm_cat};
@@ -40,7 +41,8 @@ pub(crate) use self::support::{
 };
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&crate::pipeline::KernelDef] = &[&shader::COOP, &shader::COOP_CAT, &support::PROBE];
+pub(crate) static DEFS: &[&crate::pipeline::KernelDef] =
+    &[&shader::COOP, &shader::COOP_CAT, &shader::COOP_SITES, &support::PROBE];
 
 /// Invocations per workgroup.
 const THREADS: u32 = 256;

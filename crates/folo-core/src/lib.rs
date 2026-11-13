@@ -57,7 +57,9 @@ pub mod testing;
 
 pub use autocast::{AutocastGuard, autocast, autocast_dtype};
 pub use autograd::{Grads, NoGradGuard, is_grad_enabled, no_grad, with_no_grad};
-pub use backend::{BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, Pool2dParams, ReduceOp, UnaryOp};
+pub use backend::{
+    BinaryOp, ClassSites, Conv2dParams, DetectDecode, LetterboxImage, Pool2dParams, ReduceOp, UnaryOp,
+};
 pub use device::Device;
 pub use dtype::{DType, Element};
 pub use error::{Error, Result};

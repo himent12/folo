@@ -6,7 +6,7 @@ use folo_core::{DType, DetectDecode, Device, Tensor, no_grad};
 use folo_nn::{Error, Module, Result};
 use rayon::prelude::*;
 
-use super::{FoloModel, HeadMode, HeadOutput};
+use super::{FoloModel, HeadMode, HeadOutput, ImageCandidates};
 use crate::boxes::Xyxy;
 use crate::decode::{
     decode_head, dist2bbox, side_precision, side_precisions, sigmoid, softmax_expectation, softmax_moments,
@@ -402,6 +402,17 @@ impl HeadOutput {
 
     /// The device half of [`HeadOutput::detections`]; `None` when the device has no candidate kernel.
     fn detections_on_device(&self, nms: &NmsConfig) -> Result<Option<Vec<Vec<Detection>>>> {
+        Ok(self.candidates_on_device(nms)?.map(|c| {
+            c.into_par_iter()
+                .map(|c| finish_candidates(self.mode, &c.cands, c.precisions.as_deref(), nms))
+                .collect()
+        }))
+    }
+
+    /// Every image's candidates (best class score `> nms.conf`) with their boxes, in anchor order, decoded on the
+    /// outputs' device ([`Tensor::detect_candidates`]), with DFL fusion also their side precisions (from
+    /// [`HeadOutput::moments_on_device`]); `None` when the device has no candidate kernel.
+    pub(super) fn candidates_on_device(&self, nms: &NmsConfig) -> Result<Option<Vec<ImageCandidates>>> {
         let (b, a, nc, rm) = (self.batch(), self.num_anchors(), self.num_classes, self.reg_max);
         if self.box_raw.dims() != [b, 4 * rm, a] || self.cls_raw.dims() != [b, nc, a] || a == 0 || nc == 0 {
             return Ok(None);
@@ -436,32 +447,16 @@ impl HeadOutput {
                 .into_par_iter()
                 .enumerate()
                 .map(|(i, r)| {
-                    let mut c: Vec<Candidate> = r
-                        .as_chunks::<W>()
-                        .0
-                        .iter()
-                        .map(|w| Candidate {
-                            anchor: w[0],
-                            class: w[1],
-                            score: f32::from_bits(w[2]),
-                            bbox: Xyxy::new(
-                                f32::from_bits(w[3]),
-                                f32::from_bits(w[4]),
-                                f32::from_bits(w[5]),
-                                f32::from_bits(w[6]),
-                            ),
-                        })
-                        .collect();
-                    // The kernel appends in arrival order; NMS tie-breaks by anchor.
-                    c.sort_unstable_by_key(|c| c.anchor);
-                    let prec: Option<Vec<[f32; 4]>> = moments.as_ref().map(|m| {
+                    let cands = candidates_of_records(&r);
+                    let precisions = moments.as_ref().map(|m| {
                         let img = &m[i * 8 * a..(i + 1) * 8 * a];
-                        c.iter()
+                        cands
+                            .iter()
                             .map(|c| c.anchor as usize)
                             .map(|j| precision_from_moments(img, a, j, strides[j]))
                             .collect()
                     });
-                    finish_candidates(self.mode, &c, prec.as_deref(), nms)
+                    ImageCandidates { cands, precisions }
                 })
                 .collect(),
         ))
@@ -481,6 +476,29 @@ impl HeadOutput {
         }
         Ok(Tensor::from_vec(out, [images.len(), a, 4 + nc])?)
     }
+}
+
+/// The candidates of a device decode's records (`DETECT_RECORD_WORDS` words each, in arrival order), in anchor
+/// order (NMS tie-breaks by anchor).
+pub(super) fn candidates_of_records(r: &[u32]) -> Vec<Candidate> {
+    let mut c: Vec<Candidate> = r
+        .as_chunks::<DETECT_RECORD_WORDS>()
+        .0
+        .iter()
+        .map(|w| Candidate {
+            anchor: w[0],
+            class: w[1],
+            score: f32::from_bits(w[2]),
+            bbox: Xyxy::new(
+                f32::from_bits(w[3]),
+                f32::from_bits(w[4]),
+                f32::from_bits(w[5]),
+                f32::from_bits(w[6]),
+            ),
+        })
+        .collect();
+    c.sort_unstable_by_key(|c| c.anchor);
+    c
 }
 
 impl FoloModel {

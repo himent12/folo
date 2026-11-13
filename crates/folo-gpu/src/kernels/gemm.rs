@@ -10,7 +10,8 @@
 //! gathers `B` straight from an NCHW image (forward), 2 gathers it from the output gradient with the
 //! transposed-conv rule (input gradient), and 3 gathers an im2col-transposed image tile while reading `A` from
 //! the output gradient across the batch (weight gradient). `SPLIT` splits `K` into chunks, one per extra
-//! workgroup layer, each writing its own partial result (split-K; the caller sums the partials).
+//! workgroup layer, each writing its own partial result (split-K; the caller sums the partials). `SITES` (with
+//! `CONV_MODE` 1) computes the forward conv at listed output pixels only (see [`super::conv::conv2d_sites`]).
 
 use std::fmt::Write as _;
 
@@ -280,6 +281,7 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let (kh_n, kw_n) = (spec.get_u32("KH", 1), spec.get_u32("KW", 1));
     let (dh_n, dw_n) = (spec.get_u32("DH", 1), spec.get_u32("DW", 1));
     let tap_mask = mode == 1 && kh_n * kw_n <= 32;
+    let sites = mode == 1 && spec.get_bool("SITES");
     let bias = spec.get_u32("BIAS_KIND", 0);
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`super::gemm_cat`; plain GEMM, `B` not transposed).
     let cat = spec.get_u32("CAT", 1);
@@ -316,6 +318,9 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> C: array<{}>;", wgsl_ty(c_f16, vc));
     if cat > 1 {
         s.push_str(&super::gemm_cat::cat_source(cat, "B", wgsl_ty(f16, vb), vb));
+    }
+    if sites {
+        s.push_str(super::conv::SITES_BINDING);
     }
     let _ = writeln!(s, "var<workgroup> As: array<array<vec4<f32>, {bm4}>, {}>;", 2 * bk);
     // `WG_PAD`: the weight gradient pads each B row by one vec4 (`2 · BK · 16` bytes, which
@@ -360,6 +365,10 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
          let offBias = pu(18u) + b1 * pu(19u) + b2 * pu(20u);\n",
     );
     let _ = writeln!(s, "  let m0 = wid.y * {bm}u; let n0 = wid.x * {bn}u;");
+    if sites {
+        s.push_str(super::conv::SITES_LIVE);
+        s.push_str(super::conv::SITES_RETIRE);
+    }
     match mode {
         // Forward gather: B[k][j] = X[ci][oh*SH - PH + kh*DH][ow*SW - PW + kw*DW].
         1 => s.push_str("  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n"),
@@ -385,11 +394,7 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     // One B column per thread for the whole K loop, so its index math is done once.
     match mode {
         1 => {
-            s.push_str(
-                "  let cj = n0 + bi;\n  let coh = cj / OW; let cow = cj % OW;\n\
-                 let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;\n\
-                 let cjok = cj < N;\n",
-            );
+            s.push_str(&super::conv::forward_column("bi", sites));
             if tap_mask {
                 // Which taps of this column's window lie inside the image (bit `kh·KW + kw`), and the window's
                 // top-left element (wrapping u32 arithmetic: only in-image taps are ever read).
@@ -757,6 +762,13 @@ pub(crate) static GEMM_CAT: KernelDef = KernelDef {
     source: Source::Generated(gen_gemm),
 };
 
+/// [`GEMM`] as the forward conv at listed output pixels (`CONV_MODE` 1 with `SITES`; binding 5 is the list).
+pub(crate) static GEMM_SITES: KernelDef = KernelDef {
+    name: "gemm_sites",
+    storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],
+    source: Source::Generated(gen_gemm),
+};
+
 /// Highest element index (exclusive) a strided batched matrix operand touches (0 when it touches none).
 pub(crate) fn extent(
     s: &BatchStrides,
@@ -939,4 +951,4 @@ fn gemm_impl(
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&GEMM, &GEMM_CAT];
+pub(crate) static DEFS: &[&KernelDef] = &[&GEMM, &GEMM_CAT, &GEMM_SITES];

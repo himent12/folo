@@ -9,7 +9,7 @@ use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::check_buf;
 use crate::kernels::gemm::{BatchStrides, GemmBias, GemmDesc, gemm_params};
-use crate::pipeline::{Kernel, Spec};
+use crate::pipeline::{Kernel, KernelDef, Spec};
 
 pub(super) fn base_spec(d: &GemmDesc, out: DType, cfg: CoopConfig) -> Spec {
     Spec::new()
@@ -35,7 +35,12 @@ pub(super) fn base_spec(d: &GemmDesc, out: DType, cfg: CoopConfig) -> Spec {
 /// Builds (or fetches) a tensor-core pipeline. A build failure turns tensor cores off for the context and returns
 /// `None`, so the caller can fall back to the regular kernel.
 pub(super) fn build(ctx: &GpuContext, spec: Spec) -> Option<Arc<Kernel>> {
-    match ctx.kernel(&COOP, spec) {
+    build_def(ctx, &COOP, spec)
+}
+
+/// [`build`] of the generator's `def` variant.
+pub(super) fn build_def(ctx: &GpuContext, def: &'static KernelDef, spec: Spec) -> Option<Arc<Kernel>> {
+    match ctx.kernel(def, spec) {
         Ok(k) => Some(k),
         Err(e) => {
             ctx.disable_tensor_cores(format!("a tensor-core kernel failed to build ({e})"));

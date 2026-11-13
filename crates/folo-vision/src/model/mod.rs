@@ -32,6 +32,7 @@ pub mod blocks;
 pub mod head;
 mod io;
 mod lazy;
+mod lazy_gpu;
 mod predict;
 
 use folo_core::rng::Rng;

@@ -551,6 +551,24 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Storage> {
         unsupported!(self, "conv2d_act_at")
     }
+    /// [`Backend::conv2d_act`] at listed output pixels: `sites` `U32 [N, 1 + cap]` holds per image a count, then
+    /// up to `cap` pixels `oy·OW + ox` (as [`Backend::detect_class_sites`] lists them). Returns `[N, O, cap]`:
+    /// column `j < min(count, cap)` of image `n` is, bit for bit, the value [`Backend::conv2d_act`] computes on
+    /// this batch at the image's `j`-th pixel; with `to_map`, the full `[N, O, OH, OW]` output with those sites
+    /// written instead. Everything else is unspecified. Reached through `Tensor::conv2d_act_sites`.
+    #[allow(clippy::too_many_arguments)]
+    fn conv2d_act_sites(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        sites: View<'_>,
+        to_map: bool,
+    ) -> Result<Storage> {
+        unsupported!(self, "conv2d_act_sites")
+    }
     /// Train-mode batch normalisation of `x` `[N, C, H, W]` over `N·H·W` per channel, then `act` (`None` is
     /// the identity): `y = act((x − mean) · invstd · weight + bias)` with the batch mean and
     /// `invstd = 1 / sqrt(var + eps)` of the *biased* variance. Returns `(y, mean [C], invstd [C])`.
@@ -693,6 +711,50 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Storage> {
         unsupported!(self, "detect_candidates")
     }
+    /// The class pass of one head level for candidate-first prediction (docs/MODEL.md §9.4): of `cls` (`[B, nc,
+    /// H, W]` logits, `F32` or `F16`) every pixel whose best class score (first maximum of the `nc` sigmoids) is
+    /// `> p.conf`. Returns three `U32` tensors: `sites [B, 1 + cap]` (per image the count of all candidates, then
+    /// the pixels `y·W + x` of the first `cap`, in unspecified order), `recs [B, 2·cap]` (class and score bits per
+    /// slot) and `field [B, 1 + fcap]` (the pixels of the slotted candidates' 3×3 windows inside the map, each
+    /// once, counted likewise; `fcap = min(9·cap, H·W)`, so it never overflows). Reached through
+    /// `Tensor::detect_class_sites`.
+    fn detect_class_sites(&self, cls: View<'_>, p: &ClassSites) -> Result<(Storage, Storage, Storage)> {
+        unsupported!(self, "detect_class_sites")
+    }
+    /// The boxes of every level's candidates (`levels`, from [`Backend::detect_class_sites`] with each level's box
+    /// logits at the slots, `[B, 4·reg_max, cap]`): `U32 [B, 2 + 7·Σ cap]`, per image the record count, a word
+    /// with bit `l` set when level `l` had more candidates than slots, then the records `(a, c, score, x1, y1,
+    /// x2, y2)` of [`Backend::detect_candidates`] (the decode in `f32`), in unspecified order. Reached through
+    /// `Tensor::detect_decode_sites`.
+    fn detect_decode_sites(&self, levels: &[SiteLevel<'_>], reg_max: usize) -> Result<Storage> {
+        unsupported!(self, "detect_decode_sites")
+    }
+}
+
+/// Settings of [`Backend::detect_class_sites`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClassSites {
+    /// A pixel is a candidate when its best class score is `> conf`.
+    pub conf: f32,
+    /// Candidate slots per image.
+    pub cap: usize,
+}
+
+/// One level of [`Backend::detect_decode_sites`].
+#[derive(Clone, Copy)]
+pub struct SiteLevel<'a> {
+    /// Box logits at the slots, `[B, 4·reg_max, cap]`.
+    pub raw: View<'a>,
+    /// The level's `sites` from [`Backend::detect_class_sites`].
+    pub sites: View<'a>,
+    /// The level's `recs`.
+    pub recs: View<'a>,
+    /// Map width.
+    pub width: usize,
+    /// The level's stride (anchor points are pixel centres, `(x + 0.5, y + 0.5)`, in grid units).
+    pub stride: f32,
+    /// The level's first anchor.
+    pub start: usize,
 }
 
 /// One image of [`Backend::letterbox_rgb8`]. The sampling is folo-data's `ResizePlan` for a `src` →
