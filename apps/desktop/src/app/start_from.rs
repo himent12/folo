@@ -33,9 +33,15 @@ fn score(m: &Model) -> f32 {
 }
 
 /// The options in the field's order, for a form on architecture `arch`; `current` (the form's
-/// weights) is kept as an option when the server doesn't list it (a run prefilled from one that
-/// started from a file).
-pub fn start_choices(models: &[Model], arch: usize, current: Option<&str>) -> Vec<StartChoice> {
+/// weights) is kept as an option when the server doesn't list it but it is `base`'s, the weights
+/// of the run the form was prefilled from (one that started from a file). Weights picked here and
+/// gone since (deleted elsewhere) are not: [`FoloApp::nr_weights_gone`] says so.
+pub fn start_choices(
+    models: &[Model],
+    arch: usize,
+    current: Option<&str>,
+    base: Option<&str>,
+) -> Vec<StartChoice> {
     let mut out = vec![StartChoice { id: None, label: "From scratch".into(), detail: None, arch: None }];
     let published = |m: &&Model| m.source == Some(ModelSource::Published);
     let mut trained: Vec<&Model> = models.iter().filter(|m| trainable(m) && !published(m)).collect();
@@ -67,7 +73,8 @@ pub fn start_choices(models: &[Model], arch: usize, current: Option<&str>) -> Ve
             arch: arch_index(m),
         });
     }
-    if let Some(w) = current.filter(|w| !out.iter().any(|c| c.id.as_deref() == Some(*w))) {
+    if let Some(w) = current.filter(|w| base == Some(*w) && !out.iter().any(|c| c.id.as_deref() == Some(*w)))
+    {
         let file = w.rsplit(['/', '\\']).next().unwrap_or(w);
         out.push(StartChoice {
             id: Some(w.to_string()),
@@ -108,13 +115,33 @@ impl FoloApp {
     pub fn nr_start_choices(&self) -> Vec<StartChoice> {
         let Some(f) = self.new_run.as_ref() else { return Vec::new() };
         let models = self.store.models.ready().map(Vec::as_slice).unwrap_or_default();
-        start_choices(models, f.arch, f.weights.as_deref())
+        start_choices(
+            models,
+            f.arch,
+            f.weights.as_deref(),
+            f.base.as_ref().and_then(|b| b.weights.as_deref()),
+        )
+    }
+
+    /// The picked weights are no longer listed (their run deleted elsewhere, also while the form
+    /// waited as a draft): Start waits for another choice, and this says why.
+    pub fn nr_weights_gone(&self) -> Option<String> {
+        let f = self.new_run.as_ref()?;
+        let w = f.weights.as_deref()?;
+        let models = self.store.models.ready()?;
+        let from_base = f.base.as_ref().and_then(|b| b.weights.as_deref()) == Some(w);
+        let listed = models.iter().any(|m| m.id == w);
+        (!listed && !from_base).then(|| {
+            let name = f.weights_name.clone().unwrap_or_else(|| w.to_string());
+            format!("{name} was deleted. Pick other weights, or From scratch.")
+        })
     }
 
     /// Picks a Start from option: its weights, and their size (a fine-tune trains the weights' own).
     pub fn pick_start(&mut self, c: &StartChoice, cx: &mut Context<Self>) {
         let Some(f) = self.new_run.as_mut() else { return };
         f.weights = c.id.clone();
+        f.weights_name = c.id.as_ref().map(|_| c.label.clone());
         if let Some(a) = c.arch {
             f.arch = a;
         }
@@ -122,16 +149,17 @@ impl FoloApp {
         cx.notify();
     }
 
-    /// The architecture changed by hand: weights of another size can't start this run, so it
-    /// trains from scratch again (weights the server doesn't list stay as they were).
+    /// The architecture changed by hand: weights of another size can't start this run (the server
+    /// would train the weights' own size), so it trains from scratch again; so do weights whose
+    /// size isn't known here (not listed: a checkpoint the earlier run started from).
     pub fn nr_arch_changed(&mut self, cx: &mut Context<Self>) {
         let models = self.store.models.ready().map(Vec::as_slice).unwrap_or_default();
         if let Some(f) = self.new_run.as_mut()
             && let Some(w) = f.weights.as_deref()
-            && let Some(m) = models.iter().find(|m| m.id == w)
-            && arch_index(m) != Some(f.arch)
+            && models.iter().find(|m| m.id == w).is_none_or(|m| arch_index(m) != Some(f.arch))
         {
             f.weights = None;
+            f.weights_name = None;
         }
         self.resuggest_run_name(cx);
     }
@@ -159,8 +187,11 @@ impl FoloApp {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{drive, open};
-    use crate::api::ModelSource;
+    use std::sync::Arc;
+
+    use super::super::tests::{drive, open, open_with};
+    use crate::api::mock::MockBackend;
+    use crate::api::{Backend, ModelSource};
 
     #[test]
     fn start_from_offers_this_size_first_then_others_then_published_and_sends_the_pick() {
@@ -211,14 +242,9 @@ mod tests {
 
     #[test]
     fn a_dataset_with_no_training_image_keeps_new_run_from_starting() {
-        let (mut app, window) = open();
-        let api = drive(&mut app, window, |this, w, cx| {
-            let list = this.store.datasets.ready_mut().unwrap();
-            list[0].splits.train = 0;
-            let id = list[0].id.clone();
-            this.open_new_run(Some(&id), w, cx);
-            this.store.api.clone()
-        });
+        let api = Arc::new(MockBackend::new(4200, true).with_no_training_images("ds_8f2c"));
+        let (mut app, window) = open_with(api.clone());
+        drive(&mut app, window, |this, w, cx| this.open_new_run(Some("ds_8f2c"), w, cx));
         let runs = api.runs().unwrap().len();
         drive(&mut app, window, |this, w, cx| {
             let why = this.dataset_blocked().expect("blocked");
@@ -227,5 +253,65 @@ mod tests {
             assert!(!this.new_run.as_ref().unwrap().submitting, "nothing is sent");
         });
         assert_eq!(api.runs().unwrap().len(), runs);
+    }
+
+    #[test]
+    fn a_dataset_counted_empty_before_is_asked_for_again() {
+        // The list says no training image (read before images were added); the server, asked
+        // again when New run opens on it, counts them: Start is not held back.
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| {
+            this.store
+                .datasets
+                .ready_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|d| d.id == "ds_8f2c")
+                .unwrap()
+                .splits
+                .train = 0;
+            this.open_new_run(Some("ds_8f2c"), w, cx);
+        });
+        drive(&mut app, window, |this, _, _| assert_eq!(this.dataset_blocked(), None));
+    }
+
+    #[test]
+    fn weights_deleted_while_picked_hold_start_until_another_pick() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| this.open_new_run(None, w, cx));
+        drive(&mut app, window, |this, w, cx| {
+            let pick = this.nr_start_choices()[1].clone();
+            this.pick_start(&pick, cx);
+            // Its run deleted elsewhere: the next list no longer has it.
+            let id = pick.id.clone().unwrap();
+            this.store.models.ready_mut().unwrap().retain(|m| m.id != id);
+            assert!(this.nr_start_choices().iter().all(|c| c.id.as_deref() != Some(id.as_str())));
+            let why = this.nr_weights_gone().expect("said");
+            assert_eq!(why, format!("{} was deleted. Pick other weights, or From scratch.", pick.label));
+            this.submit_new_run(w, cx);
+            assert!(!this.new_run.as_ref().unwrap().submitting, "nothing is sent");
+            let scratch = this.nr_start_choices()[0].clone();
+            this.pick_start(&scratch, cx);
+            assert_eq!(this.nr_weights_gone(), None);
+        });
+    }
+
+    #[test]
+    fn weights_of_an_unknown_size_go_when_the_size_changes() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| {
+            let mut config = this.store.runs.ready().unwrap()[0].config.clone();
+            config.weights = Some("runs/a/weights/last.folo".into());
+            this.open_new_run_from(&config, None, w, cx);
+        });
+        drive(&mut app, window, |this, _, cx| {
+            // Prefilled: kept, and listed as the earlier run's.
+            assert_eq!(this.form_config(cx).unwrap().weights.as_deref(), Some("runs/a/weights/last.folo"));
+            assert!(this.nr_start_choices().iter().any(|c| c.label == "last.folo"));
+            let f = this.new_run.as_mut().unwrap();
+            f.arch = (f.arch + 1) % 5;
+            this.nr_arch_changed(cx);
+            assert_eq!(this.form_config(cx).unwrap().weights, None);
+        });
     }
 }

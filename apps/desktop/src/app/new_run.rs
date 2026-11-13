@@ -137,6 +137,7 @@ impl FoloApp {
         {
             let fh = draft.name.read(cx).focus_handle(cx);
             self.new_run = Some(draft);
+            self.nr_recheck_dataset(cx);
             window.focus(&fh);
             cx.notify();
             return;
@@ -284,6 +285,7 @@ impl FoloApp {
             scale: 0.5,
             note: None,
             weights: None,
+            weights_name: None,
             base: None,
             epochs_input,
             lr_input,
@@ -307,6 +309,7 @@ impl FoloApp {
             submitting: false,
             error: None,
         });
+        self.nr_recheck_dataset(cx);
         window.focus(&fh);
         cx.notify();
     }
@@ -374,6 +377,28 @@ impl FoloApp {
         let f = self.new_run.as_ref()?;
         let ds = self.store.dataset_summary(&f.dataset)?;
         (ds.splits.train == 0).then(|| format!("{} has no training images. Pick another dataset.", ds.name))
+    }
+
+    /// The form's dataset has no training image by the list: ask the server for it again (its
+    /// page indexes the folder afresh), so images added since lift the block.
+    pub fn nr_recheck_dataset(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.new_run.as_ref().map(|f| f.dataset.clone()) else { return };
+        if self.store.dataset_summary(&id).is_none_or(|d| d.splits.train > 0) {
+            return;
+        }
+        self.fetch(
+            cx,
+            move |api| api.dataset(&id),
+            |this, r, cx| {
+                let Ok(ds) = r else { return };
+                if let Some(slot) =
+                    this.store.datasets.ready_mut().and_then(|l| l.iter_mut().find(|d| d.id == ds.id))
+                {
+                    *slot = ds;
+                    cx.notify();
+                }
+            },
+        );
     }
 
     /// Why New run can't send its config yet because of its compute choice: a connection chosen
@@ -465,6 +490,7 @@ impl FoloApp {
         let config = self.form_config(cx);
         let compute_blocked = self.compute_blocked().is_some();
         let dataset_blocked = self.dataset_blocked().is_some();
+        let weights_gone = self.nr_weights_gone().is_some();
         let Some(form) = self.new_run.as_mut() else { return };
         // Auto sets its own rate, so an unparsed rate entry doesn't block it.
         let lr_invalid = form.lr_invalid && form.optimizer != 0;
@@ -475,6 +501,7 @@ impl FoloApp {
             || form.optimizer_blocks().is_some()
             || compute_blocked
             || dataset_blocked
+            || weights_gone
         {
             return;
         }

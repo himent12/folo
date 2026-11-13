@@ -140,6 +140,7 @@ impl FoloApp {
                 {
                     f.dataset = id.clone();
                     this.resuggest_run_name(cx);
+                    this.nr_recheck_dataset(cx);
                 }
             }),
         );
@@ -185,6 +186,7 @@ impl FoloApp {
             ))
             .into_any_element();
         let (start_select, start_hint) = (self.start_from_select(window, cx), self.nr_start_hint());
+        let weights_gone = self.nr_weights_gone();
         let no_train = self.dataset_blocked();
         let batch_labels: Vec<String> = BATCHES.iter().map(|b| b.to_string()).collect();
         let batch_refs: Vec<&str> = batch_labels.iter().map(String::as_str).collect();
@@ -506,8 +508,16 @@ impl FoloApp {
                     .gap(px(16.))
                     .child(div().flex_1().min_w_0().child(field(
                         "Start from",
-                        div().w_full().child(start_select).into_any_element(),
-                        Some(start_hint),
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(start_select)
+                            .when_some(weights_gone, |d, why| d.child(text(ty::SM, t.danger_text).child(why)))
+                            .into_any_element(),
+                        // Not the picked weights' description when they are gone (said above).
+                        self.nr_weights_gone().is_none().then_some(start_hint),
                     )))
                     .child(div().flex_1()),
             )

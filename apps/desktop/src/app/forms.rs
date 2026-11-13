@@ -185,6 +185,8 @@ pub struct NewRunForm {
     pub note: Option<String>,
     /// Start from: the model id (or published name) to fine-tune, `None` from scratch.
     pub weights: Option<String>,
+    /// The picked weights' name, to name them if they are deleted while picked.
+    pub weights_name: Option<String>,
     /// The run this form was prefilled from: settings the form doesn't show (seed, colour and
     /// translate jitter) carry over unchanged.
     pub base: Option<TrainConfig>,
