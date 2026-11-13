@@ -40,6 +40,16 @@ export function askAllWhenCut(o: {
     return f !== null && o.conf() <= f ? o.pred.get() : null;
   });
   const retry = signal(0);
+  // The answer a failure toast is about: the toast goes with it (another image, model or backend) and with the page.
+  let failed: Prediction | null = null;
+  const takeBack = () => {
+    if (failed) toast.clear(KEY);
+    failed = null;
+  };
+  effect(() => {
+    if (o.pred.get() !== failed) takeBack();
+  });
+  effect(() => takeBack);
   // The model, image, backend and file are tracked too: a kept answer restored before the model list has loaded asks
   // once the model is known. Never while another prediction runs (a new backend or file): its answer comes next.
   effect(() => {
@@ -56,7 +66,7 @@ export function askAllWhenCut(o: {
         if (ctrl.signal.aborted || o.pred.peek() !== p) return;
         const next = { ...all, timing: p.timing, cold: p.cold };
         complete.add(next);
-        toast.clear(KEY);
+        takeBack();
         o.pred.set(next);
       },
       // The first answer stays: it is still right above its lowest score, and the count still says "1,000+".
@@ -64,6 +74,7 @@ export function askAllWhenCut(o: {
         if (ctrl.signal.aborted) return;
         if (on !== 'server' && !file && noServerWeights(e)) return o.weightsMissing();
         const below = floor.peek()?.toFixed(2);
+        failed = p;
         toast.show({
           tone: 'error',
           title: 'Could not load every candidate',

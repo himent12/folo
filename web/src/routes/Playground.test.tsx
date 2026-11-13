@@ -355,6 +355,24 @@ describe('Playground: a busy image (more candidates than the first answer holds)
     expect(asked).toEqual([1000, 30_000, 30_000]);
   });
 
+  it('takes the failure back with the answer it is about: another image, or the page left', async () => {
+    const live = () => toast.items.filter((t) => t.title === 'Could not load every candidate').length;
+    await open(0.2, 'fail');
+    setConf(0.1);
+    await until(() => live() === 1, 'the error');
+    target.querySelector<HTMLButtonElement>('button[aria-label="Clear image"]')!.click();
+    await until(() => live() === 0, 'the error to go with the image');
+    unmount(c!);
+    c = undefined;
+    target.remove();
+    await open(0.2, 'fail');
+    setConf(0.1);
+    await until(() => live() === 1, 'the error again');
+    unmount(c!);
+    c = undefined;
+    expect(live()).toBe(0);
+  });
+
   it('does not complete an answer that a new prediction is replacing (another backend)', async () => {
     const asked = await open(0.2);
     const inPage: number[] = [];
