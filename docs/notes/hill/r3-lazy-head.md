@@ -40,6 +40,20 @@ head's `cat` are never made on this path; the forward rows (dense by definition)
   NaN, so a test can only pass by computing what it reads (recycled buffers otherwise held the dense values).
   Mutation checks: the 1×1 receptive field fails the isolated-sites and o2o tests.
 
+### Box fusion (after the rebase onto #257)
+#257 added opt-in box fusion after NMS (MODEL.md §9.4: `none`, `vote`, `dfl`). `dfl` weighs each cluster member's
+sides by their precisions, which the dense CPU path computes from the same softmax moments as the box
+(`dfl_box`: `softmax_moments`, `side_precision`). Candidate-first serves every setting with the dense result:
+- `none` and `vote` read only the boxes and scores, which are already the dense ones.
+- `dfl`: `predict_candidates` returns `ImageCandidates`, the candidates plus, with `dfl` on an `o2m` head, each
+  candidate's side precisions. `boxes_at` computes them from the candidate's own box logits with `dfl_box`, so
+  they are the dense bits. `finish_candidates` passes them to `nms_candidates_with`.
+- Tests: `box_fusion_matches_dense` in `tests/lazy_head.rs` (`vote` and `dfl`, `o2m` and `o2o`, a few percent and
+  every anchor passing; every candidate's precisions against `HeadOutput::side_precisions` bit for bit; it asserts
+  that fusion moves boxes) and the predictor with `dfl`. Dropping the precisions in `finish_candidates` fails both.
+- All of val2017 again, folo-n on the CPU (`FOLO_BENCH_VERIFY=1`): 0 of 5000 images mismatched with fusion off,
+  and 0 with `FOLO_BENCH_FUSION=dfl` (`logs/verify2-cpu-*`).
+
 ## Numbers
 ### Candidates on COCO val2017
 Candidates per image that need a box, at conf 0.25 with the published weights, over all 5000 val2017 images
