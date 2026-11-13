@@ -5,7 +5,9 @@
 //! site lists hold, so the dense head serves those images).
 //!
 //! This binary asks for tensor cores before the shared GPU context exists and runs the f16 cases with them on
-//! and off (on only where the adapter has them).
+//! and off (on only where the adapter has them). It fills every buffer the GPU backend allocates with NaN
+//! (`folo_gpu::poison_uninit`), so a site value can only match by being computed: the dense forward that runs first
+//! would otherwise leave its maps in the pool for the sites path to reuse.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -22,6 +24,7 @@ fn gpu() -> Option<(Device, folo_gpu::GpuContext, MutexGuard<'static, ()>)> {
     static LOCK: Mutex<()> = Mutex::new(());
     let guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     folo_gpu::request_tensor_cores();
+    folo_gpu::poison_uninit(true);
     let ctx = match folo_gpu::GpuContext::shared() {
         Ok(c) => c,
         Err(e) => {
@@ -138,6 +141,53 @@ fn gpu_candidates_first_matches_dense_bit_for_bit() {
             }
             assert_eq!(ctx.tensor_cores(), on, "{}", ctx.tensor_cores_status());
         }
+    }
+    ctx.set_tensor_cores(true);
+}
+
+/// One batch in which one image overflows P3's site list (more than 1024 candidates at 320²) and the other fits:
+/// the overflowing image takes the dense head's candidates, the other its own, each bit for bit the dense path.
+#[test]
+fn a_batch_mixing_overflow_and_fit_matches_dense_per_image() {
+    let Some((dev, ctx, _g)) = gpu() else { return };
+    ctx.set_tensor_cores(false);
+    let _g = no_grad();
+    let m = model(3, "o2m", dev, DType::F32);
+    // A high-contrast random image and a flat grey one: this random-init model's scores hardly depend on an image
+    // in [0, 1] (about 66 distinct P3 scores), so the contrast makes the two maps differ.
+    let a = Tensor::rand_uniform([1, 3, 320, 320], -40.0, 40.0, &mut Rng::seed(11));
+    let b = a.zeros_like().unwrap().add_scalar(0.5).unwrap();
+    let x = Tensor::cat(&[&a, &b], 0).unwrap().to_device(dev).unwrap();
+    let dense = m.forward(&x).unwrap();
+    let (nc, an) = (dense.num_classes, dense.num_anchors());
+    let p3 = 40 * 40;
+    let cls = dense.cls_raw.to_vec::<f32>().unwrap();
+    // Each image's 1025th best P3 score: a threshold below it overflows that image's P3 list.
+    let kth: Vec<f32> = (0..2)
+        .map(|img| {
+            let mut best: Vec<f32> = (0..p3)
+                .map(|j| (0..nc).map(|c| cls[(img * nc + c) * an + j]).fold(f32::NEG_INFINITY, f32::max))
+                .map(|l| 1.0 / (1.0 + (-l).exp()))
+                .collect();
+            best.sort_by(|u, v| v.total_cmp(u));
+            best[1024]
+        })
+        .collect();
+    let conf = (kth[0] + kth[1]) / 2.0;
+    let nms =
+        NmsConfig { conf, iou: 1.0, max_det: usize::MAX, max_candidates: usize::MAX, ..NmsConfig::default() };
+    let got = m.predict_candidates(&x, &nms).unwrap();
+    let in_p3 = |img: usize| got[img].iter().filter(|c| (c.anchor as usize) < p3).count();
+    let (over, fit) = if kth[0] > kth[1] { (0, 1) } else { (1, 0) };
+    assert!(
+        in_p3(over) > 1024 && in_p3(fit) <= 1024,
+        "P3 candidates {} and {} ({kth:?})",
+        in_p3(0),
+        in_p3(1)
+    );
+    let want = dense.detections(&nms).unwrap();
+    for img in 0..2 {
+        assert_eq!(bits(&m.finish_candidates(&got[img], &nms)), bits(&want[img]), "image {img}");
     }
     ctx.set_tensor_cores(true);
 }

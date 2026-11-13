@@ -29,6 +29,7 @@ mod encode;
 mod ops;
 mod sites;
 mod storage;
+pub use storage::poison_uninit;
 
 use std::sync::{Arc, OnceLock};
 

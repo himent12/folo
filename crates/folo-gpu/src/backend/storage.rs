@@ -1,6 +1,8 @@
 //! Storages and views on wgpu buffers: a view's buffer, new result storages, dense copies of strided views and
 //! index operands.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use folo_core::backend::View;
 use folo_core::{DType as CoreDType, DeviceStorage, Error, Result, Storage};
 
@@ -9,6 +11,15 @@ use super::{GpuBackend, GpuStorage, core_err};
 use crate::error::GpuError;
 use crate::kernels::strided;
 use crate::pool::GpuBuffer;
+
+static POISON: AtomicBool = AtomicBool::new(false);
+
+/// Test aid (as `folo_core::cpu::poison_uninit`): while on, every buffer the GPU backend allocates for a result is
+/// filled with NaN first, so an element a kernel never wrote (that would otherwise hold whatever a recycled
+/// buffer held, such as a dense result of the same size) shows up as NaN.
+pub fn poison_uninit(on: bool) {
+    POISON.store(on, Ordering::Relaxed);
+}
 
 /// A dense (contiguous, offset 0) f32-or-other buffer for a view: borrowed when it already is, else a copy.
 pub(super) enum Dense<'a> {
@@ -48,7 +59,14 @@ impl GpuBackend {
     }
 
     pub(super) fn alloc(&self, dtype: CoreDType, len: usize) -> Result<GpuBuffer> {
-        self.ctx.alloc(elem(dtype).buffer_bytes(len).core()?).core()
+        let bytes = elem(dtype).buffer_bytes(len).core()?;
+        let b = self.ctx.alloc(bytes).core()?;
+        if POISON.load(Ordering::Relaxed) {
+            // A quiet NaN in every f32 word and in both halves of every f16 pair.
+            let nan = if elem(dtype).bytes() == 2 { 0x7e00_7e00 } else { 0x7fc0_0000 };
+            strided::fill_words(&self.ctx, b.raw(), bytes as usize / 4, nan, nan).core()?;
+        }
+        Ok(b)
     }
 
     pub(super) fn wrap(&self, dtype: CoreDType, len: usize, buf: GpuBuffer) -> Storage {

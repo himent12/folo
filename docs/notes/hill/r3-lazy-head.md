@@ -151,7 +151,7 @@ Against counsel:
   both. A/B against `main`, both built from the same bench sources:
   - GPU forward (`benches/gpu.rs`, 3 rounds): row 1 (b1 f32) 1.14 → 1.13 ms (n), 2.24 → 2.23 (s); row 3 (b16
     f32) 7.96 → 7.96 (n), 19.70 → 19.70 (s). The pipelined numbers, b16 f16 and folo-s b1 f16 were inside ±2.5%.
-    folo-n b1 f16 was 1.17 → 1.13 (−3.4%; tensor cores on; not a row the criterion names).
+    folo-n b1 f16 (regular kernels) was 1.17 → 1.13 (−3.4%; not a row the criterion names).
   - CPU row 7 (`forward 640 b1`, 28 threads): folo-n 15.21 → 15.12 ms over 7 rounds (0.994, load 17–43%). The
     folo-s rounds ran at 37–86% load and are unreadable.
   - Per layer (`FOLO_BENCH_LAYERS=1`, 5 rounds): the three C3k-bearing layers (stage4, stage5, out5) got

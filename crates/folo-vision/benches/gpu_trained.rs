@@ -9,9 +9,10 @@
 //! (`f16tc` only with tensor cores); `FOLO_BENCH_ITERS` (default 100) batch-1 calls, a third as many batch-16 calls.
 //!
 //! Rows, through the public `Predictor` with its defaults (conf 0.25): **b1** `predict` on each image in turn
-//! (rect letterbox, so the input shape changes with the image), **b16** `predict_batch` on all of them (square
-//! 640). Every call synchronised, after a second of warm-up calls; median, p90 and min, and the detections per
-//! image of the last pass.
+//! (rect letterbox, so the input shape changes with the image), **b1 one** `predict` on the first image only (one
+//! input shape), **b16** `predict_batch` on all of them (square 640). Every call synchronised, after a second of
+//! warm-up calls; median, p90 and min, and the detections per image of the last pass. A row asked to run on tensor
+//! cores fails if they were off at its end (a cooperative kernel that fails to build turns them off).
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -110,17 +111,27 @@ fn main() {
                 black_box(r);
             });
             let b1_dets = dets as f64 / next as f64;
+            let mut one = 0;
+            let b1_one = latency(dev, iters, || {
+                let r = pred.predict(&images[0]).expect("predict");
+                one = r.detections.len();
+                black_box(r);
+            });
             let mut last = 0;
             let b16 = latency(dev, iters.div_ceil(3), || {
                 let r = pred.predict_batch(&images).expect("predict");
                 last = r.iter().map(|r| r.detections.len()).sum();
                 black_box(r);
             });
-            for (name, (med, p90, min), batch, d) in
-                [("b1", b1, 1, b1_dets), ("b16", b16, images.len(), last as f64 / images.len() as f64)]
-            {
+            assert_eq!(ctx.tensor_cores(), on, "folo-{scale} {p}: {}", ctx.tensor_cores_status());
+            let rows = [
+                ("b1", b1, 1, b1_dets),
+                ("b1 one", b1_one, 1, one as f64),
+                ("b16", b16, images.len(), last as f64 / images.len() as f64),
+            ];
+            for (name, (med, p90, min), batch, d) in rows {
                 println!(
-                    "trained folo-{scale} {p:<6} predict {name:<4} median {med:>8.2} ms  p90 {p90:>8.2}  min {min:>8.2}  \
+                    "trained folo-{scale} {p:<6} predict {name:<6} median {med:>8.2} ms  p90 {p90:>8.2}  min {min:>8.2}  \
                      ({:>6.0} img/s, {d:.1} det/img)",
                     batch as f64 * 1e3 / med
                 );
