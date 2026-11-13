@@ -223,6 +223,8 @@ describe('Run: a waiting run while the training run is in its first epoch', () =
     expect(text).not.toContain('23s left');
     expect(text).toContain('time left not known yet');
     expect(text).not.toMatch(/about (under|~)/);
+    // A floor of a few seconds says nothing.
+    expect(text).not.toMatch(/more than \d+s/);
     expect(target.querySelector('#queue')?.textContent).not.toContain('23s left');
   });
 });

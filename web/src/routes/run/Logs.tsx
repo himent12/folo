@@ -346,6 +346,8 @@ css`
     padding: 0 var(--space-4) var(--space-2);
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
+    /* A snap point as the lines are, so the box can come to rest on it (scrolled to the top). */
+    scroll-snap-align: start;
   }
   .announce {
     display: inline-flex;

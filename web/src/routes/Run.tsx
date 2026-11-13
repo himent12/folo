@@ -418,9 +418,11 @@ export default function Run() {
           // queue order (what trains now, then the waiting ones), so the sum is checkable. A run whose length the server
           // cannot estimate makes the sum a floor ("more than 7m"), never an estimate of the whole (`queueWait`).
           <>
-            {wait.get()?.known ? <>Starts in {timeRange(wait.get()!.lo, wait.get()!.hi)}, after</> : wait.get() ? <>Starts in more than {eta(wait.get()!.lo)}, after</> : 'Starts after'}
-            {ahead.get() ? <>{' '}<a class="link" href={href(`/runs/${ahead.get()!.id}`)}>{ahead.get()!.name}</a>{' '}({settledEta(ahead.get()!) !== null ? `${eta(settledEta(ahead.get()!)!)} left` : 'time left not known yet'}) and</> : null}
-            {' '}
+            {/* Each piece carries the space after it, so the sentence keeps its spaces however the pieces come and go
+                (with a separate space between them, a training run that showed up after the page opened once read
+                "and" run-on into the next name). A floor under a minute ("more than 1s") says nothing: left out. */}
+            {wait.get()?.known ? <>Starts in {timeRange(wait.get()!.lo, wait.get()!.hi)}, after{' '}</> : wait.get() && wait.get()!.lo >= 60 ? <>Starts in more than {eta(wait.get()!.lo)}, after{' '}</> : 'Starts after '}
+            {ahead.get() ? <><a class="link" href={href(`/runs/${ahead.get()!.id}`)}>{ahead.get()!.name}</a>{' '}({settledEta(ahead.get()!) !== null ? `${eta(settledEta(ahead.get()!)!)} left` : 'time left not known yet'}) and{' '}</> : null}
             {before.get() ? <><a class="link" href={href(`/runs/${before.get()!.id}`)}>{before.get()!.name}</a>{place.get()! > 2 ? <>{' '}and {place.get()! - 2} more</> : null}</> : <>{place.get()! - 1} queued {place.get() === 2 ? 'run' : 'runs'}</>}
             {' '}({frontTime.get()}).
           </>
