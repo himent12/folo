@@ -91,9 +91,14 @@ describe('Overview', () => {
     expect(recent().textContent).not.toMatch(/ds_/);
     expect(recent().querySelector('.ds .sk')).not.toBeNull();
 
-    // The datasets arrive without the first run's: it was removed, and goes by the name the run recorded.
+    // The datasets arrive without the first run's: it may be new, so the list is read once more; still without it, it
+    // was removed, and goes by the name the run recorded.
     const all = await new MockApi('normal', 0).datasets();
     const done = runs.find((r) => r.status === 'completed')!;
+    const first = answer;
+    first(all.filter((d) => d.id !== done.config.dataset_id));
+    await vi.waitFor(() => expect(answer).not.toBe(first));
+    expect(recent().textContent).not.toContain('(removed)');
     answer(all.filter((d) => d.id !== done.config.dataset_id));
     await vi.waitFor(() => {
       flush();
@@ -289,4 +294,112 @@ describe('Overview', () => {
     flush();
     expect(models).toHaveBeenCalledTimes(3);
   });
+
+  it('names a dataset made after the page loaded, and lists it, rather than calling it removed (sweep 3 F4)', async () => {
+    const runs = await idleRuns();
+    const all = await new MockApi('normal', 0).datasets();
+    const run = runs.find((r) => r.status === 'completed')!;
+    const made = all.find((d) => d.id === run.config.dataset_id)!;
+    // The first read predates the dataset (a loop wrote it a moment later); the server has it from then on.
+    let reads = 0;
+    const api = new MockApi('normal', 0);
+    api.datasets = async () => (++reads === 1 ? all.filter((d) => d.id !== made.id) : all);
+    watched.runs = runs;
+    open(api);
+    const recent = () => target.querySelector('#recent-runs tbody')?.textContent ?? '';
+    await vi.waitFor(() => {
+      flush();
+      expect(reads).toBe(2);
+      expect(target.querySelector('#datasets')!.textContent).toContain(made.name);
+    });
+    expect(recent()).toContain(made.name);
+    expect(recent()).not.toContain('(removed)');
+    // Asked about once: the next poll of the runs does not read the datasets again.
+    watched.runs = [...runs];
+    flush();
+    expect(reads).toBe(2);
+  });
+
+  it('shows a loop at work as a loop, with what it does now (labeling for its first student), opening the loop (sweep 3 F5)', async () => {
+    watched.runs = await idleRuns();
+    const api = new MockApi('normal', 0);
+    const benches = await api.benches();
+    const loops = await Promise.all(benches.map((x) => api.benchLoops(x.id)));
+    const bench = benches[loops.findIndex((l) => l.length > 0)];
+    const loop = loops.find((l) => l.length > 0)![0];
+    api.labelJobs = async () => [];
+    api.benches = async () => [{ ...bench!, active: true }];
+    api.benchEntries = async () => [];
+    const gen1 = { ...loop!.generations[0]!, generation: 1, labels: null, run_id: null, model_id: null, model_name: null, entry_id: null, score: null, map50_95: null, ci95: null };
+    api.benchLoops = async () => [{ ...loop!, status: 'running', phase: 'labeling', finished: null, verdict: null, generations: [loop!.generations[0]!, gen1] }];
+    open(api);
+    const strip = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.activity');
+      if (!el?.textContent?.includes(loop!.name)) throw new Error('still waiting for the loop');
+      return el;
+    });
+    expect(strip.textContent).toContain('Labeling for gen 1');
+    expect(strip.textContent).not.toContain('An entry or a loop is running');
+    const links = [...strip.querySelectorAll('a')].map((a) => a.getAttribute('href'));
+    expect(links).toEqual([`#/benchmarks/${bench!.id}/loops/${loop!.id}`]);
+  });
+
+  it('shows the first-run card when the only models are published weights (sweep 3 F6)', async () => {
+    const api = new MockApi('empty', 0);
+    const [m] = await new MockApi('normal', 0).models();
+    api.models = async () => [{ ...m!, id: 'folo-n-coco', name: 'folo-n-coco', run_id: null, source: 'published' }];
+    open(api);
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.onboard')).not.toBeNull();
+    });
+  });
+
+  it('counts the datasets past the sixth apart from the models it cannot rank (sweep 3 F7)', async () => {
+    const api = new MockApi('normal', 0);
+    const [d0] = await api.datasets();
+    const [r0] = await idleRuns();
+    const [m0] = await api.models();
+    const n = 9;
+    const datasets = Array.from({ length: n }, (_, i) => ({ ...d0!, id: `ds_t${i}`, name: `set ${i}` }));
+    const runs = datasets.map((d, i) => ({ ...r0!, id: `run_t${i}`, name: `run ${i}`, status: 'completed' as const, config: { ...r0!.config, dataset_id: d.id }, dataset: { name: d.name, classes: d.classes } }));
+    const models = [
+      ...runs.map((r, i) => ({ ...m0!, id: `m_t${i}`, name: `${r.name}-best`, run_id: r.id, source: 'run' as const })),
+      { ...m0!, id: 'folo-n-coco', name: 'folo-n-coco', run_id: null, source: 'published' as const },
+    ];
+    api.datasets = async () => datasets;
+    api.dataset = async (id: string) => datasets.find((d) => d.id === id)!;
+    api.models = async () => models;
+    watched.runs = runs;
+    open(api);
+    const note = await vi.waitFor(() => {
+      flush();
+      const p = target.querySelector('#best-models .unranked');
+      if (!p) throw new Error('still waiting for Best models');
+      return p.textContent!;
+    });
+    expect(note).toBe('3 more datasets in All models. 1 model trained elsewhere (imported or downloaded) is not ranked.');
+  });
+
+  it('says a cloud instance whose termination is not confirmed may still be billed (studio-cloud handover)', async () => {
+    watched.runs = await idleRuns();
+    const api = new MockApi('normal', 0);
+    api.labelJobs = async () => [];
+    api.benches = async () => [];
+    const [inst] = await new MockApi('cloud-trouble', 0).cloudInstances();
+    const stuck = { ...inst!, status: 'terminating' as const, error: 'the provider did not answer (502)' };
+    api.cloudInstances = async () => [stuck, { ...stuck, id: 'ci_gone', name: 'gone', status: 'terminated' as const, error: null }];
+    open(api);
+    const strip = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.activity');
+      if (!el?.textContent?.includes(stuck.name)) throw new Error('still waiting for the instance');
+      return el;
+    });
+    expect(strip.textContent).toContain('Termination not confirmed: it may still be billed');
+    expect(strip.textContent).not.toContain('gone');
+    expect(strip.querySelector('a')!.getAttribute('href')).toBe('#/settings?section=cloud');
+  });
 });
+

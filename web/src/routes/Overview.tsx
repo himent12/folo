@@ -41,6 +41,8 @@ import { PROBLEM_LABEL } from './datasets/problem';
 import LiveRunCard from './overview/LiveRunCard';
 import { slotRun } from './overview/slot';
 import AlsoRunning from './overview/AlsoRunning';
+import { bestNote, unrankedKinds } from './overview/bestNote';
+import { followNewDatasets } from './overview/newDatasets';
 import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
 import { hasFeature } from '$lib/api/queue';
@@ -85,7 +87,8 @@ export default function Overview() {
   const streaming = computed(() => !!live.get() && streamLost.get() === null);
   const now = new Now(() => stale.get());
   const noDatasets = computed(() => datasets.data?.length === 0);
-  const fresh = computed(() => noDatasets.get() && runList.get()?.length === 0 && models.data?.length === 0);
+  // Published weights (`folo weights pull`, Desktop's download) are not the user's work: day one still shows the way in.
+  const fresh = computed(() => noDatasets.get() && runList.get()?.length === 0 && !!models.data?.every((m) => m.source === 'published'));
   function retryAll() {
     void runs.refresh();
     void models.refresh();
@@ -93,7 +96,10 @@ export default function Overview() {
   }
   const dsById = computed(() => new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
   // A run's dataset by name, a placeholder while the datasets load, the name it recorded once it was removed.
-  const dsLabel = (r: Run) => runDatasetLabel(r, datasets.data ? dsById.get() : undefined, !!datasets.error);
+  // A run on a dataset made since the list loaded (./overview/newDatasets): the name it recorded while the list is read again.
+  const lookingUp = followNewDatasets(datasets, () => runList.get());
+  const dsLabel = (r: Run) =>
+    lookingUp(r.config.dataset_id) ? (r.dataset?.name ?? undefined) : runDatasetLabel(r, datasets.data ? dsById.get() : undefined, !!datasets.error);
   const runById = computed(() => new Map<string, Run>((runList.get() ?? []).map((r) => [r.id, r])));
   // A score ranks only against scores on the same dataset and split (lib/scoreSummary): the best of each comparable
   // group, its dataset named above it and any split but validation tagged beside the score. Imported and published
@@ -110,13 +116,18 @@ export default function Overview() {
     );
   });
   const topModels = computed(() => ranking.get().groups.slice(0, 6).map((g) => ({ m: g.items[0]!, ctx: g.ctx })));
-  const unranked = computed(() => ranking.get().unranked.length + Math.max(0, ranking.get().groups.length - 6));
   // The ranking needs each model's run and dataset: wait for both (a failed one leaves the splits unknown).
   const rankReady = computed(() => !!models.data && (!!runList.get() || !!runs.error) && (!!datasets.data || !!datasets.error));
   // Why: a model's split is known from its run and dataset, so when either list failed to load that is the reason.
   const unrankedWhy = computed(() => {
     const failed = [runsFailed.get() && 'runs', !!datasets.error && !datasets.data && 'datasets'].filter(Boolean);
     return failed.length ? `could not load ${failed.join(' and ')}` : 'evaluation split unknown';
+  });
+  const note = computed(() => {
+    const runMap = runById.get();
+    const dsMap = dsById.get();
+    const kinds = unrankedKinds(ranking.get().unranked.map((m) => scoreContext(m, runMap, dsMap)));
+    return bestNote({ more: Math.max(0, ranking.get().groups.length - 6), ...kinds, why: unrankedWhy.get() });
   });
   const firstDatasets = computed(() => (datasets.data ?? []).slice(0, 6));
 
@@ -237,7 +248,13 @@ export default function Overview() {
               <Key when={live.get()!.id}>
                 <LiveRunCard
                   run={live.get()!}
-                  dataset={datasets.data ? (dsById.get().get(live.get()!.config.dataset_id) ?? null) : datasets.error ? null : undefined}
+                  dataset={
+                    datasets.data && !lookingUp(live.get()!.config.dataset_id)
+                      ? (dsById.get().get(live.get()!.config.dataset_id) ?? null)
+                      : datasets.error
+                        ? null
+                        : undefined
+                  }
                   datasetName={dsLabel(live.get()!)}
                   bind:lost={streamLost}
                 />
@@ -495,10 +512,11 @@ export default function Overview() {
                         </For>
                       </ul>
                     ) : null}{' '}
-                    {unranked.get() ? (
-                      // Imported and published weights (and any model whose split is unknown) are not ranked against these.
+                    {note.get() ? (
+                      // What the list leaves out (./overview/bestNote): the datasets past the sixth (ranked, not shown),
+                      // weights trained elsewhere, models whose split is unknown.
                       <p class="unranked" class:alone={!topModels.get().length}>
-                        {count(unranked.get(), 'model')} not ranked: {unrankedWhy.get()}.
+                        {note.get()}
                       </p>
                     ) : null}
                   </>
