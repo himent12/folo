@@ -244,7 +244,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   pull` (the `folo weights` cache: `$FOLO_WEIGHTS_DIR`, else `<FOLO_HOME or ~/.folo>/weights`, whatever the
   `--data-dir`; docs/CLI.md, Weights). Their id and name are the published name (`folo-n-coco`), `source` is
   `published` and `about` is the line `folo weights list` prints, so `TrainConfig.weights: "folo-n-coco"`, predict,
-  val, eval and export take the name everywhere a model id goes (Studio's "Start from", MCP `train { weights }`).
+  val, eval and export take the name everywhere a model id goes (Studio's and Desktop's "Start from", MCP `train { weights }`).
   A file pulled while the server runs lists at once. A published name that is not downloaded is `404
   model_not_found` with `folo weights pull <name>` as the hint.
   `source` (additive, left out by older servers): `run` (a run's `best` / `last`), `file` (`<data dir>/models`) or

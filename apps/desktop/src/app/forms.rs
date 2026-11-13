@@ -183,7 +183,11 @@ pub struct NewRunForm {
     pub scale: f32,
     /// Why some values differ from the run this form was prefilled from.
     pub note: Option<String>,
-    /// The run this form was prefilled from: settings the form doesn't show (weights, seed, colour and
+    /// Start from: the model id (or published name) to fine-tune, `None` from scratch.
+    pub weights: Option<String>,
+    /// The picked weights' name, to name them if they are deleted while picked.
+    pub weights_name: Option<String>,
+    /// The run this form was prefilled from: settings the form doesn't show (seed, colour and
     /// translate jitter) carry over unchanged.
     pub base: Option<TrainConfig>,
     /// Exact entry next to the sliders; invalid text keeps the last good value and shows a hint.
@@ -252,7 +256,7 @@ pub fn retry_batch(v: u32) -> Option<u32> {
 /// Keep what the form can't edit from the run it was prefilled from.
 pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig {
     if let Some(b) = base {
-        c.weights = b.weights.clone();
+        // Not `weights`: Start from shows them (prefilled from the base).
         c.seed = b.seed;
         c.augment.hsv = b.augment.hsv;
         c.augment.translate = b.augment.translate;
@@ -315,7 +319,8 @@ mod retry_tests {
             ..base.clone()
         };
         let out = carry_over(Some(&base), edited.clone());
-        assert_eq!(out.weights, base.weights);
+        // Start from shows the weights: the form's choice stands (here, from scratch).
+        assert_eq!(out.weights, None);
         assert_eq!(out.seed, 42);
         assert_eq!(out.augment.hsv, [0.1, 0.2, 0.3]);
         assert_eq!(out.augment.translate, 0.25);

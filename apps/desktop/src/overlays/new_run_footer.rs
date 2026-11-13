@@ -110,6 +110,8 @@ impl FoloApp {
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
         let cpu = DEVICES[device] == "cpu" && cloud.is_none();
         let compute_blocked = self.compute_blocked();
+        let dataset_blocked = self.dataset_blocked().is_some();
+        let weights_gone = self.nr_weights_gone().is_some();
         // What the footer can honestly say. With the server's estimator: its answer for this
         // config; while a changed config is out, the last answer marked as updating (if it was for
         // the same kind of device); nothing for an unparsed value, a rejected config or a deleted
@@ -316,6 +318,28 @@ impl FoloApp {
                 Btn::Primary,
                 Some(go_icon),
                 "Pick a dataset first",
+                window,
+                cx,
+            )
+        } else if dataset_blocked {
+            // It says why under the Dataset field.
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Pick a dataset with training images",
+                window,
+                cx,
+            )
+        } else if weights_gone {
+            // It says why under Start from.
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Pick what to start from",
                 window,
                 cx,
             )

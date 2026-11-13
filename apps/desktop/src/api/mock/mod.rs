@@ -172,6 +172,14 @@ impl MockBackend {
         *self.fail_images_from.lock().unwrap() = Some(offset);
     }
 
+    /// A dataset whose training images all failed to read, as the server would count it.
+    #[cfg(test)]
+    pub fn with_no_training_images(mut self, id: &str) -> Self {
+        let f = self.datasets.iter_mut().find(|d| d.ds.id == id).expect("a demo dataset");
+        f.ds.splits.train = 0;
+        self
+    }
+
     /// Lists a removed dataset (or run) again, as registering its folder again does on a server.
     #[cfg(test)]
     pub fn restore(&self, id: &str) {
