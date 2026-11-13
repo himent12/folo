@@ -92,9 +92,12 @@ impl Exec {
                             LogLevel::Warn,
                             format!("the worker did not answer ({e}); the run goes on there, asking again"),
                         );
-                        // Said on the run too, so a page shows the run's numbers stand still and why.
+                        // Said on the run too, so a page shows the run's numbers stand still and why. A silence a
+                        // process before this one recorded goes on: it keeps its start.
                         let now = rfc3339(unix_now());
-                        self.entry.update_cloud(|c| c.unanswered_since = Some(now));
+                        self.entry.update_cloud(|c| {
+                            c.unanswered_since.get_or_insert(now);
+                        });
                     }
                     let since = *unreachable.get_or_insert_with(Instant::now);
                     wait = (wait * 2).min(t.poll_max);

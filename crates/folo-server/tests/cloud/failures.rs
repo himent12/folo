@@ -231,6 +231,9 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
         serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
     file["run"]["cloud"]["unanswered_since"] = json!("2026-11-09T00:00:00Z");
     std::fs::write(&saved, file.to_string()).unwrap();
+    // And the worker does not answer the next one at first.
+    cloud.gates.cut_after_weights.store(true, Ordering::SeqCst);
+    cloud.gates.cut.store(true, Ordering::SeqCst);
     // Meanwhile a crash left two `launching` records: one whose launch created an instance, one whose did not.
     let values = Values::from(BTreeMap::from([("api_key".to_string(), SECRET.to_string())]));
     let spec = |name: &str| LaunchSpec {
@@ -257,7 +260,15 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
     until("the run followed again", || {
         logged(&store, &run.id, "following the run on its worker again").then_some(())
     });
-    // The worker answers this process: the old silence is not said any more.
+    // The worker is still silent when this process asks: the silence goes on from its start...
+    let since = || run_of(&store, &run.id).cloud.and_then(|c| c.unanswered_since);
+    until("this process asked in vain", || {
+        logged(&store, &run.id, "the worker did not answer").then_some(())
+    });
+    assert_eq!(since().as_deref(), Some("2026-11-09T00:00:00Z"));
+    cloud.gates.cut_after_weights.store(false, Ordering::SeqCst);
+    cloud.gates.cut.store(false, Ordering::SeqCst);
+    // ...until the worker answers: the old silence is not said any more.
     until("the silence cleared", || {
         run_of(&store, &run.id).cloud.is_some_and(|c| c.unanswered_since.is_none()).then_some(())
     });
