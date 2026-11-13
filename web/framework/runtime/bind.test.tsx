@@ -212,8 +212,10 @@ describe('transitions', () => {
       node.addEventListener('introend', () => ends.push('in'));
       return { duration: 10, css: (t: number) => `opacity: ${t}` };
     };
-    // happy-dom runs Web Animations on real timers.
+    // happy-dom runs Web Animations on real timers: a quiet moment shows nothing ran that should not, and what should
+    // run is waited for (a loaded machine fires a 10 ms animation's end later than any fixed margin).
     const settle = () => new Promise((r) => setTimeout(r, 80));
+    const ended = (want: string[]) => vi.waitFor(() => expect(ends).toEqual(want), { timeout: 3000, interval: 10 });
     const { container, unmount } = render(() => (
       <ul>
         <For each={list.get()}>{(n) => <li transition:slow={{}}>{n()}</li>}</For>
@@ -224,13 +226,11 @@ describe('transitions', () => {
     expect(ends).toEqual([]);
     list.set([1, 2, 3]);
     flush();
-    await settle();
-    expect(ends).toEqual(['in']);
+    await ended(['in']);
     list.set([1, 3]);
     flush();
     expect(container.querySelectorAll('li').length).toBe(3);
-    await settle();
-    expect(ends).toEqual(['in', 'out']);
+    await ended(['in', 'out']);
     expect(container.textContent).toBe('13');
     unmount();
   });
@@ -259,11 +259,13 @@ describe('transitions', () => {
       </Key>
     ));
     flush();
+    // The first render plays no intro: a quiet moment shows none ran.
     await new Promise((r) => setTimeout(r, 60));
+    expect(ends).toEqual([]);
     k.set(2);
     flush();
-    await new Promise((r) => setTimeout(r, 60));
-    expect(ends).toEqual([2]);
+    // The re-created row's intro ends when its animation does (later on a loaded machine): waited for.
+    await vi.waitFor(() => expect(ends).toEqual([2]), { timeout: 3000, interval: 10 });
     unmount();
   });
 });
