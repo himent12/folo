@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
+use crate::fusion::{BoxFusion, FUSION_IOU};
 use crate::model::{FoloModel, HeadMode, HeadOutput};
 use crate::nms::{Detection, NmsConfig, postprocess};
 
@@ -57,11 +58,24 @@ pub struct PredictConfig {
     /// ([`FoloModel::head_mode`]: `o2o`, no NMS, for a `head = "o2o"` model), `o2m` forces the one-to-many branch
     /// and NMS, `o2o` requires a model with the one-to-one branch.
     pub head: Option<HeadMode>,
+    /// Refine each kept box from its NMS cluster ([`NmsConfig::fusion`]; off by default).
+    pub fusion: BoxFusion,
+    /// The cluster IoU of [`PredictConfig::fusion`] ([`NmsConfig::fusion_iou`]).
+    pub fusion_iou: f32,
 }
 
 impl Default for PredictConfig {
     fn default() -> Self {
-        PredictConfig { imgsz: 640, conf: 0.25, iou: 0.7, max_det: 300, rect: true, head: None }
+        PredictConfig {
+            imgsz: 640,
+            conf: 0.25,
+            iou: 0.7,
+            max_det: 300,
+            rect: true,
+            head: None,
+            fusion: BoxFusion::None,
+            fusion_iou: FUSION_IOU,
+        }
     }
 }
 
@@ -79,6 +93,9 @@ impl PredictConfig {
                 self.conf, self.iou
             )));
         }
+        if !(0.0..=1.0).contains(&self.fusion_iou) {
+            return Err(Error::Config(format!("fusion_iou must be in 0..=1, got {}", self.fusion_iou)));
+        }
         if self.max_det == 0 {
             return Err(Error::Config("max_det must be at least 1".into()));
         }
@@ -86,7 +103,14 @@ impl PredictConfig {
     }
 
     fn nms(&self) -> NmsConfig {
-        NmsConfig { conf: self.conf, iou: self.iou, max_det: self.max_det, ..NmsConfig::default() }
+        NmsConfig {
+            conf: self.conf,
+            iou: self.iou,
+            max_det: self.max_det,
+            fusion: self.fusion,
+            fusion_iou: self.fusion_iou,
+            ..NmsConfig::default()
+        }
     }
 }
 
@@ -436,7 +460,8 @@ impl Predictor {
     /// The last step: class-aware NMS (with the current [`PredictConfig`]; the top-k of docs/MODEL.md §6.6 when
     /// the model predicts with its `o2o` head, [`FoloModel::head_mode`]) on each image's decoded
     /// `(boxes, scores)` (from [`HeadOutput::decode_images`] or [`HeadOutput::split_decoded`]), then the boxes
-    /// mapped back through the letterbox into original-image pixels. `nc` is the head's class count.
+    /// mapped back through the letterbox into original-image pixels. `nc` is the head's class count. Decoded boxes
+    /// carry no DFL logits, so [`BoxFusion::Dfl`] fuses as [`BoxFusion::Vote`] here.
     pub fn finish(
         &self,
         batch: &PreparedBatch,

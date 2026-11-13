@@ -117,7 +117,14 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         None
     };
     let cfg = ValConfig {
-        nms: NmsConfig { conf: args.conf, iou: args.iou, ..NmsConfig::val() },
+        nms: NmsConfig {
+            conf: args.conf,
+            iou: args.iou,
+            max_det: args.max_det.max(1) as usize,
+            fusion: args.fusion.into(),
+            fusion_iou: args.fusion_iou,
+            ..NmsConfig::val()
+        },
         samples: 0,
         workers: args.workers.unwrap_or_else(folo_vision::train::default_workers),
         keep_detections: coco_gt.is_some(),
@@ -174,6 +181,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         "device": device,
         "dtype": precision,
         "head": head,
+        "fusion": cfg.nms.fusion.as_str(),
         "seconds": r.seconds,
         "coco": coco,
     }));
@@ -321,6 +329,8 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         max_det: args.max_det.max(1) as usize,
         rect: true,
         head: args.head.map(Into::into),
+        fusion: args.fusion.into(),
+        fusion_iou: args.fusion_iou,
     };
     let predictor = Predictor::new(model, cfg).map_err(|e| engine_error("predict", e))?;
     let destinations = match &args.save {

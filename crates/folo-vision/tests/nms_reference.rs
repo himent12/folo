@@ -4,7 +4,8 @@ mod common;
 
 use common::Rng;
 use folo_vision::boxes::box_iou;
-use folo_vision::nms::{batched_nms, nms_detections, non_max_suppression};
+use folo_vision::fusion::BoxFusion;
+use folo_vision::nms::{batched_nms, nms_detections, non_max_suppression, non_max_suppression_with};
 use folo_vision::{Detection, NmsConfig, Xyxy};
 
 /// Textbook greedy NMS: visit by (score desc, index asc), keep a box unless a kept box of the same class (any class
@@ -84,14 +85,25 @@ fn large_bucket_parallel_suppression_matches_naive() {
     }
 }
 
-/// Reference for the full post-process built from the naive NMS.
-fn naive_post(boxes: &[Xyxy], scores: &[f32], nc: usize, cfg: &NmsConfig) -> Vec<Detection> {
+/// Reference for the full post-process built from the naive NMS, with box fusion (docs/MODEL.md §9.4) written out:
+/// each kept box's sides become the `f64` weighted means over every candidate of its class (any class when
+/// agnostic) with IoU `>= fusion_iou`, weights score times the anchor's side precision (`prec`, 1 when `None` or
+/// voting), skipping weights that are not `> 0`.
+fn naive_post(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    prec: Option<&[[f32; 4]]>,
+    nc: usize,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
     let mut cands = Vec::new();
+    let mut anchor = Vec::new();
     for (a, row) in scores.chunks(nc).enumerate() {
         if cfg.multi_label {
             for (c, &s) in row.iter().enumerate() {
                 if s > cfg.conf && cfg.classes.as_ref().is_none_or(|cs| cs.contains(&(c as u32))) {
                     cands.push(Detection { bbox: boxes[a], score: s, class: c as u32 });
+                    anchor.push(a);
                 }
             }
         } else {
@@ -103,6 +115,7 @@ fn naive_post(boxes: &[Xyxy], scores: &[f32], nc: usize, cfg: &NmsConfig) -> Vec
             }
             if row[best] > cfg.conf && cfg.classes.as_ref().is_none_or(|cs| cs.contains(&(best as u32))) {
                 cands.push(Detection { bbox: boxes[a], score: row[best], class: best as u32 });
+                anchor.push(a);
             }
         }
     }
@@ -111,11 +124,49 @@ fn naive_post(boxes: &[Xyxy], scores: &[f32], nc: usize, cfg: &NmsConfig) -> Vec
     idx.sort_by(|&a, &b| cands[b].score.total_cmp(&cands[a].score).then(a.cmp(&b)));
     idx.truncate(cfg.max_candidates);
     idx.sort();
+    let anchor: Vec<usize> = idx.iter().map(|&i| anchor[i]).collect();
     let cands: Vec<Detection> = idx.into_iter().map(|i| cands[i]).collect();
     let b: Vec<Xyxy> = cands.iter().map(|d| d.bbox).collect();
     let s: Vec<f32> = cands.iter().map(|d| d.score).collect();
     let c: Vec<u32> = cands.iter().map(|d| d.class).collect();
-    naive(&b, &s, &c, cfg.iou, cfg.max_det, cfg.agnostic).into_iter().map(|i| cands[i]).collect()
+    let kept = naive(&b, &s, &c, cfg.iou, cfg.max_det, cfg.agnostic);
+    let fuse = |k: usize| {
+        let mut out = cands[k].bbox.to_array();
+        if cfg.fusion == BoxFusion::None {
+            return out;
+        }
+        let (mut acc, mut sum) = ([0f64; 4], [0f64; 4]);
+        for (j, d) in cands.iter().enumerate() {
+            if !(cfg.agnostic || d.class == cands[k].class)
+                || box_iou(&cands[k].bbox, &d.bbox) < cfg.fusion_iou
+            {
+                continue;
+            }
+            let p = match (cfg.fusion, prec) {
+                (BoxFusion::Dfl, Some(p)) => p[anchor[j]],
+                _ => [1.0; 4],
+            };
+            for e in 0..4 {
+                let w = d.score as f64 * p[e] as f64;
+                if w > 0.0 {
+                    acc[e] += w * d.bbox.to_array()[e] as f64;
+                    sum[e] += w;
+                }
+            }
+        }
+        for e in 0..4 {
+            if sum[e] > 0.0 {
+                out[e] = (acc[e] / sum[e]) as f32;
+            }
+        }
+        out
+    };
+    kept.into_iter()
+        .map(|k| {
+            let [x1, y1, x2, y2] = fuse(k);
+            Detection { bbox: Xyxy::new(x1, y1, x2, y2), ..cands[k] }
+        })
+        .collect()
 }
 
 #[test]
@@ -134,10 +185,24 @@ fn post_process_matches_naive() {
             classes: if case % 5 == 0 { Some(vec![0, 2]) } else { None },
             agnostic: case % 7 == 3,
             multi_label: case % 2 == 1,
+            fusion: [BoxFusion::None, BoxFusion::Vote, BoxFusion::Dfl][(case / 3) % 3],
+            fusion_iou: [0.75, 0.5][(case / 4) % 2],
         };
-        let got = non_max_suppression(&boxes, &scores, nc, &cfg);
-        let want = naive_post(&boxes, &scores, nc, &cfg);
+        // Side precisions spanning three orders of magnitude, and some zeros.
+        let prec: Vec<[f32; 4]> = (0..a)
+            .map(|_| {
+                std::array::from_fn(
+                    |_| if rng.below(50) == 0 { 0.0 } else { 10f32.powf(rng.f32() * 3.0 - 2.0) },
+                )
+            })
+            .collect();
+        let got = non_max_suppression_with(&boxes, &scores, Some(&prec), nc, &cfg);
+        let want = naive_post(&boxes, &scores, Some(&prec), nc, &cfg);
         assert_eq!(got, want, "case {case}: a={a} nc={nc} cfg={cfg:?}");
+        if cfg.fusion == BoxFusion::Dfl {
+            continue; // the boxes-only APIs below have no precisions
+        }
+        assert_eq!(non_max_suppression(&boxes, &scores, nc, &cfg), want, "case {case}: without precisions");
         // The list API agrees when fed the multi-label candidates.
         if cfg.multi_label {
             let all: Vec<Detection> = scores
