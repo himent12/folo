@@ -32,6 +32,7 @@ export default function ClassPicker(props: ClassPickerProps) {
   const options = () => [...(list.get()?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])];
 
   async function show() {
+    typed = '';
     open.set(true);
     await tick();
     (list.get()?.querySelector<HTMLElement>('[aria-selected="true"]') ?? options()[0])?.focus();
@@ -69,7 +70,8 @@ export default function ClassPicker(props: ClassPickerProps) {
   function onkeydown(e: KeyboardEvent) {
     const all = options();
     const i = all.indexOf(document.activeElement as HTMLElement);
-    if (e.key.length === 1 && e.key !== ' ' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Not while an input method composes (its keys are not letters yet).
+    if (e.key.length === 1 && e.key !== ' ' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing) {
       e.preventDefault();
       typeAhead(e.key, Math.max(0, i))?.focus();
     } else if (e.key === 'Escape') {

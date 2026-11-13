@@ -15,5 +15,7 @@ describe('splitPath', () => {
     expect(splitPath('/data/coco/')).toEqual({ head: '', tail: '/data/coco' });
     expect(splitPath('C:\\Users\\me\\data\\bccd')).toEqual({ head: 'C:\\Users\\me', tail: '\\data\\bccd' });
     expect(splitPath('/')).toEqual({ head: '', tail: '/' });
+    expect(splitPath('D:/')).toEqual({ head: '', tail: 'D:/' });
+    expect(splitPath('C:\\')).toEqual({ head: '', tail: 'C:\\' });
   });
 });

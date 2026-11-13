@@ -13,7 +13,8 @@ export interface PathTextProps {
 
 /** `path` split into what may give way and the last two parts kept whole (`/` separators kept as written). */
 export function splitPath(path: string): { head: string; tail: string } {
-  const trimmed = path.replace(/[\\/]+$/, '');
+  // A trailing separator goes, but not a root's (`/`, `D:/`).
+  const trimmed = path.replace(/(?<=[^\\/:])[\\/]+$/, '');
   const cuts = [...trimmed.matchAll(/[\\/]/g)].map((m) => m.index!);
   // A path of three parts or fewer (D:/data/coco) is all tail: there is nothing worth cutting first.
   const at = cuts.length >= 3 ? cuts[cuts.length - 2]! : 0;

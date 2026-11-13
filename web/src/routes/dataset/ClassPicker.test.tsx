@@ -47,5 +47,14 @@ describe('ClassPicker', () => {
       type('t');
       expect(focused()).toBe(want);
     }
+    // A key an input method is composing is not a letter yet.
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', isComposing: true, bubbles: true }));
+    expect(focused()).toBe('tennis racket');
+    // Closed and opened again at once, it starts a new word.
+    type('Escape');
+    target.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]')!.click();
+    flushSync();
+    target.querySelector<HTMLElement>('[role="listbox"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true }));
+    expect(focused()).toBe('person');
   });
 });
