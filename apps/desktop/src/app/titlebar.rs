@@ -3,7 +3,7 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea, div, px,
 };
 
@@ -127,7 +127,12 @@ impl FoloApp {
                     .cursor_pointer()
                     .hover(|s| s.border_color(t.line_strong))
                     .active(|s| s.bg(t.bg_active))
-                    .on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx)))
+                    // Enter and Space open it on the press (below), not again on the release.
+                    .on_click(cx.listener(|this, ev: &ClickEvent, w, cx| {
+                        if !ev.is_keyboard() {
+                            this.open_palette(w, cx)
+                        }
+                    }))
                     .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, w, cx| {
                         if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
                             this.open_palette(w, cx);

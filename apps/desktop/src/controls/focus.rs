@@ -2,8 +2,8 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    Context, Div, InteractiveElement, KeyDownEvent, ParentElement, Stateful, StatefulInteractiveElement,
-    Styled, Window,
+    ClickEvent, Context, Div, InteractiveElement, KeyDownEvent, ParentElement, Stateful,
+    StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::app::{Action, FoloApp, focus_ring};
@@ -44,7 +44,11 @@ impl FoloApp {
         let click_fh = fh.clone();
         el.track_focus(&fh)
             .relative()
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                // Enter and Space act on the press (below): the release's keyboard click would act twice.
+                if ev.is_keyboard() {
+                    return;
+                }
                 // The clicked control takes focus first (keys then act on it, not on whatever had
                 // focus before); the action may still move focus on, as dialogs do.
                 window.focus(&click_fh);

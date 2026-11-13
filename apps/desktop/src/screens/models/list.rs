@@ -19,7 +19,10 @@ impl FoloApp {
         let t = theme(cx);
         let models = self.store.models.ready().cloned();
         let subtitle = match (&models, self.store.models.error()) {
-            (Some(m), _) => format!("{} · best and last checkpoints, plus exports", plural(m.len(), "model")),
+            (Some(m), _) => format!(
+                "{} · runs' best and last checkpoints, plus published and imported weights",
+                plural(m.len(), "model")
+            ),
             (None, Some(_)) => "The model list didn't load".to_string(),
             (None, None) => "Loading…".to_string(),
         };

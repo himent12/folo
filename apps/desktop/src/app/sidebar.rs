@@ -3,8 +3,8 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea, div, px,
+    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, WindowControlArea, div, px,
 };
 
 use crate::api::*;
@@ -139,7 +139,12 @@ impl FoloApp {
             .when(active, |d| d.bg(t.bg_active))
             .when(!active, |d| d.hover(|s| s.bg(t.bg_hover)))
             .active(|s| s.bg(t.bg_active))
-            .on_click(cx.listener(move |this, _, w, cx| this.navigate(route.clone(), w, cx)))
+            // Enter and Space navigate on the press (below), not again on the release's keyboard click.
+            .on_click(cx.listener(move |this, ev: &ClickEvent, w, cx| {
+                if !ev.is_keyboard() {
+                    this.navigate(route.clone(), w, cx)
+                }
+            }))
             .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
                 if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
                     this.navigate(r2.clone(), w, cx);
@@ -231,7 +236,11 @@ impl FoloApp {
             .hover(|s| s.bg(t.bg_hover))
             .active(|s| s.bg(t.bg_active))
             .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
-            .on_click(cx.listener(move |this, _, w, cx| this.navigate(Route::Run(id.clone()), w, cx)))
+            .on_click(cx.listener(move |this, ev: &ClickEvent, w, cx| {
+                if !ev.is_keyboard() {
+                    this.navigate(Route::Run(id.clone()), w, cx)
+                }
+            }))
             .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
                 if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
                     this.navigate(Route::Run(id2.clone()), w, cx);
