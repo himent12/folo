@@ -181,19 +181,22 @@ fn word<T: serde::Serialize>(v: T) -> String {
     serde_json::to_value(v).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
 }
 
+/// A provider's field in the providers table: `key`, `key (secret)` for a credential, in `[brackets]` when optional.
+fn field_word(f: &folo_api::CloudField) -> String {
+    let word = if f.secret { format!("{} (secret)", f.key) } else { f.key.clone() };
+    if f.required { word } else { format!("[{word}]") }
+}
+
+/// An offer's GPU memory, in GiB with one decimal as `folo doctor` says it ("15.7 GiB"); `-` when not reported.
+fn memory(bytes: u64) -> String {
+    if bytes == 0 { "-".into() } else { format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64) }
+}
+
 fn providers_table(providers: &[CloudProvider], out: Out) {
     let rows = providers
         .iter()
         .map(|p| {
-            let fields: Vec<String> = p
-                .fields
-                .iter()
-                .map(|f| match (f.secret, f.required) {
-                    (true, _) => format!("{} (secret)", f.key),
-                    (false, true) => f.key.clone(),
-                    (false, false) => format!("[{}]", f.key),
-                })
-                .collect();
+            let fields: Vec<String> = p.fields.iter().map(field_word).collect();
             vec![p.id.clone(), p.name.clone(), fields.join(", ")]
         })
         .collect();
@@ -229,7 +232,7 @@ fn offers_table(offers: &[CloudOffer], out: Out) {
     let rows = offers
         .iter()
         .map(|o| {
-            let vram = if o.vram_bytes > 0 { format!("{} GB", o.vram_bytes >> 30) } else { "-".into() };
+            let vram = memory(o.vram_bytes);
             let price = or_dash(o.price_per_hour.map(|p| format!("${p:.2}/h")));
             vec![o.id.clone(), o.gpu.clone(), vram, price, word(o.availability)]
         })
@@ -278,6 +281,29 @@ mod tests {
         assert!(e.message.contains("is not set"), "{}", e.message);
         assert_eq!(pair("--set", "url=https://a=b").unwrap(), ("url", "https://a=b"));
         assert!(pair("--set", "=x").is_err() && pair("--set", "nothing").is_err());
+        // An optional secret is bracketed like any optional field; memory is GiB as reported, not cut to whole "GB".
+        let field = |key: &str, secret, required| folo_api::CloudField {
+            key: key.into(),
+            label: key.into(),
+            secret,
+            required,
+            placeholder: None,
+            help: None,
+        };
+        let words: Vec<String> = [
+            field("api_key", true, true),
+            field("token", true, false),
+            field("url", false, true),
+            field("w", false, false),
+        ]
+        .iter()
+        .map(field_word)
+        .collect();
+        assert_eq!(words, ["api_key (secret)", "[token (secret)]", "url", "[w]"]);
+        assert_eq!(
+            (memory(16_824_401_920), memory(24 << 30), memory(0)),
+            ("15.7 GiB".into(), "24.0 GiB".into(), "-".into())
+        );
         // A secret given without its key is not repeated in the error (which `--json` prints to stdout).
         for given in ["rpa_SECRET", "=rpa_SECRET"] {
             let e = pair("--secret", given).unwrap_err();

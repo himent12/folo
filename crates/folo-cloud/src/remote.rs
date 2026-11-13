@@ -187,14 +187,22 @@ impl Server {
         })
     }
 
+    /// The server does not answer: said as a sentence about it (never starting with the URL, which a front end would
+    /// capitalise), the transport's own words once (without the URL they repeat), and the likely cause.
     fn unreachable(&self, e: impl std::fmt::Display) -> Error {
+        let why = self.detail(e);
+        // An https:// URL of a server that speaks plain HTTP fails in the TLS handshake: its answer ("HTTP/1.1 400 …",
+        // as `folo serve` gives) starts with a byte that is no TLS record type (rustls: `InvalidContentType`). Other
+        // broken records are not that, and keep the general cause.
+        let tls = self.https && why.contains("InvalidContentType");
+        let cause = if tls {
+            "it seems to speak plain HTTP: use http://, or put a TLS proxy in front of it".to_string()
+        } else {
+            "is `folo serve --host 0.0.0.0` running there?".to_string()
+        };
         Error::new(
             ErrorKind::Unavailable,
-            format!(
-                "{} does not answer ({}); is `folo serve --host 0.0.0.0` running there?",
-                self.url,
-                self.scrub(e)
-            ),
+            format!("the server at {} does not answer ({why}); {cause}", self.url),
         )
     }
 
@@ -202,8 +210,18 @@ impl Server {
     fn not_folo(&self, why: impl std::fmt::Display) -> Error {
         Error::new(
             ErrorKind::Unavailable,
-            format!("{} does not look like a FOLO server (GET /api/health: {})", self.url, self.scrub(why)),
+            format!(
+                "the server at {} does not look like a FOLO server (GET /api/health: {})",
+                self.url,
+                self.detail(why)
+            ),
         )
+    }
+
+    /// A transport or server message about this server, scrubbed, without the URL it may start with.
+    fn detail(&self, e: impl std::fmt::Display) -> String {
+        let text = self.scrub(e);
+        text.strip_prefix(&format!("{}: ", self.url)).map(str::to_string).unwrap_or(text)
     }
 
     /// `text`, made of what the server answered (decoded), with its token blanked out: a server may say anything.
@@ -392,6 +410,45 @@ mod tests {
         let silent = Fixture::hang_up();
         let e = Remote.check(&values(&silent.base(), TOKEN)).unwrap_err();
         assert_error(&e, ErrorKind::Unavailable, "does not answer");
+        // A sentence about the server (a front end capitalises its first letter: never "Http://…"), its URL once.
+        assert!(e.message.starts_with("the server at http://"), "{}", e.message);
+        assert_eq!(e.message.matches(&silent.base()).count(), 1, "{}", e.message);
+        assert!(e.message.ends_with("is `folo serve --host 0.0.0.0` running there?"), "{}", e.message);
+        // https:// to a server that speaks plain HTTP: it answers the TLS hello with an HTTP 400, as `folo serve`
+        // (hyper) does. Said so, with what to do.
+        let e = check_over_tls(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        assert_error(&e, ErrorKind::Unavailable, "it seems to speak plain HTTP: use http://");
+        // A broken TLS record (a handshake record longer than TLS allows) is not plain HTTP.
+        let e = check_over_tls(&[0x16, 0x03, 0x03, 0xff, 0xff]);
+        assert_error(&e, ErrorKind::Unavailable, "does not answer");
+        assert!(!e.message.contains("plain HTTP"), "{}", e.message);
+    }
+
+    /// `Remote.check` of `https://` a listener that answers the first bytes it reads with `answer` and closes. The
+    /// listener waits at most 10 s for the connection, so a check that never reaches it cannot hang the test.
+    fn check_over_tls(answer: &'static [u8]) -> Error {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut s, _)) => {
+                        s.set_nonblocking(false).unwrap();
+                        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                        let _ = s.read(&mut [0u8; 1024]);
+                        let _ = s.write_all(answer);
+                        return;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        let e = Remote.check(&values(&format!("https://{addr}"), TOKEN)).unwrap_err();
+        server.join().unwrap();
+        e
     }
 
     #[test]
