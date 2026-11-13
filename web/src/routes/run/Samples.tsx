@@ -29,7 +29,8 @@ export interface SamplesProps {
    * panel has the error and its Retry. */
   unavailable?: boolean;
   /** The run's dataset was removed: its images are gone, and the tiles say so (nothing to retry). */
-  datasetGone?: boolean;  /** The run has ended (stopped, failed): with no validated epoch, none will come, and the panel says so. */
+  datasetGone?: boolean;
+  /** The run has ended (stopped, failed): with no validated epoch, none will come, and the panel says so. */
   ended?: boolean;
 }
 

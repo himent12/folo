@@ -19,7 +19,8 @@ export interface PerClassProps {
   compact?: boolean;
   /** The run's history failed to load: one quiet line in place of "appear after the first validation pass"; the
    * metrics panel has the error and its Retry. */
-  unavailable?: boolean;  /** The run has ended (stopped, failed): with no validated epoch, none will come, and the panel says so. */
+  unavailable?: boolean;
+  /** The run has ended (stopped, failed): with no validated epoch, none will come, and the panel says so. */
   ended?: boolean;
 }
 
