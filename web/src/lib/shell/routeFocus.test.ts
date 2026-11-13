@@ -64,6 +64,16 @@ describe('route focus', () => {
     stop();
   });
 
+  it('moves from the main region to the heading a loading page renders once loaded (shell F10)', async () => {
+    const m = main('<div aria-busy="true">Loading run</div>');
+    const stop = holdRouteFocus(m);
+    expect(document.activeElement).toBe(m);
+    m.innerHTML = '<div class="page"><h1 tabindex="-1" data-route-focus>shapes long</h1><button>Compare</button></div>';
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.activeElement?.textContent).toBe('shapes long');
+    stop();
+  });
+
   it('leaves focus the user moved alone', async () => {
     const m = main('<h1 tabindex="-1" data-route-focus>Model</h1><button>Retry</button>');
     const stop = holdRouteFocus(m);

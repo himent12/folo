@@ -50,14 +50,19 @@ export function focusRoute(main: HTMLElement): HTMLElement {
  */
 export function holdRouteFocus(main: HTMLElement, ms = 15000): () => void {
   let target = focusRoute(main);
+  // Focus is still where the hold put it (or fell to the body), and that is no longer the page's place: the heading it
+  // was on went (a loading heading swapped for the loaded one), or the page had none and now has one (a run, dataset
+  // or benchmark page renders its title only once loaded; shell F10: focus stayed on <main>).
   const lost = () => {
     const a = document.activeElement;
-    return !target.isConnected && (a === null || a === document.body || a === main);
+    if (a !== null && a !== document.body && a !== main) return false;
+    return !target.isConnected || (target === main && routeFocusTarget(main) !== main);
   };
   const observer = new MutationObserver(() => {
     if (!lost()) return;
     target = routeFocusTarget(main);
-    target.focus({ preventScroll: true });
+    const landing = target.hasAttribute('data-route-landing');
+    target.focus({ preventScroll: true, ...(landing ? { focusVisible: false } : {}) } as FocusOptions);
   });
   observer.observe(main, { childList: true, subtree: true });
   // Focus the user moves elsewhere ends the hold; focus we set on the page's heading does not.
