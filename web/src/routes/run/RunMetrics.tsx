@@ -29,7 +29,7 @@ import LineChart, { type Marker, type Series } from '$lib/charts/LineChart';
 import { runHorizon } from '$lib/charts/horizon';
 import type { AppendLog } from '$lib/api/appendLog';
 import type { Epoch, Run, Step } from '$lib/api/types';
-import { etaSettled, runProgress, trainingSeconds } from '$lib/api/progress';
+import { etaSettled, runProgress, stoppedEarly, trainingSeconds } from '$lib/api/progress';
 import { effectiveCloseMosaic, warmupEpochs } from './resolved';
 import { conf, metric, num } from '$lib/format';
 import Segmented from '$lib/ui/Segmented';
@@ -67,12 +67,15 @@ const PLAIN: Record<string, string> = { '⁻': '−', '⁰': '0', '¹': '1', '²
  * What a progress bar's hatched end means (the last `n` of `epochs` train without mosaic, the trainer's capped count),
  * said for where the run is (`epoch` done, `live`), so a phase still ahead never reads as the current state (round
  * 27's "mosaic off" at epoch 38 of 100): before it, "Mosaic off after epoch 90"; while a live run is in it, "Mosaic off
- * · final 10 epochs"; once past, "Last 10 epochs: mosaic off". `cap` is the caption under the hatch, `full` its tooltip
- * and the bar's accessible description.
+ * · final 10 epochs"; once past, "Last 10 epochs: mosaic off". A run the trainer stopped early (`early`, lib/api/progress
+ * `stoppedEarly`) never gets there, or not to its end: "Stopped early, before mosaic off" / "Mosaic off from epoch 91".
+ * `cap` is the caption under the hatch, `full` its tooltip and the bar's accessible description.
  */
-export function mosaicOffText(n: number, epochs: number, epoch: number, live: boolean): { cap: string; full: string } {
+export function mosaicOffText(n: number, epochs: number, epoch: number, live: boolean, early = false): { cap: string; full: string } {
   const from = epochs - n;
   const last = `${n} ${n === 1 ? 'epoch' : 'epochs'}`;
+  if (early && epoch <= from) return { cap: 'Stopped early, before mosaic off', full: `Stopped early at epoch ${epoch}: mosaic was to be off after epoch ${from}` };
+  if (early) return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the early stop at epoch ${epoch}` };
   if (epoch < from) return { cap: `Mosaic off after epoch ${from}`, full: `Mosaic off after epoch ${from}: the last ${last} train without mosaic` };
   if (live) {
     const final = n === 1 ? 'final epoch' : `final ${n} epochs`;
@@ -170,7 +173,7 @@ export default function RunMetrics(props: RunMetricsProps) {
   /** The run's last epochs train without mosaic: the bar hatches them and every chart marks where they start. */
   const mosaicOff = computed(() => closeFrom.get() > 0 && closeFrom.get() < 1);
   /** What the hatch means, for where the run is: its caption, and in full its tooltip and the bar's description. */
-  const closeText = computed(() => mosaicOffText(closeN.get(), props.run.epochs, props.run.epoch, live.get()), {
+  const closeText = computed(() => mosaicOffText(closeN.get(), props.run.epochs, props.run.epoch, live.get(), stoppedEarly(props.run)), {
     equals: (a, b) => a.cap === b.cap && a.full === b.full,
   });
   const uid = createUniqueId();
