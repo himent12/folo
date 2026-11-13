@@ -167,7 +167,9 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
 - **Local inference** (`src/local.rs`): Playground's *Run on* switch runs the model in this process instead of on the
   server: Local GPU (folo-gpu, wgpu) or Local CPU. Weights are the f16 export from
   `GET /api/models/{id}/weights?format=f16`, held in memory and revalidated by ETag before each run (a retrained model
-  reloads; an unreachable server still runs the loaded copy). The demo data has no weights, so there it is Server only.
+  reloads; an unreachable server still runs the loaded copy, on the image on screen: a dataset image's file is kept
+  as fetched). The demo data has no weights, so there it is Server only. Images are shown upright by their EXIF
+  orientation, as the engine reads them (`folo_data::decode`), so the boxes land on what is shown.
   `FOLO_SERVER=… cargo test real_server -- --ignored` checks local results against the server's.
 - **`MockBackend`** is built-in demo data (procedural shapes datasets, models and runs with a live simulator) used
   for screenshots and tests, and when picked (`--mock`, `--scenario`, Settings › Connection); an unreachable server

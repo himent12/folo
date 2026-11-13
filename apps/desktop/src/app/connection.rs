@@ -89,6 +89,10 @@ impl FoloApp {
                 *e = None;
             }
         }
+        // The Playground's prediction that couldn't reach it runs again, as Retry would.
+        if self.play_pred.error().is_some_and(|e| e.code == "server_unreachable") {
+            self.rerun_predict(cx);
+        }
         // Back: read the lists now (the server may have restarted on another data dir).
         self.refresh_lists(cx);
         cx.notify();

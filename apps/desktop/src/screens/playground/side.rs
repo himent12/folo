@@ -539,12 +539,7 @@ impl FoloApp {
             Load::Idle => div().into_any_element(),
         };
         // Sample picker: validation images of the model's dataset.
-        let ds_id = model
-            .as_ref()
-            .and_then(|m| m.run_id.as_ref())
-            .and_then(|r| self.store.run(r))
-            .map(|r| r.config.dataset_id.clone())
-            .or_else(|| self.store.datasets.ready().and_then(|d| d.first()).map(|d| d.id.clone()));
+        let ds_id = self.play_sample_dataset();
         let mut thumbs: Vec<AnyElement> = Vec::new();
         if let Some(ds_id) = ds_id.clone() {
             self.ensure_dataset(&ds_id, cx);

@@ -17,6 +17,8 @@ mod new_run;
 mod overlay_state;
 mod page;
 mod playground;
+#[cfg(test)]
+mod playground_tests;
 mod preferences;
 mod render;
 mod sidebar;
@@ -45,7 +47,7 @@ pub use forms::{
     ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, format_lr,
     retry_batch, synth_errors,
 };
-pub use playground::PLAY_CONF_FLOOR;
+pub use playground::{IMAGE_FORMATS, PLAY_CONF_FLOOR};
 pub use sidebar::logo;
 
 actions!(
@@ -235,6 +237,9 @@ pub type ModelsOrderKey = (usize, usize, &'static str, bool);
 pub struct PlayImage {
     pub name: SharedString,
     pub input: PredictInput,
+    /// A dataset image's file as fetched (none in the demo, whose images are pixels): local runs
+    /// predict on it ([`PlayImage::predict_input`]).
+    pub encoded: Option<Arc<Vec<u8>>>,
     pub image: Arc<folo_ui::RenderImage>,
     pub width: u32,
     pub height: u32,
