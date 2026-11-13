@@ -26,7 +26,7 @@ import type {
 } from '$lib/api/types';
 import { AXIS_NAME, TARGET_PRECISION } from '$lib/bench/rules';
 import { MIN_LABELS } from '$lib/bench/score';
-import { compact, conf, metric, ms, num, pct, usd } from '$lib/format';
+import { compact, conf, metric, ms, num, pct, sentence, usd } from '$lib/format';
 import { AGENT_NAME } from '$lib/label';
 import { modelLabel, tokens } from '../label/words';
 
@@ -242,6 +242,35 @@ export function partialWhy(e: BenchEntry, b: Pick<Bench, 'images' | 'classes' | 
  * nothing itself, so it is never worded as a model running a condition.
  */
 export const receiving = (e: Pick<BenchEntry, 'status'> & Partial<Pick<BenchEntry, 'contestant'>>) => e.status === 'running' && e.contestant?.kind === 'external';
+
+/**
+ * The server's words for an API client in a failed entry's or loop's `hint`, and what Studio calls the same thing: the
+ * setting by its name in New loop, the run's log instead of its endpoint.
+ */
+const HINT_WORDS: [RegExp, string][] = [
+  [/^set min_confidence: its entry's/, 'start a new loop with “Keep labels from a lower confidence” set: its entry’s'],
+  [/\ba lower min_confidence\b/, 'a lower confidence (“Keep labels from a lower confidence” in New loop)'],
+  [/\bGET \/api\/runs\/\{id\}\/logs says why\b/, 'the log of its training run says why'],
+  [/\ba smaller max_images costs\b/, 'fewer images cost'],
+];
+
+/**
+ * A failed entry's or loop's `hint` as Studio says it, or null when nothing of it is for people. The server writes its
+ * hints for API clients as well ("start the entry again: POST /api/bench/benchmarks/{id}/entries", "set
+ * min_confidence: …"); the page has a button or a setting for what they ask, so a clause that names an endpoint is
+ * left out and an API field becomes the setting's name (HINT_WORDS). A sentence, capitalised and ended.
+ */
+export function hintText(hint: string | null | undefined): string | null {
+  let h = hint ?? '';
+  for (const [api, words] of HINT_WORDS) h = h.replace(api, words);
+  h = h
+    // "start it again (POST /api/… with contestant.open: true) and send …": the bracket goes.
+    .replace(/\s*\((?:GET|POST|PUT|DELETE) \/api\/[^)]*\)/g, '')
+    // "start the entry again: POST /api/…", "stop it first: POST …/stop": the endpoint and what follows it go.
+    .replace(/:?\s*\b(?:GET|POST|PUT|DELETE) (?:\/api\/|…\/)\S*.*$/, '')
+    .trim();
+  return h ? sentence(h) : null;
+}
 
 /**
  * Where a running entry is, in words: "Unchanged images" or "Haze, severity 3" (the catalog's name), and how far, as a
