@@ -19,7 +19,7 @@ mod text;
 
 pub use cloud::{
     cloud_wait_title, fmt_cost, fmt_cost_range, fmt_hours, fmt_price, fmt_transfer, hours_value, offer_line,
-    transfer_frac,
+    offer_summary, transfer_frac,
 };
 pub use format::{
     bytes, count_si, counted, device_label, display_path, f3, fmt_aug, fmt_conf, fmt_lr, fmt_scale,

@@ -343,8 +343,12 @@ impl FoloApp {
     /// device once it reports one ("RunPod · RTX 4090 · Vulkan").
     pub fn cloud_device(&self, r: &Run, c: &RunCloud) -> String {
         let provider = self.provider_name(&c.provider);
-        if r.device.is_empty() {
-            format!("{provider} · {}", c.offer.gpu)
+        // Until the worker reports its device (and for good on a run that failed before training)
+        // the server says "<offer's GPU> at <provider>": the provider is already named, so the GPU
+        // once.
+        let placeholder = format!("{} at ", c.offer.gpu);
+        if r.device.is_empty() || r.device.starts_with(&placeholder) {
+            format!("{provider} · {}", crate::ui::device_label(&c.offer.gpu))
         } else {
             format!("{provider} · {}", crate::ui::device_label(&r.device))
         }
@@ -607,6 +611,87 @@ impl FoloApp {
         self.restore_focus(window);
         cx.notify();
     }
+}
+
+/// How far one phase of a cloud run got, as its panel marks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhaseState {
+    Done,
+    Now,
+    Next,
+    Failed,
+    Skipped,
+}
+
+/// The phase a cloud run that failed before training failed in, by its error code (docs/CLOUD.md,
+/// Failure).
+fn failed_in(code: &str) -> Option<CloudPhase> {
+    match code {
+        "cloud_auth_failed" | "cloud_refused" | "cloud_unavailable" => Some(CloudPhase::Provisioning),
+        "cloud_boot_failed" => Some(CloudPhase::Booting),
+        "cloud_sync_failed" => Some(CloudPhase::Syncing),
+        _ => None,
+    }
+}
+
+/// Each phase of a cloud run with its state, as Studio marks them (`web/src/routes/run/cloud.ts`,
+/// `phaseStates`). Live, the phases before the current one are done. Once released, a run that
+/// failed is marked where it failed (from its error code) and the phases it never reached are
+/// skipped, so a run whose upload failed does not read as trained; one that never trained (no step)
+/// skips training and the collection.
+pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
+    // A newer server's phase has no known place among these: it is the one step, current.
+    if c.phase == CloudPhase::Unknown {
+        return vec![(CloudPhase::Unknown, PhaseState::Now)];
+    }
+    if c.phase != CloudPhase::Released {
+        return CloudPhase::ALL
+            .iter()
+            .map(|&p| {
+                let s = if p < c.phase {
+                    PhaseState::Done
+                } else if p == c.phase {
+                    PhaseState::Now
+                } else {
+                    PhaseState::Next
+                };
+                (p, s)
+            })
+            .collect();
+    }
+    let trained = r.step > 0 || r.epoch > 0;
+    let failed = (r.status == RunStatus::Failed)
+        .then(|| {
+            if trained {
+                Some(if r.error_code.as_deref() == Some("cloud_sync_failed") {
+                    CloudPhase::Collecting
+                } else {
+                    CloudPhase::Training
+                })
+            } else {
+                r.error_code.as_deref().and_then(failed_in)
+            }
+        })
+        .flatten();
+    CloudPhase::ALL
+        .iter()
+        .map(|&p| {
+            let s = if p >= CloudPhase::Releasing {
+                PhaseState::Done
+            } else if let Some(f) = failed {
+                match p.cmp(&f) {
+                    std::cmp::Ordering::Less => PhaseState::Done,
+                    std::cmp::Ordering::Equal => PhaseState::Failed,
+                    std::cmp::Ordering::Greater => PhaseState::Skipped,
+                }
+            } else if !trained && matches!(p, CloudPhase::Training | CloudPhase::Collecting) {
+                PhaseState::Skipped
+            } else {
+                PhaseState::Done
+            };
+            (p, s)
+        })
+        .collect()
 }
 
 #[cfg(test)]

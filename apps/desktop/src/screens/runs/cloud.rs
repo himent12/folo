@@ -28,16 +28,19 @@ impl FoloApp {
         let provider = self.provider_name(&c.provider);
         let released = c.phase == CloudPhase::Released;
         let live = r.status.is_active();
-        // A newer server's phase has no known place among these: it is the one step, current.
-        let phases =
-            if c.phase == CloudPhase::Unknown { vec![CloudPhase::Unknown] } else { CloudPhase::ALL.to_vec() };
+        // Where it failed, and what it never reached, once released (not every phase done).
+        let phases = crate::cloud::phase_states(c, r);
         let count = phases.len();
-        let steps = phases.into_iter().enumerate().map(|(i, p)| {
-            let done = p < c.phase || released;
-            let current = p == c.phase && !released;
+        let steps = phases.into_iter().enumerate().map(|(i, (p, state))| {
+            use crate::cloud::PhaseState;
+            let done = state == PhaseState::Done;
+            let current = state == PhaseState::Now;
+            let failed = state == PhaseState::Failed;
             let last = i + 1 == count;
             let dot = if current {
                 dot(t.accent_fill(), 8., live, format!("cloud-{}", r.id)).into_any_element()
+            } else if failed {
+                div().size(px(8.)).flex_none().rounded_full().bg(t.danger_text).into_any_element()
             } else if done {
                 div().size(px(8.)).flex_none().rounded_full().bg(t.text_secondary).into_any_element()
             } else {
@@ -68,6 +71,8 @@ impl FoloApp {
                         ty::SM,
                         if current {
                             t.text_primary
+                        } else if failed {
+                            t.danger_text
                         } else if done {
                             t.text_secondary
                         } else {
