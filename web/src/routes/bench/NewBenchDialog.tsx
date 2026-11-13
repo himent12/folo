@@ -29,6 +29,23 @@ import { imagesText, unreviewedText } from './words';
 
 const FIX: Record<string, string> = { name: 'Fix the name first', description: 'Shorten the description first', max: 'Fix the image limit first' };
 
+/**
+ * The labeled images of job `id` that are not reviewed, read 1000 at a time; null when the count of labeled images
+ * changed between pages (an image labeled, removed or relabeled meanwhile shifts the offsets: a page could be skipped).
+ */
+async function countUnreviewed(id: string, s: AbortSignal): Promise<number | null> {
+  let n = 0;
+  let total: number | null = null;
+  for (let offset = 0; ; ) {
+    const page = await hub.api.labelImages(id, { status: 'labeled', offset, limit: 1000 }, s);
+    if (total !== null && page.total !== total) return null;
+    total = page.total;
+    n += page.images.filter((i) => !i.reviewed).length;
+    offset += page.images.length;
+    if (!page.images.length || offset >= page.total) return offset >= page.total ? n : null;
+  }
+}
+
 export default function NewBenchDialog(props: { open?: boolean }) {
   const open = bindable(props, 'open', false);
 
@@ -81,17 +98,21 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   const dataset = computed(() => datasets.data?.find((d) => d.id === datasetId.get()));
   const job = computed(() => jobs.data?.find((j) => j.id === jobId.get()));
   // How many of the job's labeled images no person has checked (`LabelImage.reviewed`): the boxes on them become the
-  // benchmark's truth as an agent drew them. Read a page of 1000 at a time; null until known, or for a dataset.
-  const unreviewed = new Resource(async (s) => {
+  // benchmark's truth as an agent drew them. Read a page of 1000 at a time, with the job it counts (a Resource keeps
+  // its last data while it reloads, so a count shows only for its own job); null for a dataset or a count that cannot
+  // be trusted (the job's labeled images changed under the paging three times running).
+  const unreviewed = new Resource(async (s): Promise<{ job: string; n: number } | null> => {
     const id = jobId.get();
     if (kind.get() !== 'label_job' || !id) return null;
-    let n = 0;
-    for (let offset = 0; ; ) {
-      const page = await hub.api.labelImages(id, { status: 'labeled', offset, limit: 1000 }, s);
-      n += page.images.filter((i) => !i.reviewed).length;
-      offset += page.images.length;
-      if (!page.images.length || offset >= page.total) return n;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const n = await countUnreviewed(id, s);
+      if (n !== null) return { job: id, n };
     }
+    return null;
+  });
+  const unreviewedHere = computed(() => {
+    const u = unreviewed.data;
+    return u && !unreviewed.loading && !unreviewed.error && u.job === jobId.get() ? u.n : 0;
   });
   /** Images the source holds (a split's, or a job's labeled ones). */
   const sourceImages = computed(() => (kind.get() === 'dataset' ? (dataset.get()?.splits[split.get()] ?? 0) : (job.get()?.counts.labeled ?? 0)));
@@ -285,11 +306,11 @@ export default function NewBenchDialog(props: { open?: boolean }) {
             <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
             <span>A model trained on {dataset.get()?.name ?? 'this dataset'}'s training split has seen these images: on them, a benchmark measures memory, not sight. Pick the validation or test split.</span>
           </p>
-        ) : kind.get() === 'label_job' && job.get() && unreviewed.data ? (
+        ) : kind.get() === 'label_job' && job.get() && unreviewedHere.get() ? (
           <p class="note warn" data-unreviewed>
             <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
             <span>
-              {unreviewedText(unreviewed.data, job.get()!.counts.labeled)}
+              {unreviewedText(unreviewedHere.get(), job.get()!.counts.labeled)}
             </span>
           </p>
         ) : kind.get() === 'label_job' ? (
