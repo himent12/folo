@@ -626,6 +626,52 @@ fn letterbox_helpers_reject_mismatched_geometry() {
     assert!(letterbox_on_host(&imgs, &[ok[0], lb(&imgs[1], 32)]).is_err(), "different canvases");
 }
 
+/// With `rect` (the default) a batch whose images share their `rect` canvas runs on that canvas: every image gets
+/// exactly the predictions `predict` gives it alone (on a square canvas they differ). A batch of mixed canvases is
+/// padded square, as with `rect` off.
+#[test]
+fn cpu_rect_batch_matches_predict() {
+    use folo_vision::predict::{PredictConfig, Predictor};
+    let cfg = PredictConfig { imgsz: 128, conf: 0.001, ..PredictConfig::default() };
+    let p = Predictor::new(FoloModel::new(ModelConfig::new("n", 4).unwrap()).unwrap(), cfg.clone()).unwrap();
+    let square = Predictor::new(
+        FoloModel::new(ModelConfig::new("n", 4).unwrap()).unwrap(),
+        PredictConfig { rect: false, ..cfg },
+    )
+    .unwrap();
+    let mut rng = Rng::seed(22);
+    let mut images = |sizes: &[(u32, u32)]| -> Vec<folo_data::Image> {
+        sizes
+            .iter()
+            .map(|&(w, h)| {
+                let data = (0..w * h * 3).map(|_| (rng.uniform(0.0, 256.0) as u32).min(255) as u8).collect();
+                folo_data::Image::from_raw(w, h, data).unwrap()
+            })
+            .collect()
+    };
+    // Three sizes (and two images of one) with the same 128x96 canvas: five images, so the CPU runs chunks.
+    let shared = images(&[(160, 90), (150, 84), (120, 66), (160, 90), (150, 84)]);
+    let batch = p.predict_batch(&shared).unwrap();
+    let padded = square.predict_batch(&shared).unwrap();
+    assert_eq!(batch.len(), shared.len());
+    let mut differs = false;
+    for ((img, b), sq) in shared.iter().zip(&batch).zip(&padded) {
+        let one = p.predict(img).unwrap();
+        assert!(!one.detections.is_empty(), "no detections to compare");
+        assert_eq!(b.detections, one.detections, "{}x{}", img.width, img.height);
+        assert_eq!((b.width, b.height), (img.width, img.height));
+        differs |= sq.detections != one.detections;
+    }
+    assert!(differs, "the square canvas gives the same predictions: the test cannot tell the two apart");
+
+    // Canvases 128x96, 96x128 and 128x128: square, image for image.
+    let mixed = images(&[(160, 90), (90, 160), (100, 100), (160, 90)]);
+    let batch = p.predict_batch(&mixed).unwrap();
+    for (b, sq) in batch.iter().zip(square.predict_batch(&mixed).unwrap()) {
+        assert_eq!(b.detections, sq.detections);
+    }
+}
+
 /// On the CPU a batch runs as chunks of images side by side; every image's predictions are exactly what
 /// predicting it alone on the square canvas gives.
 #[test]
