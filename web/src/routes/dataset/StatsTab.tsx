@@ -28,6 +28,8 @@ export interface StatsTabProps {
   dataset: Dataset;
   stats: DatasetStats;
   counts?: IssueCounts;
+  /** Bumped when the dataset changed on disk while shown: an open issue list reads its issues again. */
+  version?: number;
   onclass: (cls: number) => void;
 }
 
@@ -173,6 +175,7 @@ export default function StatsTab(props: StatsTabProps) {
                             kinds={h().kinds}
                             severityFilter={false}
                             counts={props.counts}
+                            version={props.version}
                           />
                         </li>
                       ) : null}

@@ -25,6 +25,8 @@ export interface IssueListProps {
   counts?: IssueCounts;
   /** Only these kinds of the severity (a finding's own issues), when given. */
   kinds?: readonly IssueKind[];
+  /** Changes when the dataset changed on disk: the issues are read again. */
+  version?: number;
 }
 
 const PAGE = 50;
@@ -42,12 +44,14 @@ export default function IssueList(props: IssueListProps) {
   const kind = signal<'all' | IssueKind>('all');
   const shown = signal(PAGE);
   // Every server can filter by kind; a whole severity is one `?severity=` query where the server sends `counts`,
-  // else each of its kinds in turn (./issues), so "no errors" is only said when none exist.
-  const res = new Resource((s) =>
-    kind.get() === 'all' && p.kinds
+  // else each of its kinds in turn (./issues), so "no errors" is only said when none exist. A new `version` (the files
+  // changed) reads them again.
+  const res = new Resource((s) => {
+    void p.version;
+    return kind.get() === 'all' && p.kinds
       ? loadKinds(hub.api, id.get(), sev.get(), p.kinds, CAP, s)
-      : loadIssues(hub.api, id.get(), sev.get(), CAP, s, kind.get() === 'all' ? undefined : (kind.get() as IssueKind)),
-  );
+      : loadIssues(hub.api, id.get(), sev.get(), CAP, s, kind.get() === 'all' ? undefined : (kind.get() as IssueKind));
+  });
   const list = computed<DatasetIssue[]>(() => res.data?.list ?? []);
   const total = computed(() => res.data?.total ?? 0);
   // Counts from the latest answer that had them (the parent's until then); without them, per-kind totals of the last

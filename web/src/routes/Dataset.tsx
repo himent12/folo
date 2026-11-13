@@ -9,7 +9,7 @@ import X from '$icons/x';
 import { computed, css, effect, Index, Key, MediaQuery, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
-import type { Split } from '$lib/api/types';
+import type { Dataset, Split } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
 import { ago, compact, count, num } from '$lib/format';
 import { href, router } from '$lib/router';
@@ -34,7 +34,7 @@ import ToggleButton from '$lib/ui/ToggleButton';
 import ClassPicker from './dataset/ClassPicker';
 import DisplayMenu from './dataset/DisplayMenu';
 import { findingCount, findingLabel, healthChecks, imageCount, noTraining } from './dataset/health';
-import { missingError, readDataset } from './datasets/problem';
+import { datasetProblem, missingError, readDataset } from './datasets/problem';
 import ImageGrid from './dataset/ImageGrid';
 import Inspector from './dataset/Inspector';
 import RemoveDialog from './dataset/RemoveDialog';
@@ -190,6 +190,47 @@ export default function Dataset() {
   // Not for a dataset that cannot be read: its check would fail the same way.
   const check = new Resource((s) => (failure.get() || missingError(hub.api, id.get()) !== undefined ? Promise.resolve(null) : hub.api.datasetIssues(id.get(), { limit: 0 }, s)));
   const counts = computed(() => check.data?.counts);
+
+  // The folder can change on disk while this page is open (labels fixed in an editor, images added or deleted, as
+  // Health asks): the dataset and its check are read again whenever the page is looked at again (the window focused,
+  // the tab shown). An answer that differs (Resource keeps the objects of an equal one) re-reads the image list as
+  // well: image ids are positions, so the old list would put other images' boxes on the pixels the server now sends.
+  effect(() => {
+    const again = () => {
+      if (document.visibilityState !== 'visible' || !d() || ds.loading || ds.refreshing) return;
+      // The check after the dataset: the server notices a change on that read and indexes again, and a check read
+      // beside it could still answer from the old index.
+      void ds.refresh().then(() => check.refresh());
+    };
+    window.addEventListener('focus', again);
+    document.addEventListener('visibilitychange', again);
+    return () => {
+      window.removeEventListener('focus', again);
+      document.removeEventListener('visibilitychange', again);
+    };
+  });
+  /** Bumped when what the server says about the dataset changed while it was shown: open issue lists read again. */
+  const changed = signal(0);
+  let seen: { d: Dataset; counts: unknown } | undefined;
+  effect(() => {
+    const now = d();
+    const c = counts.get();
+    const before = seen;
+    seen = now ? { d: now, counts: c } : undefined;
+    if (!before || !now || before.d.id !== now.id) return;
+    if (before.d !== now) untrack(() => pager.get()?.reload());
+    if (before.d !== now || (before.counts !== undefined && before.counts !== c)) changed.set((n) => n + 1);
+  });
+  // The folder went missing meanwhile: say so, as on opening it, rather than keep showing what it held.
+  effect(() => {
+    const e = ds.stale;
+    if (datasetProblem(e) !== 'missing') return;
+    untrack(() => {
+      ds.data = undefined;
+      ds.error = e;
+    });
+  });
+
   const findings = computed(() => {
     const dd = d();
     return dd?.stats ? findingCount(healthChecks(dd, dd.stats, counts.get())) : 0;
@@ -380,7 +421,7 @@ export default function Dataset() {
               {tab.get() === 'stats' ? (
                 <>
                   {dd().stats ? (
-                    <StatsTab dataset={dd()} stats={dd().stats!} counts={counts.get()} onclass={(c) => setQuery({ tab: null, class: String(c), image: null }, !filtered.peek())} />
+                    <StatsTab dataset={dd()} stats={dd().stats!} counts={counts.get()} version={changed.get()} onclass={(c) => setQuery({ tab: null, class: String(c), image: null }, !filtered.peek())} />
                   ) : (
                     <Panel>
                       <EmptyState icon={ImageOff} title="No statistics" description="The server did not return statistics for this dataset." />
