@@ -255,6 +255,39 @@ describe('Create dataset again (studio-label F7)', () => {
     await vi.waitFor(() => expect(oncreated).toHaveBeenCalled());
     expect(create.mock.calls[0]![1]).toMatchObject({ name: 'fasteners-review-2' });
   });
+
+  it('sends nothing for a submit still waiting when the page goes, and a stale one leaves the next opening alone', async () => {
+    const answers: ((d: Dataset[]) => void)[] = [];
+    vi.spyOn(hub.api, 'datasets').mockImplementation(() => new Promise((r) => answers.push(r)));
+    const create = vi.spyOn(hub.api, 'createLabelDataset').mockReturnValue(new Promise(() => {}));
+    const props = deep<DatasetDialogProps>({ open: true, job: await hub.api.labelJob('lb_51d0'), oncreated: () => {} });
+    open(DatasetDialog, props);
+    const submit = () => submitButton().form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    submit();
+    props.open = false;
+    flushSync();
+    props.open = true;
+    flushSync();
+    submit();
+    answers[1]!(named());
+    await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    // The first opening's answer comes late: the second's export is still under way, and Create stays busy.
+    answers[0]!(named());
+    await new Promise((r) => setTimeout(r));
+    flushSync();
+    expect(submitButton().disabled || submitButton().getAttribute('aria-busy') === 'true').toBe(true);
+    // Another opening, then the page goes before its datasets come: no request.
+    props.open = false;
+    flushSync();
+    props.open = true;
+    flushSync();
+    submit();
+    unmount(c!);
+    c = undefined;
+    answers[2]!(named());
+    await new Promise((r) => setTimeout(r));
+    expect(create).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('the dialogs while the job changes', () => {

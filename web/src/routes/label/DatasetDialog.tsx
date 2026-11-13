@@ -70,6 +70,10 @@ export default function DatasetDialog(props: DatasetDialogProps) {
       );
     });
   });
+  // Leaving the page ends the opening: a submit still waiting for the datasets sends nothing.
+  effect(() => () => {
+    opening++;
+  });
   const exists = computed(() => {
     const n = name.get().trim();
     return n && taken.get().has(n.toLowerCase()) ? n : null;
@@ -92,8 +96,10 @@ export default function DatasetDialog(props: DatasetDialogProps) {
     status.clear();
     const seq = opening;
     await lookup;
-    // Closed (or opened afresh) meanwhile: that was not a request to make this dataset.
-    if (seq !== opening || !open.peek()) {
+    // Closed, opened afresh or gone (the page left) meanwhile: that was not a request to make this dataset, and what is
+    // on screen now belongs to another opening, if any.
+    if (seq !== opening) return;
+    if (!open.peek()) {
       busy.set(false);
       return;
     }
