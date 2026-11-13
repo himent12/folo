@@ -83,6 +83,15 @@ describe('CommandPalette actions on entities', () => {
     expect(go).toHaveBeenCalledWith(expect.stringMatching(/^\/playground\?model=/));
   });
 
+  it('finds a run by the id its page shows, and opens it (shell F3)', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    await openWith('run_q4n2', '#pi-run-run_q4n2');
+    const first = document.querySelector<HTMLElement>('[role="option"]')!;
+    expect(first.id).toBe('pi-run-run_q4n2');
+    first.click();
+    expect(go).toHaveBeenCalledWith('/runs/run_q4n2');
+  });
+
   it('writes a cloud run in its hand-over by its phase, not as Queued', async () => {
     hub.api = new MockApi('cloud-upload', 0);
     await openWith('shapes-hard-x', '#pi-run-run_c9e4');

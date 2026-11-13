@@ -52,6 +52,8 @@ interface Item {
   icon: IconType;
   /** Other phrasings it answers to (commands.rank). */
   match?: string[];
+  /** The run's, dataset's, model's ... id, which a query may name (commands.idScore). */
+  entityId?: string;
   /** An action about one run, dataset or model: offered once the query names it. */
   scoped?: boolean;
   /** A Recent entry: the id of the item it repeats (what is remembered when it is chosen). */
@@ -222,6 +224,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
     }));
     const r: Item[] = runs.get().map((x) => ({
       id: `run-${x.id}`,
+      entityId: x.id,
       group: 'Runs',
       label: x.name,
       hint: [failureCause(x) ? 'Failed, out of GPU memory' : statusWord(x), { ident: x.config.arch }, `epoch ${x.epoch}/${x.epochs}`],
@@ -231,9 +234,10 @@ export default function CommandPalette(props: CommandPaletteProps) {
     }));
     const d: Item[] = datasets.get().map((x) => ({
       id: `ds-${x.id}`,
+      entityId: x.id,
       group: 'Datasets',
       label: x.name,
-      hint: [`${x.classes.length} classes`, `${(x.splits.train + x.splits.val + x.splits.test).toLocaleString('en-US')} images`],
+      hint: [count(x.classes.length, 'class'), count(x.splits.train + x.splits.val + x.splits.test, 'image')],
       icon: Images,
       run: go(`/datasets/${x.id}`),
     }));
@@ -242,15 +246,17 @@ export default function CommandPalette(props: CommandPaletteProps) {
     const dsById = new Map(datasets.get().map((x) => [x.id, x]));
     const b: Item[] = benches.get().map((x) => ({
       id: `bench-${x.id}`,
+      entityId: x.id,
       group: 'Benchmarks',
       label: x.name,
-      hint: [`${x.images.toLocaleString('en-US')} images`, `${x.entries} ${x.entries === 1 ? 'entry' : 'entries'}`, ...(x.best ? [`best ${x.best.score.toFixed(1)}`] : [])],
+      hint: [count(x.images, 'image'), count(x.entries, 'entry', 'entries'), ...(x.best ? [`best ${x.best.score.toFixed(1)}`] : [])],
       icon: Target,
       run: go(`/benchmarks/${x.id}`),
     }));
     const benchName = new Map(benches.get().map((x) => [x.id, x.name]));
     const jobs: Item[] = labelJobs.get().map((x) => ({
       id: `label-${x.id}`,
+      entityId: x.id,
       group: 'Labeling jobs',
       label: x.name,
       match: x.classes,
@@ -260,6 +266,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
     }));
     const l: Item[] = loops.get().map((x) => ({
       id: `loop-${x.id}`,
+      entityId: x.id,
       group: 'Loops',
       label: x.name,
       hint: [`${x.status.charAt(0).toUpperCase()}${x.status.slice(1)}`, `on ${benchName.get(x.bench_id) ?? 'a benchmark'}`],
@@ -268,6 +275,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
     }));
     const m: Item[] = models.get().map((x) => ({
       id: `model-${x.id}`,
+      entityId: x.id,
       group: 'Models',
       label: x.name,
       hint: [{ ident: x.arch }, x.metrics ? scoreText(x.metrics.map50_95, scoreContext(x, runById, dsById)) : 'not scored'],

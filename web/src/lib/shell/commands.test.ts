@@ -29,6 +29,23 @@ describe('rank', () => {
     expect(ids('new run on sha')[0]).toBe('act-train-shapes');
   });
 
+  it('finds an entity by its id, whole or by its start or end, but not by a word of it (shell F3)', () => {
+    const withIds = [
+      ...items,
+      { id: 'run-a', group: 'Runs', label: 'shapes long', entityId: 'run_8f5b', scoped: true },
+      { id: 'run-b', group: 'Runs', label: 'bccd baseline', entityId: 'run_7b01', scoped: true },
+      { id: 'ds-b', group: 'Datasets', label: 'bccd', entityId: 'ds_1d06', scoped: true },
+    ];
+    const r = (q: string) => rank(withIds, q).map((i) => i.id);
+    expect(r('run_8f5b')).toEqual(['run-a']);
+    expect(r('RUN_8F5B ')).toEqual(['run-a']);
+    expect(r('8f5b')).toEqual(['run-a']);
+    expect(r('ds_1d')).toEqual(['ds-b']);
+    // Three characters name no id: "7b0" is not every run whose id holds it.
+    expect(r('8f5')).toEqual([]);
+    expect(r('b01')).toEqual([]);
+  });
+
   it('drops what does not match', () => {
     expect(ids('zzz')).toEqual([]);
   });
