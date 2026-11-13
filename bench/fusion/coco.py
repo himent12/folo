@@ -111,20 +111,16 @@ def ap_from_records(recs, weights, rec_thrs):
         # Detections of weight 0 must not add precision points: keep only columns with weight > 0.
         keep = w > 0
         tp_sum, fp_sum = tp_sum[:, keep], fp_sum[:, keep]
-        T = tp_sum.shape[0]
+        T, nd = tp_sum.shape
         prec_all = np.zeros((T, len(rec_thrs)))
-        for t in range(T):
-            tp, fp = tp_sum[t], fp_sum[t]
-            nd = len(tp)
-            rc = tp / npig
-            pr = tp / (fp + tp + np.spacing(1))
-            q = np.zeros(len(rec_thrs))
-            if nd:
-                pr = np.maximum.accumulate(pr[::-1])[::-1]
-                inds = np.searchsorted(rc, rec_thrs, side="left")
+        if nd:
+            rc = tp_sum / npig
+            pr = tp_sum / (fp_sum + tp_sum + np.spacing(1))
+            pr = np.maximum.accumulate(pr[:, ::-1], axis=1)[:, ::-1]
+            for t in range(T):
+                inds = np.searchsorted(rc[t], rec_thrs, side="left")
                 valid = inds < nd
-                q[valid] = pr[inds[valid]]
-            prec_all[t] = q
+                prec_all[t, valid] = pr[t, inds[valid]]
         aps.append(prec_all.mean())
     return float(np.mean(aps)) if aps else -1.0
 

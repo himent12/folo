@@ -284,6 +284,14 @@ def postprocess(im, cfg):
         box_orig = None
 
     ca, cc, cs = im.pair_anchor, im.pair_class, im.pair_score
+    if cfg.get("single_label"):
+        # predict's candidates: each anchor's best class (first maximum), from its pairs (every class > 0.001, so
+        # the best of them is the anchor's best whenever it can pass a predict conf).
+        order = np.lexsort((cc, -cs.astype(np.float64), ca))
+        first = np.ones(len(order), dtype=bool)
+        first[1:] = ca[order][1:] != ca[order][:-1]
+        sel = np.sort(order[first])
+        ca, cc, cs = ca[sel], cc[sel], cs[sel]
     off = cfg.get("level_offset")
     if off:
         lg = np.log(cs.astype(np.float64)) - np.log1p(-cs.astype(np.float64))
