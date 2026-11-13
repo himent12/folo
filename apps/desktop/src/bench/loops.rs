@@ -2,7 +2,7 @@
 
 use folo_ui::Context;
 
-use super::create::{SourceChoice, SourcePick};
+use super::create::{SourceChoice, SourceId, SourcePick};
 use super::load::route_bench;
 use super::merge::upsert_loop;
 use super::run::model_teaches;
@@ -37,7 +37,7 @@ impl FoloApp {
     }
 
     /// Opens the New loop form for the benchmark on screen: its best model that can teach (else the
-    /// newest that can), on the first source's train split.
+    /// newest that can), on its own dataset's train split (else the first source's).
     pub fn open_new_loop(&mut self, cx: &mut Context<Self>) {
         self.ensure_agents(cx);
         let Some(bench) = route_bench(&self.route).map(str::to_string) else { return };
@@ -52,7 +52,17 @@ impl FoloApp {
             })
         });
         let teacher = best.or_else(|| teachers.first().map(|m| m.id.clone()));
-        let pool = self.bench_sources().first().map(SourcePick::id);
+        // The pool: the benchmark's own dataset while it is listed (its train split; the server
+        // leaves the benchmark's images out), as Studio does, else the first source. Not its own
+        // labeling job: the benchmark took that job's labeled images, so none would be left.
+        let sources = self.bench_sources();
+        let own = b.as_ref().and_then(|b| match &b.source {
+            BenchSource::Dataset { dataset_id, .. } => Some(SourceId::Dataset(dataset_id.clone())),
+            BenchSource::LabelJob { .. } => None,
+        });
+        let pool = own
+            .filter(|own| sources.iter().any(|s| s.id() == *own))
+            .or_else(|| sources.first().map(SourcePick::id));
         self.bench.form_seq += 1;
         self.bench.new_loop = Some(NewLoopForm {
             bench,
@@ -162,5 +172,54 @@ impl FoloApp {
             },
         );
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::BenchSource;
+    use crate::app::Route;
+    use crate::app::tests::{drive, open};
+    use crate::bench::SourceId;
+
+    #[test]
+    fn a_new_loop_labels_the_benchmarks_own_dataset_by_default() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, _, cx| this.ensure_benches(cx));
+        let benches = drive(&mut app, window, |this, _, _| this.bench.list.ready().unwrap().clone());
+        // Every demo benchmark, whichever dataset comes first in the list.
+        for b in benches {
+            let BenchSource::Dataset { dataset_id, .. } = &b.source else { continue };
+            drive(&mut app, window, |this, _, cx| {
+                this.route = Route::Bench(b.id.clone());
+                this.open_new_loop(cx);
+                let pool = this.bench.new_loop.as_ref().unwrap().pool.clone();
+                assert_eq!(pool, Some(SourceId::Dataset(dataset_id.clone())), "{}", b.name);
+            });
+        }
+    }
+
+    #[test]
+    fn a_benchmark_of_a_labeling_job_does_not_offer_that_job_as_its_pool() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, _, cx| {
+            this.ensure_benches(cx);
+            this.ensure_agents(cx);
+        });
+        drive(&mut app, window, |this, _, cx| {
+            let sources = this.bench_sources();
+            let job = sources.iter().map(|s| s.id()).find(|id| matches!(id, SourceId::Job(_)));
+            let Some(SourceId::Job(job_id)) = job.clone() else { panic!("a demo job with labeled images") };
+            // Made from that job: it took every labeled image, so the job would leave no pool.
+            let mut b = this.bench.list.ready().unwrap()[0].clone();
+            b.id = "bn_job".into();
+            b.source = BenchSource::LabelJob { job_id };
+            this.bench.list.ready_mut().unwrap().push(b);
+            this.route = Route::Bench("bn_job".into());
+            this.open_new_loop(cx);
+            let pool = this.bench.new_loop.as_ref().unwrap().pool.clone();
+            assert_ne!(pool, job);
+            assert_eq!(pool, sources.first().map(|s| s.id()));
+        });
     }
 }

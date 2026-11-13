@@ -3,7 +3,7 @@
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::cells::{name_with_badges, num_cell};
-use super::format::loop_tone;
+use super::format::{loop_tone, loop_trend};
 use crate::api::{Bench, BenchLoop, BenchLoopStatus, BenchLoopVerdict, Label, time};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -100,13 +100,7 @@ impl FoloApp {
                 let total = l.config.generations.unwrap_or(1);
                 let done_gens =
                     l.generations.iter().filter(|g| g.generation > 0 && g.score.is_some()).count();
-                let first = l.generations.first().and_then(|g| g.map50_95);
-                let last = l.generations.iter().rev().find(|g| g.generation > 0).and_then(|g| g.map50_95);
-                let trend = match (first, last) {
-                    (Some(a), Some(z)) => format!("mAP50-95 {} → {}", f3(a), f3(z)),
-                    (Some(a), None) => format!("teacher mAP50-95 {}", f3(a)),
-                    _ => "–".to_string(),
-                };
+                let trend = loop_trend(l);
                 let state = match (l.status, l.phase) {
                     (BenchLoopStatus::Running, Some(p)) => format!(
                         "{} · generation {} of {total}",
@@ -186,7 +180,9 @@ impl FoloApp {
                     .items_center()
                     .gap(px(16.))
                     .px(px(16.))
-                    .h(px(56.))
+                    // A failed loop's reason is read whole: its row grows to wrap it.
+                    .min_h(px(56.))
+                    .py(px(8.))
                     .border_b_1()
                     .border_color(t.line_subtle)
                     .child(
@@ -201,18 +197,11 @@ impl FoloApp {
                                 badges.extend(verdict);
                                 name_with_badges(&t, window, &l.name, &badges, name_w)
                             })
-                            .child(
-                                text(
-                                    ty::SM,
-                                    if l.status == BenchLoopStatus::Failed {
-                                        t.danger_text
-                                    } else {
-                                        t.text_tertiary
-                                    },
-                                )
-                                .ellipsis()
-                                .child(state),
-                            ),
+                            .child(if l.status == BenchLoopStatus::Failed {
+                                text(ty::SM, t.danger_text).child(state)
+                            } else {
+                                text(ty::SM, t.text_tertiary).ellipsis().child(state)
+                            }),
                     )
                     .child(text(ty::SM, t.text_secondary).tnum().w(px(220.)).flex_none().child(trend))
                     .child(num_cell(

@@ -7,7 +7,9 @@ use folo_ui::{
 };
 
 use super::cells::{name_with_badges, num_cell};
-use super::format::{agent_name, axis_short, axis_text, contestant_line, entry_frac, entry_tone, pct, ranks};
+use super::format::{
+    agent_name, axis_short, axis_text, contestant_line, entry_frac, entry_tone, pct, ranks, score_text,
+};
 use crate::api::{Bench, BenchAxis, BenchEntry, BenchEntryStatus, Label};
 use crate::app::{FoloApp, Route, act};
 use crate::bench::{Contender, model_fits};
@@ -216,7 +218,13 @@ impl FoloApp {
             BenchEntryStatus::Running | BenchEntryStatus::Queued | BenchEntryStatus::Stopping => {
                 let at = e.progress.condition.as_ref().map_or_else(
                     || "unchanged images".to_string(),
-                    |c| format!("{c} · severity {}", e.progress.severity.unwrap_or(1)),
+                    |c| {
+                        format!(
+                            "{} · severity {}",
+                            self.bench_condition_name(c),
+                            e.progress.severity.unwrap_or(1)
+                        )
+                    },
                 );
                 div()
                     .flex()
@@ -257,7 +265,7 @@ impl FoloApp {
                 text(ty::MD, t.text_primary)
                     .tnum()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("{:.1}", s.total))
+                    .child(score_text(s.total))
             },
         );
         // Actions: stop while it runs; delete (a second click confirms) once it has ended.
