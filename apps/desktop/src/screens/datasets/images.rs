@@ -201,6 +201,21 @@ impl FoloApp {
                 .into_any_element();
         }
         if count == 0 {
+            // A dataset with no image at all is not a filter that matched nothing.
+            let (icon, title, body) = if ds.splits.total() == 0 {
+                let broken = ds.stats.as_ref().is_some_and(|s| s.broken_labels > 0);
+                (
+                    "icons/image.svg",
+                    "No usable images",
+                    if broken {
+                        "FOLO found no image it can read with its labels here. Broken labels above says what's wrong."
+                    } else {
+                        "FOLO found no image in this dataset's splits."
+                    },
+                )
+            } else {
+                ("icons/list-filter.svg", "No images match", "Try another split or clear the class filter.")
+            };
             return div()
                 .flex()
                 .flex_col()
@@ -208,9 +223,9 @@ impl FoloApp {
                 .child(toolbar)
                 .child(panel(&t).flex_1().flex().items_center().justify_center().child(empty_state(
                     &t,
-                    "icons/list-filter.svg",
-                    "No images match",
-                    "Try another split or clear the class filter.",
+                    icon,
+                    title,
+                    body,
                     Tone::Neutral,
                 )))
                 .into_any_element();

@@ -169,17 +169,26 @@ impl FoloApp {
         // the list's order alone.
         // Unknown while the list isn't loaded: neither "added" nor "already added" is claimed then.
         let existed = self.store.datasets.ready().map(|l| l.iter().any(|d| d.id == ds.id));
+        // Registered, but nothing in it can train: a warning, not a success.
+        let unusable = ds.splits.total() == 0;
         if let Some(list) = self.store.datasets.ready_mut() {
             upsert_dataset(list, ds);
         }
         self.changed_here(List::Datasets, cx);
+        let (tone, title, body) = match existed {
+            _ if unusable => (
+                Tone::Warning,
+                format!("{name} has no usable images"),
+                "FOLO added it but can't read any of its images with their labels. Its page says what's wrong."
+                    .to_string(),
+            ),
+            Some(true) => (Tone::Info, format!("{name} is already added"), body),
+            Some(false) => (Tone::Accent, format!("{verb} {name}"), body),
+            None => (Tone::Accent, format!("{name} is ready"), body),
+        };
         self.toast_with(
-            if existed == Some(true) { Tone::Info } else { Tone::Accent },
-            match existed {
-                Some(true) => format!("{name} is already added"),
-                Some(false) => format!("{verb} {name}"),
-                None => format!("{name} is ready"),
-            },
+            tone,
+            title,
             Some(body.into()),
             Some((
                 "Open".into(),
