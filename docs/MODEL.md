@@ -1001,8 +1001,9 @@ summed in f64 in candidate order (anchor, then class), rounded to f32; a side wi
   the highest precision `1 / (s² · ε)`, like any certain side (a guard was measured and changed nothing; such
   sides are rare, docs/notes/hill/r3-fusion.md).
 
-**Ties and edge cases.** Membership is `>=` on the f32 IoU (a member at exactly `fusion_iou` is in). A member whose
-weight is not `> 0` (a zero score, a NaN, a zero precision) is left out of that side's sums. Sums run in candidate
+**Ties and edge cases.** Membership is `>=` on the f32 IoU (a member at exactly `fusion_iou` is in). A member side whose
+weight is not `> 0` (a zero score, a NaN, a zero precision) or whose edge is not finite is left out of that side's
+sums. Sums run in candidate
 order, so the result does not depend on threads or on other classes' candidates, and identical inputs give
 identical boxes.
 

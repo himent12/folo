@@ -8,7 +8,9 @@ use rayon::prelude::*;
 
 use super::{FoloModel, HeadMode, HeadOutput};
 use crate::boxes::Xyxy;
-use crate::decode::{decode_head, dist2bbox, side_precision, side_precisions, sigmoid, softmax_moments};
+use crate::decode::{
+    decode_head, dist2bbox, side_precision, side_precisions, sigmoid, softmax_expectation, softmax_moments,
+};
 use crate::fusion::BoxFusion;
 use crate::nms::{Candidate, Detection, NmsConfig, nms_candidates_with, postprocess_with, topk_candidates};
 
@@ -306,10 +308,14 @@ impl HeadOutput {
                     for (k, v) in bins.iter_mut().enumerate() {
                         *v = rg[(side * rm + k) * a + j];
                     }
-                    // The mean is the expectation of `decode::softmax_expectation`, bit for bit.
-                    let (mean, var) = softmax_moments(&bins);
-                    d[side] = mean;
-                    p[side] = side_precision(mean, var, st);
+                    if dfl {
+                        // The mean is the expectation of `decode::softmax_expectation`, bit for bit.
+                        let (mean, var) = softmax_moments(&bins);
+                        d[side] = mean;
+                        p[side] = side_precision(mean, var, st);
+                    } else {
+                        d[side] = softmax_expectation(&bins);
+                    }
                 }
                 let bbox = dist2bbox(d, anchors.points[j]).scale(st, st);
                 cands.push(Candidate { anchor: j as u32, class: bc as u32, score: bs, bbox });

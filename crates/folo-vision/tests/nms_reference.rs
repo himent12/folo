@@ -148,7 +148,7 @@ fn naive_post(
             };
             for e in 0..4 {
                 let w = d.score as f64 * p[e] as f64;
-                if w > 0.0 {
+                if w > 0.0 && d.bbox.to_array()[e].is_finite() {
                     acc[e] += w * d.bbox.to_array()[e] as f64;
                     sum[e] += w;
                 }

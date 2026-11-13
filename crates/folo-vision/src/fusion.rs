@@ -50,8 +50,9 @@ impl BoxFusion {
 
 /// The fused boxes of the `kept` candidates (indices into `boxes` / `scores` / `classes`, the candidates that
 /// entered NMS), in `kept`'s order. Member `j` weighs `scores[j] · precision(j)[side]` on each side, with
-/// `precision` `None` meaning 1 (voting); the sums run in `f64` over the cluster in candidate order. A member whose
-/// weight is not `> 0` (a zero score, a NaN) is skipped, and a side with no weight keeps the kept box's edge.
+/// `precision` `None` meaning 1 (voting); the sums run in `f64` over the cluster in candidate order. A member side
+/// whose weight is not `> 0` (a zero score, a NaN) or whose edge is not finite is skipped, and a side with no weight
+/// keeps the kept box's edge.
 pub fn fuse_boxes(
     kept: &[usize],
     boxes: &[Xyxy],
@@ -97,7 +98,8 @@ pub fn fuse_boxes(
                 let x = c.to_array();
                 for e in 0..4 {
                     let wt = s * p[e] as f64;
-                    if wt > 0.0 {
+                    // A non-finite edge (a NaN box can join a cluster: its IoU comes out as 1) is left out.
+                    if wt > 0.0 && x[e].is_finite() {
                         acc[e] += wt * x[e] as f64;
                         sum[e] += wt;
                     }
@@ -173,6 +175,11 @@ mod tests {
         let boxes2 = [boxes[0], b(0.0, 0.0, 10.0, 9.0), boxes[1], boxes[2]];
         let got2 = fuse_boxes(&[0], &boxes2, &[0.5, 0.9, 0.5, 0.5], &[0, 1, 0, 0], false, 0.75, None)[0];
         assert_eq!(got2.y2, 8.75);
+        // A NaN box overlaps everything (IoU 1 from f32 min / max) but must not poison the kept box.
+        let boxes3 = [b(0.0, 0.0, 10.0, 10.0), b(f32::NAN, 0.0, 5.0, 10.0)];
+        let got3 = fuse_boxes(&[0], &boxes3, &[0.9, 0.8], &[0, 0], false, 0.75, None)[0];
+        assert_eq!(got3.x1, 0.0);
+        assert!(got3.to_array().iter().all(|v| v.is_finite()), "{got3:?}");
     }
 
     /// The side precision: a perfectly certain edge between two bins (DFL's {3: 0.7, 4: 0.3} for 3.3) has no
