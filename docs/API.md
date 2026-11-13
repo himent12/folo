@@ -62,7 +62,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 500 | `internal` | a bug or an IO failure |
 | 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (`POST /api/runs` with `"amp": true` where `capabilities.amp.available` is false: refused before anything is queued, with the same reason and a hint) |
 | 502 | `cloud_unavailable`, `server_unreachable`, `bad_gateway`, `agent_failed` | a cloud provider's API does not answer or fails; a worker (another FOLO server) does not answer, or answers with something that is not this API; a coding agent's call fails or its answer is not usable (designing a benchmark plan). As `Run.error_code` of a cloud run also `cloud_boot_failed`, `cloud_sync_failed` and `cloud_instance_lost` (docs/CLOUD.md) |
-| 507 | `gpu_out_of_memory` | the GPU ran out of memory (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
+| 507 | `gpu_out_of_memory` | the GPU ran out of memory, or one tensor is larger than the GPU allows a buffer to be (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
