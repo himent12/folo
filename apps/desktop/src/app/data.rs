@@ -216,6 +216,16 @@ impl FoloApp {
     }
 
     pub fn ensure_dataset(&mut self, id: &str, cx: &mut Context<Self>) {
+        // "Not found" once, listed now (its folder registered again, here or elsewhere): ask again,
+        // its images too.
+        let back = matches!(self.store.dataset.get(id), Some(Load::Failed(e)) if e.code == "dataset_not_found")
+            && self.store.dataset_summary(id).is_some();
+        if back {
+            self.store.dataset.remove(id);
+            if self.store.images.get(id).is_some_and(|l| l.error().is_some()) {
+                self.store.images.remove(id);
+            }
+        }
         if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.dataset.insert(id.to_string(), Load::Loading);
             let (a, b) = (id.to_string(), id.to_string());
