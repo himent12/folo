@@ -92,6 +92,14 @@ export default function TrainingSection(props: TrainingSectionProps) {
     return x ? `f16 on tensor cores: about ${x.toFixed(1)}× faster, 40% less memory.` : 'f16 on tensor cores: faster, about 40% less memory.';
   });
 
+  /**
+   * What the initial learning rate does: Auto picks its own (MuSGD at 0.01, docs/MODEL.md §8.2), so a value typed with it
+   * would be silently replaced; said here, before the run, instead of only in its Config afterwards ("requested 0.5").
+   */
+  const lrHint = computed(() =>
+    optimizer.get() === 'auto' ? 'Not used with Auto, which picks 0.01. Choose an optimizer to set it.' : 'Warmup 3 epochs, then linear to 1%.',
+  );
+
   /** The way out of a device the server cannot use: Auto, then back to the field. */
   function useAuto() {
     device.set('auto');
@@ -406,7 +414,7 @@ export default function TrainingSection(props: TrainingSectionProps) {
           <Field label="Optimizer" for="opt">
             <Select id="opt" bind:value={optimizer} options={(['auto', 'sgd', 'adamw', 'musgd'] as const).map((value) => ({ value, label: optimizerLabel(value) }))} />
           </Field>
-          <Field label="Initial learning rate" for="lr0" error={props.errors.lr0} hint="Warmup 3 epochs, then linear to 1%.">
+          <Field label="Initial learning rate" for="lr0" error={props.errors.lr0} hint={lrHint.get()}>
             <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!props.errors.lr0} />
           </Field>
           <Field label="Seed" for="seed" hint="Same seed, same run." error={props.errors.seed}>
