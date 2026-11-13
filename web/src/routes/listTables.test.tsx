@@ -117,6 +117,14 @@ describe('list tables: one geometry in every state', () => {
       // Each keyboard row names its entity: the list resumes at it by id after Esc or Back (ui/rowNav, shell F6).
       expect([...loaded.querySelectorAll<HTMLElement>('tr[data-row]')].filter((r) => !r.dataset.id)).toEqual([]);
       expect(loose(loaded)).toEqual(FLEX[name]);
+      // A long name cuts itself, whole in its tooltip, instead of sizing its column (w2-verify-studio N4: a
+      // 61-character dataset name left the path 55 px, "…/da…" on every row; a 68-character model name pushed
+      // Started from and Created out of the frame).
+      for (const row of loaded.querySelectorAll<HTMLElement>('tr[data-row]')) {
+        const cell = row.querySelector('td.name-cell');
+        const link = cell?.querySelector('a.name.truncate');
+        expect(link?.getAttribute('title'), `the name of ${row.dataset.id}`).toBeTruthy();
+      }
 
       await open(page, path, new MockApi('loading'));
       const skeleton = target.querySelector<HTMLTableElement>(sel)!;

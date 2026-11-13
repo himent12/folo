@@ -126,8 +126,8 @@ export default function Models() {
   // never cut (DESIGN_DIRECTION §2.3). The widths add up to the 1,160 px panel with the longest model name whole: the
   // input size (the same 640 on almost every model, and on each model's page) is not a column, which pays for
   // mAP50-95's "joint best" (120 px, its real width) and a 128 px Source run (104 px of text) from 1280 px; between
-  // 1024 and 1279 Classes, GFLOPs and Started from step out and Source run takes 144. A longer name wraps at its
-  // hyphens, never cut.
+  // 1024 and 1279 Classes, GFLOPs and Started from step out and Source run takes 144. A longer run name wraps at its
+  // hyphens, never cut; a longer model name is cut with an ellipsis (.name-cell), whole in its tooltip.
   const laptopOnly = new MediaQuery(`${media.laptopUp} and ${media.upToDesktop}`, false);
   // Sizes in one unit for the column, named in its header (prefs.units: MiB or MB).
   const cols = computed<Col[]>(() => [
@@ -430,8 +430,8 @@ export default function Models() {
                         const parent = computed(() => parentOf(m()));
                         return (
                           <tr class="link" data-row data-id={m().id} aria-label={m().name} onclick={() => router.go(`/models/${m().id}`)}>
-                            <td>
-                              <a class="name" href={href(`/models/${m().id}`)} title={m().about ?? m().name} onclick={(e) => e.stopPropagation()}>
+                            <td class="name-cell">
+                              <a class="name truncate" href={href(`/models/${m().id}`)} title={m().about ?? m().name} onclick={(e) => e.stopPropagation()}>
                                 {m().name}
                               </a>
                             </td>
@@ -657,6 +657,15 @@ css`
     text-decoration: underline;
     text-underline-offset: 3px;
     text-decoration-color: var(--line-strong);
+  }
+  /* The name takes what the fixed columns leave, cut with an ellipsis (whole in its tooltip): a 68-character name made
+     the table 1,315 px in its 1,158 px frame, Started from and Created out of view. Never under 160 px. */
+  .name-cell {
+    max-width: 0;
+    min-width: 160px;
+  }
+  .name-cell .name {
+    display: block;
   }
   /* The base table drops the last row's border; inside a group it still separates the next header. */
   .models tbody:not(:last-child) tr:last-child td {

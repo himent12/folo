@@ -340,6 +340,20 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     expect(ds?.getAttribute('title')).toBe(done.dataset!.name);
   });
 
+  it("lets a desktop row's dataset cut itself under the name, whole in its tooltip (w2-verify-studio N4)", async () => {
+    const api = new MockApi('normal', 0);
+    const done = (await api.runs()).find((r) => r.status === 'completed' && r.dataset)!;
+    await open(Runs, '/runs', api);
+    const row = await vi.waitFor(() => {
+      flushSync();
+      const tr = target.querySelector<HTMLElement>(`tr[data-id="${done.id}"]`);
+      if (!tr?.querySelector('.sub')?.textContent?.includes(done.dataset!.name)) throw new Error('rows not loaded');
+      return tr;
+    });
+    const ds = [...row.querySelectorAll<HTMLElement>('.sub .truncate')].find((e) => e.textContent?.trim() === done.dataset!.name);
+    expect(ds?.getAttribute('title')).toBe(done.dataset!.name);
+  });
+
   it('names a removed dataset as the run recorded it, marked, never by its id', async () => {
     const api = new MockApi('normal', 0);
     const done = (await api.runs()).find((r) => r.status === 'completed' && r.dataset)!;
