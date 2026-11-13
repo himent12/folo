@@ -123,20 +123,15 @@ RTX 4080 SUPER (Vulkan). Median of the per-round medians, ms (min–max):
 | folo-s f16 b16 | 20.60 (20.49–22.50) | 18.94 (18.93–19.53) | 0.919 |
 | folo-s f16 tensor cores b16 | 12.08 (11.94–15.65) | 11.58 (11.30–12.64) | 0.959 |
 
-b1 (row 5) is bimodal on this machine. Within one run of either build, calls jump between about 1.5 and 5 ms (GPU clocks), so medians move by a factor of 2 between runs. The per-run minimums are steadier (median of 3 runs, base → new):
+b1 (row 5) is **not established**. In the first run the medians favoured new by 9–35%, but p90 reached 4× the median in either build. Each run cycles through 16 rect shapes, and the logs keep only the median, p90 and min. The per-run minimums were lower on new (for example s f32 2.45 → 2.20 ms), but a minimum is one call's best case.
 
-| config | base → new | change |
-|---|---|---|
-| n f32 | 1.54 → 1.48 | −4% |
-| n f16 | 1.71 → 1.62 | −5% |
-| n f16 tensor cores | 1.60 → 1.53 | −4% |
-| s f32 | 2.45 → 2.20 | −10% |
-| s f16 | 2.49 → 2.15 | −14% |
-| s f16 tensor cores | 2.03 → 1.77 | −13% |
+A second run after review added a `b1 one` row (the first image only, one shape) and ran 4 rounds of 200 calls. The machine was 44–100% CPU-busy with another lane (`logs/ab-pr2b-gpu-*`), and b1 was noise in both builds: single runs had 7–12 ms medians on either side.
+- b1 one, new/base: 0.81–1.05.
+- b16 confirmed the first run: n 0.928 / 0.848 / 0.920, s 0.935 / 0.879 / 1.043 (f32 / f16 / f16 tensor cores; the s f16tc ranges overlap).
 
 Against counsel:
-- Row 6 measured −4 to −12%, against an estimate of about +10% throughput.
-- Row 5 measured −4 to −14% at the minimum, where counsel expected a change within noise.
+- Row 6 measured −4 to −15%, against an estimate of about +10% throughput.
+- Row 5 is unresolved; counsel expected it to stay within noise.
 
 ## Negative results and notes
 - No lazy/dense switch. Counsel's break-even (400 / 80 / 16 candidates for P3 / P4 / P5) compared a per-candidate
@@ -162,6 +157,6 @@ Against counsel:
     branch `infer/c3k-sibling-fusion` if a later round wants it (folo-m/l/x have 8 such pairs, not measured).
 
 ## Leftovers
-- A quiet CPU repeat of PR 1's rows (folo-s was unreadable under load) and the break-even sweeps on the CPU and the
-  GPU (`benches/candidates.rs`, `FOLO_BENCH_SWEEP=1`): pending a quiet window.
+- Pending a quiet window: a CPU repeat of PR 1's rows (folo-s was unreadable under load), a GPU b1 (row 5) A/B,
+  and the break-even sweeps on the CPU and the GPU (`benches/candidates.rs`, `FOLO_BENCH_SWEEP=1`).
 - The validation decode (one kernel emitting multi-label pairs plus boxes only where a pair is): not started.
