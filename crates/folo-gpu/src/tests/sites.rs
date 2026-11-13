@@ -185,7 +185,7 @@ fn check_decode(ctx: &GpuContext, dtype: DType, seed: u64) {
         .unwrap();
     let dense = bits(&out, DType::F32);
     let records = |v: &[u32], n: usize| {
-        let mut r: Vec<[u32; 7]> = v[..7 * n].chunks_exact(7).map(|c| c.try_into().unwrap()).collect();
+        let mut r: Vec<[u32; 7]> = v[..7 * n].as_chunks::<7>().0.to_vec();
         r.sort_unstable();
         r
     };
