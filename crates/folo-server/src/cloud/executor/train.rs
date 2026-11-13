@@ -88,16 +88,17 @@ impl Exec {
                 Err(e) => {
                     // Said once per silence: the run's log shows why its numbers stand still.
                     if unreachable.is_none() {
-                        self.entry.log(
-                            LogLevel::Warn,
-                            format!("the worker did not answer ({e}); the run goes on there, asking again"),
-                        );
                         // Said on the run too, so a page shows the run's numbers stand still and why. A silence a
-                        // process before this one recorded goes on: it keeps its start.
+                        // process before this one recorded goes on: it keeps its start. (Before the log line, so a
+                        // reader of the log finds the run saying so.)
                         let now = rfc3339(unix_now());
                         self.entry.update_cloud(|c| {
                             c.unanswered_since.get_or_insert(now);
                         });
+                        self.entry.log(
+                            LogLevel::Warn,
+                            format!("the worker did not answer ({e}); the run goes on there, asking again"),
+                        );
                     }
                     let since = *unreachable.get_or_insert_with(Instant::now);
                     wait = (wait * 2).min(t.poll_max);
