@@ -187,14 +187,21 @@ impl Server {
         })
     }
 
+    /// The server does not answer: said as a sentence about it (never starting with the URL, which a front end would
+    /// capitalise), the transport's own words once (without the URL they repeat), and the likely cause.
     fn unreachable(&self, e: impl std::fmt::Display) -> Error {
+        let why = self.detail(e);
+        // An https:// URL of a server that speaks plain HTTP fails in the TLS handshake (rustls: a record that is not
+        // TLS); `folo serve` itself serves plain HTTP.
+        let tls = self.https && (why.contains("InvalidContentType") || why.contains("corrupt message"));
+        let cause = if tls {
+            "it seems to speak plain HTTP: use http://, or put a TLS proxy in front of it".to_string()
+        } else {
+            "is `folo serve --host 0.0.0.0` running there?".to_string()
+        };
         Error::new(
             ErrorKind::Unavailable,
-            format!(
-                "{} does not answer ({}); is `folo serve --host 0.0.0.0` running there?",
-                self.url,
-                self.scrub(e)
-            ),
+            format!("the server at {} does not answer ({why}); {cause}", self.url),
         )
     }
 
@@ -202,8 +209,18 @@ impl Server {
     fn not_folo(&self, why: impl std::fmt::Display) -> Error {
         Error::new(
             ErrorKind::Unavailable,
-            format!("{} does not look like a FOLO server (GET /api/health: {})", self.url, self.scrub(why)),
+            format!(
+                "the server at {} does not look like a FOLO server (GET /api/health: {})",
+                self.url,
+                self.detail(why)
+            ),
         )
+    }
+
+    /// A transport or server message about this server, scrubbed, without the URL it may start with.
+    fn detail(&self, e: impl std::fmt::Display) -> String {
+        let text = self.scrub(e);
+        text.strip_prefix(&format!("{}: ", self.url)).map(str::to_string).unwrap_or(text)
     }
 
     /// `text`, made of what the server answered (decoded), with its token blanked out: a server may say anything.
@@ -392,6 +409,24 @@ mod tests {
         let silent = Fixture::hang_up();
         let e = Remote.check(&values(&silent.base(), TOKEN)).unwrap_err();
         assert_error(&e, ErrorKind::Unavailable, "does not answer");
+        // A sentence about the server (a front end capitalises its first letter: never "Http://…"), its URL once.
+        assert!(e.message.starts_with("the server at http://"), "{}", e.message);
+        assert_eq!(e.message.matches(&silent.base()).count(), 1, "{}", e.message);
+        assert!(e.message.ends_with("is `folo serve --host 0.0.0.0` running there?"), "{}", e.message);
+        // https:// to a server that speaks plain HTTP: it answers the TLS hello with an HTTP 400, as `folo serve`
+        // (hyper) does. Said so, with what to do.
+        let plain = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = plain.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut s, _) = plain.accept().unwrap();
+            let _ = s.read(&mut [0u8; 1024]);
+            let _ =
+                s.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        });
+        let e = Remote.check(&values(&format!("https://{addr}"), TOKEN)).unwrap_err();
+        server.join().unwrap();
+        assert_error(&e, ErrorKind::Unavailable, "it seems to speak plain HTTP: use http://");
     }
 
     #[test]

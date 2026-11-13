@@ -104,18 +104,30 @@ impl Default for Tuning {
     }
 }
 
-/// A provider error as an API error: [`folo_cloud::Error::code`] with its status from `folo_api::codes`.
-pub(crate) fn provider_error(e: folo_cloud::Error) -> Error {
+/// A provider error as an API error: [`folo_cloud::Error::code`] with its status from `folo_api::codes`, and a hint
+/// for a provider that `provisions` instances (a console, an API), or for a server that already runs (`remote`: its
+/// token, whether it runs and can be reached).
+pub(crate) fn provider_error(provisions: bool) -> impl Fn(folo_cloud::Error) -> Error {
+    move |e| provider_error_of(e, provisions)
+}
+
+fn provider_error_of(e: folo_cloud::Error, provisions: bool) -> Error {
     let code = e.code();
     let status = folo_api::codes::find(code)
         .and_then(|c| StatusCode::from_u16(c.status).ok())
         .unwrap_or(StatusCode::BAD_GATEWAY);
     let hint = match e.kind {
-        folo_cloud::ErrorKind::Auth => {
+        folo_cloud::ErrorKind::Auth if provisions => {
             Some("check the credentials in the provider's console, then connect again")
         }
-        folo_cloud::ErrorKind::Unavailable => {
+        folo_cloud::ErrorKind::Auth => {
+            Some("check the server's `--token` (or FOLO_TOKEN), then connect again")
+        }
+        folo_cloud::ErrorKind::Unavailable if provisions => {
             Some("the provider's API did not answer as expected; try again")
+        }
+        folo_cloud::ErrorKind::Unavailable => {
+            Some("check that the server runs and that this machine can reach its address, then try again")
         }
         folo_cloud::ErrorKind::NoOffer => {
             Some("GET /api/cloud/connections/{id}/offers lists what the connection can run on now")
@@ -200,7 +212,10 @@ impl Core {
         {
             return Ok(list.clone());
         }
-        let offers = c.provider.offers(&c.connection.values()).map_err(provider_error)?;
+        let offers = c
+            .provider
+            .offers(&c.connection.values())
+            .map_err(provider_error(c.provider.info().provisions))?;
         let list = CloudOfferList { offers, fetched: rfc3339(unix_now()) };
         self.offers.lock().unwrap().insert(c.connection.id.clone(), (Instant::now(), list.clone()));
         Ok(list)
@@ -308,7 +323,7 @@ impl Cloud {
             .hint(format!("its fields are {}", fields.join(", "))));
         }
         let values = Values::from(req.values);
-        let account = provider.check(&values).map_err(provider_error)?;
+        let account = provider.check(&values).map_err(provider_error(info.provisions))?;
         let stored = self.core.connections.add(&info, &req.name, values, account)?;
         tracing::info!(connection = %stored.id, provider = %stored.provider, "cloud connection made");
         Ok(stored.api(Some(&info)))
@@ -505,4 +520,22 @@ pub(crate) fn check_device(config: &folo_api::TrainConfig) -> Result<()> {
         format!("device is `{}`, but a cloud run trains on the device its worker picks", config.device),
     )
     .hint("leave `device` out (or set it to auto) when `compute` is set"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_provider_error_points_where_its_provider_is_fixed() {
+        let hint = |kind, provisions| {
+            provider_error(provisions)(folo_cloud::Error::new(kind, "x")).body.hint.unwrap_or_default()
+        };
+        // RunPod: its console; a remote server: its token, and whether it runs and can be reached.
+        assert!(hint(folo_cloud::ErrorKind::Auth, true).contains("provider's console"));
+        assert!(hint(folo_cloud::ErrorKind::Auth, false).contains("`--token`"));
+        assert!(hint(folo_cloud::ErrorKind::Unavailable, true).contains("provider's API"));
+        let remote = hint(folo_cloud::ErrorKind::Unavailable, false);
+        assert!(remote.contains("the server runs") && !remote.contains("provider"), "{remote}");
+    }
 }
