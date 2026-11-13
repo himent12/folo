@@ -11,6 +11,7 @@ import type { DialogStatus } from '$lib/ui/feedback';
 import { tooltip } from '$lib/ui/tooltip';
 import { swatchStyle } from './swatch';
 import { shortDir, stem } from './imagePath';
+import { count } from '$lib/format';
 
 export interface InspectorRailProps {
   img: Img | undefined;
@@ -24,6 +25,9 @@ export interface InspectorRailProps {
   status: DialogStatus;
 }
 
+/** Most classes the legend lists whether or not the image has them. */
+const LEGEND_ALL = 12;
+
 export default function InspectorRail(props: InspectorRailProps) {
   const hovered = bindable(props, 'hovered');
 
@@ -33,7 +37,11 @@ export default function InspectorRail(props: InspectorRailProps) {
     for (const b of props.img?.boxes ?? []) c.set(b.class, (c.get(b.class) ?? 0) + 1);
     return c;
   });
-  const legend = computed(() => props.classes.map((name, i) => ({ i, name, n: counts.get().get(i) ?? 0 })));
+  // Every class while there are few; past LEGEND_ALL (COCO has 80) only this image's, so the legend never takes the
+  // rail from the labels and the image's facts (studio-data F3).
+  const all = computed(() => props.classes.map((name, i) => ({ i, name, n: counts.get().get(i) ?? 0 })));
+  const legend = computed(() => (props.classes.length > LEGEND_ALL ? all.get().filter((l) => l.n > 0) : all.get()));
+  const others = computed(() => props.classes.length - legend.get().length);
   const name = (c: number) => props.classes[c] ?? `class ${c}`;
   /** The path's room, and one mono cell, so the folders shorten to whole characters with "…" set tight against "/". */
   const pathW = signal(0);
@@ -114,6 +122,11 @@ export default function InspectorRail(props: InspectorRailProps) {
             )}
           </For>
         </ul>
+        {props.classes.length > LEGEND_ALL && others.get() ? (
+          <p class="none others">
+            {count(others.get(), legend.get().length ? 'other class' : 'class', legend.get().length ? 'other classes' : 'classes')}, none in this image
+          </p>
+        ) : null}
       </section>
 
       {props.img ? (
@@ -266,6 +279,9 @@ css`
   }
   .legend li.absent {
     color: var(--text-tertiary);
+  }
+  .others {
+    margin-top: var(--space-1);
   }
   dl {
     display: grid;

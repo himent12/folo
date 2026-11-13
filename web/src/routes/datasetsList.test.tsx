@@ -122,6 +122,16 @@ describe('the Datasets list', () => {
 });
 
 describe('Add dataset from the URL', () => {
+  it('offers a folder of labeled images first when there are no datasets yet (studio-data F4)', async () => {
+    vi.spyOn(hub.api, 'datasets').mockResolvedValue([]);
+    open(Datasets, '/datasets');
+    const empty = await until(() => target.querySelector('.ui-empty, [class*="empty"]')?.closest('td') ?? null, 'the empty state');
+    expect(empty.textContent).toContain('Register a folder of images you have labeled (YOLO or COCO)');
+    [...empty.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Register folder')!.click();
+    const dialog = await until(() => document.querySelector<HTMLDialogElement>('dialog[open]'), 'the dialog');
+    expect(dialog.querySelector('input[placeholder="e.g. D:/data/my-dataset"]')).not.toBeNull();
+  });
+
   it('opens on ?add= followed while the list is open, and closing it takes ?add= out of the URL (v-shell N8)', async () => {
     const go = vi.spyOn(router, 'go').mockImplementation((path: string) => {
       router.route = parse(`#${path}`);

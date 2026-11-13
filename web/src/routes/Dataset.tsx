@@ -24,6 +24,7 @@ import { gridView } from '$lib/ui/gridView';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Meta from '$lib/ui/Meta';
 import Panel from '$lib/ui/Panel';
+import PathText from '$lib/ui/PathText';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
@@ -355,9 +356,7 @@ export default function Dataset() {
                 ) : (
                   <Meta>
                     <span class="faint">{dd().format}</span>
-                    <span class="path mono truncate" title={dd().path}>
-                      {dd().path}
-                    </span>
+                    <PathText class="ds-path" path={dd().path} />
                     <span class="num">{num(dd().splits.train)} train</span>
                     <span class="num">{num(dd().splits.val)} val</span>
                     <span class="num">{num(dd().splits.test)} test</span>
@@ -554,7 +553,8 @@ export default function Dataset() {
 }
 
 css`
-  .path {
+  /* The header's path (lib/ui/PathText, cut in the middle), in the meta line beside the counts. */
+  :global(.ds-path) {
     max-width: 360px;
   }
   .tabs {
