@@ -54,6 +54,20 @@ pub fn offer_line(o: &CloudOffer) -> String {
     parts.join(" · ")
 }
 
+/// A chosen offer as its closed select says it: the GPU, its price, then the rest ("RTX A4000 ·
+/// $0.17/h · 16.0 GiB · Community Cloud"), so when the field is too narrow what it cuts is the
+/// detail, never the price.
+pub fn offer_summary(o: &CloudOffer) -> String {
+    let line = offer_line(o);
+    let (gpu, rest) = match line.split_once(" · ") {
+        Some((g, r)) => (g.to_string(), Some(r.to_string())),
+        None => (line, None),
+    };
+    let mut parts = vec![gpu, fmt_price(o.price_per_hour)];
+    parts.extend(rest);
+    parts.join(" · ")
+}
+
 /// A transfer's progress: "1.1 of 4.5 GiB" (one unit when both sides share it), or what has moved
 /// when the total is unknown.
 pub fn fmt_transfer(p: &TransferProgress) -> String {
@@ -112,6 +126,13 @@ mod cloud_format_tests {
             detail: detail.map(Into::into),
             availability: CloudAvailability::High,
         }
+    }
+
+    #[test]
+    fn a_chosen_offer_names_its_price_before_its_details() {
+        let o = offer("RTX A4000", 16 << 30, Some("Community Cloud"));
+        assert_eq!(offer_summary(&o), "RTX A4000 · $0.69/h · 16.0 GiB · Community Cloud");
+        assert_eq!(offer_summary(&offer("RTX 4090", 0, None)), "RTX 4090 · $0.69/h");
     }
 
     #[test]

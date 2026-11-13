@@ -59,7 +59,8 @@ impl Drop for Held {
 }
 
 impl MockBackend {
-    /// Holds the next `call` (`"datasets"`, `"models"`, `"runs"`, `"predict"`, `"images"`) once its answer is made,
+    /// Holds the next `call` (`"datasets"`, `"models"`, `"runs"`, `"predict"`, `"images"`,
+    /// `"metrics <run id>"`) once its answer is made,
     /// until the returned hand releases it.
     #[cfg(test)]
     pub fn hold(&self, call: &'static str) -> Held {

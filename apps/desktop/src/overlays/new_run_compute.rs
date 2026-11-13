@@ -178,9 +178,8 @@ impl FoloApp {
                 let ids: Vec<String> = shown.iter().map(|o| o.id.clone()).collect();
                 self.select_with(
                     "nr-gpu",
-                    offer.as_ref().map_or("Choose a GPU".into(), |o| {
-                        format!("{} · {}", offer_line(o), fmt_price(o.price_per_hour)).into()
-                    }),
+                    // The price before the details: what a narrow field cuts is the detail.
+                    offer.as_ref().map_or("Choose a GPU".into(), |o| crate::ui::offer_summary(o).into()),
                     opts,
                     picked,
                     &off,

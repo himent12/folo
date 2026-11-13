@@ -146,6 +146,12 @@ impl FoloApp {
         }
     }
 
+    /// A run's history dropped (the run deleted, here or elsewhere): an answer still on its way
+    /// (metrics, samples or logs asked for before) must not bring it back.
+    pub(super) fn forget_history(&mut self, id: &str) {
+        self.history_tickets.retain(|(run, _), _| run != id);
+    }
+
     /// A fresh ticket for one history request of a run; earlier tickets stop counting.
     pub(super) fn history_ticket(&mut self, id: &str, what: &'static str) -> u64 {
         self.history_seq += 1;
@@ -484,6 +490,44 @@ impl FoloApp {
         if matches!(self.store.runs, Load::Ready(_)) {
             self.refresh_runs(cx);
         }
+        // The stream sends at most ~10 steps a second (docs/API.md), so what a page watched live
+        // holds is thinned: its loss line and smoothed loss were not the file's. Final now, the
+        // whole history is read again (in place: the charts stay while it is out), as Studio does.
+        // Still loading too: that request may have been answered before the end (a fresh ticket
+        // drops it).
+        if matches!(self.store.run_data.get(id), Some(Load::Ready(_) | Load::Loading)) {
+            self.reload_run_history(id, cx);
+        }
+    }
+
+    /// A run's metric history read again over the one shown (or still loading), which stays until
+    /// the answer is in (and if it fails).
+    fn reload_run_history(&mut self, id: &str, cx: &mut Context<Self>) {
+        let spe = self.store.run(id).map_or(1, |r| r.steps_per_epoch);
+        let ticket = self.history_ticket(id, "metrics");
+        let (rid, key) = (id.to_string(), id.to_string());
+        self.fetch(
+            cx,
+            move |api| api.metrics(&rid),
+            move |this, r, cx| {
+                if this.history_tickets.get(&(key.clone(), "metrics")) != Some(&ticket) {
+                    return;
+                }
+                // Dropped meanwhile (the run deleted): not brought back. A failure keeps a history
+                // shown, and ends one still loading (its page says so and can ask again).
+                match (r, this.store.run_data.get(&key)) {
+                    (Ok(m), Some(Load::Ready(_) | Load::Loading)) => {
+                        this.store.install_run_data(&key, Ok(RunData::new(m, spe)));
+                        cx.notify();
+                    }
+                    (Err(e), Some(Load::Loading)) => {
+                        this.store.install_run_data(&key, Err(e));
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            },
+        );
     }
 
     /// Reload the run list in place (no loading state) and subscribe to whatever is active.

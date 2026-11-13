@@ -343,8 +343,12 @@ impl FoloApp {
     /// device once it reports one ("RunPod · RTX 4090 · Vulkan").
     pub fn cloud_device(&self, r: &Run, c: &RunCloud) -> String {
         let provider = self.provider_name(&c.provider);
-        if r.device.is_empty() {
-            format!("{provider} · {}", c.offer.gpu)
+        // Until the worker reports its device (and for good on a run that failed before training)
+        // the server says "<offer's GPU> at <provider>": the provider is already named, so the GPU
+        // once.
+        let placeholder = format!("{} at ", c.offer.gpu);
+        if r.device.is_empty() || r.device.starts_with(&placeholder) {
+            format!("{provider} · {}", crate::ui::device_label(&c.offer.gpu))
         } else {
             format!("{provider} · {}", crate::ui::device_label(&r.device))
         }
@@ -607,6 +611,70 @@ impl FoloApp {
         self.restore_focus(window);
         cx.notify();
     }
+}
+
+/// How far one phase of a cloud run got, as its panel marks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhaseState {
+    Done,
+    Now,
+    Next,
+    Failed,
+    Skipped,
+}
+
+/// Each phase of a cloud run with its state, as Studio marks them (`web/src/lib/cloud.ts`,
+/// `phaseStates`). Live, the phases before the current one are done. Once released, the phases
+/// before the one its hand-over ended in (`RunCloud::ended_in`) are done, that one failed (a
+/// failed run), skipped (stopped before training) or done, and the later ones never reached; a
+/// server that doesn't say (`None`, older servers) has every phase done.
+pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
+    // A newer server's phase has no known place among these: it is the one step, current.
+    if c.phase == CloudPhase::Unknown {
+        return vec![(CloudPhase::Unknown, PhaseState::Now)];
+    }
+    if c.phase != CloudPhase::Released {
+        return CloudPhase::ALL
+            .iter()
+            .map(|&p| {
+                let s = if p < c.phase {
+                    PhaseState::Done
+                } else if p == c.phase {
+                    PhaseState::Now
+                } else {
+                    PhaseState::Next
+                };
+                (p, s)
+            })
+            .collect();
+    }
+    let failed = r.status == RunStatus::Failed;
+    // Ended while collecting but not by the copy back: training is what failed, the copy is done.
+    let collected = c.ended_in == Some(CloudPhase::Collecting)
+        && failed
+        && r.error_code.as_deref() != Some("cloud_sync_failed");
+    let ended = if collected { Some(CloudPhase::Training) } else { c.ended_in };
+    let end_state = if failed {
+        PhaseState::Failed
+    } else if r.status == RunStatus::Stopped && ended < Some(CloudPhase::Training) {
+        PhaseState::Skipped
+    } else {
+        PhaseState::Done
+    };
+    CloudPhase::ALL
+        .iter()
+        .map(|&p| {
+            let s = match ended {
+                None => PhaseState::Done,
+                _ if p >= CloudPhase::Releasing => PhaseState::Done,
+                Some(e) if p < e => PhaseState::Done,
+                _ if collected && p == CloudPhase::Collecting => PhaseState::Done,
+                Some(e) if p == e => end_state,
+                _ => PhaseState::Skipped,
+            };
+            (p, s)
+        })
+        .collect()
 }
 
 #[cfg(test)]

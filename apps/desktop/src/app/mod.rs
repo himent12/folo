@@ -25,6 +25,8 @@ mod playground;
 mod playground_tests;
 mod preferences;
 mod render;
+#[cfg(test)]
+mod run_page_tests;
 mod sidebar;
 mod start_from;
 #[cfg(test)]
