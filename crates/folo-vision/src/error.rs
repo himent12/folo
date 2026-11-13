@@ -56,13 +56,20 @@ impl Error {
     /// validation, so the whole report is searched), or when one tensor is larger than the device lets a buffer be
     /// (folo-gpu's "buffer of N bytes exceeds the device limit"): the same "too big for this GPU" with the same fixes,
     /// a smaller batch, image size or model, and usually what a batch or image size far past the GPU hits first.
+    /// The buffer limit is read only from the GPU backend's own error, so a `.folo` file whose header happens to hold
+    /// those words stays `invalid_weights`.
     pub fn is_gpu_out_of_memory(&self) -> bool {
-        matches!(self, Error::Core(_) | Error::Nn(_)) && {
-            let m = self.to_string().to_ascii_lowercase();
-            m.contains("out of memory")
-                || m.contains("outofmemory")
-                || m.contains("bytes exceeds the device limit")
-        }
+        let core = match self {
+            Error::Core(e) | Error::Nn(folo_nn::Error::Core(e)) => Some(e),
+            _ => None,
+        };
+        let too_big = matches!(core, Some(folo_core::Error::Backend { backend: "wgpu", msg })
+            if msg.contains("bytes exceeds the device limit"));
+        too_big
+            || matches!(self, Error::Core(_) | Error::Nn(_)) && {
+                let m = self.to_string().to_ascii_lowercase();
+                m.contains("out of memory") || m.contains("outofmemory")
+            }
     }
 
     /// The message an agent sees: at most [`folo_api::codes::MAX_MESSAGE_CHARS`] characters (driver reports are
@@ -140,5 +147,12 @@ Caused by:
         let dispatch = "device limit exceeded: dispatch [70000, 1, 1] exceeds 65535 workgroups per dimension";
         let e = Error::Core(folo_core::Error::Backend { backend: "wgpu", msg: dispatch.into() });
         assert_eq!(e.code(), "internal");
+        // Through a layer, the same.
+        let e =
+            Error::Nn(folo_nn::Error::Core(folo_core::Error::Backend { backend: "wgpu", msg: msg.into() }));
+        assert_eq!(e.code(), "gpu_out_of_memory");
+        // The words in a weights file's header are the file's fault, not the GPU's.
+        let e = Error::Nn(folo_nn::Error::Format(format!("tensor 'x': unknown dtype '{msg}'")));
+        assert_eq!(e.code(), "invalid_weights");
     }
 }
