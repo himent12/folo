@@ -93,6 +93,11 @@ impl FoloApp {
                     if this.store.health.needs_fetch() {
                         this.ensure_core(cx);
                     }
+                    if let Ok(s) = &r {
+                        // It answers: a later loss starts over, and its data dir says whether it is ours.
+                        this.recovered();
+                        this.note_data_dir(s.data_dir.as_deref());
+                    }
                     let r = r.map(|s| {
                         this.store.capabilities = s.capabilities;
                         this.store.data_dir = s.data_dir;

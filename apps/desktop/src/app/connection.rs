@@ -14,6 +14,12 @@ use super::{FoloApp, ServerMode};
 /// The most refreshes (2 s apart) a failed recovery waits before the next attempt.
 const RECOVER_WAIT_MAX: u32 = 30;
 
+/// Whether two addresses name one server (as typed or as the server reports itself).
+fn same_server(a: &str, b: &str) -> bool {
+    let base = |u: &str| crate::api::http::HttpBackend::new(u).base().to_ascii_lowercase();
+    base(a) == base(b)
+}
+
 /// Who asked for a connection ([`FoloApp::autoconnect`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reason {
@@ -82,6 +88,7 @@ impl FoloApp {
         self.hold_loading = false;
         // Set again by the caller when this is the local server; the reason one didn't start is old.
         self.local_url = None;
+        self.connected_url = None;
         self.start_error = None;
         self.reached = false;
         self.store.gpu_util.clear();
@@ -173,12 +180,9 @@ impl FoloApp {
                         return;
                     }
                     this.set_backend((connector.backend)(&url), ServerMode::Local, cx);
-                    // The local server again (Connect pressed on its address, or back from the demo): it
-                    // stays the one to bring back. Any other server found at an address isn't ours to start.
-                    let base = |u: &str| crate::api::http::HttpBackend::new(u).base().to_string();
-                    if this.last_local.as_deref().is_some_and(|l| base(l) == base(&url)) {
-                        this.local_url = Some(url.clone());
-                    }
+                    // Whether it is the local server (Connect pressed on its address, back from the demo)
+                    // is told by the data dir its `/system` names (`note_data_dir`), not by the address.
+                    this.connected_url = Some(url.clone());
                 })
                 .ok();
                 return;
@@ -216,11 +220,18 @@ impl FoloApp {
                                 // The data dir's server (another window's, or one started by hand): ours stays.
                                 Spawned::Running(local) => (local, false),
                             };
+                            this.recovered();
+                            if why == Reason::Recover && !started && same_server(&local, &url) {
+                                // The lost server itself answers the data dir's address: it was only
+                                // slow. Same server, nothing is reset.
+                                this.connecting = None;
+                                cx.notify();
+                                return;
+                            }
                             this.server_url.update(cx, |i, cx| i.set_text(local.clone(), cx));
                             this.set_backend((connector.backend)(&local), ServerMode::Local, cx);
                             this.local_url = Some(local.clone());
-                            this.last_local = Some(local.clone());
-                            this.recovered();
+                            this.connected_url = Some(local.clone());
                             this.said_where(why, &url, &local, started, cx);
                         })
                         .ok();
@@ -233,15 +244,17 @@ impl FoloApp {
                 if !current(this) {
                     return;
                 }
-                this.set_backend((connector.backend)(&url), ServerMode::Local, cx);
                 let mut say = true;
                 if why == Reason::Recover {
-                    // Not back yet: try again later, waiting longer each time (`connection_lost`), and
-                    // say so once.
-                    this.local_url = Some(url.clone());
+                    // Not back yet: the same address stays installed (nothing to switch to) and is tried
+                    // again later, waiting longer each time (`connection_lost`); said once.
+                    this.connecting = None;
                     this.recover_tries += 1;
                     this.recover_wait = (1u32 << this.recover_tries.min(5)).min(RECOVER_WAIT_MAX);
                     say = this.recover_tries == 1;
+                } else {
+                    this.set_backend((connector.backend)(&url), ServerMode::Local, cx);
+                    this.connected_url = Some(url.clone());
                 }
                 // Say why there is no local server; the pages show the unreachable state, and their
                 // error panels keep the reason after the toast has gone.
@@ -256,6 +269,7 @@ impl FoloApp {
                         cx,
                     );
                 }
+                cx.notify();
             })
             .ok();
         })
@@ -308,8 +322,26 @@ impl FoloApp {
         self.autoconnect(url, true, Reason::Recover, cx);
     }
 
+    /// What `/system` says the connected server serves. The data dir of the local server, once known,
+    /// is how a server reached later through an address (Connect on it, back from the demo) is
+    /// recognised as the local one again: an address alone may since belong to another server.
+    pub(super) fn note_data_dir(&mut self, dir: Option<&str>) {
+        let Some(dir) = dir else {
+            return;
+        };
+        if self.local_url.is_some() {
+            self.local_dir = Some(dir.to_string());
+        } else if self.server_mode == ServerMode::Local
+            && self.local_dir.as_deref() == Some(dir)
+            // Another machine's server may name the same path; only this machine's can be ours.
+            && self.connected_url.as_deref().is_some_and(crate::api::http::is_loopback)
+        {
+            self.local_url = self.connected_url.clone();
+        }
+    }
+
     /// The local server answers again: the next loss starts over without waiting.
-    fn recovered(&mut self) {
+    pub(super) fn recovered(&mut self) {
         self.recover_tries = 0;
         self.recover_wait = 0;
     }

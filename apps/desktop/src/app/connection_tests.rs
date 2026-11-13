@@ -132,6 +132,8 @@ fn a_recovery_that_fails_tries_again_later_and_says_so_once() {
     assert_eq!(FAILED_STARTS.load(Ordering::SeqCst), 2, "tries again");
     drive(&mut app, window, |this, _, _| {
         assert_eq!(this.local_url.as_deref(), Some("http://127.0.0.1:4000"));
+        assert_eq!(this.backend_gen, 0, "nothing to switch to: the backend stays");
+        assert!(this.connecting.is_none());
         assert_eq!(this.recover_wait, 4, "and waits longer");
         let said = titles(this).iter().filter(|t| *t == "Couldn't start folo serve").count();
         assert_eq!(said, 1, "{:?}", titles(this));
@@ -154,23 +156,61 @@ fn a_slow_local_server_is_kept_as_it_is() {
 }
 
 #[test]
-fn connect_on_the_local_servers_address_keeps_it_the_one_to_bring_back() {
+fn a_server_serving_the_local_data_dir_is_the_local_one_again() {
     let (mut app, window) = open();
-    drive(&mut app, window, |this, _, cx| {
-        this.connector = Connector { probe: |_| true, start: found_local, backend: demo };
-        this.last_local = Some("http://127.0.0.1:4100".into());
-        this.server_url.update(cx, |i, cx| i.set_text("127.0.0.1:4100", cx));
-        this.switch_source(ServerMode::Local, cx);
-    });
+    let connect = |app: &mut folo_ui::HeadlessApp, url: &'static str| {
+        drive(app, window, move |this, _, cx| {
+            this.connector = Connector { probe: |_| true, start: found_local, backend: demo };
+            this.server_url.update(cx, |i, cx| i.set_text(url, cx));
+            this.switch_source(ServerMode::Local, cx);
+        })
+    };
+    // Connect on the local server's address again (or back from the demo): its data dir says it is ours.
+    drive(&mut app, window, |this, _, _| this.local_dir = Some("D:/data".into()));
+    connect(&mut app, "127.0.0.1:4100");
     drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.local_url, None, "not before it says what it serves");
+        this.note_data_dir(Some("D:/data"));
         assert_eq!(this.local_url.as_deref(), Some("127.0.0.1:4100"));
     });
-    // Another server's address is not ours to start.
-    drive(&mut app, window, |this, _, cx| {
-        this.server_url.update(cx, |i, cx| i.set_text("127.0.0.1:4200", cx));
-        this.switch_source(ServerMode::Local, cx);
+    // Another server at an address the local one once had: not ours to start.
+    connect(&mut app, "127.0.0.1:4100");
+    drive(&mut app, window, |this, _, _| {
+        this.note_data_dir(Some("D:/other"));
+        assert_eq!(this.local_url, None);
+        assert_eq!(this.local_dir.as_deref(), Some("D:/data"));
     });
-    drive(&mut app, window, |this, _, _| assert_eq!(this.local_url, None));
+    // Nor another machine's server that happens to name the same folder.
+    connect(&mut app, "http://192.168.9.9:7878");
+    drive(&mut app, window, |this, _, _| {
+        this.note_data_dir(Some("D:/data"));
+        assert_eq!(this.local_url, None);
+    });
+}
+
+#[test]
+fn a_good_refresh_ends_the_backoff() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, _| {
+        this.recover_tries = 3;
+        this.recover_wait = 7;
+    });
+    refresh(&mut app, window);
+    drive(&mut app, window, |this, _, _| assert_eq!((this.recover_tries, this.recover_wait), (0, 0)));
+}
+
+#[test]
+fn the_lost_server_answering_the_data_dirs_address_is_kept_as_it_is() {
+    // The probe gave up, but starting finds the data dir's server at the very same address.
+    let (mut app, window) = lose_the_server_with(
+        Some("http://127.0.0.1:4100"),
+        Connector { probe: |_| false, start: found_local, backend: demo },
+    );
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.backend_gen, 0, "no backend switch");
+        assert!(this.connecting.is_none());
+        assert_eq!(this.local_url.as_deref(), Some("http://127.0.0.1:4100"));
+    });
 }
 
 #[test]

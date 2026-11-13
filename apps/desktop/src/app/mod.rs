@@ -426,9 +426,11 @@ pub struct FoloApp {
     /// The connected server is the local one (started here, or found through the data dir): if it
     /// stops answering, it is found or started again (`connection_lost`).
     pub local_url: Option<String>,
-    /// The last local server's address (kept across switches: Connect on it, or back from the demo,
-    /// makes it the local server again).
-    pub last_local: Option<String>,
+    /// The data dir the local server serves (kept across switches: a server found later that serves
+    /// it is the local one again, `note_data_dir`).
+    pub local_dir: Option<String>,
+    /// The address the installed HTTP backend talks to.
+    pub connected_url: Option<String>,
     /// Failed recoveries in a row, and the refreshes to let pass before the next attempt.
     pub recover_tries: u32,
     pub recover_wait: u32,
@@ -642,7 +644,8 @@ impl FoloApp {
             connecting: None,
             connector: Connector::default(),
             local_url: None,
-            last_local: None,
+            local_dir: None,
+            connected_url: None,
             recover_tries: 0,
             recover_wait: 0,
             start_error: None,
