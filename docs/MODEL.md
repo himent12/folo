@@ -889,7 +889,8 @@ augmentation: resize as above and pad to a square `s × s` (§9.2) only.
 - Metrics: precision, recall, mAP@0.5 and mAP@0.5:0.95 exactly as docs/METRICS.md defines them (pycocotools mAP,
   101-point, at most 100 detections per class per image out of the 300 NMS keeps; precision and recall at the
   confidence that maximises the class-mean F1), computed in the network input space: ground-truth boxes go through
-  the same resize and pad as the image, so predictions need no inverse map. Fitness is mAP@0.5:0.95.
+  the same resize and pad as the image, so predictions need no inverse map; they are clipped to the letterboxed
+  image (not to the padded input), as the COCO path clips them to the original image. Fitness is mAP@0.5:0.95.
 - Best and early stopping: `best_fitness` starts at −∞ and `best_epoch` at −1. After validating epoch `e`, if
   `fitness > best_fitness`, set both and write `best`. Write `last` every epoch (on a GPU its tensors come back in one download per dtype and 128 MiB chunk, concatenated on the device, not one wait per tensor). Stop after epoch `e` when
   `e − best_epoch >= patience`. Checkpoints persist `{ "epoch": best_epoch, "fitness": best_fitness }` as

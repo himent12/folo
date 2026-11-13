@@ -181,7 +181,9 @@ from the `Evaluator` above in exactly the places COCO's own numbers depend on:
 - **AR@1/10/100**: matching runs once with the top 100 detections per image and class; `maxDets = m` then keeps each
   image's first `m` of them. AR is the final recall averaged over thresholds and classes.
 - **Coordinates**: boxes are in original-image pixels (the predictions are mapped back from the letterbox and clipped
-  to the image), as in a COCO results file; the `Evaluator` in the trainer compares in network-input pixels.
+  to the image), as in a COCO results file; the `Evaluator` in the trainer compares in network-input pixels, with
+  the predictions clipped to the letterboxed image there (`[pad, pad + size · ratio]` per axis), so a box reaching
+  into the padding is scored as the COCO path scores it.
 - Score ties across images are broken by image id (pass the COCO image id to `add_image`), then by rank in the image.
 
 It returns the twelve `COCOeval.stats` (`AP`, `AP50`, `AP75`, `APs`, `APm`, `APl`, `AR1`, `AR10`, `AR100`, `ARs`,

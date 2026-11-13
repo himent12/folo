@@ -118,6 +118,26 @@ pub(crate) fn batch_truths(batch: &Batch) -> Vec<Vec<Truth>> {
     out
 }
 
+/// `dets` (network-input pixels) clipped to the letterboxed image inside the input, `[pad, pad + size · ratio]`
+/// per axis: the boxes [`Evaluator`] scores, as the COCO path scores them clipped to the original image
+/// ([`folo_data::ImageMeta::unmap_xyxy`]). The ground truth lies inside the image, so a box reaching into the
+/// padding would otherwise lose IoU for area no truth can cover.
+pub(crate) fn clipped_to_image(dets: &[Detection], meta: &folo_data::ImageMeta) -> Vec<Detection> {
+    let ([rx, ry], [px, py]) = (meta.ratio, meta.pad);
+    let (x2, y2) = (px + meta.orig_size[0] as f32 * rx, py + meta.orig_size[1] as f32 * ry);
+    dets.iter()
+        .map(|d| Detection {
+            bbox: Xyxy::new(
+                d.bbox.x1.clamp(px, x2),
+                d.bbox.y1.clamp(py, y2),
+                d.bbox.x2.clamp(px, x2),
+                d.bbox.y2.clamp(py, y2),
+            ),
+            ..*d
+        })
+        .collect()
+}
+
 /// Evaluate `model` (in eval mode, fused or not; `F32`, or `F16` after [`Module::to_dtype`] on a GPU that computes
 /// in it) on `ds`. Every class id of the dataset must be below the model's class count.
 pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Result<ValResult> {
@@ -320,8 +340,8 @@ impl Post<'_> {
             }
         };
         for (i, dets) in dets.into_iter().enumerate() {
-            self.ev.add_image(&dets, &truths[i]);
             let meta = &meta[i];
+            self.ev.add_image(&clipped_to_image(&dets, meta), &truths[i]);
             let unmap = |b: &Xyxy| {
                 let [x1, y1, x2, y2] = meta.unmap_xyxy([b.x1, b.y1, b.x2, b.y2]);
                 Xyxy::new(x1, y1, x2, y2)
@@ -446,6 +466,49 @@ mod tests {
     use folo_data::Split;
     use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
     use folo_nn::io::ModelConfig;
+
+    /// The evaluator's boxes are clipped to the letterboxed image, not to the input: a 640×480 image at 640 has 80
+    /// pixels of padding above and below, and a box reaching into it ends at the image's edge.
+    #[test]
+    fn evaluator_boxes_are_clipped_to_the_image() {
+        let meta =
+            folo_data::ImageMeta { index: 0, orig_size: [320, 240], ratio: [2.0, 2.0], pad: [0.0, 80.0] };
+        let d = |x1, y1, x2, y2| Detection { bbox: Xyxy::new(x1, y1, x2, y2), score: 0.5, class: 1 };
+        let got = clipped_to_image(
+            &[d(-5.0, 70.0, 100.0, 200.0), d(10.0, 90.0, 650.0, 600.0), d(1.0, 81.0, 2.0, 82.0)],
+            &meta,
+        );
+        assert_eq!(got, [d(0.0, 80.0, 100.0, 200.0), d(10.0, 90.0, 640.0, 560.0), d(1.0, 81.0, 2.0, 82.0)]);
+        // As the COCO path clips: the clipped box maps back to the clipped original-image box.
+        for (g, o) in got.iter().zip([d(-5.0, 70.0, 100.0, 200.0), d(10.0, 90.0, 650.0, 600.0)]) {
+            let back = |b: &Xyxy| meta.unmap_xyxy([b.x1, b.y1, b.x2, b.y2]);
+            assert_eq!(back(&g.bbox), back(&o.bbox));
+        }
+    }
+
+    /// Validation's metrics score the clipped box: a prediction that matches its truth inside the image but reaches
+    /// 20 pixels into the padding is a perfect detection (unclipped, its IoU would be 0.86 and mAP50-95 0.8).
+    #[test]
+    fn validation_scores_the_clipped_box() {
+        let (_, ds) = untrained(Device::Cpu);
+        let most = AtomicUsize::new(0);
+        let mut post = Post {
+            ev: Evaluator::new(1),
+            samples: Vec::new(),
+            kept: Vec::new(),
+            index: 0,
+            most: &most,
+            from_pairs: 0,
+        };
+        let meta =
+            folo_data::ImageMeta { index: 0, orig_size: [320, 240], ratio: [2.0, 2.0], pad: [0.0, 80.0] };
+        let truth = Truth { bbox: Xyxy::new(0.0, 80.0, 100.0, 200.0), class: 0 };
+        let images = Outputs::Host(vec![(vec![Xyxy::new(0.0, 60.0, 100.0, 200.0)], vec![0.9])]);
+        let d = Decoded { images, nc: 1, mode: HeadMode::O2m, truths: vec![vec![truth]], meta: vec![meta] };
+        let cfg = ValConfig { samples: 0, ..ValConfig::new(640, 1) };
+        post.add(d, &*ds, &cfg).unwrap();
+        assert_eq!(post.ev.compute().map50_95, 1.0);
+    }
 
     /// The pipelined [`validate`] (post-processing on a second thread) gives exactly what the serial loop gives:
     /// predict, then score each image in order. With conf 0 an untrained model keeps a box at every anchor, so NMS,
@@ -624,8 +687,8 @@ mod tests {
             let x = batch_tensor(&mut batch, device, dtype).unwrap();
             let pred = model.predict_raw(&x, &vc.nms).unwrap();
             for (i, img) in pred.images.iter().enumerate() {
-                ev.add_image(&img.detections, &truths[i]);
                 let meta = &batch.meta[i];
+                ev.add_image(&clipped_to_image(&img.detections, meta), &truths[i]);
                 let unmap = |b: &Xyxy| {
                     let [x1, y1, x2, y2] = meta.unmap_xyxy([b.x1, b.y1, b.x2, b.y2]);
                     Xyxy::new(x1, y1, x2, y2)
