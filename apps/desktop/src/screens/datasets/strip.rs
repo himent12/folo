@@ -120,6 +120,9 @@ impl FoloApp {
                             } else {
                                 inline_link(&t, "Show them")
                             }
+                        } else if ds.splits.total() == 0 {
+                            // Nothing to have labels: not "every image has labels" for no image.
+                            text(ty::SM, t.text_tertiary).child("no images")
                         } else {
                             text(ty::SM, t.text_tertiary).child("every image has labels")
                         }),

@@ -14,6 +14,12 @@ use crate::ui::*;
 use super::lists::List;
 use super::{FoloApp, Route};
 
+/// Image records asked for at a time when a dataset page loads its list (ten of the server's
+/// pages): the grid paints after the first.
+pub(crate) const IMAGE_PAGE: u32 = 10_000;
+/// How long a dataset's image list waits before asking again for a page that failed after the first.
+const IMAGE_PAGE_RETRY: Duration = Duration::from_secs(3);
+
 impl FoloApp {
     // ---------- data ----------
 
@@ -198,20 +204,89 @@ impl FoloApp {
         }
         if self.store.images.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.images.insert(id.to_string(), Load::Loading);
-            let (a, b) = (id.to_string(), id.to_string());
-            self.fetch(
-                cx,
-                move |api| {
-                    api.images(&a, &ImageQuery { limit: 100_000, ..Default::default() }).map(|p| p.images)
-                },
-                move |this, r, _| {
-                    this.store.images.insert(b, r.into());
-                    // New list, new truth: nothing derived from the old one may survive.
-                    *this.ds_filter_cache.borrow_mut() = None;
-                    *this.ds_split_counts.borrow_mut() = None;
-                },
-            );
+            self.images_seq += 1;
+            self.images_more.insert(id.to_string(), self.images_seq);
+            self.load_images_from(id.to_string(), self.images_seq, 0, cx);
         }
+    }
+
+    /// Every image of a dataset (the grid filters by split and class here, so a list cut short
+    /// would lose the end of train and all of val: COCO has 123k), a page of
+    /// [`IMAGE_PAGE`] at a time: the grid shows the first page while the rest arrives.
+    /// `generation` is this load's: a page of a load since replaced (the list refetched or
+    /// dropped) is not appended, and ends that load.
+    fn load_images_from(&mut self, id: String, generation: u64, offset: u32, cx: &mut Context<Self>) {
+        let a = id.clone();
+        self.fetch(
+            cx,
+            move |api| api.images(&a, &ImageQuery { offset, limit: IMAGE_PAGE, ..Default::default() }),
+            move |this, r, cx| {
+                if this.images_more.get(&id) != Some(&generation) {
+                    return;
+                }
+                let page = match r {
+                    Ok(p) => p,
+                    // A failed first page is the list's error.
+                    Err(e) if offset == 0 => {
+                        this.images_more.remove(&id);
+                        this.store.images.insert(id, Load::Failed(e));
+                        return;
+                    }
+                    // A later one keeps what came and asks again in a moment (the server
+                    // restarting, a dropped connection), still "Loading…", never a partial list
+                    // passed off as the whole; a reload or a dropped list ends it.
+                    Err(_) => {
+                        let backend = this.backend_gen;
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(IMAGE_PAGE_RETRY).await;
+                            this.update(cx, |this, cx| {
+                                // Only the same load, on the same server, of a list still held.
+                                if this.images_more.get(&id) != Some(&generation) {
+                                    return;
+                                }
+                                let held = this.store.images.get(&id).is_some_and(|l| l.ready().is_some());
+                                if this.backend_gen == backend && held {
+                                    this.load_images_from(id, generation, offset, cx);
+                                } else {
+                                    this.images_more.remove(&id);
+                                }
+                            })
+                            .ok();
+                        })
+                        .detach();
+                        return;
+                    }
+                };
+                let list = match this.store.images.get_mut(&id) {
+                    Some(Load::Ready(l)) if l.len() == offset as usize => l,
+                    Some(Load::Loading) if offset == 0 => {
+                        this.store.images.insert(id.clone(), Load::Ready(Vec::new()));
+                        this.store.images.get_mut(&id).and_then(|l| l.ready_mut()).expect("just set")
+                    }
+                    _ => {
+                        this.images_more.remove(&id);
+                        return;
+                    }
+                };
+                let got = page.images.len() as u32;
+                list.extend(page.images);
+                let next = offset + got;
+                // New list, new truth: nothing derived from the old one may survive.
+                *this.ds_filter_cache.borrow_mut() = None;
+                *this.ds_split_counts.borrow_mut() = None;
+                if got > 0 && u64::from(next) < page.total {
+                    this.load_images_from(id, generation, next, cx);
+                } else {
+                    this.images_more.remove(&id);
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Whether more of a dataset's image list is still on its way (the grid shows what came).
+    pub fn images_pending(&self, id: &str) -> bool {
+        self.images_more.contains_key(id)
     }
 
     pub fn ensure_eval(&mut self, id: &str, cx: &mut Context<Self>) {

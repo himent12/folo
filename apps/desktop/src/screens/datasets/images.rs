@@ -8,7 +8,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, canvas, div, px, uniform_list,
 };
 
-use crate::api::{Dataset, ImageInfo, Split};
+use crate::api::{Dataset, ImageInfo, Split, SplitsExt};
 use crate::app::{FoloApp, act};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
@@ -115,7 +115,17 @@ impl FoloApp {
             Some(Split::Test) => (ds.splits.test as usize, "test images"),
             None => (total, "images"),
         };
-        let count_label = if count == total {
+        let loading = self.store.images.get(&id).is_none_or(|l| l.is_loading());
+        // A large list arrives a page at a time: the grid shows what came, and the count says
+        // how much of it is in (never "0 images" or a split's partial count as if final).
+        let more = self.images_pending(&id);
+        let count_label = if loading {
+            let total = if self.ds_split.is_none() { ds.splits.total() } else { total as u64 };
+            format!("Loading {} {of}…", int(total))
+        } else if more {
+            let loaded = self.store.images.get(&id).and_then(|l| l.ready()).map_or(0, |v| v.len());
+            format!("Loading… {} of {} images", int(loaded as u64), int(ds.splits.total()))
+        } else if count == total {
             format!("{} {of}", int(total as u64))
         } else {
             format!("{} of {} {of} match", int(count as u64), int(total as u64))
@@ -186,7 +196,7 @@ impl FoloApp {
                     .child(icon("icons/image.svg", 14., t.text_tertiary)),
             );
         self.ds_view_controls = Some(view_controls.into_any_element());
-        if self.store.images.get(&id).is_none_or(|l| l.is_loading()) {
+        if loading || (more && count == 0) {
             return div()
                 .flex()
                 .flex_col()
@@ -196,6 +206,21 @@ impl FoloApp {
                 .into_any_element();
         }
         if count == 0 {
+            // A dataset with no image at all is not a filter that matched nothing.
+            let (icon, title, body) = if ds.splits.total() == 0 {
+                let broken = ds.stats.as_ref().is_some_and(|s| s.broken_labels > 0);
+                (
+                    "icons/image.svg",
+                    "No usable images",
+                    if broken {
+                        "FOLO found no image it can read with its labels here. Broken labels above says what's wrong."
+                    } else {
+                        "FOLO found no image in this dataset's splits."
+                    },
+                )
+            } else {
+                ("icons/list-filter.svg", "No images match", "Try another split or clear the class filter.")
+            };
             return div()
                 .flex()
                 .flex_col()
@@ -203,9 +228,9 @@ impl FoloApp {
                 .child(toolbar)
                 .child(panel(&t).flex_1().flex().items_center().justify_center().child(empty_state(
                     &t,
-                    "icons/list-filter.svg",
-                    "No images match",
-                    "Try another split or clear the class filter.",
+                    icon,
+                    title,
+                    body,
                     Tone::Neutral,
                 )))
                 .into_any_element();

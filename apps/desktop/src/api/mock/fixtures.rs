@@ -550,6 +550,7 @@ impl MockBackend {
             benches: Arc::new(crate::api::mock_bench::MockBench::new(frozen, now)),
             removed: Mutex::default(),
             holds: Default::default(),
+            fail_images_from: Default::default(),
             clock,
         }
     }

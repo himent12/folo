@@ -55,13 +55,23 @@ impl FoloApp {
             imgsz: 1,
             classes: 0,
             submitting: false,
+            sent_name: String::new(),
             error: None,
         });
         cx.notify();
     }
 
     pub fn close_synth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.synth = None;
+        // Closed while the server generates: the job goes on, and its result comes as a toast
+        // later; say so now rather than let it vanish without a word.
+        if let Some(f) = self.synth.take().filter(|f| f.submitting) {
+            self.toast(
+                Tone::Info,
+                format!("Generating {} in the background", f.sent_name),
+                Some("It's added to Datasets when it's ready.".into()),
+                cx,
+            );
+        }
         self.restore_focus(window);
         cx.notify();
     }
@@ -77,6 +87,7 @@ impl FoloApp {
         let images = parse_images(&f.images.read(cx).text());
         let (Some(images), false) = (images, name.is_empty()) else { return };
         f.submitting = true;
+        f.sent_name = name.clone();
         f.error = None;
         let form = f.id;
         let req = SyntheticDataset {
@@ -169,17 +180,26 @@ impl FoloApp {
         // the list's order alone.
         // Unknown while the list isn't loaded: neither "added" nor "already added" is claimed then.
         let existed = self.store.datasets.ready().map(|l| l.iter().any(|d| d.id == ds.id));
+        // Registered, but nothing in it can train: a warning, not a success.
+        let unusable = ds.splits.total() == 0;
         if let Some(list) = self.store.datasets.ready_mut() {
             upsert_dataset(list, ds);
         }
         self.changed_here(List::Datasets, cx);
+        let (tone, title, body) = match existed {
+            _ if unusable => (
+                Tone::Warning,
+                format!("{name} has no usable images"),
+                "FOLO added it but can't read any of its images with their labels. Its page says what's wrong."
+                    .to_string(),
+            ),
+            Some(true) => (Tone::Info, format!("{name} is already added"), body),
+            Some(false) => (Tone::Accent, format!("{verb} {name}"), body),
+            None => (Tone::Accent, format!("{name} is ready"), body),
+        };
         self.toast_with(
-            if existed == Some(true) { Tone::Info } else { Tone::Accent },
-            match existed {
-                Some(true) => format!("{name} is already added"),
-                Some(false) => format!("{verb} {name}"),
-                None => format!("{name} is ready"),
-            },
+            tone,
+            title,
             Some(body.into()),
             Some((
                 "Open".into(),

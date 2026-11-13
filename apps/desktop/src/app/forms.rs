@@ -101,6 +101,8 @@ pub struct SynthForm {
     pub imgsz: usize,
     pub classes: usize,
     pub submitting: bool,
+    /// The name sent with Generate (the field stays editable while the server works).
+    pub sent_name: String,
     pub error: Option<ApiError>,
 }
 

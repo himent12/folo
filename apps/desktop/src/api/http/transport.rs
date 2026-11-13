@@ -28,6 +28,24 @@ pub(super) fn stream_agent(headers: Duration) -> ureq::Agent {
         .into()
 }
 
+/// A server message or hint as a sentence, as Studio shows them (`web/src/lib/format.ts`,
+/// `sentence`): a capital first letter and a closing full stop ("the dataset has no training
+/// images" → "The dataset has no training images."). One that starts with an identifier in
+/// backticks keeps its case: it is a name, not a word.
+pub(super) fn sentence(s: &str) -> String {
+    let t = s.trim();
+    let mut chars = t.chars();
+    let mut out: String = match chars.next() {
+        None => return String::new(),
+        Some('`') => t.to_string(),
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+    };
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
+}
+
 /// Percent-encode one path segment (ids are opaque strings).
 pub(super) fn seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -66,7 +84,11 @@ impl HttpBackend {
         if status >= 400 {
             let body: Option<folo_api::ErrorBody> = resp.body_mut().read_json().ok();
             return Err(match body {
-                Some(b) => ApiError { code: b.error.code, message: b.error.message, hint: b.error.hint },
+                Some(b) => ApiError {
+                    code: b.error.code,
+                    message: sentence(&b.error.message),
+                    hint: b.error.hint.as_deref().map(sentence),
+                },
                 None => ApiError::new("http_error", format!("folo serve answered HTTP {status}")),
             });
         }
@@ -129,5 +151,14 @@ mod tests {
     fn path_segments_are_encoded() {
         assert_eq!(seg("ds_8f2c"), "ds_8f2c");
         assert_eq!(seg("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn server_messages_read_as_sentences() {
+        assert_eq!(sentence("the dataset has no training images"), "The dataset has no training images.");
+        assert_eq!(sentence("  'D:/x' does not exist. "), "'D:/x' does not exist.");
+        assert_eq!(sentence("`claude` printed no result"), "`claude` printed no result.");
+        assert_eq!(sentence("étiquettes manquantes!"), "Étiquettes manquantes!");
+        assert_eq!(sentence(""), "");
     }
 }

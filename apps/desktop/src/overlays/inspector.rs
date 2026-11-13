@@ -37,6 +37,9 @@ impl FoloApp {
                 // Unfiltered, the list is every image in order.
                 i
             }
+            // Not in yet: a large list arrives a page at a time (a run's sample can be past the
+            // first page), so wait for it rather than open another image.
+            (None, None) if self.images_pending(&ds) => return,
             (None, None) => 0,
         };
         if let Some(i) = self.inspector.as_mut() {
@@ -51,12 +54,17 @@ impl FoloApp {
         let insp = self.inspector.as_ref().unwrap();
         let ds_id = insp.dataset.clone();
         let n = self.filtered_indices(&ds_id).len();
-        if n == 0 {
+        // Its image not in yet (the list still arriving): the scrim, not another image.
+        if n == 0 || insp.want.is_some() {
             // Still loading the image list (or the filter emptied it): keep the scrim up.
-            if self.store.images.get(&ds_id).is_some_and(|l| !l.is_loading()) {
+            if self.store.images.get(&ds_id).is_some_and(|l| !l.is_loading()) && !self.images_pending(&ds_id)
+            {
                 self.inspector = None;
             }
-            return div().absolute().top_0().left_0().size_full().bg(t.bg_scrim).into_any_element();
+            // The page's scrim (it takes the clicks, and a click there closes, as Esc does).
+            return self
+                .scrim(&t, "insp-scrim", window, cx, act(|this, w, cx| this.close_inspector(w, cx)))
+                .into_any_element();
         }
         let index = insp.index.min(n - 1);
         let (zoom, pan, hover) = (insp.zoom, insp.pan, insp.hover_box);
