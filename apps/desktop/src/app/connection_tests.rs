@@ -67,10 +67,17 @@ fn another_machines_address_is_kept_and_no_local_server_takes_its_place() {
 /// The local server stops answering (the window that started it closed, or it crashed): the 2 s
 /// refresh sees it, and the app finds or starts one again instead of retrying a dead port.
 fn lose_the_server(local: Option<&str>) -> (folo_ui::HeadlessApp, folo_ui::WindowHandle<super::FoloApp>) {
+    lose_the_server_with(local, Connector { probe: |_| false, start: found_local, backend: demo })
+}
+
+fn lose_the_server_with(
+    local: Option<&str>,
+    connector: Connector,
+) -> (folo_ui::HeadlessApp, folo_ui::WindowHandle<super::FoloApp>) {
     let (mut app, window) = open();
     let local = local.map(str::to_string);
     drive(&mut app, window, move |this, _, cx| {
-        this.connector = Connector { probe: |_| false, start: found_local, backend: demo };
+        this.connector = connector;
         this.server_mode = ServerMode::Local;
         this.local_url = local;
         this.server_url.update(cx, |i, cx| i.set_text("http://127.0.0.1:4000", cx));
@@ -90,6 +97,80 @@ fn a_lost_local_server_is_found_or_started_again() {
         assert!(!this.store.unreachable());
         assert!(titles(this).contains(&"folo serve stopped".to_string()), "{:?}", titles(this));
     });
+}
+
+/// The 2 s refresh, unreachable again.
+fn refresh(app: &mut folo_ui::HeadlessApp, window: folo_ui::WindowHandle<super::FoloApp>) {
+    drive(app, window, |this, _, cx| {
+        this.store.system = Load::Idle;
+        this.ensure_core(cx);
+    });
+}
+
+static FAILED_STARTS: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn a_recovery_that_fails_tries_again_later_and_says_so_once() {
+    let (mut app, window) = lose_the_server_with(
+        Some("http://127.0.0.1:4000"),
+        Connector {
+            probe: |_| false,
+            start: |_| {
+                FAILED_STARTS.fetch_add(1, Ordering::SeqCst);
+                Err("folo serve did not start in time".into())
+            },
+            backend: |_| Arc::new(MockBackend::new(4200, true).failing()),
+        },
+    );
+    assert_eq!(FAILED_STARTS.load(Ordering::SeqCst), 1);
+    // The status already reads unreachable when the next refreshes fail (health answered first): they
+    // still count. The first failure waits two refreshes, then tries again.
+    refresh(&mut app, window);
+    refresh(&mut app, window);
+    assert_eq!(FAILED_STARTS.load(Ordering::SeqCst), 1, "waits");
+    refresh(&mut app, window);
+    assert_eq!(FAILED_STARTS.load(Ordering::SeqCst), 2, "tries again");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.local_url.as_deref(), Some("http://127.0.0.1:4000"));
+        assert_eq!(this.recover_wait, 4, "and waits longer");
+        let said = titles(this).iter().filter(|t| *t == "Couldn't start folo serve").count();
+        assert_eq!(said, 1, "{:?}", titles(this));
+    });
+}
+
+#[test]
+fn a_slow_local_server_is_kept_as_it_is() {
+    let (mut app, window) = lose_the_server_with(
+        Some("http://127.0.0.1:4000"),
+        Connector { probe: |_| true, start: found_local, backend: demo },
+    );
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(this.backend_gen, 0, "no backend switch: live views and drafts stay");
+        assert_eq!(this.server_url.read(cx).text(), "http://127.0.0.1:4000");
+        assert_eq!(this.local_url.as_deref(), Some("http://127.0.0.1:4000"));
+        assert!(this.connecting.is_none() && !this.hold_loading);
+        assert!(!titles(this).contains(&"folo serve stopped".to_string()));
+    });
+}
+
+#[test]
+fn connect_on_the_local_servers_address_keeps_it_the_one_to_bring_back() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, cx| {
+        this.connector = Connector { probe: |_| true, start: found_local, backend: demo };
+        this.last_local = Some("http://127.0.0.1:4100".into());
+        this.server_url.update(cx, |i, cx| i.set_text("127.0.0.1:4100", cx));
+        this.switch_source(ServerMode::Local, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.local_url.as_deref(), Some("127.0.0.1:4100"));
+    });
+    // Another server's address is not ours to start.
+    drive(&mut app, window, |this, _, cx| {
+        this.server_url.update(cx, |i, cx| i.set_text("127.0.0.1:4200", cx));
+        this.switch_source(ServerMode::Local, cx);
+    });
+    drive(&mut app, window, |this, _, _| assert_eq!(this.local_url, None));
 }
 
 #[test]

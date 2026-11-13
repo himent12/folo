@@ -534,6 +534,12 @@ connection: close
         ]);
         // `/api/health` is open on such a server: the probe passes, every other call is refused.
         assert!(probe(&url));
+        // Any web server answers 200; only a FOLO server's health counts.
+        let (page, _r) = canned_server(vec![
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 15\r\nconnection: close\r\n\r\n<html></html>\r\n"
+                .to_vec(),
+        ]);
+        assert!(!probe(&page));
         let api = HttpBackend::new(&url);
         for e in [api.system().unwrap_err(), api.datasets().unwrap_err()] {
             assert_eq!((e.code.as_str(), e.message.as_str()), ("unauthorized", "This server needs a token"));

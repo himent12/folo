@@ -426,6 +426,12 @@ pub struct FoloApp {
     /// The connected server is the local one (started here, or found through the data dir): if it
     /// stops answering, it is found or started again (`connection_lost`).
     pub local_url: Option<String>,
+    /// The last local server's address (kept across switches: Connect on it, or back from the demo,
+    /// makes it the local server again).
+    pub last_local: Option<String>,
+    /// Failed recoveries in a row, and the refreshes to let pass before the next attempt.
+    pub recover_tries: u32,
+    pub recover_wait: u32,
     /// Why the local server couldn't be started, while nothing answers.
     pub start_error: Option<SharedString>,
     /// The connected server has answered at least once (a lost connection, not one never made).
@@ -636,6 +642,9 @@ impl FoloApp {
             connecting: None,
             connector: Connector::default(),
             local_url: None,
+            last_local: None,
+            recover_tries: 0,
+            recover_wait: 0,
             start_error: None,
             reached: false,
             // Follow the OS animation setting until the user picks in Settings.

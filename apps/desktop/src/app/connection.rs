@@ -11,6 +11,9 @@ use crate::ui::*;
 
 use super::{FoloApp, ServerMode};
 
+/// The most refreshes (2 s apart) a failed recovery waits before the next attempt.
+const RECOVER_WAIT_MAX: u32 = 30;
+
 /// Who asked for a connection ([`FoloApp::autoconnect`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reason {
@@ -140,7 +143,13 @@ impl FoloApp {
     pub fn autoconnect(&mut self, url: String, spawn: bool, why: Reason, cx: &mut Context<Self>) {
         use crate::api::http::Spawned;
         let connector = self.connector;
-        self.hold_loading = true;
+        // A recovery keeps what is on screen (the server may only be slow); a launch or a switch shows
+        // the pages loading.
+        self.hold_loading = why != Reason::Recover;
+        if why != Reason::Recover {
+            self.recover_tries = 0;
+            self.recover_wait = 0;
+        }
         self.connecting = Some(format!("Connecting to {}", url.trim_start_matches("http://")).into());
         // Only the newest attempt may install its result; older ones bail out at each step, and a
         // server an obsolete attempt started is dropped (stopped) with it.
@@ -152,11 +161,23 @@ impl FoloApp {
             let found = cx.background_executor().spawn(async move { (connector.probe)(&probe) }).await;
             if found {
                 this.update(cx, |this, cx| {
-                    if current(this) {
-                        this.set_backend((connector.backend)(&url), ServerMode::Local, cx);
-                        // Back where the lost local server was: it stays the one to bring back. Any other
-                        // server found at an address isn't this app's to start.
-                        this.local_url = (why == Reason::Recover).then(|| url.clone());
+                    if !current(this) {
+                        return;
+                    }
+                    if why == Reason::Recover {
+                        // Still there, only slow (a loaded PC): same server, so nothing is reset (live
+                        // views, drafts); the next refresh that answers reconnects as usual.
+                        this.connecting = None;
+                        this.recovered();
+                        cx.notify();
+                        return;
+                    }
+                    this.set_backend((connector.backend)(&url), ServerMode::Local, cx);
+                    // The local server again (Connect pressed on its address, or back from the demo): it
+                    // stays the one to bring back. Any other server found at an address isn't ours to start.
+                    let base = |u: &str| crate::api::http::HttpBackend::new(u).base().to_string();
+                    if this.last_local.as_deref().is_some_and(|l| base(l) == base(&url)) {
+                        this.local_url = Some(url.clone());
                     }
                 })
                 .ok();
@@ -198,6 +219,8 @@ impl FoloApp {
                             this.server_url.update(cx, |i, cx| i.set_text(local.clone(), cx));
                             this.set_backend((connector.backend)(&local), ServerMode::Local, cx);
                             this.local_url = Some(local.clone());
+                            this.last_local = Some(local.clone());
+                            this.recovered();
                             this.said_where(why, &url, &local, started, cx);
                         })
                         .ok();
@@ -211,12 +234,21 @@ impl FoloApp {
                     return;
                 }
                 this.set_backend((connector.backend)(&url), ServerMode::Local, cx);
-                // A lost local server that couldn't be started again: the next loss tries again.
-                this.local_url = (why == Reason::Recover).then(|| url.clone());
+                let mut say = true;
+                if why == Reason::Recover {
+                    // Not back yet: try again later, waiting longer each time (`connection_lost`), and
+                    // say so once.
+                    this.local_url = Some(url.clone());
+                    this.recover_tries += 1;
+                    this.recover_wait = (1u32 << this.recover_tries.min(5)).min(RECOVER_WAIT_MAX);
+                    say = this.recover_tries == 1;
+                }
                 // Say why there is no local server; the pages show the unreachable state, and their
                 // error panels keep the reason after the toast has gone.
-                if let Some(e) = spawn_err {
+                if let Some(e) = &spawn_err {
                     this.start_error = Some(e.clone().into());
+                }
+                if let Some(e) = spawn_err.filter(|_| say) {
                     this.toast(
                         Tone::Danger,
                         "Couldn't start folo serve",
@@ -258,16 +290,28 @@ impl FoloApp {
         self.toast(Tone::Info, title, Some(body.into()), cx);
     }
 
-    /// The periodic refresh found the server gone. When it was the local one (started by this app, or
-    /// another window's found through the data dir) and starting one is on, find or start it again, as
-    /// at launch: else this window would retry a port nobody will ever listen on again.
+    /// The periodic refresh found the server unreachable (each time it does). When it is the local one
+    /// (started by this app, or another window's found through the data dir) and starting one is on,
+    /// find or start it again, as at launch: else this window would retry a port nobody will ever
+    /// listen on again. One attempt at a time; after a failed one, the next waits for more refreshes.
     pub fn connection_lost(&mut self, cx: &mut Context<Self>) {
         if self.server_mode != ServerMode::Local || !self.spawn_server || self.connecting.is_some() {
             return;
         }
-        if let Some(url) = self.local_url.take() {
-            self.autoconnect(url, true, Reason::Recover, cx);
+        let Some(url) = self.local_url.clone() else {
+            return;
+        };
+        if self.recover_wait > 0 {
+            self.recover_wait -= 1;
+            return;
         }
+        self.autoconnect(url, true, Reason::Recover, cx);
+    }
+
+    /// The local server answers again: the next loss starts over without waiting.
+    fn recovered(&mut self) {
+        self.recover_tries = 0;
+        self.recover_wait = 0;
     }
 
     /// Settings › Data source.

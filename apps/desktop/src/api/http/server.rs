@@ -82,7 +82,13 @@ pub fn probe(url: &str) -> bool {
         .timeout_global(Some(Duration::from_secs(10)))
         .build();
     let agent: ureq::Agent = agent.into();
-    agent.get(&format!("{base}/api/health")).call().is_ok_and(|r| r.status().is_success())
+    agent
+        .get(&format!("{base}/api/health"))
+        .call()
+        .ok()
+        .filter(|r| r.status().is_success())
+        // A FOLO server's health, not any web server that answers 200 (a dev server's index page).
+        .is_some_and(|mut r| r.body_mut().read_json::<Health>().is_ok())
 }
 
 /// Make the OS stop `child` when this process exits, even if it is killed (no Drop runs then).

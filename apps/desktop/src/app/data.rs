@@ -85,7 +85,8 @@ impl FoloApp {
                     this.store.note_reachability(r.as_ref().err());
                     if was_down && !this.store.unreachable() {
                         this.reconnected(cx);
-                    } else if !was_down && this.store.unreachable() {
+                    } else if this.store.unreachable() {
+                        // Every time, not only when it goes: a recovery that failed tries again later.
                         this.connection_lost(cx);
                     }
                     // Back after being unreachable: check its health now, not in 2 s.
