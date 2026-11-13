@@ -212,7 +212,7 @@ mod tests {
         list.insert(1, part);
         assert_eq!(ranks(&b, &list)[1], Some(2));
         // Ties are what the leaderboard shows: 53.35 and 53.30 both read 53.3 (f32), 53.4 doesn't.
-        let mut at = |total: f32| {
+        let at = |total: f32| {
             let mut e = list[0].clone();
             e.score.as_mut().unwrap().total = total;
             e
