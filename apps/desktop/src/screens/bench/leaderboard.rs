@@ -216,7 +216,13 @@ impl FoloApp {
             BenchEntryStatus::Running | BenchEntryStatus::Queued | BenchEntryStatus::Stopping => {
                 let at = e.progress.condition.as_ref().map_or_else(
                     || "unchanged images".to_string(),
-                    |c| format!("{c} · severity {}", e.progress.severity.unwrap_or(1)),
+                    |c| {
+                        format!(
+                            "{} · severity {}",
+                            self.bench_condition_name(c),
+                            e.progress.severity.unwrap_or(1)
+                        )
+                    },
                 );
                 div()
                     .flex()
