@@ -177,7 +177,10 @@ is not planned (folo-n and folo-s at batch 1 pin 23–102 MiB; at batch 16 a pla
 pinning 316–617 MiB); `release_memory()` drops them all, a dropped owner drops its own, and
 `ctx.plan_stats()` reports how many and how many bytes. `DetectionModel` uses them for a fused eval-mode forward
 on a GPU under `no_grad` (`forward`, `Predictor`, `folo val`, the server); `model.set_forward_plans(false)`,
-`ctx.set_forward_plans(false)` or `FOLO_GPU_NO_PLAN=1` (contexts created afterwards) turn them off. <!-- GPUNUMBERS -->
+`ctx.set_forward_plans(false)` or `FOLO_GPU_NO_PLAN=1` (contexts created afterwards) turn them off. On
+the test machine a plan halves the host's encode time of a synchronised folo-n batch-1 forward (0.42 → 0.21 ms in
+f32, 0.45 → 0.23 ms on tensor cores), which shortens the call by 3–6% when the machine is quiet (the call is then
+GPU-bound) and by 20–35% when other work loads the CPU; batch-16 calls are not planned (docs/notes/hill/r3-plan.md).
 
 The interval was 1024 until the training-step profile showed the GPU idle for most of the host's encoding and
 submission time: a step's 1300 dispatches went out in 3 submissions, so the GPU waited for each one to be built

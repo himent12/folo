@@ -9,7 +9,23 @@ Branch point `main` e5a6ccf0, RTX 4080 SUPER, i7-14700KF, 640×640.
 
 ## Method
 
-<!-- METHOD -->
+- **Benches.** `plan_gate` (new, see Step 0) for the gate and the copy / rebind comparison; the folo-vision `gpu` bench
+  (forward and predict sections, rows 1–6 of the targets table, and the train section, row 9) and `gpu_latency`
+  (1000 synchronised b1 calls per configuration: encode / submit / wait percentiles) as two binaries, the branch
+  point (`D:/folo-wt/hill3-plan-base`, target `D:/folo-build/hill3-plan-base`) against the branch, copied aside to
+  `D:/folo-build/hill3-plan-bins/{base,new}/`; the in-process toggle (`FOLO_GPU_NO_PLAN=1` on the new `gpu` binary)
+  against the same binary with plans on. `FOLO_GPU_TENSOR_CORES=1`, precisions f32 and f16 on tensor cores.
+- **Runs.** `ab.sh` alternates the two binaries run by run (order reversed every other round) under the GPU lock
+  and first waits up to 2 minutes for the CPU load to read under 30% three times in a row (`quiet.sh`, added after
+  the first three rounds), then logs the GPU and CPU load. `parse.py`, `parse_lat.py` and `parse_gate.py` give the
+  median over runs of each side's per-run median, with min–max. Raw runs and scripts:
+  `D:/folo-data/runs-hill3/plan/`.
+- **Noise.** The machine was shared all afternoon: the other lanes' builds and a 10-worker Python job kept the CPU
+  at 60–100% most of the time, the owner played a game (10–16% GPU), and in one window something outside the lock
+  held the GPU at 100% with 5.4 GiB (it made the first train A/B worthless: steps 3–30× slower on both sides). The
+  CPU read under 30% at the start of only a few runs. A host-bound batch-1 call is exactly what CPU contention
+  slows, so each table says what load it ran under, and the quietest measurement (`gpu_latency`, 4 of its first 6
+  runs at 3–20% CPU) is reported separately from the loaded ones.
 
 ## Step 0: the gate
 
@@ -38,7 +54,8 @@ other lanes' builds (`D:/folo-data/runs-hill3/plan/gate1/`, `gate.sh`). Median o
 | folo-s f16 tc b16 | 9.440 | 9.323 | 9.387 | −1.2% | −0.6% |
 
 The ceiling is 26–39% at batch 1 for folo-n and 10–26% for folo-s: **go on**. At batch 16 the GPU is the
-bottleneck and the ceiling is 0.5–3.7%.
+bottleneck and the ceiling is 0.5–3.7%. This gate ran on a loaded host; measured again at quiet starts later, the
+f32 ceilings fell under 10% (see the end of Numbers).
 
 **Host-time split** of the synchronised folo-n b1 call (medians, ms; enc = host time until the forward returns,
 sub = the final `flush`, wait = `sync`):
@@ -92,18 +109,21 @@ The machine was loaded (CPU 93–97%), so the absolute times are 30–60% above 
 - **Where it engages.** `DetectionModel::forward_in_pool` (so `forward`, `Predictor`, `folo val` and the server)
   on a GPU, when the model is fused and in eval mode and gradients are off. A plan is recorded at the second sighting
   of a key (the first call warms the pool and the caches as before) and replayed from the third.
-- **Key**: the caller's key (the head mode), the input's dims, dtype and buffer size, and the tensor-core switch.
+- **Key**: the caller's key (the head mode), the input's dims, dtype and buffer size, and the tensor-core switch,
+  hashed for the lookup; the plan keeps the whole signature and a replay needs it equal, so two keys whose hashes
+  collide never share a plan.
 - **Refusals** (the call runs normally, and a refused key is not tried again until the plans are cleared): grad
   enabled, autocast, a profiling or tracing context, a lost device, an input that is not dense from byte 0 of its
   buffer, a call that uploaded or read back, a result that is a view or shares a buffer, a buffer nobody listed, a
-  plan over the memory cap.
+  plan over the per-plan cap (256 MiB, see Memory).
 
 ### Inputs and outputs: copy slot against rebind
 
 The brief asks to measure both. The first version owned an input slot and output buffers, and a replay copied the
 caller's input into the slot and the plan's outputs into fresh result buffers (three copies). The second binds the
 caller's buffers directly (dynamic bind groups, see above). Both binaries, alternated, 3 rounds of 4 rounds × 60
-calls each (CPU 63–100%), the planned call's p50 against the forward of the same run (median of the 3 runs, min–max):
+calls each (CPU 63–100%), the planned call's p50 against the forward of the same run (median of the 3 runs,
+min–max):
 
 | config | copy | rebind |
 |---|---|---|
@@ -116,9 +136,9 @@ calls each (CPU 63–100%), the planned call's p50 against the forward of the sa
 | folo-s f32 b16 | (no plan) | (no plan) |
 | folo-s f16 tc b16 | **+2.7%** (−0.2..+2.7) | −0.1% (−2.8..+0.6) |
 
-At batch 1 the two are inside each other's noise (the copies are small); at batch 16 the copies (a 79 MB input in f32, 39 MB in f16, and
-the head outputs) make the copy variant slower than the normal call. The rebind variant ships; the copy variant's
-binary was kept (`D:/folo-build/hill3-plan-variants/copy/plan_gate.exe`).
+At batch 1 the two are inside each other's noise (the copies are small); at batch 16 the copies (a 79 MB input in
+f32, 39 MB in f16, and the head outputs) make the copy variant slower than the normal call. The rebind variant
+ships; the copy variant's binary was kept (`D:/folo-build/hill3-plan-variants/copy/plan_gate.exe`).
 
 ### Invalidation, one by one
 
@@ -133,7 +153,7 @@ binary was kept (`D:/folo-build/hill3-plan-variants/copy/plan_gate.exe`).
 | `release_memory` | every plan dropped (its bytes count as released) and the epoch bumped, so a plan built while it ran is not kept | same test |
 | Pipeline cache | a plan holds its pipelines and bind groups (refcounted wgpu handles), so nothing the cache does can free them; the kernel a call picks depends only on the shapes, the adapter and the tensor-core switch | (no state to change besides the switch) |
 | The tensor-core switch | in the key, so each setting has its own plan and switching back reuses the old one; `disable_tensor_cores` (a kernel failed) bumps the epoch and retires all | same test |
-| Device lost | `ForwardPlans::run` checks before each replay and returns the error | `a_lost_device_is_an_error_not_a_replay` (folo-gpu) |
+| Device lost | no recording and no replay on a lost device: the call runs as it is and reports the loss | `a_lost_device_is_an_error_not_a_replay` (folo-gpu) |
 | Another thread forwarding the same model | a replay is encoded whole under the batch lock, so two replays cannot interleave on the shared intermediates; each gets fresh result buffers | `threads_forwarding_one_model_get_their_own_results` (4 threads × 100 calls, bits checked) |
 | A result held while the next replay runs | results are fresh pool buffers per replay, never the plan's | `a_thousand_replays_keep_their_bits_and_results_stay_put` |
 | A model dropped while its plans live | `ForwardPlans::drop` removes its plans from every context it planned on | `context_switches_…` (plan count drops by one) |
@@ -159,7 +179,83 @@ any buffer leaves the pool. A plan goes with its owner (`ForwardPlans::drop`) an
 
 ## Numbers
 
-<!-- NUMBERS -->
+### Rows 1–6, two binaries (`gpu` bench, rounds 1–6, CPU load 5–88% at the runs' starts)
+
+Rounds 7–9 were run too and are left out: from 12:48 something outside the GPU lock held the GPU at 52–88% with
+4.5–6 GiB (logged before each run), and both sides' batch-1 medians read 4–23 ms. Median over the 6 runs of each
+run's median, ms, min–max over runs (`parse.py ab-infer-r1to6`):
+
+| row | config | base | new | |
+|---|---|---|---|---|
+| 1 | folo-n forward b1 f32 | 1.615 (1.350–1.960) | 1.240 (1.180–1.380) | −23.2% |
+| 2 | folo-n forward b1 f16 tc | 1.610 (1.140–2.180) | 1.050 (0.850–3.860) | −34.8% |
+| 1 | folo-s forward b1 f32 | 2.435 (2.300–2.590) | 2.430 (2.240–3.020) | tie |
+| 2 | folo-s forward b1 f16 tc | 1.920 (1.390–2.360) | 1.500 (1.420–1.840) | −21.9% |
+| 5 | folo-n predict b1 f32 | 2.460 (2.060–14.31) | 2.360 (2.070–2.720) | −4.1% |
+| 5 | folo-n predict b1 f16 tc | 2.245 (1.570–2.950) | 2.160 (1.430–11.15) | −3.8% |
+| 5 | folo-s predict b1 f32 | 3.685 (2.880–6.790) | 3.345 (2.830–3.970) | −9.2% |
+| 5 | folo-s predict b1 f16 tc | 2.765 (2.190–3.300) | 2.455 (1.970–3.270) | −11.2% |
+| 3 | folo-n / folo-s forward b16 f32 | 8.510 / 20.97 | 8.485 / 21.59 | −0.3% / +3.0% |
+| 4 | folo-n / folo-s forward b16 f16 tc | 4.415 / 9.700 | 4.535 / 9.935 | +2.7% / +2.4% |
+| 6 | folo-n / folo-s predict b16 f32 | 12.09 / 24.90 | 12.72 / 25.64 | +5.3% / +3.0% |
+| 6 | folo-n / folo-s predict b16 f16 tc | 8.555 / 13.39 | 8.550 / 13.54 | −0.1% / +1.1% |
+
+At batch 16 no plan is made (over the per-plan cap): both sides run the same code but for the plan's lookup (a
+hash of the signature and a look into the store, refused keys are not recorded again), and the +3.0–5.3% rows have
+ranges that overlap the base's (folo-n predict b16 f32: base 11.39–18.82, new 11.39–13.39). The p90 of folo-n
+predict b1 f16 tc reads +16.8% (2.865 → 3.345) from two loaded runs (11.80 and 4.15 ms against 1.64–2.54 in the
+other four); the toggle below and the latency bench show that configuration faster. The best runs are closer to the
+quiet numbers: folo-n forward b1 1.35 → 1.18 ms in f32 and 1.14 → 0.85 ms in f16 on tensor cores.
+
+### The in-process toggle (3 rounds, CPU 10–99%)
+
+The new `gpu` binary with `FOLO_GPU_NO_PLAN=1` against itself, median of 3: folo-n forward b1 +6.0% f32 (1.16 →
+1.23, ranges overlapping) and −21.6% f16 tc; folo-s −20.9% f32 and −26.3% f16 tc; predict b1 −40.1% / −39.5%
+(folo-n) and +2.5% / −20.1% (folo-s).
+
+### `gpu_latency` (1000 synchronised b1 calls per configuration)
+
+Quietest runs first (rounds 1–3: CPU 3–20% at 5 of 6 run starts), then all 6 rounds:
+
+| config | quiet p50 base → new | quiet p90 | quiet p99 | quiet encode p50 | all 6: p50 / p90 / p99 |
+|---|---|---|---|---|---|
+| folo-n f32 | 1.14 → 1.10 (−3.5%) | −4.1% | −6.0% | 0.42 → 0.21 | −4.7% / −6.9% / −26.3% |
+| folo-n f16 tc | 0.87 → 0.82 (−5.7%) | −12.2% | −11.5% | 0.45 → 0.23 | −21.9% / −26.6% / −54.0% |
+| folo-s f32 | 2.24 → 2.21 (−1.3%) | +26.9% (2.30–3.71 base) | +13.7% | 0.59 → 0.35 | −1.7% / −2.1% / −5.4% |
+| folo-s f16 tc | 1.35 → 1.32 (−2.2%) | −3.5% | −4.3% | 0.53 → 0.28 | −7.3% / −7.0% / −37.4% |
+
+**This is the main finding.** On a quiet machine the plan halves the host's encode time (0.42 → 0.21 ms for folo-n
+f32), but the call barely gets shorter, because the wait grows by almost as much: a batch-1 forward is GPU-bound
+once its host work is gone. The GPU starts on the first 16 dispatches about 30 µs into the call, and from there the
+call takes as long as the GPU's own work: about 1.0 ms for folo-n f32 and 0.8 ms on tensor cores, the quiet call
+times with the plan (kernel time, the barriers between dependent dispatches and the submission boundaries). Under
+host load the plan is worth 20–36% at the median and up to 54% at p99, because then the host was the bottleneck.
+**The 0.8 / 0.65 ms targets of rows 1 and 2 need the GPU's time per forward to shrink** (fewer dispatches, cheaper
+kernels), not only the host's; the plan made the host side small enough that it no longer hides that.
+
+The gate was measured under load (CPU 93–97%) and said 26–39% for folo-n. Measured again at quiet starts
+(`gate3/`), the ceiling was −8.0% (folo-n f32), −22.9% (f16 tc), −5.4% (folo-s f32) and −20.3% (f16 tc). By the
+brief's rule the f32 rows would stop the idea on a quiet machine, the tensor-core rows would not, and the plan was
+already built when the quiet numbers came in; it ships because nothing measured slower and the loaded-host and tail
+gains are real, but the lead should weigh that the quiet f32 gain is 2–5%.
+
+### Validation and training (they do not use plans; shown not slower)
+
+- **`folo val`** (folo-n COCO, `D:/folo-weights/folo-n-coco.folo`, 5000 val2017 images, GPU f32), two binaries
+  alternated, CPU 19–65% and another process holding 3.3 GiB and 27–37% of the GPU before the runs (outside the
+  lock): batch 32 (the default; its plan would pin over 1 GiB, so none is made) 6.06 / 4.82 s base against 6.02 /
+  5.02 s new, a tie. Batch 1 (plans replay for every image after the second): 12.87 → 11.77 s. **mAP50-95 is the same
+  to the last digit on both sides**: 0.30999136 at batch 32, 0.30999124 at batch 1 (a replay is bit-identical, so the
+  whole evaluation is).
+- **Training step** (`gpu` bench train section, folo-n b16, 3 rounds, the same outside GPU load, CPU 15–43%): f32
+  52.5 → 55.3 ms (+5.4%; base 44.7–55.0, new 51.8–58.6), AMP 38.3 → 35.0 ms (−8.6%). A training step never
+  records or replays; what it runs of this change is two relaxed atomic loads per dispatch and one per pool
+  allocation (the recorder hooks return at once when no thread records), nanoseconds against a 50 ms step, so both
+  differences are the shared GPU's. An earlier train A/B (`ab-train-contended/`) ran while something held the GPU
+  at 100% and read steps 3–30× slower on both sides; it is not used.
+- The machine rebooted at 13:46 during the measurements (no cause seen in this lane's logs; the GPU lock this lane
+  held at 13:39 was left with an empty owner file, which `lock.sh` would have treated as fresh forever, and was
+  removed by hand).
 
 ## Training steps (not in this lane)
 
@@ -181,8 +277,22 @@ would need:
 
 ## Second item: shape-bucketed batches
 
-<!-- RECT -->
+In its own PR (`gpu/rect-batches`), with its own section added there.
 
 ## Leftovers
 
-<!-- LEFTOVERS -->
+By expected gain:
+- **GPU time of the batch-1 forward** (the floor the plan exposed, about 1.0 ms for folo-n f32 and 0.8 ms on
+  tensor cores): fewer dispatches (138–146 per call; lane `lazy`'s fused head), and a look at what the GPU does
+  between dependent dispatches (`gpu_profile` sums kernel times; the gap between that sum and the wait is the
+  barriers and submission boundaries). Not in this lane.
+- **Plan the whole predictor call** (device letterbox, forward, candidate kernel): the letterbox uploads the image,
+  which a plan refuses; with the upload moved before the planned part (the image into a staging buffer the plan
+  binds as its input) the predict b1 rows would get the forward's gain plus the decode's dispatches. Worth it only
+  where the host is loaded; measure on a quiet machine first.
+- **Fewer per-replay checks**: 0.03–0.09 ms of a replay is the plan's own work (300–400 tensors' versions checked,
+  results allocated, the last dispatches' bind groups made). A model-wide version counter bumped by every write would
+  replace the walk.
+- **Training-step plans** (above): the larger prize if the host matters there, but a design of its own.
+- **Measure again on a quiet machine**: every number here ran next to other lanes' builds, and some next to GPU work
+  outside the lock. The quiet `gpu_latency` rounds are the ones to trust for rows 1 and 2.
