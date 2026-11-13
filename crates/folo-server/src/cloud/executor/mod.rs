@@ -114,6 +114,8 @@ pub(crate) fn abandon(core: &Core, entry: &Arc<RunEntry>, why: &str) -> Result<(
                  in the provider's console"
             ),
         );
+        // Nothing follows the run any more: a silence it recorded is not one FOLO keeps asking about.
+        entry.update_cloud(|c| c.unanswered_since = None);
         entry.set_outcome(RunStatus::Stopped, None, None);
         Ended::Finished
     });
@@ -218,6 +220,8 @@ impl Release {
         }
         self.entry.update_cloud(|c| {
             c.ended_in = ended_in(c.ended_in, c.phase);
+            // A silence that ended the run is said by how it ended, not as one that goes on.
+            c.unanswered_since = None;
             c.phase = CloudPhase::Releasing;
             c.progress = None;
         });

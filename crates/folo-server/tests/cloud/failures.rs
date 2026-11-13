@@ -150,12 +150,21 @@ fn a_checkpoint_fetched_just_before_the_worker_is_lost_is_kept() {
             .any(|n| n.starts_with(".last.folo.copy.") || n == "last.folo")
             .then_some(())
     });
+    // The run says since when its worker is silent, and stops saying so when it answers again...
+    let silent = || run_of(&store, &run.id).cloud.and_then(|c| c.unanswered_since);
+    until("the silence on the run", silent);
+    cloud.gates.cut_after_weights.store(false, Ordering::SeqCst);
+    cloud.gates.cut.store(false, Ordering::SeqCst);
+    until("the worker answers again", || silent().is_none().then_some(()));
     // ...until its instance is gone.
     cloud.kill(0);
     let lost = finished(&store, &run.id);
     assert_eq!(lost.error_code.as_deref(), Some("cloud_instance_lost"), "{:?}", log_of(&store, &run.id));
     assert!(weights.join("last.folo").is_file(), "the checkpoint fetched is kept, to resume from");
-    assert!(lost.cloud.unwrap().synced.is_some());
+    let cloud = lost.cloud.unwrap();
+    assert!(cloud.synced.is_some());
+    // An ended run's silence is said by how it ended.
+    assert_eq!(cloud.unanswered_since, None);
 }
 
 #[test]
@@ -216,6 +225,15 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
     let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
     until("epoch 1 here", || run_of(&store, &run.id).best);
     drop(store);
+    // The process before recorded a silence of the worker (it went down while the worker did not answer).
+    let saved = home.join("runs").join(&run.id).join("run.json");
+    let mut file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    file["run"]["cloud"]["unanswered_since"] = json!("2026-11-09T00:00:00Z");
+    std::fs::write(&saved, file.to_string()).unwrap();
+    // And the worker does not answer the next one at first.
+    cloud.gates.cut_after_weights.store(true, Ordering::SeqCst);
+    cloud.gates.cut.store(true, Ordering::SeqCst);
     // Meanwhile a crash left two `launching` records: one whose launch created an instance, one whose did not.
     let values = Values::from(BTreeMap::from([("api_key".to_string(), SECRET.to_string())]));
     let spec = |name: &str| LaunchSpec {
@@ -241,6 +259,18 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
     let store = plane(&home, &cloud, fast());
     until("the run followed again", || {
         logged(&store, &run.id, "following the run on its worker again").then_some(())
+    });
+    // The worker is still silent when this process asks: the silence goes on from its start...
+    let since = || run_of(&store, &run.id).cloud.and_then(|c| c.unanswered_since);
+    until("this process asked in vain", || {
+        logged(&store, &run.id, "the worker did not answer").then_some(())
+    });
+    assert_eq!(since().as_deref(), Some("2026-11-09T00:00:00Z"));
+    cloud.gates.cut_after_weights.store(false, Ordering::SeqCst);
+    cloud.gates.cut.store(false, Ordering::SeqCst);
+    // ...until the worker answers: the old silence is not said any more.
+    until("the silence cleared", || {
+        run_of(&store, &run.id).cloud.is_some_and(|c| c.unanswered_since.is_none()).then_some(())
     });
     until("the orphan terminated", || {
         let all = store.cloud_instances().unwrap();

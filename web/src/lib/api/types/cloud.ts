@@ -170,6 +170,11 @@ export interface RunCloud {
    * never reached. `null` before; absent from servers before it.
    */
   ended_in?: CloudPhase | (string & {}) | null;
+  /**
+   * Since when the worker has not answered while the run trains (it may still train there); `null` while it answers.
+   * Absent from servers before it.
+   */
+  unanswered_since?: Time | null;
 }
 
 /** `RunEstimate.cost`: what a cloud run would cost. */

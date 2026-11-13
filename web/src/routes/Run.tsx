@@ -484,6 +484,11 @@ export default function Run() {
                   <Badge tone="warning">
                     <WifiOff size={12} /> Reconnecting
                   </Badge>
+                ) : cloud.get()?.unanswered_since ? (
+                  // The worker is silent: the numbers stand still for that, not because training does (Cloud says more).
+                  <Badge tone="warning">
+                    <WifiOff size={12} /> Worker not answering
+                  </Badge>
                 ) : null}
               </>
             )}

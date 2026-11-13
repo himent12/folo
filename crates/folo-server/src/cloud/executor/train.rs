@@ -7,6 +7,7 @@ use folo_client::{Client, encode};
 use folo_cloud::InstanceState;
 
 use crate::cloud::state::Outcome;
+use crate::util::{rfc3339, unix_now};
 
 use super::{ATTEMPTS, COST_EVERY, Exec, Halt, failed};
 
@@ -57,7 +58,13 @@ impl Exec {
                     .log(LogLevel::Warn, "the worker's run did not stop in time; collecting what it has");
                 break None;
             }
-            match self.mirror(client, &run_id) {
+            let mirrored = self.mirror(client, &run_id);
+            // The worker answered: no silence is said any more, also one a process before this one recorded (the run
+            // persisted with it) and on the answer that the run ended (the collection may take minutes).
+            if mirrored.is_ok() && self.entry.run().cloud.is_some_and(|c| c.unanswered_since.is_some()) {
+                self.entry.update_cloud(|c| c.unanswered_since = None);
+            }
+            match mirrored {
                 Ok(Some(end)) => break Some(end),
                 Ok(None) => {
                     if unreachable.is_some() {
@@ -81,6 +88,13 @@ impl Exec {
                 Err(e) => {
                     // Said once per silence: the run's log shows why its numbers stand still.
                     if unreachable.is_none() {
+                        // Said on the run too, so a page shows the run's numbers stand still and why. A silence a
+                        // process before this one recorded goes on: it keeps its start. (Before the log line, so a
+                        // reader of the log finds the run saying so.)
+                        let now = rfc3339(unix_now());
+                        self.entry.update_cloud(|c| {
+                            c.unanswered_since.get_or_insert(now);
+                        });
                         self.entry.log(
                             LogLevel::Warn,
                             format!("the worker did not answer ({e}); the run goes on there, asking again"),

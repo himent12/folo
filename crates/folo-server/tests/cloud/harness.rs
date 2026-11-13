@@ -96,7 +96,8 @@ pub(super) struct Gates {
     /// While set, the first request for weights cuts the worker off: from then on only weights are served, every
     /// other request is a proxy's `502` (`cut`).
     pub(super) cut_after_weights: AtomicBool,
-    cut: AtomicBool,
+    /// The worker is cut off (set by `cut_after_weights`; cleared, it answers again).
+    pub(super) cut: AtomicBool,
 }
 
 async fn gone(State(gone): State<Arc<AtomicBool>>, req: Request, next: Next) -> Response {
