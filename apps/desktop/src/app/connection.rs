@@ -15,9 +15,28 @@ use super::{FoloApp, ServerMode};
 const RECOVER_WAIT_MAX: u32 = 30;
 
 /// Whether two addresses name one server (as typed or as the server reports itself).
-fn same_server(a: &str, b: &str) -> bool {
+/// Two forms of this machine's address (`localhost`, `127.0.0.1`, `[::1]`) with one port are one server.
+pub(super) fn same_server(a: &str, b: &str) -> bool {
+    use crate::api::http::is_loopback;
     let base = |u: &str| crate::api::http::HttpBackend::new(u).base().to_ascii_lowercase();
-    base(a) == base(b)
+    let port = |u: &str| {
+        let b = base(u);
+        let authority =
+            b.split_once("://").map_or(b.as_str(), |(_, r)| r).split('/').next().unwrap_or("").to_string();
+        let port = authority.rsplit_once(':').filter(|(_, p)| !p.contains(']')).map(|(_, p)| p.to_string());
+        port.unwrap_or_else(|| if b.starts_with("https://") { "443".into() } else { "80".into() })
+    };
+    base(a) == base(b) || (is_loopback(a) && is_loopback(b) && port(a) == port(b))
+}
+
+/// Whether two data dirs as servers report them are one folder: `/` and `\` alike, a trailing
+/// separator ignored, and on Windows case too.
+pub(super) fn same_dir(a: &str, b: &str) -> bool {
+    let norm = |p: &str| {
+        let p = p.replace('\\', "/").trim_end_matches('/').to_string();
+        if cfg!(windows) { p.to_lowercase() } else { p }
+    };
+    norm(a) == norm(b)
 }
 
 /// Who asked for a connection ([`FoloApp::autoconnect`]).
@@ -330,9 +349,15 @@ impl FoloApp {
             return;
         };
         if self.local_url.is_some() {
-            self.local_dir = Some(dir.to_string());
+            match &self.local_dir {
+                None => self.local_dir = Some(dir.to_string()),
+                // Another server now answers the local one's address (it stopped, and the port was
+                // taken): not ours to bring back.
+                Some(ours) if !same_dir(ours, dir) => self.local_url = None,
+                Some(_) => {}
+            }
         } else if self.server_mode == ServerMode::Local
-            && self.local_dir.as_deref() == Some(dir)
+            && self.local_dir.as_deref().is_some_and(|ours| same_dir(ours, dir))
             // Another machine's server may name the same path; only this machine's can be ours.
             && self.connected_url.as_deref().is_some_and(crate::api::http::is_loopback)
         {

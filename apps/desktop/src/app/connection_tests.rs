@@ -261,3 +261,30 @@ fn the_reason_the_local_server_did_not_start_stays_on_the_error_panels() {
         assert!(this.store.unreachable());
     });
 }
+
+#[test]
+fn one_server_and_one_folder_by_any_of_their_names() {
+    use super::connection::{same_dir, same_server};
+    assert!(same_server("localhost:4100", "http://127.0.0.1:4100/"));
+    assert!(same_server("http://[::1]:4100", "127.0.0.1:4100"));
+    assert!(!same_server("localhost:4100", "127.0.0.1:4101"));
+    assert!(!same_server("http://192.168.9.9:4100", "127.0.0.1:4100"));
+    assert!(same_dir("D:/folo/data/", "D:/folo/data"));
+    assert_eq!(same_dir("D:/Data", r"d:\data"), cfg!(windows));
+    assert!(!same_dir("D:/data", "D:/other"));
+}
+
+#[test]
+fn another_server_on_the_local_ones_port_is_not_ours() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, _| {
+        this.server_mode = ServerMode::Local;
+        this.local_url = Some("http://127.0.0.1:4100".into());
+        this.note_data_dir(Some("D:/data"));
+        this.note_data_dir(Some("D:/Data/"));
+        assert_eq!(this.local_url.as_deref(), Some("http://127.0.0.1:4100"), "the same folder");
+        this.note_data_dir(Some("D:/other"));
+        assert_eq!(this.local_url, None);
+        assert_eq!(this.local_dir.as_deref(), Some("D:/data"), "the local data dir stays known");
+    });
+}
