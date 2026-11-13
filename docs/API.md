@@ -922,8 +922,9 @@ exported more than once.
   the job's classes. `pending` and `failed` images are left out; a labeled image without boxes is a background
   image (an empty label file). The images are shuffled with `seed` and `round(n · val_fraction)` of them go to
   `val` (`val_fraction` in `0..=0.5`, else `400 invalid_body`; at least one image always stays in `train`).
-  `name` defaults to the job's. `400 invalid_dataset` when no image is labeled, `409 label_job_active` while a
-  run is active. While the dataset is written the job cannot be changed, deleted or given to an agent, and its
+  `name` defaults to the job's. `400 invalid_dataset` when no image is labeled, `404 image_not_found` when a
+  labeled image added from a folder is no longer on disk (the message counts them and names one; nothing is
+  written), `409 label_job_active` while a run is active. While the dataset is written the job cannot be changed, deleted or given to an agent, and its
   images cannot be edited or removed (`409 label_job_active`); images can still be added (they are not part of
   that dataset). The job keeps existing and remembers the dataset as `dataset_id`; exporting again makes
   another dataset.
