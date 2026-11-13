@@ -41,13 +41,16 @@ fn check(
     at: &[u32],
 ) -> usize {
     let _g = no_grad();
-    let dense = bits(&x.conv2d_act(w, b, p, act).unwrap());
+    // Held until the sites are checked: dropped, its buffer could come back from the pool as the sites' output,
+    // already holding the dense values where the sites conv failed to write.
+    let dense_out = x.conv2d_act(w, b, p, act).unwrap();
+    let dense = bits(&dense_out);
     let before = winograd_calls()[1];
     let t = Tensor::from_vec(at.to_vec(), [at.len()]).unwrap();
     let y = x.conv2d_act_at(w, b, p, act, &t).unwrap();
     let ran = winograd_calls()[1] - before;
     let (_, o, oh, ow) = y.dims4().unwrap();
-    assert_eq!(y.dims(), x.conv2d_act(w, b, p, act).unwrap().dims());
+    assert_eq!(y.dims(), dense_out.dims());
     let y = bits(&y);
     for &s in at {
         let (img, pix) = (s as usize / (oh * ow), s as usize % (oh * ow));

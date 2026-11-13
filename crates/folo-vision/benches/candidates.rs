@@ -109,6 +109,7 @@ fn main() {
     }
     if verify {
         println!("verified {} images against the dense path: {mismatched} mismatched", paths.len());
+        assert_eq!(mismatched, 0, "candidate-first detections differ from the dense path's");
     }
 
     if env::<String>("FOLO_BENCH_SWEEP").is_some_and(|v| v == "1") {
