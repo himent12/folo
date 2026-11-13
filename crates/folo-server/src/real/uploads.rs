@@ -12,6 +12,7 @@ use crate::uploads::Finished;
 use crate::util::slug;
 
 use super::RealStore;
+use super::datasets::Naming;
 
 impl RealStore {
     /// What the finished upload of `kind` with `fingerprint` became, while it still exists (the dataset registered,
@@ -34,7 +35,7 @@ impl RealStore {
         let dir = self.claim_dataset_dir(&slug(done.name(), "dataset"))?;
         let path = dir.to_string_lossy().into_owned();
         let registered = move_children(done.root(), &dir)
-            .and_then(|()| self.register(Some(done.name().to_string()), path, done.format()));
+            .and_then(|()| self.register(Naming::Given(done.name().to_string()), path, done.format()));
         if registered.is_err() {
             let _ = std::fs::remove_dir_all(&dir);
         }

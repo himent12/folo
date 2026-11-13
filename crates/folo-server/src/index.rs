@@ -254,7 +254,11 @@ pub fn default_name(path: &Path, taken: impl Fn(&str) -> bool) -> String {
     } else {
         name(Some(path))
     };
-    let base = base.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "dataset".into());
+    free_name(base.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "dataset".into()), taken)
+}
+
+/// `base`, or `base-2`, `base-3`, ... the first one `taken` does not claim.
+pub fn free_name(base: String, taken: impl Fn(&str) -> bool) -> String {
     if !taken(&base) {
         return base;
     }

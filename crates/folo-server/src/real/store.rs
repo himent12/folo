@@ -30,6 +30,7 @@ use crate::throughput::{EstimateInput, InferKey, InferSample};
 use crate::uploads::Uploads;
 use crate::util::slug;
 
+use super::datasets::Naming;
 use super::models::cli_weights;
 use super::training::{run_cloud, upload_fingerprint};
 use super::{MAX_SYNTHETIC_IMAGES, RealStore, SHUTDOWN_WAIT, State};
@@ -181,7 +182,7 @@ impl Store for RealStore {
     }
 
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
-        self.register(req.name, requested_path(&req.path)?, req.format)
+        self.register(req.name.map_or(Naming::Default, Naming::Given), requested_path(&req.path)?, req.format)
     }
 
     fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset> {
@@ -218,7 +219,7 @@ impl Store for RealStore {
         }
         tracing::info!(path = %dir.display(), images = cfg.images, secs = t0.elapsed().as_secs_f32(), "generated");
         let path = dir.to_string_lossy().into_owned();
-        self.register(Some(req.name.trim().to_string()), path, DatasetFormat::Yolo)
+        self.register(Naming::Unique(req.name.trim().to_string()), path, DatasetFormat::Yolo)
     }
 
     fn get_dataset(&self, id: &str) -> Result<Dataset> {

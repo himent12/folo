@@ -35,6 +35,41 @@ fn run_on(store: &RealStore, id: &str, name: &str) -> String {
     entry.id().to_string()
 }
 
+/// studio-data F7: two sample sets generated with one name, also at once (two tabs), are told apart by their names
+/// as by their folders; a registration's own name is kept as asked.
+#[test]
+fn sample_sets_of_one_name_are_numbered_also_when_generated_at_once() {
+    let t = TestDir::new("real-synthetic-names");
+    let store = Arc::new(RealStore::open(t.join("home")));
+    let go = Arc::new(Barrier::new(2));
+    let both: Vec<Dataset> = (0..2)
+        .map(|_| {
+            let (store, go) = (store.clone(), go.clone());
+            std::thread::spawn(move || {
+                go.wait();
+                synthetic(&store, "Big Set")
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect();
+    let mut names: Vec<&str> = both.iter().map(|d| d.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["Big Set", "Big Set-2"]);
+    // A third later, whatever the case it is asked in.
+    assert_eq!(synthetic(&store, "big set").name, "big set-3");
+    // A folder registered under a name a dataset has keeps that name (Studio warns before it asks).
+    let second = both.iter().find(|d| d.name == "Big Set-2").unwrap();
+    store.delete_dataset(&second.id).unwrap();
+    let req = RegisterDataset {
+        name: Some("Big Set".into()),
+        path: second.path.clone(),
+        format: DatasetFormat::Auto,
+    };
+    assert_eq!(store.register_dataset(req).unwrap().name, "Big Set");
+}
+
 #[test]
 fn an_unregistered_dataset_gets_its_id_back_and_never_another_ones() {
     let t = TestDir::new("real-tombstones");
