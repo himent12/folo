@@ -227,6 +227,34 @@ describe('Create dataset again (studio-label F7)', () => {
     });
     expect(nameInput().value).toBe('my-set');
   });
+
+  it('keeps a name edited back to the default before the datasets are known', async () => {
+    let answer!: (d: Dataset[]) => void;
+    vi.spyOn(hub.api, 'datasets').mockReturnValue(new Promise((r) => (answer = r)));
+    open(DatasetDialog, { open: true, job: await hub.api.labelJob('lb_51d0'), oncreated: () => {} });
+    type(nameInput(), 'other');
+    type(nameInput(), 'fasteners-review');
+    answer(named('fasteners-review'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(text()).toMatch(/A dataset named fasteners-review exists/);
+    });
+    expect(nameInput().value).toBe('fasteners-review');
+  });
+
+  it('waits for the datasets before it sends a default, so a quick Create never makes the duplicate', async () => {
+    let answer!: (d: Dataset[]) => void;
+    vi.spyOn(hub.api, 'datasets').mockReturnValue(new Promise((r) => (answer = r)));
+    const create = vi.spyOn(hub.api, 'createLabelDataset');
+    const oncreated = vi.fn();
+    open(DatasetDialog, { open: true, job: await hub.api.labelJob('lb_51d0'), oncreated });
+    submitButton().form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
+    answer(named('fasteners-review'));
+    await vi.waitFor(() => expect(oncreated).toHaveBeenCalled());
+    expect(create.mock.calls[0]![1]).toMatchObject({ name: 'fasteners-review-2' });
+  });
 });
 
 describe('the dialogs while the job changes', () => {
