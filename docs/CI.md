@@ -133,11 +133,19 @@ and use GitHub-hosted `macos-latest`; `FOLO_RELEASE_MACOS=false` skips them.
   on (the runners are services, and docker needs it), without the Windows drives and programs (`automount` and
   `interop` off in `/etc/wsl.conf`, so a job sees only the Linux file system and the Windows `PATH` cannot shadow
   the Linux tools), and with a size limit on its disk (`wsl --manage <distro> --resize 300GB`): the default virtual
-  disk reports about 1 TB free whatever the drive holds, so the cleanup above would never start. The distribution
-  stops when no `wsl.exe` is attached to it, so keep one running (`wsl -d <distro> --exec sleep infinity`), and
-  probe it from Windows now and then: a VM that hangs keeps its runners "online" for a while and its jobs running
-  forever. After a forced stop (`wsl --shutdown`), delete the runners' toolchains and target dirs: a file written
-  just before can be cut short (a `librustc_driver` that then failed with "cannot read file data").
+  disk reports about 1 TB free whatever the drive holds, so the cleanup above would never start.
+  - **Memory.** Builds fill the VM's memory with page cache, and with the kernel's default reserve (45 MB of 14 GB)
+    what stays free is too fragmented for the 512 KB buffer of a new `wsl.exe` connection: the kernel log shows
+    `page allocation failure: order:7` under `vmbus_alloc_ring`, and `wsl.exe` times out
+    (`Wsl/Service/WSAETIMEDOUT`) while the jobs inside still run. `vm.min_free_kbytes = 524288` and
+    `vm.watermark_scale_factor = 100` in `/etc/sysctl.d/` ended that (direct-compaction stalls over a full run of
+    every workflow: 7,172 before, 318 after).
+  - **Keep-alive and hangs.** The distribution stops when no `wsl.exe` is attached to it, so keep one running. A VM
+    that hangs keeps its runners "online" for a while and its jobs running forever (seen once, a kernel soft lockup
+    in the first minutes of the first run), so let that `wsl.exe` print a heartbeat and watch it from Windows;
+    starting a new `wsl.exe` as the probe can time out for the reason above. After a forced stop
+    (`wsl --shutdown`), delete the runners' toolchains and target dirs: a file written just before can be cut short
+    (a `librustc_driver` that then failed with "cannot read file data").
 
 ## Unstable self-hosted Windows host
 The maintainers' self-hosted Windows machine (an i7-14700KF) occasionally crashes rustc or rustfmt under heavy
