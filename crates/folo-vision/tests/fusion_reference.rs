@@ -10,6 +10,10 @@ use folo_vision::{Detection, Xyxy};
 use serde_json::Value;
 use std::path::Path;
 
+/// Largest edge difference allowed, in pixels: a few f32 ulps at 640 px (one ulp there is 6.1e-5); measured
+/// 1.2e-4 on this fixture. Switching fusion to voting or dropping the excess-variance term moves edges by far more.
+const TOL_PX: f32 = 5e-4;
+
 fn f32s(v: &Value) -> Vec<f32> {
     v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap() as f32).collect()
 }
@@ -36,7 +40,7 @@ fn dfl_fusion_matches_the_python_reference() {
         fusion_iou: f["tau"].as_f64().unwrap() as f32,
         ..NmsConfig::default()
     };
-    let (mut moved, mut kept) = (0, 0);
+    let (mut moved, mut kept, mut worst) = (0, 0, 0f32);
     for im in fx["images"].as_array().unwrap() {
         let file = im["file"].as_str().unwrap();
         let anchors: Vec<Vec<f32>> = im["anchors"].as_array().unwrap().iter().map(f32s).collect();
@@ -82,17 +86,14 @@ fn dfl_fusion_matches_the_python_reference() {
                 "{file}: NMS keeps the same candidates in order"
             );
             for (x, y) in g.bbox.to_array().into_iter().zip(w.bbox.to_array()) {
-                assert!(
-                    (x - y).abs() <= 1e-4 * (1.0 + y.abs()),
-                    "{file}: {:?} vs Python {:?}",
-                    g.bbox,
-                    w.bbox
-                );
+                worst = worst.max((x - y).abs());
+                assert!((x - y).abs() <= TOL_PX, "{file}: {:?} vs Python {:?}", g.bbox, w.bbox);
             }
             moved += usize::from(g.bbox != p.bbox);
         }
         kept += got.len();
     }
+    eprintln!("largest edge difference to Python: {worst} px");
     // Most kept boxes have other members in their cluster and move; the rest keep their box exactly.
     assert!(kept >= 40 && moved * 2 > kept, "{moved} of {kept} kept boxes moved");
 }

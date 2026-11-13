@@ -84,7 +84,16 @@ fn precision_of(model: &FoloModel) -> Precision {
     if model.dtype() == Precision::F16.dtype() { Precision::F16 } else { Precision::F32 }
 }
 
+/// `--fusion-iou` is an IoU: in `0..=1` (a NaN would put every candidate of a class in every cluster).
+fn check_fusion_iou(v: f32) -> Result<(), CliError> {
+    if (0.0..=1.0).contains(&v) {
+        return Ok(());
+    }
+    Err(CliError::new(ExitCode::Usage, "usage", format!("--fusion-iou must be in 0..=1, got {v}")))
+}
+
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
+    check_fusion_iou(args.fusion_iou)?;
     let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
     let model = open_model("val", &args.model, &args.device, args.half, args.tensor_cores, &shape)?;
     let split = match args.split {
@@ -319,6 +328,7 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
+    check_fusion_iou(args.fusion_iou)?;
     let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
     let model = open_model("predict", &args.model, &args.device, args.half, args.tensor_cores, &shape)?;
     let images = collect_images(&args.sources)?;

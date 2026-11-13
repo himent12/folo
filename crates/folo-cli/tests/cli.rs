@@ -154,6 +154,33 @@ fn usage_errors_exit_2() {
     assert!(stdout.contains("serve"));
 }
 
+/// `--fusion-iou` outside `0..=1` (or NaN) is a usage error before any model is opened.
+#[test]
+fn fusion_iou_out_of_range_is_a_usage_error() {
+    for args in [
+        &[
+            "val",
+            "--json",
+            "--model",
+            "none.folo",
+            "--data",
+            "none",
+            "--fusion",
+            "dfl",
+            "--fusion-iou",
+            "NaN",
+        ][..],
+        &["val", "--json", "--model", "none.folo", "--data", "none", "--fusion-iou", "1.5"],
+        &["predict", "--json", "--model", "none.folo", "a.jpg", "--fusion", "vote", "--fusion-iou=-0.1"],
+    ] {
+        let (code, stdout, _) = folo(args);
+        assert_eq!(code, 2, "{args:?}");
+        let e = &json_lines(&stdout)[0]["error"];
+        assert_eq!(e["code"], "usage", "{args:?}");
+        assert!(e["message"].as_str().unwrap().contains("--fusion-iou"), "{e}");
+    }
+}
+
 /// The `--json` error of a missing argument names it: clap puts the names on the lines after "the following
 /// required arguments were not provided:", which the message used to cut off.
 #[test]
