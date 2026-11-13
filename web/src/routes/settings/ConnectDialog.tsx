@@ -115,7 +115,10 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     } catch (err) {
       const field = err instanceof ApiError && err.code === 'invalid_body' ? p.fields.find((f) => err.message.includes(`\`${f.key}\``)) : undefined;
       const secret = firstSecret.peek();
-      if (err instanceof ApiError && err.code === 'cloud_auth_failed' && secret) showErrors({ [secret.key]: `${p.name} rejected this ${noun(secret)}.` });
+      // A rejected credential is said at its field; one left empty (an optional token the server needs after all) is
+      // not "rejected": the server's own words say what it wants.
+      if (err instanceof ApiError && err.code === 'cloud_auth_failed' && secret)
+        showErrors({ [secret.key]: typed[secret.key]?.trim() ? `${p.name} rejected this ${noun(secret)}.` : fieldMessage(secret, err.message) });
       else if (field && err instanceof ApiError) showErrors({ [field.key]: fieldMessage(field, err.message) });
       else failure.set(err);
     } finally {

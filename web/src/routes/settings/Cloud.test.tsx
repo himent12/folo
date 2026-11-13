@@ -3,6 +3,7 @@
 // Disconnect and Terminate flows with the errors the API documents (docs/API.md, Cloud compute).
 import { flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { toast } from '$lib/ui/toast';
@@ -165,6 +166,27 @@ describe('Settings › Cloud', () => {
     [...d.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((r) => text(r) === 'RunPod')!.click();
     flushSync();
     expect(d.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe('');
+  });
+
+  it('says what a server wants of a token left empty, not that it rejected one', async () => {
+    const api = new MockApi('normal', 0);
+    open(api);
+    vi.spyOn(api, 'connectCloud').mockRejectedValue(new ApiError(422, 'cloud_auth_failed', 'the server at 10.0.0.5 needs a token (it runs with `--token`)'));
+    await until(() => target.querySelector('#cloud header .btn'), 'Connect');
+    button(target, 'Connect')!.click();
+    const d = await until(() => dialog()?.querySelector('input[type="password"]') && dialog(), 'the dialog');
+    [...d.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((r) => text(r) === 'Remote FOLO server')!.click();
+    flushSync();
+    type(d.querySelector<HTMLInputElement>('input[type="text"]')!, 'http://10.0.0.5:7878');
+    const token = d.querySelector<HTMLInputElement>('input[type="password"]')!;
+    d.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    const msg = await until(() => d.querySelector(`#${token.id}-error`), 'the field error');
+    expect(text(msg)).toBe('The server at 10.0.0.5 needs a token (it runs with --token).');
+    // A token that was typed is the one rejected.
+    vi.mocked(api.connectCloud).mockRejectedValue(new ApiError(422, 'cloud_auth_failed', 'the server at 10.0.0.5 rejected the token'));
+    type(token, 'wrong');
+    d.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await until(() => text(d.querySelector(`#${token.id}-error`)) === 'Remote FOLO server rejected this token.', 'the rejection');
   });
 
   it('confirms Disconnect, says why a connection in use stays, and forgets one that is not', async () => {
