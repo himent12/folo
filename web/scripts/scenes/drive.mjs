@@ -2,14 +2,15 @@
 // until something shows, and keyboard focus reached with Tab.
 
 /**
- * Pages shot with `shoot.mjs --exact`, each with its wait for real-time work (image loads, blobs, lazy chunks) to finish.
+ * Pages shot with `shoot.mjs --exact` or `--qa` (a paused clock), each with its wait for real-time work (image loads,
+ * blobs, lazy chunks) to finish.
  * A wait below calls it before each look, so whether a look sees the page done never depends on how fast the machine
  * is, and a wait takes the same number of clock steps on every shoot (the live run's progress is a function of them).
  * @type {WeakMap<import('playwright-core').Page, () => Promise<void>>}
  */
 export const quietWaits = new WeakMap();
 
-/** Waits for the page's real-time work, when the page has such a wait (--exact). */
+/** Waits for the page's real-time work, when the page has such a wait (--exact, --qa). */
 export async function quiet(/** @type {import('playwright-core').Page} */ page) {
   await quietWaits.get(page)?.();
 }
