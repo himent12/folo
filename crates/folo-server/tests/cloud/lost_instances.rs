@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use folo_cloud::{LaunchSpec, Provider, Values};
 use folo_server::api::*;
@@ -98,11 +98,7 @@ fn instances_listed_after_the_wait_are_still_terminated() {
     for (id, ..) in cases {
         cloud.hide(&format!("folo-run_late-{id}"), false);
     }
-    let t0 = Instant::now();
-    while cloud.live() > 0 {
-        assert!(t0.elapsed() < Duration::from_secs(20), "{} instance(s) still run", cloud.live());
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    until("every instance terminated", || (cloud.live() == 0).then_some(()));
     for (id, age, _) in cases {
         let i = until(id, || instance(&store, id).filter(|i| i.status == CloudInstanceStatus::Terminated));
         let ran = age / 3600.0 * 0.36;
@@ -152,18 +148,6 @@ fn an_instance_never_listed_ends_at_no_cost_and_is_still_looked_for_after_its_wa
     store.disconnect_cloud(&kept.id).unwrap();
 }
 
-/// Polls `f` for at most `secs` seconds (an outcome that the wrong code reaches only much later, or never).
-fn within<T>(secs: u64, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
-    let t0 = Instant::now();
-    loop {
-        if let Some(v) = f() {
-            return v;
-        }
-        assert!(t0.elapsed() < Duration::from_secs(secs), "not within {secs} s: {what}");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 #[test]
 fn a_failed_look_for_a_never_found_instance_is_made_again_at_the_next_sweep() {
     no_gpu();
@@ -177,8 +161,8 @@ fn a_failed_look_for_a_never_found_instance_is_made_again_at_the_next_sweep() {
     cloud.script_find(name, &[2], &[]);
     lost_launch(&home, &conn.id, "ci_flaky", name, 360.0, 3600.0);
     // Not ten minutes later: at the next sweep.
-    within(10, "a third look", || (cloud.calls_with(Call::Find, name) >= 3).then_some(()));
-    let i = within(10, "the error cleared", || instance(&store, "ci_flaky").filter(|i| i.error.is_none()));
+    until("a third look", || (cloud.calls_with(Call::Find, name) >= 3).then_some(()));
+    let i = until("the error cleared", || instance(&store, "ci_flaky").filter(|i| i.error.is_none()));
     assert_eq!((i.status, i.cost_usd), (CloudInstanceStatus::Terminated, Some(0.0)));
 }
 
@@ -204,7 +188,7 @@ fn an_instance_listed_after_its_watchdog_was_due_is_still_found_and_terminated()
     // Launched two hours ago; its watchdog was due a minute ago and did not stop it. Not listed at first.
     cloud.script_find(name, &[], &[1]);
     lost_launch(&home, &conn.id, "ci_later", name, 7200.0, -60.0 - WATCHDOG_AFTER_DEADLINE);
-    within(10, "the instance terminated", || (cloud.live() == 0).then_some(()));
+    until("the instance terminated", || (cloud.live() == 0).then_some(()));
     let i = until("its record", || {
         instance(&store, "ci_later").filter(|i| i.status == CloudInstanceStatus::Terminated)
     });
@@ -224,6 +208,6 @@ fn the_watch_ends_only_with_a_last_look_that_succeeds() {
     let name = "folo-run_old-a1b2";
     cloud.script_find(name, &[2], &[]);
     lost_launch(&home, &conn.id, "ci_old", name, 8.0 * 86_400.0, -8.0 * 86_400.0);
-    within(10, "the record pruned", || instance(&store, "ci_old").is_none().then_some(()));
+    until("the record pruned", || instance(&store, "ci_old").is_none().then_some(()));
     assert_eq!(cloud.calls_with(Call::Find, name), 3, "looked at last, and again after the failed look");
 }

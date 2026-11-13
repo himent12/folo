@@ -392,18 +392,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         }));
         let summary: Vec<String> =
             p.scored_boxes(&classes).iter().take(6).map(|b| format!("{} {:.2}", b.name, b.score)).collect();
-        let more = if p.detections.len() > 6 {
-            format!(", +{} more", p.detections.len() - 6)
-        } else {
-            String::new()
-        };
-        out.human(format!(
-            "{}: {} boxes ({}{more}) {:.1} ms",
-            folo_api::json::path(path),
-            p.detections.len(),
-            summary.join(", "),
-            ti.total_ms
-        ));
+        out.human(image_line(&folo_api::json::path(path), p.detections.len(), &summary, ti.total_ms));
     }
     let done = images.len() - failed;
     if done == 1 {
@@ -656,4 +645,30 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
         bytes as f64 / 1e6
     ));
     Ok(())
+}
+
+/// `predict`'s line for one image: "a.jpg: 2 boxes (cat 0.91, dog 0.40) 9.2 ms", "1 box", "0 boxes" without an empty
+/// list; `shown` is the first boxes' "name score", at most six, and the rest are counted.
+fn image_line(path: &str, boxes: usize, shown: &[String], ms: f64) -> String {
+    let noun = if boxes == 1 { "box" } else { "boxes" };
+    let list = match boxes {
+        0 => String::new(),
+        n if n > shown.len() => format!(" ({}, +{} more)", shown.join(", "), n - shown.len()),
+        _ => format!(" ({})", shown.join(", ")),
+    };
+    format!("{path}: {boxes} {noun}{list} {ms:.1} ms")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_image_line_counts_its_boxes_and_lists_none_for_none() {
+        let two = ["cat 0.91".to_string(), "dog 0.40".to_string()];
+        assert_eq!(image_line("a.jpg", 2, &two, 9.24), "a.jpg: 2 boxes (cat 0.91, dog 0.40) 9.2 ms");
+        assert_eq!(image_line("a.jpg", 1, &two[..1], 9.0), "a.jpg: 1 box (cat 0.91) 9.0 ms");
+        assert_eq!(image_line("a.jpg", 0, &[], 14.7), "a.jpg: 0 boxes 14.7 ms");
+        assert_eq!(image_line("a.jpg", 9, &two, 1.0), "a.jpg: 9 boxes (cat 0.91, dog 0.40, +7 more) 1.0 ms");
+    }
 }

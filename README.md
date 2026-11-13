@@ -140,8 +140,8 @@ mkdir -p ~/.folo/models && cp runs/shapes-n/weights/best.folo ~/.folo/models/sha
 folo serve                                                          # or `folo serve --mock` for demo data
 ```
 
-`folo serve` keeps datasets, runs and models in its data dir (`--data-dir`, default `~/.folo`) and lists every `.folo`
-file under `<data dir>/models/` as a model, so the copy above puts your model in the Playground.
+`folo serve` keeps datasets, runs and models in its data dir (`--data-dir`, default `$FOLO_HOME` or `~/.folo`) and
+lists every `.folo` file under `<data dir>/models/` as a model, so the copy above puts your model in the Playground.
 
 **[docs/QUICKSTART.md](docs/QUICKSTART.md)** goes further: training on your own YOLO or COCO folder, fine-tuning from
 the COCO weights, evaluation, export, and running a model in the browser.
@@ -220,7 +220,7 @@ Desktop is its own cargo workspace (the app and folo-ui), so the engine's builds
 and 2025-11-25). It has 22 tools: build, register and check datasets, train (here or on a cloud GPU), follow, stop,
 reorder and resume runs, evaluate, predict, export, compare runs, and look after cloud connections and instances. It
 also has `folo://` resources (dataset images, live run status and metrics, validation sample grids, the docs) and two
-prompts. It runs the real engine on its data dir (`--data-dir`, default `~/.folo`).
+prompts. It runs the real engine on its data dir (`--data-dir`, default `$FOLO_HOME` or `~/.folo`).
 
 ```sh
 claude mcp add folo -- folo mcp                 # Claude Code

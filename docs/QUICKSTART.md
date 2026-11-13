@@ -216,8 +216,9 @@ folo serve                      # http://127.0.0.1:7878
   a model you trained with the CLI, copy it there: `mkdir -p ~/.folo/models && cp runs/shapes-n/weights/best.folo
   ~/.folo/models/shapes-n.folo` (with `--data-dir D`, use `D/models/`).
 - **Mock mode.** `folo serve --mock` serves deterministic demo data instead, which is handy for a look around.
-- **Ports.** If port 7878 is taken, `--port 0` picks a free one. The first `listening` line (or the `--json`
-  record) shows the URL.
+- **Ports.** If port 7878 is taken, `folo serve` says so and exits; `--port 0` picks a free one. Its first line
+  (`FOLO 0.1.0 … serving the real store on http://127.0.0.1:<port>`), or with `--json` the `listening` record's
+  `url`, shows the address.
 
 The desktop app (`apps/desktop`, `cargo run --release` there) shows the same screens natively and connects to the
 same server ([apps/desktop/README.md](../apps/desktop/README.md)).
