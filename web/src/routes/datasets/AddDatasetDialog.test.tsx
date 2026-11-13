@@ -9,6 +9,7 @@ import { router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import AddDatasetDialog from './AddDatasetDialog';
+import { generationEnded, pendingGeneration } from './changes';
 
 /** Port of `mount(C, { target, props })`: renders into `target`; `unmount(c)` is `c.unmount()`. */
 const mount = <P extends object>(C: (p: P) => JSX.Element, o: { target: HTMLElement; props?: P }) => render(() => C(o.props ?? ({} as P)), o.target);
@@ -92,6 +93,47 @@ describe('AddDatasetDialog', () => {
     const go = await register('D:\\data\\shapes\\', [{ id: 'ds_fasteners', name: 'fasteners' }, { id: 'ds_shapes', name: 'shapes' }]);
     expect(toast.items[0]).toMatchObject({ tone: 'info', title: 'Already registered as shapes' });
     expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');
+  });
+
+  it('keeps a folder it is reading where a reload finds it, and forgets it when the answer comes (studio-data F1)', async () => {
+    let answer!: () => void;
+    const read = hub.api.createDataset.bind(hub.api);
+    vi.spyOn(hub.api, 'createDataset').mockImplementation((b) => new Promise((ok) => (answer = () => ok(read(b)))));
+    c = mount(AddDatasetDialog, { target, props: { open: true, known: [] } });
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="e.g. D:/data/my-dataset"]')!;
+    input.value = 'D:\\data\\shapes';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    input.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await vi.waitFor(() => expect(answer).toBeDefined());
+    expect(pendingGeneration(hub.server)).toMatchObject({ name: 'shapes', path: 'D:\\data\\shapes', what: 'Reading shapes' });
+    vi.spyOn(router, 'go').mockImplementation(() => {});
+    answer();
+    await vi.waitFor(() => expect(pendingGeneration(hub.server)).toBeNull());
+  });
+
+  it('still waits for a folder whose request a reload cut off: the server goes on with it (studio-data F1)', async () => {
+    let fail!: (e: unknown) => void;
+    vi.spyOn(hub.api, 'createDataset').mockImplementation(() => new Promise((_, no) => (fail = no)));
+    c = mount(AddDatasetDialog, { target, props: { open: true, known: [] } });
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="e.g. D:/data/my-dataset"]')!;
+    input.value = 'D:/data/coco';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    input.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await vi.waitFor(() => expect(fail).toBeDefined());
+    try {
+      // The reload: the page is about to go, and its request fails as the browser drops it (before `pagehide`).
+      window.dispatchEvent(new Event('beforeunload'));
+      fail(new ApiError(0, 'network', 'Cannot reach the FOLO server.'));
+      await new Promise((r) => setTimeout(r));
+      expect(pendingGeneration(hub.server)).toMatchObject({ path: 'D:/data/coco', what: 'Reading coco' });
+    } finally {
+      window.dispatchEvent(new Event('pageshow'));
+      generationEnded(pendingGeneration(hub.server)!);
+    }
   });
 
   it('reads the list itself when it was not given one', async () => {

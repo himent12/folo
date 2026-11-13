@@ -172,6 +172,38 @@ describe('a sample set generating across a reload', () => {
     }
   });
 
+  it('says a folder still being read before a reload is on its way, until a dataset of its path is listed (studio-data F1)', async () => {
+    const api = hub.api;
+    const before = await api.datasets();
+    // As typed (back slashes, a trailing one); the server lists it with forward slashes.
+    const g = { server: hub.server, name: 'coco', since: Date.now(), ids: before.map((d) => d.id), path: 'D:\\data\\coco\\', what: 'Reading coco' };
+    generationStarted(g);
+    let there = false;
+    const read = api.datasets.bind(api);
+    vi.spyOn(api, 'datasets').mockImplementation(async (s?: AbortSignal) => {
+      const list = await read(s);
+      return there ? [...list, { ...list[0]!, id: 'ds_c0c0', name: 'COCO 2017', path: 'D:/data/coco' }] : list;
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    try {
+      open(Datasets, '/datasets');
+      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      const note = await until(() => target.querySelector('.waiting'), 'the note');
+      expect(note.textContent).toBe('Reading coco, started just now: it shows up here when it is done');
+      there = true;
+      for (let i = 0; i < 40 && !target.querySelector('tr[aria-label="COCO 2017"]'); i++) {
+        await vi.advanceTimersByTimeAsync(250);
+        flushSync();
+      }
+      expect(target.querySelector('tr[aria-label="COCO 2017"]')).not.toBeNull();
+      expect(target.querySelector('.waiting')).toBeNull();
+      expect(pendingGeneration(hub.server)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      generationEnded(g);
+    }
+  });
+
   // review studio-2 R3: a read slower than the poll's interval is never cut short by the next one.
   it('waits for each read to settle before the next, and lands a set behind reads slower than the interval', async () => {
     const api = hub.api;

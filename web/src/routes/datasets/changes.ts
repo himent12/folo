@@ -11,19 +11,48 @@ export function datasetsChanged() {
 }
 
 /**
- * A synthetic dataset this tab asked for that it has not seen land: the server it was asked of (`hub.server`), its
- * name, when, and the datasets there were then. In sessionStorage, so a reload while it generates keeps it (datasets
- * F10): the list of that server then reads itself again until the dataset is there (or the generation is long
- * overdue). No server API says a generation is running.
+ * A dataset this tab asked for that it has not seen land (a sample set generating, or a folder being read: COCO takes
+ * minutes): the server it was asked of (`hub.server`), its name, when, and the datasets there were then; for a folder,
+ * its path; and what the list says meanwhile ("Reading coco"). In sessionStorage, so a reload while it works keeps it
+ * (datasets F10, studio-data F1): the list of that server then says so and reads itself again until the dataset is
+ * there (or it is long overdue). No server API says a generation or a registration is running.
  */
 export interface Generation {
   server: string;
   name: string;
   since: number;
   ids: string[];
+  /** A folder registration's path, as asked: it has landed when a dataset of that path is listed. */
+  path?: string;
+  /** What is going on, for the list to say ("Generating 5,000 images", "Reading coco"). */
+  what?: string;
 }
 
 const KEY = 'folo.datasets.generating';
+
+/**
+ * Whether this page is going away (a reload, a link out). Its requests fail then, while the server goes on with them:
+ * a dataset on its way is not forgotten for that, so the page that follows still waits for it.
+ */
+let leaving = false;
+if (typeof window !== 'undefined') {
+  // From `beforeunload`: Chrome drops the page's requests (and runs their failure handlers) before `pagehide`. A page
+  // still here a while later was not left after all (a leave cancelled at another screen's unsaved-work prompt).
+  let stay: ReturnType<typeof setTimeout> | undefined;
+  window.addEventListener('beforeunload', () => {
+    leaving = true;
+    clearTimeout(stay);
+    stay = setTimeout(() => (leaving = false), 3000);
+  });
+  window.addEventListener('pagehide', () => {
+    clearTimeout(stay);
+    leaving = true;
+  });
+  // Back from the back-forward cache: it is a live page again.
+  window.addEventListener('pageshow', () => (leaving = false));
+}
+export const pageLeaving = () => leaving;
+
 /** Past this, a generation that never landed (it failed while no tab listened) is no longer waited for. */
 const GIVE_UP_MS = 30 * 60_000;
 
@@ -50,7 +79,14 @@ export function generationEnded(g: Generation): void {
 export function pendingGeneration(server: string, now = Date.now()): Generation | null {
   try {
     const g = JSON.parse(sessionStorage.getItem(KEY) ?? 'null') as Generation | null;
-    const valid = g && g.server === server && typeof g.name === 'string' && typeof g.since === 'number' && Array.isArray(g.ids);
+    const valid =
+      g &&
+      g.server === server &&
+      typeof g.name === 'string' &&
+      typeof g.since === 'number' &&
+      Array.isArray(g.ids) &&
+      (g.path === undefined || typeof g.path === 'string') &&
+      (g.what === undefined || typeof g.what === 'string');
     if (valid && now - g.since < GIVE_UP_MS) return g;
   } catch {
     // Unreadable: nothing to wait for.
@@ -58,8 +94,18 @@ export function pendingGeneration(server: string, now = Date.now()): Generation 
   return null;
 }
 
-/** Whether `list` has the dataset `g` makes: one that was not there, named as asked (or numbered, `name-2`). */
-export function landed(g: Generation, list: readonly { id: string; name: string }[]): boolean {
+/** A path as the server lists it and as it was typed, compared: separators, a trailing one and case aside. */
+const samePath = (a: string, b: string) => {
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  return norm(a) === norm(b);
+};
+
+/**
+ * Whether `list` has the dataset `g` makes: a folder's, by its path (a folder registered before answers with that
+ * dataset, so it may be an old one); a sample set, one that was not there, named as asked (or numbered, `name-2`).
+ */
+export function landed(g: Generation, list: readonly { id: string; name: string; path?: string }[]): boolean {
+  if (g.path !== undefined) return list.some((d) => d.path !== undefined && samePath(d.path, g.path!));
   const numbered = (n: string) => n.startsWith(`${g.name}-`) && /^\d+$/.test(n.slice(g.name.length + 1));
   return list.some((d) => !g.ids.includes(d.id) && (d.name === g.name || numbered(d.name)));
 }
