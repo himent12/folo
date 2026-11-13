@@ -47,10 +47,13 @@ describe('ClassPicker', () => {
       type('t');
       expect(focused()).toBe(want);
     }
-    // A key an input method is composing is not a letter yet.
-    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', isComposing: true, bubbles: true }));
-    expect(focused()).toBe('tennis racket');
-    // Closed and opened again at once, it starts a new word.
+    // A key an input method is composing is not a letter yet: left to the input method, focus stays.
+    vi.advanceTimersByTime(1500);
+    const composing = new KeyboardEvent('keydown', { key: 'p', isComposing: true, bubbles: true, cancelable: true });
+    list.dispatchEvent(composing);
+    expect([composing.defaultPrevented, focused()]).toEqual([false, 'tennis racket']);
+    // Closed and opened again at once after a letter, it starts a new word.
+    type('t');
     type('Escape');
     target.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]')!.click();
     flushSync();
