@@ -2,14 +2,26 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, ClickEvent, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 
 use super::tooltip::tip;
 use crate::app::{FoloApp, focus_ring};
 use crate::theme::{radius, size as tsize, theme, ty};
 use crate::ui::*;
+
+/// The narrowest a menu opens: wide enough for an option's name and detail side by side, also under
+/// a narrow trigger (a leaderboard's Run select is 220 px).
+const MENU_MIN_W: f32 = 300.;
+
+/// A menu's width and which edge of its trigger it hangs from: as wide as the trigger, at least
+/// [`MENU_MIN_W`]; from the left edge, or the right one when the window has no room for it on the
+/// right (`trigger`: its left and right edge, `viewport_w`: the window's width).
+fn menu_box(trigger: (f32, f32), viewport_w: f32) -> (f32, bool) {
+    let w = (trigger.1 - trigger.0).max(MENU_MIN_W);
+    (w, trigger.0 + w > viewport_w - 8.)
+}
 
 /// Called with the chosen option index.
 pub type OnSelect = std::rc::Rc<dyn Fn(&mut FoloApp, usize, &mut Window, &mut Context<FoloApp>)>;
@@ -101,7 +113,12 @@ impl FoloApp {
                     .size_full(),
                 )
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                // Enter and Space work the menu on the press (below); the release's keyboard click
+                // would open what they closed, or close what they opened.
+                if ev.is_keyboard() {
+                    return;
+                }
                 // The clicked select takes focus, so the keys then work its menu.
                 window.focus(&this.fh(key, cx));
                 this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
@@ -173,6 +190,10 @@ impl FoloApp {
             }
             _ => (false, 288.),
         };
+        // Measured on the first open frame: until then, the trigger's own width.
+        let wide = self.menu_trigger.get().filter(|_| open).map(|b| {
+            menu_box((f32::from(b.left()), f32::from(b.right())), f32::from(window.viewport_size().width))
+        });
         let menu_chrome = if open && !empty {
             self.scroll_chrome(menu_scroll.clone(), t.bg_overlay, 0., radius::LG - 1., cx)
         } else {
@@ -184,8 +205,11 @@ impl FoloApp {
                     .absolute()
                     .when(!up, |d| d.top(px(tsize::CONTROL_LG + 4.)))
                     .when(up, |d| d.bottom(px(tsize::CONTROL_LG + 4.)))
-                    .left_0()
-                    .right_0()
+                    .map(|d| match wide {
+                        Some((w, true)) => d.right_0().w(px(w)),
+                        Some((w, false)) => d.left_0().w(px(w)),
+                        None => d.left_0().right_0(),
+                    })
                     .occlude()
                     .on_mouse_down_out(cx.listener(move |this, ev: &folo_ui::MouseDownEvent, _, cx| {
                         let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
@@ -215,6 +239,7 @@ impl FoloApp {
                                 let lit = i == hl;
                                 let why = off[i].clone();
                                 let dead = why.is_some();
+                                let has_detail = detail.is_some();
                                 div()
                                     .id(SharedString::from(format!("{key}-opt-{i}")))
                                     .flex_none()
@@ -238,17 +263,33 @@ impl FoloApp {
                                                 cx.notify();
                                             }))
                                     })
+                                    // The name is what you choose by: it keeps its width (up to most
+                                    // of the row) and the detail beside it is cut first.
                                     .child(
                                         text(ty::BASE, if dead { t.text_tertiary } else { t.text_primary })
-                                            .flex_1()
+                                            .map(|d| {
+                                                if has_detail {
+                                                    d.flex_none().max_w(relative(0.7))
+                                                } else {
+                                                    d.flex_1()
+                                                }
+                                            })
                                             .ellipsis()
                                             .child(label),
                                     )
                                     .when_some(detail, |d, s| {
-                                        d.child(text(ty::SM, t.text_tertiary).tnum().child(s))
+                                        d.child(
+                                            text(ty::SM, t.text_tertiary)
+                                                .tnum()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .text_right()
+                                                .ellipsis()
+                                                .child(s),
+                                        )
                                     })
                                     .child(
-                                        div().w(px(14.)).when(on, |d| {
+                                        div().w(px(14.)).flex_none().when(on, |d| {
                                             d.child(icon("icons/check.svg", 14., t.accent_text))
                                         }),
                                     )
@@ -259,5 +300,20 @@ impl FoloApp {
             .with_priority(2)
         });
         div().relative().w_full().child(trigger).children(menu).into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_narrow_select_opens_a_wider_menu_toward_the_room() {
+        // A 220 px select by the window's right edge: 300 px wide, hung from its right edge.
+        assert_eq!(menu_box((1000., 1220.), 1280.), (300., true));
+        // The same select further left: from its left edge.
+        assert_eq!(menu_box((600., 820.), 1280.), (300., false));
+        // A wide select keeps its own width.
+        assert_eq!(menu_box((900., 1240.), 1280.), (340., false));
     }
 }
