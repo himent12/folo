@@ -1,6 +1,7 @@
 // Keyboard rows for list tables (Runs, Models, Datasets): one roving tab stop over the rows, J / K and ↓ / ↑ move it,
 // Home / End jump, Enter opens the row (its click), and an optional `toggle` answers X (select for compare). J or K
-// pressed while nothing on the page has focus enters the list at its first row, as in Linear. With single-key shortcuts
+// pressed while nothing on the page has focus enters the list at its first row, or at the row it was last on when the
+// page is shown again (Esc or Back from that row's page), as in Linear. With single-key shortcuts
 // off (Settings, ui/keyPrefs) the letters do nothing; the arrows, Home, End and Enter keep working on a focused row.
 
 import { isTyping } from '$lib/keys';
@@ -37,16 +38,42 @@ const MOVES: Record<string, number | 'first' | 'last'> = { j: 1, ArrowDown: 1, k
 /** The letters among the keys above (and X), which the single-key preference turns off. */
 const LETTERS = new Set(['j', 'k', 'x']);
 
+/**
+ * The row each list was last on (focused or opened), by the list's page and label: a list mounted again (Esc or Back
+ * from the row's page) puts its tab stop there, so J, K and Tab go on from the row just read instead of the first one
+ * (shell F6). For this tab's session only.
+ */
+const lastRow = new Map<string, string>();
+const listKey = (root: HTMLElement) => `${location.hash.split('?')[0]}|${root.getAttribute('aria-label') ?? ''}`;
+/** A row's identity: its `data-id`, else its name. */
+const rowKey = (row: HTMLElement) => row.dataset.id ?? row.getAttribute('aria-label') ?? '';
+
+/** Forgets the rows lists were on (tests). */
+export function forgetRows() {
+  lastRow.clear();
+}
+
 /** Action (`use:rowNav`) for the element holding the rows (a table, or a list). */
 export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
   let options = opts;
   let current: HTMLElement | null = null;
+  // Until the user moves in this list, the row it was last on is where it starts, as soon as that row is rendered.
+  let resumed = false;
+  const list = listKey(root);
+  const remember = (row: HTMLElement) => {
+    resumed = true;
+    lastRow.set(list, rowKey(row));
+  };
 
   const settle = () => {
-    current = settleTabStop(navRows(root), current) ?? null;
+    const rows = navRows(root);
+    const was = resumed ? undefined : lastRow.get(list);
+    const back = was === undefined ? undefined : rows.find((r) => rowKey(r) === was);
+    current = settleTabStop(rows, back ?? current) ?? null;
   };
   const focusRow = (row: HTMLElement | undefined) => {
     if (!row) return;
+    remember(row);
     current = row;
     settleTabStop(navRows(root), row);
     row.focus();
@@ -75,10 +102,17 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
 
   const onfocusin = (e: FocusEvent) => {
     const row = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-row]');
-    if (row && root.contains(row) && row !== current) {
+    if (row && root.contains(row)) {
+      remember(row);
+      if (row === current) return;
       current = row;
       settleTabStop(navRows(root), row);
     }
+  };
+  // A row opened by a click counts as the one the list was on.
+  const onclick = (e: MouseEvent) => {
+    const row = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-row]');
+    if (row && root.contains(row)) remember(row);
   };
 
   // J / K with nothing focused enters the list (the page's other single keys live in shell/shortcuts.ts).
@@ -99,6 +133,7 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
   observer?.observe(root, { childList: true, subtree: true });
   root.addEventListener('keydown', onkeydown);
   root.addEventListener('focusin', onfocusin);
+  root.addEventListener('click', onclick);
   window.addEventListener('keydown', onwindowkey);
   settle();
 
@@ -110,6 +145,7 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
       observer?.disconnect();
       root.removeEventListener('keydown', onkeydown);
       root.removeEventListener('focusin', onfocusin);
+      root.removeEventListener('click', onclick);
       window.removeEventListener('keydown', onwindowkey);
     },
   };
