@@ -11,7 +11,7 @@
 import { computed, signal } from 'fw';
 import { prefs } from '$lib/prefs';
 import { ApiError, HttpApi, type Api } from './client';
-import { isHealth, NOT_FOLO, refusal } from './handshake';
+import { isHealth, NOT_FOLO, refusal, TOKEN_WALL, tokenWall } from './handshake';
 import { PROBE_DELAYS, Reach } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
@@ -157,7 +157,8 @@ class Hub {
 
   /**
    * Asks the server for its health until it answers with FOLO's (or a newer connect takes over), then goes live. An
-   * answer that is not (another program, a 404 page, a sign-in wall) is said (`refused`) and asked again.
+   * answer that is not (another program, a 404 page, a sign-in wall, a server that wants a token) is said (`refused`)
+   * and asked again.
    */
   async #reachServer(http: HttpApi, attempt: number, abort: AbortSignal, settled: () => void): Promise<void> {
     const unreachable = (refused?: string | null) => {
@@ -170,9 +171,13 @@ class Hub {
       for (let i = 0; ; i++) {
         const slow = setTimeout(() => unreachable(), SLOW_CONNECT);
         try {
-          const h: unknown = await http.health(AbortSignal.any([abort, AbortSignal.timeout(CONNECT_TIMEOUT)]));
+          const check = AbortSignal.any([abort, AbortSignal.timeout(CONNECT_TIMEOUT)]);
+          const h: unknown = await http.health(check);
           if (attempt !== this.#attempt) return;
           if (!isHealth(h)) throw new ApiError(200, 'not_folo', NOT_FOLO);
+          // A FOLO server that answers its health but nothing else (`--token`) is not one Studio can use.
+          if (await tokenWall(http.base, check)) throw new ApiError(401, 'token_wall', TOKEN_WALL);
+          if (attempt !== this.#attempt) return;
           this.api = http;
           // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached
           // nothing fails the probe.

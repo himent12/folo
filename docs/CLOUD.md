@@ -225,7 +225,7 @@ A server on loopback answers only loopback `Host` names (docs/API.md, Convention
 that keeps its own `Host` needs `--allow-host <name>`, and `--token` too.
 The comparison is constant-time and the token is never logged. `folo mcp --server <url> --token <secret>` and the
 `remote` provider send it. Studio and Desktop do not sign in to a token-protected server yet: such a server is for
-API clients.
+API clients (Studio served by one says "Not connected" and why, instead of failing on every screen).
 
 ## Using it
 - **Studio / Desktop**: Settings → Cloud connects providers and lists instances; New run → Run on picks a

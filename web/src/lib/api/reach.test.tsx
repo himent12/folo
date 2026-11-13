@@ -123,9 +123,11 @@ describe('hub.offline with the server', () => {
   it('turns on when requests stop reaching it, the shell says so, and a failed list refetches by itself when it is back', async () => {
     let up = true;
     let lists = 0;
-    vi.stubGlobal('fetch', async (url: string) => {
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
       if (!up) throw new TypeError('Failed to fetch');
       if (url.endsWith('/api/health')) return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+      // The connect's token check (handshake.tokenWall): no token asked for.
+      if (init?.method === 'HEAD') return new Response(null, { status: 200 });
       lists++;
       return Response.json({ datasets: [] });
     });
@@ -244,6 +246,7 @@ describe('the first connect (v-shell N1, v-models-label N1)', () => {
   it('gives a check that hangs CONNECT_TIMEOUT, then asks again; a reconnect supersedes the waiting one', async () => {
     let health = 0;
     vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      if (init?.method === 'HEAD') return Promise.resolve(new Response(null, { status: 200 }));
       health++;
       return health === 1 ? after(10 * CONNECT_TIMEOUT, init, healthy) : Promise.resolve(healthy());
     });

@@ -22,7 +22,9 @@ Settings › Connection › Use demo data, which reloads with it. A server that 
 replaced by demo data: Studio says "Connecting…", then "Server offline" with "Can't reach folo serve. Retrying…", and
 keeps checking (`src/lib/api/index.ts`) until it answers with FOLO's health payload. An address that answers with
 something else says what came back ("This address answered, but not as a FOLO server", "This server asks for sign-in
-(401)", `src/lib/api/handshake.ts`) and is checked again the same way. So `npm run dev` without a server shows that offline state:
+(401)", `src/lib/api/handshake.ts`) and is checked again the same way; so does a FOLO server started with `--token`,
+whose health is open but whose runs list answers 401 ("This server needs a token (folo serve --token), which Studio
+can't send"). So `npm run dev` without a server shows that offline state:
 start `folo serve`, or open `http://localhost:5173/?mock=1`.
 
 - Design tokens come from `../design/tokens.json` (see `../design/README.md`). After editing it, run `npm run tokens`.
