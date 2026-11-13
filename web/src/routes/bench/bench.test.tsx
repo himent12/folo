@@ -286,6 +286,22 @@ describe('the benchmark page', () => {
     await settle(20);
   }
 
+  it('keeps "made … ago" current while the page stays open (sweep 3)', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'Date'] });
+    try {
+      const made = await hub.api.benches().then((l) => l.find((b) => b.id === 'bn_3c90')!.created);
+      vi.setSystemTime(Date.parse(made) + 10_000);
+      await page('/benchmarks/bn_3c90');
+      expect(text()).toContain('made just now');
+      vi.setSystemTime(Date.parse(made) + 5 * 60_000);
+      vi.advanceTimersByTime(30_000);
+      flushSync();
+      expect(text()).toContain('made 6m ago');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows a plan with entries as fixed, with no controls to change it', async () => {
     await page('/benchmarks/bn_7a41?tab=conditions');
     expect(text()).toContain(FROZEN);

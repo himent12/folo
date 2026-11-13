@@ -58,6 +58,7 @@ import { modelLabel } from './label/words';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
 import { axisWhyNot, costFacts, coverageFacts, entryStatus, hintText, scoreText, SPEED_HELP, teacherEligibility } from './bench/words';
+import { tickingNow } from './runs/when';
 
 const SECTIONS = [
   { id: 'score', label: 'Score' },
@@ -76,6 +77,8 @@ const SK_ROWS = [0, 1, 2, 3, 4];
 const SK_SECTIONS = [420, 520, 360];
 
 export default function BenchEntryPage() {
+  // Relative times ("made 3m ago") tick while the page is open (runs/when).
+  const clock = tickingNow();
   const id = computed(() => router.route.params.id ?? '');
   const entryId = computed(() => router.route.params.entryId ?? '');
   const phone = new MediaQuery(media.phone, false);
@@ -284,12 +287,12 @@ export default function BenchEntryPage() {
         ) : null}
         <div>
           <dt>Added</dt>
-          <dd title={date(e().created)}>{ago(e().created)}</dd>
+          <dd title={date(e().created)}>{ago(e().created, clock.get())}</dd>
         </div>
         {e().finished ? (
           <div>
             <dt>Ended</dt>
-            <dd title={date(e().finished!)}>{ago(e().finished!)}</dd>
+            <dd title={date(e().finished!)}>{ago(e().finished!, clock.get())}</dd>
           </div>
         ) : null}
       </dl>
@@ -384,7 +387,7 @@ export default function BenchEntryPage() {
                   </>
                 ) : null}
                 <span class="faint" title={date(en().created)}>
-                  added {ago(en().created)}
+                  added {ago(en().created, clock.get())}
                 </span>
               </Meta>
             )}

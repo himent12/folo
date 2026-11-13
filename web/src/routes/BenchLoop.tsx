@@ -48,6 +48,7 @@ import { generationDomain, generationPoints } from './bench/charts';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
 import { hintText, intervalText, labelsLine, LOOP_CAVEAT, loopQuestion, loopStatus, loopSteps, loopVerdictText, progressFacts, scoreText, VERDICT } from './bench/words';
+import { tickingNow } from './runs/when';
 
 const PLOT = 220;
 const SPLIT_NAME = { train: 'training', val: 'validation', test: 'test' } as const;
@@ -56,6 +57,8 @@ const known = <T extends { id: string }>(list: readonly T[] | undefined, x: stri
 const caveatWord = () => <>What it does not show</>;
 
 export default function BenchLoop() {
+  // Relative times ("made 3m ago") tick while the page is open (runs/when).
+  const clock = tickingNow();
   const id = computed(() => router.route.params.id ?? '');
   const loopId = computed(() => router.route.params.loopId ?? '');
   const phone = new MediaQuery(media.phone, false);
@@ -450,7 +453,7 @@ export default function BenchLoop() {
               {planned.get()} {planned.get() === 1 ? 'generation' : 'generations'} of {num(l().config.student?.epochs ?? 30)} epochs
             </span>
             <span class="faint" title={date(l().created)}>
-              started {ago(l().created)}
+              started {ago(l().created, clock.get())}
             </span>
           </Meta>
         )}
