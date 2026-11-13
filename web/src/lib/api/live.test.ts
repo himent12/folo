@@ -5,7 +5,7 @@ import type { Api, RunEventHandlers } from './client';
 import { hub } from './index';
 import { keepStepsPerEpoch, LiveRun, mergeBy, STREAM_GRACE_MS, streamedRun } from './live';
 import { MockApi } from './mock';
-import type { Run, RunMetrics, Step } from './types';
+import type { Run, RunLogs, RunMetrics, Step } from './types';
 
 /** Port of `root(fn)`: runs `fn` in a root of its own and returns its teardown. */
 const root = (fn: () => void) => createRoot((dispose) => (fn(), dispose));
@@ -878,7 +878,7 @@ describe('LiveRun: a long log', () => {
     const running = { ...(await new MockApi('normal', 0).run('run_q7c5')), status: 'running' as const };
     const at = (i: number) => `2026-11-12T10:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}Z`;
     const lines = Array.from({ length: 2000 }, (_, i) => ({ t: at(i), level: 'info' as const, message: `epoch ${i + 705}` }));
-    let history = deferred<{ lines: typeof lines; total?: number }>();
+    let history = deferred<RunLogs>();
     let handlers: RunEventHandlers = {};
     hub.api = {
       mock: false,
@@ -903,12 +903,28 @@ describe('LiveRun: a long log', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(live.logs).toHaveLength(2000);
     expect(live.logsEarlier).toBe(714);
+    // Two loads asked before those lines came, answered one after the other: the second sees them already merged
+    // (and sorted among the history by their times) and counts them once.
+    const first = deferred<RunLogs>();
+    const second = deferred<RunLogs>();
+    history = first;
+    handlers.reconnect?.();
+    history = second;
+    handlers.reconnect?.();
+    // The server, asked after the first ten, counts and returns them; then ten more stream in before it answers.
+    const now = [...live.logs];
+    for (let i = 0; i < 10; i++) handlers.log?.({ t: at(200 + i), level: 'info', message: `cloud ${i}` });
+    first.resolve({ lines: now, total: 2714 });
+    await vi.advanceTimersByTimeAsync(0);
+    second.resolve({ lines: now, total: 2714 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.logsEarlier).toBe(724);
     // A reload of the history from a server that does not count (or a failed one) leaves the count as it was.
     history = deferred();
     handlers.reconnect?.();
     history.resolve({ lines: lines.slice(-500) });
     await vi.advanceTimersByTimeAsync(0);
-    expect(live.logsEarlier).toBe(714);
+    expect(live.logsEarlier).toBe(724);
     stop();
   });
 });

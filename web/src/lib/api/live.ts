@@ -189,6 +189,8 @@ export class LiveRun {
   logsEarlier = 0;
   /** Log lines the stream has delivered, ever: a history load counts the ones that arrived while it was in flight. */
   #streamedLogs = 0;
+  /** The latest of them in the order they arrived (the held log is sorted by time and merged with history). */
+  #streamedTail: LogLine[] = [];
   set logs(v: LogLine[]) {
     this.logsLog.replace(v);
   }
@@ -238,6 +240,7 @@ export class LiveRun {
         this.epochs = [];
         this.logs = [];
         this.logsEarlier = 0;
+        this.#streamedTail = [];
         this.connection = 'idle';
         this.#bump();
       });
@@ -274,9 +277,10 @@ export class LiveRun {
           // The server's count is as of its answer: the lines streamed in since it was asked for (the last ones held,
           // in the order they arrived, whatever their times: a cloud worker's lines keep theirs) and not in its answer
           // are on top of it. Without a count (an older server, a failed request) the one known stays.
-          const since = Math.min(this.logs.length, this.#streamedLogs - asked);
+          const tail = this.#streamedTail;
+          const since = Math.min(tail.length, this.#streamedLogs - asked);
           const seen = new Set(l.lines.map((x) => `${x.t}|${x.message}`));
-          const newer = this.logs.slice(this.logs.length - since).filter((x) => !seen.has(`${x.t}|${x.message}`)).length;
+          const newer = tail.slice(tail.length - since).filter((x) => !seen.has(`${x.t}|${x.message}`)).length;
           this.logs = mergeLogs(l.lines, this.logs);
           if (l.total !== undefined) this.logsEarlier = Math.max(0, l.total + newer - this.logs.length);
         };
@@ -471,6 +475,8 @@ export class LiveRun {
           if (closed) return;
           this.#heard = Date.now();
           this.#streamedLogs++;
+          this.#streamedTail.push(l);
+          if (this.#streamedTail.length > MAX_LOGS) this.#streamedTail.shift();
           this.logs.push(l);
           if (this.logs.length > MAX_LOGS) {
             this.logsEarlier += this.logs.length - MAX_LOGS;
