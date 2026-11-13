@@ -34,6 +34,11 @@ pub fn axis_text(v: Option<f32>) -> String {
     v.map_or_else(|| "–".to_string(), |v| format!("{:.0}", (v * 100.).clamp(0., 100.)))
 }
 
+/// A score on its 0–100 scale as the leaderboard shows it: 53.4.
+pub fn score_text(total: f32) -> String {
+    format!("{total:.1}")
+}
+
 /// A share as a percentage: 0.834 → "83%".
 pub fn pct(v: f32) -> String {
     format!("{:.0}%", (v * 100.).clamp(0., 100.))
@@ -115,15 +120,15 @@ pub fn loop_trend(l: &BenchLoop) -> String {
 /// same (to the tenth shown) and are equally complete share a rank, as in Studio: 1, 1, 3.
 pub fn ranks(b: &Bench, entries: &[BenchEntry]) -> Vec<Option<usize>> {
     let mut n = 0;
-    let mut prev: Option<((i64, bool), usize)> = None;
+    let mut prev: Option<((String, bool), usize)> = None;
     entries
         .iter()
         .map(|e| {
             (e.status == BenchEntryStatus::Done && e.fingerprint == b.fingerprint).then(|| {
                 n += 1;
-                let shown = e.score.as_ref().map(|s| ((s.total * 10.).round() as i64, s.partial));
-                let rank = match (prev, shown) {
-                    (Some((p, r)), Some(s)) if p == s => r,
+                let shown = e.score.as_ref().map(|s| (score_text(s.total), s.partial));
+                let rank = match (&prev, &shown) {
+                    (Some((p, r)), Some(s)) if p == s => *r,
                     _ => n,
                 };
                 prev = shown.map(|s| (s, rank));
@@ -206,6 +211,18 @@ mod tests {
         part.score.as_mut().unwrap().partial = true;
         list.insert(1, part);
         assert_eq!(ranks(&b, &list)[1], Some(2));
+        // Ties are what the leaderboard shows: 53.35 and 53.30 both read 53.3 (f32), 53.4 doesn't.
+        let mut at = |total: f32| {
+            let mut e = list[0].clone();
+            e.score.as_mut().unwrap().total = total;
+            e
+        };
+        let shown = vec![at(53.35), at(53.30), at(53.26), at(53.2)];
+        assert_eq!(
+            shown.iter().map(|e| score_text(e.score.as_ref().unwrap().total)).collect::<Vec<_>>(),
+            ["53.3", "53.3", "53.3", "53.2"]
+        );
+        assert_eq!(ranks(&b, &shown), [Some(1), Some(1), Some(1), Some(4)]);
     }
 
     #[test]
