@@ -5,10 +5,9 @@ import RotateCcw from '$icons/rotate-ccw';
 import { computed, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack, type Signal } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
-import type { MockApi } from '$lib/api/mock';
 import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
-import type { Dataset, Model, PredictInput, Prediction, Run } from '$lib/api/types';
+import type { Dataset, Model, Prediction, Run } from '$lib/api/types';
 import { betterModel, modelChoices, scoreContext } from '$lib/scoreSummary';
 import { media } from '$lib/design/tokens';
 import { filterDetections } from '$lib/detect/nms';
@@ -35,15 +34,15 @@ import ResultsPanel from './playground/ResultsPanel';
 import ClassList from './playground/ClassList';
 import PhoneDetails from './playground/PhoneDetails';
 import SidePanels from './playground/SidePanels';
-import { BACKEND_NAME, DEFAULTS, FETCH, simulate } from './playground/predict';
+import { ask, BACKEND_NAME, DEFAULTS, FETCH, type RunOn } from './playground/predict';
+import { askAllWhenCut } from './playground/allCandidates';
 import { ACCEPT, droppedImages, takeImage } from './playground/intake';
 import { keepSession } from './playground/keepSession';
 import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
-import { imageBlob, type Source } from './playground/source';
+import type { Source } from './playground/source';
 import { followVanished } from './playground/vanished';
 
-type RunOn = 'server' | Backend;
 type Seg = 'file' | 'dataset' | 'webcam';
 type Det = Prediction['boxes'][number];
 
@@ -368,7 +367,6 @@ export default function Playground() {
     const file = localWeights.get().get(id ?? '');
     void retryTick.get();
     if (!id || !s || untrack(() => restored(id, s, on))) return;
-    const input: PredictInput = s.kind === 'file' ? { kind: 'file', file: s.file } : { kind: 'dataset', dataset_id: s.ds.id, image_id: s.img.id };
     const ctrl = new AbortController();
     untrack(() => {
       predicting.set(true);
@@ -383,25 +381,7 @@ export default function Playground() {
         picked.set(null);
       }
     });
-    const api = hub.api;
-    const run =
-      on === 'server'
-        ? api.predict(input, { model_id: id, ...FETCH }, ctrl.signal)
-        : api.mock
-          ? (api as unknown as MockApi).predictInPage(input, { model_id: id, ...FETCH }).then((p) => simulate(p, on))
-          : (file ? Promise.resolve(null) : api.modelWeightsTag(id, ctrl.signal)).then((tag) => {
-              // Superseded while asking for the ETag: do not start loading or running a model nobody waits for.
-              if (ctrl.signal.aborted) throw new DOMException('Superseded', 'AbortError');
-              return engine.predict({
-                modelId: id,
-                file: file ?? null,
-                download: () => hub.api.modelWeights(id),
-                tag,
-                backend: on,
-                image: () => imageBlob(s, ctrl.signal),
-                options: { conf: FETCH.conf, iou: FETCH.iou, maxDet: FETCH.max_det },
-              });
-            });
+    const run = ask({ api: hub.api, engine, model: id, source: s, on, file: file ?? null, options: FETCH, signal: ctrl.signal });
     run.then(
       (p) => {
         if (ctrl.signal.aborted) return;
@@ -428,6 +408,17 @@ export default function Playground() {
       },
     );
     return () => ctrl.abort();
+  });
+
+  // A busy image's answer is cut at FETCH.max_det candidates: a confidence below the cut asks for all of them.
+  const cut = askAllWhenCut({
+    pred,
+    conf: () => conf.get(),
+    model: () => modelId.peek(),
+    source: () => source.peek(),
+    runOn: () => runOn.peek(),
+    file: (id) => localWeights.peek().get(id) ?? null,
+    engine,
   });
 
   // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes
@@ -787,6 +778,7 @@ export default function Playground() {
                 setSource={setSource}
                 src={src.get()}
                 pred={pred.get()}
+                cut={cut()}
                 kept={kept.get()}
                 truthBoxes={truthBoxes.get()}
                 classes={classes.get()}

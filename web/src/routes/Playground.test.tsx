@@ -237,6 +237,74 @@ describe('Playground: an end-to-end (o2o) model', () => {
   });
 });
 
+describe('Playground: a busy image (more candidates than the first answer holds)', () => {
+  // The first answer holds the 1,000 highest-scoring candidates (FETCH). On a busy image they are near-duplicates of a
+  // few objects, so filtering them at a low confidence lost boxes the server finds (models F5: 194 shown where
+  // POST /api/predict at the same thresholds gave 300).
+  const box = (x: number, score: number) => ({ class: 0, name: 'circle', score, x1: x, y1: 0, x2: x + 100, y2: 100 });
+  // 1,000 copies of 3 objects, scores 0.90 down to `floor`; all candidates add 5 more objects at 0.15.
+  const first = (floor: number) => Array.from({ length: 1000 }, (_, i) => box((i % 3) * 200, 0.9 - ((0.9 - floor) * i) / 999));
+  const all = (floor: number) => [...first(floor), ...[1, 2, 3, 4, 5].map((k) => box(600 + k * 200, 0.15))];
+
+  async function open(floor: number) {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    const asked: number[] = [];
+    api.predict = async (_input, opts) => {
+      asked.push(opts.max_det ?? 300);
+      return {
+        model_id: opts.model_id,
+        image: { width: 2000, height: 640 },
+        boxes: (opts.max_det ?? 300) > 1000 ? all(floor) : first(floor),
+        timing: { preprocess_ms: 1, inference_ms: 1, postprocess_ms: 1, total_ms: 3 },
+        device: 'gpu:0',
+      };
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_n');
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    return asked;
+  }
+  const rows = () => target.querySelectorAll('#pg-panel tbody tr').length;
+  const foot = () => target.querySelector('.vfoot')?.textContent?.replace(/\s+/g, ' ') ?? '';
+  function setConf(v: number) {
+    const conf = target.querySelector<HTMLInputElement>('.slider input[type="range"]')!;
+    conf.value = String(v);
+    conf.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+  }
+
+  it('asks once for every candidate when the confidence goes under the cut, and shows what they hold', async () => {
+    const asked = await open(0.2);
+    // Above the cut the first answer is exact: no second request.
+    expect(rows()).toBe(3);
+    expect(asked).toEqual([1000]);
+    expect(foot()).toContain('of 1,000+ candidates');
+    setConf(0.1);
+    await until(() => rows() === 8, 'the boxes only all candidates hold');
+    expect(asked).toEqual([1000, 30_000]);
+    expect(foot()).toContain('of 1,005 candidates');
+    // Further down the answer is complete: nothing more is asked.
+    setConf(0.05);
+    setConf(0.01);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(asked).toEqual([1000, 30_000]);
+  });
+
+  it('keeps the first answer above its cut, whatever the slider did before', async () => {
+    const asked = await open(0.2);
+    setConf(0.5);
+    setConf(0.21);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(asked).toEqual([1000]);
+  });
+});
+
 describe('Playground: the session', () => {
   it('keeps the image, its result and the thresholds when the page is left and opened again', async () => {
     await run('normal', 'm_hard_s');
