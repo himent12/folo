@@ -281,7 +281,7 @@ fn another_server_on_the_local_ones_port_is_not_ours() {
         this.server_mode = ServerMode::Local;
         this.local_url = Some("http://127.0.0.1:4100".into());
         this.note_data_dir(Some("D:/data"));
-        this.note_data_dir(Some("D:/Data/"));
+        this.note_data_dir(Some(if cfg!(windows) { "D:/Data/" } else { "D:/data/" }));
         assert_eq!(this.local_url.as_deref(), Some("http://127.0.0.1:4100"), "the same folder");
         this.note_data_dir(Some("D:/other"));
         assert_eq!(this.local_url, None);
