@@ -1,9 +1,12 @@
-import { computed, effect, type Signal } from 'fw';
+import { computed, effect, signal, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Prediction } from '$lib/api/types';
 import type { BrowserEngine } from '$lib/inference/browser';
+import { errorDetail, toast } from '$lib/ui/toast';
 import { ALL, ask, candidateFloor, noServerWeights, type RunOn } from './predict';
 import type { Source } from './source';
+
+const KEY = 'all-candidates';
 
 /** Answers that hold every candidate: module-wide, as the session keeps an answer when the page is left. */
 const complete = new WeakSet<Prediction>();
@@ -21,6 +24,8 @@ export function askAllWhenCut(o: {
   runOn: () => RunOn;
   /** A .folo the user picked for the model. */
   file: (model: string) => File | null;
+  /** A prediction of the image is on its way: its answer, not the one on screen, is the one to complete. */
+  busy: () => boolean;
   engine: BrowserEngine;
   /** In the browser, the server cannot send the model's file (`noServerWeights`) and none was picked. */
   weightsMissing: () => void;
@@ -34,14 +39,16 @@ export function askAllWhenCut(o: {
     const f = floor.get();
     return f !== null && o.conf() <= f ? o.pred.get() : null;
   });
+  const retry = signal(0);
   // The model, image, backend and file are tracked too: a kept answer restored before the model list has loaded asks
-  // once the model is known.
+  // once the model is known. Never while another prediction runs (a new backend or file): its answer comes next.
   effect(() => {
     const p = short.get();
     const id = o.model();
     const s = o.source();
     const on = o.runOn();
-    if (!p || !id || !s || p.model_id !== id) return;
+    void retry.get();
+    if (!p || !id || !s || p.model_id !== id || o.busy()) return;
     const file = o.file(id);
     const ctrl = new AbortController();
     ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: ALL, signal: ctrl.signal }).then(
@@ -49,11 +56,21 @@ export function askAllWhenCut(o: {
         if (ctrl.signal.aborted || o.pred.peek() !== p) return;
         const next = { ...all, timing: p.timing, cold: p.cold };
         complete.add(next);
+        toast.clear(KEY);
         o.pred.set(next);
       },
-      // The first answer stays: it is still right above its lowest score.
+      // The first answer stays: it is still right above its lowest score, and the count still says "1,000+".
       (e: unknown) => {
-        if (!ctrl.signal.aborted && on !== 'server' && !file && noServerWeights(e)) o.weightsMissing();
+        if (ctrl.signal.aborted) return;
+        if (on !== 'server' && !file && noServerWeights(e)) return o.weightsMissing();
+        const below = floor.peek()?.toFixed(2);
+        toast.show({
+          tone: 'error',
+          title: 'Could not load every candidate',
+          detail: `Some boxes scored below ${below} may be missing. ${errorDetail(e)}`,
+          action: { label: 'Retry', run: () => retry.set(retry.peek() + 1) },
+          key: KEY,
+        });
       },
     );
     return () => ctrl.abort();

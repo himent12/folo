@@ -246,14 +246,20 @@ describe('Playground: a busy image (more candidates than the first answer holds)
   const first = (floor: number) => Array.from({ length: 1000 }, (_, i) => box((i % 3) * 200, 0.9 - ((0.9 - floor) * i) / 999));
   const all = (floor: number) => [...first(floor), ...[1, 2, 3, 4, 5].map((k) => box(600 + k * 200, 0.15))];
 
-  /** `hang`: the first request for every candidate never answers (the page is left while it runs). */
-  async function open(floor: number, hang = false) {
+  /**
+   * `first`: what the first request for every candidate does: never answer (the page is left while it runs) or fail
+   * (the server is busy).
+   */
+  async function open(floor: number, firstAll: 'answer' | 'hang' | 'fail' = 'answer') {
     const api = new MockApi('normal', 0);
     api.imageUrl = async () => 'data:,';
     const asked: number[] = [];
     api.predict = async (_input, opts) => {
       asked.push(opts.max_det ?? 300);
-      if (hang && asked.filter((n) => n > 1000).length === 1 && (opts.max_det ?? 300) > 1000) await new Promise(() => {});
+      if ((opts.max_det ?? 300) > 1000 && asked.filter((n) => n > 1000).length === 1) {
+        if (firstAll === 'hang') await new Promise(() => {});
+        if (firstAll === 'fail') throw new ApiError(503, 'busy', 'The GPU is busy.');
+      }
       return {
         model_id: opts.model_id,
         image: { width: 2000, height: 640 },
@@ -299,7 +305,7 @@ describe('Playground: a busy image (more candidates than the first answer holds)
   });
 
   it('asks again for a kept answer when the page is opened again, once the model list is in', async () => {
-    const asked = await open(0.2, true);
+    const asked = await open(0.2, 'hang');
     setConf(0.1);
     await until(() => asked.length === 2, 'the request for every candidate');
     unmount(c!);
@@ -334,6 +340,37 @@ describe('Playground: a busy image (more candidates than the first answer holds)
     await until(() => rows() === 3, 'the first answer');
     setConf(0.1);
     await until(() => target.textContent?.includes('Choose .folo file'), 'the request for the model file');
+  });
+
+  it('says when every candidate could not be loaded, and Retry asks again', async () => {
+    const shown = vi.spyOn(toast, 'show');
+    const asked = await open(0.2, 'fail');
+    setConf(0.1);
+    const t = await until(() => shown.mock.calls.map((c) => c[0]).find((x) => x.title === 'Could not load every candidate'), 'the error');
+    expect(t.detail).toContain('below 0.20 may be missing');
+    expect(rows()).toBe(3);
+    expect(foot()).toContain('1,000+ candidates');
+    t.action!.run();
+    await until(() => rows() === 8, 'every candidate, after Retry');
+    expect(asked).toEqual([1000, 30_000, 30_000]);
+  });
+
+  it('does not complete an answer that a new prediction is replacing (another backend)', async () => {
+    const asked = await open(0.2);
+    const inPage: number[] = [];
+    (hub.api as MockApi).predictInPage = (_input, opts) => {
+      inPage.push(opts.max_det ?? 300);
+      return new Promise(() => {});
+    };
+    const g = target.querySelector('[role="radiogroup"][aria-label="Run the model on"]')!;
+    const cpu = await until(() => [...g.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'CPU' && !b.disabled), 'the CPU');
+    cpu.click();
+    await until(() => inPage.length === 1, 'the prediction on the CPU');
+    setConf(0.1);
+    await new Promise((r) => setTimeout(r, 20));
+    flushSync();
+    expect(inPage).toEqual([1000]);
+    expect(asked).toEqual([1000]);
   });
 
   it('keeps the first answer above its cut, whatever the slider did before', async () => {

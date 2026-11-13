@@ -418,6 +418,7 @@ export default function Playground() {
     source: () => source.get(),
     runOn: () => runOn.get(),
     file: (id) => localWeights.get().get(id) ?? null,
+    busy: () => predicting.get(),
     engine,
     // A picked .folo is not kept with the session: a kept answer asks for it again, as a first one does.
     weightsMissing: () => weightsMissing.set(true),
