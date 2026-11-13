@@ -66,10 +66,10 @@ describe('hintText', () => {
     );
     expect(hintText('GET /api/runs/{id}/logs says why')).toBe('The log of its training run says why.');
     expect(hintText("set min_confidence: its entry's self-labeling chart shows what each confidence costs in precision and coverage")).toBe(
-      'Start a new loop with “Keep labels from a lower confidence” set: its entry’s self-labeling chart shows what each confidence costs in precision and coverage.',
+      'Start a new loop with “Keep labels from confidence” set: its entry’s self-labeling chart shows what each confidence costs in precision and coverage.',
     );
     expect(hintText('a lower min_confidence keeps more of its detections (the self-labeling chart of its benchmark entry shows what each confidence costs in precision); a better teacher finds more')).toBe(
-      'A lower confidence (“Keep labels from a lower confidence” in New loop) keeps more of its detections (the self-labeling chart of its benchmark entry shows what each confidence costs in precision); a better teacher finds more.',
+      'A lower confidence (“Keep labels from confidence” in New loop) keeps more of its detections (the self-labeling chart of its benchmark entry shows what each confidence costs in precision); a better teacher finds more.',
     );
     expect(hintText('start the entry again; a smaller max_images costs less to try')).toBe('Start the entry again; fewer images cost less to try.');
   });

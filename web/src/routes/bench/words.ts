@@ -248,8 +248,8 @@ export const receiving = (e: Pick<BenchEntry, 'status'> & Partial<Pick<BenchEntr
  * setting by its name in New loop, the run's log instead of its endpoint.
  */
 const HINT_WORDS: [RegExp, string][] = [
-  [/^set min_confidence: its entry's/, 'start a new loop with “Keep labels from a lower confidence” set: its entry’s'],
-  [/\ba lower min_confidence\b/, 'a lower confidence (“Keep labels from a lower confidence” in New loop)'],
+  [/^set min_confidence: its entry's/, 'start a new loop with “Keep labels from confidence” set: its entry’s'],
+  [/\ba lower min_confidence\b/, 'a lower confidence (“Keep labels from confidence” in New loop)'],
   [/\bGET \/api\/runs\/\{id\}\/logs says why\b/, 'the log of its training run says why'],
   [/\ba smaller max_images costs\b/, 'fewer images cost'],
 ];
