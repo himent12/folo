@@ -149,6 +149,20 @@ impl FoloApp {
         cx.notify();
     }
 
+    /// Which of `choices` the form has: `None` when its weights are none of them (gone since).
+    pub fn nr_start_selected(&self, choices: &[StartChoice]) -> Option<usize> {
+        let current = self.new_run.as_ref()?.weights.clone();
+        choices.iter().position(|c| c.id == current)
+    }
+
+    /// The size picked by hand; a press on the size already chosen changes nothing (its weights
+    /// stay).
+    pub fn nr_set_arch(&mut self, arch: usize, cx: &mut Context<Self>) {
+        let Some(f) = self.new_run.as_mut().filter(|f| f.arch != arch) else { return };
+        f.arch = arch;
+        self.nr_arch_changed(cx);
+    }
+
     /// The architecture changed by hand: weights of another size can't start this run (the server
     /// would train the weights' own size), so it trains from scratch again; so do weights whose
     /// size isn't known here (not listed: a checkpoint the earlier run started from).
@@ -290,6 +304,8 @@ mod tests {
             assert_eq!(why, format!("{} was deleted. Pick other weights, or From scratch.", pick.label));
             this.submit_new_run(w, cx);
             assert!(!this.new_run.as_ref().unwrap().submitting, "nothing is sent");
+            // The select shows none of its options as the choice, so From scratch is a change.
+            assert_eq!(this.nr_start_selected(&this.nr_start_choices()), None);
             let scratch = this.nr_start_choices()[0].clone();
             this.pick_start(&scratch, cx);
             assert_eq!(this.nr_weights_gone(), None);
@@ -308,10 +324,28 @@ mod tests {
             // Prefilled: kept, and listed as the earlier run's.
             assert_eq!(this.form_config(cx).unwrap().weights.as_deref(), Some("runs/a/weights/last.folo"));
             assert!(this.nr_start_choices().iter().any(|c| c.label == "last.folo"));
-            let f = this.new_run.as_mut().unwrap();
-            f.arch = (f.arch + 1) % 5;
-            this.nr_arch_changed(cx);
+            // A press on the size it has keeps them; another size drops them.
+            let arch = this.new_run.as_ref().unwrap().arch;
+            this.nr_set_arch(arch, cx);
+            assert_eq!(this.form_config(cx).unwrap().weights.as_deref(), Some("runs/a/weights/last.folo"));
+            this.nr_set_arch((arch + 1) % 5, cx);
             assert_eq!(this.form_config(cx).unwrap().weights, None);
+        });
+    }
+
+    #[test]
+    fn a_late_empty_count_never_undoes_a_newer_one() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, _, _| {
+            let list = this.store.datasets.ready_mut().unwrap();
+            let fresh = list[0].clone();
+            let mut stale = fresh.clone();
+            stale.splits.train = 0;
+            list[0].splits.train = 0;
+            // The newer answer (images added) lands first, the older empty one after it.
+            assert!(super::super::new_run::recount_dataset(list, fresh.clone()));
+            assert!(!super::super::new_run::recount_dataset(list, stale));
+            assert_eq!(list[0].splits.train, fresh.splits.train);
         });
     }
 }

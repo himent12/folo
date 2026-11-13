@@ -176,12 +176,7 @@ impl FoloApp {
                 window,
                 cx,
                 Rc::new(|this, i, _, cx| {
-                    if let Some(f) = this.new_run.as_mut() {
-                        f.arch = i;
-                        // The suggested name carries the architecture's letter, and weights of
-                        // another size can't start it.
-                        this.nr_arch_changed(cx);
-                    }
+                    this.nr_set_arch(i, cx);
                 }),
             ))
             .into_any_element();

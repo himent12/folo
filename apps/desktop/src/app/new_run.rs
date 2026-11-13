@@ -391,10 +391,9 @@ impl FoloApp {
             move |api| api.dataset(&id),
             |this, r, cx| {
                 let Ok(ds) = r else { return };
-                if let Some(slot) =
-                    this.store.datasets.ready_mut().and_then(|l| l.iter_mut().find(|d| d.id == ds.id))
+                if let Some(list) = this.store.datasets.ready_mut()
+                    && recount_dataset(list, ds)
                 {
-                    *slot = ds;
                     cx.notify();
                 }
             },
@@ -637,5 +636,19 @@ impl FoloApp {
             (None, Some(amp)) => amp.clone(),
             (None, None) => "Mixed precision isn't available on this server".into(),
         })
+    }
+}
+
+/// A dataset asked for again because the list counted no training image: its answer replaces the
+/// list's entry only when it counts some and the entry still counts none. Answers may land in any
+/// order (one asked before images were added, after one asked since), and a list read since may
+/// have the count already: a zero never undoes a count. Whether it changed the list.
+pub(super) fn recount_dataset(list: &mut [crate::api::Dataset], ds: crate::api::Dataset) -> bool {
+    match list.iter_mut().find(|d| d.id == ds.id) {
+        Some(slot) if slot.splits.train == 0 && ds.splits.train > 0 => {
+            *slot = ds;
+            true
+        }
+        _ => false,
     }
 }

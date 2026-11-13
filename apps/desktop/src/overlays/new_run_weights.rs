@@ -10,10 +10,12 @@ impl FoloApp {
     /// The Start from select: from scratch, then the weights a run can fine-tune from.
     pub(super) fn start_from_select(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let choices = self.nr_start_choices();
-        let current = self.new_run.as_ref().and_then(|f| f.weights.clone());
-        let selected = choices.iter().position(|c| c.id == current).unwrap_or(0);
-        let shown =
-            SharedString::from(choices.get(selected).map_or("From scratch".into(), |c| c.label.clone()));
+        // Weights gone since they were picked: none of the options is the choice (so picking
+        // From scratch counts as a change), and the field asks for one.
+        let selected = self.nr_start_selected(&choices).unwrap_or(choices.len());
+        let shown = SharedString::from(
+            choices.get(selected).map_or("Pick what to start from".into(), |c| c.label.clone()),
+        );
         let options = choices
             .iter()
             .map(|c| (SharedString::from(c.label.clone()), c.detail.clone().map(SharedString::from)))
