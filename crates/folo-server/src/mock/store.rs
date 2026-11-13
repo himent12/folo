@@ -13,7 +13,7 @@ use folo_api::{
 };
 
 use crate::error::{Error, Result};
-use crate::index::{Index, default_name, requested_path};
+use crate::index::{Index, default_name, free_name, requested_path};
 use crate::store::{
     ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
     Store, Subscription, Weights, WeightsFormat,
@@ -284,6 +284,11 @@ impl Store for MockStore {
         let retired = self.retired.read().unwrap();
         ds.meta.id = unique_id("ds", seed, |id| {
             list.iter().any(|d| d.meta().id == id) || retired.iter().any(|r| r.2 == id)
+        });
+        // As the real store names a sample set: numbered while a dataset has the name.
+        let lower = |n: &str| n.to_lowercase();
+        ds.meta.name = free_name(std::mem::take(&mut ds.meta.name), |n| {
+            list.iter().any(|d| lower(&d.meta().name) == lower(n))
         });
         let entry = Arc::new(DatasetEntry::Proc(ds));
         let out = entry.with_stats();

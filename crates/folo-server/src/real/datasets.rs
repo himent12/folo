@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use folo_api::{Dataset, DatasetFormat};
 
 use crate::error::{Error, Result};
-use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, default_name, write_atomic};
+use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, default_name, free_name, write_atomic};
 use crate::runs::DatasetRef;
 use crate::store::Store;
 use crate::util::{claim_dir, fnv1a, rfc3339, unique_id, unix_now};
@@ -19,6 +19,17 @@ use super::registry::{
     Gains, RegistryFile, Tombstone, read_registry, registry_path, tombstones_path, write_registry,
 };
 use super::{Entry, RealStore, Registration, State};
+
+/// What a dataset being registered is called.
+pub(super) enum Naming {
+    /// Its folder's name (`default_name`), numbered while a dataset has it.
+    Default,
+    /// The name asked for, as it is (a registration's own `name`, an upload's).
+    Given(String),
+    /// The name asked for, numbered `-2`, `-3`, ... while a dataset has it (a generated sample set: two generations
+    /// of one name, also at once, are told apart).
+    Unique(String),
+}
 
 impl RealStore {
     pub(super) fn entry(&self, id: &str) -> Result<Arc<Entry>> {
@@ -105,12 +116,7 @@ impl RealStore {
     }
 
     /// Indexes `path` and adds it to the registry.
-    pub(super) fn register(
-        &self,
-        name: Option<String>,
-        path: String,
-        format: DatasetFormat,
-    ) -> Result<Dataset> {
+    pub(super) fn register(&self, name: Naming, path: String, format: DatasetFormat) -> Result<Dataset> {
         // Shared with run admission; a deletion of dataset files waits for it (see `RealStore::files`).
         let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
         // Registered absolute, so the registry works whatever the working directory of the next start.
@@ -150,13 +156,17 @@ impl RealStore {
                 live(id) || file.holds(id) || used.contains(id)
             }),
         };
-        let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
-            let lower = |n: &str| n.to_lowercase();
-            default_name(Path::new(&path), |n| {
-                list.iter().any(|e| lower(&e.reg.lock().unwrap().name) == lower(n))
-                    || file.datasets.iter().any(|r| lower(&r.name) == lower(n))
-            })
-        });
+        // Under the registry's write lock, so two registrations at once never both take a free name.
+        let lower = |n: &str| n.to_lowercase();
+        let taken = |n: &str| {
+            list.iter().any(|e| lower(&e.reg.lock().unwrap().name) == lower(n))
+                || file.datasets.iter().any(|r| lower(&r.name) == lower(n))
+        };
+        let name = match name {
+            Naming::Given(n) if !n.trim().is_empty() => n,
+            Naming::Unique(n) if !n.trim().is_empty() => free_name(n, taken),
+            _ => default_name(Path::new(&path), taken),
+        };
         let reg = Registration {
             id,
             name,

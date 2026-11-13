@@ -246,6 +246,16 @@ async fn mock_mode_deletes_a_generated_set_with_files_but_never_a_folder() {
     err(&app, del(&other.id), StatusCode::CONFLICT, "run_active").await;
 }
 
+/// Mock mode names sample sets as real mode does: one name generated twice is numbered (studio-data F7).
+#[tokio::test]
+async fn mock_mode_numbers_a_sample_set_whose_name_is_taken() {
+    let (server, _) = mock();
+    let app = server.router();
+    let set = || post_json("/api/datasets/synthetic", json!({ "name": "Tiny", "images": 10, "imgsz": 64 }));
+    let (a, b): (Dataset, Dataset) = (ok(&app, set()).await, ok(&app, set()).await);
+    assert_eq!((a.name.as_str(), b.name.as_str()), ("Tiny", "Tiny-2"));
+}
+
 /// Mock mode keeps an unregistered folder's id for it, as real mode's tombstones do: the folder registered again
 /// gets it back, another folder never gets it.
 #[tokio::test]
