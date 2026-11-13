@@ -138,8 +138,8 @@ and use GitHub-hosted `macos-latest`; `FOLO_RELEASE_MACOS=false` skips them.
     what stays free is too fragmented for the 512 KB buffer of a new `wsl.exe` connection: the kernel log shows
     `page allocation failure: order:7` under `vmbus_alloc_ring`, and `wsl.exe` times out
     (`Wsl/Service/WSAETIMEDOUT`) while the jobs inside still run. `vm.min_free_kbytes = 524288` and
-    `vm.watermark_scale_factor = 100` in `/etc/sysctl.d/` ended that (direct-compaction stalls over a full run of
-    every workflow: 7,172 before, 318 after).
+    `vm.watermark_scale_factor = 100` in `/etc/sysctl.d/` ended that: no failure, and about twenty times fewer
+    direct-compaction stalls (`compact_stall` in `/proc/vmstat`) with every workflow running at once.
   - **Keep-alive and hangs.** The distribution stops when no `wsl.exe` is attached to it, so keep one running. A VM
     that hangs keeps its runners "online" for a while and its jobs running forever (seen once, a kernel soft lockup
     in the first minutes of the first run), so let that `wsl.exe` print a heartbeat and watch it from Windows;
