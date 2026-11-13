@@ -57,7 +57,7 @@ import NewLoopDialog from './bench/NewLoopDialog';
 import { modelLabel } from './label/words';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
-import { axisWhyNot, costFacts, coverageFacts, entryStatus, scoreText, SPEED_HELP, teacherEligibility } from './bench/words';
+import { axisWhyNot, costFacts, coverageFacts, entryStatus, hintText, scoreText, SPEED_HELP, teacherEligibility } from './bench/words';
 
 const SECTIONS = [
   { id: 'score', label: 'Score' },
@@ -470,10 +470,10 @@ export default function BenchEntryPage() {
                   actions={() => <Button href={href(`/benchmarks/${b().id}?add=${en().contestant.kind}`)}>Add it again</Button>}
                 >
                   <CodeText text={sentence(en().error ?? 'The entry failed.')} />
-                  {en().hint ? (
+                  {hintText(en().hint) ? (
                     <>
                       {' '}
-                      <CodeText text={en().hint!} />
+                      <CodeText text={hintText(en().hint)!} />
                     </>
                   ) : null}
                 </Callout>

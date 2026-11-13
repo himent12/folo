@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Bench, BenchCatalog, BenchEntry } from '$lib/api/types';
 import { catalog } from '$lib/api/mock/benchCatalog';
-import { contestantFacts, costFacts, coverageFacts, entryStatus, progressFacts, shortFingerprint, sourceKind } from './words';
+import { contestantFacts, costFacts, coverageFacts, entryStatus, hintText, progressFacts, shortFingerprint, sourceKind } from './words';
 
 const bench = { images: 360, classes: ['a', 'b', 'c', 'd'], plan: catalog().default_plan } as unknown as Pick<Bench, 'images' | 'classes' | 'plan'>;
 const entry = (o: Partial<BenchEntry>) =>
@@ -51,5 +51,35 @@ describe('words', () => {
     const model = { ...open, contestant: { kind: 'model' }, progress: { done: 1200, total: 6000, condition: 'haze', severity: 3 } } as unknown as BenchEntry;
     expect(progressFacts(model).where).toBe('haze, severity 3');
     expect(entryStatus(model).label).toBe('Running');
+  });
+});
+
+describe('hintText', () => {
+  // The hints the server stores on a failed entry or loop (crates/folo-server/src/bench), word for word.
+  it('says a hint written for API clients in the words of the page: no endpoint, no request field', () => {
+    expect(hintText('start the entry again: POST /api/bench/benchmarks/{id}/entries')).toBe('Start the entry again.');
+    expect(hintText("its finished generations are kept; start a new loop to run the rest: POST /api/bench/benchmarks/{id}/loops")).toBe(
+      'Its finished generations are kept; start a new loop to run the rest.',
+    );
+    expect(hintText('start it again (POST /api/bench/benchmarks/{id}/entries with contestant.open: true) and send its parts without long pauses')).toBe(
+      'Start it again and send its parts without long pauses.',
+    );
+    expect(hintText('GET /api/runs/{id}/logs says why')).toBe('The log of its training run says why.');
+    expect(hintText("set min_confidence: its entry's self-labeling chart shows what each confidence costs in precision and coverage")).toBe(
+      'Start a new loop with “Keep labels from confidence” set: its entry’s self-labeling chart shows what each confidence costs in precision and coverage.',
+    );
+    expect(hintText('a lower min_confidence keeps more of its detections (the self-labeling chart of its benchmark entry shows what each confidence costs in precision); a better teacher finds more')).toBe(
+      'A lower confidence (“Keep labels from confidence” in New loop) keeps more of its detections (the self-labeling chart of its benchmark entry shows what each confidence costs in precision); a better teacher finds more.',
+    );
+    expect(hintText('start the entry again; a smaller max_images costs less to try')).toBe('Start the entry again; fewer images cost less to try.');
+  });
+
+  it('keeps a hint for people as it is, and has nothing for none', () => {
+    expect(hintText('Sign in to Claude Code on the server’s machine (run `claude` and follow /login), then add the entry again.')).toBe(
+      'Sign in to Claude Code on the server’s machine (run `claude` and follow /login), then add the entry again.',
+    );
+    expect(hintText('start the entry again once the server runs')).toBe('Start the entry again once the server runs.');
+    expect(hintText(null)).toBeNull();
+    expect(hintText('POST /api/bench/benchmarks/{id}/entries')).toBeNull();
   });
 });

@@ -47,7 +47,7 @@ import Callout from './run/Callout';
 import { generationDomain, generationPoints } from './bench/charts';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
-import { intervalText, labelsLine, LOOP_CAVEAT, loopQuestion, loopStatus, loopSteps, loopVerdictText, progressFacts, scoreText, VERDICT } from './bench/words';
+import { hintText, intervalText, labelsLine, LOOP_CAVEAT, loopQuestion, loopStatus, loopSteps, loopVerdictText, progressFacts, scoreText, VERDICT } from './bench/words';
 
 const PLOT = 220;
 const SPLIT_NAME = { train: 'training', val: 'validation', test: 'test' } as const;
@@ -491,10 +491,10 @@ export default function BenchLoop() {
         {l().status === 'failed' ? (
           <Callout tone="danger" icon={TriangleAlert} title={`It failed at generation ${l().generations.at(-1)?.generation ?? 0}`} role="alert">
             <CodeText text={sentence(l().error ?? 'The loop failed.')} />
-            {l().hint ? (
+            {hintText(l().hint) ? (
               <>
                 {' '}
-                <CodeText text={sentence(l().hint!)} />
+                <CodeText text={hintText(l().hint)!} />
               </>
             ) : null}
           </Callout>

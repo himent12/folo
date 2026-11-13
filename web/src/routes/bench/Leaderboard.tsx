@@ -15,7 +15,7 @@ import Trash from '$icons/trash-2';
 import { bindable, computed, css, For, signal } from 'fw';
 import type { Bench, BenchCatalog, BenchEntry, LabelAgent } from '$lib/api/types';
 import { AXES, AXIS_NAME, AXIS_WEIGHT, isEntryActive } from '$lib/bench/rules';
-import { metric, pct } from '$lib/format';
+import { metric, pct, sentence } from '$lib/format';
 import { href, router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import CodeText from '$lib/ui/CodeText';
@@ -33,7 +33,7 @@ import { tooltip } from '$lib/ui/tooltip';
 import IntervalPlot from './IntervalPlot';
 import { along, bandEntry, boardOrder, compareHint, COMPARE_MIN, finished, intervalScale, overlaps, ranks, scaleTicks, stale, toggleSelection } from './leaderboard';
 import ScoreAxes from './ScoreAxes';
-import { contestantFacts, costFacts, coverageFacts, entryStatus, partialWhy, progressFacts, progressShare, scoreText, SPEED_HELP, STALE_HELP } from './words';
+import { contestantFacts, costFacts, coverageFacts, entryStatus, hintText, partialWhy, progressFacts, progressShare, scoreText, SPEED_HELP, STALE_HELP } from './words';
 
 export interface LeaderboardProps {
   bench: Bench;
@@ -121,11 +121,15 @@ export default function Leaderboard(props: LeaderboardProps) {
     );
   };
 
+  // What an entry was graded on: only a finished one was graded on anything, so one that runs, failed or was stopped
+  // is never "Complete" (as the phone rows, which say it only under a finished entry).
   const coverage = (e: () => BenchEntry) => {
     const f = computed(() => coverageFacts(e(), props.bench));
     return (
       <>
-        {f.get().length ? (
+        {!finished(e()) ? (
+          <NoValue label={isEntryActive(e()) ? 'not yet' : 'nothing was graded'} />
+        ) : f.get().length ? (
           <Meta>
             <For each={f.get()} key={(x) => x}>
               {(x) => <span>{x()}</span>}
@@ -320,11 +324,11 @@ export default function Leaderboard(props: LeaderboardProps) {
                                 ) : e().status === 'failed' ? (
                                   <span class="fail">
                                     <span class="fail-why">
-                                      <CodeText text={e().error ?? 'The entry failed.'} />
+                                      <CodeText text={sentence(e().error ?? 'The entry failed.')} />
                                     </span>
-                                    {e().hint ? (
+                                    {hintText(e().hint) ? (
                                       <span class="fail-hint">
-                                        <CodeText text={e().hint!} />
+                                        <CodeText text={hintText(e().hint)!} />
                                       </span>
                                     ) : null}
                                   </span>
@@ -463,7 +467,7 @@ export default function Leaderboard(props: LeaderboardProps) {
                           ) : null}
                           {e().status === 'failed' ? (
                             <span class="m-cause" data-fact>
-                              <CodeText text={e().error ?? 'The entry failed.'} />
+                              <CodeText text={sentence(e().error ?? 'The entry failed.')} />
                             </span>
                           ) : null}
                         </span>
