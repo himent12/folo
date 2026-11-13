@@ -307,25 +307,36 @@ impl FoloApp {
                 Some(t) => crate::local::predict(api, &req, t, generation),
                 None => api.predict(&req),
             },
-            move |this, r, _| {
-                if seq == this.play_pred_seq {
-                    // Every detection has a name to show: a class outside the model's list (a
-                    // mismatched server, an old export) reads "class N", never a blank row.
-                    let r = r.map(|mut p| {
-                        for b in &mut p.boxes {
-                            if b.name.trim().is_empty() {
-                                b.name = format!("class {}", b.class);
-                            }
-                        }
-                        p
-                    });
-                    this.play_pred = r.into();
-                    this.play_pred_for = Some(key);
-                    this.play_pred_pending = false;
-                    this.play_pred_dim = false;
-                }
-            },
+            move |this, r, _| this.play_pred_answered(seq, key, r),
         );
+    }
+
+    /// A prediction's answer: shown if it is still the latest asked for (`seq`). One that couldn't
+    /// reach the server says so to the connection state too, so the next answer from the server
+    /// (the 2 s refresh) counts as a reconnect and runs it again, however short the outage was.
+    pub(super) fn play_pred_answered(&mut self, seq: u64, key: (u64, String), r: ApiResult<PredictResponse>) {
+        if let Err(e) = &r
+            && e.code == "server_unreachable"
+        {
+            self.store.note_reachability(Some(e));
+        }
+        if seq != self.play_pred_seq {
+            return;
+        }
+        // Every detection has a name to show: a class outside the model's list (a mismatched
+        // server, an old export) reads "class N", never a blank row.
+        let r = r.map(|mut p| {
+            for b in &mut p.boxes {
+                if b.name.trim().is_empty() {
+                    b.name = format!("class {}", b.class);
+                }
+            }
+            p
+        });
+        self.play_pred = r.into();
+        self.play_pred_for = Some(key);
+        self.play_pred_pending = false;
+        self.play_pred_dim = false;
     }
 
     /// Why Open image can't run now, if it can't: the model list failed (with the runs list too:

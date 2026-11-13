@@ -88,3 +88,28 @@ fn a_prediction_that_could_not_reach_the_server_runs_again_once_it_answers() {
         assert!(this.play_pred.ready().is_some(), "the boxes are back without a Retry");
     });
 }
+
+#[test]
+fn an_outage_only_the_prediction_saw_is_recovered_too() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, cx| {
+        this.play_model = Some("m_44c0".into());
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+    });
+    // The server was down for less than the 2 s refresh: only the prediction's answer saw it.
+    let down = ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7926");
+    drive(&mut app, window, |this, _, cx| {
+        assert!(!this.store.unreachable());
+        let key = this.play_pred_for.clone().unwrap();
+        this.play_pred_seq += 1;
+        this.play_pred_answered(this.play_pred_seq, key, Err(down.clone()));
+        assert!(this.play_pred.error().is_some() && this.store.unreachable(), "the outage is noted");
+        // The next refresh is answered.
+        this.store.system = Load::Idle;
+        this.ensure_core(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.store.unreachable());
+        assert!(this.play_pred.ready().is_some(), "the boxes are back without a Retry");
+    });
+}
