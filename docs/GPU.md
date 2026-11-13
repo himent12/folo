@@ -185,8 +185,9 @@ layers' settings are public fields); `Predictor` turns them on for its model, wh
 `model.set_forward_plans(true)` opts a bare model in; `ctx.set_forward_plans(false)` or `FOLO_GPU_NO_PLAN=1`
 (contexts created afterwards) turn them off for a context. On
 the test machine a plan halves the host's encode time of a synchronised folo-n batch-1 forward (0.42 → 0.21 ms in
-f32, 0.45 → 0.23 ms on tensor cores), which shortens the call by 3–6% when the machine is quiet (the call is then
-GPU-bound) and by 20–35% when other work loads the CPU; batch-16 calls are not planned (docs/notes/hill/r3-plan.md).
+f32, 0.45 → 0.23 ms on tensor cores), which shortens the call by 3–6% in runs that started at a low CPU load (the GPU
+was not idle in them; the likely reading is that the call is then GPU-bound) and by 20–35% when other work loads
+the CPU; batch-16 calls are not planned (docs/notes/hill/r3-plan.md).
 
 The interval was 1024 until the training-step profile showed the GPU idle for most of the host's encoding and
 submission time: a step's 1300 dispatches went out in 3 submissions, so the GPU waited for each one to be built

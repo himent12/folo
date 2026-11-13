@@ -369,18 +369,24 @@ impl GpuContext {
         Ok(self.freeze_mapped(ops, |b| Buf::Fixed(b.clone())))
     }
 
+    /// The size of the uniform buffer [`GpuContext::freeze_mapped`] makes for `ops`: a slot per dispatch.
+    fn uniform_bytes(&self, ops: &[TracedOp]) -> u64 {
+        let align = UNIFORM_SLOT.max(self.inner.caps.uniform_align as u64);
+        ops.iter().filter(|o| matches!(o.kind, TracedKind::Dispatch { .. })).count() as u64 * align
+    }
+
     fn freeze_mapped(&self, ops: &[TracedOp], map: impl Fn(&wgpu::Buffer) -> Buf) -> Frozen {
         let align = UNIFORM_SLOT.max(self.inner.caps.uniform_align as u64);
-        let n = ops.iter().filter(|o| matches!(o.kind, TracedKind::Dispatch { .. })).count() as u64;
-        let uniform = (n > 0).then(|| {
+        let size = self.uniform_bytes(ops);
+        let uniform = (size > 0).then(|| {
             self.inner.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("folo-gpu plan params"),
-                size: n * align,
+                size,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
         });
-        let mut bytes = vec![0u8; (n * align) as usize];
+        let mut bytes = vec![0u8; size as usize];
         let mut steps = Vec::with_capacity(ops.len());
         let mut dynamic = Vec::new();
         let mut slot = 0u64;
@@ -552,9 +558,10 @@ impl GpuContext {
         }
         // Before any buffer leaves the pool: a plan too large to keep would only cost the pool its buffers. Besides
         // its intermediates, a plan keeps the last input and results it was replayed with (in the bind groups of
-        // its dynamic dispatches), so those count too.
+        // its dynamic dispatches), so those count too, as does the uniform buffer it will make.
         let held = input.size() + outputs.iter().map(wgpu::Buffer::size).sum::<u64>();
-        let pinned: u64 = internal.iter().map(wgpu::Buffer::size).sum::<u64>() + held;
+        let pinned: u64 =
+            internal.iter().map(wgpu::Buffer::size).sum::<u64>() + held + self.uniform_bytes(&rec.ops);
         if pinned > MAX_PLAN_BYTES_EACH {
             return Err(format!("the plan would hold {pinned} bytes, more than {MAX_PLAN_BYTES_EACH}"));
         }
@@ -581,7 +588,7 @@ impl GpuContext {
             Some(Role::Internal(k)) => Buf::Fixed(internal[*k].clone()),
             _ => Buf::Fixed(b.clone()),
         });
-        let bytes = pinned + frozen.uniform.as_ref().map_or(0, wgpu::Buffer::size);
+        let bytes = pinned;
         let last = std::sync::Mutex::new((0..frozen.dynamic.len()).map(|_| None).collect());
         Ok(Plan {
             frozen,

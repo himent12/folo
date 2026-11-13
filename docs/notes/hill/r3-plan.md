@@ -164,7 +164,7 @@ ships; the copy variant's binary was kept (`D:/folo-build/hill3-plan-variants/co
 | Pool eviction, `trim_pool` | the plan owns its intermediates (taken out of the pool), so the pool cannot hand them out or drop them | `context_switches_retire_plans_and_release_frees_them` |
 | `release_memory` | every plan dropped (its bytes count as released) and the epoch bumped; a recording keeps the epoch it started in and is checked again under the store's lock, so a plan recorded across a release is not kept | same test (a release between calls); the overlap itself is not tested (it needs a second thread timed into a recording) |
 | Pipeline cache | a plan holds its pipelines and bind groups (refcounted wgpu handles), so nothing the cache does can free them; the kernel a call picks depends only on the shapes, the adapter and the tensor-core switch | (no state to change besides the switch) |
-| The tensor-core switch | in the key, so each setting has its own plan and switching back reuses the old one; `disable_tensor_cores` (a kernel failed) bumps the epoch and retires all | same test |
+| The tensor-core switch | in the key, so each setting has its own plan and switching back reuses the old one; `disable_tensor_cores` (a kernel failed) bumps the epoch and retires all | same test for the switch (`set_tensor_cores`); the `disable_tensor_cores` path is inspected, not tested (it needs a failing kernel build) |
 | Device lost | no recording and no replay on a lost device: the call runs as it is and reports the loss | `a_lost_device_is_an_error_not_a_replay` (folo-gpu) |
 | Another thread forwarding the same model | a replay is encoded whole under the batch lock, so two replays cannot interleave on the shared intermediates; each gets fresh result buffers | `threads_forwarding_one_model_get_their_own_results` (4 threads × 100 calls, bits checked) |
 | A result held while the next replay runs | results are fresh pool buffers per replay, never the plan's | `a_thousand_replays_keep_their_bits_and_results_stay_put`; `a_pure_call_replays_and_its_results_are_its_own` (folo-gpu: held results rechecked after a replay of another input) |
@@ -293,8 +293,9 @@ plans at all (a bare model has them off).
 - **Training step** (`gpu` bench train section, folo-n b16, 3 rounds, the same outside GPU load, CPU 15–43%): f32
   52.5 → 55.3 ms (+5.4%; base 44.7–55.0, new 51.8–58.6), AMP 38.3 → 35.0 ms (−8.6%). A training step never
   records or replays; what it runs of this change is two relaxed atomic loads per dispatch and one per pool
-  allocation (the recorder hooks return at once when no thread records), nanoseconds against a 50 ms step, so both
-  differences are the shared GPU's. An earlier train A/B (`ab-train-contended/`) ran while something held the GPU
+  allocation (the recorder hooks return at once when no thread records), nanoseconds against a 50 ms step, so I
+  expect both differences to be the shared GPU's; that is a hypothesis until a controlled run (see "Rows that read
+  slower"). An earlier train A/B (`ab-train-contended/`) ran while something held the GPU
   at 100% and read steps 3–30× slower on both sides; it is not used.
 - The machine rebooted at 13:46 during the measurements (no cause seen in this lane's logs; the GPU lock this lane
   held at 13:39 was left with an empty owner file, which `lock.sh` would have treated as fresh forever, and was
