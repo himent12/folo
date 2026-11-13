@@ -678,3 +678,21 @@ fn closing_while_its_own_server_trains_asks_first_alone_and_keep_open_keeps_it()
     assert!(!drive(&mut app, window, |this, w, cx| this.should_close_with(None, w, cx)));
     drive(&mut app, window, |this, _, _| assert_eq!(this.confirm_close.as_deref(), Some(&[][..])));
 }
+
+#[test]
+fn a_dataset_page_for_an_id_the_server_does_not_have_leads_to_the_list_not_to_settings() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Dataset("ds_nope".into()), w, cx));
+    // A frame asks for the dataset, the answer comes, the next frame draws it.
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        assert!(keys.iter().any(|k| k == "ds-missing-all"), "{keys:?}");
+        assert!(
+            !keys.iter().any(|k| k.starts_with("ds-detail-retry")),
+            "no Connection settings or Retry: {keys:?}"
+        );
+    });
+}
