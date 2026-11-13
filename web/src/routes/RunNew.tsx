@@ -258,7 +258,7 @@ function RunNewForm() {
   const otherChoices = computed(() => otherSizeChoices(otherOptions.get(), arch.get(), scoreCtx.get()));
   const picked = computed(() => (weights.get() === 'none' ? undefined : startable.get().find((m) => m.id === weights.get())));
   /** Start from's hint: the picked weights' score with all of its context, and what published weights are. */
-  const startHint = computed(() => startHintOf(picked.get(), scoreCtx.get(), arch.get(), weightOptions.get().length, otherOptions.get()));
+  const startHint = computed(() => startHintOf(picked.get(), scoreCtx.get(), arch.get(), weightOptions.get().length, otherOptions.get(), dataset.get()));
   /** Published weights' provenance: the server's description, then the score with what it is on. */
   const pickedAbout = computed(() => {
     const p = picked.get();
