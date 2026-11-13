@@ -1,8 +1,10 @@
 /**
  * One image of a labeling job, to review and correct: its boxes in full size and as a list; select a box (on the
  * image, or in the list), change its class (the list's select, or 1–9), delete it (Delete, Backspace or its button),
- * move or resize it by dragging or with the arrow keys (Alt: resize; Shift: 10 px), draw a new one on empty image or
- * add one with Add box. Save (the hand-drawn labels replace the image's; none is a background image; an image not
+ * move or resize it by dragging or with the arrow keys (Alt: resize; Shift: ten steps; a step is about a screen pixel,
+ * never under an image pixel), draw a new one on empty image or add one with Add box; Esc drops the selection before it
+ * closes anything. Undo and Redo (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y; ⌘ too) step through this image's edits, Discard
+ * included. Save (the hand-drawn labels replace the image's; none is a background image; an image not
  * labeled yet can be saved as it is) or Discard; leaving unsaved changes asks first, whichever way (J / K, Close, a
  * link, Back), and closing the tab warns. J / K step through the images in the current filter. "Looks right" (Enter)
  * marks labels nobody changed as reviewed and opens the next image to review; saved boxes are reviewed too, so with
@@ -15,16 +17,19 @@ import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import Check from '$icons/check';
 import Plus from '$icons/plus';
+import Redo from '$icons/redo-2';
 import Sparkles from '$icons/sparkles';
 import Trash from '$icons/trash-2';
+import Undo from '$icons/undo-2';
 import X from '$icons/x';
-import { computed, createUniqueId, css, effect, Index, MediaQuery, onWindow, signal } from 'fw';
+import { computed, createUniqueId, css, effect, Index, MediaQuery, onWindow, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import type { LiveLabelJob } from '$lib/api/liveLabel';
 import type { Box, LabelImage, LabelJob } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
 import { num } from '$lib/format';
 import { NOTE_MAX } from '$lib/label';
+import { isTyping } from '$lib/keys';
 import { router } from '$lib/router';
 import { dialogKey } from '$lib/shell/pageCommands';
 import { TOUCH_ONLY } from '$lib/shell/shortcuts';
@@ -38,7 +43,8 @@ import Kbd from '$lib/ui/Kbd';
 import Select from '$lib/ui/Select';
 import { tooltip } from '$lib/ui/tooltip';
 import type { AgentChoice } from './agentChoice';
-import { newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
+import { keyStep, newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
+import { History } from './history';
 import EditCanvas from './EditCanvas';
 import { askOutcome, imageState } from './words';
 
@@ -79,12 +85,23 @@ export default function Editor(props: EditorProps) {
   const selected = signal<number | null>(null);
   const hovered = signal<number | null>(null);
   const lastClass = signal(0);
+  /** Screen px per image px as the canvas shows the image. */
+  const scale = signal(0);
   let shownId: string | null = null;
   const dirty = computed(() => !sameBoxes(draft.get(), base.get()));
   const picked = computed(() => {
     const s = selected.get();
     return s === null ? undefined : draft.get()[s];
   });
+  // This image's edits, for Undo and Redo; `rev` tells the buttons it changed.
+  const history = new History<Box[]>();
+  const rev = signal(0);
+  const canUndo = computed(() => (rev.get(), history.past.length > 0));
+  const canRedo = computed(() => (rev.get(), history.future.length > 0));
+  function forget() {
+    history.clear();
+    rev.set(rev.peek() + 1);
+  }
   effect(() => {
     const cur = img.get();
     if (!cur) return;
@@ -96,49 +113,71 @@ export default function Editor(props: EditorProps) {
       note.set('');
       asked.set(null);
       status.clear();
+      untrack(forget);
     } else if (!sameBoxes(cur.boxes, base.get()) && sameBoxes(draft.get(), base.get())) {
       base.set(cur.boxes);
       draft.set(cur.boxes);
       selected.set(null);
+      untrack(forget);
     }
   });
 
   const locked = computed(() => (img.get()?.status === 'labeling' ? 'The agent is labeling this image. You can edit it once it is done.' : null));
 
   // ---------- editing ----------
-  function edit(next: Box[]) {
+  /** Every edit of the draft goes through here, so it can be undone; `kind` joins a run of like edits into one step. */
+  function edit(next: Box[], kind: string | null = null) {
+    if (sameBoxes(next, draft.peek())) return;
+    history.record(draft.peek(), kind);
     draft.set(next);
+    rev.set(rev.peek() + 1);
+  }
+  function undo(redo = false) {
+    if (locked.peek()) return;
+    const to = redo ? history.redo(draft.peek()) : history.undo(draft.peek());
+    if (!to) return;
+    draft.set(to);
+    rev.set(rev.peek() + 1);
+    const s = selected.peek();
+    if (s !== null && s >= to.length) selected.set(null);
   }
   function setClass(c: number) {
     const s = selected.peek();
     if (s === null || locked.peek() || c >= props.job.classes.length) return;
     lastClass.set(c);
-    draft.set(draft.peek().map((b, i) => (i === s ? { ...b, class: c } : b)));
+    edit(draft.peek().map((b, i) => (i === s ? { ...b, class: c } : b)));
   }
   function removeBox() {
     const s = selected.peek();
     if (s === null || locked.peek()) return;
-    draft.set(draft.peek().filter((_, i) => i !== s));
+    edit(draft.peek().filter((_, i) => i !== s));
     selected.set(null);
   }
   /** Add box: a box of the class used last in the middle of the image, selected (the keyboard's way to draw one). */
   function addBox() {
     const cur = img.peek();
     if (!cur || locked.peek()) return;
-    draft.set([...draft.peek(), newBox(cur.width, cur.height, Math.min(lastClass.peek(), props.job.classes.length - 1))]);
+    edit([...draft.peek(), newBox(cur.width, cur.height, Math.min(lastClass.peek(), props.job.classes.length - 1))]);
     selected.set(draft.peek().length - 1);
   }
-  /** Arrow keys on the selected box: move it, or with Alt resize it from its bottom-right corner; Shift: 10 px. */
+  /** Arrow keys on the selected box: move it, or with Alt resize it from its bottom-right corner; Shift: ten steps. */
   function arrow(e: KeyboardEvent): boolean {
     const d = ARROWS[e.key];
     const b = picked.peek();
     const cur = img.peek();
     if (!d || !b || !cur || locked.peek()) return false;
-    const by = e.shiftKey ? 10 : 1;
+    const by = keyStep(scale.peek()) * (e.shiftKey ? 10 : 1);
     const next = e.altKey ? stretch(b, d[0] * by, d[1] * by, cur.width, cur.height) : nudge(b, d[0] * by, d[1] * by, cur.width, cur.height);
     const s = selected.peek();
-    draft.set(draft.peek().map((x, i) => (i === s ? next : x)));
+    edit(
+      draft.peek().map((x, i) => (i === s ? next : x)),
+      `${e.altKey ? 'size' : 'move'} ${s}`,
+    );
     return true;
+  }
+  function discard() {
+    edit(base.peek());
+    selected.set(null);
   }
 
   const saving = signal(false);
@@ -269,10 +308,21 @@ export default function Editor(props: EditorProps) {
       if (savable.peek() && !locked.peek()) void save();
       return;
     }
+    // Undo / redo the boxes; in a field they are the field's own.
+    const z = e.key.toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (z === 'z' || (z === 'y' && !e.shiftKey)) && inEditor && !isTyping(e) && !e.defaultPrevented) {
+      e.preventDefault();
+      undo(z === 'y' || e.shiftKey);
+      return;
+    }
     if (dropped ? e.defaultPrevented || e.metaKey || e.ctrlKey : !dialogKey(e, dialog)) return;
     if (dropped) dialog!.focus();
     const k = e.key;
-    if (k in ARROWS) {
+    // Esc drops the selection first (its default, the dialog's close, is kept for the next press).
+    if (k === 'Escape') {
+      if (selected.peek() === null) return;
+      selected.set(null);
+    } else if (k in ARROWS) {
       if (!arrow(e)) return;
     } else if (e.altKey) return;
     else if (k === 'j' || k === 'J') step(1);
@@ -407,7 +457,7 @@ export default function Editor(props: EditorProps) {
                 No changes yet
               </p>
             ) : null}
-            <Button variant="ghost" disabled={!dirty.get()} onclick={() => (draft.set(base.peek()), selected.set(null))}>
+            <Button variant="ghost" disabled={!dirty.get()} onclick={discard}>
               Discard
             </Button>
             {img.get()?.reviewed && !dirty.get() && !locked.get() ? (
@@ -465,6 +515,7 @@ export default function Editor(props: EditorProps) {
                   classes={props.job.classes}
                   boxes={draft.get()}
                   bind:selected={selected}
+                  bind:scale={scale}
                   hovered={hovered.get()}
                   cls={lastClass.get()}
                   disabled={!!locked.get()}
@@ -479,9 +530,17 @@ export default function Editor(props: EditorProps) {
                   <h3>
                     Boxes <span class="meta num">{draft.get().length}</span>
                   </h3>
-                  <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} onclick={addBox}>
-                    Add box
-                  </Button>
+                  <span class="tools">
+                    <span use:tooltip={{ text: 'Undo', keys: 'Mod+Z' }}>
+                      <Button variant="ghost" size="sm" icon={Undo} aria-label="Undo" disabled={!canUndo.get() || !!locked.get()} onclick={() => undo()} />
+                    </span>
+                    <span use:tooltip={{ text: 'Redo', keys: 'Mod+Shift+Z' }}>
+                      <Button variant="ghost" size="sm" icon={Redo} aria-label="Redo" disabled={!canRedo.get() || !!locked.get()} onclick={() => undo(true)} />
+                    </span>
+                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} onclick={addBox}>
+                      Add box
+                    </Button>
+                  </span>
                 </div>
                 {draft.get().length ? (
                   <ul class="boxes scroll-shade" onpointerleave={() => hovered.set(null)}>
@@ -665,6 +724,11 @@ css`
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
+  }
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
   }
   .meta {
     margin-left: var(--space-1);

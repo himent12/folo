@@ -265,6 +265,58 @@ describe('the labeling editor: keys', () => {
     await openEditor('1');
     expect(key('ArrowRight').defaultPrevented).toBe(false);
   });
+
+  it('drops the selection on Esc first, and leaves the next Esc to the dialog', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    expect(selectedSize()).toBeTruthy();
+    expect(key('Escape').defaultPrevented).toBe(true);
+    expect(selectedSize()).toBeUndefined();
+    expect(editor()!.open).toBe(true);
+    expect(key('Escape').defaultPrevented).toBe(false);
+  });
+});
+
+describe('the labeling editor: undo and redo (studio-label F4)', () => {
+  const button = (label: string) => editor()!.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+
+  it('steps back and forth through the edits with the keys, a run of arrow presses as one step, Discard too', async () => {
+    await openEditor('1');
+    expect(button('Undo').disabled).toBe(true);
+    click(inEditor('Add box'));
+    const added = selectedSize();
+    key('ArrowRight');
+    key('ArrowRight');
+    key('ArrowRight');
+    expect(key('z', { ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(selectedSize()).toBe(added);
+    expect(boxCount()).toBe(1);
+    key('z', { metaKey: true });
+    expect(boxCount()).toBe(0);
+    expect(footer()).not.toMatch(/Unsaved changes/);
+    key('z', { ctrlKey: true, shiftKey: true });
+    key('y', { ctrlKey: true });
+    expect(boxCount()).toBe(1);
+    click(inEditor('Discard'));
+    expect(boxCount()).toBe(0);
+    click(button('Undo'));
+    expect(boxCount()).toBe(1);
+    expect(footer()).toMatch(/Unsaved changes/);
+  });
+
+  it('starts afresh on another image, and leaves Ctrl+Z in a field to the field', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    expect(key('z', { ctrlKey: true }, editor()!.querySelector('input')!).defaultPrevented).toBe(false);
+    expect(boxCount()).toBe(1);
+    click(inEditor('Discard'));
+    click(editor()!.querySelector<HTMLButtonElement>('button[aria-label="Next image"]')!);
+    await vi.waitFor(() => expect(router.route.query.get('image')).toBe('2'));
+    flushSync();
+    expect(button('Undo').disabled).toBe(true);
+    expect(key('z', { ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(router.route.query.get('image')).toBe('2');
+  });
 });
 
 describe('the labeling editor: asking the agent again', () => {
