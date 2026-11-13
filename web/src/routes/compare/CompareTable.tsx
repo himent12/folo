@@ -352,10 +352,15 @@ export default function CompareTable(props: CompareTableProps) {
                         <>
                           {metric(v()!.precision)} · {metric(v()!.recall)}
                           <span class="pr-at">
-                            <Meta>
-                              <span>{v()!.best_f1_conf != null ? `conf ${conf(v()!.best_f1_conf)}` : 'best-F1 conf'}</span>
-                              <span>ep {r().best?.epoch}</span>
-                            </Meta>
+                            {/* Nothing detected: said in words, as the run page says it, never "conf 1.00 · ep 1". */}
+                            {v()!.precision === 0 && v()!.recall === 0 ? (
+                              'no detections'
+                            ) : (
+                              <Meta>
+                                <span>{v()!.best_f1_conf != null ? `conf ${conf(v()!.best_f1_conf)}` : 'best-F1 conf'}</span>
+                                <span>ep {r().best?.epoch}</span>
+                              </Meta>
+                            )}
                           </span>
                         </>
                       ) : (

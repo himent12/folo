@@ -210,3 +210,27 @@ describe('Compare runs from a link that names a deleted run', () => {
     expect(target.textContent).not.toContain("Could not load these runs' metrics");
   });
 });
+
+describe('Compare: a run that detected nothing', () => {
+  it('says "no detections" in its precision · recall cell, never "conf 1.00 · ep 1" (studio-train F1)', async () => {
+    const api = hub.api as MockApi;
+    const [blank, other] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const metrics = api.runMetrics.bind(api);
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      const m = await metrics(id, ...rest);
+      if (id !== blank!.id) return m;
+      const val = { map50: 0, map50_95: 0, precision: 0, recall: 0, per_class: [], best_f1_conf: 1 };
+      return { ...m, epochs: m.epochs.map((e) => ({ ...e, val })) };
+    });
+    router.route = parse(`#/runs/compare?ids=${blank!.id},${other!.id}`);
+    c = mount(RunCompare, { target });
+    const pr = await until(
+      () => [...target.querySelectorAll('#cmp-table tbody tr')].find((tr) => tr.querySelector('td.k')?.textContent === 'Precision · recall' && tr.textContent?.includes('ep ')),
+      'precision · recall',
+    );
+    const cells = [...pr.querySelectorAll('td')].slice(1).map((td) => td.textContent ?? '');
+    expect(cells[0]).toContain('no detections');
+    expect(cells[0]).not.toContain('conf 1.00');
+    expect(cells[1]).toContain(`ep ${other!.best?.epoch}`);
+  });
+});
