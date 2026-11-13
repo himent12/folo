@@ -44,6 +44,7 @@ use head::Detect;
 pub use head::HeadMode;
 
 pub use folo_nn::io::ModelConfig;
+pub use lazy::ImageCandidates;
 pub use predict::{ImagePrediction, RawPrediction};
 
 /// The layer prefixes of MODEL.md §4, indexed by layer number (`""` for the parameter-free Upsample and Concat

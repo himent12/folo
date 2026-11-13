@@ -266,11 +266,11 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   candidate-first (MODEL.md §9.5, `FoloModel::predict_candidates`, `model/lazy.rs`): the three class branches run
   side by side, each level's candidates come straight from its class map (blocks of 1024 anchors in parallel),
   and the three box branches then run only at the candidates (`conv2d_act_at`; `conv0` on their 3x3 receptive
-  fields), so the dense box outputs and the head's `cat` are never made; the detections are the dense path's bit
-  for bit. The candidate extraction and the box branch count as inference, NMS and the letterbox inverse as
-  postprocess. An unfused model, multi-label settings, f16 or another device take the dense forward (the six
-  branch chains side by side) and `HeadOutput::detections`, which reads the head outputs in place and extracts
-  candidates the same way.
+  fields; with DFL box fusion also the candidates' side precisions), so the dense box outputs and the head's `cat`
+  are never made; the detections are the dense path's bit for bit. The candidate extraction and the box branch
+  count as inference, NMS and the letterbox inverse as postprocess. An unfused model, multi-label settings, f16 or
+  another device take the dense forward (the six branch chains side by side) and `HeadOutput::detections`, which
+  reads the head outputs in place and extracts candidates the same way.
 - **ONNX export** (`folo_vision::export::onnx`): `FoloModel::to_onnx` turns a fused model into an opset-17 graph
   that mirrors `forward` op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o`
   model ends in the §6.6 top-k: end-to-end `[B, K, 6]` detections; fixed or dynamic

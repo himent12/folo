@@ -1036,7 +1036,9 @@ dense conv gives it. FOLO's CPU path (fused f32 models in eval mode, single-labe
 2×2 output tiles that hold a needed site, where each output reads only its own 3×3 window, and the 1×1 `out` runs
 the dense GEMM over the sites' columns. The dense raw outputs (§6.3, `HeadOutput`) are not made on this path;
 training, validation (multi-label at `conf = 0.001`), export and every other consumer of them use the dense
-forward.
+forward. Box fusion (§9.4) is served as on the dense path: `vote` needs only the boxes and scores, and `dfl` takes
+each candidate's side precisions from its own box logits with the dense CPU path's functions (the same softmax
+moments, so the same bits).
 
 ## 10. Verification plan
 

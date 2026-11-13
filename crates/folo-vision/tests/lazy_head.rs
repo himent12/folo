@@ -1,11 +1,13 @@
 //! Candidate-first prediction on the CPU (docs/MODEL.md §9.5): the records and detections of
 //! `FoloModel::predict_candidates` are the dense path's bit for bit, at square, rectangular and odd-sided inputs,
-//! batches, sparse and dense candidate sets, both heads (with ties in score), class filters, and through the
-//! predictor; the dense forward (`HeadOutput`) is unchanged.
+//! batches, sparse and dense candidate sets, both heads (with ties in score), class filters, every box fusion
+//! (MODEL.md §9.4, with DFL fusion's side precisions), and through the predictor; the dense forward
+//! (`HeadOutput`) is unchanged.
 
 use folo_core::rng::Rng;
 use folo_core::{Tensor, no_grad};
 use folo_nn::Module;
+use folo_vision::fusion::BoxFusion;
 use folo_vision::model::{FoloModel, HeadMode, HeadOutput, ModelConfig};
 use folo_vision::nms::{Candidate, Detection, NmsConfig};
 use folo_vision::{PredictConfig, Predictor};
@@ -103,8 +105,9 @@ fn det_bits(d: &[Vec<Detection>]) -> Vec<Vec<[u32; 6]>> {
         .collect()
 }
 
-/// Records and detections of the candidate-first path against the dense path's, bit for bit; returns the
-/// candidates per image.
+/// Records and detections of the candidate-first path against the dense path's, bit for bit (with DFL fusion
+/// also each record's side precisions, against [`HeadOutput::side_precisions`]); returns the candidates per
+/// image.
 fn check(m: &FoloModel, x: &Tensor, nms: &NmsConfig) -> Vec<usize> {
     // Whatever the box branch reads that it did not compute is NaN (never the dense forward's values left in a
     // recycled buffer), so a record can only match by computing what it reads.
@@ -114,17 +117,34 @@ fn check(m: &FoloModel, x: &Tensor, nms: &NmsConfig) -> Vec<usize> {
     let best = dense_best(&out);
     let got = m.predict_candidates(x, nms).unwrap();
     assert_eq!(got.len(), x.dims()[0]);
+    let dfl = nms.fusion == BoxFusion::Dfl && m.head_mode() == HeadMode::O2m;
+    let prec = if dfl { Some(out.side_precisions().unwrap()) } else { None };
     for (i, (g, b)) in got.iter().zip(&best).enumerate() {
         let want = expected(b, nms, m.head_mode());
-        let (g, w): (Vec<_>, Vec<_>) =
-            (g.iter().map(cand_bits).collect(), want.iter().map(cand_bits).collect());
-        assert_eq!(g.len(), w.len(), "image {i}: candidate count");
-        for (k, (g, w)) in g.iter().zip(&w).enumerate() {
+        let (gb, wb): (Vec<_>, Vec<_>) =
+            (g.cands.iter().map(cand_bits).collect(), want.iter().map(cand_bits).collect());
+        assert_eq!(gb.len(), wb.len(), "image {i}: candidate count");
+        for (k, (g, w)) in gb.iter().zip(&wb).enumerate() {
             assert_eq!(g, w, "image {i}, record {k}");
+        }
+        match &prec {
+            Some(p) => {
+                let gp = g.precisions.as_ref().expect("DFL fusion needs the precisions");
+                assert_eq!(gp.len(), want.len(), "image {i}: precision count");
+                for (k, (gp, c)) in gp.iter().zip(&want).enumerate() {
+                    let wp = p[i][c.anchor as usize];
+                    assert_eq!(
+                        gp.map(f32::to_bits),
+                        wp.map(f32::to_bits),
+                        "image {i}, record {k}: precisions"
+                    );
+                }
+            }
+            None => assert_eq!(g.precisions, None, "image {i}"),
         }
     }
     assert_eq!(det_bits(&m.predict_detections(x, nms).unwrap()), det_bits(&out.detections(nms).unwrap()));
-    got.iter().map(Vec::len).collect()
+    got.iter().map(|c| c.cands.len()).collect()
 }
 
 /// folo-n at 640², 320² (two images), 384×640, 352² and 352×640 (P5 has 11 rows), with a few percent of the
@@ -222,22 +242,57 @@ fn class_filters_match_dense() {
     }
 }
 
-/// The predictor takes the candidate-first path and returns what prepare → forward → detections gives.
+/// Box fusion (MODEL.md §9.4): score voting and DFL evidence fusion, after NMS and with the top-k head (which
+/// ignores them), give the dense path's detections bit for bit, DFL fusion from the dense side precisions.
+#[test]
+fn box_fusion_matches_dense() {
+    for (head, seed) in [("o2m", 14), ("o2o", 15)] {
+        let m = model("n", 4, head, seed);
+        let x = input(2, 288, 352, seed + 100);
+        let out = {
+            let _g = no_grad();
+            m.forward(&x).unwrap()
+        };
+        let best = dense_best(&out);
+        for frac in [0.05, 1.0] {
+            let conf = conf_for(&out, &best, frac);
+            for fusion in [BoxFusion::Vote, BoxFusion::Dfl] {
+                // A low IoU threshold so NMS suppresses (and fusion merges) many boxes per cluster.
+                let nms = NmsConfig { conf, iou: 0.3, fusion, fusion_iou: 0.4, ..NmsConfig::default() };
+                let n = check(&m, &x, &nms);
+                assert!(n.iter().all(|&n| n > 0), "{head} {fusion:?} at {frac}: no candidates");
+                if head == "o2m" {
+                    let fused = det_bits(&m.predict_detections(&x, &nms).unwrap());
+                    let plain = det_bits(
+                        &out.detections(&NmsConfig { fusion: BoxFusion::None, ..nms.clone() }).unwrap(),
+                    );
+                    assert_ne!(fused, plain, "{fusion:?} at {frac} moved no box: the test cannot see it");
+                }
+            }
+        }
+    }
+}
+
+/// The predictor takes the candidate-first path and returns what prepare → forward → detections gives, with
+/// and without DFL fusion.
 #[test]
 fn predictor_matches_its_dense_steps() {
-    let p = Predictor::new(model("n", 4, "o2m", 9), PredictConfig { conf: 0.0, ..PredictConfig::default() })
-        .unwrap();
-    let mut rng = Rng::seed(11);
-    let data = (0..300 * 200 * 3).map(|_| rng.uniform(0.0, 255.0) as u8).collect();
-    let img = folo_data::Image::from_raw(300, 200, data).unwrap();
-    let got = p.predict(&img).unwrap();
-    let batch = p.prepare(std::slice::from_ref(&img), true).unwrap();
-    let c = p.config();
-    let nms = NmsConfig { conf: c.conf, iou: c.iou, max_det: c.max_det, ..NmsConfig::default() };
-    let dense = p.forward(&batch).unwrap().detections(&nms).unwrap();
-    let want = p.finish_detections(&batch, dense);
-    assert!(!want[0].is_empty());
-    assert_eq!(det_bits(&[got.detections]), det_bits(&want));
+    for fusion in [BoxFusion::None, BoxFusion::Dfl] {
+        let cfg = PredictConfig { conf: 0.0, fusion, ..PredictConfig::default() };
+        let p = Predictor::new(model("n", 4, "o2m", 9), cfg).unwrap();
+        let mut rng = Rng::seed(11);
+        let data = (0..300 * 200 * 3).map(|_| rng.uniform(0.0, 255.0) as u8).collect();
+        let img = folo_data::Image::from_raw(300, 200, data).unwrap();
+        let got = p.predict(&img).unwrap();
+        let batch = p.prepare(std::slice::from_ref(&img), true).unwrap();
+        let c = p.config();
+        let (conf, iou, max_det, fusion_iou) = (c.conf, c.iou, c.max_det, c.fusion_iou);
+        let nms = NmsConfig { conf, iou, max_det, fusion, fusion_iou, ..NmsConfig::default() };
+        let dense = p.forward(&batch).unwrap().detections(&nms).unwrap();
+        let want = p.finish_detections(&batch, dense);
+        assert!(!want[0].is_empty());
+        assert_eq!(det_bits(&[got.detections]), det_bits(&want), "{fusion:?}");
+    }
 }
 
 /// The dense forward is untouched: a fused model's `HeadOutput` still holds every anchor's raw box outputs, the

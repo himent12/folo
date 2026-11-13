@@ -3,7 +3,8 @@
 //!
 //! `FOLO_BENCH_WEIGHTS` (a `.folo` file) and `FOLO_BENCH_IMAGES` (an image folder, e.g. COCO val2017) are required;
 //! `FOLO_BENCH_IMAGES_N` (default: all) caps the images, by name. Each image is letterboxed as the CPU predictor
-//! does (rect, 640) and predicted at `FOLO_BENCH_CONF` (default 0.25) with the model's head:
+//! does (rect, 640) and predicted at `FOLO_BENCH_CONF` (default 0.25) with the model's head and the box fusion
+//! `FOLO_BENCH_FUSION` (`none`, the default, `vote` or `dfl`; MODEL.md §9.4):
 //!
 //! - **Statistics**: the candidates that need a box, per level and in total, per image: median, p90, p99, max,
 //!   mean. With `FOLO_BENCH_VERIFY=1` every image's detections are also compared with the dense path's (forward,
@@ -17,6 +18,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use folo_core::{Tensor, no_grad};
+use folo_vision::fusion::BoxFusion;
 use folo_vision::nms::{Detection, NmsConfig};
 use folo_vision::predict::{PredictConfig, Predictor};
 
@@ -59,13 +61,20 @@ fn main() {
     paths.truncate(env("FOLO_BENCH_IMAGES_N").unwrap_or(usize::MAX));
     let pred = Predictor::open(&weights, PredictConfig::default()).expect("weights");
     let model = pred.model();
-    let nms = NmsConfig { conf, ..NmsConfig::default() };
+    let fusion = match env::<String>("FOLO_BENCH_FUSION").as_deref() {
+        None | Some("none") => BoxFusion::None,
+        Some("vote") => BoxFusion::Vote,
+        Some("dfl") => BoxFusion::Dfl,
+        Some(f) => panic!("FOLO_BENCH_FUSION: {f} is not none, vote or dfl"),
+    };
+    let nms = NmsConfig { conf, fusion, ..NmsConfig::default() };
     let verify = env::<String>("FOLO_BENCH_VERIFY").is_some_and(|v| v == "1");
     println!(
-        "candidates bench: {weights} ({}, head {}), {} images from {dir}, conf {conf}, {} rayon threads",
+        "candidates bench: {weights} ({}, head {}), {} images from {dir}, conf {conf}, fusion {}, {} rayon threads",
         model.arch(),
         model.head_mode(),
         paths.len(),
+        fusion.as_str(),
         rayon::current_num_threads()
     );
     let prepare = |p: &std::path::Path| -> Tensor {
@@ -85,9 +94,9 @@ fn main() {
         let c = &cands[0];
         for (l, lv) in anchors.levels.iter().enumerate() {
             let range = lv.start as u32..(lv.start + lv.height * lv.width) as u32;
-            per_level[l].push(c.iter().filter(|c| range.contains(&c.anchor)).count());
+            per_level[l].push(c.cands.iter().filter(|c| range.contains(&c.anchor)).count());
         }
-        total.push(c.len());
+        total.push(c.cands.len());
         if verify {
             let lazy = model.finish_candidates(c, &nms);
             let dense = model.forward(&x).expect("forward").detections(&nms).expect("detections");
@@ -118,7 +127,7 @@ fn main() {
         let inputs: Vec<Tensor> = paths[..n].iter().map(|p| prepare(p)).collect();
         println!("sweep: {n} images, {rounds} rounds, times are the median per image of the model step");
         for conf in [0.5f32, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001] {
-            let nms = NmsConfig { conf, ..NmsConfig::default() };
+            let nms = NmsConfig { conf, fusion, ..NmsConfig::default() };
             let (mut lazy_t, mut dense_t, mut counts) = (Vec::new(), Vec::new(), [0usize; 3]);
             for r in 0..rounds {
                 for (i, x) in inputs.iter().enumerate() {
@@ -145,7 +154,7 @@ fn main() {
                         let (h, w) = (x.dims()[2], x.dims()[3]);
                         for (l, lv) in model.anchors(h, w).levels.iter().enumerate() {
                             let range = lv.start as u32..(lv.start + lv.height * lv.width) as u32;
-                            counts[l] += c[0].iter().filter(|c| range.contains(&c.anchor)).count();
+                            counts[l] += c[0].cands.iter().filter(|c| range.contains(&c.anchor)).count();
                         }
                     }
                     lazy_t.push(black_box(tl));
