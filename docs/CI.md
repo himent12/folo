@@ -145,7 +145,8 @@ and use GitHub-hosted `macos-latest`; `FOLO_RELEASE_MACOS=false` skips them.
     there was no allocation failure, and all 70 `wsl.exe` probes answered. `compact_stall` in `/proc/vmstat` read
     318 after it, against 7,172 before; the two totals cover different jobs and durations, so they are an
     indication, not a controlled comparison.
-  - **Keep-alive and hangs.** The distribution stops when no `wsl.exe` is attached to it, so keep one running. A VM
+  - **Keep-alive and hangs.** Systemd services alone do not keep a WSL distribution alive: it can shut down once it
+    is idle, so keep a long-running `wsl.exe` session attached. A VM
     that hangs keeps its runners "online" for a while and its jobs running forever (seen once, a kernel soft lockup
     in the first minutes of the first run), so let that `wsl.exe` print a heartbeat and watch it from Windows;
     a new `wsl.exe` started as the probe may time out as described above. After a forced stop
