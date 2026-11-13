@@ -11,6 +11,33 @@ use crate::ui::*;
 
 use super::{FoloApp, ServerMode};
 
+/// Who asked for a connection ([`FoloApp::autoconnect`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reason {
+    /// The app starting up (`$FOLO_SERVER` or the default address).
+    Launch,
+    /// Connect or Enter in Settings, or picking `folo serve` there.
+    Typed,
+    /// The local server stopped answering ([`FoloApp::connection_lost`]).
+    Recover,
+}
+
+/// How the app reaches servers: asking an address whether a `folo serve` answers, starting a local one,
+/// and the backend for an address. Real HTTP and processes; the tests put fakes in.
+#[derive(Clone, Copy)]
+pub struct Connector {
+    pub probe: fn(&str) -> bool,
+    pub start: fn(std::time::Duration) -> Result<crate::api::http::Spawned, String>,
+    pub backend: fn(&str) -> Arc<dyn Backend>,
+}
+
+impl Default for Connector {
+    fn default() -> Self {
+        use crate::api::http::{HttpBackend, probe, spawn_server};
+        Self { probe, start: spawn_server, backend: |url| Arc::new(HttpBackend::new(url)) }
+    }
+}
+
 impl FoloApp {
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
@@ -50,6 +77,10 @@ impl FoloApp {
         });
         self.connecting = None;
         self.hold_loading = false;
+        // Set again by the caller when this is the local server; the reason one didn't start is old.
+        self.local_url = None;
+        self.start_error = None;
+        self.reached = false;
         self.store.gpu_util.clear();
         self.play_pred = Load::Idle;
         self.play_pred_pending = false;
@@ -101,10 +132,14 @@ impl FoloApp {
     /// Connect to a running `folo serve`, or start a local `folo serve` (the real engine, bare
     /// until datasets and runs are added) when `spawn` is on; when the data dir already has a server,
     /// connect to that one instead. If neither is reachable, stay on the HTTP backend so the
-    /// unreachable state is shown instead of silent demo data. A server this app started runs until
-    /// the app quits, whatever it connects to later: it may be training.
-    pub fn autoconnect(&mut self, url: String, spawn: bool, cx: &mut Context<Self>) {
-        use crate::api::http::{HttpBackend, Spawned, spawn_server};
+    /// unreachable state is shown instead of silent demo data, and keep the reason the local server
+    /// didn't start for the error panels. A server this app started runs until the app quits, whatever
+    /// it connects to later: it may be training. `why` says who asked: a connection that lands
+    /// somewhere else than the address typed in Settings, or one that brings a lost local server back,
+    /// says so.
+    pub fn autoconnect(&mut self, url: String, spawn: bool, why: Reason, cx: &mut Context<Self>) {
+        use crate::api::http::Spawned;
+        let connector = self.connector;
         self.hold_loading = true;
         self.connecting = Some(format!("Connecting to {}", url.trim_start_matches("http://")).into());
         // Only the newest attempt may install its result; older ones bail out at each step, and a
@@ -114,14 +149,14 @@ impl FoloApp {
         cx.spawn(async move |this, cx| {
             let current = |this: &Self| this.connect_seq == seq;
             let probe = url.clone();
-            let found = cx
-                .background_executor()
-                .spawn(async move { HttpBackend::new(&probe).health().is_ok() })
-                .await;
+            let found = cx.background_executor().spawn(async move { (connector.probe)(&probe) }).await;
             if found {
                 this.update(cx, |this, cx| {
                     if current(this) {
-                        this.set_backend(Arc::new(HttpBackend::new(&url)), ServerMode::Local, cx);
+                        this.set_backend((connector.backend)(&url), ServerMode::Local, cx);
+                        // Back where the lost local server was: it stays the one to bring back. Any other
+                        // server found at an address isn't this app's to start.
+                        this.local_url = (why == Reason::Recover).then(|| url.clone());
                     }
                 })
                 .ok();
@@ -143,7 +178,7 @@ impl FoloApp {
                 }
                 let started = cx
                     .background_executor()
-                    .spawn(async move { spawn_server(std::time::Duration::from_secs(15)) })
+                    .spawn(async move { (connector.start)(std::time::Duration::from_secs(15)) })
                     .await;
                 match started {
                     Ok(spawned) => {
@@ -151,17 +186,19 @@ impl FoloApp {
                             if !current(this) {
                                 return; // A started server drops here: the stray server stops.
                             }
-                            let url = match spawned {
+                            let (local, started) = match spawned {
                                 Spawned::Started(proc_) => {
-                                    let url = proc_.url.clone();
+                                    let local = proc_.url.clone();
                                     this.server_proc = Some(proc_);
-                                    url
+                                    (local, true)
                                 }
                                 // The data dir's server (another window's, or one started by hand): ours stays.
-                                Spawned::Running(url) => url,
+                                Spawned::Running(local) => (local, false),
                             };
-                            this.server_url.update(cx, |i, cx| i.set_text(url.clone(), cx));
-                            this.set_backend(Arc::new(HttpBackend::new(&url)), ServerMode::Local, cx);
+                            this.server_url.update(cx, |i, cx| i.set_text(local.clone(), cx));
+                            this.set_backend((connector.backend)(&local), ServerMode::Local, cx);
+                            this.local_url = Some(local.clone());
+                            this.said_where(why, &url, &local, started, cx);
                         })
                         .ok();
                         return;
@@ -173,9 +210,13 @@ impl FoloApp {
                 if !current(this) {
                     return;
                 }
-                this.set_backend(Arc::new(HttpBackend::new(&url)), ServerMode::Local, cx);
-                // Say why there is no local server; the pages show the unreachable state.
+                this.set_backend((connector.backend)(&url), ServerMode::Local, cx);
+                // A lost local server that couldn't be started again: the next loss tries again.
+                this.local_url = (why == Reason::Recover).then(|| url.clone());
+                // Say why there is no local server; the pages show the unreachable state, and their
+                // error panels keep the reason after the toast has gone.
                 if let Some(e) = spawn_err {
+                    this.start_error = Some(e.clone().into());
                     this.toast(
                         Tone::Danger,
                         "Couldn't start folo serve",
@@ -188,6 +229,45 @@ impl FoloApp {
         })
         .detach();
         cx.notify();
+    }
+
+    /// After a connection landed on a local server instead of the address asked for: say so when a
+    /// person typed that address, or when the local server had stopped.
+    fn said_where(&mut self, why: Reason, asked: &str, local: &str, started: bool, cx: &mut Context<Self>) {
+        let host = |u: &str| u.trim().trim_start_matches("http://").trim_end_matches('/').to_string();
+        let (title, body) = match why {
+            Reason::Launch => return,
+            Reason::Typed if host(asked) == host(local) => return,
+            Reason::Typed => (
+                format!("Nothing answered at {}", host(asked)),
+                format!(
+                    "Connected to the folo serve {} at {} instead.",
+                    if started { "FOLO started" } else { "already serving this data" },
+                    host(local)
+                ),
+            ),
+            Reason::Recover => (
+                "folo serve stopped".to_string(),
+                if started {
+                    format!("FOLO started it again at {}.", host(local))
+                } else {
+                    format!("Connected to the folo serve now serving this data, at {}.", host(local))
+                },
+            ),
+        };
+        self.toast(Tone::Info, title, Some(body.into()), cx);
+    }
+
+    /// The periodic refresh found the server gone. When it was the local one (started by this app, or
+    /// another window's found through the data dir) and starting one is on, find or start it again, as
+    /// at launch: else this window would retry a port nobody will ever listen on again.
+    pub fn connection_lost(&mut self, cx: &mut Context<Self>) {
+        if self.server_mode != ServerMode::Local || !self.spawn_server || self.connecting.is_some() {
+            return;
+        }
+        if let Some(url) = self.local_url.take() {
+            self.autoconnect(url, true, Reason::Recover, cx);
+        }
     }
 
     /// Settings › Data source.
@@ -205,8 +285,10 @@ impl FoloApp {
             }
             ServerMode::Local => {
                 let url = self.server_url.read(cx).text().to_string();
-                let spawn = self.spawn_server;
-                self.autoconnect(url, spawn, cx);
+                // Only this machine's server can be started here: a typo in another machine's address
+                // must say so, not land on the local data.
+                let spawn = self.spawn_server && crate::api::http::is_loopback(&url);
+                self.autoconnect(url, spawn, Reason::Typed, cx);
             }
         }
     }

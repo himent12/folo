@@ -62,7 +62,8 @@ impl Render for FoloApp {
         let overlays = self.overlays(window, cx);
         // Lost the server (it was there, and the 2 s refresh can't reach it): said over the page,
         // so the page keeps its place, until it answers again.
-        let lost = (self.store.unreachable() && self.connecting.is_none()).then(|| lost_banner(&t));
+        let lost =
+            (self.store.unreachable() && self.connecting.is_none()).then(|| lost_banner(&t, self.reached));
         div()
             .id("root")
             .key_context("FoloApp")
@@ -261,9 +262,9 @@ impl Render for FoloApp {
     }
 }
 
-/// "Lost connection to folo serve, retrying…": a slim pill over the top of the page area, which
-/// moves nothing under it.
-fn lost_banner(t: &Theme) -> folo_ui::Div {
+/// "Lost connection to folo serve, retrying…" (or, for a server that never answered, "Can't reach
+/// folo serve, retrying…"): a slim pill over the top of the page area, which moves nothing under it.
+fn lost_banner(t: &Theme, reached: bool) -> folo_ui::Div {
     div().absolute().top(px(8.)).left_0().right_0().flex().justify_center().child(
         div()
             .id("lost-connection")
@@ -279,12 +280,13 @@ fn lost_banner(t: &Theme) -> folo_ui::Div {
             .border_color(t.line_strong)
             .shadow(t.shadow_lg())
             .child(crate::ui::icon("icons/refresh-cw.svg", 14., t.warning_solid))
-            .child(
-                crate::ui::text(ty::SM, t.text_secondary)
-                    .whitespace_nowrap()
-                    .child("Lost connection to folo serve, retrying…"),
-            ),
+            .child(crate::ui::text(ty::SM, t.text_secondary).whitespace_nowrap().child(lost_text(reached))),
     )
+}
+
+/// The pill's words: nothing was lost if the server never answered.
+pub(super) fn lost_text(reached: bool) -> &'static str {
+    if reached { "Lost connection to folo serve, retrying…" } else { "Can't reach folo serve, retrying…" }
 }
 
 /// The strip over the page's bottom edge that names the focused control's keys: 32 px, a

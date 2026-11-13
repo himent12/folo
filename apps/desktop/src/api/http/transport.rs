@@ -46,6 +46,14 @@ pub(super) fn sentence(s: &str) -> String {
     out
 }
 
+/// A server started with `--token` (every `/api` call but `/api/health` answers `401 unauthorized`): the app
+/// has no way to send a token, so it says what works instead.
+pub(crate) fn needs_token() -> ApiError {
+    ApiError::new("unauthorized", "This server needs a token").with_hint(
+        "It was started with `folo serve --token`, and FOLO Desktop can't send one. Start it without `--token`, or connect to another server.",
+    )
+}
+
 /// Percent-encode one path segment (ids are opaque strings).
 pub(super) fn seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -64,11 +72,11 @@ impl HttpBackend {
         format!("{}/api{path}", self.base)
     }
 
-    pub(super) fn unreachable(&self, e: &ureq::Error) -> ApiError {
+    /// Nothing answered: said for a person (ureq's own words, "timeout: connect" for a refused port on
+    /// Windows, would read as a fault of the server).
+    pub(super) fn unreachable(&self, _e: &ureq::Error) -> ApiError {
         ApiError::new("server_unreachable", format!("Could not reach folo serve at {}", self.host()))
-            .with_hint(format!(
-                "Start it with `folo serve`, or switch to the built-in demo in Settings. ({e})"
-            ))
+            .with_hint("Start it with `folo serve`, or switch to the built-in demo in Settings.")
     }
 
     pub(super) fn host(&self) -> String {
@@ -84,11 +92,14 @@ impl HttpBackend {
         if status >= 400 {
             let body: Option<folo_api::ErrorBody> = resp.body_mut().read_json().ok();
             return Err(match body {
+                // `folo serve --token`: the server's words are for an HTTP client that can send one.
+                Some(b) if b.error.code == "unauthorized" => needs_token(),
                 Some(b) => ApiError {
                     code: b.error.code,
                     message: sentence(&b.error.message),
                     hint: b.error.hint.as_deref().map(sentence),
                 },
+                None if status == 401 => needs_token(),
                 None => ApiError::new("http_error", format!("folo serve answered HTTP {status}")),
             });
         }

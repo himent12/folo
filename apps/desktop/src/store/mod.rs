@@ -191,7 +191,10 @@ impl Store {
     /// after that has health checked again.
     pub fn note_reachability(&mut self, err: Option<&ApiError>) {
         match err {
-            Some(e) if e.code == "server_unreachable" => self.health = Load::Failed(e.clone()),
+            // `--token` leaves `/api/health` open: the status says what every other call answers.
+            Some(e) if e.code == "server_unreachable" || e.code == "unauthorized" => {
+                self.health = Load::Failed(e.clone())
+            }
             None if matches!(self.health, Load::Failed(_)) => self.health = Load::Idle,
             _ => {}
         }
@@ -231,6 +234,9 @@ mod tests {
         store.note_reachability(None);
         store.note_reachability(Some(&ApiError::new("http_error", "folo serve answered HTTP 500")));
         assert!(store.health.ready().is_some());
+        // A `--token` server answers its health but nothing else: the status says so, not "Connected".
+        store.note_reachability(Some(&crate::api::http::needs_token()));
+        assert!(matches!(&store.health, Load::Failed(e) if e.code == "unauthorized") && !store.unreachable());
     }
 
     #[test]
