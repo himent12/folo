@@ -9,6 +9,9 @@ import type { LabelImagesAdded, SkippedImage } from '$lib/api/types';
 import { UploadIncomplete, type UploadProgress } from '$lib/api/upload';
 import { count } from '$lib/format';
 
+/** A file's reason said of several files ("40 files: the job already has them"). */
+const PLURAL: Record<string, string> = { 'the job already has this file': 'the job already has them' };
+
 /**
  * Why a folder added nothing, in one line from what the server skipped: its one reason (no images there, not an image
  * file, already in the job), or each reason with how many files it took.
@@ -20,7 +23,7 @@ export function whyNothingAdded(skipped: readonly SkippedImage[]): string {
   if (skipped.length === 1) return `${cap(first.reason)}.`;
   const reasons = new Map<string, number>();
   for (const s of skipped) reasons.set(s.reason, (reasons.get(s.reason) ?? 0) + 1);
-  return `${[...reasons].map(([r, n]) => `${count(n, 'file')}: ${r}`).join('; ')}.`;
+  return `${[...reasons].map(([r, n]) => `${count(n, 'file')}: ${n > 1 ? (PLURAL[r] ?? r) : r}`).join('; ')}.`;
 }
 
 export class Uploads {
