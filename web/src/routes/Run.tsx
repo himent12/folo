@@ -492,11 +492,15 @@ export default function Run() {
               // the size and batch step out (Config has them), below 1024 the time joins the status row and, on a line
               // with the precision or head items, the device steps out too. Phones keep the dataset, model and lineage.
               <Meta class={config.get()!.amp || config.get()!.head === 'o2o' ? 'run-meta extra' : 'run-meta'}>
+                {/* The dataset's name is free text: longer than the line (a phone, a 64-character name) it is cut
+                    with an ellipsis, whole in its tooltip (ui/Meta), never pushing the page sideways. */}
                 {datasetGone.get() ? (
                   // Removed from FOLO: its name as recorded, no link to a page that is gone.
-                  <span title="This dataset is no longer registered in FOLO">{datasetName.get() ?? 'Removed dataset'} (removed)</span>
+                  <span class="truncate" title={`${datasetName.get() ?? 'Removed dataset'} (removed): no longer registered in FOLO`}>
+                    {datasetName.get() ?? 'Removed dataset'} (removed)
+                  </span>
                 ) : (
-                  <a class="link" href={href(`/datasets/${config.get()!.dataset_id}`)}>
+                  <a class="link truncate" href={href(`/datasets/${config.get()!.dataset_id}`)} title={datasetName.get() ?? config.get()!.dataset_id}>
                     {datasetName.get() ?? config.get()!.dataset_id}
                   </a>
                 )}
