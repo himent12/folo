@@ -109,7 +109,12 @@ export default function RunRows(props: RunRowsProps) {
                             <span>
                               {r().epoch}/{r().epochs}
                             </span>
-                            {!props.choosing ? <span>{props.datasetName(r())}</span> : null}
+                            {/* A free-text name, the one item that may cut itself (ui/Meta), whole in its tooltip. */}
+                            {!props.choosing ? (
+                              <span class="truncate" title={props.datasetName(r())}>
+                                {props.datasetName(r())}
+                              </span>
+                            ) : null}
                           </Meta>
                         </span>
                       </span>{' '}
@@ -300,9 +305,12 @@ css`
       flex: 1;
       min-width: 0;
       display: grid;
+      /* One column no wider than the row: a 64-character run name truncates instead of widening the page. */
+      grid-template-columns: minmax(0, 1fr);
       gap: 2px;
     }
     .r-name .name {
+      min-width: 0;
       font-weight: var(--weight-medium);
     }
     .r-name {

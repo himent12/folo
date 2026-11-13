@@ -111,10 +111,12 @@ export default function PerClass(props: PerClassProps) {
               <For each={rows.get()} key={(c) => c.class}>
                 {(c) => (
                   <tr>
-                    <td>
+                    <td class="c-name">
                       <span class="cls">
                         <span class="sw" style:background={classInk(c().class)}></span>
-                        {c().name}
+                        <span class="truncate" title={c().name}>
+                          {c().name}
+                        </span>
                       </span>
                     </td>
                     <td class="r num">{c().map50_95.toFixed(3)}</td>
@@ -165,11 +167,20 @@ css`
     color: var(--text-tertiary);
   }
   .cls {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     gap: var(--space-2);
+    min-width: 0;
+  }
+  /* A long class name is cut with an ellipsis, whole in its tooltip: a 60-character one pushed the table, and the page,
+     sideways. \`max-width: 0\` keeps the name from sizing its column; the column takes most of the table and the bar
+     gives way first (.bar-col), so a usual name (\`hexagon\`, \`triangle\`) is not cut in the 299 px rail at 1024. */
+  td.c-name {
+    width: 60%;
+    max-width: 0;
   }
   .sw {
+    flex: none;
     width: 8px;
     height: 8px;
     border-radius: 2px;
@@ -188,7 +199,7 @@ css`
     color: var(--text-tertiary);
   }
   .bar-col {
-    width: 28%;
+    width: 20%;
     /* Low enough that the table fits the rail at 960 px (about 278 px wide). */
     min-width: 40px;
   }

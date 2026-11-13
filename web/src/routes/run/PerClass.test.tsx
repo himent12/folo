@@ -41,3 +41,17 @@ describe('PerClass with no rows', () => {
     expect(open([validated], true)).toBe('No per-class results: no class has a box in the validation images.');
   });
 });
+
+describe('PerClass with a long class name', () => {
+  it('cuts the name in its cell, whole in its tooltip, so the table keeps its column (studio-shell handover)', () => {
+    const long = 'platelet_cluster_with_overlapping_red_blood_cells_partially';
+    const e: Epoch = { ...validated, val: { ...validated.val, per_class: [{ class: 0, map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5 }] } };
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <PerClass classes={[long]} epochs={[e]} version={0} loading={false} />, target);
+    flushSync();
+    const name = target.querySelector<HTMLElement>('td.c-name .truncate')!;
+    expect(name.textContent?.trim()).toBe(long);
+    expect(name.getAttribute('title')).toBe(long);
+  });
+});

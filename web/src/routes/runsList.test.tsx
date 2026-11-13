@@ -325,6 +325,21 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     });
   });
 
+  it("lets a phone row's name and dataset cut themselves, whole in their tooltips (studio-shell handover)", async () => {
+    const api = new MockApi('normal', 0);
+    const done = (await api.runs()).find((r) => r.status === 'completed' && r.dataset)!;
+    await open(Runs, '/runs', api);
+    const row = await vi.waitFor(() => {
+      flushSync();
+      const li = [...target.querySelectorAll<HTMLElement>('.rows li')].find((l) => l.querySelector('.name')?.textContent?.trim() === done.name);
+      if (!li?.querySelector('.r-meta')?.textContent?.includes(done.dataset!.name)) throw new Error('rows not loaded');
+      return li;
+    });
+    expect(row.querySelector('.name')?.getAttribute('title')).toBe(done.name);
+    const ds = [...row.querySelectorAll<HTMLElement>('.r-meta .truncate')].find((e) => e.textContent?.trim() === done.dataset!.name);
+    expect(ds?.getAttribute('title')).toBe(done.dataset!.name);
+  });
+
   it('names a removed dataset as the run recorded it, marked, never by its id', async () => {
     const api = new MockApi('normal', 0);
     const done = (await api.runs()).find((r) => r.status === 'completed' && r.dataset)!;
