@@ -201,8 +201,10 @@ impl FoloApp {
             let (a, b) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
+                // Every image: the grid filters by split and class here, so a list cut short
+                // (COCO has 123k) would lose the end of train and all of val.
                 move |api| {
-                    api.images(&a, &ImageQuery { limit: 100_000, ..Default::default() }).map(|p| p.images)
+                    api.images(&a, &ImageQuery { limit: u32::MAX, ..Default::default() }).map(|p| p.images)
                 },
                 move |this, r, _| {
                     this.store.images.insert(b, r.into());

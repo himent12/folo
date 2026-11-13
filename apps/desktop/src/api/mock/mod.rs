@@ -148,6 +148,22 @@ impl MockBackend {
             .ok_or_else(|| ApiError::new("dataset_not_found", format!("No dataset with id {id}")))
     }
 
+    /// Grows a dataset to `n` val images past its own (copies of its last image under new ids), as
+    /// large as a test needs (a COCO-sized list).
+    #[cfg(test)]
+    pub fn with_more_val_images(mut self, id: &str, n: usize) -> Self {
+        let f = self.datasets.iter_mut().find(|d| d.ds.id == id).expect("a demo dataset");
+        let last = f.images.last().cloned().expect("an image");
+        let start = f.images.len();
+        f.images.extend((0..n).map(|i| ImageInfo {
+            id: format!("img_{}", start + i + 1),
+            split: Split::Val,
+            ..last.clone()
+        }));
+        f.ds.splits.val += n as u64;
+        self
+    }
+
     /// Lists a removed dataset (or run) again, as registering its folder again does on a server.
     #[cfg(test)]
     pub fn restore(&self, id: &str) {

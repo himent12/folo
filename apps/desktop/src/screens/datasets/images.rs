@@ -8,7 +8,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, canvas, div, px, uniform_list,
 };
 
-use crate::api::{Dataset, ImageInfo, Split};
+use crate::api::{Dataset, ImageInfo, Split, SplitsExt};
 use crate::app::{FoloApp, act};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
@@ -115,7 +115,12 @@ impl FoloApp {
             Some(Split::Test) => (ds.splits.test as usize, "test images"),
             None => (total, "images"),
         };
-        let count_label = if count == total {
+        let loading = self.store.images.get(&id).is_none_or(|l| l.is_loading());
+        let count_label = if loading {
+            // Not "0 images" while a large list is on its way: the header's count, as loading.
+            let total = if self.ds_split.is_none() { ds.splits.total() } else { total as u64 };
+            format!("Loading {} {of}…", int(total))
+        } else if count == total {
             format!("{} {of}", int(total as u64))
         } else {
             format!("{} of {} {of} match", int(count as u64), int(total as u64))
@@ -186,7 +191,7 @@ impl FoloApp {
                     .child(icon("icons/image.svg", 14., t.text_tertiary)),
             );
         self.ds_view_controls = Some(view_controls.into_any_element());
-        if self.store.images.get(&id).is_none_or(|l| l.is_loading()) {
+        if loading {
             return div()
                 .flex()
                 .flex_col()

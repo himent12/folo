@@ -4,6 +4,8 @@
 mod actions;
 mod connection;
 mod data;
+#[cfg(test)]
+mod dataset_tests;
 mod deleted;
 mod descriptions;
 mod drag;
