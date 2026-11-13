@@ -139,6 +139,8 @@ export default function Run() {
     const c = cloud.get();
     return c ? providerName(c.provider, cloudProviders.data ?? undefined) : '';
   });
+  /** Its provider launches an instance per run (a remote server does not); a provider not listed yet counts as one. */
+  const provisions = computed(() => cloudProviders.data?.find((p) => p.id === cloud.get()?.provider)?.provisions ?? cloud.get()?.provider !== 'remote');
   /** Before training a cloud run is the hand-over, not a wait in the training queue: its title is the phase. */
   const handover = computed(() => (cloud.get() && status.get() === 'queued' ? cloud.get()! : null));
   /** Stop on a run waiting in the training queue takes it out of the queue (a cloud run waits in none here). */
@@ -591,7 +593,7 @@ export default function Run() {
                   <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={datasetName.get()} weights={lineage.get()} essential={phone.current} cli={runCli.get()} />
                 </div>
                 <div class="w-side">
-                  {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} /> : null}
+                  {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} /> : null}
                   <WaitingPanels
                     queue={place.get() !== null ? queue.get() : []}
                     ahead={ahead.get()}
@@ -676,7 +678,7 @@ export default function Run() {
                     ) : null}
                     {cloud.get() ? (
                       <div class="part" data-part="cloud">
-                        <CloudPanel cloud={cloud.get()!} provider={provider.get()} />
+                        <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} />
                       </div>
                     ) : null}
                     {/* One column in the rail (laptops up) and on phones; on a tablet the section is the panel's full

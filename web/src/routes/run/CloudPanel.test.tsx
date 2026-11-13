@@ -40,6 +40,8 @@ const fact = (label: string) => text([...target.querySelectorAll('#cloud .facts 
 
 beforeEach(() => {
   hub.mode = 'mock';
+  // A released run's panel asks for its instance: the mock answers, never a network.
+  hub.api = new MockApi('normal', 0);
   target = document.createElement('div');
   document.body.appendChild(target);
 });
@@ -112,6 +114,23 @@ describe('CloudPanel', () => {
     expect(fact('Cost')).toBe('not billed');
     expect(target.querySelector('#cloud .facts a')).toBeNull();
   });
+
+  it('marks where a released run failed and what it never reached, and a remote server’s steps as its own', () => {
+    // The worker stopped answering during the upload: no training happened, so none is ticked.
+    const failedUpload = { status: 'failed' as const, error_code: 'cloud_sync_failed', step: 0, epoch: 0 };
+    c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'released', progress: null }), provider: 'RunPod', run: failedUpload } });
+    flushSync();
+    expect(phases()).toEqual(['done Provisioning', 'done Booting', 'failed Uploading data', 'skipped Training', 'skipped Collecting weights', 'done Releasing', 'done Released']);
+    expect(fact('Last checkpoint copy')).toBe('none');
+    unmount(c);
+    // A remote server: nothing provisioned or released, connected to; its GPU is not an instance.
+    const remote = state({ provider: 'remote', instance_id: null, phase: 'training', progress: null, cost_usd: null });
+    c = mount(CloudPanel, { target, props: { cloud: remote, provider: 'Remote FOLO server', provisions: false } });
+    flushSync();
+    expect(phases()).toEqual(['done Connecting', 'done Uploading data', 'now Training', 'next Collecting weights', 'next Done']);
+    expect(fact('GPU')).toBe('RTX 4090 · 24.0 GiB · Secure Cloud');
+    expect(fact('Instance')).toBe('');
+  });
 });
 
 describe('Run: a cloud run', () => {
@@ -153,5 +172,15 @@ describe('Run: a cloud run', () => {
     await open(new MockApi('normal', 0), 'run_c3d5');
     expect(phases().every((p) => p.startsWith('done'))).toBe(true);
     expect(fact('Cost')).toMatch(/^\$\d+\.\d\d$/);
+    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+  });
+
+  it('keeps releasing under way on a finished run whose instance’s termination is not confirmed', async () => {
+    // cloud-trouble: the key was revoked, so RunPod never confirmed the termination of shapes-m's instance.
+    await open(new MockApi('cloud-trouble', 0), 'run_c3d5');
+    const note = await until(() => target.querySelector('#cloud .unconfirmed'), 'the unconfirmed termination');
+    expect(text(note)).toBe('Termination not confirmed: the instance may still be billed. Settings › Cloud');
+    expect(phases().slice(-2)).toEqual(['now Releasing', 'next Released']);
+    expect(fact('Cost')).toMatch(/^\$\d+\.\d\d so far$/);
   });
 });
