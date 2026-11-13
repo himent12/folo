@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use crate::kernels::bounds::{MAX_INT, precompilable};
 use crate::pipeline::{KernelKey, Spec};
-use crate::pipeline_cache::{checksum, decode_as, encode_as, remove_stale_tmp, write_atomic};
+use crate::pipeline_cache::{checksum, decode_as, encode_as, make_folder, remove_stale_tmp, write_atomic};
 
 /// A list file larger than this is ignored, and a list that would be larger is cut at the last whole line.
 pub const MAX_FILE: u64 = 1 << 20;
@@ -244,6 +244,7 @@ impl Open {
 impl Recording {
     /// A recording for `tag` written to `path`, starting from the kernels `on_disk` that file holds.
     pub fn open(tag: &str, path: PathBuf, identity: String, on_disk: &[KernelKey]) -> Arc<Self> {
+        make_folder(&path);
         let rec = Arc::new(Self {
             tag: tag.to_owned(),
             path,
@@ -369,6 +370,21 @@ mod tests {
 
     fn key(name: &'static str, spec: Spec) -> KernelKey {
         KernelKey { name, spec }
+    }
+
+    /// A save after the list's folder was removed (a test's folder, a cache the user deleted) fails instead of making
+    /// the folder again: a recording's last save can come from another thread after its owner is gone, which left
+    /// `folo-gpu-precompile-*` test folders behind on CI.
+    #[test]
+    fn a_late_save_never_makes_a_removed_folder_again() {
+        let root = folo_test_support::TestDir::new("gpu-late-save");
+        let dir = root.join("lists");
+        let rec = Recording::open("late", dir.join("late.list"), "id".into(), &[]);
+        assert!(dir.is_dir(), "made when the recording opens");
+        std::fs::remove_dir_all(&dir).unwrap();
+        rec.used(&key("unary", Spec::new().i32("OP", 1)));
+        rec.retire();
+        assert!(!dir.exists(), "not made again by the last save");
     }
 
     #[test]
