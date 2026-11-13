@@ -172,16 +172,26 @@ pub(crate) fn encode_as(magic: &[u8; 8], format: u32, payload: &[u8], identity: 
 }
 
 /// Writes `bytes` to `path` through a temporary file in the same folder (`.<name>.<pid>-<n>.tmp`), so a reader
-/// never sees half a file. The temporary file is removed when the write or the rename fails.
+/// never sees half a file. The temporary file is removed when the write or the rename fails. The folder is made
+/// when its cache or list is opened ([`make_folder`]), never here: the last save of one can come from another
+/// thread after its owner is gone (a precompile worker or a saver holding the last reference), and a folder removed
+/// meanwhile (a test's, or a cache the user deleted) must stay removed.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!(".{name}.{}-{n}.tmp", std::process::id()));
     std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// Makes the folder `path` is written to, when its cache or list opens (best effort: without it, saves fail and
+/// nothing else does).
+pub(crate) fn make_folder(path: &Path) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
 }
 
 /// Whether `name` is one of [`write_atomic`]'s temporary files for the cache file `file`.
@@ -235,6 +245,7 @@ impl DiskCache {
     /// Opens the cache at `path` on `device` (created with [`wgpu::Features::PIPELINE_CACHE`]), loading the file
     /// when it is valid for this adapter and starting empty otherwise, and starts its saver thread.
     pub fn open(device: &wgpu::Device, info: &wgpu::AdapterInfo, path: PathBuf) -> Arc<Self> {
+        make_folder(&path);
         remove_stale_tmp(&path);
         let identity = identity(info);
         let file = std::fs::metadata(&path)
