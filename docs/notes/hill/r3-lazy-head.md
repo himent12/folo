@@ -105,12 +105,63 @@ was 32–55% busy with other work (another lane's evaluation, a JVM), so only th
 Counsel's estimate for row 8 was 13.12 → 11.6–12.0 ms (−9 to −12%); under this load folo-n measured −14% at 640² and
 −8% on the rect input (fewer anchors, so the box branch is a smaller share). A quiet repeat is pending.
 
+### GPU A/B (PR 2)
+Bit for bit on real data: `benches/candidates.rs` with `FOLO_BENCH_DEVICE=gpu FOLO_BENCH_VERIFY=1`, all 5000
+val2017 images, folo-n and folo-s, f32, f16 on the regular kernels and f16 on tensor cores: **0 mismatched** in every
+config (`logs/verify-gpu-*.txt`).
+
+`benches/gpu_trained.rs` (the public `Predictor`, conf 0.25, the first 16 val2017 images; b1 = `predict` per image,
+rect letterbox; b16 = `predict_batch` at 640²), `main` against the branch, 3 alternating rounds in one GPU lock hold,
+RTX 4080 SUPER (Vulkan). Median of the per-round medians, ms (min–max):
+
+| row | base | new | new/base |
+|---|---|---|---|
+| folo-n f32 b16 (row 6) | 10.66 (10.27–11.07) | 9.54 (9.51–9.86) | 0.895 |
+| folo-n f16 b16 | 9.97 (9.96–13.41) | 8.98 (8.82–9.37) | 0.901 |
+| folo-n f16 tensor cores b16 (row 6) | 7.69 (7.17–60.28) | 6.79 (6.59–7.78) | 0.883 |
+| folo-s f32 b16 | 22.83 (22.71–60.65) | 20.79 (20.64–21.34) | 0.911 |
+| folo-s f16 b16 | 20.60 (20.49–22.50) | 18.94 (18.93–19.53) | 0.919 |
+| folo-s f16 tensor cores b16 | 12.08 (11.94–15.65) | 11.58 (11.30–12.64) | 0.959 |
+
+b1 (row 5) is bimodal on this machine. Within one run of either build, calls jump between about 1.5 and 5 ms (GPU clocks), so medians move by a factor of 2 between runs. The per-run minimums are steadier (median of 3 runs, base → new):
+
+| config | base → new | change |
+|---|---|---|
+| n f32 | 1.54 → 1.48 | −4% |
+| n f16 | 1.71 → 1.62 | −5% |
+| n f16 tensor cores | 1.60 → 1.53 | −4% |
+| s f32 | 2.45 → 2.20 | −10% |
+| s f16 | 2.49 → 2.15 | −14% |
+| s f16 tensor cores | 2.03 → 1.77 | −13% |
+
+Against counsel:
+- Row 6 measured −4 to −12%, against an estimate of about +10% throughput.
+- Row 5 measured −4 to −14% at the minimum, where counsel expected a change within noise.
+
 ## Negative results and notes
 - No lazy/dense switch. Counsel's break-even (400 / 80 / 16 candidates for P3 / P4 / P5) compared a per-candidate
   GEMM with dense Winograd. With the tile list, lazy runs the dense arithmetic on a subset of tiles, so its work
   is at most the dense work plus building the site lists; it can only lose by that overhead (see the sweep).
 - The random-init benches pass no candidate at `conf = 0.25`, so their e2e rows would show the box branch vanish;
   the trained rows (`FOLO_BENCH_WEIGHTS`, `FOLO_BENCH_IMAGES`) are the ones to read.
+- **C3k sibling fusion (PR 3): a measured tie; not shipped.** A fused C3k ran `cv1` and `cv2` as one conv with their
+  weights stacked (`Tensor::conv2d_act_stacked`: the stacked copy was a derived value kept with the first weight's
+  storage and keyed by the other parts' storage and version, so writes to any part made it again). Bit for bit the
+  unstacked block on the CPU and the GPU (f32, f16, tensor cores), checked at folo-n/s C3k shapes; a mutation failed
+  both. A/B against `main`, both built from the same bench sources:
+  - GPU forward (`benches/gpu.rs`, 3 rounds): row 1 (b1 f32) 1.14 → 1.13 ms (n), 2.24 → 2.23 (s); row 3 (b16
+    f32) 7.96 → 7.96 (n), 19.70 → 19.70 (s). The pipelined numbers, b16 f16 and folo-s b1 f16 were inside ±2.5%.
+    folo-n b1 f16 was 1.17 → 1.13 (−3.4%; tensor cores on; not a row the criterion names).
+  - CPU row 7 (`forward 640 b1`, 28 threads): folo-n 15.21 → 15.12 ms over 7 rounds (0.994, load 17–43%). The
+    folo-s rounds ran at 37–86% load and are unreadable.
+  - Per layer (`FOLO_BENCH_LAYERS=1`, 5 rounds): the three C3k-bearing layers (stage4, stage5, out5) got
+    0.07–0.12 ms faster each on folo-n, 0.32 ms in all, about 2.5% of the forward. On folo-s they saved about
+    0.4 ms, about 1.4%. That fits what fusing saves: one pass over the input and one pool wait (CPU) or one
+    dispatch (GPU) per C3k, three times per model.
+  - Inside ±3% on rows 7, 1 and 3, so not shipped (the brief's rule). The commit is `05cf15a1` on the local
+    branch `infer/c3k-sibling-fusion` if a later round wants it (folo-m/l/x have 8 such pairs, not measured).
 
 ## Leftovers
-- PR 3: C3k sibling fusion.
+- A quiet CPU repeat of PR 1's rows (folo-s was unreadable under load) and the break-even sweeps on the CPU and the
+  GPU (`benches/candidates.rs`, `FOLO_BENCH_SWEEP=1`): pending a quiet window.
+- The validation decode (one kernel emitting multi-label pairs plus boxes only where a pair is): not started.
