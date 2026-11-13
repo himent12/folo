@@ -317,7 +317,7 @@ export default function Datasets() {
                 ) : (
                   <For each={shown.get()} key={(d) => d.id}>
                     {(d) => (
-                      <tr class="link" data-row aria-label={d().name} onclick={() => router.go(`/datasets/${d().id}`)}>
+                      <tr class="link" data-row data-id={d().id} aria-label={d().name} onclick={() => router.go(`/datasets/${d().id}`)}>
                         <td>
                           <a class="name" href={href(`/datasets/${d().id}`)} onclick={(e) => e.stopPropagation()}>
                             {d().name}

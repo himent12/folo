@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { rowNav, settleTabStop, stepRow } from './rowNav';
+import { forgetRows, rowNav, settleTabStop, stepRow } from './rowNav';
 
 afterEach(() => {
   document.body.innerHTML = '';
+  forgetRows();
 });
 
 function table(n: number) {
@@ -92,4 +93,61 @@ describe('rowNav', () => {
     expect(document.activeElement).not.toBe(rows[0]);
     nav.destroy();
   });
+
+  it('starts again on the row it was last on when the list comes back, once that row is there (shell F6)', () => {
+    location.hash = '#/runs';
+    const first = table(4);
+    let nav = rowNav(first.t);
+    first.rows[0]!.focus();
+    key(first.rows[0]!, 'j');
+    key(first.rows[1]!, 'j');
+    key(first.rows[2]!, 'Enter');
+    nav.destroy();
+    first.t.remove();
+    // Esc or Back: the page mounts a new table, its rows arrive after the data.
+    const again = document.createElement('table');
+    document.body.appendChild(again);
+    nav = rowNav(again);
+    again.innerHTML = `<tbody>${[0, 1, 2, 3].map((i) => `<tr data-row data-id="r${i}"></tr>`).join('')}</tbody>`;
+    return new Promise<void>((done) =>
+      setTimeout(() => {
+        const rows = [...again.querySelectorAll<HTMLElement>('tr')];
+        expect(rows.map((r) => r.tabIndex)).toEqual([-1, -1, 0, -1]);
+        (document.activeElement as HTMLElement | null)?.blur();
+        key(window as unknown as Element, 'j');
+        expect(document.activeElement).toBe(rows[2]);
+        key(rows[2]!, 'j');
+        expect(document.activeElement).toBe(rows[3]);
+        nav.destroy();
+        // Another list, or the same list on another page, starts at its top.
+        location.hash = '#/models';
+        const other = table(3);
+        const n2 = rowNav(other.t);
+        expect(other.rows.map((r) => r.tabIndex)).toEqual([0, -1, -1]);
+        n2.destroy();
+        done();
+      }),
+    );
+  });
+
+  it('restores a row by its id, not its name: two rows can share a name (review of #223)', () => {
+    location.hash = '#/datasets';
+    const make = () => {
+      const t = document.createElement('table');
+      t.setAttribute('aria-label', 'Datasets');
+      t.innerHTML = `<tbody>${['ds_a', 'ds_b', 'ds_c'].map((id) => `<tr data-row data-id="${id}" aria-label="shapes"></tr>`).join('')}</tbody>`;
+      document.body.appendChild(t);
+      return { t, rows: [...t.querySelectorAll<HTMLElement>('tr')] };
+    };
+    const first = make();
+    let nav = rowNav(first.t);
+    first.rows[1]!.focus();
+    nav.destroy();
+    first.t.remove();
+    const again = make();
+    nav = rowNav(again.t);
+    expect(again.rows.map((r) => r.tabIndex)).toEqual([-1, 0, -1]);
+    nav.destroy();
+  });
 });
+

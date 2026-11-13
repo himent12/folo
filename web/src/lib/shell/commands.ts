@@ -76,6 +76,17 @@ export interface Rankable {
   match?: string[];
   /** Only offered for a query: an action about one entity ("New run on shapes") would flood the empty palette. */
   scoped?: boolean;
+  /** The entity's id (`run_8f5b`), found by the whole id, or by its start or end from four characters (shell F3). */
+  entityId?: string;
+}
+
+/** How well `query` names the id `id` (see Rankable.entityId), or -1: never by a word of it, so "run" is not every run. */
+export function idScore(query: string, id: string): number {
+  const q = query.trim().toLowerCase();
+  const t = id.toLowerCase();
+  // Above an exact name (2000): an id names one thing, a name may be another thing's id.
+  if (q === t) return 2100;
+  return q.length >= 4 && (t.startsWith(q) || t.endsWith(q)) ? 1500 : -1;
 }
 
 /**
@@ -88,7 +99,12 @@ export function rank<T extends Rankable>(items: T[], query: string, limit = 40):
   return items
     .map((i) => ({
       i,
-      s: Math.max(fuzzy(query, i.label), fuzzy(query, `${i.group} ${i.label}`) - 20, ...(i.match ?? []).map((m) => fuzzy(query, m) - (i.scoped ? 10 : 0))),
+      s: Math.max(
+        fuzzy(query, i.label),
+        fuzzy(query, `${i.group} ${i.label}`) - 20,
+        ...(i.match ?? []).map((m) => fuzzy(query, m) - (i.scoped ? 10 : 0)),
+        i.entityId === undefined ? -1 : idScore(query, i.entityId),
+      ),
     }))
     .filter((x) => x.s >= 0)
     .sort((a, b) => b.s - a.s)

@@ -429,7 +429,7 @@ export default function Models() {
                       {(m) => {
                         const parent = computed(() => parentOf(m()));
                         return (
-                          <tr class="link" data-row aria-label={m().name} onclick={() => router.go(`/models/${m().id}`)}>
+                          <tr class="link" data-row data-id={m().id} aria-label={m().name} onclick={() => router.go(`/models/${m().id}`)}>
                             <td>
                               <a class="name" href={href(`/models/${m().id}`)} title={m().about ?? m().name} onclick={(e) => e.stopPropagation()}>
                                 {m().name}

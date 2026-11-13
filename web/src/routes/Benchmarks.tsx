@@ -240,7 +240,7 @@ export default function Benchmarks() {
                     ) : (
                       <For each={shown.get()} key={(b) => b.id}>
                         {(b) => (
-                          <tr class="link" data-row aria-label={b().name} onclick={() => open(b())}>
+                          <tr class="link" data-row data-id={b().id} aria-label={b().name} onclick={() => open(b())}>
                             <td class="name-cell">
                               <span class="nm-row">
                                 <a class="name truncate" href={href(`/benchmarks/${b().id}`)} onclick={(e) => e.stopPropagation()} title={b().name}>
