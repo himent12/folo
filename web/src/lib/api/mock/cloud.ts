@@ -206,6 +206,12 @@ function costAt(c: CloudTimeline, trainEnd: number, now: number): number | null 
   return Math.round(c.offer.price_per_hour * (Math.max(0, until - c.launchedAt) / HOUR) * 100) / 100;
 }
 
+/** The phase the hand-over was in when the run ended: the collection after training, else the one it stopped or was lost in. */
+function endedIn(c: CloudTimeline, trainEnd: number): CloudPhase {
+  const end = stopAt(c, trainEnd);
+  return !c.lost && end > trainAt(c) ? 'collecting' : phaseAt(c, trainEnd, end - 1).phase;
+}
+
 const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString());
 
 /** `Run.cloud` at `now`; `trainEnd` is when training ends on the worker if nothing stops it, `epochMs` an epoch's length. */
@@ -223,6 +229,7 @@ export function runCloudAt(c: CloudTimeline, trainEnd: number, epochMs: number, 
     deadline: exists ? iso(c.launchedAt + c.maxHours * HOUR) : null,
     cost_usd: costAt(c, trainEnd, now),
     synced: iso(syncedAt(c, trainEnd, epochMs, now)),
+    ended_in: phase === 'releasing' || phase === 'released' ? endedIn(c, trainEnd) : null,
   };
 }
 

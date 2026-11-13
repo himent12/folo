@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunEventHandlers } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
-import type { RunCloud } from '$lib/api/types';
+import type { CloudInstance, RunCloud } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import Run from '../Run';
 import CloudPanel, { type CloudPanelProps } from './CloudPanel';
@@ -117,8 +117,7 @@ describe('CloudPanel', () => {
 
   it('marks where a released run failed and what it never reached, and a remote server’s steps as its own', () => {
     // The worker stopped answering during the upload: no training happened, so none is ticked.
-    const failedUpload = { status: 'failed' as const, error_code: 'cloud_sync_failed', step: 0, epoch: 0 };
-    c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'released', progress: null }), provider: 'RunPod', run: failedUpload } });
+    c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'released', progress: null, ended_in: 'syncing' }), provider: 'RunPod', run: { status: 'failed' } } });
     flushSync();
     expect(phases()).toEqual(['done Provisioning', 'done Booting', 'failed Uploading data', 'skipped Training', 'skipped Collecting weights', 'done Releasing', 'done Released']);
     expect(fact('Last checkpoint copy')).toBe('none');
@@ -130,6 +129,32 @@ describe('CloudPanel', () => {
     expect(phases()).toEqual(['done Connecting', 'done Uploading data', 'now Training', 'next Collecting weights', 'next Done']);
     expect(fact('GPU')).toBe('RTX 4090 · 24.0 GiB · Secure Cloud');
     expect(fact('Instance')).toBe('');
+  });
+
+  it('takes a released run’s cost from its instance, only its own, and says when the ledger cannot be read', async () => {
+    vi.useRealTimers();
+    const inst = (id: string, status: CloudInstance['status'], cost: number): CloudInstance =>
+      ({ id, status, cost_usd: cost, offer: state().offer, error: null }) as CloudInstance;
+    const answer = vi.spyOn(hub.api, 'cloudInstances').mockResolvedValue([inst('ci_other', 'terminating', 9.99), inst('ci_1', 'terminated', 1.91)]);
+    // The run stopped waiting for the termination at $1.84; the reaper confirmed it later, at $1.91.
+    const cloud = state({ phase: 'released', progress: null, cost_usd: 1.84, ended_in: 'collecting' });
+    c = mount(CloudPanel, { target, props: { cloud, provider: 'RunPod', run: { status: 'completed' } } });
+    await until(() => fact('Cost') === '$1.91', 'the ledger’s cost');
+    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+    unmount(c);
+    // Another run's instance in the answer is never this run's.
+    answer.mockResolvedValue([inst('ci_other', 'terminating', 9.99)]);
+    c = mount(CloudPanel, { target, props: { cloud, provider: 'RunPod', run: { status: 'completed' } } });
+    await until(() => answer.mock.calls.length >= 2, 'the second lookup');
+    flushSync();
+    expect(fact('Cost')).toBe('$1.84');
+    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+    unmount(c);
+    // The ledger cannot be read: whether the instance is gone is not known.
+    answer.mockRejectedValue(new Error('down'));
+    c = mount(CloudPanel, { target, props: { cloud, provider: 'RunPod', run: { status: 'completed' } } });
+    const note = await until(() => target.querySelector('#cloud .unconfirmed'), 'the note');
+    expect(text(note)).toBe('Could not check that the instance is terminated. Settings › Cloud');
   });
 });
 

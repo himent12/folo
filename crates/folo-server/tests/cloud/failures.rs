@@ -97,6 +97,8 @@ fn an_instance_that_gives_up_before_its_worker_answers_fails_the_boot_at_once() 
     // Said as soon as the provider is believed, not at the boot timeout (whose message is "did not answer within").
     assert!(!e.contains("did not answer within"), "{e}");
     assert_eq!(phase(&done), CloudPhase::Released);
+    // It failed while booting, and the run says so (Studio marks that phase, not the ones after it).
+    assert_eq!(done.cloud.as_ref().unwrap().ended_in, Some(CloudPhase::Booting));
     assert_eq!(store.cloud_instances().unwrap()[0].status, CloudInstanceStatus::Terminated);
 }
 

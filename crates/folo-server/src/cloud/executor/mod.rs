@@ -217,6 +217,7 @@ impl Release {
             return;
         }
         self.entry.update_cloud(|c| {
+            c.ended_in = Some(c.phase);
             c.phase = CloudPhase::Releasing;
             c.progress = None;
         });

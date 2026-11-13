@@ -240,5 +240,6 @@ pub(super) fn run_cloud(compute: &Compute, connected: &cloud::Connected, offer: 
         deadline: None,
         cost_usd: None,
         synced: None,
+        ended_in: None,
     }
 }

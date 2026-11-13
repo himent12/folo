@@ -165,6 +165,11 @@ export interface RunCloud {
   cost_usd: number | null;
   /** When `weights/last.folo` was last copied to this machine. */
   synced: Time | null;
+  /**
+   * The phase it was in when the run ended (set at `releasing`): where a failed run failed, and the phases after it it
+   * never reached. `null` before; absent from servers before it.
+   */
+  ended_in?: CloudPhase | (string & {}) | null;
 }
 
 /** `RunEstimate.cost`: what a cloud run would cost. */

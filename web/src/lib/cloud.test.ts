@@ -82,11 +82,12 @@ describe('the Cloud panel’s phases', () => {
     synced: null,
     ...extra,
   });
-  const run = (status: RunStatus, error_code: string | undefined, step: number, epoch = 0): PhaseRun => ({ status, error_code, step, epoch });
+  const run = (status: RunStatus): PhaseRun => ({ status });
   const marks = (list: { phase: string; state: string }[]) => list.map((p) => `${p.state} ${p.phase}`);
+  const ended = (phase: string) => cloud('released', { ended_in: phase as RunCloud['phase'] });
 
   it('marks the phases before the current one done while the run is alive', () => {
-    expect(marks(phaseStates(cloud('syncing'), run('queued', undefined, 0), true))).toEqual([
+    expect(marks(phaseStates(cloud('syncing'), run('queued'), true))).toEqual([
       'done provisioning',
       'done booting',
       'now syncing',
@@ -97,9 +98,9 @@ describe('the Cloud panel’s phases', () => {
     ]);
   });
 
-  it('marks where a released run failed, and never a phase it did not reach as done', () => {
+  it('marks the phase a released run ended in, and never one it did not reach as done', () => {
     // The upload failed (the remote server stopped at 1%): no training, no collection.
-    expect(marks(phaseStates(cloud('released'), run('failed', 'cloud_sync_failed', 0), true))).toEqual([
+    expect(marks(phaseStates(ended('syncing'), run('failed'), true))).toEqual([
       'done provisioning',
       'done booting',
       'failed syncing',
@@ -108,26 +109,26 @@ describe('the Cloud panel’s phases', () => {
       'done releasing',
       'done released',
     ]);
-    // The same code after training is the collection of the weights.
-    expect(marks(phaseStates(cloud('released'), run('failed', 'cloud_sync_failed', 40, 3), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed collecting']);
-    expect(marks(phaseStates(cloud('released'), run('failed', 'cloud_boot_failed', 0), true)).slice(0, 3)).toEqual(['done provisioning', 'failed booting', 'skipped syncing']);
-    expect(marks(phaseStates(cloud('released'), run('failed', 'cloud_instance_lost', 40, 3), true))[3]).toBe('failed training');
-    // Stopped before it trained: the hand-over before training happened, training did not.
-    expect(marks(phaseStates(cloud('released'), run('stopped', undefined, 0), true)).filter((m) => !m.startsWith('done'))).toEqual(['skipped training', 'skipped collecting']);
-    expect(phaseStates(cloud('released'), run('completed', undefined, 400, 10), true).every((p) => p.state === 'done')).toBe(true);
-    // Without the run (an older caller), as before: all done.
-    expect(phaseStates(cloud('released'), undefined, true).every((p) => p.state === 'done')).toBe(true);
+    // A worker download that is not there fails the run before anything is rented (cloud_boot_failed, in provisioning).
+    expect(marks(phaseStates(ended('provisioning'), run('failed'), true)).slice(0, 2)).toEqual(['failed provisioning', 'skipped booting']);
+    expect(marks(phaseStates(ended('training'), run('failed'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed training', 'skipped collecting']);
+    // Stopped before it trained: the phase it was stopped in did not finish. Stopped while training: it trained.
+    expect(marks(phaseStates(ended('booting'), run('stopped'), true)).filter((m) => !m.startsWith('done'))).toEqual(['skipped booting', 'skipped syncing', 'skipped training', 'skipped collecting']);
+    expect(marks(phaseStates(ended('training'), run('stopped'), true)).filter((m) => !m.startsWith('done'))).toEqual(['skipped collecting']);
+    expect(phaseStates(ended('collecting'), run('completed'), true).every((p) => p.state === 'done')).toBe(true);
+    // A server from before `ended_in` says nothing: as before, every phase done.
+    expect(phaseStates(cloud('released'), run('failed'), true).every((p) => p.state === 'done')).toBe(true);
   });
 
   it('lists no provisioning or releasing for a remote server, and words its steps as connecting and done', () => {
-    const remote = cloud('released', { provider: 'remote', instance_id: null });
-    expect(marks(phaseStates(remote, run('failed', 'cloud_unavailable', 0), false))).toEqual(['failed booting', 'skipped syncing', 'skipped training', 'skipped collecting', 'done released']);
+    const remote = cloud('released', { provider: 'remote', instance_id: null, ended_in: 'booting' });
+    expect(marks(phaseStates(remote, run('failed'), false))).toEqual(['failed booting', 'skipped syncing', 'skipped training', 'skipped collecting', 'done released']);
     expect(['booting', 'released', 'syncing'].map((p) => panelPhaseLabel(p as never, false))).toEqual(['Connecting', 'Done', 'Uploading data']);
     expect(panelPhaseLabel('booting', true)).toBe('Booting');
   });
 
   it('keeps releasing under way while the termination is not confirmed', () => {
-    expect(marks(phaseStates(cloud('released'), run('completed', undefined, 400, 10), true, true)).slice(-2)).toEqual(['now releasing', 'next released']);
+    expect(marks(phaseStates(ended('collecting'), run('completed'), true, true)).slice(-2)).toEqual(['now releasing', 'next released']);
   });
 });
 

@@ -1,9 +1,10 @@
 /**
  * A cloud run's Cloud panel (docs/CLOUD.md): how far the hand-over is (the phases as done, current and to come, the
  * current one with its transfer; once released, where a failed run failed and what it never reached), where it runs,
- * what it has cost and the most it can, and when its checkpoint was last copied home. It stays once the run has ended,
- * with the final cost, unless its instance's termination is not confirmed yet: then releasing is still under way, the
- * instance may still be billed, and its cost is the instance's own, read again every 30 s.
+ * what it has cost and the most it can, and when its checkpoint was last copied home. It stays once the run has ended.
+ * A released run's cost is its instance's own, from the ledger (`GET /api/cloud/instances`), which keeps counting
+ * after the run stopped waiting for the termination; while the provider has not confirmed it, releasing is still under
+ * way and the instance may still be billed, and the instance is read again every 30 s (also while it cannot be read).
  */
 import Check from '$icons/check';
 import TriangleAlert from '$icons/triangle-alert';
@@ -34,16 +35,21 @@ const UNCONFIRMED_POLL_MS = 30_000;
 export default function CloudPanel(props: CloudPanelProps) {
   const provisions = () => props.provisions ?? true;
   const released = computed(() => props.cloud.phase === 'released');
-  // A released run's instance, while the provider has not confirmed its termination (the run stops waiting after a
-  // minute): it may still be billed. Only a provisioned instance, only once released.
+  // A released run's instance in the ledger: its cost, and whether the provider confirmed its termination (the run
+  // stops waiting after a minute; until then it may still be billed). Only a provisioned instance, only once released.
+  const instanceId = computed(() => (released.get() && provisions() ? props.cloud.instance_id : null));
   const instance = new Resource(async (s) => {
-    const id = props.cloud.instance_id;
-    if (!id || !released.get() || !provisions()) return null;
+    const id = instanceId.get();
+    if (!id) return null;
     return (await hub.api.cloudInstances(s)).find((i) => i.id === id) ?? null;
   });
-  const unconfirmed = computed(() => (instance.data && isAlive(instance.data.status) ? instance.data : null));
+  /** The instance of this run (the panel stays when the page moves to another run; an answer for the last one is not this one's). */
+  const own = computed(() => (instance.data && instance.data.id === instanceId.get() ? instance.data : null));
+  const unconfirmed = computed(() => (own.get() && isAlive(own.get()!.status) ? own.get() : null));
+  /** The ledger could not be read: whether the instance is gone is not known. */
+  const unknown = computed(() => !!instanceId.get() && !own.get() && instance.error !== undefined);
   effect(() => {
-    if (!unconfirmed.get()) return;
+    if (!unconfirmed.get() && !unknown.get()) return;
     const t = setInterval(() => {
       if (document.visibilityState === 'visible') void instance.refresh();
     }, UNCONFIRMED_POLL_MS);
@@ -53,8 +59,8 @@ export default function CloudPanel(props: CloudPanelProps) {
   const share = computed(() => transferShare(props.cloud.progress));
   const cost = computed(() => {
     const c = props.cloud;
-    const u = unconfirmed.get();
-    if (u) return u.cost_usd === null ? 'not billed' : `${usd(u.cost_usd)} so far`;
+    const i = own.get();
+    if (i) return i.cost_usd === null ? 'not billed' : isAlive(i.status) ? `${usd(i.cost_usd)} so far` : usd(i.cost_usd);
     return c.cost_usd === null ? 'not billed' : released.get() ? usd(c.cost_usd) : `${usd(c.cost_usd)} so far`;
   });
   const limit = computed(() => {
@@ -108,6 +114,16 @@ export default function CloudPanel(props: CloudPanelProps) {
                 <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
                 <span>
                   Termination not confirmed: the instance may still be billed.{' '}
+                  <a class="link" href={href('/settings?section=cloud')}>
+                    Settings › Cloud
+                  </a>
+                </span>
+              </p>
+            ) : unknown.get() ? (
+              <p class="unconfirmed" role="status">
+                <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
+                <span>
+                  Could not check that the instance is terminated.{' '}
                   <a class="link" href={href('/settings?section=cloud')}>
                     Settings › Cloud
                   </a>

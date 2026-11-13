@@ -86,47 +86,32 @@ export function cloudGpu(run: Pick<Run, 'device'> & { cloud: RunCloud }): string
 /** How far a phase of a finished or running cloud run got, as the Cloud panel marks it. */
 export type PhaseState = 'done' | 'now' | 'next' | 'failed' | 'skipped';
 
-/** The phase a cloud run that failed before training failed in, by its error code (docs/CLOUD.md, Failure). */
-const FAILED_IN: Partial<Record<string, CloudPhase>> = {
-  cloud_auth_failed: 'provisioning',
-  cloud_refused: 'provisioning',
-  cloud_unavailable: 'provisioning',
-  cloud_boot_failed: 'booting',
-  cloud_sync_failed: 'syncing',
-};
-
-/** What a cloud run's phases need of the run: how it ended, and whether it trained at all. */
-export type PhaseRun = Pick<Run, 'status' | 'error_code' | 'step' | 'epoch'>;
+/** What a cloud run's phases need of the run: how it ended. */
+export type PhaseRun = Pick<Run, 'status'>;
 
 /**
  * The phases a cloud run's panel lists, each with its state. A provider that launches nothing (a remote server) has no
- * provisioning or releasing. Live, the phases before the current one are done. Once released, a run that failed is
- * marked where it failed (from its error code) and the phases it never reached are skipped, so a run whose upload
- * failed does not read as trained; one that never trained skips training and the collection. `unconfirmed`: the
- * instance's termination is not confirmed yet (the run stops waiting after a minute), so releasing is still under way.
+ * provisioning or releasing. Live, the phases before the current one are done. Once released, the server says which
+ * phase the run ended in (`ended_in`): the phases before it are done, it is failed for a failed run (not done for one
+ * stopped before training), and the phases after it were never reached, so a run whose upload failed does not read as
+ * trained. A server from before `ended_in` says nothing, and then every phase is done, as it said before.
+ * `unconfirmed`: the instance's termination is not confirmed yet (the run stops waiting after a minute), so releasing
+ * is still under way.
  */
 export function phaseStates(cloud: RunCloud, run: PhaseRun | undefined, provisions: boolean, unconfirmed = false): { phase: CloudPhase; state: PhaseState }[] {
   const shown = provisions ? PHASES : PHASES.filter((p) => p !== 'provisioning' && p !== 'releasing');
   const at = phaseIndex(cloud.phase);
   if (cloud.phase !== 'released') return shown.map((p) => ({ phase: p, state: PHASES.indexOf(p) < at ? 'done' : PHASES.indexOf(p) === at ? 'now' : 'next' }));
-  const trained = !!run && (run.step > 0 || run.epoch > 0);
-  let failed: CloudPhase | null = null;
-  if (run?.status === 'failed') {
-    if (trained) failed = run.error_code === 'cloud_sync_failed' ? 'collecting' : 'training';
-    else failed = (run.error_code && FAILED_IN[run.error_code]) || null;
-    // A remote server is connected to, not provisioned: what fails before the boot fails while connecting.
-    if (failed === 'provisioning' && !provisions) failed = 'booting';
-  }
-  const fi = failed ? PHASES.indexOf(failed) : -1;
+  const ended = cloud.ended_in ? phaseIndex(cloud.ended_in) : -1;
   const releasing = PHASES.indexOf('releasing');
+  const endState = (): PhaseState =>
+    run?.status === 'failed' ? 'failed' : run?.status === 'stopped' && ended < PHASES.indexOf('training') ? 'skipped' : 'done';
   return shown.map((p) => {
     const i = PHASES.indexOf(p);
     if (unconfirmed && p === 'releasing') return { phase: p, state: 'now' };
     if (unconfirmed && p === 'released') return { phase: p, state: 'next' };
-    if (i >= releasing) return { phase: p, state: 'done' };
-    if (fi >= 0) return { phase: p, state: i < fi ? 'done' : i === fi ? 'failed' : 'skipped' };
-    if (!trained && run && (p === 'training' || p === 'collecting')) return { phase: p, state: 'skipped' };
-    return { phase: p, state: 'done' };
+    if (i >= releasing || ended < 0 || i < ended) return { phase: p, state: 'done' };
+    return { phase: p, state: i === ended ? endState() : 'skipped' };
   });
 }
 
