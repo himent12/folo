@@ -17,6 +17,8 @@ use super::{FoloApp, Route};
 /// Image records asked for at a time when a dataset page loads its list (ten of the server's
 /// pages): the grid paints after the first.
 pub(crate) const IMAGE_PAGE: u32 = 10_000;
+/// How long a dataset's image list waits before asking again for a page that failed after the first.
+const IMAGE_PAGE_RETRY: Duration = Duration::from_secs(3);
 
 impl FoloApp {
     // ---------- data ----------
@@ -224,12 +226,26 @@ impl FoloApp {
                 }
                 let page = match r {
                     Ok(p) => p,
-                    Err(e) => {
+                    // A failed first page is the list's error.
+                    Err(e) if offset == 0 => {
                         this.images_more.remove(&id);
-                        // A failed first page is the list's error; a later one keeps what came.
-                        if offset == 0 {
-                            this.store.images.insert(id, Load::Failed(e));
-                        }
+                        this.store.images.insert(id, Load::Failed(e));
+                        return;
+                    }
+                    // A later one keeps what came and asks again in a moment (the server
+                    // restarting, a dropped connection), still "Loading…", never a partial list
+                    // passed off as the whole; a reload or a dropped list ends it.
+                    Err(_) => {
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(IMAGE_PAGE_RETRY).await;
+                            this.update(cx, |this, cx| {
+                                if this.images_more.get(&id) == Some(&generation) {
+                                    this.load_images_from(id, generation, offset, cx);
+                                }
+                            })
+                            .ok();
+                        })
+                        .detach();
                         return;
                     }
                 };

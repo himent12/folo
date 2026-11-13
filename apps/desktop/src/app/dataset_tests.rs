@@ -65,6 +65,67 @@ fn a_large_list_shows_its_first_page_while_the_rest_arrives() {
 }
 
 #[test]
+fn a_page_that_fails_after_the_first_is_asked_for_again() {
+    let api = Arc::new(MockBackend::new(4200, true).with_more_val_images("ds_8f2c", 25_000));
+    let (mut app, window) = open_with(api.clone());
+    api.fail_images_once_from(IMAGE_PAGE);
+    drive(&mut app, window, |this, _, cx| this.ensure_dataset("ds_8f2c", cx));
+    drive(&mut app, window, |this, _, _| {
+        let got = this.store.images.get("ds_8f2c").and_then(|l| l.ready()).map(|v| v.len());
+        assert_eq!(got, Some(IMAGE_PAGE as usize));
+        assert!(this.images_pending("ds_8f2c"), "still loading, not passed off as the whole list");
+    });
+    app.advance_clock(std::time::Duration::from_secs(5));
+    drive(&mut app, window, |this, _, _| {
+        let total = this.store.dataset.get("ds_8f2c").and_then(|l| l.ready()).map(|d| d.splits.total());
+        let got = this.store.images.get("ds_8f2c").and_then(|l| l.ready()).map(|v| v.len() as u64);
+        assert_eq!(got, total);
+        assert!(!this.images_pending("ds_8f2c"));
+    });
+}
+
+#[test]
+fn a_sample_past_the_first_page_opens_on_itself() {
+    let api = Arc::new(MockBackend::new(4200, true).with_more_val_images("ds_8f2c", 25_000));
+    let (mut app, window) = open_with(api.clone());
+    drive(&mut app, window, |this, _, cx| this.ensure_dataset("ds_8f2c", cx));
+    let last = drive(&mut app, window, |this, _, _| {
+        this.store.dataset.get("ds_8f2c").and_then(|l| l.ready()).map(|d| d.splits.total()).unwrap()
+    });
+    let want = format!("img_{last}");
+    drive(&mut app, window, |this, _, _| this.store.images.remove("ds_8f2c"));
+    // The first page in, the second held: the inspector waits for its image.
+    let (first, second) = (api.hold("images"), api.hold("images"));
+    app.update(|cx| {
+        window
+            .update(cx, |this, w, cx| this.open_sample("ds_8f2c".into(), want.clone(), "run_x".into(), w, cx))
+            .unwrap()
+    });
+    app.run_until_held(1);
+    drop(first);
+    while !second.is_held() {
+        app.run_until_held(1);
+    }
+    app.frame(window.into());
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                let i = this.inspector.as_ref().expect("still open");
+                assert_eq!(i.want.as_deref(), Some(want.as_str()), "waiting, not on image 0");
+            })
+            .unwrap()
+    });
+    drop(second);
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let i = this.inspector.as_ref().expect("open");
+        assert!(i.want.is_none());
+        assert_eq!(this.filtered_image("ds_8f2c", i.index).map(|m| m.id.clone()), Some(want.clone()));
+    });
+}
+
+#[test]
 fn a_folder_with_no_usable_image_is_added_with_a_warning() {
     let (mut app, window) = open_with(Arc::new(MockBackend::new(4200, true)));
     drive(&mut app, window, |this, _, cx| {

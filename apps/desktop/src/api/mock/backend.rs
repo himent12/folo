@@ -133,6 +133,16 @@ impl Backend for MockBackend {
 
     fn images(&self, id: &str, q: &ImageQuery) -> ApiResult<ImagePage> {
         self.check()?;
+        {
+            let mut fail = self.fail_images_from.lock().unwrap();
+            if fail.is_some_and(|from| q.offset >= from) {
+                *fail = None;
+                return Err(ApiError::new(
+                    "server_unreachable",
+                    "Could not reach folo serve at 127.0.0.1:7878",
+                ));
+            }
+        }
         let f = self.fixture(id)?;
         let matching: Vec<&ImageInfo> = f
             .images
