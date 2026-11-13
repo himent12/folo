@@ -471,6 +471,34 @@ impl FoloApp {
         if matches!(self.store.runs, Load::Ready(_)) {
             self.refresh_runs(cx);
         }
+        // The stream sends at most ~10 steps a second (docs/API.md), so what a page watched live
+        // holds is thinned: its loss line and smoothed loss were not the file's. Final now, the
+        // whole history is read again (in place: the charts stay while it is out), as Studio does.
+        if matches!(self.store.run_data.get(id), Some(Load::Ready(_))) {
+            self.reload_run_history(id, cx);
+        }
+    }
+
+    /// A run's metric history read again over the one shown, which stays until the answer is in
+    /// (and if it fails).
+    fn reload_run_history(&mut self, id: &str, cx: &mut Context<Self>) {
+        let spe = self.store.run(id).map_or(1, |r| r.steps_per_epoch);
+        let ticket = self.history_ticket(id, "metrics");
+        let (rid, key) = (id.to_string(), id.to_string());
+        self.fetch(
+            cx,
+            move |api| api.metrics(&rid),
+            move |this, r, cx| {
+                if this.history_tickets.get(&(key.clone(), "metrics")) != Some(&ticket) {
+                    return;
+                }
+                // Dropped meanwhile (the run deleted): not brought back.
+                if let (Ok(m), Some(Load::Ready(_))) = (r, this.store.run_data.get(&key)) {
+                    this.store.install_run_data(&key, Ok(RunData::new(m, spe)));
+                    cx.notify();
+                }
+            },
+        );
     }
 
     /// Reload the run list in place (no loading state) and subscribe to whatever is active.
