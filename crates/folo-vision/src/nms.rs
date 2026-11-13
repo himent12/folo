@@ -22,6 +22,7 @@
 //! cost is therefore `O(n log n + max_det * n)` instead of the `O(n²)` worst case of textbook greedy NMS.
 
 use crate::boxes::Xyxy;
+use crate::fusion::{BoxFusion, FUSION_IOU, fuse_boxes};
 use crate::model::HeadMode;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,12 @@ pub struct NmsConfig {
     pub agnostic: bool,
     /// One candidate per (anchor, class) pair above `conf` instead of one per anchor (its best class).
     pub multi_label: bool,
+    /// Refine each kept box from its NMS cluster ([`crate::fusion`], docs/MODEL.md §9.4). Off by default. Not used
+    /// by the NMS-free `o2o` selection, which has no clusters.
+    pub fusion: BoxFusion,
+    /// The cluster of a kept box for [`NmsConfig::fusion`]: the candidates of its class (any class with
+    /// `agnostic`) whose IoU with it is `>=` this.
+    pub fusion_iou: f32,
 }
 
 impl Default for NmsConfig {
@@ -79,6 +86,8 @@ impl Default for NmsConfig {
             classes: None,
             agnostic: false,
             multi_label: false,
+            fusion: BoxFusion::None,
+            fusion_iou: FUSION_IOU,
         }
     }
 }
@@ -235,9 +244,19 @@ struct Cand {
     class: u32,
 }
 
+/// Per-side precisions ([`crate::decode::side_precision`]) of the candidates' sources, by source index (anchor
+/// or input position): what [`BoxFusion::Dfl`] weighs a cluster member's sides by. `None`: equal precisions.
+pub type Precisions<'a> = Option<&'a [[f32; 4]]>;
+
 /// Cap the candidates (given in `(idx, class)` order) at the `cap` best by score, ties to the earlier candidate,
-/// then run batched NMS and build the detections.
-fn finish(mut cands: Vec<Cand>, cfg: &NmsConfig, bbox_of: impl Fn(u32) -> Xyxy) -> Vec<Detection> {
+/// then run batched NMS, fuse the kept boxes when [`NmsConfig::fusion`] asks for it (with `precision`, indexed by
+/// source index, for [`BoxFusion::Dfl`]), and build the detections.
+fn finish(
+    mut cands: Vec<Cand>,
+    cfg: &NmsConfig,
+    bbox_of: impl Fn(u32) -> Xyxy,
+    precision: Precisions,
+) -> Vec<Detection> {
     if cands.len() > cfg.max_candidates {
         if cfg.max_candidates == 0 {
             return Vec::new();
@@ -254,9 +273,25 @@ fn finish(mut cands: Vec<Cand>, cfg: &NmsConfig, bbox_of: impl Fn(u32) -> Xyxy) 
     let boxes: Vec<Xyxy> = cands.iter().map(|c| bbox_of(c.idx)).collect();
     let scores: Vec<f32> = cands.iter().map(|c| c.score).collect();
     let classes: Vec<u32> = cands.iter().map(|c| c.class).collect();
-    batched_nms(&boxes, &scores, &classes, cfg.iou, cfg.max_det, cfg.agnostic)
-        .into_iter()
-        .map(|k| Detection { bbox: boxes[k], score: scores[k], class: classes[k] })
+    let kept = batched_nms(&boxes, &scores, &classes, cfg.iou, cfg.max_det, cfg.agnostic);
+    let fused = match cfg.fusion {
+        BoxFusion::None => None,
+        BoxFusion::Vote => {
+            Some(fuse_boxes(&kept, &boxes, &scores, &classes, cfg.agnostic, cfg.fusion_iou, None))
+        }
+        BoxFusion::Dfl => {
+            let of = precision.map(|p| move |k: usize| p[cands[k].idx as usize]);
+            let of = of.as_ref().map(|f| f as &dyn Fn(usize) -> [f32; 4]);
+            Some(fuse_boxes(&kept, &boxes, &scores, &classes, cfg.agnostic, cfg.fusion_iou, of))
+        }
+    };
+    kept.iter()
+        .enumerate()
+        .map(|(i, &k)| Detection {
+            bbox: fused.as_ref().map_or(boxes[k], |f| f[i]),
+            score: scores[k],
+            class: classes[k],
+        })
         .collect()
 }
 
@@ -276,7 +311,7 @@ pub fn nms_detections(dets: &[Detection], cfg: &NmsConfig) -> Vec<Detection> {
         .filter(|(_, d)| d.score > cfg.conf && class_allowed(cfg, d.class))
         .map(|(i, d)| Cand { score: d.score, idx: i as u32, class: d.class })
         .collect();
-    finish(cands, cfg, |i| dets[i as usize].bbox)
+    finish(cands, cfg, |i| dets[i as usize].bbox, None)
 }
 
 /// The detector post-process for one image.
@@ -296,6 +331,22 @@ pub fn non_max_suppression(
     num_classes: usize,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
+    non_max_suppression_with(boxes, scores, None, num_classes, cfg)
+}
+
+/// [`non_max_suppression`] with the anchors' side precisions (`[A]`, [`crate::decode::side_precisions`]) for
+/// [`BoxFusion::Dfl`]; `None` weighs every side alike.
+///
+/// # Panics
+/// As [`non_max_suppression`], or if `precision` is not `[A]`.
+pub fn non_max_suppression_with(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    precision: Precisions,
+    num_classes: usize,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
+    assert!(precision.is_none_or(|p| p.len() == boxes.len()), "non_max_suppression: precision must be [A]");
     assert_eq!(
         scores.len(),
         boxes.len() * num_classes,
@@ -306,7 +357,7 @@ pub fn non_max_suppression(
         return Vec::new();
     }
     let cands = extract_candidates(scores, boxes.len(), num_classes, num_classes, 0, cfg);
-    finish(cands, cfg, |i| boxes[i as usize])
+    finish(cands, cfg, |i| boxes[i as usize], precision)
 }
 
 /// [`non_max_suppression`] of one image's decoded outputs as rows `[A, 4 + num_classes]` (`x1, y1, x2, y2`, then
@@ -315,6 +366,19 @@ pub fn non_max_suppression(
 /// # Panics
 /// If `rows.len()` is not a multiple of `4 + num_classes`, or there are more than `u32::MAX` anchors.
 pub fn non_max_suppression_rows(rows: &[f32], num_classes: usize, cfg: &NmsConfig) -> Vec<Detection> {
+    non_max_suppression_rows_with(rows, None, num_classes, cfg)
+}
+
+/// [`non_max_suppression_rows`] with the anchors' side precisions (`[A]`) for [`BoxFusion::Dfl`].
+///
+/// # Panics
+/// As [`non_max_suppression_rows`], or if `precision` is not `[A]`.
+pub fn non_max_suppression_rows_with(
+    rows: &[f32],
+    precision: Precisions,
+    num_classes: usize,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
     let w = 4 + num_classes;
     assert!(rows.len().is_multiple_of(w), "non_max_suppression_rows: rows must be [A, 4 + num_classes]");
     let a = rows.len() / w;
@@ -322,11 +386,13 @@ pub fn non_max_suppression_rows(rows: &[f32], num_classes: usize, cfg: &NmsConfi
     if num_classes == 0 || a == 0 {
         return Vec::new();
     }
+    assert!(precision.is_none_or(|p| p.len() == a), "non_max_suppression_rows: precision must be [A]");
     let cands = extract_candidates(rows, a, num_classes, w, 4, cfg);
-    finish(cands, cfg, |i| {
+    let bbox_of = |i: u32| {
         let r = &rows[i as usize * w..];
         Xyxy::new(r[0], r[1], r[2], r[3])
-    })
+    };
+    finish(cands, cfg, bbox_of, precision)
 }
 
 /// Multi-label [`non_max_suppression_rows`] from the `(anchor, class, score)` pairs whose score is `> conf`, in any
@@ -334,8 +400,18 @@ pub fn non_max_suppression_rows(rows: &[f32], num_classes: usize, cfg: &NmsConfi
 /// box of anchor `i` from `bbox_of(i)`. Given exactly the pairs above `conf` of the same scores, the result is that
 /// of [`non_max_suppression_rows`] (the pairs are put back in its `(anchor, class)` order). Needs `multi_label`.
 pub fn non_max_suppression_pairs(
+    pairs: Vec<(u32, u32, f32)>,
+    bbox_of: impl Fn(u32) -> Xyxy,
+    cfg: &NmsConfig,
+) -> Vec<Detection> {
+    non_max_suppression_pairs_with(pairs, bbox_of, None, cfg)
+}
+
+/// [`non_max_suppression_pairs`] with the anchors' side precisions (indexed by anchor) for [`BoxFusion::Dfl`].
+pub fn non_max_suppression_pairs_with(
     mut pairs: Vec<(u32, u32, f32)>,
     bbox_of: impl Fn(u32) -> Xyxy,
+    precision: Precisions,
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
     debug_assert!(cfg.multi_label, "non_max_suppression_pairs is the multi-label path");
@@ -345,7 +421,7 @@ pub fn non_max_suppression_pairs(
         .filter(|&(_, c, s)| s > cfg.conf && class_allowed(cfg, c))
         .map(|(idx, class, score)| Cand { score, idx, class })
         .collect();
-    finish(cands, cfg, bbox_of)
+    finish(cands, cfg, bbox_of, precision)
 }
 
 /// The candidates of `anchors` score rows (row `a` is `data[a * stride + offset..][..num_classes]`), in anchor
@@ -423,7 +499,16 @@ pub struct Candidate {
 /// # Panics
 /// If there are more than `u32::MAX` candidates.
 pub fn nms_candidates(cands: &[Candidate], cfg: &NmsConfig) -> Vec<Detection> {
+    nms_candidates_with(cands, None, cfg)
+}
+
+/// [`nms_candidates`] with each candidate's side precisions (parallel to `cands`) for [`BoxFusion::Dfl`].
+///
+/// # Panics
+/// As [`nms_candidates`], or if `precision` is not as long as `cands`.
+pub fn nms_candidates_with(cands: &[Candidate], precision: Precisions, cfg: &NmsConfig) -> Vec<Detection> {
     assert!(cands.len() <= u32::MAX as usize, "nms_candidates: too many candidates");
+    assert!(precision.is_none_or(|p| p.len() == cands.len()), "nms_candidates: precision must match cands");
     debug_assert!(cands.windows(2).all(|w| w[0].anchor < w[1].anchor), "nms_candidates: unsorted");
     // Positions in anchor order tie-break exactly as anchor indices do.
     let list: Vec<Cand> = cands
@@ -432,7 +517,7 @@ pub fn nms_candidates(cands: &[Candidate], cfg: &NmsConfig) -> Vec<Detection> {
         .filter(|(_, c)| c.score > cfg.conf && class_allowed(cfg, c.class))
         .map(|(i, c)| Cand { score: c.score, idx: i as u32, class: c.class })
         .collect();
-    finish(list, cfg, |i| cands[i as usize].bbox)
+    finish(list, cfg, |i| cands[i as usize].bbox, precision)
 }
 
 /// Ranks `(score, key)` pairs by descending score, ties by ascending key (NaN never reaches here: it fails every
@@ -547,8 +632,20 @@ pub fn postprocess(
     cfg: &NmsConfig,
     mode: HeadMode,
 ) -> Vec<Detection> {
+    postprocess_with(boxes, scores, None, num_classes, cfg, mode)
+}
+
+/// [`postprocess`] with the anchors' side precisions (`[A]`) for [`BoxFusion::Dfl`] (unused by `o2o`).
+pub fn postprocess_with(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    precision: Precisions,
+    num_classes: usize,
+    cfg: &NmsConfig,
+    mode: HeadMode,
+) -> Vec<Detection> {
     match mode {
-        HeadMode::O2m => non_max_suppression(boxes, scores, num_classes, cfg),
+        HeadMode::O2m => non_max_suppression_with(boxes, scores, precision, num_classes, cfg),
         HeadMode::O2o => topk_detections(boxes, scores, num_classes, cfg),
     }
 }

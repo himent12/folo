@@ -216,6 +216,7 @@ impl Engine {
             max_det: NmsConfig::val().max_det,
             rect: false,
             head: None,
+            ..PredictConfig::default()
         };
         Predictor::new(model, cfg).map_err(engine_error)
     }

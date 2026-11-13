@@ -970,6 +970,59 @@ index then class), keep at most 30000, run greedy class-aware NMS (a candidate i
 same class has plain IoU `> iou`), keep the first `max_det`, then map boxes back (§9.2). Output per image:
 `[x1, y1, x2, y2, score, class]`, sorted by score.
 
+### 9.4 Box fusion (opt-in)
+Off by default (`NmsConfig::fusion = none`; every published number is without it). `folo val` / `folo predict`
+`--fusion vote|dfl [--fusion-iou 0.75]` refine each box NMS keeps from the candidates it suppressed
+(`crates/folo-vision/src/fusion.rs`). Scores, classes, which candidates are kept and their order stay NMS's; only the
+four edges move.
+
+**Cluster.** For a kept candidate `k`, `C(k)` is every candidate `j` that entered NMS (score `> conf`, class filter,
+the 30000 cap) with `class_j = class_k` (any class with `agnostic`) and `IoU(b_k, b_j) >= fusion_iou`, computed in
+f32 as NMS computes it; `k ∈ C(k)`.
+
+**Fused edge.** For each side `e ∈ {x1, y1, x2, y2}`, with member weights `w_{j,e}`:
+
+    x̂_{k,e} = Σ_{j ∈ C(k), w_{j,e} > 0} w_{j,e} · x_{j,e}  /  Σ_{j ∈ C(k), w_{j,e} > 0} w_{j,e}
+
+summed in f64 in candidate order (anchor, then class), rounded to f32; a side with no positive weight keeps `x_{k,e}`.
+
+- `vote` (score-weighted box voting): `w_{j,e} = score_j`.
+- `dfl` (DFL evidence fusion): `w_{j,e} = score_j · π_{j,e}`, the member's precision on that side, read from its DFL
+  distribution (§6.4, `reg_max = R = 16` bins of `stride` pixels). With `p_i = softmax(logits_{j,e})_i`,
+  `μ = Σ_i p_i · i`, `σ² = Σ_i p_i · i² − μ²` (bins²) and `f = μ − ⌊μ⌋`:
+
+      π_{j,e} = 1 / ( s_j² · ( max(σ² − f·(1 − f), 0) + ε ) ),   ε = 0.1 bins²,  s_j = the anchor's stride
+
+  `f·(1 − f)` is the variance DFL's own two-bin target has for a distance `f` of the way between two bins (§7.4), so
+  a perfectly certain side between bins has excess variance 0, like one on a bin; `s_j²` converts bins² to pixels², so
+  across pyramid levels a stride-8 member is trusted 16 times a stride-32 member with the same distribution. An
+  anchor near an object's left edge typically knows that edge sharply and the far edge vaguely, so its left edge
+  counts for more than its right. There is no censoring guard: a side piled on bin `R − 1` (or 0) has `σ² ≈ 0` and
+  the highest precision `1 / (s² · ε)`, like any certain side (a guard was measured and changed nothing; such
+  sides are rare, docs/notes/hill/r3-fusion.md).
+
+**Ties and edge cases.** Membership is `>=` on the f32 IoU (a member at exactly `fusion_iou` is in). A member side whose
+weight is not `> 0` (a zero score, a NaN, a zero precision) or whose edge is not finite is left out of that side's
+sums. Sums run in candidate
+order, so the result does not depend on threads or on other classes' candidates, and identical inputs give
+identical boxes.
+
+**Where the moments come from.** On the CPU, from the logits, in f32, with the same accumulation as the decode's
+expectation (the mean is the decoded distance bit for bit). On a GPU, the device computes `Σ p_i · i` and
+`Σ p_i · i²` per anchor and side (`HeadOutput::moments_on_device`, `[B, 8, A]`, an eighth of the logits) and the host
+takes `σ² = max(m₂ − μ², 0)`; the full decode, the CPU candidate path and the device candidate path give the same
+detections up to that float rounding. Callers with boxes but no logits (`nms_detections`, `Predictor::finish` as
+folo-wasm uses it) weigh every side alike, which is `vote`. The NMS-free `o2o` selection has no clusters and ignores
+`fusion`. ONNX export does not include it.
+
+**Chosen how.** Hill-climb 3's lane `fusion` (docs/notes/hill/r3-fusion.md) compared hard-NMS settings, Soft-NMS,
+Matrix NMS, per-level score offsets, DFL temperature and windowed expectations, box voting variants, lattice pooling
+of the distributions and this fusion on 5000 seeded train2017 images (folo-n v1, v2 and folo-s), then read val2017
+once. The best combination for COCO AP is `--fusion dfl --iou 0.65 --max-det 1000` (`fusion_iou` 0.75). On
+val2017 it adds +0.0043 (folo-n-coco), +0.0034 (folo-n-coco-v2) and +0.0025 (folo-s-coco) AP over §9.3, of which
+voting alone gives most; the DFL weights add +0.0003 to +0.0010 over voting (paired bootstrap intervals in the note).
+Cost per image at batch 1: ~0.01–0.15 ms on the CPU (conf 0.25 / 0.001), ~0.3 ms on a GPU (the moments readback).
+
 ## 10. Verification plan
 
 ### 10.1 Block unit tests (folo-nn / folo-vision)

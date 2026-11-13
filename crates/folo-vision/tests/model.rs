@@ -546,10 +546,12 @@ fn config_serde_and_seeds() {
 
 /// `HeadOutput::detections` on the CPU (anchors prefiltered by their largest logit, only candidates decoded,
 /// in blocks of 1024 anchors on the rayon pool) is bit for bit the full decode + `non_max_suppression`, on a
-/// small grid (one block) and on a 640×384 one (5040 anchors, five blocks).
+/// small grid (one block) and on a 640×384 one (5040 anchors, five blocks); with box voting and DFL fusion too
+/// (the candidates' side precisions read in the blocks, the full decode's from every anchor).
 #[test]
 fn cpu_detections_match_full_decode() {
-    use folo_vision::nms::{NmsConfig, non_max_suppression};
+    use folo_vision::fusion::BoxFusion;
+    use folo_vision::nms::{NmsConfig, non_max_suppression, non_max_suppression_with};
     let rng = &mut folo_core::rng::Rng::seed(11);
     let m = model("n", 7);
     let cases = [
@@ -590,6 +592,22 @@ fn cpu_detections_match_full_decode() {
         };
         assert!(shared.box_raw.same_storage(&shared.cls_raw));
         assert_eq!(shared.detections(&cfg).unwrap(), want, "{cfg:?}, one storage");
+        let prec = out.side_precisions().unwrap();
+        for fusion in [BoxFusion::Vote, BoxFusion::Dfl] {
+            let cfg = NmsConfig { fusion, fusion_iou: 0.5, ..cfg.clone() };
+            let fused: Vec<_> = out
+                .decode_images()
+                .unwrap()
+                .iter()
+                .zip(&prec)
+                .map(|((bx, sc), p)| non_max_suppression_with(bx, sc, Some(p), nc, &cfg))
+                .collect();
+            assert_eq!(out.detections(&cfg).unwrap(), fused, "{cfg:?}");
+            assert_eq!(
+                fused.iter().map(Vec::len).collect::<Vec<_>>(),
+                want.iter().map(Vec::len).collect::<Vec<_>>()
+            );
+        }
     }
 }
 

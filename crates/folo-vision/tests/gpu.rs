@@ -315,16 +315,22 @@ fn device_candidates_and_detections_match_cpu() {
                 }
             }
         }
-        let nms = NmsConfig { conf, iou: 0.6, ..NmsConfig::default() };
-        let want = cpu.detections(&nms).unwrap();
-        let got = gpu.detections(&nms).unwrap();
-        assert_eq!(got.len(), want.len());
-        for (g, w) in got.iter().zip(&want) {
-            assert_eq!(g.len(), w.len(), "detections per image");
-            for (x, y) in g.iter().zip(w) {
-                assert_eq!(x.class, y.class);
-                assert!((x.score - y.score).abs() <= 1e-6);
-                assert!((x.bbox.x1 - y.bbox.x1).abs() <= 1e-2 && (x.bbox.y2 - y.bbox.y2).abs() <= 1e-2);
+        // Plain NMS, and DFL fusion (the side moments computed on the device for the GPU's candidates, read from
+        // the logits on the host for the CPU's): the same detections up to float rounding.
+        for fusion in [folo_vision::fusion::BoxFusion::None, folo_vision::fusion::BoxFusion::Dfl] {
+            let nms = NmsConfig { conf, iou: 0.6, fusion, fusion_iou: 0.5, ..NmsConfig::default() };
+            let want = cpu.detections(&nms).unwrap();
+            let got = gpu.detections(&nms).unwrap();
+            assert_eq!(got.len(), want.len());
+            for (g, w) in got.iter().zip(&want) {
+                assert_eq!(g.len(), w.len(), "detections per image");
+                for (x, y) in g.iter().zip(w) {
+                    assert_eq!(x.class, y.class);
+                    assert!((x.score - y.score).abs() <= 1e-6);
+                    for (a, b) in x.bbox.to_array().iter().zip(y.bbox.to_array()) {
+                        assert!((a - b).abs() <= 1e-2, "{fusion:?}: {:?} vs {:?}", x.bbox, y.bbox);
+                    }
+                }
             }
         }
     }

@@ -302,6 +302,27 @@ impl From<HeadArg> for folo_vision::model::HeadMode {
     }
 }
 
+/// Box fusion after NMS (docs/MODEL.md §9.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum FusionArg {
+    /// The kept boxes as NMS keeps them.
+    None,
+    /// Score-weighted box voting.
+    Vote,
+    /// DFL evidence fusion: score times per-side DFL certainty.
+    Dfl,
+}
+
+impl From<FusionArg> for folo_vision::fusion::BoxFusion {
+    fn from(f: FusionArg) -> Self {
+        match f {
+            FusionArg::None => folo_vision::fusion::BoxFusion::None,
+            FusionArg::Vote => folo_vision::fusion::BoxFusion::Vote,
+            FusionArg::Dfl => folo_vision::fusion::BoxFusion::Dfl,
+        }
+    }
+}
+
 /// Dataset split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum SplitArg {
@@ -337,6 +358,17 @@ pub struct ValArgs {
     /// NMS IoU threshold.
     #[arg(long, default_value_t = 0.7)]
     pub iou: f32,
+    /// Maximum detections per image (COCO's AP reads the best 100 of them).
+    #[arg(long, default_value_t = 300)]
+    pub max_det: u32,
+    /// Refine each kept box from its NMS cluster (docs/MODEL.md §9.4): `vote` moves each side to the
+    /// score-weighted mean of its cluster, `dfl` weighs each member's side by its score times the certainty of its
+    /// DFL distribution. Off by default.
+    #[arg(long, value_enum, default_value_t = FusionArg::None)]
+    pub fusion: FusionArg,
+    /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
+    #[arg(long, default_value_t = folo_vision::fusion::FUSION_IOU)]
+    pub fusion_iou: f32,
     /// Head to evaluate [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`
     /// evaluates such a model's one-to-many branch with NMS.
     #[arg(long, value_enum)]
@@ -383,6 +415,14 @@ pub struct PredictArgs {
     /// Maximum detections per image.
     #[arg(long, default_value_t = 300)]
     pub max_det: u32,
+    /// Refine each kept box from its NMS cluster (docs/MODEL.md §9.4): `vote` moves each side to the
+    /// score-weighted mean of its cluster, `dfl` weighs each member's side by its score times the certainty of its
+    /// DFL distribution. Off by default.
+    #[arg(long, value_enum, default_value_t = FusionArg::None)]
+    pub fusion: FusionArg,
+    /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
+    #[arg(long, default_value_t = folo_vision::fusion::FUSION_IOU)]
+    pub fusion_iou: f32,
     /// Head to predict with [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`
     /// uses such a model's one-to-many branch with NMS.
     #[arg(long, value_enum)]

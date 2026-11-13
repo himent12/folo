@@ -30,6 +30,7 @@ pub mod cocoeval;
 pub mod decode;
 mod error;
 pub mod export;
+pub mod fusion;
 pub mod loss;
 pub mod metrics;
 pub mod model;

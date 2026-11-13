@@ -112,6 +112,46 @@ pub fn softmax_expectation(logits: &[f32]) -> f32 {
     e / z
 }
 
+/// Mean and variance (in bins and bins²) of `softmax(logits)` over the bin indices, computed stably
+/// (max-subtracted); the mean is [`softmax_expectation`]'s. `(0, 0)` for an empty slice.
+#[inline]
+pub fn softmax_moments(logits: &[f32]) -> (f32, f32) {
+    if logits.is_empty() {
+        return (0.0, 0.0);
+    }
+    let m = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let (mut z, mut e, mut e2) = (0.0f32, 0.0f32, 0.0f32);
+    for (i, &l) in logits.iter().enumerate() {
+        let p = (l - m).exp();
+        let k = i as f32;
+        z += p;
+        e += p * k;
+        e2 += p * k * k;
+    }
+    let mean = e / z;
+    (mean, (e2 / z - mean * mean).max(0.0))
+}
+
+/// The side precision of DFL evidence fusion (docs/MODEL.md §9.4) for a side whose distribution has `mean` and
+/// `var` (bins, bins²) at an anchor of stride `stride`: `1 / (stride² · (max(var − f·(1 − f), 0) + ε))` with
+/// `f = mean − floor(mean)` and `ε =` [`crate::fusion::DFL_FUSION_EPS`]. `f·(1 − f)` is the variance DFL trains a
+/// perfectly certain edge at `mean` to (its two neighbouring bins), so only the excess is uncertainty.
+#[inline]
+pub fn side_precision(mean: f32, var: f32, stride: f32) -> f32 {
+    let f = mean - mean.floor();
+    let excess = (var - f * (1.0 - f)).max(0.0);
+    1.0 / (stride * stride * (excess + crate::fusion::DFL_FUSION_EPS))
+}
+
+/// The four [`side_precision`]s (`l, t, r, b`) of one anchor from its `4 * reg_max` DFL logits (one row of
+/// [`dfl_decode_into`]'s `reg`), at `stride`.
+pub fn side_precisions(row: &[f32], reg_max: usize, stride: f32) -> [f32; 4] {
+    std::array::from_fn(|side| {
+        let (mean, var) = softmax_moments(&row[side * reg_max..(side + 1) * reg_max]);
+        side_precision(mean, var, stride)
+    })
+}
+
 /// DFL decode: `reg` `[A, 4 * reg_max]` → `out` `[A, 4]` `ltrb` distances in stride units.
 ///
 /// # Panics

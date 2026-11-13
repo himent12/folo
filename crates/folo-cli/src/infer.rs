@@ -84,7 +84,16 @@ fn precision_of(model: &FoloModel) -> Precision {
     if model.dtype() == Precision::F16.dtype() { Precision::F16 } else { Precision::F32 }
 }
 
+/// `--fusion-iou` is an IoU: in `0..=1` (a NaN would put every candidate of a class in every cluster).
+fn check_fusion_iou(v: f32) -> Result<(), CliError> {
+    if (0.0..=1.0).contains(&v) {
+        return Ok(());
+    }
+    Err(CliError::new(ExitCode::Usage, "usage", format!("--fusion-iou must be in 0..=1, got {v}")))
+}
+
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
+    check_fusion_iou(args.fusion_iou)?;
     let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
     let model = open_model("val", &args.model, &args.device, args.half, args.tensor_cores, &shape)?;
     let split = match args.split {
@@ -117,7 +126,14 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         None
     };
     let cfg = ValConfig {
-        nms: NmsConfig { conf: args.conf, iou: args.iou, ..NmsConfig::val() },
+        nms: NmsConfig {
+            conf: args.conf,
+            iou: args.iou,
+            max_det: args.max_det.max(1) as usize,
+            fusion: args.fusion.into(),
+            fusion_iou: args.fusion_iou,
+            ..NmsConfig::val()
+        },
         samples: 0,
         workers: args.workers.unwrap_or_else(folo_vision::train::default_workers),
         keep_detections: coco_gt.is_some(),
@@ -174,6 +190,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         "device": device,
         "dtype": precision,
         "head": head,
+        "fusion": cfg.nms.fusion.as_str(),
         "seconds": r.seconds,
         "coco": coco,
     }));
@@ -311,6 +328,7 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
+    check_fusion_iou(args.fusion_iou)?;
     let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
     let model = open_model("predict", &args.model, &args.device, args.half, args.tensor_cores, &shape)?;
     let images = collect_images(&args.sources)?;
@@ -321,6 +339,8 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         max_det: args.max_det.max(1) as usize,
         rect: true,
         head: args.head.map(Into::into),
+        fusion: args.fusion.into(),
+        fusion_iou: args.fusion_iou,
     };
     let predictor = Predictor::new(model, cfg).map_err(|e| engine_error("predict", e))?;
     let destinations = match &args.save {

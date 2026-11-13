@@ -100,6 +100,7 @@ fn cpu_matches_predictor() {
         max_det: OPTS.max_det,
         rect: true,
         head: None,
+        ..PredictConfig::default()
     };
     let p = Predictor::new(m, cfg).unwrap();
     let want = p.predict(&rgba_to_image(&img, w, h).unwrap()).unwrap();

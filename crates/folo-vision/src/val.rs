@@ -16,6 +16,7 @@ use serde::Serialize;
 
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
+use crate::fusion::BoxFusion;
 use crate::metrics::{EvalReport, Evaluator, Truth};
 use crate::model::{FoloModel, HeadMode};
 use crate::nms::{Detection, NmsConfig};
@@ -153,11 +154,17 @@ fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) ->
     }
     let n = &cfg.nms;
     let unit = |x: f32| (0.0..=1.0).contains(&x); // false for NaN
-    if !unit(n.conf) || !unit(n.iou) || !unit(cfg.sample_conf) || n.max_det == 0 || n.max_candidates == 0 {
+    if !unit(n.conf)
+        || !unit(n.iou)
+        || !unit(n.fusion_iou)
+        || !unit(cfg.sample_conf)
+        || n.max_det == 0
+        || n.max_candidates == 0
+    {
         return Err(Error::Config(format!(
-            "validation needs conf, iou and sample_conf in 0..=1 and max_det, max_candidates >= 1; got conf {} iou \
-             {} sample_conf {} max_det {} max_candidates {}",
-            n.conf, n.iou, cfg.sample_conf, n.max_det, n.max_candidates
+            "validation needs conf, iou, fusion_iou and sample_conf in 0..=1 and max_det, max_candidates >= 1; got \
+             conf {} iou {} fusion_iou {} sample_conf {} max_det {} max_candidates {}",
+            n.conf, n.iou, n.fusion_iou, cfg.sample_conf, n.max_det, n.max_candidates
         )));
     }
     let head = cfg.head.unwrap_or(model.head_mode());
@@ -225,6 +232,12 @@ fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) ->
             let (nc, mode) = (output.num_classes, output.mode);
             let a = output.num_anchors();
             let cap = pair_capacity(most.load(Ordering::Relaxed), a, nc);
+            // DFL fusion's side precisions, read before the decode is handed over (`None` unless asked for).
+            let prec = if cfg.nms.fusion == BoxFusion::Dfl && mode == HeadMode::O2m {
+                Some(output.side_precisions()?)
+            } else {
+                None
+            };
             let images = if output.box_raw.device().is_cpu() {
                 Outputs::Host(output.decode_images()?)
             } else if let Some(cap) = cap
@@ -242,7 +255,7 @@ fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) ->
                 Outputs::Device(output.decoded_on_device()?, a)
             };
             drop(output);
-            if tx.send(Decoded { images, nc, mode, truths, meta: batch.meta }).is_err() {
+            if tx.send(Decoded { images, prec, nc, mode, truths, meta: batch.meta }).is_err() {
                 break; // the post-processing thread failed; joining it below reports why
             }
         }
@@ -257,6 +270,8 @@ fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) ->
 /// One batch's decoded outputs and ground truth, on their way to [`Post`].
 struct Decoded {
     images: Outputs,
+    /// Per image, every anchor's side precisions for [`BoxFusion::Dfl`].
+    prec: Option<Vec<Vec<[f32; 4]>>>,
     nc: usize,
     mode: HeadMode,
     truths: Vec<Vec<Truth>>,
@@ -320,23 +335,30 @@ struct Post<'a> {
 impl Post<'_> {
     fn add(&mut self, d: Decoded, ds: &dyn Dataset, cfg: &ValConfig) -> Result<()> {
         use rayon::prelude::*;
-        let Decoded { images, nc, mode, truths, meta } = d;
-        let post = |(b, s): (Vec<Xyxy>, Vec<f32>)| crate::nms::postprocess(&b, &s, nc, &cfg.nms, mode);
+        let Decoded { images, prec, nc, mode, truths, meta } = d;
+        let prec_of = |i: usize| prec.as_ref().map(|p| p[i].as_slice());
+        let post = |(i, (b, s)): (usize, (Vec<Xyxy>, Vec<f32>))| {
+            crate::nms::postprocess_with(&b, &s, prec_of(i), nc, &cfg.nms, mode)
+        };
         let dets: Vec<Vec<Detection>> = match images {
-            Outputs::Host(images) => images.into_par_iter().map(post).collect(),
+            Outputs::Host(images) => images.into_par_iter().enumerate().map(post).collect(),
             Outputs::Device(t, a) => {
                 let all = t.to_vec::<f32>()?;
                 if mode == HeadMode::O2m {
                     // NMS straight from the downloaded rows, without splitting them into boxes and scores.
                     all.par_chunks_exact(a * (4 + nc))
-                        .map(|rows| crate::nms::non_max_suppression_rows(rows, nc, &cfg.nms))
+                        .enumerate()
+                        .map(|(i, rows)| {
+                            crate::nms::non_max_suppression_rows_with(rows, prec_of(i), nc, &cfg.nms)
+                        })
                         .collect()
                 } else {
-                    crate::model::HeadOutput::split_decoded(&all, a, nc).into_par_iter().map(post).collect()
+                    let images = crate::model::HeadOutput::split_decoded(&all, a, nc);
+                    images.into_par_iter().enumerate().map(post).collect()
                 }
             }
             Outputs::Pairs { pairs, boxes, decoded, cap, anchors: a } => {
-                self.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &cfg.nms)?
+                self.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &cfg.nms, prec.as_deref())?
             }
         };
         for (i, dets) in dets.into_iter().enumerate() {
@@ -385,6 +407,7 @@ impl Post<'_> {
         a: usize,
         nc: usize,
         nms: &NmsConfig,
+        prec: Option<&[Vec<[f32; 4]>]>,
     ) -> Result<Vec<Vec<Detection>>> {
         use rayon::prelude::*;
         let words = pairs.to_vec::<u32>()?;
@@ -410,8 +433,9 @@ impl Post<'_> {
         (0..b)
             .into_par_iter()
             .map(|i| {
+                let p = prec.map(|p| p[i].as_slice());
                 if let Some(rows) = &full[i] {
-                    return Ok(crate::nms::non_max_suppression_rows(rows, nc, nms));
+                    return Ok(crate::nms::non_max_suppression_rows_with(rows, p, nc, nms));
                 }
                 let n = counts[i];
                 let recs = &words[i * region + 1..][..folo_gpu::detect::CANDIDATE_RECORD_WORDS * n];
@@ -431,7 +455,7 @@ impl Post<'_> {
                     let j = j as usize;
                     Xyxy::new(bx[j], bx[a + j], bx[2 * a + j], bx[3 * a + j])
                 };
-                Ok(crate::nms::non_max_suppression_pairs(list, bbox, nms))
+                Ok(crate::nms::non_max_suppression_pairs_with(list, bbox, p, nms))
             })
             .collect()
     }
@@ -504,7 +528,14 @@ mod tests {
             folo_data::ImageMeta { index: 0, orig_size: [320, 240], ratio: [2.0, 2.0], pad: [0.0, 80.0] };
         let truth = Truth { bbox: Xyxy::new(0.0, 80.0, 100.0, 200.0), class: 0 };
         let images = Outputs::Host(vec![(vec![Xyxy::new(0.0, 60.0, 100.0, 200.0)], vec![0.9])]);
-        let d = Decoded { images, nc: 1, mode: HeadMode::O2m, truths: vec![vec![truth]], meta: vec![meta] };
+        let d = Decoded {
+            images,
+            prec: None,
+            nc: 1,
+            mode: HeadMode::O2m,
+            truths: vec![vec![truth]],
+            meta: vec![meta],
+        };
         let cfg = ValConfig { samples: 0, ..ValConfig::new(640, 1) };
         post.add(d, &*ds, &cfg).unwrap();
         assert_eq!(post.ev.compute().map50_95, 1.0);
@@ -516,25 +547,59 @@ mod tests {
     #[test]
     fn validate_matches_the_serial_loop() {
         let (model, ds) = untrained(Device::Cpu);
-        check_against_serial(&model, &ds, 0.0);
+        check_against_serial(&model, &ds, 0.0, BoxFusion::None);
+        // DFL fusion: the precisions read from the logits on the host, as `predict_raw`'s full decode reads them.
+        check_against_serial(&model, &ds, 0.0, BoxFusion::Dfl);
     }
 
     /// The same on a GPU, where the other thread also downloads the decoded outputs: at conf 0 the whole decode
     /// ([`Outputs::Device`]); at validation's conf 0.001, which lies between the untrained class priors of the
     /// stride-8 and the stride-16/32 anchors, the device candidate pairs ([`Outputs::Pairs`]), in f32 and, on a
-    /// GPU that computes in it, in f16.
+    /// GPU that computes in it, in f16. Both paths with DFL fusion too (the side moments computed on the device).
     #[test]
     fn validate_matches_the_serial_loop_on_gpu() {
         let Some(device) = gpu() else { return };
         let (mut model, ds) = untrained(device);
-        assert_eq!(check_against_serial(&model, &ds, 0.0), 0, "conf 0 downloads the whole decode");
         let conf = NmsConfig::val().conf;
-        assert_eq!(check_against_serial(&model, &ds, conf), 10, "every image from its device pairs");
+        for fusion in [BoxFusion::None, BoxFusion::Dfl] {
+            assert_eq!(
+                check_against_serial(&model, &ds, 0.0, fusion),
+                0,
+                "conf 0 downloads the whole decode"
+            );
+            assert_eq!(
+                check_against_serial(&model, &ds, conf, fusion),
+                10,
+                "every image from its device pairs"
+            );
+        }
         if folo_core::backend::computes_f16(device) {
             model.to_dtype(DType::F16).unwrap();
-            assert_eq!(check_against_serial(&model, &ds, conf), 10, "f16: every image from its pairs");
+            assert_eq!(
+                check_against_serial(&model, &ds, conf, BoxFusion::None),
+                10,
+                "f16: every image from its pairs"
+            );
+            assert_eq!(check_against_serial(&model, &ds, conf, BoxFusion::Dfl), 10, "f16, DFL fusion");
         } else {
             eprintln!("note: skipping the f16 case, the GPU does not compute in f16");
+        }
+    }
+
+    /// A threshold outside 0..=1 (NaN included) is a config error before any image is read, the fusion cluster IoU
+    /// too: NaN would put every same-class candidate in one cluster, a value above 1 would switch fusion off.
+    #[test]
+    fn validate_rejects_thresholds_outside_the_unit_range() {
+        let (model, ds) = untrained(Device::Cpu);
+        // (conf, iou, fusion_iou)
+        for (conf, iou, fusion_iou) in
+            [(f32::NAN, 0.7, 0.75), (0.001, 1.5, 0.75), (0.001, 0.7, f32::NAN), (0.001, 0.7, 1.5)]
+        {
+            let mut vc = ValConfig::new(64, 4);
+            vc.nms.fusion = BoxFusion::Dfl;
+            (vc.nms.conf, vc.nms.iou, vc.nms.fusion_iou) = (conf, iou, fusion_iou);
+            let got = validate(&model, ds.clone(), &vc);
+            assert!(matches!(got, Err(Error::Config(_))), "conf {conf} iou {iou} fusion_iou {fusion_iou}");
         }
     }
 
@@ -614,6 +679,21 @@ mod tests {
         assert!(counts[1] < 1024 && counts[0] > 1024 && counts[2] > 1024, "{counts:?}");
         let most = AtomicUsize::new(0);
         let boxes = decoded.narrow(1, 0, 4).unwrap();
+        // DFL fusion with arbitrary side precisions: the pairs path still gives the full-row result.
+        let dfl = NmsConfig { fusion: BoxFusion::Dfl, fusion_iou: 0.5, ..nms.clone() };
+        let prec: Vec<Vec<[f32; 4]>> = (0..b)
+            .map(|_| (0..a).map(|_| std::array::from_fn(|_| rng.uniform(0.01, 4.0))).collect())
+            .collect();
+        let want_dfl: Vec<Vec<Detection>> = (0..b)
+            .map(|i| {
+                let mut rows = Vec::with_capacity(a * (4 + nc));
+                for j in 0..a {
+                    rows.extend((0..4 + nc).map(|r| host[(i * (4 + nc) + r) * a + j]));
+                }
+                crate::nms::non_max_suppression_rows_with(&rows, Some(&prec[i]), nc, &dfl)
+            })
+            .collect();
+        assert!(want_dfl.iter().zip(&want).any(|(f, w)| f.iter().zip(w).any(|(f, w)| f.bbox != w.bbox)));
         // Room for every pair, for image 1's only, for none: how many images are served from their pairs.
         for (cap, served) in [(a * nc, 3), (1024, 1), (200, 0)] {
             let mut post = Post {
@@ -628,9 +708,11 @@ mod tests {
             let words = pairs.to_vec::<u32>().unwrap();
             let region = folo_gpu::detect::candidate_region_words(cap);
             assert_eq!((0..b).map(|i| words[i * region] as usize).collect::<Vec<_>>(), counts, "cap {cap}");
-            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &nms).unwrap();
+            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &nms, None).unwrap();
             assert_eq!(got, want, "cap {cap}");
             assert_eq!(post.from_pairs, served, "cap {cap}");
+            let got = post.pairs_nms(&pairs, &boxes, &decoded, cap, a, nc, &dfl, Some(&prec)).unwrap();
+            assert_eq!(got, want_dfl, "cap {cap}, DFL fusion");
         }
         assert_eq!(most.load(Ordering::Relaxed), *counts.iter().max().unwrap());
     }
@@ -668,11 +750,12 @@ mod tests {
         (model, ds)
     }
 
-    /// [`validate`] of `model` on `ds` at `conf` (the sample conf too) against the serial loop; returns how many of
-    /// the images it post-processed from device candidate pairs.
-    fn check_against_serial(model: &FoloModel, ds: &Arc<dyn Dataset>, conf: f32) -> usize {
+    /// [`validate`] of `model` on `ds` at `conf` (the sample conf too) with `fusion` against the serial loop; returns
+    /// how many of the images it post-processed from device candidate pairs.
+    fn check_against_serial(model: &FoloModel, ds: &Arc<dyn Dataset>, conf: f32, fusion: BoxFusion) -> usize {
         let (device, dtype) = (model.device(), model.dtype());
         let mut vc = ValConfig { samples: 5, keep_detections: true, workers: 2, ..ValConfig::new(64, 4) };
+        vc.nms.fusion = fusion;
         // Untrained scores sit near the class prior: conf 0 keeps everything, so NMS has every anchor to sort out.
         (vc.nms.conf, vc.sample_conf) = (conf, conf);
         let (got, from_pairs) = validate_counted(model, ds.clone(), &vc).unwrap();

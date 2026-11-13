@@ -430,6 +430,7 @@ impl Store for RealStore {
             rect: true,
             // The model's own head: o2o models predict without NMS.
             head: None,
+            ..PredictConfig::default()
         };
         p.set_config(cfg).map_err(engine_error)?;
         let pred = p.predict(&decoded).map_err(engine_error)?;
