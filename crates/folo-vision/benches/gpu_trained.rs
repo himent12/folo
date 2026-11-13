@@ -1,6 +1,6 @@
 //! End-to-end GPU prediction with trained weights on real images (docs/BENCHMARKS.md's GPU predict rows, measured
 //! where the model finds objects: untrained weights pass no candidate, so the detect head's box branch would cost
-//! nothing in candidate-first prediction, docs/MODEL.md §9.4). Run with
+//! nothing in candidate-first prediction, docs/MODEL.md §9.5). Run with
 //! `cargo bench -p folo-vision --bench gpu_trained`.
 //!
 //! `FOLO_BENCH_WEIGHTS` (required): a `.folo` path in which `{scale}` stands for the scale; `FOLO_BENCH_SCALES`

@@ -1,6 +1,6 @@
 //! The forward conv at listed output pixels ([`conv2d_sites`]): the implicit GEMM (`CONV_MODE` 1 with `SITES`)
 //! whose column `j` of image `n` is the output pixel the image's site list names, instead of pixel `j`. A
-//! detector's box branch needs its convs only where a candidate is (docs/MODEL.md §9.4).
+//! detector's box branch needs its convs only where a candidate is (docs/MODEL.md §9.5).
 //!
 //! The values are the dense conv's bit for bit: the GEMM sums every output in `K` order, one fused multiply-add
 //! after another, whatever the column, so only the split-K chunks (each chunk sums on its own, then the finish

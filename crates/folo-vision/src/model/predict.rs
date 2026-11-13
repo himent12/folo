@@ -314,19 +314,7 @@ impl HeadOutput {
     /// the DFL softmax over the bin indices (bins and bins², f32): what [`HeadOutput::side_precisions`] downloads
     /// instead of the `4 · reg_max` logits.
     pub fn moments_on_device(&self) -> Result<Tensor> {
-        let _g = no_grad();
-        let (b, a, rm) = (self.batch(), self.num_anchors(), self.reg_max);
-        let dev = self.box_raw.device();
-        let mut k = Vec::with_capacity(2 * rm);
-        k.extend((0..rm).map(|i| i as f32));
-        k.extend((0..rm).map(|i| (i * i) as f32));
-        let k = Tensor::from_vec(k, [2 * rm])?.to_device(dev)?;
-        let bins = k.narrow(0, 0, rm)?.reshape([1, 1, rm, 1])?;
-        let bins2 = k.narrow(0, rm, rm)?.reshape([1, 1, rm, 1])?;
-        let p = self.box_raw.to_dtype(DType::F32)?.reshape([b, 4, rm, a])?.softmax(2)?;
-        let mean = p.mul(&bins)?.sum(2, false)?;
-        let m2 = p.mul(&bins2)?.sum(2, false)?;
-        Ok(Tensor::cat(&[&mean, &m2], 1)?)
+        dfl_moments(&self.box_raw, self.reg_max)
     }
 
     /// The CPU half of [`HeadOutput::detections`]: straight from the channel-major outputs (borrowed, not
@@ -558,8 +546,27 @@ impl FoloModel {
     }
 }
 
+/// [`HeadOutput::moments_on_device`] of raw box outputs `box_raw` (`[B, 4 · reg_max, A]`, on any device). For
+/// `A > 1` every op runs column by column (an anchor's values read its own logits only, in the same order for
+/// any `A`), so any such `box_raw` holding an anchor's logits gives that anchor the same bits.
+pub(super) fn dfl_moments(box_raw: &Tensor, rm: usize) -> Result<Tensor> {
+    let _g = no_grad();
+    let (b, a) = (box_raw.dims()[0], box_raw.dims()[2]);
+    let dev = box_raw.device();
+    let mut k = Vec::with_capacity(2 * rm);
+    k.extend((0..rm).map(|i| i as f32));
+    k.extend((0..rm).map(|i| (i * i) as f32));
+    let k = Tensor::from_vec(k, [2 * rm])?.to_device(dev)?;
+    let bins = k.narrow(0, 0, rm)?.reshape([1, 1, rm, 1])?;
+    let bins2 = k.narrow(0, rm, rm)?.reshape([1, 1, rm, 1])?;
+    let p = box_raw.to_dtype(DType::F32)?.reshape([b, 4, rm, a])?.softmax(2)?;
+    let mean = p.mul(&bins)?.sum(2, false)?;
+    let m2 = p.mul(&bins2)?.sum(2, false)?;
+    Ok(Tensor::cat(&[&mean, &m2], 1)?)
+}
+
 /// The side precisions of anchor `j` from one image's [`HeadOutput::moments_on_device`] values (`[8, A]`).
-fn precision_from_moments(img: &[f32], a: usize, j: usize, stride: f32) -> [f32; 4] {
+pub(super) fn precision_from_moments(img: &[f32], a: usize, j: usize, stride: f32) -> [f32; 4] {
     std::array::from_fn(|side| {
         let mean = img[side * a + j];
         let var = (img[(4 + side) * a + j] - mean * mean).max(0.0);

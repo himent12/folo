@@ -1,8 +1,10 @@
-//! Candidate-first prediction on the GPU (docs/MODEL.md §9.4) against the dense GPU path, bit for bit: every
+//! Candidate-first prediction on the GPU (docs/MODEL.md §9.5) against the dense GPU path, bit for bit: every
 //! detection of `predict_candidates` + `finish_candidates` equals the dense forward's `detections` (with NMS at
 //! IoU 1 and no cap, so every candidate is compared), in f32, in f16 on the regular kernels and on tensor cores,
 //! for `o2m` and `o2o` heads, at thresholds from none passing to every anchor passing (more candidates than the
-//! site lists hold, so the dense head serves those images).
+//! site lists hold, so the dense head serves those images). With DFL box fusion (MODEL.md §9.4) also every
+//! candidate's side precisions against the dense `HeadOutput::side_precisions`, bit for bit, and the fused
+//! detections.
 //!
 //! This binary asks for tensor cores before the shared GPU context exists and runs the f16 cases with them on
 //! and off (on only where the adapter has them). It fills every buffer the GPU backend allocates with NaN
@@ -16,7 +18,8 @@ use folo_core::{DType, Device, Tensor, no_grad};
 use folo_nn::Module;
 use folo_nn::io::ModelFile;
 use folo_test_support::TestFile;
-use folo_vision::model::{FoloModel, ModelConfig};
+use folo_vision::fusion::BoxFusion;
+use folo_vision::model::{FoloModel, HeadMode, ImageCandidates, ModelConfig};
 use folo_vision::nms::{Detection, NmsConfig};
 
 /// The GPU device and its context (tensor cores requested; a lock, since the tests flip the switch), or `None`.
@@ -75,9 +78,34 @@ fn bits(d: &[Detection]) -> Vec<[u32; 6]> {
         .collect()
 }
 
-/// Candidate-first against dense on `x`, at thresholds picked from the dense scores: none passing, the top 1%,
-/// 5% and 30% of all anchors, and every anchor. Returns how many detections were compared.
-fn check(m: &FoloModel, x: &Tensor, what: &str) -> usize {
+/// With DFL fusion on an `o2m` head, each candidate's side precisions in `got` against the dense ones (`dense`,
+/// per image per anchor), bit for bit; otherwise that `got` carries none.
+fn check_precisions(
+    m: &FoloModel,
+    got: &[ImageCandidates],
+    dense: &[Vec<[f32; 4]>],
+    nms: &NmsConfig,
+    what: &str,
+) {
+    let dfl = nms.fusion == BoxFusion::Dfl && m.head_mode() == HeadMode::O2m;
+    for (i, c) in got.iter().enumerate() {
+        if !dfl {
+            assert_eq!(c.precisions, None, "{what}: image {i}");
+            continue;
+        }
+        let p = c.precisions.as_ref().unwrap_or_else(|| panic!("{what}: image {i} has no precisions"));
+        assert_eq!(p.len(), c.cands.len(), "{what}: image {i}");
+        for (c, p) in c.cands.iter().zip(p) {
+            let want = dense[i][c.anchor as usize];
+            assert_eq!(p.map(f32::to_bits), want.map(f32::to_bits), "{what}: image {i}, anchor {}", c.anchor);
+        }
+    }
+}
+
+/// Candidate-first against dense on `x` with the box fusion `fusion`, at thresholds picked from the dense scores:
+/// none passing, the top 1%, 5% and 30% of all anchors, and every anchor. Returns how many detections were
+/// compared.
+fn check(m: &FoloModel, x: &Tensor, what: &str, fusion: BoxFusion) -> usize {
     let _g = no_grad();
     let dense = m.forward(x).unwrap();
     let (b, nc, a) = (dense.batch(), dense.num_classes, dense.num_anchors());
@@ -98,12 +126,22 @@ fn check(m: &FoloModel, x: &Tensor, what: &str) -> usize {
             iou: 1.0,
             max_det: usize::MAX,
             max_candidates: usize::MAX,
+            fusion,
             ..NmsConfig::default()
         };
         assert!(m.candidates_first_applies(x.device(), &nms), "{what}: candidate-first applies");
         let want = dense.detections(&nms).unwrap();
-        let got: Vec<Vec<Detection>> =
-            m.predict_candidates(x, &nms).unwrap().iter().map(|c| m.finish_candidates(c, &nms)).collect();
+        let cands = m.predict_candidates(x, &nms).unwrap();
+        if fusion == BoxFusion::Dfl {
+            check_precisions(
+                m,
+                &cands,
+                &dense.side_precisions().unwrap(),
+                &nms,
+                &format!("{what} at conf {conf}"),
+            );
+        }
+        let got: Vec<Vec<Detection>> = cands.iter().map(|c| m.finish_candidates(c, &nms)).collect();
         assert_eq!(got.len(), want.len());
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             assert_eq!(bits(g), bits(w), "{what}: image {i} at conf {conf}");
@@ -136,11 +174,48 @@ fn gpu_candidates_first_matches_dense_bit_for_bit() {
             // 320²: P3 has more pixels than its site list, so "every anchor" overflows; 384×640 is rectangular.
             for (dims, seed) in [([2, 3, 320, 320], 1), ([1, 3, 384, 640], 2), ([3, 3, 128, 96], 3)] {
                 let what = format!("{head} {dtype:?} tensor cores {on} {dims:?}");
-                let n = check(&m, &input(dims, seed, dev, dtype), &what);
+                let n = check(&m, &input(dims, seed, dev, dtype), &what, BoxFusion::None);
                 assert!(n > 0, "{what}: nothing compared");
             }
             assert_eq!(ctx.tensor_cores(), on, "{}", ctx.tensor_cores_status());
         }
+    }
+    ctx.set_tensor_cores(true);
+}
+
+/// Box fusion: score voting and DFL evidence fusion give the dense GPU path's detections bit for bit, DFL fusion
+/// from side precisions that are the dense ones bit for bit (the site columns' moments, and the dense head's for
+/// an image that overflows), in f32 and f16, on the regular kernels and on tensor cores.
+#[test]
+fn gpu_box_fusion_matches_dense_bit_for_bit() {
+    let Some((dev, ctx, _g)) = gpu() else { return };
+    let mut dtypes = vec![(DType::F32, false)];
+    if ctx.caps().shader_f16 {
+        dtypes.push((DType::F16, false));
+        if ctx.caps().coop_f16 {
+            dtypes.push((DType::F16, true));
+        }
+    }
+    for &(dtype, on) in &dtypes {
+        let m = model(3, "o2m", dev, dtype);
+        ctx.set_tensor_cores(on);
+        for fusion in [BoxFusion::Vote, BoxFusion::Dfl] {
+            // 320²: every anchor passing overflows P3's site list; 384×640 is rectangular.
+            for (dims, seed) in [([2, 3, 320, 320], 4), ([1, 3, 384, 640], 5)] {
+                let what = format!("{fusion:?} {dtype:?} tensor cores {on} {dims:?}");
+                let n = check(&m, &input(dims, seed, dev, dtype), &what, fusion);
+                assert!(n > 0, "{what}: nothing compared");
+            }
+        }
+        // The fusion moves boxes, so the comparison above sees the precisions.
+        let x = input([1, 3, 384, 640], 5, dev, dtype);
+        let _g = no_grad();
+        let out = m.forward(&x).unwrap();
+        let nms = |fusion| NmsConfig { conf: 0.3, fusion, ..NmsConfig::default() };
+        let (dfl, vote) =
+            (out.detections(&nms(BoxFusion::Dfl)).unwrap(), out.detections(&nms(BoxFusion::Vote)).unwrap());
+        assert_ne!(bits(&dfl[0]), bits(&vote[0]), "{dtype:?}: DFL fusion moved no box past voting");
+        assert_eq!(ctx.tensor_cores(), on, "{}", ctx.tensor_cores_status());
     }
     ctx.set_tensor_cores(true);
 }
@@ -177,7 +252,7 @@ fn a_batch_mixing_overflow_and_fit_matches_dense_per_image() {
     let nms =
         NmsConfig { conf, iou: 1.0, max_det: usize::MAX, max_candidates: usize::MAX, ..NmsConfig::default() };
     let got = m.predict_candidates(&x, &nms).unwrap();
-    let in_p3 = |img: usize| got[img].iter().filter(|c| (c.anchor as usize) < p3).count();
+    let in_p3 = |img: usize| got[img].cands.iter().filter(|c| (c.anchor as usize) < p3).count();
     let (over, fit) = if kth[0] > kth[1] { (0, 1) } else { (1, 0) };
     assert!(
         in_p3(over) > 1024 && in_p3(fit) <= 1024,
@@ -188,6 +263,14 @@ fn a_batch_mixing_overflow_and_fit_matches_dense_per_image() {
     let want = dense.detections(&nms).unwrap();
     for img in 0..2 {
         assert_eq!(bits(&m.finish_candidates(&got[img], &nms)), bits(&want[img]), "image {img}");
+    }
+    // DFL fusion: the overflowing image's precisions come from the dense head, the other's from its sites.
+    let nms = NmsConfig { fusion: BoxFusion::Dfl, ..nms };
+    let got = m.predict_candidates(&x, &nms).unwrap();
+    check_precisions(&m, &got, &dense.side_precisions().unwrap(), &nms, "mixed batch, DFL");
+    let want = dense.detections(&nms).unwrap();
+    for img in 0..2 {
+        assert_eq!(bits(&m.finish_candidates(&got[img], &nms)), bits(&want[img]), "DFL: image {img}");
     }
     ctx.set_tensor_cores(true);
 }

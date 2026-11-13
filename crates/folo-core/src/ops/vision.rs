@@ -113,7 +113,7 @@ impl Tensor {
         }
     }
 
-    /// The class pass of one head level for candidate-first prediction (docs/MODEL.md §9.4,
+    /// The class pass of one head level for candidate-first prediction (docs/MODEL.md §9.5,
     /// [`crate::backend::Backend::detect_class_sites`]): from `self` (`[B, nc, H, W]` logits) the `U32` tensors
     /// `(sites [B, 1 + cap], recs [B, 2·cap], field [B, 1 + min(9·cap, H·W)])`. `Ok(None)` when the device has no
     /// kernel for it. Not recorded by autograd.

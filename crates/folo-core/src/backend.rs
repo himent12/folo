@@ -711,7 +711,7 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Storage> {
         unsupported!(self, "detect_candidates")
     }
-    /// The class pass of one head level for candidate-first prediction (docs/MODEL.md §9.4): of `cls` (`[B, nc,
+    /// The class pass of one head level for candidate-first prediction (docs/MODEL.md §9.5): of `cls` (`[B, nc,
     /// H, W]` logits, `F32` or `F16`) every pixel whose best class score (first maximum of the `nc` sigmoids) is
     /// `> p.conf`. Returns three `U32` tensors: `sites [B, 1 + cap]` (per image the count of all candidates, then
     /// the pixels `y·W + x` of the first `cap`, in unspecified order), `recs [B, 2·cap]` (class and score bits per

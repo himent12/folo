@@ -1043,7 +1043,9 @@ candidates on a level than the list holds (1024, 512, 256 for P3, P4, P5) takes 
 raw outputs (§6.3, `HeadOutput`) are not made on these paths; training, validation (multi-label at
 `conf = 0.001`), export and every other consumer of them use the dense forward. Box fusion (§9.4) is served as on
 the dense path: `vote` needs only the boxes and scores, and `dfl` takes each candidate's side precisions from its
-own box logits with the dense CPU path's functions (the same softmax moments, so the same bits).
+own box logits, which are the dense logits bit for bit, with the dense path's functions: on the CPU the same
+softmax moments per candidate; on a GPU the dense path's moment ops (`HeadOutput::moments_on_device`) over the
+candidates' columns, which compute each column on its own, so the same bits.
 
 ## 10. Verification plan
 

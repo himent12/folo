@@ -279,9 +279,10 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   (`model/lazy_gpu.rs`): per level the class branch, the class pass into fixed-capacity site lists, `conv0` on the
   listed windows (scattered back into a map), `conv1` and `out` at the candidates, then one decode of every level and
   one readback of the records; the dispatches do not depend on the candidates, and an image whose candidates overflow
-  a list takes the dense head on the same features. An unfused model, multi-label settings or f16 on the CPU take the
-  dense forward (the six branch chains side by side) and `HeadOutput::detections`, which reads the head outputs in
-  place and extracts candidates the same way.
+  a list takes the dense head on the same features. With DFL box fusion the dense path's moment ops also run on the
+  candidates' box-logit columns (the moments and the site lists are read back too). An unfused model, multi-label
+  settings or f16 on the CPU take the dense forward (the six branch chains side by side) and `HeadOutput::detections`,
+  which reads the head outputs in place and extracts candidates the same way.
 - **ONNX export** (`folo_vision::export::onnx`): `FoloModel::to_onnx` turns a fused model into an opset-17 graph
   that mirrors `forward` op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o`
   model ends in the §6.6 top-k: end-to-end `[B, K, 6]` detections; fixed or dynamic

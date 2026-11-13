@@ -1,4 +1,4 @@
-//! Candidate-first detection on the GPU (docs/MODEL.md §9.4): a level's class pass lists its candidates and the
+//! Candidate-first detection on the GPU (docs/MODEL.md §9.5): a level's class pass lists its candidates and the
 //! pixels their box branch reads ([`class_sites`]), the box convs run at those sites only
 //! ([`super::conv::conv2d_sites`], with [`scatter_sites`] writing the first conv's values back into a map for the
 //! second), and [`decode_sites`] decodes the candidates' boxes into one compact list per image, the same records

@@ -1,5 +1,5 @@
 //! [`GpuBackend`]'s candidate-first detection hooks (folo-core's `conv2d_act_sites`, `detect_class_sites` and
-//! `detect_decode_sites`, docs/MODEL.md §9.4) over [`crate::kernels::conv::conv2d_sites`] and
+//! `detect_decode_sites`, docs/MODEL.md §9.5) over [`crate::kernels::conv::conv2d_sites`] and
 //! [`crate::kernels::detect_sites`].
 
 use folo_core::backend::{ClassSites, Conv2dParams, SiteLevel, UnaryOp, View};

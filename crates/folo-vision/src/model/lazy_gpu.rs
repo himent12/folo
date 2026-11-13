@@ -1,4 +1,4 @@
-//! Candidate-first prediction on a GPU (docs/MODEL.md §9.4): per level the class branch runs densely, a class pass
+//! Candidate-first prediction on a GPU (docs/MODEL.md §9.5): per level the class branch runs densely, a class pass
 //! lists the candidates (and the pixels their box branch reads) into fixed-capacity lists on the device, the box
 //! branch runs at those sites only ([`Tensor::conv2d_act_sites`]: `conv0` on the candidates' 3×3 windows, written
 //! back into a map; `conv1` and `out` at the candidates), and one decode appends every level's boxes to one record
@@ -8,14 +8,25 @@
 //! The lists' capacities fix the dispatches, whatever an image's candidates; a level with more candidates than
 //! slots in some image is flagged, and those images take their candidates from the dense head (a second round
 //! trip on the same features).
+//!
+//! DFL box fusion needs each candidate's side precisions: the dense path's moment ops
+//! ([`HeadOutput::moments_on_device`]) run on the candidates' box-logit columns, which hold the dense logits bit
+//! for bit, so the precisions are the dense ones bit for bit (only then are the moments and the site lists read
+//! back too).
+
+use std::collections::HashMap;
 
 use folo_core::{ClassSites, Tensor, no_grad};
 use folo_nn::{ConvBnAct, Forward, Result};
 
 use super::head::{HeadLevel, HeadMode};
-use super::predict::candidates_of_records;
+use super::predict::{candidates_of_records, dfl_moments, precision_from_moments};
 use super::{FoloModel, HeadOutput, ImageCandidates};
-use crate::nms::{Candidate, NmsConfig};
+use crate::nms::NmsConfig;
+
+/// One level's site outputs for the decode: the raw box outputs `[B, 4 · reg_max, cap]`, the site list
+/// `[B, 1 + cap]`, the class records, the map width, the stride and the level's first anchor.
+type SitePart = (Tensor, Tensor, Tensor, usize, f32, usize);
 
 /// Candidate slots per image of the P3, P4 and P5 levels (at most the level's pixels). At `conf = 0.25` over COCO
 /// val2017 with the published weights the most any image has is far below (docs/notes/hill/r3-lazy-head.md); the
@@ -46,10 +57,7 @@ impl FoloModel {
         if let Some((cands, fits)) = &sited
             && fits.iter().all(|&f| f)
         {
-            return Ok(cands
-                .iter()
-                .map(|c| ImageCandidates { cands: c.clone(), precisions: None })
-                .collect());
+            return Ok(cands.clone());
         }
         // The dense head on the same features, for the images that did not fit.
         let feats = [&feats[0], &feats[1], &feats[2]];
@@ -74,24 +82,23 @@ impl FoloModel {
             .ok_or_else(|| folo_nn::Error::Invalid(format!("no candidate kernel on {:?}", x.device())))?;
         Ok(match sited {
             Some((cands, fits)) => {
-                let sited = cands.into_iter().map(|cands| ImageCandidates { cands, precisions: None });
-                sited.zip(fits).zip(dense).map(|((c, f), d)| if f { c } else { d }).collect()
+                cands.into_iter().zip(fits).zip(dense).map(|((c, f), d)| if f { c } else { d }).collect()
             }
             None => dense,
         })
     }
 
-    /// Every image's candidates in anchor order, and whether they fit the slots (`false`: some level had more);
+    /// Every image's candidates in anchor order (with DFL fusion also their side precisions), and whether they fit
+    /// the slots (`false`: some level had more; that image's candidates are partial and carry no precisions);
     /// `None` when the device lacks a site kernel.
-    #[allow(clippy::type_complexity)]
     fn candidates_at_sites(
         &self,
         levels: &[HeadLevel],
         feats: &[Tensor; 3],
         nms: &NmsConfig,
-    ) -> Result<Option<(Vec<Vec<Candidate>>, Vec<bool>)>> {
+    ) -> Result<Option<(Vec<ImageCandidates>, Vec<bool>)>> {
         let (b, rm) = (feats[0].dims()[0], self.head.reg_max);
-        let mut parts = Vec::with_capacity(3);
+        let mut parts: Vec<SitePart> = Vec::with_capacity(3);
         let mut start = 0;
         for (l, (lv, x)) in levels.iter().zip(feats).enumerate() {
             let (_, _, h, w) = x.dims4()?;
@@ -119,9 +126,61 @@ impl FoloModel {
         let mut fits = Vec::with_capacity(b);
         for row in v.chunks_exact(words) {
             let n = (row[0] as usize).min((words - 2) / 7);
-            cands.push(candidates_of_records(&row[2..2 + 7 * n]));
+            cands
+                .push(ImageCandidates { cands: candidates_of_records(&row[2..2 + 7 * n]), precisions: None });
             fits.push(row[1] == 0);
         }
+        if self.wants_precisions(nms) {
+            self.site_precisions(&parts, &mut cands, &fits)?;
+        }
         Ok(Some((cands, fits)))
+    }
+
+    /// DFL fusion's side precisions of the fitting images' candidates: [`dfl_moments`] of the levels' box-logit
+    /// columns side by side (`Σ cap ≥ 3` columns, so the column kernels the dense `A` takes), then
+    /// [`precision_from_moments`] at each candidate's column. A candidate's column holds its anchor's dense box
+    /// logits bit for bit, so its precisions are the dense path's bit for bit.
+    fn site_precisions(
+        &self,
+        parts: &[SitePart],
+        cands: &mut [ImageCandidates],
+        fits: &[bool],
+    ) -> Result<()> {
+        let raws: Vec<&Tensor> = parts.iter().map(|p| &p.0).collect();
+        let cols: usize = raws.iter().map(|r| r.dims()[2]).sum();
+        let m = dfl_moments(&Tensor::cat(&raws, 2)?, self.head.reg_max)?.to_vec::<f32>()?;
+        let mut sites = Vec::with_capacity(parts.len());
+        for p in parts {
+            sites.push(p.1.to_vec::<u32>()?);
+        }
+        for (i, (c, &fit)) in cands.iter_mut().zip(fits).enumerate() {
+            if !fit {
+                continue;
+            }
+            // Global anchor -> (column, stride) of every slotted candidate.
+            let mut at = HashMap::new();
+            let mut col0 = 0;
+            for ((raw, _, _, _, stride, start), s) in parts.iter().zip(&sites) {
+                let cap = raw.dims()[2];
+                let row = &s[i * (1 + cap)..(i + 1) * (1 + cap)];
+                for (k, &px) in row[1..].iter().take((row[0] as usize).min(cap)).enumerate() {
+                    at.insert(*start as u32 + px, (col0 + k, *stride));
+                }
+                col0 += cap;
+            }
+            let img = &m[i * 8 * cols..(i + 1) * 8 * cols];
+            let prec = c
+                .cands
+                .iter()
+                .map(|c| {
+                    let &(j, stride) = at.get(&c.anchor).ok_or_else(|| {
+                        folo_nn::Error::Invalid(format!("candidate anchor {} is in no site list", c.anchor))
+                    })?;
+                    Ok(precision_from_moments(img, cols, j, stride))
+                })
+                .collect::<Result<_>>()?;
+            c.precisions = Some(prec);
+        }
+        Ok(())
     }
 }
