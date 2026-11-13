@@ -9,6 +9,7 @@ import { parse, router } from '$lib/router';
 import { restoringScroll } from '$lib/shell/entryMemory';
 import App from './App';
 import { Screens, type ScreenModule, type ScreenName } from './routes';
+import { entryScript } from './ScreenError';
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -89,6 +90,38 @@ describe('the screen kept on display while the next one loads', () => {
 });
 
 describe('a screen whose chunk fails to load', () => {
+  // An upgrade of folo serve under an open tab (shell F11): the old build's chunks are gone, so Retry cannot help.
+  for (const [what, served, says] of [
+    ['another build', '/assets/index-NEW.js', 'Studio was updated'],
+    ['the same build', '/assets/index-OLD.js', 'Could not load this screen'],
+  ] as const) {
+    it(`asks for a reload only when the server serves ${what} of Studio`, async () => {
+      // This page's entry script (a real <script> would be loaded by happy-dom).
+      const query = document.querySelector.bind(document);
+      vi.spyOn(document, 'querySelector').mockImplementation(((sel: string) =>
+        sel === 'script[type="module"][src]' ? Object.assign(document.createElement('div'), { getAttribute: () => '/assets/index-OLD.js' }) : query(sel)) as typeof document.querySelector);
+      const fetch = vi.fn(async () => new Response(`<!doctype html><script>theme()</script><script type="module" crossorigin src="${served}"></script>`));
+      vi.stubGlobal('fetch', fetch);
+      try {
+        const screens = new Screens((name) => (name === 'runs' ? () => Promise.reject(new TypeError('Failed to fetch dynamically imported module')) : undefined));
+        router.route = parse('#/runs');
+        c = render(() => <App screens={screens} />, target);
+        await until(() => main().querySelector('[role="alert"]') && fetch.mock.calls.length > 0, 'the error');
+        await settle();
+        expect(main().querySelector('.title')?.textContent).toBe(says);
+        const buttons = [...main().querySelectorAll('button')].map((b) => b.textContent?.trim());
+        expect(buttons).toEqual(says === 'Studio was updated' ? ['Reload'] : ['Retry']);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  }
+
+  it("reads a built index.html's entry script", () => {
+    expect(entryScript('<script>x()</script>\n<script type="module" crossorigin src="/assets/index-C2L3TdP8.js"></script>')).toBe('/assets/index-C2L3TdP8.js');
+    expect(entryScript('<p>no app here</p>')).toBeNull();
+  });
+
   it('shows an error with Retry, which loads it again', async () => {
     let tries = 0;
     const screens = new Screens((name) =>

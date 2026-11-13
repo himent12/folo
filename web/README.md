@@ -33,7 +33,8 @@ start `folo serve`, or open `http://localhost:5173/?mock=1`.
   its own, `src/routes.ts`).
 - Routing is hash based (`#/runs/run_7d1e`) so any static server works. Screens read `router.route`, the route on
   display: while the next screen's chunk loads, the screen still shown keeps its own route (`router.location` is the
-  URL's); a chunk that fails to load shows an error with Retry (`src/ScreenError.tsx`).
+  URL's); a chunk that fails to load shows an error with Retry (`src/ScreenError.tsx`), or, when the server's
+  index.html now names another entry script (Studio was updated under the open page), "Studio was updated" with Reload.
 - Components are `.tsx` files: JSX with HTML attribute names, a `css\`...\`` block of scoped styles. How to write one:
   `framework/README.md` (design, API) and `framework/PORTING.md` (every construct, with its Svelte origin).
 - Icons: `import X from '$icons/x'` (lucide). Their data is vendored in `framework/icons/lucide.json`;
