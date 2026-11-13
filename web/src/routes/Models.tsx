@@ -431,7 +431,7 @@ export default function Models() {
                         return (
                           <tr class="link" data-row data-id={m().id} aria-label={m().name} onclick={() => router.go(`/models/${m().id}`)}>
                             <td class="name-cell">
-                              <a class="name truncate" href={href(`/models/${m().id}`)} title={m().about ?? m().name} onclick={(e) => e.stopPropagation()}>
+                              <a class="name truncate" href={href(`/models/${m().id}`)} title={m().about ? `${m().name} · ${m().about}` : m().name} onclick={(e) => e.stopPropagation()}>
                                 {m().name}
                               </a>
                             </td>

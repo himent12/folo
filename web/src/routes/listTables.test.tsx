@@ -142,7 +142,8 @@ describe('list tables: one geometry in every state', () => {
         const cell = row.querySelector('td.name-cell');
         const link = cell?.querySelector('a.name.truncate');
         expect(link?.getAttribute('title'), `the name of ${row.dataset.id}`).toBeTruthy();
-        if (name === 'Datasets') expect(link!.getAttribute('title')).toBe(row.getAttribute('aria-label'));
+        // Whole in its tooltip: the name itself, first (a published model's description follows it).
+        expect(link!.getAttribute('title')!.startsWith(row.getAttribute('aria-label')!), `the tooltip of ${row.dataset.id}`).toBe(true);
         // The cell is bounded, so the name cuts itself instead of sizing its column.
         expect(ownRules(SOURCE[name]!, cell!).some((b) => /max-width:\s*0\s*;/.test(b)), `a bounded name cell in ${name}`).toBe(true);
         // And the name is a block in it, or its ellipsis never applies and the text spills past the cell.
