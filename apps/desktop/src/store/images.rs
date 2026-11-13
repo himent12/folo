@@ -83,12 +83,23 @@ impl ImageCache {
     }
 }
 
-/// Turn backend pixels into a `RenderImage` (BGRA frames).
+/// Decodes an encoded image upright, as the engine does (`folo_data::decode`: turned by its JPEG EXIF
+/// orientation), so the boxes the server or the local predictor return land on what is shown. Keeps alpha.
+pub fn decode_upright(bytes: &[u8]) -> Option<image::RgbaImage> {
+    let mut img = image::load_from_memory(bytes).ok()?;
+    if let Some(o) = folo_data::jpeg_exif_orientation(bytes).and_then(image::metadata::Orientation::from_exif)
+    {
+        img.apply_orientation(o);
+    }
+    Some(img.to_rgba8())
+}
+
+/// Turn backend pixels into a `RenderImage` (BGRA frames); encoded ones upright ([`decode_upright`]).
 pub fn to_render_image(data: ImageData) -> Option<Arc<RenderImage>> {
     let (w, h, mut px) = match data {
         ImageData::Rgba { width, height, pixels } => (width, height, pixels),
         ImageData::Encoded(bytes) => {
-            let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+            let img = decode_upright(&bytes)?;
             let (w, h) = img.dimensions();
             (w, h, img.into_raw())
         }
@@ -142,6 +153,45 @@ mod tests {
         c.finish(key(ImageCache::BUDGET + 1), None);
         assert!(c.get(&key(1)).is_none() && c.get(&key(2)).is_some());
         assert_eq!(c.slots.len(), ImageCache::BUDGET);
+    }
+
+    /// `jpeg` with an EXIF APP1 segment holding `orientation` right after its SOI marker.
+    fn with_exif_orientation(jpeg: &[u8], orientation: u16) -> Vec<u8> {
+        let mut seg = b"Exif\0\0II\x2A\x00\x08\x00\x00\x00".to_vec();
+        for v in [1u16, 0x0112, 3] {
+            seg.extend_from_slice(&v.to_le_bytes());
+        }
+        seg.extend_from_slice(&1u32.to_le_bytes());
+        seg.extend_from_slice(&orientation.to_le_bytes());
+        seg.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        let mut out = jpeg[..2].to_vec();
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&((seg.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&seg);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn an_exif_rotated_photo_is_shown_as_the_engine_sees_it() {
+        // 48x32 in four colour blocks, so every turn and mirror reads differently.
+        let mut img = folo_data::Image::new(48, 32, [240, 20, 20]);
+        img.fill_rect(24, 0, 24, 16, [20, 240, 20]);
+        img.fill_rect(0, 16, 24, 16, [20, 20, 240]);
+        img.fill_rect(24, 16, 24, 16, [240, 240, 20]);
+        let jpeg = folo_data::encode(&img, folo_data::ImageFormat::Jpeg(95)).unwrap();
+        for o in 1..=8u16 {
+            let bytes = with_exif_orientation(&jpeg, o);
+            let engine = folo_data::decode(&bytes).unwrap();
+            let shown = decode_upright(&bytes).unwrap();
+            assert_eq!(shown.dimensions(), (engine.width, engine.height), "orientation {o}");
+            let rgb: Vec<u8> = shown.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+            assert!(rgb == engine.data, "orientation {o}: the pixels differ from the engine's");
+            // The render image the Playground draws has the same upright size.
+            let render = to_render_image(ImageData::Encoded(bytes)).unwrap();
+            let s = render.size(0);
+            assert_eq!((s.width.0 as u32, s.height.0 as u32), (engine.width, engine.height));
+        }
     }
 
     #[test]
