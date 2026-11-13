@@ -1,10 +1,12 @@
 /**
- * Export a model to a deployable file: pick a format and run it on the server. The f16 file can then be downloaded
- * to this computer (GET /api/models/{id}/weights?format=f16), under the name the server gave it. Servers that list
- * `export_onnx_switches` in /api/system's `features` get folo export's three ONNX switches as checkboxes. Servers
- * that list `weights_onnx` serve the ONNX graph itself (GET /api/models/{id}/weights?format=onnx, the switches as
- * query parameters): ONNX then downloads straight to this computer, the button naming the file
- * ("Download fasteners-n-best.onnx"). On older servers ONNX is written on the server and its path shown.
+ * Export a model to a deployable file. FOLO f16 downloads straight to this computer (GET
+ * /api/models/{id}/weights?format=f16), the button naming the file ("Download fasteners-n-best-f16.folo"); nothing is
+ * written on the server but its cache. Servers that list `export_onnx_switches` in /api/system's `features` get folo
+ * export's three ONNX switches as checkboxes. Servers that list `weights_onnx` serve the ONNX graph the same way
+ * (GET /api/models/{id}/weights?format=onnx, the switches as query parameters). On older servers ONNX is written on
+ * the server (POST /api/models/{id}/export) and its path shown.
+ *
+ * Closing the dialog while a file is on its way does not drop it: it is still saved, and a toast says so (or why not).
  *
  * The demo (the in-browser mock) creates no file and says so before and after: "Demo: no file is created" under the
  * formats, then a neutral preview with no success check, no saved-file claim and no Download, whose one action is
@@ -15,8 +17,8 @@ import Plug from '$icons/plug';
 import Copy from '$icons/copy';
 import Download from '$icons/download';
 import Info from '$icons/info';
-import { bindable, computed, css, effect, For, signal } from 'fw';
-import { HttpApi, onnxFileName } from '$lib/api/client';
+import { bindable, computed, css, effect, For, onCleanup, signal } from 'fw';
+import { f16FileName, onnxFileName } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { ExportFormat, ExportResult, Model, OnnxSwitches } from '$lib/api/types';
 import { bytes } from '$lib/format';
@@ -90,13 +92,14 @@ export default function ExportDialog(props: ExportDialogProps) {
   const perParam = (f: (typeof formats)[number]) => (f.value === 'onnx' && switchesOk.get() && switches.get().half ? 2.05 : f.bytesPerParam);
   /** The app's one size format (`bytes`: one decimal, "≈ 18.3 MiB", "≈ 37.0 MiB"). */
   const estimate = (b: number) => bytes(b, prefs.units);
-  /** The format of the finished export (the radio may not be shown any more); `onnx-file` a direct ONNX download. */
-  const done = signal<ExportFormat | 'onnx-file' | null>(null);
+  /** The format of the finished export (the radio may not be shown any more); `file` a direct download. */
+  const done = signal<ExportFormat | 'file' | null>(null);
   /** The ONNX switches go with the request when the server takes them (`weights_onnx` takes them as query parameters). */
   const onnxSwitches = computed(() => switchesOk.get() || onnxDirect.get());
-  /** Direct ONNX download: the file it will be, by the server's naming rule, and the file once it arrived. */
+  /** Direct download: the file it will be, by the server's naming rule, and the file once it arrived. */
   const onnxName = computed(() => onnxFileName(model().name, onnxSwitches.get() && switches.get().half, onnxSwitches.get() && switches.get().decode));
-  const direct = computed(() => format.get() === 'onnx' && onnxDirect.get() && !demo.get());
+  const direct = computed(() => !demo.get() && (format.get() === 'folo-f16' || onnxDirect.get()));
+  const directName = computed(() => (format.get() === 'onnx' ? onnxName.get() : f16FileName(model().name)));
   /** The format as listed, for the demo preview's size. */
   const picked = computed(() => formats.find((f) => f.value === format.get())!);
   const file = signal<File | null>(null);
@@ -108,7 +111,7 @@ export default function ExportDialog(props: ExportDialogProps) {
     const r = result.get();
     return ph === 'running'
       ? direct.get()
-        ? `Preparing ${onnxName.get()}…`
+        ? `Preparing ${directName.get()}…`
         : `Exporting ${model().name}…`
       : ph === 'done' && demo.get()
         ? 'Demo preview: no file was created.'
@@ -118,33 +121,42 @@ export default function ExportDialog(props: ExportDialogProps) {
             ? `Export finished: ${r.path.split('/').pop() ?? r.path}, ${bytes(r.bytes, prefs.units)}.`
             : '';
   });
-  /** The file's name as the server wrote it, which is also the name it downloads under. */
-  const fileName = computed(() => {
+  /** The file a server would create, for the demo's preview (the name its export path has). */
+  const previewName = computed(() => {
     const r = result.get();
-    return r ? (r.path.split('/').pop() ?? r.path) : '';
+    return format.get() === 'onnx' ? onnxName.get() : r ? (r.path.split('/').pop() ?? r.path) : '';
   });
-  /** The file a server would create, for the demo's preview (the server's naming rule for ONNX). */
-  const previewName = computed(() => (format.get() === 'onnx' ? onnxName.get() : fileName.get()));
   const error = signal<unknown>(null);
   const copied = signal(false);
   /** Results inside the open dialog (a blocked copy, the demo's missing file) show in its status region, not a toast. */
   const status = new DialogStatus();
   let run = 0;
+  let destroyed = false;
+  onCleanup(() => {
+    destroyed = true;
+  });
+
+  /** An export that ended after the dialog closed: its toast is out, and the dialog starts afresh when opened again. */
+  function endedClosed(e?: unknown) {
+    // page-level: only called once the dialog is closed or the page has gone.
+    if (e !== undefined) toast.error(e, `Could not export ${model().name}`);
+    reset();
+  }
 
   /**
-   * ONNX on a server with `weights_onnx`: asks for the graph (built on the first request, about as long as an export)
-   * and saves it through the browser under the server's name. The demo's models have no graph, so nothing is saved.
+   * FOLO f16, and ONNX on a server with `weights_onnx`: asks for the file (an ONNX graph is built on the first
+   * request, about as long as an export) and saves it through the browser under the server's name.
    */
-  async function downloadOnnx() {
+  async function downloadFile() {
     const id = ++run;
     phase.set('running');
     error.set(null);
     try {
       const api = hub.api;
-      const f = await api.onnxFile(model().id, onnxSwitches.peek() ? { ...switches.peek() } : {});
+      const f = await (format.peek() === 'onnx' ? api.onnxFile(model().id, onnxSwitches.peek() ? { ...switches.peek() } : {}) : api.f16File(model().id));
       if (id !== run) return;
       file.set(f);
-      done.set('onnx-file');
+      done.set('file');
       phase.set('done');
       if (api.mock) return;
       const url = URL.createObjectURL(f);
@@ -154,16 +166,20 @@ export default function ExportDialog(props: ExportDialogProps) {
       a.rel = 'noopener';
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      if (!open.peek()) toast.success(`Downloaded ${f.name}`, bytes(f.size, prefs.units));
+      if (!open.peek() || destroyed) {
+        toast.success(`Downloaded ${f.name}`, bytes(f.size, prefs.units));
+        endedClosed();
+      }
     } catch (e) {
       if (id !== run) return;
+      if (!open.peek() || destroyed) return endedClosed(e);
       error.set(e);
       phase.set('error');
     }
   }
 
   async function start() {
-    if (direct.peek()) return downloadOnnx();
+    if (direct.peek()) return downloadFile();
     const id = ++run;
     phase.set('running');
     error.set(null);
@@ -175,12 +191,14 @@ export default function ExportDialog(props: ExportDialogProps) {
       done.set(fmt);
       phase.set('done');
       // The open dialog already says "Export finished" with the path: a toast would say it twice at once.
-      if (!open.peek()) {
+      if (!open.peek() || destroyed) {
         if (demo.peek()) toast.info('Demo preview', `Exporting ${model().name} created no file.`);
         else toast.success(`Exported ${model().name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
+        endedClosed();
       }
     } catch (e) {
       if (id !== run) return;
+      if (!open.peek() || destroyed) return endedClosed(e);
       error.set(e);
       phase.set('error');
     }
@@ -196,20 +214,6 @@ export default function ExportDialog(props: ExportDialogProps) {
     } catch {
       status.error(new Error('Your browser blocked clipboard access; select the path and copy it by hand.'), 'Could not copy the path');
     }
-  }
-
-  /** Saves the f16 file through the browser, under the server's file name. The demo's models have no file to save. */
-  function download() {
-    const api = hub.api;
-    if (!(api instanceof HttpApi)) {
-      status.info('Nothing to download in the demo', 'Demo models are not real networks, so they have no weights file.');
-      return;
-    }
-    const a = document.createElement('a');
-    a.href = api.weightsUrl(model().id);
-    a.download = fileName.peek();
-    a.rel = 'noopener';
-    a.click();
   }
 
   function reset() {
@@ -230,13 +234,17 @@ export default function ExportDialog(props: ExportDialogProps) {
     set: (v: boolean) => switches.set({ ...switches.peek(), [key]: v }),
   });
   const close = () => open.set(false);
+  // A file on its way is not dropped by closing: it goes on, and a toast says how it ended.
+  const onclose = () => {
+    if (phase.peek() !== 'running') reset();
+  };
 
   const footer = () => (
     <>
       {phase.get() === 'done' ? (
         // One shape for every result: "Export another" a quiet link at the footer's start (a way back, not an action on
-        // the result), Done the secondary, and the result's next step the one primary at the end: Connect to a server in
-        // the demo, Download for the f16 file; ONNX has nothing to download, so Done is the primary.
+        // the result), and the result's next step the one primary at the end: Connect to a server in the demo (Done the
+        // secondary), else Done (the file is saved already, or stays on the server).
         <>
           <button type="button" class="another" onclick={reset}>
             Export another
@@ -246,13 +254,6 @@ export default function ExportDialog(props: ExportDialogProps) {
               <Button onclick={close}>Done</Button>
               <Button variant="primary" icon={Plug} href={href('/settings')} onclick={close}>
                 Connect to a server
-              </Button>
-            </>
-          ) : done.get() === 'folo-f16' ? (
-            <>
-              <Button onclick={close}>Done</Button>
-              <Button variant="primary" icon={Download} onclick={download}>
-                Download
               </Button>
             </>
           ) : (
@@ -271,7 +272,7 @@ export default function ExportDialog(props: ExportDialogProps) {
               'Retry'
             ) : direct.get() ? (
               <>
-                Download <span class="mono file">{onnxName.get()}</span>
+                Download <span class="mono file">{directName.get()}</span>
               </>
             ) : (
               'Export'
@@ -283,7 +284,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   );
 
   return (
-    <Dialog bind:open={open} title="Export model" description={`Write ${model().name} to a file you can deploy.`} onclose={reset} status={status} footer={footer}>
+    <Dialog bind:open={open} title="Export model" description={`Write ${model().name} to a file you can deploy.`} onclose={onclose} status={status} footer={footer}>
       {/* One live region that stays in the dialog, so the start and the end of an export are both announced (the toast is
           held back while the dialog is open). Failures announce themselves through ErrorState's alert. */}
       <p class="sr-only" role="status">
@@ -305,7 +306,7 @@ export default function ExportDialog(props: ExportDialogProps) {
           </p>
         </div>
       ) : phase.get() === 'done' && file.get() ? (
-        // The ONNX graph, downloaded straight to this computer (servers with weights_onnx).
+        // The file, downloaded straight to this computer.
         <div class="done">
           <div class="done-head">
             <span class="ok" aria-hidden="true">
@@ -406,7 +407,7 @@ export default function ExportDialog(props: ExportDialogProps) {
               <span class="faint">
                 {direct.get() ? (
                   <>
-                    Preparing <span class="mono">{onnxName.get()}</span>…
+                    Preparing <span class="mono">{directName.get()}</span>…
                   </>
                 ) : (
                   <>Exporting {model().name}…</>

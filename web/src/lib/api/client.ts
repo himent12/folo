@@ -122,6 +122,11 @@ export interface Api {
    * under the name the server gives it (`<name>.onnx`, `<name>-f16.onnx` with `half`). Servers list `weights_onnx`.
    */
   onnxFile(id: string, switches: OnnxSwitches, signal?: AbortSignal): Promise<File>;
+  /**
+   * The model's FOLO f16 export as a file (GET /api/models/{id}/weights?format=f16), under the name the server gives it
+   * (`<name>-f16.folo`). Nothing is written on the server but its cache.
+   */
+  f16File(id: string, signal?: AbortSignal): Promise<File>;
 
   runs(signal?: AbortSignal): Promise<Run[]>;
   run(id: string, signal?: AbortSignal): Promise<Run>;
@@ -303,6 +308,11 @@ export function attachmentName(header: string | null): string | null {
  */
 export function onnxFileName(modelName: string, half: boolean, decode = false): string {
   return `${modelName.replace(/[^A-Za-z0-9._-]/g, '_')}${decode ? '-decoded' : ''}${half ? '-f16' : ''}.onnx`;
+}
+
+/** The name a model's FOLO f16 download gets on the server (docs/API.md): `<name>-f16.folo`, by the same rule. */
+export function f16FileName(modelName: string): string {
+  return `${modelName.replace(/[^A-Za-z0-9._-]/g, '_')}-f16.folo`;
 }
 
 /** Builds a query string from defined values only. */
@@ -635,12 +645,21 @@ export class HttpApi implements Api {
     throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the model (HTTP ${res.status}).`, err?.hint);
   }
 
-  async onnxFile(id: string, switches: OnnxSwitches, signal?: AbortSignal) {
+  onnxFile(id: string, switches: OnnxSwitches, signal?: AbortSignal) {
     const on = (k: keyof OnnxSwitches) => (switches[k] ? 'true' : undefined);
-    const url = `${this.base}/api/models/${encodeURIComponent(id)}/weights${qs({ format: 'onnx', decode: on('decode'), dynamic: on('dynamic'), half: on('half') })}`;
+    const query = qs({ format: 'onnx', decode: on('decode'), dynamic: on('dynamic'), half: on('half') });
+    return this.#weightsFile(id, query, onnxFileName('model', !!switches.half, !!switches.decode), 'the ONNX file', signal);
+  }
+
+  f16File(id: string, signal?: AbortSignal) {
+    return this.#weightsFile(id, '?format=f16', f16FileName('model'), 'the model', signal);
+  }
+
+  /** A `/weights` export as a file, under the name the server gives it (`fallback` when it gives none). */
+  async #weightsFile(id: string, query: string, fallback: string, what: string, signal?: AbortSignal) {
     let res: Response;
     try {
-      res = await fetch(url, { signal });
+      res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights${query}`, { signal });
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') throw e;
       this.reach?.failed();
@@ -648,15 +667,10 @@ export class HttpApi implements Api {
     }
     if (!res.ok) {
       const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
-      throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the ONNX file (HTTP ${res.status}).`, err?.hint);
+      throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download ${what} (HTTP ${res.status}).`, err?.hint);
     }
-    const name = attachmentName(res.headers.get('content-disposition')) ?? onnxFileName('model', !!switches.half, !!switches.decode);
+    const name = attachmentName(res.headers.get('content-disposition')) ?? fallback;
     return new File([await res.blob()], name, { type: 'application/octet-stream' });
-  }
-
-  /** The f16 `.folo` file's URL (GET /api/models/{id}/weights?format=f16), for a browser download link. */
-  weightsUrl(id: string): string {
-    return `${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`;
   }
 
   async modelWeightsTag(id: string, signal?: AbortSignal) {

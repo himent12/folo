@@ -69,31 +69,40 @@ afterEach(() => {
 });
 
 describe('ExportDialog', () => {
-  it("offers the f16 file as the primary download, named as the server's file", async () => {
+  it('downloads the f16 file straight away, the button naming it, and writes nothing on the server', async () => {
     const api = new HttpApi('http://folo.test');
-    // A second export of the same model: the server names it -2, and the download follows.
-    vi.spyOn(api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best-f16-2.folo', bytes: 5_300_000 });
-    vi.spyOn(api, 'system').mockResolvedValue({ cpu: { name: 'cpu', threads: 1, util: 0 }, memory: { used_bytes: 0, total_bytes: 1 }, gpus: [] });
+    vi.spyOn(api, 'system').mockResolvedValue(SYS);
+    const exp = vi.spyOn(api, 'exportModel');
+    const get = vi.spyOn(api, 'f16File').mockResolvedValue(new File([new Uint8Array(4096)], 'shapes-n-best-f16.folo'));
     hub.api = api;
     c = mount(ExportDialog, { target, props: { model, open: true } });
     flushSync();
-    button('Export')!.click();
-    const dl = await until(() => button('Download'), 'the download button');
+    const dl = await until(() => button('Download shapes-n-best-f16.folo'), 'the download button');
     expect(dl.classList.contains('primary')).toBe(true);
-    expect(button('Done')!.classList.contains('primary')).toBe(false);
-    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
-      expect(this.href).toBe('http://folo.test/api/models/m_x/weights?format=f16');
-      expect(this.download).toBe('shapes-n-best-f16-2.folo');
+    let saved = '';
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      saved = this.download;
     });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
     dl.click();
-    expect(clicked).toHaveBeenCalledOnce();
+    await until(() => button('Done'), 'the finished state');
+    expect(get).toHaveBeenCalledWith('m_x');
+    // models F1: each Export used to write <name>-f16-2.folo, -3, ... on the server, then download another file.
+    expect(exp).not.toHaveBeenCalled();
+    expect(saved).toBe('shapes-n-best-f16.folo');
+    expect(button('Download')).toBeUndefined();
+    expect(target.ownerDocument.querySelector('dialog .done')?.textContent).toContain('Nothing was written on the server.');
   });
 
   it('says "Export finished" once: no toast on top of the open dialog', async () => {
     hub.api = asServer(new MockApi('normal', 0));
-    vi.spyOn(hub.api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best-f16.folo', bytes: 5_300_000 });
+    // An older server: ONNX is written on the server.
+    vi.spyOn(hub.api, 'system').mockResolvedValue({ ...SYS, features: [] });
+    vi.spyOn(hub.api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best.onnx', bytes: 10_700_000 });
     const success = vi.spyOn(toast, 'success');
     c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
     flushSync();
     button('Export')!.click();
     await until(() => button('Done'), 'the finished state');
@@ -102,7 +111,7 @@ describe('ExportDialog', () => {
     // Without the toast, a live region in the dialog announces it.
     const live = target.ownerDocument.querySelectorAll('dialog p[role="status"]');
     expect(live).toHaveLength(1);
-    expect(live[0]!.textContent).toBe('Export finished: shapes-n-best-f16.folo, 5.1 MiB.');
+    expect(live[0]!.textContent).toBe('Export finished: shapes-n-best.onnx, 10.2 MiB.');
   });
 
   it('says plainly that ONNX cannot be downloaded, and shows where it is', async () => {
@@ -204,6 +213,63 @@ describe('ExportDialog: ONNX download (weights_onnx)', () => {
     expect(target.ownerDocument.querySelector('dialog [role="status"]')?.textContent).toBe('Downloaded shapes-n-best-f16.onnx, 2.0 KiB.');
   });
 
+});
+
+describe('ExportDialog: closing while the file is on its way', () => {
+  /** A download that ends when the test says. */
+  function deferred() {
+    let resolve!: (f: File) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<File>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+  const dialog = () => target.ownerDocument.querySelector('dialog')!;
+
+  async function startThenClose(api: HttpApi) {
+    vi.spyOn(api, 'system').mockResolvedValue(SYS);
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    (await until(() => button('Download shapes-n-best-f16.folo'), 'the download button')).click();
+    flushSync();
+    expect(dialog().textContent).toContain('Preparing');
+    button('Cancel')!.click();
+    flushSync();
+    // happy-dom's close() may not fire the event the browser fires.
+    if (!dialog().open) dialog().dispatchEvent(new Event('close'));
+    flushSync();
+  }
+
+  it('still saves the file, and says so in a toast (models F6)', async () => {
+    const api = new HttpApi('http://folo.test');
+    const d = deferred();
+    vi.spyOn(api, 'f16File').mockReturnValue(d.promise);
+    const saved: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
+    const success = vi.spyOn(toast, 'success');
+    await startThenClose(api);
+    d.resolve(new File([new Uint8Array(2048)], 'shapes-n-best-f16.folo'));
+    await until(() => saved.length > 0, 'the save');
+    expect(saved).toEqual(['shapes-n-best-f16.folo']);
+    expect(success).toHaveBeenCalledWith('Downloaded shapes-n-best-f16.folo', '2.0 KiB');
+  });
+
+  it('says in a toast when it fails after closing', async () => {
+    const api = new HttpApi('http://folo.test');
+    const d = deferred();
+    vi.spyOn(api, 'f16File').mockReturnValue(d.promise);
+    const failed = vi.spyOn(toast, 'error');
+    await startThenClose(api);
+    d.reject(new Error('disk full'));
+    await until(() => failed.mock.calls.length > 0, 'the error toast');
+    expect(failed.mock.calls[0]![1]).toBe('Could not export shapes-n-best');
+  });
 });
 
 describe('ExportDialog: the demo creates no file', () => {

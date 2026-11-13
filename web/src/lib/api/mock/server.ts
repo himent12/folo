@@ -2,7 +2,7 @@
 // scenarios that fail or stall, the training queue's worker), with the System, Datasets and Models endpoints. Runs and
 // cloud compute are in ./trainingApi; agent labeling, benchmarks and inference in ./index.
 
-import { ApiError, onnxFileName } from '../client';
+import { ApiError, f16FileName, onnxFileName } from '../client';
 import type {
   BenchmarkReport,
   BenchmarkRequest,
@@ -576,6 +576,15 @@ export class MockServer {
       const m = this.allModels().find((x) => x.id === id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
       return new File([], onnxFileName(m.name, !!switches.half, !!switches.decode), { type: 'application/octet-stream' });
+    }, 1200);
+  }
+
+  /** `/weights?format=f16`, named as the server names it; empty, as `onnxFile`. */
+  f16File(id: string): Promise<File> {
+    return this.call(() => {
+      const m = this.allModels().find((x) => x.id === id);
+      if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
+      return new File([], f16FileName(m.name), { type: 'application/octet-stream' });
     }, 1200);
   }
 
