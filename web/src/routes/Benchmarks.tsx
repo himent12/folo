@@ -31,6 +31,7 @@ import NewBenchDialog from './bench/NewBenchDialog';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
 import { entriesText, entryStatus, imagesText, scoreText, sourceKind } from './bench/words';
+import { tickingNow } from './runs/when';
 
 type Key = 'name' | 'source' | 'images' | 'classes' | 'conditions' | 'entries' | 'leader' | 'created';
 interface Col {
@@ -59,6 +60,8 @@ type Filter = 'all' | 'dataset' | 'label_job' | 'active';
 const keep = (b: Bench, f: Filter) => f === 'all' || (f === 'active' ? b.active : b.source.kind === f);
 
 export default function Benchmarks() {
+  // Relative times ("made 3m ago") tick while the page is open (runs/when).
+  const clock = tickingNow();
   setCrumbs({ label: 'Benchmarks' });
   ownCreateAction();
 
@@ -280,7 +283,7 @@ export default function Benchmarks() {
                               )}
                             </td>
                             <td class="r faint hide-md" title={date(b().created)}>
-                              {ago(b().created)}
+                              {ago(b().created, clock.get())}
                             </td>
                           </tr>
                         )}

@@ -49,10 +49,13 @@ import PlanTab from './bench/PlanTab';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
 import { classesText, entriesText, FINGERPRINT_HELP, FROZEN, imagesText, shortFingerprint, sourceKind, sourcePath } from './bench/words';
+import { tickingNow } from './runs/when';
 
 type Tab = 'leaderboard' | 'conditions' | 'loops';
 
 export default function Benchmark() {
+  // Relative times ("made 3m ago") tick while the page is open (runs/when).
+  const clock = tickingNow();
   const id = computed(() => router.route.params.id ?? '');
   const tab = computed<Tab>(() => {
     const t = router.route.query.get('tab');
@@ -419,7 +422,7 @@ export default function Benchmark() {
                 <span class="num">{num(b().boxes)} boxes</span>
                 <span class="num">{classesText(b().classes.length)}</span>
                 <span class="faint" title={date(b().created)}>
-                  made {ago(b().created)}
+                  made {ago(b().created, clock.get())}
                 </span>
               </Meta>
             )}

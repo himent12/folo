@@ -24,6 +24,7 @@ import NoValue from '$lib/ui/NoValue';
 import Panel from '$lib/ui/Panel';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { loopStatus, scoreText, VERDICT } from './words';
+import { tickingNow } from '../runs/when';
 
 export interface LoopsTabProps {
   bench: Bench;
@@ -40,6 +41,8 @@ export interface LoopsTabProps {
 const scores = (l: BenchLoop) => l.generations.map((g) => g.score).filter((s): s is number => s !== null);
 
 export default function LoopsTab(props: LoopsTabProps) {
+  // Relative times ("made 3m ago") tick while the page is open (runs/when).
+  const clock = tickingNow();
   const path = (l: BenchLoop) => `/benchmarks/${props.bench.id}/loops/${l.id}`;
 
   const pool = (l: BenchLoop) => {
@@ -155,7 +158,7 @@ export default function LoopsTab(props: LoopsTabProps) {
                           )}
                         </td>
                         <td class="r faint hide-md" title={date(l().created)}>
-                          {ago(l().created)}
+                          {ago(l().created, clock.get())}
                         </td>
                         <td class="chev-cell">
                           <ChevronRight size={16} strokeWidth={1.75} aria-hidden="true" />
