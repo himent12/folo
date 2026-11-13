@@ -433,6 +433,9 @@ impl Backend for MockBackend {
 
     fn metrics(&self, id: &str) -> ApiResult<RunMetrics> {
         self.check()?;
+        if self.fail_metrics.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878"));
+        }
         let runs = self.runs.lock().unwrap();
         let f = runs
             .iter()

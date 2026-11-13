@@ -58,6 +58,8 @@ pub struct MockBackend {
     holds: Mutex<Vec<(&'static str, Arc<hold::Gate>)>>,
     /// An image-list call from this offset on fails once ([`MockBackend::fail_images_once_from`]).
     fail_images_from: Mutex<Option<u32>>,
+    /// The next run-history read fails ([`MockBackend::fail_metrics_once`]).
+    fail_metrics: std::sync::atomic::AtomicBool,
     clock: Clock,
 }
 
@@ -164,6 +166,12 @@ impl MockBackend {
         }));
         f.ds.splits.val += n as u64;
         self
+    }
+
+    /// The next run-history read fails as an unreachable server would.
+    #[cfg(test)]
+    pub fn fail_metrics_once(&self) {
+        self.fail_metrics.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The next image-list call at `offset` or later fails as an unreachable server would.

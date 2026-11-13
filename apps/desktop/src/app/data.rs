@@ -494,10 +494,18 @@ impl FoloApp {
                 if this.history_tickets.get(&(key.clone(), "metrics")) != Some(&ticket) {
                     return;
                 }
-                // Dropped meanwhile (the run deleted): not brought back.
-                if let (Ok(m), Some(Load::Ready(_) | Load::Loading)) = (r, this.store.run_data.get(&key)) {
-                    this.store.install_run_data(&key, Ok(RunData::new(m, spe)));
-                    cx.notify();
+                // Dropped meanwhile (the run deleted): not brought back. A failure keeps a history
+                // shown, and ends one still loading (its page says so and can ask again).
+                match (r, this.store.run_data.get(&key)) {
+                    (Ok(m), Some(Load::Ready(_) | Load::Loading)) => {
+                        this.store.install_run_data(&key, Ok(RunData::new(m, spe)));
+                        cx.notify();
+                    }
+                    (Err(e), Some(Load::Loading)) => {
+                        this.store.install_run_data(&key, Err(e));
+                        cx.notify();
+                    }
+                    _ => {}
                 }
             },
         );

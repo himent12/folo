@@ -99,3 +99,26 @@ fn a_history_asked_for_before_the_end_is_replaced_by_the_final_one() {
         let Some(Load::Ready(_)) = this.store.run_data.get("run_52e8") else { panic!("loaded") };
     });
 }
+
+#[test]
+fn a_final_read_that_fails_does_not_leave_the_history_loading() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let held = api.hold("metrics run_52e8");
+    app.update(|cx| window.update(cx, |this, _, cx| this.ensure_run_data("run_52e8", cx)).unwrap());
+    app.run_until_held(1);
+    held.wait_held();
+    // The final read fails (the server went away for a moment).
+    api.fail_metrics_once();
+    app.update(|cx| {
+        window.update(cx, |this, _, cx| this.run_ended("run_52e8", RunStatus::Completed, cx)).unwrap()
+    });
+    drop(held);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            matches!(this.store.run_data.get("run_52e8"), Some(Load::Failed(_))),
+            "a failure, not loading for good"
+        );
+    });
+}
