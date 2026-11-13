@@ -173,10 +173,10 @@ css`
     min-width: 0;
   }
   /* A long class name is cut with an ellipsis, whole in its tooltip: a 60-character one pushed the table, and the page,
-     sideways. \`max-width: 0\` keeps the name from sizing its column; the column keeps about the share a usual name
-     takes beside the numbers and the bar. */
+     sideways. \`max-width: 0\` keeps the name from sizing its column; the column takes most of the table and the bar
+     gives way first (.bar-col), so a usual name (\`hexagon\`, \`triangle\`) is not cut in the 299 px rail at 1024. */
   td.c-name {
-    width: 40%;
+    width: 60%;
     max-width: 0;
   }
   .sw {
@@ -199,7 +199,7 @@ css`
     color: var(--text-tertiary);
   }
   .bar-col {
-    width: 28%;
+    width: 20%;
     /* Low enough that the table fits the rail at 960 px (about 278 px wide). */
     min-width: 40px;
   }
