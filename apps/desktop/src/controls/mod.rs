@@ -4,6 +4,8 @@
 mod button;
 mod chart_group;
 mod focus;
+#[cfg(test)]
+mod key_tests;
 mod scroll;
 mod segmented;
 mod select;
