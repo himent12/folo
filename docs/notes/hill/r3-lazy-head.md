@@ -123,7 +123,7 @@ RTX 4080 SUPER (Vulkan). Median of the per-round medians, ms (min–max):
 | folo-s f16 b16 | 20.60 (20.49–22.50) | 18.94 (18.93–19.53) | 0.919 |
 | folo-s f16 tensor cores b16 | 12.08 (11.94–15.65) | 11.58 (11.30–12.64) | 0.959 |
 
-b1 (row 5) is **not established**. In the first run the medians favoured new by 9–35%, but p90 reached 4× the median in either build. Each run cycles through 16 rect shapes, and the logs keep only the median, p90 and min. The per-run minimums were lower on new (for example s f32 2.45 → 2.20 ms), but a minimum is one call's best case.
+b1 (row 5) is **not established**. In the first run the medians favoured new by 9–35%, but p90 reached up to 18× the median in base and 4.8× in new. Each run cycles through 16 rect shapes, and the logs keep only the median, p90 and min. The per-run minimums were lower on new (for example s f32 2.45 → 2.20 ms), but a minimum is one call's best case.
 
 A second run after review added a `b1 one` row (the first image only, one shape) and ran 4 rounds of 200 calls. The machine was 44–100% CPU-busy with another lane (`logs/ab-pr2b-gpu-*`), so this run does not settle b1 either.
 - Base b1 medians ran 1.95–4.07 ms; new ran 1.70–11.71 ms.
