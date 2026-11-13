@@ -44,6 +44,53 @@ pub fn find_folo() -> Option<std::path::PathBuf> {
         .and_then(|paths| std::env::split_paths(&paths).map(|d| d.join(exe)).find(|p| p.is_file()))
 }
 
+/// Why no `folo` binary was found, for a person: `$FOLO_BIN` names a file that isn't there (`fobin`), or
+/// nothing was set and none is next to the app or on `PATH`.
+fn not_found(fobin: Option<&std::ffi::OsStr>) -> String {
+    match fobin.filter(|p| !p.is_empty()) {
+        Some(p) => format!(
+            "FOLO_BIN names {}, which isn't a file, and there's no folo next to FOLO Desktop or on PATH",
+            std::path::Path::new(p).display()
+        ),
+        None => "folo was not found next to FOLO Desktop or on PATH (set FOLO_BIN to it)".into(),
+    }
+}
+
+/// Whether `url` (as typed: a scheme, user info, a port and a path are all optional) names this machine:
+/// `localhost`, `127.x.y.z` or `[::1]`. Only there can the app start the server itself.
+pub fn is_loopback(url: &str) -> bool {
+    let url = url.trim();
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback())
+}
+
+/// Whether a `folo serve` answers `GET /api/health` at `url`. On this machine the connection gets half a
+/// second: a port nothing listens on is refused only after Windows' SYN retries (2 s), and a listening one
+/// accepts at once however busy the server is.
+pub fn probe(url: &str) -> bool {
+    let connect = if is_loopback(url) { Duration::from_millis(500) } else { Duration::from_secs(2) };
+    let base = super::HttpBackend::new(url).base().to_string();
+    let agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(connect))
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build();
+    let agent: ureq::Agent = agent.into();
+    agent
+        .get(&format!("{base}/api/health"))
+        .call()
+        .ok()
+        .filter(|r| r.status().is_success())
+        // A FOLO server's health, not any web server that answers 200 (a dev server's index page).
+        .is_some_and(|mut r| r.body_mut().read_json::<Health>().is_ok())
+}
+
 /// Make the OS stop `child` when this process exits, even if it is killed (no Drop runs then).
 #[cfg(windows)]
 fn bind_to_app(child: &Child) {
@@ -109,7 +156,7 @@ fn startup_record(line: &str) -> Option<Startup> {
 /// When the data dir already has an owner, connect to it once it is listening there: retried until `timeout`,
 /// as the owner may still be starting (or be an embedded `folo mcp`, which has no address).
 pub fn spawn_server(timeout: Duration) -> Result<Spawned, String> {
-    let bin = find_folo().ok_or("folo was not found (set FOLO_BIN or put folo on PATH)")?;
+    let bin = find_folo().ok_or_else(|| not_found(std::env::var_os("FOLO_BIN").as_deref()))?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -187,8 +234,9 @@ fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Attempt,
         Ok(Startup::InUse(url, dir)) => Ok(Attempt::InUse(url, dir)),
         Ok(Startup::Failed(message)) => Err(message),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("folo serve did not start in time".into()),
+        // No record at all: whatever ran isn't a folo that serves.
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err("folo serve exited before it was listening".into())
+            Err(format!("{} stopped before it was listening (is it FOLO's folo?)", bin.display()))
         }
     }
 }
@@ -196,6 +244,34 @@ fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Attempt,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_this_machines_addresses_are_loopback() {
+        for url in [
+            "http://127.0.0.1:7878",
+            "127.0.0.1:1",
+            " localhost:7878/ ",
+            "http://LOCALHOST",
+            "https://127.4.5.6:9/api",
+            "http://[::1]:7878",
+            "http://me@127.0.0.1:7878",
+        ] {
+            assert!(is_loopback(url), "{url}");
+        }
+        for url in
+            ["http://192.168.9.9:7878", "10.0.0.2", "http://example.com", "abc def", "", "http://[::2]:1"]
+        {
+            assert!(!is_loopback(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_missing_folo_names_what_was_looked_for() {
+        let set = not_found(Some(std::ffi::OsStr::new(r"D:\nope\folo.exe")));
+        assert!(set.starts_with(r"FOLO_BIN names D:\nope\folo.exe, which isn't a file"), "{set}");
+        assert!(not_found(None).contains("set FOLO_BIN"));
+        assert_eq!(not_found(Some(std::ffi::OsStr::new(""))), not_found(None));
+    }
 
     #[test]
     fn startup_records_are_read() {

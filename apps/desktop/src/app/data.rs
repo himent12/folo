@@ -85,10 +85,18 @@ impl FoloApp {
                     this.store.note_reachability(r.as_ref().err());
                     if was_down && !this.store.unreachable() {
                         this.reconnected(cx);
+                    } else if this.store.unreachable() {
+                        // Every time, not only when it goes: a recovery that failed tries again later.
+                        this.connection_lost(cx);
                     }
                     // Back after being unreachable: check its health now, not in 2 s.
                     if this.store.health.needs_fetch() {
                         this.ensure_core(cx);
+                    }
+                    if let Ok(s) = &r {
+                        // It answers: a later loss starts over, and its data dir says whether it is ours.
+                        this.recovered();
+                        this.note_data_dir(s.data_dir.as_deref());
                     }
                     let r = r.map(|s| {
                         this.store.capabilities = s.capabilities;
@@ -102,7 +110,18 @@ impl FoloApp {
         }
         if self.store.health.needs_fetch() {
             self.store.health = Load::Loading;
-            self.fetch(cx, |api| api.health(), |this, r, _| this.store.health = r.into());
+            self.fetch(
+                cx,
+                |api| api.health(),
+                |this, r, _| {
+                    this.reached |= r.is_ok();
+                    // The refresh may have said meanwhile that the server is gone or wants a token
+                    // (`/api/health` is the one call a token server answers): that stands.
+                    if this.store.health.is_loading() {
+                        this.store.health = r.into();
+                    }
+                },
+            );
         }
     }
 

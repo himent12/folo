@@ -3,6 +3,8 @@
 
 mod actions;
 mod connection;
+#[cfg(test)]
+mod connection_tests;
 mod data;
 #[cfg(test)]
 mod dataset_tests;
@@ -44,6 +46,7 @@ use crate::store::*;
 use crate::theme::{Mode, theme};
 use crate::ui::*;
 
+pub use connection::{Connector, Reason};
 pub use focus::focus_ring;
 pub use forms::{
     ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, format_lr,
@@ -418,6 +421,23 @@ pub struct FoloApp {
     server_proc: Option<crate::api::http::ServerProcess>,
     /// Startup / switch in progress: what the app is doing ("Starting folo serve…").
     pub connecting: Option<SharedString>,
+    /// How servers are probed, started and talked to (fakes in tests).
+    pub connector: Connector,
+    /// The connected server is the local one (started here, or found through the data dir): if it
+    /// stops answering, it is found or started again (`connection_lost`).
+    pub local_url: Option<String>,
+    /// The data dir the local server serves (kept across switches: a server found later that serves
+    /// it is the local one again, `note_data_dir`).
+    pub local_dir: Option<String>,
+    /// The address the installed HTTP backend talks to.
+    pub connected_url: Option<String>,
+    /// Failed recoveries in a row, and the refreshes to let pass before the next attempt.
+    pub recover_tries: u32,
+    pub recover_wait: u32,
+    /// Why the local server couldn't be started, while nothing answers.
+    pub start_error: Option<SharedString>,
+    /// The connected server has answered at least once (a lost connection, not one never made).
+    pub reached: bool,
     pub reduce_motion: bool,
 
     // Overlays
@@ -622,6 +642,14 @@ impl FoloApp {
             spawn_server: true,
             server_proc: None,
             connecting: None,
+            connector: Connector::default(),
+            local_url: None,
+            local_dir: None,
+            connected_url: None,
+            recover_tries: 0,
+            recover_wait: 0,
+            start_error: None,
+            reached: false,
             // Follow the OS animation setting until the user picks in Settings.
             reduce_motion: calm,
             palette: None,

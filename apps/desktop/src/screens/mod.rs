@@ -116,7 +116,15 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        let hint = e.hint.clone().unwrap_or_else(|| format!("Error code {}", e.code));
+        let hint = match &self.start_error {
+            // Nothing answers because the local server didn't start: why, not "start it yourself" alone.
+            Some(why) if e.code == "server_unreachable" => {
+                format!(
+                    "Couldn't start folo serve: {why}. Start one yourself, or switch to the built-in demo in Settings."
+                )
+            }
+            _ => e.hint.clone().unwrap_or_else(|| format!("Error code {}", e.code)),
+        };
         let retry = self.button(
             retry_key,
             "Retry",

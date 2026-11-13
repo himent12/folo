@@ -215,7 +215,7 @@ fn main() {
                             scenario::apply(&mut app, s, window, cx);
                         }
                         if auto {
-                            app.autoconnect(connect_url.clone(), spawn_server, cx);
+                            app.autoconnect(connect_url.clone(), spawn_server, app::Reason::Launch, cx);
                         }
                         if open.as_deref() == Some("new-run") {
                             app.open_new_run_pending = true;

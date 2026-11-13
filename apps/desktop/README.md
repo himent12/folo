@@ -211,8 +211,13 @@ cost and time limit. `src/cloud.rs` holds the state and the rules those surfaces
 By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts a
 local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening
 bare against the real data dir (`$FOLO_HOME` or `~/.folo`). When that data dir already has a `folo serve` (another
-window's), it connects to that one instead (`data_dir_in_use`, docs/CLI.md). `--server URL` and `--mock` pick a source explicitly;
-Settings › Connection switches at runtime. `--open run:<id>` (or `dataset:`, `model:`, `runs`, …) starts on a screen.
+window's), it connects to that one instead (`data_dir_in_use`, docs/CLI.md). If that local server stops answering (the
+window that started it closed, or it crashed), the app finds or starts one again the same way and says so. Why a
+local server couldn't start stays on the pages' error panels. `--server URL` and `--mock` pick a source explicitly;
+Settings › Connection switches at runtime: an address on this machine that doesn't answer falls back to the local
+server with a note saying so, and another machine's address is never replaced by the local server. A server started
+with `--token` shows as needing one (the app can't send a token). `--open run:<id>` (or `dataset:`, `model:`, `runs`,
+…) starts on a screen.
 
 ## Design tokens
 

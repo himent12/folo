@@ -13,7 +13,9 @@ use serde::Serialize;
 
 use super::*;
 
-pub use server::{ServerProcess, Spawned, spawn_server};
+pub use server::{ServerProcess, Spawned, is_loopback, probe, spawn_server};
+#[cfg(test)]
+pub(crate) use transport::needs_token;
 use transport::{agent, seg, stream_agent};
 
 /// How long an event stream may take to send its response headers.
@@ -39,6 +41,11 @@ impl HttpBackend {
         let base = base.trim().trim_end_matches('/');
         let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
         Self { base, agent: agent(Some(Duration::from_secs(30))), stream_agent: stream_agent(handshake) }
+    }
+
+    /// The server's address as requests use it (scheme added, no trailing `/`).
+    pub fn base(&self) -> &str {
+        &self.base
     }
 }
 
@@ -507,7 +514,38 @@ FOLO"
         let api = HttpBackend::new(&url);
         let e = api.health().unwrap_err();
         assert_eq!(e.code, "server_unreachable");
-        assert!(e.hint.is_some());
+        // For a person: no transport jargon ("timeout: connect", "io: …").
+        let hint = e.hint.unwrap();
+        assert!(hint.starts_with("Start it with `folo serve`") && !hint.contains('('), "{hint}");
+    }
+
+    #[test]
+    fn a_token_server_says_what_works_instead_of_asking_for_a_header() {
+        let body = r#"{ "error": { "code": "unauthorized", "message": "this server needs a token: send `Authorization: Bearer <token>`", "hint": "send the token the server was started with" } }"#;
+        let (url, _requests) = canned_server(vec![
+            json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#),
+            json("401 Unauthorized", body),
+            b"HTTP/1.1 401 Unauthorized
+content-length: 0
+connection: close
+
+"
+            .to_vec(),
+        ]);
+        // `/api/health` is open on such a server: the probe passes, every other call is refused.
+        assert!(probe(&url));
+        // Any web server answers 200; only a FOLO server's health counts.
+        let (page, _r) = canned_server(vec![
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 15\r\nconnection: close\r\n\r\n<html></html>\r\n"
+                .to_vec(),
+        ]);
+        assert!(!probe(&page));
+        let api = HttpBackend::new(&url);
+        for e in [api.system().unwrap_err(), api.datasets().unwrap_err()] {
+            assert_eq!((e.code.as_str(), e.message.as_str()), ("unauthorized", "This server needs a token"));
+            let hint = e.hint.unwrap();
+            assert!(hint.contains("--token") && !hint.contains("Authorization"), "{hint}");
+        }
     }
 
     /// Every benchmark call the app makes, against a real `folo serve` with a benchmark that has a
