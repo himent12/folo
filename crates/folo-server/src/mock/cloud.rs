@@ -243,6 +243,7 @@ impl SimCloud {
             cost_usd: cost,
             synced,
             ended_in,
+            unanswered_since: None,
         }
     }
 

@@ -419,6 +419,11 @@ pub struct RunCloud {
     /// and which phases it never reached. `null` until then, and from servers before it.
     #[serde(default)]
     pub ended_in: Option<CloudPhase>,
+    /// RFC 3339 time since when the worker has not answered while the run trains (it may still train there; the
+    /// run fails as `cloud_instance_lost` when the worker stays silent and its instance is gone, or a remote server
+    /// is silent for 10 minutes). `null` while it answers, and from servers before it.
+    #[serde(default)]
+    pub unanswered_since: Option<String>,
 }
 
 /// `RunEstimate.cost`: what a cloud run would cost.

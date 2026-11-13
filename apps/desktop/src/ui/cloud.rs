@@ -170,6 +170,7 @@ mod cloud_format_tests {
             cost_usd: None,
             synced: None,
             ended_in: None,
+            unanswered_since: None,
         };
         assert_eq!(cloud_wait_title(&c, "RunPod"), "Provisioning an RTX 4090 at RunPod");
         c.phase = CloudPhase::Booting;

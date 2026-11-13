@@ -8,8 +8,9 @@
  */
 import Check from '$icons/check';
 import TriangleAlert from '$icons/triangle-alert';
+import WifiOff from '$icons/wifi-off';
 import X from '$icons/x';
-import { computed, css, effect, For } from 'fw';
+import { computed, css, effect, For, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { RunCloud } from '$lib/api/types';
@@ -63,6 +64,14 @@ export default function CloudPanel(props: CloudPanelProps) {
     if (i) return i.cost_usd === null ? 'not billed' : isAlive(i.status) ? `${usd(i.cost_usd)} so far` : usd(i.cost_usd);
     return c.cost_usd === null ? 'not billed' : released.get() ? usd(c.cost_usd) : `${usd(c.cost_usd)} so far`;
   });
+  // The facts that are times ago ("Last checkpoint copy: 2m ago") move on while nothing else on the run does (a
+  // worker that does not answer sends nothing new).
+  const now = signal(Date.now());
+  effect(() => {
+    if (released.get()) return;
+    const t = setInterval(() => now.set(Date.now()), 30_000);
+    return () => clearInterval(t);
+  });
   const limit = computed(() => {
     const c = props.cloud;
     return !released.get() && c.deadline ? `${hoursText(c.max_hours)} · stops by ${timeOfDay(c.deadline)}` : hoursText(c.max_hours);
@@ -109,8 +118,16 @@ export default function CloudPanel(props: CloudPanelProps) {
           </ol>
           {/* One row per fact, each its own line: a long label never narrows another row's value. */}
           <dl class="facts">
-            {unconfirmed.get() ? (
-              <p class="unconfirmed" role="status">
+            {props.cloud.unanswered_since ? (
+              <p class="warn-line" role="status">
+                <WifiOff size={14} strokeWidth={2} aria-hidden="true" />
+                <span>
+                  The worker has not answered since {timeOfDay(props.cloud.unanswered_since)}. FOLO keeps asking; the run
+                  goes on there while the worker is up.
+                </span>
+              </p>
+            ) : unconfirmed.get() ? (
+              <p class="warn-line" role="status">
                 <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
                 <span>
                   Termination not confirmed: the instance may still be billed.{' '}
@@ -120,7 +137,7 @@ export default function CloudPanel(props: CloudPanelProps) {
                 </span>
               </p>
             ) : unknown.get() ? (
-              <p class="unconfirmed" role="status">
+              <p class="warn-line" role="status">
                 <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
                 <span>
                   Could not check that the instance is terminated.{' '}
@@ -153,7 +170,7 @@ export default function CloudPanel(props: CloudPanelProps) {
             </div>
             <div>
               <dt>Last checkpoint copy</dt>
-              <dd class="num">{props.cloud.synced ? ago(props.cloud.synced) : released.get() ? 'none' : 'none yet'}</dd>
+              <dd class="num">{props.cloud.synced ? ago(props.cloud.synced, now.get()) : released.get() ? 'none' : 'none yet'}</dd>
             </div>
           </dl>
         </div>
@@ -238,8 +255,9 @@ css`
   [data-state='skipped'] .mark {
     border-style: dashed;
   }
-  /* Releasing still under way after the run ended: the warning mark in its hue, the words secondary. */
-  .unconfirmed {
+  /* A worker that does not answer, a termination not confirmed, a ledger not read: the mark in its hue, the words
+     secondary. */
+  .warn-line {
     display: flex;
     align-items: flex-start;
     gap: var(--space-2);
@@ -247,7 +265,7 @@ css`
     border-bottom: 1px solid var(--line-subtle);
     color: var(--text-secondary);
   }
-  .unconfirmed :global(svg) {
+  .warn-line :global(svg) {
     flex: none;
     margin-top: 2px;
     color: var(--warning-solid);

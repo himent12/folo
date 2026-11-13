@@ -150,12 +150,21 @@ fn a_checkpoint_fetched_just_before_the_worker_is_lost_is_kept() {
             .any(|n| n.starts_with(".last.folo.copy.") || n == "last.folo")
             .then_some(())
     });
+    // The run says since when its worker is silent, and stops saying so when it answers again...
+    let silent = || run_of(&store, &run.id).cloud.and_then(|c| c.unanswered_since);
+    until("the silence on the run", silent);
+    cloud.gates.cut_after_weights.store(false, Ordering::SeqCst);
+    cloud.gates.cut.store(false, Ordering::SeqCst);
+    until("the worker answers again", || silent().is_none().then_some(()));
     // ...until its instance is gone.
     cloud.kill(0);
     let lost = finished(&store, &run.id);
     assert_eq!(lost.error_code.as_deref(), Some("cloud_instance_lost"), "{:?}", log_of(&store, &run.id));
     assert!(weights.join("last.folo").is_file(), "the checkpoint fetched is kept, to resume from");
-    assert!(lost.cloud.unwrap().synced.is_some());
+    let cloud = lost.cloud.unwrap();
+    assert!(cloud.synced.is_some());
+    // An ended run's silence is said by how it ended.
+    assert_eq!(cloud.unanswered_since, None);
 }
 
 #[test]

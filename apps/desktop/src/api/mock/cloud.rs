@@ -264,6 +264,7 @@ pub(super) fn launch_state(
         cost_usd: None,
         synced: None,
         ended_in: None,
+        unanswered_since: None,
     }
 }
 

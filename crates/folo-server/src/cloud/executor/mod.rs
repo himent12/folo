@@ -218,6 +218,8 @@ impl Release {
         }
         self.entry.update_cloud(|c| {
             c.ended_in = ended_in(c.ended_in, c.phase);
+            // A silence that ended the run is said by how it ended, not as one that goes on.
+            c.unanswered_since = None;
             c.phase = CloudPhase::Releasing;
             c.progress = None;
         });

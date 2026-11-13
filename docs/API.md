@@ -561,8 +561,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "max_hours": 12, "deadline": "..." | null,   // when the time limit ends; null until the instance exists
   "cost_usd": 0.42 | null,          // estimate so far, final once released; null without a price
   "synced": "..." | null,           // when weights/last.folo was last copied to this machine
-  "ended_in": "syncing" | null }    // the phase it was in when the run ended (set at releasing): where a failed run
+  "ended_in": "syncing" | null,     // the phase it was in when the run ended (set at releasing): where a failed run
                                     // failed, and the phases after it it never reached; null before, and from older servers
+  "unanswered_since": "..." | null } // while the run trains, since when its worker has not answered (it may still train
+                                    // there); null while it answers, once the run ends, and from older servers
 // While phase is provisioning, booting or syncing the status is `queued` (nothing trains yet): show the phase.
 // ResolvedTrain: the settings the run trains with. `config` stays what was requested ("optimizer": "auto",
 // "lr0": 0.01); these are what that became (docs/MODEL.md §8.2, §8.4), as in the run folder's config.json.

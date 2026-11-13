@@ -7,6 +7,7 @@ use folo_client::{Client, encode};
 use folo_cloud::InstanceState;
 
 use crate::cloud::state::Outcome;
+use crate::util::{rfc3339, unix_now};
 
 use super::{ATTEMPTS, COST_EVERY, Exec, Halt, failed};
 
@@ -62,6 +63,7 @@ impl Exec {
                 Ok(None) => {
                     if unreachable.is_some() {
                         self.entry.log(LogLevel::Info, "the worker answers again");
+                        self.entry.update_cloud(|c| c.unanswered_since = None);
                     }
                     // A run followed again whose record does not say when its worker first answered (a server
                     // of before wrote it, or that write failed): it answers now. The first time stays.
@@ -85,6 +87,9 @@ impl Exec {
                             LogLevel::Warn,
                             format!("the worker did not answer ({e}); the run goes on there, asking again"),
                         );
+                        // Said on the run too, so a page shows the run's numbers stand still and why.
+                        let now = rfc3339(unix_now());
+                        self.entry.update_cloud(|c| c.unanswered_since = Some(now));
                     }
                     let since = *unreachable.get_or_insert_with(Instant::now);
                     wait = (wait * 2).min(t.poll_max);

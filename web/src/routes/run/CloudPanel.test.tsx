@@ -141,7 +141,7 @@ describe('CloudPanel', () => {
     const cloud = signal(first);
     c = render(() => <CloudPanel cloud={cloud.get()} provider="RunPod" run={{ status: 'completed' }} />, target);
     await until(() => fact('Cost') === '$1.91', 'the ledger’s cost');
-    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+    expect(target.querySelector('#cloud .warn-line')).toBeNull();
     // The same panel, another run's page (whose instance is ci_3), while its lookup is still on the way: nothing of
     // ci_1 is shown for it, and ci_2's warning never is.
     let answerLater: (v: CloudInstance[]) => void = () => {};
@@ -149,23 +149,38 @@ describe('CloudPanel', () => {
     cloud.set(state({ phase: 'released', progress: null, cost_usd: 0.5, instance_id: 'ci_3', ended_in: 'collecting' }));
     flushSync();
     expect(fact('Cost')).toBe('$0.50');
-    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+    expect(target.querySelector('#cloud .warn-line')).toBeNull();
     answerLater([inst('ci_2', 'terminating', 9.99)]);
     await until(() => answer.mock.calls.length >= 2, 'the second lookup');
     flushSync();
     expect(fact('Cost')).toBe('$0.50');
-    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+    expect(target.querySelector('#cloud .warn-line')).toBeNull();
+  });
+
+  it('says since when the worker is silent, and keeps its times ago moving while nothing else does', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date(2026, 10, 9, 12, 0));
+    const synced = new Date(2026, 10, 9, 11, 59, 50).toISOString();
+    const silent = new Date(2026, 10, 9, 11, 59, 55).toISOString();
+    c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'training', progress: null, synced, unanswered_since: silent }), provider: 'RunPod' } });
+    flushSync();
+    expect(text(target.querySelector('#cloud .warn-line'))).toBe('The worker has not answered since 11:59. FOLO keeps asking; the run goes on there while the worker is up.');
+    expect(fact('Last checkpoint copy')).toBe('just now');
+    // Ninety seconds on, with no new state from the server: the copy is no longer "just now".
+    vi.advanceTimersByTime(90_000);
+    flushSync();
+    expect(fact('Last checkpoint copy')).toBe('2m ago');
   });
 
   it('says when the ledger cannot be read, and reads it again until it can', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const answer = vi.spyOn(hub.api, 'cloudInstances').mockRejectedValue(new Error('down'));
     c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'released', progress: null, ended_in: 'collecting' }), provider: 'RunPod', run: { status: 'completed' } } });
-    const note = await until(() => target.querySelector('#cloud .unconfirmed'), 'the note');
+    const note = await until(() => target.querySelector('#cloud .warn-line'), 'the note');
     expect(text(note)).toBe('Could not check that the instance is terminated. Settings › Cloud');
     answer.mockResolvedValue([{ id: 'ci_1', status: 'terminated', cost_usd: 1.2, offer: state().offer, error: null } as CloudInstance]);
     vi.advanceTimersByTime(30_000);
-    await until(() => !target.querySelector('#cloud .unconfirmed') && fact('Cost') === '$1.20', 'the ledger read again');
+    await until(() => !target.querySelector('#cloud .warn-line') && fact('Cost') === '$1.20', 'the ledger read again');
   });
 });
 
@@ -204,17 +219,35 @@ describe('Run: a cloud run', () => {
     await until(() => text(target.querySelector('.callout .c-title')) === 'Booting the instance', 'the next title');
   });
 
+  it('says in the header that the worker does not answer, and stops saying it when it does', async () => {
+    const api = new MockApi('cloud-training', 0);
+    let handlers: RunEventHandlers = {};
+    vi.spyOn(api, 'runEvents').mockImplementation((_id, h) => {
+      handlers = h;
+      return () => {};
+    });
+    const id = (await api.runs()).find((r) => r.cloud && r.status === 'running')!.id;
+    await open(api, id);
+    const run = await api.run(id);
+    const badges = () => [...target.querySelectorAll('.badge')].map(text);
+    expect(badges()).not.toContain('Worker not answering');
+    handlers.cloud?.({ ...run.cloud!, unanswered_since: new Date().toISOString() });
+    await until(() => badges().includes('Worker not answering'), 'the badge');
+    handlers.cloud?.({ ...run.cloud!, unanswered_since: null });
+    await until(() => !badges().includes('Worker not answering'), 'the badge gone');
+  });
+
   it('keeps the Cloud panel on a finished run, released, with its final cost', async () => {
     await open(new MockApi('normal', 0), 'run_c3d5');
     expect(phases().every((p) => p.startsWith('done'))).toBe(true);
     expect(fact('Cost')).toMatch(/^\$\d+\.\d\d$/);
-    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+    expect(target.querySelector('#cloud .warn-line')).toBeNull();
   });
 
   it('keeps releasing under way on a finished run whose instance’s termination is not confirmed', async () => {
     // cloud-trouble: the key was revoked, so RunPod never confirmed the termination of shapes-m's instance.
     await open(new MockApi('cloud-trouble', 0), 'run_c3d5');
-    const note = await until(() => target.querySelector('#cloud .unconfirmed'), 'the unconfirmed termination');
+    const note = await until(() => target.querySelector('#cloud .warn-line'), 'the unconfirmed termination');
     expect(text(note)).toBe('Termination not confirmed: the instance may still be billed. Settings › Cloud');
     expect(phases().slice(-2)).toEqual(['now Releasing', 'next Released']);
     expect(fact('Cost')).toMatch(/^\$\d+\.\d\d so far$/);

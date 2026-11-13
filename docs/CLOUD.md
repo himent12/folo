@@ -73,7 +73,9 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
 - **Mirroring.** While the worker trains, the control plane polls it (about once a second; backing off to 30 s
   while it does not answer, which the run's log says once, and again when it answers): the run, new steps and
   epochs (`/metrics?after_step=&after_epoch=`), new log lines
-  (`/logs?after=`) and each new epoch's samples. They go through the same sink as a local trainer's events, so
+  (`/logs?after=`) and each new epoch's samples. While the worker does not answer, `Run.cloud.unanswered_since` says
+  since when (Studio: "Worker not answering"), so a page whose numbers stand still says why. They go through the
+  same sink as a local trainer's events, so
   `metrics.jsonl`, `log.jsonl`, `samples/`, SSE and `Run` behave as for a local run (subscribers get every epoch
   and at most the newest step of each poll). Polling, not SSE, because provider proxies cut long connections;
   every request is short and retried.
