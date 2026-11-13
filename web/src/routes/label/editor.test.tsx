@@ -304,6 +304,44 @@ describe('the labeling editor: undo and redo (studio-label F4)', () => {
     expect(footer()).toMatch(/Unsaved changes/);
   });
 
+  it('makes separate arrow presses, and presses either side of a save, separate steps', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    const at = () => selectedSize();
+    key('ArrowRight', { altKey: true });
+    const one = at();
+    window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight' }));
+    key('ArrowRight', { altKey: true });
+    key('z', { ctrlKey: true });
+    expect(at()).toBe(one);
+    key('ArrowDown', { altKey: true });
+    const saved = at();
+    key('s', { ctrlKey: true });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(footer()).toMatch(/Reviewed|No changes yet/);
+    });
+    key('ArrowDown', { altKey: true });
+    key('z', { ctrlKey: true });
+    expect(at()).toBe(saved);
+    expect(footer()).not.toMatch(/Unsaved changes/);
+  });
+
+  it('drops the selection when an undo puts back or takes away a box, so Delete never hits another one', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    click(inEditor('Add box'));
+    key('Delete');
+    expect(boxCount()).toBe(1);
+    click(editor()!.querySelector<HTMLButtonElement>('.boxes button')!);
+    expect(selectedSize()).toBeTruthy();
+    key('z', { ctrlKey: true });
+    expect(boxCount()).toBe(2);
+    expect(selectedSize()).toBeUndefined();
+    expect(key('Delete').defaultPrevented).toBe(true);
+    expect(boxCount()).toBe(2);
+  });
+
   it('starts afresh on another image, and leaves Ctrl+Z in a field to the field', async () => {
     await openEditor('1');
     click(inEditor('Add box'));

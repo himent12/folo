@@ -38,6 +38,11 @@ export class History<T> {
     return next;
   }
 
+  /** Ends the current run of like edits: the next edit is a step of its own (a key released, a save). */
+  seal() {
+    this.#last = null;
+  }
+
   clear() {
     this.past = [];
     this.future = [];

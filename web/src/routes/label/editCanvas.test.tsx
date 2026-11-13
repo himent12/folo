@@ -36,7 +36,7 @@ const start: Box[] = [
   { class: 1, x1: 224, y1: 141.12, x2: 352, y2: 261.12 },
 ];
 
-function mount(selected: number | null) {
+function mount(selected: number | null, boxes = signal<Box[]>(start)) {
   const api = new MockApi('normal', 0);
   api.labelImageUrl = async () => 'data:,a';
   hub.api = api;
@@ -45,7 +45,7 @@ function mount(selected: number | null) {
   const sel = signal<number | null>(selected);
   const onchange = vi.fn<(b: Box[]) => void>();
   c = render(
-    () => <EditCanvas jobId="lb_1" img={img} classes={['a', 'b']} boxes={start} bind:selected={sel} hovered={null} cls={0} disabled={false} onchange={onchange} />,
+    () => <EditCanvas jobId="lb_1" img={img} classes={['a', 'b']} boxes={boxes.get()} bind:selected={sel} hovered={null} cls={0} disabled={false} onchange={onchange} />,
     target,
   );
   flushSync();
@@ -104,6 +104,19 @@ describe('the editor canvas', () => {
     expect(sel.peek()).toBeNull();
     gesture(canvas.querySelector('.hit')!, [360, 10], [390, 40]);
     expect(onchange.mock.calls[0]![0]).toHaveLength(3);
+  });
+
+  it('drops a gesture whose boxes changed under it (an undo mid-drag), instead of writing over the new ones', async () => {
+    const boxes = signal<Box[]>(start);
+    const { onchange, canvas } = mount(1, boxes);
+    const on = await selectedBox(canvas);
+    on.dispatchEvent(new PointerEvent('pointerdown', { clientX: 300, clientY: 200, button: 0, pointerId: 1, bubbles: true, cancelable: true }));
+    on.dispatchEvent(new PointerEvent('pointermove', { clientX: 330, clientY: 220, pointerId: 1, bubbles: true }));
+    boxes.set([start[1]!, start[0]!]);
+    flushSync();
+    on.dispatchEvent(new PointerEvent('pointerup', { clientX: 330, clientY: 220, pointerId: 1, bubbles: true }));
+    flushSync();
+    expect(onchange).not.toHaveBeenCalled();
   });
 
   it('takes focus from a field of its dialog, so Delete and the arrows reach the boxes', () => {

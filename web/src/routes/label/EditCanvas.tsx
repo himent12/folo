@@ -38,6 +38,8 @@ export default function EditCanvas(props: EditCanvasProps) {
   /** Where the gesture went down on screen, and whether the pointer has since left the click's slop. */
   let press: [number, number] = [0, 0];
   let dragged = false;
+  /** The boxes the gesture started on: if they change under it (an undo, the agent, another image), it is dropped. */
+  let pressedOn: Box[] = [];
 
   const place = computed(() => (cw.get() && ch.get() ? fit(props.img.width, props.img.height, cw.get(), ch.get()) : null));
   effect(() => {
@@ -76,6 +78,7 @@ export default function EditCanvas(props: EditCanvasProps) {
     el!.setPointerCapture?.(e.pointerId);
     press = [e.clientX, e.clientY];
     dragged = false;
+    pressedOn = props.boxes;
     const [x, y] = point(e);
     const reach = (e.pointerType === 'touch' ? HANDLE_REACH_TOUCH : HANDLE_REACH) / p.s;
     const boxes = props.boxes;
@@ -99,6 +102,11 @@ export default function EditCanvas(props: EditCanvasProps) {
     const s = shown.peek();
     if (!d || !s) return;
     const boxes = props.boxes;
+    if (boxes !== pressedOn) {
+      drag.set(null);
+      shown.set(null);
+      return;
+    }
     const r = settle(boxes, d, s, !dragged);
     const moved = r.boxes.length !== boxes.length || r.boxes.some((b, i) => b !== boxes[i]);
     selected.set(r.selected);

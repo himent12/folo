@@ -136,10 +136,11 @@ export default function Editor(props: EditorProps) {
     if (locked.peek()) return;
     const to = redo ? history.redo(draft.peek()) : history.undo(draft.peek());
     if (!to) return;
+    // A step that kept the number of boxes changed one box in place, so the selection still names the same box;
+    // one that added or removed a box shifts the places, and the selection goes.
+    if (to.length !== draft.peek().length) selected.set(null);
     draft.set(to);
     rev.set(rev.peek() + 1);
-    const s = selected.peek();
-    if (s !== null && s >= to.length) selected.set(null);
   }
   function setClass(c: number) {
     const s = selected.peek();
@@ -191,6 +192,8 @@ export default function Editor(props: EditorProps) {
     const id = cur.id;
     const sent = draft.peek();
     const mark = props.live.mark();
+    // A save ends a run of arrow presses: the next one is a step of its own, back to what was saved.
+    history.seal();
     saving.set(true);
     status.clear();
     try {
@@ -341,6 +344,8 @@ export default function Editor(props: EditorProps) {
     e.preventDefault();
   }
   onWindow('keydown', onkeydown);
+  // A held arrow repeats as one step; a released one ends it, so separate presses are separate steps.
+  onWindow('keyup', (e) => e.key in ARROWS && history.seal());
   onWindow('beforeunload', onbeforeunload);
 
   // ---------- asking the agent again ----------
