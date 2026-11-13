@@ -528,7 +528,14 @@ mod tests {
             folo_data::ImageMeta { index: 0, orig_size: [320, 240], ratio: [2.0, 2.0], pad: [0.0, 80.0] };
         let truth = Truth { bbox: Xyxy::new(0.0, 80.0, 100.0, 200.0), class: 0 };
         let images = Outputs::Host(vec![(vec![Xyxy::new(0.0, 60.0, 100.0, 200.0)], vec![0.9])]);
-        let d = Decoded { images, nc: 1, mode: HeadMode::O2m, truths: vec![vec![truth]], meta: vec![meta] };
+        let d = Decoded {
+            images,
+            prec: None,
+            nc: 1,
+            mode: HeadMode::O2m,
+            truths: vec![vec![truth]],
+            meta: vec![meta],
+        };
         let cfg = ValConfig { samples: 0, ..ValConfig::new(640, 1) };
         post.add(d, &*ds, &cfg).unwrap();
         assert_eq!(post.ev.compute().map50_95, 1.0);
