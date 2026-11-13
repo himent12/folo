@@ -60,7 +60,8 @@ node scripts/perf.mjs --baseline-dist <dir>   # against a stored build (another 
 
 - `shoot.mjs --exact` (what parity uses) makes a shot reproducible to the pixel: the clock paused as for `--qa`,
   `Math.random` constant (the mock's latency jitter), real-time work (blobs, image loads and decodes, chunks, fonts)
-  awaited before and after every clock step, Chrome drawing in software, animations frozen at the shot. It also writes a
+  awaited before and after every clock step (`--qa` does that too, so a loaded machine cannot run a scene's clock out
+  before its page is in), Chrome drawing in software, animations frozen at the shot. It also writes a
   normalized DOM (`<shot>.dom.txt`) and `shoot.json` (failed states and why). `--out`, `--base <url>`, `--prod`,
   `--jobs N`; `--only a,b` takes a comma list. Scope classes `fw-*` (`FOLO_SCOPE_PREFIX`) and `svelte-*` (so the
   Svelte app's stored shoots stay comparable) are left out of the DOM dumps.

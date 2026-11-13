@@ -8,6 +8,7 @@ import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
 import { restoringScroll } from '$lib/shell/entryMemory';
 import App from './App';
+import * as RunScreen from './routes/Run';
 import { Screens, type ScreenModule, type ScreenName } from './routes';
 import { entryScript } from './ScreenError';
 
@@ -64,7 +65,9 @@ describe('the screen kept on display while the next one loads', () => {
     const events = vi.spyOn(MockApi.prototype, 'runEvents');
     const model = deferred<ScreenModule>();
     const loaders: Partial<Record<ScreenName, () => Promise<ScreenModule>>> = {
-      run: () => import('./routes/Run'),
+      // Already loaded (imported above): transforming Run's module graph took seconds of the test's own waits on a
+      // loaded machine. The screen still arrives through a loader's promise, as a chunk does.
+      run: () => Promise.resolve(RunScreen),
       model: () => model.promise,
     };
     const screens = new Screens((name) => loaders[name]);

@@ -165,9 +165,7 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
     await open('normal');
     const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
     await until(() => target.querySelector('select, .model-pick'), 'the pickers');
-    await new Promise((r) => setTimeout(r, 50));
-    flushSync();
-    expect(option(g, 'CPU').disabled).toBe(false);
+    await until(() => !option(g, 'CPU').disabled, 'the CPU offered');
     expect(target.querySelector('#runon-note')?.textContent ?? '').not.toContain('runtime');
   });
 

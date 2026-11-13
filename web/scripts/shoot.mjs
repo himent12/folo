@@ -109,12 +109,12 @@ async function settle(page) {
   await page.clock.runFor(50);
   await page.waitForTimeout(150);
   // A face a setup brought on screen (a mono figure in a dialog) loads after the first fonts.ready.
-  if (exact) await quiet(page);
+  if (paused) await quiet(page);
 }
 
 /**
- * --exact: makes `page` wait for its real-time work before and after every step of its paused clock (and before each
- * look of drive.mjs's waits). With the clock paused, a step fires the mock's timers; what follows them in real time
+ * --exact and --qa (a paused clock): makes `page` wait for its real-time work before and after every step of its
+ * paused clock (and before each look of drive.mjs's waits). With the clock paused, a step fires the mock's timers; what follows them in real time
  * (a canvas encoded to a blob, an image loading or decoding, a lazy chunk, a font) would otherwise land before or after
  * the next step depending on the machine's load, and with it how many steps a wait takes and the live run's progress.
  * Counted in the page: pending blob encodes, bitmaps, image decodes and fetches, images not yet complete, fonts
@@ -699,10 +699,11 @@ async function shoot(scene, theme, vp, touch = false) {
     // --exact: the mock's latency jitter (Math.random, src/lib/api/mock/server.ts) decides how many of the scenes'
     // 250 ms clock steps a wait takes, so the live run's progress drifts between shoots. A constant draw gives every
     // call its nominal latency, whatever order an app makes its calls in.
-    if (exact) {
-      await page.addInitScript(() => (Math.random = () => 0.5));
-      await makeQuiet(page);
-    }
+    if (exact) await page.addInitScript(() => (Math.random = () => 0.5));
+    // A paused clock (--qa too) steps only by the scenes' runFor: each step waits for the real-time work the last one
+    // started, or a loaded machine lets the steps run out before a lazy chunk or an image is in, and a wait that
+    // needs the mock's next timer never sees it (the qa states that timed out on CI only).
+    if (paused) await makeQuiet(page);
     const res = await page.goto(`${base}${ENTRY}?mock=1${scene.search ? `&${scene.search}` : ''}#${scene.path}`, { waitUntil: 'networkidle' });
     if (res && !res.ok()) throw new Error(`${ENTRY} answered ${res.status()}`);
     await page.evaluate(() => document.fonts.ready);

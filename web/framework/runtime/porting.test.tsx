@@ -298,8 +298,8 @@ describe('text runs', () => {
     // Leaving (made inert, as Svelte does), the part with the text around it.
     expect(div.querySelector('b')?.inert).toBe(true);
     expect(div.textContent).toBe('start bold end');
-    await new Promise((r) => setTimeout(r, 80));
-    expect(ends).toEqual(['out']);
+    // The outro ends when its animation does (happy-dom runs it on real timers; later on a loaded machine).
+    await vi.waitFor(() => expect(ends).toEqual(['out']), { timeout: 3000, interval: 10 });
     expect(html(div)).toBe('');
     unmount();
   });
