@@ -320,6 +320,31 @@ describe('Overview', () => {
     expect(reads).toBe(2);
   });
 
+  it('shows a loop at work as a loop, with what it does now (labeling for its first student), opening the loop (sweep 3 F5)', async () => {
+    watched.runs = await idleRuns();
+    const api = new MockApi('normal', 0);
+    const benches = await api.benches();
+    const loops = await Promise.all(benches.map((x) => api.benchLoops(x.id)));
+    const bench = benches[loops.findIndex((l) => l.length > 0)];
+    const loop = loops.find((l) => l.length > 0)![0];
+    api.labelJobs = async () => [];
+    api.benches = async () => [{ ...bench!, active: true }];
+    api.benchEntries = async () => [];
+    const gen1 = { ...loop!.generations[0]!, generation: 1, labels: null, run_id: null, model_id: null, model_name: null, entry_id: null, score: null, map50_95: null, ci95: null };
+    api.benchLoops = async () => [{ ...loop!, status: 'running', phase: 'labeling', finished: null, verdict: null, generations: [loop!.generations[0]!, gen1] }];
+    open(api);
+    const strip = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.activity');
+      if (!el?.textContent?.includes(loop!.name)) throw new Error('still waiting for the loop');
+      return el;
+    });
+    expect(strip.textContent).toContain('Labeling for gen 1');
+    expect(strip.textContent).not.toContain('An entry or a loop is running');
+    const links = [...strip.querySelectorAll('a')].map((a) => a.getAttribute('href'));
+    expect(links).toEqual([`#/benchmarks/${bench!.id}/loops/${loop!.id}`]);
+  });
+
   it('shows the first-run card when the only models are published weights (sweep 3 F6)', async () => {
     const api = new MockApi('empty', 0);
     const [m] = await new MockApi('normal', 0).models();
@@ -355,6 +380,26 @@ describe('Overview', () => {
       return p.textContent!;
     });
     expect(note).toBe('3 more datasets in All models. 1 model trained elsewhere (imported or downloaded) is not ranked.');
+  });
+
+  it('says a cloud instance whose termination is not confirmed may still be billed (studio-cloud handover)', async () => {
+    watched.runs = await idleRuns();
+    const api = new MockApi('normal', 0);
+    api.labelJobs = async () => [];
+    api.benches = async () => [];
+    const [inst] = await new MockApi('cloud-trouble', 0).cloudInstances();
+    const stuck = { ...inst!, status: 'terminating' as const, error: 'the provider did not answer (502)' };
+    api.cloudInstances = async () => [stuck, { ...stuck, id: 'ci_gone', name: 'gone', status: 'terminated' as const, error: null }];
+    open(api);
+    const strip = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.activity');
+      if (!el?.textContent?.includes(stuck.name)) throw new Error('still waiting for the instance');
+      return el;
+    });
+    expect(strip.textContent).toContain('Termination not confirmed: it may still be billed');
+    expect(strip.textContent).not.toContain('gone');
+    expect(strip.querySelector('a')!.getAttribute('href')).toBe('#/settings?section=cloud');
   });
 });
 
