@@ -225,7 +225,7 @@ export default function LabelJobs() {
                         {(j) => {
                           const st = () => jobStatus(j());
                           return (
-                            <tr class="link" data-row aria-label={j().name} onclick={() => open(j())}>
+                            <tr class="link" data-row data-id={j().id} aria-label={j().name} onclick={() => open(j())}>
                               <td class="name-cell">
                                 <a class="name truncate" href={href(`/datasets/label/${j().id}`)} onclick={(e) => e.stopPropagation()} title={j().name}>
                                   {j().name}

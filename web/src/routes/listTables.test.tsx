@@ -114,6 +114,8 @@ describe('list tables: one geometry in every state', () => {
       await open(page, path, new MockApi('normal', 0));
       const loaded = await table(sel, (t) => !!t.querySelector('tbody tr[data-row]'), 'the rows');
       expectAligned(loaded);
+      // Each keyboard row names its entity: the list resumes at it by id after Esc or Back (ui/rowNav, shell F6).
+      expect([...loaded.querySelectorAll<HTMLElement>('tr[data-row]')].filter((r) => !r.dataset.id)).toEqual([]);
       expect(loose(loaded)).toEqual(FLEX[name]);
 
       await open(page, path, new MockApi('loading'));

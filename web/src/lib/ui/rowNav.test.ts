@@ -129,4 +129,25 @@ describe('rowNav', () => {
       }),
     );
   });
+
+  it('restores a row by its id, not its name: two rows can share a name (review of #223)', () => {
+    location.hash = '#/datasets';
+    const make = () => {
+      const t = document.createElement('table');
+      t.setAttribute('aria-label', 'Datasets');
+      t.innerHTML = `<tbody>${['ds_a', 'ds_b', 'ds_c'].map((id) => `<tr data-row data-id="${id}" aria-label="shapes"></tr>`).join('')}</tbody>`;
+      document.body.appendChild(t);
+      return { t, rows: [...t.querySelectorAll<HTMLElement>('tr')] };
+    };
+    const first = make();
+    let nav = rowNav(first.t);
+    first.rows[1]!.focus();
+    nav.destroy();
+    first.t.remove();
+    const again = make();
+    nav = rowNav(again.t);
+    expect(again.rows.map((r) => r.tabIndex)).toEqual([-1, 0, -1]);
+    nav.destroy();
+  });
 });
+

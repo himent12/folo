@@ -45,8 +45,8 @@ const LETTERS = new Set(['j', 'k', 'x']);
  */
 const lastRow = new Map<string, string>();
 const listKey = (root: HTMLElement) => `${location.hash.split('?')[0]}|${root.getAttribute('aria-label') ?? ''}`;
-/** A row's identity: its `data-id`, else its name. */
-const rowKey = (row: HTMLElement) => row.dataset.id ?? row.getAttribute('aria-label') ?? '';
+/** A row's identity: its entity's `data-id` (names are not unique); a row without one is not remembered. */
+const rowKey = (row: HTMLElement) => row.dataset.id;
 
 /** Forgets the rows lists were on (tests). */
 export function forgetRows() {
@@ -62,7 +62,9 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
   const list = listKey(root);
   const remember = (row: HTMLElement) => {
     resumed = true;
-    lastRow.set(list, rowKey(row));
+    const id = rowKey(row);
+    if (id === undefined) lastRow.delete(list);
+    else lastRow.set(list, id);
   };
 
   const settle = () => {
