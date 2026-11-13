@@ -48,6 +48,21 @@ impl Labeler {
             )
             .hint("label images first: POST /api/label/jobs/{id}/start, or draw boxes by hand"));
         }
+        // Images added from a folder are read in place: a folder moved or renamed since leaves them behind. Said as
+        // that, before any folder is made, rather than as a failure to write the dataset.
+        let missing: Vec<&dataset::Item> = items.iter().filter(|i| !i.source.is_file()).collect();
+        if let Some(first) = missing.first() {
+            let what = match missing.len() {
+                1 => "1 labeled image is".to_string(),
+                n => format!("{n} labeled images are"),
+            };
+            return Err(Error::new(
+                StatusCode::NOT_FOUND,
+                "image_not_found",
+                format!("{what} no longer on disk, such as {}", first.source.display()),
+            )
+            .hint("put the folder back where it was, or remove those images from the job"));
+        }
         let path = claim_dir(&self.datasets, &slug(&name, "labeled"))
             .map_err(|e| io_error("creating a folder in", &self.datasets, e))?;
         if let Err(e) =

@@ -4,7 +4,7 @@ import { createComponent } from 'fw/internal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi, type Scenario } from '$lib/api/mock';
-import type { LabelImagesAdded, LabelJob } from '$lib/api/types';
+import type { Dataset, LabelImagesAdded, LabelJob } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { toast } from '$lib/ui/toast';
@@ -160,7 +160,7 @@ describe('Add images › Server folder', () => {
       expect(document.querySelector('dialog[open] .nothing')?.textContent).toBe(`Nothing was added${reason.replace('no', 'No')}.`);
     });
     expect(whyNothingAdded([1, 2, 3].map((i) => ({ file: `${i}.png`, reason: i < 3 ? 'the job already has this file' : 'not a readable image' })))).toBe(
-      '2 files: the job already has this file; 1 file: not a readable image.',
+      '2 files: the job already has them; 1 file: not a readable image.',
     );
   });
 
@@ -194,6 +194,99 @@ describe('Create dataset', () => {
     open(DatasetDialog, { open: true, job, oncreated: () => {} });
     expect(text()).toMatch(/8 images with labels, \d+ boxes\. 16 images without labels are left out\./);
     expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('parts-bench');
+  });
+});
+
+describe('Create dataset again (studio-label F7)', () => {
+  const nameInput = () => document.querySelector<HTMLInputElement>('input[id$="-name"]')!;
+  const named = (...names: string[]) => names.map((name) => ({ name }) as Dataset);
+
+  it('defaults to a name no dataset has yet, and says so when the name typed is taken', async () => {
+    vi.spyOn(hub.api, 'datasets').mockResolvedValue(named('Fasteners-review', 'fasteners-review-2', 'bccd'));
+    const job = await hub.api.labelJob('lb_51d0');
+    open(DatasetDialog, { open: true, job, oncreated: () => {} });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(nameInput().value).toBe('fasteners-review-3');
+    });
+    expect(text()).not.toMatch(/exists/);
+    type(nameInput(), 'bccd');
+    expect(text()).toMatch(/A dataset named bccd exists\. This makes another one beside it; that one, and the runs trained on it, stay as they are\./);
+  });
+
+  it('keeps a name typed before the datasets are known', async () => {
+    let answer!: (d: Dataset[]) => void;
+    vi.spyOn(hub.api, 'datasets').mockReturnValue(new Promise((r) => (answer = r)));
+    const job = await hub.api.labelJob('lb_51d0');
+    open(DatasetDialog, { open: true, job, oncreated: () => {} });
+    type(nameInput(), 'my-set');
+    answer(named('fasteners-review', 'my-set'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(text()).toMatch(/A dataset named my-set exists/);
+    });
+    expect(nameInput().value).toBe('my-set');
+  });
+
+  it('keeps a name edited back to the default before the datasets are known', async () => {
+    let answer!: (d: Dataset[]) => void;
+    vi.spyOn(hub.api, 'datasets').mockReturnValue(new Promise((r) => (answer = r)));
+    open(DatasetDialog, { open: true, job: await hub.api.labelJob('lb_51d0'), oncreated: () => {} });
+    type(nameInput(), 'other');
+    type(nameInput(), 'fasteners-review');
+    answer(named('fasteners-review'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(text()).toMatch(/A dataset named fasteners-review exists/);
+    });
+    expect(nameInput().value).toBe('fasteners-review');
+  });
+
+  it('waits for the datasets before it sends a default, so a quick Create never makes the duplicate', async () => {
+    let answer!: (d: Dataset[]) => void;
+    vi.spyOn(hub.api, 'datasets').mockReturnValue(new Promise((r) => (answer = r)));
+    const create = vi.spyOn(hub.api, 'createLabelDataset');
+    const oncreated = vi.fn();
+    open(DatasetDialog, { open: true, job: await hub.api.labelJob('lb_51d0'), oncreated });
+    submitButton().form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
+    answer(named('fasteners-review'));
+    await vi.waitFor(() => expect(oncreated).toHaveBeenCalled());
+    expect(create.mock.calls[0]![1]).toMatchObject({ name: 'fasteners-review-2' });
+  });
+
+  it('sends nothing for a submit still waiting when the page goes, and a stale one leaves the next opening alone', async () => {
+    const answers: ((d: Dataset[]) => void)[] = [];
+    vi.spyOn(hub.api, 'datasets').mockImplementation(() => new Promise((r) => answers.push(r)));
+    const create = vi.spyOn(hub.api, 'createLabelDataset').mockReturnValue(new Promise(() => {}));
+    const props = deep<DatasetDialogProps>({ open: true, job: await hub.api.labelJob('lb_51d0'), oncreated: () => {} });
+    open(DatasetDialog, props);
+    const submit = () => submitButton().form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    submit();
+    props.open = false;
+    flushSync();
+    props.open = true;
+    flushSync();
+    submit();
+    answers[1]!(named());
+    await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    // The first opening's answer comes late: the second's export is still under way, and Create stays busy.
+    answers[0]!(named());
+    await new Promise((r) => setTimeout(r));
+    flushSync();
+    expect(submitButton().disabled || submitButton().getAttribute('aria-busy') === 'true').toBe(true);
+    // Another opening, then the page goes before its datasets come: no request.
+    props.open = false;
+    flushSync();
+    props.open = true;
+    flushSync();
+    submit();
+    unmount(c!);
+    c = undefined;
+    answers[2]!(named());
+    await new Promise((r) => setTimeout(r));
+    expect(create).toHaveBeenCalledTimes(1);
   });
 });
 

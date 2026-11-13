@@ -326,8 +326,21 @@ async fn folder_images_are_read_in_place() {
     ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), json!({ "agent": "claude" })))
         .await;
     idle(app, &job.id).await;
-    let ds: Dataset =
-        ok(app, post(&format!("/api/label/jobs/{}/dataset", job.id), json!({ "val_fraction": 0 }))).await;
+    // A file moved away since: the export says which, and makes no folder.
+    let away = t.join("a.png");
+    std::fs::rename(photos.join("day 2").join("a.png"), &away).unwrap();
+    let dataset = format!("/api/label/jobs/{}/dataset", job.id);
+    let e = err(app, post(&dataset, json!({})), StatusCode::NOT_FOUND, "image_not_found").await;
+    let gone = photos.join("day 2").join("a.png");
+    // The folder as the server keeps it (made absolute), so only its end is compared.
+    let named = e.message.strip_prefix("1 labeled image is no longer on disk, such as ").unwrap();
+    assert!(Path::new(named).ends_with(Path::new("photos").join("day 2").join("a.png")), "{}", e.message);
+    assert!(
+        !t.join("home/datasets").exists()
+            || std::fs::read_dir(t.join("home/datasets")).unwrap().next().is_none()
+    );
+    std::fs::rename(&away, &gone).unwrap();
+    let ds: Dataset = ok(app, post(&dataset, json!({ "val_fraction": 0 }))).await;
     assert_eq!(ds.splits, Splits { train: 4, val: 0, test: 0 });
     assert!(Path::new(&ds.path).join("images/train/a-2.png").is_file());
     assert!(Path::new(&ds.path).join("labels/train/a-2.txt").is_file());

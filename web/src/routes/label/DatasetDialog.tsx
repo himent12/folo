@@ -1,6 +1,9 @@
 /**
  * "Create dataset": the job's labeled images written as a YOLO dataset that trains like any other. Says plainly what
- * goes in and what is left out; the name follows the Datasets rules (one click to the nearest valid one).
+ * goes in and what is left out; the name follows the Datasets rules (one click to the nearest valid one). Making it
+ * again (after more review) makes a new dataset: its name defaults to one no dataset has yet ("street-2"), and a name
+ * that is taken says the dataset of that name and its runs stay as they are, so two same-named sets are never made
+ * unawares.
  */
 import Database from '$icons/database';
 import { bindable, computed, createUniqueId, css, effect, signal, untrack } from 'fw';
@@ -14,7 +17,7 @@ import { DialogStatus } from '$lib/ui/feedback';
 import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import Segmented from '$lib/ui/Segmented';
-import { NAME_RE, suggestName } from '../datasets/names';
+import { NAME_RE, suggestName, uniqueName } from '../datasets/names';
 import { images } from './words';
 
 export interface DatasetDialogProps {
@@ -31,6 +34,13 @@ export default function DatasetDialog(props: DatasetDialogProps) {
   const val = signal<'0.1' | '0.2' | '0.3'>('0.2');
   const busy = signal(false);
   const touched = signal(false);
+  /** The names of the datasets on the server, lowercased; read on every opening. */
+  const taken = signal<ReadonlySet<string>>(new Set());
+  let opening = 0;
+  /** The user changed the name in this opening (typed, or took the suggested fix): theirs is never replaced. */
+  let edited = false;
+  /** This opening's read of the datasets; a submit waits for it, so the default it would free is the one sent. */
+  let lookup: Promise<void> = Promise.resolve();
 
   // Every opening (or another job) starts afresh; a change of the job while it is open (a run's progress) keeps what was
   // typed, and a submit in flight.
@@ -40,11 +50,33 @@ export default function DatasetDialog(props: DatasetDialogProps) {
     void jobId.get();
     untrack(() => {
       const job = props.job;
-      name.set(NAME_RE.test(job.name) ? job.name : (suggestName(job.name) ?? ''));
+      const first = NAME_RE.test(job.name) ? job.name : (suggestName(job.name) ?? '');
+      name.set(first);
       val.set('0.2');
       touched.set(false);
       busy.set(false);
+      taken.set(new Set());
+      edited = false;
+      // Once the datasets are known, a default that one of them has moves on to a free name, unless it was edited.
+      const seq = ++opening;
+      lookup = hub.api.datasets().then(
+        (list) => {
+          if (seq !== opening || !open.peek()) return;
+          const names = new Set(list.map((d) => d.name.toLowerCase()));
+          taken.set(names);
+          if (!edited && first) name.set(uniqueName(first, names));
+        },
+        () => {},
+      );
     });
+  });
+  // Leaving the page ends the opening: a submit still waiting for the datasets sends nothing.
+  effect(() => () => {
+    opening++;
+  });
+  const exists = computed(() => {
+    const n = name.get().trim();
+    return n && taken.get().has(n.toLowerCase()) ? n : null;
   });
 
   const nameError = computed(() => {
@@ -59,10 +91,23 @@ export default function DatasetDialog(props: DatasetDialogProps) {
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
-    touched.set(true);
-    if (nameError.peek() || busy.peek()) return;
+    if (busy.peek()) return;
     busy.set(true);
     status.clear();
+    const seq = opening;
+    await lookup;
+    // Closed, opened afresh or gone (the page left) meanwhile: that was not a request to make this dataset, and what is
+    // on screen now belongs to another opening, if any.
+    if (seq !== opening) return;
+    if (!open.peek()) {
+      busy.set(false);
+      return;
+    }
+    touched.set(true);
+    if (nameError.peek()) {
+      busy.set(false);
+      return;
+    }
     try {
       const ds = await hub.api.createLabelDataset(props.job.id, { name: name.peek().trim(), val_fraction: Number(val.peek()) });
       open.set(false);
@@ -113,10 +158,16 @@ export default function DatasetDialog(props: DatasetDialogProps) {
           label="Name"
           for={`${uid}-name`}
           error={touched.get() ? nameError.get() : null}
-          fix={touched.get() && fixed.get() ? { label: `Try ${fixed.get()}`, apply: () => name.set(fixed.peek()!) } : null}
+          fix={touched.get() && fixed.get() ? { label: `Try ${fixed.get()}`, apply: () => ((edited = true), name.set(fixed.peek()!)) } : null}
         >
-          <Input id={`${uid}-name`} bind:value={name} autocomplete="off" spellcheck={false} invalid={touched.get() && !!nameError.get()} />
+          <Input id={`${uid}-name`} bind:value={name} oninput={() => (edited = true)} autocomplete="off" spellcheck={false} invalid={touched.get() && !!nameError.get()} />
         </Field>
+        {exists.get() ? (
+          <p class="facts" role="status">
+            A dataset named {exists.get()} exists. This makes another one beside it; that one, and the runs trained on it, stay as they
+            are.
+          </p>
+        ) : null}
         <Field label="Validation share" hint={`About ${images(labeled.get() - valImages.get())} to train on and ${images(valImages.get())} to check the model with.`}>
           <Segmented
             label="Validation share"
