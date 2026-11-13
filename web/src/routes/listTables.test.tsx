@@ -145,6 +145,8 @@ describe('list tables: one geometry in every state', () => {
         if (name === 'Datasets') expect(link!.getAttribute('title')).toBe(row.getAttribute('aria-label'));
         // The cell is bounded, so the name cuts itself instead of sizing its column.
         expect(ownRules(SOURCE[name]!, cell!).some((b) => /max-width:\s*0\s*;/.test(b)), `a bounded name cell in ${name}`).toBe(true);
+        // And the name is a block in it, or its ellipsis never applies and the text spills past the cell.
+        expect(ownRules(SOURCE[name]!, link!).some((b) => /display:\s*block\s*;/.test(b)), `a block name link in ${name}`).toBe(true);
       }
 
       await open(page, path, new MockApi('loading'));
