@@ -154,11 +154,17 @@ fn validate_counted(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) ->
     }
     let n = &cfg.nms;
     let unit = |x: f32| (0.0..=1.0).contains(&x); // false for NaN
-    if !unit(n.conf) || !unit(n.iou) || !unit(cfg.sample_conf) || n.max_det == 0 || n.max_candidates == 0 {
+    if !unit(n.conf)
+        || !unit(n.iou)
+        || !unit(n.fusion_iou)
+        || !unit(cfg.sample_conf)
+        || n.max_det == 0
+        || n.max_candidates == 0
+    {
         return Err(Error::Config(format!(
-            "validation needs conf, iou and sample_conf in 0..=1 and max_det, max_candidates >= 1; got conf {} iou \
-             {} sample_conf {} max_det {} max_candidates {}",
-            n.conf, n.iou, cfg.sample_conf, n.max_det, n.max_candidates
+            "validation needs conf, iou, fusion_iou and sample_conf in 0..=1 and max_det, max_candidates >= 1; got \
+             conf {} iou {} fusion_iou {} sample_conf {} max_det {} max_candidates {}",
+            n.conf, n.iou, n.fusion_iou, cfg.sample_conf, n.max_det, n.max_candidates
         )));
     }
     let head = cfg.head.unwrap_or(model.head_mode());
@@ -570,6 +576,23 @@ mod tests {
             assert_eq!(check_against_serial(&model, &ds, conf, BoxFusion::Dfl), 10, "f16, DFL fusion");
         } else {
             eprintln!("note: skipping the f16 case, the GPU does not compute in f16");
+        }
+    }
+
+    /// A threshold outside 0..=1 (NaN included) is a config error before any image is read, the fusion cluster IoU
+    /// too: NaN would put every same-class candidate in one cluster, a value above 1 would switch fusion off.
+    #[test]
+    fn validate_rejects_thresholds_outside_the_unit_range() {
+        let (model, ds) = untrained(Device::Cpu);
+        // (conf, iou, fusion_iou)
+        for (conf, iou, fusion_iou) in
+            [(f32::NAN, 0.7, 0.75), (0.001, 1.5, 0.75), (0.001, 0.7, f32::NAN), (0.001, 0.7, 1.5)]
+        {
+            let mut vc = ValConfig::new(64, 4);
+            vc.nms.fusion = BoxFusion::Dfl;
+            (vc.nms.conf, vc.nms.iou, vc.nms.fusion_iou) = (conf, iou, fusion_iou);
+            let got = validate(&model, ds.clone(), &vc);
+            assert!(matches!(got, Err(Error::Config(_))), "conf {conf} iou {iou} fusion_iou {fusion_iou}");
         }
     }
 
