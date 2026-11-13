@@ -225,6 +225,11 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
     let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
     until("epoch 1 here", || run_of(&store, &run.id).best);
     drop(store);
+    // Its thread has let go of the run (it holds the run's lock until then; a loaded machine can keep it in a poll
+    // after the drop returns): only now is the worker cut off, or that thread would hold the lock through its
+    // retries and the next process could not follow the run.
+    let lock = home.join("runs").join(&run.id).join("cloud.lock");
+    until("the run let go", || std::fs::File::open(&lock).ok()?.try_lock().ok());
     // The process before recorded a silence of the worker (it went down while the worker did not answer).
     let saved = home.join("runs").join(&run.id).join("run.json");
     let mut file: serde_json::Value =
