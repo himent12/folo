@@ -896,8 +896,9 @@ describe('LiveRun: a long log', () => {
       live = new LiveRun(() => 'run_q7c5');
     });
     flushSync();
-    // Ten lines stream in after the server answered with 2,704, before its answer is applied.
-    for (let i = 0; i < 10; i++) handlers.log?.({ t: at(2000 + i), level: 'info', message: `late ${i}` });
+    // Ten lines stream in after the server answered with 2,704, before its answer is applied; a cloud worker's keep
+    // their own (earlier) times.
+    for (let i = 0; i < 10; i++) handlers.log?.({ t: at(i % 2 ? 2000 + i : 100 + i), level: 'info', message: `late ${i}` });
     history.resolve({ lines, total: 2704 });
     await vi.advanceTimersByTimeAsync(0);
     expect(live.logs).toHaveLength(2000);

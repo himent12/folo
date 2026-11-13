@@ -187,6 +187,8 @@ export class LiveRun {
    * when the history loaded, and the lines the cap dropped since. The log panel says how many it does not show.
    */
   logsEarlier = 0;
+  /** Log lines the stream has delivered, ever: a history load counts the ones that arrived while it was in flight. */
+  #streamedLogs = 0;
   set logs(v: LogLine[]) {
     this.logsLog.replace(v);
   }
@@ -266,13 +268,15 @@ export class LiveRun {
         const gen = this.#gen;
         const my = ++loadIssued;
         // Older servers have no /logs; the live stream still fills the view.
+        const asked = this.#streamedLogs;
         const logsLoad = api.runLogs(runId, MAX_LOGS).catch((): RunLogs => ({ lines: [] }));
         const held = (l: RunLogs) => {
-          // The server's count is as of its answer: the lines streamed in after its last one are on top of it. Without
-          // a count (an older server, a failed request) the one known stays.
-          const last = l.lines[l.lines.length - 1];
+          // The server's count is as of its answer: the lines streamed in since it was asked for (the last ones held,
+          // in the order they arrived, whatever their times: a cloud worker's lines keep theirs) and not in its answer
+          // are on top of it. Without a count (an older server, a failed request) the one known stays.
+          const since = Math.min(this.logs.length, this.#streamedLogs - asked);
           const seen = new Set(l.lines.map((x) => `${x.t}|${x.message}`));
-          const newer = last ? this.logs.filter((x) => x.t >= last.t && !seen.has(`${x.t}|${x.message}`)).length : this.logs.length;
+          const newer = this.logs.slice(this.logs.length - since).filter((x) => !seen.has(`${x.t}|${x.message}`)).length;
           this.logs = mergeLogs(l.lines, this.logs);
           if (l.total !== undefined) this.logsEarlier = Math.max(0, l.total + newer - this.logs.length);
         };
@@ -466,6 +470,7 @@ export class LiveRun {
         log: (l) => {
           if (closed) return;
           this.#heard = Date.now();
+          this.#streamedLogs++;
           this.logs.push(l);
           if (this.logs.length > MAX_LOGS) {
             this.logsEarlier += this.logs.length - MAX_LOGS;
