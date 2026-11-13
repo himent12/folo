@@ -461,10 +461,10 @@ fn park_moves_a_window_on_a_display_off_every_display() {
     use ::windows::Win32::UI::HiDpi::{
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
     };
-    // Every rectangle in device pixels, whatever the process's awareness. A test running beside this
-    // one makes a `WindowsPlatform`, which turns the whole process per-monitor aware at some moment of
-    // this one; then the window's size could read back scaled (450 x 300 for 300 x 200 at 150 %, about
-    // one run in 40 here). This thread's own awareness, fixed for the whole test, doesn't move.
+    // Every rectangle in device pixels, in one awareness for the whole test: this thread's own, whatever
+    // the process's. Without it the size read back scaled about one run in 40 (450 x 300 for 300 x 200
+    // at 150 %), most likely because a test beside this one makes a `WindowsPlatform`, which turns the
+    // whole process per-monitor aware meanwhile.
     // SAFETY: this thread's own setting, put back at the end.
     let before = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let make = |x: i32, y: i32, style: WINDOW_STYLE, parent: Option<HWND>| {
