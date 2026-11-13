@@ -390,16 +390,27 @@ impl Predictor {
         let batch = self.prepare(imgs, rect)?;
         self.wait_for_device()?;
         let pre = ms(t0);
+        let nms = self.cfg.nms();
 
-        let t1 = Instant::now();
-        let out = self.forward(&batch)?;
-        self.wait_for_device()?;
-        let inf = ms(t1);
-
-        // docs/API.md counts the decode as post-processing.
-        let t2 = Instant::now();
-        let dets = self.finish_detections(&batch, out.detections(&self.cfg.nms())?);
-        let post = ms(t2);
+        let (dets, inf, post) = if self.model.candidates_first_applies(batch.input.device(), &nms) {
+            // Candidate-first (MODEL.md §9.5): the box branch runs once the candidates are known, so the
+            // candidate extraction and the candidates' box decode count as inference (docs/API.md, `timing`).
+            let t1 = Instant::now();
+            let cands = self.model.predict_candidates(&batch.input, &nms)?;
+            let inf = ms(t1);
+            let t2 = Instant::now();
+            let dets = cands.into_par_iter().map(|c| self.model.finish_candidates(&c, &nms)).collect();
+            (self.finish_detections(&batch, dets), inf, ms(t2))
+        } else {
+            let t1 = Instant::now();
+            let out = self.forward(&batch)?;
+            self.wait_for_device()?;
+            let inf = ms(t1);
+            // docs/API.md counts the decode as post-processing.
+            let t2 = Instant::now();
+            let dets = self.finish_detections(&batch, out.detections(&nms)?);
+            (dets, inf, ms(t2))
+        };
         let n = imgs.len() as f64;
         Ok(batch.predictions(dets, Timing::new(pre / n, inf / n, post / n)))
     }

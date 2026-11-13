@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
@@ -24,6 +24,15 @@ struct Pool {
 }
 
 static POOL: Mutex<Option<Pool>> = Mutex::new(None);
+
+static POISON: AtomicBool = AtomicBool::new(false);
+
+/// A testing aid: while on (process-wide), every buffer the CPU kernels take without initialising it is filled
+/// with NaN, so an output element a kernel never wrote, or an input it reads that nobody wrote (results that
+/// would otherwise depend on whatever a recycled buffer held), shows up as NaN.
+pub fn poison_uninit(on: bool) {
+    POISON.store(on, Ordering::Relaxed);
+}
 
 /// Cap the bytes held by the CPU buffer cache (default 1 GiB; 0 disables caching). Shrinks immediately.
 pub fn set_buffer_cache_limit(bytes: usize) {
@@ -61,6 +70,9 @@ fn take(n: usize) -> Option<Vec<f32>> {
 
 /// A buffer of `n` floats with unspecified contents (for kernels that overwrite every element).
 pub(crate) fn alloc_uninit(n: usize) -> Vec<f32> {
+    if POISON.load(Ordering::Relaxed) {
+        return alloc_filled(n, f32::NAN);
+    }
     take(n).unwrap_or_else(|| vec![0.0; n])
 }
 

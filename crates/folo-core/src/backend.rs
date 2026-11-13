@@ -535,6 +535,22 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Storage> {
         unsupported!(self, "conv2d_act_cat")
     }
+    /// [`Backend::conv2d_act`] where only the output sites `at` are needed (`U32 [S]`, flat output indices
+    /// `n · OH·OW + oy · OW + ox`, each `< N·OH·OW`, any order, repeats allowed): the result is the full
+    /// `[N, O, OH, OW]` output in which every site holds the value [`Backend::conv2d_act`] computes there, and
+    /// every other element is unspecified. Reached through `Tensor::conv2d_act_at`, which falls back to the dense
+    /// [`Backend::conv2d_act`].
+    fn conv2d_act_at(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        at: View<'_>,
+    ) -> Result<Storage> {
+        unsupported!(self, "conv2d_act_at")
+    }
     /// Train-mode batch normalisation of `x` `[N, C, H, W]` over `N·H·W` per channel, then `act` (`None` is
     /// the identity): `y = act((x − mean) · invstd · weight + bias)` with the batch mean and
     /// `invstd = 1 / sqrt(var + eps)` of the *biased* variance. Returns `(y, mean [C], invstd [C])`.

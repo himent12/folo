@@ -20,7 +20,97 @@ pub const CANDIDATE_READBACK: usize = 1024;
 
 /// Anchors per task of the CPU candidate extraction ([`HeadOutput::detections`] on the CPU): 8400 anchors at
 /// 640 px make nine blocks, and a block's running class maximum (4 KiB) stays in L1.
-const CPU_DECODE_BLOCK: usize = 1024;
+pub(super) const CPU_DECODE_BLOCK: usize = 1024;
+
+/// An anchor that passes the single-label confidence test: `(anchor, best class, its score)`.
+pub(super) type Found = (u32, u32, f32);
+
+/// The single-label candidates among anchors `j0..j1` (at most [`CPU_DECODE_BLOCK`] of them) of one image's
+/// channel-major class logits `cl` (`[nc, a]`), appended to `out` in anchor order: a running maximum of the
+/// logits per anchor, then the full extraction of `non_max_suppression` (sigmoid of every class, first maximum,
+/// `> conf`) only for anchors whose largest logit could pass. The sigmoid is monotonic, so a skipped anchor has no
+/// score above `conf` (a NaN first score never passes either).
+pub(super) fn single_label_block(
+    cl: &[f32],
+    a: usize,
+    j0: usize,
+    j1: usize,
+    conf: f32,
+    out: &mut Vec<Found>,
+) {
+    let nc = cl.len() / a;
+    let mut best = [0f32; CPU_DECODE_BLOCK];
+    let best = &mut best[..j1 - j0];
+    best.copy_from_slice(&cl[j0..j1]);
+    for row in cl.chunks_exact(a).skip(1) {
+        for (m, &v) in best.iter_mut().zip(&row[j0..j1]) {
+            *m = m.max(v);
+        }
+    }
+    for (j, &m) in (j0..j1).zip(best.iter()) {
+        // A margin of a few ulp, so even a libm `exp` that is not monotonic cannot skip a candidate; the exact
+        // test follows.
+        let may_pass = sigmoid(m) * (1.0 + 1e-6) + 1e-30 > conf;
+        if !may_pass {
+            continue;
+        }
+        // Exactly the extraction of `non_max_suppression`.
+        let (mut bc, mut bs) = (0usize, sigmoid(cl[j]));
+        for c in 1..nc {
+            let s = sigmoid(cl[c * a + j]);
+            if s > bs {
+                (bc, bs) = (c, s);
+            }
+        }
+        if bs > conf {
+            out.push((j as u32, bc as u32, bs)); // never for NaN
+        }
+    }
+}
+
+/// The DFL decode of one anchor (MODEL.md §6.4) with the functions of [`crate::decode::decode_head`]: `read(i)`
+/// is its raw box output `i` (`side · reg_max + bin`), `bins` is `reg_max` long scratch. With `precisions`, also
+/// its side precisions for DFL evidence fusion ([`crate::decode::side_precision`] of each side's mean and
+/// variance at `stride`), the box then from the same moments' means.
+pub(super) fn dfl_box(
+    bins: &mut [f32],
+    read: impl Fn(usize) -> f32,
+    point: [f32; 2],
+    stride: f32,
+    precisions: bool,
+) -> (Xyxy, Option<[f32; 4]>) {
+    let rm = bins.len();
+    let (mut d, mut p) = ([0f32; 4], [0f32; 4]);
+    for side in 0..4 {
+        for (k, v) in bins.iter_mut().enumerate() {
+            *v = read(side * rm + k);
+        }
+        if precisions {
+            // The mean is the expectation of `decode::softmax_expectation`, bit for bit.
+            let (mean, var) = softmax_moments(bins);
+            d[side] = mean;
+            p[side] = side_precision(mean, var, stride);
+        } else {
+            d[side] = softmax_expectation(bins);
+        }
+    }
+    (dist2bbox(d, point).scale(stride, stride), precisions.then_some(p))
+}
+
+/// The single-label post-process of one image's candidates (sorted by anchor) for the branch `mode`: NMS for
+/// `o2m` (with the candidates' side precisions, parallel to `cands`, when DFL fusion wants them), §6.6's top-k for
+/// `o2o`.
+pub(super) fn finish_candidates(
+    mode: HeadMode,
+    cands: &[Candidate],
+    prec: Option<&[[f32; 4]]>,
+    nms: &NmsConfig,
+) -> Vec<Detection> {
+    match mode {
+        HeadMode::O2m => nms_candidates_with(cands, prec, nms),
+        HeadMode::O2o => topk_candidates(cands, nms),
+    }
+}
 
 /// One image's decoded output, in network-input pixels (no letterbox inverse).
 #[derive(Debug, Clone, PartialEq)]
@@ -239,25 +329,9 @@ impl HeadOutput {
         Ok(Tensor::cat(&[&mean, &m2], 1)?)
     }
 
-    /// The single-label post-process of one image's candidates (sorted by anchor) for this output's branch, with
-    /// their side precisions (parallel to `cands`) when DFL fusion wants them.
-    fn finish_candidates(
-        &self,
-        cands: &[Candidate],
-        prec: Option<&[[f32; 4]]>,
-        nms: &NmsConfig,
-    ) -> Vec<Detection> {
-        match self.mode {
-            HeadMode::O2m => nms_candidates_with(cands, prec, nms),
-            HeadMode::O2o => topk_candidates(cands, nms),
-        }
-    }
-
     /// The CPU half of [`HeadOutput::detections`]: straight from the channel-major outputs (borrowed, not
-    /// copied), a running maximum of the class logits per anchor, then the full single-label extraction
-    /// (sigmoid of every class, first maximum, `> conf`) and the DFL decode only for anchors whose largest logit
-    /// could pass. The sigmoid is monotonic, so a skipped anchor has no score above `conf` (a NaN first score
-    /// never passes either). Like the GPU candidate kernel, anchors are processed in independent blocks
+    /// copied), [`single_label_block`]'s extraction, and the DFL decode ([`dfl_box`]) only for the anchors that
+    /// pass. Like the GPU candidate kernel, anchors are processed in independent blocks
     /// ([`CPU_DECODE_BLOCK`]) on the rayon pool, and the blocks' candidates are joined in anchor order, so the
     /// result does not depend on the split. `None` for shapes (or dtypes) the full path should report.
     fn detections_on_cpu(&self, nms: &NmsConfig) -> Result<Option<Vec<Vec<Detection>>>> {
@@ -272,57 +346,20 @@ impl HeadOutput {
         let dfl = self.wants_precisions(nms);
         // The candidates among anchors `j0..j1` of one image, and with `dfl` their side precisions.
         let block = |cl: &[f32], rg: &[f32], j0: usize, j1: usize| -> (Vec<Candidate>, Vec<[f32; 4]>) {
-            let mut best = [0f32; CPU_DECODE_BLOCK];
-            let best = &mut best[..j1 - j0];
-            best.copy_from_slice(&cl[j0..j1]);
-            for row in cl.chunks_exact(a).skip(1) {
-                for (m, &v) in best.iter_mut().zip(&row[j0..j1]) {
-                    *m = m.max(v);
-                }
-            }
-            let mut cands = Vec::new();
-            let mut precs = Vec::new();
+            let mut found = Vec::new();
+            single_label_block(cl, a, j0, j1, nms.conf, &mut found);
             let mut bins = vec![0f32; rm];
-            for (j, &m) in (j0..j1).zip(best.iter()) {
-                // A margin of a few ulp, so even a libm `exp` that is not monotonic cannot skip a candidate;
-                // the exact test follows.
-                let may_pass = sigmoid(m) * (1.0 + 1e-6) + 1e-30 > nms.conf;
-                if !may_pass {
-                    continue;
-                }
-                // Exactly the extraction of `non_max_suppression`.
-                let (mut bc, mut bs) = (0usize, sigmoid(cl[j]));
-                for c in 1..nc {
-                    let s = sigmoid(cl[c * a + j]);
-                    if s > bs {
-                        (bc, bs) = (c, s);
-                    }
-                }
-                let passes = bs > nms.conf; // false for NaN
-                if !passes {
-                    continue;
-                }
-                let st = anchors.strides[j];
-                let (mut d, mut p) = ([0f32; 4], [0f32; 4]);
-                for side in 0..4 {
-                    for (k, v) in bins.iter_mut().enumerate() {
-                        *v = rg[(side * rm + k) * a + j];
-                    }
-                    if dfl {
-                        // The mean is the expectation of `decode::softmax_expectation`, bit for bit.
-                        let (mean, var) = softmax_moments(&bins);
-                        d[side] = mean;
-                        p[side] = side_precision(mean, var, st);
-                    } else {
-                        d[side] = softmax_expectation(&bins);
-                    }
-                }
-                let bbox = dist2bbox(d, anchors.points[j]).scale(st, st);
-                cands.push(Candidate { anchor: j as u32, class: bc as u32, score: bs, bbox });
-                if dfl {
-                    precs.push(p);
-                }
-            }
+            let mut precs = Vec::new();
+            let cands = found
+                .into_iter()
+                .map(|(j, class, score)| {
+                    let j = j as usize;
+                    let (point, st) = (anchors.points[j], anchors.strides[j]);
+                    let (bbox, p) = dfl_box(&mut bins, |i| rg[i * a + j], point, st, dfl);
+                    precs.extend(p);
+                    Candidate { anchor: j as u32, class, score, bbox }
+                })
+                .collect();
             (cands, precs)
         };
         let blocks = a.div_ceil(CPU_DECODE_BLOCK);
@@ -338,7 +375,7 @@ impl HeadOutput {
                         .collect();
                     let (cands, precs): (Vec<_>, Vec<_>) = parts.into_iter().unzip();
                     let precs = precs.concat();
-                    self.finish_candidates(&cands.concat(), dfl.then_some(precs.as_slice()), nms)
+                    finish_candidates(self.mode, &cands.concat(), dfl.then_some(precs.as_slice()), nms)
                 })
                 .collect()
         };
@@ -424,7 +461,7 @@ impl HeadOutput {
                             .map(|j| precision_from_moments(img, a, j, strides[j]))
                             .collect()
                     });
-                    self.finish_candidates(&c, prec.as_deref(), nms)
+                    finish_candidates(self.mode, &c, prec.as_deref(), nms)
                 })
                 .collect(),
         ))
@@ -483,13 +520,20 @@ impl FoloModel {
 
     /// The predictor's model step without the per-anchor outputs: an eval-mode forward under `no_grad`,
     /// then [`HeadOutput::detections`] (decoded on the outputs' device where it can be, so a GPU prediction
-    /// downloads only the candidates). Boxes are in network-input pixels. Fails in training mode.
+    /// downloads only the candidates). Where [`FoloModel::candidates_first_applies`] (a fused model on the CPU),
+    /// [`FoloModel::predict_candidates`] then [`FoloModel::finish_candidates`] instead: the same detections, bit
+    /// for bit, with the box branch run only at the candidates. Boxes are in network-input pixels. Fails in
+    /// training mode.
     pub fn predict_detections(&self, x: &Tensor, nms: &NmsConfig) -> Result<Vec<Vec<Detection>>> {
         if self.is_training() {
             return Err(Error::Invalid(
                 "FoloModel::predict_detections: the model is in training mode; call eval() or fuse() first"
                     .into(),
             ));
+        }
+        if self.candidates_first_applies(x.device(), nms) {
+            let cands = self.predict_candidates(x, nms)?;
+            return Ok(cands.into_par_iter().map(|c| self.finish_candidates(&c, nms)).collect());
         }
         let _g = no_grad();
         self.forward(x)?.detections(nms)

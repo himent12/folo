@@ -12,6 +12,14 @@
 //! `FOLO_BENCH_SCALE` (default `n`) picks the model (`n`, `s`, `m`, ...), `FOLO_BENCH_BATCH` (default 0: off)
 //! adds a `predict_batch` row of that many 640×640 images, and `FOLO_BENCH_LAYERS=1` prints the fastest and
 //! median time of every layer of docs/MODEL.md §4 (the head is the forward minus the traced layers).
+//!
+//! Trained weights: with `FOLO_BENCH_WEIGHTS` (a `.folo` file, e.g. `folo-n-coco`) and `FOLO_BENCH_IMAGES` (a folder
+//! of images, e.g. COCO val2017; the first `FOLO_BENCH_IMAGES_N`, default 16, by name) the same rows run on real
+//! images with the trained model, cycling through the images: each letterboxed to 640×640, each resized to
+//! 1280×720 (rect, 640×384), and `predict_batch` of `FOLO_BENCH_BATCH` of them. Untrained weights pass no
+//! candidate at `conf = 0.25`, so only these rows show what candidate-first prediction (MODEL.md §9.5) does.
+//! `FOLO_BENCH_UNTRAINED=0` skips the untrained rows. Only the predictor's public API is used, so the file builds
+//! against older trees for A/B runs.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -47,6 +55,10 @@ fn main() {
         rayon::current_num_threads()
     );
     let model = || FoloModel::new(ModelConfig::new(&scale, 80).expect("config")).expect("model");
+    if std::env::var("FOLO_BENCH_UNTRAINED").is_ok_and(|v| v == "0") {
+        trained(iters, batch);
+        return;
+    }
 
     let mut fwd = model();
     fwd.eval();
@@ -127,6 +139,84 @@ fn main() {
         println!(
             "{:<38} median {med:>7.2} ms   min {:>7.2}   {:>6.1} img/s (best {:.1})",
             format!("predict_batch {batch} x 640x640 u8"),
+            wall[0],
+            batch as f64 * 1e3 / med,
+            batch as f64 * 1e3 / wall[0],
+        );
+    }
+    trained(iters, batch);
+}
+
+/// The rows on real images with trained weights (see the module docs).
+fn trained(iters: usize, batch: usize) {
+    let (Ok(weights), Ok(dir)) = (std::env::var("FOLO_BENCH_WEIGHTS"), std::env::var("FOLO_BENCH_IMAGES"))
+    else {
+        println!(
+            "trained rows skipped: set FOLO_BENCH_WEIGHTS (a .folo file) and FOLO_BENCH_IMAGES (an image folder)"
+        );
+        return;
+    };
+    let n: usize = std::env::var("FOLO_BENCH_IMAGES_N").ok().and_then(|s| s.parse().ok()).unwrap_or(16);
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .expect("FOLO_BENCH_IMAGES")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("png"))
+        })
+        .collect();
+    paths.sort();
+    paths.truncate(n);
+    let imgs: Vec<folo_data::Image> =
+        paths.iter().map(|p| folo_data::read_image(p).expect("image")).collect();
+    assert!(!imgs.is_empty(), "no images in {dir}");
+    let hd: Vec<folo_data::Image> = imgs.iter().map(|i| folo_data::resize::resize(i, 1280, 720)).collect();
+    let mut pred = Predictor::open(&weights, PredictConfig::default()).expect("weights");
+    println!("trained: {weights}, {} images from {dir}", imgs.len());
+    let rows = [("trained 640x640 (square)", &imgs, false), ("trained 1280x720 (rect 640x384)", &hd, true)];
+    for (name, set, rect) in rows {
+        pred.set_config(PredictConfig { rect, ..PredictConfig::default() }).expect("config");
+        for img in set.iter() {
+            black_box(pred.predict(img).expect("predict"));
+        }
+        let (mut wall, mut pre, mut inf, mut post, mut dets) = (vec![], vec![], vec![], vec![], 0usize);
+        for i in 0..iters {
+            let s = Instant::now();
+            let p = black_box(pred.predict(&set[i % set.len()]).expect("predict"));
+            wall.push(ms(s.elapsed()));
+            pre.push(p.timing.preprocess_ms);
+            inf.push(p.timing.inference_ms);
+            post.push(p.timing.postprocess_ms);
+            dets += p.detections.len();
+        }
+        let mut sorted = wall.clone();
+        sorted.sort_by(f64::total_cmp);
+        let p90 = sorted[(sorted.len() * 9 / 10).min(sorted.len() - 1)];
+        println!(
+            "{name:<38} median {:>7.2} ms   p90 {p90:>7.2}   min {:>7.2}   pre {:>5.2} / inf {:>6.2} / post {:>5.2}   {:.1} det/img",
+            median(&mut wall),
+            sorted[0],
+            median(&mut pre),
+            median(&mut inf),
+            median(&mut post),
+            dets as f64 / iters as f64,
+        );
+    }
+    if batch > 0 {
+        let set: Vec<folo_data::Image> = (0..batch).map(|i| imgs[i % imgs.len()].clone()).collect();
+        for _ in 0..3 {
+            black_box(pred.predict_batch(&set).expect("predict"));
+        }
+        let mut wall: Vec<f64> = (0..iters.div_ceil(4))
+            .map(|_| {
+                let s = Instant::now();
+                black_box(pred.predict_batch(&set).expect("predict"));
+                ms(s.elapsed())
+            })
+            .collect();
+        let med = median(&mut wall);
+        println!(
+            "{:<38} median {med:>7.2} ms   min {:>7.2}   {:>6.1} img/s (best {:.1})",
+            format!("trained predict_batch {batch} x 640x640"),
             wall[0],
             batch as f64 * 1e3 / med,
             batch as f64 * 1e3 / wall[0],

@@ -20,11 +20,13 @@ mod pool;
 mod pool_alloc;
 pub(crate) mod reduce;
 #[cfg(test)]
+mod sites_tests;
+#[cfg(test)]
 mod winograd_tests;
 
 pub use elementwise::{SILU_MAX_REL_ERR, fast_exp, silu, silu_backward};
 pub(crate) use pool_alloc::{alloc_filled, alloc_uninit, alloc_zeroed, recycle};
-pub use pool_alloc::{buffer_cache_bytes, clear_buffer_cache, set_buffer_cache_limit};
+pub use pool_alloc::{buffer_cache_bytes, clear_buffer_cache, poison_uninit, set_buffer_cache_limit};
 
 /// A buffer of `n` floats from the CPU buffer cache (see [`set_buffer_cache_limit`]), with unspecified
 /// contents: zeros or the stale data of a recycled buffer. For kernels outside folo-core (custom ops) that
@@ -358,7 +360,7 @@ impl Backend for CpuBackend {
     }
 
     fn conv2d(&self, x: View<'_>, w: View<'_>, bias: Option<View<'_>>, p: &Conv2dParams) -> Result<Storage> {
-        conv_forward(&[x], w, bias, p, None, false)
+        conv_forward(&[x], w, bias, p, None, false, None)
     }
 
     fn conv2d_act(
@@ -369,7 +371,24 @@ impl Backend for CpuBackend {
         p: &Conv2dParams,
         act: Option<UnaryOp>,
     ) -> Result<Storage> {
-        conv_forward(&[x], w, bias, p, act, true)
+        conv_forward(&[x], w, bias, p, act, true, None)
+    }
+
+    fn conv2d_act_at(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        at: View<'_>,
+    ) -> Result<Storage> {
+        let (n, _, h, wi) = nchw(x.shape());
+        let (_, _, kh, kw) = nchw(w.shape());
+        let [oh, ow] =
+            p.output_hw(h, wi, kh, kw).expect("conv2d_act_at: output size validated by the caller");
+        let at = indices(&at, "conv2d_act_at", n * oh * ow)?;
+        conv_forward(&[x], w, bias, p, act, true, Some(&at))
     }
 
     fn conv2d_act_cat(
@@ -380,7 +399,7 @@ impl Backend for CpuBackend {
         p: &Conv2dParams,
         act: Option<UnaryOp>,
     ) -> Result<Storage> {
-        conv_forward(xs, w, bias, p, act, true)
+        conv_forward(xs, w, bias, p, act, true, None)
     }
     fn conv2d_backward_input(
         &self,
@@ -578,6 +597,10 @@ impl Backend for CpuBackend {
 /// conv2d forward over the channel concatenation of `xs` with bias and activation, for every conv entry point.
 /// `inference` (the fused entry points, which never record a gradient) may take Winograd F(2x2, 3x3), which is
 /// not bit for bit the direct conv; the autograd forward keeps the direct conv that its backward matches.
+///
+/// With `sites` (flat output indices, `conv2d_act_at`), only those outputs need their values: a Winograd conv
+/// computes the 2x2 tiles that hold them and a pointwise conv their columns (`conv::sites`), each bit for bit
+/// what the dense call gives; the other elements of the output are unspecified. Any other conv runs densely.
 fn conv_forward(
     xs: &[View<'_>],
     w: View<'_>,
@@ -585,6 +608,7 @@ fn conv_forward(
     p: &Conv2dParams,
     act: Option<UnaryOp>,
     inference: bool,
+    sites: Option<&[usize]>,
 ) -> Result<Storage> {
     // Parts whose images are each contiguous (a channel slice, for example) are read in place.
     let owned = xs
@@ -614,11 +638,23 @@ fn conv_forward(
         // Bias and activation are applied to each finished block of the output, while it is in cache.
         let epi = gemm::BiasAct { bias: bd.as_deref(), act };
         let fused = bd.is_some() || act.is_some();
+        let input = conv::ConvInput { parts: &parts };
         if inference && conv::uses_winograd(&g) {
             // Transformed once per weight tensor, and kept with it until it is written.
             let key = derived_key("winograd f(2x2, 3x3)", w.layout);
             let u = w.derived(key, || conv::transform_weights(&wd, o, c));
-            conv::winograd_forward(conv::ConvInput { parts: &parts }, &u, &mut out, &g, fused.then_some(epi));
+            match sites {
+                Some(at) => {
+                    let tiles = conv::winograd_tiles_at(&g, at);
+                    conv::winograd_forward_at(input, &u, &mut out, &g, fused.then_some(epi), &tiles);
+                }
+                None => conv::winograd_forward(input, &u, &mut out, &g, fused.then_some(epi)),
+            }
+            return Ok(f32_storage(out));
+        }
+        if let Some(at) = sites
+            && conv::pointwise_forward_at(input, &wd, &mut out, &g, fused.then_some(epi), at)
+        {
             return Ok(f32_storage(out));
         }
         conv::conv2d_forward_parts(

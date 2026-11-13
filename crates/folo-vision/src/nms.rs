@@ -295,7 +295,7 @@ fn finish(
         .collect()
 }
 
-fn class_allowed(cfg: &NmsConfig, c: u32) -> bool {
+pub(crate) fn class_allowed(cfg: &NmsConfig, c: u32) -> bool {
     cfg.classes.as_ref().is_none_or(|cs| cs.contains(&c))
 }
 

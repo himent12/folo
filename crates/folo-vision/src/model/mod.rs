@@ -31,6 +31,7 @@
 pub mod blocks;
 pub mod head;
 mod io;
+mod lazy;
 mod predict;
 
 use folo_core::rng::Rng;
@@ -454,15 +455,40 @@ impl FoloModel {
         self.forward_impl(x, Some(trace), self.head_mode)
     }
 
-    /// The forward pass. Without a trace, the neck's Concat layers (12, 15, 18, 21) are never written: the
-    /// C3k2 after each reads both parts in place ([`C3k2::forward_cat`]).
+    /// The forward pass: [`FoloModel::features`], then the head.
     fn forward_impl(
         &self,
         x: &Tensor,
-        mut trace: Option<&mut LayerTrace<'_>>,
+        trace: Option<&mut LayerTrace<'_>>,
         head_mode: HeadMode,
     ) -> Result<HeadOutput> {
         let (h, w) = self.check_input(x)?;
+        let [x16, x19, x22] = self.features(x, trace)?;
+        let feats = [&x16, &x19, &x22];
+        let (mode, (box_raw, cls_raw), o2o) = if self.is_training() {
+            (HeadMode::O2m, self.head.forward(feats)?, self.head.forward_o2o(feats)?)
+        } else if head_mode == HeadMode::O2o
+            && let Some(raw) = self.head.forward_o2o(feats)?
+        {
+            (HeadMode::O2o, raw, None)
+        } else {
+            (HeadMode::O2m, self.head.forward(feats)?, None)
+        };
+        Ok(HeadOutput {
+            box_raw,
+            cls_raw,
+            mode,
+            o2o,
+            anchors: self.anchors(h, w),
+            reg_max: self.head.reg_max,
+            num_classes: self.head.num_classes,
+        })
+    }
+
+    /// Layers 0–22 of a checked input: the head's inputs (the P3, P4 and P5 features, layers 16, 19 and 22).
+    /// Without a trace, the neck's Concat layers (12, 15, 18, 21) are never written: the C3k2 after each reads
+    /// both parts in place ([`C3k2::forward_cat`]).
+    fn features(&self, x: &Tensor, mut trace: Option<&mut LayerTrace<'_>>) -> Result<[Tensor; 3]> {
         let b = &self.backbone;
         let n = &self.neck;
         let traced = trace.is_some();
@@ -507,27 +533,7 @@ impl FoloModel {
         drop(x13);
         y = t(20, n.down4.forward(&x19)?);
         let x22 = cat_c3k2(&mut t, 21, &n.out5, &y, &x10)?;
-        drop(x10);
-        drop(y);
-        let feats = [&x16, &x19, &x22];
-        let (mode, (box_raw, cls_raw), o2o) = if self.is_training() {
-            (HeadMode::O2m, self.head.forward(feats)?, self.head.forward_o2o(feats)?)
-        } else if head_mode == HeadMode::O2o
-            && let Some(raw) = self.head.forward_o2o(feats)?
-        {
-            (HeadMode::O2o, raw, None)
-        } else {
-            (HeadMode::O2m, self.head.forward(feats)?, None)
-        };
-        Ok(HeadOutput {
-            box_raw,
-            cls_raw,
-            mode,
-            o2o,
-            anchors: self.anchors(h, w),
-            reg_max: self.head.reg_max,
-            num_classes: self.head.num_classes,
-        })
+        Ok([x16, x19, x22])
     }
 
     fn check_input(&self, x: &Tensor) -> Result<(usize, usize)> {
