@@ -237,6 +237,169 @@ describe('Playground: an end-to-end (o2o) model', () => {
   });
 });
 
+describe('Playground: a busy image (more candidates than the first answer holds)', () => {
+  // The first answer holds the 1,000 highest-scoring candidates (FETCH). On a busy image they are near-duplicates of a
+  // few objects, so filtering them at a low confidence lost boxes the server finds (models F5: 194 shown where
+  // POST /api/predict at the same thresholds gave 300).
+  const box = (x: number, score: number) => ({ class: 0, name: 'circle', score, x1: x, y1: 0, x2: x + 100, y2: 100 });
+  // 1,000 copies of 3 objects, scores 0.90 down to `floor`; all candidates add 5 more objects at 0.15.
+  const first = (floor: number) => Array.from({ length: 1000 }, (_, i) => box((i % 3) * 200, 0.9 - ((0.9 - floor) * i) / 999));
+  const all = (floor: number) => [...first(floor), ...[1, 2, 3, 4, 5].map((k) => box(600 + k * 200, 0.15))];
+
+  /**
+   * `first`: what the first request for every candidate does: never answer (the page is left while it runs) or fail
+   * (the server is busy).
+   */
+  async function open(floor: number, firstAll: 'answer' | 'hang' | 'fail' = 'answer') {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    const asked: number[] = [];
+    api.predict = async (_input, opts) => {
+      asked.push(opts.max_det ?? 300);
+      if ((opts.max_det ?? 300) > 1000 && asked.filter((n) => n > 1000).length === 1) {
+        if (firstAll === 'hang') await new Promise(() => {});
+        if (firstAll === 'fail') throw new ApiError(503, 'busy', 'The GPU is busy.');
+      }
+      return {
+        model_id: opts.model_id,
+        image: { width: 2000, height: 640 },
+        boxes: (opts.max_det ?? 300) > 1000 ? all(floor) : first(floor),
+        timing: { preprocess_ms: 1, inference_ms: 1, postprocess_ms: 1, total_ms: 3 },
+        device: 'gpu:0',
+      };
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_n');
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    return asked;
+  }
+  const rows = () => target.querySelectorAll('#pg-panel tbody tr').length;
+  const foot = () => target.querySelector('.vfoot')?.textContent?.replace(/\s+/g, ' ') ?? '';
+  function setConf(v: number) {
+    const conf = target.querySelector<HTMLInputElement>('.slider input[type="range"]')!;
+    conf.value = String(v);
+    conf.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+  }
+
+  it('asks once for every candidate when the confidence goes under the cut, and shows what they hold', async () => {
+    const asked = await open(0.2);
+    // Above the cut the first answer is exact: no second request.
+    expect(rows()).toBe(3);
+    expect(asked).toEqual([1000]);
+    expect(foot()).toContain('of 1,000+ candidates');
+    setConf(0.1);
+    await until(() => rows() === 8, 'the boxes only all candidates hold');
+    expect(asked).toEqual([1000, 30_000]);
+    expect(foot()).toContain('of 1,005 candidates');
+    // Further down the answer is complete: nothing more is asked.
+    setConf(0.05);
+    setConf(0.01);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(asked).toEqual([1000, 30_000]);
+  });
+
+  it('asks again for a kept answer when the page is opened again, once the model list is in', async () => {
+    const asked = await open(0.2, 'hang');
+    setConf(0.1);
+    await until(() => asked.length === 2, 'the request for every candidate');
+    unmount(c!);
+    target.remove();
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_n');
+    c = mount(Playground, { target });
+    await until(() => rows() === 8, `every candidate, asked for again (asked ${asked}, rows ${rows()})`);
+    expect(asked).toEqual([1000, 30_000, 30_000]);
+  });
+
+  it('asks for the model file when the browser cannot get every candidate from the server weights', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    // In the browser: the first answer came (from a .folo picked earlier, not kept), the server has no weights to send.
+    api.predictInPage = async (_input, opts) => {
+      if ((opts.max_det ?? 300) > 1000) throw new ApiError(501, 'not_implemented', 'This server cannot send weights.');
+      const p = { model_id: opts.model_id, image: { width: 2000, height: 640 }, boxes: first(0.2), device: 'cpu' };
+      return { ...p, timing: { preprocess_ms: 1, inference_ms: 1, postprocess_ms: 1, total_ms: 3 } };
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_n');
+    c = mount(Playground, { target });
+    const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+    const cpu = await until(() => [...g.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'CPU' && !b.disabled), 'the CPU');
+    cpu.click();
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => rows() === 3, 'the first answer');
+    setConf(0.1);
+    await until(() => target.textContent?.includes('Choose .folo file'), 'the request for the model file');
+  });
+
+  it('says when every candidate could not be loaded, and Retry asks again', async () => {
+    const shown = vi.spyOn(toast, 'show');
+    const asked = await open(0.2, 'fail');
+    setConf(0.1);
+    const t = await until(() => shown.mock.calls.map((c) => c[0]).find((x) => x.title === 'Could not load every candidate'), 'the error');
+    expect(t.detail).toContain('below 0.20 may be missing');
+    expect(rows()).toBe(3);
+    expect(foot()).toContain('1,000+ candidates');
+    t.action!.run();
+    await until(() => rows() === 8, 'every candidate, after Retry');
+    expect(asked).toEqual([1000, 30_000, 30_000]);
+  });
+
+  it('takes the failure back with the answer it is about: another image, or the page left', async () => {
+    const live = () => toast.items.filter((t) => t.title === 'Could not load every candidate').length;
+    await open(0.2, 'fail');
+    setConf(0.1);
+    await until(() => live() === 1, 'the error');
+    target.querySelector<HTMLButtonElement>('button[aria-label="Clear image"]')!.click();
+    await until(() => live() === 0, 'the error to go with the image');
+    unmount(c!);
+    c = undefined;
+    target.remove();
+    await open(0.2, 'fail');
+    setConf(0.1);
+    await until(() => live() === 1, 'the error again');
+    unmount(c!);
+    c = undefined;
+    expect(live()).toBe(0);
+  });
+
+  it('does not complete an answer that a new prediction is replacing (another backend)', async () => {
+    const asked = await open(0.2);
+    const inPage: number[] = [];
+    (hub.api as MockApi).predictInPage = (_input, opts) => {
+      inPage.push(opts.max_det ?? 300);
+      return new Promise(() => {});
+    };
+    const g = target.querySelector('[role="radiogroup"][aria-label="Run the model on"]')!;
+    const cpu = await until(() => [...g.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'CPU' && !b.disabled), 'the CPU');
+    cpu.click();
+    await until(() => inPage.length === 1, 'the prediction on the CPU');
+    setConf(0.1);
+    await new Promise((r) => setTimeout(r, 20));
+    flushSync();
+    expect(inPage).toEqual([1000]);
+    expect(asked).toEqual([1000]);
+  });
+
+  it('keeps the first answer above its cut, whatever the slider did before', async () => {
+    const asked = await open(0.2);
+    setConf(0.5);
+    setConf(0.21);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(asked).toEqual([1000]);
+  });
+});
+
 describe('Playground: the session', () => {
   it('keeps the image, its result and the thresholds when the page is left and opened again', async () => {
     await run('normal', 'm_hard_s');

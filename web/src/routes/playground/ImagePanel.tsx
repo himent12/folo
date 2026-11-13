@@ -67,6 +67,8 @@ export interface ImagePanelProps {
   setSource: (s: Source) => void;
   src: string | null;
   pred: Prediction | null;
+  /** The answer holds the highest-scoring candidates, not all of them (./allCandidates): its count reads "1,000+". */
+  cut?: boolean;
   kept: Det[];
   truthBoxes: Img['boxes'];
   classes: string[];
@@ -330,7 +332,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                 <>
                   {/* Each item after the first draws its own separator, so hiding one never leaves a stray dot. */}
                   <span class="fi">
-                    <b>{props.rows.length}</b> shown <span class="wide">of {num(props.pred?.boxes.length)} candidates</span>
+                    <b>{props.rows.length}</b> shown <span class="wide">of {num(props.pred?.boxes.length)}{props.cut ? '+' : ''} candidates</span>
                   </span>
                   <span class="fi wide">conf ≥ {conf.get().toFixed(2)}</span>
                   <span class="fi" class:wide={iou.get() === DEFAULTS.iou}>
