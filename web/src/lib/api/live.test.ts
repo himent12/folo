@@ -840,3 +840,36 @@ describe('LiveRun: a cloud run (docs/API.md, SSE cloud)', () => {
     stop();
   });
 });
+
+describe('LiveRun: a long log', () => {
+  const saved = hub.api;
+  afterEach(() => {
+    hub.api = saved;
+    vi.useRealTimers();
+  });
+
+  it('asks for as many lines as it keeps, and counts the older ones the server has (the panel says them)', async () => {
+    vi.useFakeTimers();
+    const done = { ...(await new MockApi('normal', 0).run('run_q7c5')), status: 'completed' as const };
+    const limits: (number | undefined)[] = [];
+    const lines = Array.from({ length: 2000 }, (_, i) => ({ t: `2026-11-12T10:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}Z`, level: 'info' as const, message: `epoch ${i + 705}` }));
+    hub.api = {
+      mock: false,
+      run: () => Promise.resolve(done),
+      runMetrics: () => Promise.resolve({ steps: [], epochs: [] }),
+      runLogs: (_id: string, limit?: number) => (limits.push(limit), Promise.resolve({ lines, total: 2704 })),
+      runEvents: () => () => {},
+    } as unknown as Api;
+    hub.mode = 'live';
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_q7c5');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(limits).toEqual([2000]);
+    expect(live.logs).toHaveLength(2000);
+    expect(live.logsEarlier).toBe(704);
+    stop();
+  });
+});

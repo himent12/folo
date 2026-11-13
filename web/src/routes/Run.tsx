@@ -666,7 +666,7 @@ export default function Run() {
                       </div>
                     ) : null}
                     <div class="part" data-part="logs">
-                      <Logs log={live.logsLog} version={live.version} live={active.get()} />
+                      <Logs log={live.logsLog} version={live.version} live={active.get()} earlier={live.logsEarlier} />
                     </div>
                   </div>
                   <aside class="rail" aria-label="Per-class results and config">

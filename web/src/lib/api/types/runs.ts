@@ -190,6 +190,8 @@ export interface LogLine {
 /** GET /api/runs/{id}/logs?limit=N: the most recent lines, oldest first. */
 export interface RunLogs {
   lines: LogLine[];
+  /** Every line of the run's log, the ones not in `lines` included (feature `run_cursors`; missing reads as 0). */
+  total?: number;
 }
 
 /** SSE events on GET /api/runs/{id}/events, keyed by the SSE `event:` name. */

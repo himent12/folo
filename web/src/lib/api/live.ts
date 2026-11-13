@@ -22,7 +22,7 @@
 import { effect, ReactiveSet, signal, untrack } from 'fw';
 import { AppendLog } from './appendLog';
 import { hub } from './index';
-import type { Epoch, LogLine, Run, RunCloud, Step } from './types';
+import type { Epoch, LogLine, Run, RunCloud, RunLogs, Step } from './types';
 
 /** Log lines a live view keeps (the latest). */
 export const MAX_LOGS = 2000;
@@ -182,6 +182,11 @@ export class LiveRun {
   get logs(): LogLine[] {
     return this.logsLog.items;
   }
+  /**
+   * Lines of the run's log older than the ones held (`logs`, the latest `MAX_LOGS`): what the server counted past them
+   * when the history loaded, and the lines the cap dropped since. The log panel says how many it does not show.
+   */
+  logsEarlier = 0;
   set logs(v: LogLine[]) {
     this.logsLog.replace(v);
   }
@@ -230,6 +235,7 @@ export class LiveRun {
         this.steps = [];
         this.epochs = [];
         this.logs = [];
+        this.logsEarlier = 0;
         this.connection = 'idle';
         this.#bump();
       });
@@ -260,13 +266,17 @@ export class LiveRun {
         const gen = this.#gen;
         const my = ++loadIssued;
         // Older servers have no /logs; the live stream still fills the view.
-        const logsLoad = api.runLogs(runId, 500).catch(() => ({ lines: [] }));
+        const logsLoad = api.runLogs(runId, MAX_LOGS).catch((): RunLogs => ({ lines: [] }));
+        const held = (l: RunLogs) => {
+          this.logs = mergeLogs(l.lines, this.logs);
+          this.logsEarlier = Math.max(0, (l.total ?? 0) - this.logs.length);
+        };
         const metricsLoad = api.runMetrics(runId);
         // The log is a request of its own: it shows while the metrics failed (their panel says so, with Retry).
         metricsLoad.catch(() =>
           logsLoad.then((l) => {
             if (closed || my < loadApplied || gen !== this.#gen) return;
-            this.logs = mergeLogs(l.lines, this.logs);
+            held(l);
             this.#bump();
           }),
         );
@@ -285,7 +295,7 @@ export class LiveRun {
           clearTimeout(replayTimer);
           replayTimer = setTimeout(() => sync(), 3000);
         }
-        this.logs = mergeLogs(logs.lines, this.logs);
+        held(logs);
         this.loading = false;
         // A history that failed before (the panels said so) is in now.
         this.error = undefined;
@@ -452,7 +462,10 @@ export class LiveRun {
           if (closed) return;
           this.#heard = Date.now();
           this.logs.push(l);
-          if (this.logs.length > MAX_LOGS) this.logsLog.trimFront(this.logs.length - MAX_LOGS);
+          if (this.logs.length > MAX_LOGS) {
+            this.logsEarlier += this.logs.length - MAX_LOGS;
+            this.logsLog.trimFront(this.logs.length - MAX_LOGS);
+          }
           this.#bump();
         },
         reconnect: () => {
