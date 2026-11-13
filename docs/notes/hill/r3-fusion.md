@@ -136,7 +136,7 @@ Each rung alone against B0. AP is COCO AP@[.5:.95]; full stats (AP50, AP_S/M/L, 
 | iou0.65 | 0.3473 | 0.3399 | 0.5084 | 0.3714 | 0.3647 | 0.5523 | 0.154 / 0.364 / 0.492 |
 | iou0.75 | 0.3450 | 0.3372 | 0.5076 | 0.3749 | 0.3672 | 0.5576 | 0.154 / 0.362 / 0.490 |
 | maxdet1000 | 0.3470 | 0.3395 | 0.5088 | 0.3744 | 0.3671 | 0.5560 | 0.155 / 0.364 / 0.492 |
-| maxdet100 | 0.3449 | 0.3372 | 0.5069 | 0.3724 | 0.3650 | 0.5543 | 0.151 / 0.362 / 0.491 |
+| maxdet100 | 0.3449 | 0.3372 | 0.5069 | 0.3724 | 0.3650 | 0.5543 | 0.151 / 0.363 / 0.491 |
 
 #### Rung 2: Soft-NMS (Gaussian, σ) and Matrix NMS
 
@@ -160,7 +160,7 @@ Each rung alone against B0. AP is COCO AP@[.5:.95]; full stats (AP50, AP_S/M/L, 
 | off-0.30+0.30 | 0.3448 | 0.3362 | 0.5073 | 0.3717 | 0.3630 | 0.5532 | 0.154 / 0.361 / 0.498 |
 | off+0.00-0.30 | 0.3461 | 0.3388 | 0.5074 | 0.3736 | 0.3668 | 0.5550 | 0.154 / 0.362 / 0.486 |
 | off+0.00+0.30 | 0.3463 | 0.3378 | 0.5078 | 0.3737 | 0.3651 | 0.5549 | 0.154 / 0.366 / 0.497 |
-| off+0.30-0.30 | 0.3437 | 0.3364 | 0.5044 | 0.3718 | 0.3646 | 0.5526 | 0.154 / 0.363 / 0.478 |
+| off+0.30-0.30 | 0.3437 | 0.3364 | 0.5044 | 0.3718 | 0.3646 | 0.5526 | 0.154 / 0.364 / 0.478 |
 | off+0.30+0.00 | 0.3456 | 0.3380 | 0.5063 | 0.3737 | 0.3664 | 0.5541 | 0.154 / 0.366 / 0.486 |
 | off+0.30+0.30 | 0.3459 | 0.3380 | 0.5072 | 0.3739 | 0.3660 | 0.5546 | 0.154 / 0.368 / 0.492 |
 
@@ -168,11 +168,11 @@ Each rung alone against B0. AP is COCO AP@[.5:.95]; full stats (AP50, AP_S/M/L, 
 
 | config | v1 AP | v2 AP | s AP | v1 AP75 | v2 AP75 | s AP75 | v1 S / M / L |
 |---|---:|---:|---:|---:|---:|---:|---|
-| T0.7 | 0.3426 | 0.3352 | 0.5003 | 0.3704 | 0.3633 | 0.5488 | 0.151 / 0.360 / 0.487 |
-| T0.85 | 0.3461 | 0.3385 | 0.5072 | 0.3728 | 0.3656 | 0.5533 | 0.154 / 0.363 / 0.491 |
+| T0.7 | 0.3426 | 0.3352 | 0.5003 | 0.3704 | 0.3633 | 0.5488 | 0.151 / 0.361 / 0.487 |
+| T0.85 | 0.3461 | 0.3385 | 0.5072 | 0.3728 | 0.3656 | 0.5533 | 0.154 / 0.364 / 0.491 |
 | T1.15 | 0.3456 | 0.3382 | 0.5065 | 0.3731 | 0.3663 | 0.5529 | 0.154 / 0.363 / 0.490 |
 | T1.3 | 0.3438 | 0.3365 | 0.5026 | 0.3722 | 0.3652 | 0.5505 | 0.154 / 0.361 / 0.488 |
-| win1 | 0.3465 | 0.3389 | 0.5086 | 0.3726 | 0.3648 | 0.5550 | 0.155 / 0.363 / 0.492 |
+| win1 | 0.3465 | 0.3389 | 0.5086 | 0.3726 | 0.3648 | 0.5550 | 0.155 / 0.364 / 0.492 |
 | win2 | 0.3471 | 0.3394 | 0.5093 | 0.3740 | 0.3667 | 0.5567 | 0.155 / 0.364 / 0.493 |
 | win3 | 0.3472 | 0.3394 | 0.5088 | 0.3740 | 0.3668 | 0.5564 | 0.155 / 0.364 / 0.492 |
 
@@ -186,13 +186,13 @@ Each rung alone against B0. AP is COCO AP@[.5:.95]; full stats (AP50, AP_S/M/L, 
 | vote-t0.65-a0.0 | 0.3375 | 0.3286 | 0.4989 | 0.3717 | 0.3639 | 0.5511 | 0.153 / 0.357 / 0.476 |
 | vote-t0.65-a1.0 | 0.3457 | 0.3374 | 0.5067 | 0.3716 | 0.3663 | 0.5514 | 0.153 / 0.363 / 0.492 |
 | vote-t0.65-a2.0 | 0.3453 | 0.3371 | 0.5062 | 0.3698 | 0.3639 | 0.5494 | 0.153 / 0.362 / 0.492 |
-| vote-t0.75-a0.0 | 0.3456 | 0.3374 | 0.5080 | 0.3773 | 0.3692 | 0.5573 | 0.155 / 0.363 / 0.489 |
+| vote-t0.75-a0.0 | 0.3456 | 0.3374 | 0.5080 | 0.3773 | 0.3692 | 0.5573 | 0.155 / 0.364 / 0.489 |
 | vote-t0.75-a1.0 | 0.3488 | 0.3412 | 0.5102 | 0.3764 | 0.3712 | 0.5568 | 0.156 / 0.366 / 0.495 |
 | vote-t0.75-a2.0 | 0.3487 | 0.3410 | 0.5099 | 0.3755 | 0.3703 | 0.5561 | 0.156 / 0.366 / 0.495 |
 | vote-t0.85-a0.0 | 0.3475 | 0.3401 | 0.5100 | 0.3743 | 0.3682 | 0.5565 | 0.155 / 0.365 / 0.493 |
-| vote-t0.85-a1.0 | 0.3484 | 0.3411 | 0.5104 | 0.3743 | 0.3695 | 0.5566 | 0.155 / 0.366 / 0.494 |
+| vote-t0.85-a1.0 | 0.3484 | 0.3411 | 0.5104 | 0.3743 | 0.3695 | 0.5566 | 0.155 / 0.366 / 0.495 |
 | vote-t0.85-a2.0 | 0.3485 | 0.3411 | 0.5102 | 0.3743 | 0.3697 | 0.5564 | 0.155 / 0.366 / 0.495 |
-| vote-t0.55-a1.0-s0.025 | 0.3490 | 0.3413 | 0.5104 | 0.3759 | 0.3698 | 0.5571 | 0.156 / 0.366 / 0.495 |
+| vote-t0.55-a1.0-s0.025 | 0.3490 | 0.3413 | 0.5104 | 0.3759 | 0.3698 | 0.5571 | 0.156 / 0.367 / 0.495 |
 | vote-t0.55-a1.0-s0.05 | 0.3480 | 0.3402 | 0.5093 | 0.3743 | 0.3691 | 0.5556 | 0.155 / 0.366 / 0.494 |
 | vote-t0.55-a1.0-s0.1 | 0.3455 | 0.3380 | 0.5067 | 0.3707 | 0.3661 | 0.5510 | 0.153 / 0.363 / 0.492 |
 
@@ -200,11 +200,11 @@ Each rung alone against B0. AP is COCO AP@[.5:.95]; full stats (AP50, AP_S/M/L, 
 
 | config | v1 AP | v2 AP | s AP | v1 AP75 | v2 AP75 | s AP75 | v1 S / M / L |
 |---|---:|---:|---:|---:|---:|---:|---|
-| var-t0.75-b0.5-e0.01 | 0.3493 | 0.3416 | 0.5105 | 0.3770 | 0.3707 | 0.5564 | 0.155 / 0.367 / 0.496 |
+| var-t0.75-b0.5-e0.01 | 0.3493 | 0.3416 | 0.5105 | 0.3770 | 0.3707 | 0.5564 | 0.156 / 0.367 / 0.496 |
 | var-t0.75-b0.5-e0.1 | 0.3492 | 0.3416 | 0.5105 | 0.3769 | 0.3709 | 0.5566 | 0.156 / 0.367 / 0.496 |
 | var-t0.75-b1.0-e0.01 | 0.3494 | 0.3418 | 0.5105 | 0.3773 | 0.3704 | 0.5565 | 0.156 / 0.367 / 0.496 |
 | var-t0.75-b1.0-e0.1 | 0.3493 | 0.3419 | 0.5107 | 0.3773 | 0.3706 | 0.5568 | 0.156 / 0.367 / 0.496 |
-| var-t0.75-b0.5-e0.01-x | 0.3495 | 0.3417 | 0.5106 | 0.3766 | 0.3712 | 0.5567 | 0.155 / 0.367 / 0.496 |
+| var-t0.75-b0.5-e0.01-x | 0.3495 | 0.3417 | 0.5106 | 0.3766 | 0.3712 | 0.5567 | 0.156 / 0.367 / 0.496 |
 | var-t0.75-b0.5-e0.1-x | 0.3494 | 0.3419 | 0.5106 | 0.3770 | 0.3710 | 0.5568 | 0.156 / 0.367 / 0.496 |
 | var-t0.75-b1.0-e0.01-x | 0.3496 | 0.3419 | 0.5107 | 0.3765 | 0.3708 | 0.5563 | 0.155 / 0.367 / 0.497 |
 | var-t0.75-b1.0-e0.1-x | 0.3497 | 0.3422 | 0.5109 | 0.3770 | 0.3710 | 0.5570 | 0.156 / 0.367 / 0.497 |
@@ -217,7 +217,7 @@ Each rung alone against B0. AP is COCO AP@[.5:.95]; full stats (AP50, AP_S/M/L, 
 |---|---:|---:|---:|---:|---:|---:|---|
 | varx | 0.3497 | 0.3422 | 0.5109 | 0.3770 | 0.3710 | 0.5570 | 0.156 / 0.367 / 0.497 |
 | varx-c1 | 0.3497 | 0.3422 | 0.5109 | 0.3771 | 0.3713 | 0.5572 | 0.156 / 0.367 / 0.497 |
-| varx-c2 | 0.3498 | 0.3423 | 0.5109 | 0.3770 | 0.3711 | 0.5572 | 0.155 / 0.367 / 0.497 |
+| varx-c2 | 0.3498 | 0.3423 | 0.5109 | 0.3770 | 0.3711 | 0.5572 | 0.156 / 0.367 / 0.497 |
 | varx-c4 | 0.3497 | 0.3421 | 0.5108 | 0.3769 | 0.3703 | 0.5569 | 0.156 / 0.367 / 0.497 |
 | varx-thr0.5 | 0.3497 | 0.3422 | 0.5108 | 0.3773 | 0.3709 | 0.5571 | 0.156 / 0.367 / 0.497 |
 | varx-thr0.3 | 0.3496 | 0.3422 | 0.5109 | 0.3771 | 0.3705 | 0.5565 | 0.155 / 0.367 / 0.497 |
@@ -225,9 +225,9 @@ Each rung alone against B0. AP is COCO AP@[.5:.95]; full stats (AP50, AP_S/M/L, 
 | varx-t0.8 | 0.3493 | 0.3420 | 0.5108 | 0.3754 | 0.3702 | 0.5571 | 0.156 / 0.366 / 0.496 |
 | varx-t0.85 | 0.3487 | 0.3416 | 0.5105 | 0.3743 | 0.3690 | 0.5565 | 0.155 / 0.366 / 0.495 |
 | varx-b1.5 | 0.3497 | 0.3420 | 0.5110 | 0.3767 | 0.3702 | 0.5563 | 0.156 / 0.367 / 0.497 |
-| varx-b2 | 0.3495 | 0.3417 | 0.5109 | 0.3767 | 0.3697 | 0.5562 | 0.155 / 0.366 / 0.496 |
+| varx-b2 | 0.3495 | 0.3417 | 0.5109 | 0.3767 | 0.3697 | 0.5562 | 0.155 / 0.367 / 0.496 |
 | varx-a2 | 0.3497 | 0.3419 | 0.5107 | 0.3761 | 0.3703 | 0.5567 | 0.156 / 0.367 / 0.497 |
-| varx-s0.05 | 0.3497 | 0.3421 | 0.5110 | 0.3762 | 0.3702 | 0.5572 | 0.156 / 0.367 / 0.496 |
+| varx-s0.05 | 0.3497 | 0.3421 | 0.5110 | 0.3762 | 0.3702 | 0.5572 | 0.156 / 0.367 / 0.497 |
 | varx-iou0.65 | 0.3505 | 0.3433 | 0.5111 | 0.3755 | 0.3699 | 0.5552 | 0.156 / 0.368 / 0.497 |
 | varx-md1000 | 0.3500 | 0.3425 | 0.5111 | 0.3773 | 0.3713 | 0.5571 | 0.156 / 0.367 / 0.497 |
 | varx-win2 | 0.3500 | 0.3422 | 0.5111 | 0.3768 | 0.3709 | 0.5575 | 0.156 / 0.367 / 0.496 |
@@ -243,7 +243,11 @@ linear: −0.0009). Negative.
 
 **Rung 3** (per-level score offsets): a ±0.3 logit grid on P4 and P5 (P3 fixed): no cell beats B0 on more than one
 model (best folo-s −0.3/−0.3: +0.0004, the same cell −0.0006 on v1). Negative: the levels' scores are calibrated
-against each other already.
+against each other already. Caveat on the positive cells: the dump keeps pairs above 0.001 only, so a +0.3 offset
+cannot lift the pairs between 0.00074 and 0.001 over the threshold. That band is worth little: dropping the same
+logit band from the top instead (B0 at conf 0.00135 against 0.001) moves train-dev AP by 0.0000 / 0.0000 / −0.0002,
+less than every positive cell's loss against B0 (−0.0004 to −0.0042), so the conclusion stands, but those cells are
+an approximation of the stated transform, not an exact measurement (`logs/review256.log`).
 
 **Rung 4** (DFL point estimate): a softmax temperature loses in both directions (T 0.85: −0.0006 / −0.0006 /
 −0.0014). The expectation in a ±2-bin window around the argmax gains +0.0004 / +0.0003 / +0.0007 on its own and
@@ -251,9 +255,13 @@ against each other already.
 detect kernel, the CPU decode and the full decode would all need it, for 0.0003.
 
 **Rung 5** (score-weighted box voting, the baseline to beat): weights `score^a · exp(−(1 − IoU)² / σ)`, cluster =
-same-class candidates with IoU ≥ τ. Best: τ 0.75, a 1, no IoU kernel (+0.0021 / +0.0021 / +0.0016). The plateau is
-τ 0.75–0.85, a 1–2; a wide cluster (τ 0.55) needs the IoU kernel (σ 0.025 recovers +0.0023 / +0.0022 / +0.0018),
-and flat weights (a 0) at τ 0.55 lose 0.025 AP (the cluster pulls boxes into their neighbours).
+same-class candidates with IoU ≥ τ. Chosen as the baseline: τ 0.75, a 1, no IoU kernel (+0.0021 / +0.0021 /
++0.0016). The plateau is τ 0.75–0.85, a 1–2; a wide cluster (τ 0.55) needs the IoU kernel, and with σ 0.025 it is
+the highest voting row (+0.0023 / +0.0022 / +0.0018, i.e. +0.0002 / +0.0001 / +0.0002 above the chosen one), but it
+adds a parameter for a difference inside the plateau's spread, so the simpler setting is the baseline. Under B*'s
+NMS settings the two are as close (v1 0.3500 / 0.3503, v2 0.3428 / 0.3429, folo-s 0.5106 / 0.5107) and B* beats
+both (0.3508 / 0.3437 / 0.5112; `logs/review256.log`), so "B* − voting" below does not depend on that choice. Flat
+weights (a 0) at τ 0.55 lose 0.025 AP (the cluster pulls boxes into their neighbours).
 
 **Rung 6** (DFL evidence fusion, against rung 5 at the same τ 0.75, a 1): inverse-variance weights per side.
 
@@ -274,8 +282,8 @@ and flat weights (a 0) at τ 0.55 lose 0.025 AP (the cluster pulls boxes into th
 - **Cluster τ** around 0.75: 0.7 −0.0005, 0.8 −0.0004, 0.85 −0.0010 (v1); same shape on v2 and s.
 
 **Rung 7** (score from cluster consensus) was not run: time went to Part 4. The cluster oracle (Part 3) measures
-box-choice headroom, which a score change does not reach; the class oracle is the closer bound on what rescoring
-from cluster features could do.
+box-choice headroom, which a score change does not reach; the class oracle is the closer (also greedy) estimate of
+what rescoring from cluster features could do.
 
 **Combinations** (train-dev; `nms` = IoU 0.65 + max_det 1000):
 
@@ -285,6 +293,7 @@ from cluster features could do.
 | nms | 0.3476 | 0.3402 | 0.5085 | 0.3779 |
 | vote (τ 0.75, a 1) | 0.3488 | 0.3412 | 0.5102 | 0.3791 |
 | vote + nms | 0.3500 | 0.3428 | 0.5106 | 0.3804 |
+| vote (τ 0.55, a 1, σ 0.025) + nms | 0.3503 | 0.3429 | 0.5107 | |
 | dfl (excess, b 1, ε 0.1) | 0.3497 | 0.3422 | 0.5109 | 0.3798 |
 | **dfl + nms = B\*** | **0.3508** | **0.3437** | **0.5112** | **0.3809** |
 | dfl + IoU 0.6 + max_det 1000 | 0.3507 | 0.3437 | 0.5102 | 0.3807 |
@@ -307,36 +316,47 @@ AP50 / AP75 of B* against B0: v1 0.4612 / 0.3424 (0.4554 / 0.3392), v2 0.4634 / 
 duplicates suppressed wrongly, more detections kept); fusion moves AP75 and the high-IoU end.
 
 **Rust reproduces it**: `folo val --coco --fusion dfl --iou 0.65 --max-det 1000` (vision/box-fusion) gives
-the same AP as the Python post-process (v1 0.3181, folo-s 0.4186, landed 0.3434; `--fusion vote` on v1 0.3171), detection by detection: same number of detections (v1 1,447,744; folo-s 814,656; landed 1,443,104), no image with a different (class, score) list, boxes within 0.0036 / 0.0051 / 0.0043 px (Rust computes the side moments in f32, Python in f64; voting matches to the bit). Script `D:/folo-data/runs-hill3/fusion/bin/repro-fusion.sh`, log `logs/repro-fusion.log`.
+the same AP as the Python post-process (v1 0.3181, folo-s 0.4186, landed 0.3434; `--fusion vote` on v1 0.3171),
+detection by detection: same number of detections (v1 1,447,744; folo-s 814,656; landed 1,443,104), no image with a
+different (class, score) list, boxes within 0.0036 / 0.0051 / 0.0043 px (Rust computes the side moments in f32,
+Python in f64; voting matches to the bit). Script `D:/folo-data/runs-hill3/fusion/bin/repro-fusion.sh`, log
+`logs/repro-fusion.log`.
 
 ### The operating point (conf 0.25, single-label, val2017)
 
 What `folo predict` shows a user: single-label candidates above 0.25, NMS IoU 0.7, 300 detections (`operating.py`;
-truths matched greedily by score per class at IoU 0.5, crowd matches left out). P50 / P75: share of detections that
-match a truth at IoU ≥ 0.5 / 0.75; mean IoU over the true positives at 0.5.
+truths matched greedily by score per class at IoU 0.5; a detection covering a crowd region by half of its own area is
+left out, as COCOeval does). P50 / P75: share of the remaining detections that match a truth at IoU ≥ 0.5 / 0.75;
+mean IoU over the true positives at 0.5.
 
 | weights | config | detections | P50 | P75 | R50 | mean IoU of TPs |
 |---|---|---:|---:|---:|---:|---:|
-| v1 | B0 | 22,842 | 0.6849 | 0.5433 | 0.4305 | 0.8424 |
-| v1 | vote | 22,842 | 0.6848 | 0.5461 | 0.4304 | 0.8440 |
-| v1 | dfl | 22,842 | 0.6846 | 0.5463 | 0.4303 | 0.8447 |
-| v1 | B* | 22,181 | 0.7035 | 0.5627 | 0.4294 | 0.8452 |
-| v2 | B0 | 24,165 | 0.6638 | 0.5276 | 0.4413 | 0.8425 |
-| v2 | dfl | 24,165 | 0.6638 | 0.5302 | 0.4413 | 0.8445 |
-| v2 | B* | 23,510 | 0.6811 | 0.5448 | 0.4405 | 0.8449 |
-| folo-s | B0 | 25,091 | 0.7520 | 0.6241 | 0.5191 | 0.8580 |
-| folo-s | dfl | 25,091 | 0.7526 | 0.6266 | 0.5195 | 0.8590 |
-| folo-s | B* | 24,752 | 0.7619 | 0.6351 | 0.5188 | 0.8593 |
-| landed | B0 | 25,926 | 0.6620 | 0.5265 | 0.4722 | 0.8437 |
-| landed | dfl | 25,926 | 0.6624 | 0.5291 | 0.4725 | 0.8452 |
-| landed | B* | 25,242 | 0.6790 | 0.5436 | 0.4715 | 0.8457 |
+| v1 | B0 | 22,842 | 0.7136 | 0.5661 | 0.4305 | 0.8424 |
+| v1 | vote | 22,842 | 0.7134 | 0.5689 | 0.4304 | 0.8440 |
+| v1 | dfl | 22,842 | 0.7132 | 0.5691 | 0.4303 | 0.8447 |
+| v1 | B* | 22,181 | 0.7312 | 0.5848 | 0.4294 | 0.8452 |
+| v2 | B0 | 24,165 | 0.6890 | 0.5477 | 0.4413 | 0.8425 |
+| v2 | vote | 24,165 | 0.6892 | 0.5506 | 0.4414 | 0.8437 |
+| v2 | dfl | 24,165 | 0.6891 | 0.5504 | 0.4413 | 0.8445 |
+| v2 | B* | 23,510 | 0.7060 | 0.5648 | 0.4405 | 0.8449 |
+| folo-s | B0 | 25,091 | 0.7784 | 0.6461 | 0.5191 | 0.8580 |
+| folo-s | vote | 25,091 | 0.7790 | 0.6485 | 0.5194 | 0.8587 |
+| folo-s | dfl | 25,091 | 0.7790 | 0.6486 | 0.5195 | 0.8590 |
+| folo-s | B* | 24,752 | 0.7881 | 0.6569 | 0.5188 | 0.8593 |
+| landed | B0 | 25,926 | 0.6895 | 0.5484 | 0.4722 | 0.8437 |
+| landed | vote | 25,926 | 0.6901 | 0.5511 | 0.4726 | 0.8445 |
+| landed | dfl | 25,926 | 0.6899 | 0.5511 | 0.4725 | 0.8452 |
+| landed | B* | 25,242 | 0.7059 | 0.5651 | 0.4715 | 0.8457 |
 
-(`vote` rows for v2 / folo-s / landed in `logs/operating.log`; they sit between B0 and dfl.)
+(An earlier version of this table matched crowd regions by plain IoU, so most detections inside a crowd region
+(830–1,040 per row under the COCO rule) counted as false positives and P50 was 0.025–0.029 lower everywhere. Fixed
+in `operating.py`; the IoU and recall columns did not change.)
 
 Fusion alone keeps the detection count (scores and the kept set are NMS's) and moves P50 and recall by at most
-0.0006, and it tightens the boxes a user sees: mean IoU of true positives +0.001 to +0.002, P75 +0.0025 to +0.003,
-DFL a little ahead of voting on both. The NMS IoU 0.65 of B* drops about 3%
-of the detections (duplicates), which raises P50 by 0.02 at a recall cost of 0.001.
+0.0006, and it tightens the boxes a user sees: mean IoU of true positives +0.0007 to +0.0023 and P75 +0.0024 to
++0.0030 over B0. DFL and voting are within 0.0003 of each other on P50, P75 and recall (either can be ahead); DFL's
+mean IoU of true positives is higher on all four weights (+0.0003 to +0.0008). The NMS IoU 0.65 of B* drops 1.3–2.9%
+of the detections (duplicates), which raises P50 by 0.010–0.018 at a recall cost of at most 0.0011.
 
 ### The lead's three guesses
 
@@ -356,18 +376,22 @@ of the detections (duplicates), which raises P50 by 0.02 at a recall cost of 0.0
 | (a) the same at IoU ≥ 0.75 | 0.698 | 0.745 | 0.713 |
 | (a) any class at IoU ≥ 0.5 / ≥ 0.75 | 0.890 / 0.720 | 0.909 / 0.761 | 0.899 / 0.732 |
 | B* AP | 0.3181 | 0.4186 | 0.3434 |
-| (b) cluster oracle: best-IoU member's box, the cluster's top score | 0.3637 (+0.046) | 0.4613 (+0.043) | 0.3892 (+0.046) |
+| (b) cluster oracle (greedy, see below): best-IoU member's box, the cluster's top score | 0.3637 (+0.046) | 0.4613 (+0.043) | 0.3892 (+0.046) |
 | (c) box oracle, 25% of the way to the truth | 0.3580 (+0.040) | 0.4653 (+0.047) | 0.3850 (+0.042) |
 | (c) 50% | 0.4061 (+0.088) | 0.5202 (+0.102) | 0.4355 (+0.092) |
 | (c) 100% | 0.4996 (+0.182) | 0.6244 (+0.206) | 0.5323 (+0.189) |
 | (d) class oracle | 0.3555 (+0.037) | 0.4483 (+0.030) | 0.3804 (+0.037) |
 
-The cluster oracle adds AP75 0.051–0.053 and AP50 only 0.012–0.014: the boxes are the headroom, not the
-detections. Logs `logs/oracles.log`, `results/oracles-<model>.json`.
+The cluster oracle adds AP75 0.048–0.053 and AP50 only 0.012–0.014: the boxes are the headroom, not the
+detections. It is a greedy oracle, not an upper bound on member selection: each detection's target is the truth its
+B* (fused, clipped) box overlaps most, its cluster is drawn around that box rather than around the NMS survivor, and
+two detections can pick the same truth where a joint assignment would cover two. A true bound would be at least as
+high. Logs `logs/oracles.log`, `results/oracles-<model>.json`.
 
-**What this says.** A learned "consensus glance" over cluster features that only picks the best member box is
-bounded by +0.043–0.046 AP, and DFL fusion, a training-free weighting of the same members, reaches +0.003–0.004
-of it: a small learned module has room (ten times what fusion gets) but only if it can tell which member is right,
+**What this says.** A learned "consensus glance" over cluster features that only picks the best member box has at
+least +0.043–0.046 AP of room by the greedy oracle, and DFL fusion, a training-free weighting of the same members,
+takes +0.003–0.004 of it: a small learned module has room (ten times what fusion gets) but only if it can tell which
+member is right,
 which the scores and the DFL widths evidently do not. Box refinement is the larger lever: moving every kept box just
 a quarter of the way to its truth is worth +0.040–0.047 AP, as much as a perfect member choice, and the recall
 ceiling (86–89% of truths have a candidate at IoU 0.5, 70–75% at 0.75) says the candidates are mostly there; a
@@ -437,8 +461,9 @@ Right: `val.rs` fed the evaluator network-space boxes that can protrude past the
 COCO path clips to the original image. Fixed in PR #253 (vision/val-clip): the evaluator now scores boxes clipped to
 the image area in network pixels (the same box the COCO path scores, before the unmap). Effect on the internal
 mAP50-95 of the published weights on val2017: v1 0.309991 → 0.310246 (+0.00025), v2 0.313401 → 0.313577 (+0.00018),
-folo-s 0.411677 → 0.411954 (+0.00028). It would not change which epoch is `best.folo` in the landing run (its
-epoch-to-epoch steps are ≥ 0.0004 and all positive), and it changes no COCO number.
+folo-s 0.411677 → 0.411954 (+0.00028), and no COCO number changes. Whether it would have changed which epoch is
+`best.folo` in a past run is not measured: three released checkpoints do not bound how the clip's benefit differs
+between epochs of one run, and runs keep no per-epoch checkpoints.
 
 ## Negative results
 

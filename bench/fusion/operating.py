@@ -1,10 +1,10 @@
 """The user-facing operating point: what `folo predict` returns at conf 0.25 (single-label, NMS IoU 0.7, 300
 detections), with and without box fusion, against the val2017 truths.
 
-Per configuration: detections, true positives at IoU 0.5 (each truth matched once, greedily by score, per class,
-crowd truths and their matches left out as COCO does), precision at IoU 0.5 and at 0.75 (the share of detections that
-match a truth that well), recall at 0.5, and the mean IoU of the true positives at 0.5 (how tight the boxes a user
-sees are). Usage:
+Per configuration: detections, true positives at IoU 0.5 (each truth matched once, greedily by score, per class;
+a detection overlapping a crowd region by 0.5 of its own area left out, as COCOeval does), precision at IoU 0.5
+and at 0.75 (the share of the remaining detections that match a truth that well), recall at 0.5,
+and the mean IoU of the true positives at 0.5 (how tight the boxes a user sees are). Usage:
 
     python operating.py --dump <val dump> --gt instances_val2017.json --configs <json> [--workers 8]
 """
@@ -33,14 +33,17 @@ def _post(i):
     return im.file, [postprocess(im, c) for c in _CFGS]
 
 
-def iou_xyxy(a, b):
-    """IoU of every box in a (n x 4) with every box in b (m x 4), f64."""
+def iou_xyxy(a, b, crowd=None):
+    """IoU of every box in a (n x 4) with every box in b (m x 4), f64. Against a crowd region (`crowd[j]`), the
+    overlap is the intersection over the detection's own area, as COCOeval computes it."""
     a, b = a.astype(np.float64), b.astype(np.float64)
     ix = np.clip(np.minimum(a[:, None, 2], b[None, :, 2]) - np.maximum(a[:, None, 0], b[None, :, 0]), 0, None)
     iy = np.clip(np.minimum(a[:, None, 3], b[None, :, 3]) - np.maximum(a[:, None, 1], b[None, :, 1]), 0, None)
     inter = ix * iy
     area = lambda x: (x[:, 2] - x[:, 0]) * (x[:, 3] - x[:, 1])
     union = area(a)[:, None] + area(b)[None, :] - inter
+    if crowd is not None:
+        union = np.where(crowd[None, :], np.broadcast_to(area(a)[:, None], union.shape), union)
     return np.where(union > 0, inter / np.where(union > 0, union, 1), 0.0)
 
 
@@ -56,8 +59,8 @@ def match(boxes, scores, classes, gt_boxes, gt_classes, gt_crowd):
         g = np.nonzero(gt_classes == c)[0]
         if len(g) == 0:
             continue
-        iou = iou_xyxy(boxes[d], gt_boxes[g])
         crowd = gt_crowd[g]
+        iou = iou_xyxy(boxes[d], gt_boxes[g], crowd)
         used = np.zeros(len(g), dtype=bool)
         for r, k in enumerate(d):
             cand = np.where(~used & ~crowd, iou[r], -1.0)
