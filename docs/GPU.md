@@ -171,13 +171,19 @@ Plans are keyed by the owner, the caller's key, the input's dims, dtype and buff
 switch; a key is recorded at its second sighting and replayed from the third. Before each replay the owner's
 tensors are checked against their `(TensorId, storage_version)` at recording, so any write, replacement, `to_device`
 or `to_dtype` retires the plan. No plan is made with gradients on, under autocast, while profiling or tracing, on a
-lost device, or for an input that is not dense. A context keeps at most `MAX_PLANS` (8) plans and `MAX_PLAN_BYTES`
-(1 GiB), least recently used first out, and a call whose plan would pin more than `MAX_PLAN_BYTES_EACH` (256 MiB)
-is not planned (folo-n and folo-s at batch 1 pin 23–102 MiB; at batch 16 a plan tied the normal call while
-pinning 316–617 MiB); `release_memory()` drops them all, a dropped owner drops its own, and
-`ctx.plan_stats()` reports how many and how many bytes. `DetectionModel` uses them for a fused eval-mode forward
-on a GPU under `no_grad` (`forward`, `Predictor`, `folo val`, the server); `model.set_forward_plans(false)`,
-`ctx.set_forward_plans(false)` or `FOLO_GPU_NO_PLAN=1` (contexts created afterwards) turn them off. On
+lost device, or for an input that is not dense. What a call does besides reading tensors (the kernels a layer's
+own settings pick, such as its activation or stride) is not checked: the caller puts it in the key or keeps plans
+off while it can change. A plan recorded across a `release_memory()` is dropped, and a call made while the thread
+records another runs as it is (its work becomes part of the outer plan). A context keeps at most `MAX_PLANS` (8)
+plans and `MAX_PLAN_BYTES` (1 GiB), least recently used first out, and a call whose plan would pin more than
+`MAX_PLAN_BYTES_EACH` (256 MiB, counting its intermediates, its uniform buffer and the input and result sizes,
+which its kept bind groups hold on to) is not planned (folo-n and folo-s at batch 1 pin 23–102 MiB; at batch 16 a
+plan tied the normal call while pinning 316–617 MiB); `release_memory()` drops them all, a dropped owner drops its
+own, and `ctx.plan_stats()` reports how many and how many bytes. A `FoloModel` on its own has plans off (its
+layers' settings are public fields); `Predictor` turns them on for its model, which it never lends out mutably, so
+`folo predict`, the server and `predict_batch` use them and `folo val` and training do not.
+`model.set_forward_plans(true)` opts a bare model in; `ctx.set_forward_plans(false)` or `FOLO_GPU_NO_PLAN=1`
+(contexts created afterwards) turn them off for a context. On
 the test machine a plan halves the host's encode time of a synchronised folo-n batch-1 forward (0.42 → 0.21 ms in
 f32, 0.45 → 0.23 ms on tensor cores), which shortens the call by 3–6% when the machine is quiet (the call is then
 GPU-bound) and by 20–35% when other work loads the CPU; batch-16 calls are not planned (docs/notes/hill/r3-plan.md).

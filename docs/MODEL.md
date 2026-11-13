@@ -938,9 +938,11 @@ f32, the letterbox writes the f16 input, and the head decode (DFL softmax, sigmo
 outputs. Its mAP must be within 0.002 of the f32 model's (docs/BENCHMARKS.md), with and without tensor cores
 (`--tensor-cores`, docs/GPU.md).
 
-On a GPU, a fused eval-mode forward under `no_grad` is recorded at the second call of an input shape (and head
-mode) and replayed from the third, with the same bits (forward plans, docs/GPU.md); any change to the model's
-tensors retires the plan. `DetectionModel::set_forward_plans(false)` or `FOLO_GPU_NO_PLAN=1` turns this off.
+Inside a `Predictor` (or after `FoloModel::set_forward_plans(true)`), a fused eval-mode GPU forward under
+`no_grad` is recorded at the second call of an input shape (and head mode) and replayed from the third, with the
+same bits (forward plans, docs/GPU.md); any change to the model's tensors retires the plan. A plan does not see the
+layers' settings (activation, stride, `residual`, SPPF `k`), so a model on its own has plans off; turn them off
+before changing one. `FOLO_GPU_NO_PLAN=1` turns them off for the process.
 
 ### 9.2 Letterbox
 For an `h0 × w0` image and target `S` (default `imgsz = 640`): `r = min(S / h0, S / w0)` (upscaling allowed),

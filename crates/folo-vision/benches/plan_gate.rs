@@ -71,7 +71,7 @@ fn main() {
                 model
             };
             let (model, planned) = (load(), load());
-            model.set_forward_plans(false);
+            planned.set_forward_plans(true);
             let _g = no_grad();
             for batch in
                 var("FOLO_BENCH_BATCH", "1").split(',').map(|b| b.trim().parse::<usize>().expect("batch"))

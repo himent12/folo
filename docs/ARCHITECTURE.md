@@ -183,7 +183,8 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
 - One `GpuDevice` per adapter (Vulkan / DX12 / Metal natively; WebGPU in the browser through wasm). Buffer pool with
   size buckets to avoid allocation churn; command batching so a forward pass is a few submissions, not hundreds.
   Forward plans (`folo_gpu::ForwardPlans`) record an inference call once and replay it as a flat list of dispatches
-  over buffers the plan owns, bit-identically, retired when a listed tensor changes (docs/GPU.md).
+  over buffers the plan owns, bit-identically, retired when a listed tensor changes; `Predictor` turns them on for
+  its model (docs/GPU.md).
 - Kernels in WGSL: tiled GEMM (shared-memory tiles, vec4 loads), im2col / direct conv, elementwise + fused activations,
   reductions, softmax, pooling, upsample, concat. Each kernel is tested against the CPU reference.
 - f16 storage/compute when the adapter supports `shader-f16`, with f32 accumulation.

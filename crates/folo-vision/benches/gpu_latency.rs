@@ -209,6 +209,8 @@ fn run(
     model.to_device(dev).expect("to_device");
     model.fuse().expect("fuse");
     model.to_dtype(prec.dtype()).expect("to_dtype");
+    // Recorded forwards, as inside a `Predictor` (a model on its own has them off).
+    model.set_forward_plans(true);
     let _g = no_grad();
     let x = Tensor::rand_uniform([1, 3, 640, 640], 0.0, 1.0, &mut Rng::seed(0))
         .to_device(dev)

@@ -1,4 +1,5 @@
-//! [`crate::ForwardPlans`] on small calls: what makes a call unplannable, a panic while recording, a lost device.
+//! [`crate::ForwardPlans`] on small calls: what makes a call unplannable, a call inside a recording, a panic while
+//! recording, a lost device.
 //! The model-level tests (bit-identity, invalidation, threads) are folo-vision's `tests/gpu_plan.rs`.
 
 use folo_core::{Device, Tensor, no_grad};
@@ -47,6 +48,44 @@ fn a_pure_call_replays_and_its_results_are_its_own() {
     let out = plans.run(0, &y, &tensors, |y| call(y, &w, &b)).unwrap();
     assert_eq!(plans.replays(), 4);
     assert_eq!(vals(&out), vec![2.5, 0.0, 0.0, 0.0]);
+    // The replay for y wrote none of the results held from x.
+    for out in &held {
+        assert_eq!(vals(out), want);
+    }
+}
+
+#[test]
+fn a_call_inside_a_recording_runs_as_part_of_it() {
+    let _ctx = gpu!();
+    let d = crate::init().unwrap();
+    let _g = no_grad();
+    let (x, w, b, want) = setup(d);
+    let tensors = |f: &mut dyn FnMut(&Tensor)| {
+        f(&w);
+        f(&b);
+    };
+    // The inner owner has a plan before the outer one records.
+    let inner = ForwardPlans::new();
+    for _ in 0..3 {
+        inner.run(0, &x, &tensors, |x| call(x, &w, &b)).unwrap();
+    }
+    assert_eq!(inner.replays(), 1, "{:?}", inner.refusal());
+    let outer = ForwardPlans::new();
+    let twice = |x: &Tensor| -> folo_core::Result<Vec<Tensor>> {
+        let y = inner.run(0, x, &tensors, |x| call(x, &w, &b))?;
+        Ok(vec![y[0].mul_scalar(2.0)?])
+    };
+    for _ in 0..4 {
+        assert_eq!(
+            vals(&outer.run(0, &x, &tensors, twice).unwrap()),
+            want.iter().map(|v| v * 2.0).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(outer.replays(), 2, "{:?}", outer.refusal());
+    // The outer replay carries the inner work: another input gives its own results.
+    let y = x.mul_scalar(-1.0).unwrap();
+    assert_eq!(vals(&outer.run(0, &y, &tensors, twice).unwrap()), vec![5.0, 0.0, 0.0, 0.0]);
+    assert_eq!(outer.replays(), 3);
 }
 
 #[test]
@@ -90,6 +129,31 @@ fn uploads_and_unlisted_tensors_make_a_call_unplannable() {
         assert_eq!(out.unwrap()[0].to_vec::<f32>().unwrap(), want[1..3]);
     }
     assert_eq!(plans.replays(), 0);
+
+    // A readback inside the call: the host sees data the replay would not produce again.
+    let plans = ForwardPlans::new();
+    for _ in 0..4 {
+        let out = plans
+            .run(0, &x, &both, |x| {
+                let _ = x.to_vec::<f32>()?;
+                call(x, &w, &b)
+            })
+            .unwrap();
+        assert_eq!(vals(&out), want);
+    }
+    assert_eq!(plans.replays(), 0);
+    assert!(plans.refusal().is_some_and(|r| r.contains("readback")), "{:?}", plans.refusal());
+
+    // Under autocast (a matrix op would pick other kernels): no plan, nothing recorded.
+    let plans = ForwardPlans::new();
+    {
+        let _a = folo_core::autocast();
+        for _ in 0..4 {
+            assert_eq!(vals(&plans.run(0, &x, &both, |x| call(x, &w, &b)).unwrap()), want);
+        }
+    }
+    assert_eq!(plans.replays(), 0);
+    assert_eq!(plans.refusal(), None);
 }
 
 #[test]

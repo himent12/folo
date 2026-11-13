@@ -269,13 +269,16 @@ impl Predictor {
     }
 
     /// Wrap a model: it is fused (a no-op if it already is) and stays in eval mode. The model keeps its dtype
-    /// (an f16 model, from [`Module::to_dtype`], predicts in f16).
+    /// (an f16 model, from [`Module::to_dtype`], predicts in f16). Its GPU forwards are recorded and replayed
+    /// ([`FoloModel::set_forward_plans`]): the predictor never lends the model out mutably, so no layer setting can
+    /// change under a plan.
     pub fn new(mut model: FoloModel, cfg: PredictConfig) -> Result<Self> {
         cfg.validate()?;
         if let Some(h) = cfg.head {
             model.set_head_mode(h)?;
         }
         model.fuse()?;
+        model.set_forward_plans(true);
         Ok(Predictor { model, cfg, fallback: None })
     }
 

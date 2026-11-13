@@ -1,6 +1,7 @@
 //! Recorded GPU forwards ([`folo_gpu::ForwardPlans`] behind a fused eval-mode `FoloModel`): a replayed forward gives
-//! the same bits as running it, and every change that could make a plan stale retires it. The tests share the GPU
-//! context's switches (tensor cores, plans, memory release), so they run one at a time.
+//! the same bits as running it, every change that could make a plan stale retires it, and plans are off on a
+//! model on its own and on in a `Predictor`. The tests share the GPU context's switches (tensor cores, plans,
+//! memory release), so they run one at a time.
 //!
 //! Skips (with a note) without a hardware adapter; set `FOLO_GPU_TEST_SOFTWARE=1` to run on WARP / llvmpipe.
 
@@ -11,7 +12,7 @@ use folo_core::{DType, Device, Tensor, no_grad};
 use folo_gpu::GpuContext;
 use folo_nn::Module;
 use folo_vision::model::{FoloModel, HeadMode, ModelConfig};
-use folo_vision::predict::f16_unavailable;
+use folo_vision::predict::{PredictConfig, Predictor, f16_unavailable};
 
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
@@ -30,7 +31,15 @@ fn gpu() -> Option<(GpuContext, Device)> {
     Some((ctx, folo_gpu::init().unwrap()))
 }
 
+/// A fused model on `dev` with plans on, as inside a `Predictor`.
 fn model(dev: Device, nc: usize, seed: u64) -> FoloModel {
+    let m = bare(dev, nc, seed);
+    m.set_forward_plans(true);
+    m
+}
+
+/// A fused model on `dev` as built: plans off.
+fn bare(dev: Device, nc: usize, seed: u64) -> FoloModel {
     let mut m = FoloModel::with_rng(ModelConfig::new("n", nc).unwrap(), &mut Rng::seed(seed)).unwrap();
     m.fuse().unwrap();
     m.to_device(dev).unwrap();
@@ -72,6 +81,15 @@ fn until_replayed(m: &FoloModel, x: &Tensor, want: &[u32]) {
         assert_eq!(bits(m, x), want, "call {call}");
     }
     assert!(m.plan_replays() > before, "no replay after three calls: {:?}", m.plan_refusal());
+}
+
+/// The next forward's bits, asserting it was not answered from a plan.
+#[track_caller]
+fn not_replayed(m: &FoloModel, x: &Tensor) -> Vec<u32> {
+    let before = m.plan_replays();
+    let b = bits(m, x);
+    assert_eq!(m.plan_replays(), before, "a stale plan answered");
+    b
 }
 
 #[test]
@@ -169,36 +187,46 @@ fn weight_changes_retire_the_plan() {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
     let Some((_ctx, dev)) = gpu() else { return };
     let _g = no_grad();
-    let mut m = model(dev, 4, 0);
+    // `m` plans; `r`, the same weights, never does and gives the bits each change should lead to.
+    let (mut m, mut r) = (model(dev, 4, 0), bare(dev, 4, 0));
     let x = input(dev, [1, 3, 64, 64], DType::F32, 7);
-    let want = unplanned(&m, &x);
+    let want = bits(&r, &x);
     until_replayed(&m, &x, &want);
 
     // An in-place write (as an optimizer step makes).
-    m.backbone.stem.conv.weight.mul_scalar_assign(0.5).unwrap();
-    let halved = unplanned(&m, &x);
+    for m in [&mut m, &mut r] {
+        m.backbone.stem.conv.weight.mul_scalar_assign(0.5).unwrap();
+    }
+    let halved = bits(&r, &x);
     assert_ne!(halved, want);
+    assert_eq!(not_replayed(&m, &x), halved);
     until_replayed(&m, &x, &halved);
 
     // A tensor replaced by another (the old one still alive elsewhere).
     let old = m.backbone.stem.conv.weight.clone();
-    m.backbone.stem.conv.weight = old.mul_scalar(2.0).unwrap();
-    let doubled = unplanned(&m, &x);
+    for m in [&mut m, &mut r] {
+        m.backbone.stem.conv.weight = m.backbone.stem.conv.weight.mul_scalar(2.0).unwrap();
+    }
+    let doubled = bits(&r, &x);
     assert_ne!(doubled, halved);
-    assert_eq!(bits(&m, &x), doubled);
+    assert_eq!(not_replayed(&m, &x), doubled);
     until_replayed(&m, &x, &doubled);
+    drop(old);
 
-    // A round trip through the CPU (in place, same ids, new storage versions).
+    // A round trip through the CPU (in place, same ids, new storage versions): the values do not change.
     m.to_device(Device::Cpu).unwrap();
     m.to_device(dev).unwrap();
-    assert_eq!(bits(&m, &x), doubled);
+    assert_eq!(not_replayed(&m, &x), doubled);
     until_replayed(&m, &x, &doubled);
 
     // `to_dtype` there and back: the values are rounded, so the plan must follow them.
-    m.to_dtype(DType::F16).unwrap();
-    m.to_dtype(DType::F32).unwrap();
-    let rounded = unplanned(&m, &x);
-    assert_eq!(bits(&m, &x), rounded);
+    for m in [&mut m, &mut r] {
+        m.to_dtype(DType::F16).unwrap();
+        m.to_dtype(DType::F32).unwrap();
+    }
+    let rounded = bits(&r, &x);
+    assert_ne!(rounded, doubled);
+    assert_eq!(not_replayed(&m, &x), rounded);
     until_replayed(&m, &x, &rounded);
 }
 
@@ -305,4 +333,42 @@ fn no_plan_with_gradients_on_or_in_training_mode() {
         m.forward(&x).unwrap();
     }
     assert_eq!(m.plan_replays(), 0);
+}
+
+#[test]
+fn no_plan_while_tracing() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let Some((ctx, dev)) = gpu() else { return };
+    let _g = no_grad();
+    // (Autocast, the other context-wide refusal, is folo-gpu's `tests/plan.rs`: a fused model does not run under it.)
+    let m = model(dev, 4, 0);
+    let x = input(dev, [1, 3, 32, 32], DType::F32, 10);
+    let want = bits(&m, &x);
+    // A trace wants every operation run (a replay would leave it empty).
+    ctx.trace_begin();
+    for _ in 0..4 {
+        assert_eq!(bits(&m, &x), want);
+    }
+    let ops = ctx.trace_end();
+    assert_eq!(m.plan_replays(), 0);
+    assert!(!ops.is_empty());
+}
+
+#[test]
+fn a_model_on_its_own_does_not_plan_and_a_predictor_does() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let Some((_ctx, dev)) = gpu() else { return };
+    let _g = no_grad();
+    let x = input(dev, [1, 3, 32, 32], DType::F32, 11);
+    let m = bare(dev, 4, 0);
+    for _ in 0..4 {
+        m.forward(&x).unwrap();
+    }
+    assert_eq!(m.plan_replays(), 0);
+    assert_eq!(m.plan_refusal(), None);
+    let pred = Predictor::new(m, PredictConfig::default()).unwrap();
+    for _ in 0..4 {
+        pred.model().forward(&x).unwrap();
+    }
+    assert!(pred.model().plan_replays() > 0, "{:?}", pred.model().plan_refusal());
 }

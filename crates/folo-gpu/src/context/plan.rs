@@ -61,6 +61,8 @@ pub(crate) struct Recorder {
     taken: FxSet,
     /// Why the call cannot be replayed (an upload or a readback inside it).
     tainted: Option<&'static str>,
+    /// [`GpuContext::plan_epoch`] when the recording began: a `release_memory` during the call retires its plan.
+    epoch: u64,
 }
 
 /// Recording on this thread; ends (and is discarded) on drop, also in a panic.
@@ -165,9 +167,11 @@ pub(crate) struct Plan {
     pub results: Vec<PlanOutput>,
     /// The external tensors and their storage versions when the call was recorded.
     pub state: Vec<(TensorId, u64)>,
-    /// Bytes of device memory the plan holds: intermediates and parameters.
+    /// Bytes of device memory the plan holds: intermediates, parameters, and the sizes of its input and results (the
+    /// last ones it was replayed with stay referenced). The listed tensors it binds are not counted: their owner
+    /// holds them.
     pub bytes: u64,
-    /// [`GpuContext::plan_epoch`] at recording.
+    /// [`GpuContext::plan_epoch`] when the recording began.
     pub epoch: u64,
     last: std::sync::Mutex<LastBinds>,
     /// The intermediates (the bind groups hold them too).
@@ -289,7 +293,13 @@ impl GpuContext {
             if r.is_some() {
                 return None;
             }
-            *r = Some(Recorder { ctx: self.key(), ops: Vec::new(), taken: FxSet::default(), tainted: None });
+            *r = Some(Recorder {
+                ctx: self.key(),
+                ops: Vec::new(),
+                taken: FxSet::default(),
+                tainted: None,
+                epoch: self.plan_epoch(),
+            });
             RECORDING.fetch_add(1, Ordering::Relaxed);
             Some(RecordGuard(()))
         })
@@ -540,8 +550,11 @@ impl GpuContext {
         {
             return Err(format!("result {k} was not written by the call"));
         }
-        // Before any buffer leaves the pool: a plan too large to keep would only cost the pool its buffers.
-        let pinned: u64 = internal.iter().map(wgpu::Buffer::size).sum();
+        // Before any buffer leaves the pool: a plan too large to keep would only cost the pool its buffers. Besides
+        // its intermediates, a plan keeps the last input and results it was replayed with (in the bind groups of
+        // its dynamic dispatches), so those count too.
+        let held = input.size() + outputs.iter().map(wgpu::Buffer::size).sum::<u64>();
+        let pinned: u64 = internal.iter().map(wgpu::Buffer::size).sum::<u64>() + held;
         if pinned > MAX_PLAN_BYTES_EACH {
             return Err(format!("the plan would hold {pinned} bytes, more than {MAX_PLAN_BYTES_EACH}"));
         }
@@ -568,8 +581,7 @@ impl GpuContext {
             Some(Role::Internal(k)) => Buf::Fixed(internal[*k].clone()),
             _ => Buf::Fixed(b.clone()),
         });
-        let bytes = internal.iter().map(wgpu::Buffer::size).sum::<u64>()
-            + frozen.uniform.as_ref().map_or(0, wgpu::Buffer::size);
+        let bytes = pinned + frozen.uniform.as_ref().map_or(0, wgpu::Buffer::size);
         let last = std::sync::Mutex::new((0..frozen.dynamic.len()).map(|_| None).collect());
         Ok(Plan {
             frozen,
@@ -578,7 +590,7 @@ impl GpuContext {
             results: Vec::new(),
             state: Vec::new(),
             bytes,
-            epoch: self.plan_epoch(),
+            epoch: rec.epoch,
             last,
             _internal: internal,
         })

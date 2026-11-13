@@ -264,7 +264,7 @@ pub struct FoloModel {
     mode: Mode,
     fused: bool,
     head_mode: HeadMode,
-    /// Recorded GPU forwards of the fused model ([`FoloModel::forward`]).
+    /// Recorded GPU forwards of the fused model ([`FoloModel::set_forward_plans`]; off until turned on).
     plans: folo_gpu::ForwardPlans,
     /// Layers 0–10.
     pub backbone: Backbone,
@@ -321,7 +321,7 @@ impl FoloModel {
         let classes = (0..config.num_classes).map(|c| format!("class{c}")).collect();
         let head_mode = if o2o { HeadMode::O2o } else { HeadMode::O2m };
         let (mode, fused) = (Mode::new(), false);
-        let plans = folo_gpu::ForwardPlans::new();
+        let plans = folo_gpu::ForwardPlans::with_enabled(false);
         Ok(FoloModel { config, classes, imgsz: 640, mode, fused, head_mode, plans, backbone, neck, head })
     }
 
@@ -457,9 +457,9 @@ impl FoloModel {
         }
     }
 
-    /// The eval forward through [`folo_gpu::ForwardPlans`]: under `no_grad`, its second call for an input shape and
-    /// dtype records the forward's dispatches and later calls replay them (bit for bit the same outputs) as long as
-    /// no weight changed. `FOLO_GPU_NO_PLAN=1` or [`folo_gpu::GpuContext::set_forward_plans`] turns it off.
+    /// The eval forward through [`folo_gpu::ForwardPlans`]: with plans on ([`FoloModel::set_forward_plans`]) and
+    /// under `no_grad`, its second call for an input shape and dtype records the forward's dispatches and later calls
+    /// replay them (bit for bit the same outputs) as long as no tensor of the model changed.
     fn forward_planned(&self, x: &Tensor, mode: HeadMode) -> Result<HeadOutput> {
         let (h, w) = self.check_input(x)?;
         let o2o = mode == HeadMode::O2o && self.has_o2o();
@@ -482,8 +482,13 @@ impl FoloModel {
         })
     }
 
-    /// Turns the recorded GPU forwards of this model on (the default) or off, for A/B comparisons in one process
-    /// ([`folo_gpu::ForwardPlans::set_enabled`]); `FOLO_GPU_NO_PLAN=1` turns them off for the whole process.
+    /// Turns the recorded GPU forwards of this model on or off (off drops them; [`folo_gpu::ForwardPlans`]). They are
+    /// off for a model on its own and on inside a [`crate::predict::Predictor`], which never lends its model out
+    /// mutably. With plans on, a fused eval-mode forward on a GPU under `no_grad` is recorded at its second call per
+    /// input shape and head mode and replayed from the third, bit for bit, until a tensor of the model is written or
+    /// replaced. What a plan does not see is the layers' own settings (an activation, a stride, a block's `residual`,
+    /// SPPF's `k`): turn plans off before changing one. `FOLO_GPU_NO_PLAN=1` or
+    /// [`folo_gpu::GpuContext::set_forward_plans`] turns them off for a whole context.
     pub fn set_forward_plans(&self, on: bool) {
         self.plans.set_enabled(on);
     }

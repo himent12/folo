@@ -28,10 +28,14 @@ pub type Tensors<'a> = dyn Fn(&mut dyn FnMut(&Tensor)) + 'a;
 ///   ([`Tensor::storage_version`]): an in-place write, `to_device_` or `to_dtype_` of a weight, or a tensor replaced
 ///   by another, retires the plan.
 ///
-/// The call must be a pure function of its input and the listed tensors: what it reads from anywhere else, an
-/// upload or readback inside it, or an intermediate it keeps make it unplannable ([`ForwardPlans::refusal`] says
-/// why). Results are fresh tensors on every call. Plans live in the context, at most [`crate::MAX_PLANS`] and
-/// [`crate::MAX_PLAN_BYTES`] per context ([`crate::MAX_PLAN_BYTES_EACH`] each), and go when their owner is dropped or the context releases its memory.
+/// The call must be a pure function of its input, the listed tensors and `key`: a buffer it reads from anywhere else,
+/// an upload or readback inside it, or an intermediate it keeps make it unplannable ([`ForwardPlans::refusal`] says
+/// why). What the call does besides reading tensors (which kernels it picks from the caller's own settings, such as
+/// a layer's activation or stride) is not checked: the caller must put it in `key`, or turn the owner's plans off
+/// while it can change. A call made while this thread records another call runs as it is, so its work becomes
+/// part of the outer recording. Results are fresh tensors on every call. Plans live in the context, at most [`crate::MAX_PLANS`] and
+/// [`crate::MAX_PLAN_BYTES`] per context ([`crate::MAX_PLAN_BYTES_EACH`] each), and go when their owner is dropped or
+/// the context releases its memory.
 pub struct ForwardPlans {
     id: u64,
     enabled: AtomicBool,
@@ -40,13 +44,9 @@ pub struct ForwardPlans {
 }
 
 impl Default for ForwardPlans {
+    /// An owner with plans on.
     fn default() -> Self {
-        Self {
-            id: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
-            enabled: AtomicBool::new(true),
-            replays: AtomicU64::new(0),
-            refusal: Mutex::new(None),
-        }
+        Self::with_enabled(true)
     }
 }
 
@@ -76,12 +76,22 @@ fn storage_buffer(t: &Tensor) -> Option<wgpu::Buffer> {
 }
 
 impl ForwardPlans {
-    /// An owner with no plans.
+    /// An owner with no plans, plans on.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Turns this owner's plans on (the default) or off; off drops them.
+    /// An owner with no plans, on or off ([`ForwardPlans::set_enabled`]).
+    pub fn with_enabled(on: bool) -> Self {
+        Self {
+            id: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
+            enabled: AtomicBool::new(on),
+            replays: AtomicU64::new(0),
+            refusal: Mutex::new(None),
+        }
+    }
+
+    /// Turns this owner's plans on or off; off drops them.
     pub fn set_enabled(&self, on: bool) {
         self.enabled.store(on, Ordering::Relaxed);
         if !on {
@@ -123,6 +133,10 @@ impl ForwardPlans {
             return f(x);
         }
         let Some((ctx, input)) = eligible(x) else { return f(x) };
+        if ctx.recording() {
+            // Inside another call's recording: run, so the outer recording sees this call's work.
+            return f(x);
+        }
         let mut signature = vec![key, x.dtype() as u64, input.size(), ctx.tensor_cores() as u64];
         signature.extend(x.dims().iter().map(|&d| d as u64));
         let key = crate::context::binds::id_of(&signature);
@@ -166,8 +180,18 @@ impl ForwardPlans {
             Ok::<Plan, String>(plan)
         })();
         let refusal = match plan {
-            Ok(plan) => (!ctx.plans().insert(self.id, key, plan))
-                .then(|| format!("the plan would hold more than {} bytes", crate::MAX_PLAN_BYTES_EACH)),
+            Ok(plan) => {
+                let mut plans = ctx.plans();
+                // Checked under the store's lock, which `release_memory` takes after bumping the epoch: a plan
+                // recorded across a release is dropped (and may be recorded again), never kept.
+                if plan.epoch != ctx.plan_epoch() {
+                    None
+                } else {
+                    (!plans.insert(self.id, key, plan)).then(|| {
+                        format!("the plan would hold more than {} bytes", crate::MAX_PLAN_BYTES_EACH)
+                    })
+                }
+            }
             Err(why) => Some(why),
         };
         if refusal.is_some() {
