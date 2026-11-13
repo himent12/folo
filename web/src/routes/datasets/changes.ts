@@ -113,7 +113,11 @@ export function pendingGeneration(server: string, now = Date.now()): Generation 
  */
 const samePath = (a: string, b: string) => {
   const norm = (p: string) => {
-    const s = p.replace(/\\/g, '/');
+    // Windows' verbatim prefix (\\?\D:\…, \\?\UNC\nas\…), which the server lists without.
+    const s = p
+      .replace(/\\/g, '/')
+      .replace(/^\/\/\?\/UNC\//i, '//')
+      .replace(/^\/\/\?\//, '');
     const parts: string[] = [];
     for (const x of s.split('/')) {
       if (x === '..' && parts.length > 1) parts.pop();

@@ -10,6 +10,8 @@ describe('a folder being registered has landed', () => {
     expect(landed(reading('d:/Data/./sets/../coco'), listed('D:/data/coco'))).toBe(true);
     expect(landed(reading('\\\\nas\\share\\COCO'), listed('//nas/share/coco'))).toBe(true);
     expect(landed(reading('/data/./coco/'), listed('/data/coco'))).toBe(true);
+    expect(landed(reading('\\\\?\\D:\\data\\coco'), listed('D:/data/coco'))).toBe(true);
+    expect(landed(reading('\\\\?\\UNC\\nas\\share\\coco'), listed('//nas/share/coco'))).toBe(true);
   });
 
   it('not when only another folder is listed: on a Linux server case counts', () => {
