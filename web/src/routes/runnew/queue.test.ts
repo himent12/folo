@@ -14,9 +14,12 @@ describe('a new run and the queue', () => {
   });
 
   it('waits behind the run training now and the runs already waiting, and says when the first should end', () => {
-    const one = aheadOf([run('q-one', 'running', null, { eta_s: 30 })], false)!;
+    const one = aheadOf([run('q-one', 'running', null, { eta_s: 30, epoch: 2, epochs: 5, step: 60, steps_per_epoch: 50 })], false)!;
     expect(one.position).toBe(1);
     expect(aheadLine(one)).toBe('q-one is training: this run waits in the queue and starts when it ends (it ends in about 30s).');
+    // In its first epoch the estimate still carries the start (data, GPU pipelines): not quoted, as its own page holds it back.
+    const first = aheadOf([run('q-one', 'running', null, { eta_s: 23, epoch: 1, epochs: 5, step: 3, steps_per_epoch: 50 })], false)!;
+    expect(aheadLine(first)).toBe('q-one is training: this run waits in the queue and starts when it ends.');
     const three = aheadOf([run('q-one', 'running'), run('q-two', 'queued', 1), run('q-three', 'queued', 2)], false)!;
     expect(three.position).toBe(3);
     expect(aheadLine(three)).toBe('q-one is training and 2 runs wait: this run will be 3rd in the queue.');

@@ -68,7 +68,7 @@ describe('a run that ended without training', () => {
   });
 
   it('stopped during its first epoch: the readings that will never come say so, nothing waits for a validation', async () => {
-    const step: Step = { epoch: 1, step: 1, lr: 0, loss: { box: 4, cls: 6, dfl: 2.5, total: 12.5 }, imgs_per_s: 2, eta_s: null, steps_per_epoch: 100, epochs: 10 };
+    const step: Step = { epoch: 1, step: 1, lr: 0, loss: { box: 4, cls: 6, dfl: 2.5, total: 12.5 }, imgs_per_s: 2, eta_s: 0, steps_per_epoch: 100, epochs: 10 };
     await open({ status: 'stopped', error: null, epoch: 0, step: 1, steps_per_epoch: 100, epochs: 10 }, [step], (t) => (t.querySelector('.metrics')?.textContent ?? '').includes('12.5'));
     const text = target.textContent ?? '';
     expect(text).toContain('Stopped during its first epoch');

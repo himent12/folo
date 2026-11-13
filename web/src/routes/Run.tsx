@@ -23,7 +23,7 @@ import { computed, css, effect, MediaQuery, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { LiveRun } from '$lib/api/live';
 import { modelsResource } from '$lib/api/models';
-import { trainingSeconds } from '$lib/api/progress';
+import { settledEta, trainingSeconds } from '$lib/api/progress';
 import { Resource } from '$lib/api/resource';
 import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
 import type { QueueRequest } from '$lib/api/types';
@@ -198,12 +198,12 @@ export default function Run() {
   /** The wait: what the training run has left plus the lengths in front (`queueWait`); a floor when any is unknown. */
   const wait = computed(() => {
     const a = ahead.get();
-    return queueWait(a ? a.eta_s : undefined, lengths.get());
+    return queueWait(a ? settledEta(a) : undefined, lengths.get());
   });
   /** The queued runs in front, together: one run's estimate, or their sum when every one is known. */
   const frontTime = computed(() => {
     const all = queueWait(undefined, lengths.get());
-    return all?.known ? `about ${timeRange(all.lo, all.hi)}` : inFront.get().length > 1 ? 'lengths not known yet' : 'length not known yet';
+    return all?.known ? timeRange(all.lo, all.hi) : inFront.get().length > 1 ? 'lengths not known yet' : 'length not known yet';
   });
   /** Start next is a move only when something is in front (or nothing trains, and it starts at once). */
   const canStart = computed(() => place.get() !== null && (place.get()! > 1 || !ahead.get()) && !starting.get());
@@ -418,15 +418,15 @@ export default function Run() {
           // queue order (what trains now, then the waiting ones), so the sum is checkable. A run whose length the server
           // cannot estimate makes the sum a floor ("more than 7m"), never an estimate of the whole (`queueWait`).
           <>
-            {wait.get()?.known ? <>Starts in about {timeRange(wait.get()!.lo, wait.get()!.hi)}, after</> : wait.get() ? <>Starts in more than {eta(wait.get()!.lo)}, after</> : 'Starts after'}
-            {ahead.get() ? <>{' '}<a class="link" href={href(`/runs/${ahead.get()!.id}`)}>{ahead.get()!.name}</a>{' '}({ahead.get()!.eta_s !== null ? `${eta(ahead.get()!.eta_s)} left` : 'time left not known'}) and</> : null}
+            {wait.get()?.known ? <>Starts in {timeRange(wait.get()!.lo, wait.get()!.hi)}, after</> : wait.get() ? <>Starts in more than {eta(wait.get()!.lo)}, after</> : 'Starts after'}
+            {ahead.get() ? <>{' '}<a class="link" href={href(`/runs/${ahead.get()!.id}`)}>{ahead.get()!.name}</a>{' '}({settledEta(ahead.get()!) !== null ? `${eta(settledEta(ahead.get()!)!)} left` : 'time left not known yet'}) and</> : null}
             {' '}
             {before.get() ? <><a class="link" href={href(`/runs/${before.get()!.id}`)}>{before.get()!.name}</a>{place.get()! > 2 ? <>{' '}and {place.get()! - 2} more</> : null}</> : <>{place.get()! - 1} queued {place.get() === 2 ? 'run' : 'runs'}</>}
             {' '}({frontTime.get()}).
           </>
         ) : ahead.get() ? (
           <>
-            Starts when <a class="link" href={href(`/runs/${ahead.get()!.id}`)}>{ahead.get()!.name}</a> finishes{ahead.get()!.eta_s !== null ? <>, in about {eta(ahead.get()!.eta_s)}</> : null}.
+            Starts when <a class="link" href={href(`/runs/${ahead.get()!.id}`)}>{ahead.get()!.name}</a> finishes{settledEta(ahead.get()!) !== null ? <>, in about {eta(settledEta(ahead.get()!)!)}</> : null}.
           </>
         ) : (
           'Starts as soon as the device is free.'

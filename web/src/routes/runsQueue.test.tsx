@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type RunEventHandlers } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import type { Run as RunT } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import Run from './Run';
@@ -194,6 +195,35 @@ describe('Run: a waiting run on a server without estimates', () => {
     expect(text).not.toMatch(/Starts in about/);
     expect(text).toMatch(/Starts in more than|Starts after/);
     expect(text).toMatch(/not known yet/);
+  });
+});
+
+describe('Run: a waiting run while the training run is in its first epoch', () => {
+  it('quotes no time left the training run itself still estimates, and says a known wait without "about under"', async () => {
+    const api = new MockApi('normal', 0);
+    const runs = api.runs.bind(api);
+    // The run training now has just started: its estimate still carries the start, its own page says "estimating".
+    const fresh = (r: RunT): RunT => (r.status === 'running' ? { ...r, epoch: 1, step: 3, steps_per_epoch: 50, eta_s: 23 } : r);
+    vi.spyOn(api, 'runs').mockImplementation(async (...a) => (await runs(...a)).map(fresh));
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse('#/runs/run_q7c5');
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = mount(Run, { target });
+    const text = await vi.waitFor(
+      () => {
+        flushSync();
+        const t = [...target.querySelectorAll('p, div')].map((e) => e.textContent ?? '').find((t) => /Starts (in|after)/.test(t) && /\(.*\)\./.test(t));
+        if (!t) throw new Error('no queue line yet');
+        return t.replace(/\s+/g, ' ');
+      },
+      { timeout: 4000, interval: 10 },
+    );
+    expect(text).not.toContain('23s left');
+    expect(text).toContain('time left not known yet');
+    expect(text).not.toMatch(/about (under|~)/);
+    expect(target.querySelector('#queue')?.textContent).not.toContain('23s left');
   });
 });
 

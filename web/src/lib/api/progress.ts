@@ -52,6 +52,15 @@ export function stoppedEarly(run: Pick<Run, 'status' | 'epoch' | 'epochs'>): boo
   return run.status === 'completed' && run.epoch > 0 && run.epoch < run.epochs;
 }
 
+/**
+ * A run's time left once it has settled ([`etaSettled`]), else null: what another screen quotes for it (a queued run's
+ * wait, the queue panel, New run's queue note), so none of them says "23s left" while the run's own page is still
+ * estimating.
+ */
+export function settledEta(run: Pick<Run, 'step' | 'epoch' | 'epochs' | 'steps_per_epoch' | 'status' | 'eta_s'>): number | null {
+  return run.eta_s !== null && etaSettled(run) ? run.eta_s : null;
+}
+
 /** What a live run says about its time left: "3m left", or "estimating time left…" until it has settled. */
 export const ETA_PENDING = 'estimating time left…';
 
