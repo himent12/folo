@@ -19,7 +19,7 @@ import Segmented from '$lib/ui/Segmented';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
 import { noTraining } from '../dataset/health';
-import { datasetsChanged, generationEnded, generationStarted, pageLeaving } from './changes';
+import { datasetsChanged, generationEnded, generationStarted, pageLeaving, whenStaying } from './changes';
 import { isUnlabeled } from './problem';
 import { cleanPath, isFullPath, NAME_RE, nameFromPath, suggestName, uniqueName } from './names';
 
@@ -228,14 +228,18 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       else toast.success(title, detail);
       router.go(`/datasets/${ds.id}`);
     } catch (err) {
-      // The page is going away (a reload while it works): the server goes on, and the next page waits for it.
-      if (pageLeaving()) return;
-      work.set(null);
-      generationEnded(gen);
-      if (here()) error.set(err);
-      else if (showing()) status.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
-      // page-level: no opening of the dialog is on screen.
-      else toast.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
+      const failed = () => {
+        work.set(null);
+        generationEnded(gen);
+        if (here()) error.set(err);
+        else if (showing()) status.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
+        // page-level: no opening of the dialog is on screen.
+        else toast.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
+      };
+      // The page is going away (a reload while it works): the server goes on, and the next page waits for it. If it
+      // stays after all, the failure is said then.
+      if (pageLeaving()) whenStaying(failed);
+      else failed();
     }
   }
 

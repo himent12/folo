@@ -9,7 +9,7 @@ import { router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import AddDatasetDialog from './AddDatasetDialog';
-import { generationEnded, pendingGeneration } from './changes';
+import { pendingGeneration } from './changes';
 
 /** Port of `mount(C, { target, props })`: renders into `target`; `unmount(c)` is `c.unmount()`. */
 const mount = <P extends object>(C: (p: P) => JSX.Element, o: { target: HTMLElement; props?: P }) => render(() => C(o.props ?? ({} as P)), o.target);
@@ -130,10 +130,14 @@ describe('AddDatasetDialog', () => {
       fail(new ApiError(0, 'network', 'Cannot reach the FOLO server.'));
       await new Promise((r) => setTimeout(r));
       expect(pendingGeneration(hub.server)).toMatchObject({ path: 'D:/data/coco', what: 'Reading coco' });
+      expect(document.querySelector('.err')).toBeNull();
     } finally {
+      // The page stays after all (here: back from the cache): the failure is said, and the dataset no longer waited for.
       window.dispatchEvent(new Event('pageshow'));
-      generationEnded(pendingGeneration(hub.server)!);
     }
+    flushSync();
+    expect(document.querySelector('.err')?.textContent).toContain("Can't reach the FOLO server");
+    expect(pendingGeneration(hub.server)).toBeNull();
   });
 
   it('reads the list itself when it was not given one', async () => {

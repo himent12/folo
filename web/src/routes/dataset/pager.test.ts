@@ -72,5 +72,41 @@ describe('ImagePager', () => {
     expect(pager.get(250)).toBeUndefined();
     // Only what was read again (page 0, by the reader above) was asked for: not every page ever loaded.
     expect(reads.filter((o) => o === 0)).toHaveLength(2);
+    expect([pager.revision, pager.revisionOf(0), pager.revisionOf(250)]).toEqual([1, 1, 0]);
+  });
+
+  it('keeps a page whose read after reload() failed for Retry, which reads it again', async () => {
+    const mock = new MockApi('normal', 0);
+    let fail = false;
+    const api: Partial<Api> = { datasetImages: (id, q) => (fail ? Promise.reject(new Error('offline')) : mock.datasetImages(id, q)) };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_fasteners', undefined, undefined);
+    await pager.at(0);
+    fail = true;
+    pager.reload();
+    pager.get(0);
+    await vi.waitFor(() => expect(pager.error).toBeTruthy());
+    // What it showed stays; reading it again is up to Retry (no loop of failing reads meanwhile).
+    expect(pager.get(0)?.id).toBeDefined();
+    const read = vi.spyOn(api, 'datasetImages');
+    fail = false;
+    pager.retry();
+    await vi.waitFor(() => expect(pager.error).toBeUndefined());
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it('reads an empty filter again on reload(), where no row asks for a page', async () => {
+    const mock = new MockApi('normal', 0);
+    let none = true;
+    const api: Partial<Api> = {
+      datasetImages: async (id, q) => (none ? { total: 0, images: [] } : mock.datasetImages(id, q)),
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_fasteners', undefined, 2);
+    await pager.at(0);
+    expect(pager.total).toBe(0);
+    none = false;
+    pager.reload();
+    await vi.waitFor(() => expect(pager.total).toBeGreaterThan(0));
   });
 });

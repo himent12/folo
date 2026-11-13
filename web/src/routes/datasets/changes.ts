@@ -35,6 +35,14 @@ const KEY = 'folo.datasets.generating';
  * a dataset on its way is not forgotten for that, so the page that follows still waits for it.
  */
 let leaving = false;
+/** What waits for the page to turn out to stay (`whenStaying`). */
+let held: (() => void)[] = [];
+const stayed = () => {
+  leaving = false;
+  const run = held;
+  held = [];
+  for (const f of run) f();
+};
 if (typeof window !== 'undefined') {
   // From `beforeunload`: Chrome drops the page's requests (and runs their failure handlers) before `pagehide`. A page
   // still here a while later was not left after all (a leave cancelled at another screen's unsaved-work prompt).
@@ -42,16 +50,21 @@ if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', () => {
     leaving = true;
     clearTimeout(stay);
-    stay = setTimeout(() => (leaving = false), 3000);
+    stay = setTimeout(stayed, 3000);
   });
   window.addEventListener('pagehide', () => {
     clearTimeout(stay);
     leaving = true;
   });
   // Back from the back-forward cache: it is a live page again.
-  window.addEventListener('pageshow', () => (leaving = false));
+  window.addEventListener('pageshow', stayed);
 }
 export const pageLeaving = () => leaving;
+
+/** Runs `f` if the page that looked like going away stays after all (a leave cancelled at a prompt). */
+export function whenStaying(f: () => void): void {
+  held.push(f);
+}
 
 /** Past this, a generation that never landed (it failed while no tab listened) is no longer waited for. */
 const GIVE_UP_MS = 30 * 60_000;

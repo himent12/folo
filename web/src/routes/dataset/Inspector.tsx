@@ -76,10 +76,11 @@ export default function Inspector(props: InspectorProps) {
     status.clear();
   });
 
-  // Resolve a linked id that is not loaded yet.
+  // Resolve a linked id that is not loaded yet, and the open one again after the folder changed (it may be gone).
   effect(() => {
     const want = id.get();
-    if (!want || untrack(() => props.pager.indexOf(want)) >= 0) return;
+    const changed = props.pager.revision > 0;
+    if (!want || (!changed && untrack(() => props.pager.indexOf(want)) >= 0)) return;
     let live = true;
     void props.pager.find(want).then(
       (i) => {
@@ -405,6 +406,7 @@ export default function Inspector(props: InspectorProps) {
                 <DatasetImage
                   datasetId={props.pager.datasetId}
                   imageId={im().id}
+                  rev={props.pager.revisionOf(idx.get())}
                   width={im().width}
                   height={im().height}
                   boxes={im().boxes}

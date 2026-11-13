@@ -37,7 +37,26 @@ export class ImagePager {
   #stale = new Set<number>();
   /** Bumped by `reload()`: an answer to a read made before it is dropped, even one already on its way. */
   #gen = 0;
+  #revision = signal(0);
   #ctrl = new AbortController();
+
+  /** The `reload()` each page was read after (0: before any). */
+  #pageRev = new Map<number, number>();
+
+  /** How many times the dataset changed on disk while shown (`reload()`). */
+  get revision(): number {
+    return this.#revision.get();
+  }
+
+  /**
+   * The revision image `i`'s page was read at. Image ids are positions, so its pixels are fetched again under a new
+   * one (lib/detect/DatasetImage `rev`), together with the boxes of that read, never before it (an id past the new
+   * end would be asked for).
+   */
+  revisionOf(i: number): number {
+    void this.#version.get();
+    return this.#pageRev.get(Math.floor(i / PAGE)) ?? 0;
+  }
 
   constructor(
     readonly datasetId: string,
@@ -56,8 +75,8 @@ export class ImagePager {
     void this.#version.get();
     const p = Math.floor(i / PAGE);
     // A stale page is read again by whoever still shows it (the grid's rows in view, the inspector's image), so only
-    // what is on screen is asked for after a change.
-    if (this.#stale.has(p)) void this.#load(p);
+    // what is on screen is asked for after a change; one whose read failed waits for Retry.
+    if (this.#stale.has(p) && !this.#failed.has(p)) void this.#load(p);
     return this.#pages.get(p)?.[i % PAGE];
   }
 
@@ -86,7 +105,12 @@ export class ImagePager {
   /** Finds an image id in this filter: loaded pages, then a guess from `img_<n>` ids, then a scan. -1 if absent. */
   async find(id: string): Promise<number> {
     const hit = this.#index.get(id);
-    if (hit !== undefined) return hit;
+    if (hit !== undefined) {
+      // A place read before the dataset changed counts once its page is read again (the id may be gone since).
+      if (!this.#fresh(Math.floor(hit / PAGE))) await this.#load(Math.floor(hit / PAGE));
+      const now = this.#index.get(id);
+      if (now !== undefined && this.#fresh(Math.floor(now / PAGE))) return now;
+    }
     const n = /(\d+)$/.exec(id);
     if (n && this.cls === undefined) {
       const guess = Number(n[1]) - this.splitStart;
@@ -128,6 +152,7 @@ export class ImagePager {
     // A stale page's ids may now name other places (or nothing): they give way to the new read's.
     for (const [k, im] of (this.#pages.get(p) ?? []).entries()) if (this.#index.get(im.id) === p * PAGE + k) this.#index.delete(im.id);
     this.#stale.delete(p);
+    this.#pageRev.set(p, this.#gen);
     this.#pages.set(p, images);
     images.forEach((im, k) => this.#index.set(im.id, p * PAGE + k));
     this.#total.set(total);
@@ -150,8 +175,7 @@ export class ImagePager {
         },
         (e: unknown) => {
           if (gen !== this.#gen || (e instanceof DOMException && e.name === 'AbortError')) return;
-          // A stale page that cannot be read again keeps what it showed, as a failed page: Retry reads it.
-          this.#stale.delete(p);
+          // A stale page that cannot be read again keeps what it showed (still stale, so Retry reads it).
           this.#failed.add(p);
           this.#error.set(e);
         },
@@ -178,7 +202,9 @@ export class ImagePager {
     for (const p of this.#failed) this.#stale.add(p);
     this.#failed.clear();
     this.#error.set(undefined);
-    // Readers run again and ask for their pages (`get`).
+    // Readers run again and ask for their pages (`get`); with no row shown (an empty filter), nothing would ask.
+    if (!this.total) void this.#load(0);
+    this.#revision.set(this.#gen);
     this.#version.set((v) => v + 1);
   }
 

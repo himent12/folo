@@ -538,7 +538,7 @@ export default function Dataset() {
               onclose={() => setQuery({ image: null })}
               onmissing={(im) => {
                 // page-level: a linked image that is not in this view; the inspector closes on the next line.
-                toast.info('Image not in this view', `${im} does not match the current filters.`);
+                toast.info('Image not in this view', `${im} does not match the current filters, or is no longer in the folder.`);
                 setQuery({ image: null });
               }}
             />

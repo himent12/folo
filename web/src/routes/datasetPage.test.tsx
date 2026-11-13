@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
+import { toast } from '$lib/ui/toast';
 import Dataset from './Dataset';
 
 let target: HTMLElement;
@@ -107,6 +108,30 @@ describe('Dataset page', () => {
     expect(issues).toHaveBeenCalledTimes(1);
     release();
     await until(() => issues.mock.calls.length === 2, 'the check read again');
+  });
+
+  it('closes an open image that left the folder, saying so, when the window comes back', async () => {
+    const { total } = await api.datasetImages('ds_shapes', { offset: 0, limit: 1 });
+    const last = (await api.datasetImages('ds_shapes', { offset: total - 1, limit: 1 })).images[0]!;
+    const read = api.dataset.bind(api);
+    const list = api.datasetImages.bind(api);
+    let gone = false;
+    vi.spyOn(api, 'dataset').mockImplementation(async (id: string) => {
+      const d = await read(id);
+      return gone ? { ...d, splits: { ...d.splits, test: d.splits.test - 1 } } : d;
+    });
+    vi.spyOn(api, 'datasetImages').mockImplementation(async (id, q) => {
+      const page = await list(id, q);
+      return gone ? { total: page.total - 1, images: page.images.filter((im) => im.id !== last.id) } : page;
+    });
+    const info = vi.spyOn(toast, 'info');
+    open(`/datasets/ds_shapes?image=${last.id}`);
+    await until(() => document.querySelector('dialog.insp')?.textContent?.includes(last.file.split('/').pop()!), 'the image');
+    gone = true;
+    window.dispatchEvent(new Event('focus'));
+    await until(() => info.mock.calls.length > 0, 'the note');
+    expect(info).toHaveBeenCalledWith('Image not in this view', `${last.id} does not match the current filters, or is no longer in the folder.`);
+    await until(() => !decodeURIComponent(location.hash).includes('image='), 'the inspector closed');
   });
 
   it('says the folder is missing when it went while the page was open, instead of showing what it held', async () => {
