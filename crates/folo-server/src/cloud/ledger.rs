@@ -510,6 +510,9 @@ mod tests {
         let usd = |seconds: f64| Some((seconds / 3600.0 * 3.6 * 1e4).round() / 1e4);
         let ten_hours = |i: &CloudInstance| i.cost_usd.unwrap() >= 35.99;
         let end = |i: &CloudInstance| i.ended.as_deref().and_then(parse_rfc3339).unwrap();
+        // Ended "now", by the ledger's own clock: between the start of this test and the moment of the check,
+        // however long a busy machine took to get here (a second of slack for a clock that is being adjusted).
+        let ended_now = |i: &CloudInstance| (now - 1.0..=unix_now() + 1.0).contains(&end(i));
 
         // A provider that arms its instances, and a worker that answered four minutes after the launch request:
         // the instance should be gone an hour and its own grace after that, whatever `now` is.
@@ -540,15 +543,15 @@ mod tests {
         let there = forgotten(&ledger, CloudInstanceStatus::Running, hour);
         ledger.booted_at(&there.id, created + 240.0).unwrap();
         let there = ledger.terminated(&there.id, false).unwrap();
-        assert!((end(&there) - now).abs() < 5.0 && ten_hours(&there), "{there:?}");
+        assert!(ended_now(&there) && ten_hours(&there), "{there:?}");
         // So does one that is terminated before its time, and one that changes status any other way.
         let early = ledger.create("cc_1", "arming", "run_2", &offer(None), None, hour).unwrap();
         ledger.booted(&early.id).unwrap();
-        assert!((end(&ledger.terminated(&early.id, true).unwrap()) - now).abs() < 5.0);
+        assert!(ended_now(&ledger.terminated(&early.id, true).unwrap()));
         let lost = forgotten(&ledger, CloudInstanceStatus::Running, hour);
         ledger.booted_at(&lost.id, created + 240.0).unwrap();
         let lost = ledger.update(&lost.id, |i| i.status = CloudInstanceStatus::Lost).unwrap();
-        assert!((end(&lost) - now).abs() < 5.0);
+        assert!(ended_now(&lost));
 
         // No estimate without what it takes: a worker that never answered (when its setup started, if it did,
         // nobody knows), no time limit on record, a provider that does not arm its instances.
