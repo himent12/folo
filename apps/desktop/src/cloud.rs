@@ -32,6 +32,15 @@ pub struct CloudState {
     pub terminate: Option<Confirm>,
     /// Bumped on every opening of the Connect dialog: a late answer only touches its own dialog.
     pub connect_seq: u64,
+    /// Instance ids of cloud runs that the installed instance list covers (the run was known when
+    /// that read was asked): a row missing for one of these is gone from the ledger, not new.
+    pub asked_for: HashSet<String>,
+    /// Instance-list reads asked for, and the newest whose answer is installed: an older answer
+    /// landing later is dropped, so it can't put back a list that lacks a newer instance.
+    pub instances_seq: u64,
+    pub instances_shown: u64,
+    /// The newest instance-list read that landed failed (the list shown may be out of date).
+    pub instances_failed: bool,
 }
 
 /// The Connect dialog.
@@ -217,16 +226,41 @@ impl FoloApp {
 
     /// Reloads the instance list in place (no loading state once it has one).
     pub fn refresh_instances(&mut self, cx: &mut Context<Self>) {
+        // The cloud runs known now: an answer covers them (a run seen later isn't).
+        let covered = self.run_instance_ids();
+        self.cloud.instances_seq += 1;
+        let seq = self.cloud.instances_seq;
         self.fetch(
             cx,
             |api| api.cloud_instances(),
-            |this, r, _| {
-                // A refresh that fails keeps the list there is.
-                if r.is_ok() || this.cloud.instances.ready().is_none() {
-                    this.cloud.instances = r.into();
+            move |this, r, _| {
+                // Older than the list shown: it may lack an instance the shown one has.
+                if seq <= this.cloud.instances_shown {
+                    return;
+                }
+                match r {
+                    Ok(list) => {
+                        this.cloud.instances = Load::Ready(list);
+                        this.cloud.instances_shown = seq;
+                        this.cloud.asked_for = covered.into_iter().collect();
+                        this.cloud.instances_failed = false;
+                    }
+                    Err(e) => {
+                        this.cloud.instances_failed = true;
+                        // A refresh that fails keeps the list there is.
+                        if this.cloud.instances.ready().is_none() {
+                            this.cloud.instances = Load::Failed(e);
+                        }
+                    }
                 }
             },
         );
+    }
+
+    /// Every cloud run's instance id.
+    fn run_instance_ids(&self) -> Vec<String> {
+        let runs = self.store.runs.ready().into_iter().flatten();
+        runs.filter_map(|r| r.cloud.as_ref()?.instance_id.clone()).collect()
     }
 
     /// Settings shows the section as the server has it now (also when going back to it).
@@ -242,12 +276,58 @@ impl FoloApp {
     /// Forgets everything cloud (a new data source, or Retry).
     pub fn clear_cloud(&mut self) {
         let seq = self.cloud.connect_seq;
-        self.cloud = CloudState { connect_seq: seq, ..CloudState::default() };
+        // Instance reads still out are the old source's: they land older than anything new.
+        let reads = self.cloud.instances_seq;
+        self.cloud = CloudState {
+            connect_seq: seq,
+            instances_seq: reads,
+            instances_shown: reads,
+            ..CloudState::default()
+        };
     }
 
     /// Whether an instance may still cost money: the list then refreshes every 5 s.
     pub fn instance_alive(&self) -> bool {
         self.cloud.instances.ready().is_some_and(|l| l.iter().any(|i| i.status.is_alive()))
+    }
+
+    /// Whether a cloud run's instance is missing from the instance list and no successful read
+    /// since the run was known covered it (a run created after the list was read, here or
+    /// elsewhere): the list is read again until one does. The ledger drops instances that ended
+    /// over 7 days ago, so once a read covered an id, its missing row is final, not asked for forever.
+    pub fn instances_missing(&self) -> bool {
+        let Some(list) = self.cloud.instances.ready() else { return false };
+        self.run_instance_ids()
+            .iter()
+            .any(|id| !list.iter().any(|i| &i.id == id) && !self.cloud.asked_for.contains(id))
+    }
+
+    /// A released cloud run's instance in the ledger (`GET /api/cloud/instances`), which keeps its
+    /// cost counting until the provider confirms the termination. `None` before the release, for a
+    /// run without an instance (a remote server), or while the ledger has no row for it.
+    pub fn released_instance(&self, c: &RunCloud) -> Option<&CloudInstance> {
+        let id = c.instance_id.as_ref().filter(|_| c.phase == CloudPhase::Released)?;
+        self.cloud.instances.ready()?.iter().find(|i| &i.id == id)
+    }
+
+    /// Nothing the ledger said confirms a released run's instance is gone or tells its cost: no list
+    /// yet (loading, or every read failed), or its row missing from one that didn't cover it (the
+    /// run was new). Its release and cost stay provisional until a read covers it.
+    pub fn released_instance_unverified(&self, c: &RunCloud) -> bool {
+        let Some(id) = c.instance_id.as_ref().filter(|_| c.phase == CloudPhase::Released) else {
+            return false;
+        };
+        match self.cloud.instances.ready() {
+            Some(list) => !list.iter().any(|i| &i.id == id) && !self.cloud.asked_for.contains(id),
+            None => true,
+        }
+    }
+
+    /// [`Self::released_instance_unverified`] because a read failed (not while one is on its way):
+    /// the panel then says it couldn't check.
+    pub fn released_instance_unknown(&self, c: &RunCloud) -> bool {
+        self.released_instance_unverified(c)
+            && (self.cloud.instances_failed || self.cloud.instances.error().is_some())
     }
 
     /// A connection's offers, fetched once per connection (`refresh` asks the provider again).
@@ -627,8 +707,10 @@ pub enum PhaseState {
 /// `phaseStates`). Live, the phases before the current one are done. Once released, the phases
 /// before the one its hand-over ended in (`RunCloud::ended_in`) are done, that one failed (a
 /// failed run), skipped (stopped before training) or done, and the later ones never reached; a
-/// server that doesn't say (`None`, older servers) has every phase done.
-pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
+/// server that doesn't say (`None`, older servers) has every phase done. `unconfirmed`: the
+/// provider hasn't confirmed its instance's termination (the run stops waiting after a minute), so
+/// releasing is still under way and released still to come.
+pub fn phase_states(c: &RunCloud, r: &Run, unconfirmed: bool) -> Vec<(CloudPhase, PhaseState)> {
     // A newer server's phase has no known place among these: it is the one step, current.
     if c.phase == CloudPhase::Unknown {
         return vec![(CloudPhase::Unknown, PhaseState::Now)];
@@ -665,6 +747,8 @@ pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
         .iter()
         .map(|&p| {
             let s = match ended {
+                _ if unconfirmed && p == CloudPhase::Releasing => PhaseState::Now,
+                _ if unconfirmed && p == CloudPhase::Released => PhaseState::Next,
                 None => PhaseState::Done,
                 _ if p >= CloudPhase::Releasing => PhaseState::Done,
                 Some(e) if p < e => PhaseState::Done,
@@ -675,6 +759,57 @@ pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
             (p, s)
         })
         .collect()
+}
+
+/// The one line of trouble a cloud run's panel shows, as Studio's (`CloudPanel.tsx`): the worker
+/// silent since a moment (`unanswered_since`), else a released run's instance not confirmed
+/// terminated (`unconfirmed`), else the ledger not read (`unknown`). The mark, the words, and
+/// whether they lead to Settings › Cloud.
+pub fn panel_warning(
+    c: &RunCloud,
+    unconfirmed: bool,
+    unknown: bool,
+    now: i64,
+) -> Option<(&'static str, String, bool)> {
+    if let Some(since) = c.unanswered_since.as_deref().and_then(time::parse) {
+        let words = format!(
+            "The worker has not answered since {}. FOLO keeps asking; the run may still be training or waiting there.",
+            time::local_deadline(since, now)
+        );
+        Some(("icons/wifi-off.svg", words, false))
+    } else if unconfirmed {
+        let words = "Termination not confirmed: the instance may still be billed.".to_string();
+        Some(("icons/triangle-alert.svg", words, true))
+    } else if unknown {
+        Some((
+            "icons/triangle-alert.svg",
+            "Could not check that the instance is terminated.".to_string(),
+            true,
+        ))
+    } else {
+        None
+    }
+}
+
+/// A cloud run's cost in its panel. A released run's is its instance's own from the ledger, which
+/// keeps counting while the termination isn't confirmed ("so far" then); without the ledger's row,
+/// the run's own, "so far" until released, and also after when the ledger couldn't be read
+/// (`unknown`: nothing says the instance stopped costing). No price: not billed.
+pub fn panel_cost(c: &RunCloud, instance: Option<&CloudInstance>, unknown: bool) -> String {
+    let released = c.phase == CloudPhase::Released && !unknown;
+    match instance {
+        Some(i) => match i.cost_usd {
+            None => "not billed".to_string(),
+            Some(usd) if i.status.is_alive() => format!("{} so far", crate::ui::fmt_cost(usd)),
+            Some(usd) => crate::ui::fmt_cost(usd),
+        },
+        None => match (c.cost_usd, c.offer.price_per_hour) {
+            (_, None) => "not billed".to_string(),
+            (Some(usd), _) if released => crate::ui::fmt_cost(usd),
+            (Some(usd), _) => format!("{} so far", crate::ui::fmt_cost(usd)),
+            (None, Some(_)) => "—".to_string(),
+        },
+    }
 }
 
 #[cfg(test)]

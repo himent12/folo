@@ -60,6 +60,8 @@ pub struct MockBackend {
     fail_images_from: Mutex<Option<u32>>,
     /// The next run-history read fails ([`MockBackend::fail_metrics_once`]).
     fail_metrics: std::sync::atomic::AtomicBool,
+    /// The next instance-list read fails ([`MockBackend::fail_instances_once`]).
+    fail_instances: std::sync::atomic::AtomicBool,
     clock: Clock,
 }
 
@@ -136,6 +138,19 @@ impl MockBackend {
         self
     }
 
+    /// The training cloud run's worker ([`MockBackend::with_cloud_runs`]) silent for three minutes:
+    /// the run page's "Worker not answering".
+    pub fn cloud_silent(self) -> Self {
+        for f in self.runs.lock().unwrap().iter_mut() {
+            if let Some(sim) =
+                f.cloud.as_mut().filter(|s| s.elapsed() >= s.train_at() && s.released_at().is_none())
+            {
+                sim.silent_since = Some(sim.elapsed() - 180.);
+            }
+        }
+        self
+    }
+
     fn check(&self) -> ApiResult<()> {
         if self.fail {
             Err(ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878")
@@ -172,6 +187,12 @@ impl MockBackend {
     #[cfg(test)]
     pub fn fail_metrics_once(&self) {
         self.fail_metrics.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next instance-list read fails as an unreachable server would.
+    #[cfg(test)]
+    pub fn fail_instances_once(&self) {
+        self.fail_instances.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The next image-list call at `offset` or later fails as an unreachable server would.

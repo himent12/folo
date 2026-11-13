@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::tests::{drive, open, open_with};
 use crate::api::mock::MockBackend;
 use crate::api::{CloudPhase, RunStatus};
-use crate::cloud::{PhaseState, phase_states};
+use crate::cloud::{PhaseState, panel_cost, panel_warning, phase_states};
 use crate::store::Load;
 
 #[test]
@@ -39,7 +39,7 @@ fn a_cloud_run_that_failed_uploading_did_not_train() {
         let mut r = this.store.runs.ready().unwrap().iter().find(|r| r.cloud.is_some()).unwrap().clone();
         let mut c = r.cloud.clone().unwrap();
         let marks = |c: &crate::api::RunCloud, r: &crate::api::Run| -> Vec<PhaseState> {
-            phase_states(c, r).into_iter().map(|(_, s)| s).collect()
+            phase_states(c, r, false).into_iter().map(|(_, s)| s).collect()
         };
         // Released after the upload failed: syncing failed, training and collecting never reached.
         c.phase = CloudPhase::Released;
@@ -120,5 +120,161 @@ fn a_final_read_that_fails_does_not_leave_the_history_loading() {
             matches!(this.store.run_data.get("run_52e8"), Some(Load::Failed(_))),
             "a failure, not loading for good"
         );
+    });
+}
+
+#[test]
+fn a_released_runs_instance_not_confirmed_terminated_says_it_may_still_be_billed() {
+    use PhaseState::*;
+    // RunPod hasn't confirmed the termination of the training run's instance (the demo's +trouble).
+    let (mut app, window) = open_with(Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble()));
+    drive(&mut app, window, |this, _, cx| this.ensure_cloud(cx));
+    drive(&mut app, window, |this, _, _| {
+        let r = this.store.runs.ready().unwrap().iter().find(|r| r.id == "run_c2e1").unwrap().clone();
+        let c = r.cloud.clone().unwrap();
+        assert_eq!(c.phase, CloudPhase::Released);
+        let i = this.released_instance(&c).expect("its instance in the ledger").clone();
+        assert!(i.status.is_alive(), "not confirmed terminated");
+        // Releasing is still under way, released still to come.
+        let marks: Vec<_> = phase_states(&c, &r, true).into_iter().map(|(_, s)| s).collect();
+        assert_eq!(&marks[5..], [Now, Next]);
+        // The words promise no more than the app knows, and lead to the instance.
+        let (_, words, to_settings) = panel_warning(&c, true, false, 0).unwrap();
+        assert_eq!(words, "Termination not confirmed: the instance may still be billed.");
+        assert!(to_settings);
+        // Its cost is the instance's own, still counting.
+        assert_eq!(
+            panel_cost(&c, Some(&i), false),
+            format!("{} so far", crate::ui::fmt_cost(i.cost_usd.unwrap()))
+        );
+        // Confirmed: final, no warning, every phase done.
+        let mut gone = i.clone();
+        gone.status = crate::api::CloudInstanceStatus::Terminated;
+        assert_eq!(panel_cost(&c, Some(&gone), false), crate::ui::fmt_cost(i.cost_usd.unwrap()));
+        assert!(panel_warning(&c, false, false, 0).is_none());
+        // The ledger couldn't be read: that is said, not "terminated".
+        let (_, words, _) = panel_warning(&c, false, true, 0).unwrap();
+        assert_eq!(words, "Could not check that the instance is terminated.");
+        // …and its cost stays provisional: the run's own, "so far", not a final figure.
+        let usd = crate::ui::fmt_cost(c.cost_usd.unwrap());
+        assert_eq!(panel_cost(&c, None, true), format!("{usd} so far"));
+        assert_eq!(panel_cost(&c, None, false), usd, "a row the ledger no longer keeps: final");
+        // A machine of yours (no price) is not billed either way.
+        let mut own = c.clone();
+        own.offer.price_per_hour = None;
+        assert_eq!(panel_cost(&own, None, true), "not billed");
+    });
+}
+
+#[test]
+fn a_cloud_run_whose_worker_is_silent_says_so_with_the_time() {
+    let (mut app, window) = open_with(Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_silent()));
+    drive(&mut app, window, |this, _, _| {
+        let r = this.store.runs.ready().unwrap().iter().find(|r| r.id == "run_c2e1").unwrap().clone();
+        let c = r.cloud.clone().unwrap();
+        assert_eq!(c.phase, CloudPhase::Training);
+        let since = c.unanswered_since.as_deref().and_then(crate::api::time::parse).expect("silent");
+        let (mark, words, to_settings) = panel_warning(&c, false, false, since).unwrap();
+        assert_eq!(mark, "icons/wifi-off.svg");
+        assert!(!to_settings);
+        let at = crate::api::time::local_deadline(since, since);
+        assert_eq!(
+            words,
+            format!(
+                "The worker has not answered since {at}. FOLO keeps asking; the run may still be training or waiting there."
+            )
+        );
+        // A silent worker comes first: it is what the run is waiting on.
+        assert_eq!(panel_warning(&c, true, true, since).unwrap().0, "icons/wifi-off.svg");
+    });
+}
+
+#[test]
+fn a_cloud_run_the_instance_list_had_not_got_is_read_again_until_a_read_covers_it() {
+    let api = Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble());
+    let (mut app, window) = open_with(api.clone());
+    let cloud = |this: &crate::app::FoloApp| {
+        this.store.runs.ready().unwrap().iter().find(|r| r.id == "run_c2e1").unwrap().cloud.clone().unwrap()
+    };
+    // The list as read before these runs existed (they started elsewhere afterwards): no live
+    // instance, so the 5 s refresh that follows live ones never fired for them.
+    drive(&mut app, window, |this, _, _| {
+        this.cloud.instances = Load::Ready(Vec::new());
+        assert!(!this.instance_alive());
+        assert!(this.instances_missing(), "the runs' instances are to be read");
+        // Meanwhile nothing confirms the release: its cost and Releasing stay provisional, without
+        // an alarm while no read has failed.
+        assert!(this.released_instance_unverified(&cloud(this)));
+        assert!(!this.released_instance_unknown(&cloud(this)));
+    });
+    // That read fails: still missing, still provisional, read again at the next tick.
+    api.fail_instances_once();
+    drive(&mut app, window, |this, _, cx| this.refresh_instances(cx));
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.instances_missing(), "a failed read covers nothing");
+        assert!(this.released_instance_unknown(&cloud(this)), "and it is said");
+    });
+    // The next one answers: the instance is there, alive, its termination unconfirmed.
+    drive(&mut app, window, |this, _, cx| this.refresh_instances(cx));
+    drive(&mut app, window, |this, _, _| {
+        let i = this.released_instance(&cloud(this)).expect("found after a read that worked");
+        assert!(i.status.is_alive());
+        assert!(!this.released_instance_unverified(&cloud(this)) && !this.instances_missing());
+        // An id a successful read covered but the ledger no longer keeps (ended over 7 days ago)
+        // is final, not read again forever.
+        this.cloud.instances = Load::Ready(Vec::new());
+        assert!(!this.instances_missing());
+        assert!(!this.released_instance_unverified(&cloud(this)));
+    });
+}
+
+#[test]
+fn an_instance_list_answer_older_than_the_one_shown_is_dropped() {
+    let api = Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble());
+    let (mut app, window) = open_with(api.clone());
+    // A first read is held out; a second one answers and is shown.
+    let held = api.hold("instances");
+    app.update(|cx| window.update(cx, |this, _, cx| this.refresh_instances(cx)).unwrap());
+    app.run_until_held(1);
+    held.wait_held();
+    app.update(|cx| window.update(cx, |this, _, cx| this.refresh_instances(cx)).unwrap());
+    app.run_until_held(1);
+    // What the newer answer showed, told apart from the older one's: emptied here.
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                assert!(this.cloud.instances.ready().is_some_and(|l| !l.is_empty()));
+                this.cloud.instances = Load::Ready(Vec::new());
+            })
+            .unwrap()
+    });
+    // The older answer lands last: dropped, not put back over the newer list.
+    drop(held);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.cloud.instances.ready().is_some_and(|l| l.is_empty()), "the older answer was installed");
+    });
+}
+
+#[test]
+fn a_released_run_reads_provisional_while_the_instance_list_loads() {
+    let (mut app, window) = open_with(Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble()));
+    drive(&mut app, window, |this, _, _| {
+        this.cloud.instances = Load::Loading;
+        let c = this
+            .store
+            .runs
+            .ready()
+            .unwrap()
+            .iter()
+            .find(|r| r.id == "run_c2e1")
+            .unwrap()
+            .cloud
+            .clone()
+            .unwrap();
+        assert!(this.released_instance_unverified(&c), "nothing confirms the release yet");
+        assert!(!this.released_instance_unknown(&c), "but no read failed: no alarm");
+        let usd = crate::ui::fmt_cost(c.cost_usd.unwrap());
+        assert_eq!(panel_cost(&c, None, true), format!("{usd} so far"));
     });
 }

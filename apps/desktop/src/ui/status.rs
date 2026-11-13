@@ -7,7 +7,7 @@ use folo_ui::{
 };
 
 use super::motion::reduce_motion;
-use super::text::text;
+use super::text::{icon, text};
 use crate::api::{Label, Run, RunExt, RunStatus};
 use crate::theme::{Theme, radius, ty};
 
@@ -92,6 +92,22 @@ pub fn badge(t: &Theme, label: impl Into<SharedString>, tone: Tone) -> Div {
         .bg(bg)
         .whitespace_nowrap()
         .child(label.into())
+}
+
+/// [`badge`] with a mark before its word, in the word's colour ("Worker not answering").
+pub fn badge_icon(t: &Theme, mark: &'static str, label: impl Into<SharedString>, tone: Tone) -> Div {
+    let (bg, fg, _) = tone.colors(t);
+    div()
+        .h(px(20.))
+        .px(px(6.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(5.))
+        .rounded(px(radius::XS))
+        .bg(bg)
+        .child(icon(mark, 12., fg))
+        .child(text(ty::SM, fg).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label.into()))
 }
 
 /// A run's status in one word, wherever a status is drawn (badges, rows, the palette): the status,
