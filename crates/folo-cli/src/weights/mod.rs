@@ -69,14 +69,19 @@ fn list(out: Out) {
             "cached": cached, "about": p.about,
         }));
         out.human(format!(
-            "{:<20} {:<11} {}\n{:<20} {}",
+            "{:<20} {:<14} {}\n{:<20} {}",
             p.name,
-            if cached { "downloaded" } else { "-" },
+            cache_word(cached),
             p.about,
             "",
             folo_api::json::path(&path)
         ));
     }
+}
+
+/// Whether a published file is in the cache, in words (a bare `-` read as nothing at all).
+fn cache_word(cached: bool) -> &'static str {
+    if cached { "downloaded" } else { "not downloaded" }
 }
 
 /// Lowercase hex SHA-256 of a file.
@@ -186,6 +191,11 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use folo_test_support::TestDir;
+
+    #[test]
+    fn the_list_says_whether_each_file_is_downloaded() {
+        assert_eq!((cache_word(true), cache_word(false)), ("downloaded", "not downloaded"));
+    }
 
     #[test]
     fn sums_lookup() {
