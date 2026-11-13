@@ -235,6 +235,8 @@ export default function Settings() {
   });
 
   const units = signal<Units>(prefs.units);
+  // Changed in another tab too (prefs follows the storage event): the control shows what the sizes use.
+  effect(() => units.set(prefs.units));
 
   /** A section link, in the rail and in the strip: the same anchor, the same behaviour. */
   const link = (s: () => { id: string; label: string }) => (

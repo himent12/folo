@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // Preferences in two tabs of one browser (shell F2): a tab never puts back what another tab changed, and it shows the
 // other tab's choices without a reload (the server address excepted: it stays on the server it is connected to).
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrefsStore } from './prefs';
 import { keyPrefs } from './ui/keyPrefs';
 
@@ -31,6 +31,18 @@ describe('preferences across tabs', () => {
     fromOtherTab(KEY, JSON.stringify({ ...read(), later: 1 }));
     b.units = 'binary';
     expect(read()).toMatchObject({ later: 1, theme: 'light', units: 'binary' });
+  });
+
+  it('keeps a change whose write failed for the next save (review of #220)', () => {
+    const a = new PrefsStore();
+    const full = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new DOMException('full', 'QuotaExceededError');
+    });
+    a.serverUrl = 'http://gpu-box:7878';
+    full.mockRestore();
+    expect(localStorage.getItem(KEY)).toBeNull();
+    a.sidebarCollapsed = true;
+    expect(read()).toMatchObject({ serverUrl: 'http://gpu-box:7878', sidebarCollapsed: true });
   });
 
   it("shows another tab's theme, units and sidebar at once, but keeps its own server address", () => {

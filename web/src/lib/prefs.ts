@@ -40,6 +40,8 @@ export class PrefsStore {
   #p: { [K in keyof Prefs]: Signal<Prefs[K]> };
   /** The stored object as last read or written (keys of a later version included), written back with the values over it. */
   #rest: Prefs;
+  /** Preferences changed in this tab whose last write failed. */
+  #dirty = new Set<keyof Prefs>();
   #systemDark = signal(true);
   #resolved = computed<'dark' | 'light'>(() => {
     const t = this.#p.theme.get();
@@ -127,11 +129,15 @@ export class PrefsStore {
    * opened earlier put back the old theme, units and server address the next time it saved anything).
    */
   #save<K extends keyof Prefs>(key: K) {
-    const out: Prefs = { ...(stored() ?? this.#rest), [key]: this.#p[key].peek() };
-    this.#rest = out;
+    // Changes not written yet (a write that failed, e.g. storage full) go with the next save instead of being lost.
+    this.#dirty.add(key);
+    const out = { ...(stored() ?? this.#rest) } as Record<keyof Prefs, unknown>;
+    for (const k of this.#dirty) out[k] = this.#p[k].peek();
+    this.#rest = out as Prefs;
     try {
       localStorage.setItem(KEY, JSON.stringify(out));
-      localStorage.setItem('folo.theme', out.theme);
+      localStorage.setItem('folo.theme', this.#rest.theme);
+      this.#dirty.clear();
     } catch {
       /* storage may be unavailable (private mode); preferences then last for the session */
     }

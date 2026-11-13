@@ -304,6 +304,21 @@ describe("Settings › System: FOLO's GPU memory (gpu_pool)", () => {
     ]);
   });
 
+  it("shows the units another tab picked in the control too, not only in the sizes (review of #220)", async () => {
+    hub.api = new MockApi('normal', 0);
+    prefs.units = 'binary';
+    c = mount(Settings, { target });
+    await until(() => target.querySelector('#system .pool'), 'the GPU memory row');
+    const picked = () => target.querySelector('#units [aria-checked="true"], #units [aria-pressed="true"]')?.textContent;
+    expect(picked()).toMatch(/^Binary/);
+    localStorage.setItem('folo.prefs', JSON.stringify({ ...JSON.parse(localStorage.getItem('folo.prefs')!), units: 'metric' }));
+    window.dispatchEvent(new StorageEvent('storage', { key: 'folo.prefs' }));
+    flushSync();
+    expect(picked()).toMatch(/^Metric/);
+    expect(target.querySelector('#system .pool')?.textContent).toContain('GB');
+    prefs.units = 'binary';
+  });
+
   it('shows nothing where the server reports no pool', async () => {
     hub.api = new MockApi('empty', 0);
     c = mount(Settings, { target });
