@@ -664,6 +664,16 @@ fn closing_while_its_own_server_trains_asks_first_alone_and_keep_open_keeps_it()
         this.dismiss(w, cx);
         assert!(this.confirm_close.is_none());
     });
+    // `--open new-run` waiting for the datasets doesn't open under the question.
+    drive(&mut app, window, |this, w, cx| {
+        this.open_new_run_pending = true;
+        assert!(!this.should_close_with(Some(vec!["shapes-hard-m".into()]), w, cx));
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.new_run.is_none() && this.open_new_run_pending, "it waits");
+        this.dismiss(w, cx);
+    });
     // The server didn't say: asked too (no names: "couldn't check").
     assert!(!drive(&mut app, window, |this, w, cx| this.should_close_with(None, w, cx)));
     drive(&mut app, window, |this, _, _| assert_eq!(this.confirm_close.as_deref(), Some(&[][..])));
