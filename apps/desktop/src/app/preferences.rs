@@ -20,24 +20,45 @@ impl FoloApp {
 
     /// The window is asked to close (its Close button, Alt F4, full screen's Close). Closing stops the
     /// `folo serve` this app started, and every run of this machine training or waiting on it: that
-    /// server is asked now (whatever server the window shows, and however old its list), and when a run
-    /// would stop, or it doesn't answer in time, the window asks first (`false` keeps it open).
+    /// server is asked (whatever server the window shows, and however old its list), off the UI thread,
+    /// and the window stays until it answers. It closes then if nothing would stop; else, or when the
+    /// server doesn't answer in time, it asks first. `false` keeps it open for now.
     pub fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.confirm_close.is_some() {
+        if self.confirm_close.is_some() || self.close_checking {
             return false;
         }
-        let own = self.server_proc.as_mut().map(|p| (p.running(), p.url.clone()));
-        let stops = match own {
-            Some((true, url)) => {
-                crate::api::http::runs_now(&url).map(|runs| crate::overlays::closing_stops(&runs))
-            }
+        let Some(url) = self.server_proc.as_mut().and_then(|p| p.running().then(|| p.url.clone())) else {
             // Nothing of ours runs: nothing stops.
-            _ => Some(Vec::new()),
+            self.save_window_state(window, cx);
+            return true;
         };
-        self.should_close_with(stops, window, cx)
+        self.close_checking = true;
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let stops =
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::api::http::runs_now(&url).map(|r| crate::overlays::closing_stops(&r))
+                    })
+                    .await;
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.close_checking = false;
+                        if this.should_close_with(stops, window, cx) {
+                            window.remove_window();
+                        }
+                    })
+                })
+                .ok();
+        })
+        .detach();
+        false
     }
 
-    /// [`Self::should_close`] with the runs closing would stop (`None`: the server couldn't say).
+    /// [`Self::should_close`] with the runs closing would stop (`None`: the server couldn't say):
+    /// `true` when nothing would. Else the question opens, alone: every other overlay closes first (New
+    /// run is kept as a draft, as Esc keeps it), so nothing under it takes keys, focus or Esc.
     pub(crate) fn should_close_with(
         &mut self,
         stops: Option<Vec<String>>,
@@ -49,10 +70,19 @@ impl FoloApp {
             return true;
         }
         if self.confirm_close.is_none() {
-            // Its own return place: an overlay under it (a Stop confirmation, New run) keeps its own.
-            self.close_return = window.focused(cx);
+            self.menu_open = None;
+            self.export_open = false;
             self.palette = None;
-            self.close_unchecked = stops.is_none();
+            self.confirm_stop = None;
+            self.confirm_delete = None;
+            self.cloud.connect = None;
+            self.cloud.disconnect = None;
+            self.cloud.terminate = None;
+            self.new_run_draft =
+                self.new_run.take().and_then(|f| self.keep_draft(f)).or(self.new_run_draft.take());
+            self.synth = None;
+            self.inspector = None;
+            self.overlay_return = None;
             self.confirm_close = Some(stops.unwrap_or_default());
             let fh = self.fh("close-cancel", cx);
             window.focus(&fh);
@@ -61,18 +91,10 @@ impl FoloApp {
         false
     }
 
-    /// The window shows the server this app started.
-    pub fn shows_own_server(&self) -> bool {
-        self.server_proc.as_ref().is_some_and(|p| self.local_url.as_deref() == Some(p.url.as_str()))
-    }
-
-    /// Keep open: the question goes, focus goes back to where it was.
+    /// Keep open: the question goes, focus goes back to the page.
     pub fn keep_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm_close = None;
-        match self.close_return.take() {
-            Some(fh) => window.focus(&fh),
-            None => window.focus(&self.root_focus),
-        }
+        window.focus(&self.root_focus);
         cx.notify();
     }
 

@@ -24,7 +24,8 @@ impl Render for FoloApp {
         if let Some(r) = self.route_pending.take() {
             self.navigate(r, window, cx);
         }
-        if std::mem::take(&mut self.restore_pending) {
+        // Not from under the close question (a dialog that finished behind it): it keeps the focus.
+        if std::mem::take(&mut self.restore_pending) && self.confirm_close.is_none() {
             self.restore_focus(window);
         }
         if self.scroll_end_pending > 0 {

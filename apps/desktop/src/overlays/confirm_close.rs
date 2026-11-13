@@ -17,16 +17,14 @@ pub fn closing_stops(runs: &[Run]) -> Vec<String> {
     runs.iter().filter(|r| r.cloud.is_none() && r.status.is_active()).map(|r| r.name.clone()).collect()
 }
 
-/// What the dialog says: the runs that would stop (`names`), none any more, or that the server
-/// couldn't say (`unchecked`).
-fn what_stops(names: &[String], unchecked: bool) -> String {
+/// What the dialog says: the runs that would stop (`names`, as the server said when asked: a run that
+/// ends meanwhile stays named, a warning, never a false "nothing"), or, with none, that the server
+/// couldn't say.
+fn what_stops(names: &[String]) -> String {
     const SERVER: &str = "the folo serve FOLO Desktop started, which stops when it closes";
     const KEPT: &str = "A stopped run keeps its last finished epoch, and you can resume it.";
     match names {
-        [] if unchecked => {
-            format!("FOLO Desktop couldn't check whether a run is training on {SERVER}. {KEPT}")
-        }
-        [] => "Nothing is training on the folo serve FOLO Desktop started any more.".to_string(),
+        [] => format!("FOLO Desktop couldn't check whether a run is training on {SERVER}. {KEPT}"),
         [one] => format!("{one} is training or waiting to train on {SERVER}. {KEPT}"),
         many => format!("{} runs are training or waiting to train on {SERVER}. {KEPT}", many.len()),
     }
@@ -40,18 +38,6 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        // The runs as the window now sees them, when it shows that server: one that ended while asking
-        // no longer stops.
-        let own = self.shows_own_server();
-        let names: Vec<String> = match self.store.runs.ready().filter(|_| own) {
-            Some(runs) => names
-                .iter()
-                .filter(|n| runs.iter().find(|r| &r.name == *n).is_none_or(|r| r.status.is_active()))
-                .cloned()
-                .collect(),
-            None => names.to_vec(),
-        };
-        let unchecked = self.close_unchecked;
         let keep = self.button(
             "close-cancel",
             "Keep open",
@@ -61,12 +47,11 @@ impl FoloApp {
             cx,
             act(|this, w, cx| this.keep_open(w, cx)),
         );
-        let nothing_left = names.is_empty() && !unchecked;
         let close = self.button(
             "close-confirm",
-            if nothing_left { "Close" } else { "Stop and close" },
-            if nothing_left { Btn::Primary } else { Btn::DangerCommit },
-            (!nothing_left).then_some("icons/stop.svg"),
+            "Stop and close",
+            Btn::DangerCommit,
+            Some("icons/stop.svg"),
             window,
             cx,
             act(|this, w, cx| {
@@ -75,11 +60,7 @@ impl FoloApp {
             }),
         );
         let body = div().px(px(20.)).pb(px(20.)).child(
-            text(ty::BASE, t.text_secondary)
-                .w_full()
-                .min_w_0()
-                .whitespace_normal()
-                .child(what_stops(&names, unchecked)),
+            text(ty::BASE, t.text_secondary).w_full().min_w_0().whitespace_normal().child(what_stops(names)),
         );
         let footer = dialog_footer(&t).justify_end().child(keep).child(close);
         self.dialog_frame(
@@ -116,9 +97,8 @@ mod tests {
         );
         assert!(stops.iter().all(|n| runs.iter().any(|r| &r.name == n && r.cloud.is_none())));
         assert!(!stops.iter().any(|n| runs.iter().any(|r| &r.name == n && r.status == RunStatus::Completed)));
-        assert!(what_stops(&stops[..1], false).starts_with(&format!("{} is training", stops[0])));
-        assert!(what_stops(&["a".into(), "b".into()], false).starts_with("2 runs are training"));
-        assert!(what_stops(&[], true).starts_with("FOLO Desktop couldn't check"));
-        assert!(what_stops(&[], false).starts_with("Nothing is training"));
+        assert!(what_stops(&stops[..1]).starts_with(&format!("{} is training", stops[0])));
+        assert!(what_stops(&["a".into(), "b".into()]).starts_with("2 runs are training"));
+        assert!(what_stops(&[]).starts_with("FOLO Desktop couldn't check"));
     }
 }
