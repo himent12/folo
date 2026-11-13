@@ -246,12 +246,14 @@ describe('Playground: a busy image (more candidates than the first answer holds)
   const first = (floor: number) => Array.from({ length: 1000 }, (_, i) => box((i % 3) * 200, 0.9 - ((0.9 - floor) * i) / 999));
   const all = (floor: number) => [...first(floor), ...[1, 2, 3, 4, 5].map((k) => box(600 + k * 200, 0.15))];
 
-  async function open(floor: number) {
+  /** `hang`: the first request for every candidate never answers (the page is left while it runs). */
+  async function open(floor: number, hang = false) {
     const api = new MockApi('normal', 0);
     api.imageUrl = async () => 'data:,';
     const asked: number[] = [];
     api.predict = async (_input, opts) => {
       asked.push(opts.max_det ?? 300);
+      if (hang && asked.filter((n) => n > 1000).length === 1 && (opts.max_det ?? 300) > 1000) await new Promise(() => {});
       return {
         model_id: opts.model_id,
         image: { width: 2000, height: 640 },
@@ -294,6 +296,44 @@ describe('Playground: a busy image (more candidates than the first answer holds)
     setConf(0.01);
     await new Promise((r) => setTimeout(r, 20));
     expect(asked).toEqual([1000, 30_000]);
+  });
+
+  it('asks again for a kept answer when the page is opened again, once the model list is in', async () => {
+    const asked = await open(0.2, true);
+    setConf(0.1);
+    await until(() => asked.length === 2, 'the request for every candidate');
+    unmount(c!);
+    target.remove();
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_n');
+    c = mount(Playground, { target });
+    await until(() => rows() === 8, `every candidate, asked for again (asked ${asked}, rows ${rows()})`);
+    expect(asked).toEqual([1000, 30_000, 30_000]);
+  });
+
+  it('asks for the model file when the browser cannot get every candidate from the server weights', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    // In the browser: the first answer came (from a .folo picked earlier, not kept), the server has no weights to send.
+    api.predictInPage = async (_input, opts) => {
+      if ((opts.max_det ?? 300) > 1000) throw new ApiError(501, 'not_implemented', 'This server cannot send weights.');
+      const p = { model_id: opts.model_id, image: { width: 2000, height: 640 }, boxes: first(0.2), device: 'cpu' };
+      return { ...p, timing: { preprocess_ms: 1, inference_ms: 1, postprocess_ms: 1, total_ms: 3 } };
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_n');
+    c = mount(Playground, { target });
+    const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+    const cpu = await until(() => [...g.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'CPU' && !b.disabled), 'the CPU');
+    cpu.click();
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => rows() === 3, 'the first answer');
+    setConf(0.1);
+    await until(() => target.textContent?.includes('Choose .folo file'), 'the request for the model file');
   });
 
   it('keeps the first answer above its cut, whatever the slider did before', async () => {

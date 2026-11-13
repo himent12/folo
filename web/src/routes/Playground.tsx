@@ -34,7 +34,7 @@ import ResultsPanel from './playground/ResultsPanel';
 import ClassList from './playground/ClassList';
 import PhoneDetails from './playground/PhoneDetails';
 import SidePanels from './playground/SidePanels';
-import { ask, BACKEND_NAME, DEFAULTS, FETCH, type RunOn } from './playground/predict';
+import { ask, BACKEND_NAME, DEFAULTS, FETCH, noServerWeights, type RunOn } from './playground/predict';
 import { askAllWhenCut } from './playground/allCandidates';
 import { ACCEPT, droppedImages, takeImage } from './playground/intake';
 import { keepSession } from './playground/keepSession';
@@ -397,7 +397,7 @@ export default function Playground() {
           return;
         }
         // A server without the weights route (or one that cannot read this model's file): ask for the file.
-        if (on !== 'server' && !file && e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501) && e.code !== 'model_not_found') {
+        if (on !== 'server' && !file && noServerWeights(e)) {
           weightsMissing.set(true);
           return;
         }
@@ -414,11 +414,13 @@ export default function Playground() {
   const cut = askAllWhenCut({
     pred,
     conf: () => conf.get(),
-    model: () => modelId.peek(),
-    source: () => source.peek(),
-    runOn: () => runOn.peek(),
-    file: (id) => localWeights.peek().get(id) ?? null,
+    model: () => modelId.get(),
+    source: () => source.get(),
+    runOn: () => runOn.get(),
+    file: (id) => localWeights.get().get(id) ?? null,
     engine,
+    // A picked .folo is not kept with the session: a kept answer asks for it again, as a first one does.
+    weightsMissing: () => weightsMissing.set(true),
   });
 
   // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes

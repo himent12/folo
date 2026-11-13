@@ -1,4 +1,4 @@
-import type { Api } from '$lib/api/client';
+import { ApiError, type Api } from '$lib/api/client';
 import type { MockApi } from '$lib/api/mock';
 import type { PredictInput, Prediction } from '$lib/api/types';
 import type { Backend, BrowserEngine } from '$lib/inference/browser';
@@ -32,6 +32,11 @@ export function simulate(p: Prediction, backend: Backend): Prediction {
 export function candidateFloor(p: Prediction, cap = FETCH.max_det): number | null {
   if (p.boxes.length < cap) return null;
   return p.boxes.reduce((m, b) => Math.min(m, b.score), Infinity);
+}
+
+/** The server cannot send this model's file (no weights route, or it cannot read it): the user can pick it. */
+export function noServerWeights(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501) && e.code !== 'model_not_found';
 }
 
 /** One prediction of the Playground's image with `options`, wherever it runs: the server, or this browser. */
