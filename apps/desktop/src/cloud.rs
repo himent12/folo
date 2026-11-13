@@ -623,22 +623,11 @@ pub enum PhaseState {
     Skipped,
 }
 
-/// The phase a cloud run that failed before training failed in, by its error code (docs/CLOUD.md,
-/// Failure).
-fn failed_in(code: &str) -> Option<CloudPhase> {
-    match code {
-        "cloud_auth_failed" | "cloud_refused" | "cloud_unavailable" => Some(CloudPhase::Provisioning),
-        "cloud_boot_failed" => Some(CloudPhase::Booting),
-        "cloud_sync_failed" => Some(CloudPhase::Syncing),
-        _ => None,
-    }
-}
-
-/// Each phase of a cloud run with its state, as Studio marks them (`web/src/routes/run/cloud.ts`,
-/// `phaseStates`). Live, the phases before the current one are done. Once released, a run that
-/// failed is marked where it failed (from its error code) and the phases it never reached are
-/// skipped, so a run whose upload failed does not read as trained; one that never trained (no step)
-/// skips training and the collection.
+/// Each phase of a cloud run with its state, as Studio marks them (`web/src/lib/cloud.ts`,
+/// `phaseStates`). Live, the phases before the current one are done. Once released, the phases
+/// before the one its hand-over ended in (`RunCloud::ended_in`) are done, that one failed (a
+/// failed run), skipped (stopped before training) or done, and the later ones never reached; a
+/// server that doesn't say (`None`, older servers) has every phase done.
 pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
     // A newer server's phase has no known place among these: it is the one step, current.
     if c.phase == CloudPhase::Unknown {
@@ -659,35 +648,29 @@ pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
             })
             .collect();
     }
-    let trained = r.step > 0 || r.epoch > 0;
-    let failed = (r.status == RunStatus::Failed)
-        .then(|| {
-            if trained {
-                Some(if r.error_code.as_deref() == Some("cloud_sync_failed") {
-                    CloudPhase::Collecting
-                } else {
-                    CloudPhase::Training
-                })
-            } else {
-                r.error_code.as_deref().and_then(failed_in)
-            }
-        })
-        .flatten();
+    let failed = r.status == RunStatus::Failed;
+    // Ended while collecting but not by the copy back: training is what failed, the copy is done.
+    let collected = c.ended_in == Some(CloudPhase::Collecting)
+        && failed
+        && r.error_code.as_deref() != Some("cloud_sync_failed");
+    let ended = if collected { Some(CloudPhase::Training) } else { c.ended_in };
+    let end_state = if failed {
+        PhaseState::Failed
+    } else if r.status == RunStatus::Stopped && ended < Some(CloudPhase::Training) {
+        PhaseState::Skipped
+    } else {
+        PhaseState::Done
+    };
     CloudPhase::ALL
         .iter()
         .map(|&p| {
-            let s = if p >= CloudPhase::Releasing {
-                PhaseState::Done
-            } else if let Some(f) = failed {
-                match p.cmp(&f) {
-                    std::cmp::Ordering::Less => PhaseState::Done,
-                    std::cmp::Ordering::Equal => PhaseState::Failed,
-                    std::cmp::Ordering::Greater => PhaseState::Skipped,
-                }
-            } else if !trained && matches!(p, CloudPhase::Training | CloudPhase::Collecting) {
-                PhaseState::Skipped
-            } else {
-                PhaseState::Done
+            let s = match ended {
+                None => PhaseState::Done,
+                _ if p >= CloudPhase::Releasing => PhaseState::Done,
+                Some(e) if p < e => PhaseState::Done,
+                _ if collected && p == CloudPhase::Collecting => PhaseState::Done,
+                Some(e) if p == e => end_state,
+                _ => PhaseState::Skipped,
             };
             (p, s)
         })
