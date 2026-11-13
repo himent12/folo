@@ -143,15 +143,26 @@ fn a_released_runs_instance_not_confirmed_terminated_says_it_may_still_be_billed
         assert_eq!(words, "Termination not confirmed: the instance may still be billed.");
         assert!(to_settings);
         // Its cost is the instance's own, still counting.
-        assert_eq!(panel_cost(&c, Some(&i)), format!("{} so far", crate::ui::fmt_cost(i.cost_usd.unwrap())));
+        assert_eq!(
+            panel_cost(&c, Some(&i), false),
+            format!("{} so far", crate::ui::fmt_cost(i.cost_usd.unwrap()))
+        );
         // Confirmed: final, no warning, every phase done.
         let mut gone = i.clone();
         gone.status = crate::api::CloudInstanceStatus::Terminated;
-        assert_eq!(panel_cost(&c, Some(&gone)), crate::ui::fmt_cost(i.cost_usd.unwrap()));
+        assert_eq!(panel_cost(&c, Some(&gone), false), crate::ui::fmt_cost(i.cost_usd.unwrap()));
         assert!(panel_warning(&c, false, false, 0).is_none());
         // The ledger couldn't be read: that is said, not "terminated".
         let (_, words, _) = panel_warning(&c, false, true, 0).unwrap();
         assert_eq!(words, "Could not check that the instance is terminated.");
+        // …and its cost stays provisional: the run's own, "so far", not a final figure.
+        let usd = crate::ui::fmt_cost(c.cost_usd.unwrap());
+        assert_eq!(panel_cost(&c, None, true), format!("{usd} so far"));
+        assert_eq!(panel_cost(&c, None, false), usd, "a row the ledger no longer keeps: final");
+        // A machine of yours (no price) is not billed either way.
+        let mut own = c.clone();
+        own.offer.price_per_hour = None;
+        assert_eq!(panel_cost(&own, None, true), "not billed");
     });
 }
 

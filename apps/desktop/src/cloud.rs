@@ -751,9 +751,10 @@ pub fn panel_warning(
 
 /// A cloud run's cost in its panel. A released run's is its instance's own from the ledger, which
 /// keeps counting while the termination isn't confirmed ("so far" then); without the ledger's row,
-/// the run's own, "so far" until released. No price: not billed.
-pub fn panel_cost(c: &RunCloud, instance: Option<&CloudInstance>) -> String {
-    let released = c.phase == CloudPhase::Released;
+/// the run's own, "so far" until released, and also after when the ledger couldn't be read
+/// (`unknown`: nothing says the instance stopped costing). No price: not billed.
+pub fn panel_cost(c: &RunCloud, instance: Option<&CloudInstance>, unknown: bool) -> String {
+    let released = c.phase == CloudPhase::Released && !unknown;
     match instance {
         Some(i) => match i.cost_usd {
             None => "not billed".to_string(),

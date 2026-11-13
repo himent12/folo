@@ -35,8 +35,10 @@ impl FoloApp {
         // confirmed the termination.
         let ledger = self.released_instance(c);
         let unconfirmed = ledger.is_some_and(|i| i.status.is_alive());
+        // The ledger couldn't be read: nothing confirms the release either.
+        let unknown = self.released_instance_unknown(c);
         // Where it failed, and what it never reached, once released (not every phase done).
-        let phases = crate::cloud::phase_states(c, r, unconfirmed);
+        let phases = crate::cloud::phase_states(c, r, unconfirmed || unknown);
         let count = phases.len();
         let steps = phases.into_iter().enumerate().map(|(i, (p, state))| {
             use crate::cloud::PhaseState;
@@ -114,7 +116,7 @@ impl FoloApp {
         };
         let value = |s: String| text(ty::SM, t.text_primary).tnum().ellipsis().child(s).into_any_element();
         let line = offer_line(&c.offer);
-        let warning = crate::cloud::panel_warning(c, unconfirmed, self.released_instance_unknown(c), now);
+        let warning = crate::cloud::panel_warning(c, unconfirmed, unknown, now);
         let warn = warning.map(|(mark, words, to_settings)| {
             let line = warn_line(&t, mark, words);
             if !to_settings {
@@ -169,7 +171,7 @@ impl FoloApp {
         } else {
             value(line)
         };
-        let cost = crate::cloud::panel_cost(c, ledger);
+        let cost = crate::cloud::panel_cost(c, ledger, unknown);
         let limit = match c.deadline.as_deref().and_then(time::parse).filter(|_| !released) {
             Some(d) => format!("{} · stops by {}", fmt_hours(c.max_hours), time::local_deadline(d, now)),
             None => fmt_hours(c.max_hours),
