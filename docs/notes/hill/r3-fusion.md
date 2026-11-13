@@ -245,7 +245,7 @@ linear: −0.0009). Negative.
 model (best folo-s −0.3/−0.3: +0.0004, the same cell −0.0006 on v1). Negative: the levels' scores are calibrated
 against each other already. Caveat on the positive cells: the dump keeps pairs above 0.001 only, so a +0.3 offset
 cannot lift the pairs between 0.00074 and 0.001 over the threshold. That band is worth little: dropping the same
-logit band from the top instead (B0 at conf 0.00135 against 0.001) moves train-dev AP by 0.0000 / 0.0000 / −0.0002,
+logit band from the top instead (B0 at conf 0.00135 against 0.001) moves train-dev AP by 0.0000 / 0.0000 / −0.0001,
 less than every positive cell's loss against B0 (−0.0004 to −0.0042), so the conclusion stands, but those cells are
 an approximation of the stated transform, not an exact measurement (`logs/review256.log`).
 
@@ -255,9 +255,9 @@ an approximation of the stated transform, not an exact measurement (`logs/review
 detect kernel, the CPU decode and the full decode would all need it, for 0.0003.
 
 **Rung 5** (score-weighted box voting, the baseline to beat): weights `score^a · exp(−(1 − IoU)² / σ)`, cluster =
-same-class candidates with IoU ≥ τ. Chosen as the baseline: τ 0.75, a 1, no IoU kernel (+0.0021 / +0.0021 /
+same-class candidates with IoU ≥ τ. Chosen as the baseline: τ 0.75, a 1, no IoU kernel (+0.0020 / +0.0021 /
 +0.0016). The plateau is τ 0.75–0.85, a 1–2; a wide cluster (τ 0.55) needs the IoU kernel, and with σ 0.025 it is
-the highest voting row (+0.0023 / +0.0022 / +0.0018, i.e. +0.0002 / +0.0001 / +0.0002 above the chosen one), but it
+the highest voting row (+0.0023 / +0.0022 / +0.0019, i.e. +0.0003 / +0.0002 / +0.0002 above the chosen one), but it
 adds a parameter for a difference inside the plateau's spread, so the simpler setting is the baseline. Under B*'s
 NMS settings the two are as close (v1 0.3500 / 0.3503, v2 0.3428 / 0.3429, folo-s 0.5106 / 0.5107) and B* beats
 both (0.3508 / 0.3437 / 0.5112; `logs/review256.log`), so "B* − voting" below does not depend on that choice. Flat
@@ -265,8 +265,8 @@ weights (a 0) at τ 0.55 lose 0.025 AP (the cluster pulls boxes into their neigh
 
 **Rung 6** (DFL evidence fusion, against rung 5 at the same τ 0.75, a 1): inverse-variance weights per side.
 
-- **Plain variance** (`v = stride² · Var`, `b` 1, ε 0.1 bins²): +0.0005 / +0.0007 / +0.0005 over voting.
-- **Excess variance** (`v' = max(v − f(1 − f), 0) + ε`): +0.0004 / +0.0003 / +0.0002 more (v1 0.3493 → 0.3497,
+- **Plain variance** (`v = stride² · Var`, `b` 1, ε 0.1 bins²): +0.0006 / +0.0007 / +0.0005 over voting.
+- **Excess variance** (`v' = max(v − f(1 − f), 0) + ε`): +0.0003 / +0.0003 / +0.0002 more (v1 0.3493 → 0.3497,
   v2 0.3419 → 0.3422, s 0.5107 → 0.5109). Small, the same sign on all three models, kept.
 - **Exponent and floor**: `b` 0.5 / 1 / 1.5 / 2 and ε 0.01 / 0.1 all within 0.0003: not knife-edge.
 - **Censoring guard**: `(1 − p_end)^c` for c 1, 2, 4 and hard drops above p_end 0.3 / 0.5: every variant within
