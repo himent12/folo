@@ -609,6 +609,11 @@ impl FoloApp {
                         if tick.is_multiple_of(50) && this.instance_alive() {
                             this.refresh_instances(cx);
                         }
+                        // A ledger that couldn't be read is asked again every 30 s: a released
+                        // run's page can't say whether its instance is gone until it is.
+                        if tick.is_multiple_of(300) && this.cloud.instances.error().is_some() {
+                            this.refresh_instances(cx);
+                        }
                         if changed {
                             cx.notify();
                         }

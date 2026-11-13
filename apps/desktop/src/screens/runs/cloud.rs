@@ -14,7 +14,10 @@ use crate::ui::*;
 impl FoloApp {
     /// A cloud run's panel: its phases (done, current with its transfer, to come), then the
     /// instance, the cost so far (final once released), the time limit and the last checkpoint
-    /// copied here. Before training its title says what the run waits on.
+    /// copied here. Before training its title says what the run waits on. As Studio's
+    /// (`web/src/routes/run/CloudPanel.tsx`), it says when the worker doesn't answer, and when a
+    /// released run's instance isn't confirmed terminated (it may still be billed: releasing is
+    /// still under way, and the cost is the instance's own, so far).
     pub(super) fn cloud_run_panel(
         &self,
         r: &Run,
@@ -28,8 +31,12 @@ impl FoloApp {
         let provider = self.provider_name(&c.provider);
         let released = c.phase == CloudPhase::Released;
         let live = r.status.is_active();
+        // Once released, the instance in the ledger: still alive means the provider hasn't
+        // confirmed the termination.
+        let ledger = self.released_instance(c);
+        let unconfirmed = ledger.is_some_and(|i| i.status.is_alive());
         // Where it failed, and what it never reached, once released (not every phase done).
-        let phases = crate::cloud::phase_states(c, r);
+        let phases = crate::cloud::phase_states(c, r, unconfirmed);
         let count = phases.len();
         let steps = phases.into_iter().enumerate().map(|(i, (p, state))| {
             use crate::cloud::PhaseState;
@@ -107,6 +114,31 @@ impl FoloApp {
         };
         let value = |s: String| text(ty::SM, t.text_primary).tnum().ellipsis().child(s).into_any_element();
         let line = offer_line(&c.offer);
+        let warning = crate::cloud::panel_warning(c, unconfirmed, self.released_instance_unknown(c), now);
+        let warn = warning.map(|(mark, words, to_settings)| {
+            let line = warn_line(&t, mark, words);
+            if !to_settings {
+                return line;
+            }
+            line.child(
+                self.bind(
+                    div()
+                        .id("cloud-warn-settings")
+                        .flex_none()
+                        .px(px(4.))
+                        .mx(px(-4.))
+                        .rounded(px(radius::SM))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.bg_hover))
+                        .child(text(ty::SM, t.accent_text).whitespace_nowrap().child("Settings › Cloud")),
+                    "cloud-warn-settings",
+                    radius::SM,
+                    window,
+                    cx,
+                    act(|this, w, cx| this.navigate(Route::Settings, w, cx)),
+                ),
+            )
+        });
         let instance = if c.instance_id.is_some() {
             let el = div()
                 .id("cloud-instance")
@@ -137,12 +169,7 @@ impl FoloApp {
         } else {
             value(line)
         };
-        let cost = match (c.cost_usd, c.offer.price_per_hour) {
-            (_, None) => "not billed".to_string(),
-            (Some(usd), _) if released => fmt_cost(usd),
-            (Some(usd), _) => format!("{} so far", fmt_cost(usd)),
-            (None, Some(_)) => "—".to_string(),
-        };
+        let cost = crate::cloud::panel_cost(c, ledger);
         let limit = match c.deadline.as_deref().and_then(time::parse).filter(|_| !released) {
             Some(d) => format!("{} · stops by {}", fmt_hours(c.max_hours), time::local_deadline(d, now)),
             None => fmt_hours(c.max_hours),
@@ -159,6 +186,7 @@ impl FoloApp {
             .overflow_hidden()
             .child(panel_header(&t, &title))
             .child(div().flex().gap(px(8.)).px(px(16.)).pt(px(14.)).pb(px(12.)).children(steps))
+            .children(warn.map(|w| w.px(px(16.)).py(px(8.)).border_t_1().border_color(t.line_subtle)))
             .child(
                 div()
                     .flex()
@@ -174,4 +202,15 @@ impl FoloApp {
             )
             .into_any_element()
     }
+}
+
+/// One line of trouble in the panel (a silent worker, a termination not confirmed, a ledger not
+/// read): the mark in the warning hue, the words secondary, as Studio's `.warn-line`.
+fn warn_line(t: &crate::theme::Theme, mark: &'static str, words: String) -> folo_ui::Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(8.))
+        .child(div().pt(px(2.)).flex_none().child(icon(mark, 14., t.warning_solid)))
+        .child(text(ty::SM, t.text_secondary).flex_1().min_w_0().child(words))
 }

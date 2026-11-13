@@ -250,6 +250,22 @@ impl FoloApp {
         self.cloud.instances.ready().is_some_and(|l| l.iter().any(|i| i.status.is_alive()))
     }
 
+    /// A released cloud run's instance in the ledger (`GET /api/cloud/instances`), which keeps its
+    /// cost counting until the provider confirms the termination. `None` before the release, for a
+    /// run without an instance (a remote server), or while the ledger has no row for it.
+    pub fn released_instance(&self, c: &RunCloud) -> Option<&CloudInstance> {
+        let id = c.instance_id.as_ref().filter(|_| c.phase == CloudPhase::Released)?;
+        self.cloud.instances.ready()?.iter().find(|i| &i.id == id)
+    }
+
+    /// The ledger couldn't be read for a released run's instance: whether it is gone isn't known.
+    pub fn released_instance_unknown(&self, c: &RunCloud) -> bool {
+        c.phase == CloudPhase::Released
+            && c.instance_id.is_some()
+            && self.cloud.instances.ready().is_none()
+            && self.cloud.instances.error().is_some()
+    }
+
     /// A connection's offers, fetched once per connection (`refresh` asks the provider again).
     pub fn ensure_offers(&mut self, connection: &str, refresh: bool, cx: &mut Context<Self>) {
         if !refresh && self.cloud.offers.get(connection).is_some_and(|l| !l.needs_fetch()) {
@@ -627,8 +643,10 @@ pub enum PhaseState {
 /// `phaseStates`). Live, the phases before the current one are done. Once released, the phases
 /// before the one its hand-over ended in (`RunCloud::ended_in`) are done, that one failed (a
 /// failed run), skipped (stopped before training) or done, and the later ones never reached; a
-/// server that doesn't say (`None`, older servers) has every phase done.
-pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
+/// server that doesn't say (`None`, older servers) has every phase done. `unconfirmed`: the
+/// provider hasn't confirmed its instance's termination (the run stops waiting after a minute), so
+/// releasing is still under way and released still to come.
+pub fn phase_states(c: &RunCloud, r: &Run, unconfirmed: bool) -> Vec<(CloudPhase, PhaseState)> {
     // A newer server's phase has no known place among these: it is the one step, current.
     if c.phase == CloudPhase::Unknown {
         return vec![(CloudPhase::Unknown, PhaseState::Now)];
@@ -665,6 +683,8 @@ pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
         .iter()
         .map(|&p| {
             let s = match ended {
+                _ if unconfirmed && p == CloudPhase::Releasing => PhaseState::Now,
+                _ if unconfirmed && p == CloudPhase::Released => PhaseState::Next,
                 None => PhaseState::Done,
                 _ if p >= CloudPhase::Releasing => PhaseState::Done,
                 Some(e) if p < e => PhaseState::Done,
@@ -675,6 +695,56 @@ pub fn phase_states(c: &RunCloud, r: &Run) -> Vec<(CloudPhase, PhaseState)> {
             (p, s)
         })
         .collect()
+}
+
+/// The one line of trouble a cloud run's panel shows, as Studio's (`CloudPanel.tsx`): the worker
+/// silent since a moment (`unanswered_since`), else a released run's instance not confirmed
+/// terminated (`unconfirmed`), else the ledger not read (`unknown`). The mark, the words, and
+/// whether they lead to Settings › Cloud.
+pub fn panel_warning(
+    c: &RunCloud,
+    unconfirmed: bool,
+    unknown: bool,
+    now: i64,
+) -> Option<(&'static str, String, bool)> {
+    if let Some(since) = c.unanswered_since.as_deref().and_then(time::parse) {
+        let words = format!(
+            "The worker has not answered since {}. FOLO keeps asking; the run may still be training or waiting there.",
+            time::local_deadline(since, now)
+        );
+        Some(("icons/wifi-off.svg", words, false))
+    } else if unconfirmed {
+        let words = "Termination not confirmed: the instance may still be billed.".to_string();
+        Some(("icons/triangle-alert.svg", words, true))
+    } else if unknown {
+        Some((
+            "icons/triangle-alert.svg",
+            "Could not check that the instance is terminated.".to_string(),
+            true,
+        ))
+    } else {
+        None
+    }
+}
+
+/// A cloud run's cost in its panel. A released run's is its instance's own from the ledger, which
+/// keeps counting while the termination isn't confirmed ("so far" then); without the ledger's row,
+/// the run's own, "so far" until released. No price: not billed.
+pub fn panel_cost(c: &RunCloud, instance: Option<&CloudInstance>) -> String {
+    let released = c.phase == CloudPhase::Released;
+    match instance {
+        Some(i) => match i.cost_usd {
+            None => "not billed".to_string(),
+            Some(usd) if i.status.is_alive() => format!("{} so far", crate::ui::fmt_cost(usd)),
+            Some(usd) => crate::ui::fmt_cost(usd),
+        },
+        None => match (c.cost_usd, c.offer.price_per_hour) {
+            (_, None) => "not billed".to_string(),
+            (Some(usd), _) if released => crate::ui::fmt_cost(usd),
+            (Some(usd), _) => format!("{} so far", crate::ui::fmt_cost(usd)),
+            (None, Some(_)) => "—".to_string(),
+        },
+    }
 }
 
 #[cfg(test)]

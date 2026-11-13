@@ -208,7 +208,11 @@ With a server that lists the `cloud` feature, Settings › Cloud connects provid
 server; secrets are typed into masked fields, sent once and never kept by the app) and lists every instance with
 its cost and a Terminate; New run's Compute section picks where a run trains (this machine or a connection, its
 GPU offer and Stop after, with the cost beside Start training); a cloud run's page shows its phases, instance,
-cost and time limit. `src/cloud.rs` holds the state and the rules those surfaces share.
+cost and time limit. As Studio's, it says when the worker stops answering ("Worker not answering" beside the
+status, and since when in the Cloud panel), and when a released run's instance is still alive in the instance list:
+"Termination not confirmed: the instance may still be billed.", with Releasing still the current step and the
+instance's own cost so far. `src/cloud.rs` holds the state and the rules those surfaces share; the demo's
+`run-cloud+silent` and `run-cloud+trouble` scenarios show both.
 
 By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts a
 local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening

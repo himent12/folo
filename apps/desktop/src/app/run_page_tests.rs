@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::tests::{drive, open, open_with};
 use crate::api::mock::MockBackend;
 use crate::api::{CloudPhase, RunStatus};
-use crate::cloud::{PhaseState, phase_states};
+use crate::cloud::{PhaseState, panel_cost, panel_warning, phase_states};
 use crate::store::Load;
 
 #[test]
@@ -39,7 +39,7 @@ fn a_cloud_run_that_failed_uploading_did_not_train() {
         let mut r = this.store.runs.ready().unwrap().iter().find(|r| r.cloud.is_some()).unwrap().clone();
         let mut c = r.cloud.clone().unwrap();
         let marks = |c: &crate::api::RunCloud, r: &crate::api::Run| -> Vec<PhaseState> {
-            phase_states(c, r).into_iter().map(|(_, s)| s).collect()
+            phase_states(c, r, false).into_iter().map(|(_, s)| s).collect()
         };
         // Released after the upload failed: syncing failed, training and collecting never reached.
         c.phase = CloudPhase::Released;
@@ -120,5 +120,60 @@ fn a_final_read_that_fails_does_not_leave_the_history_loading() {
             matches!(this.store.run_data.get("run_52e8"), Some(Load::Failed(_))),
             "a failure, not loading for good"
         );
+    });
+}
+
+#[test]
+fn a_released_runs_instance_not_confirmed_terminated_says_it_may_still_be_billed() {
+    use PhaseState::*;
+    // RunPod hasn't confirmed the termination of the training run's instance (the demo's +trouble).
+    let (mut app, window) = open_with(Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble()));
+    drive(&mut app, window, |this, _, cx| this.ensure_cloud(cx));
+    drive(&mut app, window, |this, _, _| {
+        let r = this.store.runs.ready().unwrap().iter().find(|r| r.id == "run_c2e1").unwrap().clone();
+        let c = r.cloud.clone().unwrap();
+        assert_eq!(c.phase, CloudPhase::Released);
+        let i = this.released_instance(&c).expect("its instance in the ledger").clone();
+        assert!(i.status.is_alive(), "not confirmed terminated");
+        // Releasing is still under way, released still to come.
+        let marks: Vec<_> = phase_states(&c, &r, true).into_iter().map(|(_, s)| s).collect();
+        assert_eq!(&marks[5..], [Now, Next]);
+        // The words promise no more than the app knows, and lead to the instance.
+        let (_, words, to_settings) = panel_warning(&c, true, false, 0).unwrap();
+        assert_eq!(words, "Termination not confirmed: the instance may still be billed.");
+        assert!(to_settings);
+        // Its cost is the instance's own, still counting.
+        assert_eq!(panel_cost(&c, Some(&i)), format!("{} so far", crate::ui::fmt_cost(i.cost_usd.unwrap())));
+        // Confirmed: final, no warning, every phase done.
+        let mut gone = i.clone();
+        gone.status = crate::api::CloudInstanceStatus::Terminated;
+        assert_eq!(panel_cost(&c, Some(&gone)), crate::ui::fmt_cost(i.cost_usd.unwrap()));
+        assert!(panel_warning(&c, false, false, 0).is_none());
+        // The ledger couldn't be read: that is said, not "terminated".
+        let (_, words, _) = panel_warning(&c, false, true, 0).unwrap();
+        assert_eq!(words, "Could not check that the instance is terminated.");
+    });
+}
+
+#[test]
+fn a_cloud_run_whose_worker_is_silent_says_so_with_the_time() {
+    let (mut app, window) = open_with(Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_silent()));
+    drive(&mut app, window, |this, _, _| {
+        let r = this.store.runs.ready().unwrap().iter().find(|r| r.id == "run_c2e1").unwrap().clone();
+        let c = r.cloud.clone().unwrap();
+        assert_eq!(c.phase, CloudPhase::Training);
+        let since = c.unanswered_since.as_deref().and_then(crate::api::time::parse).expect("silent");
+        let (mark, words, to_settings) = panel_warning(&c, false, false, since).unwrap();
+        assert_eq!(mark, "icons/wifi-off.svg");
+        assert!(!to_settings);
+        let at = crate::api::time::local_deadline(since, since);
+        assert_eq!(
+            words,
+            format!(
+                "The worker has not answered since {at}. FOLO keeps asking; the run may still be training or waiting there."
+            )
+        );
+        // A silent worker comes first: it is what the run is waiting on.
+        assert_eq!(panel_warning(&c, true, true, since).unwrap().0, "icons/wifi-off.svg");
     });
 }
