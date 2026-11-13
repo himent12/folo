@@ -104,6 +104,8 @@ pub const ALL: &[&str] = &[
     "run-cloud+training",
     "run-cloud+training+light",
     "run-cloud+released",
+    "run-cloud+silent",
+    "run-cloud+trouble",
     "toast",
     "kb-focus",
 ];
@@ -277,7 +279,8 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             app.route = Route::Settings;
             app.throughput = app.store.api.throughput().into();
         }
-        // A cloud run uploading its data, training on its instance, released with its final cost.
+        // A cloud run uploading its data, training on its instance, released with its final cost;
+        // `+silent` its worker not answering, `+trouble` released with its termination unconfirmed.
         "run-cloud" => {
             let id = if s.has("syncing") {
                 "run_c1d0"

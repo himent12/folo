@@ -180,6 +180,9 @@ fn main() {
             if spec.as_ref().is_some_and(|s| s.has("trouble")) {
                 mock = mock.cloud_trouble();
             }
+            if spec.as_ref().is_some_and(|s| s.has("silent")) {
+                mock = mock.cloud_silent();
+            }
             Arc::new(mock)
         } else {
             Arc::new(api::http::HttpBackend::new(&connect_url))

@@ -136,6 +136,19 @@ impl MockBackend {
         self
     }
 
+    /// The training cloud run's worker ([`MockBackend::with_cloud_runs`]) silent for three minutes:
+    /// the run page's "Worker not answering".
+    pub fn cloud_silent(self) -> Self {
+        for f in self.runs.lock().unwrap().iter_mut() {
+            if let Some(sim) =
+                f.cloud.as_mut().filter(|s| s.elapsed() >= s.train_at() && s.released_at().is_none())
+            {
+                sim.silent_since = Some(sim.elapsed() - 180.);
+            }
+        }
+        self
+    }
+
     fn check(&self) -> ApiResult<()> {
         if self.fail {
             Err(ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878")

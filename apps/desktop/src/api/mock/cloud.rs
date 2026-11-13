@@ -42,6 +42,8 @@ pub(super) struct CloudSim {
     pub(super) ended: Option<(f64, Ended)>,
     /// Why the provider hasn't confirmed the termination (the instance stays `terminating`).
     pub(super) release_error: Option<String>,
+    /// Since when (seconds since `t0`) the worker hasn't answered: `unanswered_since` while it trains.
+    pub(super) silent_since: Option<f64>,
 }
 
 /// Seconds of collecting the weights, then of releasing the instance.
@@ -64,6 +66,7 @@ impl CloudSim {
             total,
             ended: None,
             release_error: None,
+            silent_since: None,
         }
     }
 
@@ -170,6 +173,7 @@ impl CloudSim {
             // Final once released, even while the provider hasn't confirmed the termination.
             cost_usd: self.cost(self.released_at().unwrap_or(self.elapsed())),
             synced: synced.map(|s| self.at(s)),
+            unanswered_since: self.silent_since.filter(|_| phase == CloudPhase::Training).map(|s| self.at(s)),
             ..self.base.clone()
         }
     }
