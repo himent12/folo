@@ -236,11 +236,19 @@ impl FoloApp {
                     // restarting, a dropped connection), still "Loading…", never a partial list
                     // passed off as the whole; a reload or a dropped list ends it.
                     Err(_) => {
+                        let backend = this.backend_gen;
                         cx.spawn(async move |this, cx| {
                             cx.background_executor().timer(IMAGE_PAGE_RETRY).await;
                             this.update(cx, |this, cx| {
-                                if this.images_more.get(&id) == Some(&generation) {
+                                // Only the same load, on the same server, of a list still held.
+                                if this.images_more.get(&id) != Some(&generation) {
+                                    return;
+                                }
+                                let held = this.store.images.get(&id).is_some_and(|l| l.ready().is_some());
+                                if this.backend_gen == backend && held {
                                     this.load_images_from(id, generation, offset, cx);
+                                } else {
+                                    this.images_more.remove(&id);
                                 }
                             })
                             .ok();

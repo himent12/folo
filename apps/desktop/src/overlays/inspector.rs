@@ -61,7 +61,10 @@ impl FoloApp {
             {
                 self.inspector = None;
             }
-            return div().absolute().top_0().left_0().size_full().bg(t.bg_scrim).into_any_element();
+            // The page's scrim (it takes the clicks, and a click there closes, as Esc does).
+            return self
+                .scrim(&t, "insp-scrim", window, cx, act(|this, w, cx| this.close_inspector(w, cx)))
+                .into_any_element();
         }
         let index = insp.index.min(n - 1);
         let (zoom, pan, hover) = (insp.zoom, insp.pan, insp.hover_box);

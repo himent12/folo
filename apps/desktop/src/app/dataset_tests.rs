@@ -85,6 +85,26 @@ fn a_page_that_fails_after_the_first_is_asked_for_again() {
 }
 
 #[test]
+fn a_retry_ends_with_the_list_it_was_for() {
+    let api = Arc::new(MockBackend::new(4200, true).with_more_val_images("ds_8f2c", 25_000));
+    let (mut app, window) = open_with(api.clone());
+    api.fail_images_once_from(IMAGE_PAGE);
+    drive(&mut app, window, |this, _, cx| this.ensure_dataset("ds_8f2c", cx));
+    // The dataset removed (here or elsewhere) while its page waits to be asked again.
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.images_pending("ds_8f2c"));
+        this.store.images.remove("ds_8f2c");
+    });
+    // Asked again, it would fail again (a removed dataset is a 404) and wait for another turn.
+    api.fail_images_once_from(IMAGE_PAGE);
+    app.advance_clock(std::time::Duration::from_secs(5));
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.images_pending("ds_8f2c"), "the retry ends instead of asking forever");
+        assert!(!this.store.images.contains_key("ds_8f2c"), "nothing comes back for a dropped list");
+    });
+}
+
+#[test]
 fn a_sample_past_the_first_page_opens_on_itself() {
     let api = Arc::new(MockBackend::new(4200, true).with_more_val_images("ds_8f2c", 25_000));
     let (mut app, window) = open_with(api.clone());
