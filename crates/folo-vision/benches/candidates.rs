@@ -13,14 +13,18 @@
 //!   thresholds from 0.5 down to 0.001, the model step candidate-first (`predict_candidates` + `finish_candidates`)
 //!   against dense (`forward` + `detections`), alternated image by image for `FOLO_BENCH_ROUNDS` (default 3)
 //!   rounds: the mean candidates per level and the median time per image of both, which locates the break-even.
+//!
+//! `FOLO_BENCH_DEVICE=gpu` runs all of it on the GPU (both paths end in a readback, so the times are synchronised)
+//! in `FOLO_BENCH_PRECISION` (`f32` or `f16`; tensor cores as `FOLO_GPU_TENSOR_CORES` says).
 
 use std::hint::black_box;
 use std::time::Instant;
 
+use folo_core::Device;
 use folo_core::{Tensor, no_grad};
 use folo_vision::fusion::BoxFusion;
 use folo_vision::nms::{Detection, NmsConfig};
-use folo_vision::predict::{PredictConfig, Predictor};
+use folo_vision::predict::{Precision, PredictConfig, Predictor};
 
 fn env<T: std::str::FromStr>(k: &str) -> Option<T> {
     std::env::var(k).ok().and_then(|s| s.parse().ok())
@@ -59,7 +63,11 @@ fn main() {
         .collect();
     paths.sort();
     paths.truncate(env("FOLO_BENCH_IMAGES_N").unwrap_or(usize::MAX));
-    let pred = Predictor::open(&weights, PredictConfig::default()).expect("weights");
+    let gpu = env::<String>("FOLO_BENCH_DEVICE").is_some_and(|d| d == "gpu");
+    let prec: Precision = env("FOLO_BENCH_PRECISION").unwrap_or(Precision::F32);
+    let dev =
+        if gpu { folo_gpu::init().expect("FOLO_BENCH_DEVICE=gpu: no GPU adapter") } else { Device::Cpu };
+    let pred = Predictor::open_on(&weights, PredictConfig::default(), dev, prec).expect("weights");
     let model = pred.model();
     let fusion = match env::<String>("FOLO_BENCH_FUSION").as_deref() {
         None | Some("none") => BoxFusion::None,
@@ -70,9 +78,14 @@ fn main() {
     let nms = NmsConfig { conf, fusion, ..NmsConfig::default() };
     let verify = env::<String>("FOLO_BENCH_VERIFY").is_some_and(|v| v == "1");
     println!(
-        "candidates bench: {weights} ({}, head {}), {} images from {dir}, conf {conf}, fusion {}, {} rayon threads",
+        "candidates bench: {weights} ({}, head {}) on {dev:?} {prec:?}{}, {} images from {dir}, conf {conf}, fusion {}, {} threads",
         model.arch(),
         model.head_mode(),
+        if gpu {
+            format!(" ({})", folo_gpu::GpuContext::shared().expect("context").tensor_cores_status())
+        } else {
+            String::new()
+        },
         paths.len(),
         fusion.as_str(),
         rayon::current_num_threads()

@@ -54,6 +54,21 @@ sides by their precisions, which the dense CPU path computes from the same softm
 - All of val2017 again, folo-n on the CPU (`FOLO_BENCH_VERIFY=1`): 0 of 5000 images mismatched with fusion off,
   and 0 with `FOLO_BENCH_FUSION=dfl` (`logs/verify2-cpu-*`).
 
+## The GPU path (PR 2, `infer/lazy-box-head-gpu`)
+Class pass (`sites_class.wgsl`) → fixed-capacity site lists per image and level (1024 / 512 / 256; val2017 at 0.25
+never needs more than 117 / 201 / 82) plus a deduplicated field list of the sites' 3×3 windows → `conv0` on the
+field (scattered into a full map), `conv1` and `out` at the sites (compact `[B, C, cap]`) → decode
+(`sites_decode.wgsl`, anchors computed in the kernel) → one readback. An image that overflows a level is answered
+by the dense head on the same features.
+- The `SITES` conv (`kernels/conv/sites.rs`) is the implicit GEMM with each column's pixel read from the site list.
+  The per-element sum is sequential over K, so the column's position and the tile config do not change bits; the
+  split-K plan and the tensor-core choice do, so the sites conv takes the dense shape's. Bit for bit in f32, f16 and
+  on tensor cores (tests at the box convs' shapes, and the whole predictor against the dense GPU path).
+- Tensor cores: naga refuses cooperative-matrix ops after a `return` that depends on a buffer (uniformity). The first
+  cut retired dead workgroups that way; the kernel failed to build, which silently turned tensor cores off for the
+  whole context, and the f16 test then failed by 1 ulp against the dense tensor-core conv. The sites variant now runs
+  zero K tiles instead of returning, and the tests assert the tensor-core state after the run.
+
 ## Numbers
 ### Candidates on COCO val2017
 Candidates per image that need a box, at conf 0.25 with the published weights, over all 5000 val2017 images
@@ -98,5 +113,4 @@ Counsel's estimate for row 8 was 13.12 → 11.6–12.0 ms (−9 to −12%); unde
   the trained rows (`FOLO_BENCH_WEIGHTS`, `FOLO_BENCH_IMAGES`) are the ones to read.
 
 ## Leftovers
-- PR 2: the GPU path (`SITES` conv variant, class pass split from the decode, fixed capacity).
 - PR 3: C3k sibling fusion.
