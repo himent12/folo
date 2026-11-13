@@ -41,7 +41,40 @@ head's `cat` are never made on this path; the forward rows (dense by definition)
   Mutation checks: the 1×1 receptive field fails the isolated-sites and o2o tests.
 
 ## Numbers
-(pending: measured once the fusion lane's training run released the CPU)
+### Candidates on COCO val2017
+Candidates per image that need a box, at conf 0.25 with the published weights, over all 5000 val2017 images
+(`benches/candidates.rs`, rect letterbox at 640, as the predictor runs). With `FOLO_BENCH_VERIFY=1` every image's
+detections were also compared with the dense path: **0 mismatched** for both models.
+
+| model | level (anchors at 640²) | median | p90 | p99 | max | mean |
+|---|---|---|---|---|---|---|
+| folo-n | P3 (6400) | 0 | 19 | 57 | 104 | 6.0 |
+| folo-n | P4 (1600) | 5 | 29 | 71 | 201 | 10.3 |
+| folo-n | P5 (400) | 10 | 26 | 46 | 77 | 12.6 |
+| folo-n | total (8400) | 21 | 63 | 119 | 227 | 28.9 |
+| folo-s | P3 | 0 | 19 | 55 | 117 | 5.9 |
+| folo-s | P4 | 8 | 40 | 90 | 166 | 14.5 |
+| folo-s | P5 | 11 | 31 | 55 | 82 | 15.5 |
+| folo-s | total | 26 | 77 | 143 | 249 | 35.9 |
+
+So the median image boxes about 0.3% of its anchors, and the worst image 3%.
+
+### CPU A/B (first run, under load)
+`benches/cpu_e2e.rs` trained rows (the first 16 val2017 images, 28 threads, 100 iterations), `main` (e5a6ccf0)
+against this branch, both built from this bench source, alternated in 3 rounds in one `cpu` lock hold. The machine
+was 32–55% busy with other work (another lane's evaluation, a JVM), so only the folo-n rows are readable:
+
+| row | base | new | new/base |
+|---|---|---|---|
+| folo-n 640² b1 (row 8) | 17.49 ms (17.12–17.67) | 15.02 (14.65–15.91) | 0.859 |
+| folo-n 1280×720 (rect 640×384) | 12.83 (12.29–12.84) | 11.79 (11.73–12.19) | 0.919 |
+| folo-n `predict_batch` 16 × 640² | 202.2 (190.6–208.2) | 177.4 (169.9–191.4) | 0.877 |
+| folo-s 640² b1 | 39.87 (34.52–51.15) | 40.74 (33.57–53.12) | noise |
+| folo-s 1280×720 | 26.57 (22.50–31.65) | 24.96 (22.72–28.22) | noise |
+| folo-s `predict_batch` 16 | 458.8 (444.2–551.8) | 508.1 (438.9–509.8) | noise |
+
+Counsel's estimate for row 8 was 13.12 → 11.6–12.0 ms (−9 to −12%); under this load folo-n measured −14% at 640² and
+−8% on the rect input (fewer anchors, so the box branch is a smaller share). A quiet repeat is pending.
 
 ## Negative results and notes
 - No lazy/dense switch. Counsel's break-even (400 / 80 / 16 candidates for P3 / P4 / P5) compared a per-candidate
