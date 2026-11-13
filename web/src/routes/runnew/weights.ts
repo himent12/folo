@@ -49,5 +49,5 @@ export function startHintOf(
   const what = isPublished(picked) ? publishedSummary(picked) : scoreMeta(picked.metrics?.map50_95, scoreCtx(picked)) || 'Fine-tuning from a trained model converges much faster.';
   // A model whose classes are not recorded (an older file) says nothing it cannot know.
   const same = !dataset || !picked.classes.length || (picked.classes.length === dataset.classes.length && picked.classes.every((c, i) => c === dataset.classes[i]));
-  return same ? what : `${what.replace(/\.$/, '')}. Its classes are not ${dataset.name}'s: the class outputs start fresh, the rest is kept.`;
+  return same ? what : `${what.replace(/\.$/, '')}. Its classes are not ${dataset.name}'s: the class outputs start fresh, other weights are kept where their shapes match.`;
 }

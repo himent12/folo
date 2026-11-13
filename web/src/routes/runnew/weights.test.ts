@@ -10,7 +10,7 @@ const bccd = { name: 'bccd', classes: ['RBC', 'WBC', 'Platelets'] };
 describe('Start from: the hint', () => {
   it('says the class outputs start fresh when the weights were trained on other classes', () => {
     expect(startHintOf(coco, none, 'folo-n', 1, [], bccd)).toBe(
-      "Pretrained on COCO (80 classes) · good for fine-tuning. Its classes are not bccd's: the class outputs start fresh, the rest is kept.",
+      "Pretrained on COCO (80 classes) · good for fine-tuning. Its classes are not bccd's: the class outputs start fresh, other weights are kept where their shapes match.",
     );
     // A model trained on the same classes, in the same order, keeps them: nothing to say.
     const same = model({ classes: ['RBC', 'WBC', 'Platelets'] });
