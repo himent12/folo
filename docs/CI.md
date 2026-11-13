@@ -120,13 +120,15 @@ and use GitHub-hosted `macos-latest`; `FOLO_RELEASE_MACOS=false` skips them.
   reboot.
 - An offline self-hosted runner does not trigger the fallback: its jobs queue (up to 24 h). If the machine is off for
   long, delete the variable so the jobs run on GitHub-hosted runners.
-- **A Linux runner** needs a C toolchain (`build-essential`), `git`, `curl`, `jq` and `python3`; `docker` and `gh`
-  for `release.yml` (docs/RELEASE.md, Runners); and Chrome for the layout QA, or passwordless `sudo` so the job can
-  install Playwright's Chromium with its libraries. The jobs install the rest (Rust, Node, Python for the ONNX
-  test).
-- **One Linux user per runner.** The Linux jobs keep their target dir under `$HOME` (`~/gha/folo-target` and its
-  siblings). Two runners of one user on one machine would build in the same folder, each waiting for the other's
-  lock, and the under-20-GB cleanup of one would delete it under the other.
+- **A Linux runner** needs, besides the usual shell tools of a Linux system (`bash`, `tar`, gzip, `sha256sum`), a C
+  toolchain (`build-essential`), `git`, `curl`, `jq` and `python3`; `docker` and `gh` for `release.yml`
+  (docs/RELEASE.md, Runners); and Chrome for the layout QA, or passwordless `sudo` so the job can install
+  Playwright's Chromium with its libraries. The jobs install Rust, Node and the Python of the ONNX test themselves.
+- **One Linux user per runner.** On a self-hosted runner the Rust jobs of `ci.yml`, `desktop.yml` and `wasm.yml`
+  keep a persistent target dir under `$HOME` (`~/gha/folo-target`, `~/gha/folo-desktop-target`,
+  `~/gha/folo-target-wasm`; release builds use a fresh one in `$RUNNER_TEMP`). Two runners of one user on one
+  machine can run the same job in the same folder: each waits for the other's cargo lock, and the under-20-GB
+  cleanup of one deletes the folder under the other.
 - **Linux runners in WSL2**, on a Windows machine that already runs the Windows jobs: a distribution with systemd
   on (the runners are services, and docker needs it), without the Windows drives and programs (`automount` and
   `interop` off in `/etc/wsl.conf`, so a job sees only the Linux file system and the Windows `PATH` cannot shadow
