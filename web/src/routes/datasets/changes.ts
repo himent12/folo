@@ -107,9 +107,21 @@ export function pendingGeneration(server: string, now = Date.now()): Generation 
   return null;
 }
 
-/** A path as the server lists it and as it was typed, compared: separators, a trailing one and case aside. */
+/**
+ * A path as the server lists it and as it was typed, compared: separators, a trailing one, `.` and `..` aside, and
+ * case on a Windows path (a drive letter or a UNC share) only: a Linux server's /data/coco and /data/COCO differ.
+ */
 const samePath = (a: string, b: string) => {
-  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const norm = (p: string) => {
+    const s = p.replace(/\\/g, '/');
+    const parts: string[] = [];
+    for (const x of s.split('/')) {
+      if (x === '..' && parts.length > 1) parts.pop();
+      else if (x !== '.' && (x !== '' || parts.length === 0)) parts.push(x);
+    }
+    const out = parts.join('/');
+    return /^([A-Za-z]:|\/\/)/.test(s) ? out.toLowerCase() : out;
+  };
   return norm(a) === norm(b);
 };
 

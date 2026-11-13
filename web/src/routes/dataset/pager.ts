@@ -42,6 +42,12 @@ export class ImagePager {
 
   /** The `reload()` each page was read after (0: before any). */
   #pageRev = new Map<number, number>();
+  #refreshed = signal(0);
+
+  /** Bumps when a page read before a change is replaced by its new read (an image may have gone or moved). */
+  get refreshed(): number {
+    return this.#refreshed.get();
+  }
 
   /** How many times the dataset changed on disk while shown (`reload()`). */
   get revision(): number {
@@ -117,7 +123,7 @@ export class ImagePager {
       if (guess >= 0) {
         await this.at(guess).catch(() => undefined);
         const g = this.#index.get(id);
-        if (g !== undefined) return g;
+        if (g !== undefined && this.#fresh(Math.floor(g / PAGE))) return g;
       }
     }
     if (this.total === null) await this.#load(0);
@@ -149,6 +155,7 @@ export class ImagePager {
 
   #store(p: number, images: DatasetImage[], total: number) {
     if (this.#fresh(p)) return;
+    const was = this.#stale.has(p);
     // A stale page's ids may now name other places (or nothing): they give way to the new read's.
     for (const [k, im] of (this.#pages.get(p) ?? []).entries()) if (this.#index.get(im.id) === p * PAGE + k) this.#index.delete(im.id);
     this.#stale.delete(p);
@@ -157,6 +164,7 @@ export class ImagePager {
     images.forEach((im, k) => this.#index.set(im.id, p * PAGE + k));
     this.#total.set(total);
     this.#version.set((v) => v + 1);
+    if (was) this.#refreshed.set((n) => n + 1);
   }
 
   #load(p: number): Promise<void> {
@@ -197,6 +205,8 @@ export class ImagePager {
     this.#gen++;
     this.#ctrl.abort();
     this.#ctrl = new AbortController();
+    // A page on its way is read again too, by whoever waited for it.
+    for (const p of this.#inflight.keys()) this.#stale.add(p);
     this.#inflight.clear();
     for (const p of this.#pages.keys()) this.#stale.add(p);
     for (const p of this.#failed) this.#stale.add(p);

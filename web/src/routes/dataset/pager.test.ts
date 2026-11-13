@@ -72,7 +72,7 @@ describe('ImagePager', () => {
     expect(pager.get(250)).toBeUndefined();
     // Only what was read again (page 0, by the reader above) was asked for: not every page ever loaded.
     expect(reads.filter((o) => o === 0)).toHaveLength(2);
-    expect([pager.revision, pager.revisionOf(0), pager.revisionOf(250)]).toEqual([1, 1, 0]);
+    expect([pager.revision, pager.revisionOf(0), pager.revisionOf(250), pager.refreshed]).toEqual([1, 1, 0, 1]);
   });
 
   it('keeps a page whose read after reload() failed for Retry, which reads it again', async () => {
@@ -93,6 +93,43 @@ describe('ImagePager', () => {
     pager.retry();
     await vi.waitFor(() => expect(pager.error).toBeUndefined());
     expect(read).toHaveBeenCalledOnce();
+  });
+
+  it('reads a page that was on its way at reload() again, for the reader that waited for it', async () => {
+    const mock = new MockApi('normal', 0);
+    let release!: () => void;
+    const hold = new Promise<void>((r) => (release = r));
+    let first = true;
+    const api: Partial<Api> = {
+      datasetImages: async (id, q) => {
+        if (q.offset === 100 && first) {
+          first = false;
+          await hold;
+        }
+        return mock.datasetImages(id, q);
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_fasteners', undefined, undefined);
+    await pager.at(0);
+    pager.ensure(100, 120);
+    pager.reload();
+    release();
+    // The row that asked before the change asks again as it reads (no new range is needed).
+    expect(pager.get(100)).toBeUndefined();
+    await vi.waitFor(() => expect(pager.get(100)?.id).toBeDefined());
+  });
+
+  it('does not take a place read before a change for an image, while its page cannot be read again', async () => {
+    const mock = new MockApi('normal', 0);
+    let fail = false;
+    const api: Partial<Api> = { datasetImages: (id, q) => (fail ? Promise.reject(new Error('offline')) : mock.datasetImages(id, q)) };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_fasteners', undefined, undefined);
+    const last = await pager.at(99);
+    fail = true;
+    pager.reload();
+    await expect(pager.find(last!.id)).rejects.toThrow('offline');
   });
 
   it('reads an empty filter again on reload(), where no row asks for a page', async () => {
