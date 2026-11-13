@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use super::ServerMode;
 use super::tests::{drive, open_with};
 use crate::api::mock::MockBackend;
 use crate::api::{Split, SplitsExt};
@@ -36,4 +37,32 @@ fn a_folder_with_no_usable_image_is_added_with_a_warning() {
         assert_eq!((t.tone, t.title.as_ref()), (Tone::Warning, "broken has no usable images"));
         assert!(t.action.is_some(), "with Open, to its page");
     });
+}
+
+#[test]
+fn closing_generate_while_it_works_says_it_goes_on() {
+    let (mut app, window) = open_with(Arc::new(MockBackend::new(4200, true)));
+    let toasts = |app: &mut _| drive(app, window, |this, _, _| this.toasts.len());
+    let before = toasts(&mut app);
+    // Closed idle: nothing to say.
+    drive(&mut app, window, |this, w, cx| {
+        this.server_mode = ServerMode::Local;
+        this.open_synth(w, cx);
+        this.dismiss(w, cx);
+    });
+    assert_eq!(toasts(&mut app), before);
+    // Esc while the server generates: the dialog goes, and a toast says the job goes on.
+    drive(&mut app, window, |this, w, cx| {
+        this.open_synth(w, cx);
+        this.synth.as_mut().unwrap().submitting = true;
+        this.dismiss(w, cx);
+        assert!(this.synth.is_none());
+        let t = this.toasts.last().expect("a toast");
+        assert!(
+            t.title.starts_with("Generating shapes") && t.title.ends_with("in the background"),
+            "{}",
+            t.title
+        );
+    });
+    assert_eq!(toasts(&mut app), before + 1);
 }

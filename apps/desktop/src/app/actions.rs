@@ -61,7 +61,17 @@ impl FoloApp {
     }
 
     pub fn close_synth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.synth = None;
+        // Closed while the server generates: the job goes on, and its result comes as a toast
+        // later; say so now rather than let it vanish without a word.
+        if let Some(f) = self.synth.take().filter(|f| f.submitting) {
+            let name = f.name.read(cx).text().trim().to_string();
+            self.toast(
+                Tone::Info,
+                format!("Generating {name} in the background"),
+                Some("It's added to Datasets when it's ready.".into()),
+                cx,
+            );
+        }
         self.restore_focus(window);
         cx.notify();
     }

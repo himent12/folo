@@ -243,8 +243,7 @@ impl FoloApp {
             self.new_run_draft = self.new_run.take().and_then(|f| self.keep_draft(f));
             self.restore_focus(window);
         } else if self.synth.is_some() {
-            self.synth = None;
-            self.restore_focus(window);
+            self.close_synth(window, cx);
         } else if self.inspector.is_some() {
             self.close_inspector(window, cx);
         } else if let Some(p) = self.parent_route() {
