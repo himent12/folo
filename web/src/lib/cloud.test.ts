@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CloudOffer, RunCloud, RunStatus } from './api/types';
-import { article, beforeTraining, defaultMaxHours, inHandover, isAlive, limitText, menuOrder, phaseIndex, phaseLabel, phaseTitle, pickOffer, transferShare, transferText } from './cloud';
+import { article, beforeTraining, cloudGpu, defaultMaxHours, inHandover, isAlive, limitText, menuOrder, panelPhaseLabel, phaseIndex, phaseLabel, phaseStates, phaseTitle, pickOffer, providerName, transferShare, transferText, validHours, type PhaseRun } from './cloud';
 
 const GiB = 2 ** 30;
 const offer = (id: string, gpu: string, vram: number, price: number | null, availability: CloudOffer['availability'] = 'high'): CloudOffer => ({
@@ -65,6 +65,93 @@ describe('cloud phases', () => {
 
   it('reads a GPU name aloud for its article', () => {
     expect(['RTX 4090', 'A100 PCIe', 'H100 SXM', 'L40S', 'GeForce GTX', 'Tesla T4'].map(article)).toEqual(['an', 'an', 'an', 'an', 'a', 'a']);
+  });
+});
+
+describe('the Cloud panel’s phases', () => {
+  const cloud = (phase: string, extra: Partial<RunCloud> = {}): RunCloud => ({
+    connection_id: 'cc_1',
+    provider: 'runpod',
+    offer: offer('o', 'RTX 4090', 24, 0.69),
+    instance_id: 'ci_1',
+    phase,
+    progress: null,
+    max_hours: 12,
+    deadline: null,
+    cost_usd: null,
+    synced: null,
+    ...extra,
+  });
+  const run = (status: RunStatus, error_code?: string): PhaseRun => ({ status, error_code });
+  const marks = (list: { phase: string; state: string }[]) => list.map((p) => `${p.state} ${p.phase}`);
+  const ended = (phase: string) => cloud('released', { ended_in: phase as RunCloud['phase'] });
+
+  it('marks the phases before the current one done while the run is alive', () => {
+    expect(marks(phaseStates(cloud('syncing'), run('queued'), true))).toEqual([
+      'done provisioning',
+      'done booting',
+      'now syncing',
+      'next training',
+      'next collecting',
+      'next releasing',
+      'next released',
+    ]);
+  });
+
+  it('marks the phase a released run ended in, and never one it did not reach as done', () => {
+    // The upload failed (the remote server stopped at 1%): no training, no collection.
+    expect(marks(phaseStates(ended('syncing'), run('failed'), true))).toEqual([
+      'done provisioning',
+      'done booting',
+      'failed syncing',
+      'skipped training',
+      'skipped collecting',
+      'done releasing',
+      'done released',
+    ]);
+    // A worker download that is not there fails the run before anything is rented (cloud_boot_failed, in provisioning).
+    expect(marks(phaseStates(ended('provisioning'), run('failed'), true)).slice(0, 2)).toEqual(['failed provisioning', 'skipped booting']);
+    expect(marks(phaseStates(ended('training'), run('failed'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed training', 'skipped collecting']);
+    // Training failed on the worker (out of memory), its weights were collected: training failed, not the collection.
+    expect(marks(phaseStates(ended('collecting'), run('failed', 'oom'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed training']);
+    expect(marks(phaseStates(ended('collecting'), run('failed', 'cloud_sync_failed'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed collecting']);
+    // Stopped before it trained: the phase it was stopped in did not finish. Stopped while training: it trained.
+    expect(marks(phaseStates(ended('booting'), run('stopped'), true)).filter((m) => !m.startsWith('done'))).toEqual(['skipped booting', 'skipped syncing', 'skipped training', 'skipped collecting']);
+    expect(marks(phaseStates(ended('training'), run('stopped'), true)).filter((m) => !m.startsWith('done'))).toEqual(['skipped collecting']);
+    expect(phaseStates(ended('collecting'), run('completed'), true).every((p) => p.state === 'done')).toBe(true);
+    // A server from before `ended_in` says nothing: as before, every phase done.
+    expect(phaseStates(cloud('released'), run('failed'), true).every((p) => p.state === 'done')).toBe(true);
+  });
+
+  it('lists no provisioning or releasing for a remote server, and words its steps as connecting and done', () => {
+    const remote = cloud('released', { provider: 'remote', instance_id: null, ended_in: 'booting' });
+    expect(marks(phaseStates(remote, run('failed'), false))).toEqual(['failed booting', 'skipped syncing', 'skipped training', 'skipped collecting', 'done released']);
+    expect(['booting', 'released', 'syncing'].map((p) => panelPhaseLabel(p as never, false))).toEqual(['Connecting', 'Done', 'Uploading data']);
+    expect(panelPhaseLabel('booting', true)).toBe('Booting');
+  });
+
+  it('keeps releasing under way while the termination is not confirmed', () => {
+    expect(marks(phaseStates(ended('collecting'), run('completed'), true, true)).slice(-2)).toEqual(['now releasing', 'next released']);
+  });
+});
+
+describe('a cloud run’s names', () => {
+  it('names the GPU once: the offer’s until the worker reports its device, never "<gpu> at <provider>"', () => {
+    const c = { offer: offer('o', 'NVIDIA GeForce RTX 4080 SUPER', 16, null) } as RunCloud;
+    expect(cloudGpu({ device: 'NVIDIA GeForce RTX 4080 SUPER at Remote FOLO server', cloud: c })).toBe('RTX 4080 SUPER');
+    expect(cloudGpu({ device: '', cloud: c })).toBe('RTX 4080 SUPER');
+    expect(cloudGpu({ device: 'NVIDIA GeForce RTX 4080 SUPER (vulkan)', cloud: c })).toBe('RTX 4080 SUPER');
+  });
+
+  it('names a known provider before the server’s list is in, never by its id', () => {
+    expect(providerName('remote', undefined)).toBe('Remote FOLO server');
+    expect(providerName('runpod', undefined)).toBe('RunPod');
+    expect(providerName('lab', undefined)).toBe('lab');
+    expect(providerName('remote', [{ id: 'remote', name: 'Your server' } as never])).toBe('Your server');
+  });
+
+  it('takes a time limit within 0.25 to 720 hours only', () => {
+    expect([null, 0, -3, 0.01, 0.25, 72, 720, 1000].map(validHours)).toEqual([false, false, false, false, true, true, true, false]);
   });
 });
 

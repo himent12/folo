@@ -1,5 +1,5 @@
 import type { Augment, Capabilities, Dataset, Model, Optimizer, RunEstimate } from '$lib/api/types';
-import { compact, num, sentence } from '$lib/format';
+import { compact, deviceName, num, sentence } from '$lib/format';
 import { FROM_SCRATCH } from '$lib/lineage';
 import { referenceSource } from '$lib/reference';
 import { basisLine, confidenceLine, referenceBasis, updatedWords } from '$lib/throughput';
@@ -122,7 +122,7 @@ export function reviewRows(
     { key: 'imgsz', label: 'Image size', value: `${imgszN} px` },
     // A cloud run says where it runs ("RunPod · RTX 4090") in the device's place.
     onCloud
-      ? { key: 'runon' as const, label: 'Runs on', value: cloudPick.offer ? `${cloudPick.provider} · ${cloudPick.offer.gpu}` : cloudPick.provider, warn: !!errors.runon || !!errors.offer }
+      ? { key: 'runon' as const, label: 'Runs on', value: cloudPick.offer ? `${cloudPick.provider} · ${deviceName(cloudPick.offer.gpu)}` : cloudPick.provider, warn: !!errors.runon || !!errors.offer }
       : { key: 'device' as const, label: 'Device', value: deviceLabel, warn: !!deviceMsg },
     ...(caps || onCloud ? [{ key: 'amp' as const, label: 'Mixed precision', value: ampOn ? 'On' : 'Off' }] : []),
     {

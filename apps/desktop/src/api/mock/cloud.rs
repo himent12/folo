@@ -263,6 +263,7 @@ pub(super) fn launch_state(
         deadline: None,
         cost_usd: None,
         synced: None,
+        ended_in: None,
     }
 }
 

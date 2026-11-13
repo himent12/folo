@@ -9,7 +9,7 @@ import { bindable, computed, css, field, type Signal } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import type { Arch, Capabilities, Dataset, Optimizer, Run, SystemInfo } from '$lib/api/types';
 import { deviceName, pricePerHour, sentence, usd } from '$lib/format';
-import { availabilityNote, maxCost, menuOrder, offerLine } from '$lib/cloud';
+import { availabilityNote, maxCost, menuOrder, offerLine, validHours } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
@@ -111,7 +111,7 @@ export default function TrainingSection(props: TrainingSectionProps) {
   const chosen = () => cloudPick.offer;
   const most = () => {
     const c = chosen();
-    return c && cloudPick.hours !== null ? maxCost(c.price_per_hour, cloudPick.hours) : null;
+    return c && validHours(cloudPick.hours) ? maxCost(c.price_per_hour, cloudPick.hours) : null;
   };
 
   return (

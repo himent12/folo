@@ -152,6 +152,16 @@ describe('New run › Run on', () => {
     flushSync();
     expect(text(await until(() => target.querySelector('#hours-error'), 'the error'))).toBe('From 0.25 to 720 hours.');
     expect(target.querySelector<HTMLButtonElement>('.start button[type="submit"]')!.disabled).toBe(true);
+    // The Summary prices no limit the server would refuse ("$2,990 at 1,000 h", "$-0.51 at -3 h"); the time and the
+    // cost estimate do not depend on it, and stay (an empty field is no reason to say "Estimating…").
+    for (const v of ['1000', '-3', '0', '']) {
+      hours.value = v;
+      hours.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      expect(summary('Limit')).toBe('');
+      expect(summary('Est. time')).not.toBe('Estimating…');
+      expect(summary('Est. cost')).toMatch(/^\$\d+\.\d\d–\$\d+\.\d\d$/);
+    }
   });
 
   it('says a refusal at the control it is about: no capacity at the GPU (the offers read again), a connection at Run on', async () => {

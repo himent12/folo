@@ -415,6 +415,10 @@ pub struct RunCloud {
     /// RFC 3339 time `weights/last.folo` was last copied to this machine.
     #[serde(default)]
     pub synced: Option<String>,
+    /// The phase the hand-over was in when the run ended (when it went to `releasing`): where a failed run failed,
+    /// and which phases it never reached. `null` until then, and from servers before it.
+    #[serde(default)]
+    pub ended_in: Option<CloudPhase>,
 }
 
 /// `RunEstimate.cost`: what a cloud run would cost.

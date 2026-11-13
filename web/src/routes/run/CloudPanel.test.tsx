@@ -1,13 +1,13 @@
 // @vitest-environment happy-dom
 // A cloud run's page (docs/CLOUD.md): the hand-over is the waiting state's title, never a place in the queue; the
 // Cloud panel shows the phases, the transfer, the instance, the cost and the limit; a `cloud` event replaces the state.
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { render, type Rendered } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunEventHandlers } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
-import type { RunCloud } from '$lib/api/types';
+import type { CloudInstance, RunCloud } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import Run from '../Run';
 import CloudPanel, { type CloudPanelProps } from './CloudPanel';
@@ -40,6 +40,8 @@ const fact = (label: string) => text([...target.querySelectorAll('#cloud .facts 
 
 beforeEach(() => {
   hub.mode = 'mock';
+  // A released run's panel asks for its instance: the mock answers, never a network.
+  hub.api = new MockApi('normal', 0);
   target = document.createElement('div');
   document.body.appendChild(target);
 });
@@ -112,6 +114,59 @@ describe('CloudPanel', () => {
     expect(fact('Cost')).toBe('not billed');
     expect(target.querySelector('#cloud .facts a')).toBeNull();
   });
+
+  it('marks where a released run failed and what it never reached, and a remote server’s steps as its own', () => {
+    // The worker stopped answering during the upload: no training happened, so none is ticked.
+    c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'released', progress: null, ended_in: 'syncing' }), provider: 'RunPod', run: { status: 'failed' } } });
+    flushSync();
+    expect(phases()).toEqual(['done Provisioning', 'done Booting', 'failed Uploading data', 'skipped Training', 'skipped Collecting weights', 'done Releasing', 'done Released']);
+    expect(fact('Last checkpoint copy')).toBe('none');
+    unmount(c);
+    // A remote server: nothing provisioned or released, connected to; its GPU is not an instance.
+    const remote = state({ provider: 'remote', instance_id: null, phase: 'training', progress: null, cost_usd: null });
+    c = mount(CloudPanel, { target, props: { cloud: remote, provider: 'Remote FOLO server', provisions: false } });
+    flushSync();
+    expect(phases()).toEqual(['done Connecting', 'done Uploading data', 'now Training', 'next Collecting weights', 'next Done']);
+    expect(fact('GPU')).toBe('RTX 4090 · 24.0 GiB · Secure Cloud');
+    expect(fact('Instance')).toBe('');
+  });
+
+  it('takes a released run’s cost from its instance, and never another run’s', async () => {
+    vi.useRealTimers();
+    const inst = (id: string, status: CloudInstance['status'], cost: number): CloudInstance =>
+      ({ id, status, cost_usd: cost, offer: state().offer, error: null }) as CloudInstance;
+    const answer = vi.spyOn(hub.api, 'cloudInstances').mockResolvedValue([inst('ci_2', 'terminating', 9.99), inst('ci_1', 'terminated', 1.91)]);
+    // The run stopped waiting for the termination at $1.84; the reaper confirmed it later, at $1.91.
+    const first = state({ phase: 'released', progress: null, cost_usd: 1.84, ended_in: 'collecting' });
+    const cloud = signal(first);
+    c = render(() => <CloudPanel cloud={cloud.get()} provider="RunPod" run={{ status: 'completed' }} />, target);
+    await until(() => fact('Cost') === '$1.91', 'the ledger’s cost');
+    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+    // The same panel, another run's page (whose instance is ci_3), while its lookup is still on the way: nothing of
+    // ci_1 is shown for it, and ci_2's warning never is.
+    let answerLater: (v: CloudInstance[]) => void = () => {};
+    answer.mockReturnValueOnce(new Promise((r) => (answerLater = r)));
+    cloud.set(state({ phase: 'released', progress: null, cost_usd: 0.5, instance_id: 'ci_3', ended_in: 'collecting' }));
+    flushSync();
+    expect(fact('Cost')).toBe('$0.50');
+    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+    answerLater([inst('ci_2', 'terminating', 9.99)]);
+    await until(() => answer.mock.calls.length >= 2, 'the second lookup');
+    flushSync();
+    expect(fact('Cost')).toBe('$0.50');
+    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+  });
+
+  it('says when the ledger cannot be read, and reads it again until it can', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const answer = vi.spyOn(hub.api, 'cloudInstances').mockRejectedValue(new Error('down'));
+    c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'released', progress: null, ended_in: 'collecting' }), provider: 'RunPod', run: { status: 'completed' } } });
+    const note = await until(() => target.querySelector('#cloud .unconfirmed'), 'the note');
+    expect(text(note)).toBe('Could not check that the instance is terminated. Settings › Cloud');
+    answer.mockResolvedValue([{ id: 'ci_1', status: 'terminated', cost_usd: 1.2, offer: state().offer, error: null } as CloudInstance]);
+    vi.advanceTimersByTime(30_000);
+    await until(() => !target.querySelector('#cloud .unconfirmed') && fact('Cost') === '$1.20', 'the ledger read again');
+  });
 });
 
 describe('Run: a cloud run', () => {
@@ -153,5 +208,15 @@ describe('Run: a cloud run', () => {
     await open(new MockApi('normal', 0), 'run_c3d5');
     expect(phases().every((p) => p.startsWith('done'))).toBe(true);
     expect(fact('Cost')).toMatch(/^\$\d+\.\d\d$/);
+    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+  });
+
+  it('keeps releasing under way on a finished run whose instance’s termination is not confirmed', async () => {
+    // cloud-trouble: the key was revoked, so RunPod never confirmed the termination of shapes-m's instance.
+    await open(new MockApi('cloud-trouble', 0), 'run_c3d5');
+    const note = await until(() => target.querySelector('#cloud .unconfirmed'), 'the unconfirmed termination');
+    expect(text(note)).toBe('Termination not confirmed: the instance may still be billed. Settings › Cloud');
+    expect(phases().slice(-2)).toEqual(['now Releasing', 'next Released']);
+    expect(fact('Cost')).toMatch(/^\$\d+\.\d\d so far$/);
   });
 });

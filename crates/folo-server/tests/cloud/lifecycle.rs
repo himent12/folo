@@ -52,6 +52,8 @@ fn a_cloud_run_trains_on_an_instance_mirrors_it_and_releases_it() {
     assert_eq!(running_at.unwrap().last(), Some(&CloudPhase::Training));
     let c = done.cloud.clone().unwrap();
     assert_eq!(c.phase, CloudPhase::Released);
+    // It ended after the collection: every phase was reached.
+    assert_eq!(c.ended_in, Some(CloudPhase::Collecting));
     assert!(c.instance_id.is_some() && c.deadline.is_some() && c.synced.is_some() && c.cost_usd.is_some());
 
     // The worker trained the run without `compute`, on its own device, with the dataset sent as FOLO reads it.

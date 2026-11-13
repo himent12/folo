@@ -1,12 +1,19 @@
 /**
  * A cloud run's Cloud panel (docs/CLOUD.md): how far the hand-over is (the phases as done, current and to come, the
- * current one with its transfer), where it runs, what it has cost and the most it can, and when its checkpoint was
- * last copied home. It stays once the run has ended, with the final cost.
+ * current one with its transfer; once released, where a failed run failed and what it never reached), where it runs,
+ * what it has cost and the most it can, and when its checkpoint was last copied home. It stays once the run has ended.
+ * A released run's cost is its instance's own, from the ledger (`GET /api/cloud/instances`), which keeps counting
+ * after the run stopped waiting for the termination; while the provider has not confirmed it, releasing is still under
+ * way and the instance may still be billed, and the instance is read again every 30 s (also while it cannot be read).
  */
 import Check from '$icons/check';
-import { computed, css, For } from 'fw';
+import TriangleAlert from '$icons/triangle-alert';
+import X from '$icons/x';
+import { computed, css, effect, For } from 'fw';
+import { hub } from '$lib/api/index';
+import { Resource } from '$lib/api/resource';
 import type { RunCloud } from '$lib/api/types';
-import { offerLine, phaseIndex, phaseLabel, PHASES, PHASE_LABEL, transferShare, transferText } from '$lib/cloud';
+import { isAlive, offerLine, panelPhaseLabel, phaseIndex, phaseLabel, phaseStates, transferShare, transferText, type PhaseRun } from '$lib/cloud';
 import { ago, hoursText, timeOfDay, usd } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
@@ -16,15 +23,44 @@ import Progress from '$lib/ui/Progress';
 export interface CloudPanelProps {
   cloud: RunCloud;
   provider: string;
+  /** How the run ended and whether it trained: where a failed run failed, what it never reached. */
+  run?: PhaseRun;
+  /** The provider launches an instance per run (RunPod); a remote server does not (no provisioning, no release). */
+  provisions?: boolean;
 }
 
+/** How often an instance whose termination is not confirmed is read again. */
+const UNCONFIRMED_POLL_MS = 30_000;
+
 export default function CloudPanel(props: CloudPanelProps) {
-  const at = computed(() => phaseIndex(props.cloud.phase));
+  const provisions = () => props.provisions ?? true;
   const released = computed(() => props.cloud.phase === 'released');
+  // A released run's instance in the ledger: its cost, and whether the provider confirmed its termination (the run
+  // stops waiting after a minute; until then it may still be billed). Only a provisioned instance, only once released.
+  const instanceId = computed(() => (released.get() && provisions() ? props.cloud.instance_id : null));
+  const instance = new Resource(async (s) => {
+    const id = instanceId.get();
+    if (!id) return null;
+    return (await hub.api.cloudInstances(s)).find((i) => i.id === id) ?? null;
+  });
+  /** The instance of this run (the panel stays when the page moves to another run; an answer for the last one is not this one's). */
+  const own = computed(() => (instance.data && instance.data.id === instanceId.get() ? instance.data : null));
+  const unconfirmed = computed(() => (own.get() && isAlive(own.get()!.status) ? own.get() : null));
+  /** The ledger could not be read: whether the instance is gone is not known. */
+  const unknown = computed(() => !!instanceId.get() && !own.get() && instance.error !== undefined);
+  effect(() => {
+    if (!unconfirmed.get() && !unknown.get()) return;
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') void instance.refresh();
+    }, UNCONFIRMED_POLL_MS);
+    return () => clearInterval(t);
+  });
+  const states = computed(() => phaseStates(props.cloud, props.run, provisions(), !!unconfirmed.get()));
   const share = computed(() => transferShare(props.cloud.progress));
-  const state = (i: number) => (released.get() || i < at.get() ? 'done' : i === at.get() ? 'now' : 'next');
   const cost = computed(() => {
     const c = props.cloud;
+    const i = own.get();
+    if (i) return i.cost_usd === null ? 'not billed' : isAlive(i.status) ? `${usd(i.cost_usd)} so far` : usd(i.cost_usd);
     return c.cost_usd === null ? 'not billed' : released.get() ? usd(c.cost_usd) : `${usd(c.cost_usd)} so far`;
   });
   const limit = computed(() => {
@@ -37,21 +73,24 @@ export default function CloudPanel(props: CloudPanelProps) {
       <div class="body">
         <div class="wrap">
           <ol class="phases" aria-label="Hand-over">
-            <For each={PHASES} key={(p) => p}>
-              {(p, i) => {
-                const s = () => state(i());
+            <For each={states.get()} key={(p) => p.phase}>
+              {(p) => {
+                const s = () => p().state;
+                const label = () => panelPhaseLabel(p().phase, provisions());
                 return (
                   <li data-state={s()} aria-current={s() === 'now' ? 'step' : undefined}>
                     <span class="mark" aria-hidden="true">
-                      {s() === 'done' ? <Check size={12} strokeWidth={2.25} /> : null}
+                      {s() === 'done' ? <Check size={12} strokeWidth={2.25} /> : s() === 'failed' ? <X size={12} strokeWidth={2.25} /> : null}
                     </span>
-                    <span class="name">{PHASE_LABEL[p()]}</span>
+                    <span class="name">{label()}</span>
+                    {/* Out of the grid (absolute): the mark's meaning for a screen reader. */}
+                    {s() === 'failed' ? <span class="sr-only">(failed)</span> : s() === 'skipped' ? <span class="sr-only">(not reached)</span> : null}
                     {s() === 'now' && props.cloud.progress ? (
                       <>
                         <span class="xfer num">{transferText(props.cloud.progress, prefs.units)}</span>
                         {share.get() !== null ? (
                           <span class="bar">
-                            <Progress value={share.get()!} size="xs" label={`${PHASE_LABEL[p()]}: ${transferText(props.cloud.progress, prefs.units)}`} />
+                            <Progress value={share.get()!} size="xs" label={`${label()}: ${transferText(props.cloud.progress, prefs.units)}`} />
                           </span>
                         ) : null}
                       </>
@@ -60,7 +99,7 @@ export default function CloudPanel(props: CloudPanelProps) {
                 );
               }}
             </For>
-            {at.get() < 0 ? (
+            {phaseIndex(props.cloud.phase) < 0 ? (
               // A phase from a newer server: its own word, as the current one.
               <li data-state="now" aria-current="step">
                 <span class="mark" aria-hidden="true"></span>
@@ -70,8 +109,30 @@ export default function CloudPanel(props: CloudPanelProps) {
           </ol>
           {/* One row per fact, each its own line: a long label never narrows another row's value. */}
           <dl class="facts">
+            {unconfirmed.get() ? (
+              <p class="unconfirmed" role="status">
+                <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
+                <span>
+                  Termination not confirmed: the instance may still be billed.{' '}
+                  <a class="link" href={href('/settings?section=cloud')}>
+                    Settings › Cloud
+                  </a>
+                </span>
+              </p>
+            ) : unknown.get() ? (
+              <p class="unconfirmed" role="status">
+                <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
+                <span>
+                  Could not check that the instance is terminated.{' '}
+                  <a class="link" href={href('/settings?section=cloud')}>
+                    Settings › Cloud
+                  </a>
+                </span>
+              </p>
+            ) : null}
             <div>
-              <dt>Instance</dt>
+              {/* A remote server is not an instance: the row says its GPU. */}
+              <dt>{provisions() ? 'Instance' : 'GPU'}</dt>
               <dd>
                 {props.cloud.instance_id ? (
                   <a class="link" href={href('/settings?section=cloud')}>
@@ -92,7 +153,7 @@ export default function CloudPanel(props: CloudPanelProps) {
             </div>
             <div>
               <dt>Last checkpoint copy</dt>
-              <dd class="num">{props.cloud.synced ? ago(props.cloud.synced) : 'none yet'}</dd>
+              <dd class="num">{props.cloud.synced ? ago(props.cloud.synced) : released.get() ? 'none' : 'none yet'}</dd>
             </div>
           </dl>
         </div>
@@ -164,6 +225,32 @@ css`
     border-color: var(--accent-line);
     box-shadow: inset 0 0 0 3px var(--bg-panel);
     background: var(--accent-line);
+  }
+  /* A failed phase: its mark in the danger hue, the word in ink (DESIGN_DIRECTION §2.6). Phases never reached: faint,
+     their ring dashed. */
+  [data-state='failed'] {
+    color: var(--text-primary);
+  }
+  [data-state='failed'] .mark {
+    border-color: transparent;
+    color: var(--danger-solid);
+  }
+  [data-state='skipped'] .mark {
+    border-style: dashed;
+  }
+  /* Releasing still under way after the run ended: the warning mark in its hue, the words secondary. */
+  .unconfirmed {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: 4px 0;
+    border-bottom: 1px solid var(--line-subtle);
+    color: var(--text-secondary);
+  }
+  .unconfirmed :global(svg) {
+    flex: none;
+    margin-top: 2px;
+    color: var(--warning-solid);
   }
   .xfer {
     color: var(--text-secondary);

@@ -275,6 +275,10 @@ describe('Outcome', () => {
     expect(r.target.querySelector('.c-title')?.textContent).toBe('Interrupted: the server stopped before it started');
     expect(r.labels).toEqual(['Start again']);
     r.done();
+    // A cloud run's worker (a remote server) restarted; this server ran on.
+    r = render({ ...run, cloud: { provider: 'remote', phase: 'released' } as Run['cloud'] });
+    expect(r.target.querySelector('.c-title')?.textContent).toBe('Interrupted: the worker stopped during training');
+    r.done();
   });
 
   it('says the warning alone while the run has no outcome yet', () => {

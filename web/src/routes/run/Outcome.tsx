@@ -64,9 +64,13 @@ const NONE: string[] = [];
  */
 export const canContinue = (run: Pick<Run, 'best' | 'model_id'>) => !!run.model_id || !!run.best;
 
-/** A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. */
+/**
+ * A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. A
+ * cloud run's is its worker's (a remote server or an instance restarted), not this server's, which ran on.
+ */
 function stoppedTitle(run: Run) {
-  if (run.error_code === 'interrupted') return run.started ? 'Interrupted: the server stopped during training' : 'Interrupted: the server stopped before it started';
+  const who = run.cloud ? 'the worker' : 'the server';
+  if (run.error_code === 'interrupted') return run.started ? `Interrupted: ${who} stopped during training` : `Interrupted: ${who} stopped before it started`;
   return canContinue(run) ? `Stopped at epoch ${run.epoch}` : run.started ? 'Stopped during its first epoch' : 'Stopped before it started';
 }
 

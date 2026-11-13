@@ -3,7 +3,7 @@
 // run and the run page say the same thing with the same numbers.
 
 import type { CloudAvailability, CloudInstanceStatus, CloudOffer, CloudPhase, CloudProvider, Run, RunCloud, SystemInfo, TransferProgress } from './api/types';
-import { bytes, hoursText, pct, pricePerHour, usd } from './format';
+import { bytes, deviceName, hoursText, pct, pricePerHour, usd } from './format';
 
 /**
  * Whether the server has cloud compute (`/api/system`'s `cloud` feature): without it no cloud control renders and no
@@ -67,8 +67,64 @@ export function article(name: string): 'a' | 'an' {
   return /^[aeiou]/i.test(name) ? 'an' : 'a';
 }
 
-/** A provider's display name ("RunPod") from its id, the id itself until the list is in. */
-export const providerName = (id: string, providers: readonly CloudProvider[] | undefined): string => providers?.find((p) => p.id === id)?.name ?? id;
+/** The names of the providers this Studio knows, until the server's list is in (so a page never flashes "remote"). */
+const KNOWN_PROVIDERS: Record<string, string> = { runpod: 'RunPod', remote: 'Remote FOLO server' };
+
+/** A provider's display name ("RunPod") from its id: the server's word, a known one until the list is in, else the id. */
+export const providerName = (id: string, providers: readonly CloudProvider[] | undefined): string =>
+  providers?.find((p) => p.id === id)?.name ?? KNOWN_PROVIDERS[id] ?? id;
+
+/**
+ * The GPU a cloud run's header names: the worker's device once it reported one, else the offer's GPU. Until then the
+ * server's `device` is "<gpu> at <provider>", and the header already says the provider.
+ */
+export function cloudGpu(run: Pick<Run, 'device'> & { cloud: RunCloud }): string {
+  const d = run.device;
+  return deviceName(!d || d.startsWith(`${run.cloud.offer.gpu} at `) ? run.cloud.offer.gpu : d);
+}
+
+/** How far a phase of a finished or running cloud run got, as the Cloud panel marks it. */
+export type PhaseState = 'done' | 'now' | 'next' | 'failed' | 'skipped';
+
+/** What a cloud run's phases need of the run: how it ended. */
+export type PhaseRun = Pick<Run, 'status' | 'error_code'>;
+
+/**
+ * The phases a cloud run's panel lists, each with its state. A provider that launches nothing (a remote server) has no
+ * provisioning or releasing. Live, the phases before the current one are done. Once released, the server says which
+ * phase the run ended in (`ended_in`): the phases before it are done, it is failed for a failed run (not done for one
+ * stopped before training), and the phases after it were never reached, so a run whose upload failed does not read as
+ * trained. A run that failed on the worker still has its weights collected (it ends in `collecting`): its training
+ * failed, not the collection, which fails only as `cloud_sync_failed`. A server from before `ended_in` says nothing,
+ * and then every phase is done, as it said before.
+ * `unconfirmed`: the instance's termination is not confirmed yet (the run stops waiting after a minute), so releasing
+ * is still under way.
+ */
+export function phaseStates(cloud: RunCloud, run: PhaseRun | undefined, provisions: boolean, unconfirmed = false): { phase: CloudPhase; state: PhaseState }[] {
+  const shown = provisions ? PHASES : PHASES.filter((p) => p !== 'provisioning' && p !== 'releasing');
+  const at = phaseIndex(cloud.phase);
+  if (cloud.phase !== 'released') return shown.map((p) => ({ phase: p, state: PHASES.indexOf(p) < at ? 'done' : PHASES.indexOf(p) === at ? 'now' : 'next' }));
+  const collected = cloud.ended_in === 'collecting' && run?.status === 'failed' && run.error_code !== 'cloud_sync_failed';
+  const ended = collected ? PHASES.indexOf('training') : cloud.ended_in ? phaseIndex(cloud.ended_in) : -1;
+  const releasing = PHASES.indexOf('releasing');
+  const endState = (): PhaseState =>
+    run?.status === 'failed' ? 'failed' : run?.status === 'stopped' && ended < PHASES.indexOf('training') ? 'skipped' : 'done';
+  return shown.map((p) => {
+    const i = PHASES.indexOf(p);
+    if (unconfirmed && p === 'releasing') return { phase: p, state: 'now' };
+    if (unconfirmed && p === 'released') return { phase: p, state: 'next' };
+    if (i >= releasing || ended < 0 || i < ended) return { phase: p, state: 'done' };
+    if (collected && p === 'collecting') return { phase: p, state: 'done' };
+    return { phase: p, state: i === ended ? endState() : 'skipped' };
+  });
+}
+
+/** A phase's words in the panel: a remote server's boot is the wait for it to answer, and its end is not a release. */
+export const panelPhaseLabel = (phase: CloudPhase, provisions: boolean): string =>
+  provisions ? PHASE_LABEL[phase] : phase === 'booting' ? 'Connecting' : phase === 'released' ? 'Done' : PHASE_LABEL[phase];
+
+/** `Compute.max_hours` within its limits: what New run can price and send. */
+export const validHours = (h: number | null): h is number => h !== null && h >= MIN_HOURS && h <= MAX_HOURS;
 
 /**
  * The waiting state's title while a cloud run is queued: the phase it is in ("Provisioning an RTX 4090 at RunPod",
