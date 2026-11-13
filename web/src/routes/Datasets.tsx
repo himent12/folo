@@ -1,3 +1,4 @@
+import FolderOpen from '$icons/folder-open';
 import Images from '$icons/images';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
@@ -248,9 +249,12 @@ export default function Datasets() {
                     <EmptyState
                       icon={Images}
                       title="No datasets yet"
-                      description="Try FOLO in a minute with a generated set of shapes, or have an agent label your own images."
+                      description="Register a folder of images you have labeled (YOLO or COCO), try FOLO in a minute with a generated set of shapes, or have an agent label your images."
                       actions={() => (
                         <>
+                          <Button icon={FolderOpen} onclick={() => add('folder')}>
+                            Register folder
+                          </Button>
                           <Button icon={Sparkles} onclick={() => add('synthetic')}>
                             Generate sample set
                           </Button>
