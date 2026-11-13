@@ -6,6 +6,8 @@
  * query parameters): ONNX then downloads straight to this computer, the button naming the file
  * ("Download fasteners-n-best.onnx"). On older servers ONNX is written on the server and its path shown.
  *
+ * Closing the dialog while a file is on its way does not drop it: it is still saved, and a toast says so (or why not).
+ *
  * The demo (the in-browser mock) creates no file and says so before and after: "Demo: no file is created" under the
  * formats, then a neutral preview with no success check, no saved-file claim and no Download, whose one action is
  * "Connect to a server" (Settings › Connection). FOLO and ONNX alike.
@@ -15,7 +17,7 @@ import Plug from '$icons/plug';
 import Copy from '$icons/copy';
 import Download from '$icons/download';
 import Info from '$icons/info';
-import { bindable, computed, css, effect, For, signal } from 'fw';
+import { bindable, computed, css, effect, For, onCleanup, signal } from 'fw';
 import { HttpApi, onnxFileName } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { ExportFormat, ExportResult, Model, OnnxSwitches } from '$lib/api/types';
@@ -130,6 +132,17 @@ export default function ExportDialog(props: ExportDialogProps) {
   /** Results inside the open dialog (a blocked copy, the demo's missing file) show in its status region, not a toast. */
   const status = new DialogStatus();
   let run = 0;
+  let destroyed = false;
+  onCleanup(() => {
+    destroyed = true;
+  });
+
+  /** An export that ended after the dialog closed: its toast is out, and the dialog starts afresh when opened again. */
+  function endedClosed(e?: unknown) {
+    // page-level: only called once the dialog is closed or the page has gone.
+    if (e !== undefined) toast.error(e, `Could not export ${model().name}`);
+    reset();
+  }
 
   /**
    * ONNX on a server with `weights_onnx`: asks for the graph (built on the first request, about as long as an export)
@@ -154,9 +167,13 @@ export default function ExportDialog(props: ExportDialogProps) {
       a.rel = 'noopener';
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      if (!open.peek()) toast.success(`Downloaded ${f.name}`, bytes(f.size, prefs.units));
+      if (!open.peek() || destroyed) {
+        toast.success(`Downloaded ${f.name}`, bytes(f.size, prefs.units));
+        endedClosed();
+      }
     } catch (e) {
       if (id !== run) return;
+      if (!open.peek() || destroyed) return endedClosed(e);
       error.set(e);
       phase.set('error');
     }
@@ -175,12 +192,14 @@ export default function ExportDialog(props: ExportDialogProps) {
       done.set(fmt);
       phase.set('done');
       // The open dialog already says "Export finished" with the path: a toast would say it twice at once.
-      if (!open.peek()) {
+      if (!open.peek() || destroyed) {
         if (demo.peek()) toast.info('Demo preview', `Exporting ${model().name} created no file.`);
         else toast.success(`Exported ${model().name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
+        endedClosed();
       }
     } catch (e) {
       if (id !== run) return;
+      if (!open.peek() || destroyed) return endedClosed(e);
       error.set(e);
       phase.set('error');
     }
@@ -230,6 +249,10 @@ export default function ExportDialog(props: ExportDialogProps) {
     set: (v: boolean) => switches.set({ ...switches.peek(), [key]: v }),
   });
   const close = () => open.set(false);
+  // A file on its way is not dropped by closing: it goes on, and a toast says how it ended.
+  const onclose = () => {
+    if (phase.peek() !== 'running') reset();
+  };
 
   const footer = () => (
     <>
@@ -283,7 +306,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   );
 
   return (
-    <Dialog bind:open={open} title="Export model" description={`Write ${model().name} to a file you can deploy.`} onclose={reset} status={status} footer={footer}>
+    <Dialog bind:open={open} title="Export model" description={`Write ${model().name} to a file you can deploy.`} onclose={onclose} status={status} footer={footer}>
       {/* One live region that stays in the dialog, so the start and the end of an export are both announced (the toast is
           held back while the dialog is open). Failures announce themselves through ErrorState's alert. */}
       <p class="sr-only" role="status">

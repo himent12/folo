@@ -206,6 +206,64 @@ describe('ExportDialog: ONNX download (weights_onnx)', () => {
 
 });
 
+describe('ExportDialog: closing while the file is on its way', () => {
+  /** A download that ends when the test says. */
+  function deferred() {
+    let resolve!: (f: File) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<File>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+  const dialog = () => target.ownerDocument.querySelector('dialog')!;
+
+  async function startThenClose(api: HttpApi) {
+    vi.spyOn(api, 'system').mockResolvedValue({ ...SYS, features: ['weights_onnx'] });
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
+    (await until(() => button('Download shapes-n-best.onnx'), 'the download button')).click();
+    flushSync();
+    expect(dialog().textContent).toContain('Preparing');
+    button('Cancel')!.click();
+    flushSync();
+    // happy-dom's close() may not fire the event the browser fires.
+    if (!dialog().open) dialog().dispatchEvent(new Event('close'));
+    flushSync();
+  }
+
+  it('still saves the file, and says so in a toast (models F6)', async () => {
+    const api = new HttpApi('http://folo.test');
+    const d = deferred();
+    vi.spyOn(api, 'onnxFile').mockReturnValue(d.promise);
+    const saved: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
+    const success = vi.spyOn(toast, 'success');
+    await startThenClose(api);
+    d.resolve(new File([new Uint8Array(2048)], 'shapes-n-best.onnx'));
+    await until(() => saved.length > 0, 'the save');
+    expect(saved).toEqual(['shapes-n-best.onnx']);
+    expect(success).toHaveBeenCalledWith('Downloaded shapes-n-best.onnx', '2.0 KiB');
+  });
+
+  it('says in a toast when it fails after closing', async () => {
+    const api = new HttpApi('http://folo.test');
+    const d = deferred();
+    vi.spyOn(api, 'onnxFile').mockReturnValue(d.promise);
+    const failed = vi.spyOn(toast, 'error');
+    await startThenClose(api);
+    d.reject(new Error('disk full'));
+    await until(() => failed.mock.calls.length > 0, 'the error toast');
+    expect(failed.mock.calls[0]![1]).toBe('Could not export shapes-n-best');
+  });
+});
+
 describe('ExportDialog: the demo creates no file', () => {
   const dialogText = () => target.ownerDocument.querySelector('dialog')?.textContent?.replace(/\s+/g, ' ') ?? '';
   const links = () => [...target.ownerDocument.querySelectorAll<HTMLAnchorElement>('dialog a')];
