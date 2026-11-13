@@ -79,6 +79,8 @@ css`
   /* Settings to review: 28 px rows, each a way back to its control. */
   .review {
     display: grid;
+    /* A long value (a remote server's GPU) is cut with an ellipsis inside its row, never widens the Summary. */
+    grid-template-columns: minmax(0, 1fr);
     margin: calc(-1 * var(--space-1)) calc(-1 * var(--space-2)) 0;
   }
   /* Touch: each review row is a full 44 px target (after the base rule, so it wins). */

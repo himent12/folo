@@ -134,6 +134,9 @@ export function phaseStates(cloud: RunCloud, run: PhaseRun | undefined, provisio
 export const panelPhaseLabel = (phase: CloudPhase, provisions: boolean): string =>
   provisions ? PHASE_LABEL[phase] : phase === 'booting' ? 'Connecting' : phase === 'released' ? 'Done' : PHASE_LABEL[phase];
 
+/** `Compute.max_hours` within its limits: what New run can price and send. */
+export const validHours = (h: number | null): h is number => h !== null && h >= MIN_HOURS && h <= MAX_HOURS;
+
 /**
  * The waiting state's title while a cloud run is queued: the phase it is in ("Provisioning an RTX 4090 at RunPod",
  * "Booting the instance", "Uploading data · 25%"), or, once the worker has the run, that it starts there.

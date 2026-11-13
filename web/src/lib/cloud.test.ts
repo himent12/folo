@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CloudOffer, RunCloud, RunStatus } from './api/types';
-import { article, beforeTraining, cloudGpu, defaultMaxHours, inHandover, isAlive, limitText, menuOrder, panelPhaseLabel, phaseIndex, phaseLabel, phaseStates, phaseTitle, pickOffer, providerName, transferShare, transferText, type PhaseRun } from './cloud';
+import { article, beforeTraining, cloudGpu, defaultMaxHours, inHandover, isAlive, limitText, menuOrder, panelPhaseLabel, phaseIndex, phaseLabel, phaseStates, phaseTitle, pickOffer, providerName, transferShare, transferText, validHours, type PhaseRun } from './cloud';
 
 const GiB = 2 ** 30;
 const offer = (id: string, gpu: string, vram: number, price: number | null, availability: CloudOffer['availability'] = 'high'): CloudOffer => ({
@@ -146,6 +146,9 @@ describe('a cloud run’s names', () => {
     expect(providerName('remote', [{ id: 'remote', name: 'Your server' } as never])).toBe('Your server');
   });
 
+  it('takes a time limit within 0.25 to 720 hours only', () => {
+    expect([null, 0, -3, 0.01, 0.25, 72, 720, 1000].map(validHours)).toEqual([false, false, false, false, true, true, true, false]);
+  });
 });
 
 describe('offers', () => {

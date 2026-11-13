@@ -7,7 +7,7 @@ import TriangleAlert from '$icons/triangle-alert';
 import { bindable, computed, css, For, type Signal } from 'fw';
 import type { OomFix } from '$lib/oom';
 import { bytes, num, usdRange } from '$lib/format';
-import { limitText } from '$lib/cloud';
+import { limitText, validHours } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
 import { timeRange } from '$lib/throughput';
 import Skeleton from '$lib/ui/Skeleton';
@@ -180,7 +180,7 @@ export default function EstimateFigures(props: EstimateFiguresProps) {
                 </p>
               </details>
             </dd>
-            {props.onCloud && props.cloudPick.offer && props.cloudPick.hours !== null ? (
+            {props.onCloud && props.cloudPick.offer ? (
               // Money before it is spent: the training's range, with what comes on top, and the most the run can cost,
               // beside the time they follow from (the memory and its meter stay together, last).
               <>
@@ -193,8 +193,13 @@ export default function EstimateFigures(props: EstimateFiguresProps) {
                     <dd class="cost-note">Training only: booting and the upload come on top.</dd>
                   </>
                 ) : null}
-                <dt>Limit</dt>
-                <dd class="num">{limitText(props.cloudPick.offer!.price_per_hour, props.cloudPick.hours!)}</dd>
+                {/* Only a time limit the server takes: "Stop after" in error says why under its field. */}
+                {validHours(props.cloudPick.hours) ? (
+                  <>
+                    <dt>Limit</dt>
+                    <dd class="num">{limitText(props.cloudPick.offer!.price_per_hour, props.cloudPick.hours)}</dd>
+                  </>
+                ) : null}
               </>
             ) : null}
             {props.memShown ? (
