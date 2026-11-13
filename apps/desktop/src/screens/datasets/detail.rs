@@ -83,7 +83,33 @@ impl FoloApp {
             Some(Load::Failed(e)) => {
                 let e = e.clone();
                 let header = page_header(&t, "Dataset", "", vec![]);
-                let err = self.error_panel(&e, "ds-detail-retry", window, cx);
+                // The server answered: no such dataset (removed elsewhere, or a stale link). Not a
+                // connection problem, so no Connection settings: the way back is the list.
+                let err = if e.code == "dataset_not_found" {
+                    let all = self.button(
+                        "ds-missing-all",
+                        "All datasets",
+                        Btn::Secondary,
+                        None,
+                        window,
+                        cx,
+                        act(|this, w, cx| this.navigate(crate::app::Route::Datasets, w, cx)),
+                    );
+                    panel(&t)
+                        .child(
+                            empty_state(
+                                &t,
+                                "icons/circle-alert.svg",
+                                "Dataset not found",
+                                "It may have been removed.",
+                                Tone::Neutral,
+                            )
+                            .child(all),
+                        )
+                        .into_any_element()
+                } else {
+                    self.error_panel(&e, "ds-detail-retry", window, cx)
+                };
                 return self.page_frame(&t, header, err, cx);
             }
             _ => {

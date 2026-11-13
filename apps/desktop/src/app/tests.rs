@@ -678,3 +678,44 @@ fn closing_while_its_own_server_trains_asks_first_alone_and_keep_open_keeps_it()
     assert!(!drive(&mut app, window, |this, w, cx| this.should_close_with(None, w, cx)));
     drive(&mut app, window, |this, _, _| assert_eq!(this.confirm_close.as_deref(), Some(&[][..])));
 }
+
+#[test]
+fn a_dataset_page_for_an_id_the_server_does_not_have_leads_to_the_list_not_to_settings() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Dataset("ds_nope".into()), w, cx));
+    // A frame asks for the dataset, the answer comes, the next frame draws it.
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        assert!(keys.iter().any(|k| k == "ds-missing-all"), "{keys:?}");
+        assert!(
+            !keys.iter().any(|k| k.starts_with("ds-detail-retry")),
+            "no Connection settings or Retry: {keys:?}"
+        );
+    });
+}
+
+#[test]
+fn a_dataset_not_found_once_loads_again_once_it_is_listed() {
+    use crate::api::ApiError;
+    use crate::store::Load;
+    let (mut app, window) = open();
+    // Its page was opened while it wasn't registered; now the list has it again.
+    let id = drive(&mut app, window, |this, _, _| {
+        let id = this.store.datasets.ready().unwrap()[0].id.clone();
+        this.store.dataset.insert(id.clone(), Load::Failed(ApiError::new("dataset_not_found", "gone")));
+        id
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_dataset(&id, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset.get(&id).is_some_and(|l| l.ready().is_some()))
+    });
+    // One the list doesn't have stays "not found" (no request loop).
+    drive(&mut app, window, |this, _, cx| {
+        this.store.dataset.insert("ds_nope".into(), Load::Failed(ApiError::new("dataset_not_found", "gone")));
+        this.ensure_dataset("ds_nope", cx);
+        assert!(this.store.dataset.get("ds_nope").is_some_and(|l| l.error().is_some()));
+    });
+}
