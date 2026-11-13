@@ -169,7 +169,8 @@ describe('New benchmark', () => {
     select.value = a.id;
     select.dispatchEvent(new Event('change', { bubbles: true }));
     const note = await until(() => document.querySelector('.note.warn[data-unreviewed]'), 'the unreviewed note');
-    expect(note.textContent).toMatch(/^1 of its/);
+    // Out of the labeled images of the same read, not of the job's older list.
+    expect(note.textContent).toMatch(/^1 of its 1,001 labeled images/);
     expect(aReads).toBe(4);
     // Job B picked: A's count is not shown for it while B's answer is out, nor after it says every image is reviewed.
     select.value = b.id;

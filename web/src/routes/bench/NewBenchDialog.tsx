@@ -33,7 +33,7 @@ const FIX: Record<string, string> = { name: 'Fix the name first', description: '
  * The labeled images of job `id` that are not reviewed, read 1000 at a time; null when the count of labeled images
  * changed between pages (an image labeled, removed or relabeled meanwhile shifts the offsets: a page could be skipped).
  */
-async function countUnreviewed(id: string, s: AbortSignal): Promise<number | null> {
+async function countUnreviewed(id: string, s: AbortSignal): Promise<{ n: number; labeled: number } | null> {
   let n = 0;
   let total: number | null = null;
   for (let offset = 0; ; ) {
@@ -42,7 +42,7 @@ async function countUnreviewed(id: string, s: AbortSignal): Promise<number | nul
     total = page.total;
     n += page.images.filter((i) => !i.reviewed).length;
     offset += page.images.length;
-    if (!page.images.length || offset >= page.total) return offset >= page.total ? n : null;
+    if (!page.images.length || offset >= page.total) return offset >= page.total ? { n, labeled: page.total } : null;
   }
 }
 
@@ -101,18 +101,19 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   // benchmark's truth as an agent drew them. Read a page of 1000 at a time, with the job it counts (a Resource keeps
   // its last data while it reloads, so a count shows only for its own job); null for a dataset or a count that cannot
   // be trusted (the job's labeled images changed under the paging three times running).
-  const unreviewed = new Resource(async (s): Promise<{ job: string; n: number } | null> => {
+  const unreviewed = new Resource(async (s): Promise<{ job: string; n: number; labeled: number } | null> => {
     const id = jobId.get();
     if (kind.get() !== 'label_job' || !id) return null;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const n = await countUnreviewed(id, s);
-      if (n !== null) return { job: id, n };
+      const c = await countUnreviewed(id, s);
+      if (c !== null) return { job: id, ...c };
     }
     return null;
   });
   const unreviewedHere = computed(() => {
     const u = unreviewed.data;
-    return u && !unreviewed.loading && !unreviewed.error && u.job === jobId.get() ? u.n : 0;
+    // With the labeled count of the same read: the job's list may be older (an agent labeled more since).
+    return u && !unreviewed.loading && !unreviewed.error && u.job === jobId.get() && u.n ? u : null;
   });
   /** Images the source holds (a split's, or a job's labeled ones). */
   const sourceImages = computed(() => (kind.get() === 'dataset' ? (dataset.get()?.splits[split.get()] ?? 0) : (job.get()?.counts.labeled ?? 0)));
@@ -310,7 +311,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
           <p class="note warn" data-unreviewed>
             <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
             <span>
-              {unreviewedText(unreviewedHere.get(), job.get()!.counts.labeled)}
+              {unreviewedText(unreviewedHere.get()!.n, unreviewedHere.get()!.labeled)}
             </span>
           </p>
         ) : kind.get() === 'label_job' ? (
