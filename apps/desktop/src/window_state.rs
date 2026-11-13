@@ -21,6 +21,9 @@ pub struct State {
     /// Whether connecting starts a local `folo serve` when none is running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_server: Option<bool>,
+    /// Settings › Reduce motion, when picked against the OS's own setting (else it follows the OS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce_motion: Option<bool>,
 }
 
 /// The window in logical pixels: its restored (windowed) bounds, and how it was showing.
@@ -208,9 +211,13 @@ mod tests {
             }),
             theme: Some("light".into()),
             spawn_server: Some(false),
+            reduce_motion: Some(true),
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);
+        // A file written before Reduce motion was kept: it follows the OS.
+        std::fs::write(&path, r#"{"theme":"dark","spawn_server":true}"#).unwrap();
+        assert_eq!(load(&path).reduce_motion, None);
         // Saving again replaces the file and leaves no temporary file behind.
         let state2 = State { theme: Some("dark".into()), ..state.clone() };
         save(&path, &state2).unwrap();

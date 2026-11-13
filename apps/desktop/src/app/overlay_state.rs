@@ -226,6 +226,9 @@ impl FoloApp {
         if self.menu_open.is_some() || self.export_open {
             self.menu_open = None;
             self.export_open = false;
+        } else if self.confirm_close.is_some() {
+            // On top of every other overlay: it goes first, and theirs stay as they were.
+            self.keep_open(window, cx);
         } else if self.palette.is_some() {
             self.close_palette(window, cx);
         } else if self.confirm_delete.is_some() {

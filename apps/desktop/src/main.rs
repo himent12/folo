@@ -80,7 +80,8 @@ Options:
   --server URL          Connect to the folo serve at URL
   --mock                Use the built-in demo data
   --open SCREEN         Start on a screen: overview, datasets, dataset:ID, runs, run:ID, models,
-                        model:ID, playground, settings, or new-run (the dialog)
+                        model:ID, benchmarks, bench:ID, bench-entry:ID/ENTRY, playground,
+                        settings, or new-run (the dialog)
   --theme dark|light    Colour theme [default: the last one, else dark]
   --width W             Window width in px [default: the last size, else 1280]
   --height H            Window height in px [default: the last size, else 800]
@@ -210,6 +211,10 @@ fn main() {
                         app.state_path = state_path.clone();
                         app.server_mode = server_mode;
                         app.spawn_server = spawn_server;
+                        if let Some(calm) = saved.reduce_motion {
+                            app.reduce_motion = calm;
+                            crate::ui::set_reduce_motion(calm);
+                        }
                         app.server_url.update(cx, |i, cx| i.set_text(connect_url.clone(), cx));
                         if let Some(s) = &spec {
                             scenario::apply(&mut app, s, window, cx);
@@ -221,11 +226,14 @@ fn main() {
                             app.open_new_run_pending = true;
                         } else if let Some(route) = open.as_deref().and_then(app::Route::parse) {
                             app.route = route;
+                        } else if let Some(target) = &open {
+                            eprintln!(
+                                "folo-desktop: --open {target}: not a screen (see --help); opening Overview"
+                            );
                         }
                         let this = cx.weak_entity();
                         window.on_window_should_close(cx, move |window, cx| {
-                            this.update(cx, |app, cx| app.save_window_state(window, cx)).ok();
-                            true
+                            this.update(cx, |app, cx| app.should_close(window, cx)).unwrap_or(true)
                         });
                         app
                     })
@@ -321,6 +329,24 @@ mod tests {
             assert!(help.contains(flag), "{flag} missing from --help");
         }
         assert_eq!(info_text(&["--mock", "--open", "runs"]), None);
+        // Every kind of `--open` target parses, and --help names it.
+        for target in [
+            "overview",
+            "datasets",
+            "dataset:ID",
+            "runs",
+            "run:ID",
+            "models",
+            "model:ID",
+            "benchmarks",
+            "bench:ID",
+            "bench-entry:ID/ENTRY",
+            "playground",
+            "settings",
+        ] {
+            assert!(app::Route::parse(target).is_some(), "{target}");
+            assert!(help.contains(target), "--help leaves out {target}");
+        }
         assert_eq!(info_text::<&str>(&[]), None);
     }
 }

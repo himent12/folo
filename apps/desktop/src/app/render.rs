@@ -24,7 +24,8 @@ impl Render for FoloApp {
         if let Some(r) = self.route_pending.take() {
             self.navigate(r, window, cx);
         }
-        if std::mem::take(&mut self.restore_pending) {
+        // Not from under the close question (a dialog that finished behind it): it keeps the focus.
+        if std::mem::take(&mut self.restore_pending) && self.confirm_close.is_none() {
             self.restore_focus(window);
         }
         if self.scroll_end_pending > 0 {
@@ -38,7 +39,11 @@ impl Render for FoloApp {
             REVEAL.with(|r| *r.borrow_mut() = Some(vec![self.page_scroll.clone()]));
             window.request_animation_frame();
         }
-        if self.open_new_run_pending && self.store.datasets.ready().is_some_and(|d| !d.is_empty()) {
+        // Not under the close question: it waits until the window stays open.
+        if self.open_new_run_pending
+            && self.confirm_close.is_none()
+            && self.store.datasets.ready().is_some_and(|d| !d.is_empty())
+        {
             self.open_new_run_pending = false;
             self.open_new_run(None, window, cx);
         }
@@ -104,6 +109,10 @@ impl Render for FoloApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &Submit, w, cx| {
+                // Ctrl Enter never reaches a form under the close question.
+                if this.confirm_close.is_some() {
+                    return;
+                }
                 if this.cloud.connect.is_some() {
                     this.submit_connect(w, cx);
                 } else if this.new_run.is_some() {

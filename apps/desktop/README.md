@@ -58,15 +58,17 @@ dismisses. The caption buttons' width and Close's hover colours are tokens (`lay
 `F11` (or Toggle full screen in the palette) toggles full screen. There the window has no caption areas, so the
 three buttons are plain buttons: Minimize, Restore (leaves full screen) and Close.
 
-The window opens as it was closed: its restored size and place, maximized or full screen, and the theme
-(`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file).
+The window opens as it was closed: its restored size and place, maximized or full screen, the theme and Reduce
+motion when it was set against the OS's own setting (`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file).
 It reopens on the display it was on (the display's UUID, derived from its device name as GPUI did, so a file
 written by an older build still matches; kept with the place: each display's bounds are in its own logical pixels,
 so with mixed scale factors their rectangles overlap and the place alone can't say which), if
 that display still shows enough of the title bar to grab; else on the display that shows the most of it (a tie
 goes to the primary display). A place no connected display shows enough of opens centred on the primary display. Launches for screenshots
 (`--scenario`, `--width`, `--height`) neither read nor write it, and `--theme` beats the remembered theme.
-Closed while minimized, it keeps the mode it had before (`window_state::closing_mode`).
+Closed while minimized, it keeps the mode it had before (`window_state::closing_mode`). Closing the window stops the
+`folo serve` the app started: when a run of this machine is training or queued on it, the app asks first (Keep open,
+or Stop and close).
 
 The app icon (taskbar, Alt-Tab, Explorer) is `assets/folo.ico`, the logo of `design/logo-icon.svg` drawn with the
 tokens by `tools/make-icon.ps1` (run it again when either changes, and commit the .ico). folo-ui loads icon resource

@@ -463,6 +463,11 @@ pub struct FoloApp {
     pub narrow: bool,
     pub confirm_stop: Option<String>,
     pub confirm_delete: Option<DeleteTarget>,
+    /// Closing the window would stop these runs (on the server this app started): asked first. Empty:
+    /// that server didn't say (it didn't answer in time).
+    pub confirm_close: Option<Vec<String>>,
+    /// The app's own server is being asked which runs closing would stop.
+    pub close_checking: bool,
     /// Remove a dataset with its files (`?files=true`): asked in its confirmation, off each time
     /// it opens, offered only for a dataset the server wrote.
     pub delete_files: bool,
@@ -666,6 +671,8 @@ impl FoloApp {
             narrow: false,
             confirm_stop: None,
             confirm_delete: None,
+            confirm_close: None,
+            close_checking: false,
             delete_files: false,
             nr_estimate: None,
             nr_estimate_last: None,
