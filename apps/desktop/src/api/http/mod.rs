@@ -448,7 +448,7 @@ FOLO"
             json("200 OK", &instance),
             json(
                 "409 Conflict",
-                r#"{ "error": { "code": "connection_in_use", "message": "RunPod has a live instance", "hint": null } }"#,
+                r#"{ "error": { "code": "connection_in_use", "message": "this connection has a live instance", "hint": "terminate it first" } }"#,
             ),
         ]);
         let api = HttpBackend::new(&url);
@@ -477,10 +477,11 @@ FOLO"
         assert_eq!(line(), "GET /api/cloud/instances HTTP/1.1");
         assert_eq!(api.terminate_instance("ci_1").unwrap().cost_usd, Some(0.42));
         assert_eq!(line(), "DELETE /api/cloud/instances/ci_1 HTTP/1.1");
+        // The server's message and hint, as sentences (as Studio shows them).
         let busy = api.disconnect_cloud("cc_1").unwrap_err();
         assert_eq!(
-            (busy.code.as_str(), busy.message.as_str()),
-            ("connection_in_use", "RunPod has a live instance")
+            (busy.code.as_str(), busy.message.as_str(), busy.hint.as_deref()),
+            ("connection_in_use", "This connection has a live instance.", Some("Terminate it first."))
         );
     }
 
