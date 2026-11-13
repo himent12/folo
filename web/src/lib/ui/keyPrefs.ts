@@ -17,6 +17,11 @@ function load(): boolean {
 class KeyPrefs {
   #on = signal(typeof localStorage === 'undefined' ? true : load());
 
+  constructor() {
+    // Switched in another tab: here too (shell F2).
+    if (typeof window !== 'undefined') window.addEventListener('storage', (e) => (e.key === KEY || e.key === null) && this.#on.set(load()));
+  }
+
   get singleKeys() {
     return this.#on.get();
   }

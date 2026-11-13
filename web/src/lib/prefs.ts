@@ -18,7 +18,8 @@ interface Prefs {
 const KEY = 'folo.prefs';
 const defaults: Prefs = { theme: 'dark', serverUrl: '', units: 'binary', sidebarCollapsed: false, labelAgent: null };
 
-function load(): Prefs {
+/** What is stored now (keys of a later version included), or null when storage cannot be read. */
+function stored(): Prefs | null {
   try {
     const raw = localStorage.getItem(KEY);
     const theme = localStorage.getItem('folo.theme');
@@ -26,11 +27,16 @@ function load(): Prefs {
     if (theme === 'dark' || theme === 'light' || theme === 'system') p.theme = theme;
     return p;
   } catch {
-    return { ...defaults };
+    return null;
   }
 }
 
-class PrefsStore {
+function load(): Prefs {
+  return stored() ?? { ...defaults };
+}
+
+/** Exported for tests; the app uses `prefs`. */
+export class PrefsStore {
   #p: { [K in keyof Prefs]: Signal<Prefs[K]> };
   /** The stored object as last read or written (keys of a later version included), written back with the values over it. */
   #rest: Prefs;
@@ -54,6 +60,19 @@ class PrefsStore {
     const mq = matchMedia('(prefers-color-scheme: dark)');
     this.#systemDark.set(mq.matches);
     mq.addEventListener('change', (e) => this.#systemDark.set(e.matches));
+    // Another tab of this Studio changed a preference: show it here too (shell F2: a tab kept its theme until reloaded).
+    // The server address is the exception: this tab stays on the server it is connected to until it reloads, since a
+    // reconnect would swap the data under its open pages; its own saves no longer put the old address back (#save).
+    window.addEventListener('storage', (e) => {
+      if (e.key !== null && e.key !== KEY && e.key !== 'folo.theme') return;
+      const p = stored();
+      if (!p) return;
+      this.#rest = p;
+      this.#p.theme.set(p.theme);
+      this.#p.units.set(p.units);
+      this.#p.sidebarCollapsed.set(p.sidebarCollapsed);
+      this.#p.labelAgent.set(p.labelAgent);
+    });
   }
 
   get resolvedTheme(): 'dark' | 'light' {
@@ -65,28 +84,28 @@ class PrefsStore {
   }
   set theme(v: ThemePref) {
     this.#p.theme.set(v);
-    this.#save();
+    this.#save('theme');
   }
   get serverUrl() {
     return this.#p.serverUrl.get();
   }
   set serverUrl(v: string) {
     this.#p.serverUrl.set(v.trim().replace(/\/+$/, ''));
-    this.#save();
+    this.#save('serverUrl');
   }
   get units() {
     return this.#p.units.get();
   }
   set units(v: Units) {
     this.#p.units.set(v);
-    this.#save();
+    this.#save('units');
   }
   get sidebarCollapsed() {
     return this.#p.sidebarCollapsed.get();
   }
   set sidebarCollapsed(v: boolean) {
     this.#p.sidebarCollapsed.set(v);
-    this.#save();
+    this.#save('sidebarCollapsed');
   }
 
   get labelAgent() {
@@ -94,7 +113,7 @@ class PrefsStore {
   }
   set labelAgent(v: LabelAgentId | null) {
     this.#p.labelAgent.set(v);
-    this.#save();
+    this.#save('labelAgent');
   }
 
   /** Cycle dark → light → system. */
@@ -102,17 +121,13 @@ class PrefsStore {
     this.theme = this.theme === 'dark' ? 'light' : this.theme === 'light' ? 'system' : 'dark';
   }
 
-  #save() {
-    const p = this.#p;
-    // The same object the Svelte store writes: whatever it was loaded with, the current values over it, in its key order.
-    const out: Prefs = {
-      ...this.#rest,
-      theme: p.theme.peek(),
-      serverUrl: p.serverUrl.peek(),
-      units: p.units.peek(),
-      sidebarCollapsed: p.sidebarCollapsed.peek(),
-      labelAgent: p.labelAgent.peek(),
-    };
+  /**
+   * Writes the one preference that changed over what is stored now (in its key order, as the Svelte store wrote it),
+   * never this tab's copy of the others: another tab may have changed them since this one loaded (shell F2: a tab
+   * opened earlier put back the old theme, units and server address the next time it saved anything).
+   */
+  #save<K extends keyof Prefs>(key: K) {
+    const out: Prefs = { ...(stored() ?? this.#rest), [key]: this.#p[key].peek() };
     this.#rest = out;
     try {
       localStorage.setItem(KEY, JSON.stringify(out));
