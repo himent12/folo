@@ -458,6 +458,15 @@ fn typed_text_is_windows_translation() {
 /// using the PC. Checked on a hidden window (never shown), where the parking hook's own move happens.
 #[test]
 fn park_moves_a_window_on_a_display_off_every_display() {
+    use ::windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+    };
+    // Every rectangle in device pixels, whatever the process's awareness. A test running beside this
+    // one makes a `WindowsPlatform`, which turns the whole process per-monitor aware at some moment of
+    // this one; then the window's size could read back scaled (450 x 300 for 300 x 200 at 150 %, about
+    // one run in 40 here). This thread's own awareness, fixed for the whole test, doesn't move.
+    // SAFETY: this thread's own setting, put back at the end.
+    let before = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let make = |x: i32, y: i32, style: WINDOW_STYLE, parent: Option<HWND>| {
         // SAFETY: a plain hidden STATIC window (no WS_VISIBLE), destroyed below.
         unsafe {
@@ -496,6 +505,8 @@ fn park_moves_a_window_on_a_display_off_every_display() {
     for hwnd in [child, parent, on_screen] {
         destroy(hwnd);
     }
+    // SAFETY: as above.
+    unsafe { SetThreadDpiAwarenessContext(before) };
 }
 
 /// The backend's file dialogs, Explorer and browser go through the shared off-screen gate, built from
