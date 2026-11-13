@@ -45,6 +45,20 @@ describe('preferences across tabs', () => {
     expect(read()).toMatchObject({ serverUrl: 'http://gpu-box:7878', sidebarCollapsed: true });
   });
 
+  it("keeps a change whose write failed when another tab saves meanwhile (review of #220, round 2)", () => {
+    const a = new PrefsStore();
+    const full = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new DOMException('full', 'QuotaExceededError');
+    });
+    a.units = 'metric';
+    full.mockRestore();
+    // Space is freed; tab B saves its sidebar (still binary in storage).
+    fromOtherTab(KEY, JSON.stringify({ theme: 'dark', serverUrl: '', units: 'binary', sidebarCollapsed: true, labelAgent: null }));
+    expect([a.units, a.sidebarCollapsed]).toEqual(['metric', true]);
+    a.theme = 'light';
+    expect(read()).toMatchObject({ units: 'metric', sidebarCollapsed: true, theme: 'light' });
+  });
+
   it("shows another tab's theme, units and sidebar at once, but keeps its own server address", () => {
     const b = new PrefsStore();
     expect([b.theme, b.units, b.sidebarCollapsed, b.serverUrl]).toEqual(['dark', 'binary', false, '']);

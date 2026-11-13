@@ -70,10 +70,14 @@ export class PrefsStore {
       const p = stored();
       if (!p) return;
       this.#rest = p;
-      this.#p.theme.set(p.theme);
-      this.#p.units.set(p.units);
-      this.#p.sidebarCollapsed.set(p.sidebarCollapsed);
-      this.#p.labelAgent.set(p.labelAgent);
+      // A change of this tab's that is not written yet (#dirty) stays: it is the newer one, and the next save writes it.
+      const follow = <K extends 'theme' | 'units' | 'sidebarCollapsed' | 'labelAgent'>(k: K) => {
+        if (!this.#dirty.has(k)) this.#p[k].set(p[k]);
+      };
+      follow('theme');
+      follow('units');
+      follow('sidebarCollapsed');
+      follow('labelAgent');
     });
   }
 
