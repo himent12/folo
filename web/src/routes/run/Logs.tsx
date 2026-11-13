@@ -155,7 +155,8 @@ export default function Logs(props: LogsProps) {
    */
   const before = computed(() => {
     const lv = level.get();
-    const held = lv === 'all' ? counts.get().held : lv === 'warn' ? counts.get().warn : counts.get().error;
+    // Warn shows warnings and errors.
+    const held = lv === 'all' ? counts.get().held : lv === 'warn' ? counts.get().warn + counts.get().error : counts.get().error;
     return { hidden: Math.max(0, held - shown.get().length), older: lv === 'all' ? counts.get().earlier : 0 };
   });
 

@@ -268,8 +268,13 @@ export class LiveRun {
         // Older servers have no /logs; the live stream still fills the view.
         const logsLoad = api.runLogs(runId, MAX_LOGS).catch((): RunLogs => ({ lines: [] }));
         const held = (l: RunLogs) => {
+          // The server's count is as of its answer: the lines streamed in after its last one are on top of it. Without
+          // a count (an older server, a failed request) the one known stays.
+          const last = l.lines[l.lines.length - 1];
+          const seen = new Set(l.lines.map((x) => `${x.t}|${x.message}`));
+          const newer = last ? this.logs.filter((x) => x.t >= last.t && !seen.has(`${x.t}|${x.message}`)).length : this.logs.length;
           this.logs = mergeLogs(l.lines, this.logs);
-          this.logsEarlier = Math.max(0, (l.total ?? 0) - this.logs.length);
+          if (l.total !== undefined) this.logsEarlier = Math.max(0, l.total + newer - this.logs.length);
         };
         const metricsLoad = api.runMetrics(runId);
         // The log is a request of its own: it shows while the metrics failed (their panel says so, with Retry).

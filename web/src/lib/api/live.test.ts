@@ -872,4 +872,42 @@ describe('LiveRun: a long log', () => {
     expect(live.logsEarlier).toBe(704);
     stop();
   });
+
+  it('adds the lines streamed after the server counted them, and keeps its count when a later load has none', async () => {
+    vi.useFakeTimers();
+    const running = { ...(await new MockApi('normal', 0).run('run_q7c5')), status: 'running' as const };
+    const at = (i: number) => `2026-11-12T10:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}Z`;
+    const lines = Array.from({ length: 2000 }, (_, i) => ({ t: at(i), level: 'info' as const, message: `epoch ${i + 705}` }));
+    let history = deferred<{ lines: typeof lines; total?: number }>();
+    let handlers: RunEventHandlers = {};
+    hub.api = {
+      mock: false,
+      run: () => Promise.resolve(running),
+      runMetrics: () => Promise.resolve({ steps: [], epochs: [] }),
+      runLogs: () => history.promise,
+      runEvents: (_id: string, h: RunEventHandlers) => {
+        handlers = h;
+        return () => {};
+      },
+    } as unknown as Api;
+    hub.mode = 'live';
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_q7c5');
+    });
+    flushSync();
+    // Ten lines stream in after the server answered with 2,704, before its answer is applied.
+    for (let i = 0; i < 10; i++) handlers.log?.({ t: at(2000 + i), level: 'info', message: `late ${i}` });
+    history.resolve({ lines, total: 2704 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.logs).toHaveLength(2000);
+    expect(live.logsEarlier).toBe(714);
+    // A reload of the history from a server that does not count (or a failed one) leaves the count as it was.
+    history = deferred();
+    handlers.reconnect?.();
+    history.resolve({ lines: lines.slice(-500) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.logsEarlier).toBe(714);
+    stop();
+  });
 });

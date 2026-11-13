@@ -202,6 +202,17 @@ describe('Logs: a log longer than the box shows', () => {
     expect(head()).toBe("704 lines earlier are in the run folder's log.jsonl.");
   });
 
+  it('counts errors among the lines Warn shows', () => {
+    const log = new AppendLog<LogLine>();
+    log.push(...Array.from({ length: 550 }, (_, i) => ({ t: `2026-11-12T10:00:00Z`, level: i % 5 === 0 ? ('error' as const) : ('warn' as const), message: `w ${i}` })));
+    c = render(() => <Logs log={log} version={0} live={false} />, target);
+    flushSync();
+    [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.startsWith('Warn'))!.click();
+    flushSync();
+    expect(rows()).toBe(500);
+    expect(head()).toBe('50 lines earlier Show them');
+  });
+
   it('says nothing above a log the box shows whole', () => {
     open(30);
     expect(head()).toBeUndefined();

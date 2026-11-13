@@ -74,7 +74,13 @@ export default function PerClass(props: PerClassProps) {
           <Index each={[0, 1, 2, 3]}>{() => <Skeleton h="18px" />}</Index>
         </div>
       ) : rows.get().length === 0 ? (
-        <p class="none">{props.ended ? 'No per-class results: it ended before its first validation.' : 'Per-class metrics appear after the first validation pass.'}</p>
+        <p class="none">
+          {lastTwo.get()[0]
+            ? 'No per-class results: no class has a box in the validation images.'
+            : props.ended
+              ? 'No per-class results: it ended before its first validation.'
+              : 'Per-class metrics appear after the first validation pass.'}
+        </p>
       ) : (
         <div class="scroll">
           <table class="table dense">
