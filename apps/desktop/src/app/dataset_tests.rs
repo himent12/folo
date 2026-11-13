@@ -54,15 +54,14 @@ fn closing_generate_while_it_works_says_it_goes_on() {
     // Esc while the server generates: the dialog goes, and a toast says the job goes on.
     drive(&mut app, window, |this, w, cx| {
         this.open_synth(w, cx);
-        this.synth.as_mut().unwrap().submitting = true;
+        let f = this.synth.as_mut().unwrap();
+        (f.submitting, f.sent_name) = (true, "shapes-sent".into());
+        // Edited after Generate: the toast names what was sent.
+        f.name.update(cx, |i, cx| i.set_text("other", cx));
         this.dismiss(w, cx);
         assert!(this.synth.is_none());
         let t = this.toasts.last().expect("a toast");
-        assert!(
-            t.title.starts_with("Generating shapes") && t.title.ends_with("in the background"),
-            "{}",
-            t.title
-        );
+        assert_eq!(t.title.as_ref(), "Generating shapes-sent in the background");
     });
     assert_eq!(toasts(&mut app), before + 1);
 }

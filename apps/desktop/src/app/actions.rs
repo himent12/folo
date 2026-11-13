@@ -55,6 +55,7 @@ impl FoloApp {
             imgsz: 1,
             classes: 0,
             submitting: false,
+            sent_name: String::new(),
             error: None,
         });
         cx.notify();
@@ -64,10 +65,9 @@ impl FoloApp {
         // Closed while the server generates: the job goes on, and its result comes as a toast
         // later; say so now rather than let it vanish without a word.
         if let Some(f) = self.synth.take().filter(|f| f.submitting) {
-            let name = f.name.read(cx).text().trim().to_string();
             self.toast(
                 Tone::Info,
-                format!("Generating {name} in the background"),
+                format!("Generating {} in the background", f.sent_name),
                 Some("It's added to Datasets when it's ready.".into()),
                 cx,
             );
@@ -87,6 +87,7 @@ impl FoloApp {
         let images = parse_images(&f.images.read(cx).text());
         let (Some(images), false) = (images, name.is_empty()) else { return };
         f.submitting = true;
+        f.sent_name = name.clone();
         f.error = None;
         let form = f.id;
         let req = SyntheticDataset {
