@@ -17,6 +17,7 @@ import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
+import PathText from '$lib/ui/PathText';
 import Segmented from '$lib/ui/Segmented';
 import Skeleton from '$lib/ui/Skeleton';
 import TableState from '$lib/ui/TableState';
@@ -325,9 +326,7 @@ export default function Datasets() {
                         </td>
                         <td class="hide-md faint">{d().format}</td>
                         <td class="hide-lg path-cell">
-                          <span class="path mono truncate" title={d().path}>
-                            {d().path}
-                          </span>
+                          <PathText class="path" path={d().path} />
                         </td>
                         <td class="r num muted">{num(d().splits.train)}</td>
                         <td class="r num muted">{num(d().splits.val)}</td>
@@ -461,8 +460,8 @@ css`
   .rest {
     padding: 0;
   }
-  .path {
-    display: block;
+  /* Cut in the middle (lib/ui/PathText): two folders of one name in different places read apart. */
+  .path-cell :global(.path) {
     color: var(--text-tertiary);
   }
   /* The class balance column: never under 160 px (the header holds it open in every state), the strip filling it. */
