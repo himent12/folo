@@ -604,3 +604,4 @@ jobs:
           }
           & (Join-Path $dir 'folo.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'folo --version failed' }
+# test: touches this workflow so the pull request runs it on the new Linux runners; not for merging

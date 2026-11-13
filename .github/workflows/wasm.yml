@@ -57,3 +57,4 @@ jobs:
         with:
           node-version: 22
       - run: npx --yes -p typescript@6.0 tsc -p crates/folo-wasm/demo/tsconfig.json
+# test: touches this workflow so the pull request runs it on the new Linux runners; not for merging

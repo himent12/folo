@@ -117,3 +117,4 @@ jobs:
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && runner.os == 'Windows' && '2' || '1' }}
         run: bash tools/ci-retry.sh bash tools/test-tmp.sh cargo test --workspace
+# test: touches this workflow so the pull request runs it on the new Linux runners; not for merging
