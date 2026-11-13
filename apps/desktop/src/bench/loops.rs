@@ -2,7 +2,7 @@
 
 use folo_ui::Context;
 
-use super::create::{SourceChoice, SourcePick};
+use super::create::{SourceChoice, SourceId, SourcePick};
 use super::load::route_bench;
 use super::merge::upsert_loop;
 use super::run::model_teaches;
@@ -37,7 +37,7 @@ impl FoloApp {
     }
 
     /// Opens the New loop form for the benchmark on screen: its best model that can teach (else the
-    /// newest that can), on the first source's train split.
+    /// newest that can), on its own source's train split (else the first source's).
     pub fn open_new_loop(&mut self, cx: &mut Context<Self>) {
         self.ensure_agents(cx);
         let Some(bench) = route_bench(&self.route).map(str::to_string) else { return };
@@ -52,7 +52,16 @@ impl FoloApp {
             })
         });
         let teacher = best.or_else(|| teachers.first().map(|m| m.id.clone()));
-        let pool = self.bench_sources().first().map(SourcePick::id);
+        // The pool: the benchmark's own source while it is listed (the server leaves the benchmark's
+        // images out of it), as Studio does, else the first source.
+        let sources = self.bench_sources();
+        let own = b.as_ref().map(|b| match &b.source {
+            BenchSource::Dataset { dataset_id, .. } => SourceId::Dataset(dataset_id.clone()),
+            BenchSource::LabelJob { job_id } => SourceId::Job(job_id.clone()),
+        });
+        let pool = own
+            .filter(|own| sources.iter().any(|s| s.id() == *own))
+            .or_else(|| sources.first().map(SourcePick::id));
         self.bench.form_seq += 1;
         self.bench.new_loop = Some(NewLoopForm {
             bench,
@@ -162,5 +171,30 @@ impl FoloApp {
             },
         );
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::BenchSource;
+    use crate::app::Route;
+    use crate::app::tests::{drive, open};
+    use crate::bench::SourceId;
+
+    #[test]
+    fn a_new_loop_labels_the_benchmarks_own_dataset_by_default() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, _, cx| this.ensure_benches(cx));
+        let benches = drive(&mut app, window, |this, _, _| this.bench.list.ready().unwrap().clone());
+        // Every demo benchmark, whichever dataset comes first in the list.
+        for b in benches {
+            let BenchSource::Dataset { dataset_id, .. } = &b.source else { continue };
+            drive(&mut app, window, |this, _, cx| {
+                this.route = Route::Bench(b.id.clone());
+                this.open_new_loop(cx);
+                let pool = this.bench.new_loop.as_ref().unwrap().pool.clone();
+                assert_eq!(pool, Some(SourceId::Dataset(dataset_id.clone())), "{}", b.name);
+            });
+        }
     }
 }
