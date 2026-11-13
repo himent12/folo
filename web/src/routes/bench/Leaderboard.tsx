@@ -121,11 +121,15 @@ export default function Leaderboard(props: LeaderboardProps) {
     );
   };
 
+  // What an entry was graded on: only a finished one was graded on anything, so one that runs, failed or was stopped
+  // is never "Complete" (as the phone rows, which say it only under a finished entry).
   const coverage = (e: () => BenchEntry) => {
     const f = computed(() => coverageFacts(e(), props.bench));
     return (
       <>
-        {f.get().length ? (
+        {!finished(e()) ? (
+          <NoValue label={isEntryActive(e()) ? 'not yet' : 'nothing was graded'} />
+        ) : f.get().length ? (
           <Meta>
             <For each={f.get()} key={(x) => x}>
               {(x) => <span>{x()}</span>}

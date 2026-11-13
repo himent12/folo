@@ -377,6 +377,19 @@ describe('the benchmark page', () => {
     }
   });
 
+  it('says "Complete" only of a finished entry: one that runs or failed was graded on nothing yet', async () => {
+    await page('/benchmarks/bn_3c90');
+    const ran = (status: string) =>
+      [...document.querySelectorAll<HTMLElement>('table.board tbody tr[data-id]')]
+        .filter((r) => r.textContent!.includes(status))
+        .map((r) => r.querySelector<HTMLElement>('td.ran')!.textContent!.trim());
+    const all = [...document.querySelectorAll<HTMLElement>('table.board tbody td.ran')].map((td) => td.textContent!.trim());
+    expect(all).toContain('Complete');
+    expect(ran('Failed')).toHaveLength(1);
+    expect(ran('Failed')[0]).not.toContain('Complete');
+    expect(ran('Running')[0]).not.toContain('Complete');
+  });
+
   it('picks finished entries for Compare, at most four, and makes Compare the one primary from two', async () => {
     await page('/benchmarks/bn_3c90');
     const boxes = [...document.querySelectorAll<HTMLInputElement>('table.board tbody input[type="checkbox"]')];
