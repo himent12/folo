@@ -86,7 +86,8 @@ variables move a platform to a self-hosted runner, each a JSON `runs-on` value:
 | `RUNS_ON_WINDOWS` | `["self-hosted","folo-win"]` | the Windows jobs run on that runner; with a GPU there, the GPU tests run in CI |
 
 The maintainers ran the Windows jobs this way, on a machine with an RTX 4080 SUPER, while the repository was private:
-that is where the GPU tests ran on every pull request. Set a variable with
+that is where the GPU tests ran on every pull request. The Linux jobs ran on the same machine, on runners inside a
+WSL2 distribution (Self-hosted runners, below). Set a variable with
 `gh variable set RUNS_ON_WINDOWS --body '["self-hosted","<label>"]'` and delete it to go back
 (`gh variable delete RUNS_ON_WINDOWS`).
 
@@ -119,6 +120,22 @@ and use GitHub-hosted `macos-latest`; `FOLO_RELEASE_MACOS=false` skips them.
   reboot.
 - An offline self-hosted runner does not trigger the fallback: its jobs queue (up to 24 h). If the machine is off for
   long, delete the variable so the jobs run on GitHub-hosted runners.
+- **A Linux runner** needs a C toolchain (`build-essential`), `git`, `curl`, `jq` and `python3`; `docker` and `gh`
+  for `release.yml` (docs/RELEASE.md, Runners); and Chrome for the layout QA, or passwordless `sudo` so the job can
+  install Playwright's Chromium with its libraries. The jobs install the rest (Rust, Node, Python for the ONNX
+  test).
+- **One Linux user per runner.** The Linux jobs keep their target dir under `$HOME` (`~/gha/folo-target` and its
+  siblings). Two runners of one user on one machine would build in the same folder, each waiting for the other's
+  lock, and the under-20-GB cleanup of one would delete it under the other.
+- **Linux runners in WSL2**, on a Windows machine that already runs the Windows jobs: a distribution with systemd
+  on (the runners are services, and docker needs it), without the Windows drives and programs (`automount` and
+  `interop` off in `/etc/wsl.conf`, so a job sees only the Linux file system and the Windows `PATH` cannot shadow
+  the Linux tools), and with a size limit on its disk (`wsl --manage <distro> --resize 300GB`): the default virtual
+  disk reports about 1 TB free whatever the drive holds, so the cleanup above would never start. The distribution
+  stops when no `wsl.exe` is attached to it, so keep one running (`wsl -d <distro> --exec sleep infinity`), and
+  probe it from Windows now and then: a VM that hangs keeps its runners "online" for a while and its jobs running
+  forever. After a forced stop (`wsl --shutdown`), delete the runners' toolchains and target dirs: a file written
+  just before can be cut short (a `librustc_driver` that then failed with "cannot read file data").
 
 ## Unstable self-hosted Windows host
 The maintainers' self-hosted Windows machine (an i7-14700KF) occasionally crashes rustc or rustfmt under heavy
