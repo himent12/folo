@@ -33,6 +33,25 @@ afterEach(() => {
 });
 
 describe('Inspector labels', () => {
+  it("lists only the image's classes in the legend of a dataset with many (studio-data F3: COCO has 80)", async () => {
+    const dataset = await hub.api.dataset('ds_fasteners');
+    const pager = new ImagePager(dataset.id, undefined, undefined);
+    const first = await pager.at(0);
+    const many = [...dataset.classes, ...Array.from({ length: 80 - dataset.classes.length }, (_, i) => `extra ${i}`)];
+    const here = new Set(first!.boxes.map((b) => b.class));
+    c = mount(Inspector, {
+      target,
+      props: { pager, classes: many, imageId: first!.id, only: null, onnavigate: () => {}, onclose: () => {}, onmissing: () => {} },
+    });
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('.legend li')) throw new Error('legend not rendered yet');
+    });
+    const legend = [...target.querySelectorAll('.legend li')].map((l) => l.textContent?.trim());
+    expect(legend).toHaveLength(here.size);
+    expect(target.querySelector('.others')?.textContent).toBe(`${80 - here.size} other classes, none in this image`);
+  });
+
   it('keeps hover and selection apart: a clicked label is selected (aria-current) until clicked again', async () => {
     const dataset = await hub.api.dataset('ds_fasteners');
     const pager = new ImagePager(dataset.id, undefined, undefined);
