@@ -51,7 +51,9 @@ impl FoloApp {
 
     /// Whether the focused element belongs to the topmost overlay (always true without one).
     fn focus_in_scope(&self, window: &Window, cx: &App) -> bool {
-        let prefixes: &[&str] = if self.confirm_delete.is_some() {
+        let prefixes: &[&str] = if self.confirm_close.is_some() {
+            &["close-", "dialog-close"]
+        } else if self.confirm_delete.is_some() {
             &["del-", "dialog-close"]
         } else if self.confirm_stop.is_some() {
             &["stop-", "dialog-close"]
@@ -79,6 +81,7 @@ impl FoloApp {
         if let Some(f) = &self.new_run
             && self.confirm_stop.is_none()
             && self.confirm_delete.is_none()
+            && self.confirm_close.is_none()
             && [&f.name, &f.epochs_input, &f.lr_input, &f.close_input, &f.hours_input]
                 .iter()
                 .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
@@ -86,6 +89,7 @@ impl FoloApp {
             return true;
         }
         if let Some(f) = &self.cloud.connect
+            && self.confirm_close.is_none()
             && self.cloud.disconnect.is_none()
             && self.cloud.terminate.is_none()
             && f.fields.iter().chain([&f.name]).any(|i| i.read(cx).focus_handle(cx).is_focused(window))

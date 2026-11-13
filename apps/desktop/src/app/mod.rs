@@ -462,6 +462,10 @@ pub struct FoloApp {
     pub confirm_delete: Option<DeleteTarget>,
     /// Closing the window would stop these runs (on the server this app started): asked first.
     pub confirm_close: Option<Vec<String>>,
+    /// That server didn't say which runs it has (it didn't answer in time).
+    pub close_unchecked: bool,
+    /// Where focus goes back when the window stays open.
+    close_return: Option<FocusHandle>,
     /// Remove a dataset with its files (`?files=true`): asked in its confirmation, off each time
     /// it opens, offered only for a dataset the server wrote.
     pub delete_files: bool,
@@ -666,6 +670,8 @@ impl FoloApp {
             confirm_stop: None,
             confirm_delete: None,
             confirm_close: None,
+            close_unchecked: false,
+            close_return: None,
             delete_files: false,
             nr_estimate: None,
             nr_estimate_last: None,

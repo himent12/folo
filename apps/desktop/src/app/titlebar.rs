@@ -178,10 +178,12 @@ impl FoloApp {
                 WindowControlArea::Min => d.on_click(|_, w, _| w.minimize_window()),
                 // Full screen's "restore" leaves full screen.
                 WindowControlArea::Max => d.on_click(|_, w, _| w.toggle_fullscreen()),
-                // Closing this way skips the window's should-close hook: remember here.
+                // Closing this way skips the window's should-close hook: ask it here (it remembers the
+                // window, or asks first when closing would stop training).
                 WindowControlArea::Close => d.on_click(cx.listener(|this, _, w, cx| {
-                    this.save_window_state(w, cx);
-                    w.remove_window();
+                    if this.should_close(w, cx) {
+                        w.remove_window();
+                    }
                 })),
                 WindowControlArea::Drag => d,
             })

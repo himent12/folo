@@ -15,6 +15,27 @@ pub struct ServerProcess {
     pub url: String,
 }
 
+impl ServerProcess {
+    /// Whether the server is still running (it may have crashed, or been stopped by hand).
+    pub fn running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+/// The runs of the server at `url` now, asked with a one-second limit (closing the window waits on it);
+/// `None` when it doesn't answer in time.
+pub fn runs_now(url: &str) -> Option<Vec<Run>> {
+    let base = super::HttpBackend::new(url).base().to_string();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_millis(500)))
+        .timeout_global(Some(Duration::from_secs(1)))
+        .build()
+        .into();
+    let mut r = agent.get(&format!("{base}/api/runs")).call().ok().filter(|r| r.status().is_success())?;
+    r.body_mut().with_config().limit(64 << 20).read_json::<folo_api::RunList>().ok().map(|l| l.runs)
+}
+
 impl Drop for ServerProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();

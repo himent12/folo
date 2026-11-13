@@ -643,18 +643,26 @@ fn new_run_refuses_a_name_longer_than_the_server_takes_and_fits_its_own() {
 #[test]
 fn closing_while_its_own_server_trains_asks_first_and_keep_open_keeps_it() {
     let (mut app, window) = open();
-    // A server this app didn't start keeps training: the window just closes.
-    assert!(drive(&mut app, window, |this, w, cx| this.should_close_owned(false, w, cx)));
-    // Its own server, with the demo's run training: asked, not closed.
-    assert!(!drive(&mut app, window, |this, w, cx| this.should_close_owned(true, w, cx)));
+    // Nothing would stop: the window just closes.
+    assert!(drive(&mut app, window, |this, w, cx| this.should_close_with(Some(Vec::new()), w, cx)));
+    // A Stop confirmation is open when the window is asked to close while its server trains.
+    drive(&mut app, window, |this, w, cx| this.ask_stop("run_a19f".into(), w, cx));
+    assert!(!drive(&mut app, window, |this, w, cx| this.should_close_with(
+        Some(vec!["shapes-hard-m".into()]),
+        w,
+        cx
+    )));
     drive(&mut app, window, |this, w, cx| {
-        let names = this.confirm_close.clone().expect("asked");
-        assert!(names.iter().any(|n| n == "shapes-hard-m"), "{names:?}");
-        assert!(this.modal_open());
+        assert_eq!(this.confirm_close.as_deref(), Some(&["shapes-hard-m".to_string()][..]));
+        assert!(this.modal_open() && !this.close_unchecked);
         // Asked again while asking (Close pressed twice): still asking, still open.
-        assert!(!this.should_close_owned(true, w, cx));
-        // Esc is Keep open.
+        assert!(!this.should_close(w, cx));
+        // Esc answers the question on top (Keep open); the Stop confirmation under it stays.
         this.dismiss(w, cx);
         assert!(this.confirm_close.is_none());
+        assert!(this.confirm_stop.is_some());
     });
+    // The server didn't say: asked too, in other words.
+    assert!(!drive(&mut app, window, |this, w, cx| this.should_close_with(None, w, cx)));
+    drive(&mut app, window, |this, _, _| assert!(this.close_unchecked && this.confirm_close.is_some()));
 }

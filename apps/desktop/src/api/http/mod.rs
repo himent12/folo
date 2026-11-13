@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use super::*;
 
-pub use server::{ServerProcess, Spawned, is_loopback, probe, spawn_server};
+pub use server::{ServerProcess, Spawned, is_loopback, probe, runs_now, spawn_server};
 #[cfg(test)]
 pub(crate) use transport::needs_token;
 use transport::{agent, seg, stream_agent};
@@ -546,6 +546,15 @@ connection: close
             let hint = e.hint.unwrap();
             assert!(hint.contains("--token") && !hint.contains("Authorization"), "{hint}");
         }
+    }
+
+    #[test]
+    fn closing_asks_the_apps_server_for_its_runs_and_tells_no_answer_apart() {
+        let (url, requests) = canned_server(vec![json("200 OK", r#"{ "runs": [] }"#), Vec::new()]);
+        assert_eq!(runs_now(&url).map(|r| r.len()), Some(0));
+        assert!(requests.recv().unwrap().starts_with("GET /api/runs "));
+        // Hangs up without answering: unknown, not "nothing is training".
+        assert!(runs_now(&url).is_none());
     }
 
     /// Every benchmark call the app makes, against a real `folo serve` with a benchmark that has a

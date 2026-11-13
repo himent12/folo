@@ -18,36 +18,62 @@ impl FoloApp {
         self.set_mode(next, cx);
     }
 
-    /// The window is asked to close (its Close button, Alt F4). Closing stops the `folo serve` this app
-    /// started, and every run training on it: when there is one, ask first (`false` keeps it open).
+    /// The window is asked to close (its Close button, Alt F4, full screen's Close). Closing stops the
+    /// `folo serve` this app started, and every run of this machine training or waiting on it: that
+    /// server is asked now (whatever server the window shows, and however old its list), and when a run
+    /// would stop, or it doesn't answer in time, the window asks first (`false` keeps it open).
     pub fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let owned =
-            self.server_proc.as_ref().is_some_and(|p| self.local_url.as_deref() == Some(p.url.as_str()));
-        self.should_close_owned(owned, window, cx)
+        if self.confirm_close.is_some() {
+            return false;
+        }
+        let own = self.server_proc.as_mut().map(|p| (p.running(), p.url.clone()));
+        let stops = match own {
+            Some((true, url)) => {
+                crate::api::http::runs_now(&url).map(|runs| crate::overlays::closing_stops(&runs))
+            }
+            // Nothing of ours runs: nothing stops.
+            _ => Some(Vec::new()),
+        };
+        self.should_close_with(stops, window, cx)
     }
 
-    /// [`Self::should_close`], told whether the connected server is the one this app started.
-    pub(crate) fn should_close_owned(
+    /// [`Self::should_close`] with the runs closing would stop (`None`: the server couldn't say).
+    pub(crate) fn should_close_with(
         &mut self,
-        owned: bool,
+        stops: Option<Vec<String>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let stops =
-            self.store.runs.ready().map(|r| crate::overlays::closing_stops(r, owned)).unwrap_or_default();
-        if stops.is_empty() {
+        if stops.as_ref().is_some_and(|s| s.is_empty()) {
             self.save_window_state(window, cx);
             return true;
         }
         if self.confirm_close.is_none() {
-            self.remember_focus(window, cx);
+            // Its own return place: an overlay under it (a Stop confirmation, New run) keeps its own.
+            self.close_return = window.focused(cx);
             self.palette = None;
-            self.confirm_close = Some(stops);
+            self.close_unchecked = stops.is_none();
+            self.confirm_close = Some(stops.unwrap_or_default());
             let fh = self.fh("close-cancel", cx);
             window.focus(&fh);
             cx.notify();
         }
         false
+    }
+
+    /// The window shows the server this app started.
+    pub fn shows_own_server(&self) -> bool {
+        self.server_proc.as_ref().is_some_and(|p| self.local_url.as_deref() == Some(p.url.as_str()))
+    }
+
+    /// Keep open: the question goes, focus goes back to where it was.
+    pub fn keep_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_close = None;
+        match self.close_return.take() {
+            Some(fh) => window.focus(&fh),
+            None => window.focus(&self.root_focus),
+        }
+        cx.notify();
     }
 
     /// Close the window after "Stop and close": remembered as any close is.
