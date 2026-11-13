@@ -265,6 +265,123 @@ describe('the labeling editor: keys', () => {
     await openEditor('1');
     expect(key('ArrowRight').defaultPrevented).toBe(false);
   });
+
+  it('drops the selection on Esc first, and leaves the next Esc to the dialog', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    expect(selectedSize()).toBeTruthy();
+    expect(key('Escape').defaultPrevented).toBe(true);
+    expect(selectedSize()).toBeUndefined();
+    expect(editor()!.open).toBe(true);
+    expect(key('Escape').defaultPrevented).toBe(false);
+  });
+});
+
+describe('the labeling editor: undo and redo (studio-label F4)', () => {
+  /** The first box's size, as the list says it (an undo drops the selection). */
+  const firstSize = () => editor()!.querySelector('.boxes button')?.getAttribute('aria-label');
+  const button = (label: string) => editor()!.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+
+  it('steps back and forth through the edits with the keys, a run of arrow presses as one step, Discard too', async () => {
+    await openEditor('1');
+    expect(button('Undo').disabled).toBe(true);
+    click(inEditor('Add box'));
+    const added = firstSize();
+    key('ArrowRight');
+    key('ArrowRight');
+    key('ArrowRight');
+    expect(key('z', { ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(firstSize()).toBe(added);
+    expect(boxCount()).toBe(1);
+    key('z', { metaKey: true });
+    expect(boxCount()).toBe(0);
+    expect(footer()).not.toMatch(/Unsaved changes/);
+    key('z', { ctrlKey: true, shiftKey: true });
+    key('y', { ctrlKey: true });
+    expect(boxCount()).toBe(1);
+    click(inEditor('Discard'));
+    expect(boxCount()).toBe(0);
+    click(button('Undo'));
+    expect(boxCount()).toBe(1);
+    expect(footer()).toMatch(/Unsaved changes/);
+  });
+
+  it('makes separate arrow presses, and presses either side of a save, separate steps', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    const at = () => firstSize();
+    key('ArrowRight', { altKey: true });
+    const one = at();
+    window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight' }));
+    key('ArrowRight', { altKey: true });
+    key('z', { ctrlKey: true });
+    expect(at()).toBe(one);
+    click(editor()!.querySelector<HTMLButtonElement>('.boxes button')!);
+    key('ArrowDown', { altKey: true });
+    const saved = at();
+    key('s', { ctrlKey: true });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(footer()).toMatch(/Reviewed|No changes yet/);
+    });
+    // Still selected after the save.
+    key('ArrowDown', { altKey: true });
+    expect(at()).not.toBe(saved);
+    key('z', { ctrlKey: true });
+    expect(at()).toBe(saved);
+    expect(footer()).not.toMatch(/Unsaved changes/);
+  });
+
+  it('drops the selection on undo, so Delete never hits another box', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    click(inEditor('Add box'));
+    key('Delete');
+    expect(boxCount()).toBe(1);
+    click(editor()!.querySelector<HTMLButtonElement>('.boxes button')!);
+    expect(selectedSize()).toBeTruthy();
+    key('z', { ctrlKey: true });
+    expect(boxCount()).toBe(2);
+    expect(selectedSize()).toBeUndefined();
+    expect(key('Delete').defaultPrevented).toBe(true);
+    expect(boxCount()).toBe(2);
+  });
+
+  it('drops the selection when an undo swaps the boxes at the same count (Discard undone)', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    key('ArrowRight', { altKey: true, shiftKey: true });
+    click(inEditor('Save'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(footer()).not.toMatch(/Unsaved changes/);
+    });
+    const saved = selectedSize();
+    key('Delete');
+    click(inEditor('Add box'));
+    click(inEditor('Discard'));
+    click(editor()!.querySelector<HTMLButtonElement>('.boxes button')!);
+    expect(selectedSize()).toBe(saved);
+    key('z', { ctrlKey: true });
+    expect(boxCount()).toBe(1);
+    expect(selectedSize()).toBeUndefined();
+    key('Delete');
+    expect(boxCount()).toBe(1);
+  });
+
+  it('starts afresh on another image, and leaves Ctrl+Z in a field to the field', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    expect(key('z', { ctrlKey: true }, editor()!.querySelector('input')!).defaultPrevented).toBe(false);
+    expect(boxCount()).toBe(1);
+    click(inEditor('Discard'));
+    click(editor()!.querySelector<HTMLButtonElement>('button[aria-label="Next image"]')!);
+    await vi.waitFor(() => expect(router.route.query.get('image')).toBe('2'));
+    flushSync();
+    expect(button('Undo').disabled).toBe(true);
+    expect(key('z', { ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(router.route.query.get('image')).toBe('2');
+  });
 });
 
 describe('the labeling editor: asking the agent again', () => {

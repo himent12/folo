@@ -1,7 +1,8 @@
 // Drawing and correcting boxes on one image (the labeling editor). Everything here is in image pixels, as the API's
 // boxes are: the component maps a pointer into the image (`toImage`), asks what a press grabs (`grab`), and draws the
 // box `dragTo` gives back while the pointer moves; `settle` decides what the gesture leaves. Every box stays inside the
-// image, and a box under 2 px on either side is not a box.
+// image, and a box under 2 px on either side is not a box. A press that moves the pointer less than `CLICK_SLOP` screen
+// px is a click, whatever the image's size: it selects, and changes nothing.
 
 import type { Box } from '$lib/api/types';
 
@@ -10,6 +11,11 @@ export const MIN_SIDE = 2;
 /** How far from a handle (screen px) a press still takes it; a fingertip gets more. */
 export const HANDLE_REACH = 8;
 export const HANDLE_REACH_TOUCH = 16;
+/** A press whose pointer stays within this many screen px of where it went down is a click, not a drag. */
+export const CLICK_SLOP = 4;
+
+/** Whether the pointer went from screen point `a` to `b` without leaving the click's slop. */
+export const isClick = (a: readonly [number, number], b: readonly [number, number]) => Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) < CLICK_SLOP;
 
 /** How the image sits on screen: a screen point is `o + image point · s`. */
 export interface Placement {
@@ -122,16 +128,25 @@ export function dragTo(d: Drag, x: number, y: number, width: number, height: num
 /**
  * The boxes once a gesture ends with `shown` drawn, and which one is selected: a drawn box is added (and selected)
  * unless it is too small, which leaves nothing selected (a press on empty image clears the selection); a move or a
- * resize replaces its box, or keeps the old one when the result is too small.
+ * resize replaces its box, or keeps the old one when the result is too small. A `click` (the pointer hardly moved) only
+ * selects: it leaves every box as it was, so looking at a box never counts as a change.
  */
-export function settle(boxes: readonly Box[], d: Drag, shown: Box): { boxes: Box[]; selected: number | null } {
-  if (d.grip.kind === 'draw') return tooSmall(shown) ? { boxes: [...boxes], selected: null } : { boxes: [...boxes, shown], selected: boxes.length };
+export function settle(boxes: readonly Box[], d: Drag, shown: Box, click = false): { boxes: Box[]; selected: number | null } {
+  if (d.grip.kind === 'draw') return click || tooSmall(shown) ? { boxes: [...boxes], selected: null } : { boxes: [...boxes, shown], selected: boxes.length };
   const i = d.grip.index;
-  if (tooSmall(shown)) return { boxes: [...boxes], selected: i };
+  if (click || tooSmall(shown)) return { boxes: [...boxes], selected: i };
   return { boxes: boxes.map((b, k) => (k === i ? shown : b)), selected: i };
 }
 
 // ---------- the keyboard's reach: a new box, and moving or resizing the selected one ----------
+
+/**
+ * One arrow press, in image px, for an image shown at `scale` screen px per image px: about one screen pixel, never
+ * under one image pixel (a 12000 px photo moves visibly, a 40 px icon by its own pixels).
+ */
+export function keyStep(scale: number): number {
+  return scale > 0 ? Math.max(1, Math.round(1 / scale)) : 1;
+}
 
 /** A new box of class `cls` for Add box: a square a quarter of the image's shorter side, in its middle. */
 export function newBox(width: number, height: number, cls: number): Box {

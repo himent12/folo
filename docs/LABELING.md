@@ -33,7 +33,8 @@ images you may not share with them.
    place, not copied). A job holds up to 10000 images; JPEG, PNG, BMP and WebP.
 3. **Pick the agent and press Label.** Images turn from pending to labeled as the calls come back; the panel
    shows progress, the tokens the agent reported, and the log. Stop ends the run at once and keeps what is done.
-4. **Review.** Open an image to move, resize, relabel, delete or draw boxes; saving marks it as labeled by hand
+4. **Review.** Open an image to move, resize, relabel, delete or draw boxes (Ctrl+Z or ⌘Z undoes an edit,
+   Ctrl+Shift+Z redoes it); saving marks it as labeled by hand
    and reviewed (Enter saves and opens the next image to review, Ctrl+S or ⌘S saves and stays; its tile then says
    Edited and Reviewed). When the agent's boxes are right, **Looks right** (Enter) marks them reviewed and opens the next
    image to review; the To review and Reviewed filters and the count in the header show how far you are. If the agent got an image wrong in a way you can describe, ask it again with a note ("the boxes are too
