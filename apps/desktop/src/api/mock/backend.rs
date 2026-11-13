@@ -439,10 +439,14 @@ impl Backend for MockBackend {
             .find(|f| f.run.id == id)
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
         let step = Self::current_step(f);
-        Ok(RunMetrics {
+        let metrics = RunMetrics {
             steps: (1..=step).map(|i| f.curve.step(i)).collect(),
             epochs: (1..=(step / f.run.steps_per_epoch) as u32).map(|e| f.curve.epoch(e)).collect(),
-        })
+        };
+        drop(runs);
+        // One run's history ("metrics run_52e8"): other runs' (a live one's) are not held.
+        self.hold_point(&format!("metrics {id}"));
+        Ok(metrics)
     }
 
     fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<RunSamples> {

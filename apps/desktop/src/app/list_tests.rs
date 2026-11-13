@@ -332,3 +332,23 @@ fn a_run_or_model_page_removed_elsewhere_gives_way_to_its_list() {
         assert!(this.toasts.iter().any(|t| t.title == said.as_str()), "{said}");
     });
 }
+
+#[test]
+fn a_runs_history_answering_after_it_was_deleted_elsewhere_stays_gone() {
+    // What made `a_run_or_model_page_removed_elsewhere_gives_way_to_its_list` flaky on loaded CI
+    // runners: the run page's history request answers after the refreshed list dropped the run.
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let held = api.hold("metrics run_52e8");
+    start(&mut app, window, 1, |this, _, cx| this.ensure_run_data("run_52e8", cx));
+    held.wait_held();
+    api.delete_run("run_52e8").unwrap();
+    start(&mut app, window, 1, |this, _, cx| this.refresh_lists(cx));
+    // (Read in place: `drive` would wait for the held answer.)
+    app.update(|cx| window.update(cx, |this, _, _| assert!(this.store.run("run_52e8").is_none())).unwrap());
+    drop(held);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.store.run_data.contains_key("run_52e8"), "the late answer does not bring it back");
+    });
+}

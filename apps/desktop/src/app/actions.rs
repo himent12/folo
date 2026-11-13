@@ -348,6 +348,7 @@ impl FoloApp {
         self.store.run_data.remove(id);
         self.store.samples.remove(id);
         self.store.logs.remove(id);
+        self.forget_history(id);
         let made: Vec<String> = self
             .store
             .models

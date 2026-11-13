@@ -127,6 +127,12 @@ impl FoloApp {
         }
     }
 
+    /// A run's history dropped (the run deleted, here or elsewhere): an answer still on its way
+    /// (metrics, samples or logs asked for before) must not bring it back.
+    pub(super) fn forget_history(&mut self, id: &str) {
+        self.history_tickets.retain(|(run, _), _| run != id);
+    }
+
     /// A fresh ticket for one history request of a run; earlier tickets stop counting.
     pub(super) fn history_ticket(&mut self, id: &str, what: &'static str) -> u64 {
         self.history_seq += 1;
