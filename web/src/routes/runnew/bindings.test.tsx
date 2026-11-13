@@ -169,6 +169,17 @@ describe('New run: bindings', () => {
     expect([config.optimizer, config.lr0, config.seed]).toEqual(['sgd', 0.02, 7]);
   });
 
+  it('says the learning rate is not used while the optimizer is Auto, which picks its own', async () => {
+    await open();
+    const hint = () => {
+      const id = $<HTMLInputElement>('input#lr0').getAttribute('aria-describedby');
+      return id ? target.querySelector(`#${id}`)?.textContent?.trim() : undefined;
+    };
+    expect(hint()).toBe('Not used with Auto, which picks 0.01. Choose an optimizer to set it.');
+    choose('select#opt', 'adamw');
+    expect(hint()).toBe('Warmup 3 epochs, then linear to 1%.');
+  });
+
   it('edits the augmentation from its sliders, and Defaults puts every one back', async () => {
     await open();
     $<HTMLButtonElement>('.aug-toggle').click();

@@ -26,9 +26,18 @@ export function otherSizeChoices(models: readonly Model[], arch: Arch, scoreCtx:
 
 /**
  * Start from's hint: the picked weights' score with all of its context, and what published weights are. With none
- * picked and no trained model of this size, where the trained ones are (`others`, of the other sizes).
+ * picked and no trained model of this size, where the trained ones are (`others`, of the other sizes). When the
+ * picked weights' class list is not the dataset's (`dataset`), what the run keeps of them: the trainer starts the class
+ * outputs fresh and loads the rest (docs/API.md, `weights`), which the run's log says only once it has started.
  */
-export function startHintOf(picked: Model | undefined, scoreCtx: (m: Model) => ScoreContext, arch?: Arch, mine = 0, others: readonly Model[] = []): string {
+export function startHintOf(
+  picked: Model | undefined,
+  scoreCtx: (m: Model) => ScoreContext,
+  arch?: Arch,
+  mine = 0,
+  others: readonly Model[] = [],
+  dataset?: Pick<Dataset, 'name' | 'classes'>,
+): string {
   if (!picked && !mine && others.length) {
     const sizes = [...new Set(others.map((m) => m.arch))];
     const what = sizes.length === 1 ? `${others.length} trained ${sizes[0]} ${others.length === 1 ? 'model is' : 'models are'}` : `${others.length} trained models of other sizes are`;
@@ -37,6 +46,8 @@ export function startHintOf(picked: Model | undefined, scoreCtx: (m: Model) => S
   if (!picked) return 'Fine-tuning from a trained model converges much faster.';
   // Published weights: what they are for, in plain words; their provenance and score are in the ⓘ beside the label
   // (pickedAbout). Trained ones are their score with its context.
-  if (isPublished(picked)) return publishedSummary(picked);
-  return scoreMeta(picked.metrics?.map50_95, scoreCtx(picked)) || 'Fine-tuning from a trained model converges much faster.';
+  const what = isPublished(picked) ? publishedSummary(picked) : scoreMeta(picked.metrics?.map50_95, scoreCtx(picked)) || 'Fine-tuning from a trained model converges much faster.';
+  // A model whose classes are not recorded (an older file) says nothing it cannot know.
+  const same = !dataset || !picked.classes.length || (picked.classes.length === dataset.classes.length && picked.classes.every((c, i) => c === dataset.classes[i]));
+  return same ? what : `${what.replace(/\.$/, '')}. Its classes are not ${dataset.name}'s: the class outputs start fresh, other weights are kept where their shapes match.`;
 }
