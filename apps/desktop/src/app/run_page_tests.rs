@@ -190,37 +190,38 @@ fn a_cloud_run_whose_worker_is_silent_says_so_with_the_time() {
 }
 
 #[test]
-fn a_cloud_run_the_instance_list_had_not_got_is_asked_for_once() {
-    let (mut app, window) = open_with(Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble()));
-    drive(&mut app, window, |this, _, cx| this.ensure_cloud(cx));
+fn a_cloud_run_the_instance_list_had_not_got_is_read_again_until_a_read_covers_it() {
+    let api = Arc::new(MockBackend::with_cloud_runs(4200, true).cloud_trouble());
+    let (mut app, window) = open_with(api.clone());
+    let cloud = |this: &crate::app::FoloApp| {
+        this.store.runs.ready().unwrap().iter().find(|r| r.id == "run_c2e1").unwrap().cloud.clone().unwrap()
+    };
     // The list as read before these runs existed (they started elsewhere afterwards): no live
     // instance, so the 5 s refresh that follows live ones never fired for them.
     drive(&mut app, window, |this, _, _| {
         this.cloud.instances = Load::Ready(Vec::new());
         assert!(!this.instance_alive());
-        let c = this.store.runs.ready().unwrap().iter().find(|r| r.id == "run_c2e1").unwrap().cloud.clone();
-        assert!(this.released_instance(&c.unwrap()).is_none(), "nothing to say yet");
+        assert!(this.instances_missing(), "the runs' instances are to be read");
+        // Meanwhile nothing confirms the release: its cost and Releasing stay provisional.
+        assert!(this.released_instance_unknown(&cloud(this)));
     });
-    drive(&mut app, window, |this, _, cx| {
-        assert!(this.take_missing_instances(), "the runs' instances are asked for");
-        this.refresh_instances(cx);
-    });
+    // That read fails: still missing, still provisional, read again at the next tick.
+    api.fail_instances_once();
+    drive(&mut app, window, |this, _, cx| this.refresh_instances(cx));
     drive(&mut app, window, |this, _, _| {
-        let c = this
-            .store
-            .runs
-            .ready()
-            .unwrap()
-            .iter()
-            .find(|r| r.id == "run_c2e1")
-            .unwrap()
-            .cloud
-            .clone()
-            .unwrap();
-        let i = this.released_instance(&c).expect("found after one read");
-        assert!(i.status.is_alive(), "and its termination is still unconfirmed");
-        // Once each: an id the list still hasn't got (ended over 7 days ago) isn't asked for forever.
+        assert!(this.instances_missing(), "a failed read covers nothing");
+        assert!(this.released_instance_unknown(&cloud(this)));
+    });
+    // The next one answers: the instance is there, alive, its termination unconfirmed.
+    drive(&mut app, window, |this, _, cx| this.refresh_instances(cx));
+    drive(&mut app, window, |this, _, _| {
+        let i = this.released_instance(&cloud(this)).expect("found after a read that worked");
+        assert!(i.status.is_alive());
+        assert!(!this.released_instance_unknown(&cloud(this)) && !this.instances_missing());
+        // An id a successful read covered but the ledger no longer keeps (ended over 7 days ago)
+        // is final, not read again forever.
         this.cloud.instances = Load::Ready(Vec::new());
-        assert!(!this.take_missing_instances());
+        assert!(!this.instances_missing());
+        assert!(!this.released_instance_unknown(&cloud(this)));
     });
 }

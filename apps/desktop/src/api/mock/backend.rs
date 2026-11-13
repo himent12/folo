@@ -628,6 +628,9 @@ impl Backend for MockBackend {
 
     fn cloud_instances(&self) -> ApiResult<Vec<CloudInstance>> {
         self.check()?;
+        if self.fail_instances.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878"));
+        }
         if self.empty {
             return Ok(Vec::new());
         }

@@ -32,8 +32,8 @@ pub struct CloudState {
     pub terminate: Option<Confirm>,
     /// Bumped on every opening of the Connect dialog: a late answer only touches its own dialog.
     pub connect_seq: u64,
-    /// Instance ids of cloud runs the instance list was asked again for, once each, because it
-    /// hadn't got them (a run created after the list was read, here or elsewhere).
+    /// Instance ids of cloud runs that a successful read of the instance list covered (the run was
+    /// known when it was asked): a row missing for one of these is gone from the ledger, not new.
     pub asked_for: HashSet<String>,
 }
 
@@ -220,16 +220,27 @@ impl FoloApp {
 
     /// Reloads the instance list in place (no loading state once it has one).
     pub fn refresh_instances(&mut self, cx: &mut Context<Self>) {
+        // The cloud runs known now: an answer covers them (a run seen later isn't).
+        let covered = self.run_instance_ids();
         self.fetch(
             cx,
             |api| api.cloud_instances(),
-            |this, r, _| {
+            move |this, r, _| {
+                if r.is_ok() {
+                    this.cloud.asked_for.extend(covered);
+                }
                 // A refresh that fails keeps the list there is.
                 if r.is_ok() || this.cloud.instances.ready().is_none() {
                     this.cloud.instances = r.into();
                 }
             },
         );
+    }
+
+    /// Every cloud run's instance id.
+    fn run_instance_ids(&self) -> Vec<String> {
+        let runs = self.store.runs.ready().into_iter().flatten();
+        runs.filter_map(|r| r.cloud.as_ref()?.instance_id.clone()).collect()
     }
 
     /// Settings shows the section as the server has it now (also when going back to it).
@@ -253,23 +264,15 @@ impl FoloApp {
         self.cloud.instances.ready().is_some_and(|l| l.iter().any(|i| i.status.is_alive()))
     }
 
-    /// Cloud runs' instance ids that the instance list hasn't got and wasn't asked again for:
-    /// read it again (once per id; the ledger drops instances that ended over 7 days ago, so a
-    /// missing old one isn't asked for forever). Each one returned is marked asked.
-    pub fn take_missing_instances(&mut self) -> bool {
+    /// Whether a cloud run's instance is missing from the instance list and no successful read
+    /// since the run was known covered it (a run created after the list was read, here or
+    /// elsewhere): the list is read again until one does. The ledger drops instances that ended
+    /// over 7 days ago, so once a read covered an id, its missing row is final, not asked for forever.
+    pub fn instances_missing(&self) -> bool {
         let Some(list) = self.cloud.instances.ready() else { return false };
-        let missing: Vec<String> = self
-            .store
-            .runs
-            .ready()
-            .into_iter()
-            .flatten()
-            .filter_map(|r| r.cloud.as_ref()?.instance_id.clone())
-            .filter(|id| !list.iter().any(|i| &i.id == id) && !self.cloud.asked_for.contains(id))
-            .collect();
-        let any = !missing.is_empty();
-        self.cloud.asked_for.extend(missing);
-        any
+        self.run_instance_ids()
+            .iter()
+            .any(|id| !list.iter().any(|i| &i.id == id) && !self.cloud.asked_for.contains(id))
     }
 
     /// A released cloud run's instance in the ledger (`GET /api/cloud/instances`), which keeps its
@@ -280,12 +283,17 @@ impl FoloApp {
         self.cloud.instances.ready()?.iter().find(|i| &i.id == id)
     }
 
-    /// The ledger couldn't be read for a released run's instance: whether it is gone isn't known.
+    /// The ledger couldn't be read for a released run's instance, or hasn't been read since the run
+    /// was known (its row is missing and no successful read covered it): whether it is gone isn't
+    /// known.
     pub fn released_instance_unknown(&self, c: &RunCloud) -> bool {
-        c.phase == CloudPhase::Released
-            && c.instance_id.is_some()
-            && self.cloud.instances.ready().is_none()
-            && self.cloud.instances.error().is_some()
+        let Some(id) = c.instance_id.as_ref().filter(|_| c.phase == CloudPhase::Released) else {
+            return false;
+        };
+        match self.cloud.instances.ready() {
+            Some(list) => !list.iter().any(|i| &i.id == id) && !self.cloud.asked_for.contains(id),
+            None => self.cloud.instances.error().is_some(),
+        }
     }
 
     /// A connection's offers, fetched once per connection (`refresh` asks the provider again).
