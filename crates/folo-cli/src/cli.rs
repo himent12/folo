@@ -578,7 +578,7 @@ pub struct CloudConnectArgs {
     /// The provider's id (`folo cloud providers`), e.g. runpod or remote.
     pub provider: String,
     /// The connection's name [default: the provider's name, with 2, 3, ... when taken].
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", hide_default_value = true)]
     pub name: String,
     /// A value that is not secret, as KEY=VALUE (repeatable), e.g. --set url=https://gpu-box.example.com:7878.
     #[arg(long = "set", value_name = "KEY=VALUE")]
