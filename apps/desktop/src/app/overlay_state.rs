@@ -234,6 +234,9 @@ impl FoloApp {
         } else if self.confirm_stop.is_some() {
             self.confirm_stop = None;
             self.restore_focus(window);
+        } else if self.confirm_close.is_some() {
+            self.confirm_close = None;
+            self.restore_focus(window);
         } else if self.cloud.disconnect.is_some() || self.cloud.terminate.is_some() {
             self.close_confirm(window, cx);
         } else if self.cloud.connect.is_some() {

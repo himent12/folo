@@ -18,8 +18,46 @@ impl FoloApp {
         self.set_mode(next, cx);
     }
 
-    /// Remember the window (restored bounds, maximized or full screen) and the theme for the next
-    /// launch, when this one remembers (`window_state`).
+    /// The window is asked to close (its Close button, Alt F4). Closing stops the `folo serve` this app
+    /// started, and every run training on it: when there is one, ask first (`false` keeps it open).
+    pub fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let owned =
+            self.server_proc.as_ref().is_some_and(|p| self.local_url.as_deref() == Some(p.url.as_str()));
+        self.should_close_owned(owned, window, cx)
+    }
+
+    /// [`Self::should_close`], told whether the connected server is the one this app started.
+    pub(crate) fn should_close_owned(
+        &mut self,
+        owned: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let stops =
+            self.store.runs.ready().map(|r| crate::overlays::closing_stops(r, owned)).unwrap_or_default();
+        if stops.is_empty() {
+            self.save_window_state(window, cx);
+            return true;
+        }
+        if self.confirm_close.is_none() {
+            self.remember_focus(window, cx);
+            self.palette = None;
+            self.confirm_close = Some(stops);
+            let fh = self.fh("close-cancel", cx);
+            window.focus(&fh);
+            cx.notify();
+        }
+        false
+    }
+
+    /// Close the window after "Stop and close": remembered as any close is.
+    pub fn close_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_window_state(window, cx);
+        window.remove_window();
+    }
+
+    /// Remember the window (restored bounds, maximized or full screen), the theme and a Reduce motion
+    /// that differs from the OS's for the next launch, when this one remembers (`window_state`).
     pub fn save_window_state(&self, window: &Window, cx: &App) {
         use crate::window_state::{Placement, State, WindowMode};
         let Some(path) = &self.state_path else {
@@ -42,6 +80,9 @@ impl FoloApp {
             }),
             theme: Some(if self.mode == Mode::Light { "light" } else { "dark" }.into()),
             spawn_server: Some(self.spawn_server),
+            // Kept only when picked against the OS setting, so an untouched one keeps following it.
+            reduce_motion: (self.reduce_motion != crate::ui::os_prefers_reduced_motion())
+                .then_some(self.reduce_motion),
         };
         if let Err(e) = crate::window_state::save(path, &state) {
             eprintln!("folo-desktop: couldn't remember the window in {}: {e}", path.display());

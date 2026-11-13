@@ -639,3 +639,22 @@ fn new_run_refuses_a_name_longer_than_the_server_takes_and_fits_its_own() {
     });
     assert_eq!(api.runs().unwrap().len(), runs);
 }
+
+#[test]
+fn closing_while_its_own_server_trains_asks_first_and_keep_open_keeps_it() {
+    let (mut app, window) = open();
+    // A server this app didn't start keeps training: the window just closes.
+    assert!(drive(&mut app, window, |this, w, cx| this.should_close_owned(false, w, cx)));
+    // Its own server, with the demo's run training: asked, not closed.
+    assert!(!drive(&mut app, window, |this, w, cx| this.should_close_owned(true, w, cx)));
+    drive(&mut app, window, |this, w, cx| {
+        let names = this.confirm_close.clone().expect("asked");
+        assert!(names.iter().any(|n| n == "shapes-hard-m"), "{names:?}");
+        assert!(this.modal_open());
+        // Asked again while asking (Close pressed twice): still asking, still open.
+        assert!(!this.should_close_owned(true, w, cx));
+        // Esc is Keep open.
+        this.dismiss(w, cx);
+        assert!(this.confirm_close.is_none());
+    });
+}

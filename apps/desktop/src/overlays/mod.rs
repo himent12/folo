@@ -1,6 +1,7 @@
 //! Overlays drawn above the page: command palette, dialogs, the image inspector and toasts.
 
 mod cloud_dialogs;
+mod confirm_close;
 mod confirm_delete;
 mod confirm_stop;
 mod inspector;
@@ -21,6 +22,7 @@ use crate::app::{Action, FoloApp};
 use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
 
+pub use confirm_close::closing_stops;
 pub use new_run_footer::estimate;
 
 /// A dialog's footer: its actions on the raised band under a hairline.
@@ -76,6 +78,9 @@ impl FoloApp {
         }
         if let Some(target) = self.confirm_delete.clone() {
             out.push(self.delete_dialog(&target, window, cx));
+        }
+        if let Some(names) = self.confirm_close.clone() {
+            out.push(self.close_dialog(&names, window, cx));
         }
         if self.cloud.connect.is_some() {
             out.push(self.connect_dialog(window, cx));
