@@ -14,6 +14,30 @@ use super::{FoloApp, PlayImage, Route};
 /// slider filters above it locally.
 pub const PLAY_CONF_FLOOR: f32 = 0.05;
 
+/// The image files the Playground opens: what the engine decodes (folo_data::IMAGE_EXTENSIONS).
+pub const IMAGE_FORMATS: &str = "JPEG, PNG, BMP or WebP";
+
+/// An encoded image upright ([`decode_upright`]) as a render image, with its size.
+fn upright_render(bytes: &[u8]) -> Option<(Arc<folo_ui::RenderImage>, u32, u32)> {
+    let img = decode_upright(bytes)?;
+    let (w, h) = img.dimensions();
+    let image = to_render_image(ImageData::Rgba { width: w, height: h, pixels: img.into_raw() })?;
+    Some((image, w, h))
+}
+
+impl PlayImage {
+    /// What a prediction of this image sends: a dataset image by its id to the server (which reads
+    /// it from disk), but its bytes, already here, to a local run, so that needs no server.
+    pub fn predict_input(&self, local: bool) -> PredictInput {
+        match (&self.input, &self.encoded) {
+            (PredictInput::Dataset { .. }, Some(bytes)) if local => {
+                PredictInput::File { name: self.name.to_string(), bytes: bytes.clone() }
+            }
+            _ => self.input.clone(),
+        }
+    }
+}
+
 impl FoloApp {
     // ---------- playground ----------
 
@@ -26,24 +50,25 @@ impl FoloApp {
         self.fetch(
             cx,
             move |api| {
-                let data = api.image(&d, &i, None)?;
-                let (w, h) = match &data {
-                    ImageData::Rgba { width, height, .. } => (*width, *height),
+                let failed = || ApiError::new("decode_failed", "Could not decode the image");
+                match api.image(&d, &i, None)? {
+                    // Kept as fetched: a local run predicts on these bytes, with or without the server.
                     ImageData::Encoded(b) => {
-                        image::load_from_memory(b).map(|i| (i.width(), i.height())).unwrap_or((0, 0))
+                        let (image, w, h) = upright_render(&b).ok_or_else(failed)?;
+                        Ok((image, w, h, Some(Arc::new(b))))
                     }
-                };
-                to_render_image(data)
-                    .map(|img| (img, w, h))
-                    .ok_or_else(|| ApiError::new("decode_failed", "Could not decode the image"))
+                    data @ ImageData::Rgba { width, height, .. } => {
+                        Ok((to_render_image(data).ok_or_else(failed)?, width, height, None))
+                    }
+                }
             },
             move |this, r, cx| {
                 if seq != this.play_load_seq {
                     return;
                 }
                 match r {
-                    Ok((image, width, height)) => {
-                        this.set_play_image(PlayImage { name, input, image, width, height }, cx);
+                    Ok((image, width, height, encoded)) => {
+                        this.set_play_image(PlayImage { name, input, encoded, image, width, height }, cx);
                     }
                     Err(e) => {
                         this.toast(Tone::Danger, "Could not open the image", Some(e.message.into()), cx)
@@ -69,17 +94,10 @@ impl FoloApp {
             move |_| {
                 let bytes = std::fs::read(&path)
                     .map_err(|e| ApiError::new("read_failed", format!("Could not read {n2}: {e}")))?;
-                let img = image::load_from_memory(&bytes).map_err(|_| {
+                let (render, w, h) = upright_render(&bytes).ok_or_else(|| {
                     ApiError::new("unsupported_image", format!("{n2} is not an image FOLO can read"))
-                        .with_hint("Use a JPEG or PNG.")
+                        .with_hint(format!("Use a {IMAGE_FORMATS} file."))
                 })?;
-                let (w, h) = (img.width(), img.height());
-                let render = to_render_image(ImageData::Rgba {
-                    width: w,
-                    height: h,
-                    pixels: img.to_rgba8().into_raw(),
-                })
-                .ok_or_else(|| ApiError::new("decode_failed", "Could not decode the image"))?;
                 Ok((Arc::new(bytes), render, w, h))
             },
             move |this, r, cx| {
@@ -90,7 +108,7 @@ impl FoloApp {
                     Ok((bytes, image, width, height)) => {
                         let input = PredictInput::File { name: name.to_string(), bytes };
                         this.set_play_image(
-                            PlayImage { name: name.clone(), input, image, width, height },
+                            PlayImage { name: name.clone(), input, encoded: None, image, width, height },
                             cx,
                         );
                     }
@@ -137,6 +155,19 @@ impl FoloApp {
                 self.rerun_predict(cx);
             }
         }
+    }
+
+    /// The dataset whose validation images the Playground offers for its model, as the server picks
+    /// one to evaluate it on: its run's dataset while that is registered, else the first dataset with
+    /// exactly the model's classes, else none (a COCO model next to a blood-cell set gets no samples).
+    pub fn play_sample_dataset(&self) -> Option<String> {
+        let model = self.play_shown_model()?;
+        let datasets = self.store.datasets.ready()?;
+        let of_run = model.run_id.as_ref().and_then(|r| self.store.run(r)).map(|r| &r.config.dataset_id);
+        of_run
+            .and_then(|id| datasets.iter().find(|d| d.id == *id))
+            .or_else(|| datasets.iter().find(|d| d.classes == model.classes))
+            .map(|d| d.id.clone())
     }
 
     /// Look for a GPU for local inference (once; setting up folo-gpu blocks for a moment).
@@ -252,7 +283,7 @@ impl FoloApp {
         let floor = self.play_conf.min(PLAY_CONF_FLOOR);
         let req = PredictRequest {
             model_id: model.clone(),
-            input: img.input.clone(),
+            input: img.predict_input(self.play_target.is_some()),
             conf: floor,
             iou: self.play_iou,
             max_det: 300,

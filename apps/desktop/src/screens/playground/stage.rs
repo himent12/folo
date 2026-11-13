@@ -6,7 +6,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, canvas, div, px,
 };
 
-use crate::app::{FoloApp, act};
+use crate::app::{FoloApp, IMAGE_FORMATS, act};
 use crate::controls::Btn;
 use crate::store::Load;
 use crate::theme::{radius, theme, ty};
@@ -22,6 +22,8 @@ impl FoloApp {
             let no_datasets = self.store.datasets.ready().is_some_and(|d| d.is_empty());
             // The model list failed: the step is fetching it again, not picking an image.
             let models_failed = self.store.models.error().is_some();
+            // The side panel offers validation images only from a dataset the model knows.
+            let samples = self.play_sample_dataset().is_some();
             let pick = if models_failed {
                 self.button(
                     "play-pick",
@@ -114,13 +116,16 @@ impl FoloApp {
                                     "Drop an image to detect objects"
                                 }))
                                 .child(text(ty::SM, t.text_secondary).child(if models_failed {
-                                    "Check the connection, then try again."
+                                    "Check the connection, then try again.".to_string()
                                 } else if no_models && no_datasets {
-                                    "Then train a model on it and come back with an image."
+                                    "Then train a model on it and come back with an image.".to_string()
                                 } else if no_models {
                                     "The Playground runs your trained models. Start a run, then come back with an image."
+                                        .to_string()
+                                } else if samples {
+                                    format!("{IMAGE_FORMATS} · or pick a validation image on the right")
                                 } else {
-                                    "JPEG or PNG · or pick a validation image on the right"
+                                    IMAGE_FORMATS.to_string()
                                 })),
                         )
                         .child(div().flex().items_center().gap(px(12.)).child(pick).when(!no_models && !models_failed, |d| {
