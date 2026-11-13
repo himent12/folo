@@ -125,7 +125,11 @@ RTX 4080 SUPER (Vulkan). Median of the per-round medians, ms (min–max):
 
 b1 (row 5) is **not established**. In the first run the medians favoured new by 9–35%, but p90 reached 4× the median in either build. Each run cycles through 16 rect shapes, and the logs keep only the median, p90 and min. The per-run minimums were lower on new (for example s f32 2.45 → 2.20 ms), but a minimum is one call's best case.
 
-A second run after review added a `b1 one` row (the first image only, one shape) and ran 4 rounds of 200 calls. The machine was 44–100% CPU-busy with another lane (`logs/ab-pr2b-gpu-*`), and b1 was noise in both builds: single runs had 7–12 ms medians on either side.
+A second run after review added a `b1 one` row (the first image only, one shape) and ran 4 rounds of 200 calls. The machine was 44–100% CPU-busy with another lane (`logs/ab-pr2b-gpu-*`), so this run does not settle b1 either.
+- Base b1 medians ran 1.95–4.07 ms; new ran 1.70–11.71 ms.
+- Every median above 5 ms is a folo-s row from the new side's rounds 1 and 2, which started at 90% and 100% CPU load (base: 59% and 94%).
+- In rounds 3 and 4 (new 71% and 61%, base 65% and 44%), new was faster in most b1 rows.
+- An uneven load cannot be told apart from a b1 regression on folo-s.
 - b1 one, new/base: 0.81–1.05.
 - b16 confirmed the first run: n 0.928 / 0.848 / 0.920, s 0.935 / 0.879 / 1.043 (f32 / f16 / f16 tensor cores; the s f16tc ranges overlap).
 
