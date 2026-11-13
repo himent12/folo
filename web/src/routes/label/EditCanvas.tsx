@@ -1,12 +1,15 @@
 /**
  * The editor's image: its boxes in the full-size style, the selected one with handles. A press on a box selects and
- * moves it, on a handle resizes it, on empty image draws a new box (in the class used last). Mouse, pen and touch
- * alike; the geometry is ./boxEdit's, in image pixels.
+ * moves it, on a handle resizes it, on empty image draws a new box (in the class used last); a press that hardly moves
+ * is a click, which selects and changes nothing. Mouse, pen and touch alike; the geometry is ./boxEdit's, in image
+ * pixels. The whole frame takes the gestures, boxes included: the selected box is drawn above everything else, and a
+ * press on it (or on its handles) is still the editor's. A press also takes focus from a field of the editor (the note),
+ * so the keys that follow act on the boxes.
  */
-import { bindable, computed, css, Index, signal } from 'fw';
+import { bindable, computed, css, effect, Index, signal } from 'fw';
 import type { Box, LabelImage } from '$lib/api/types';
 import DatasetImage from '$lib/detect/DatasetImage';
-import { dragTo, fit, grab, HANDLE_REACH, HANDLE_REACH_TOUCH, HANDLES, handleAt, settle, toImage, toScreen, type Drag } from './boxEdit';
+import { dragTo, fit, grab, HANDLE_REACH, HANDLE_REACH_TOUCH, HANDLES, handleAt, isClick, settle, toImage, toScreen, type Drag } from './boxEdit';
 
 export interface EditCanvasProps {
   jobId: string;
@@ -20,17 +23,26 @@ export interface EditCanvasProps {
   cls: number;
   disabled: boolean;
   onchange: (boxes: Box[]) => void;
+  /** Out: screen px per image px as shown (0 until the frame has a size), for the keyboard's steps. */
+  scale?: number;
 }
 
 export default function EditCanvas(props: EditCanvasProps) {
   const selected = bindable(props, 'selected');
+  const scale = bindable(props, 'scale', 0);
   const cw = signal(0);
   const ch = signal(0);
   let el: HTMLDivElement | undefined;
   const drag = signal<Drag | null>(null);
   const shown = signal<Box | null>(null);
+  /** Where the gesture went down on screen, and whether the pointer has since left the click's slop. */
+  let press: [number, number] = [0, 0];
+  let dragged = false;
 
   const place = computed(() => (cw.get() && ch.get() ? fit(props.img.width, props.img.height, cw.get(), ch.get()) : null));
+  effect(() => {
+    scale.set(place.get()?.s ?? 0);
+  });
   /** The boxes as drawn now: the one in the gesture where it is, a new one at the end. */
   const view = computed(() => {
     const d = drag.get();
@@ -57,8 +69,13 @@ export default function EditCanvas(props: EditCanvasProps) {
   function onpointerdown(e: PointerEvent) {
     const p = place.peek();
     if (props.disabled || !p || e.button !== 0) return;
+    // No default (no text selection, no native drag), so no focus move either: a field that had focus gives it up here.
     e.preventDefault();
-    el!.setPointerCapture(e.pointerId);
+    const dialog = el!.closest('dialog');
+    if (dialog && document.activeElement !== dialog && dialog.contains(document.activeElement)) dialog.focus();
+    el!.setPointerCapture?.(e.pointerId);
+    press = [e.clientX, e.clientY];
+    dragged = false;
     const [x, y] = point(e);
     const reach = (e.pointerType === 'touch' ? HANDLE_REACH_TOUCH : HANDLE_REACH) / p.s;
     const boxes = props.boxes;
@@ -72,6 +89,7 @@ export default function EditCanvas(props: EditCanvasProps) {
   function onpointermove(e: PointerEvent) {
     const d = drag.peek();
     if (!d) return;
+    dragged ||= !isClick(press, [e.clientX, e.clientY]);
     const [x, y] = point(e);
     shown.set(dragTo(d, x, y, props.img.width, props.img.height));
   }
@@ -81,7 +99,7 @@ export default function EditCanvas(props: EditCanvasProps) {
     const s = shown.peek();
     if (!d || !s) return;
     const boxes = props.boxes;
-    const r = settle(boxes, d, s);
+    const r = settle(boxes, d, s, !dragged);
     const moved = r.boxes.length !== boxes.length || r.boxes.some((b, i) => b !== boxes[i]);
     selected.set(r.selected);
     drag.set(null);
@@ -90,7 +108,17 @@ export default function EditCanvas(props: EditCanvasProps) {
   }
 
   return (
-    <div class="canvas" bind:clientWidth={cw} bind:clientHeight={ch}>
+    <div
+      class="canvas"
+      class:off={props.disabled}
+      bind:clientWidth={cw}
+      bind:clientHeight={ch}
+      ref={(e) => (el = e)}
+      onpointerdown={onpointerdown}
+      onpointermove={onpointermove}
+      onpointerup={onpointerup}
+      onpointercancel={() => (drag.set(null), shown.set(null))}
+    >
       <DatasetImage
         jobId={props.jobId}
         imageId={props.img.id}
@@ -105,15 +133,7 @@ export default function EditCanvas(props: EditCanvasProps) {
       />
       {/* The pointer's way to draw and move boxes; the keyboard's is the box list beside it (add, select, class, delete)
           and the dialog's keys (arrows move or resize the selected box). */}
-      <div
-        class="hit"
-        class:off={props.disabled}
-        ref={(e) => (el = e)}
-        onpointerdown={onpointerdown}
-        onpointermove={onpointermove}
-        onpointerup={onpointerup}
-        onpointercancel={() => (drag.set(null), shown.set(null))}
-      >
+      <div class="hit">
         <Index each={handles.get()}>{(h) => <span class="grip" style:left={`${h()[0]}px`} style:top={`${h()[1]}px`}></span>}</Index>
       </div>
     </div>
@@ -121,6 +141,7 @@ export default function EditCanvas(props: EditCanvasProps) {
 }
 
 css`
+  /* Every press in the frame is a gesture of the editor's, never a page scroll or a sheet pull. */
   .canvas {
     position: relative;
     width: 100%;
@@ -129,16 +150,16 @@ css`
     border-radius: var(--radius-md);
     background: var(--bg-inset);
     overflow: hidden;
-  }
-  /* Over the image and its boxes: every press is a gesture of the editor's, never a page scroll or a sheet pull. */
-  .hit {
-    position: absolute;
-    inset: 0;
     cursor: crosshair;
     touch-action: none;
   }
-  .hit.off {
+  .canvas.off {
     cursor: default;
+  }
+  /* Over the image and its boxes (all but the selected one, which is drawn above it): the handles. */
+  .hit {
+    position: absolute;
+    inset: 0;
   }
   .grip {
     position: absolute;

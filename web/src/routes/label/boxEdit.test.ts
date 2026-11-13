@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Box } from '$lib/api/types';
-import { clampBox, dragTo, fit, grab, handleAt, MIN_SIDE, newBox, nudge, sameBoxes, settle, stretch, tidy, toImage, toScreen, tooSmall, type Drag } from './boxEdit';
+import { CLICK_SLOP, clampBox, dragTo, fit, grab, handleAt, isClick, keyStep, MIN_SIDE, newBox, nudge, sameBoxes, settle, stretch, tidy, toImage, toScreen, tooSmall, type Drag } from './boxEdit';
 
 const box = (x1: number, y1: number, x2: number, y2: number, cls = 0): Box => ({ class: cls, x1, y1, x2, y2 });
 const W = 640;
@@ -80,6 +80,20 @@ describe('settle', () => {
     expect(settle(boxes, resize, box(10, 10, 80, 50))).toEqual({ boxes: [box(10, 10, 80, 50)], selected: 0 });
     expect(settle(boxes, resize, box(10, 10, 11, 50))).toEqual({ boxes, selected: 0 });
   });
+
+  it('changes nothing on a click: a big box drawn by a wobble on a large image, or a box pressed to select it', () => {
+    const draw: Drag = { grip: { kind: 'draw' }, from: [100, 100], start: null, cls: 1 };
+    expect(settle(boxes, draw, box(100, 100, 129, 129, 1), true)).toEqual({ boxes, selected: null });
+    const move: Drag = { grip: { kind: 'move', index: 0 }, from: [30, 30], start: boxes[0]!, cls: 0 };
+    const r = settle(boxes, move, box(10, 10, 50, 50.00000000000001), true);
+    expect(r.selected).toBe(0);
+    expect(r.boxes[0]).toBe(boxes[0]);
+  });
+
+  it('tells a click from a drag by the screen distance the pointer went', () => {
+    expect(isClick([10, 10], [10 + CLICK_SLOP - 1, 10 - CLICK_SLOP + 1])).toBe(true);
+    expect(isClick([10, 10], [10, 10 + CLICK_SLOP])).toBe(false);
+  });
 });
 
 describe('helpers', () => {
@@ -98,6 +112,13 @@ describe('helpers', () => {
 });
 
 describe('the keyboard: Add box, arrows and Alt+arrows', () => {
+  it('steps about a screen pixel, never under an image pixel', () => {
+    expect(keyStep(0.069)).toBe(14); // a 12000 px photo in a 830 px frame
+    expect(keyStep(1.3)).toBe(1);
+    expect(keyStep(20)).toBe(1); // a 40 px icon
+    expect(keyStep(0)).toBe(1); // not laid out yet
+  });
+
   it('adds a square a quarter of the shorter side in the middle, in the class given', () => {
     expect(newBox(W, H, 2)).toEqual(box(260, 180, 380, 300, 2));
     // A tiny image still gets a box it can hold.
