@@ -68,6 +68,23 @@ by the dense head on the same features.
   cut retired dead workgroups that way; the kernel failed to build, which silently turned tensor cores off for the
   whole context, and the f16 test then failed by 1 ulp against the dense tensor-core conv. The sites variant now runs
   zero K tiles instead of returning, and the tests assert the tensor-core state after the run.
+- Box fusion (#257): with `dfl` on an `o2m` head the site path runs the dense path's own moment ops (`dfl_moments`,
+  factored out of `HeadOutput::moments_on_device`) on the three levels' box-logit columns side by side
+  (`[B, 64, 1792]`), reads back the moments and the site lists, and takes each candidate's precisions at its column.
+  This is **bit-identical** to the dense device moments, not just within rounding:
+  - the columns hold the dense logits bit for bit;
+  - the softmax and the sums over the middle axis take their per-column kernels whenever the trailing size is above
+    1 (`Σ cap ≥ 3`, as for the dense `A`);
+  - a 16-long sum never takes the split-reduction path.
+
+  I chose this over a decode-kernel flag (the lead's first option), because a shader's own `exp` and sum order
+  would match the dense moments only within rounding. An image that overflows takes its precisions from the dense
+  head with its candidates (`candidates_on_device` returns `ImageCandidates`).
+  - Tests: `gpu_box_fusion_matches_dense_bit_for_bit` (`vote` and `dfl`, f32, f16, f16 on tensor cores; every
+    candidate's precisions against `HeadOutput::side_precisions` bit for bit, then the fused detections) and the
+    mixed-overflow batch with `dfl`. Dropping the levels' column offset fails both.
+  - All of val2017 again, folo-n on the GPU: 0 of 5000 images mismatched in f32 and in f16 on tensor cores, each
+    with fusion off and with `dfl` (`logs/verify2-gpu-*`).
 
 ## Numbers
 ### Candidates on COCO val2017
