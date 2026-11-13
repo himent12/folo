@@ -164,7 +164,7 @@ describe('CloudPanel', () => {
     const silent = new Date(2026, 10, 9, 11, 59, 55).toISOString();
     c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'training', progress: null, synced, unanswered_since: silent }), provider: 'RunPod' } });
     flushSync();
-    expect(text(target.querySelector('#cloud .warn-line'))).toBe('The worker has not answered since 11:59. FOLO keeps asking; the run goes on there while the worker is up.');
+    expect(text(target.querySelector('#cloud .warn-line'))).toBe('The worker has not answered since 11:59. FOLO keeps asking; the run may still be training or waiting there.');
     expect(fact('Last checkpoint copy')).toBe('just now');
     // Ninety seconds on, with no new state from the server: the copy is no longer "just now".
     vi.advanceTimersByTime(90_000);

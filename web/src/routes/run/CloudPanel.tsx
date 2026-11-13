@@ -123,7 +123,7 @@ export default function CloudPanel(props: CloudPanelProps) {
                 <WifiOff size={14} strokeWidth={2} aria-hidden="true" />
                 <span>
                   The worker has not answered since {timeOfDay(props.cloud.unanswered_since)}. FOLO keeps asking; the run
-                  goes on there while the worker is up.
+                  may still be training or waiting there.
                 </span>
               </p>
             ) : unconfirmed.get() ? (

@@ -225,6 +225,12 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
     let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
     until("epoch 1 here", || run_of(&store, &run.id).best);
     drop(store);
+    // The process before recorded a silence of the worker (it went down while the worker did not answer).
+    let saved = home.join("runs").join(&run.id).join("run.json");
+    let mut file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    file["run"]["cloud"]["unanswered_since"] = json!("2026-11-09T00:00:00Z");
+    std::fs::write(&saved, file.to_string()).unwrap();
     // Meanwhile a crash left two `launching` records: one whose launch created an instance, one whose did not.
     let values = Values::from(BTreeMap::from([("api_key".to_string(), SECRET.to_string())]));
     let spec = |name: &str| LaunchSpec {
@@ -250,6 +256,10 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
     let store = plane(&home, &cloud, fast());
     until("the run followed again", || {
         logged(&store, &run.id, "following the run on its worker again").then_some(())
+    });
+    // The worker answers this process: the old silence is not said any more.
+    until("the silence cleared", || {
+        run_of(&store, &run.id).cloud.is_some_and(|c| c.unanswered_since.is_none()).then_some(())
     });
     until("the orphan terminated", || {
         let all = store.cloud_instances().unwrap();

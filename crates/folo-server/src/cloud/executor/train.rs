@@ -58,12 +58,17 @@ impl Exec {
                     .log(LogLevel::Warn, "the worker's run did not stop in time; collecting what it has");
                 break None;
             }
-            match self.mirror(client, &run_id) {
+            let mirrored = self.mirror(client, &run_id);
+            // The worker answered: no silence is said any more, also one a process before this one recorded (the run
+            // persisted with it) and on the answer that the run ended (the collection may take minutes).
+            if mirrored.is_ok() && self.entry.run().cloud.is_some_and(|c| c.unanswered_since.is_some()) {
+                self.entry.update_cloud(|c| c.unanswered_since = None);
+            }
+            match mirrored {
                 Ok(Some(end)) => break Some(end),
                 Ok(None) => {
                     if unreachable.is_some() {
                         self.entry.log(LogLevel::Info, "the worker answers again");
-                        self.entry.update_cloud(|c| c.unanswered_since = None);
                     }
                     // A run followed again whose record does not say when its worker first answered (a server
                     // of before wrote it, or that write failed): it answers now. The first time stays.

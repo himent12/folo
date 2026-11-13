@@ -114,6 +114,8 @@ pub(crate) fn abandon(core: &Core, entry: &Arc<RunEntry>, why: &str) -> Result<(
                  in the provider's console"
             ),
         );
+        // Nothing follows the run any more: a silence it recorded is not one FOLO keeps asking about.
+        entry.update_cloud(|c| c.unanswered_since = None);
         entry.set_outcome(RunStatus::Stopped, None, None);
         Ended::Finished
     });
