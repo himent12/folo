@@ -136,9 +136,9 @@ export default function Editor(props: EditorProps) {
     if (locked.peek()) return;
     const to = redo ? history.redo(draft.peek()) : history.undo(draft.peek());
     if (!to) return;
-    // A step that kept the number of boxes changed one box in place, so the selection still names the same box;
-    // one that added or removed a box shifts the places, and the selection goes.
-    if (to.length !== draft.peek().length) selected.set(null);
+    // The selection is a place in the list, and a step (Discard most of all) may put another box there: it goes, so
+    // Delete or a class key never lands on a box the user did not pick.
+    selected.set(null);
     draft.set(to);
     rev.set(rev.peek() + 1);
   }
