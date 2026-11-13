@@ -29,9 +29,13 @@ export default defineConfig({
     sourcemap: true,
   },
   // An unhandled error (a deferred callback outliving its component) fails the run, never only a warning.
+  // In CI a test gets 20 s instead of vitest's 5 s: a runner shares its machine with other jobs, and a test that
+  // takes 2 s alone (routes/run/Logs.test.tsx, the streaming one) took over 5 s beside two Rust builds. A test that
+  // hangs still fails; a slow one is a matter for review (docs/CI.md, Keeping CI fast), not for the timeout.
   test: {
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'framework/**/*.test.ts', 'framework/**/*.test.tsx', 'scripts/**/*.test.mjs'],
     environment: 'node',
     dangerouslyIgnoreUnhandledErrors: false,
+    testTimeout: process.env.CI ? 20_000 : 5_000,
   },
 });
