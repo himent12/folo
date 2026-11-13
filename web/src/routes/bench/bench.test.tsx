@@ -119,6 +119,69 @@ describe('New benchmark', () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/5,000/);
   });
 
+  it("says how many of a labeling job's labeled images nobody reviewed before they become the truth (sweep 3)", async () => {
+    const [job] = (await hub.api.labelJobs()).filter((j) => j.counts.labeled > 0);
+    const page = await hub.api.labelImages(job!.id, { status: 'labeled', limit: 1000 });
+    const labeled = page.images.map((im, i) => ({ ...im, reviewed: i > 0 }));
+    hub.api.labelImages = async () => ({ total: labeled.length, images: labeled });
+    open(NewBenchDialog, { open: true });
+    await settle();
+    [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((r) => r.textContent?.includes('A labeling job'))!.click();
+    await settle();
+    const select = await until(() => document.querySelector<HTMLSelectElement>('dialog[open] select:not([id$="-ds"])'), 'the job picker');
+    select.value = job!.id;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+    const note = await until(() => document.querySelector('.note.warn[data-unreviewed]'), 'the unreviewed note');
+    expect(note.textContent).toContain(`1 of its ${labeled.length} labeled images has not been reviewed`);
+    expect(text()).not.toContain('as reviewed');
+    // Every image reviewed: no warning, the note on training instead.
+    labeled.forEach((im) => (im.reviewed = true));
+    [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((r) => r.textContent?.includes('A dataset split'))!.click();
+    await settle();
+    [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((r) => r.textContent?.includes('A labeling job'))!.click();
+    await settle();
+    expect(document.querySelector('.note.warn')).toBeNull();
+    expect(text()).toContain('a model trained on a dataset made from this job has seen them');
+  });
+
+  it('shows a job’s unreviewed count only for that job, and reads again when the images move while it pages', async () => {
+    const jobs = (await hub.api.labelJobs()).filter((j) => j.counts.labeled > 0);
+    const [a, b] = [jobs[0]!, { ...jobs[0]!, id: 'lb_other', name: 'other job' }];
+    hub.api.labelJobs = async () => [a, b];
+    const img = (await hub.api.labelImages(a.id, { status: 'labeled', limit: 1 })).images[0]!;
+    const page = (total: number, images: number, reviewed: boolean) => ({ total, images: Array.from({ length: images }, (_, i) => ({ ...img, id: `${i}`, reviewed })) });
+    // Job A: 1,001 labeled images, the last one unreviewed. Its first read is torn (an image went between the two pages:
+    // the second page says 1,000 in all), the second read is whole. Job B: all reviewed, and its answer is held.
+    let aReads = 0;
+    let answerB: () => void = () => {};
+    hub.api.labelImages = async (id, q) => {
+      if (id === b.id) return new Promise((ok) => (answerB = () => ok(page(3, 3, true))));
+      aReads++;
+      if (!q?.offset) return page(1001, 1000, true);
+      return aReads === 2 ? page(1000, 0, true) : page(1001, 1, false);
+    };
+    open(NewBenchDialog, { open: true });
+    await settle();
+    [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((r) => r.textContent?.includes('A labeling job'))!.click();
+    await settle();
+    const select = await until(() => document.querySelector<HTMLSelectElement>('dialog[open] select:not([id$="-ds"])'), 'the job picker');
+    select.value = a.id;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    const note = await until(() => document.querySelector('.note.warn[data-unreviewed]'), 'the unreviewed note');
+    // Out of the labeled images of the same read, not of the job's older list.
+    expect(note.textContent).toMatch(/^1 of its 1,001 labeled images/);
+    expect(aReads).toBe(4);
+    // Job B picked: A's count is not shown for it while B's answer is out, nor after it says every image is reviewed.
+    select.value = b.id;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+    expect(document.querySelector('.note.warn')).toBeNull();
+    answerB();
+    await settle();
+    expect(document.querySelector('.note.warn')).toBeNull();
+  });
+
   it('creates it with the default plan and opens its page', async () => {
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     open(NewBenchDialog, { open: true });

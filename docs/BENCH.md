@@ -255,7 +255,8 @@ from"). It can still be run with a confidence set by hand; the entry's label cha
 **Benchmarks** in the sidebar (on a phone: under Models).
 
 1. **New benchmark.** Name it, say what the camera sees and what makes its job hard, and pick the images: a
-   split of a dataset, or the labeled images of a labeling job. It starts with the default plan.
+   split of a dataset, or the labeled images of a labeling job. It starts with the default plan. From a job, it says
+   how many of the labeled images nobody has reviewed: their boxes become the benchmark's truth as the agent drew them.
 2. **Conditions.** Switch conditions on and off, pick their severities and weights, and look at any image of the
    benchmark under any condition next to the unchanged one. **Design with an agent** proposes a plan from the
    description. The plan is yours to change until the first entry.

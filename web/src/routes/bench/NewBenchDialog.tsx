@@ -25,9 +25,26 @@ import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import TextArea from '$lib/ui/TextArea';
 import { toast } from '$lib/ui/toast';
-import { imagesText } from './words';
+import { imagesText, unreviewedText } from './words';
 
 const FIX: Record<string, string> = { name: 'Fix the name first', description: 'Shorten the description first', max: 'Fix the image limit first' };
+
+/**
+ * The labeled images of job `id` that are not reviewed, read 1000 at a time; null when the count of labeled images
+ * changed between pages (an image labeled, removed or relabeled meanwhile shifts the offsets: a page could be skipped).
+ */
+async function countUnreviewed(id: string, s: AbortSignal): Promise<{ n: number; labeled: number } | null> {
+  let n = 0;
+  let total: number | null = null;
+  for (let offset = 0; ; ) {
+    const page = await hub.api.labelImages(id, { status: 'labeled', offset, limit: 1000 }, s);
+    if (total !== null && page.total !== total) return null;
+    total = page.total;
+    n += page.images.filter((i) => !i.reviewed).length;
+    offset += page.images.length;
+    if (!page.images.length || offset >= page.total) return offset >= page.total ? { n, labeled: page.total } : null;
+  }
+}
 
 export default function NewBenchDialog(props: { open?: boolean }) {
   const open = bindable(props, 'open', false);
@@ -80,6 +97,24 @@ export default function NewBenchDialog(props: { open?: boolean }) {
 
   const dataset = computed(() => datasets.data?.find((d) => d.id === datasetId.get()));
   const job = computed(() => jobs.data?.find((j) => j.id === jobId.get()));
+  // How many of the job's labeled images no person has checked (`LabelImage.reviewed`): the boxes on them become the
+  // benchmark's truth as an agent drew them. Read a page of 1000 at a time, with the job it counts (a Resource keeps
+  // its last data while it reloads, so a count shows only for its own job); null for a dataset or a count that cannot
+  // be trusted (the job's labeled images changed under the paging three times running).
+  const unreviewed = new Resource(async (s): Promise<{ job: string; n: number; labeled: number } | null> => {
+    const id = jobId.get();
+    if (kind.get() !== 'label_job' || !id) return null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const c = await countUnreviewed(id, s);
+      if (c !== null) return { job: id, ...c };
+    }
+    return null;
+  });
+  const unreviewedHere = computed(() => {
+    const u = unreviewed.data;
+    // With the labeled count of the same read: the job's list may be older (an agent labeled more since).
+    return u && !unreviewed.loading && !unreviewed.error && u.job === jobId.get() && u.n ? u : null;
+  });
   /** Images the source holds (a split's, or a job's labeled ones). */
   const sourceImages = computed(() => (kind.get() === 'dataset' ? (dataset.get()?.splits[split.get()] ?? 0) : (job.get()?.counts.labeled ?? 0)));
   const max = computed(() => Number(maxText.get()));
@@ -259,7 +294,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
           <Field
             label="Labeling job"
             for={`${uid}-job`}
-            hint={job.get() ? `Its ${imagesText(job.get()!.counts.labeled)} with labels, boxes as reviewed; the others are left out.` : undefined}
+            hint={job.get() ? `Its ${imagesText(job.get()!.counts.labeled)} with labels; the others are left out.` : undefined}
           >
             <Select id={`${uid}-job`} bind:value={jobId} disabled={!jobs.data?.length} options={jobOptions.get()} />
           </Field>
@@ -271,6 +306,18 @@ export default function NewBenchDialog(props: { open?: boolean }) {
           <p class="note warn">
             <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
             <span>A model trained on {dataset.get()?.name ?? 'this dataset'}'s training split has seen these images: on them, a benchmark measures memory, not sight. Pick the validation or test split.</span>
+          </p>
+        ) : kind.get() === 'label_job' && job.get() && unreviewedHere.get() ? (
+          <p class="note warn" data-unreviewed>
+            <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+            <span>
+              {unreviewedText(unreviewedHere.get()!.n, unreviewedHere.get()!.labeled)}
+            </span>
+          </p>
+        ) : kind.get() === 'label_job' ? (
+          <p class="note">
+            <Info size={14} strokeWidth={1.75} aria-hidden="true" />
+            <span>Keep these images out of training: a model trained on a dataset made from this job has seen them.</span>
           </p>
         ) : (
           <p class="note">
