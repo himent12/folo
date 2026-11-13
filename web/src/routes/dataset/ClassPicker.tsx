@@ -45,10 +45,34 @@ export default function ClassPicker(props: ClassPickerProps) {
     if (cls !== p.value) p.onchange(cls);
   }
 
+  // Type-ahead, as a select's list: typed letters move to the first class whose name starts with them (COCO has 80);
+  // the same letter again moves on to the next one. A pause of a second starts over.
+  let typed = '';
+  let typedAt = 0;
+  function typeAhead(key: string, from: number): HTMLElement | undefined {
+    const now = Date.now();
+    typed = now - typedAt > 1000 ? key : typed + key;
+    typedAt = now;
+    const q = typed.toLowerCase();
+    const again = [...q].every((ch) => ch === q[0]);
+    const all = options();
+    const name = (o: HTMLElement) => (o.querySelector('.name')?.textContent ?? '').trim().toLowerCase();
+    // A new word looks from the focused option on (it may match already); one letter again, from the next.
+    const start = q.length > 1 && !again ? from : from + 1;
+    for (let k = 0; k < all.length; k++) {
+      const o = all[(start + k) % all.length]!;
+      if (name(o).startsWith(again ? q[0]! : q)) return o;
+    }
+    return undefined;
+  }
+
   function onkeydown(e: KeyboardEvent) {
     const all = options();
     const i = all.indexOf(document.activeElement as HTMLElement);
-    if (e.key === 'Escape') {
+    if (e.key.length === 1 && e.key !== ' ' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      typeAhead(e.key, Math.max(0, i))?.focus();
+    } else if (e.key === 'Escape') {
       e.preventDefault();
       hide();
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
