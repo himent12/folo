@@ -659,6 +659,7 @@ export default function Run() {
                           classes={classes.get()}
                           datasetGone={datasetGone.get()}
                           epochsDone={epochsDone.get()}
+                          ended={!!status.get() && !active.get()}
                           title={`${scoresTitle(evalOn.get())} samples`}
                           unavailable={historyError.get() !== undefined}
                         />
@@ -671,7 +672,7 @@ export default function Run() {
                   <aside class="rail" aria-label="Per-class results and config">
                     {!neverTrained.get() ? (
                       <div class="part" data-part="classes">
-                        <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} />
+                        <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} ended={!!status.get() && !active.get()} />
                       </div>
                     ) : null}
                     {cloud.get() ? (

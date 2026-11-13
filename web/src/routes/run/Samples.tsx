@@ -29,7 +29,8 @@ export interface SamplesProps {
    * panel has the error and its Retry. */
   unavailable?: boolean;
   /** The run's dataset was removed: its images are gone, and the tiles say so (nothing to retry). */
-  datasetGone?: boolean;
+  datasetGone?: boolean;  /** The run has ended (stopped, failed): with no validated epoch, none will come, and the panel says so. */
+  ended?: boolean;
 }
 
 export default function Samples(props: SamplesProps) {
@@ -140,7 +141,7 @@ export default function Samples(props: SamplesProps) {
         {props.unavailable ? (
           <p class="none">Samples show once the run's metrics load.</p>
         ) : props.epochsDone === 0 ? (
-          <p class="none">Samples appear after the first validation pass.</p>
+          <p class="none">{props.ended ? 'No samples: it ended before its first validation.' : 'Samples appear after the first validation pass.'}</p>
         ) : samples.error && !samples.data && props.datasetGone ? (
           <p class="none">The dataset was removed, so its sample images are gone.</p>
         ) : samples.error && !samples.data ? (

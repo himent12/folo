@@ -389,9 +389,15 @@ export default function RunMetrics(props: RunMetricsProps) {
     return [{ x: b.epoch, y, label: 'best', quiet: true, pulse: pulse.get(), focus: focus.get() }];
   });
 
+  /**
+   * It ended (stopped, failed) after training steps but before its first validation: the per-epoch readings will never
+   * come, so they say so instead of "after the first epoch" and "Waiting for the first validation…".
+   */
+  const unvalidated = computed(() => !live.get() && !queued() && !props.loading && !lastEpoch.get());
+  const firstEpoch = computed(() => (unvalidated.get() ? 'not validated' : 'after the first epoch'));
   // The one live-value label, as in the chart's legend: "Latest · ep 37". Per-epoch values come from the last
   // validation; per-step values from the epoch the last step is in.
-  const latestEp = computed(() => (lastEpoch.get() ? `Latest · ep ${lastEpoch.get()!.epoch}` : 'after the first epoch'));
+  const latestEp = computed(() => (lastEpoch.get() ? `Latest · ep ${lastEpoch.get()!.epoch}` : firstEpoch.get()));
   // One label for every per-step reading (the Loss, LR and Throughput tabs and the legend), "(partial)" past the end.
   const stepEpWord = computed(() => stepEpoch(props.run.status, observed.get(), lastEpoch.get()?.epoch ?? 0));
   const stepEp = computed(() => (lastStep.get() ? `Latest · ${stepEpWord.get()}` : 'after the first step'));
@@ -426,7 +432,7 @@ export default function RunMetrics(props: RunMetricsProps) {
         id: 'map',
         label: 'mAP50-95',
         value: metric(le?.val.map50_95),
-        caption: nothing ? noneYet.get() : run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
+        caption: nothing ? noneYet.get() : run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : firstEpoch.get(),
         capShort: nothing ? noneYet.get() : run.best ? `best · ep ${run.best.epoch}` : 'not yet',
         title: `${scoresTitle(evalOn())} mAP50-95`,
         qualifier: run.best && !nothing ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
@@ -438,7 +444,7 @@ export default function RunMetrics(props: RunMetricsProps) {
         short: 'P · R',
         value: le ? `${metric(le.val.precision)} · ${metric(le.val.recall)}` : '—',
         // The latest epoch's threshold: "conf 0.31 · ep 37" (each epoch has its own, so the chart says "each at").
-        caption: prNone ? noneYet.get() : le ? (pc != null ? `conf ${conf(pc)} · ep ${le.epoch}` : `best-F1 conf · ep ${le.epoch}`) : 'after the first epoch',
+        caption: prNone ? noneYet.get() : le ? (pc != null ? `conf ${conf(pc)} · ep ${le.epoch}` : `best-F1 conf · ep ${le.epoch}`) : firstEpoch.get(),
         capShort: prNone ? noneYet.get() : le && pc != null ? `conf ${conf(pc)}` : latestShort.get(),
         title: 'Precision and recall',
         qualifier: pc != null ? `by epoch · at each epoch's best-F1 conf (latest ${conf(pc)})` : "by epoch · at each epoch's best-F1 confidence",
@@ -683,7 +689,15 @@ export default function RunMetrics(props: RunMetricsProps) {
                         legendNote={legendNote.get()}
                         label={`${current.get().title} by epoch`}
                         endLabels={tab.get() === 'loss'}
-                        empty={queued() ? 'Curves appear here once training starts' : unit.get() ? 'Waiting for the first validation…' : 'Waiting for the first step…'}
+                        empty={
+                          queued()
+                            ? 'Curves appear here once training starts'
+                            : !unit.get()
+                              ? 'Waiting for the first step…'
+                              : unvalidated.get()
+                                ? 'No validation: it ended before its first epoch finished.'
+                                : 'Waiting for the first validation…'
+                        }
                       />
                     </div>
                   </Key>
