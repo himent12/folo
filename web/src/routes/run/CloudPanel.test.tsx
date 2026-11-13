@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // A cloud run's page (docs/CLOUD.md): the hand-over is the waiting state's title, never a place in the queue; the
 // Cloud panel shows the phases, the transfer, the instance, the cost and the limit; a `cloud` event replaces the state.
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { render, type Rendered } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunEventHandlers } from '$lib/api/client';
@@ -131,30 +131,41 @@ describe('CloudPanel', () => {
     expect(fact('Instance')).toBe('');
   });
 
-  it('takes a released run’s cost from its instance, only its own, and says when the ledger cannot be read', async () => {
+  it('takes a released run’s cost from its instance, and never another run’s', async () => {
     vi.useRealTimers();
     const inst = (id: string, status: CloudInstance['status'], cost: number): CloudInstance =>
       ({ id, status, cost_usd: cost, offer: state().offer, error: null }) as CloudInstance;
-    const answer = vi.spyOn(hub.api, 'cloudInstances').mockResolvedValue([inst('ci_other', 'terminating', 9.99), inst('ci_1', 'terminated', 1.91)]);
+    const answer = vi.spyOn(hub.api, 'cloudInstances').mockResolvedValue([inst('ci_2', 'terminating', 9.99), inst('ci_1', 'terminated', 1.91)]);
     // The run stopped waiting for the termination at $1.84; the reaper confirmed it later, at $1.91.
-    const cloud = state({ phase: 'released', progress: null, cost_usd: 1.84, ended_in: 'collecting' });
-    c = mount(CloudPanel, { target, props: { cloud, provider: 'RunPod', run: { status: 'completed' } } });
+    const first = state({ phase: 'released', progress: null, cost_usd: 1.84, ended_in: 'collecting' });
+    const cloud = signal(first);
+    c = render(() => <CloudPanel cloud={cloud.get()} provider="RunPod" run={{ status: 'completed' }} />, target);
     await until(() => fact('Cost') === '$1.91', 'the ledger’s cost');
     expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
-    unmount(c);
-    // Another run's instance in the answer is never this run's.
-    answer.mockResolvedValue([inst('ci_other', 'terminating', 9.99)]);
-    c = mount(CloudPanel, { target, props: { cloud, provider: 'RunPod', run: { status: 'completed' } } });
+    // The same panel, another run's page (whose instance is ci_3), while its lookup is still on the way: nothing of
+    // ci_1 is shown for it, and ci_2's warning never is.
+    let answerLater: (v: CloudInstance[]) => void = () => {};
+    answer.mockReturnValueOnce(new Promise((r) => (answerLater = r)));
+    cloud.set(state({ phase: 'released', progress: null, cost_usd: 0.5, instance_id: 'ci_3', ended_in: 'collecting' }));
+    flushSync();
+    expect(fact('Cost')).toBe('$0.50');
+    expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
+    answerLater([inst('ci_2', 'terminating', 9.99)]);
     await until(() => answer.mock.calls.length >= 2, 'the second lookup');
     flushSync();
-    expect(fact('Cost')).toBe('$1.84');
+    expect(fact('Cost')).toBe('$0.50');
     expect(target.querySelector('#cloud .unconfirmed')).toBeNull();
-    unmount(c);
-    // The ledger cannot be read: whether the instance is gone is not known.
-    answer.mockRejectedValue(new Error('down'));
-    c = mount(CloudPanel, { target, props: { cloud, provider: 'RunPod', run: { status: 'completed' } } });
+  });
+
+  it('says when the ledger cannot be read, and reads it again until it can', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const answer = vi.spyOn(hub.api, 'cloudInstances').mockRejectedValue(new Error('down'));
+    c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'released', progress: null, ended_in: 'collecting' }), provider: 'RunPod', run: { status: 'completed' } } });
     const note = await until(() => target.querySelector('#cloud .unconfirmed'), 'the note');
     expect(text(note)).toBe('Could not check that the instance is terminated. Settings › Cloud');
+    answer.mockResolvedValue([{ id: 'ci_1', status: 'terminated', cost_usd: 1.2, offer: state().offer, error: null } as CloudInstance]);
+    vi.advanceTimersByTime(30_000);
+    await until(() => !target.querySelector('#cloud .unconfirmed') && fact('Cost') === '$1.20', 'the ledger read again');
   });
 });
 

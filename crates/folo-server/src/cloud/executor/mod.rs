@@ -217,7 +217,7 @@ impl Release {
             return;
         }
         self.entry.update_cloud(|c| {
-            c.ended_in = Some(c.phase);
+            c.ended_in = ended_in(c.ended_in, c.phase);
             c.phase = CloudPhase::Releasing;
             c.progress = None;
         });
@@ -250,6 +250,13 @@ impl Release {
         }
         self.entry.update_cloud(|c| c.phase = CloudPhase::Released);
     }
+}
+
+/// `RunCloud::ended_in` as a release starts in `phase`: the phase the hand-over was in, kept as it was when this run is
+/// released again (a restart after a crash in `releasing` releases it once more), and never `releasing` itself (a run
+/// recorded before the field: not known).
+fn ended_in(recorded: Option<CloudPhase>, phase: CloudPhase) -> Option<CloudPhase> {
+    recorded.or_else(|| (!matches!(phase, CloudPhase::Releasing | CloudPhase::Released)).then_some(phase))
 }
 
 impl Drop for Release {
@@ -488,6 +495,16 @@ impl Exec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_records_the_phase_it_started_in_once() {
+        assert_eq!(ended_in(None, CloudPhase::Syncing), Some(CloudPhase::Syncing));
+        // A restart releases a run a crash left in `releasing` again: what it recorded stays.
+        assert_eq!(ended_in(Some(CloudPhase::Syncing), CloudPhase::Releasing), Some(CloudPhase::Syncing));
+        // One from before the field: not known, never `releasing`.
+        assert_eq!(ended_in(None, CloudPhase::Releasing), None);
+        assert_eq!(ended_in(None, CloudPhase::Released), None);
+    }
 
     #[test]
     fn sizes_and_disks() {

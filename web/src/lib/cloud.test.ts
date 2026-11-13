@@ -82,7 +82,7 @@ describe('the Cloud panel’s phases', () => {
     synced: null,
     ...extra,
   });
-  const run = (status: RunStatus): PhaseRun => ({ status });
+  const run = (status: RunStatus, error_code?: string): PhaseRun => ({ status, error_code });
   const marks = (list: { phase: string; state: string }[]) => list.map((p) => `${p.state} ${p.phase}`);
   const ended = (phase: string) => cloud('released', { ended_in: phase as RunCloud['phase'] });
 
@@ -112,6 +112,9 @@ describe('the Cloud panel’s phases', () => {
     // A worker download that is not there fails the run before anything is rented (cloud_boot_failed, in provisioning).
     expect(marks(phaseStates(ended('provisioning'), run('failed'), true)).slice(0, 2)).toEqual(['failed provisioning', 'skipped booting']);
     expect(marks(phaseStates(ended('training'), run('failed'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed training', 'skipped collecting']);
+    // Training failed on the worker (out of memory), its weights were collected: training failed, not the collection.
+    expect(marks(phaseStates(ended('collecting'), run('failed', 'oom'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed training']);
+    expect(marks(phaseStates(ended('collecting'), run('failed', 'cloud_sync_failed'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed collecting']);
     // Stopped before it trained: the phase it was stopped in did not finish. Stopped while training: it trained.
     expect(marks(phaseStates(ended('booting'), run('stopped'), true)).filter((m) => !m.startsWith('done'))).toEqual(['skipped booting', 'skipped syncing', 'skipped training', 'skipped collecting']);
     expect(marks(phaseStates(ended('training'), run('stopped'), true)).filter((m) => !m.startsWith('done'))).toEqual(['skipped collecting']);

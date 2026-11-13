@@ -87,14 +87,16 @@ export function cloudGpu(run: Pick<Run, 'device'> & { cloud: RunCloud }): string
 export type PhaseState = 'done' | 'now' | 'next' | 'failed' | 'skipped';
 
 /** What a cloud run's phases need of the run: how it ended. */
-export type PhaseRun = Pick<Run, 'status'>;
+export type PhaseRun = Pick<Run, 'status' | 'error_code'>;
 
 /**
  * The phases a cloud run's panel lists, each with its state. A provider that launches nothing (a remote server) has no
  * provisioning or releasing. Live, the phases before the current one are done. Once released, the server says which
  * phase the run ended in (`ended_in`): the phases before it are done, it is failed for a failed run (not done for one
  * stopped before training), and the phases after it were never reached, so a run whose upload failed does not read as
- * trained. A server from before `ended_in` says nothing, and then every phase is done, as it said before.
+ * trained. A run that failed on the worker still has its weights collected (it ends in `collecting`): its training
+ * failed, not the collection, which fails only as `cloud_sync_failed`. A server from before `ended_in` says nothing,
+ * and then every phase is done, as it said before.
  * `unconfirmed`: the instance's termination is not confirmed yet (the run stops waiting after a minute), so releasing
  * is still under way.
  */
@@ -102,7 +104,8 @@ export function phaseStates(cloud: RunCloud, run: PhaseRun | undefined, provisio
   const shown = provisions ? PHASES : PHASES.filter((p) => p !== 'provisioning' && p !== 'releasing');
   const at = phaseIndex(cloud.phase);
   if (cloud.phase !== 'released') return shown.map((p) => ({ phase: p, state: PHASES.indexOf(p) < at ? 'done' : PHASES.indexOf(p) === at ? 'now' : 'next' }));
-  const ended = cloud.ended_in ? phaseIndex(cloud.ended_in) : -1;
+  const collected = cloud.ended_in === 'collecting' && run?.status === 'failed' && run.error_code !== 'cloud_sync_failed';
+  const ended = collected ? PHASES.indexOf('training') : cloud.ended_in ? phaseIndex(cloud.ended_in) : -1;
   const releasing = PHASES.indexOf('releasing');
   const endState = (): PhaseState =>
     run?.status === 'failed' ? 'failed' : run?.status === 'stopped' && ended < PHASES.indexOf('training') ? 'skipped' : 'done';
@@ -111,6 +114,7 @@ export function phaseStates(cloud: RunCloud, run: PhaseRun | undefined, provisio
     if (unconfirmed && p === 'releasing') return { phase: p, state: 'now' };
     if (unconfirmed && p === 'released') return { phase: p, state: 'next' };
     if (i >= releasing || ended < 0 || i < ended) return { phase: p, state: 'done' };
+    if (collected && p === 'collecting') return { phase: p, state: 'done' };
     return { phase: p, state: i === ended ? endState() : 'skipped' };
   });
 }
