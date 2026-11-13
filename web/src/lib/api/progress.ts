@@ -43,6 +43,24 @@ export function etaSettled(run: Pick<Run, 'step' | 'epoch' | 'epochs' | 'steps_p
   return run.epochs === 1 && runProgress(run) >= 0.5;
 }
 
+/**
+ * A run that completed before its last planned epoch: the trainer's early stop (`patience`, docs/MODEL.md §8.1: no
+ * better validation score for that many epochs) ended it. Every screen that says "Epoch 256 of 2000" for a finished
+ * run says why with this.
+ */
+export function stoppedEarly(run: Pick<Run, 'status' | 'epoch' | 'epochs'>): boolean {
+  return run.status === 'completed' && run.epoch > 0 && run.epoch < run.epochs;
+}
+
+/**
+ * A run's time left once it has settled ([`etaSettled`]), else null: what another screen quotes for it (a queued run's
+ * wait, the queue panel, New run's queue note), so none of them says "23s left" while the run's own page is still
+ * estimating.
+ */
+export function settledEta(run: Pick<Run, 'step' | 'epoch' | 'epochs' | 'steps_per_epoch' | 'status' | 'eta_s'>): number | null {
+  return run.eta_s !== null && etaSettled(run) ? run.eta_s : null;
+}
+
 /** What a live run says about its time left: "3m left", or "estimating time left…" until it has settled. */
 export const ETA_PENDING = 'estimating time left…';
 

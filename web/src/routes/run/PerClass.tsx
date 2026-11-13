@@ -19,7 +19,8 @@ export interface PerClassProps {
   compact?: boolean;
   /** The run's history failed to load: one quiet line in place of "appear after the first validation pass"; the
    * metrics panel has the error and its Retry. */
-  unavailable?: boolean;
+  unavailable?: boolean;  /** The run has ended (stopped, failed): with no validated epoch, none will come, and the panel says so. */
+  ended?: boolean;
 }
 
 /** The last two epochs, compared by identity: a step (which bumps `version` too) leaves them as they were. */
@@ -73,7 +74,13 @@ export default function PerClass(props: PerClassProps) {
           <Index each={[0, 1, 2, 3]}>{() => <Skeleton h="18px" />}</Index>
         </div>
       ) : rows.get().length === 0 ? (
-        <p class="none">Per-class metrics appear after the first validation pass.</p>
+        <p class="none">
+          {lastTwo.get()[0]
+            ? 'No per-class results: no class has a box in the validation images.'
+            : props.ended
+              ? 'No per-class results: it ended before its first validation.'
+              : 'Per-class metrics appear after the first validation pass.'}
+        </p>
       ) : (
         <div class="scroll">
           <table class="table dense">

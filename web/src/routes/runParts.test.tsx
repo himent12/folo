@@ -37,6 +37,9 @@ describe('Run metrics: mosaicOffText', () => {
     // Past it.
     expect(mosaicOffText(7, 15, 15, false).cap).toBe('Last 7 epochs: mosaic off');
     expect(mosaicOffText(1, 20, 20, false).full).toBe('Last 1 epoch: mosaic off');
+    // Stopped early by the trainer: the phase it never reached is not promised, one it ended in is not "the last 10".
+    expect(mosaicOffText(10, 2000, 256, false, true).cap).toBe('Stopped early, before mosaic off');
+    expect(mosaicOffText(10, 100, 95, false, true).cap).toBe('Mosaic off from epoch 91');
   });
 });
 

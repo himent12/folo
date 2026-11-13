@@ -20,6 +20,7 @@ import TriangleAlert from '$icons/triangle-alert';
 import { computed, css, effect, For, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Run, SystemInfo } from '$lib/api/types';
+import { stoppedEarly } from '$lib/api/progress';
 import { bytes, duration, metric } from '$lib/format';
 import { fitFixes, isOom, oomCalibration, oomDetail, oomFixes, retryPath, vramForecaster, type OomFix } from '$lib/oom';
 import { prefs } from '$lib/prefs';
@@ -146,6 +147,17 @@ export default function Outcome(props: OutcomeProps) {
       )}
     </span>
   );
+  /**
+   * Why a completed run ended before its last planned epoch: the trainer's early stop, in the words of what it saw ("no
+   * better score after epoch 156"), so "Epoch 256 of 2000" never reads as a crash or lost epochs.
+   */
+  const earlyFact = () =>
+    stoppedEarly(props.run) ? (
+      <span>
+        stopped early at epoch {props.run.epoch} of {props.run.epochs}
+        {props.run.best ? `: no better score after epoch ${props.run.best.epoch}` : ''}
+      </span>
+    ) : null;
   /** A failure's cause in plain words (./failure), by its error code; null: the server's message is the cause. */
   const summary = computed(() => (props.run.status === 'failed' ? failureSummary(props.run.error_code, props.datasetName ?? 'this run', failedEpoch(props.run) !== null) : null));
   /**
@@ -289,7 +301,12 @@ export default function Outcome(props: OutcomeProps) {
           title={`Completed in ${duration(props.elapsed)}`}
           moreLabel="Why?"
           also={short.get()}
-          facts={() => bestFact()}
+          facts={() => (
+            <>
+              {bestFact()}
+              {earlyFact()}
+            </>
+          )}
           actions={() => (
             <>
               {scheduleFix()}
@@ -307,6 +324,7 @@ export default function Outcome(props: OutcomeProps) {
           facts={() => (
             <>
               {bestFact()}
+              {earlyFact()}
               <span>saved as a model</span>
             </>
           )}

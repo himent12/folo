@@ -29,7 +29,7 @@ import LineChart, { type Marker, type Series } from '$lib/charts/LineChart';
 import { runHorizon } from '$lib/charts/horizon';
 import type { AppendLog } from '$lib/api/appendLog';
 import type { Epoch, Run, Step } from '$lib/api/types';
-import { etaSettled, runProgress, trainingSeconds } from '$lib/api/progress';
+import { etaSettled, runProgress, stoppedEarly, trainingSeconds } from '$lib/api/progress';
 import { effectiveCloseMosaic, warmupEpochs } from './resolved';
 import { conf, metric, num } from '$lib/format';
 import Segmented from '$lib/ui/Segmented';
@@ -67,12 +67,15 @@ const PLAIN: Record<string, string> = { '⁻': '−', '⁰': '0', '¹': '1', '²
  * What a progress bar's hatched end means (the last `n` of `epochs` train without mosaic, the trainer's capped count),
  * said for where the run is (`epoch` done, `live`), so a phase still ahead never reads as the current state (round
  * 27's "mosaic off" at epoch 38 of 100): before it, "Mosaic off after epoch 90"; while a live run is in it, "Mosaic off
- * · final 10 epochs"; once past, "Last 10 epochs: mosaic off". `cap` is the caption under the hatch, `full` its tooltip
- * and the bar's accessible description.
+ * · final 10 epochs"; once past, "Last 10 epochs: mosaic off". A run the trainer stopped early (`early`, lib/api/progress
+ * `stoppedEarly`) never gets there, or not to its end: "Stopped early, before mosaic off" / "Mosaic off from epoch 91".
+ * `cap` is the caption under the hatch, `full` its tooltip and the bar's accessible description.
  */
-export function mosaicOffText(n: number, epochs: number, epoch: number, live: boolean): { cap: string; full: string } {
+export function mosaicOffText(n: number, epochs: number, epoch: number, live: boolean, early = false): { cap: string; full: string } {
   const from = epochs - n;
   const last = `${n} ${n === 1 ? 'epoch' : 'epochs'}`;
+  if (early && epoch <= from) return { cap: 'Stopped early, before mosaic off', full: `Stopped early at epoch ${epoch}: mosaic was to be off after epoch ${from}` };
+  if (early) return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the early stop at epoch ${epoch}` };
   if (epoch < from) return { cap: `Mosaic off after epoch ${from}`, full: `Mosaic off after epoch ${from}: the last ${last} train without mosaic` };
   if (live) {
     const final = n === 1 ? 'final epoch' : `final ${n} epochs`;
@@ -170,7 +173,7 @@ export default function RunMetrics(props: RunMetricsProps) {
   /** The run's last epochs train without mosaic: the bar hatches them and every chart marks where they start. */
   const mosaicOff = computed(() => closeFrom.get() > 0 && closeFrom.get() < 1);
   /** What the hatch means, for where the run is: its caption, and in full its tooltip and the bar's description. */
-  const closeText = computed(() => mosaicOffText(closeN.get(), props.run.epochs, props.run.epoch, live.get()), {
+  const closeText = computed(() => mosaicOffText(closeN.get(), props.run.epochs, props.run.epoch, live.get(), stoppedEarly(props.run)), {
     equals: (a, b) => a.cap === b.cap && a.full === b.full,
   });
   const uid = createUniqueId();
@@ -386,9 +389,15 @@ export default function RunMetrics(props: RunMetricsProps) {
     return [{ x: b.epoch, y, label: 'best', quiet: true, pulse: pulse.get(), focus: focus.get() }];
   });
 
+  /**
+   * It ended (stopped, failed) after training steps but before its first validation: the per-epoch readings will never
+   * come, so they say so instead of "after the first epoch" and "Waiting for the first validation…".
+   */
+  const unvalidated = computed(() => !live.get() && !queued() && !props.loading && !lastEpoch.get());
+  const firstEpoch = computed(() => (unvalidated.get() ? 'not validated' : 'after the first epoch'));
   // The one live-value label, as in the chart's legend: "Latest · ep 37". Per-epoch values come from the last
   // validation; per-step values from the epoch the last step is in.
-  const latestEp = computed(() => (lastEpoch.get() ? `Latest · ep ${lastEpoch.get()!.epoch}` : 'after the first epoch'));
+  const latestEp = computed(() => (lastEpoch.get() ? `Latest · ep ${lastEpoch.get()!.epoch}` : firstEpoch.get()));
   // One label for every per-step reading (the Loss, LR and Throughput tabs and the legend), "(partial)" past the end.
   const stepEpWord = computed(() => stepEpoch(props.run.status, observed.get(), lastEpoch.get()?.epoch ?? 0));
   const stepEp = computed(() => (lastStep.get() ? `Latest · ${stepEpWord.get()}` : 'after the first step'));
@@ -423,7 +432,7 @@ export default function RunMetrics(props: RunMetricsProps) {
         id: 'map',
         label: 'mAP50-95',
         value: metric(le?.val.map50_95),
-        caption: nothing ? noneYet.get() : run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
+        caption: nothing ? noneYet.get() : run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : firstEpoch.get(),
         capShort: nothing ? noneYet.get() : run.best ? `best · ep ${run.best.epoch}` : 'not yet',
         title: `${scoresTitle(evalOn())} mAP50-95`,
         qualifier: run.best && !nothing ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
@@ -435,7 +444,7 @@ export default function RunMetrics(props: RunMetricsProps) {
         short: 'P · R',
         value: le ? `${metric(le.val.precision)} · ${metric(le.val.recall)}` : '—',
         // The latest epoch's threshold: "conf 0.31 · ep 37" (each epoch has its own, so the chart says "each at").
-        caption: prNone ? noneYet.get() : le ? (pc != null ? `conf ${conf(pc)} · ep ${le.epoch}` : `best-F1 conf · ep ${le.epoch}`) : 'after the first epoch',
+        caption: prNone ? noneYet.get() : le ? (pc != null ? `conf ${conf(pc)} · ep ${le.epoch}` : `best-F1 conf · ep ${le.epoch}`) : firstEpoch.get(),
         capShort: prNone ? noneYet.get() : le && pc != null ? `conf ${conf(pc)}` : latestShort.get(),
         title: 'Precision and recall',
         qualifier: pc != null ? `by epoch · at each epoch's best-F1 conf (latest ${conf(pc)})` : "by epoch · at each epoch's best-F1 confidence",
@@ -680,7 +689,15 @@ export default function RunMetrics(props: RunMetricsProps) {
                         legendNote={legendNote.get()}
                         label={`${current.get().title} by epoch`}
                         endLabels={tab.get() === 'loss'}
-                        empty={queued() ? 'Curves appear here once training starts' : unit.get() ? 'Waiting for the first validation…' : 'Waiting for the first step…'}
+                        empty={
+                          queued()
+                            ? 'Curves appear here once training starts'
+                            : !unit.get()
+                              ? 'Waiting for the first step…'
+                              : unvalidated.get()
+                                ? 'No validation: it ended before its first epoch finished.'
+                                : 'Waiting for the first validation…'
+                        }
                       />
                     </div>
                   </Key>

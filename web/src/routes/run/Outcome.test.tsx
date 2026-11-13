@@ -234,6 +234,17 @@ describe('Outcome', () => {
     r.done();
   });
 
+  it('says why a completed run ended before its last epoch: the early stop, with the epoch it last improved', () => {
+    const early: Run = { ...failed(''), status: 'completed', error: null, epoch: 256, epochs: 2000, best: { epoch: 156, map50_95: 0.196 }, model_id: 'm_a2f0' };
+    let r = render(early);
+    expect(r.target.querySelector('.c-text')?.textContent).toContain('stopped early at epoch 256 of 2000: no better score after epoch 156');
+    r.done();
+    // A run that trained every epoch says nothing of the kind.
+    r = render({ ...early, epoch: 2000 });
+    expect(r.target.querySelector('.c-text')?.textContent).not.toContain('stopped early');
+    r.done();
+  });
+
   it('never claims a checkpoint for a run stopped before an epoch finished: Start again, not Resume', () => {
     const stopped = (started: string | null): Run => ({ ...failed(''), status: 'stopped', error: null, started, epoch: 0, best: null, model_id: null });
     for (const [started, title, msg] of [

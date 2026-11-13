@@ -37,10 +37,12 @@ export interface LogsProps {
   log: AppendLog<LogLine>;
   version: number;
   live: boolean;
+  /** Lines of the run's log older than `log` (`live.logsEarlier`): counted in the header, said above the first line. */
+  earlier?: number;
 }
 
 const order: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
-/** The most lines the box holds: the latest 500 the level filter shows. */
+/** The most lines the box holds: the latest 500 the level filter shows, until "Show earlier" asks for all it has. */
 const SHOWN = 500;
 
 /** A line at warn level or above, with its absolute index in the log (the cap trims the front: older ones leave). */
@@ -108,8 +110,13 @@ const lastLines = (list: Kept[], n: number) => {
   return out;
 };
 
+/** "1 line", "204 lines". */
+const lineCount = (n: number) => `${n.toLocaleString('en-US')} ${n === 1 ? 'line' : 'lines'}`;
+
 export default function Logs(props: LogsProps) {
   const level = signal<'all' | 'warn' | 'error'>('all');
+  /** How many of the latest lines the box shows: `SHOWN`, or every line held once asked ("Show earlier"). */
+  const cap = signal(SHOWN);
   const follow = signal(true);
   const box = signal<HTMLDivElement>();
 
@@ -119,11 +126,12 @@ export default function Logs(props: LogsProps) {
     () => {
       void props.version;
       index.sync(props.log);
-      return { total: props.log.length, warn: index.warn, error: index.error };
+      return { held: props.log.length, earlier: props.earlier ?? 0, warn: index.warn, error: index.error };
     },
-    { equals: (a, b) => a.total === b.total && a.warn === b.warn && a.error === b.error },
+    { equals: (a, b) => a.held === b.held && a.earlier === b.earlier && a.warn === b.warn && a.error === b.error },
   );
-  const total = () => counts.get().total;
+  /** Every line of the run's log, the ones older than those held included: what the header counts. */
+  const total = () => counts.get().held + counts.get().earlier;
   // The lines shown: a new list only when the log or the filter changed (steps bump `version` too, several times a
   // second, and each new list would re-pin the box: a layout read).
   let shownKey = '';
@@ -132,13 +140,24 @@ export default function Logs(props: LogsProps) {
     void props.version;
     counts.get();
     const lv = level.get();
+    const n = cap.get();
     const c = index.cursor;
-    const key = c ? `${c.gen}|${c.start}|${c.end}|${lv}` : lv;
+    const key = c ? `${c.gen}|${c.start}|${c.end}|${lv}|${n}` : `${lv}|${n}`;
     if (key !== shownKey) {
       shownKey = key;
-      shownLines = lv === 'all' ? props.log.items.slice(-SHOWN) : lastLines(lv === 'warn' ? index.warnUp : index.errors, SHOWN);
+      shownLines = lv === 'all' ? props.log.items.slice(-n) : lastLines(lv === 'warn' ? index.warnUp : index.errors, n);
     }
     return shownLines;
+  });
+  /**
+   * The lines above the first one shown, at this level: the ones the box leaves out (it can show them), and for All
+   * the ones older than this view holds (the run folder's log.jsonl has them).
+   */
+  const before = computed(() => {
+    const lv = level.get();
+    // Warn shows warnings and errors.
+    const held = lv === 'all' ? counts.get().held : lv === 'warn' ? counts.get().warn + counts.get().error : counts.get().error;
+    return { hidden: Math.max(0, held - shown.get().length), older: lv === 'all' ? counts.get().earlier : 0 };
   });
 
   /** Space after the last entry, so that, pinned to the bottom, the top entry starts whole on the box's top edge. */
@@ -270,6 +289,20 @@ export default function Logs(props: LogsProps) {
           {/* Silent: new lines are read only through the batched status line below, when asked for. */}
           <div class="log" ref={box} onscroll={onscroll} role="log" aria-live="off" aria-label="Training log" tabindex={0}>
             <div ref={inner}>
+              {before.get().hidden || before.get().older ? (
+                <p class="earlier">
+                  {before.get().hidden ? (
+                    <>
+                      {lineCount(before.get().hidden + before.get().older)} earlier{' '}
+                      <Button size="sm" variant="ghost" onclick={() => cap.set(Infinity)}>
+                        Show {before.get().older ? lineCount(before.get().hidden) : 'them'}
+                      </Button>
+                    </>
+                  ) : (
+                    <>{lineCount(before.get().older)} earlier are in the run folder's log.jsonl.</>
+                  )}
+                </p>
+              ) : null}
               <For each={shown.get()} key={(l) => l} fallback={<p class="empty">No log lines{level.get() !== 'all' ? ` at ${level.get()} level` : ''} yet.</p>}>
                 {(l) => (
                   // The message wraps only at spaces, each `key value` pair and flag whole (./logTokens).
@@ -306,6 +339,17 @@ export default function Logs(props: LogsProps) {
 }
 
 css`
+  .earlier {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    padding: 0 var(--space-4) var(--space-2);
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
+    /* A snap point as the lines are, so the box can come to rest on it (scrolled to the top). */
+    scroll-snap-align: start;
+  }
   .announce {
     display: inline-flex;
   }

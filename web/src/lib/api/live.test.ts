@@ -5,7 +5,7 @@ import type { Api, RunEventHandlers } from './client';
 import { hub } from './index';
 import { keepStepsPerEpoch, LiveRun, mergeBy, STREAM_GRACE_MS, streamedRun } from './live';
 import { MockApi } from './mock';
-import type { Run, RunMetrics, Step } from './types';
+import type { Run, RunLogs, RunMetrics, Step } from './types';
 
 /** Port of `root(fn)`: runs `fn` in a root of its own and returns its teardown. */
 const root = (fn: () => void) => createRoot((dispose) => (fn(), dispose));
@@ -837,6 +837,94 @@ describe('LiveRun: a cloud run (docs/API.md, SSE cloud)', () => {
     // State, not a change: a later event replaces it whole.
     handlers.cloud?.({ ...next, phase: 'collecting', progress: { done_bytes: 1, total_bytes: 2 } });
     expect(live.run?.cloud).toMatchObject({ phase: 'collecting', progress: { done_bytes: 1, total_bytes: 2 } });
+    stop();
+  });
+});
+
+describe('LiveRun: a long log', () => {
+  const saved = hub.api;
+  afterEach(() => {
+    hub.api = saved;
+    vi.useRealTimers();
+  });
+
+  it('asks for as many lines as it keeps, and counts the older ones the server has (the panel says them)', async () => {
+    vi.useFakeTimers();
+    const done = { ...(await new MockApi('normal', 0).run('run_q7c5')), status: 'completed' as const };
+    const limits: (number | undefined)[] = [];
+    const lines = Array.from({ length: 2000 }, (_, i) => ({ t: `2026-11-12T10:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}Z`, level: 'info' as const, message: `epoch ${i + 705}` }));
+    hub.api = {
+      mock: false,
+      run: () => Promise.resolve(done),
+      runMetrics: () => Promise.resolve({ steps: [], epochs: [] }),
+      runLogs: (_id: string, limit?: number) => (limits.push(limit), Promise.resolve({ lines, total: 2704 })),
+      runEvents: () => () => {},
+    } as unknown as Api;
+    hub.mode = 'live';
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_q7c5');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(limits).toEqual([2000]);
+    expect(live.logs).toHaveLength(2000);
+    expect(live.logsEarlier).toBe(704);
+    stop();
+  });
+
+  it('adds the lines streamed after the server counted them, and keeps its count when a later load has none', async () => {
+    vi.useFakeTimers();
+    const running = { ...(await new MockApi('normal', 0).run('run_q7c5')), status: 'running' as const };
+    const at = (i: number) => `2026-11-12T10:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}Z`;
+    const lines = Array.from({ length: 2000 }, (_, i) => ({ t: at(i), level: 'info' as const, message: `epoch ${i + 705}` }));
+    let history = deferred<RunLogs>();
+    let handlers: RunEventHandlers = {};
+    hub.api = {
+      mock: false,
+      run: () => Promise.resolve(running),
+      runMetrics: () => Promise.resolve({ steps: [], epochs: [] }),
+      runLogs: () => history.promise,
+      runEvents: (_id: string, h: RunEventHandlers) => {
+        handlers = h;
+        return () => {};
+      },
+    } as unknown as Api;
+    hub.mode = 'live';
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_q7c5');
+    });
+    flushSync();
+    // Ten lines stream in after the server answered with 2,704, before its answer is applied; a cloud worker's keep
+    // their own (earlier) times.
+    for (let i = 0; i < 10; i++) handlers.log?.({ t: at(i % 2 ? 2000 + i : 100 + i), level: 'info', message: `late ${i}` });
+    history.resolve({ lines, total: 2704 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.logs).toHaveLength(2000);
+    expect(live.logsEarlier).toBe(714);
+    // Two loads asked before those lines came, answered one after the other: the second sees them already merged
+    // (and sorted among the history by their times) and counts them once.
+    const first = deferred<RunLogs>();
+    const second = deferred<RunLogs>();
+    history = first;
+    handlers.reconnect?.();
+    history = second;
+    handlers.reconnect?.();
+    // The server, asked after the first ten, counts and returns them; then ten more stream in before it answers.
+    const now = [...live.logs];
+    for (let i = 0; i < 10; i++) handlers.log?.({ t: at(200 + i), level: 'info', message: `cloud ${i}` });
+    first.resolve({ lines: now, total: 2714 });
+    await vi.advanceTimersByTimeAsync(0);
+    second.resolve({ lines: now, total: 2714 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.logsEarlier).toBe(724);
+    // A reload of the history from a server that does not count (or a failed one) leaves the count as it was.
+    history = deferred();
+    handlers.reconnect?.();
+    history.resolve({ lines: lines.slice(-500) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.logsEarlier).toBe(724);
     stop();
   });
 });

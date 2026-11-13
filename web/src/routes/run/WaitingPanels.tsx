@@ -3,6 +3,7 @@
  * run marked; and what the run will have once it trains, one quiet list instead of empty frames.
  */
 import { css, For } from 'fw';
+import { settledEta } from '$lib/api/progress';
 import { ordinal } from '$lib/api/queue';
 import type { Run } from '$lib/api/types';
 import { eta } from '$lib/format';
@@ -36,7 +37,7 @@ export default function WaitingPanels(props: WaitingPanelsProps) {
                 <a class="q-name" href={href(`/runs/${props.ahead.id}`)}>
                   {props.ahead.name}
                 </a>
-                <span class="q-meta num">{props.ahead.eta_s !== null ? `${eta(props.ahead.eta_s)} left` : 'training'}</span>
+                <span class="q-meta num">{settledEta(props.ahead) !== null ? `${eta(settledEta(props.ahead)!)} left` : 'training'}</span>
               </li>
             ) : null}
             <For each={props.queue} key={(q) => q.id}>

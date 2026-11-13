@@ -170,3 +170,51 @@ describe('Logs: streaming', () => {
     }
   });
 });
+
+describe('Logs: a log longer than the box shows', () => {
+  const open = (n: number, earlier = 0) => {
+    const log = new AppendLog<LogLine>();
+    log.push(...Array.from({ length: n }, (_, i) => ({ t: `2026-11-12T10:00:00Z`, level: 'info' as const, message: `epoch ${i + 1}` })));
+    c = render(() => <Logs log={log} version={0} live={false} earlier={earlier} />, target);
+    flushSync();
+  };
+  const head = () => target.querySelector('.earlier')?.textContent?.replace(/\s+/g, ' ').trim();
+  const rows = () => target.querySelectorAll('.line').length;
+
+  it('counts every line, says how many come before the first shown, and shows them when asked', () => {
+    open(704);
+    expect(target.textContent).toContain('704');
+    expect(rows()).toBe(500);
+    expect(head()).toBe('204 lines earlier Show them');
+    [...target.querySelectorAll<HTMLButtonElement>('.earlier button')][0]!.click();
+    flushSync();
+    expect(rows()).toBe(704);
+    expect(target.querySelector('.line')?.textContent).toContain('epoch 1');
+    expect(head()).toBeUndefined();
+  });
+
+  it('says where the lines older than the ones it holds are', () => {
+    open(2000, 704);
+    expect(target.querySelector('header, .head')?.textContent ?? target.textContent).toContain('2704');
+    expect(head()).toBe('2,204 lines earlier Show 1,500 lines');
+    target.querySelector<HTMLButtonElement>('.earlier button')!.click();
+    flushSync();
+    expect(head()).toBe("704 lines earlier are in the run folder's log.jsonl.");
+  });
+
+  it('counts errors among the lines Warn shows', () => {
+    const log = new AppendLog<LogLine>();
+    log.push(...Array.from({ length: 550 }, (_, i) => ({ t: `2026-11-12T10:00:00Z`, level: i % 5 === 0 ? ('error' as const) : ('warn' as const), message: `w ${i}` })));
+    c = render(() => <Logs log={log} version={0} live={false} />, target);
+    flushSync();
+    [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.startsWith('Warn'))!.click();
+    flushSync();
+    expect(rows()).toBe(500);
+    expect(head()).toBe('50 lines earlier Show them');
+  });
+
+  it('says nothing above a log the box shows whole', () => {
+    open(30);
+    expect(head()).toBeUndefined();
+  });
+});

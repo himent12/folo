@@ -3,6 +3,7 @@
 // cloud run trains elsewhere and never waits for this machine.
 
 import { eta } from '$lib/format';
+import { settledEta } from '$lib/api/progress';
 import { ordinal, queuePlace } from '$lib/api/queue';
 import type { Run } from '$lib/api/types';
 
@@ -28,7 +29,8 @@ export function aheadOf(runs: readonly Run[] | undefined, onCloud: boolean): Ahe
 /** The Summary's line: what the run waits for, its place, and when the run training now should end. */
 export function aheadLine(a: Ahead): string {
   const now = a.training ? `${a.training.name} is ${a.training.status === 'queued' ? 'starting' : 'training'}` : 'Another run is starting';
-  const ends = a.training?.eta_s != null ? ` (it ends in about ${eta(a.training.eta_s)})` : '';
+  const left = a.training ? settledEta(a.training) : null;
+  const ends = left !== null ? ` (it ends in about ${eta(left)})` : '';
   if (a.waiting === 0) return `${now}: this run waits in the queue and starts when it ends${ends}.`;
   const others = `${a.waiting} ${a.waiting === 1 ? 'run waits' : 'runs wait'}`;
   return `${now} and ${others}: this run will be ${ordinal(a.position)} in the queue${ends}.`;
