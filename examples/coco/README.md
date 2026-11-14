@@ -379,7 +379,7 @@ non-finite.
 | 8 (last with mosaic) | 1.234 | 1.512 | 1.268 | 0.587 | 0.439 | 0.473 | 0.327 | 532 s |
 | 9 (mosaic off) | 1.228 | 1.422 | 1.257 | 0.551 | 0.451 | 0.475 | 0.329 | 360 s |
 | 12 | 1.204 | 1.360 | 1.241 | 0.565 | 0.451 | 0.478 | 0.332 | 324 s |
-| **16** (last, best) | 1.173 | 1.290 | 1.220 | 0.585 | 0.448 | 0.481 | **0.336** | 233 s |
+| **16** (last, best) | 1.173 | 1.290 | 1.220 | 0.585 | 0.448 | 0.481 | **0.335** | 233 s |
 
 Epochs 1–3 sit below v2's 0.313 because the EMA restarts from the transferred weights and lags them at first; it
 is past v2 at epoch 4 and rises in every epoch to the last (+0.0004 in epoch 16), so a longer ending would likely add
