@@ -354,8 +354,9 @@ dispatches do not depend on the image, only the counts in the lists do, and thos
 ### Numbers
 
 Measured once at the end, as asked, after the integration. The owner was expected to game on the GPU tonight;
-in fact no other GPU process ran in either measurement (the `nvidia-smi` snapshots list none; GPU 0% / P5–P8
-before), and the CPU read 2–21% before them. A first toggle run was contaminated (an orphaned A/B job of this
+in fact the `nvidia-smi` snapshots before and after both measurements list no other GPU process (GPU 0% / P5–P8
+before), and the CPU read 2–21% before them. That shows a quiet start and end, not that nothing competed in
+between. A first toggle run was contaminated (an orphaned A/B job of this
 lane, which survived a `TaskStop`, took the lock as "already held" and ran beside it); it is kept as
 `toggle-cand-contended/` and not used.
 
