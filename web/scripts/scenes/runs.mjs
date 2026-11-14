@@ -10,17 +10,16 @@ export const runScenes = [
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // The loss chart: total in ink, box / cls / dfl in their design/README.md hues (amber, violet dashed, teal dotted).
+    // The loss chart beside Validation mAP: total in ink, box / cls / dfl in their design/README.md hues (amber, violet
+    // dashed, teal dotted), the last raw step and the smoothed total in its header.
     name: 'run-loss',
     path: '/runs/run_c19a',
+    fullPage: false,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
-      // Tabs from 768 px, a picker on phones; wait for either (the QA run's clock is paused, so data lands later).
-      const tab = page.locator('[data-tab="loss"]');
-      const pick = page.locator('select[aria-label="Metric to chart"]:visible');
-      await page.locator('[data-tab="loss"]:visible, select[aria-label="Metric to chart"]:visible').first().waitFor();
-      if (await tab.isVisible()) await tab.click();
-      else await pick.selectOption('loss');
+      // The QA run's clock is paused, so data lands later: wait for the legend.
+      await page.locator('#chart-loss .legend').waitFor();
+      await page.locator('#chart-loss').scrollIntoViewIfNeeded();
       await page.mouse.move(0, 0);
       await page.clock.runFor(500);
     },
@@ -32,10 +31,8 @@ export const runScenes = [
     fullPage: false,
     viewports: ['desktop', 'mobile'],
     setup: async (page) => {
-      await page.locator('[data-tab="loss"]:visible, select[aria-label="Metric to chart"]:visible').first().waitFor();
-      const tab = page.locator('[data-tab="loss"]');
-      if (await tab.isVisible()) await tab.click();
-      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      await page.locator('#chart-loss .legend').waitFor();
+      await page.locator('#chart-loss').scrollIntoViewIfNeeded();
       await page.clock.runFor(500);
       await page.getByRole('button', { name: 'What the loss terms mean' }).click();
       await page.mouse.move(0, 0);
@@ -43,7 +40,7 @@ export const runScenes = [
     },
   },
   {
-    // Phones, one section at a time (here: per-class results): the chart folds to its one-line readout above it.
+    // Phones, one section at a time (here: per-class results), under the KPI tiles, Validation mAP and Training loss.
     name: 'run-live-phone-classes',
     path: '/runs/run_7d1e',
     advance: 4000,
@@ -143,7 +140,8 @@ export const runScenes = [
     fullPage: false,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
-      await until(page, 'text=Completed in');
+      // No completed banner: the page is in once its KPI tiles have the run's numbers.
+      await until(page, '.kpis .tile .value');
       await page.mouse.move(0, 0);
     },
   },
@@ -155,7 +153,7 @@ export const runScenes = [
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
   },
   {
-    // Phones: with Logs picked, the chart folds to its one-line readout, so the log starts in the first screen.
+    // Phones: with Logs picked, the section picker and the log under the tiles and the two charts.
     name: 'run-phone-logs',
     path: '/runs/run_7d1e',
     advance: 4000,
@@ -167,18 +165,31 @@ export const runScenes = [
     },
   },
   {
-    // Keyboard focus on a chart: the readout row says how to read it.
+    // Phones: Precision / Recall and Learning rate are sections of the picker (design/UNIFIED.md §4 Run, smaller tiers).
+    name: 'run-phone-pr',
+    path: '/runs/run_c19a',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await page.getByRole('tab', { name: 'P / R', exact: true }).click();
+      await page.locator('#chart-pr .legend').waitFor();
+      await page.locator('.phone-pick').scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Keyboard focus on a chart (Validation mAP): the readout row says how to read it.
     // From the tablet tier up: phones and touch-only devices get no key hint.
     name: 'chart-key-hint',
     path: '/runs/run_c19a',
     fullPage: false,
     viewports: ['desktop', 'tablet'],
     setup: async (page) => {
-      const svg = page.locator('#run-chart svg[aria-roledescription="chart"]').first();
+      const svg = page.locator('#chart-map svg[aria-roledescription="chart"]').first();
       await svg.scrollIntoViewIfNeeded();
       await page.keyboard.press('Tab');
       await svg.focus();
-      await page.locator('#run-chart .legend .note.hint').waitFor({ state: 'visible', timeout: 3000 });
+      await page.locator('#chart-map .legend .note.hint').waitFor({ state: 'visible', timeout: 3000 });
     },
   },
   {
@@ -188,13 +199,10 @@ export const runScenes = [
     viewports: ['desktop', 'mobile'],
     fullPage: false,
     setup: async (page) => {
-      // Tabs from 768 px, a picker on phones; wait for either (the QA run's clock is paused, so data lands later).
-      const tab = page.locator('[data-tab="loss"]');
-      const pick = page.locator('select[aria-label="Metric to chart"]:visible');
-      await page.locator('[data-tab="loss"]:visible, select[aria-label="Metric to chart"]:visible').first().waitFor();
-      if (await tab.isVisible()) await tab.click();
-      else await pick.selectOption('loss');
-      await page.locator('button.trigger').click();
+      // The QA run's clock is paused, so data lands later: wait for the legend.
+      await page.locator('#chart-loss .legend').waitFor();
+      await page.locator('#chart-loss').scrollIntoViewIfNeeded();
+      await page.locator('#chart-loss button.trigger').click();
       await page.clock.runFor(500);
     },
   },
@@ -262,20 +270,22 @@ export const runScenes = [
     },
   },
   {
+    // The one cursor of the run's four charts: hovering Validation mAP reads the same epoch in every chart's legend.
     name: 'chart-hover',
     path: '/runs/run_c19a',
     themes: ['dark'],
     viewports: ['desktop'],
     fullPage: false,
     setup: async (page) => {
-      // Scroll the chart into view first: the pointer cannot hover outside the viewport. Then require the tooltip.
-      const svg = page.locator('#run-chart svg[aria-roledescription="chart"]').first();
+      // Scroll the chart into view first: the pointer cannot hover outside the viewport. Then require the readout.
+      const svg = page.locator('#chart-map svg[aria-roledescription="chart"]').first();
       await svg.scrollIntoViewIfNeeded();
       const box = await svg.boundingBox();
       if (!box) throw new Error('chart-hover: no chart');
       await page.mouse.move(box.x + box.width * 0.55, box.y + box.height * 0.45);
       // The legend is the readout: it switches to the hovered epoch.
-      await page.locator('#run-chart .legend .note.at').waitFor({ state: 'visible', timeout: 3000 });
+      await page.locator('#chart-map .legend .note.at').waitFor({ state: 'visible', timeout: 3000 });
+      await page.locator('#chart-lr .legend .note.at').waitFor({ state: 'visible', timeout: 3000 });
     },
   },
   {

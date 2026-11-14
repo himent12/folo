@@ -401,5 +401,38 @@ describe('Overview', () => {
     expect(strip.textContent).not.toContain('gone');
     expect(strip.querySelector('a')!.getAttribute('href')).toBe('#/settings?section=cloud');
   });
-});
 
+  it('says what is there in its header facts line, beside New run (design/UNIFIED.md §4 Overview)', async () => {
+    watched.runs = await idleRuns();
+    const api = new MockApi('normal', 0);
+    open(api);
+    const [ds, models] = await Promise.all([api.datasets(), api.models()]);
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toBe(`${ds.length} datasets · ${models.length} models · nothing training`);
+    });
+    const primary = [...target.querySelectorAll<HTMLAnchorElement>('header a')].find((a) => a.textContent?.trim() === 'New run');
+    expect(primary?.getAttribute('href')).toBe('#/runs/new');
+  });
+
+  it('shows the live run as one panel: the rail under its header, four tiles beside the chart, the machine at its foot', async () => {
+    const api = new MockApi('normal', 0);
+    const running = (await api.runs()).find((r) => r.status === 'running')!;
+    open(api);
+    const card = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.live .card');
+      if (!el?.querySelector('.foot') || !el.querySelector('.legend')) throw new Error('still waiting for the live panel');
+      return el;
+    });
+    expect(card.querySelector('header h2')?.textContent).toBe(running.name);
+    expect(card.querySelector('header .rail[role=progressbar]')).not.toBeNull();
+    expect([...card.querySelectorAll('.kpis .tile .label')].map((l) => l.textContent)).toEqual(['Epoch', 'mAP50-95 · latest', 'Throughput', 'Time left']);
+    expect(card.querySelector('.kpis .tile .sub')?.textContent).toMatch(/^\d+% complete$/);
+    const sys = await api.system();
+    expect(card.querySelector('.foot')?.textContent).toContain(`CPU · ${sys.cpu.threads} threads`);
+    expect(card.querySelector('.foot')?.textContent).toContain('Memory');
+    // The chart in the series hues: mAP50-95 and mAP50, with the best in the legend.
+    expect([...card.querySelectorAll('.legend li .name')].map((n) => n.textContent)).toEqual(['mAP50-95', 'mAP50', 'best']);
+  });
+});

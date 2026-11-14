@@ -9,7 +9,6 @@ import { computed, css, createUniqueId } from 'fw';
 import { ETA_PENDING, progressText } from '$lib/api/progress';
 import Sparkline from '$lib/charts/Sparkline';
 import { ago, conf, duration, eta, metric, num } from '$lib/format';
-import Meta from '$lib/ui/Meta';
 import Stat from '$lib/ui/Stat';
 import { tooltip } from '$lib/ui/tooltip';
 import { failedEpoch } from './failure';
