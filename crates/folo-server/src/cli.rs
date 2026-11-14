@@ -225,6 +225,35 @@ pub fn with_transfer(
     cmd
 }
 
+/// The distillation settings a run trained with (`distill`, docs/MODEL.md §8.9; [`recorded_train`]), `None` when it
+/// had no teacher or nothing records its config.
+pub fn recorded_distill(run_dir: &std::path::Path) -> Option<folo_vision::DistillConfig> {
+    serde_json::from_value(recorded_train(run_dir)?.get("distill")?.clone()).ok()
+}
+
+/// `cmd` with `--teacher` and `--set distill.<key>=<value>` for each setting that differs from the starting values,
+/// when the run distilled from a teacher (a run continued from a CLI run's checkpoint: the API itself takes none).
+pub fn with_distill(mut cmd: CliCommand, distill: Option<folo_vision::DistillConfig>) -> CliCommand {
+    let Some(d) = distill else { return cmd };
+    let start = folo_vision::DistillConfig::new(d.teacher.clone());
+    cmd.argv.extend(["--teacher".to_string(), d.teacher.clone()]);
+    let mut set = |k: &str, v: String| cmd.argv.extend(["--set".to_string(), format!("distill.{k}={v}")]);
+    for (k, v, s) in [
+        ("cls_gain", d.cls_gain, start.cls_gain),
+        ("dfl_gain", d.dfl_gain, start.dfl_gain),
+        ("temperature", d.temperature, start.temperature),
+    ] {
+        if v != s {
+            set(k, v.to_string());
+        }
+    }
+    if d.consensus != start.consensus {
+        set("consensus", d.consensus.as_str().to_string());
+    }
+    cmd.cli = shell_join(&cmd.argv);
+    cmd
+}
+
 /// `argv` as one command line, quoted for PowerShell (as Studio shows commands): an argument with characters a shell
 /// treats specially is single-quoted, with each quote inside doubled (`'O''Brien'`; PowerShell also reads the
 /// typographic quotes U+2018 to U+201B as single quotes, so they are doubled too). POSIX shells read the same words
@@ -360,6 +389,30 @@ mod tests {
         let e = check_optimizer(&c).unwrap_err().body;
         assert_eq!(e.code, "invalid_config");
         assert!(e.message.contains("optimizer is unknown"), "{}", e.message);
+    }
+
+    /// A run that distilled from a teacher (`distill` in its config) repeats with `--teacher` and the settings that
+    /// differ from the starting values; a run without one gets nothing.
+    #[test]
+    fn distillation_runs_repeat_with_their_teacher() {
+        use folo_test_support::TestDir;
+        let dir = TestDir::new("cli-distill");
+        let c: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
+        let base = || train_command(&c, "D:/coco", DatasetFormat::Coco, None);
+        assert_eq!(with_distill(base(), recorded_distill(&dir)).cli, base().cli, "no config.json");
+        let write = |v: serde_json::Value| std::fs::write(dir.join("config.json"), v.to_string()).unwrap();
+        write(serde_json::json!({ "train": { "epochs": 3 } }));
+        assert_eq!(recorded_distill(&dir), None);
+        let distill = serde_json::json!({
+            "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 2.0, "consensus": "flip"
+        });
+        write(serde_json::json!({ "train": { "distill": distill } }));
+        let cmd = with_distill(base(), recorded_distill(&dir));
+        assert_eq!(
+            cmd.cli,
+            "folo train --data D:/coco --format coco --teacher folo-s-coco --set distill.temperature=2 --set \
+             distill.consensus=flip"
+        );
     }
 
     #[test]

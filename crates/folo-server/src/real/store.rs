@@ -155,7 +155,9 @@ impl Store for RealStore {
         let (transfer, weights) =
             (crate::cli::recorded_transfer(e.dir()), crate::cli::recorded_musgd_weights(e.dir()));
         let cmd = crate::cli::with_transfer(cmd, &config, rule, transfer, weights);
-        Ok(crate::cli::with_warmup_floor(cmd, crate::cli::recorded_warmup_floor(e.dir())))
+        let cmd = crate::cli::with_warmup_floor(cmd, crate::cli::recorded_warmup_floor(e.dir()));
+        // A run continued from a distillation run's checkpoint keeps its teacher.
+        Ok(crate::cli::with_distill(cmd, crate::cli::recorded_distill(e.dir())))
     }
 
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {

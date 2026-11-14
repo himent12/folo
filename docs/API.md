@@ -382,7 +382,11 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   trainer's (real mode: `imgsz >= 64`), a dataset without classes or training images), `404 device_not_found` (a
   `gpu:<n>` this machine has no usable adapter for), `503 shutting_down` (real mode: the server is shutting down;
   also for resuming). Runs train one at a time, first come first served; the others wait
-  `queued` (their log says how many runs are ahead).
+  `queued` (their log says how many runs are ahead). A body with a `distill` key (distillation from a teacher,
+  docs/MODEL.md §8.9) is `400 invalid_config`, for a new run and a resume alike: distillation is a setting of
+  `folo train --teacher` only, refused here so that a request for a teacher never trains without one. A run that
+  continues a distillation run's checkpoint keeps its teacher (it is part of the checkpoint's `folo.train`), and
+  `GET /api/runs/{id}/cli` of such a run adds `--teacher` and its `--set distill.*` values.
   With `"resume_run_id": "<run id>"` in the body, the request **resumes** that `stopped` or `failed` run instead →
   `200 Run` (same id, status `queued` again): from its `weights/last.folo` with the full checkpoint state
   (docs/FORMAT.md: epoch, optimizer, schedule, EMA, RNG), or from scratch when no epoch had finished. The run keeps

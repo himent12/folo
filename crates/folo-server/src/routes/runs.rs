@@ -55,6 +55,16 @@ pub(super) async fn create_run(
     let serde_json::Value::Object(mut fields) = body else {
         return Err(body_error("expected a JSON object"));
     };
+    // Distillation is a recipe key of the CLI (docs/MODEL.md §8.9), not part of the API's TrainConfig: refused, so a
+    // body that asks for a teacher never trains without one.
+    if fields.contains_key("distill") {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_config",
+            "distill (distillation from a teacher, docs/MODEL.md §8.9) is not a setting of the HTTP API",
+        )
+        .hint("train with a teacher from the CLI: folo train --teacher <weights> (docs/CLI.md)"));
+    }
     let checkpoint = string_field(&fields, "checkpoint")?;
     let resume = string_field(&fields, "resume_run_id")?;
     if checkpoint.is_some() {
