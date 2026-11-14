@@ -8,7 +8,8 @@
 //!
 //! - **Statistics**: the candidates that need a box, per level and in total, per image: median, p90, p99, max,
 //!   mean. With `FOLO_BENCH_VERIFY=1` every image's detections are also compared with the dense path's (forward,
-//!   then `HeadOutput::detections`), bit for bit.
+//!   then `HeadOutput::detections`), bit for bit; with `FOLO_BENCH_VERIFY=plan` every image's candidates (and
+//!   precisions) from the predictor's model, whose forward plans are on, with those of a copy with plans off.
 //! - **Sweep** (`FOLO_BENCH_SWEEP=1`): on the first `FOLO_BENCH_SWEEP_N` (default 32) images, at confidence
 //!   thresholds from 0.5 down to 0.001, the model step candidate-first (`predict_candidates` + `finish_candidates`)
 //!   against dense (`forward` + `detections`), alternated image by image for `FOLO_BENCH_ROUNDS` (default 3)
@@ -23,6 +24,7 @@ use std::time::Instant;
 use folo_core::Device;
 use folo_core::{Tensor, no_grad};
 use folo_vision::fusion::BoxFusion;
+use folo_vision::model::ImageCandidates;
 use folo_vision::nms::{Detection, NmsConfig};
 use folo_vision::predict::{Precision, PredictConfig, Predictor};
 
@@ -42,6 +44,27 @@ fn bits(d: &[Detection]) -> Vec<[u32; 6]> {
             [d.class, d.score.to_bits(), b.x1.to_bits(), b.y1.to_bits(), b.x2.to_bits(), b.y2.to_bits()]
         })
         .collect()
+}
+
+/// Every field of every candidate and precision, as bits.
+fn cand_bits(c: &ImageCandidates) -> (Vec<[u32; 7]>, Option<Vec<[u32; 4]>>) {
+    let cands = c
+        .cands
+        .iter()
+        .map(|c| {
+            let b = c.bbox;
+            [
+                c.anchor,
+                c.class,
+                c.score.to_bits(),
+                b.x1.to_bits(),
+                b.y1.to_bits(),
+                b.x2.to_bits(),
+                b.y2.to_bits(),
+            ]
+        })
+        .collect();
+    (cands, c.precisions.as_ref().map(|p| p.iter().map(|q| q.map(f32::to_bits)).collect()))
 }
 
 fn main() {
@@ -77,6 +100,11 @@ fn main() {
     };
     let nms = NmsConfig { conf, fusion, ..NmsConfig::default() };
     let verify = env::<String>("FOLO_BENCH_VERIFY").is_some_and(|v| v == "1");
+    let unplanned = env::<String>("FOLO_BENCH_VERIFY").is_some_and(|v| v == "plan").then(|| {
+        let p = Predictor::open_on(&weights, PredictConfig::default(), dev, prec).expect("weights");
+        p.model().set_forward_plans(false);
+        p
+    });
     println!(
         "candidates bench: {weights} ({}, head {}) on {dev:?} {prec:?}{}, {} images from {dir}, conf {conf}, fusion {}, {} threads",
         model.arch(),
@@ -110,6 +138,13 @@ fn main() {
             per_level[l].push(c.cands.iter().filter(|c| range.contains(&c.anchor)).count());
         }
         total.push(c.cands.len());
+        if let Some(u) = &unplanned {
+            let want = u.model().predict_candidates(&x, &nms).expect("candidates");
+            if cand_bits(c) != cand_bits(&want[0]) {
+                mismatched += 1;
+                println!("MISMATCH {} ({}x{})", p.display(), w, h);
+            }
+        }
         if verify {
             let lazy = model.finish_candidates(c, &nms);
             let dense = model.forward(&x).expect("forward").detections(&nms).expect("detections");
@@ -128,6 +163,15 @@ fn main() {
             quantile(v, 0.99),
             quantile(v, 1.0),
         );
+    }
+    if unplanned.is_some() {
+        println!(
+            "verified {} images against plans off: {mismatched} mismatched; {} answered from a plan (last refusal: {:?})",
+            paths.len(),
+            model.plan_replays(),
+            model.plan_refusal()
+        );
+        assert_eq!(mismatched, 0, "planned candidates differ from the unplanned ones");
     }
     if verify {
         println!("verified {} images against the dense path: {mismatched} mismatched", paths.len());

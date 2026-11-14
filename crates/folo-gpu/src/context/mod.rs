@@ -4,6 +4,7 @@ mod batch;
 pub(crate) mod binds;
 mod device;
 mod memory;
+mod plan;
 mod precompile;
 mod readback;
 mod trace;
@@ -20,6 +21,8 @@ use crate::pool::BufferPool;
 use crate::profile::Profiler;
 
 pub use device::AdapterSummary;
+pub use plan::{Frozen, MAX_PLAN_BYTES, MAX_PLAN_BYTES_EACH, MAX_PLANS};
+pub(crate) use plan::{Plan, PlanOutput};
 
 /// A stable id of a buffer for the bind-group cache (see `context/binds.rs`).
 pub(crate) fn buffer_id(buf: &wgpu::Buffer) -> u64 {
@@ -64,6 +67,9 @@ pub fn request_tensor_cores() -> bool {
 /// Environment variable that turns the bind-group cache off in contexts created afterwards
 /// (`FOLO_GPU_NO_BIND_CACHE=1`, for A/B runs; see [`GpuContext::set_bind_cache`]).
 pub const ENV_NO_BIND_CACHE: &str = "FOLO_GPU_NO_BIND_CACHE";
+/// Environment variable that turns forward plans off in contexts created afterwards (`FOLO_GPU_NO_PLAN=1`, for A/B
+/// runs; see [`GpuContext::set_forward_plans`]).
+pub const ENV_NO_PLAN: &str = "FOLO_GPU_NO_PLAN";
 /// Environment variable that overrides the flush interval ([`GpuContext::set_flush_interval`]) of contexts created
 /// afterwards, for experiments (`FOLO_GPU_FLUSH_EVERY=1024`).
 pub const ENV_FLUSH_EVERY: &str = "FOLO_GPU_FLUSH_EVERY";
@@ -266,6 +272,12 @@ struct Inner {
     cache_dir: Option<std::path::PathBuf>,
     /// Kernels compiled ahead on worker threads and the kernel lists being recorded.
     precompile: precompile::Precompile,
+    /// Recorded forward plans ([`crate::ForwardPlans`]).
+    plans: Mutex<plan::PlanStore>,
+    /// Bumped by changes that retire every plan (see `context/plan.rs`).
+    plan_epoch: AtomicU64,
+    /// Forward plans are on ([`GpuContext::set_forward_plans`]).
+    plans_on: AtomicBool,
 }
 
 /// The idle staging buffers of [`GpuContext::upload_with`].
@@ -299,6 +311,7 @@ impl Staged {
 /// One operation recorded by [`GpuContext::trace_begin`]: a kernel dispatch or a buffer copy, with everything
 /// needed to encode it again ([`GpuContext::replay`]). Profiling tools replay each operation of a forward pass
 /// on its own to see where the GPU time goes.
+#[derive(Clone)]
 pub struct TracedOp {
     /// Kernel name, or `"copy"` for a buffer copy.
     pub name: &'static str,
@@ -309,9 +322,11 @@ pub struct TracedOp {
     kind: TracedKind,
 }
 
+#[derive(Clone)]
 enum TracedKind {
     Dispatch { kernel: Kernel, buffers: Vec<wgpu::Buffer>, params: Box<Params> },
     Copy { src: wgpu::Buffer, src_off: u64, dst: wgpu::Buffer, dst_off: u64, len: u64 },
+    Clear { buf: wgpu::Buffer, bytes: u64 },
 }
 
 /// Work counters since the context was created (see [`GpuContext::work_stats`]).
@@ -366,6 +381,7 @@ impl GpuContext {
     pub fn set_tensor_cores(&self, on: bool) -> bool {
         let status = self.inner.tensor_cores_status.lock().expect("status lock");
         let on = on && self.inner.caps.coop_f16 && *status == "on";
+        // Plans are keyed by the switch, so they need not be retired.
         self.inner.tensor_cores.store(on, Ordering::Relaxed);
         on
     }
@@ -390,6 +406,7 @@ impl GpuContext {
     pub(crate) fn disable_tensor_cores(&self, why: String) {
         let mut status = self.inner.tensor_cores_status.lock().expect("status lock");
         self.inner.tensor_cores.store(false, Ordering::Relaxed);
+        self.bump_plan_epoch();
         *status = format!("off: {why}");
     }
 

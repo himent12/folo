@@ -202,6 +202,19 @@ impl BufferPool {
         self.retired_flag.store(true, Ordering::Relaxed);
     }
 
+    /// Takes `buf` out of the pool for good if it is free (a forward plan keeps it, `context/plan.rs`): it leaves the
+    /// free lists and the pool's ownership, so the bind-group cache drops what binds it. False when it is not free.
+    pub(crate) fn adopt(&mut self, buf: &wgpu::Buffer) -> bool {
+        let key = (buf.size(), buf.usage());
+        let Some(list) = self.free.get_mut(&key) else { return false };
+        let Some(k) = list.iter().find(|(_, b)| *b == buf).map(|(k, _)| *k) else { return false };
+        let buf = list.remove(&k).expect("found above");
+        self.stats.cached_bytes -= key.0;
+        self.cached_buffers -= 1;
+        self.retire(&buf);
+        true
+    }
+
     /// Current counters.
     pub fn stats(&self) -> PoolStats {
         self.stats

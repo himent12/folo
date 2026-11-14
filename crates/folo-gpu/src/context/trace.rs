@@ -14,6 +14,7 @@ impl TracedOp {
         match &self.kind {
             TracedKind::Dispatch { buffers, .. } => buffers.contains(buf),
             TracedKind::Copy { src, dst, .. } => src == buf || dst == buf,
+            TracedKind::Clear { buf: b, .. } => b == buf,
         }
     }
 }
@@ -44,12 +45,30 @@ impl GpuContext {
                 self.copy(src, *src_off, dst, *dst_off, *len);
                 Ok(())
             }
+            TracedKind::Clear { buf, bytes } => {
+                self.clear(buf, *bytes);
+                Ok(())
+            }
         }
     }
 
+    /// Whether [`GpuContext::trace_begin`] is recording.
+    pub(crate) fn tracing(&self) -> bool {
+        self.inner.tracing.load(Ordering::Relaxed)
+    }
+
     pub(super) fn record(&self, op: impl FnOnce() -> TracedOp) {
-        if self.inner.tracing.load(Ordering::Relaxed) {
-            self.inner.trace.lock().expect("trace lock").push(op());
+        let tracing = self.inner.tracing.load(Ordering::Relaxed);
+        let recording = self.recording();
+        if !tracing && !recording {
+            return;
+        }
+        let op = op();
+        if recording {
+            self.record_op(op.clone());
+        }
+        if tracing {
+            self.inner.trace.lock().expect("trace lock").push(op);
         }
     }
 

@@ -264,6 +264,8 @@ pub struct FoloModel {
     mode: Mode,
     fused: bool,
     head_mode: HeadMode,
+    /// Recorded GPU forwards of the fused model ([`FoloModel::set_forward_plans`]; off until turned on).
+    plans: folo_gpu::ForwardPlans,
     /// Layers 0–10.
     pub backbone: Backbone,
     /// Layers 11–22.
@@ -319,7 +321,8 @@ impl FoloModel {
         let classes = (0..config.num_classes).map(|c| format!("class{c}")).collect();
         let head_mode = if o2o { HeadMode::O2o } else { HeadMode::O2m };
         let (mode, fused) = (Mode::new(), false);
-        Ok(FoloModel { config, classes, imgsz: 640, mode, fused, head_mode, backbone, neck, head })
+        let plans = folo_gpu::ForwardPlans::with_enabled(false);
+        Ok(FoloModel { config, classes, imgsz: 640, mode, fused, head_mode, plans, backbone, neck, head })
     }
 
     /// The model config (`folo.config`).
@@ -442,13 +445,62 @@ impl FoloModel {
     }
 
     /// [`FoloModel::forward_impl`] without a trace, on a CPU from inside the rayon pool ([`folo_core::cpu::in_pool`]):
-    /// its hundred-odd parallel kernels then start on a worker instead of each waking the pool from outside.
+    /// its hundred-odd parallel kernels then start on a worker instead of each waking the pool from outside. A fused
+    /// eval-mode model on a GPU goes through its recorded plans ([`FoloModel::forward_planned`]).
     fn forward_in_pool(&self, x: &Tensor, mode: HeadMode) -> Result<HeadOutput> {
         if x.device().is_cpu() {
             folo_core::cpu::in_pool(|| self.forward_impl(x, None, mode))
+        } else if self.fused && !self.is_training() {
+            self.forward_planned(x, mode)
         } else {
             self.forward_impl(x, None, mode)
         }
+    }
+
+    /// The eval forward through [`folo_gpu::ForwardPlans`]: with plans on ([`FoloModel::set_forward_plans`]) and
+    /// under `no_grad`, its second call for an input shape and dtype records the forward's dispatches and later calls
+    /// replay them (bit for bit the same outputs) as long as no tensor of the model changed.
+    fn forward_planned(&self, x: &Tensor, mode: HeadMode) -> Result<HeadOutput> {
+        let (h, w) = self.check_input(x)?;
+        let o2o = mode == HeadMode::O2o && self.has_o2o();
+        let tensors = |f: &mut dyn FnMut(&Tensor)| each_tensor(self, f);
+        let mut out = self.plans.run(&[o2o as u64], x, &tensors, |x| {
+            let o = self.forward_impl(x, None, mode)?;
+            Ok::<_, Error>(vec![o.box_raw, o.cls_raw])
+        })?;
+        let (Some(cls_raw), Some(box_raw)) = (out.pop(), out.pop()) else {
+            unreachable!("two outputs");
+        };
+        Ok(HeadOutput {
+            box_raw,
+            cls_raw,
+            mode: if o2o { HeadMode::O2o } else { HeadMode::O2m },
+            o2o: None,
+            anchors: self.anchors(h, w),
+            reg_max: self.head.reg_max,
+            num_classes: self.head.num_classes,
+        })
+    }
+
+    /// Turns the recorded GPU forwards of this model on or off (off drops them; [`folo_gpu::ForwardPlans`]). They are
+    /// off for a model on its own and on inside a [`crate::predict::Predictor`], which never lends its model out
+    /// mutably. With plans on, a fused eval-mode forward on a GPU under `no_grad` is recorded at its second call per
+    /// input shape and head mode and replayed from the third, bit for bit, until a tensor of the model is written or
+    /// replaced. What a plan does not see is the layers' own settings (an activation, a stride, a block's `residual`,
+    /// SPPF's `k`): turn plans off before changing one. `FOLO_GPU_NO_PLAN=1` or
+    /// [`folo_gpu::GpuContext::set_forward_plans`] turns them off for a whole context.
+    pub fn set_forward_plans(&self, on: bool) {
+        self.plans.set_enabled(on);
+    }
+
+    /// Forwards of this model answered from a recorded plan so far.
+    pub fn plan_replays(&self) -> u64 {
+        self.plans.replays()
+    }
+
+    /// Why the last recording of this model's forward did not become a plan ([`folo_gpu::ForwardPlans::refusal`]).
+    pub fn plan_refusal(&self) -> Option<String> {
+        self.plans.refusal()
     }
 
     /// [`FoloModel::forward`], calling `trace(layer, output)` with the output of every layer 0–22 of
@@ -581,6 +633,12 @@ impl FoloModel {
     pub fn to_device(&mut self, device: Device) -> Result<()> {
         Module::to_device(self, device)
     }
+}
+
+/// Calls `f` with every tensor of `m` and its descendants, in canonical order, without allocating.
+fn each_tensor(m: &dyn Module, f: &mut dyn FnMut(&Tensor)) {
+    m.visit_tensors(&mut |_, t, _| f(t));
+    m.visit_children(&mut |_, c| each_tensor(c, f));
 }
 
 impl Module for FoloModel {

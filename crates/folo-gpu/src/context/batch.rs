@@ -48,6 +48,12 @@ impl GpuContext {
         if bytes == 0 {
             return;
         }
+        self.record(|| TracedOp {
+            name: "clear",
+            spec: String::new(),
+            groups: [(bytes / 4).min(u32::MAX as u64) as u32, 1, 1],
+            kind: TracedKind::Clear { buf: buf.clone(), bytes },
+        });
         let mut b = self.inner.batch.lock().expect("batch lock");
         let mut prof = self.profiler();
         let q = prof.as_mut().map(|p| p.begin("clear"));
@@ -78,7 +84,7 @@ impl GpuContext {
         })
     }
 
-    fn bump(&self, b: &mut Batch) {
+    pub(super) fn bump(&self, b: &mut Batch) {
         b.dispatches += 1;
         let every = self.inner.flush_every.load(Ordering::Relaxed);
         if b.dispatches >= b.limit.min(every) {

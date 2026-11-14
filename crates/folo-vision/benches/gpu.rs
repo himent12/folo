@@ -145,6 +145,8 @@ fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, tc: 
     model.to_device(dev).expect("to_device");
     model.fuse().expect("fuse");
     model.to_dtype(prec.dtype()).expect("to_dtype");
+    // Recorded forwards, as inside a `Predictor` (a model on its own has them off).
+    model.set_forward_plans(true);
     println!("  fused: {} parameters", model.num_parameters());
     let rng = &mut Rng::seed(0);
     let _g = no_grad();

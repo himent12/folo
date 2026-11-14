@@ -3,9 +3,16 @@
 //! (`f32,f16tc`; `f16tc` needs `FOLO_GPU_TENSOR_CORES=1`), `FOLO_BENCH_CALLS` (default 1000), `FOLO_BENCH_GAP_MS`
 //! (time the thread sleeps after each call, default 0), `FOLO_BENCH_SPINS` (wait spins in microseconds to compare in
 //! one process, interleaved in blocks of 50 calls, for example `0,300,2000`; default: the context's),
-//! `FOLO_BENCH_RAMP=1` (trace the recovery after two idle seconds first), `FOLO_BENCH_ECORES` (see below)).
+//! `FOLO_BENCH_RAMP=1` (trace the recovery after two idle seconds first), `FOLO_BENCH_ECORES` (see below),
+//! `FOLO_BENCH_CALL` (`forward`, the default, or `candidates`), `FOLO_BENCH_WEIGHTS` (a `.folo` file, `{scale}`
+//! standing for the scale; default: random weights), `FOLO_BENCH_PLANS=toggle` (see below)).
 //!
 //! The fused model at 640×640, input on the GPU, every call synchronised (the `gpu` bench's forward b1 latency row).
+//! `FOLO_BENCH_CALL=candidates` times candidate-first prediction instead (`FoloModel::predict_candidates` with the
+//! default `NmsConfig`, a `Predictor`'s call), which reads its candidates back inside the call, so its encode phase
+//! holds the whole call and submit and wait are about zero. `FOLO_BENCH_PLANS=toggle` compares forward plans on
+//! (the default here, as inside a `Predictor`) and off: two models of the same weights, interleaved in blocks of
+//! calls like the wait spins (with spins given, every spin with each).
 //! Per call: host time encoding the forward, submitting the rest of the batch (`flush`), and waiting for the GPU
 //! (`sync`), and the logical processor the thread ran on right before and right after the wait, and at the start of
 //! the call. The processor number is `rdtscp`'s `IA32_TSC_AUX`, which Windows and Linux set to it (that is the OS's
@@ -27,7 +34,9 @@ use folo_core::rng::Rng;
 use folo_core::{Device, Tensor, no_grad};
 use folo_gpu::GpuContext;
 use folo_nn::Module;
+use folo_nn::io::ModelFile;
 use folo_vision::model::{FoloModel, ModelConfig};
+use folo_vision::nms::NmsConfig;
 use folo_vision::predict::{Precision, f16_unavailable};
 
 /// Whether this processor has `rdtscp` (CPUID extended leaf `0x8000_0001`, EDX bit 27).
@@ -188,6 +197,34 @@ fn clocks_line(clocks: Option<Clocks>) -> String {
     }
 }
 
+/// What a measured call runs (`FOLO_BENCH_CALL`).
+#[derive(Clone, Copy, PartialEq)]
+enum Call0 {
+    Forward,
+    Candidates,
+}
+
+/// The fused `scale` model in `prec` on `dev`, from `FOLO_BENCH_WEIGHTS` or random, with forward plans `plans`.
+fn model(scale: &str, dev: Device, prec: Precision, plans: bool) -> FoloModel {
+    let model = match std::env::var("FOLO_BENCH_WEIGHTS") {
+        Ok(w) => {
+            let file = ModelFile::open(w.replace("{scale}", scale)).expect("FOLO_BENCH_WEIGHTS");
+            FoloModel::from_file_for_inference(&file, dev, prec.dtype()).expect("weights")
+        }
+        Err(_) => {
+            let mut model = FoloModel::new(ModelConfig::new(scale, 80).expect("config")).expect("model");
+            model.to_device(dev).expect("to_device");
+            model.fuse().expect("fuse");
+            model.to_dtype(prec.dtype()).expect("to_dtype");
+            model
+        }
+    };
+    model.eval();
+    // Recorded forwards, as inside a `Predictor` (a model on its own has them off).
+    model.set_forward_plans(plans);
+    model
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     scale: &str,
@@ -200,33 +237,42 @@ fn run(
     spins: &[Duration],
     spin0: Duration,
     e_cores: &[u32],
+    what: Call0,
+    toggle: bool,
 ) {
     ctx.set_tensor_cores(tc);
     // The context's own spin for the warm-up and the ramp, not the previous run's last setting.
     ctx.set_wait_spin(spin0);
     let label = if tc { format!("{prec}, tensor cores") } else { prec.to_string() };
-    let mut model = FoloModel::new(ModelConfig::new(scale, 80).expect("config")).expect("model");
-    model.to_device(dev).expect("to_device");
-    model.fuse().expect("fuse");
-    model.to_dtype(prec.dtype()).expect("to_dtype");
+    // [plans on, plans off] with the toggle, else [plans on].
+    let models: Vec<FoloModel> =
+        [true, false][..1 + toggle as usize].iter().map(|&p| model(scale, dev, prec, p)).collect();
+    let nms = NmsConfig::default();
     let _g = no_grad();
     let x = Tensor::rand_uniform([1, 3, 640, 640], 0.0, 1.0, &mut Rng::seed(0))
         .to_device(dev)
         .expect("upload")
         .to_dtype(prec.dtype())
         .expect("dtype");
-    let forward = || drop(black_box(model.forward(&x).expect("forward")));
-    for _ in 0..25 {
-        forward();
-        synchronize(dev).expect("sync");
+    let call = |m: usize| match what {
+        Call0::Forward => drop(black_box(models[m].forward(&x).expect("forward"))),
+        Call0::Candidates => drop(black_box(models[m].predict_candidates(&x, &nms).expect("candidates"))),
+    };
+    for m in 0..models.len() {
+        for _ in 0..25 {
+            call(m);
+            synchronize(dev).expect("sync");
+        }
     }
     if std::env::var("FOLO_BENCH_RAMP").is_ok_and(|v| v != "0" && !v.is_empty()) {
-        ramp(dev, &forward, &label, scale);
+        ramp(dev, &|| call(0), &label, scale);
     }
-    // One setting per block of calls, cycling, so every setting sees the same stretches of machine load; cycle `c`
-    // starts with setting `c % n`, so no setting always goes first.
-    let settings: Vec<Option<Duration>> =
+    // One setting (a wait spin, and with the toggle which model) per block of calls, cycling, so every setting sees
+    // the same stretches of machine load; cycle `c` starts with setting `c % n`, so no setting always goes first.
+    let spin_list: Vec<Option<Duration>> =
         if spins.is_empty() { vec![None] } else { spins.iter().copied().map(Some).collect() };
+    let settings: Vec<(Option<Duration>, usize)> =
+        spin_list.iter().flat_map(|&s| (0..models.len()).map(move |m| (s, m))).collect();
     const BLOCK: usize = 50;
     let n = settings.len();
     let clocks = Clocks::start();
@@ -239,7 +285,8 @@ fn run(
         if logs[k].len() >= calls {
             continue;
         }
-        if let Some(spin) = settings[k] {
+        let (spin, m) = settings[k];
+        if let Some(spin) = spin {
             ctx.set_wait_spin(spin);
         }
         if !gap.is_zero() {
@@ -247,7 +294,7 @@ fn run(
         }
         let c0 = cpu();
         let t0 = Instant::now();
-        forward();
+        call(m);
         let t1 = Instant::now();
         ctx.flush();
         let t2 = Instant::now();
@@ -259,14 +306,30 @@ fn run(
         logs[k].push(Call { enc: ms(t0, t1), sub: ms(t1, t2), wait: ms(t2, t3), cpus: [c0, c1, c2] });
     }
     let clocks = clocks_line(clocks);
+    let name = if what == Call0::Candidates { "candidates" } else { "forward" };
     println!(
-        "\nfolo-{scale} {label} b1, {calls} synchronised calls per setting, {} ms sleep after each call",
+        "\nfolo-{scale} {label} b1 {name}, {calls} synchronised calls per setting, {} ms sleep after each call",
         gap.as_millis()
     );
-    for (setting, log) in settings.iter().zip(&logs) {
-        match setting {
-            Some(s) => println!(" wait spin {} us:", s.as_micros()),
-            None => println!(" wait spin {} us (the context's):", ctx.wait_spin().as_micros()),
+    if toggle {
+        println!(
+            " plans answered {} calls (last refusal {:?}); the plans-off model {}",
+            models[0].plan_replays(),
+            models[0].plan_refusal(),
+            models[1].plan_replays()
+        );
+    }
+    for ((spin, m), log) in settings.iter().zip(&logs) {
+        let plans = if !toggle {
+            ""
+        } else if *m == 0 {
+            ", plans on"
+        } else {
+            ", plans off"
+        };
+        match spin {
+            Some(s) => println!(" wait spin {} us{plans}:", s.as_micros()),
+            None => println!(" wait spin {} us (the context's){plans}:", ctx.wait_spin().as_micros()),
         }
         report(log, e_cores);
     }
@@ -404,6 +467,12 @@ fn main() {
         .map(|s| Duration::from_micros(s.parse().expect("FOLO_BENCH_SPINS: microseconds")))
         .collect();
     let e_cores = parse_cores(&var("FOLO_BENCH_ECORES", ""));
+    let what = match var("FOLO_BENCH_CALL", "forward").as_str() {
+        "forward" => Call0::Forward,
+        "candidates" => Call0::Candidates,
+        _ => panic!("FOLO_BENCH_CALL: forward or candidates"),
+    };
+    let toggle = var("FOLO_BENCH_PLANS", "") == "toggle";
     let spin0 = ctx.wait_spin();
     let tc = ctx.tensor_cores();
     for scale in var("FOLO_BENCH_SCALES", "n").split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -423,7 +492,7 @@ fn main() {
                 println!("\nfolo-{scale} f16 on tensor cores: skipped ({})", ctx.tensor_cores_status());
                 continue;
             }
-            run(scale, dev, &ctx, prec, on, calls, gap, &spins, spin0, &e_cores);
+            run(scale, dev, &ctx, prec, on, calls, gap, &spins, spin0, &e_cores, what, toggle);
         }
     }
     ctx.set_tensor_cores(tc);

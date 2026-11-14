@@ -49,6 +49,8 @@ impl GpuContext {
     /// names kernels this process never used) are dropped too; ones still queued or compiling stay.
     pub fn release_memory(&self) -> Result<u64> {
         self.drop_finished_precompiles();
+        self.bump_plan_epoch();
+        let planned = self.plans().clear();
         let released = {
             // The batch lock first (the order `alloc` inside an encode takes them in), so nothing encodes between
             // the trim and the submission below.
@@ -73,7 +75,7 @@ impl GpuContext {
             b.chunks.clear();
             b.binds.clear();
             self.inner.pool.lock().expect("pool lock").take_retired();
-            released + staged
+            released + staged + planned
         };
         self.wait_idle()?;
         Ok(released)
@@ -121,6 +123,7 @@ impl GpuContext {
             )));
         }
         let buf = self.inner.pool.lock().expect("pool lock").take(&self.inner.device, class, usage);
+        self.record_taken(&buf);
         Ok(GpuBuffer::new(buf, class, self.inner.pool.clone()))
     }
 
@@ -169,6 +172,7 @@ impl GpuContext {
         len: u64,
         fill: impl FnOnce(wgpu::WriteOnly<'_, [u8]>) -> R,
     ) -> Result<(GpuBuffer, R)> {
+        self.record_taint("an upload");
         let len4 = len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT).max(wgpu::COPY_BUFFER_ALIGNMENT);
         let class = size_class(len4);
         let reused = {
@@ -213,6 +217,7 @@ impl GpuContext {
     /// A pooled storage buffer holding the bytes of `staged`, filled by a copy encoded after all work so far
     /// (no submission, no wait).
     pub fn upload_staged(&self, staged: &Staged) -> Result<GpuBuffer> {
+        self.record_taint("an upload");
         let out = self.alloc(staged.len.max(1))?;
         let len = staged.len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
         self.copy(&staged.buf, 0, out.raw(), 0, len.min(staged.buf.size()));
@@ -234,6 +239,7 @@ impl GpuContext {
         if data.is_empty() {
             return Ok(());
         }
+        self.record_taint("an upload");
         // `Queue::write_buffer` runs before the next submission's commands, so submit what is open first:
         // otherwise a pooled buffer still read by unsubmitted work would be overwritten early.
         self.flush();

@@ -13,6 +13,12 @@
 //! input shape), **b16** `predict_batch` on all of them (square 640). Every call synchronised, after a second of
 //! warm-up calls; median, p90 and min, and the detections per image of the last pass. A row asked to run on tensor
 //! cores fails if they were off at its end (a cooperative kernel that fails to build turns them off).
+//!
+//! `FOLO_BENCH_PLANS=toggle` instead compares forward plans on (a `Predictor`'s default) and off, in one process
+//! with two predictors of the same weights, alternated for `FOLO_BENCH_ROUNDS` (default 6) rounds of
+//! `FOLO_BENCH_ITERS` calls per row and side: **b1** and **b1 one** as above, and **step**, the model step alone
+//! (`predict_candidates` on the first image's prepared input, which ends in its readback). Per row and side: p50,
+//! p90 and p99 of every call, and the median and range of the round medians.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -21,6 +27,7 @@ use folo_core::Device;
 use folo_core::backend::synchronize;
 use folo_data::Image;
 use folo_gpu::GpuContext;
+use folo_vision::nms::NmsConfig;
 use folo_vision::predict::{Precision, PredictConfig, Predictor, f16_unavailable};
 
 fn env<T: std::str::FromStr>(k: &str) -> Option<T> {
@@ -44,6 +51,86 @@ fn latency(dev: Device, iters: usize, mut f: impl FnMut()) -> (f64, f64, f64) {
         .collect();
     v.sort_by(f64::total_cmp);
     (v[v.len() / 2], v[(v.len() * 9 / 10).min(v.len() - 1)], v[0])
+}
+
+/// `iters` synchronised calls of `f` in ms, after `warm` unmeasured ones.
+fn calls(dev: Device, warm: usize, iters: usize, mut f: impl FnMut()) -> Vec<f64> {
+    for _ in 0..warm {
+        f();
+        synchronize(dev).expect("sync");
+    }
+    (0..iters)
+        .map(|_| {
+            let t = Instant::now();
+            f();
+            synchronize(dev).expect("sync");
+            t.elapsed().as_secs_f64() * 1e3
+        })
+        .collect()
+}
+
+fn pct(v: &[f64], q: f64) -> f64 {
+    let mut s = v.to_vec();
+    s.sort_by(f64::total_cmp);
+    s[((s.len() as f64 * q) as usize).min(s.len() - 1)]
+}
+
+/// `FOLO_BENCH_PLANS=toggle`: plans on against off, alternated (see the module docs).
+fn toggle(dev: Device, path: &str, prec: Precision, label: &str, images: &[Image], iters: usize) {
+    let rounds: usize = env("FOLO_BENCH_ROUNDS").unwrap_or(6);
+    let on = Predictor::open_on(path, PredictConfig::default(), dev, prec).expect("predictor");
+    let off = Predictor::open_on(path, PredictConfig::default(), dev, prec).expect("predictor");
+    off.model().set_forward_plans(false);
+    let nms = NmsConfig { conf: on.config().conf, ..NmsConfig::default() };
+    let x = on.prepare(std::slice::from_ref(&images[0]), true).expect("prepare").input;
+    const ROWS: [&str; 3] = ["b1", "b1 one", "step"];
+    // [row][side: 0 on, 1 off] -> every call, and each round's median.
+    let mut all: Vec<[Vec<f64>; 2]> = (0..3).map(|_| Default::default()).collect();
+    let mut med: Vec<[Vec<f64>; 2]> = (0..3).map(|_| Default::default()).collect();
+    for r in 0..rounds {
+        for k in 0..2 {
+            let side = (r + k) % 2;
+            let pred = if side == 0 { &on } else { &off };
+            let mut next = 0;
+            let v = [
+                calls(dev, 20, iters, || {
+                    black_box(pred.predict(&images[next % images.len()]).expect("predict"));
+                    next += 1;
+                }),
+                calls(dev, 20, iters, || drop(black_box(pred.predict(&images[0]).expect("predict")))),
+                calls(dev, 20, iters, || {
+                    drop(black_box(pred.model().predict_candidates(&x, &nms).expect("candidates")))
+                }),
+            ];
+            for (row, v) in v.into_iter().enumerate() {
+                med[row][side].push(pct(&v, 0.5));
+                all[row][side].extend(v);
+            }
+        }
+    }
+    println!(
+        "trained {label}: plans answered {} calls (last refusal {:?}); the plans-off side {}",
+        on.model().plan_replays(),
+        on.model().plan_refusal(),
+        off.model().plan_replays()
+    );
+    for (row, name) in ROWS.iter().enumerate() {
+        let side = |s: usize| {
+            let (a, m) = (&all[row][s], &med[row][s]);
+            let lo = m.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = m.iter().copied().fold(0.0, f64::max);
+            format!(
+                "p50 {:>6.3} p90 {:>6.3} p99 {:>6.3} rounds {:.3} ({lo:.3}-{hi:.3})",
+                pct(a, 0.5),
+                pct(a, 0.9),
+                pct(a, 0.99),
+                pct(m, 0.5)
+            )
+        };
+        let (a, b) = (pct(&all[row][0], 0.5), pct(&all[row][1], 0.5));
+        println!("  {name:<7} on  {}", side(0));
+        println!("  {name:<7} off {}   on vs off p50 {:+.1}%", side(1), (a / b - 1.0) * 100.0);
+    }
 }
 
 fn main() {
@@ -101,6 +188,11 @@ fn main() {
                 continue;
             }
             ctx.set_tensor_cores(on);
+            if std::env::var("FOLO_BENCH_PLANS").is_ok_and(|v| v == "toggle") {
+                toggle(dev, &path, prec, &format!("folo-{scale} {p}"), &images, iters);
+                assert_eq!(ctx.tensor_cores(), on, "folo-{scale} {p}: {}", ctx.tensor_cores_status());
+                continue;
+            }
             let pred = Predictor::open_on(&path, PredictConfig::default(), dev, prec).expect("predictor");
             let mut next = 0;
             let mut dets = 0;

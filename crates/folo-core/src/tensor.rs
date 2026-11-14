@@ -373,7 +373,10 @@ impl Tensor {
         self.0.node.as_ref()
     }
 
-    pub(crate) fn storage_version(&self) -> u64 {
+    /// The version of this tensor's storage, shared by every view of it: bumped by every in-place write and by the
+    /// in-place conversions ([`Tensor::to_device_`], [`Tensor::to_dtype_`]). With [`Tensor::id`] it tells whether a
+    /// tensor still holds the data it held earlier.
+    pub fn storage_version(&self) -> u64 {
         self.0.storage.version()
     }
 
