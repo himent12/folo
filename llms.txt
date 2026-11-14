@@ -21,7 +21,10 @@ Fastest path for an agent:
 
 ## Start here
 - [README](README.md): the pitch, the speed and accuracy charts against Ultralytics yolo26n, the quickstart, Studio
-  and Desktop, agent setup (Claude Code / Codex / .mcp.json), architecture at a glance, project status
+  and Desktop, agent setup (Claude Code / Codex / .mcp.json), architecture at a glance, where each folder is, project
+  status
+- [Docs index](docs/README.md): every doc in docs/, grouped by task (use FOLO, drive it from an agent, the apps, the
+  internals, measuring, contributing), and a reading order for a new contributor
 - [Quickstart](docs/QUICKSTART.md): the longer walkthrough. It covers building, synthetic data, training on your
   own YOLO or COCO folder, dataset checks, fine-tuning from a .folo file, resume, val, predict, export, Studio,
   in-browser inference and troubleshooting
@@ -53,11 +56,15 @@ Fastest path for an agent:
 - [Cloud compute](docs/CLOUD.md): training runs on a rented GPU (RunPod) or on another FOLO server
   (`TrainConfig.compute`, `folo cloud`, MCP `cloud_*`). It has the lifecycle of a cloud run, how instances are
   never left behind, the providers, and `folo serve --token`
-- [Architecture](docs/ARCHITECTURE.md): the crates (folo-core, folo-gpu, folo-nn, folo-data, folo-vision,
-  folo-api, folo-client, folo-cloud, folo-server, folo-mcp, folo-cli, folo-wasm) and how they fit together, with
-  the backend contract
+- [Architecture](docs/ARCHITECTURE.md): the map of the repository. It covers the crates (folo-core, folo-gpu,
+  folo-nn, folo-data, folo-vision, folo-api, folo-bench, folo-client, folo-cloud, folo-server, folo-mcp, folo-cli,
+  folo-wasm, folo-test-support), how they fit together, the main flows, and a "Where do I change ...?" table from a
+  change to the files it touches
+- [Server internals](docs/SERVER.md): how folo-server is built: the router, the Store and the services behind the API
 - [Detector spec](docs/MODEL.md): the normative spec of folo-n/s/m/l/x. It covers the blocks, the head, the loss,
   the task-aligned assigner, the training recipe and the inference path
+- [Vision internals](docs/VISION.md): a tour of folo-vision's code: the model, loss, assigner, trainer and predictor
+- [Core](docs/CORE.md): folo-core in depth: tensors, CPU kernels and autograd
 - [Data](docs/DATA.md): YOLO and COCO detection rules, label parsing, robustness, augmentation, the data loader,
   dataset checks and conversion
 - [Metrics](docs/METRICS.md): how mAP, precision, recall and the confusion matrix are computed (pycocotools parity)
@@ -74,6 +81,24 @@ Fastest path for an agent:
   yolo26n and folo-s vs yolo26s, one pycocotools scorer) in `bench/finetune/`; the charts' data and generator in
   `tools/charts/`
 
+## Code map
+- [Crates](crates/README.md): the 14 crates of the root workspace in dependency order, what each uses, the dependency
+  rules and where to start reading the engine
+- Each crate's README maps its modules to what they hold: [folo-core](crates/folo-core/README.md),
+  [folo-api](crates/folo-api/README.md), [folo-data](crates/folo-data/README.md),
+  [folo-gpu](crates/folo-gpu/README.md), [folo-nn](crates/folo-nn/README.md),
+  [folo-vision](crates/folo-vision/README.md), [folo-bench](crates/folo-bench/README.md),
+  [folo-wasm](crates/folo-wasm/README.md), [folo-client](crates/folo-client/README.md),
+  [folo-cloud](crates/folo-cloud/README.md), [folo-server](crates/folo-server/README.md),
+  [folo-mcp](crates/folo-mcp/README.md), [folo-cli](crates/folo-cli/README.md),
+  [folo-test-support](crates/folo-test-support/README.md)
+- [Examples folder](examples/README.md): the shapes and COCO runs and `bench_external.py`, an external benchmark entry
+- [Bench harnesses](bench/README.md): the Python scripts outside cargo (Ultralytics baselines, fine-tuning accuracy
+  and the other folders under `bench/`)
+- [Tools](tools/README.md): CI and development helpers, including `file-size.sh`, `test-tmp.sh` and the chart
+  generator in `tools/charts/`
+- [Scripts](scripts/README.md): `build-wasm.sh` / `build-wasm.ps1` and the install scripts
+
 ## Examples
 - [Shapes](examples/shapes/README.md): the convergence test (folo-n on synthetic shapes at 320 px). It has the
   commands and per-epoch results on CPU (72 min) and GPU (169 s)
@@ -81,8 +106,10 @@ Fastest path for an agent:
   and 0.416), with pycocotools parity and `folo weights`
 
 ## Apps
-- [FOLO Studio](web/README.md): the web app (TypeScript + Vite on fw, its own UI framework in web/framework). It covers the dev server, checks,
-  tests, screenshots (`npm run shoot`) and data sources
+- [FOLO Studio](web/README.md): the web app (TypeScript + Vite on fw, its own UI framework in web/framework). It
+  covers the dev server, checks, tests, screenshots (`npm run shoot`) and data sources
+- [fw](web/framework/README.md): Studio's UI framework (JSX compiled at build time to DOM templates, fine-grained
+  signals, no virtual DOM)
 - [FOLO Desktop](apps/desktop/README.md): the native app. It covers running it, connecting to `folo serve`,
   `--mock`, `--scenario`, layout and screenshots
 - [folo-ui](apps/desktop/ui/README.md): Desktop's UI framework (GPUI's API, CPU-rendered). It covers building and
@@ -95,10 +122,12 @@ Fastest path for an agent:
     [log](apps/desktop/notes/HILLCLIMB.md), [review brief](apps/desktop/tools/review-brief.md)
 
 ## Project
-- [CLAUDE.md](CLAUDE.md): the entry point for Claude Code; it points at AGENTS.md and docs/ARCHITECTURE.md
-- [Agent rules](AGENTS.md): the ground rules for contributors, agents and people (stable Rust, no ML frameworks,
-  tests, docs), the pull request workflow and the layout
-- [Contributing](CONTRIBUTING.md): building, the checks a pull request must pass, conventions, licence;
+- [CLAUDE.md](CLAUDE.md): the entry point for Claude Code; it points at AGENTS.md, docs/ARCHITECTURE.md and the
+  crate READMEs
+- [Agent rules](AGENTS.md): where to find your way, the ground rules for contributors, agents and people (stable
+  Rust, no ML frameworks, tests, docs), the pull request workflow and the layout
+- [Contributing](CONTRIBUTING.md): a map of the repository, building, the checks a pull request must pass,
+  conventions, licence;
   [Security](SECURITY.md): reporting a vulnerability, and what to keep in mind when exposing `folo serve`
 - [Roadmap](docs/ROADMAP.md): milestones, with what is merged, in progress and next
 - [Releasing](docs/RELEASE.md): versioning, the tag → draft release workflow, the install scripts

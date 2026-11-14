@@ -1,6 +1,7 @@
 <!-- Title: `area: imperative summary`, e.g. `core: add broadcasting binary ops`. See CONTRIBUTING.md. -->
 
 ## What and why
+<!-- A change to behaviour or an interface updates its file in docs/; a module added or moved, its crate's README. -->
 
 
 ## How it was tested

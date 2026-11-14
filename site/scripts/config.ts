@@ -52,11 +52,14 @@ export const NAV: NavGroup[] = [
     pages: [
       { src: 'docs/API.md', label: 'HTTP API' },
       { src: 'docs/MCP.md', label: 'MCP server' },
+      { src: 'docs/SERVER.md', label: 'Server internals' },
       { src: 'docs/FORMAT.md', label: '.folo file format' },
       { src: 'docs/MODEL.md', label: 'Detector spec' },
+      { src: 'docs/VISION.md', label: 'Vision: the implementation' },
       { src: 'docs/NN.md', label: 'NN: layers and optimizers' },
       { src: 'docs/DATA.md', label: 'Data' },
       { src: 'docs/METRICS.md', label: 'Metrics' },
+      { src: 'docs/CORE.md', label: 'Core: tensors and autograd' },
       { src: 'docs/GPU.md', label: 'GPU' },
       { src: 'docs/WASM.md', label: 'In the browser' },
     ],
@@ -64,6 +67,7 @@ export const NAV: NavGroup[] = [
   {
     title: 'Project',
     pages: [
+      { src: 'docs/README.md', label: 'All docs by task' },
       { src: 'docs/ARCHITECTURE.md', label: 'Architecture' },
       { src: 'docs/BENCHMARKS.md', label: 'Speed benchmarks' },
       { src: 'docs/ROADMAP.md', label: 'Roadmap' },

@@ -4,6 +4,24 @@ Bug reports, measurements on other hardware and pull requests are all welcome. T
 [AGENTS.md](AGENTS.md) has the full rules (they apply to people and to coding agents alike) and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains how the crates fit together.
 
+## Finding your way around
+
+- `crates/`: the Rust engine (folo-core, folo-gpu, folo-nn, folo-data, folo-vision) and the services and the `folo`
+  binary on top of it (folo-server, folo-mcp, folo-cli and their helpers), one cargo workspace.
+- `web/`: FOLO Studio, the web app. `apps/desktop/`: FOLO Desktop and its UI framework, a second cargo workspace.
+- `docs/`: the documentation. `examples/`, `bench/`: worked runs and the benchmark harnesses.
+- `tools/`, `scripts/`, `site/`, `design/`: CI helpers, the build and install scripts, the docs site, the shared
+  design tokens.
+
+The [README's map](README.md#architecture-at-a-glance) links every folder's README, and
+[crates/README.md](crates/README.md) lists the crates in dependency order. To find the files a change touches, use
+the "Where do I change ...?" table in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); [docs/README.md](docs/README.md)
+lists every doc by what it answers.
+
+A first contribution is easiest where no GPU is needed: the docs and the examples (checked by `npm run check` in
+`site/`), the CLI, the server and the dataset tools, which CI tests on runners without a GPU. A change to
+`crates/folo-gpu` or a GPU path needs a machine with a GPU to test (see Building).
+
 ## Reporting a problem
 
 Open an issue with what you ran, what happened and what you expected. `folo doctor --json` prints the version, the
@@ -14,8 +32,8 @@ For a vulnerability, do not open an issue: see [SECURITY.md](SECURITY.md).
 
 ## Building
 
-You need Rust stable (`rust-toolchain.toml` pins the channel and the components). Node 22 or newer is needed only for
-Studio and the docs site.
+You need Rust stable (`rust-toolchain.toml` pins the channel and the components). Node is needed only for Studio and
+the docs site: CI uses Node 22 for Studio and Node 24 for the site, whose scripts are TypeScript run by `node` itself.
 
 ```sh
 cargo folo doctor                         # builds the CLI (`cargo folo` = `cargo run --release -p folo-cli --`)
@@ -50,7 +68,8 @@ change touches `crates/folo-gpu` or a GPU path, run the tests on a machine that 
 - **Fast is a feature.** A change to a hot path reports numbers, measured against the build before it on the same
   machine, the two alternated (`cargo bench -p folo-vision --bench gpu`, `--bench cpu_e2e`, `--bench train_step`;
   [docs/BENCHMARKS.md](docs/BENCHMARKS.md) describes the method). Negative results are worth writing down as well.
-- **Docs in the same pull request.** A change to behaviour or an interface updates the matching file in `docs/`.
+- **Docs in the same pull request.** A change to behaviour or an interface updates the matching file in `docs/`; a
+  module added, moved or removed updates that crate's README.
 - **Names.** Branches `<area>/<short-topic>` (`core/autograd`, `ui/run-view`); commit and pull request titles
   `area: imperative summary` (`core: add broadcasting binary ops`).
 - **No secrets, ever**, in code, tests, logs or pull requests.

@@ -300,6 +300,16 @@ fixes.
   `folo serve --allow-host NAME` (repeatable) adds a name for a tunnel or reverse proxy that keeps its own `Host`. A
   server bound beyond loopback (`--host 0.0.0.0`, cloud workers) is not checked: use `--token` there.
 
+#### Repository map
+A map for newcomers to the code, and two moves that make the code match it.
+- `docs/ARCHITECTURE.md` is now a short map: the repository, the crates, the main flows and a "Where do I change
+  ...?" table. `docs/CORE.md`, `docs/VISION.md` and `docs/SERVER.md` take folo-core, folo-vision and folo-server in
+  depth, and `docs/README.md` indexes every doc by task.
+- Every crate has a README, and so do `crates/`, `bench/`, `tools/`, `scripts/` and `examples/`. The README's
+  architecture diagram shows all 14 crates, and a table links each top-level folder.
+- folo-server's `/api/bench` handlers moved from `bench/http.rs` to `routes/bench.rs`, next to the other areas;
+  `folo serve`, `folo mcp` and `folo doctor` moved out of folo-cli's `main.rs` into modules of their own.
+
 ### The foundation
 
 #### Engine
