@@ -21,6 +21,8 @@ let entered = false;
 
 export interface PageProps {
   title: string;
+  /** A small tag right after the title (a dataset's format), part of its heading; a snippet, like `sub`. */
+  titleTag?: JSX.Element;
   /** A meta line under the title (snippet for rich content). */
   sub?: JSX.Element;
   /** Phones: a short meta line (one line, ellipsis as a guard) in place of `sub`; the header becomes one row. */
@@ -60,6 +62,7 @@ export default function Page(props: PageProps) {
           {/* Route changes move focus here (App), so the new page is announced by its name. */}
           <h1 tabindex={-1} data-route-focus>
             {p.title}
+            {p.titleTag ? <span class="title-tag">{p.titleTag}</span> : null}
           </h1>
           {p.sub ? (
             <div class="sub" class:wide-only={!!p.subPhone}>
@@ -141,6 +144,13 @@ css`
     align-items: center;
     gap: var(--space-2);
     margin-bottom: 2px;
+  }
+  .title-tag {
+    display: inline-flex;
+    vertical-align: middle;
+    margin-left: var(--space-2);
+    font-size: var(--type-base-size);
+    letter-spacing: normal;
   }
   h1 {
     font-size: var(--type-xl-size);

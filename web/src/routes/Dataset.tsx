@@ -28,6 +28,7 @@ import PathText from '$lib/ui/PathText';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
+import Badge from '$lib/ui/Badge';
 import Tabs from '$lib/ui/Tabs';
 import type { Density } from '$lib/ui/TileGrid';
 import { toast } from '$lib/ui/toast';
@@ -342,6 +343,7 @@ export default function Dataset() {
         <>
           <Page
             title={dd().name}
+            titleTag={phone() ? undefined : () => <Badge>{dd()?.format}</Badge>}
             sub={() => (
               <>
                 {phone() ? (
@@ -355,7 +357,6 @@ export default function Dataset() {
                   </span>
                 ) : (
                   <Meta>
-                    <span class="faint">{dd().format}</span>
                     <PathText class="ds-path" path={dd().path} />
                     <span class="num">{num(dd().splits.train)} train</span>
                     <span class="num">{num(dd().splits.val)} val</span>
@@ -399,8 +400,8 @@ export default function Dataset() {
                 label="Dataset views"
                 idPrefix="ds-tab"
                 tabs={[
-                  { value: 'images', label: 'Images', meta: compact(total.get()) },
-                  { value: 'stats', label: 'Stats', meta: findingLabel(findings.get()) },
+                  { value: 'images', label: 'Images', meta: phone() ? compact(total.get()) : num(total.get()) },
+                  { value: 'stats', label: 'Statistics', meta: findings.get() ? `· ${findingLabel(findings.get())}` : undefined },
                 ]}
                 value={tab.get()}
                 onchange={(t) => setQuery({ tab: t === 'images' ? null : t, image: null })}
