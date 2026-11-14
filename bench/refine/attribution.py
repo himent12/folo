@@ -56,7 +56,8 @@ def main():
     for lo, hi in ((0.3, 0.6), (0.6, 0.8), (0.8, 1.01)):
         sel = (gi >= lo) & (gi < hi)
         variants[f"gt_iou[{lo},{hi})"] = np.where(sel[:, None], ref, box)
-    # Oracle gates (upper bounds for any gating of this refiner): refine only the matched boxes it improves.
+    # A truth-assisted gate (an illustration, not a bound on COCO AP): refine only the matched boxes whose IoU with
+    # their assigned truth goes up.
     import torch
     from refiner import box_iou
     gt = np.asarray(d.t["gt"])

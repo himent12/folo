@@ -19,12 +19,13 @@ the detector's own DFL width for that side), move the B* boxes toward their trut
 
 (The best P3–P5 row is c-prim-nofeat, the no-features control; every feature variant is below it.)
 
-Why: the top-scoring box per truth (the one AP sees) is already close, with a median edge error of 1.2 / 1.9 /
-2.7 px for small / medium / large objects. That is near COCO's own annotation noise (~1–2 px), and 3–4.5× below
-the DFL width that sets the probe spacing. No source tried (P3–P5, the stem, the input image down to 1 px
-spacing) moves medium and large primaries toward their truths; small ones gain 1.7% of their edge error from the
-input image. A refiner trained on all matched boxes does close 19% of the matched boxes' edge error, but on the
-lower-ranked duplicates, and costs the tight top boxes more AP than it gains.
+Why: the top-scoring box per truth (a proxy for the box AP sees) is already close, with a median edge error of
+1.2 / 1.9 / 2.7 px for small / medium / large objects, 3–4.5× below the DFL width that sets the probe spacing. None
+of the refiners tried (on P3–P5, on the stem, on the input image down to 1 px spacing) moves medium and large
+primaries toward their truths; small ones gain 1.7% of their edge error from the input image. A refiner trained on
+all boxes at IoU ≥ 0.3 does close 19% of the edge error of the boxes at IoU ≥ 0.5, but mostly on lower-ranked
+duplicates, and costs the tight top boxes more AP than it gains. (COCO's annotation noise, often put at 1–2 px per
+edge, may set a floor for the small objects; it is not measured here.)
 
 ## Setup
 
@@ -62,7 +63,7 @@ image at conf 0.001), 149,943 with a truth at IoU ≥ 0.3; training views: 6,611
   landed weights (`results/dev-bstar.json`).
 - The dumped features against the detector (`check_features.py`): the head's box branch (BN folded, PyTorch) run on
   the dumped P3 / P4 / P5 gives the dumped DFL logits of every candidate anchor, max |logit diff| 0.006 (relative
-  ~1e-4, the f16 storage), decoded distances within 0.0002 bins on average and 0.002 at worst; a wrong level order,
+  ~1e-4, the f16 storage), decoded distances within 0.0002 bins on average and 0.004 at worst; a wrong level order,
   layout or a one-cell shift would be off by whole bins (`logs/check-features.log`). A first version read the
   file's raw weights and got 0.02–0.06 bins: `best.folo` also holds an `ema.` copy, which is what FOLO infers with
   (`read_folo` now prefers it). The refiner never used these weights (it reads the dumped features), so no result
@@ -105,20 +106,22 @@ B* boxes, scores unchanged). Δ and the 95% interval are the paired image bootst
 | p-fixed | primary boxes | fixed probe spacing | 0.3803 | −0.0005 | [−0.0011, −0.0001] |
 | p-all | primary boxes | all three levels at every probe | 0.3788 | −0.0021 | [−0.0028, −0.0015] |
 | p-big | primary boxes | d 128, hidden 512 | 0.3786 | −0.0023 | [−0.0030, −0.0016] |
-| p-ovf | 256 training views | 200 epochs (capacity check) | 0.3445 | | |
+| p-ovf | primaries of 800 training views | 40 epochs, CIoU weight 5 (capacity check) | 0.3445 | | |
 
 The features hurt: c-base − c-nofeat −0.0054 [−0.0064, −0.0045], c-prim − c-prim-nofeat −0.0012 [−0.0017,
 −0.0007]. No run reaches B*, so the gate (+0.005 on dev) is far away, and val-A was not scored.
 
-**The refiner does learn something.** c-base closes 19% of the mean edge error of all matched boxes (mean IoU with
-the truth 0.695 → 0.740; by size S +1.3%, M +13%, L +22.5%). But AP is decided by the top-scoring box per truth,
+**The refiner does learn something.** c-base closes 19% of the mean edge error of the dev boxes at IoU ≥ 0.5 with
+a truth (71,957 boxes, `evaluate.py`'s diagnostics; it trained on IoU ≥ 0.3), mean IoU with the truth 0.695 →
+0.740; by size S +1.3%, M +13%, L +22.5% (`logs/dev-c-base.log`). But AP is decided by the top-scoring box per truth,
 and the gain is on the many lower-ranked duplicates around it.
 
 **Attribution (c-base, `attribution.py`).** Refining only the boxes that have a truth at IoU ≥ 0.3 gives 0.3709, the
 unmatched only 0.3809 (untouched). By the true IoU of the B* box: refining only [0.3, 0.6) gives 0.3829 (+0.0020),
-[0.6, 0.8) 0.3789, [0.8, 1] 0.3704. The tight boxes are what is lost, and they carry AP75 and above. An oracle that
-keeps the refined box only where it is closer to the truth: 0.3920 (+0.011), the ceiling for any gate on these
-predictions.
+[0.6, 0.8) 0.3789, [0.8, 1] 0.3704. The tight boxes are what is lost, and they carry AP75 and above. A truth-assisted
+gate that keeps the refined box only where its IoU with its assigned truth went up gives 0.3920 (+0.011,
+`logs/attrib-dev-c-base-oracle.log`): an illustration of how much of the refiner's movement is useful, not a
+ceiling (COCO's matching between competing boxes and truths can make another subset score higher).
 
 **Gates and shrinkage** (c-base; trained on the training views, picked there): moving only part of the way
 (λ 0.25: 0.3801; 0.5: 0.3780), a z gate on the predicted shift over its spread (z 1: 0.3778, 2: 0.3803, 3: 0.3805)
@@ -130,8 +133,10 @@ and the residual distribution (`residuals.py`) of dev, val-A and the training vi
 fixed.
 
 **The primary boxes.** For each truth its primary box is the top-scoring same-class B* box at IoU ≥ 0.5
-(`primary.py`; 30,949 on dev, mean |edge error| 5.29 px: S 2.02, M 4.09, L 8.50). This is the box AP sees. Fraction
-of the primaries' mean |edge error| closed (`primary_error.py`; negative = worse):
+(`primary.py`; 30,949 on dev, mean |edge error| 5.29 px: S 2.02, M 4.09, L 8.50). This is a proxy for the box AP
+sees: COCO matches greedily by score at each IoU threshold, so the primary is the first box tried for its truth
+at IoU 0.5, unless another truth takes it first. Fraction of the primaries' mean |edge error| closed
+(`primary_error.py`; negative = worse):
 
 | run | all | S | M | L |
 |---|---:|---:|---:|---:|
@@ -150,8 +155,9 @@ of the primaries' mean |edge error| closed (`primary_error.py`; negative = worse
 
 Every refiner makes the primaries worse. Trained on primaries only, the training CIoU loss stays flat (0.2096 at
 the start, 0.2107 at the end of c-prim): the network cannot find a direction that helps those boxes, and goes
-nearly to identity. It can fit (p-ovf: 0.209 → 0.079 on its 256 views), so it is not a capacity or optimisation
-failure. With P3–P5 (strides 8–32) the remaining error of a primary box is below what the probes can resolve.
+nearly to identity. It can fit (p-ovf: training CIoU 0.209 → 0.079 on its 800 views), so it is not a capacity or
+optimisation failure. With P3–P5 (strides 8–32) the remaining error of a primary box is below what these probes
+resolved.
 
 ## Part 4: experiment H, high-resolution probes
 
@@ -222,19 +228,21 @@ Where the primaries' error lives (`logs/primary-scale-dev.log`, dev primaries, n
    median error) and 2.2 px / 4.75 px for medium / large (coarser than theirs); only the small primaries improved.
    That suggested M and L only lacked resolution, so h2px samples every strip 1 px apart (finer than every size's
    median error). S stays where it was (+1.7%), M and L are hurt a little less (−0.7%, −1.0%) but still move
-   farther as often as closer. So for M and L, finer image evidence at the edge does not tell the refiner which way
-   the truth lies.
+   farther as often as closer. (h2px also narrows the strip's coverage, to ±16 px.) So for M and L, none of these
+   architectures, losses and sampling patterns found in finer image evidence which way the truth lies; other
+   designs are not ruled out.
 3. **The mean is the tail.** Mean / median is 1.7 (S), 2.2 (M), 3.1 (L): a few edges with large errors carry the mean
    (not inspected one by one; presumably occluded or truncated extents and part-whole ambiguity, which a local edge
    probe cannot settle).
-4. **Annotation noise.** COCO's polygon-derived boxes carry about 1–2 px of noise per edge. The small primaries'
-   median error (1.1 px in the original image) is at that level, so little of it may be reducible against these
-   labels at all; the medium ones (1.8 px) are near it.
+4. **Annotation noise (a caveat, not measured here).** COCO's boxes are often said to carry about 1–2 px of noise
+   per edge. If so, the small primaries' median error (1.1 px in the original image) is at that level and little
+   of it is reducible against these labels; the medium ones (1.8 px) are near it. This lane has no measurement
+   that separates label noise from prediction error, so it is a possible floor, not an explanation.
 
-So the lane's answer: B*'s top boxes are already within about one annotation noise of their truths at the median;
-the remaining error of medium and large boxes is not visible as a local edge at any resolution tried (stride 8 down
-to 1 px); small boxes gain a little from the input image (+1.7% of their edge error, +0.0019 AP_S); and the
-duplicates a pyramid refiner can fix do not carry AP.
+So the lane's answer: B*'s top boxes are already within about 1–3 px of their truths at the median, well inside
+the DFL width the probes were spaced by; no refiner tried here moved the medium and large ones toward their truths
+from any source (stride 8 down to 1 px); small boxes gain a little from the input image (+1.7% of their edge error,
++0.0019 AP_S); and the duplicates a pyramid refiner can fix do not carry AP.
 
 ## Negative results
 

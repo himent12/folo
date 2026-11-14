@@ -1,9 +1,10 @@
 """Checks a feature dump against the detector itself: the head's box branch (MODEL.md §6.1, fused weights) run in
 PyTorch on the dumped P3 / P4 / P5 features must give the dumped DFL logits of the image's candidate anchors (up
-to the f16 storage of the features: measured mean |logit diff| 0.07-0.09, decoded distances 0.02-0.06 bins on
-average). A wrong level order, layout, image offset or a one-cell shift fails it (whole bins on most anchors).
+to the f16 storage of the features: measured on landed folo-n with its EMA weights, max |logit diff| 0.006,
+decoded distances 0.0002 bins on average and 0.004 at worst). A wrong level order, layout, image offset or a
+one-cell shift fails it (whole bins on most anchors).
 
-    python check_features.py <fused weights .folo> <dump dir> [--images 0 1 2]
+    python check_features.py <weights .folo> <dump dir> [--images 0 1 2]
 """
 
 import argparse
