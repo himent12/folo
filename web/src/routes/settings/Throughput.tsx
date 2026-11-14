@@ -1,23 +1,28 @@
 /**
- * Settings › System › Throughput: the speed this server has measured (GET /api/system/throughput), training and
- * prediction rows with their spread, sample count and age; the reference rows (docs/BENCHMARKS.md) are not listed,
- * one sentence says they fill the rest. Where the server has `benchmark`, Measure now runs its probe (1–10 s, the
- * elapsed time counted honestly beside it) and reloads the rows.
+ * Settings › Throughput: the speed this server has measured (GET /api/system/throughput), as a table of training or
+ * prediction rows (Training / Inference in the panel's header) with their spread, sample count and age; phones keep a
+ * two-line list. The reference rows (docs/BENCHMARKS.md) are not listed, one sentence says they fill the rest. Where the
+ * server has `benchmark`, Measure now runs its probe (1–10 s, the elapsed time counted honestly beside it) and reloads
+ * the rows.
  */
 import Gauge from '$icons/gauge';
-import { computed, css, defaults, effect, For, signal } from 'fw';
+import { computed, css, defaults, effect, For, MediaQuery, signal } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { InferThroughput, TrainThroughput } from '$lib/api/types';
+import { media } from '$lib/design/tokens';
 import { deviceName, num } from '$lib/format';
 import { latencyMs, latencyRange, measuredHere, measuredRows, updatedWords } from '$lib/throughput';
 import { referenceSource } from '$lib/reference';
 import Button from '$lib/ui/Button';
 import Ident from '$lib/ui/Ident';
+import Panel from '$lib/ui/Panel';
+import Segmented from '$lib/ui/Segmented';
 import { toast } from '$lib/ui/toast';
 
 type Row = TrainThroughput | InferThroughput;
+type View = 'training' | 'inference';
 
 /**
  * "640 px · batch 16 · f32" / "640 px · f16 · tensor cores", and where it was measured when that is not this server's
@@ -30,6 +35,11 @@ function setting(r: Row): string {
   if (r.device === 'cpu') parts.push('CPU');
   return parts.join(' · ');
 }
+
+/** "amp" / "f32"; "f16 · tensor cores". */
+const precision = (r: Row) => ('amp' in r ? (r.amp ? 'amp' : 'f32') : `${r.precision}${r.tensor_cores ? ' · tensor cores' : ''}`);
+/** The server's device the row is for: `gpu:0` as "GPU 0", `cpu` as "CPU". */
+const deviceLabel = (d: string) => (d === 'cpu' ? 'CPU' : d.replace(/^gpu:(\d+)$/, 'GPU $1'));
 
 const rowKey = (r: Row) => `${r.device}/${r.measured_on}/${r.arch}/${r.imgsz}/${'amp' in r ? `${r.batch}/${r.amp}` : `${r.precision}/${r.tensor_cores}`}`;
 
@@ -50,10 +60,12 @@ export default function Throughput(props: { benchmark?: boolean }) {
   });
 
   const elsewhere = (r: Row) => (table.data && !measuredHere(table.data, r) ? deviceName(r.measured_on) : null);
-  const meta = (r: Row) => {
+  const samples = (r: Row) => {
     const probes = 'probes' in r && r.probes > 0 ? (r.probes === r.samples ? (r.samples === 1 ? ' (a probe)' : ' (probes)') : `, ${num(r.probes)} from probes`) : '';
-    return `${num(r.samples)} ${r.samples === 1 ? 'sample' : 'samples'}${probes} · ${updatedWords(r, now.get())}`;
+    return `${num(r.samples)} ${r.samples === 1 ? 'sample' : 'samples'}${probes}`;
   };
+  const meta = (r: Row) => `${samples(r)} · ${updatedWords(r, now.get())}`;
+  const phone = new MediaQuery(media.phone, false);
 
   // ---- Measure now ----
   const measuring = signal(false);
@@ -83,106 +95,179 @@ export default function Throughput(props: { benchmark?: boolean }) {
     }
   }
 
-  const group = (title: string, list: () => Row[]) => (
-    <>
-      {list().length ? (
-        <div class="tp-group">
-          <h3 class="tp-h group-label">{title}</h3>
-          <ul aria-label={title}>
-            <For each={list()} key={rowKey}>
-              {(r) => {
-                const other = () => elsewhere(r());
-                const train = () => {
-                  const x = r();
-                  return 'amp' in x ? x : null;
-                };
-                const infer = () => r() as InferThroughput;
-                // The spaces between the blocks render nothing; they keep the row's text as Svelte's ("f32 99 samples").
-                return (
-                  <li class="tp-row">
-                    <div class="tp-what">
-                      <p>
-                        <Ident value={r().arch} /> <span class="tp-set num">{setting(r())}</span>
-                      </p>{' '}
-                      <p class="tp-meta num">
-                        {meta(r())}
-                        {other() ? <>{' '}· measured on another GPU ({other()}), so not used for this one</> : null}
-                      </p>
-                    </div>{' '}
-                    <div class="tp-val num">
-                      {train() ? (
-                        <>
-                          <p>{num(train()!.imgs_per_s)} img/s</p>{' '}
-                          {train()!.mosaic && train()!.mosaic!.samples > 1 ? (
-                            <p class="tp-meta">
-                              {num(train()!.mosaic!.low)}–{num(train()!.mosaic!.high)}
-                            </p>
-                          ) : null}
-                        </>
-                      ) : (
-                        <>
-                          <p>{latencyMs(infer().latency_ms)}</p>{' '}
-                          {infer().samples > 1 ? <p class="tp-meta">{latencyRange(infer().latency_ms_low, infer().latency_ms_high)}</p> : null}
-                        </>
-                      )}
-                    </div>
-                  </li>
-                );
-              }}
-            </For>
-          </ul>
-        </div>
-      ) : null}
-    </>
+  /** The group shown: Training first, Inference when only it has rows. */
+  const view = signal<View>('training');
+  let picked = false;
+  effect(() => {
+    const r = rows.get();
+    if (!picked && r && !r.training.length && r.inference.length) view.set('inference');
+  });
+  const list = computed<Row[]>(() => (view.get() === 'training' ? (rows.get()?.training ?? []) : (rows.get()?.inference ?? [])));
+
+  const source = (r: Row) => {
+    const other = elsewhere(r);
+    return other ? `Measured on ${other} · ${samples(r)} · not used here` : `Measured · ${samples(r)}`;
+  };
+  const range = (r: Row) => {
+    if ('amp' in r) return r.mosaic && r.mosaic.samples > 1 ? `${num(r.mosaic.low)}–${num(r.mosaic.high)}` : null;
+    return r.samples > 1 ? latencyRange(r.latency_ms_low, r.latency_ms_high) : null;
+  };
+  const figure = (r: Row) => ('amp' in r ? num(r.imgs_per_s) : latencyMs(r.latency_ms));
+
+  /** From 768 px: one row a measurement, a column a fact (design/UNIFIED.md §4). */
+  const grid = () => (
+    <div class="tp-scroll">
+      <table class="table" aria-label={view.get() === 'training' ? 'Training' : 'Predictions, end to end'}>
+        <thead>
+          <tr>
+            <th scope="col">Device</th>
+            <th scope="col">Architecture</th>
+            <th scope="col" class="r">
+              Image size
+            </th>
+            <th scope="col" class="r">
+              Batch
+            </th>
+            <th scope="col">Precision</th>
+            <th scope="col" class="r">
+              {view.get() === 'training' ? 'img/s' : 'Latency'}
+            </th>
+            <th scope="col" class="r">
+              Range
+            </th>
+            <th scope="col">Source</th>
+            <th scope="col" class="r">
+              Updated
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <For each={list.get()} key={rowKey}>
+            {(r) => (
+              <tr class="tp-row" class:other={!!elsewhere(r())}>
+                <td class="muted tp-dev">{deviceLabel(r().device)}</td>
+                <td class="lead">
+                  <Ident value={r().arch} />
+                </td>
+                <td class="r num muted">{r().imgsz} px</td>
+                <td class="r num muted">{r().batch}</td>
+                <td class="muted">{precision(r())}</td>
+                <td class="r num tp-fig">{figure(r())}</td>
+                <td class="r num muted">{range(r()) ?? '—'}</td>
+                <td class="muted tp-src" title={elsewhere(r()) ? `Measured on another GPU (${elsewhere(r())}), so not used for this one` : undefined}>
+                  {source(r())}
+                </td>
+                <td class="r num muted">{updatedWords(r(), now.get())}</td>
+              </tr>
+            )}
+          </For>
+        </tbody>
+      </table>
+    </div>
   );
 
+  /** Phones: each measurement two lines, the figure and its spread on the right. */
+  const phoneList = () => (
+    <ul class="tp-list" aria-label={view.get() === 'training' ? 'Training' : 'Predictions, end to end'}>
+      <For each={list.get()} key={rowKey}>
+        {(r) => {
+          const other = () => elsewhere(r());
+          // The spaces between the blocks render nothing; they keep the row's text as Svelte's ("f32 99 samples").
+          return (
+            <li class="tp-row">
+              <div class="tp-what">
+                <p>
+                  <Ident value={r().arch} /> <span class="tp-set num">{setting(r())}</span>
+                </p>{' '}
+                <p class="tp-meta num">
+                  {meta(r())}
+                  {other() ? <>{' '}· measured on another GPU ({other()}), so not used for this one</> : null}
+                </p>
+              </div>{' '}
+              <div class="tp-val num">
+                <p>{'amp' in r() ? `${figure(r())} img/s` : figure(r())}</p>{' '}
+                {range(r()) ? <p class="tp-meta">{range(r())}</p> : null}
+              </div>
+            </li>
+          );
+        }}
+      </For>
+    </ul>
+  );
+
+  const measureButton = () =>
+    p.benchmark ? (
+      <Button size="sm" icon={Gauge} loading={measuring.get()} onclick={measure}>
+        {measuring.get() ? 'Measuring' : 'Measure now'}
+      </Button>
+    ) : null;
+
   return (
-    <div class="tp">
-      <div class="tp-head">
-        <div class="setting-text">
-          <p>Throughput</p>
-          <p class="note">
-            Speed measured on this server by its runs, predictions{p.benchmark ? ' and probes' : ''}. Estimates use it; where nothing is measured, they come from{' '}
-            {referenceSource(false)}, scaled to each setting.
+    <Panel
+      title="Throughput"
+      id="throughput"
+      divided
+      pad="none"
+      actions={
+        <>
+          {rows.get() && !empty.get() ? (
+            <Segmented
+              size="sm"
+              label="Measurements shown"
+              bind:value={view}
+              onchange={() => (picked = true)}
+              options={[
+                { value: 'training', label: 'Training', meta: String(rows.get()!.training.length) },
+                { value: 'inference', label: 'Inference', meta: String(rows.get()!.inference.length) },
+              ]}
+            />
+          ) : null}
+          {phone.current ? null : measureButton()}
+        </>
+      }
+    >
+      <div class="tp">
+        <p class="tp-note">
+          Speed measured on {table.data ? <>this server ({deviceName(table.data.device_name)})</> : 'this server'} by its runs, predictions
+          {p.benchmark ? ' and probes' : ''}; predictions are timed end to end. Estimates use it; where nothing is measured, they come from{' '}
+          {referenceSource(false)}, scaled to each setting.
+        </p>
+        {phone.current && p.benchmark ? <div class="tp-measure">{measureButton()}</div> : null}
+        {measuring.get() ? (
+          /* The probe trains for a few seconds, then predicts: 1–10 s plus setup. The counter is the time so far. */
+          <p class="tp-status" role="status">
+            Training, then predicting on {table.data ? deviceName(table.data.device_name) : 'this server'}:{' '}
+            <span class="tp-clock num">
+              {elapsed.get()} s <span class="faint">of up to 10 s</span>
+            </span>
           </p>
-        </div>
-        {p.benchmark ? (
-          <Button size="sm" icon={Gauge} loading={measuring.get()} onclick={measure}>
-            {measuring.get() ? 'Measuring' : 'Measure now'}
-          </Button>
+        ) : failure.get() ? (
+          <p class="tp-status err" role="alert">
+            {failure.get()!.message}
+            {failure.get()!.hint ? (
+              <>
+                {' '}
+                <span class="faint">{failure.get()!.hint}</span>
+              </>
+            ) : null}
+          </p>
         ) : null}
       </div>
-      {measuring.get() ? (
-        /* The probe trains for a few seconds, then predicts: 1–10 s plus setup. The counter is the time so far. */
-        <p class="tp-status" role="status">
-          Training, then predicting on {table.data ? deviceName(table.data.device_name) : 'this server'}:{' '}
-          <span class="tp-clock num">
-            {elapsed.get()} s <span class="faint">of up to 10 s</span>
-          </span>
-        </p>
-      ) : failure.get() ? (
-        <p class="tp-status err" role="alert">
-          {failure.get()!.message}
-          {failure.get()!.hint ? (
-            <>
-              {' '}
-              <span class="faint">{failure.get()!.hint}</span>
-            </>
-          ) : null}
-        </p>
-      ) : null}
 
       {table.error && !table.data ? (
         <p class="tp-empty">Could not read the measurements.</p>
       ) : empty.get() ? (
         <p class="tp-empty">Nothing measured here yet: runs and predictions add their speed as they go{p.benchmark ? ', or measure now' : ''}.</p>
+      ) : rows.get() && !list.get().length ? (
+        <p class="tp-empty">{view.get() === 'training' ? 'No training measured here yet.' : 'No predictions measured here yet.'}</p>
       ) : rows.get() ? (
-        <>
-          {group('Training', () => rows.get()?.training ?? [])}
-          {group('Predictions, end to end', () => rows.get()?.inference ?? [])}
-        </>
+        phone.current ? (
+          phoneList()
+        ) : (
+          grid()
+        )
       ) : null}
-    </div>
+    </Panel>
   );
 }
 
@@ -190,27 +275,12 @@ css`
   .tp {
     display: grid;
     gap: var(--space-3);
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--line-subtle);
+    padding: var(--space-3) var(--space-4);
   }
-  .tp-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-4);
-  }
-  .setting-text {
-    min-width: 0;
-  }
-  .note {
-    max-inline-size: var(--measure);
-    margin-top: 2px;
+  .tp-note {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-  }
-  .tp-head :global(.btn) {
-    flex-shrink: 0;
   }
   .tp-status {
     font-size: var(--type-sm-size);
@@ -227,18 +297,51 @@ css`
     color: var(--text-tertiary);
   }
   .tp-empty {
+    padding: 0 var(--space-4) var(--space-4);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
-  .tp-group {
-    display: grid;
+  /* The table keeps its columns: on a tablet it scrolls sideways inside the panel rather than squeeze them. */
+  .tp-scroll {
+    overflow-x: auto;
   }
-  /* Type and ink: the shared group label (base.css .group-label). */
-  .tp-h {
+  .tp-scroll .table {
+    min-width: 640px;
+  }
+  .tp-scroll .table td,
+  .tp-scroll .table th {
+    white-space: nowrap;
+  }
+  /* The architecture is the row's name (.lead); the device it is for reads as the other settings do. */
+  .tp-scroll .tp-dev {
+    font-weight: var(--weight-regular);
+  }
+  /* Below 1024 px the nine columns take 8 px gaps, so the table fits a tablet's column. */
+  @media (max-width: 1023px) {
+    .tp-scroll .table :is(th, td):not(:first-child):not(:last-child) {
+      padding: 0 var(--space-2);
+    }
+  }
+  /* The source is a phrase: it wraps (the row grows) before Updated leaves the panel. */
+  .tp-scroll .table td.tp-src {
+    min-width: 120px;
+    padding-top: var(--space-1);
     padding-bottom: var(--space-1);
+    white-space: normal;
   }
-  .tp-row {
+  .tp-fig {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  /* A row measured on another adapter is listed, not used: one step quieter. */
+  .tp-row.other td {
+    color: var(--text-tertiary);
+  }
+  .tp-list {
+    padding: 0 var(--space-4) var(--space-2);
+  }
+  .tp-list .tp-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
@@ -261,10 +364,7 @@ css`
     text-align: right;
     white-space: nowrap;
   }
-  @media (max-width: 767px) {
-    .tp-head {
-      flex-direction: column;
-      align-items: stretch;
-    }
+  .tp-measure :global(.btn) {
+    width: 100%;
   }
 `;

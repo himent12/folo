@@ -1,5 +1,6 @@
 /** Settings › Connection: whether Studio talks to a server or shows demo data, and the server's address (test, save). */
 import Check from '$icons/check';
+import CircleAlert from '$icons/circle-alert';
 import CircleCheck from '$icons/circle-check';
 import FlaskConical from '$icons/flask-conical';
 import PlugZap from '$icons/plug-zap';
@@ -10,10 +11,10 @@ import { isHealth, NOT_FOLO, refusal } from '$lib/api/handshake';
 import { hub } from '$lib/api/index';
 import { prefs } from '$lib/prefs';
 import Button from '$lib/ui/Button';
-import Field from '$lib/ui/Field.tsx';
 import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
+import Row from './Row';
 
 type Test = { ok: true; version: string; mock: boolean; ms: number } | { ok: false; message: string };
 
@@ -100,65 +101,77 @@ export default function ConnectionPanel() {
     location.assign(to.href);
   }
 
+  /** The field's message: the error when the address will not do, else its hint (as an enclosing Field would). */
+  const describedby = () => (problem.get() ? 'server-url-error' : 'server-url-hint');
+
   return (
-    <Panel title="Connection" id="connection" divided>
-      <div class="stack">
-        <div class="status" data-mode={hub.offline ? 'offline' : hub.mode}>
-          {/* Demo data is a mode, not a degraded state: the sidebar's neutral flask, never the warning hue. A server
-              that answers gets the mark and the word Settings > Cloud gives a working connection (a check in a
-              circle, "Connected"), not a ringed dot and "Live". */}
-          {hub.offline ? (
-            <WifiOff class="led-glyph off" size={16} strokeWidth={1.75} aria-hidden="true" />
-          ) : hub.mode === 'mock' ? (
-            <FlaskConical class="led-glyph" size={16} strokeWidth={1.75} aria-hidden="true" />
-          ) : hub.mode === 'live' ? (
-            <CircleCheck class="led-glyph ok" size={16} strokeWidth={1.75} aria-hidden="true" />
-          ) : (
-            <span class="led" aria-hidden="true"></span>
-          )}
-          <div class="status-text">
+    <Panel title="Connection" id="connection" divided pad="none">
+      <Row
+        fact
+        class="status-row"
+        name={
+          <span class="s-title" data-mode={hub.offline ? 'offline' : hub.mode}>
+            {/* Demo data is a mode, not a degraded state: the sidebar's neutral flask, never the warning hue. A server
+                that answers gets the mark and the word Settings > Cloud gives a working connection (a check in a
+                circle, "Connected"), not a ringed dot and "Live". */}
             {hub.offline ? (
-              <>
-                <p class="s-title">{hub.refused ? 'Not connected' : 'Server offline'}</p>
-                <p class="s-desc">
-                  {hub.refused ? (
-                    <>
-                      <span class="mono">{hub.serverUrl}</span>: {hub.refused} Retrying…
-                    </>
-                  ) : (
-                    <>
-                      No answer from <span class="mono">{hub.serverUrl}</span>. Retrying…
-                    </>
-                  )}
-                </p>
-              </>
+              <WifiOff class="led-glyph off" size={16} strokeWidth={1.75} aria-hidden="true" />
+            ) : hub.mode === 'mock' ? (
+              <FlaskConical class="led-glyph" size={16} strokeWidth={1.75} aria-hidden="true" />
+            ) : hub.mode === 'live' ? (
+              <CircleCheck class="led-glyph ok" size={16} strokeWidth={1.75} aria-hidden="true" />
+            ) : (
+              <span class="led" aria-hidden="true"></span>
+            )}
+            {hub.offline ? (
+              hub.refused ? (
+                'Not connected'
+              ) : (
+                'Server offline'
+              )
             ) : hub.mode === 'live' ? (
               <>
-                <p class="s-title">
-                  Connected <span class="mono faint">folo serve {hub.version}</span>
-                </p>
-                <p class="s-desc">
-                  <span class="mono">{hub.serverUrl}</span>
-                </p>
+                Connected <span class="mono faint">folo serve {hub.version}</span>
               </>
             ) : hub.mode === 'mock' ? (
-              <>
-                {/* What it means for the user, in one line; why (the address, the endpoint) is in Technical details. */}
-                <p class="s-title">Using demo data</p>
-                <p class="s-desc">Sample runs, datasets and models.</p>
-              </>
+              'Using demo data'
+            ) : (
+              'Connecting…'
+            )}
+          </span>
+        }
+        desc={
+          <span class="s-line">
+            {hub.offline ? (
+              hub.refused ? (
+                <>
+                  <span class="mono">{hub.serverUrl}</span>: {hub.refused} Retrying…
+                </>
+              ) : (
+                <>
+                  No answer from <span class="mono">{hub.serverUrl}</span>. Retrying…
+                </>
+              )
+            ) : hub.mode === 'live' ? (
+              <span class="mono">{hub.serverUrl}</span>
+            ) : hub.mode === 'mock' ? (
+              /* What it means for the user, in one line; why (the address, the endpoint) is in Technical details. */
+              'Sample runs, datasets and models.'
             ) : (
               <>
-                <p class="s-title">Connecting…</p>
-                <p class="s-desc">
-                  Looking for <span class="mono">{hub.serverUrl}</span>.
-                </p>
+                Looking for <span class="mono">{hub.serverUrl}</span>.
               </>
             )}
-          </div>
-        </div>
+          </span>
+        }
+      />
 
-        <Field label="Server URL" for="server-url" hint="Leave blank to use this server." error={problem.get()}>
+      <Row
+        name="Server URL"
+        for="server-url"
+        desc="Leave blank to use this server."
+        descId="server-url-hint"
+        control={
           <div class="url-row">
             <Input
               id="server-url"
@@ -167,6 +180,7 @@ export default function ConnectionPanel() {
               spellcheck={false}
               autocomplete="off"
               invalid={invalid.get()}
+              aria-describedby={describedby()}
               class="mono-input"
               onkeydown={(e: KeyboardEvent) => {
                 if (e.key === 'Enter') void runTest();
@@ -176,30 +190,38 @@ export default function ConnectionPanel() {
               Test
             </Button>
           </div>
-        </Field>
+        }
+        below={
+          problem.get() ? (
+            <p class="msg error" id="server-url-error" role="alert">
+              <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>{problem.get()}</span>
+            </p>
+          ) : test.get() ? (
+            <div class="test" class:ok={!!passed.get()} role="status">
+              {passed.get() ? (
+                <>
+                  <Check size={14} strokeWidth={2.25} aria-hidden="true" />
+                  <span>
+                    Reachable: <span class="mono">folo serve {passed.get()?.version}</span>
+                    {passed.get()?.mock ? ' (mock mode)' : ''}
+                  </span>
+                  <span class="num faint">{Math.round(passed.get()?.ms ?? 0)} ms</span>
+                </>
+              ) : (
+                <>
+                  <span class="x" aria-hidden="true">
+                    ×
+                  </span>
+                  <span>{failed.get()?.message}</span>
+                </>
+              )}
+            </div>
+          ) : undefined
+        }
+      />
 
-        {test.get() ? (
-          <div class="test" class:ok={!!passed.get()} role="status">
-            {passed.get() ? (
-              <>
-                <Check size={14} strokeWidth={2.25} aria-hidden="true" />
-                <span>
-                  Reachable: <span class="mono">folo serve {passed.get()?.version}</span>
-                  {passed.get()?.mock ? ' (mock mode)' : ''}
-                </span>
-                <span class="num faint">{Math.round(passed.get()?.ms ?? 0)} ms</span>
-              </>
-            ) : (
-              <>
-                <span class="x" aria-hidden="true">
-                  ×
-                </span>
-                <span>{failed.get()?.message}</span>
-              </>
-            )}
-          </div>
-        ) : null}
-
+      <div class="s-row foot">
         <details class="tech">
           <summary>Technical details</summary>
           <dl>
@@ -244,58 +266,42 @@ export default function ConnectionPanel() {
 }
 
 css`
-  .stack {
-    display: grid;
-    gap: var(--space-4);
-  }
-  .status {
-    display: flex;
-    gap: var(--space-3);
-    padding: var(--space-3);
-    border-radius: var(--radius-md);
-    background: var(--bg-inset);
-    border: 1px solid var(--line-subtle);
-  }
-  :global([data-theme='light']) .status {
-    background: var(--bg-raised);
+  /* The connection's state is the first row: the mark and the state as its name, the address or why under it. */
+  .s-title {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
   }
   .led {
     flex-shrink: 0;
     width: 8px;
     height: 8px;
-    margin-top: 6px;
     border-radius: 50%;
     background: var(--text-tertiary);
   }
-  .status :global(.led-glyph) {
+  .s-title :global(.led-glyph) {
     flex-shrink: 0;
-    margin-top: 2px;
     color: var(--text-tertiary);
   }
-  .status :global(.led-glyph.ok) {
+  .s-title :global(.led-glyph.ok) {
     color: var(--success-text);
   }
-  .status :global(.led-glyph.off) {
+  .s-title :global(.led-glyph.off) {
     color: var(--danger-text);
   }
-  .status-text {
-    display: grid;
-    gap: 2px;
-    min-width: 0;
+  .s-title .faint {
+    font-weight: var(--weight-regular);
   }
-  .s-title {
-    font-weight: var(--weight-medium);
-    display: flex;
-    gap: var(--space-2);
-    align-items: baseline;
-  }
-  .s-desc {
-    color: var(--text-secondary);
+  .s-line {
     overflow-wrap: anywhere;
   }
   .url-row {
     display: flex;
     gap: var(--space-2);
+    /* Its own width, capped by the row: on a phone, where it drops under the name, the row's whole width. */
+    width: 360px;
+    max-width: 100%;
   }
   .url-row :global(.input) {
     flex: 1;
@@ -313,8 +319,17 @@ css`
     font-family: var(--font-sans);
     font-size: var(--type-base-size);
   }
+  .msg.error {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    padding-bottom: var(--space-2);
+    font-size: var(--type-sm-size);
+    color: var(--danger-text);
+  }
   .test {
     display: flex;
+    padding-bottom: var(--space-2);
     align-items: center;
     gap: var(--space-2);
     font-size: var(--type-sm-size);
@@ -389,15 +404,27 @@ css`
       margin-top: var(--space-2);
     }
   }
+  /* The last row: the mechanics folded on the left, the actions on the right edge. */
+  .foot {
+    align-items: flex-start;
+    padding-top: var(--space-3);
+    padding-bottom: var(--space-3);
+  }
+  .foot .tech {
+    flex: 1 1 240px;
+    min-width: 0;
+    padding-top: 6px;
+  }
   .row-actions {
     display: flex;
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: var(--space-2);
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--line-subtle);
   }
   @media (max-width: 767px) {
+    .row-actions {
+      width: 100%;
+    }
     .row-actions :global(.btn) {
       width: 100%;
     }

@@ -48,6 +48,11 @@ export interface ConfusionMatrixProps {
   /** Show a labelled 0–100% colour scale under the matrix. */
   scale?: boolean;
   /**
+   * What a cell's number says: its share of the true class (`share`, the default) or the objects counted (`count`,
+   * "1.2k" from a thousand). The shade is the share either way.
+   */
+  values?: 'share' | 'count';
+  /**
    * The palette index of each entry of `classes` (defaults to its position), for reduced matrices whose rows are a
    * subset of the model's classes; a negative index draws a neutral dot (e.g. "other classes").
    */
@@ -57,6 +62,12 @@ export interface ConfusionMatrixProps {
 }
 
 type At = { r: number; c: number };
+
+/** A cell's count in at most four characters: 7, 526, 1.2k, 12k. */
+function countText(n: number): string {
+  if (n < 1000) return String(n);
+  return n < 9950 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
+}
 
 /** Row labels (96 px) plus the grid gap: where the columns start. */
 const HEAD = 98;
@@ -108,7 +119,7 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
         return {
           zero: !count,
           v,
-          t: share,
+          t: p.values === 'count' ? countText(count) : share,
           hi: labelHigh(v, t),
           s: rampShare(v, t),
           label: `${rname} predicted as ${cname}: ${count.toLocaleString('en-US')} of ${(sums[r] ?? 0).toLocaleString('en-US')}, ${share || '0'}%`,
@@ -287,7 +298,7 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
           <>
             {/* The share where it fits; else a dot, so no shaded cell carries its value by shade alone. Either way the
                 cell's name and the readout (hover, focus) state the counts. */}
-            <span class="v" class:hi={cell()!.hi} class:long={cell()!.t.length > 2} aria-hidden="true">
+            <span class="v" class:hi={cell()!.hi} class:long={cell()!.t.length > 2} class:longer={cell()!.t.length > 3} aria-hidden="true">
               {cell()!.t}
             </span>
             <i class="mark" class:hi={cell()!.hi} aria-hidden="true"></i>
@@ -598,6 +609,15 @@ css`
       display: none;
     }
     .cell .v.long + .mark {
+      display: block;
+    }
+  }
+  /* A four-character count ("1.2k") from 36 px. */
+  @container (max-width: 35.98px) {
+    .cell .v.longer {
+      display: none;
+    }
+    .cell .v.longer + .mark {
       display: block;
     }
   }

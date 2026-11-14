@@ -1,13 +1,15 @@
 /**
- * The model's four headline metrics: one strip of numbers in ink, or (`grid`, phones) a 2 × 2 summary that folds
- * to one line; the ⓘ after the first label opens what they mean.
+ * The model's headline numbers: one KPI strip of five tiles (mAP50-95 at twice the width and one size up, mAP50,
+ * Precision / Recall, Parameters, File size), or (`grid`, phones) a 2 × 2 summary of the four metrics that folds to
+ * one line; the ⓘ after the first label opens what the metrics mean.
  */
 import ChevronDown from '$icons/chevron-down';
 import { bindable, css, defaults, For } from 'fw';
 import type { Model } from '$lib/api/types';
 import type { Evaluation } from '$lib/api/evaluation';
 import { evaluatedOn, metricsLabel, sourceShort, type EvalSource } from '$lib/evaluated';
-import { atBestF1, conf, metric } from '$lib/format';
+import { atBestF1, bytes, compact, conf, metric, num } from '$lib/format';
+import { prefs } from '$lib/prefs';
 import InfoButton from '$lib/ui/InfoButton';
 
 export interface KpiSummaryProps {
@@ -22,6 +24,13 @@ export interface KpiSummaryProps {
   helpOpen?: boolean;
 }
 
+/** "2.62M" → ["2.62", "M"], "5.2 MiB" → ["5.2", "MiB"]: the figure, and its unit one step smaller. */
+function splitUnit(s: string): [string, string] {
+  const m = /^(.*?)\s?([kMB]|[KMGT]?i?B|[kMGT]B)$/.exec(s);
+  return m ? [m[1]!, m[2]!] : [s, ''];
+}
+
+// Phones' 2 × 2 grid: the four metrics.
 const kpis = (m: Model) => [
   { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
   { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
@@ -42,6 +51,26 @@ export default function KpiSummary(props: KpiSummaryProps) {
   // while this strip said "validation split of shapes").
   const fromFile = () => !p.m.run_id;
   const label = () => (fromFile() ? 'Metrics stored with the file' : metricsLabel(p.source));
+  // The strip (§2 KPI strip): the headline names what it was measured on; the operating point, the compute and the
+  // file's format are the other tiles' captions.
+  const tiles = () => {
+    const m = p.m;
+    const mm = m.metrics;
+    // In Desktop's few words ("fasteners · val"), so the caption holds in the tablet's narrower tile.
+    const src = p.source;
+    const where = fromFile() ? null : [src.datasetName, src.split].filter(Boolean).join(' · ') || null;
+    const [pv, pu] = splitUnit(compact(m.params));
+    const [bv, bu] = splitUnit(bytes(m.bytes, prefs.units));
+    const dtype = m.precision === 'f32' || m.precision === 'f16' ? `${m.precision} weights` : null;
+    return [
+      { key: 'map', label: 'mAP50-95', value: metric(mm?.map50_95), sub: where ? `IoU 0.50–0.95 · ${where}` : 'IoU 0.50–0.95' },
+      { key: 'map50', label: 'mAP50', value: metric(mm?.map50), sub: 'IoU 0.50' },
+      // The stored metrics' own threshold (the epoch that wrote the weights), never /eval's: one source per strip.
+      { key: 'pr', label: 'Precision / Recall', pair: [metric(mm?.precision), metric(mm?.recall)] as const, sub: atBestF1(mm?.best_f1_conf) },
+      { key: 'params', label: 'Parameters', value: pv, unit: pu, sub: `${num(m.flops_g, 1)} GFLOPs` },
+      { key: 'size', label: 'File size', value: bv, unit: bu, sub: ['.folo', dtype].filter(Boolean).join(' · ') },
+    ] as { key: string; label: string; value?: string; unit?: string; pair?: readonly [string, string]; sub: string }[];
+  };
   const kHelp = () => <InfoButton label="What these metrics mean" controls="metric-help" bind:open={helpOpen} class="k-help" />;
   const metricHelp = () => (
     <dl class="k-body" id="metric-help">
@@ -116,15 +145,30 @@ export default function KpiSummary(props: KpiSummaryProps) {
         </section>
       ) : (
         <section class="kpis" aria-label={label()}>
-          <For each={kpis(p.m)} key={(k) => k.label}>
+          <For each={tiles()} key={(k) => k.key}>
             {(k, i) => (
-              <div class="kpi" class:hero={i() === 0}>
+              <div class={`kpi ${k().key}`} class:hero={i() === 0}>
                 <span class="k-label">
                   <span class="truncate">{k().label}</span>
                   {i() === 0 ? kHelp() : null}
                 </span>
-                <span class="k-value num">{metric(k().value)}</span>
-                <span class="k-sub">{k().sub}</span>
+                <span class="k-value num">
+                  {k().pair ? (
+                    <>
+                      {k().pair![0]}
+                      <span class="unit"> / </span>
+                      {k().pair![1]}
+                    </>
+                  ) : (
+                    <>
+                      {k().value}
+                      {k().unit ? <span class="unit"> {k().unit}</span> : null}
+                    </>
+                  )}
+                </span>
+                <span class="k-sub" title={k().sub}>
+                  {k().sub}
+                </span>
               </div>
             )}
           </For>
@@ -137,9 +181,10 @@ export default function KpiSummary(props: KpiSummaryProps) {
 
 css`
   /* 1 px gaps over a hairline-coloured background draw the dividers in any column count. */
+  /* Five tiles: the headline twice as wide as a plain one, the precision / recall pair a little wider (two values). */
   .kpis {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr);
     gap: 1px;
     background: var(--line-subtle);
     background-clip: padding-box;
@@ -160,14 +205,10 @@ css`
   .k-sub {
     font-size: var(--type-sm-size);
     line-height: 16px;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  /* The caption is read ("at conf 0.39 (best F1)"): secondary, like every KPI caption (ui/Stat, Run's tabs). */
-  .k-sub {
-    color: var(--text-secondary);
   }
   .kpis {
     position: relative;
@@ -179,8 +220,11 @@ css`
     letter-spacing: var(--type-2xl-tracking);
     font-weight: var(--weight-semibold);
   }
-  .hero .k-label {
-    color: var(--text-secondary);
+  /* Units and the pair's slash one step smaller, in tertiary (README, Type). */
+  .k-value .unit {
+    font-size: var(--type-xl-size);
+    letter-spacing: var(--type-xl-tracking);
+    color: var(--text-tertiary);
   }
   /* The help toggle follows the first label, on its line: a 20 px box (the row is 16 px tall), with a 44 px target on
      touch screens. */
@@ -342,6 +386,17 @@ css`
      DESIGN_DIRECTION §2.2); on a tablet each term sits over its definition, so a definition keeps the column's width
      instead of a 200 px strip beside a 112 px term. Phones: one column. */
   @media (max-width: 1023px) {
+    /* Tablets: the three metrics on one row, the model's size under them (a 680 px strip holds no five tiles). */
+    .kpis {
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+    }
+    .kpi {
+      grid-column: span 2;
+    }
+    .kpi.params,
+    .kpi.size {
+      grid-column: span 3;
+    }
     .k-body > div {
       grid-template-columns: minmax(0, 1fr);
       gap: 2px;

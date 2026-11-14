@@ -1,6 +1,5 @@
 import ArrowLeft from '$icons/arrow-left';
 import ChevronDown from '$icons/chevron-down';
-import ChevronRight from '$icons/chevron-right';
 import Download from '$icons/download';
 import Copy from '$icons/copy';
 import ScanSearch from '$icons/scan-search';
@@ -129,9 +128,6 @@ export default function Model() {
   /** The curves panel's band / every-curve switch (many classes). */
   const allCurves = signal(false);
   const exportOpen = signal(false);
-  // Below the desktop tier the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
-  const narrow = new MediaQuery(media.upToLaptop, false);
-  const detailsOpen = signal(false);
   // Phones: after the headline metrics, one section at a time (as on the run page) instead of a 4,000 px column.
   const phone = new MediaQuery(media.phone, false);
   const section = signal<ModelSection>('curves');
@@ -229,23 +225,6 @@ export default function Model() {
       </span>
     </>
   );
-  const detailList = (two: boolean) => (
-    <DetailsList
-      m={m()}
-      two={two}
-      tp={tp}
-      run={run()}
-      context={context}
-      source={source.get()}
-      ev={ev.get()}
-      lineage={lineage.get()}
-      unevaluated={unevaluable.get()}
-      stored={stored.get()}
-      head={head()}
-      bind:aboutOpen={aboutOpen}
-    />
-  );
-
   return (
     <>
       {(model.error && !model.data) || gone.get() ? (
@@ -256,10 +235,7 @@ export default function Model() {
       ) : !model.data ? (
         <Page title="Model" sub={() => <Skeleton w="320px" h="14px" />}>
           <Skeleton h="106px" r="var(--radius-lg)" />
-          <div class="detail">
-            <Skeleton h="480px" r="var(--radius-lg)" />
-            <Skeleton h="480px" r="var(--radius-lg)" />
-          </div>
+          <Skeleton h="480px" r="var(--radius-lg)" />
         </Page>
       ) : (
         <>
@@ -288,13 +264,12 @@ export default function Model() {
                     ) : null}
                   </>
                 ) : (
-                  // One line, its last item ("created yesterday") never alone on a second one (DESIGN_DIRECTION §10): on
-                  // tablets the file size steps out (Details has it).
+                  // One line, its last item ("created yesterday") never alone on a second one (DESIGN_DIRECTION §10): the
+                  // file size is the strip's last tile, not repeated here.
                   <Meta>
                     <Ident value={m().arch} />
                     <span class="num">{m().classes.length} classes</span>
                     <span class="num">{m().imgsz} px</span>
-                    <span class="num file-size">{bytes(m().bytes, prefs.units)}</span>
                     {provenance()}
                   </Meta>
                 )}
@@ -347,70 +322,67 @@ export default function Model() {
               id="model-sec-panel"
               role={phone.current ? 'tabpanel' : undefined}
               aria-labelledby={phone.current ? `model-sec-${section.get()}` : undefined}
+              style={{ '--pick-bottom': phone.current ? `calc(var(--size-topbar) + var(--space-2) + ${pickH.get()}px)` : undefined }}
             >
               {phone.current ? (
                 <KpiSummary m={m()} source={source.get()} ev={ev.get()} head={head()} grid kpiFolded={kpiFolded()} bind:kpiOpen={kpiOpen} bind:helpOpen={helpOpen} />
               ) : null}
 
-              {/* Evidence beside reference: the curves (8 columns) and the Details rail (4) stretch to one height, the plot
-                  taking what the rail adds; the per-class table, the curves' legend, follows in a row of its own. Up to 1199 px
-                  the table follows the curves and the details fold into one line under it. Both PR panels share the traced and
-                  pointed-at classes. */}
-              <div
-                class="detail"
-                class:off={!showing('curves') && !showing('classes') && !showing('details')}
-                style={{ '--pick-bottom': phone.current ? `calc(var(--size-topbar) + var(--space-2) + ${pickH.get()}px)` : undefined }}
-              >
-                <div class="main-col" class:off={!showing('curves')}>
-                  <Panel
-                    title="Precision–recall"
-                    meta={prMeta.get()}
-                    pad="none"
-                    id="pr"
-                    actions={() => (
-                      // Many classes: the band / every-curve switch is the chart's one header control, so the legend row keeps
-                      // one line in the laptop's narrower column. Phones put it on the Trace row (PrCurves), never on a
-                      // header row of its own that wraps under the title.
-                      <>
-                        {ev.get() && m().classes.length > 10 && !phone.current ? (
-                          <Segmented
-                            size="sm"
-                            label="Curves shown"
-                            bind:value={curvesMode}
-                            options={[
-                              { value: 'band', label: 'Band' },
-                              { value: 'all', label: 'All curves' },
-                            ]}
-                          />
-                        ) : null}
-                      </>
-                    )}
-                  >
-                    {ev.get() ? (
-                      <PrCurves
-                        classes={m().classes}
-                        ev={ev.get()!}
-                        map50={m().metrics?.map50 ?? null}
-                        view="curves"
-                        bind:allCurves={allCurves}
-                        modeInHeader
-                        bind:selected={prSelected}
-                        bind:hovered={prHovered}
-                        onback={backTo.get() !== null ? backToClasses : undefined}
-                      />
-                    ) : unevaluable.get() ? (
-                      notEvaluated()
-                    ) : evaluation.error ? (
-                      <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
-                    ) : (
-                      <div class="sk">
-                        <Skeleton h="24px" w="200px" />
-                        <Skeleton h="360px" />
-                      </div>
-                    )}
-                  </Panel>
-                </div>
-                <div class="cls-part" class:off={!showing('classes')}>
+              {/* Top to bottom (§4 Model): one Precision-recall panel, the plot with its per-class table as the legend
+                  (side by side from 1024 px, the table under the plot below), the confusion matrix, then Details. Phones:
+                  one section at a time, the curves and the table as two sections sharing the traced and pointed-at
+                  classes. */}
+              <div class="part" class:off={!showing('curves')}>
+                <Panel
+                  title="Precision–recall"
+                  meta={prMeta.get()}
+                  pad="none"
+                  id="pr"
+                  actions={() => (
+                    // Many classes: the band / every-curve switch is the chart's one header control, so the legend row keeps
+                    // one line. Phones put it on the Trace row (PrCurves), never on a header row of its own that wraps
+                    // under the title.
+                    <>
+                      {ev.get() && m().classes.length > 10 && !phone.current ? (
+                        <Segmented
+                          size="sm"
+                          label="Curves shown"
+                          bind:value={curvesMode}
+                          options={[
+                            { value: 'band', label: 'Band' },
+                            { value: 'all', label: 'All curves' },
+                          ]}
+                        />
+                      ) : null}
+                    </>
+                  )}
+                >
+                  {ev.get() ? (
+                    <PrCurves
+                      classes={m().classes}
+                      ev={ev.get()!}
+                      map50={m().metrics?.map50 ?? null}
+                      view={phone.current ? 'curves' : 'all'}
+                      bind:allCurves={allCurves}
+                      modeInHeader
+                      bind:selected={prSelected}
+                      bind:hovered={prHovered}
+                      onback={backTo.get() !== null ? backToClasses : undefined}
+                    />
+                  ) : unevaluable.get() ? (
+                    notEvaluated()
+                  ) : evaluation.error ? (
+                    <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
+                  ) : (
+                    <div class="sk">
+                      <Skeleton h="24px" w="200px" />
+                      <Skeleton h="360px" />
+                    </div>
+                  )}
+                </Panel>
+              </div>
+              {phone.current ? (
+                <div class="part" class:off={!showing('classes')}>
                   <Panel title="Per class" meta={`${m().classes.length} classes · IoU 0.5`} pad="none" id="per-class">
                     {ev.get() ? (
                       <PrCurves
@@ -420,21 +392,13 @@ export default function Model() {
                         view="classes"
                         bind:selected={prSelected}
                         bind:hovered={prHovered}
-                        onviewcurve={phone.current ? viewCurve : undefined}
+                        onviewcurve={viewCurve}
                       />
+                    ) : unevaluable.get() ? (
+                      notEvaluated()
                     ) : evaluation.error ? (
-                      // The failure is said once, in the curves' panel (or here on a phone, where that panel is another section).
-                      <>
-                        {phone.current && unevaluable.get() ? (
-                          notEvaluated()
-                        ) : phone.current ? (
-                          <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
-                        ) : unevaluable.get() ? (
-                          <p class="quiet">Not evaluated.</p>
-                        ) : (
-                          <p class="quiet">The per-class figures show once the evaluation loads.</p>
-                        )}
-                      </>
+                      // The failure is said in the section the reader is on: the curves are another section here.
+                      <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
                     ) : (
                       <div class="sk">
                         {[0, 1, 2, 3, 4, 5].map(() => (
@@ -444,38 +408,28 @@ export default function Model() {
                     )}
                   </Panel>
                 </div>
-
-                <aside class="rail" class:off={!showing('details')} aria-label="Model details">
-                  {phone.current ? (
-                    // Its own section on phones: the whole list, no fold, and no title repeating the Details picker above it.
-                    <Panel id="details">{detailList(true)}</Panel>
-                  ) : narrow.current ? (
-                    <Panel pad="none" id="details">
-                      <button type="button" class="d-line" aria-expanded={detailsOpen.get()} aria-controls="model-details" onclick={() => detailsOpen.set(!detailsOpen.get())}>
-                        <span class="d-sum num">
-                          <Meta line>
-                            <Ident value={m().arch} />
-                            <span>{m().imgsz} px</span>
-                            <span>{num(m().flops_g, 1)} GFLOPs</span>
-                            <span>{bytes(m().bytes, prefs.units)}</span>
-                          </Meta>
-                        </span>
-                        <span class="d-verb">
-                          Details <ChevronRight size={14} aria-hidden="true" />
-                        </span>
-                      </button>
-                      {detailsOpen.get() ? <div class="d-body">{detailList(true)}</div> : null}
-                    </Panel>
-                  ) : (
-                    <Panel title="Details" id="details">
-                      {detailList(false)}
-                    </Panel>
-                  )}
-                </aside>
-              </div>
-              {/* Full width: the matrix grows with the class count, and the rail beside it would sit empty. */}
-              <div class="cm-part" class:off={!showing('confusion')}>
+              ) : null}
+              <div class="part" class:off={!showing('confusion')}>
                 <ConfusionPanel m={m()} ev={ev.get()} source={source.get()} phone={phone} bind:section={section} evaluation={evaluation} />
+              </div>
+              {/* Every fact about the model in one full-width panel, three columns (two on tablets). Phones: its own
+                  section, no title repeating the Details picker above it. */}
+              <div class="part" class:off={!showing('details')}>
+                <Panel title={phone.current ? undefined : 'Details'} id="details">
+                  <DetailsList
+                    m={m()}
+                    tp={tp}
+                    run={run()}
+                    context={context}
+                    source={source.get()}
+                    ev={ev.get()}
+                    lineage={lineage.get()}
+                    unevaluated={unevaluable.get()}
+                    stored={stored.get()}
+                    head={head()}
+                    bind:aboutOpen={aboutOpen}
+                  />
+                </Panel>
               </div>
             </div>
           </Page>
@@ -529,50 +483,7 @@ css`
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
   }
-  /* One rule at every class count, decided by structure, not by stretching: the curves (8) at their fixed plot height,
-     the per-class table (their legend) under them in the same column, and Details (4) a sticky properties rail beside
-     both (DESIGN_DIRECTION §2.2, as on Linear's issue view). No panel is stretched to its neighbour, so the plot never
-     grows to a long rail and no frame holds empty space. */
-  .detail {
-    display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-    grid-template-areas: 'pr rail' 'cls rail';
-    align-items: start;
-    gap: var(--space-4);
-  }
-  @media (min-width: 1024px) {
-    .detail {
-      grid-template-rows: auto 1fr;
-    }
-    .rail {
-      position: sticky;
-      top: calc(var(--size-topbar) + var(--space-4));
-    }
-  }
-
-  .main-col {
-    grid-area: pr;
-  }
-  .rail {
-    grid-area: rail;
-  }
-  .cls-part {
-    grid-area: cls;
-  }
-  .main-col,
-  .rail,
-  .cls-part {
-    display: grid;
-    gap: var(--space-4);
-    min-width: 0;
-  }
-  .quiet {
-    padding: 0 var(--space-4) var(--space-4);
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-  }
-  /* Phones: the sections the picker is not showing. */
-  .cm-part {
+  .part {
     display: grid;
     min-width: 0;
   }
@@ -603,76 +514,10 @@ css`
     gap: var(--space-2);
     padding: 0 var(--space-4) var(--space-4);
   }
-  .d-line {
-    display: flex;
-    align-items: center;
-    gap: var(--space-4);
-    width: 100%;
-    min-height: 44px;
-    padding: 0 var(--space-4);
-    border-radius: inherit;
-    text-align: left;
-  }
-  .d-line:hover {
-    background: var(--bg-hover);
-  }
-  .d-line:focus-visible {
-    outline-offset: -2px;
-  }
-  .d-sum {
-    flex: 1;
-    min-width: 0;
-    color: var(--text-secondary);
-  }
-  .d-sum :global(.ident) {
-    color: var(--text-primary);
-  }
-  .d-verb {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    flex-shrink: 0;
-    color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-  }
-  .d-verb :global(svg) {
-    transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  .d-line[aria-expanded='true'] .d-verb :global(svg) {
-    transform: rotate(90deg);
-  }
-  .d-body {
-    padding: var(--space-3) var(--space-4) var(--space-4);
-    border-top: 1px solid var(--line-subtle);
-  }
-  /* Tablets: the rail is folded to one line of facts (Details ›), so it sits right under the KPI strip, the reference
-     before the evidence, never under a long per-class table. Phones show it as a section of its own. */
-  @media (max-width: 1023px) {
-    .detail {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-areas: 'rail' 'pr' 'cls';
-    }
-  }
   @media (max-width: 767px) {
-    /* One section at a time behind the picker: no named rows, so the hidden sections leave no empty tracks or gaps
-       and every section starts 12 px under the picker (as on Run; the shoot's QA checks it). */
-    .detail {
-      grid-template-areas: none;
-      gap: 0;
-    }
-    .main-col,
-    .rail,
-    .cls-part {
-      grid-area: auto;
-    }
     /* "View curve" and "Back to Classes" land the curves panel under the top bar and the section picker. */
-    .main-col :global(#pr) {
+    .part :global(#pr) {
       scroll-margin-top: calc(var(--size-topbar) + var(--space-16));
-    }
-  }
-  @media (min-width: 768px) and (max-width: 1023px) {
-    .file-size {
-      display: none;
     }
   }
 `;

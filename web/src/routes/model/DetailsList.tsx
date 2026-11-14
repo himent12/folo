@@ -1,4 +1,8 @@
-/** The model's details: what it is, how it was trained and stored, its classes, where it came from and its latency. */
+/**
+ * The model's details: what it is, how it was trained and stored, its classes, where it came from and its latency.
+ * A full-width panel's facts, each label beside its value: three columns from 1280 px, two on laptops and tablets,
+ * one on phones; the classes and the latency take a row of their own.
+ */
 import { bindable, computed, css, For } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run, ThroughputTable } from '$lib/api/types';
@@ -22,8 +26,6 @@ import { weightsEpoch } from './weightsEpoch';
 
 export interface DetailsListProps {
   m: Model;
-  /** Folded rail (up to 1199 px) and phones: labels beside their values, in two columns. */
-  two: boolean;
   tp: Resource<ThroughputTable | null>;
   run: Run | null | undefined;
   /** The source run, its dataset and the model it was fine-tuned from. */
@@ -54,7 +56,7 @@ export default function DetailsList(props: DetailsListProps) {
   const h = () => here.get()!;
 
   return (
-    <dl class="details" class:two={props.two} id="model-details">
+    <dl class="details" id="model-details">
       <div class="kv">
         <dt>Architecture</dt>
         <dd>
@@ -289,25 +291,26 @@ css`
   }
   .details {
     display: grid;
-    gap: var(--space-3);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-3) var(--space-8);
   }
   .kv {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: var(--space-4);
-  }
-  /* A value with a sentence under it (published weights and what they are): the label over it, the sentence at the
-     measure, in the rail; the folded rail keeps its label column (\`.two .kv\` below). */
-  .kv.stack {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
+    grid-template-columns: 112px minmax(0, 1fr);
+    align-items: baseline;
+    gap: var(--space-3);
+  }
+  .kv.wide {
+    grid-column: 1 / -1;
+  }
+  /* A value with a sentence under it (published weights and what they are): a row of its own, the sentence at the
+     measure. */
+  .kv.stack {
+    grid-column: 1 / -1;
   }
   .kv.stack dd {
     display: grid;
     gap: 2px;
-    text-align: left;
   }
   .pub {
     display: inline-flex;
@@ -321,37 +324,13 @@ css`
     color: var(--text-secondary);
     text-wrap: pretty;
   }
-  /* Folded rail (up to 1199 px): labels beside their values, in two columns. */
-  .details.two {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-2) var(--space-8);
-  }
-  .two .kv {
-    display: grid;
-    grid-template-columns: 112px minmax(0, 1fr);
-    gap: var(--space-3);
-  }
-  .two .kv.wide {
-    grid-column: 1 / -1;
-  }
-  .two dd {
-    text-align: left;
-  }
-  .two .classes {
-    justify-content: flex-start;
-  }
   .evald {
     display: grid;
-    justify-items: end;
-    text-align: right;
+    justify-items: start;
   }
   .evald .faint {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-  }
-  .two .evald {
-    justify-items: start;
-    text-align: left;
   }
   dt {
     color: var(--text-tertiary);
@@ -359,12 +338,10 @@ css`
   }
   dd {
     min-width: 0;
-    text-align: right;
     overflow-wrap: anywhere;
   }
   /* Stacked in every layout: the label is long, and the value keeps its conditions on the same line. */
-  .kv.ref,
-  .two .kv.ref {
+  .kv.ref {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: 2px;
@@ -408,7 +385,6 @@ css`
   .classes {
     display: flex;
     flex-wrap: wrap;
-    justify-content: flex-end;
     gap: var(--space-1);
   }
   .chip {
@@ -422,11 +398,16 @@ css`
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
+  @media (max-width: 1279px) {
+    .details {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
   @media (max-width: 767px) {
-    .details.two {
+    .details {
       grid-template-columns: minmax(0, 1fr);
     }
-    .two .kv {
+    .kv {
       grid-template-columns: 96px minmax(0, 1fr);
     }
   }

@@ -20,7 +20,6 @@ import ArrowRight from '$icons/arrow-right';
 import ChevronDown from '$icons/chevron-down';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
-import X from '$icons/x';
 import { bindable, computed, createUniqueId, css, defaults, effect, For, MediaQuery, signal, untrack } from 'fw';
 import type { Evaluation } from '$lib/api/evaluation';
 import LineChart, { type Series } from '$lib/charts/LineChart';
@@ -30,6 +29,7 @@ import { metric, num } from '$lib/format';
 import Input from '$lib/ui/Input';
 import Segmented from '$lib/ui/Segmented';
 import { classMetrics, matchesClass, prContext, prEnvelope, trimPrTail } from './pr';
+import PrTracer from './PrTracer';
 import { prDomain, PR_ZOOM, UNIT_ZOOM_NOTE } from '$lib/charts/domain';
 import { media } from '$lib/design/tokens';
 
@@ -67,6 +67,8 @@ const AXES_H = 24 + 36;
 const COLS_NARROW = 4;
 // Large class sets: a filter and 16 rows until the reader asks for all of them.
 const ROWS_MAX = 16;
+/** The narrowest panel that holds the plot and the table side by side. */
+const SIDE_MIN = 1100;
 const classOf = (id: string | null) => (id !== null && id.startsWith('c') ? Number(id.slice(1)) : null);
 
 export default function PrCurves(props: PrCurvesProps) {
@@ -80,6 +82,12 @@ export default function PrCurves(props: PrCurvesProps) {
   // Phones get a shorter plot so the table (the legend) starts on the first screen.
   const phoneQuery = new MediaQuery(media.phone, false);
   const narrow = () => phoneQuery.current;
+  // A wide panel is one body: the plot on seven twelfths and the table, its legend, on five, scrolling inside itself at
+  // the plot's height when the classes do not fit (80 COCO classes). The panel's own width decides, not the viewport's
+  // tier: the table's six columns need about 460 px, which the panel of a 1440 px window has (and of a laptop's wider
+  // windows, whose sidebar is icons) and of a 1280 px one does not; there the table follows the plot.
+  const width = signal(0);
+  const side = () => p.view === 'all' && width.get() >= SIDE_MIN;
 
   // Few classes: a leaderboard by AP. Many: by frequency.
   const many = computed(() => p.classes.length > 10);
@@ -178,20 +186,8 @@ export default function PrCurves(props: PrCurvesProps) {
   const meanAp = computed(() => p.map50 ?? p.ev.perClass.reduce((a, c) => a + c.ap50, 0) / Math.max(1, p.ev.perClass.length));
   const apOf = computed(() => new Map(p.ev.perClass.map((c) => [c.class, c.ap50])));
 
-  // Phones' Curves: the classes to trace, picked beside the graph. The traced first (in the order they were traced),
-  // then the rest in the table's order; with many classes, the first 12 until a name is typed.
   const uid = createUniqueId();
   const tracing = signal(false);
-  const traceQuery = signal('');
-  const traceList = computed(() => {
-    const s = selected.get();
-    const q = traceQuery.get();
-    const rest = order
-      .get()
-      .map((c) => c.class)
-      .filter((i) => !s.includes(i) && matchesClass(name(i), q));
-    return [...s, ...(many.get() && !q ? rest.slice(0, 12) : rest)];
-  });
 
   const query = signal('');
   const all = signal(false);
@@ -199,7 +195,7 @@ export default function PrCurves(props: PrCurvesProps) {
     const q = query.get();
     return order.get().filter((c) => matchesClass(name(c.class), q));
   });
-  const rows = computed(() => (all.get() || query.get() ? listed.get() : listed.get().slice(0, ROWS_MAX)));
+  const rows = computed(() => (all.get() || query.get() || side() ? listed.get() : listed.get().slice(0, ROWS_MAX)));
 
   /** The band / every-curve switch (Segmented's value). */
   const curvesMode = { get: () => (allCurves.get() ? 'all' : 'band') as 'all' | 'band', set: (v: 'all' | 'band') => allCurves.set(v === 'all') };
@@ -223,7 +219,7 @@ export default function PrCurves(props: PrCurvesProps) {
   );
 
   return (
-    <div class="pr">
+    <div class="pr" class:side={side()} bind:clientWidth={width}>
       <div class="part" class:off={p.view === 'classes'}>
         {/* Phones' Curves section has no table beside it: its selection bar, held under the section picker, says what is
             traced and carries the way back and Clear, so the legend below stays a readout. */}
@@ -300,7 +296,7 @@ export default function PrCurves(props: PrCurvesProps) {
               10th–90th percentile of classes
             </span>
           ) : null}
-          {p.view === 'curves' && !narrow() ? (
+          {p.view !== 'classes' && !narrow() ? (
             // The class picker, as on phones: the classes as chips under this row, the traced first.
             <>
               {traceButton('view trace mode')}
@@ -317,39 +313,8 @@ export default function PrCurves(props: PrCurvesProps) {
             </button>
           ) : null}
         </div>
-        {p.view === 'curves' ? (
-          // The classes to trace, right here at every width (the graph and its legend stay in view): the traced ones
-          // first, in their hue, each a tap to remove; then the others in the table's order, a tap to trace; many
-          // classes are found by name. The traced set is the one the Classes section shows.
-          <div class="tracer" id={`${uid}-trace`} role="group" aria-label="Classes to trace" hidden={!tracing.get()}>
-            {many.get() ? (
-              <div class="filter">
-                <Input bind:value={traceQuery} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class to trace" />
-              </div>
-            ) : null}
-            <div class="t-chips">
-              <For each={traceList.get()} key={(i) => i}>
-                {(i) => {
-                  const on = () => selected.get().includes(i());
-                  return (
-                    <button
-                      type="button"
-                      class="t-chip"
-                      aria-pressed={on()}
-                      aria-label={on() ? `Stop tracing ${name(i())}` : `Trace ${name(i())}`}
-                      style={{ '--c': classStroke(i()) }}
-                      onclick={() => toggle(i())}
-                    >
-                      <span class="t-key" aria-hidden="true"></span>
-                      <span class="t-name">{name(i())}</span>
-                      {on() ? <X size={14} aria-hidden="true" /> : null}
-                    </button>
-                  );
-                }}
-              </For>
-              {!traceList.get().length ? <span class="hint">No class matches “{traceQuery.get()}”</span> : null}
-            </div>
-          </div>
+        {p.view !== 'classes' ? (
+          <PrTracer id={`${uid}-trace`} open={tracing.get()} order={order.get().map((c) => c.class)} name={name} many={many.get()} bind:selected={selected} />
         ) : null}
         <div class="plot" class:fill={p.fill} bind:clientHeight={plotH} onpointerup={onplotup}>
           <LineChart
@@ -376,176 +341,190 @@ export default function PrCurves(props: PrCurvesProps) {
         </div>
       </div>
 
-      <div class="part" class:off={p.view === 'curves'}>
-        {/* The rows are the curves' controls: say so, and how many are traced, with a way back. Phones: with classes
-            traced, this row is the selection's action bar ("View curve"), held under the section picker while the
-            table scrolls. */}
-        <div class="tools" class:bar={narrow() && !!p.onviewcurve && n() > 0}>
-          {many.get() ? (
-            <div class="filter">
-              <Input bind:value={query} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class" />
-            </div>
-          ) : null}
-          <p class="pick num" aria-live="polite">
-            {n() ? (
-              <>
-                <span>
-                  {n()} {n() === 1 ? 'class' : 'classes'} traced
-                </span>
-                {p.onviewcurve ? (
-                  <button type="button" class="view to-curve" onclick={() => viewCurve(selected.peek()[selected.peek().length - 1]!)}>
-                    {n() === 1 ? 'View curve' : 'View curves'}
-                    <ArrowRight size={14} aria-hidden="true" />
-                  </button>
-                ) : null}
-                <button type="button" class="clear" onclick={() => selected.set([])}>
-                  Clear
-                </button>
-              </>
-            ) : (
-              <span class="hint">{narrow() ? 'Tap a class to trace its curve, the arrow for its details' : 'Select classes to trace their curves'}</span>
-            )}
-          </p>
-        </div>
-        <div class="scroll">
-          <table class="table dense" class:fixed={narrow()}>
-            {/* Phones: one column definition for the header and every row (fixed layout), so the headings sit over their
-                numbers and the class column ends a clear gutter before AP50. */}
-            {narrow() ? (
-              <colgroup>
-                <col />
-                <col class="c-ap" />
-                <col class="c-ap95" />
-                <col class="c-inst" />
-              </colgroup>
+      <div class="part legend-t" class:off={p.view === 'curves'}>
+        {/* Beside the plot (side): out of flow, so the plot's column alone sets the panel's height. */}
+        <div class="t-in">
+          {/* The rows are the curves' controls: say so, and how many are traced, with a way back. Phones: with classes
+              traced, this row is the selection's action bar ("View curve"), held under the section picker while the
+              table scrolls. */}
+          <div class="tools" class:bar={narrow() && !!p.onviewcurve && n() > 0}>
+            {many.get() ? (
+              <div class="filter">
+                <Input bind:value={query} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class" />
+              </div>
             ) : null}
-            {/* Wider screens: bounded columns (the class 224 px, each number 96 px) and an empty last column that takes
-                what is left, so 3 or 80 classes read as one compact block on the left, never figures strewn across the
-                panel. */}
-            <thead>
-              <tr>
-                <th scope="col" class="cls-h" style:width={narrow() ? undefined : '224px'}>
-                  Class
-                </th>
-                <th scope="col" class="r" style:width={narrow() ? undefined : '96px'}>
-                  AP50
-                </th>
-                <th scope="col" class="r" style:width={narrow() ? undefined : '96px'}>
-                  AP50-95
-                </th>
-                <th scope="col" class="r hide-sm" style:width={narrow() ? undefined : '96px'}>
-                  Precision
-                </th>
-                <th scope="col" class="r hide-sm" style:width={narrow() ? undefined : '96px'}>
-                  Recall
-                </th>
-                <th scope="col" class="r" style:width={narrow() ? undefined : '96px'}>
-                  Instances
-                </th>
-                {!narrow() ? <th class="rest" aria-hidden="true"></th> : null}
-              </tr>
-            </thead>
-            <tbody>
-              <For
-                each={rows.get()}
-                key={(c) => c.class}
-                fallback={
-                  <tr>
-                    <td colspan={narrow() ? COLS_NARROW : 7} class="none">
-                      No class matches “{query.get().trim()}”
-                    </td>
-                  </tr>
-                }
-              >
-                {(c) => {
-                  const on = () => selected.get().includes(c().class);
-                  const open = () => narrow() && opened.get().includes(c().class);
-                  return (
-                    <>
-                      <tr
-                        class="link"
-                        class:on={on()}
-                        class:hot={hovered.get() === c().class}
-                        onpointerenter={() => hovered.set(c().class)}
-                        onpointerleave={() => hovered.set(null)}
-                        onclick={() => toggle(c().class)}
-                      >
-                        <td>
-                          {/* The class name traces its curve (a toggle). Phones: the chevron beside it is a separate
-                              control that opens the details row. */}
-                          <div class="cls-cell">
-                            <button
-                              type="button"
-                              class="cls"
-                              data-cls={c().class}
-                              aria-pressed={on()}
-                              aria-label={`Trace ${name(c().class)}`}
-                              onclick={(e) => (e.stopPropagation(), toggle(c().class))}
-                              onfocus={() => hovered.set(c().class)}
-                              onblur={() => hovered.set(null)}
-                            >
-                              <span class="sw" style:background={classInk(c().class)} aria-hidden="true"></span>
-                              <span class="truncate">{name(c().class)}</span>
-                            </button>
-                            {narrow() ? (
+            <p class="pick num" aria-live="polite">
+              {n() ? (
+                <>
+                  <span>
+                    {n()} {n() === 1 ? 'class' : 'classes'} traced
+                  </span>
+                  {p.onviewcurve ? (
+                    <button type="button" class="view to-curve" onclick={() => viewCurve(selected.peek()[selected.peek().length - 1]!)}>
+                      {n() === 1 ? 'View curve' : 'View curves'}
+                      <ArrowRight size={14} aria-hidden="true" />
+                    </button>
+                  ) : null}
+                  <button type="button" class="clear" onclick={() => selected.set([])}>
+                    Clear
+                  </button>
+                </>
+              ) : (
+                <span class="hint">{narrow() ? 'Tap a class to trace its curve, the arrow for its details' : side() ? 'Hover a class to see its curve, click to trace it' : 'Select classes to trace their curves'}</span>
+              )}
+            </p>
+          </div>
+          <div class="scroll">
+            <table class="table dense" class:fixed={narrow() || side()}>
+              {/* Phones: one column definition for the header and every row (fixed layout), so the headings sit over their
+                  numbers and the class column ends a clear gutter before AP50. */}
+              {narrow() ? (
+                <colgroup>
+                  <col />
+                  <col class="c-ap" />
+                  <col class="c-ap95" />
+                  <col class="c-inst" />
+                </colgroup>
+              ) : side() ? (
+                // Beside the plot: each figure as wide as its heading and an 8 px gutter; the class takes the rest (a long
+                // name truncates, its button keeps the whole name).
+                <colgroup>
+                  <col />
+                  <col class="s-ap" />
+                  <col class="s-ap95" />
+                  <col class="s-p" />
+                  <col class="s-r" />
+                  <col class="s-inst" />
+                </colgroup>
+              ) : null}
+              {/* Wider screens: bounded columns (the class 224 px, each number 96 px) and an empty last column that takes
+                  what is left, so 3 or 80 classes read as one compact block on the left, never figures strewn across the
+                  panel. */}
+              <thead>
+                <tr>
+                  <th scope="col" class="cls-h" style:width={narrow() || side() ? undefined : '224px'}>
+                    Class
+                  </th>
+                  <th scope="col" class="r" style:width={narrow() || side() ? undefined : '96px'}>
+                    AP50
+                  </th>
+                  <th scope="col" class="r" style:width={narrow() || side() ? undefined : '96px'}>
+                    AP50-95
+                  </th>
+                  <th scope="col" class="r hide-sm" style:width={narrow() || side() ? undefined : '96px'}>
+                    Precision
+                  </th>
+                  <th scope="col" class="r hide-sm" style:width={narrow() || side() ? undefined : '96px'}>
+                    Recall
+                  </th>
+                  <th scope="col" class="r" style:width={narrow() || side() ? undefined : '96px'}>
+                    Instances
+                  </th>
+                  {!narrow() && !side() ? <th class="rest" aria-hidden="true"></th> : null}
+                </tr>
+              </thead>
+              <tbody>
+                <For
+                  each={rows.get()}
+                  key={(c) => c.class}
+                  fallback={
+                    <tr>
+                      <td colspan={narrow() ? COLS_NARROW : side() ? 6 : 7} class="none">
+                        No class matches “{query.get().trim()}”
+                      </td>
+                    </tr>
+                  }
+                >
+                  {(c) => {
+                    const on = () => selected.get().includes(c().class);
+                    const open = () => narrow() && opened.get().includes(c().class);
+                    return (
+                      <>
+                        <tr
+                          class="link"
+                          class:on={on()}
+                          class:hot={hovered.get() === c().class}
+                          onpointerenter={() => hovered.set(c().class)}
+                          onpointerleave={() => hovered.set(null)}
+                          onclick={() => toggle(c().class)}
+                        >
+                          <td>
+                            {/* The class name traces its curve (a toggle). Phones: the chevron beside it is a separate
+                                control that opens the details row. */}
+                            <div class="cls-cell">
                               <button
                                 type="button"
-                                class="disc"
+                                class="cls"
                                 data-cls={c().class}
-                                aria-expanded={open()}
-                                aria-controls={`pr-detail-${c().class}`}
-                                aria-label={`${name(c().class)} details`}
-                                onclick={(e) => (e.stopPropagation(), disclose(c().class))}
+                                aria-pressed={on()}
+                                aria-label={`Trace ${name(c().class)}`}
+                                onclick={(e) => (e.stopPropagation(), toggle(c().class))}
+                                onfocus={() => hovered.set(c().class)}
+                                onblur={() => hovered.set(null)}
                               >
-                                <span class="chev" class:open={open()} aria-hidden="true">
-                                  <ChevronDown size={14} />
-                                </span>
+                                <span class="sw" style:background={classInk(c().class)} aria-hidden="true"></span>
+                                <span class="truncate">{name(c().class)}</span>
                               </button>
-                            ) : null}
-                          </div>
-                        </td>
-                        <td class="r">{metric(c().ap50)}</td>
-                        <td class="r muted">{metric(c().ap50_95)}</td>
-                        <td class="r hide-sm muted">{metric(c().precision)}</td>
-                        <td class="r hide-sm muted">{metric(c().recall)}</td>
-                        <td class="r muted">{num(c().instances)}</td>
-                        {!narrow() ? <td class="rest" aria-hidden="true"></td> : null}
-                      </tr>
-                      {open() ? (
-                        <tr class="detail" class:on={on()} id={`pr-detail-${c().class}`}>
-                          <td colspan={COLS_NARROW}>
-                            <dl>
-                              <For each={classMetrics(c())} key={(d) => d.label}>
-                                {(d) => (
-                                  <div>
-                                    <dt>{d().label}</dt>
-                                    <dd class="num">{d().value}</dd>
-                                  </div>
-                                )}
-                              </For>
-                            </dl>
-                            {/* The way to the curve is the selection bar's "View curve" alone (one action, one place). */}
-                            <p class="ctx">{prContext(p.ev.bestF1Conf)}</p>
+                              {narrow() ? (
+                                <button
+                                  type="button"
+                                  class="disc"
+                                  data-cls={c().class}
+                                  aria-expanded={open()}
+                                  aria-controls={`pr-detail-${c().class}`}
+                                  aria-label={`${name(c().class)} details`}
+                                  onclick={(e) => (e.stopPropagation(), disclose(c().class))}
+                                >
+                                  <span class="chev" class:open={open()} aria-hidden="true">
+                                    <ChevronDown size={14} />
+                                  </span>
+                                </button>
+                              ) : null}
+                            </div>
                           </td>
+                          <td class="r">{metric(c().ap50)}</td>
+                          <td class="r muted">{metric(c().ap50_95)}</td>
+                          <td class="r hide-sm muted">{metric(c().precision)}</td>
+                          <td class="r hide-sm muted">{metric(c().recall)}</td>
+                          <td class="r muted">{num(c().instances)}</td>
+                          {!narrow() && !side() ? <td class="rest" aria-hidden="true"></td> : null}
                         </tr>
-                      ) : null}
-                    </>
-                  );
-                }}
-              </For>
-            </tbody>
-          </table>
+                        {open() ? (
+                          <tr class="detail" class:on={on()} id={`pr-detail-${c().class}`}>
+                            <td colspan={COLS_NARROW}>
+                              <dl>
+                                <For each={classMetrics(c())} key={(d) => d.label}>
+                                  {(d) => (
+                                    <div>
+                                      <dt>{d().label}</dt>
+                                      <dd class="num">{d().value}</dd>
+                                    </div>
+                                  )}
+                                </For>
+                              </dl>
+                              {/* The way to the curve is the selection bar's "View curve" alone (one action, one place). */}
+                              <p class="ctx">{prContext(p.ev.bestF1Conf)}</p>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </>
+                    );
+                  }}
+                </For>
+              </tbody>
+            </table>
+          </div>
+          {!query.get() && !side() && listed.get().length > ROWS_MAX ? (
+            <button type="button" class="more" aria-expanded={all.get()} onclick={() => all.set(!all.get())}>
+              {all.get() ? `Show the first ${ROWS_MAX}` : `Show all ${listed.get().length}`}
+            </button>
+          ) : null}
+          {/* The split actually evaluated, never "validation" by default: the page's notice says why when it is not. */}
+          <p class="foot">
+            Evaluated on {imagesOf(p.ev.source, p.ev.images)} at IoU 0.50. Precision and recall {prContext(p.ev.bestF1Conf, false)}; instances are
+            ground-truth boxes per class.
+          </p>
         </div>
-        {!query.get() && listed.get().length > ROWS_MAX ? (
-          <button type="button" class="more" aria-expanded={all.get()} onclick={() => all.set(!all.get())}>
-            {all.get() ? `Show the first ${ROWS_MAX}` : `Show all ${listed.get().length}`}
-          </button>
-        ) : null}
-        {/* The split actually evaluated, never "validation" by default: the page's notice says why when it is not. */}
-        <p class="foot">
-          Evaluated on {imagesOf(p.ev.source, p.ev.images)} at IoU 0.50. Precision and recall {prContext(p.ev.bestF1Conf, false)}; instances are
-          ground-truth boxes per class.
-        </p>
       </div>
     </div>
   );
@@ -559,11 +538,74 @@ css`
     min-width: 0;
   }
   /* The two halves lay out as direct children of .pr (the foot keeps pinning to the bottom); \`view\` hides one. */
-  .part {
+  .part,
+  .t-in {
     display: contents;
   }
   .part.off {
     display: none;
+  }
+  /* From the laptop tier (side): the plot and its readout on the left seven twelfths, the table on the right five,
+     parted by a hairline. The table's column is as tall as the plot's: its content sits out of flow and scrolls
+     inside it (its head held at the top), so 3 classes or 80 never change the panel's height. */
+  .pr.side {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  }
+  .side > .part {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .side > .legend-t {
+    position: relative;
+    border-left: 1px solid var(--line-subtle);
+  }
+  .side .t-in {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .side .scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .side .scroll thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--bg-panel);
+  }
+  .side .cls {
+    max-width: 100%;
+  }
+  .side .fixed {
+    table-layout: fixed;
+  }
+  .s-ap {
+    width: 56px;
+  }
+  .s-ap95 {
+    width: 72px;
+  }
+  .s-p {
+    width: 76px;
+  }
+  .s-r {
+    width: 60px;
+  }
+  .s-inst {
+    width: 84px;
+  }
+  /* Six columns in five twelfths: 8 px gutters between the figures. */
+  .side .scroll :is(th, td):not(:first-child) {
+    padding-left: var(--space-2);
+  }
+  .side .scroll :is(th, td):not(:last-child) {
+    padding-right: var(--space-2);
   }
   .swatch-band {
     width: 14px;
@@ -697,73 +739,6 @@ css`
   .view.to-curve,
   .view.trace {
     margin-top: 0;
-  }
-  /* Phones' class picker under the Curves bar: wrapping chips, each a 32 px toggle (44 on touch). A traced class is
-     the selection rule (bg.active) with its hue as the key and a remove mark; the others a neutral hollow key (a class
-     takes its hue once traced, as its curve does). */
-  .tracer {
-    display: grid;
-    gap: var(--space-2);
-    padding: 0 var(--space-4) var(--space-2);
-  }
-  .tracer[hidden] {
-    display: none;
-  }
-  .tracer .filter {
-    width: 100%;
-  }
-  .t-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-  }
-  .t-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1-5);
-    min-height: 32px;
-    max-width: 100%;
-    padding: 0 var(--space-3);
-    border: 1px solid var(--line-default);
-    border-radius: var(--radius-md);
-    font-size: var(--type-sm-size);
-    color: var(--text-secondary);
-  }
-  .t-chip[aria-pressed='true'] {
-    padding-right: var(--space-2);
-    background: var(--bg-active);
-    border-color: transparent;
-    color: var(--text-primary);
-  }
-  .t-chip :global(svg) {
-    flex-shrink: 0;
-    color: var(--text-tertiary);
-  }
-  .t-key {
-    flex-shrink: 0;
-    width: 10px;
-    height: 10px;
-    border: 2px solid var(--text-tertiary);
-    border-radius: 50%;
-  }
-  .t-chip[aria-pressed='true'] .t-key {
-    border-color: var(--c);
-    background: var(--c);
-  }
-  .t-name {
-    overflow-wrap: anywhere;
-    text-align: left;
-  }
-  @media (hover: hover) {
-    .t-chip:hover {
-      border-color: var(--line-strong);
-      color: var(--text-primary);
-    }
-  }
-  @media (pointer: coarse) {
-    .t-chip {
-      min-height: 44px;
-    }
   }
   .filter {
     width: 240px;

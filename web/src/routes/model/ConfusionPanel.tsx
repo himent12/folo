@@ -15,6 +15,7 @@ import { matrixCounted, matrixVsPr, type EvalSource } from '$lib/evaluated';
 import { atBestF1, num } from '$lib/format';
 import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
+import Segmented from '$lib/ui/Segmented';
 import Skeleton from '$lib/ui/Skeleton';
 import { cmIndex, rankConfusions, type ConfusionEntry } from './confusion';
 import type { ModelSection } from './sections';
@@ -141,6 +142,20 @@ export default function ConfusionPanel(props: ConfusionPanelProps) {
     document.querySelector<HTMLElement>('#cm .explore')?.focus({ preventScroll: true });
   }
 
+  /** What the cells say (the header's Row % / Counts switch); the shade is the row's share either way. */
+  const values = signal<'share' | 'count'>('share');
+  const valuesSwitch = () => (
+    <Segmented
+      size="sm"
+      label="Cell values"
+      bind:value={values}
+      options={[
+        { value: 'share', label: 'Row %' },
+        { value: 'count', label: 'Counts' },
+      ]}
+    />
+  );
+
   // Phones, exploring the matrix: the way back is in the panel's heading row, so the only control row above the
   // cells is the matrix's own (overview and pages).
   const cmBack = () => (
@@ -160,13 +175,21 @@ export default function ConfusionPanel(props: ConfusionPanelProps) {
         phone() && !cmExplore.get()
           ? 'largest share of a class first'
           : [
-              cm.get()?.partial ? (phone() ? `top ${CM_MAX} + Other` : `${CM_MAX} most common classes + Other + background`) : phone() ? null : 'share of each true class',
+              cm.get()?.partial
+                ? phone()
+                  ? `top ${CM_MAX} + Other`
+                  : `${CM_MAX} most common classes + Other + background`
+                : phone()
+                  ? null
+                  : values.get() === 'count'
+                    ? 'objects per true class'
+                    : 'share of each true class',
               matrixAtMeta.get(),
             ]
               .filter(Boolean)
               .join(' · ') || undefined
       }
-      actions={phone() && cmExplore.get() && cm.get() ? cmBack : undefined}
+      actions={phone() ? (cmExplore.get() && cm.get() ? cmBack : undefined) : cm.get() ? valuesSwitch : undefined}
       id="cm"
     >
       {cm.get() && phone() && !cmExplore.get() ? (
@@ -249,6 +272,7 @@ export default function ConfusionPanel(props: ConfusionPanelProps) {
               label={`Confusion matrix of ${props.m.name}`}
               minCell={32}
               maxCell={48}
+              values={phone() ? 'share' : values.get()}
               scale
             />
           </div>
