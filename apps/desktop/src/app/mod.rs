@@ -215,6 +215,14 @@ pub enum SampleView {
     Both,
 }
 
+/// The run log's level filter: every line, warnings, or errors.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LogFilter {
+    All,
+    Warn,
+    Error,
+}
+
 pub struct Toast {
     pub id: u64,
     pub tone: Tone,
@@ -343,9 +351,17 @@ pub struct FoloApp {
     // Runs
     pub run_filter: RunFilter,
     pub chart_hover: Option<f32>,
+    /// The run charts' x axis: Some(true) fits it to the epochs trained ("So far"), Some(false)
+    /// shows the planned run ("All N"); None takes the default (planned while active, else trained).
+    pub run_x_fit: Option<bool>,
     pub sample_view: SampleView,
+    /// The validation samples' minimum confidence for a prediction to be drawn.
+    pub sample_conf: f32,
+    pub log_filter: LogFilter,
     pub loss_parts: [bool; 4],
     pub log_scroll: ScrollHandle,
+    /// The run page's Per class list, scrolled inside its panel.
+    pub per_class_scroll: ScrollHandle,
     /// Log lines on screen at the last render (new ones scroll into view while following).
     pub log_seen: u64,
     /// The log follows its tail. Only a scroll changes this (the offset moved); a reflow that
@@ -604,9 +620,13 @@ impl FoloApp {
             ds_view_controls: None,
             run_filter: RunFilter::All,
             chart_hover: None,
-            sample_view: SampleView::Predictions,
+            run_x_fit: None,
+            sample_view: SampleView::Both,
+            sample_conf: 0.3,
+            log_filter: LogFilter::All,
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
+            per_class_scroll: ScrollHandle::new(),
             log_seen: 0,
             log_follow: true,
             log_last_y: px(0.),

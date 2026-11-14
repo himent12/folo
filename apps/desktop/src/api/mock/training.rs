@@ -92,7 +92,10 @@ impl Curve {
         let per_class = (0..self.classes)
             .map(|c| {
                 let d = 1.0 + 0.09 * Rng::new(self.seed ^ c as u64).normal() - 0.03 * c as f32;
-                let cm = (m * d).clamp(0.0, 0.99);
+                // Each epoch moves each class a little on its own, so a class can fall while the
+                // mean rises (the run page's Per class panel shows the change).
+                let e = 1.0 + 0.02 * self.noise(epoch as u64, 40 + c as u64);
+                let cm = (m * d * e).clamp(0.0, 0.99);
                 ClassMetrics {
                     class: c,
                     map50: (cm * 1.22 + 0.05 * (1.0 - cm)).min(0.99),

@@ -1,4 +1,6 @@
-//! A run's log panel: its lines, keyboard scrolling and copying.
+//! A run's log panel: its lines, the level filter, keyboard scrolling and copying.
+
+use std::rc::Rc;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
@@ -6,8 +8,8 @@ use folo_ui::{
     Window, div, px,
 };
 
-use crate::api::{LogLevel, Run, RunStatus, time};
-use crate::app::{FoloApp, act};
+use crate::api::{LogLevel, LogLine, Run, RunStatus, time};
+use crate::app::{FoloApp, LogFilter, act};
 use crate::controls::Btn;
 use crate::screens::loading_rows;
 use crate::store::Load;
@@ -15,8 +17,17 @@ use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
 impl FoloApp {
-    pub(super) fn logs_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The log panel. `beside`: it sits beside Config, so its scrollback takes the row's height
+    /// (at least its usual 372 px); stacked, it is 372 px tall.
+    pub(super) fn logs_panel(
+        &mut self,
+        r: &Run,
+        beside: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
+        let filter = self.log_filter;
         // The scrollback is one Tab stop: arrows step a line, Page Up/Down a screen, Home/End the ends.
         let log_fh = self.fh("log-scroll", cx);
         let log_ring = self.ring(&log_fh, window);
@@ -26,7 +37,8 @@ impl FoloApp {
         let log_chrome = self.scroll_chrome(self.log_scroll.clone(), t.bg_inset, 0., 0., cx);
         let body = match self.store.logs.get(&r.id) {
             Some(Load::Ready(lines)) => {
-                let start = lines.len().saturating_sub(300);
+                let shown: Vec<&LogLine> = lines.iter().filter(|l| shows(filter, l.level)).collect();
+                let start = shown.len().saturating_sub(300);
                 div()
                     .relative()
                     .flex_1()
@@ -59,12 +71,21 @@ impl FoloApp {
                                 cx.notify();
                             }))
                             .flex_1()
-                            .h(px(372.))
+                            .when(beside, |d| d.flex_basis(px(0.)).min_h(px(LOG_H)))
+                            .when(!beside, |d| d.h(px(LOG_H)))
                             .overflow_y_scroll()
                             .track_scroll(&self.log_scroll)
                             .bg(t.bg_inset)
                             .py(px(10.))
-                            .children(lines[start..].iter().map(|l| {
+                            .when(shown.is_empty(), |d| {
+                                d.child(div().px(px(16.)).py(px(2.)).child(
+                                    text(ty::SM, t.text_tertiary).child(match filter {
+                                        LogFilter::Error => "No errors in this run's log.",
+                                        _ => "No warnings or errors in this run's log.",
+                                    }),
+                                ))
+                            })
+                            .children(shown[start..].iter().map(|l| {
                                 let (tag, color) = match l.level {
                                     LogLevel::Debug => ("DBG", t.text_tertiary),
                                     LogLevel::Info => ("INF", t.text_tertiary),
@@ -138,6 +159,24 @@ impl FoloApp {
         }
         self.log_seen = rev;
         let at_bottom = self.log_follow;
+        let (warns, errors) =
+            self.store.logs.get(&r.id).and_then(|l| l.ready()).map_or((0, 0), |l| level_counts(l));
+        // A count reads in tertiary after its label (the no-break space marks it).
+        let count = |label: &str, n: usize| format!("{label}\u{a0}{}", crate::ui::int(n as u64));
+        let filters = [LogFilter::All, LogFilter::Warn, LogFilter::Error];
+        let levels = self.segmented(
+            "log-level",
+            &["All", &count("Warn", warns), &count("Error", errors)],
+            filters.iter().position(|f| *f == filter).unwrap_or(0),
+            window,
+            cx,
+            Rc::new(move |this, i, _, _| {
+                this.log_filter = filters[i];
+                // A new filter starts at the newest lines, following.
+                this.log_follow = true;
+                this.log_scroll.scroll_to_bottom();
+            }),
+        );
         let follow = if r.status != RunStatus::Running {
             div().into_any_element()
         } else if at_bottom {
@@ -178,11 +217,12 @@ impl FoloApp {
         };
         panel(&t)
             .flex_1()
+            .min_w_0()
             .flex()
             .flex_col()
             .overflow_hidden()
-            .child(panel_header(&t, "Log").child(
-                div().flex().items_center().gap(px(12.)).child(follow).when(
+            .child(panel_header(&t, "Logs").child(
+                div().flex().items_center().gap(px(12.)).child(follow).child(levels).when(
                     self.store.logs.get(&r.id).is_some_and(|l| l.ready().is_some_and(|v| !v.is_empty())),
                     |d| {
                         let rid = r.id.clone();
@@ -250,9 +290,38 @@ fn slash_paths(s: &str) -> String {
 
 /// One log line with its padding: an arrow key's scroll step in the log.
 const LOG_LINE: f32 = 21.;
+/// The scrollback's height stacked, and its least beside Config.
+const LOG_H: f32 = 372.;
+
+/// Whether the level filter shows a line: Warn shows warnings and errors, Error errors alone.
+fn shows(filter: LogFilter, level: LogLevel) -> bool {
+    match filter {
+        LogFilter::All => true,
+        LogFilter::Warn => matches!(level, LogLevel::Warn | LogLevel::Error),
+        LogFilter::Error => level == LogLevel::Error,
+    }
+}
+
+/// The log's warnings and its errors, as the filter's counts say them.
+fn level_counts(lines: &[LogLine]) -> (usize, usize) {
+    let n = |lv: LogLevel| lines.iter().filter(|l| l.level == lv).count();
+    (n(LogLevel::Warn), n(LogLevel::Error))
+}
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_level_filter_shows_warnings_and_up_or_errors_alone_and_counts_each() {
+        let line = |level| LogLine { t: String::new(), level, message: String::new() };
+        let lines =
+            [LogLevel::Info, LogLevel::Warn, LogLevel::Debug, LogLevel::Error, LogLevel::Warn].map(line);
+        assert_eq!(level_counts(&lines), (2, 1));
+        let n = |f| lines.iter().filter(|l| shows(f, l.level)).count();
+        assert_eq!((n(LogFilter::All), n(LogFilter::Warn), n(LogFilter::Error)), (5, 3, 1));
+    }
+
     #[test]
     fn log_lines_break_between_fields() {
         let f = super::log_fields("epoch 32/100 · mAP50-95 0.594 · mAP50 0.745 · 14.3 s");

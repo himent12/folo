@@ -286,12 +286,14 @@ impl FoloApp {
                 body = body.child(div().h(px(560.)).child(skeleton(&t, "charts")));
             }
         }
+        // Rows 4 and 5: the samples (two thirds) beside each class's AP, and the log (two thirds)
+        // beside the config. Below 1120 px each row stacks, as the chart rows do.
+        let stack = window.viewport_size().width < px(1120.);
         let samples = self.samples_panel(&r, window, cx);
-        let logs = self.logs_panel(&r, window, cx);
-        // Samples, then the log, each full width: an epoch's log line (~52 mono characters) reads on
-        // one line, as in a terminal, instead of wrapping in a 2/5 column at every window size.
-        body = body.child(div().flex().child(samples)).child(div().flex().child(logs));
-        body = body.child(self.config_panel(&r, &ds_name, window, cx));
+        let per_class = self.per_class_panel(&r, !stack, window, cx);
+        let logs = self.logs_panel(&r, !stack, window, cx);
+        let config = self.config_panel(&r, &ds_name, window, cx);
+        body = body.child(two_thirds(samples, per_class, stack)).child(two_thirds(logs, config, stack));
         self.page_frame(&t, header, body, cx)
     }
 
@@ -613,6 +615,22 @@ impl FoloApp {
         }
         panel(&t).flex().flex_col().children(rows).into_any_element()
     }
+}
+
+/// A row of the run page: `a` in two thirds beside `b` in one (both as tall as the taller), or one
+/// above the other when `stack`.
+fn two_thirds(a: AnyElement, b: AnyElement, stack: bool) -> folo_ui::Div {
+    if stack {
+        return div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(div().flex().child(a))
+            .child(div().flex().child(b));
+    }
+    let cell =
+        |e: AnyElement, f: f32| div().flex().min_w_0().flex_grow().flex_basis(folo_ui::relative(f)).child(e);
+    div().flex().gap(px(16.)).child(cell(a, 2. / 3.)).child(cell(b, 1. / 3.))
 }
 
 /// A run that failed with `gpu_out_of_memory`. Runs carry the message, not the code (docs/API.md):

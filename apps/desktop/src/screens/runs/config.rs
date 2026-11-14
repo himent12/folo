@@ -1,4 +1,4 @@
-//! A run's configuration panel and its `folo train` command.
+//! A run's Config panel (one column of its settings) and its `folo train` command.
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
@@ -45,7 +45,6 @@ impl FoloApp {
         // A rate's power of ten in a legible raised run (`sci`).
         let mono_v = |s: String| crate::ui::sci(ty::SM, t.text_primary, s);
         let col1 = div()
-            .flex_1()
             .flex()
             .flex_col()
             .child(kv(&t, "Dataset", mono_v(ds_name.to_string())))
@@ -74,7 +73,6 @@ impl FoloApp {
             .child(kv(&t, "Seed", mono_v(c.seed.to_string())))
             .child(kv(&t, "Device", mono_v(c.device.clone())));
         let col2 = div()
-            .flex_1()
             .flex()
             .flex_col()
             .child(kv(&t, "Epochs", mono_v(c.epochs.to_string())))
@@ -99,9 +97,8 @@ impl FoloApp {
                     None => format!("{} · lr0 {}", c.optimizer.label(), crate::ui::fmt_lr(c.lr0 as f64)),
                 }),
             ));
-        // Augmentation, one setting per row.
+        // Augmentation, one setting per row, under the training settings.
         let col3 = div()
-            .flex_1()
             .flex()
             .flex_col()
             .child(kv(
@@ -133,15 +130,23 @@ impl FoloApp {
             ))
             .child(kv(&t, "Scale", mono_v(crate::ui::fmt_scale(a.scale))));
         panel(&t)
+            .flex_1()
+            .min_w_0()
             .flex()
             .flex_col()
             .child(
-                panel_header(&t, "Configuration").child(
+                panel_header(&t, "Config").child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(12.))
-                        .child(text(ty::SM, t.text_tertiary).font_family(crate::theme::MONO).child(r.id.clone()))
+                        .child(
+                            text(ty::SM, t.text_tertiary)
+                                .font_family(crate::theme::MONO)
+                                .min_w_0()
+                                .ellipsis()
+                                .child(r.id.clone()),
+                        )
                         // The `folo train` command for this config on the server's machine (servers
                         // with `run_cli`): train it again from a terminal.
                         .when(self.store.features.iter().any(|f| f == "run_cli"), |d| {
@@ -164,7 +169,7 @@ impl FoloApp {
                         }),
                 ),
             )
-            .child(div().flex().gap(px(32.)).px(px(16.)).py(px(8.)).child(col1).child(col2).child(col3))
+            .child(div().flex().flex_col().px(px(16.)).py(px(8.)).child(col1).child(col2).child(col3))
             .into_any_element()
     }
 }

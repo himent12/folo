@@ -46,6 +46,7 @@ pub const ALL: &[&str] = &[
     "run-live+light",
     "run-live+hover",
     "run-live+charts-focus",
+    "run-live+log-focus",
     "run-done",
     "run-done+bottom",
     "run-done+sample-focus",
@@ -61,6 +62,7 @@ pub const ALL: &[&str] = &[
     "model",
     "model+light",
     "model+table-focus",
+    "model+bottom",
     "playground",
     "playground+nms",
     "playground+empty",
@@ -262,7 +264,13 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
                 app.scroll_end_pending = 60;
             }
         }
-        "model" => app.route = Route::Model("m_44c0".into()),
+        "model" => {
+            app.route = Route::Model("m_44c0".into());
+            // The page's end: the confusion matrix and the Details panel.
+            if s.has("bottom") {
+                app.scroll_end_pending = 60;
+            }
+        }
         "playground" => app.route = Route::Playground,
         "settings" => {
             app.route = Route::Settings;
@@ -431,6 +439,8 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     let focus = [
         ("charts-focus", "run-charts"),
         ("sample-focus", "smp-2"),
+        // Row 5: the log (its level filter and counts) beside the config.
+        ("log-focus", "log-scroll"),
         ("table-focus", "pc-row-1"),
         ("canvas-focus", "stage-canvas"),
     ]
