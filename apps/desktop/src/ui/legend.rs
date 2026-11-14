@@ -1,10 +1,10 @@
-//! Legend swatches: line samples, colour squares and class colours.
+//! Legend swatches: line samples, the best ring, colour squares and class colours.
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{Div, Hsla, ParentElement, Styled, div, px};
 
 use super::format::sci;
-use super::text::text;
+use super::text::{StyledExt, text};
 use crate::theme::{Theme, ty};
 
 /// One legend entry with its value: swatch, name, number (tabular).
@@ -32,6 +32,17 @@ pub fn legend_value(t: &Theme, name: &str, color: Hsla, dashed: bool, value: Opt
         .child(swatch)
         .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(name.to_string()))
         .when_some(value, |d, v| d.child(sci(ty::SM, t.text_primary, v)))
+}
+
+/// The best point's key, "○ best 0.656 @ 41": the chart's hollow ink ring, then the value.
+pub fn best_legend(t: &Theme, value: String) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .child(div().size(px(9.)).flex_none().rounded_full().border(px(1.5)).border_color(t.text_primary))
+        .child(text(ty::SM, t.text_secondary).child("best"))
+        .child(text(ty::SM, t.text_primary).tnum().child(value))
 }
 
 /// A class swatch: a small square in the class colour.

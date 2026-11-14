@@ -15,7 +15,10 @@ use super::axis::{
     ticks,
 };
 use super::cursor::{chip_label, cursor_x, nearest};
+use super::domain::unit_domain;
 use super::ease::ease;
+use super::end_labels::{end_gutter, paint_end_names};
+use super::marks::{End, end_ink, end_radius, is_ink, merged_end, paint_best, paint_end};
 use super::smooth::{cached_envelope, memo, smoothed};
 use super::spec::{LineChart, Marker};
 use super::text::{paint_text, text_width};
@@ -34,9 +37,6 @@ fn clamp_in(v: Pixels, lo: Pixels, hi: Pixels) -> Pixels {
 /// Dash patterns (on, off) in px.
 const DASHED: &[f32] = &[4., 3.];
 const DOTTED: &[f32] = &[1.5, 3.];
-/// Long dashes and dash-dot, for line sets beyond solid / dashed / dotted (the PR curves).
-pub const LONG_DASH: &[f32] = &[9., 3.];
-pub const DASH_DOT: &[f32] = &[6., 2.5, 1.5, 2.5];
 
 pub(super) fn stroke_path(window: &mut Window, pts: &[Point<Pixels>], width: f32, color: Hsla, dash: &[f32]) {
     if pts.len() < 2 {
@@ -151,7 +151,16 @@ fn paint_line_chart(
         y0 = 0.0;
         y1 = 1.0;
     }
-    if let Some((a, b)) = spec.y_range {
+    // A 0–1 metric's fitted axis: its ticks thin out on a short plot, so the plot's height (before
+    // the marker band, which takes at most the lanes given) decides how many it labels.
+    let unit = spec.unit_max.map(|m| {
+        let lanes = spec.min_lanes.max(usize::from(!spec.markers.is_empty()));
+        let pads = if spec.axis_titles.is_some() { 66. } else { 28. };
+        unit_domain(m, f32::from(bounds.size.height) - pads - lanes as f32 * LANE)
+    });
+    if let Some(f) = &unit {
+        (y0, y1) = f.domain;
+    } else if let Some((a, b)) = spec.y_range {
         y0 = a;
         y1 = b;
     } else {
@@ -178,7 +187,9 @@ fn paint_line_chart(
     let fit = ((f32::from(bounds.size.height) - 40.) / 22.).floor().max(2.) as usize;
     let stride = pow2_stride(y0, y1, fit);
     let (ly0, ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
-    let yticks = if let Some(v) = &spec.y_tick_values {
+    let yticks = if let Some(f) = &unit {
+        f.ticks.clone()
+    } else if let Some(v) = &spec.y_tick_values {
         v.clone()
     } else if spec.log_y {
         pow2_ticks_every(y0, y1, stride)
@@ -191,6 +202,8 @@ fn paint_line_chart(
     let ylabels: Vec<String> = yticks
         .iter()
         .map(|v| match (spec.y_fmt, ypow) {
+            // A fitted axis: every label at its step's decimals ("0.0 0.2 0.4", "0 0.25 0.50").
+            _ if unit.is_some() => format!("{v:.prec$}", prec = unit.as_ref().map_or(2, |f| f.decimals)),
             // Powers of two read as plain numbers: 8, 4, 2, 1, 0.5, 0.25.
             (None, _) if spec.log_y => format!("{v}"),
             (Some(f), _) => f(*v),
@@ -204,7 +217,8 @@ fn paint_line_chart(
     // A shared minimum gutter keeps plots in a grid aligned.
     let label_w = ylabels.iter().map(|l| text_width(window, l, label_size)).fold(px(30.), |a, b| a.max(b));
     let left = bounds.left() + label_w + px(10.);
-    let plot_w = bounds.right() - left - px(2.);
+    let (named, gutter) = end_gutter(spec, window, x0, x1, bounds.right() - left - px(2.));
+    let plot_w = bounds.right() - left - px(2.) - gutter;
     let sx0 = |x: f32| left + plot_w * ((x - x0) / (x1 - x0));
     // Marker labels live in a band above the plot, in lanes so they never overlap each other, and
     // the data never runs through them.
@@ -380,6 +394,8 @@ fn paint_line_chart(
         labels.push((r, m));
     }
     let columns = (plot.size.width / px(1.)).max(1.0) as usize;
+    // Each line's last drawn point (the smoothed one for a smoothed line): its end mark and its name.
+    let mut ends: Vec<(Point<Pixels>, &super::spec::Series)> = Vec::new();
     window.with_content_mask(
         Some(folo_ui::ContentMask {
             bounds: Bounds::new(
@@ -388,8 +404,6 @@ fn paint_line_chart(
             ),
         }),
         |window| {
-            // Live endpoint dots already drawn: one within 3 px of another is skipped.
-            let mut live_dots: Vec<Point<Pixels>> = Vec::new();
             for s in &spec.series {
                 if s.points.is_empty() {
                     continue;
@@ -422,9 +436,7 @@ fn paint_line_chart(
                         );
                     }
                 }
-                let dash = if let Some(p) = s.pattern {
-                    p
-                } else if s.dotted {
+                let dash = if s.dotted {
                     DOTTED
                 } else if s.dashed {
                     DASHED
@@ -440,29 +452,35 @@ fn paint_line_chart(
                         );
                     }
                 }
-                // While the cursor inspects, its dots are the markers; latest-point halos return on exit.
-                if s.live
-                    && spec.hover.is_none()
-                    && let Some(&(x, y)) = main.last()
-                    && !live_dots.iter().any(|d| {
-                        let c = point(sx(x), sy(y));
-                        // Only a dot that would sit on another is dropped; near ones both show.
-                        (d.x - c.x).abs() < px(3.) && (d.y - c.y).abs() < px(3.)
-                    })
+                if let Some(&(x, y)) = main.last()
+                    && x >= x0
+                    && x <= x1
                 {
-                    let c = point(sx(x), sy(y));
-                    live_dots.push(c);
-                    window.paint_quad(
-                        fill(Bounds::centered_at(c, size(px(10.), px(10.))), alpha(s.color, 0.22))
-                            .corner_radii(px(5.)),
-                    );
-                    window.paint_quad(
-                        fill(Bounds::centered_at(c, size(px(5.), px(5.))), s.color).corner_radii(px(2.5)),
-                    );
+                    ends.push((point(sx(x), sy(y)), s));
                 }
             }
         },
     );
+    // End marks over the lines (outside the plot's clip, so a mark on its edge is whole), then the
+    // best ring: on its own, or around the end mark it meets.
+    for (c, s) in &ends {
+        paint_end(window, t, *c, s.end, end_ink(t, s.end, s.color, is_ink(t, s.color)));
+    }
+    if let Some((bx, by)) = spec.best.filter(|b| b.0 >= x0 && b.0 <= x1) {
+        let at: Vec<(f32, f32, f32)> = ends
+            .iter()
+            .filter(|(_, s)| s.end != End::None)
+            .map(|(c, s)| (f32::from(c.x), f32::from(c.y), end_radius(s.end)))
+            .collect();
+        let b = point(sx(bx), sy(by));
+        match merged_end((f32::from(b.x), f32::from(b.y)), &at) {
+            Some(i) => paint_best(window, t, point(px(at[i].0), px(at[i].1)), Some(at[i].2)),
+            None => paint_best(window, t, b, None),
+        }
+    }
+    if named {
+        paint_end_names(window, cx, t, &ends, plot, gutter > px(0.));
+    }
 
     // Dots that would overlap are nudged apart (8 px between centres), so none hides another.
     let mut placed: Vec<Point<Pixels>> = Vec::new();

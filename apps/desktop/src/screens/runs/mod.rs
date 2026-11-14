@@ -6,7 +6,10 @@ mod config;
 mod detail;
 mod list;
 mod logs;
+mod per_class;
 mod samples;
+
+pub(crate) use samples::SAMPLE_CONF;
 
 use crate::api::{Run, time};
 

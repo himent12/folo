@@ -49,8 +49,7 @@ The screens are competent everywhere and memorable nowhere. Each weak area trace
     |---|---|---|---|---|
     | Nav | top bar + tab bar | icon sidebar | icon sidebar (opens over the page) | full sidebar, collapsible |
     | Page header (`shell/Page`) | title in the top bar; primary + ⋯ | actions on the title row | the same | the same |
-    | Rails (Run, New run, Playground) | sections behind a picker | stacked under the main column, or sections behind a picker (Run) | main column + sticky rail | main column + sticky rail |
-    | Rails (Run, Model, New run, Playground) | sections behind a picker | stacked under the main column (Run: Validation samples, Per class, Logs, Config) | main column + sticky rail | main column + sticky rail |
+    | Rails (Run, New run, Playground) | sections behind a picker | stacked under the main column (Run: Validation samples, Per class, Logs, Config) | main column + sticky rail | main column + sticky rail |
     | Run's metrics | five KPI tiles 2 × 2 plus one, Validation mAP and Training loss; Precision / Recall and Learning rate are sections of the picker | five tiles three over two, the four charts stacked | five tiles in one row (Throughput without its trend); Validation mAP (3/5) beside Training loss (2/5), Precision / Recall beside Learning rate | the same, Throughput with its trend |
     | KPI rows (Model, Dataset stats) | 2 × 2 | 4 across, short captions (Model: 3 + 2) | 4 across (Model: 5) | 4 across (Model: 5) |
     | List toolbars (Runs, Models, Datasets: `.list-toolbar`) | filter, then the field at full width | the same two rows | one row: filter left, a 280 px field right | one row |

@@ -6,6 +6,7 @@ use folo_ui::{Hsla, SharedString};
 
 use super::HoverFn;
 use super::axis::format_tick;
+use super::marks::End;
 
 #[derive(Clone)]
 pub struct Series {
@@ -20,10 +21,11 @@ pub struct Series {
     pub dashed: bool,
     /// Dotted (wins over dashed).
     pub dotted: bool,
-    /// Any other dash pattern (wins over both), for sets of more than three lines.
-    pub pattern: Option<&'static [f32]>,
-    /// Draw a live dot with a halo on the last point.
-    pub live: bool,
+    /// How the line ends: the mark on its last point (`charts::marks`).
+    pub end: End,
+    /// The ink of the line's name at its end, on a chart that names its lines there
+    /// (`LineChart::end_labels`); None leaves it unnamed.
+    pub end_label: Option<Hsla>,
 }
 
 impl Series {
@@ -37,11 +39,6 @@ impl Series {
         self
     }
 
-    pub fn pattern(mut self, dash: &'static [f32]) -> Self {
-        self.pattern = Some(dash);
-        self
-    }
-
     pub fn new(name: impl Into<SharedString>, color: Hsla, points: Arc<Vec<(f32, f32)>>) -> Self {
         Self {
             name: name.into(),
@@ -52,8 +49,8 @@ impl Series {
             width: 1.5,
             dashed: false,
             dotted: false,
-            pattern: None,
-            live: false,
+            end: End::None,
+            end_label: None,
         }
     }
 
@@ -67,8 +64,22 @@ impl Series {
         self
     }
 
+    /// A live run's line, ending in the lime dot (no mark otherwise).
     pub fn live(mut self, live: bool) -> Self {
-        self.live = live;
+        if live {
+            self.end = End::Live;
+        }
+        self
+    }
+
+    pub fn end(mut self, end: End) -> Self {
+        self.end = end;
+        self
+    }
+
+    /// Named at its end in `ink` (`chart.text` of its hue, or the text ink).
+    pub fn end_label(mut self, ink: Hsla) -> Self {
+        self.end_label = Some(ink);
         self
     }
 
@@ -123,8 +134,15 @@ pub struct LineChart {
     pub pow_caption: bool,
     /// The part of x not reached yet (a live run's remaining epochs): tinted, with a label.
     pub future: Option<(f32, SharedString)>,
-    /// Points to mark with a dot (x, y, colour), e.g. the best epoch.
+    /// Points to mark with a dot (x, y, colour), e.g. a class's operating point.
     pub dots: Vec<(f32, f32, Hsla)>,
+    /// The best point (x, y): a hollow ring in ink, drawn around a line's end mark when they meet.
+    pub best: Option<(f32, f32)>,
+    /// A 0–1 metric whose highest value is this: y from 0 to a little above it with 3 to 5 round
+    /// gridlines (`charts::domain::unit_domain`), instead of `y_range`.
+    pub unit_max: Option<f32>,
+    /// Name the lines that have an `end_label` at their ends, where the plot has room.
+    pub end_labels: bool,
 }
 
 impl LineChart {
@@ -154,6 +172,9 @@ impl LineChart {
             ease_key: 0,
             pow_caption: true,
             dots: Vec::new(),
+            best: None,
+            unit_max: None,
+            end_labels: false,
         }
     }
 }

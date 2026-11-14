@@ -26,7 +26,7 @@ pub use format::{
     gpu_label, int, latency_text, lr_sci, may_overflow, model_storage, operating_conf, plural, pr_caption,
     queue_text, queue_wait_text, sci, score_delta, share_spare, short_gpu, split_label, waiting_text,
 };
-pub use legend::{class_swatch, legend_value, line_swatch, swatch};
+pub use legend::{best_legend, class_swatch, legend_value, line_swatch, swatch};
 pub use metric::{baseline_lift, detail_line, duration_metric, kv, metric, metric_pair, stat_at, stat_sized};
 pub use motion::{appear, os_prefers_reduced_motion, reduce_motion, set_reduce_motion};
 pub use scroll::{ThumbGeo, paint_thumb, scroll_edges};
