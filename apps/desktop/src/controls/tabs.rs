@@ -9,7 +9,7 @@ use folo_ui::{
 
 use super::select::OnSelect;
 use crate::app::{FoloApp, act};
-use crate::theme::{radius, theme, ty};
+use crate::theme::{radius, size as tsize, theme, ty};
 use crate::ui::*;
 
 /// One tab: its label and what it holds, after the label in tertiary ("2,400", "· 3 findings").
@@ -45,7 +45,7 @@ impl FoloApp {
                 let id = format!("{key}-{i}");
                 let el = div()
                     .id(SharedString::from(id.clone()))
-                    .h(px(32.))
+                    .h(px(tsize::CONTROL_LG))
                     .flex()
                     .items_center()
                     .border_b_2()

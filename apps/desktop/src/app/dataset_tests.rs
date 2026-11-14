@@ -200,9 +200,22 @@ fn a_dataset_page_has_its_tabs_and_one_toolbar_and_statistics_holds_the_strip() 
     assert!(!images.iter().any(|k| k == "ds-tile" || k.starts_with("ds-class-")), "{images:?}");
     // The empty-images and broken-labels tiles moved into Statistics with the rest of the strip.
     assert!(!images.iter().any(|k| k == "ds-empty-tile"), "{images:?}");
-    drive(&mut app, window, |this, _, _| this.ds_tab = super::DsTab::Statistics);
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_tab = super::DsTab::Statistics;
+        cx.notify();
+    });
     let stats = drawn_keys(&mut app, window);
     assert!(stats.iter().any(|k| k == "ds-empty-tile"), "Show them stays: {stats:?}");
+    // The health summary is a Tab stop (its focus tip lists every finding).
+    assert!(stats.iter().any(|k| k == "ds-health"), "{stats:?}");
+    // "Show them": the empty-images chip takes the class picker's place on the toolbar.
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_tab = super::DsTab::Images;
+        this.ds_empty_only = true;
+        cx.notify();
+    });
+    let empty = drawn_keys(&mut app, window);
+    assert!(empty.iter().any(|k| k == "ds-empty-chip"), "{empty:?}");
 }
 
 /// The focus keys a page draws, once what it asked for has come.

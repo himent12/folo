@@ -9,7 +9,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::health::{Finding, health_line};
+use super::health::{Finding, findings_text, health_line};
 use crate::api::Dataset;
 use crate::app::FoloApp;
 use crate::charts::{HoverFn, histogram};
@@ -125,6 +125,24 @@ impl FoloApp {
             self.hist_hover.get("per").copied(),
             Some(hover_fn("per")),
         );
+        // The health line is one Tab stop: its focus tip lists every finding with what it means
+        // (the tooltips are the pointer's way to the same).
+        let health = {
+            let fh = self.fh("ds-health".to_string(), cx);
+            let ring = self.ring(&fh, window);
+            div()
+                .id("ds-health")
+                .track_focus(&fh)
+                .relative()
+                .when(ring, |d| {
+                    d.child(crate::app::focus_ring(&t, radius::LG)).child(crate::controls::focus_tip(
+                        &t,
+                        findings_text(health),
+                        40.,
+                    ))
+                })
+                .child(health_line(&t, health, self.content_width(window)))
+        };
         div()
             .id("ds-stats")
             .flex_1()
@@ -134,7 +152,7 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(16.))
-                    .child(health_line(&t, health))
+                    .child(health)
                     .child(self.dataset_strip_stats(ds, window, cx))
                     .child(
                         panel(&t)

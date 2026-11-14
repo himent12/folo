@@ -11,7 +11,7 @@ use folo_ui::{
 
 use crate::api::{Dataset, ImageInfo, Split, SplitsExt};
 use crate::app::{FoloApp, act};
-use crate::theme::{radius, theme, ty};
+use crate::theme::{radius, size as tsize, theme, ty};
 use crate::ui::*;
 
 const GAP: f32 = 8.;
@@ -159,13 +159,15 @@ impl FoloApp {
         // One toolbar over the grid: what is shown (the split, the class, the count) on the left,
         // how it is drawn (Boxes, the size, Fit / Fill) on the right.
         let toolbar = div()
-            .h(px(32.))
+            .h(px(tsize::CONTROL_LG))
             .mb(px(12.))
             .flex()
             .items_center()
             .gap(px(if narrow { 8. } else { 12. }))
             .child(seg)
-            .child(picker)
+            // Empty images have no class, so the two filters never both apply: while "Show them"
+            // (Statistics) holds the empty images, its chip takes the class picker's place.
+            .when(!self.ds_empty_only, |d| d.child(picker))
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(
                     "ds-empty-chip",

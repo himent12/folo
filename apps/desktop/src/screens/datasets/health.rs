@@ -191,9 +191,43 @@ pub fn finding_count(items: &[Finding]) -> usize {
     items.iter().filter(|f| f.severity != Severity::Ok).count()
 }
 
-/// The Statistics tab's one-line health summary: "Health", then each finding with its severity's
-/// mark, its explanation in its tooltip.
-pub fn health_line(t: &Theme, items: &[Finding]) -> folo_ui::Div {
+/// About how wide a finding's words are, at the summary's text size (an upper bound).
+fn words_w(s: &str) -> f32 {
+    let mut w = 0.;
+    while crate::ui::may_overflow(s, ty::SM.size, w) {
+        w += 4.;
+    }
+    w
+}
+
+/// How many findings fit on a summary line `width` wide (the panel's), most severe first; the rest
+/// are counted in a "+N more" at its end.
+pub fn findings_that_fit(items: &[Finding], width: f32) -> usize {
+    // The panel's padding, "Health" and its gap; room kept for "+N more".
+    let mut room = width - 32. - 64. - 72.;
+    let mut n = 0;
+    for f in items {
+        // Its mark, the mark's gap, the words and the gap to the next.
+        let need = 14. + 6. + words_w(&f.short) + 16.;
+        if need > room {
+            break;
+        }
+        room -= need;
+        n += 1;
+    }
+    // The last one may take the room kept for "+N more" when nothing follows it.
+    if n + 1 == items.len() && 14. + 6. + words_w(&items[n].short) <= room + 72. {
+        n += 1;
+    }
+    n
+}
+
+/// The Statistics tab's one-line health summary: "Health", then each finding that fits with its
+/// severity's mark (its explanation in its tooltip), then "+N more" for the rest (named in its
+/// tooltip). The caller makes the line a Tab stop whose focus tip lists every finding in full.
+pub fn health_line(t: &Theme, items: &[Finding], width: f32) -> folo_ui::Div {
+    let shown = findings_that_fit(items, width);
+    let rest: Vec<String> = items[shown..].iter().map(|f| f.short.clone()).collect();
     panel(t)
         .h(px(40.))
         .px(px(16.))
@@ -207,7 +241,7 @@ pub fn health_line(t: &Theme, items: &[Finding]) -> folo_ui::Div {
                 .flex_none()
                 .child("Health"),
         )
-        .children(items.iter().enumerate().map(|(i, f)| {
+        .children(items[..shown].iter().enumerate().map(|(i, f)| {
             let (mark, color, ink) = match f.severity {
                 Severity::Danger => ("icons/circle-alert.svg", t.danger_solid, t.text_primary),
                 Severity::Warning => ("icons/triangle-alert.svg", t.warning_solid, t.text_primary),
@@ -231,6 +265,24 @@ pub fn health_line(t: &Theme, items: &[Finding]) -> folo_ui::Div {
                 )
                 .into_any_element()
         }))
+        .when(!rest.is_empty(), |d| {
+            d.child(
+                div()
+                    .id("ds-health-more")
+                    .flex_none()
+                    .tooltip(crate::controls::tip(rest.join(" · "), None))
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .whitespace_nowrap()
+                            .child(format!("+{} more", rest.len())),
+                    ),
+            )
+        })
+}
+
+/// Every finding in full, for the summary's focus tip.
+pub fn findings_text(items: &[Finding]) -> String {
+    items.iter().map(|f| format!("{}: {}", f.short, f.detail)).collect::<Vec<_>>().join(" · ")
 }
 
 #[cfg(test)]
@@ -268,6 +320,11 @@ mod tests {
         );
         assert!(items.windows(2).all(|w| w[0].severity <= w[1].severity));
         assert_eq!(finding_count(&items), items.len());
+
+        // A narrow line keeps the most severe and counts the rest; a wide one shows them all.
+        let fit = findings_that_fit(&items, 560.);
+        assert!(fit >= 1 && fit < items.len(), "{fit} of {}", items.len());
+        assert_eq!(findings_that_fit(&items, 4000.), items.len());
 
         // A clean dataset: one Ok, no findings counted.
         d.splits.val = d.splits.val.max(1);

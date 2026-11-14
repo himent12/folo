@@ -226,11 +226,12 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    // The table's 2 px rail, lime only while the entry runs (UNIFIED.md §2 Progress).
                     .child(div().w(px(120.)).flex_none().child(progress(
                         &t,
                         entry_frac(e),
-                        t.accent_fill(),
-                        4.,
+                        if e.status == BenchEntryStatus::Running { t.accent_fill() } else { t.text_tertiary },
+                        2.,
                     )))
                     .child(
                         text(ty::SM, t.text_tertiary)
