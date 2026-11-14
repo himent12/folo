@@ -242,6 +242,21 @@ describe('the four run charts', () => {
     c.unmount();
   });
 
+  it('end the learning rate and the throughput on the last step of a long run, as the tiles do', () => {
+    // 1,201 steps: the learning rate's stride is 2 and its picks (0, 2, …, 1200) would stop a step short on 1,202.
+    for (const n of [1201, 1202, 1999]) {
+      const steps = Array.from({ length: n }, (_, i) => ({ ...step(i + 1, 100), lr: 1e-3 * (1 - i / n), imgs_per_s: 30 + (i % 7) }));
+      const { c, model } = show({ ...base, status: 'completed', epochs: 20, epoch: 20, step: n, steps_per_epoch: 100 }, { steps, epochs: [epoch(1), epoch(2)] });
+      const last = steps.at(-1)!;
+      const lr = model.lrSeries.get()[0]!.points;
+      expect(lr.at(-1)).toEqual({ x: last.step / 100, y: last.lr });
+      expect(lr.length).toBeLessThanOrEqual(1201);
+      expect(model.ipsSeries.get()[0]!.points.at(-1)!.x).toBe(last.step / 100);
+      expect(model.ipsSeries.get()[0]!.points.length).toBe(n);
+      c.unmount();
+    }
+  });
+
   it("end each chart's first line in the run's mark, the loss and the learning rate too (design/UNIFIED.md §3, Marks)", () => {
     const first = (m: RunModel) => [m.mapSeries.get()[0]!, m.prSeries.get()[0]!, m.lossSeries.get().find((s) => s.id === 'total')!, m.lrSeries.get()[0]!, m.ipsSeries.get()[0]!];
     const live = show({ ...base, status: 'running' }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });

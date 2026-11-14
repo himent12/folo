@@ -215,23 +215,24 @@ export class RunModel {
   });
   readonly lrSeries = computed((): Series[] => {
     this.stepsRev();
-    // Every k-th step: at most about 1,200 points, whatever the run's length.
+    // Every k-th step (a schedule is smooth): at most about 1,200 points, whatever the run's length, and always the last
+    // step, so the line and its resting legend end on the reading the run is at.
     const all = this.stepData.raw('lr').pts;
-    const k = Math.max(1, Math.floor(this.stepData.steps.length / 600));
+    const k = Math.max(1, Math.floor(all.length / 600));
     const points: Pt[] = [];
     for (let i = 0; i < all.length; i += k) points.push(all[i]!);
+    if (all.length && points.at(-1) !== all.at(-1)) points.push(all.at(-1)!);
     return [{ id: 'lr', label: 'lr', color: 'var(--text-secondary)', end: this.endMark.get(), points }];
   });
   /** The fourth chart's view: the learning rate, or the throughput over the whole run (the tile keeps the last steps). */
   readonly lrView = signal<'lr' | 'ips'>('lr');
-  /** Throughput at every k-th step, smoothed as the tile's sparkline is: the run's whole history, read by the cursor. */
+  /**
+   * Throughput at every step, smoothed as the tile's sparkline is: the run's whole history, read by the cursor. All of
+   * it, as the loss lines: the chart's downsampler keeps each bucket's extremes (a slowdown survives) and the last step.
+   */
   readonly ipsSeries = computed((): Series[] => {
     this.stepsRev();
-    const all = this.stepData.smoothed('ips', 0.9).pts;
-    const k = Math.max(1, Math.floor(this.stepData.steps.length / 600));
-    const points: Pt[] = [];
-    for (let i = 0; i < all.length; i += k) points.push(all[i]!);
-    return [{ id: 'ips', label: 'img/s', color: 'var(--text-secondary)', end: this.endMark.get(), points }];
+    return [{ id: 'ips', label: 'img/s', color: 'var(--text-secondary)', end: this.endMark.get(), points: this.stepData.smoothed('ips', 0.9).pts.slice() }];
   });
   /** The throughput of the last steps (the tile's sparkline, smoothed as the old chart drew it) and their average. */
   readonly ips = computed(() => {
