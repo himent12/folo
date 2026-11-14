@@ -305,14 +305,14 @@ css`
       grid-template-columns: repeat(4, minmax(0, 1fr));
     }
   }
-  /* Phones: the tiles 2 × 2 again over the chart; the meta line on a row of its own under the name. */
-  @media (max-width: 767px) {
+  /* Tablets and phones: the meta line (with the device) on a row of its own under the name, never cut. */
+  @media (max-width: 1023px) {
     header {
       flex-wrap: wrap;
       height: auto;
       min-height: 48px;
-      padding: var(--space-2) var(--space-1) var(--space-2) var(--space-3);
-      gap: var(--space-1) var(--space-2);
+      padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+      gap: var(--space-1) var(--space-3);
     }
     .meta {
       order: 3;
@@ -320,6 +320,13 @@ css`
     }
     .cta {
       margin-left: auto;
+    }
+  }
+  /* Phones: the tiles 2 × 2 again over the chart. */
+  @media (max-width: 767px) {
+    header {
+      padding: var(--space-2) var(--space-1) var(--space-2) var(--space-3);
+      gap: var(--space-1) var(--space-2);
     }
     .body {
       padding: var(--space-3);
