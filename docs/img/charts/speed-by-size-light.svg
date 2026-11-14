@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 798" width="720" height="798" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
 <title id="t">Speed-up over the YOLO26 model of the same size</title>
-<desc id="d">Grouped bars of how many times faster FOLO is than the YOLO26 model of the same size, for the nano and the small models. GPU forward, batch 1, f32: 4.3× for folo-n, 2.2× for folo-s. GPU forward, batch 1, the fastest precision of each: 5.2× for folo-n, 3.6× for folo-s. GPU forward, batch 16, f32: 1.4× for folo-n, 1.3× for folo-s. GPU forward, batch 16, both f16, FOLO on tensor cores: 1.8× for folo-n, 1.6× for folo-s. GPU end to end, batch 1, f32: 4.0× for folo-n, 2.8× for folo-s. GPU end to end, batch 16, both f16, FOLO on tensor cores: 3.5× for folo-n, 3.0× for folo-s. CPU forward, batch 1, f32: 1.8× for folo-n, 1.5× for folo-s. CPU end to end, batch 1, f32: 1.9× for folo-n, 1.7× for folo-s. Training step, batch 16, f32: 1.9× for folo-n, 1.5× for folo-s. Training step, batch 16, AMP: 2.4× for folo-n, 1.6× for folo-s.</desc>
+<desc id="d">Grouped bars of how many times faster FOLO is than the YOLO26 model of the same size, for the nano and the small models. GPU forward, batch 1, f32: 4.5× for folo-n, 2.3× for folo-s. GPU forward, batch 1, the fastest precision of each: 5.9× for folo-n, 3.7× for folo-s. GPU forward, batch 16, f32: 1.4× for folo-n, 1.3× for folo-s. GPU forward, batch 16, both f16, FOLO on tensor cores: 1.8× for folo-n, 1.6× for folo-s. GPU end to end, batch 1, f32: 4.3× for folo-n, 3.2× for folo-s. GPU end to end, batch 16, both f16, FOLO on tensor cores: 3.9× for folo-n, 3.0× for folo-s. CPU forward, batch 1, f32: 1.8× for folo-n, 1.5× for folo-s. CPU end to end, batch 1, f32: 1.8× for folo-n, 1.7× for folo-s. Training step, batch 16, f32: 1.9× for folo-n, 1.5× for folo-s. Training step, batch 16, AMP: 2.4× for folo-n, 1.6× for folo-s.</desc>
 <rect x="0.5" y="0.5" width="719" height="797" rx="8" fill="#FFFFFF" stroke="#E4E5E5"/>
 <text x="28" y="43" font-size="17" font-weight="600" letter-spacing="-0.01em" fill="#0C0E12">Speed-up over the YOLO26 model of the same size</text>
 <text x="28" y="66" font-size="13" fill="#4F5661">RTX 4080 SUPER, Core i7-14700KF, 640×640 input</text>
@@ -10,69 +10,69 @@
 <text x="220.32" y="93.5" font-size="13" fill="#4F5661">folo-s against yolo26s</text>
 <path d="M28 112.5L692 112.5" stroke="#F1F1F1" stroke-width="1" fill="none"/>
 <text x="28" y="138" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">Times faster</tspan><tspan font-size="12.5" fill="#646B75">   latency: YOLO26 over FOLO; throughput: FOLO over YOLO26</tspan></text>
-<path d="M316.39 152L316.39 668" stroke="#D8D8D9" stroke-width="1" fill="none"/>
+<path d="M307.56 152L307.56 668" stroke="#D8D8D9" stroke-width="1" fill="none"/>
 <text x="28" y="172" font-size="13" font-weight="500" fill="#0C0E12">GPU forward, batch 1</text>
 <text x="28" y="189" font-size="12.5" fill="#646B75">f32</text>
-<path d="M236 162h342.91a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-342.91z" fill="#0A8FD6"/>
-<text x="590.91" y="172.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">4.3×</tspan></text>
-<path d="M236 178h169.7a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-169.7z" fill="#AD6C00"/>
-<text x="417.7" y="188.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">2.2×</tspan></text>
+<path d="M236 162h318.72a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-318.72z" fill="#0A8FD6"/>
+<text x="566.72" y="172.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">4.5×</tspan></text>
+<path d="M236 178h156.22a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-156.22z" fill="#AD6C00"/>
+<text x="404.22" y="188.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">2.3×</tspan></text>
 <text x="28" y="224" font-size="13" font-weight="500" fill="#0C0E12">GPU forward, batch 1</text>
 <text x="28" y="241" font-size="12.5" fill="#646B75">the fastest precision of each</text>
 <path d="M236 214h412.29a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-412.29z" fill="#0A8FD6"/>
-<text x="660.29" y="224.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">5.2×</tspan></text>
-<path d="M236 230h282.09a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-282.09z" fill="#AD6C00"/>
-<text x="530.09" y="240.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">3.6×</tspan></text>
+<text x="660.29" y="224.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">5.9×</tspan></text>
+<path d="M236 230h262.22a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-262.22z" fill="#AD6C00"/>
+<text x="510.22" y="240.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">3.7×</tspan></text>
 <text x="28" y="276" font-size="13" font-weight="500" fill="#0C0E12">GPU forward, batch 16</text>
 <text x="28" y="293" font-size="12.5" fill="#646B75">f32</text>
-<path d="M236 266h110.35a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-110.35z" fill="#0A8FD6"/>
-<text x="358.35" y="276.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.4×</tspan></text>
-<path d="M236 282h100.36a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-100.36z" fill="#AD6C00"/>
-<text x="348.36" y="292.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.3×</tspan></text>
+<path d="M236 266h97.71a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-97.71z" fill="#0A8FD6"/>
+<text x="345.71" y="276.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.4×</tspan></text>
+<path d="M236 282h88.82a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-88.82z" fill="#AD6C00"/>
+<text x="336.82" y="292.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.3×</tspan></text>
 <text x="28" y="328" font-size="13" font-weight="500" fill="#0C0E12">GPU forward, batch 16</text>
 <text x="28" y="345" font-size="12.5" fill="#646B75">both f16, FOLO on tensor cores</text>
-<path d="M236 318h136.2a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-136.2z" fill="#0A8FD6"/>
-<text x="384.2" y="328.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.8×</tspan></text>
-<path d="M236 334h120.01a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-120.01z" fill="#AD6C00"/>
-<text x="368.01" y="344.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.6×</tspan></text>
+<path d="M236 318h120.71a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-120.71z" fill="#0A8FD6"/>
+<text x="368.71" y="328.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.8×</tspan></text>
+<path d="M236 334h106.31a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-106.31z" fill="#AD6C00"/>
+<text x="354.31" y="344.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.6×</tspan></text>
 <text x="28" y="380" font-size="13" font-weight="500" fill="#0C0E12">GPU end to end, batch 1</text>
 <text x="28" y="397" font-size="12.5" fill="#646B75">f32</text>
-<path d="M236 370h311.92a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-311.92z" fill="#0A8FD6"/>
-<text x="559.92" y="380.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">4.0×</tspan></text>
-<path d="M236 386h221.75a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-221.75z" fill="#AD6C00"/>
-<text x="469.75" y="396.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">2.8×</tspan></text>
+<path d="M236 370h303.35a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-303.35z" fill="#0A8FD6"/>
+<text x="551.35" y="380.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">4.3×</tspan></text>
+<path d="M236 386h226.35a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-226.35z" fill="#AD6C00"/>
+<text x="474.35" y="396.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">3.2×</tspan></text>
 <text x="28" y="432" font-size="13" font-weight="500" fill="#0C0E12">GPU end to end, batch 16</text>
 <text x="28" y="449" font-size="12.5" fill="#646B75">both f16, FOLO on tensor cores</text>
-<path d="M236 422h275.95a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-275.95z" fill="#0A8FD6"/>
-<text x="523.95" y="432.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">3.5×</tspan></text>
-<path d="M236 438h235.5a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-235.5z" fill="#AD6C00"/>
-<text x="483.5" y="448.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">3.0×</tspan></text>
+<path d="M236 422h276.1a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-276.1z" fill="#0A8FD6"/>
+<text x="524.1" y="432.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">3.9×</tspan></text>
+<path d="M236 438h211.9a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-211.9z" fill="#AD6C00"/>
+<text x="459.9" y="448.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">3.0×</tspan></text>
 <text x="28" y="484" font-size="13" font-weight="500" fill="#0C0E12">CPU forward, batch 1</text>
 <text x="28" y="501" font-size="12.5" fill="#646B75">f32</text>
-<path d="M236 474h138.98a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-138.98z" fill="#0A8FD6"/>
-<text x="386.98" y="484.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.8×</tspan></text>
-<path d="M236 490h112.28a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-112.28z" fill="#AD6C00"/>
-<text x="360.28" y="500.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.5×</tspan></text>
+<path d="M236 474h123.18a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-123.18z" fill="#0A8FD6"/>
+<text x="371.18" y="484.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.8×</tspan></text>
+<path d="M236 490h99.43a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-99.43z" fill="#AD6C00"/>
+<text x="347.43" y="500.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.5×</tspan></text>
 <text x="28" y="536" font-size="13" font-weight="500" fill="#0C0E12">CPU end to end, batch 1</text>
 <text x="28" y="553" font-size="12.5" fill="#646B75">f32</text>
-<path d="M236 526h147.02a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-147.02z" fill="#0A8FD6"/>
-<text x="395.02" y="536.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.9×</tspan></text>
-<path d="M236 542h133.46a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-133.46z" fill="#AD6C00"/>
-<text x="381.46" y="552.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.7×</tspan></text>
+<path d="M236 526h125.87a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-125.87z" fill="#0A8FD6"/>
+<text x="373.87" y="536.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.8×</tspan></text>
+<path d="M236 542h119.52a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-119.52z" fill="#AD6C00"/>
+<text x="367.52" y="552.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.7×</tspan></text>
 <text x="28" y="588" font-size="13" font-weight="500" fill="#0C0E12">Training step, batch 16</text>
 <text x="28" y="605" font-size="12.5" fill="#646B75">f32</text>
-<path d="M236 578h146.3a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-146.3z" fill="#0A8FD6"/>
-<text x="394.3" y="588.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.9×</tspan></text>
-<path d="M236 594h119.27a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-119.27z" fill="#AD6C00"/>
-<text x="367.27" y="604.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.5×</tspan></text>
+<path d="M236 578h129.68a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-129.68z" fill="#0A8FD6"/>
+<text x="377.68" y="588.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.9×</tspan></text>
+<path d="M236 594h105.64a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-105.64z" fill="#AD6C00"/>
+<text x="353.64" y="604.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.5×</tspan></text>
 <text x="28" y="640" font-size="13" font-weight="500" fill="#0C0E12">Training step, batch 16</text>
 <text x="28" y="657" font-size="12.5" fill="#646B75">AMP</text>
-<path d="M236 630h184.32a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-184.32z" fill="#0A8FD6"/>
-<text x="432.32" y="640.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">2.4×</tspan></text>
-<path d="M236 646h123.07a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-123.07z" fill="#AD6C00"/>
-<text x="371.07" y="656.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.6×</tspan></text>
+<path d="M236 630h163.51a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-163.51z" fill="#0A8FD6"/>
+<text x="411.51" y="640.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">2.4×</tspan></text>
+<path d="M236 646h109.02a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-109.02z" fill="#AD6C00"/>
+<text x="357.02" y="656.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#0C0E12">1.6×</tspan></text>
 <path d="M235.5 154L235.5 666" stroke="#D8D8D9" stroke-width="1" fill="none"/>
-<text x="315.89" y="682" font-size="12.5" text-anchor="middle" fill="#646B75">1× = YOLO26</text>
+<text x="307.06" y="682" font-size="12.5" text-anchor="middle" fill="#646B75">1× = YOLO26</text>
 <path d="M28 696.5L692 696.5" stroke="#F1F1F1" stroke-width="1" fill="none"/>
 <text x="28" y="720" font-size="12.5" fill="#646B75">Each bar divides two numbers of the FOLO targets table in docs/BENCHMARKS.md: FOLO's median and the</text>
 <text x="28" y="738" font-size="12.5" fill="#646B75">best YOLO26 configuration of that row (measured 2026-11-12 and 2026-11-07).</text>

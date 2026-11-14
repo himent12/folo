@@ -17,11 +17,12 @@ throughout.
 ## Summary
 
 On one machine (an RTX 4080 SUPER and an i7-14700KF), at 640×640 and against the incumbent's best configuration for
-each row, folo-n is faster than yolo26n on every row measured: 4.0× to 5.2× at batch-1 latency on the GPU, 1.4× to
-3.5× at batch-16 throughput, 1.8× to 1.9× on the CPU and 1.9× to 2.7× in training, with about a quarter less GPU
-memory allocated. folo-s against yolo26s: 1.3× to 3.6×. The table of record is [FOLO targets](#folo-targets); FOLO's
-numbers are medians of runs alternated with its previous build (2026-11-12), the incumbent's were measured on
-2026-11-07. One difference in protocol is open, in the GPU batch-1 latency rows: both sides warm up with 25 calls
+each row, folo-n is faster than yolo26n on every row measured: 4.3× to 5.9× at batch-1 latency on the GPU, 1.4× to
+3.9× at batch-16 throughput, 1.8× on the CPU and 1.9× to 2.7× in training, with about a quarter less GPU memory
+allocated. folo-s against yolo26s: 1.3× to 3.7×. The table of record is [FOLO targets](#folo-targets); FOLO's
+numbers are medians of runs alternated with its previous build (2026-11-13 for the rows
+[hill-climb 3](#hill-climb-3-2026-11-13) moved, the end-to-end ones on trained weights; 2026-11-12 for the rest), the
+incumbent's were measured on 2026-11-07. One difference in protocol is open, in the GPU batch-1 latency rows: both sides warm up with 25 calls
 (forward) or 10 (end to end), and FOLO's bench then keeps warming until a second has passed (since
 [Hill-climb 2](#hill-climb-2-2026-11-12)), which the incumbent's does not ([Method](#method)). The incumbent has not
 been measured again with that longer warm-up. The CPU rows warm up with 5 calls on both sides.
@@ -29,12 +30,12 @@ been measured again with that longer warm-up. The CPU rows warm up with 5 calls 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="img/charts/speed-by-size-dark.svg">
-    <img src="img/charts/speed-by-size-light.svg" alt="How many times faster FOLO is than the YOLO26 model of the same size, folo-n and folo-s. GPU forward at batch 1: 4.3 and 2.2 times in f32, 5.2 and 3.6 times with the fastest precision of each. GPU forward at batch 16: 1.4 and 1.3 times in f32, 1.8 and 1.6 times in f16. GPU end to end: 4.0 and 2.8 times at batch 1, 3.5 and 3.0 times at batch 16. CPU forward 1.8 and 1.5 times, CPU end to end 1.9 and 1.7 times. Training step: 1.9 and 1.5 times in f32, 2.4 and 1.6 times with mixed precision." width="720">
+    <img src="img/charts/speed-by-size-light.svg" alt="How many times faster FOLO is than the YOLO26 model of the same size, folo-n and folo-s. GPU forward at batch 1: 4.5 and 2.3 times in f32, 5.9 and 3.7 times with the fastest precision of each. GPU forward at batch 16: 1.4 and 1.3 times in f32, 1.8 and 1.6 times in f16. GPU end to end: 4.3 and 3.2 times at batch 1, 3.9 and 3.0 times at batch 16. CPU forward 1.8 and 1.5 times, CPU end to end 1.8 and 1.7 times. Training step: 1.9 and 1.5 times in f32, 2.4 and 1.6 times with mixed precision." width="720">
   </picture>
 </p>
 
-Accuracy is the other half. Trained from scratch on COCO alone for 56 to 62 epochs, FOLO's models are 0.06 to 0.09 AP
-behind the incumbent's published ones, which were pretrained on Objects365 and trained far longer; how much of the
+Accuracy is the other half. Trained from scratch on COCO alone for 56 (folo-s) and 78 epochs (folo-n,
+`folo-n-coco-v3`; v2 read 0.317 after 62), FOLO's models are 0.06 to 0.07 AP behind the incumbent's published ones, which were pretrained on Objects365 and trained far longer; how much of the
 gap each of those accounts for is not known. On a COCO subset at an equal budget FOLO's trainer and Ultralytics' reach
 the same AP per epoch, and fine-tuned on four small datasets folo-n and yolo26n are level on three
 ([Accuracy](#accuracy)).
@@ -42,7 +43,7 @@ the same AP per epoch, and fine-tuned on four small datasets folo-n and yolo26n 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="img/charts/accuracy-dark.svg">
-    <img src="img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.317 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained from scratch for 56 to 62 epochs, the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
+    <img src="img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.340 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained from scratch for 56 to 78 epochs, the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
   </picture>
 </p>
 
@@ -52,7 +53,7 @@ the same AP per epoch, and fine-tuned on four small datasets folo-n and yolo26n 
 |---|---|
 | [Machine](#machine), [Reproduce](#reproduce), [Method](#method) | How the incumbent was measured, and what its numbers say |
 | [FOLO targets](#folo-targets) | The table of record: every headline row, folo-n and folo-s against the incumbent's best |
-| [Hill-climb 2](#hill-climb-2-2026-11-12), [Hill-climb](#hill-climb-2026-11-09) | The two optimisation rounds: before and after, where each gain came from, what was tried and lost |
+| [Hill-climb 3](#hill-climb-3-2026-11-13), [Hill-climb 2](#hill-climb-2-2026-11-12), [Hill-climb](#hill-climb-2026-11-09) | The three optimisation rounds: before and after, where each gain came from, what was tried and lost |
 | [Accuracy](#accuracy) | COCO, the equal-budget comparison, fine-tuning on small datasets |
 | [FOLO on the GPU](#folo-on-the-gpu), [NMS-free head](#nms-free-head-o2o), [FOLO on the CPU](#folo-on-the-cpu) | The measurement log of the work that built each path. Older numbers are kept with their dates; the current ones are in FOLO targets |
 | [Next optimisations](#next-optimisations) | What is known to be left |
@@ -220,7 +221,20 @@ NMS-free. **FOLO's end-to-end numbers must include its NMS.** Compare folo-n aga
 and so on. When FOLO's params/GFLOPs land, list them in the model-size table so the comparison stays honest about
 model size.
 
-**Measured 2026-11-12 on `main` after [hill-climb 2](#hill-climb-2-2026-11-12)** (a37f7f23: PRs #181–#205; row 10
+**Measured 2026-11-13 on `main` after [hill-climb 3](#hill-climb-3-2026-11-13)** (ffa0f8cb: PRs #253–#260) against
+`main` before that climb (e5a6ccf0), the two binaries alternated run by run, for the rows the climb could move: rows
+1, 2, 5, 6 and 8 (and the folo-s cells of 8). Each such cell is the median of the rounds kept (min–max), then
+e5a6ccf0's median in the same session; rows 1 and 2 also give `main` with plans off (`FOLO_GPU_NO_PLAN=1`). Rows 5, 6
+and 8 are measured on trained weights from this climb on (the published `folo-n-coco` / `folo-s-coco`, the first 16
+val2017 images, resized to 640×640 for rows 5 and 6): untrained weights pass no candidate at `conf` 0.25, so
+candidate-first would skip the whole box branch there. Load: 0–8% GPU from other processes and 1.3–3.3 other CPU
+cores for the GPU cells (row 6: 0–1% and 1.6–17.0, every run kept); the CPU cells are loaded (1.3–4.6 other cores
+for row 8, up to 7.4 for the regression checks).
+Rows 3, 4, 7 and 9 were re-measured as regression checks and tie, so they keep their 2026-11-12 cells with a note;
+rows 10 and 11 were not re-measured (row 9 did not move). Per section in [Hill-climb 3](#hill-climb-3-2026-11-13) and
+[notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md).
+
+**Measured 2026-11-12 on `main` after [hill-climb 2](#hill-climb-2-2026-11-12)** (the cells not re-measured above; a37f7f23: PRs #181–#205; row 10
 also on e4fa2b43, with #206) against `main` before that climb (647b981f), the two binaries alternated run by run,
 3–8 rounds: each cell is the median of the rounds (min–max), then 647b981f's median in the same session. Load: 0–4%
 GPU from other processes, with 15–21% bursts in two of the eight inference rounds; about one other
@@ -230,15 +244,15 @@ tie. The 2026-11-09 table (the first hill-climb's build against c50211ba) is in 
 
 | # | metric (640x640) | incumbent bar (yolo26n) | FOLO config to compare | folo-n | folo-s |
 |---|---|---|---|---|---|
-| 1 | GPU forward latency, batch 1, f32 (median) | **4.95 ms** (best of TF32/strict, cudnn.benchmark on/off); 6.04 ms default | f32 | **1.14 ms** (1.13–1.33; 647b981f 2.13), p90 1.17: beats, 4.3x | **2.24 ms** (2.16–2.28; 647b981f 3.96): yolo26s 4.87, beats 2.2x |
-| 2 | GPU forward latency, batch 1, f16 (median) | **6.25 ms** | f16 | **0.95 ms** on tensor cores (0.87–1.55; 647b981f 1.85); regular f16 1.15 (647b981f 2.16): beats, 6.6x | **1.36 ms** on tensor cores (1.35–1.44; 647b981f 2.18); regular f16 2.14 (3.80): yolo26s 7.47, beats 5.5x |
-| 3 | GPU forward throughput, batch 16, f32 | **1454 img/s** (TF32 convs); 1334 img/s strict fp32 | f32 | **2081 img/s** (2048–2098; 647b981f 1619): beats TF32 by 43% | **819 img/s** (743–826; 647b981f 624): yolo26s 627, beats by 31% (was a tie) |
-| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **4159 img/s** on tensor cores (3127–4187; 647b981f 3081): beats, 1.75x | **1799 img/s** on tensor cores (1730–1825; 647b981f 1237): yolo26s 1159, beats 1.55x (was a tie) |
-| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **1.75 ms** f32 (1.69–2.05; 647b981f 2.92); **1.56 ms** on tensor cores (647b981f 2.52): beats, 4.0–4.6x | **3.04 ms** f32 (2.82–5.65; 647b981f 4.90); **2.12 ms** on tensor cores (647b981f 2.80): yolo26s 8.59, beats |
-| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **2155 img/s** on tensor cores (1724–2312; 647b981f 1840); f32 1469 (647b981f 1189): beats, 3.5x | **1337 img/s** on tensor cores (1279–1348; 647b981f 979); f32 699 (647b981f 580): yolo26s 446, beats, 3.0x |
-| 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **12.74 ms** at 28 threads (12.63–12.75; 647b981f 15.23): beats, 1.8x | folo-s **29.2 ms** (27.9–29.6; 647b981f 33.3): yolo26s 42.5, beats; folo-m **68.9 ms** (68.7–70.3; 647b981f 77.7): yolo26m 106.6, beats (28 threads) |
-| 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | **13.12 ms** at 28 threads (13.12–13.14; 647b981f 15.90): beats, 1.9x. The NMS-free head does not change it ([NMS-free head](#nms-free-head-o2o)) | folo-s **29.7 ms** (28.0–30.1; 647b981f 33.4): yolo26s 51.1, beats; folo-m **68.8 ms** (68.3–70.3; 647b981f 79.7): yolo26m 107.8, beats |
-| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **380 img/s** f32 (375–380; 647b981f 333), **594 img/s AMP** (591–609; 647b981f 544): beats, 1.9x / 2.4x. With the trainer's gradient clipping (`FOLO_BENCH_CLIP=1`) 376 / 613 (647b981f 345 / 526); with MuSGD 366 / 592 (647b981f 316 / 443) | **162 img/s** f32 (162–162; 647b981f 151), **299 img/s AMP** (299–300; 647b981f 276): yolo26s 105 / 188, beats. With clipping 161 / 296 (647b981f 150 / 268) |
+| 1 | GPU forward latency, batch 1, f32 (median) | **4.95 ms** (best of TF32/strict, cudnn.benchmark on/off); 6.04 ms default | f32 | **1.09 ms** (1.08–1.13; e5a6ccf0 1.13; `main` with plans off 1.13), p90 1.11: beats, 4.5x | **2.16 ms** (2.11–2.18; e5a6ccf0 2.21; plans off 2.29): yolo26s 4.87, beats 2.3x |
+| 2 | GPU forward latency, batch 1, f16 (median) | **6.25 ms** | f16 | **0.845 ms** on tensor cores (0.82–1.01; e5a6ccf0 1.21, bimodal 0.86–1.31; plans off 0.94); regular f16 1.09 (e5a6ccf0 1.14): beats, 7.4x | **1.30 ms** on tensor cores (1.28–1.31; e5a6ccf0 1.65; plans off 1.41); regular f16 2.13 (2.16): yolo26s 7.47, beats 5.7x |
+| 3 | GPU forward throughput, batch 16, f32 | **1454 img/s** (TF32 convs); 1334 img/s strict fp32 | f32 | **2081 img/s** (2048–2098; 647b981f 1619): beats TF32 by 43%. 2026-11-13: a tie (synchronised median 7.81 vs 7.84 ms against e5a6ccf0) | **819 img/s** (743–826; 647b981f 624): yolo26s 627, beats by 31% (was a tie). 2026-11-13: a tie |
+| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **4159 img/s** on tensor cores (3127–4187; 647b981f 3081): beats, 1.75x. 2026-11-13: a tie (4148 vs 4166 img/s) | **1799 img/s** on tensor cores (1730–1825; 647b981f 1237): yolo26s 1159, beats 1.55x (was a tie). 2026-11-13: a tie (1738 vs 1800) |
+| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **1.60 ms** f32 (1.58–1.62; e5a6ccf0 1.77), p90 1.70; **1.33 ms** on tensor cores (1.28–1.35; e5a6ccf0 1.51), trained weights: beats, 4.3–5.3x | **2.65 ms** f32 (2.63–2.69; e5a6ccf0 4.57, bimodal; in a later pass 2.86 against its fast mode's 2.79, a tie); **1.82 ms** on tensor cores (1.80–1.84; e5a6ccf0 1.98): yolo26s 8.59, beats 3.2x |
+| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **2424 img/s** on tensor cores (6.60 ms, 6.57–7.10; e5a6ccf0 2171), trained weights; f32 1316 (e5a6ccf0 1186, bimodal): beats, 3.9x | **1355 img/s** on tensor cores (11.81 ms, 11.48–11.91; e5a6ccf0 1266); f32 755 (e5a6ccf0 704): yolo26s 446, beats, 3.0x |
+| 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **12.74 ms** at 28 threads (12.63–12.75; 647b981f 15.23): beats, 1.8x. 2026-11-13: a tie under load (14.64 vs 14.46 ms, 3.7–7.4 other cores) | folo-s **29.2 ms** (27.9–29.6; 647b981f 33.3): yolo26s 42.5, beats; folo-m **68.9 ms** (68.7–70.3; 647b981f 77.7): yolo26m 106.6, beats (28 threads) |
+| 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | **13.57 ms** at 28 threads on trained weights (13.54–14.13; e5a6ccf0 13.58: a tie; 1.3–4.6 other cores): beats, 1.8x. Untrained (the 2026-11-12 protocol, where `main` now runs no box branch) 13.12 on 2026-11-12. The NMS-free head does not change it ([NMS-free head](#nms-free-head-o2o)) | folo-s **29.4 ms** trained (29.1–29.6; e5a6ccf0 31.0): yolo26s 51.1, beats; folo-m **68.8 ms** untrained (68.3–70.3; 647b981f 79.7, 2026-11-12; no folo-m weights): yolo26m 107.8, beats |
+| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **380 img/s** f32 (375–380; 647b981f 333), **594 img/s AMP** (591–609; 647b981f 544): beats, 1.9x / 2.4x. 2026-11-13: a tie (383 vs 382, 583 vs 608 img/s). With the trainer's gradient clipping (`FOLO_BENCH_CLIP=1`) 376 / 613 (647b981f 345 / 526); with MuSGD 366 / 592 (647b981f 316 / 443) | **162 img/s** f32 (162–162; 647b981f 151), **299 img/s AMP** (299–300; 647b981f 276): yolo26s 105 / 188, beats. With clipping 161 / 296 (647b981f 150 / 268) |
 | 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers | **199 img/s** fp32 / 224 img/s AMP (best of 3) | f32, and AMP | **388 img/s** f32 (388–391; 647b981f 358), **613 img/s AMP** (612–615; 647b981f 553), median of 5 quiet rounds: beats, 1.9x / 2.7x ([Hill-climb 2](#the-trainer-row-10-2026-11-12)) | not measured |
 | 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32, and AMP | **3467 MiB**, **2022 MiB AMP** (train step, as 647b981f; yolo26n train step 4517 / 2646, trainer 4353 / 2435): beats. The pool now keeps a step's buffers between steps: it holds up to 4196 MiB and wgpu reserves 4608 MiB in f32 | **6520 MiB**, **3713 MiB AMP** (as 647b981f; yolo26s train step 8245 / 4614): beats |
 
@@ -248,6 +262,236 @@ launch-bound there.
 
 Note on f32: PyTorch's default fp32 lets cuDNN use TF32 for convolutions. A strict-f32 FOLO kernel should be compared
 against the `fp32-strict` rows. The default-fp32 rows are what users actually get from the incumbent.
+
+## Hill-climb 3 (2026-11-13)
+
+The third round tried new algorithms rather than kernel tuning. Four lanes, each on its own branches with PRs reviewed
+by GPT-6.1 Sol agents and merged one by one, each with a notebook:
+- **lazy**, [candidate-first prediction](notes/hill/r3-lazy-head.md): the class branches run dense, and the box
+  branch (its 3×3 convs and DFL output) runs only at the pixels whose best class score passes `conf`, bit for bit
+  the dense result. On the CPU (#254) and the GPU (#255). It moves only the end-to-end rows: at `conf` 0.25 folo-n
+  needs a box at a median of 21 of its 8400 anchors per val2017 image (p99 119), folo-s at 26 (p99 143).
+- **plan**, [recorded forward plans and same-canvas batches](notes/hill/r3-plan.md): a `Predictor`'s GPU prediction
+  is recorded once per input shape, precision and head settings and then replayed as a flat list of dispatches,
+  without the tensor layer, the pool or the bind-group cache (#258; `FOLO_GPU_NO_PLAN=1` turns it off; no plan is made
+  at batch 16, which would pin over 256 MiB). `predict_batch` runs on the images' `rect` canvas when they all share one (16 frames of
+  1280×720 run at 640×384 instead of 640×640), and pads a batch of mixed canvases square as before (#259).
+- **fusion**, [box fusion and the landing run](notes/hill/r3-fusion.md): opt-in box fusion after NMS (#257, #256),
+  the evaluator scoring boxes clipped to the image (#253: the internal mAP50-95 of the published weights +0.0002 to
+  +0.0003, no COCO number moved), and 16 annealing epochs for `folo-n-coco-v2`, published as `folo-n-coco-v3` by
+  #261 ([Accuracy](#accuracy)).
+- **refine**, [a learned box refiner](notes/hill/r3-refine.md): a negative result (#260; [Tried and
+  lost](#tried-and-lost-2026-11-13)).
+
+Every number below was measured again on `main` ffa0f8cb against `main` before the round (e5a6ccf0), the two
+binaries alternated run by run, on an evening the machine was in use (a browser, music, and a game client on the GPU
+for part of it); each section says which runs were quiet and keeps only those where it could. The trained-weight
+rows use the published `folo-n-coco` and `folo-s-coco` and the first 16 val2017 images; the notebook
+([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md)) has the commands, the load of every run and the log behind
+every cell. Inside ±3% with overlapping ranges is a tie.
+
+### GPU prediction (2026-11-13)
+
+Trained weights (the `gpu_trained` bench, the public `Predictor` at `conf` 0.25), median of the runs (min–max): 6
+quiet pairs from two evening passes (4 for the 640×640 batch-1 row; 0–5% other GPU, 1.3–3.3 other cores), and for
+the 640×640 batch-16 rows (row 6, added after them) a third pass at 01:08–01:15 with every run kept (0–1% other GPU,
+1.6–17.0 other cores; the batch-16 rows of the loaded runs fall inside the quiet runs' range; one `main` run crashed
+after its folo-n rows, so folo-s has 4):
+
+| row | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` |
+|---|---|---|---|---|
+| f32 e2e b1, 640×640 images (row 5) | 1.77 ms (1.73–1.78) | **1.60** (1.58–1.62), −10% | 4.57 (3.16–4.58), bimodal; third pass 2.79 (2.75–3.47) | 2.65 (2.63–2.69); third pass 2.86 (2.62–3.16), a tie with e5a6ccf0's fast mode |
+| f16 tensor cores e2e b1, 640×640 | 1.51 (1.46–1.52) | **1.33** (1.28–1.35), −12% | 1.98 (1.96–2.01) | **1.82** (1.80–1.84), −8% |
+| f32 e2e b1, val2017 images (`rect`) | 1.43 (1.42–1.44) | **1.38** (1.36–1.40), −4% | 2.42 (2.36–2.45) | **2.29** (2.27–2.40), −6% |
+| f16 tensor cores e2e b1, `rect` | 1.43 (1.36–1.57) | **1.24** (1.21–1.31), −13% | 1.69 (1.65–1.75) | 1.63 (1.60–1.67), −4% |
+| f32 e2e b16, 640×640 images (row 6) | 13.49 ms (11.38–16.72), 1186 img/s, bimodal | **12.16** (10.35–12.65), 1316 img/s, −10% | 22.74 (22.53–23.24), 704 img/s | **21.20** (20.89–21.43), 755 img/s, −7% |
+| f16 tensor cores e2e b16, 640×640 (row 6) | 7.37 (7.12–8.01), 2171 img/s | **6.60** (6.57–7.10), 2424 img/s, −10% | 12.64 (12.26–12.72), 1266 img/s | **11.81** (11.48–11.91), 1355 img/s, −7% |
+| f32 e2e b16, val2017 images (padded square) | 10.46 ms (10.05–10.89), 1530 img/s | **9.30** (9.04–10.25), 1721 img/s, −11% | 22.37 (22.02–22.77), 715 img/s | 21.53 (20.41–22.45), 743 img/s, −4% |
+| f16 tensor cores e2e b16, val2017 images | 6.24 (6.16–6.30), 2566 img/s | **5.81** (5.74–6.06), 2754 img/s, −7% | 11.22 (11.18–11.45), 1427 img/s | **10.70** (10.64–10.93), 1496 img/s, −5% |
+| f32 `predict_batch` 16 × 1280×720 | 14.13 (13.43–25.49); third pass 14.10 | 13.95 (10.02–21.17), bimodal; third pass 10.24 (10.17–10.38) | 25.59 (25.37–25.83) | **17.44** (16.05–17.91), −32% |
+| f16 tensor cores `predict_batch` 16 × 1280×720 | 9.67 (9.62–9.90) | **7.96** (7.90–8.10), −18% | 14.61 (14.55–14.85) | **11.01** (10.95–11.04), −25% |
+
+The forward rows, random weights (the `gpu` bench, 5 rounds: e5a6ccf0 all 5, `main` and `main` with
+`FOLO_GPU_NO_PLAN=1` 4 each, after dropping two runs with 6.4 and 8.0 other cores; 0–8% other GPU, 1.3–2.4 other cores):
+
+| row | folo-n e5a6ccf0 | folo-n `main` | `main`, plans off | folo-s e5a6ccf0 | folo-s `main` | `main`, plans off |
+|---|---|---|---|---|---|---|
+| f32 forward b1 (row 1) | 1.13 ms (1.13–1.32) | **1.09** (1.08–1.13) | 1.13 (1.12–1.18) | 2.21 (2.16–2.67) | **2.16** (2.11–2.18) | 2.29 (2.22–2.46) |
+| f16 forward b1 | 1.14 (1.12–1.44) | **1.09** (1.08–1.09) | 1.15 (1.14–1.50) | 2.16 (2.11–2.72) | 2.13 (2.06–2.33) | 2.20 (2.15–2.26) |
+| f16 tensor cores forward b1 (row 2) | 1.21 (0.86–1.31), bimodal | **0.845** (0.82–1.01) | 0.94 (0.87–0.96) | 1.65 (1.32–1.95) | **1.30** (1.28–1.31) | 1.41 (1.38–1.57) |
+| f32 forward b16 (row 3), pipelined | 2064 img/s (1804–2083) | 1962 (1827–2089) | 1977 (1882–2074) | 767 (39–826) | 825 (97–828) | 822 (802–828) |
+| f32 forward b16, synchronised median | 7.81 ms (7.77–9.47) | 7.84 (7.78–8.76), tie | 8.63 (7.99–8.95) | 20.05 (19.63–22.31) | 19.65 (19.58–19.87), tie | 19.76 (19.62–20.62) |
+| f16 tensor cores forward b16 (row 4) | 4148 img/s (3685–4164) | 4166 (4144–4184), tie | 4093 (4052–4185) | 1738 (1493–1823) | 1800 (1626–1823), tie | 1654 (1573–1818) |
+| f32 `predict_batch` 16 × 1280×720 | 14.16 ms (13.65–16.15) | **10.20** (9.62–10.97), −28% | 10.14 (9.77–10.41) | 25.92 (25.39–31.87) | **17.90** (17.87–18.03), −31% | 17.86 (17.76–19.55) |
+| f16 tensor cores `predict_batch` 16 × 1280×720 | 10.07 (9.49–11.52) | **7.98** (7.68–8.99), −21% | 8.22 (8.08–8.27) | 15.46 (14.50–18.02) | **11.64** (11.38–13.43), −25% | 11.29 (11.20–12.50) |
+
+Where it comes from:
+- **Batch 1, end to end** (row 5, −10% f32 and −12% on tensor cores for folo-n): candidate-first (#255) skips the box
+  branch at all but a few dozen pixels, and the plan (#258) replays the device side of a prediction after the
+  letterbox. On the same binary the plan's share of the forward is −3.5% (f32) and −10% (tensor
+  cores) for folo-n, −6% and −8% for folo-s (plans off against on, above).
+- **The forward rows** do not run candidate-first (they are dense by definition), so rows 1 and 2 move by the plan
+  alone: folo-n f32 1.13 → 1.09 ms, tensor cores 0.94 → 0.845 ms with plans on, and e5a6ccf0's tensor-core row is
+  bimodal (0.86–0.91 ms in two runs, 1.21–1.31 in three).
+- **Batch 16**: no plan is made, so the forward rows 3 and 4 tie; candidate-first gives −4 to −11% end to end on
+  trained weights.
+- **1280×720 batches** (−18 to −35%): #259 runs them at 640×384, 60% of the pixels, plus candidate-first.
+- The random-weight bench's end-to-end rows are not used for rows 5 and 6: random weights pass no candidate at
+  `conf` 0.25, so `main` runs no box branch there at all (folo-n f32 e2e b1 2.64 → 1.79 ms, bimodal on every binary
+  that evening; the notebook has them).
+
+### GPU training step (2026-11-13)
+
+`FOLO_GPU_TENSOR_CORES=1 FOLO_BENCH_SECTIONS=train`, batch 16 at 640, SGD, 5 rounds (one quiet: 1.4–1.7 other cores;
+the others 3.8–16.5, and a CI test on the GPU beside one e5a6ccf0 run; the GPU-bound medians held their range through
+it): a tie, as expected, since a training step records no plan and runs the same kernels.
+
+| row | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` |
+|---|---|---|---|---|
+| f32 | 41.73 ms (41.53–42.11), 383 img/s | 41.93 (41.67–42.01), 382 img/s: tie | 99.06 (97.79–99.19), 162 img/s | 98.22 (97.59–98.64), 163 img/s: tie |
+| AMP | 27.44 (25.87–36.58), 583 img/s | 26.30 (26.03–27.27), 608 img/s: tie | 53.82 (53.03–56.45), 297 img/s | 53.28 (53.20–54.69), 300 img/s: tie |
+| dispatches, new bind groups, new pool buffers per f32 step | 1117, 0, 0 | the same | 1120, 0, 0 | the same |
+| peak memory f32 / AMP | 3467 / 2022 MiB | the same | 6520 / 3713 MiB | the same |
+
+### CPU (2026-11-13)
+
+`cargo bench -p folo-vision --bench cpu_e2e`, 28 threads, at High priority, in two kinds of run: the whole bench
+(untrained rows, trained rows, batches of 16; folo-n 6 rounds, folo-s 5 and 3 more later, folo-m 3) with 3.7–7.4
+other cores busy (a game open until about 23:50; folo-m and the later folo-s rounds 1.8–4.4), and the trained rows
+alone (`FOLO_BENCH_BATCH=0 FOLO_BENCH_UNTRAINED=0`, 60 calls, folo-n 3 rounds with 1.3–4.6 other cores, folo-s 4
+rounds with 2.8–8.7 in runs of 4 s). No CPU run met the 3-core quiet rule, so every cell is loaded, and the trained
+1280×720 frames of folo-s are slower in the whole bench only (below). The trained rows cycle the first 16 val2017
+images (letterboxed square, or resized to 1280×720 for the `rect` rows):
+
+| row (28 threads) | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` | folo-m e5a6ccf0 | folo-m `main` |
+|---|---|---|---|---|---|---|
+| forward b1 (row 7), whole bench | 14.64 ms (13.61–15.09) | 14.46 (14.16–14.90), tie | 30.48 (29.76–30.70) | 31.41 (30.28–31.75), tie | 75.32 (74.71–75.76) | 75.47 (75.20–76.07), tie |
+| e2e b1, trained, 640×640 (row 8), trained rows alone | 13.58 ms (13.41–14.87) | 13.57 (13.54–14.13), **tie** | 31.00 (30.30–31.48) | **29.40** (29.05–29.64), −5% | no weights | |
+| the same, whole bench | 15.65 (14.39–15.79) | 15.36 (14.73–16.13), tie | 31.37 (30.97–32.92) | 31.19 (30.16–31.70), tie | | |
+| e2e b1, trained, 1280×720 (`rect` 640×384), trained rows alone | 11.73 (10.88–11.94) | **11.10** (10.82–11.40), −5% | 22.27 (21.08–22.97) | **21.25** (20.48–21.40), −5% | | |
+| the same, whole bench | 12.52 (11.19–12.96) | 12.04 (10.43–12.64), −4% | 22.08 (21.46–23.15) | **27.29** (26.39–31.07), **+24%** | | |
+| e2e b1, untrained, 640×640 (no box branch on `main`) | 15.45 (13.74–15.63) | 13.84 (12.81–14.05) | 31.18 (30.48–31.61) | 30.11 (29.54–30.44) | 76.46 (75.85–76.92) | 74.23 (73.09–74.54) |
+| `predict_batch` 16, trained, val2017 images (padded square) | 151.7 ms (149.6–153.7), 105 img/s | **130.2** (129.0–134.0), 123 img/s, −14% | 385.5 (379.5–392.7), 42 img/s | **354.0** (347.5–363.3), 45 img/s, −8% | | |
+| `predict_batch` 16 × 1280×720, trained | 146.7 (143.0–150.6), 109 img/s | **96.5** (93.9–100.2), 166 img/s, −34% | 382.5 (380.3–398.2), 42 img/s | **275.2** (272.8–283.5), 58 img/s, −28% | 1045.8 (1041.2–1056.9), untrained | **667.6** (666.4–669.6), −36% |
+| `predict_batch` 16, mixed shapes, untrained | 149.6 (144.0–151.2) | **129.2** (124.9–130.6), −14% | 378.6 (377.4–397.9) | **352.7** (345.8–366.0), −7% | 1056.5 (1054.2–1062.4) | **998.9** (982.4–1001.8), −5% |
+
+- **Row 8 did not move for folo-n on trained weights**: 13.58 → 13.57 ms at 640×640 with the rows alone, a tie in
+  the whole bench too (−2%). Candidate-first saves 5% on the 1280×720 frames and 14% on a batch of 16, and folo-s
+  gains 5%. On untrained weights `main` runs no box branch at all (−10% for folo-n, the most candidate-first could
+  give); with trained weights at 640×640 the saving does not show here. Lane lazy measured −14% at 32–55% CPU load;
+  one reading is that the dense box branch is cheap while cores are free and costly when they compete, but that is
+  not tested.
+- **Batches of 1280×720 frames**: −28 to −36%, the rect canvas (#259, 60% of the pixels) and candidate-first
+  together; a batch of val2017 images, padded square, gains −8 to −14% from candidate-first alone.
+- **folo-s's trained 1280×720 row is 24–29% slower on `main` in the whole bench** (22.08 → 27.29 ms in the evening's
+  5 rounds, 21.88 → 28.21 ms in 3 later rounds with 1.8–4.2 other cores, every run of both) and 5% faster with the
+  trained rows alone or with either the untrained rows or the batches left out (`FOLO_BENCH_BATCH=0`: 22.01 → 20.91
+  ms; `FOLO_BENCH_UNTRAINED=0`: 21.94 → 20.87). So it depends on what ran before it in the process; folo-n does not
+  show it. A bisect with the same bench (3 rounds each): f04dce45 (candidate-first, before #258 and #259) 21.29 /
+  21.45 ms, 25666428 (+ #259) 29.13, ffa0f8cb 26.92–27.29: it arrives with #259, whose CPU change is the rect batch
+  the untrained model's `predict_batch` rows now run ([Rows worse than e5a6ccf0](#rows-worse-than-e5a6ccf0)).
+- The forward rows tie: CPU forward code did not change in the round.
+
+### Accuracy (2026-11-13)
+
+`folo val --coco` of every published COCO checkpoint with and without `--fusion dfl --iou 0.65 --max-det 1000`:
+the table is in [Accuracy](#accuracy) ("Box fusion, an option"). Every number matches lane fusion's to four digits,
+and `folo-n-coco-v3` matches #261's verification (0.339555 / 0.487367; 0.343357 with the flags). With the default
+flags `folo-n-coco`, `-v2` and `folo-s-coco` read 0.3138, 0.3168 and 0.4162, lane fusion's B0 (the clip of #253
+moves only the trainer's internal mAP, not the COCO path).
+
+### Tried and lost (2026-11-13)
+
+From the notebooks, measured and not shipped:
+- **A learned box refiner** (lane refine): eleven refiners on a frozen folo-n (nine on edge probes of the P3–P5
+  features, two on the input image), best +0.0007 AP on the dev split against a +0.005 gate. The top-scoring box per
+  object is already 1–3 px from its truth at the median (1.2 / 1.9 / 2.7 px for small / medium / large objects); the
+  remaining error is a tail (occlusion, ambiguous extent) that local edges do not settle, and a refiner that helps
+  the looser duplicates costs the tight top boxes more than it gains.
+- **C3k sibling fusion** (lane lazy: the two 1×1 convs that read a C3k block's input run as one): a tie (folo-n
+  forward b1 1.14 → 1.13 ms on the GPU, CPU 15.21 → 15.12 ms).
+- **Lattice pooling** in box fusion (a weighted product of the members' DFL distributions on the kept box's bin
+  lattice): below even plain NMS on the dev split (−0.0009 / −0.0017 / −0.0133 AP for v1 / v2 / folo-s), since a
+  power distorts DFL's sub-bin position and the levels' lattices are offset from each other. **The censoring guard** (down-weighting
+  a side whose mass sits on the last DFL bin): within ±0.0001 AP; only 0.02% of sides put more than 0.3 of their mass
+  there. Soft-NMS, Matrix NMS, per-level score offsets and a DFL temperature tied or lost as well.
+- **The plan's copy-slot variant** (copying each call's input into the plan's own buffer instead of rebinding it): a
+  tie at batch 1, +2.7 to +6.2% at batch 16 (a 79 MB f32 input and the head outputs copied per call).
+- **Plans at batch 16**: a ceiling of 0.5–3.7% and a tie, while pinning 316–617 MiB; the 256 MiB cap now leaves
+  batch 16 unplanned.
+- **Mixed-canvas batches as one pass per canvas on the CPU**: four passes of four images +4.7% (median of 6 rounds)
+  against one padded square pass, so mixed batches stay square.
+
+From the lead's counsel before the round, not built:
+- **A learned rescoring pass** (a second look at each candidate to correct its score): redundant with the IoU-aware
+  score TAL already trains, with low odds of a measurable gain; the cluster's neighbours (box fusion) were the unused
+  information instead.
+- **An upsample-commute rewrite** (a 1×1 conv applied before the nearest upsample instead of after): 2.4% of the
+  FLOPs, at most 0.15 ms on the CPU and 1.5% at GPU batch 16, inside the tie band; its GPU form is the epilogue add
+  that already lost in hill-climb 2.
+- **An integer CPU path**: i16 accumulation leaves 9-bit weights and 11-bit activations at K = 2304 and Winograd needs
+  about 4 more bits, so the 3×3 convs (37% of the FLOPs) would only tie; at most 1.2× on rows 7 and 8, not exact, a
+  second kernel family, and int8 loses mAP without quantisation-aware training.
+- **Video delta inference** (recomputing only what changed since the last frame): not exact with real cameras, whose
+  noise changes every pixel.
+
+### Against the lanes' own claims (2026-11-13)
+
+The lanes measured under each other's load (often 30–100% CPU) and, late in the day, beside a game on the GPU.
+Where a number here differs from a lane's by more than noise:
+- **The plan's +5.4% on the folo-n f32 training step** (plan: 52.5 → 55.3 ms beside another GPU process, unresolved):
+  does not reproduce, +0.5% here (41.73 → 41.93 ms, inside both builds' range). Its AMP −8.6% is a tie here too.
+- **The plan's batch-1 gains** (plan: row 1 −23%, row 2 −35% with two binaries under 5–88% CPU load; −3.5% / −5.7%
+  in its quieter `gpu_latency` rounds; about −5% f32 and −10% tensor cores for folo-n and a tie for folo-s with plans
+  toggled in one process): plans off against on on `main`'s binary here read −3.5% and −10% for folo-n, as its
+  quiet numbers, and −6% / −8% for folo-s, where the lane had a tie.
+- **The plan's slower batch-16 rows** (plan: +2.4 to +5.3% under load): ties here, and no plan is made at batch 16.
+- **"The mixed-batch slow mode no longer reproduces on `main`"** (plan): it does, on both builds (folo-n f32
+  `predict_batch` of 16 mixed shapes, 35–39 ms in 3 of 9 runs against 10.5–14.6; random weights), so it predates
+  the round. A leftover ([Next optimisations](#next-optimisations)).
+- **The plan's 1280×720 batches** (plan, against `main` with candidate-first already in: −21 / −14 / −32 / −21% for
+  folo-n f32, folo-n tensor cores, folo-s f32, folo-s tensor cores): −28 / −21 / −31 / −25% here against e5a6ccf0 on
+  random weights, which add candidate-first's gain (overstated there), and on trained weights folo-n tensor cores −18%,
+  folo-s −32% / −25%. folo-n f32 on trained weights is bimodal on `main` (10.0 ms in 3 of 10 runs, 11–21 ms in the
+  others), so it is not read as a gain.
+- **Lazy's GPU batch 16** (lazy: folo-n f32 −10.5%, tensor cores −11.7%, folo-s f32 −8.9%, tensor cores −4.1%): −11%,
+  −7%, −4% and −5% here; the folo-n tensor-core and folo-s f32 gains are smaller here.
+- **Lazy's "row 5 not established"**: established here for folo-n, −10% (f32) and −12% (tensor cores) at 640×640
+  (−9% and −8% in the third pass), and −8% for folo-s on tensor cores; folo-s f32 ties: e5a6ccf0 has a slow mode
+  (4.57 ms in three of five evening runs), and in its fast mode it reads 2.79 ms against `main`'s 2.86.
+- **Lazy's CPU row 8** (lazy: folo-n 17.49 → 15.02 ms, −14%, at 32–55% CPU load; counsel's estimate before the round
+  −9 to −12%): does not reproduce, a tie here on trained weights (13.58 → 13.57 ms with the rows alone, −2% in the
+  whole bench; 1.3–7.4 other cores). Its 1280×720 frame (−8%) is −5% here and its batch of 16 (−12%) −14%. folo-s,
+  which the lane could not read under load: −5% at 640×640 and on the 1280×720 frame with the rows alone.
+- **The plan's CPU batch of 1280×720 frames** (plan: −16.6%, #259 alone): −20% (untrained) and −21% (trained) here
+  for #259 alone in the bisect (f04dce45 against 25666428, folo-s), −34% for folo-n against e5a6ccf0 with
+  candidate-first in it. The lane did not see the folo-s single-frame slowdown its change brings in the whole bench
+  ([Rows worse than e5a6ccf0](#rows-worse-than-e5a6ccf0)).
+
+Everything else agrees within noise: plan's 0 mismatches and lazy's bit-identity are not re-tested here, but the
+detections per image of every trained row are the same on both builds (folo-n 3.6 / 3.8 / 3.8, folo-s 4.6 / 5.3 /
+4.8); the training step's dispatches, bind groups, pool buffers and peak memory are unchanged; and every accuracy
+number of lane fusion reproduces to four digits.
+
+### Rows worse than e5a6ccf0
+
+- **folo-s on the CPU, a trained 1280×720 frame after the untrained model's rows in one process**: +24 to +29%
+  (22.08 → 27.29 and 21.88 → 28.21 ms, every run), and 5% faster than e5a6ccf0 when those rows did not run first.
+  It arrives with #259 (f04dce45 21.29 / 21.45 ms, 25666428 29.13), so something the untrained model's rect
+  `predict_batch` leaves behind in the process slows the next model's single 640×384 calls. Reproduce: `FOLO_BENCH_SCALE=s FOLO_BENCH_ITERS=40 FOLO_BENCH_BATCH=16
+  FOLO_BENCH_WEIGHTS=<dir>/folo-s-coco.folo FOLO_BENCH_IMAGES=<val2017> cargo bench -p folo-vision --bench cpu_e2e`,
+  the `trained 1280x720 (rect 640x384)` row; with `FOLO_BENCH_BATCH=0` or `FOLO_BENCH_UNTRAINED=0` it is fast. Not
+  diagnosed; it does not change any prediction (the same detections).
+- **folo-n f32 `predict_batch` of 16 × 1280×720 frames on the GPU, trained weights**: not slower at the median (14.13 →
+  13.95 ms) but bimodal on `main` in the two evening passes (10.0 ms in 3 of 10 runs, 11–21 ms in the others;
+  e5a6ccf0 13.4–15.1, one 25.5), and steady in the third pass (10.24 ms, 10.17–10.38, against 14.10: −27%). Not
+  explained.
+- **folo-n f32 forward at batch 16, pipelined**: 2064 → 1962 img/s (−5%) with overlapping ranges, and the synchronised
+  median ties (7.81 vs 7.84 ms); no plan is made at batch 16 and that path did not change, so it is read as noise.
+
+Nothing else measured is slower than e5a6ccf0. One `main` run of the `gpu_trained` bench crashed with an access
+violation at the switch from folo-n's predictors to folo-s's, once in 30 runs of `main`'s GPU benches and in none of
+e5a6ccf0's 25; not reproduced ([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md), Leftovers).
 
 ## Hill-climb 2 (2026-11-12)
 
@@ -624,8 +868,14 @@ Speed only counts at comparable accuracy, so this section tracks FOLO's accuracy
 the same detections with pycocotools itself, all 12 stats equal to 6e-16). folo-n trained from scratch for 50 epochs
 (8.7 h on the RTX 4080 SUPER), published as `folo-n-coco` (release `weights-v1`). v2 runs the same recipe with
 mixed precision on a 300-epoch schedule; it was **paused after epoch 62** (8.0 h) and its weights at the pause are the
-interim `folo-n-coco-v2` (release `weights-v2`). folo-s was trained from scratch for **56 epochs** with AMP on one
-rented RTX PRO 4000 Blackwell (9.5 h of epochs, about $5.60 for the pod), published as `folo-s-coco` (release `weights-v3`):
+interim `folo-n-coco-v2` (release `weights-v2`). v3 gives v2's weights the ending its schedule never reached: 16
+more epochs from `folo-n-coco-v2` (78 in all; SGD at lr0 0.005 decaying linearly to 1%, momentum 0.9, no warmup,
+mosaic off for the last 8, AMP, seed 0; 1.58 h on the RTX 4080 SUPER, hill-climb 3's lane fusion,
+[notes/hill/r3-fusion.md](notes/hill/r3-fusion.md), Part 0), published as `folo-n-coco-v3` (release `weights-v4`);
+the trainer's own mAP50-95 was still rising at its last epoch (0.3355, +0.0004). folo-s was trained from scratch for
+**56 epochs** with AMP on one rented RTX PRO 4000 Blackwell (9.5 h of epochs, about $5.60 for the pod), published as
+`folo-s-coco` (release `weights-v3`). Measured again on 2026-11-13 with `main`'s `folo val`
+([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md), Accuracy): every published file reads the AP below.
 
 *Nano*
 
@@ -633,8 +883,10 @@ rented RTX PRO 4000 Blackwell (9.5 h of epochs, about $5.60 for the pod), publis
 |---|---:|---|---:|---:|---:|---:|---:|---:|
 | folo-n, f32 | 2.6 M | **50 epochs from scratch**, FOLO trainer | **0.314** | 0.455 | 0.339 | 0.144 | 0.335 | 0.458 |
 | folo-n, f16 (`--half`) | 2.6 M | the same weights | 0.314 | 0.455 | 0.339 | 0.144 | 0.335 | 0.458 |
-| **folo-n v2, f32** | 2.6 M | **62 of 300 epochs from scratch** (paused; LR still 0.90 · lr0, mosaic on), AMP | **0.317** | 0.458 | 0.343 | 0.153 | 0.344 | 0.453 |
+| folo-n v2, f32 | 2.6 M | 62 of 300 epochs from scratch (paused; LR still 0.90 · lr0, mosaic on), AMP | 0.317 | 0.458 | 0.343 | 0.153 | 0.344 | 0.453 |
 | folo-n v2, f16 (`--half`) | 2.6 M | the same weights | 0.317 | 0.458 | 0.343 | 0.153 | 0.344 | 0.453 |
+| **folo-n v3, f32** (`folo-n-coco-v3`) | 2.6 M | **v2 + 16 annealing epochs** (78 in all), SGD, AMP | **0.340** | 0.487 | 0.367 | 0.163 | 0.368 | 0.494 |
+| folo-n v3, f16 (`--half`, `folo-n-coco-v3-f16`) | 2.6 M | the same weights, fused f16 file | 0.339 | 0.487 | 0.367 | 0.163 | 0.367 | 0.494 |
 | YOLO11n (Ultralytics, published) | 2.6 M | Ultralytics recipe (not given on its model page) | 0.395 | | | | | |
 | YOLO26n (Ultralytics, published) | 2.4 M | 150 epochs Objects365-v1, then 245 epochs COCO, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.409 (e2e 0.401) | | | | | |
 
@@ -667,15 +919,39 @@ reads a little lower than the pycocotools-exact AP of the tables):
   training for this round ran on rented GPUs with a fixed budget of about $9, and the remaining 238 epochs (about
   29 h on the RTX 4080 SUPER, 25–45 h on what $9 rents) did not fit next to folo-s and the fine-tuning benchmark. It can be resumed from its checkpoint
   ([examples/coco, Resume (v2)](../examples/coco/README.md#resume-v2)); what the full schedule reaches is not known.
-  folo-n is **0.08–0.09 AP behind the published nano models** (v2 interim; 0.08–0.10 for v1).
+  v3 (2026-11-13) does not resume it: it gives v2's weights a short ending (the learning rate decayed to 1%, mosaic
+  off) and gains 0.023 AP over v2 (0.317 → 0.340), so most of v2's distance to v1's ending was the missing anneal,
+  not the epochs. folo-n v3 is **0.06–0.07 AP behind the published nano models** (v2 was 0.08–0.09, v1 0.08–0.10).
 - **folo-s.** 56 epochs (103,544 optimizer steps, 9.49 h of epochs on a 140 W card) reach **AP 0.416 / AP50 0.580**,
   **0.05–0.06 AP behind YOLO11s / YOLO26s** and above both published nano models. That is the epoch budget's floor,
   not a plateau: internal mAP50-95 rose in every one of the 56 epochs, and the last six gains (0.0007 to 0.0001)
   shrank with the linear decay to `lr0 · lrf`, not at a healthy learning rate.
 
 The speed rows above should be read with these gaps in mind. **The folo-n 0.314 / 0.317 are unchanged by the
-hill-climb**: both checkpoints were trained with SGD before it. folo-s is the first full-scale run with the
-hill-climb's trainer (the `auto` rule, MuSGD).
+first two hill-climbs**: both checkpoints were trained with SGD before them; v3's 16 epochs used SGD as well (the
+original run's optimizer). folo-s is the first full-scale run with the hill-climb's trainer (the `auto` rule, MuSGD).
+
+**Box fusion, an option** (hill-climb 3, #257; docs/MODEL.md §9.4): `--fusion dfl --iou 0.65 --max-det 1000` on
+`folo val` and `folo predict` moves the four edges of each box NMS keeps to a weighted mean over the candidates of its
+class that overlap it (IoU at least `--fusion-iou`, 0.75, the kept box included), each side weighted by the member's score times the
+precision of its DFL distribution on that side, with NMS at IoU 0.65 instead of 0.7 and up to 1000 detections per
+image instead of 300. Scores, classes and which boxes are kept stay NMS's. It is off by default, and every table
+above is without it. On the published weights (one deterministic run each, `main`'s `folo val --coco`):
+
+| weights | default AP / AP50 / AP75 | with the fusion flags | gain |
+|---|---|---|---:|
+| `folo-n-coco` | 0.3138 / 0.4554 / 0.3392 | 0.3181 / 0.4612 / 0.3424 | +0.0043 |
+| `folo-n-coco-v2` | 0.3168 / 0.4578 / 0.3428 | 0.3202 / 0.4634 / 0.3457 | +0.0034 |
+| `folo-n-coco-v3` | 0.3396 / 0.4874 / 0.3671 | **0.3434** / 0.4922 / 0.3692 | +0.0038 |
+| `folo-s-coco` | 0.4162 / 0.5798 / 0.4519 | **0.4186** / 0.5840 / 0.4537 | +0.0025 |
+
+Every cell matches lane fusion's own ([notes/hill/r3-fusion.md](notes/hill/r3-fusion.md), Headline) to four digits.
+From its paired bootstrap (not run again here; every interval above zero except the NMS change on folo-s): the NMS
+settings alone give +0.0000 to +0.0009, the DFL weights +0.0003 to +0.0010 over plain score-weighted voting, and
+the rest is voting. What it costs: `folo val` took 4–9 s
+by default and 6–14 s with the flags in these single runs (not an A/B; lane fusion's per-image timing is in its
+notebook), since the flags keep up to 1000 detections per image and read back each candidate's side moments. The
+server, Studio, ONNX export and the wasm build do not offer it yet ([Next optimisations](#next-optimisations)).
 
 **Equal budget on a COCO proxy** (the hill-climb's learn agent, [notes/hill/learn.md](notes/hill/learn.md)): 20,000 train2017 /
 2,000 val2017 images pre-shrunk to 320 px (all 80 classes), folo-n against Ultralytics 8.4.198 YOLO11n, both from
@@ -1316,9 +1592,10 @@ Results stay bitwise identical from run to run and across thread counts.
 
 ## Next optimisations
 
-By expected gain, from the leftovers of the hill-climb 2 notebooks (each has the measurements behind its item; the
-first climb's items that shipped are gone: bind groups, the convs' concatenations at inference, validation readback,
-the pipeline cache, MuSGD's step cost, split-K, `--cache ram`, the COCO header cache):
+By expected gain, from the leftovers of the hill-climb 2 and 3 notebooks (each has the measurements behind its item;
+the earlier climbs' items that shipped are gone: bind groups, the convs' concatenations at inference, validation
+readback, the pipeline cache, MuSGD's step cost, split-K, `--cache ram`, the COCO header cache; hill-climb 3 shipped
+none of the numbered items and adds the list after them):
 1. **f32 weight gradients and the training forward's concatenations** (row 9 f32: 380 img/s, the lane's target was
    390). folo-n's weight gradients take 10.6–10.8 GPU-ms plus 1.0–1.2 ms of split-K reductions per step, where the
    forward convs do the same FLOPs in about 7 ms: the regular tiles (4×4 / 4×8 per invocation) and the column
@@ -1332,8 +1609,11 @@ the pipeline cache, MuSGD's step cost, split-K, `--cache ram`, the COCO header c
 3. **Accuracy at full scale**: a full COCO run under `auto` rule 5 (the folo-s COCO run used rule 3: momentum 0.9, no
    bias warmup, step weights 0.2 / 1.0), then `loss.cls_gain` by class count (+4.5% on the 80-class proxy, −0.006 on
    BCCD), `o2o_attached_epochs` with three seeds, an EMA time constant for short fine-tunes; BCCD is level with
-   yolo26n (0.625 vs 0.626), likely limited by the pretrained weights (COCO AP 0.317 vs 0.409)
-   ([notes/hill/r2-learn.md](notes/hill/r2-learn.md)).
+   yolo26n (0.625 vs 0.626), likely limited by the pretrained weights it started from (v2, COCO AP 0.317 vs 0.409;
+   v3's 0.340 has not been fine-tuned) ([notes/hill/r2-learn.md](notes/hill/r2-learn.md)). Post-hoc box
+   refinement is not the way (Hill-climb 3, Tried and lost): the next accuracy step has to change training
+   (distillation from folo-s, a longer schedule; v3's landing still gained 0.0004 in its last epoch), judged first on
+   the top boxes' edge error by object size ([notes/hill/r3-refine.md](notes/hill/r3-refine.md)).
 4. **CPU batch 1** (folo-n 12.7 ms; the cpu2 target was 12.5): pointwise convs at 40² and 20² (4.9 of 12.4 ms of
    convs timed alone, 50–300 GF/s, waiting on the pool), Winograd F(4×4, 3×3) measured on a quiet machine (1.1–1.9x
    per core, a tie under load), stride-2 convs as four phase convs with Winograd F(2, 2) (about 1.4x fewer
@@ -1355,6 +1635,32 @@ the pipeline cache, MuSGD's step cost, split-K, `--cache ram`, the COCO header c
 9. **Batch-1 latency for spaced-out calls**: with 200 ms between calls the GPU drops to P8 (16 ms per f32 call); the
    driver decides the clocks (its "Prefer maximum performance" mode for the process), FOLO cannot through Vulkan
    ([notes/hill/r2-gpu-dispatch.md](notes/hill/r2-gpu-dispatch.md)).
+
+From hill-climb 3's notebooks (not ranked against the list above):
+- **The CPU slowdown after a rect batch** ([Rows worse than e5a6ccf0](#rows-worse-than-e5a6ccf0)): folo-s single
+  1280×720 frames +24–29% after another model's rect `predict_batch` in the same process, since #259; and the access
+  violation seen once in `main`'s GPU bench ([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md), Leftovers).
+- **A quiet CPU repeat**: no CPU run of hill-climb 3's fold-in met the quiet rule; row 8's tie for folo-n (lane
+  lazy's −14% was measured under load) should be read again on an idle machine.
+- **The GPU batch-1 floor** (rows 1, 2, 5): with plans, the folo-n batch-1 forward is about 1.0 ms of GPU time in
+  f32 and 0.8 ms on tensor cores, in 138–146 dispatches. Fewer dispatches (fused small layers) and a look at the
+  gaps between dependent dispatches; the device letterbox inside the plan (it uploads the image, which a plan
+  refuses; prediction and the planned step differ by 0.3–0.4 ms); a model-wide version counter instead of the
+  0.03–0.09 ms per-replay walk of 300–400 tensors ([notes/hill/r3-plan.md](notes/hill/r3-plan.md)).
+- **Training-step plans** (row 9): a step records no plan, and its host side is a design of its own
+  ([notes/hill/r3-plan.md](notes/hill/r3-plan.md)).
+- **Box fusion everywhere and cheaper** (Accuracy, "Box fusion, an option"): `--fusion` in the server's predict
+  API, Studio, ONNX export and folo-wasm (where `dfl` falls back to `vote`); the side moments read only at the
+  candidates instead of a `[B, 8, A]` readback (most of the 0.25–0.3 ms the GPU path pays); the ±2-bin window
+  expectation (+0.0003 AP on top, needs the same change in three decodes)
+  ([notes/hill/r3-fusion.md](notes/hill/r3-fusion.md)).
+- **The bimodal rows** ([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md), Leftovers): folo-n f32
+  `predict_batch` of 16 × 1280×720 frames on trained weights (10.0 or 11–21 ms run by run on `main`), the 35–39 ms mode
+  of a folo-n f32 batch of mixed shapes on both builds, the random-weight end-to-end batch-1 rows on every binary.
+  The GPU clocks per run are the first thing to log.
+- **The validation decode on the candidates** (one kernel emitting multi-label pairs, and boxes only where a pair
+  is) and the candidate-first break-even sweeps (`benches/candidates.rs`, `FOLO_BENCH_SWEEP=1`)
+  ([notes/hill/r3-lazy-head.md](notes/hill/r3-lazy-head.md)).
 
 ## Results
 

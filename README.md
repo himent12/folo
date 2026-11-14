@@ -37,7 +37,7 @@ much noise to expect.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/img/charts/speed-inference-dark.svg">
-    <img src="docs/img/charts/speed-inference-light.svg" alt="Inference speed, folo-n against yolo26n. Latency at batch 1: GPU forward 1.14 ms against 4.95 ms, GPU end to end 1.75 ms against 6.92 ms, CPU forward 12.7 ms against 22.8 ms, CPU end to end 13.1 ms against 24.8 ms. Throughput at batch 16: GPU forward in f32 2081 against 1454 images per second, in f16 4159 against 2370, GPU end to end 2155 against 615." width="720">
+    <img src="docs/img/charts/speed-inference-light.svg" alt="Inference speed, folo-n against yolo26n. Latency at batch 1: GPU forward 1.09 ms against 4.95 ms, GPU end to end 1.60 ms against 6.92 ms, CPU forward 12.7 ms against 22.8 ms, CPU end to end 13.6 ms against 24.8 ms. Throughput at batch 16: GPU forward in f32 2081 against 1454 images per second, in f16 4159 against 2370, GPU end to end 2424 against 615." width="720">
   </picture>
 </p>
 
@@ -53,21 +53,22 @@ much noise to expect.
 
 | metric | folo-n | yolo26n (best configuration) | |
 |---|---:|---:|---|
-| GPU forward, batch 1, f32 (median latency) | **1.14 ms** | 4.95 ms (6.04 ms at its defaults) | FOLO 4.3× faster |
-| GPU end to end, batch 1 (decoded image in, boxes out) | **1.75 ms** | 6.92 ms | FOLO 4.0× faster |
+| GPU forward, batch 1, f32 (median latency) | **1.09 ms** | 4.95 ms (6.04 ms at its defaults) | FOLO 4.5× faster |
+| GPU end to end, batch 1 (decoded image in, boxes out) | **1.60 ms** | 6.92 ms | FOLO 4.3× faster |
 | CPU forward, batch 1, f32 | **12.7 ms** (28 threads) | 22.8 ms (8 threads) | FOLO 1.8× faster |
-| CPU end to end, batch 1 | **13.1 ms** (28 threads) | 24.8 ms | FOLO 1.9× faster |
+| CPU end to end, batch 1 | **13.6 ms** (28 threads) | 24.8 ms | FOLO 1.8× faster |
 | GPU forward, batch 16, f32 (throughput) | **2081 img/s** | 1454 img/s (TF32) | FOLO 1.4× faster |
 | GPU forward, batch 16, f16 (tensor cores) | **4159 img/s** | 2370 img/s (fp16) | FOLO 1.8× faster |
-| GPU end to end, batch 16, f16 (tensor cores) | **2155 img/s** | 615 img/s (fp16) | FOLO 3.5× faster |
+| GPU end to end, batch 16, f16 (tensor cores) | **2424 img/s** | 615 img/s (fp16) | FOLO 3.9× faster |
 | Training step, batch 16 (forward, loss, backward, SGD) | **380 img/s** (f32) / **594 img/s** (AMP) | 202 img/s (fp32 with TF32) / 252 img/s (AMP) | FOLO 1.9× / 2.4× faster |
 | Whole trainer, sustained (data loader, mosaic, 8 workers) | **388 img/s** (f32) / **613 img/s** (AMP) | 199 / 224 img/s | FOLO 1.9× / 2.7× faster |
 | Training step peak GPU memory allocated, batch 16 | **3467 MiB** (f32) / **2022 MiB** (AMP) | 4517 / 2646 MiB | FOLO allocates 23% / 24% less |
 
 </details>
 
-FOLO's numbers were measured on `main` on 2026-11-12, alternated run by run with the build before it on a mostly
-quiet machine; yolo26n's on 2026-11-07, its best configuration for each row. The GPU batch-1 latency warm-ups
+FOLO's numbers were measured on `main`, alternated run by run with the build before it: on 2026-11-13 the GPU
+batch-1 rows and the end-to-end rows (the end-to-end ones with the published COCO weights, which find objects, on
+the first 16 val2017 images), on 2026-11-12 the rest; yolo26n's on 2026-11-07, its best configuration for each row. The GPU batch-1 latency warm-ups
 differ: both make the same calls first (25, or 10 end to end), and FOLO's bench then keeps warming until a second has
 passed. folo-s beats yolo26s on every row
 measured for it as well ([the chart by model size](docs/BENCHMARKS.md#summary)); its whole-trainer row was not
@@ -76,8 +77,9 @@ measured.
 ### Accuracy
 
 Speed only counts at comparable accuracy, and on COCO FOLO is not there yet. Trained from scratch on COCO alone,
-folo-n reaches AP 0.317 on val2017 after 62 epochs and folo-s 0.416 after 56. Ultralytics publishes 0.409 for yolo26n
-and 0.480 for yolo26s, from models pretrained on Objects365 and then trained on COCO for far longer (245 epochs for
+folo-n reaches AP 0.340 on val2017 after 78 epochs (`folo-n-coco-v3`; the earlier `folo-n-coco-v2` read 0.317 after
+62) and folo-s 0.416 after 56; the opt-in box fusion (`--fusion dfl --iou 0.65 --max-det 1000`) adds 0.002–0.004
+AP to each. Ultralytics publishes 0.409 for yolo26n and 0.480 for yolo26s, from models pretrained on Objects365 and then trained on COCO for far longer (245 epochs for
 yolo26n). That is not like for like, and a full COCO comparison at an equal budget has not been run. Two things have
 been measured at an equal budget:
 
@@ -85,12 +87,12 @@ been measured at an equal budget:
   FOLO's trainer with folo-n and Ultralytics' with YOLO11n reach the same AP with the same optimizer (SGD 0.086
   against 0.085, MuSGD 0.113–0.116 against 0.113). What causes the gap on full COCO has not been measured.
 - **Fine-tuned on small datasets, folo-n and yolo26n are level on three of four.** Each starts from its own COCO
-  weights and trains 100 epochs at its defaults; one scorer (pycocotools) grades both.
+  weights (folo-n from `folo-n-coco-v2`) and trains 100 epochs at its defaults; one scorer (pycocotools) grades both.
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/img/charts/accuracy-dark.svg">
-    <img src="docs/img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.317 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained from scratch for 56 to 62 epochs, the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
+    <img src="docs/img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.340 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained from scratch for 56 to 78 epochs, the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
   </picture>
 </p>
 

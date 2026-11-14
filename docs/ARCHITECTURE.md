@@ -266,8 +266,9 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   the checkpoint's `folo.amp`. `folo_vision::val::validate`
   is the same validation for `folo val`.
 - **Predictor** (`folo_vision::predict::Predictor`): loads `.folo` (EMA when present), fuses BN, letterboxes (rect for
-  one image, square for a batch), forward, decode, NMS, rescale to the original image, with a preprocess /
-  inference / postprocess timing split. On a GPU the raw `u8` images are uploaded and letterboxed there
+  one image and for a batch whose images share a rect canvas, square for a batch of mixed canvases), forward
+  (candidate-first: the box branch only at the candidates, docs/MODEL.md §9.5), decode, NMS, rescale to the
+  original image, with a preprocess / inference / postprocess timing split. On a GPU the raw `u8` images are uploaded and letterboxed there
   (bit-exact with the CPU letterbox) and only the decoded candidates come back: one upload per image, one queue of
   work, one small readback. On the CPU the whole prediction runs inside the rayon pool (`cpu::in_pool`), the
   letterbox is one fused pass per image (`Letterbox::apply_planar_f32`: resize, padding and `/ 255` straight into

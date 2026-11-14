@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 608" width="720" height="608" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 626" width="720" height="626" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
 <title id="t">Training speed: folo-n against yolo26n</title>
 <desc id="d">Grouped bars. Training throughput at batch 16 in images per second and peak GPU memory allocated by a training step in MiB, for folo-n and yolo26n. Training step, f32: 380 against 202 images per second. Training step, AMP: 594 against 252 images per second. Whole trainer, f32: 388 against 199 images per second. Whole trainer, AMP: 613 against 224 images per second. Training step, f32: 3467 against 4517 MiB. Training step, AMP: 2022 against 2646 MiB.</desc>
-<rect x="0.5" y="0.5" width="719" height="607" rx="8" fill="#FFFFFF" stroke="#E4E5E5"/>
+<rect x="0.5" y="0.5" width="719" height="625" rx="8" fill="#FFFFFF" stroke="#E4E5E5"/>
 <text x="28" y="43" font-size="17" font-weight="600" letter-spacing="-0.01em" fill="#0C0E12">Training speed: folo-n against yolo26n</text>
 <text x="28" y="66" font-size="13" fill="#4F5661">RTX 4080 SUPER, Core i7-14700KF, 640×640 input</text>
 <rect x="28" y="84" width="10" height="10" rx="2" fill="#0A8FD6"/>
@@ -63,7 +63,8 @@
 <text x="692" y="500" font-size="12.5" text-anchor="end" fill="#646B75">less</text>
 <path d="M235.5 412L235.5 508" stroke="#D8D8D9" stroke-width="1" fill="none"/>
 <path d="M28 524.5L692 524.5" stroke="#F1F1F1" stroke-width="1" fill="none"/>
-<text x="28" y="548" font-size="12.5" fill="#646B75">FOLO: medians of runs alternated with its previous build, 2026-11-12. YOLO26: its best configuration per row,</text>
-<text x="28" y="566" font-size="12.5" fill="#646B75">measured 2026-11-07 (whole trainer: the best of 3 runs). Method and noise: docs/BENCHMARKS.md.</text>
-<text x="28" y="584" font-size="12.5" fill="#646B75">Memory is what live tensors hold at the peak; both allocators reserve more than that (row 11 there).</text>
+<text x="28" y="548" font-size="12.5" fill="#646B75">FOLO: medians of runs alternated with its previous build, 2026-11-13 (the rows hill-climb 3 moved; end to end</text>
+<text x="28" y="566" font-size="12.5" fill="#646B75">on trained weights) and 2026-11-12 (the rest). YOLO26: its best configuration per row, measured 2026-11-07</text>
+<text x="28" y="584" font-size="12.5" fill="#646B75">(whole trainer: the best of 3 runs). Method and noise: docs/BENCHMARKS.md.</text>
+<text x="28" y="602" font-size="12.5" fill="#646B75">Memory is what live tensors hold at the peak; both allocators reserve more than that (row 11 there).</text>
 </svg>
