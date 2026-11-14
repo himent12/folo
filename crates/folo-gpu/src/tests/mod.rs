@@ -21,6 +21,7 @@ mod pool;
 mod precompile;
 mod reduce;
 mod runtime;
+mod sites;
 
 use crate::GpuContext;
 

@@ -3,7 +3,8 @@
 
 #[cfg(doc)]
 use super::matmul::gemm;
-use super::matmul::{base_spec, build, check_io, encode_gemm};
+use super::matmul::{base_spec, build, build_def, check_io, encode_gemm};
+use super::shader::COOP_SITES;
 use super::{CoopConfig, conv_config, pick_config, pick_config_conv, resolve};
 use crate::DType;
 use crate::UnaryOp;
@@ -105,6 +106,59 @@ pub(crate) fn encode_conv(
     let p = p.uz(splits)?.uz(chunk)?.uz(out_elems)?;
     ctx.dispatch(&kernel, &[weight, x, ctx.dummy(), part.raw()], &p, groups)?;
     let f = split::Finish { splits, out_elems, plane: oh * ow, channels: d.c_out, act: d.act, out };
+    split::finish(ctx, &f, part.raw(), has_bias.then_some(bias), y)?;
+    Ok(true)
+}
+
+/// [`encode_conv`] at listed output pixels (`crate::kernels::conv::conv2d_sites`): `dense` is the conv's GEMM view
+/// (it picks the tile config and the split-K chunks, as [`encode_conv`] would), `g` the view with one column per
+/// site slot; `sites` lists the pixels, `y` takes the `[N, C_out, slots]` result. Returns `false` (nothing encoded)
+/// when the kernel failed to build.
+pub(crate) fn encode_conv_sites(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    (dense, g): (&GemmDesc, &GemmDesc),
+    x: &wgpu::Buffer,
+    weight: &wgpu::Buffer,
+    bias: &wgpu::Buffer,
+    (sites, y): (&wgpu::Buffer, &wgpu::Buffer),
+) -> Result<bool> {
+    let (oh, ow) = d.output()?;
+    let Some(cfg) = resolve(ctx, None, || pick_config_conv(dense.m, dense.n))? else { return Ok(false) };
+    let (batch, dense_elems) = (d.n * d.groups, d.n * d.c_out * oh * ow);
+    let tiles = dense.m.div_ceil(cfg.bm as usize) * dense.n.div_ceil(cfg.bn as usize);
+    let (splits, chunk) = split::plan(cfg.bk as usize, g.k, tiles, batch, dense_elems, None);
+    let mut g = g.clone();
+    let has_bias = g.bias != GemmBias::None;
+    if splits > 1 {
+        g.bias = GemmBias::None;
+        g.act = UnaryOp::Identity;
+    }
+    let check = !g.m.is_multiple_of(cfg.bm as usize)
+        || !g.n.is_multiple_of(cfg.bn as usize)
+        || !g.k.is_multiple_of(cfg.bk as usize);
+    let spec = base_spec(&g, if splits > 1 { DType::F32 } else { DType::F16 }, cfg)
+        .bool("VEC_A", g.k.is_multiple_of(4))
+        .bool("VEC_B", false)
+        .bool("VEC_C", g.n.is_multiple_of(4))
+        .bool("TRANS_A", false)
+        .bool("TRANS_B", false)
+        .bool("CHECK", check)
+        .u32("CONV_MODE", 1)
+        .bool("SITES", true)
+        .bool("SPLIT", splits > 1);
+    let Some(kernel) = build_def(ctx, &COOP_SITES, with_window(spec, d)) else { return Ok(false) };
+    let p = gemm_params(&g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
+    let groups = grid(&g, cfg, batch * splits)?;
+    if splits == 1 {
+        ctx.dispatch(&kernel, &[weight, x, bias, y, sites], &p, groups)?;
+        return Ok(true);
+    }
+    let out_elems = d.n * d.c_out * g.n;
+    let part = ctx.alloc(DType::F32.bytes(crate::kernels::prod(&[splits, out_elems])?))?;
+    let p = p.uz(splits)?.uz(chunk)?.uz(out_elems)?;
+    ctx.dispatch(&kernel, &[weight, x, ctx.dummy(), part.raw(), sites], &p, groups)?;
+    let f = split::Finish { splits, out_elems, plane: g.n, channels: d.c_out, act: d.act, out: DType::F16 };
     split::finish(ctx, &f, part.raw(), has_bias.then_some(bias), y)?;
     Ok(true)
 }

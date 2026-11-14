@@ -3,7 +3,7 @@
 //! without the kernels (the CPU), so callers keep their host implementations as the fallback and reference.
 
 use super::with_views_dyn;
-use crate::backend::{DETECT_RECORD_WORDS, DetectDecode, LetterboxImage};
+use crate::backend::{ClassSites, DETECT_RECORD_WORDS, DetectDecode, LetterboxImage, SiteLevel};
 use crate::{DType, Error, Result, Shape, Tensor};
 
 fn unsupported(e: &Error) -> bool {
@@ -108,6 +108,86 @@ impl Tensor {
         let be = box_raw.backend()?;
         match with_views_dyn(&[box_raw, cls_raw, anchors], |v| be.detect_candidates(v[0], v[1], v[2], p)) {
             Ok(s) => Ok(Some(Tensor::wrap(s, Shape::new(&[b, 1 + DETECT_RECORD_WORDS * a]), OP)?)),
+            Err(e) if unsupported(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The class pass of one head level for candidate-first prediction (docs/MODEL.md §9.5,
+    /// [`crate::backend::Backend::detect_class_sites`]): from `self` (`[B, nc, H, W]` logits) the `U32` tensors
+    /// `(sites [B, 1 + cap], recs [B, 2·cap], field [B, 1 + min(9·cap, H·W)])`. `Ok(None)` when the device has no
+    /// kernel for it. Not recorded by autograd.
+    pub fn detect_class_sites(&self, p: &ClassSites) -> Result<Option<(Tensor, Tensor, Tensor)>> {
+        const OP: &str = "detect_class_sites";
+        self.check_float(OP)?;
+        let (b, nc, h, w) =
+            self.dims4().map_err(|_| Error::invalid_shape(OP, self.shape(), "must be NCHW"))?;
+        if nc == 0 || h * w == 0 || p.cap == 0 {
+            return Err(Error::invalid_shape(OP, self.shape(), format!("empty level or no slots ({p:?})")));
+        }
+        let fcap = (9 * p.cap).min(h * w);
+        let be = self.backend()?;
+        match with_views_dyn(&[self], |v| be.detect_class_sites(v[0], p)) {
+            Ok((s, r, f)) => Ok(Some((
+                Tensor::wrap(s, Shape::new(&[b, 1 + p.cap]), OP)?,
+                Tensor::wrap(r, Shape::new(&[b, 2 * p.cap]), OP)?,
+                Tensor::wrap(f, Shape::new(&[b, 1 + fcap]), OP)?,
+            ))),
+            Err(e) if unsupported(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The boxes of every level's candidates ([`crate::backend::Backend::detect_decode_sites`]): `levels[l]` is
+    /// `(raw, sites, recs, width, stride, start)`, `raw` the level's box logits at its slots (`[B, 4·reg_max,
+    /// cap]`, as [`Tensor::conv2d_act_sites`] gives them), `sites` and `recs` from [`Tensor::detect_class_sites`].
+    /// `U32 [B, 2 + 7·Σ cap]`: per image a record count, the overflowing levels' bits, then the records.
+    /// `Ok(None)` when the device has no kernel for it. Not recorded by autograd.
+    pub fn detect_decode_sites(
+        levels: &[(&Tensor, &Tensor, &Tensor, usize, f32, usize)],
+        reg_max: usize,
+    ) -> Result<Option<Tensor>> {
+        const OP: &str = "detect_decode_sites";
+        let Some(&(first, ..)) = levels.first() else {
+            return Err(Error::invalid_arg(OP, "no levels given"));
+        };
+        first.check_float(OP)?;
+        let b = first.dims().first().copied().unwrap_or(0);
+        let mut slots = 0;
+        let mut ts = Vec::with_capacity(3 * levels.len());
+        for &(raw, sites, recs, ..) in levels {
+            raw.check_float_like(first, OP)?;
+            let cap = sites.dims().get(1).map_or(0, |w| w.saturating_sub(1));
+            if raw.dims() != [b, 4 * reg_max, cap] || cap == 0 || reg_max == 0 {
+                return Err(Error::invalid_shape(OP, raw.shape(), "box logits must be [B, 4·reg_max, cap]"));
+            }
+            if sites.dtype() != DType::U32 || recs.dtype() != DType::U32 || recs.dims() != [b, 2 * cap] {
+                return Err(Error::invalid_shape(OP, recs.shape(), "sites and records must be U32 lists"));
+            }
+            for t in [raw, sites, recs] {
+                first.check_same_device(t, OP)?;
+                ts.push(t);
+            }
+            slots += cap;
+        }
+        let be = first.backend()?;
+        let r = with_views_dyn(&ts, |v| {
+            let lv: Vec<SiteLevel<'_>> = levels
+                .iter()
+                .enumerate()
+                .map(|(l, &(_, _, _, width, stride, start))| SiteLevel {
+                    raw: v[3 * l],
+                    sites: v[3 * l + 1],
+                    recs: v[3 * l + 2],
+                    width,
+                    stride,
+                    start,
+                })
+                .collect();
+            be.detect_decode_sites(&lv, reg_max)
+        });
+        match r {
+            Ok(s) => Ok(Some(Tensor::wrap(s, Shape::new(&[b, 2 + DETECT_RECORD_WORDS * slots]), OP)?)),
             Err(e) if unsupported(&e) => Ok(None),
             Err(e) => Err(e),
         }

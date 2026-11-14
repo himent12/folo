@@ -2,8 +2,8 @@
 //! the ops without an f16 kernel.
 
 use folo_core::backend::{
-    Backend, BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, MuonItem, MuonSettings, NormReduce,
-    OptimItem, OptimStep, Pool2dParams, ReduceOp, RunningUpdate, UnaryOp, View,
+    Backend, BinaryOp, ClassSites, Conv2dParams, DetectDecode, LetterboxImage, MuonItem, MuonSettings,
+    NormReduce, OptimItem, OptimStep, Pool2dParams, ReduceOp, RunningUpdate, SiteLevel, UnaryOp, View,
 };
 use folo_core::{CpuStorage, DType as CoreDType, Device, Error, Layout, Result, Shape, Storage};
 
@@ -555,6 +555,19 @@ impl Backend for GpuBackend {
         Ok(self.wrap(dtype, len, out))
     }
 
+    fn conv2d_act_sites(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        sites: View<'_>,
+        to_map: bool,
+    ) -> Result<Storage> {
+        self.sites_conv(x, w, bias, p, act, sites, to_map)
+    }
+
     fn conv2d_act_cat(
         &self,
         xs: &[View<'_>],
@@ -876,5 +889,13 @@ impl Backend for GpuBackend {
         )
         .core()?;
         Ok(self.wrap(CoreDType::U32, len, out))
+    }
+
+    fn detect_class_sites(&self, cls: View<'_>, p: &ClassSites) -> Result<(Storage, Storage, Storage)> {
+        self.class_sites(cls, p)
+    }
+
+    fn detect_decode_sites(&self, levels: &[SiteLevel<'_>], reg_max: usize) -> Result<Storage> {
+        self.decode_sites(levels, reg_max)
     }
 }

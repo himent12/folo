@@ -69,7 +69,14 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   on which tiles share its block) and a pointwise conv runs the dense GEMM over the sites' columns gathered into
   planes of their own (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv runs densely, as
   does a backend without the kernel. A site reads only its receptive field: in Winograd F(2x2, 3x3) each output
-  of a tile reads only its own 3x3 window of the 4x4 patch (tested with NaN everywhere else).
+  of a tile reads only its own 3x3 window of the 4x4 patch (tested with NaN everywhere else). On the GPU,
+  `Tensor::conv2d_act_sites` takes per image a fixed-capacity list of output pixels (a count, then the pixels):
+  folo-gpu's implicit GEMM with `SITES` (`kernels/conv/sites.rs`; regular and tensor-core generators) maps column
+  `j` to the image's `j`-th listed pixel, runs the dense conv's tile config and split-K chunks (planned for the
+  full output, so each value is the dense one bit for bit) and retires workgroups past the image's count; the
+  result is compact `[N, O, cap]` or scattered back into a full map. `detect_class_sites` and
+  `detect_decode_sites` (`kernels/detect_sites.rs`) are the head's class pass into such lists and the decode of
+  the boxes computed there.
   `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
   (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
   separable (row pass, then column pass; same first-maximum argmax as a direct scan); when nothing is recorded
@@ -267,10 +274,15 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   side by side, each level's candidates come straight from its class map (blocks of 1024 anchors in parallel),
   and the three box branches then run only at the candidates (`conv2d_act_at`; `conv0` on their 3x3 receptive
   fields; with DFL box fusion also the candidates' side precisions), so the dense box outputs and the head's `cat`
-  are never made; the detections are the dense path's bit for bit. The candidate extraction and the box branch
-  count as inference, NMS and the letterbox inverse as postprocess. An unfused model, multi-label settings, f16 or
-  another device take the dense forward (the six branch chains side by side) and `HeadOutput::detections`, which
-  reads the head outputs in place and extracts candidates the same way.
+  are never made; the detections are the dense path's bit for bit. The candidate extraction and the box branch count
+  as inference, NMS and the letterbox inverse as postprocess. On a GPU the head is candidate-first too
+  (`model/lazy_gpu.rs`): per level the class branch, the class pass into fixed-capacity site lists, `conv0` on the
+  listed windows (scattered back into a map), `conv1` and `out` at the candidates, then one decode of every level and
+  one readback of the records; the dispatches do not depend on the candidates, and an image whose candidates overflow
+  a list takes the dense head on the same features. With DFL box fusion the dense path's moment ops also run on the
+  candidates' box-logit columns (the moments and the site lists are read back too). An unfused model, multi-label
+  settings or f16 on the CPU take the dense forward (the six branch chains side by side) and `HeadOutput::detections`,
+  which reads the head outputs in place and extracts candidates the same way.
 - **ONNX export** (`folo_vision::export::onnx`): `FoloModel::to_onnx` turns a fused model into an opset-17 graph
   that mirrors `forward` op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o`
   model ends in the §6.6 top-k: end-to-end `[B, K, 6]` detections; fixed or dynamic

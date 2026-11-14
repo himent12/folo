@@ -101,27 +101,36 @@ fn needing_boxes(
 
 impl FoloModel {
     /// Whether [`FoloModel::predict_candidates`] serves an input on `device` with the settings `nms`: a fused
-    /// model in eval mode, in `F32`, on the CPU, single-label (multi-label validation at `conf = 0.001` passes
-    /// thousands of anchors per image and stays on the dense path).
+    /// model in eval mode, on the CPU in `F32` or on a GPU, single-label (multi-label validation at
+    /// `conf = 0.001` passes thousands of anchors per image and stays on the dense path).
     pub fn candidates_first_applies(&self, device: Device, nms: &NmsConfig) -> bool {
-        self.fused && !self.is_training() && device.is_cpu() && self.dtype() == DType::F32 && !nms.multi_label
+        self.fused
+            && !self.is_training()
+            && !nms.multi_label
+            && (!device.is_cpu() || self.dtype() == DType::F32)
     }
 
     /// Candidate-first prediction (MODEL.md §9.5) of a `[B, 3, H, W]` batch with the [`FoloModel::head_mode`]
     /// branch: per image the candidates that [`FoloModel::finish_candidates`] can keep, with their boxes, in
-    /// anchor order, each bit for bit the record the dense path ([`HeadOutput::detections`] on the CPU) makes for
-    /// that anchor. The backbone, the neck and the class branches run densely; the box branch only at the
-    /// candidates; the dense raw outputs ([`HeadOutput`]) are never made. Fails unless
+    /// anchor order, each bit for bit the record the dense path ([`HeadOutput::detections`] on the same device)
+    /// makes for that anchor. The backbone, the neck and the class branches run densely; the box branch only at
+    /// the candidates; the dense raw outputs ([`HeadOutput`]) are never made (on a GPU, only for an image with
+    /// more candidates than [`GPU_SITE_SLOTS`] on some level). Fails unless
     /// [`FoloModel::candidates_first_applies`].
+    ///
+    /// [`GPU_SITE_SLOTS`]: super::lazy_gpu::GPU_SITE_SLOTS
     ///
     /// [`HeadOutput`]: super::HeadOutput
     /// [`HeadOutput::detections`]: super::HeadOutput::detections
     pub fn predict_candidates(&self, x: &Tensor, nms: &NmsConfig) -> Result<Vec<ImageCandidates>> {
         if !self.candidates_first_applies(x.device(), nms) {
             return Err(folo_nn::Error::Invalid(
-                "FoloModel::predict_candidates needs a fused F32 model in eval mode on the CPU, single-label"
+                "FoloModel::predict_candidates needs a fused model in eval mode (F32 on the CPU), single-label"
                     .into(),
             ));
+        }
+        if !x.device().is_cpu() {
+            return self.predict_candidates_gpu(x, nms);
         }
         folo_core::cpu::in_pool(|| {
             let _g = no_grad();

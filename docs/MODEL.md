@@ -1034,11 +1034,18 @@ the dense branch). The detections are the dense path's when every conv gives eac
 dense conv gives it. FOLO's CPU path (fused f32 models in eval mode, single-label: `Predictor`,
 `FoloModel::predict_detections`) does so bit for bit: its 3×3 box convs run Winograd F(2×2, 3×3) over the list of
 2×2 output tiles that hold a needed site, where each output reads only its own 3×3 window, and the 1×1 `out` runs
-the dense GEMM over the sites' columns. The dense raw outputs (§6.3, `HeadOutput`) are not made on this path;
-training, validation (multi-label at `conf = 0.001`), export and every other consumer of them use the dense
-forward. Box fusion (§9.4) is served as on the dense path: `vote` needs only the boxes and scores, and `dfl` takes
-each candidate's side precisions from its own box logits with the dense CPU path's functions (the same softmax
-moments, so the same bits).
+the dense GEMM over the sites' columns. FOLO's GPU path (fused models in eval mode, f32 or f16, single-label)
+does so bit for bit too: a class pass lists each image's candidates and the pixels of their 3×3 windows into
+fixed-capacity lists on the device, the 3×3 box convs run the dense implicit GEMM (regular or tensor-core) with
+one column per listed pixel and the dense conv's split-K chunks, `out` runs the dense GEMM over the candidates'
+columns, and one decode appends the boxes to one record list per image, read back once; an image with more
+candidates on a level than the list holds (1024, 512, 256 for P3, P4, P5) takes the dense head instead. The dense
+raw outputs (§6.3, `HeadOutput`) are not made on these paths; training, validation (multi-label at
+`conf = 0.001`), export and every other consumer of them use the dense forward. Box fusion (§9.4) is served as on
+the dense path: `vote` needs only the boxes and scores, and `dfl` takes each candidate's side precisions from its
+own box logits, which are the dense logits bit for bit, with the dense path's functions: on the CPU the same
+softmax moments per candidate; on a GPU the dense path's moment ops (`HeadOutput::moments_on_device`) over the
+candidates' columns, which compute each column on its own, so the same bits.
 
 ## 10. Verification plan
 

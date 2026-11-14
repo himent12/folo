@@ -62,6 +62,8 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let (kh_n, kw_n) = (spec.get_u32("KH", 1), spec.get_u32("KW", 1));
     let (dh_n, dw_n) = (spec.get_u32("DH", 1), spec.get_u32("DW", 1));
     let tap_mask = mode == 1 && kh_n * kw_n <= 32;
+    // The forward conv at listed output pixels (`crate::kernels::conv::conv2d_sites`).
+    let sites = mode == 1 && spec.get_bool("SITES");
     let bias = spec.get_u32("BIAS_KIND", 0);
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`crate::kernels::gemm_cat`).
     let cat = spec.get_u32("CAT", 1);
@@ -89,6 +91,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> MC: array<{}>;", vty(vc, "CT"));
     if cat > 1 {
         s.push_str(&crate::kernels::gemm_cat::cat_source(cat, "MB", &vty(vb, "f16"), vb));
+    }
+    if sites {
+        s.push_str(crate::kernels::conv::SITES_BINDING);
     }
     for b in 0..2 {
         let _ = writeln!(s, "var<workgroup> As{b}: array<f16, {a_len}>;");
@@ -124,6 +129,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
          \x20 let offBias = pu(18u) + b1 * pu(19u) + b2 * pu(20u);\n",
     );
     let _ = writeln!(s, "  let m0 = wid.y * {bm}u; let n0 = wid.x * {bn}u;");
+    if sites {
+        s.push_str(crate::kernels::conv::SITES_LIVE);
+    }
     // The clamp keeps the fragment offsets in bounds whatever the driver reports (safety condition 2).
     let _ =
         writeln!(s, "  let sg = min(sgid, {}u); let wm = sg / {wgn}u; let wn = sg % {wgn}u;", SUBGROUPS - 1);
@@ -149,14 +157,8 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     match mode {
         // Forward: column = output pixel; B[k = (ci, kh, kw)][j] = X[ci][oh·SH − PH + kh·DH][ow·SW − PW + kw·DW].
         1 => {
-            let _ = writeln!(
-                s,
-                "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n\
-                 \x20 let cj = n0 + {}; let cjok = cj < N;\n\
-                 \x20 let coh = cj / OW; let cow = cj % OW;\n\
-                 \x20 let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;",
-                pb.inner_expr()
-            );
+            s.push_str("  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n");
+            s.push_str(&crate::kernels::conv::forward_column(&pb.inner_expr(), sites));
             if tap_mask {
                 // As in `crate::kernels::gemm`: which taps of this column's window lie inside the image (bit
                 // `kh·KW + kw`), and the window's top-left element (wrapping u32: only in-image taps are read).
@@ -228,7 +230,12 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             let _ = writeln!(s, "  var acc{i}_{j} = coop_mat16x16<f32, C>();");
         }
     }
-    let _ = writeln!(s, "  let nt = (K - kbeg + {bk}u - 1u) / {bk}u;");
+    if sites {
+        // No `K` tile for a workgroup past the live columns (see `crate::kernels::conv::SITES_RETIRE`).
+        let _ = writeln!(s, "  let nt = select(0u, (K - kbeg + {bk}u - 1u) / {bk}u, n0 < live);");
+    } else {
+        let _ = writeln!(s, "  let nt = (K - kbeg + {bk}u - 1u) / {bk}u;");
+    }
 
     // --- global → registers (ordinary bounds-checked loads) --------------------------------------------------
     let mut load = String::new();
@@ -542,6 +549,13 @@ pub(crate) static COOP: KernelDef = KernelDef {
 };
 
 /// [`COOP`] with `B` in up to [`crate::kernels::gemm_cat::MAX_CAT_PARTS`] buffers (`CAT`).
+/// [`COOP`] as the forward conv at listed output pixels (`CONV_MODE` 1 with `SITES`; binding 5 is the list).
+pub(crate) static COOP_SITES: KernelDef = KernelDef {
+    name: "coop_gemm_sites",
+    storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],
+    source: Source::Generated(gen_coop),
+};
+
 pub(crate) static COOP_CAT: KernelDef = KernelDef {
     name: "coop_gemm_cat",
     storage: &[

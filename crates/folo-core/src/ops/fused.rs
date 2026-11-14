@@ -201,6 +201,55 @@ impl Tensor {
         self.conv2d_act(weight, bias, p, act)
     }
 
+    /// [`Tensor::conv2d_act`] at the output pixels `sites` (`U32 [N, 1 + cap]` on the same device: per image a
+    /// count, then up to `cap` pixels `oy·OW + ox`, as [`Tensor::detect_class_sites`] lists them), on backends
+    /// with the kernel ([`crate::backend::Backend::conv2d_act_sites`]): `[N, O, cap]`, column `j` of image `n`
+    /// (for `j < min(count, cap)`) bit for bit the dense conv's value at that image's `j`-th pixel on this batch;
+    /// with `to_map`, the full `[N, O, OH, OW]` output holding those sites. Everything else is unspecified.
+    /// `Ok(None)` on the other backends. Inference only: fails while recording gradients for an input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv2d_act_sites(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        sites: &Tensor,
+        to_map: bool,
+    ) -> Result<Option<Tensor>> {
+        const OP: &str = "conv2d_act_sites";
+        if is_grad_enabled()
+            && (self.requires_grad() || weight.requires_grad() || bias.is_some_and(Tensor::requires_grad))
+        {
+            return Err(Error::invalid_arg(OP, "not differentiable: call it under no_grad"));
+        }
+        let n = self.dims().first().copied().unwrap_or(0);
+        let [sn, w] = *sites.dims() else {
+            return Err(Error::invalid_shape(OP, sites.shape(), "sites must be [N, 1 + cap]"));
+        };
+        if sites.dtype() != DType::U32 || sn != n || w == 0 {
+            return Err(Error::invalid_shape(OP, sites.shape(), "sites must be U32 [N, 1 + cap]"));
+        }
+        self.check_same_device(sites, OP)?;
+        let (dev, dt) = (self.device(), self.dtype());
+        let uniform = weight.device() == dev
+            && bias.is_none_or(|b| b.device() == dev && b.dtype() == dt)
+            && weight.dtype() == dt
+            && self.check_float(OP).is_ok();
+        let Some(shape) = conv_out_shape(self, weight, bias, p).filter(|_| uniform) else { return Ok(None) };
+        let shape = if to_map { shape } else { Shape::new(&[n, shape.dims()[1], w - 1]) };
+        let b = self.backend()?;
+        let mut ts = vec![self, weight, sites];
+        ts.extend(bias);
+        let r =
+            with_views_dyn(&ts, |v| b.conv2d_act_sites(v[0], v[1], v.get(3).copied(), p, act, v[2], to_map));
+        match r {
+            Ok(s) => Ok(Some(Tensor::wrap(s, shape, OP)?)),
+            Err(e) if unsupported(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Fused train-mode BatchNorm over the channels of `self` (`[N, C, H, W]`, statistics over `N·H·W`)
     /// followed by `act` (`None` is the identity), on backends that have the kernels
     /// ([`crate::backend::Backend::batch_norm_act`]); `Ok(None)` on the others.

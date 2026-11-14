@@ -62,6 +62,10 @@ name = "gpu_latency"
 harness = false
 
 [[bench]]
+name = "gpu_trained"
+harness = false
+
+[[bench]]
 name = "head"
 harness = false
 

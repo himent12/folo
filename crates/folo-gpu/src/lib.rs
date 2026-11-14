@@ -44,7 +44,7 @@ pub mod tensor;
 
 pub use backend::{
     GpuBackend, GpuStorage, context_for, dense_buffer, download_async, init, init_async, is_device_lost,
-    register, tensor_from_buffer,
+    poison_uninit, register, tensor_from_buffer,
 };
 pub use context::{
     AdapterSummary, Capabilities, GpuContext, GpuOptions, Staged, TracedOp, WorkStats, request_tensor_cores,

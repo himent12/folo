@@ -10,6 +10,7 @@ pub(crate) mod bounds;
 pub mod conv;
 pub mod coop;
 pub mod detect;
+pub mod detect_sites;
 pub mod elementwise;
 pub mod ew;
 pub mod gemm;
@@ -51,6 +52,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         conv::DEFS,
         coop::DEFS,
         detect::DEFS,
+        detect_sites::DEFS,
         elementwise::DEFS,
         ew::DEFS,
         gemm::DEFS,
