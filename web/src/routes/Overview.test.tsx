@@ -439,11 +439,11 @@ describe('Overview', () => {
     expect(target.querySelectorAll('#datasets li.card[data-id]')).toHaveLength(Math.min(4, datasets.length));
     // From 1280 px the panel takes its third but at least 380 px (design/UNIFIED.md §4 Overview); in a narrow panel the
     // dataset's name is cut last (its whole name in the tooltip), never wrapped, and only the split tag goes under it.
-    expect(row.querySelector('td.ds .cut')).not.toBeNull();
+    expect(row.querySelector('td.ds .ds-name')).not.toBeNull();
     const src = (f: string) => readFileSync(resolve(process.cwd(), f), 'utf8');
     expect(src('src/routes/Overview.tsx')).toMatch(/@media \(min-width: 1280px\) \{[^@]*grid-template-columns: minmax\(0, 2fr\) minmax\(380px, 1fr\);/);
     const narrow = src('src/routes/overview/BestModels.tsx').match(/@container \(max-width: 479\.98px\) \{([\s\S]*?)\n {2}\}/)![1]!;
-    expect(narrow).toContain('.m-tag');
+    expect(narrow).toContain('.ds-line');
     expect(narrow).not.toMatch(/white-space: normal|overflow-wrap/);
   });
 

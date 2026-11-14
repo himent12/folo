@@ -94,8 +94,9 @@ export default function BestModels(props: BestModelsProps) {
                       return (
                         <tr class="link" onclick={() => router.go(`/models/${t().m.id}`)}>
                           <td class="ds">
-                            <span class="cut" use:tooltip={evalOn()}>
-                              {t().ctx.datasetName}
+                            {/* Only the name is ever cut (a free-text name, whole in the tooltip); the split tag is a fact. */}
+                            <span class="ds-line" use:tooltip={evalOn()}>
+                              <span class="ds-name">{t().ctx.datasetName}</span>
                               {tag() ? (
                                 <span class="m-tag" data-fact>
                                   <span class="sep">{' · '}</span>
@@ -156,6 +157,18 @@ css`
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .ds-line {
+    display: flex;
+    width: 0;
+    min-width: 100%;
+    white-space: nowrap;
+  }
+  .ds-name {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .name.cut {
     width: auto;
     min-width: 0;
@@ -177,13 +190,14 @@ css`
     font-weight: var(--weight-regular);
   }
   .m-tag {
+    flex: none;
     color: var(--text-tertiary);
   }
   /* A narrow panel (a 1280 px window's third, a phone): the split goes under the dataset's name, never cut after it;
      the name itself stays on one line, cut last with its whole name in the tooltip. */
   @container (max-width: 479.98px) {
-    .m-tag {
-      display: block;
+    .ds-line {
+      flex-direction: column;
     }
     .sep {
       display: none;
