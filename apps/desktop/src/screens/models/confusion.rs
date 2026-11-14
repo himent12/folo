@@ -1,4 +1,5 @@
-//! The confusion matrix panel.
+//! The confusion matrix panel: the matrix on one luminance ramp (`confusion_ink`), the share of its
+//! row in each cell (or its count), and beside it the Most confused and Most missed lists.
 
 use std::rc::Rc;
 
@@ -8,14 +9,23 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+use super::confusion_ink::{
+    FLOOR, Kind, RANK_MAX, cell_fill, label_ink, missed_overall, rank_confusions, share_pct,
+};
 use crate::api::{Model, ModelEval};
-use crate::app::FoloApp;
-use crate::theme::{alpha, radius, theme, ty};
+use crate::app::{FoloApp, act};
+use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
 /// Row-label column of the confusion matrix (fits "hexagon" and "FP share"); the columns get the
 /// rest, so class names head them in full at 1280.
 const LABEL_W: f32 = 64.;
+/// The widest a matrix column gets: a full-width panel would otherwise stretch six cells into bars.
+const CELL_MAX: f32 = 76.;
+/// The lists' column beside the matrix.
+const RAIL_W: f32 = 300.;
+/// A class row needs this many objects to rank: one stray box can't top a list.
+const MIN_ROW: u32 = 20;
 
 impl FoloApp {
     pub(super) fn confusion_panel(
@@ -55,28 +65,10 @@ impl FoloApp {
         labels.truncate(n.saturating_sub(1));
         labels.push("Missed".into());
         // Rows are what was there, columns what was predicted: the last column is objects nothing
-        // detected, the last row detections with no object.
+        // detected, the last row detections with no object (a share of all false positives).
         let row_sums: Vec<u32> = ev.confusion.iter().map(|r| r.iter().sum::<u32>().max(1)).collect();
-        let max_count = ev.confusion.iter().flatten().copied().max().unwrap_or(1).max(1);
-        // The error ramp spans 0 to the largest error cell, false positives included (their row
-        // is a share of all false positives, a row % like the class rows'), so the worst error is
-        // the darkest cell and small ones stay apart (the key states that maximum).
-        let frac_of =
-            |r: usize, v: u32| if norm { v as f32 / row_sums[r] as f32 } else { v as f32 / max_count as f32 };
-        let last = ev.confusion.len().saturating_sub(1);
-        let max_err = ev
-            .confusion
-            .iter()
-            .enumerate()
-            .flat_map(|(r, row)| row.iter().enumerate().map(move |(c, &v)| (r, c, v)))
-            .filter(|&(r, c, _)| r != c && !(r == last && c == last))
-            .map(|(r, _, v)| frac_of(r, v))
-            .fold(0f32, f32::max)
-            .max(1e-6);
+        let share = |r: usize, v: u32| v as f32 / row_sums[r] as f32;
         let cell_h = px(32.);
-        // Correct cells on the success hue: a series or class colour would read as "that class"
-        // (series 1 is also the circle class's cyan).
-        let base = t.success_solid;
         // Column headings get a measured width (the column area as last laid out, split evenly):
         // a name that doesn't fit shows a short form, in full on hover.
         let cols = self.cm_cols.clone();
@@ -150,35 +142,29 @@ impl FoloApp {
                         )
                 })),
         );
-        // One cell at a time can be read out: under the pointer, or the matrix's keyboard cursor.
+        // One cell at a time can be read out: under the pointer, the matrix's keyboard cursor, or the
+        // one a ranked line points at.
         let sel = self.cm_cell.filter(|&(r, c)| r < n && c < n);
         let readout = sel.map(|(r, c)| {
             let v = ev.confusion[r][c];
-            let pct = |d: u32| format!("{:.0}%", v as f32 / d.max(1) as f32 * 100.);
+            let pct = if v == 0 { "0%".to_string() } else { format!("{}%", share_pct(share(r, v))) };
             let name = |i: usize| labels.get(i).cloned().unwrap_or_default();
             let count = int(v as u64);
             match (r == n - 1, c == n - 1) {
                 (true, true) => "No value: there is no unmatched detection of no object".to_string(),
                 (true, false) => {
                     format!(
-                        "False positives predicted as {}: {count} · {} of all false positives",
-                        name(c),
-                        pct(row_sums[r])
+                        "False positives predicted as {}: {count} · {pct} of all false positives",
+                        name(c)
                     )
                 }
-                (false, true) => {
-                    format!("{} missed: {count} · {} of {} objects", name(r), pct(row_sums[r]), name(r))
-                }
+                (false, true) => format!("{} missed: {count} · {pct} of {} objects", name(r), name(r)),
                 (false, false) if r == c => {
-                    format!("{} found: {count} · {} of {} objects", name(r), pct(row_sums[r]), name(r))
+                    format!("{} found: {count} · {pct} of {} objects", name(r), name(r))
                 }
-                (false, false) => format!(
-                    "{} predicted as {}: {count} · {} of {} objects",
-                    name(r),
-                    name(c),
-                    pct(row_sums[r]),
-                    name(r)
-                ),
+                (false, false) => {
+                    format!("{} predicted as {}: {count} · {pct} of {} objects", name(r), name(c), name(r))
+                }
             }
         });
         let rows = ev.confusion.iter().enumerate().map(|(r, row)| {
@@ -202,48 +188,20 @@ impl FoloApp {
                         }),
                 )
                 .children(row.iter().enumerate().map(|(c, &v)| {
-                    let frac = if norm { v as f32 / row_sums[r] as f32 } else { v as f32 / max_count as f32 };
-                    let diag = r == c;
                     let na = r == n - 1 && c == n - 1;
-                    // Under 1 % reads as noise: leave those cells blank, like zero.
-                    let tiny = norm && frac < 0.01;
-                    // An error under 2 % of its row is noise next to the ones that matter: it
-                    // keeps its number on the empty cells' fill, so the ramp marks real confusions.
-                    let faint = !diag && !na && (v as f32 / row_sums[r] as f32) < 0.02;
-                    let fill = if na {
-                        folo_ui::transparent_black()
-                    } else if v == 0 || faint {
-                        crate::theme::over(t.bg_panel, t.bg_hover)
-                    } else {
-                        // Correct cells on the success ramp; errors on a danger ramp (linear from a
-                        // faint floor up to the largest error), so small and large confusions stay apart.
-                        // The false-positive row is errors too: the same ramp and key.
-                        if diag {
-                            crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
-                        } else {
-                            crate::theme::over(t.bg_panel, alpha(t.danger_solid, err_alpha(frac / max_err)))
-                        }
-                    };
+                    // One ramp for every cell, the diagonal told apart by its place: the share of
+                    // the row, in both views (Counts changes the label only).
+                    let fill = if na { folo_ui::transparent_black() } else { cell_fill(&t, share(r, v)) };
                     let label = if na {
                         "–".to_string()
+                    } else if v == 0 {
+                        String::new()
                     } else if norm {
-                        if v == 0 {
-                            "·".to_string()
-                        } else if tiny {
-                            "<1%".to_string()
-                        } else {
-                            format!("{:.0}%", v as f32 / row_sums[r] as f32 * 100.)
-                        }
+                        format!("{}%", share_pct(share(r, v)))
                     } else {
                         int(v as u64)
                     };
-                    let strong = frac > 0.55;
-                    // Pick the label colour from the composited cell, not the theme.
-                    let ink = if na || v == 0 || faint {
-                        t.text_tertiary
-                    } else {
-                        t.readable_on(crate::theme::over(t.bg_panel, fill))
-                    };
+                    let ink = if na { t.text_tertiary } else { label_ink(fill) };
                     let picked = sel == Some((r, c));
                     div()
                         .id(SharedString::from(format!("cm-{r}-{c}")))
@@ -266,55 +224,46 @@ impl FoloApp {
                                 .size_full()
                                 .rounded(px(3.))
                                 .bg(fill)
-                                .when(diag && !na, |d| d.border_1().border_color(alpha(base, 0.9)))
+                                // No objects: the panel itself, edged by the hairline grid.
+                                .when(v == 0 && !na, |d| d.border_1().border_color(t.line_subtle))
                                 // The cell being read out.
                                 .when(picked, |d| d.border_2().border_color(t.text_primary))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(
-                                    text(ty::SM, ink)
-                                        .tnum()
-                                        .when(strong, |d| d.font_weight(FontWeight::MEDIUM))
-                                        .child(label),
-                                ),
+                                .child(text(ty::SM, ink).tnum().child(label)),
                         )
                 }))
         });
-        // Scale key for the error ramp: a continuous strip from 0 to 100 %.
+        // The ramp's key: empty, the three floor steps, then the even ramp from 10 % to 100 %.
+        let swatch = |v: f32| {
+            div()
+                .w(px(14.))
+                .h(px(10.))
+                .rounded(px(2.))
+                .bg(cell_fill(&t, v))
+                .when(v == 0., |d| d.border_1().border_color(t.line_subtle))
+        };
+        let tick = |s: &str| text(ty::SM, t.text_tertiary).tnum().child(s.to_string());
         let key = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(6.))
-            .child(
-                div()
-                    .w(px(10.))
-                    .h(px(10.))
-                    .rounded(px(2.))
-                    .bg(crate::theme::over(t.bg_inset, alpha(base, 0.8)))
-                    .border_1()
-                    .border_color(alpha(base, 0.9)),
-            )
-            .child(text(ty::SM, t.text_tertiary).mr(px(6.)).child("correct"))
-            .child(text(ty::SM, t.text_tertiary).ml(px(2.)).child(if norm {
-                "Error share 2%"
-            } else {
-                "Errors 0"
+            .child(text(ty::SM, t.text_tertiary).mr(px(4.)).child("Share of the row"))
+            .child(swatch(0.))
+            .child(tick("0").mr(px(4.)))
+            .children([(0.005, "<1%"), (FLOOR[0], "1%"), (FLOOR[1], "5%")].into_iter().map(|(v, s)| {
+                div().flex().items_center().gap(px(4.)).mr(px(4.)).child(swatch(v)).child(tick(s))
             }))
-            .child(div().flex().h(px(8.)).w(px(96.)).rounded(px(2.)).overflow_hidden().children((0..12).map(
-                |i| {
-                    let f = i as f32 / 11.;
-                    div()
-                        .flex_1()
-                        .h_full()
-                        .bg(crate::theme::over(t.bg_inset, alpha(t.danger_solid, err_alpha(f))))
-                },
-            )))
-            .child(text(ty::SM, t.text_tertiary).tnum().child(if norm {
-                format!("{:.0}% max", max_err * 100.)
-            } else {
-                format!("{} max", int((max_err * max_count as f32).round() as u64))
-            }));
+            .child(tick("10%"))
+            .child(div().flex().h(px(10.)).w(px(96.)).rounded(px(2.)).overflow_hidden().children(
+                (0..12).map(|i| {
+                    let v = FLOOR[2] + (1. - FLOOR[2]) * i as f32 / 11.;
+                    div().flex_1().h_full().bg(cell_fill(&t, v))
+                }),
+            ))
+            .child(tick("100%"));
         // The cells are one Tab stop: arrows move a cursor cell (the readout follows), Esc clears.
         let rows: Vec<AnyElement> = rows.map(|r| r.into_any_element()).collect();
         let fh = self.fh("cm-grid", cx);
@@ -357,6 +306,49 @@ impl FoloApp {
                 }
             }))
             .children(rows);
+        let matrix = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .w_full()
+            .max_w(px(LABEL_W + 6. + n as f32 * (CELL_MAX + 2.)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(text(ty::SM, t.text_tertiary).w(px(LABEL_W)).pr(px(8.)).text_right().child("Actual ↓"))
+                    .child(text(ty::SM, t.text_tertiary).flex_1().child("Predicted →")),
+            )
+            .child(header_row)
+            .child(grid)
+            // The key sits under the matrix, away from the column labels.
+            .child(div().pt(px(10.)).child(key))
+            // The selected cell in words, else what the rows mean.
+            .child(div().pt(px(4.)).w_full().min_w_0().child(match readout {
+                Some(r) => text(ty::SM, t.text_primary).tnum().whitespace_normal().child(r),
+                None => text(ty::SM, t.text_tertiary).whitespace_normal().child(if norm {
+                    "Rows are actual objects; the bottom row splits false positives by class. Hover or focus a cell to read it."
+                } else {
+                    "Counts of objects and unmatched detections. Hover or focus a cell to read it."
+                }),
+            }))
+            // The grid is one Tab stop: with keyboard focus, how to move in it (in the strip
+            // under the page, as every keyed control says it).
+            .when(ring, |d| {
+                self.hint_keys("Arrows move the cell · Home / End row ends · Esc clears");
+                d
+            })
+            .child(div().pt(px(4.)).child(text(ty::SM, t.text_tertiary).tnum().child(match &eval_ds {
+                Some((d, split)) => format!("{}{cm_rule}", split_label(d, split, Some(ev.images as u64))),
+                // Unknown dataset: the split isn't known either.
+                None => format!("Evaluation · {} images{cm_rule}", int(ev.images as u64)),
+            })))
+            // Evaluated on another split than validation: the server's sentence says why.
+            .when_some(ev.split_fallback.as_ref(), |d, f| {
+                d.child(text(ty::SM, t.text_secondary).child(f.message.clone()))
+            });
+        let stacked = self.content_width(window) < LABEL_W + n as f32 * 48. + RAIL_W + 80.;
+        let rail = self.confusion_rail(ev, &labels, window, cx);
         panel(&t)
             .flex_1()
             .min_w_0()
@@ -366,61 +358,114 @@ impl FoloApp {
             .child(
                 div()
                     .flex()
-                    .flex_col()
+                    .when(stacked, |d| d.flex_col())
+                    .gap(px(24.))
                     .px(px(16.))
                     .py(px(12.))
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .child(
-                                text(ty::SM, t.text_tertiary)
-                                    .w(px(LABEL_W))
-                                    .pr(px(8.))
-                                    .text_right()
-                                    .child("Actual ↓"),
-                            )
-                            .child(text(ty::SM, t.text_tertiary).flex_1().child("Predicted →")),
-                    )
-                    .child(header_row)
-                    .child(grid)
-                    // The key sits under the matrix, away from the column labels.
-                    .child(div().pt(px(10.)).child(key))
-                    // The selected cell in words, else what the rows mean.
-                    .child(div().pt(px(4.)).w_full().min_w_0().child(match readout {
-                        Some(r) => text(ty::SM, t.text_primary).tnum().whitespace_normal().child(r),
-                        None => text(ty::SM, t.text_tertiary).whitespace_normal().child(if norm {
-                            "Rows are actual objects; the bottom row splits false positives by class. Hover or focus a cell to read it."
-                        } else {
-                            "Counts of objects and unmatched detections. Hover or focus a cell to read it."
-                        }),
-                    }))
-                    // The grid is one Tab stop: with keyboard focus, how to move in it (in the strip
-                    // under the page, as every keyed control says it).
-                    .when(ring, |d| {
-                        self.hint_keys("Arrows move the cell · Home / End row ends · Esc clears");
-                        d
-                    })
-                    .child(
-                        div().pt(px(4.)).child(
-                            text(ty::SM, t.text_tertiary)
-                                .tnum()
-                                .child(match &eval_ds {
-                                    Some((d, split)) => {
-                                        format!("{}{cm_rule}", split_label(d, split, Some(ev.images as u64)))
-                                    }
-                                    // Unknown dataset: the split isn't known either.
-                                    None => format!("Evaluation · {} images{cm_rule}", int(ev.images as u64)),
-                                }),
-                        ),
-                    )
-                    // Evaluated on another split than validation: the server's sentence says why.
-                    .when_some(ev.split_fallback.as_ref(), |d, f| {
-                        d.child(text(ty::SM, t.text_secondary).child(f.message.clone()))
-                    }),
+                    .child(div().flex_1().min_w_0().child(matrix))
+                    .child(div().when(!stacked, |d| d.w(px(RAIL_W)).flex_none()).child(rail)),
             )
             .into_any_element()
+    }
+
+    /// What goes wrong most, ranked: the classes most taken for another and most missed, each line
+    /// showing its cell in the matrix (click or Enter); then the share missed overall.
+    fn confusion_rail(
+        &mut self,
+        ev: &ModelEval,
+        labels: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let all = rank_confusions(&ev.confusion, usize::MAX, MIN_ROW);
+        let any_errors = !rank_confusions(&ev.confusion, 1, 1).is_empty();
+        let name = |i: usize| labels.get(i).cloned().unwrap_or_else(|| format!("class {i}"));
+        let mut col = div().flex().flex_col().gap(px(12.));
+        for (kind, title) in [(Kind::Confused, "Most confused"), (Kind::Missed, "Most missed")] {
+            let lines: Vec<_> = all.iter().filter(|e| e.kind == kind).take(RANK_MAX).copied().collect();
+            if lines.is_empty() {
+                continue;
+            }
+            let mut list = div().flex().flex_col().child(
+                text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).h(px(24.)).child(title),
+            );
+            for e in lines {
+                let key = format!("cm-rank-{}-{}", e.r, e.c);
+                let what = if e.kind == Kind::Missed {
+                    name(e.r)
+                } else {
+                    format!("{} → {}", name(e.r), name(e.c))
+                };
+                let pct = format!("{}%", share_pct(e.v));
+                let tip = format!(
+                    "{what}: {} of {}, {pct} · show in the matrix",
+                    int(e.count as u64),
+                    int(e.total as u64)
+                );
+                let picked = self.cm_cell == Some((e.r, e.c));
+                let row = div()
+                    .id(SharedString::from(key.clone()))
+                    .h(px(30.))
+                    .px(px(6.))
+                    .mx(px(-6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .when(picked, |d| d.bg(t.bg_selected))
+                    .hover(|s| s.bg(t.bg_hover))
+                    .active(|s| s.bg(t.bg_active))
+                    .tooltip(crate::controls::tip(tip, None))
+                    .child(class_swatch(&t, e.r as u32, 8.))
+                    .child(text(ty::SM, t.text_primary).flex_1().min_w_0().ellipsis().child(what))
+                    .child(text(ty::SM, t.text_tertiary).tnum().flex_none().child(format!(
+                        "{} of {}",
+                        int(e.count as u64),
+                        int(e.total as u64)
+                    )))
+                    .child(
+                        text(ty::SM, t.text_primary).tnum().w(px(36.)).flex_none().text_right().child(pct),
+                    );
+                let cell = (e.r, e.c);
+                list = list.child(self.bind(
+                    row,
+                    &key,
+                    radius::SM,
+                    window,
+                    cx,
+                    act(move |this, _, cx| {
+                        this.cm_cell = if this.cm_cell == Some(cell) { None } else { Some(cell) };
+                        cx.notify();
+                    }),
+                ));
+            }
+            col = col.child(list);
+        }
+        if all.is_empty() {
+            col = col.child(text(ty::SM, t.text_tertiary).whitespace_normal().child(if any_errors {
+                "No class with 20 or more objects is confused or missed: the few errors are in the matrix."
+            } else {
+                "No confusions and no misses: every object was found as its own class."
+            }));
+        }
+        if let Some(v) = missed_overall(&ev.confusion) {
+            let pct = share_pct(v);
+            col = col.child(
+                div()
+                    .flex()
+                    .gap(px(4.))
+                    .child(
+                        text(ty::SM, t.text_primary)
+                            .tnum()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(format!("{}%", if pct.is_empty() { "0".into() } else { pct })),
+                    )
+                    .child(text(ty::SM, t.text_tertiary).child("of all objects missed overall.")),
+            );
+        }
+        col.into_any_element()
     }
 }
 
@@ -428,41 +473,4 @@ impl FoloApp {
 fn short_name(name: &str) -> String {
     let short: String = name.chars().take(3).collect();
     if short.chars().count() < name.chars().count() { format!("{short}.") } else { short }
-}
-
-/// Fill opacity of an error cell: linear over `frac`, the cell's share of the largest
-/// class-to-class confusion shown, from 0.18 (errors under 2 % of their row aren't filled at all,
-/// so the lightest fill is a real confusion) to 0.72.
-/// The square-root ramp it replaces lifted 1–4 % confusions toward full red, so the whole
-/// off-diagonal read as alarm. The top stops at 0.72 so the strongest cell's label (dark or white,
-/// whichever reads better) keeps 4.5:1 in both themes; at 0.8 neither did (4.36:1).
-fn err_alpha(frac: f32) -> f32 {
-    0.18 + 0.54 * frac.clamp(0., 1.)
-}
-
-#[cfg(test)]
-mod matrix_tests {
-    use crate::theme::{Mode, Theme, alpha, over};
-    use folo_ui::{Hsla, Rgba};
-
-    fn contrast(a: Hsla, b: Hsla) -> f32 {
-        let lum = |c: Hsla| {
-            let c: Rgba = c.into();
-            let f = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
-            0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
-        };
-        let (x, y) = (lum(a), lum(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
-    }
-
-    #[test]
-    fn error_cells_keep_their_label_readable() {
-        for t in [Theme::new(Mode::Dark), Theme::new(Mode::Light)] {
-            for frac in (0..=100).map(|i| i as f32 / 100.) {
-                let cell = over(t.bg_panel, alpha(t.danger_solid, super::err_alpha(frac)));
-                let c = contrast(t.readable_on(cell), cell);
-                assert!(c >= 4.5, "{:?} error cell at {frac}: {c:.2}:1", t.mode);
-            }
-        }
-    }
 }

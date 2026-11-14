@@ -3,6 +3,8 @@
 
 mod class_table;
 mod confusion;
+mod confusion_ink;
 mod detail;
+mod details;
 mod list;
 mod pr;

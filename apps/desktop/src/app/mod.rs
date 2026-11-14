@@ -362,6 +362,8 @@ pub struct FoloApp {
     pub log_scroll: ScrollHandle,
     /// The run page's Per class list, scrolled inside its panel.
     pub per_class_scroll: ScrollHandle,
+    /// The model page's class table, scrolled inside the precision-recall panel.
+    pub pc_scroll: ScrollHandle,
     /// Log lines on screen at the last render (new ones scroll into view while following).
     pub log_seen: u64,
     /// The log follows its tail. Only a scroll changes this (the offset moved); a reflow that
@@ -627,6 +629,7 @@ impl FoloApp {
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
             per_class_scroll: ScrollHandle::new(),
+            pc_scroll: ScrollHandle::new(),
             log_seen: 0,
             log_follow: true,
             log_last_y: px(0.),

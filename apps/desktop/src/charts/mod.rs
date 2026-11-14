@@ -23,7 +23,7 @@ pub use axis::{axis_pow, in_pow, nice_step, superscript};
 pub use cursor::{nearest, value_at, value_near};
 pub use ease::{Points, ease_key};
 pub use histogram::histogram;
-pub use line::{DASH_DOT, LONG_DASH, line_chart};
+pub use line::line_chart;
 pub use marks::End;
 pub use smooth::{ema, smoothed};
 pub use sparkline::sparkline;

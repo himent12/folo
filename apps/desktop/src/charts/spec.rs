@@ -21,8 +21,6 @@ pub struct Series {
     pub dashed: bool,
     /// Dotted (wins over dashed).
     pub dotted: bool,
-    /// Any other dash pattern (wins over both), for sets of more than three lines.
-    pub pattern: Option<&'static [f32]>,
     /// How the line ends: the mark on its last point (`charts::marks`).
     pub end: End,
     /// The ink of the line's name at its end, on a chart that names its lines there
@@ -41,11 +39,6 @@ impl Series {
         self
     }
 
-    pub fn pattern(mut self, dash: &'static [f32]) -> Self {
-        self.pattern = Some(dash);
-        self
-    }
-
     pub fn new(name: impl Into<SharedString>, color: Hsla, points: Arc<Vec<(f32, f32)>>) -> Self {
         Self {
             name: name.into(),
@@ -56,7 +49,6 @@ impl Series {
             width: 1.5,
             dashed: false,
             dotted: false,
-            pattern: None,
             end: End::None,
             end_label: None,
         }

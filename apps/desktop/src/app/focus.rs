@@ -161,6 +161,9 @@ impl FoloApp {
             vec![self.dialog_scroll.clone()]
         } else if matches!(self.route, Route::Playground) {
             vec![self.play_side_scroll.clone(), self.page_scroll.clone()]
+        } else if matches!(self.route, Route::Model(_)) {
+            // A class row scrolls into view inside its table first.
+            vec![self.pc_scroll.clone(), self.page_scroll.clone()]
         } else {
             vec![self.page_scroll.clone()]
         };
