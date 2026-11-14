@@ -36,19 +36,22 @@
 //! thread scheduling: repeated runs are bitwise identical.
 //!
 //! Files: `assignment.rs` ([`assign_batch`], the detached host part), `terms.rs` ([`loss_with_assignment`] and
-//! [`ciou`], the differentiable terms), `device.rs` ([`assign_batch_device`], the folo-gpu kernels) and `tests.rs`.
+//! [`ciou`], the differentiable terms), `device.rs` ([`assign_batch_device`], the folo-gpu kernels), `distill/`
+//! (the opt-in distillation term of §8.9, [`distill_loss`]) and `tests.rs`.
 //! This file: [`LossConfig`], [`ImageTargets`], [`BatchAssignment`], [`detection_loss`] and [`dual_loss`] (§6.6).
 //!
 //! [`assign`]: crate::assign::assign
 
 mod assignment;
 mod device;
+pub mod distill;
 mod terms;
 #[cfg(test)]
 mod tests;
 
 pub use assignment::assign_batch;
 pub use device::assign_batch_device;
+pub use distill::{Consensus, DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss};
 pub use terms::{ciou, loss_with_assignment};
 
 use crate::assign::TalConfig;
