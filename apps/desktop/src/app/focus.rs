@@ -188,10 +188,11 @@ thread_local! {
     pub(super) static REVEAL: RefCell<Option<Vec<ScrollHandle>>> = const { RefCell::new(None) };
 }
 
-/// Scroll the first candidate container holding `b` (horizontally) so `b` is fully visible,
-/// clear of the edge fades (24 px, so 32 at the top) and of the key-hint strip over the page's
-/// bottom (32 px, so 40 there). Runs once per request.
-fn reveal(b: folo_ui::Bounds<Pixels>, window: &mut Window) {
+/// Scroll each candidate container holding `b` (horizontally), innermost first, so `b` is fully
+/// visible, clear of the edge fades (24 px, so 32 at the top) and of the key-hint strip over the
+/// page's bottom (32 px, so 40 there): a row in a list that scrolls inside the page comes into the
+/// list's view, then the page brings the list's row into its own. Runs once per request.
+fn reveal(mut b: folo_ui::Bounds<Pixels>, window: &mut Window) {
     let Some(handles) = REVEAL.with(|r| r.borrow_mut().take()) else { return };
     let margin = px(8.);
     let (top_m, bottom_m) = (px(32.), px(40.));
@@ -229,8 +230,9 @@ fn reveal(b: folo_ui::Bounds<Pixels>, window: &mut Window) {
             let y = (off.y - dy).clamp(-h.max_offset().height, px(0.));
             h.set_offset(folo_ui::point(off.x, y));
             window.refresh();
+            // Where the control is now, for the containers around this one.
+            b.origin.y -= off.y - y;
         }
-        return;
     }
 }
 

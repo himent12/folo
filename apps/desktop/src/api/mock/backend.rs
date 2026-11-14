@@ -454,6 +454,7 @@ impl Backend for MockBackend {
 
     fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<RunSamples> {
         self.check()?;
+        self.hold_point(&format!("samples {id}"));
         let (curve, dataset_id, done) = {
             let runs = self.runs.lock().unwrap();
             let f = runs

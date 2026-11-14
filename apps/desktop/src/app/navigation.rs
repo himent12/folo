@@ -105,9 +105,11 @@ impl FoloApp {
         self.menu_open = None;
         self.run_x_fit = None;
         self.log_filter = crate::app::LogFilter::All;
-        // An earlier epoch's samples were picked: the next run page starts on the latest again.
+        // An earlier epoch's samples were picked: the next run page starts on the latest again, and a
+        // request for the picked epoch still on its way is dropped when it lands.
         if self.sample_epoch.take().is_some() {
             self.store.samples.clear();
+            self.history_tickets.retain(|(_, what), _| *what != "samples");
         }
         if !self.focus_within_page(window) {
             window.focus(&self.root_focus);

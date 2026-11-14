@@ -15,7 +15,8 @@ pub fn ema(points: &[(f32, f32)], w: f32) -> Vec<(f32, f32)> {
 }
 
 /// Reduce to at most ~2 points per pixel column, keeping each column's min and max so spikes
-/// survive downsampling.
+/// survive downsampling, and the series' last point, so the line ends (and its end mark sits)
+/// where the data does.
 fn envelope(points: &[(f32, f32)], x0: f32, x1: f32, columns: usize) -> Vec<(f32, f32)> {
     if points.len() <= columns * 2 || x1 <= x0 {
         return points.to_vec();
@@ -48,6 +49,11 @@ fn envelope(points: &[(f32, f32)], x0: f32, x1: f32, columns: usize) -> Vec<(f32
                 out.push(lo);
             }
         }
+    }
+    if let Some(&last) = points.last()
+        && out.last() != Some(&last)
+    {
+        out.push(last);
     }
     out
 }
@@ -114,6 +120,17 @@ mod tests {
         let e = envelope(&pts, 0.0, 999.0, 50);
         assert!(e.len() <= 100);
         assert!(e.iter().any(|p| p.1 == 9.0));
+    }
+
+    #[test]
+    fn envelope_ends_at_the_last_point() {
+        // A flat last column keeps its first point as both extremes; the line must still end
+        // on the latest sample.
+        let pts: Vec<(f32, f32)> =
+            (0..1000).map(|i| (i as f32, if i < 990 { i as f32 } else { 2.0 })).collect();
+        let e = envelope(&pts, 0.0, 999.0, 50);
+        assert_eq!(e.last(), Some(&(999.0, 2.0)));
+        assert!(e.windows(2).all(|w| w[0].0 <= w[1].0), "x stays in order");
     }
 
     #[test]

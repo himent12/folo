@@ -278,3 +278,31 @@ fn a_released_run_reads_provisional_while_the_instance_list_loads() {
         assert_eq!(panel_cost(&c, None, true), format!("{usd} so far"));
     });
 }
+
+#[test]
+fn an_earlier_epochs_samples_landing_after_leaving_the_page_are_dropped() {
+    // A past epoch was picked on the run page, and the page was left before its samples came.
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let held = api.hold("samples run_52e8");
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                this.sample_epoch = Some(5);
+                this.ensure_samples("run_52e8", cx);
+            })
+            .unwrap()
+    });
+    app.run_until_held(1);
+    held.wait_held();
+    app.update(|cx| window.update(cx, |this, w, cx| this.navigate(crate::app::Route::Runs, w, cx)).unwrap());
+    drop(held);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.sample_epoch, None, "the next run page starts on the latest epoch");
+        assert!(
+            !this.store.samples.contains_key("run_52e8"),
+            "epoch 5's late answer must not stand in for the latest"
+        );
+    });
+}
