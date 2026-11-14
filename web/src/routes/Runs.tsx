@@ -235,7 +235,7 @@ export default function Runs() {
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds right now, "10 runs · 3 active ·
   // 1 failed · 2h 15m of training", over every run whatever the filter; a filtered list says what it shows under it.
   const trained = computed(() => (runs.data ?? []).reduce((a, r) => a + (trainingSeconds(r, now.get()) ?? 0), 0));
-  const facts = computed(() => {
+  const facts = computed<string[] | null>(() => {
     const all = runs.data;
     if (!all?.length) return null;
     const n = (k: number, one: string, many = `${one}s`) => `${k.toLocaleString('en-US')} ${k === 1 ? one : many}`;
@@ -245,8 +245,7 @@ export default function Runs() {
       count('failed') ? `${count('failed')} failed` : '',
       trained.get() > 0 ? `${duration(trained.get())} of training` : '',
     ]
-      .filter(Boolean)
-      .join(' · ');
+      .filter(Boolean);
   });
 
   function toggle(id: string) {
@@ -281,8 +280,9 @@ export default function Runs() {
     <>
       <Page
         title="Runs"
-        sub={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
-        subPhone={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
+        sub={facts.get() ? () => <span class="num">{facts.get()!.join(' · ')}</span> : undefined}
+        // Phones: the first two facts, beside the page's action (the rest are a wider screen's).
+        subPhone={facts.get() ? () => <span class="num">{facts.get()!.slice(0, 2).join(' · ')}</span> : undefined}
         actions={() => (
           <>
             {runs.data?.length !== 0 ? (

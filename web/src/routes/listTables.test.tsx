@@ -225,7 +225,9 @@ describe('Datasets: cards in every state', () => {
   it('draws each mosaic from the first images of its dataset, as thumbnails with their boxes', async () => {
     // happy-dom never reports a card in view: without an observer a card reads its mosaic at once.
     vi.stubGlobal('IntersectionObserver', undefined);
-    onTestFinished(() => vi.unstubAllGlobals());
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
     const api = new MockApi('normal', 0);
     const asked = vi.spyOn(api, 'datasetImages');
     await open(Datasets, '/datasets', api);

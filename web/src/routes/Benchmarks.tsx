@@ -105,7 +105,7 @@ export default function Benchmarks() {
   });
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "4 benchmarks · 1,240 images ·
   // 9 entries · 1 running", whatever the filter; a narrowed list says what it shows under it.
-  const facts = computed(() => {
+  const facts = computed<string[] | null>(() => {
     const all = benches.data;
     if (!all?.length) return null;
     const active = count('active');
@@ -115,8 +115,7 @@ export default function Benchmarks() {
       entriesText(all.reduce((a, b) => a + b.entries, 0)),
       active ? `${active} running` : '',
     ]
-      .filter(Boolean)
-      .join(' · ');
+      .filter(Boolean);
   });
 
   const offline = computed(() => !benches.data && isOffline(benches.error));
@@ -130,8 +129,9 @@ export default function Benchmarks() {
       <Page
         title="Benchmarks"
         // What the page holds (what a benchmark is, frozen labeled images that grade any model, is the empty state's).
-        sub={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
-        subPhone={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
+        sub={facts.get() ? () => <span class="num">{facts.get()!.join(' · ')}</span> : undefined}
+        // Phones: the first two facts, beside the page's action (the rest are a wider screen's).
+        subPhone={facts.get() ? () => <span class="num">{facts.get()!.slice(0, 2).join(' · ')}</span> : undefined}
         actions={() => (
           <>
             {!unsupported.get() ? (

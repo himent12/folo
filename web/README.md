@@ -28,6 +28,10 @@ can't send"). So `npm run dev` without a server shows that offline state:
 start `folo serve`, or open `http://localhost:5173/?mock=1`.
 
 - Design tokens come from `../design/tokens.json` (see `../design/README.md`). After editing it, run `npm run tokens`.
+- The look is one with FOLO Desktop's: `../design/UNIFIED.md` says screen by screen what each shows, and
+  `DESIGN_DIRECTION.md` the rules Studio's code follows. Screens build from the shared parts, never their own copies:
+  `shell/Page` (title, status `badge`, the facts line), `ui/Panel`, `ui/KpiStrip` and `ui/Stat`, `ui/StatusBadge`,
+  `ui/Segmented`, `ui/SortHeader`, `ui/Ident` (names in sans, ids and paths in mono) and the `.table` class.
 - `src/lib/design/` generated tokens + base CSS · `src/lib/ui/` components · `src/lib/shell/` app chrome ·
   `src/lib/charts/` SVG/canvas charts · `src/lib/api/` typed client + dev mock · `src/routes/` screens (each a chunk of
   its own, `src/routes.ts`).

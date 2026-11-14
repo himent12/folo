@@ -166,12 +166,13 @@ css`
     outline: var(--size-focus-ring) solid var(--focus);
     outline-offset: var(--size-focus-offset);
   }
-  /* The 2 × 2 mosaic: four 4:3 cells with 1 px seams, on the inset well an image letterboxes on. */
+  /* The 2 × 2 mosaic: four 16:9 cells with 1 px seams (a wide card stays short), on the inset well an image letterboxes
+     on. */
   .mosaic {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1px;
-    aspect-ratio: 8 / 6;
+    aspect-ratio: 16 / 9;
     background: var(--line-subtle);
     border-bottom: 1px solid var(--line-subtle);
   }

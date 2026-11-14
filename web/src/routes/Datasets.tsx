@@ -142,11 +142,11 @@ export default function Datasets() {
   });
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "5 datasets · 9,400 images ·
   // 64,086 boxes", whatever the filter; a narrowed list says what it shows under it.
-  const facts = computed(() => {
+  const facts = computed<string[] | null>(() => {
     const list = datasets.data;
     if (!list?.length) return null;
     const boxes = list.reduce((a, d) => a + (d.stats?.boxes ?? 0), 0);
-    return [count(list.length, 'dataset'), count(list.reduce((a, d) => a + imageCount(d), 0), 'image'), boxes ? count(boxes, 'box') : ''].filter(Boolean).join(' · ');
+    return [count(list.length, 'dataset'), count(list.reduce((a, d) => a + imageCount(d), 0), 'image'), boxes ? count(boxes, 'box') : ''].filter(Boolean);
   });
 
   // Nothing answers: adding a dataset needs the server, so the action is disabled and says why (as on Runs).
@@ -164,9 +164,9 @@ export default function Datasets() {
         more={[{ label: 'Label images', icon: Tags, href: href('/datasets/label') }]}
         moreLabel="More dataset actions"
         // What the page holds (what a dataset is, YOLO or COCO folders, is the empty state's).
-        sub={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
-        // Phones: one header row, this line beside Add dataset.
-        subPhone={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
+        sub={facts.get() ? () => <span class="num">{facts.get()!.join(' · ')}</span> : undefined}
+        // Phones: the first two facts, beside the page's action (the rest are a wider screen's).
+        subPhone={facts.get() ? () => <span class="num">{facts.get()!.slice(0, 2).join(' · ')}</span> : undefined}
         actions={() => (
           <Gate reason={offline.get() ? OFFLINE_REASON : null}>
             {(why) => (

@@ -435,6 +435,11 @@ describe('Runs: one fact per column (design/UNIFIED.md §4)', () => {
       flushSync();
       if (!target.querySelector('header .sub')?.textContent?.includes(`${runs.length} runs`)) throw new Error('no facts yet');
     });
+    // Every fact on a wider screen; a phone's one header row keeps the first two beside New run, so none is cut.
+    const wide = target.querySelector('header .sub.wide-only')!.textContent!.trim();
+    expect(wide.split(' · ').length).toBeGreaterThan(2);
+    expect(wide).toContain('of training');
+    expect(target.querySelector('header .sub.phone-only')!.textContent!.trim()).toBe(wide.split(' · ').slice(0, 2).join(' · '));
     expect(target.querySelector('.list-foot')).toBeNull();
     await open(Runs, '/runs?status=failed', api);
     const foot = await vi.waitFor(() => {
