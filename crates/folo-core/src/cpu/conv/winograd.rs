@@ -129,6 +129,46 @@ fn block_tiles(c: usize, o: usize, tiles: usize, threads: usize) -> usize {
     cache.min(spread).clamp(NR, 8 * NR)
 }
 
+/// The 2x2 output tiles a Winograd pass computes in one image: all of them (row-major `0..n`), or a list of
+/// tile indices `ty · ⌈OW/2⌉ + tx`, ascending and distinct.
+#[derive(Clone, Copy)]
+enum Tiles<'a> {
+    All(usize),
+    List(&'a [u32]),
+}
+
+impl Tiles<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Tiles::All(n) => *n,
+            Tiles::List(l) => l.len(),
+        }
+    }
+
+    /// The runs of the tiles at positions `t0..t1` (in a `tw`-wide tile grid) that are consecutive tiles of one
+    /// tile row, at most [`SEG`] long: `(ty, tx0, len, pos)` with `pos` the run's first position relative to `t0`.
+    fn segments(self, t0: usize, t1: usize, tw: usize) -> impl Iterator<Item = (usize, usize, usize, usize)> {
+        let mut t = t0;
+        std::iter::from_fn(move || {
+            if t >= t1 {
+                return None;
+            }
+            let (tile, len) = match self {
+                Tiles::All(_) => (t, (tw - t % tw).min(t1 - t).min(SEG)),
+                Tiles::List(l) => {
+                    let first = l[t] as usize;
+                    let room = (tw - first % tw).min(t1 - t).min(SEG);
+                    let len = (1..room).find(|&k| l[t + k] as usize != first + k).unwrap_or(room);
+                    (first, len)
+                }
+            };
+            let seg = (tile / tw, tile % tw, len, t - t0);
+            t += len;
+            Some(seg)
+        })
+    }
+}
+
 /// Forward conv2d of a [`winograd_shape`] conv into `out` (`[N, O, OH, OW]`, overwritten) with the transformed
 /// weights `u` ([`transform_weights`]). `epi`, if given, sees every finished output element once.
 /// An image with at least half as many blocks as threads runs each block as one task. A smaller one (a 20x20
@@ -143,14 +183,53 @@ pub(crate) fn winograd_forward(
     g: &ConvGeom,
     epi: Option<ChannelEpilogue<'_>>,
 ) {
+    winograd_run(x, u, out, g, epi, None);
+}
+
+/// [`winograd_forward`] of only the output tiles `tiles[img]` of each image (tile indices `ty · ⌈OW/2⌉ + tx`,
+/// ascending and distinct): every element of those tiles gets the value [`winograd_forward`] gives it, bit for
+/// bit, and every other element of `out` is left as it was. A tile's arithmetic reads only its own 4x4 input
+/// patch (zeros outside the plane) and runs the same GEMM sums whatever tiles share its block (whole `NR`-wide
+/// panels, the same `KC` blocks), so the list changes how much is computed, never a value.
+pub(crate) fn winograd_forward_at(
+    x: ConvInput<'_>,
+    u: &[f32],
+    out: &mut [f32],
+    g: &ConvGeom,
+    epi: Option<ChannelEpilogue<'_>>,
+    tiles: &[Vec<u32>],
+) {
+    assert_eq!(tiles.len(), g.n, "winograd: one tile list per image");
+    let all = g.oh.div_ceil(2) * g.ow.div_ceil(2);
+    debug_assert!(
+        tiles
+            .iter()
+            .all(|l| l.windows(2).all(|w| w[0] < w[1]) && l.last().is_none_or(|&t| (t as usize) < all))
+    );
+    winograd_run(x, u, out, g, epi, Some(tiles));
+}
+
+fn winograd_run(
+    x: ConvInput<'_>,
+    u: &[f32],
+    out: &mut [f32],
+    g: &ConvGeom,
+    epi: Option<ChannelEpilogue<'_>>,
+    lists: Option<&[Vec<u32>]>,
+) {
     debug_assert!(winograd_shape(g));
     #[cfg(test)]
     count(1);
     let (c, o) = (g.c, g.o);
     assert_eq!(u.len(), 16 * o * c, "winograd: transformed weights are not 16 x O x C");
-    let tiles = g.oh.div_ceil(2) * g.ow.div_ceil(2);
+    let all = g.oh.div_ceil(2) * g.ow.div_ceil(2);
     let hw = g.h * g.w;
     for_each_image(out, o * g.ohw(), g.n, 0, |img, out_img, threads| {
+        let ts = lists.map_or(Tiles::All(all), |l| Tiles::List(&l[img]));
+        let tiles = ts.len();
+        if tiles == 0 {
+            return;
+        }
         let planes = x.planes(img, hw);
         let tb = block_tiles(c, o, tiles, threads);
         let blocks = tiles.div_ceil(tb);
@@ -175,7 +254,7 @@ pub(crate) fn winograd_forward(
                 let (ci0, ci1) = (part * cstep, ((part + 1) * cstep).min(c));
                 // SAFETY: block b's V is the vlen floats from b * vlen, inside `vall`; this task is the only one
                 // with its rows (xi, ci0..ci1), and nothing reads `vall` until every task is done.
-                unsafe { input_transform(&planes[ci0..ci1], ci0, g, t0, t1, tb, vptr.0.add(b * vlen)) };
+                unsafe { input_transform(&planes[ci0..ci1], ci0, g, ts, t0, t1, tb, vptr.0.add(b * vlen)) };
             });
             let vall_ref = &vall;
             (0..blocks * oparts).into_par_iter().for_each(|q| {
@@ -185,7 +264,7 @@ pub(crate) fn winograd_forward(
                 let v = &vall_ref[b * vlen..(b + 1) * vlen];
                 with_scratch(16 * (o1 - o0) * tb, |m| {
                     // SAFETY: each (block, output channel part) owns its output elements.
-                    unsafe { gemm_output(u, v, o0..o1, g, epi, t0, t1, tb, m, optr.0) };
+                    unsafe { gemm_output(u, v, o0..o1, g, epi, ts, t0, t1, tb, m, optr.0) };
                 });
             });
             crate::cpu::recycle(vall);
@@ -196,9 +275,9 @@ pub(crate) fn winograd_forward(
             with_scratch(16 * (c + o) * tb, |buf| {
                 let (v, m) = buf[..16 * (c + o) * tb].split_at_mut(16 * c * tb);
                 // SAFETY: `v` is this block's V, all of it.
-                unsafe { input_transform(&planes, 0, g, t0, t1, tb, v.as_mut_ptr()) };
+                unsafe { input_transform(&planes, 0, g, ts, t0, t1, tb, v.as_mut_ptr()) };
                 // SAFETY: blocks own disjoint output tiles, so the elements each one writes are its own.
-                unsafe { gemm_output(u, v, 0..o, g, epi, t0, t1, tb, m, optr.0) };
+                unsafe { gemm_output(u, v, 0..o, g, epi, ts, t0, t1, tb, m, optr.0) };
             });
         };
         if threads > 1 && blocks > 1 {
@@ -207,22 +286,6 @@ pub(crate) fn winograd_forward(
             (0..blocks).for_each(run);
         }
     });
-}
-
-/// The runs of tiles `t0..t1` (row-major over a `tw`-wide tile grid) that lie in one tile row, at most [`SEG`]
-/// long: `(ty, tx0, len, pos)` with `pos` the run's first tile relative to `t0`.
-fn segments(t0: usize, t1: usize, tw: usize) -> impl Iterator<Item = (usize, usize, usize, usize)> {
-    let mut t = t0;
-    std::iter::from_fn(move || {
-        if t >= t1 {
-            return None;
-        }
-        let (ty, tx0) = (t / tw, t % tw);
-        let len = (tw - tx0).min(t1 - t).min(SEG);
-        let seg = (ty, tx0, len, t - t0);
-        t += len;
-        Some(seg)
-    })
 }
 
 /// Defines `$name` as `$body` compiled for AVX2 + FMA and runs it when the CPU has them, else runs `$body` as
@@ -244,36 +307,40 @@ macro_rules! avx2_or_plain {
     }};
 }
 
-/// Input transform of tiles `t0..t1` for the channels `ci0..` of `planes`: `V[i*4 + j][ci][pos] = (Bt d B)[i][j]`
-/// of the 4x4 input patch `d` of tile `t0 + pos` in channel `ci`, into the block's `v` (`16 x C x tb`). Columns
+/// Input transform of the tiles at positions `t0..t1` of `ts` for the channels `ci0..` of `planes`: `V[i*4 + j][ci][pos] = (Bt d B)[i][j]`
+/// of the 4x4 input patch `d` of the tile at position `t0 + pos` in channel `ci`, into the block's `v` (`16 x C x tb`). Columns
 /// past the last tile are zeros. Writes through slices of single rows `(xi, ci)` of `v`, so tasks that own other
 /// channels of the same `V` can run at once.
 ///
 /// # Safety
 /// `v` points to a block's `V` (`16 · C · tb` floats), and no one else accesses its rows `(xi, ci0..ci0 + n)`
 /// (every `xi`, `n = planes.len()`) while this runs.
+#[allow(clippy::too_many_arguments)]
 unsafe fn input_transform(
     planes: &[&[f32]],
     ci0: usize,
     g: &ConvGeom,
+    ts: Tiles<'_>,
     t0: usize,
     t1: usize,
     tb: usize,
     v: *mut f32,
 ) {
-    avx2_or_plain!(run(planes: &[&[f32]], ci0: usize, g: &ConvGeom, t0: usize, t1: usize, tb: usize, v: *mut f32) {
+    avx2_or_plain!(run(planes: &[&[f32]], ci0: usize, g: &ConvGeom, ts: Tiles<'_>, t0: usize, t1: usize, tb: usize, v: *mut f32) {
         // SAFETY: forwarded.
-        unsafe { input_transform_body(planes, ci0, g, t0, t1, tb, v) }
+        unsafe { input_transform_body(planes, ci0, g, ts, t0, t1, tb, v) }
     })
 }
 
 /// # Safety
 /// As [`input_transform`].
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 unsafe fn input_transform_body(
     planes: &[&[f32]],
     ci0: usize,
     g: &ConvGeom,
+    ts: Tiles<'_>,
     t0: usize,
     t1: usize,
     tb: usize,
@@ -290,7 +357,7 @@ unsafe fn input_transform_body(
         let ci = ci0 + cl;
         // SAFETY: row (xi, ci) of V is tb floats inside `v`, and the caller's alone; one is live at a time.
         let row = |xi: usize| unsafe { std::slice::from_raw_parts_mut(v.add((xi * c + ci) * tb), tb) };
-        for (ty, tx0, len, pos) in segments(t0, t1, tw) {
+        for (ty, tx0, len, pos) in ts.segments(t0, t1, tw) {
             let x0 = 2 * tx0 as isize - pw;
             let (lo, hi) = (x0.max(0), (x0 + 2 * len as isize + 2).min(w));
             for (r, [t0r, t1r, t2r, t3r]) in tr.iter_mut().enumerate() {
@@ -349,7 +416,7 @@ unsafe fn input_transform_body(
 }
 
 /// The GEMMs `M[xi] = U[xi] · V[xi]` for the output channels `os` (into `m`, `16 x |os| x tb`), then the output
-/// transform `Y = Aᵀ M A` of tiles `t0..t1` into the image's `out` (`[O, OH, OW]`), and the epilogue.
+/// transform `Y = Aᵀ M A` of the tiles at positions `t0..t1` of `ts` into the image's `out` (`[O, OH, OW]`), and the epilogue.
 ///
 /// # Safety
 /// `out` is the image's output, and no one else accesses its elements of channels `os` in tiles `t0..t1`.
@@ -360,6 +427,7 @@ unsafe fn gemm_output(
     os: std::ops::Range<usize>,
     g: &ConvGeom,
     epi: Option<ChannelEpilogue<'_>>,
+    ts: Tiles<'_>,
     t0: usize,
     t1: usize,
     tb: usize,
@@ -377,9 +445,9 @@ unsafe fn gemm_output(
         unsafe { gemm_rows_serial(mo, c, a, c, &rows, tb, &mut m[xi * mo * tb..(xi + 1) * mo * tb], tb) };
     }
     let (m, o0) = (&*m, os.start);
-    avx2_or_plain!(run(m: &[f32], mo: usize, o0: usize, g: &ConvGeom, epi: Option<ChannelEpilogue<'_>>, t0: usize, t1: usize, tb: usize, out: *mut f32) {
+    avx2_or_plain!(run(m: &[f32], mo: usize, o0: usize, g: &ConvGeom, epi: Option<ChannelEpilogue<'_>>, ts: Tiles<'_>, t0: usize, t1: usize, tb: usize, out: *mut f32) {
         // SAFETY: forwarded.
-        unsafe { output_transform_body(m, mo, o0, g, epi, t0, t1, tb, out) }
+        unsafe { output_transform_body(m, mo, o0, g, epi, ts, t0, t1, tb, out) }
     })
 }
 
@@ -395,6 +463,7 @@ unsafe fn output_transform_body(
     o0: usize,
     g: &ConvGeom,
     epi: Option<ChannelEpilogue<'_>>,
+    ts: Tiles<'_>,
     t0: usize,
     t1: usize,
     tb: usize,
@@ -407,7 +476,7 @@ unsafe fn output_transform_body(
     for ol in 0..mo {
         let oc = o0 + ol;
         let mrow = |xi: usize| &m[(xi * mo + ol) * tb..][..tb];
-        for (ty, tx0, len, pos) in segments(t0, t1, tw) {
+        for (ty, tx0, len, pos) in ts.segments(t0, t1, tw) {
             let [s0, s1] = &mut sm;
             for (j, (s0j, s1j)) in s0.iter_mut().zip(s1.iter_mut()).enumerate() {
                 let r = |xi: usize| &mrow(xi)[pos..pos + len];

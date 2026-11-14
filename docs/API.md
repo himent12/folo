@@ -636,6 +636,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   - `inference_ms`: the forward pass, until the device has finished it;
   - `postprocess_ms`: decoding the head outputs into candidates (on a GPU, a small kernel), reading them back, NMS
     and mapping the boxes to image pixels;
+  - on the CPU the head is evaluated candidate-first (docs/MODEL.md §9.5: the box branch runs only at the
+    candidates, so it cannot run before they are known), and `inference_ms` holds the whole network including
+    the candidate extraction and the candidates' box decode, `postprocess_ms` NMS and the mapping to image pixels;
   - `total_ms`: their sum.
   `/api/predict` (and MCP's `predict_batch`, which calls it per image) times one image per call, so these are that
   call's stages. A batch through the library (`Predictor::predict_batch`) gives each image its pass's stage times

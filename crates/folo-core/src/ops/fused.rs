@@ -149,6 +149,58 @@ impl Tensor {
         Tensor::cat(xs, 1)?.conv2d_act(weight, bias, p, act)
     }
 
+    /// [`Tensor::conv2d_act`] where only the output sites `at` are needed: `at` is a `U32` vector on the same
+    /// device of flat output indices `n · OH·OW + oy · OW + ox` (any order, repeats allowed). The result has the
+    /// full output shape `[N, O, OH, OW]`; every site of `at` holds the value [`Tensor::conv2d_act`] computes
+    /// there on this backend, and **every other element is unspecified** (a backend may compute neighbours of
+    /// the sites, leave garbage, or compute everything).
+    ///
+    /// A site's value depends only on `self` within the site's receptive field, so `self` needs its true values
+    /// there and nowhere else (the box branch of candidate-first prediction evaluates a conv on such a partly
+    /// computed tensor). On the CPU ([`crate::backend::Backend::conv2d_act_at`]) a Winograd conv computes only
+    /// the 2×2 output tiles that hold a site, and a pointwise conv only the sites' columns, both bit for bit the
+    /// dense values; in Winograd F(2×2, 3×3) each output of a tile reads only its own 3×3 window of the tile's
+    /// 4×4 input patch (its transforms never combine the other row or column into it), so garbage, even NaN,
+    /// elsewhere in the patch reaches only the tile's other outputs. A backend without the kernel computes the
+    /// dense [`Tensor::conv2d_act`] (the same values everywhere). Never recorded: call it under `no_grad` or on
+    /// tensors that do not require grad.
+    pub fn conv2d_act_at(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+        at: &Tensor,
+    ) -> Result<Tensor> {
+        const OP: &str = "conv2d_act_at";
+        if is_grad_enabled()
+            && (self.requires_grad() || weight.requires_grad() || bias.is_some_and(Tensor::requires_grad))
+        {
+            return Err(Error::invalid_arg(OP, "not differentiable: call it under no_grad"));
+        }
+        if at.rank() != 1 || at.dtype() != DType::U32 {
+            return Err(Error::invalid_shape(OP, at.shape(), "sites must be a U32 vector"));
+        }
+        self.check_same_device(at, OP)?;
+        let (dev, dt) = (self.device(), self.dtype());
+        let uniform = weight.device() == dev
+            && bias.is_none_or(|b| b.device() == dev && b.dtype() == dt)
+            && weight.dtype() == dt
+            && self.check_float(OP).is_ok();
+        if uniform && let Some(shape) = conv_out_shape(self, weight, bias, p) {
+            let b = self.backend()?;
+            let mut ts = vec![self, weight, at];
+            ts.extend(bias);
+            let r = with_views_dyn(&ts, |v| b.conv2d_act_at(v[0], v[1], v.get(3).copied(), p, act, v[2]));
+            match r {
+                Ok(s) => return Tensor::wrap(s, shape, OP),
+                Err(e) if unsupported(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.conv2d_act(weight, bias, p, act)
+    }
+
     /// Fused train-mode BatchNorm over the channels of `self` (`[N, C, H, W]`, statistics over `N·H·W`)
     /// followed by `act` (`None` is the identity), on backends that have the kernels
     /// ([`crate::backend::Backend::batch_norm_act`]); `Ok(None)` on the others.

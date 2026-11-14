@@ -62,6 +62,14 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   conv's `K · 2^-23 · Σ|terms|`; COCO val AP of
   folo-n-coco changed by less than 1e-6. The same
   bits for any thread count or batch. The autograd conv (`conv2d_with`) keeps the direct conv.
+  `Tensor::conv2d_act_at` (`Backend::conv2d_act_at`) is the same inference conv needed only at some output sites
+  (flat `n · OH·OW + oy · OW + ox`, a `U32` vector): the result has the full output shape, the sites hold the dense
+  conv's values and every other element is unspecified. On the CPU a Winograd conv runs the block code over the
+  list of 2x2 tiles that hold a site (`winograd_forward_at`: a tile's arithmetic and its GEMM sums do not depend
+  on which tiles share its block) and a pointwise conv runs the dense GEMM over the sites' columns gathered into
+  planes of their own (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv runs densely, as
+  does a backend without the kernel. A site reads only its receptive field: in Winograd F(2x2, 3x3) each output
+  of a tile reads only its own 3x3 window of the 4x4 patch (tested with NaN everywhere else).
   `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
   (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
   separable (row pass, then column pass; same first-maximum argmax as a direct scan); when nothing is recorded
@@ -254,9 +262,15 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   work, one small readback. On the CPU the whole prediction runs inside the rayon pool (`cpu::in_pool`), the
   letterbox is one fused pass per image (`Letterbox::apply_planar_f32`: resize, padding and `/ 255` straight into
   planar f32, rows in parallel) into an input buffer from folo-core's
-  buffer cache, the head's six branch chains run side by side, the neck's Concat layers are never written
-  (`C3k2::forward_cat`), and the decode reads the head outputs in place and extracts candidates in blocks of 1024
-  anchors in parallel.
+  buffer cache, the neck's Concat layers are never written (`C3k2::forward_cat`), and the head is evaluated
+  candidate-first (MODEL.md §9.5, `FoloModel::predict_candidates`, `model/lazy.rs`): the three class branches run
+  side by side, each level's candidates come straight from its class map (blocks of 1024 anchors in parallel),
+  and the three box branches then run only at the candidates (`conv2d_act_at`; `conv0` on their 3x3 receptive
+  fields; with DFL box fusion also the candidates' side precisions), so the dense box outputs and the head's `cat`
+  are never made; the detections are the dense path's bit for bit. The candidate extraction and the box branch
+  count as inference, NMS and the letterbox inverse as postprocess. An unfused model, multi-label settings, f16 or
+  another device take the dense forward (the six branch chains side by side) and `HeadOutput::detections`, which
+  reads the head outputs in place and extracts candidates the same way.
 - **ONNX export** (`folo_vision::export::onnx`): `FoloModel::to_onnx` turns a fused model into an opset-17 graph
   that mirrors `forward` op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o`
   model ends in the §6.6 top-k: end-to-end `[B, K, 6]` detections; fixed or dynamic

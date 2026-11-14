@@ -1023,6 +1023,23 @@ val2017 it adds +0.0043 (folo-n-coco), +0.0034 (folo-n-coco-v2) and +0.0025 (fol
 voting alone gives most; the DFL weights add +0.0003 to +0.0010 over voting (paired bootstrap intervals in the note).
 Cost per image at batch 1: ~0.01–0.15 ms on the CPU (conf 0.25 / 0.001), ~0.3 ms on a GPU (the moments readback).
 
+### 9.5 Candidate-first evaluation
+Single-label prediction needs a box only for the anchors whose best class scores `> conf` (tens per image at
+`conf = 0.25`; `o2o`: at most `max_det` of them, the best by score then anchor, at any `conf`), and §6.1's box and
+class branches are independent functions of the same level feature. So an implementation may run the class
+branches densely, take the candidates straight from each level's class map (§9.3's extraction), and evaluate the
+box branch (`conv0`, `conv1`, `out`, then §6.4's decode) only at the candidates: `out` and `conv1` at the
+candidate's pixel, `conv0` on that pixel's 3×3 receptive field (zero padding at the map border is `conv1`'s, as in
+the dense branch). The detections are the dense path's when every conv gives each evaluated output the value the
+dense conv gives it. FOLO's CPU path (fused f32 models in eval mode, single-label: `Predictor`,
+`FoloModel::predict_detections`) does so bit for bit: its 3×3 box convs run Winograd F(2×2, 3×3) over the list of
+2×2 output tiles that hold a needed site, where each output reads only its own 3×3 window, and the 1×1 `out` runs
+the dense GEMM over the sites' columns. The dense raw outputs (§6.3, `HeadOutput`) are not made on this path;
+training, validation (multi-label at `conf = 0.001`), export and every other consumer of them use the dense
+forward. Box fusion (§9.4) is served as on the dense path: `vote` needs only the boxes and scores, and `dfl` takes
+each candidate's side precisions from its own box logits with the dense CPU path's functions (the same softmax
+moments, so the same bits).
+
 ## 10. Verification plan
 
 ### 10.1 Block unit tests (folo-nn / folo-vision)

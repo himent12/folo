@@ -7,6 +7,7 @@ mod im2col;
 #[cfg(test)]
 mod kernel_tests;
 mod shifted;
+mod sites;
 mod small_c;
 mod winograd;
 
@@ -17,10 +18,11 @@ use crate::backend::Conv2dParams;
 use depthwise::depthwise_forward;
 use im2col::{Im2Col, PlaneRows};
 use shifted::{ShiftedRows, shifted_scratch};
+pub(crate) use sites::{pointwise_forward_at, winograd_tiles_at};
 use small_c::{small_c_forward, uses_small_c};
 #[cfg(test)]
 pub(crate) use winograd::calls as winograd_calls;
-pub(crate) use winograd::{transform_weights, uses_winograd, winograd_forward};
+pub(crate) use winograd::{transform_weights, uses_winograd, winograd_forward, winograd_forward_at};
 
 pub(crate) use backward_input::{backward_input_overwrites, conv2d_backward_input};
 pub(crate) use backward_weight::conv2d_backward_weight;
