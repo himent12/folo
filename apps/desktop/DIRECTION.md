@@ -40,15 +40,17 @@ The components are fine; the page structure is not.
   - No floating readout. The cursor is a line, dots and an x chip on the axis.
   - One 16 px annotation band for events (close mosaic, failure, warmup).
   - The best epoch is a hollow ring in `text.primary` on its series ("○ best 0.656 @ 41" in the legend). A line's end
-    says the run's status: a lime dot while live, a dot of its hue when completed, a square when stopped, a cross
-    when failed; a best ring at the end goes around the end mark. No lime text in plots.
+    says the run's status: while live, the chart's first series (mAP50-95, total loss, precision, the learning rate)
+    ends in a lime dot and every other series in a dot of its own hue, so a chart has one lime dot; when completed
+    a dot of its hue, a square when stopped, a cross when failed; a best ring at the end goes around the end mark.
+    No lime text in plots.
   - A 0–1 metric's axis runs from 0 to its highest value plus headroom, with 3 to 5 round gridlines; under 0.25 the
     chart says it is zoomed in. Loss lines are named at their ends where there is room.
   - Fixed y gutter. Primary plots 220 px, secondary 140 px.
 - **Lime:**
   - At most one lime-filled button per screen.
   - The live run's dot, rail and badge.
-  - Focus rings and the live end of a chart line.
+  - Focus rings and the live end of a chart's first line (one per chart).
   - Running in a table is a ringed lime dot with plain text.
 - **Status:** one glyph per state, the same for runs, benchmark entries and loops and cloud instances: a hollow ring
   (queued), a ringed dot (running), a check (completed), a cross (failed), a square (stopped). In a table the glyph
@@ -63,7 +65,7 @@ The components are fine; the page structure is not.
 
 ## Screens
 
-- **Sidebar:** the live card becomes one 36 px row (dot, name, %) over a 2 px rail.
+- **Sidebar:** the live card becomes one 36 px row (name, %) over a 2 px rail, on every page while a run trains.
 - **Overview:**
   - The live panel shows a 48 px header with a 2 px progress rail, then from 1280 px a 2×2 KPI block on the left third
     beside the validation-mAP chart (one row of four tiles over the chart below 1280).

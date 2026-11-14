@@ -101,6 +101,18 @@ impl FoloApp {
         let content = self.content_width(window);
         let c = BenchCols::fit(content);
         let name_w = (content - c.fixed() - BENCH_SLACK).clamp(BENCH_NAME_MIN, 480.);
+        // The leader's name is cut before a benchmark's name, never while the Benchmark column has
+        // room it doesn't use: the room past the longest name (and the running dot) goes to Leader.
+        let name_need = list
+            .iter()
+            .flat_map(|l| l.iter())
+            .map(|b| {
+                let w = f32::from(crate::charts::text_width(window, &b.name, ty::SM.size)) * 1.05;
+                w.ceil() + if b.active { 20. } else { 0. }
+            })
+            .fold(BENCH_NAME_FLOOR, f32::max);
+        let leader_w = LEADER_W + (name_w - name_need).max(0.).floor();
+        let name_w = name_w.min(name_need);
         let now = self.store.api.now();
         let head = div()
             .flex()
@@ -110,13 +122,13 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(th(&t, "Benchmark").flex_1().min_w(px(BENCH_NAME_MIN)))
+            .child(th(&t, "Benchmark").flex_1().min_w(px(name_w)))
             .child(th(&t, "Images from").w(px(FROM_W)).flex_none())
             .child(num_cell(72., th(&t, "Images")))
             .when(c.classes, |d| d.child(num_cell(64., th(&t, "Classes"))))
             .when(c.conditions, |d| d.child(num_cell(84., th(&t, "Conditions"))))
             .child(num_cell(64., th(&t, "Entries")))
-            .child(th(&t, "Leader").w(px(LEADER_W)).flex_none())
+            .child(th(&t, "Leader").w(px(leader_w)).flex_none())
             .when(c.created, |d| d.child(num_cell(84., th(&t, "Created"))));
         let table = match list {
             None => panel(&t).child(head).child(loading_rows(&t, "benches", 3)).into_any_element(),
@@ -160,7 +172,7 @@ impl FoloApp {
                         let name = div()
                             .id(SharedString::from(format!("bench-name-{}", b.id)))
                             .flex_1()
-                            .min_w(px(BENCH_NAME_MIN))
+                            .min_w(px(name_w))
                             .flex()
                             .items_center()
                             .gap(px(6.))
@@ -220,7 +232,7 @@ impl FoloApp {
                                 ))
                             })
                             .child(num_cell(64., text(ty::SM, t.text_secondary).tnum().child(b.entries.to_string())))
-                            .child(div().w(px(LEADER_W)).flex_none().min_w_0().child(leader))
+                            .child(div().w(px(leader_w)).flex_none().min_w_0().child(leader))
                             .when(c.created, |d| {
                                 d.child(num_cell(
                                     84.,
@@ -244,6 +256,8 @@ impl FoloApp {
 
 /// The narrowest the Benchmark column gets; optional columns drop before it would go under.
 const BENCH_NAME_MIN: f32 = 140.;
+/// The narrowest it gets when its names are short and Leader takes its spare room ("Benchmark").
+const BENCH_NAME_FLOOR: f32 = 96.;
 /// Row padding, the panel's borders and slack for rounding.
 const BENCH_SLACK: f32 = 32. + 2. + 8.;
 const FROM_W: f32 = 140.;

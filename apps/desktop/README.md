@@ -114,7 +114,7 @@ never click Show in Explorer, Show in folder or a link there: Explorer and the b
 on your desktop take the request and open their window on your screen.
 
 - `shoot.ps1`: one headless screenshot (`folo-desktop --scenario … --shot`; Screenshots, below).
-- `shoot-all.ps1`: every review scenario headless, in parallel (98 PNGs in a few seconds on a release build),
+- `shoot-all.ps1`: every review scenario headless, in parallel (108 PNGs in a few seconds on a release build),
   as `<Dir>\<W>x<H>\<scenario>.png`: all scenarios at 1280 x 800, the densest at 960 x 620 and 1680 x 1050.
 - `parity.py` (Python with numpy and Pillow): compares two such trees pixel by pixel (the per-pixel difference
   is the largest channel difference): per pair the share of pixels above `--tol`, the largest difference, the
@@ -238,7 +238,7 @@ add a token instead. folo-ui has no letter-spacing (GPUI had none either, and th
 with `+` (`dataset+light`, `overview+empty`). `folo-desktop --list-scenarios` prints the review set.
 
 ```powershell
-tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (98 PNGs in <W>x<H> folders; a few seconds on a release build)
+tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (108 PNGs in <W>x<H> folders; a few seconds on a release build)
 tools\shoot.ps1 -Scenario palette -Out shots\palette.png -Width 960 -Height 620
 tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://127.0.0.1:7878 --open run:run_9d9d"   # real data
 ```

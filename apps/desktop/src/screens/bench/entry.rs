@@ -179,9 +179,11 @@ impl FoloApp {
             let v = s.and_then(|s| s.value);
             let detail = match a {
                 BenchAxis::Accuracy => format!("mAP50-95 {}", f3(r.accuracy.map50_95)),
-                BenchAxis::Robustness => r.robustness.as_ref().map_or("conditions not run".into(), |x| {
-                    format!("keeps {} of its accuracy", pct(x.retention))
-                }),
+                // Short enough for the tile at 1280 px; the Robustness panel says it in full.
+                BenchAxis::Robustness => r
+                    .robustness
+                    .as_ref()
+                    .map_or("conditions not run".into(), |x| format!("{} accuracy kept", pct(x.retention))),
                 BenchAxis::SelfLabeling => match r.self_labeling.readiness {
                     BenchReadiness::Ready => "ready to self-label".into(),
                     BenchReadiness::Partial => "partly ready".into(),

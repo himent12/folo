@@ -18,7 +18,7 @@ use super::cursor::{chip_label, cursor_x, nearest};
 use super::domain::unit_domain;
 use super::ease::ease;
 use super::end_labels::{end_gutter, paint_end_names};
-use super::marks::{End, end_ink, end_radius, is_ink, merged_end, paint_best, paint_end};
+use super::marks::{End, end_ink, end_radius, is_ink, merged_end, one_live, paint_best, paint_end};
 use super::smooth::{cached_envelope, memo, smoothed};
 use super::spec::{LineChart, Marker};
 use super::text::{paint_text, text_width};
@@ -463,14 +463,17 @@ fn paint_line_chart(
     );
     // End marks over the lines (outside the plot's clip, so a mark on its edge is whole), then the
     // best ring: on its own, or around the end mark it meets.
-    for (c, s) in &ends {
-        paint_end(window, t, *c, s.end, end_ink(t, s.end, s.color, is_ink(t, s.color)));
+    // One lime dot per chart: the first live line's; the others end in their hue.
+    let shown = one_live(ends.iter().map(|(_, s)| s.end));
+    for ((c, s), &end) in ends.iter().zip(&shown) {
+        paint_end(window, t, *c, end, end_ink(t, end, s.color, is_ink(t, s.color)));
     }
     if let Some((bx, by)) = spec.best.filter(|b| b.0 >= x0 && b.0 <= x1) {
         let at: Vec<(f32, f32, f32)> = ends
             .iter()
-            .filter(|(_, s)| s.end != End::None)
-            .map(|(c, s)| (f32::from(c.x), f32::from(c.y), end_radius(s.end)))
+            .zip(&shown)
+            .filter(|(_, end)| **end != End::None)
+            .map(|((c, _), &end)| (f32::from(c.x), f32::from(c.y), end_radius(end)))
             .collect();
         let b = point(sx(bx), sy(by));
         match merged_end((f32::from(b.x), f32::from(b.y)), &at) {

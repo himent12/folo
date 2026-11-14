@@ -28,7 +28,8 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         let live = r.status == RunStatus::Running;
-        // How each line ends: the lime dot while it trains, else the run's outcome (charts::marks).
+        // How each line ends: while it trains the chart's first series in the lime dot and the
+        // others in a dot of their hue (`trail`), else the run's outcome (charts::marks).
         let end = match r.status {
             RunStatus::Running | RunStatus::Stopping => End::Live,
             RunStatus::Completed => End::Done,
@@ -36,6 +37,7 @@ impl FoloApp {
             RunStatus::Failed => End::Failed,
             RunStatus::Queued => End::None,
         };
+        let trail = end.trailing();
         let hover = self.chart_hover;
         let (split, map_title) = (self.eval_split(r), self.map_title(r));
         // The P/R chart's operating point follows the cursor: each epoch's own best-F1 confidence.
@@ -124,6 +126,8 @@ impl FoloApp {
         let (primary_h, secondary_h) = if short { (140., 110.) } else { (220., 140.) };
         let names = ["box", "cls", "dfl", "total"];
         let colors = t.loss_colors();
+        // Total leads the loss chart (its lime end while live); without it, the first part shown.
+        let lead = if self.loss_parts[3] { 3 } else { (0..4).find(|&i| self.loss_parts[i]).unwrap_or(3) };
         // Each loss line's name at its end, in its hue's text ink (total in ink).
         let label_inks = [t.chart_text[1], t.chart_text[4], t.chart_text[3], t.text_primary];
         let loss_series: Vec<Series> = (0..4)
@@ -131,7 +135,7 @@ impl FoloApp {
             .map(|i| {
                 let s = Series::new(names[i], colors[i], d.loss[i].clone())
                     .smooth(LOSS_EMA)
-                    .end(end)
+                    .end(if i == lead { end } else { trail })
                     .end_label(label_inks[i]);
                 match i {
                     1 => s.dashed(),
@@ -153,7 +157,7 @@ impl FoloApp {
             vec![
                 Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().end(end).width(1.75),
                 // Dashed: the pair reads apart without colour (as in the legend).
-                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed().end(end),
+                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed().end(trail),
             ],
             primary_h,
         );
@@ -185,7 +189,7 @@ impl FoloApp {
             vec![
                 // One hue for the pair, told apart by dash: no other chart here uses slot 5.
                 Series::new("precision", t.chart_series[2], d.precision.clone()).end(end),
-                Series::new("recall", t.chart_series[3], d.recall.clone()).dashed().end(end),
+                Series::new("recall", t.chart_series[3], d.recall.clone()).dashed().end(trail),
             ],
             secondary_h,
         );

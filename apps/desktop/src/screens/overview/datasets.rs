@@ -1,4 +1,4 @@
-//! The datasets strip and its cards, and the "View all" links.
+//! The datasets strip and its cards, and the panels' quiet links ("All datasets →").
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
@@ -15,7 +15,7 @@ use crate::ui::*;
 impl FoloApp {
     pub(super) fn dataset_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let all = self.view_all("ov-ds-all", Route::Datasets, window, cx);
+        let all = self.view_all("ov-ds-all", "All datasets", Route::Datasets, window, cx);
         let datasets = self.store.datasets.ready().cloned().unwrap_or_default();
         let cards: Vec<AnyElement> =
             datasets.iter().take(3).map(|d| self.dataset_card(d, window, cx)).collect();
@@ -173,10 +173,21 @@ impl FoloApp {
         .into_any_element()
     }
 
-    pub fn view_all(&self, key: &str, route: Route, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    /// A panel header's quiet link to where it leads ("All runs →"): secondary ink with the arrow
+    /// after the words, ink and the hover fill under the pointer (Studio's small ghost button).
+    pub fn quiet_link(
+        &self,
+        key: &str,
+        label: &'static str,
+        window: &Window,
+        cx: &mut Context<Self>,
+        action: crate::app::Action,
+    ) -> AnyElement {
         let t = theme(cx);
+        let group = SharedString::from(format!("{key}-link"));
         let el = div()
             .id(SharedString::from(key.to_string()))
+            .group(group.clone())
             .flex()
             .items_center()
             .gap(px(4.))
@@ -187,17 +198,29 @@ impl FoloApp {
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_hover))
             .active(|s| s.bg(t.bg_active))
-            .child(text(ty::SM, t.text_secondary).child("View all"))
-            .child(icon("icons/chevron-right.svg", 12., t.text_tertiary));
-        self.bind(
-            el,
-            key,
-            radius::SM,
-            window,
-            cx,
-            act(move |this, w, cx| this.navigate(route.clone(), w, cx)),
-        )
-        .into_any_element()
+            .child(
+                text(ty::SM, t.text_secondary)
+                    .whitespace_nowrap()
+                    .group_hover(group.clone(), |s| s.text_color(t.text_primary))
+                    .child(label),
+            )
+            .child(
+                icon("icons/arrow-right.svg", 12., t.text_secondary)
+                    .group_hover(group, |s| s.text_color(t.text_primary)),
+            );
+        self.bind(el, key, radius::SM, window, cx, action).into_any_element()
+    }
+
+    /// The quiet link from a panel to the list it previews ("All datasets →").
+    pub fn view_all(
+        &self,
+        key: &str,
+        label: &'static str,
+        route: Route,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.quiet_link(key, label, window, cx, act(move |this, w, cx| this.navigate(route.clone(), w, cx)))
     }
 }
 

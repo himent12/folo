@@ -8,8 +8,7 @@ use folo_ui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Sty
 use super::page::{hero_height, two_columns};
 use crate::api::{Run, RunExt, time};
 use crate::app::{FoloApp, Route, act};
-use crate::charts::{LineChart, Series, line_chart};
-use crate::controls::Btn;
+use crate::charts::{End, LineChart, Series, line_chart};
 use crate::theme::{theme, ty};
 use crate::ui::*;
 
@@ -25,11 +24,10 @@ impl FoloApp {
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
         let id = r.id.clone();
-        let open = self.button(
+        // The way to the full dashboard: a quiet link like the panels' "All runs →".
+        let open = self.quiet_link(
             "ov-dash",
             "Open run",
-            Btn::Secondary,
-            Some("icons/arrow-up-right.svg"),
             window,
             cx,
             act(move |this, w, cx| this.navigate(Route::Run(id.clone()), w, cx)),
@@ -72,10 +70,11 @@ impl FoloApp {
                     vec![
                         Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(true),
                         // Dashed: the pair reads apart without colour (as in the legend).
+                        // The chart's one lime dot is mAP50-95's: this line ends in a dot of its hue.
                         Series::new("mAP50", t.chart_series[1], d.map50.clone())
                             .width(1.25)
                             .dashed()
-                            .live(true),
+                            .end(End::Done),
                     ],
                 );
                 map.x_range = Some((0., total));

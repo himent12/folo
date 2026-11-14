@@ -1,11 +1,12 @@
 //! The marks at a line's end and on its best point, as Studio draws them
 //! (`web/src/lib/charts/endMarks.ts`): each mark has one shape for one meaning. The best epoch is a
-//! hollow ring in ink; the end of a live run's line a filled lime dot, a completed run's a dot of the
-//! line's hue, a stopped run's a square and a failed run's a cross. So lime on a chart always means
-//! now. The glyph says the status and the hue says whose line it is: a cross on a hued line takes the
-//! line's hue, one on an ink line the danger ink. The best ring and the end mark are always two
-//! shapes; only when the best is the line's end (or so close that the marks would touch) is the ring
-//! drawn around the end mark, as one mark.
+//! hollow ring in ink; while a run is live, the end of a chart's first series a filled lime dot and
+//! every other line's a dot of its own hue; a completed run's lines end in a dot of their hue, a
+//! stopped run's in a square and a failed run's in a cross. So lime on a chart always means now,
+//! once per chart. The glyph says the status and the hue says whose line it is: a cross on a hued
+//! line takes the line's hue, one on an ink line the danger ink. The best ring and the end mark are
+//! always two shapes; only when the best is the line's end (or so close that the marks would touch)
+//! is the ring drawn around the end mark, as one mark.
 
 use folo_ui::{Bounds, Hsla, PathBuilder, Pixels, Point, Window, fill, point, px, size};
 
@@ -17,7 +18,7 @@ pub enum End {
     /// No mark (a curve that is not a run's history).
     #[default]
     None,
-    /// A run still training: a filled lime dot.
+    /// A run still training: a filled lime dot (a chart's first series only; see `End::trailing`).
     Live,
     /// A completed run: a dot of the line's hue.
     Done,
@@ -25,6 +26,31 @@ pub enum End {
     Stopped,
     /// A failed run: a cross.
     Failed,
+}
+
+impl End {
+    /// The end of a chart's other series: a live run's line that is not the chart's first ends in
+    /// a dot of its own hue, so the chart has one lime dot. Any other end is unchanged.
+    pub fn trailing(self) -> Self {
+        if self == End::Live { End::Done } else { self }
+    }
+}
+
+/// The ends as drawn: the first live end keeps its lime dot, every later one ends in its hue.
+pub fn one_live(ends: impl IntoIterator<Item = End>) -> Vec<End> {
+    let mut lime = false;
+    ends.into_iter()
+        .map(|e| {
+            if e != End::Live {
+                e
+            } else if lime {
+                e.trailing()
+            } else {
+                lime = true;
+                e
+            }
+        })
+        .collect()
 }
 
 /// The end dot's radius, px.
@@ -149,5 +175,20 @@ mod tests {
         }
         assert_eq!(end_radius(End::Live), END_R + LIVE_GROW);
         assert_eq!(end_radius(End::Stopped), END_R);
+    }
+
+    #[test]
+    fn a_chart_has_one_lime_end_and_its_other_live_lines_end_in_their_hue() {
+        use End::*;
+        assert_eq!(Live.trailing(), Done);
+        for e in [None, Done, Stopped, Failed] {
+            assert_eq!(e.trailing(), e);
+        }
+        // Whatever the call sites ask for, a chart draws at most one lime dot: the first.
+        assert_eq!(one_live([Live, Live, Live]), vec![Live, Done, Done]);
+        assert_eq!(one_live([None, Done, Live, Live]), vec![None, Done, Live, Done]);
+        // A finished run keeps every outcome mark.
+        assert_eq!(one_live([Stopped, Stopped]), vec![Stopped, Stopped]);
+        assert_eq!(one_live([Failed, Failed]), vec![Failed, Failed]);
     }
 }

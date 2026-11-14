@@ -23,11 +23,8 @@ impl FoloApp {
         let compact = window.viewport_size().width < px(1120.);
         let section = self.route.section();
         let live = self.store.live_run().cloned();
-        let active_count = self
-            .store
-            .runs
-            .ready()
-            .map_or(0, |r| r.iter().filter(|r| r.status == RunStatus::Running).count());
+        // The Runs badge: how many runs train and how many wait (UNIFIED.md §1, as Studio counts).
+        let counts = self.store.runs.ready().map_or(RunsBadge::default(), |r| RunsBadge::of(r));
         let nav = [
             (Section::Overview, "Overview", "icons/layout-dashboard.svg", Route::Overview, "1"),
             (Section::Datasets, "Datasets", "icons/images.svg", Route::Datasets, "2"),
@@ -39,7 +36,7 @@ impl FoloApp {
         let items: Vec<AnyElement> = nav
             .into_iter()
             .map(|(sec, label, icon_path, route, key)| {
-                let badge = (sec == Section::Runs && active_count > 0).then_some(active_count);
+                let badge = (sec == Section::Runs && counts.total() > 0).then_some(counts);
                 self.nav_item(label, icon_path, section == sec, route, key, badge, compact, window, cx)
             })
             .collect();
@@ -54,14 +51,10 @@ impl FoloApp {
             window,
             cx,
         );
-        let mut live_card = None;
-        // On Overview the live run is already the hero; don't repeat it in the sidebar.
-        if let Some(r) =
-            live.filter(|r| self.route != Route::Overview && self.route != Route::Run(r.id.clone()))
-        {
-            live_card =
-                Some(if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
-        }
+        // The live run's row on every page while a run trains, its own page and Overview included:
+        // the chrome doesn't change as you move between pages (as in Studio).
+        let live_card = live
+            .map(|r| if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         let brand_press = self.leave_kb(cx);
         let health = self.connection_line(compact, window, cx);
         div()
@@ -116,7 +109,7 @@ impl FoloApp {
         active: bool,
         route: Route,
         key: &'static str,
-        badge: Option<usize>,
+        badge: Option<RunsBadge>,
         compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -158,15 +151,13 @@ impl FoloApp {
             })
             .when(compact, |d| {
                 d.justify_center().px(px(0.)).tooltip(crate::controls::tip(
-                    match badge {
-                        Some(n) => format!("{label} · {n} training"),
-                        None => label.to_string(),
-                    },
+                    badge.map_or(label.to_string(), |b| b.text(label)),
                     Some(shortcut_label(key)),
                 ))
             })
             .child(icon(icon_path, 16., if active { t.text_primary } else { t.text_tertiary }))
-            .when(compact && badge.is_some(), |d| {
+            // The icon rail has no room for the count: a lime dot while a run trains (now, so lime).
+            .when(compact && badge.is_some_and(|b| b.training > 0), |d| {
                 d.child(div().absolute().top(px(6.)).right(px(8.)).child(dot(
                     t.accent_fill(),
                     6.,
@@ -181,30 +172,27 @@ impl FoloApp {
                         .flex_1()
                         .child(label),
                 )
-                // How many runs train right now, as a count chip in the accent: the number alone, since the
-                // sidebar's own card names the run and the tooltip says what is counted.
-                .when_some(badge, |d, n| {
+                // How many runs train or wait, as a 20 px count chip in the accent: the number alone,
+                // since the sidebar's live row names the run and the tooltip says what is counted.
+                .when_some(badge, |d, b| {
                     d.child(
                         text(ty::SM, t.accent_text)
                             .tnum()
                             .font_weight(FontWeight::MEDIUM)
-                            .h(px(18.))
-                            .min_w(px(18.))
-                            .px(px(5.))
+                            .h(px(20.))
+                            .min_w(px(20.))
+                            .px(px(6.))
                             .flex()
                             .flex_none()
                             .items_center()
                             .justify_center()
-                            .rounded(px(9.))
+                            .rounded(px(10.))
                             .bg(t.accent_muted)
-                            .child(n.to_string()),
+                            .child(b.total().to_string()),
                     )
                 })
                 .tooltip(crate::controls::tip(
-                    match badge {
-                        Some(n) => format!("{label} · {n} training"),
-                        None => label.to_string(),
-                    },
+                    badge.map_or(label.to_string(), |b| b.text(label)),
                     Some(shortcut_label(key)),
                 ))
             })
@@ -407,4 +395,52 @@ fn wordmark(t: &Theme, height: f32) -> impl IntoElement {
                 .rounded_full()
                 .bg(t.accent_solid),
         )
+}
+
+/// The Runs badge's counts: runs training (stopping included) and runs waiting in the queue.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct RunsBadge {
+    pub training: usize,
+    pub queued: usize,
+}
+
+impl RunsBadge {
+    pub fn of(runs: &[Run]) -> Self {
+        let n = |f: fn(RunStatus) -> bool| runs.iter().filter(|r| f(r.status)).count();
+        RunsBadge {
+            training: n(|s| matches!(s, RunStatus::Running | RunStatus::Stopping)),
+            queued: n(|s| s == RunStatus::Queued),
+        }
+    }
+
+    /// The number on the badge.
+    pub fn total(self) -> usize {
+        self.training + self.queued
+    }
+
+    /// The row's name with the badge in words ("Runs · 1 training · 2 queued"), for its tooltip.
+    pub fn text(self, label: &str) -> String {
+        let mut s = label.to_string();
+        if self.training > 0 {
+            s += &format!(" · {} training", self.training);
+        }
+        if self.queued > 0 {
+            s += &format!(" · {} queued", self.queued);
+        }
+        s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunsBadge;
+
+    #[test]
+    fn the_runs_badge_counts_training_and_queued_runs() {
+        let b = RunsBadge { training: 1, queued: 2 };
+        assert_eq!(b.total(), 3);
+        assert_eq!(b.text("Runs"), "Runs · 1 training · 2 queued");
+        assert_eq!(RunsBadge { training: 0, queued: 1 }.text("Runs"), "Runs · 1 queued");
+        assert_eq!(RunsBadge::default().total(), 0);
+    }
 }

@@ -23,7 +23,7 @@ impl FoloApp {
         let meta_w = meta_col.unwrap_or(0.);
         let (prog_w, best_w, when_w) = (PROG_W, BEST_W, WHEN_W);
         let now = self.store.api.now();
-        let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
+        let all = self.view_all("ov-runs-all", "All runs", Route::Runs, window, cx);
         let header = panel_header(&t, "Recent runs").child(all);
         // Column heads on the rows' grid, so the metric label sits over its values.
         let heads = div()
@@ -201,12 +201,10 @@ impl FoloApp {
 
     pub(super) fn top_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let all = self.view_all("ov-models-all", Route::Models, window, cx);
+        let all = self.view_all("ov-models-all", "All models", Route::Models, window, cx);
         // mAP compares only within one dataset's validation split, so the card ranks within each
         // dataset and shows its best: one row per dataset, never one list across them.
         let header = panel_header(&t, "Best models").child(all);
-        // The dataset column: narrower in the one-third column at 1280.
-        let ds_w = if self.tables_beside(window) && self.side_w(window) < 400. { 96. } else { 120. };
         let body = match &self.store.models {
             Load::Ready(models) if models.is_empty() => div()
                 .child(empty_state(
@@ -258,6 +256,25 @@ impl FoloApp {
                 // Stacked under Recent runs (full width), the table carries the Models list's
                 // architecture, mAP50 and age too, rather than three columns across 1,100 px.
                 let wide = !self.tables_beside(window);
+                // The model's name is what the row is for: it takes the room it needs, and the
+                // dataset takes what it needs of the rest (it is the one cut when both don't fit).
+                let panel_w = if wide { self.content_width(window) } else { self.side_w(window) };
+                let fixed = if wide { 120. + 64. + 64. + 80. } else { 64. };
+                let gaps = COL_GAP * if wide { 5. } else { 2. };
+                let free = panel_w - BEST_ROW_EXTRA - fixed - gaps;
+                let shown = &models[..models.len().min(5)];
+                let ds_widths: Vec<f32> = shown
+                    .iter()
+                    .map(|(ds, _)| f32::from(crate::charts::text_width(window, ds, ty::SM.size)))
+                    .collect();
+                let head_w = f32::from(crate::charts::text_width(window, "Dataset", ty::SM.size));
+                let ds_need = ds_widths.iter().copied().fold(head_w, f32::max);
+                // Names are set in 500, a little wider than the regular weight measured.
+                let name_need = shown
+                    .iter()
+                    .map(|(_, m)| f32::from(crate::charts::text_width(window, &m.name, ty::SM.size)) * 1.05)
+                    .fold(0., f32::max);
+                let ds_w = best_dataset_w(free, ds_need, name_need);
                 let now = self.store.api.now();
                 // Column heads like Recent runs beside it, so the two lists share row lines.
                 let heads = div()
@@ -283,7 +300,7 @@ impl FoloApp {
                     .flex_col()
                     .pb(px(4.))
                     .child(heads)
-                    .children(models.into_iter().take(5).map(|(ds_name, m)| {
+                    .children(models.into_iter().zip(ds_widths).map(|((ds_name, m), ds_text_w)| {
                         let id = m.id.clone();
                         let key = format!("ov-model-{}", m.id);
                         let map = m.metrics.as_ref().map_or(0., |m| m.map50_95);
@@ -307,15 +324,24 @@ impl FoloApp {
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
+                            // The dataset gives way first: when it is cut, in full on hover.
                             .child(
-                                text(ty::SM, t.text_secondary)
+                                div()
+                                    .id(SharedString::from(format!("ov-md-{}", m.id)))
                                     .w(px(ds_w))
                                     .flex_none()
-                                    .ellipsis()
-                                    .child(ds_name.clone()),
+                                    .when(ds_w < ds_text_w.ceil() + 1., |d| {
+                                        d.tooltip(crate::controls::tip(ds_name.clone(), None))
+                                    })
+                                    .child(
+                                        text(ty::SM, t.text_secondary)
+                                            .w_full()
+                                            .ellipsis()
+                                            .child(ds_name.clone()),
+                                    ),
                             )
-                            // Its best model, then the same compact e2e tag as the Models table; in
-                            // full on hover (the one-third column cuts long names).
+                            // Its best model, in full on hover (a very long name can still be cut).
+                            // The e2e head is on the Models page and the model's page.
                             .child(
                                 div()
                                     .id(SharedString::from(format!("ov-mn-{}", m.id)))
@@ -331,10 +357,7 @@ impl FoloApp {
                                             .min_w_0()
                                             .ellipsis()
                                             .child(m.name.clone()),
-                                    )
-                                    .when(self.model_e2e(&m), |d| {
-                                        d.child(e2e_tag(&t, format!("e2e-ov-{}", m.id)))
-                                    }),
+                                    ),
                             )
                             .when(wide, |d| {
                                 d.child(
@@ -424,6 +447,18 @@ const META_W: f32 = 150.;
 const NAME_MIN: f32 = 140.;
 /// Between columns.
 const COL_GAP: f32 = 12.;
+/// A Best models row's margins and padding, the panel's borders and 4 px of slack.
+const BEST_ROW_EXTRA: f32 = 8. + 24. + 2. + 4.;
+/// The narrowest the Best models dataset column gets ("shapes…").
+const DS_MIN: f32 = 56.;
+
+/// The Best models dataset column's width, given `free` px for it and the model's name: what the
+/// longest dataset name needs, cut only where the longest model name would be otherwise (never under
+/// `DS_MIN`). The model column takes the rest.
+pub(super) fn best_dataset_w(free: f32, ds_need: f32, name_need: f32) -> f32 {
+    let ds_need = ds_need.ceil() + 1.;
+    ds_need.min((free - name_need.ceil()).max(DS_MIN.min(ds_need))).floor()
+}
 /// A row's margins, padding and the panel's borders, plus 24 px of slack: a row within about 10 px
 /// of its slot (a rounding error, the page's scrollbar) overflows it, and the layout then puts the
 /// whole page at its min-content width (the Datasets cards drawn empty at 1680 px, measured).
@@ -463,7 +498,19 @@ impl RecentCols {
 
 #[cfg(test)]
 mod tests {
-    use super::RecentCols;
+    use super::{DS_MIN, RecentCols, best_dataset_w};
+
+    #[test]
+    fn best_models_cut_the_dataset_before_the_model_name() {
+        // Room for both: the dataset takes what it needs, no more.
+        assert_eq!(best_dataset_w(400., 90., 150.), 91.);
+        // Not enough: the model's name keeps its width, the dataset gives way.
+        assert_eq!(best_dataset_w(206., 104., 140.), 66.);
+        // Never under its floor, even when the name is longer still.
+        assert_eq!(best_dataset_w(206., 104., 200.), DS_MIN);
+        // A short dataset name is never padded to the floor's width.
+        assert_eq!(best_dataset_w(100., 40., 200.), 41.);
+    }
 
     #[test]
     fn recent_runs_drop_whole_columns_in_the_two_thirds() {
