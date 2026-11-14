@@ -7,7 +7,7 @@ changing a number are in [docs/BENCHMARKS.md, Charts](../../docs/BENCHMARKS.md#c
 
 | file | what it does |
 |---|---|
-| [`data.json`](data.json) | every number the charts show; each group names in its `source` the section of docs/BENCHMARKS.md it was copied from |
+| [`data.json`](data.json) | every number the charts show; each group's `source` names the document section or the run records it was copied from (`coco_curves`: the runs' `metrics.jsonl`) |
 | [`render.mjs`](render.mjs) | the chart definitions; writes `docs/img/charts/<name>-light.svg` and `<name>-dark.svg`, or with `--check` compares them |
 | [`bars.mjs`](bars.mjs) | the layout of the horizontal grouped bar charts |
 | [`lines.mjs`](lines.mjs) | the layout of the line chart (validation mAP by epoch) |

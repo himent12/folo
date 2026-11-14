@@ -1,5 +1,5 @@
-// One vision benchmark (`#/benchmarks/<id>`): its plan (edited here while the benchmark has no entries), its entries
-// and its loops. The parts are in ./bench/.
+// One vision benchmark (`#/benchmarks/<id>`): its plan (editable here while no entry is done or under way), its
+// entries and its loops. The parts are in ./bench/.
 import ArrowLeft from '$icons/arrow-left';
 import Copy from '$icons/copy';
 import GitCompare from '$icons/git-compare-arrows';
@@ -97,7 +97,7 @@ export default function Benchmark() {
     router.go(`/benchmarks/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`, { replace: true });
   }
 
-  // ---------- the plan: edited here while the benchmark has no entries, saved with Save plan ----------
+  // ---------- the plan: editable here while no entry is done or under way, saved with Save plan ----------
   const draft = signal<BenchPlan>({ conditions: [] });
   // Fixed once an entry finished or is under way (failed and stopped ones graded nothing to keep comparable).
   const editable = computed(() => !!bench.get() && planEditable(live.entries));

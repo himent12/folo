@@ -111,7 +111,8 @@ bash tools/test-tmp.sh cargo test -p folo-cli   # as CI runs them: fails if a te
 
 - No test needs a GPU: `tests/engine.rs` passes `--device cpu` to the engine commands.
 - `tests/onnx.rs` needs a Python with `onnx`, `onnxruntime` and `numpy` (`FOLO_ONNX_PYTHON`, else the venv at
-  `FOLO_ONNX_VENV`). Without one it prints why and passes, unless `FOLO_ONNX_REQUIRED=1`, which CI's `onnx` job sets.
+  `FOLO_ONNX_VENV`). Without one it prints why and passes, unless `FOLO_ONNX_REQUIRED=1`, which CI's `rust (linux)`
+  job sets.
 - No test in this crate is `#[ignore]`d.
 - The crate has no benchmarks.
 

@@ -30,8 +30,10 @@ normative specs it implements are [MODEL.md](../../docs/MODEL.md) (blocks and tr
 
 ## Start here
 
-1. `Module` and `Forward` in `src/module.rs`: every layer and the whole detector implement them; names come from
-   `visit_tensors` and `visit_children`.
+1. `Module` and `Forward` in `src/module.rs`: every layer and the whole detector (`FoloModel`) implement `Module`,
+   whose names come from `visit_tensors` and `visit_children`. Only one-tensor-in, one-tensor-out layers implement
+   `Forward`: `Concat` and `FoloModel` (whose `forward` returns a `HeadOutput`) do not, so they cannot go in a
+   `Sequential`.
 2. `ConvBnAct` in `src/layers/conv_bn_act.rs`: the block the detector is made of, and how its forward picks a path
    (fused, train, eval).
 3. `StandardGroups` and the `Optimizer` trait in `src/optim/mod.rs`, then `Sgd` in `src/optim/sgd.rs`.
@@ -44,7 +46,7 @@ normative specs it implements are [MODEL.md](../../docs/MODEL.md) (blocks and tr
 
 | To do this | Touch these files |
 |---|---|
-| Add a layer | A file in `src/layers/` (a small one can go in `simple.rs`); `mod` and `pub use` in `src/layers/mod.rs`; the re-export in `src/lib.rs`; `impl Module` (an empty impl for a layer without tensors, as `MaxPool2d`) and `impl Forward`; tests in `tests/modules.rs`; the Layers table in `docs/NN.md` |
+| Add a layer | A file in `src/layers/` (a small one can go in `simple.rs`); `mod` and `pub use` in `src/layers/mod.rs`; the re-export in `src/lib.rs`; `impl Module` (an empty impl for a layer without tensors, as `MaxPool2d`) and, for a one-input layer, `impl Forward`; tests in `tests/modules.rs`; the Layers table in `docs/NN.md` |
 | Add an optimizer | A file in `src/optim/` implementing `Optimizer`; a variant of `OptimKind` and its `as_str` in `src/optim/mod.rs`; its state tensor names in `src/io/checkpoint.rs`; tests in `tests/optim.rs` and `tests/folo_io.rs` (resume). To make training use it: `OptimizerChoice` and `ResolvedOptim` in `crates/folo-vision/src/train/config.rs`, the constructor match in `crates/folo-vision/src/train/setup.rs`, `Optimizer` and `ResolvedOptimizer` in `crates/folo-api/src/runs.rs`, `OptimizerArg` in `crates/folo-cli/src/cli.rs` and its match in `config_of` (`crates/folo-cli/src/train/config.rs`). Docs: MODEL.md §8.2, FORMAT.md (`folo.optim`), API.md |
 | Change the LR schedule | `src/sched.rs`; `tests/optim.rs`; MODEL.md §8.4 and FORMAT.md (`folo.sched`) |
 | Change `.folo` metadata or the loading rules | `src/io/meta.rs` or `src/io/file.rs`; `tests/folo_io.rs`; FORMAT.md |

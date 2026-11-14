@@ -20,7 +20,7 @@
 //! - [`codes`]: every error code with its HTTP status and CLI exit code; [`json`]: JSON presentation helpers of the
 //!   CLI and MCP; [`weights`]: the published weights, their cache folder and FOLO's home folder.
 //!
-//! The `schema` feature derives `schemars::JsonSchema` for every type (off by default; `folo-mcp` turns it on).
+//! The `schema` feature derives `schemars::JsonSchema` for the wire types (off by default; `folo-mcp` turns it on).
 
 mod bench;
 mod cloud;

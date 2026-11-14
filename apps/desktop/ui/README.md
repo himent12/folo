@@ -87,7 +87,7 @@ Features:
   opt-in; the deterministic text tests use it, since it gives the same layout and masks on every OS.
 - `winit`: the winit + softbuffer backend (`platform/winit`, with arboard and rfd). Always on off Windows. On
   Windows it lets that backend's shared code build and run on a Windows machine (`FOLO_UI_PLATFORM=winit`).
-- `test-support`: exposes `FixedTextSystem` (`text/types.rs`), a fake text backend with fixed metrics, to other
+- `test-support`: exposes `FixedTextSystem` (`text/fixed.rs`), a fake text backend with fixed metrics, to other
   crates. Unit tests inside the crate get it through `cfg(test)`.
 
 Code gates on `#[cfg(any(not(windows), feature = "winit"))]` (and the same with `"portable-text"`);

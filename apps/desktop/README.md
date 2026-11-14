@@ -90,11 +90,12 @@ Each recipe names an existing example to copy.
   other exhaustive `match` on `Route` or `Section`. Then the sidebar's `nav` list (`src/app/sidebar.rs`), the
   palette's (`palette_items` in `src/overlays/palette.rs`), `USAGE` in `src/main.rs`, and a scenario in
   `src/scenario.rs` (`ALL` and `apply`). Example: Benchmarks (`Route::Benches`, `screens/bench/`).
-- **An API call.** Check the endpoint in docs/API.md and its types in `crates/folo-api` (re-exported by
-  `src/api/types.rs`). Add the method to `Backend` (`src/api/mod.rs`), with a default that answers
-  `not_supported` when only some servers have it; implement it on `HttpBackend` (`src/api/http/`, through
-  `self.get` / `self.post`) and on `MockBackend` (`src/api/mock/backend.rs`). A page calls it on the background
-  executor with `FoloApp::fetch` (`src/app/data.rs`) and keeps the answer in a `Load<T>` (`src/store/mod.rs`).
+- **An API call.** Check the endpoint in docs/API.md and its types in `crates/folo-api`. `src/api/types.rs`
+  re-exports those types by name, so a new type goes into one of its `pub use folo_api::{…}` lists. Add the method
+  to `Backend` (`src/api/mod.rs`), with a default that answers `not_supported` when only some servers have it;
+  implement it on `HttpBackend` (`src/api/http/`, through `self.get` / `self.post`) and on `MockBackend`
+  (`src/api/mock/backend.rs`). A page calls it on the background executor with `FoloApp::fetch` (`src/app/data.rs`)
+  and keeps the answer in a `Load<T>` (`src/store/mod.rs`).
   Example: `throughput`, loaded by `load_throughput` in `src/screens/settings/throughput.rs`.
 - **A control.** An `impl FoloApp` method in a file under `src/controls/` that builds a `Stateful<Div>` with the
   key as its id and passes it through `FoloApp::bind` (`controls/focus.rs`), which makes it focusable and

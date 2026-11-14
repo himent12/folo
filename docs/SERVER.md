@@ -52,7 +52,8 @@ stream sends a keep-alive comment every 15 s (`KEEP_ALIVE`) and ends when the se
 - `RealStore` (`real/`): the engine (the sections below).
 - `MockStore` (`mock/`): deterministic synthetic data for `folo serve --mock`, for UI work before or without a
   trained model.
-- `folo_mcp::proxy::HttpStore` (in folo-mcp): forwards every call to a running `folo serve` over HTTP.
+- `folo_mcp::proxy::HttpStore` (in folo-mcp): forwards the request / response calls to a running `folo serve` over
+  HTTP. `subscribe` (a run's event stream) answers `not_implemented`, and it has no labeler or benchmarks.
 
 The services hang off the real store, all built in `RealStore::open_with_cloud`: `Runs` (training), `Models`,
 `Predictors`, `Throughput`, `Uploads`, `Cloud`, `Labeler` and `Benches`. The store hands the labeler and the benchmarks
@@ -79,8 +80,9 @@ out through `Store::labeler` and `Store::benches`; the mock has neither.
 - The trainer's event sink is `RunEntry::on_event` (`runs/entry.rs`): it updates the run, persists what matters and
   forwards each event to SSE subscribers through a per-run broadcast channel (`Runs::subscribe`, `runs/history.rs`).
 - `RunEntry::execute` is the one claim-execute-publish path, shared by local and cloud runs.
-- On open, runs a previous process left `queued`, `running` or `stopping` become `stopped`; `Runs::resume` continues
-  one from `weights/last.folo`.
+- On open, **local** runs a previous process left `queued`, `running` or `stopping` become `stopped`;
+  `Runs::resume` continues one from `weights/last.folo`. An active cloud run is left for `crate::cloud` to follow
+  again or end (`runs/registry.rs`, `Runs::open`).
 
 ## The data dir
 `real/mod.rs` documents the layout in full. In short:

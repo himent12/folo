@@ -24,7 +24,7 @@ and FOLO Desktop (`apps/desktop`) for local inference.
 | `src/detect.rs` | The task-aligned assigner and the detection loss on folo-core GPU tensors. |
 | `src/profile.rs` | Per-kernel GPU timings (`FOLO_GPU_PROFILE=1`). |
 | `src/dtype.rs`, `src/error.rs` | Buffer element types; `GpuError`. |
-| `src/tests/` | Every test of the crate (unit tests, compiled with `cargo test`): `backend/` (the backend against folo-core's CPU backend, by area) and kernel-level files (`gemm.rs`, `conv.rs`, `coop.rs`, `elementwise.rs`, ...) plus runtime tests (`runtime.rs`, `pool.rs`, `binds.rs`, `plan.rs`, `precompile.rs`, `pipeline_cache.rs`). |
+| `src/tests/` | The GPU tests (unit tests, compiled with `cargo test`; `kernel_list.rs`, `pool.rs` and `pipeline_cache.rs` also have unit tests of their own): `backend/` (the backend against folo-core's CPU backend, by area) and kernel-level files (`gemm.rs`, `conv.rs`, `coop.rs`, `elementwise.rs`, ...) plus runtime tests (`runtime.rs`, `pool.rs`, `binds.rs`, `plan.rs`, `precompile.rs`, `pipeline_cache.rs`). |
 | `benches/` | `gemm.rs`, `conv.rs`, `conv_model.rs`, `elementwise.rs`, `backend.rs`. |
 
 There is no `tests/` folder at the crate root and no `build.rs`.
@@ -53,28 +53,28 @@ shader file where it has one (`softmax` and `softmax.wgsl`, `tal_topk` and `tal_
 
 | Op (folo-core) | `GpuBackend` method | Kernel entry point | WGSL | Test against the CPU |
 |---|---|---|---|---|
-| unary, binary, comparisons, `where` | `unary`, `unary_backward`, `binary`, `where_cond` (through `GpuBackend::ew` in `encode.rs`) | `kernels::ew::elementwise` | generated in `ew.rs` | `tests/backend/elementwise.rs` |
-| sum / mean / max / min, argmax / argmin | `reduce` | `kernels::reduce::{reduce_split, arg_reduce}` | `reduce_rows.wgsl`, `reduce_cols.wgsl`, `arg_reduce.wgsl` | `tests/backend/reduce.rs` |
-| softmax, log-softmax | `softmax` | `kernels::reduce::softmax_dim` | `softmax.wgsl`, `softmax_cols.wgsl` | `tests/backend/reduce.rs` |
-| top-k | `topk` | `kernels::reduce::topk` | `topk.wgsl` | `tests/backend/reduce.rs`, `tests/backend/index.rs` |
-| matmul | `matmul` | `kernels::gemm::gemm` | generated in `gemm.rs` | `tests/backend/matmul.rs`, `tests/gemm.rs` |
-| conv2d and its gradients | `conv2d`, `conv2d_act`, `conv2d_backward_input`, `conv2d_backward_weight(_as)` | `kernels::conv::{conv2d, conv2d_input, conv2d_backward_input, conv2d_backward_weight_as}` | generated (`gemm.rs`, `conv/`, `coop/shader.rs`); `depthwise.wgsl` | `tests/backend/conv.rs`, `tests/conv.rs`, `tests/coop_conv.rs` |
-| 1x1 conv over a concatenation | `conv2d_act_cat` | `kernels::conv::conv2d_cat` (`gemm_cat.rs`) | generated | `tests/backend/conv_cat.rs` |
-| max / avg / adaptive pooling and gradients | `max_pool2d`, `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pool_grad::*` | generated in `pool_grad.rs` | `tests/backend/pooling.rs` |
-| nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d`, `kernels::pool_grad::upsample_nearest2d_backward` | `upsample.wgsl`; generated | `tests/backend/pooling.rs` |
-| index ops | `index_select`, `index_add`, `gather`, `scatter_add` | `kernels::strided::*` | generated in `strided.rs` | `tests/backend/index.rs` |
-| copies, casts, fills | `copy_strided`, `copy_into`, `cast`, `full` | `kernels::strided::*` | generated in `strided.rs` | `tests/backend/transfer.rs` |
-| train-mode BatchNorm + activation | `batch_norm_act`, `batch_norm_act_backward` | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | `bn_*.wgsl` | `tests/amp.rs`; folo-nn `tests/gpu/main.rs` |
+| unary, binary, comparisons, `where` | `unary`, `unary_backward`, `binary`, `where_cond` (through `GpuBackend::ew` in `encode.rs`) | `kernels::ew::elementwise` | generated in `ew.rs` | `src/tests/backend/elementwise.rs` |
+| sum / mean / max / min, argmax / argmin | `reduce` | `kernels::reduce::{reduce_split, arg_reduce}` | `reduce_rows.wgsl`, `reduce_cols.wgsl`, `arg_reduce.wgsl` | `src/tests/backend/reduce.rs` |
+| softmax, log-softmax | `softmax` | `kernels::reduce::softmax_dim` | `softmax.wgsl`, `softmax_cols.wgsl` | `src/tests/backend/reduce.rs` |
+| top-k | `topk` | `kernels::reduce::topk` | `topk.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/backend/index.rs` |
+| matmul | `matmul` | `kernels::gemm::gemm` | generated in `gemm.rs` | `src/tests/backend/matmul.rs`, `src/tests/gemm.rs` |
+| conv2d and its gradients | `conv2d`, `conv2d_act`, `conv2d_backward_input`, `conv2d_backward_weight(_as)` | `kernels::conv::{conv2d, conv2d_input, conv2d_backward_input, conv2d_backward_weight_as}` | generated (`gemm.rs`, `conv/`, `coop/shader.rs`); `depthwise.wgsl` | `src/tests/backend/conv.rs`, `src/tests/conv.rs`, `src/tests/coop_conv.rs` |
+| 1x1 conv over a concatenation | `conv2d_act_cat` | `kernels::conv::conv2d_cat` (`conv/forward.rs`, calling `gemm_cat.rs`) | generated | `src/tests/backend/conv_cat.rs` |
+| max / avg / adaptive pooling and gradients | `max_pool2d`, `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pool_grad::*` | generated in `pool_grad.rs` | `src/tests/backend/pooling.rs` |
+| nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d`, `kernels::pool_grad::upsample_nearest2d_backward` | `upsample.wgsl`; generated | `src/tests/backend/pooling.rs` |
+| index ops | `index_select`, `index_add`, `gather`, `scatter_add` | `kernels::strided::*` | generated in `strided.rs` | `src/tests/backend/index.rs` |
+| copies, casts, fills | `copy_strided`, `copy_into`, `cast`, `full` | `kernels::strided::*` | generated in `strided.rs` | `src/tests/backend/transfer.rs` |
+| train-mode BatchNorm + activation | `batch_norm_act`, `batch_norm_act_backward` | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | `bn_*.wgsl` | `src/tests/amp.rs`; folo-nn `tests/gpu/main.rs` |
 | optimizer updates, clipping, loss-scaler unscale | `optimizer_step(_many)`, `norm_partials_many`, `scale_many`, `unscale_check(_many)` | `kernels::optim::*` | `optim.wgsl`; generated `_many` kernels | folo-nn `tests/gpu/main.rs` |
-| Muon (MuSGD) | `muon_step_many` | `kernels::muon::muon_step_many` | generated in `muon.rs` | `tests/muon.rs`; folo-nn `tests/gpu/muon.rs` |
+| Muon (MuSGD) | `muon_step_many` | `kernels::muon::muon_step_many` | generated in `muon.rs` | `src/tests/muon.rs`; folo-nn `tests/gpu/muon.rs` |
 | letterbox | `letterbox_rgb8` | `kernels::vision::letterbox_rgb8` | `letterbox.wgsl` | folo-vision `tests/gpu.rs` |
-| detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` | `tests/sites.rs` |
-| candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl`; generated | `tests/sites.rs` |
+| detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` | `src/tests/sites.rs` |
+| candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl`; generated | `src/tests/sites.rs` |
 | assigner and detection loss (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss}` | `kernels::detect::*` | `tal_*.wgsl`, `det_*.wgsl`, `detect_common.wgsl` | folo-vision `tests/gpu_loss.rs` |
 
 `GpuTensor` (`src/tensor.rs`) has kernels of its own that the backend does not use: `kernels::elementwise`
-(`unary.wgsl`, `binary.wgsl`, `bias_act.wgsl`, tested in `tests/elementwise.rs`) and `kernels::pooling`
-(`maxpool.wgsl`, tested in `tests/layout.rs`). It shares `kernels::layout`, `kernels::reduce`, `kernels::gemm` and
+(`unary.wgsl`, `binary.wgsl`, `bias_act.wgsl`, tested in `src/tests/elementwise.rs`) and `kernels::pooling`
+(`maxpool.wgsl`, tested in `src/tests/layout.rs`). It shares `kernels::layout`, `kernels::reduce`, `kernels::gemm` and
 `kernels::conv` with the backend.
 
 ## Start here
@@ -105,7 +105,7 @@ cargo test -p folo-gpu                        # every kernel and the backend aga
 cargo bench -p folo-gpu --bench gemm          # also: conv, conv_model, elementwise, backend
 ```
 
-- The tests ask for the shared context (`gpu!()`, or `dev!()` for the backend tests) and return early, printing a
+- The GPU tests ask for the shared context (`gpu!()`, or `dev!()` for the backend tests) and return early, printing a
   note, when there is no hardware adapter. CI runners have none, so there they pass without running: run them on a
   machine with a GPU.
 - Software adapters (WARP, llvmpipe) are skipped too unless `FOLO_GPU_TEST_SOFTWARE=1`.

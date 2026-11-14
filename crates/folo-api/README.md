@@ -39,7 +39,7 @@ Every module but `codes`, `json` and `weights` is private and re-exported at the
 
 ## The `schema` feature
 
-`schema` derives `schemars::JsonSchema` for every type (`#[cfg_attr(feature = "schema", ...)]`), so the MCP server
+`schema` derives `schemars::JsonSchema` for the wire types (`#[cfg_attr(feature = "schema", ...)]`), so the MCP server
 (docs/MCP.md) and `folo describe` can publish JSON Schemas generated from the wire types. It is off by default to
 keep the crate light for FOLO Desktop. folo-mcp turns it on in its `Cargo.toml`; the `folo` binary gets it through
 folo-mcp.

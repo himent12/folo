@@ -1,6 +1,7 @@
 //! Detector pre- and post-processing behind optional `Backend` hooks: letterboxing `u8` images into the
-//! network input, and decoding the head into above-threshold candidates. Both return `Ok(None)` on backends
-//! without the kernels (the CPU), so callers keep their host implementations as the fallback and reference.
+//! network input, decoding the head into above-threshold candidates, and the class pass and box decode of
+//! candidate-first prediction. All four return `Ok(None)` on backends without the kernels (the CPU), so callers
+//! keep their host implementations as the fallback and reference.
 
 use super::with_views_dyn;
 use crate::backend::{ClassSites, DETECT_RECORD_WORDS, DetectDecode, LetterboxImage, SiteLevel};

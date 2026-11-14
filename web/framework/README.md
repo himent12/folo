@@ -195,7 +195,7 @@ import { ... } from 'fw';
 | Area | API | Defined in |
 |---|---|---|
 | State | `signal(v, { equals? })` → `{ get, set, peek }` (`state` alias) · `computed(fn, { equals? })` → `{ get, peek }` · `deep(obj)` (proxy) · `snapshot(x)` | `runtime/core.ts`; `deep`, `snapshot`: `runtime/reactivity.ts` |
-| Effects | `effect(fn)` (after DOM updates; returns cleanup) · `effect.pre(fn)` · `renderEffect` (internal) · `onMount` · `onCleanup` / `onDestroy` · `untrack` · `isTracking` | `runtime/core.ts` |
+| Effects | `effect(fn)` (after DOM updates; `fn` may return a cleanup) · `effect.pre(fn)` · `renderEffect` (internal) · `onMount` · `onCleanup` / `onDestroy` · `untrack` · `isTracking` | `runtime/core.ts` |
 | Scheduling | `flush()` (≙ `flushSync`) · `tick()` · `batch(fn)` | `runtime/core.ts` |
 | Ownership | `createRoot((dispose) => …, parent?)` · `getOwner` · `runWithOwner` · `dispose` · `memo` | `runtime/core.ts` |
 | Context | `setContext` · `getContext` · `hasContext` · `createContext(default)` | `runtime/core.ts` |

@@ -11,7 +11,7 @@ docs/BENCHMARKS.md, for example [The trainer (row 10)](../../docs/BENCHMARKS.md#
 | file | what it does |
 |---|---|
 | [`ab.py`](ab.py) | `ab.py train` / `ab.py val`: per run the per-epoch training img/s, each epoch's duration, the process wall time and the CPU cores used by the run and by everything else; then median, best and spread per binary |
-| [`startup.py`](startup.py) | process start to the first `step` record at or past `--until-step` of `folo train --json`, then stops the run; prints every record with its arrival time |
+| [`startup.py`](startup.py) | process start to the first `step` record at or past `--until-step` of `folo train --json`, then kills the process; writes every line it received with its arrival time to `<out>/<tag>.log`, prints a JSON row per run, then the median and range per binary |
 | [`first_epoch.sh`](first_epoch.sh) | one epoch: `$BASE`, then `$NEW` with a deleted and with a warm GPU pipeline cache, per round; prints epoch 1's `duration_s`, the process wall and the compile timer's line |
 | [`cold_start.sh`](cold_start.sh) | first-ever runs: an empty FOLO cache and an empty NVIDIA shader cache (`__GL_SHADER_DISK_CACHE_PATH`) per run, and `$NEW` with its kernel list kept but no pipeline cache |
 | [`warm_start.sh`](warm_start.sh) | second starts of several binaries, each with its own cache folder filled by an untimed run; `train` (one epoch) or `predict` (one image) |

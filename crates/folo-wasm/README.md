@@ -44,7 +44,7 @@ rustup when missing) and `wasm-bindgen-cli` at exactly the `wasm-bindgen` versio
 
 | To do this | Touch these files |
 |---|---|
-| Add or change an option or a result field | `LoadOptions`, `DetectOptions` or `DetectorInfo` in `src/detector.rs`; the matching interface in `TS_TYPES` in `src/lib.rs`; `tests/detector.rs`; `demo/api-check.ts`; WASM.md (JS API) |
+| Add or change an option or a result field | `LoadOptions`, `DetectOptions` or `DetectorInfo` in `src/detector.rs`; a result field in `DetectResult` (`src/detector.rs`) or in `folo_api::PredictResponse`, which it flattens; the matching interface in `TS_TYPES` in `src/lib.rs`; `tests/detector.rs`; `demo/api-check.ts`; WASM.md (JS API) |
 | Change the JS bindings | `src/lib.rs` (keep `TS_TYPES` in step: `load` and `detect` are declared there, not generated); `demo/api-check.ts`; WASM.md |
 
 ## Tests

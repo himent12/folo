@@ -65,7 +65,8 @@ dimensions, or made contiguous once.
 - Pointwise convs pack B as a plain copy.
 - Depthwise convs have a direct kernel (`cpu/conv/depthwise.rs`; with AVX2 at stride 1: the plane copied once with
   its padding, every output vector its taps' FMAs in registers).
-- So do convs with at most 4 input channels (the 3-channel stem, `cpu/conv/small_c.rs`): per output row the
+- So do convs with at most 4 input channels (one group, not pointwise, `c·kh·kw <= 256`: the 3-channel stem,
+  `cpu/conv/small_c.rs`): per output row the
   `c·kh·kw` taps are gathered into L1 and every output channel is that many FMAs per pixel in the GEMM's order, bit
   for bit the GEMM result, without the per-channel phase copy.
 - Bias and activation run as an epilogue on each finished output (`Tensor::conv2d_act`, used by fused `ConvBnAct`
@@ -78,9 +79,9 @@ dimensions, or made contiguous once.
 
 ### Winograd F(2x2, 3x3)
 - The fused entry points (`conv2d_act`, `conv2d_act_cat`: nothing is recorded) run a dense 3x3 stride-1 conv with at
-  least 16 input and 8 output channels (at most 4096 together, which bounds the per-thread scratch), and a 32x32 or
-  larger output or `c · o >= 4096`, as Winograd F(2x2, 3x3) (`cpu/conv/winograd.rs`): 16 multiplies per 2x2 output
-  tile and channel pair instead of 36.
+  least 16 input and 8 output channels (at most 4096 together, which bounds the per-thread scratch), and at least
+  256 2x2 output tiles (`⌈OH/2⌉ · ⌈OW/2⌉ >= 256`) or `c · o >= 4096`, as Winograd F(2x2, 3x3)
+  (`cpu/conv/winograd.rs`): 16 multiplies per 2x2 output tile and channel pair instead of 36.
 - The weights are transformed once per weight tensor and kept with its storage until the storage is next written
   (`View::derived`: every write lock clears it; a view whose `storage` field was pointed elsewhere neither uses nor
   fills it).
@@ -101,9 +102,9 @@ dimensions, or made contiguous once.
   conv's values and every other element is unspecified.
 - On the CPU a Winograd conv runs the block code over the list of 2x2 tiles that hold a site
   (`winograd_forward_at`: a tile's arithmetic and its GEMM sums do not depend on which tiles share its block) and a
-  pointwise conv runs the dense GEMM over the sites' columns gathered into planes of their own
-  (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv runs densely, as does a backend without
-  the kernel.
+  pointwise conv (one group, fewer than 2048 input channels) runs the dense GEMM over the sites' columns gathered
+  into planes of their own (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv runs densely, as
+  does a backend without the kernel.
 - A site reads only its receptive field: in Winograd F(2x2, 3x3) each output of a tile reads only its own 3x3 window
   of the 4x4 patch (tested with NaN everywhere else).
 - On the GPU, `Tensor::conv2d_act_sites` takes per image a fixed-capacity list of output pixels (a count, then the
@@ -118,9 +119,11 @@ dimensions, or made contiguous once.
 channel slice of a tensor) in place, so `cat` + conv never writes the concatenation.
 
 ### conv2d gradients
-- The stride-1 input gradient is the forward kernel run on the output gradient with the flipped, channel-swapped
-  kernel (no col2im); strided convs use an unfolded gradient and col2im (`cpu/conv/backward_input.rs`).
-- The weight gradient of a stride-1 conv (or a pointwise one with at least 64 input channels) is
+- The input gradient (`cpu/conv/backward_input.rs`): pointwise convs multiply by `Wᵀ` directly (`Wᵀ · gy`). Other
+  non-depthwise convs with stride 1 and `p <= d (k - 1)` on both axes run the forward kernel on the output gradient
+  with the flipped, channel-swapped kernel (no col2im); the rest use an unfolded gradient and col2im. Depthwise convs
+  have their own kernel (`cpu/conv/depthwise.rs`).
+- The weight gradient of a non-pointwise stride-1 conv, or of a pointwise one with `C/groups >= 64`, is
   `dWᵀ = X_unfolded · gyᵀ` with the input's shifted rows as A, read in place by a 6x16 micro-kernel through six row
   pointers (`gemm_arows`), and the output gradient transposed once per image into packed B panels (zeros in the
   dropped columns); K is cut into parts and the rows into tiles by shape alone, partials added in order. Other convs
@@ -193,11 +196,13 @@ through a graph that saved the old values fails with `Error::ModifiedInPlace` in
   implements them, the CPU backend implements `conv2d_act` and `conv2d_act_cat`, other backends fall back.
 
 ## Detector pre- and post-processing hooks
-`ops/vision.rs` holds two hooks that return `Ok(None)` without a kernel, so callers keep their host code; folo-gpu
-implements both:
+`ops/vision.rs` holds four hooks that return `Ok(None)` without a kernel, so callers keep their host code; folo-gpu
+implements all four:
 - `Tensor::letterbox_rgb8`: raw `u8` images → letterboxed `f32` NCHW input, sampled with folo-data's exact resize
   taps.
 - `Tensor::detect_candidates`: head → per-anchor best class above `conf` with its decoded box, as a compact list.
+- `Tensor::detect_class_sites` and `Tensor::detect_decode_sites`: the class pass of one head level into a list of
+  candidate sites, and the decode of the boxes computed at those sites (candidate-first prediction, above).
 
 ## Mixed precision
 `folo_core::autocast` works like `torch.autocast`:
@@ -223,7 +228,8 @@ This is the contract for folo-gpu and any other device.
   `DeviceStorage::new` and wrap foreign buffers into tensors with `Tensor::from_storage`.
 - **Views.** Every method receives `View`s (storage + `Layout`). Layouts may be strided or broadcast (stride 0);
   outputs are fresh contiguous storages on the same device. folo-core validates shapes, dtypes and devices before
-  calling; binary, `where_cond` and `matmul` operands arrive already broadcast to the output shape.
+  calling; binary and `where_cond` operands arrive already broadcast to the output shape, and `matmul` operands have
+  identical, already broadcast batch dims.
 - **Required methods:** `name`, `full`, `upload`, `download` (to host, logical order), `copy_strided`, `copy_into`
   (strided write used by `cat`, `pad`, view gradients and `copy_from`), `cast`.
 - **Compute methods** (unary + `unary_backward`, binary, `where_cond`, `reduce`, `softmax`, `matmul`, conv2d forward /

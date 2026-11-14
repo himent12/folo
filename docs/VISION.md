@@ -42,8 +42,8 @@ differentiable, so it works on folo-core tensors.
   downloaded), `to_device()`, and `.folo` save / load (`open_on(path, device)`) / transfer through folo-nn.
 
 ## The loss
-- Task-aligned assigner (TAL: `score^alpha * IoU^beta`, top-k), BCE classification on aligned targets, CIoU box loss
-  and DFL, weighted 7.5 / 0.5 / 1.5 by default.
+- Task-aligned assigner (TAL: `score^alpha * max(CIoU, 0)^beta`, top-k), BCE classification on aligned targets,
+  CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default.
 - On the CPU `folo_vision::loss` runs the assigner on the detached head outputs, then builds the terms from
   folo-core tensor ops (fused custom ops for the full-size BCE and gather), so gradients flow into both head
   branches.
@@ -59,8 +59,8 @@ NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision / 
 `folo_vision::train::Trainer` implements MODEL.md §8.
 - **Data to step:** folo-data's `DataLoader` (seeded per epoch and sample, so batches do not depend on the worker
   count) → tensors → train-mode forward → loss → backward into a `GradAccumulator` (nominal batch 64) → schedule
-  (warmup + linear / cosine, in optimizer steps), global-norm clipping, SGD / AdamW with `decay` / `bn` / `bias`
-  groups (`auto` picks per §8.2), EMA.
+  (warmup + linear / cosine, in optimizer steps), global-norm clipping, SGD / AdamW / MuSGD with `decay` / `bn` /
+  `bias` groups (`auto` picks per §8.2), EMA.
 - **Non-finite batches:** batches with a non-finite loss or BatchNorm statistic are skipped and their running
   statistics restored.
 - **After every epoch:** validation of the EMA model with `metrics::Evaluator`, fitness mAP@0.5:0.95, `last.folo` /
@@ -116,7 +116,8 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
   top-k: end-to-end `[B, K, 6]` detections; fixed or dynamic shapes; f32 or f16).
 - It is encoded by a small hand-written protobuf writer (`export::onnx::proto`), with the class names and `folo.*`
   metadata in `metadata_props`.
-- Any model tensor no node consumed, or an unfused BatchNorm, is an error naming it.
+- Apart from the head branch the export does not use (`head.o2o.*`, or `head.box.*` / `head.cls.*` for end-to-end),
+  any model tensor no node consumed, or an unfused BatchNorm, is an error naming it.
 - `folo export --format onnx` and `POST /api/models/{id}/export` call `export_file`; parity with onnxruntime is
   `crates/folo-cli/tests/onnx.rs` + `bench/parity/onnx_check.py` ([CLI.md](CLI.md#onnx-export)).
 - `.folo` export itself lives in folo-nn ([FORMAT.md](FORMAT.md), [NN.md](NN.md)).

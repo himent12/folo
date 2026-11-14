@@ -36,8 +36,8 @@ cargo test -p folo-test-support                                  # the helpers a
 bash tools/test-tmp.sh cargo test --workspace                    # every test, as CI runs them
 ```
 
-`tools/test-tmp.sh` runs the tests the way CI does and fails if they leave anything behind (AGENTS.md, Tests and temp
-dirs).
+`tools/test-tmp.sh` runs the tests the way CI does and fails if they leave `folo-*` entries behind (AGENTS.md, Tests
+and temp dirs).
 
 ## Further reading
 

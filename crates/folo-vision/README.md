@@ -14,7 +14,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | Crate docs and the re-exports |
-| `src/model/` | `mod.rs` (`FoloModel`: construction, forward, `fuse`, `to_device`; `HeadOutput`), `blocks.rs` (Bottleneck, C3k, C3k2, SPPF, Attention, PSABlock, C2PSA), `head.rs` (the detect head, and the `o2o` branch), `io.rs` (`.folo` weight IO), `predict.rs` (decode and `predict_raw`), `lazy.rs` / `lazy_gpu.rs` (candidate-first prediction on the CPU / a GPU) |
+| `src/model/` | `mod.rs` (`FoloModel`: construction, forward, `fuse`, `to_device`; `HeadOutput`), `blocks.rs` (`Bottleneck`, `C3k`, `C3k2`, `Sppf`, `Attention`, `PsaBlock`, `C2Psa`), `head.rs` (the detect head, and the `o2o` branch), `io.rs` (`.folo` weight IO), `predict.rs` (decode and `predict_raw`), `lazy.rs` / `lazy_gpu.rs` (candidate-first prediction on the CPU / a GPU) |
 | `src/boxes.rs` | `Xyxy` / `Cxcywh`, letterbox mapping, IoU / GIoU / DIoU / CIoU |
 | `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs |
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
@@ -77,7 +77,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 |---|---|
 | Change a block or a layer table | `src/model/blocks.rs` or `src/model/mod.rs`; the same change in `src/export/onnx/blocks.rs`; `tests/model.rs` (when names change, re-bless `tests/golden/folo-n-names.txt` with `FOLO_BLESS=1 cargo test -p folo-vision --test model golden_names`); the parameter count in the `src/model/mod.rs` doctest; MODEL.md §2, §4, §5 |
 | Add a training recipe key | The field and its default in `TrainConfig` (`src/train/config.rs`); where it acts (`setup.rs`, `epoch.rs` or `run.rs`); `tests/train.rs`; MODEL.md §8.1. To set it over the API: `TrainConfig` in `crates/folo-api/src/runs.rs`, `TrainConfig::from_api`, and API.md |
-| Change a loss term | `src/loss/terms.rs`; on a GPU, folo-gpu's `src/detect.rs` and `src/kernels/detect.rs` behind `src/loss/device.rs`; `tests/loss_cases.rs` and `tests/gpu_loss.rs`; MODEL.md §7.4 |
+| Change a loss term | `src/loss/terms.rs`; on a GPU, folo-gpu's `src/detect.rs`, `src/kernels/detect.rs` and the shaders `det_bce_fwd.wgsl`, `det_bce_bwd.wgsl`, `det_box.wgsl` and `detect_common.wgsl` behind `src/loss/device.rs`; `tests/loss_cases.rs` and `tests/gpu_loss.rs`; MODEL.md §7.4 |
 | Change the post-process | `src/nms.rs` or `src/fusion.rs`; `tests/nms_reference.rs`, `tests/fusion_reference.rs`, and `tests/lazy_head.rs` / `tests/gpu_lazy_head.rs` (candidate-first must equal the dense path); MODEL.md §9.3, §9.4 |
 | Change a metric | `src/metrics.rs` or `src/cocoeval.rs`; `tests/metrics_known.rs`, `tests/coco_parity.rs`, `tests/coco_full.rs`; METRICS.md |
 | Change the ONNX export | `src/export/onnx/graph.rs` (layer helpers), `blocks.rs` or `decode.rs`; the unit tests and the op table in `src/export/onnx/mod.rs`; CLI.md (`folo export`) |

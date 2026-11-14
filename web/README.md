@@ -149,7 +149,8 @@ in `src/lib/api/client.ts` (as `throughput()`: `this.#req<ThroughputTable>('GET'
 signal)`), and the
 same method to the mock: `src/lib/api/mock/server.ts` (system, datasets, models), `trainingApi.ts` (runs, cloud) or
 `index.ts` (labeling, benchmarks, inference), answering through `this.call(...)` as `MockServer.throughput()` does.
-`MockApi` implements `Api`, so tsc fails until the mock has the method too.
+`MockApi` implements `Api`, so tsc fails until the mock has the method too. A GET method also goes into `READS` in
+`src/lib/api/share.ts`; without it, identical requests issued together are not shared.
 
 **Add a component.** A `.tsx` file in `src/lib/ui/` (or in the screen's folder when only that screen uses it) with a
 default-exported function and one `css\`...\`` block of scoped styles that uses the tokens' CSS variables
