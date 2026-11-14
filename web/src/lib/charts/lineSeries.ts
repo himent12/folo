@@ -1,5 +1,5 @@
 /**
- * A line chart's series (LineChart's `Series`, `Marker` and `XMark`) and how each one is drawn and named: its line
+ * A line chart's series (LineChart's `Series`, `Marker`, `XMark` and `Future`) and how each one is drawn and named: its line
  * pattern and ink, its legend swatch, its direct label, its latest value.
  */
 import type { Pt } from './downsample';
@@ -74,6 +74,15 @@ export interface Marker {
 export interface XMark {
   x: number;
   label: string;
+}
+
+/**
+ * The planned part of a live run's x axis, not trained yet: shaded from `x` (the latest point) to the end of the
+ * domain, and `label` (the ETA, "ETA 12m 02s") over its start in the band above the plot.
+ */
+export interface Future {
+  x: number;
+  label?: string;
 }
 
 /** A line's direct label: its short `endLabel`, else its legend label; null for none. */

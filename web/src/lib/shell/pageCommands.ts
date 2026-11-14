@@ -53,7 +53,7 @@ export function pageCommands(get: () => PageCommand[]) {
 }
 
 /**
- * Page keys, for a page that offers some (Run's 1–6): `handler` sees single-key presses with the same guards as the
+ * Page keys, for a page that offers some: `handler` sees single-key presses with the same guards as the
  * global ones (not while typing, a dialog is open, a modifier is held, or single-key shortcuts are off) and returns
  * true when it used the key. Call from a component's body; it stops when the component goes.
  */

@@ -57,6 +57,8 @@ export default function Samples(props: SamplesProps) {
   const showAll = signal(false);
   // Phones drop the header's epoch meta (the picker names it).
   const phone = new MediaQuery(media.phone, false);
+  /** From 1280 px the header holds every control (design/UNIFIED.md §4 Run); narrower, the slider is on the key's row. */
+  const wide = new MediaQuery(media.desktop, false);
 
   // Memoise the props the fetcher reads: the parent passes values derived from a run object that changes every
   // step, and an unmemoised prop read would refetch on each one.
@@ -85,6 +87,12 @@ export default function Samples(props: SamplesProps) {
     return showAll.get() ? all : all.slice(0, FIRST.get());
   });
 
+  const confSlider = () => (
+    <div class="conf">
+      <Slider label="Min confidence" bind:value={conf} min={0.05} max={0.95} step={0.05} inline />
+    </div>
+  );
+
   return (
     <>
       {/* The epoch picker names the epoch, so phones drop the meta that repeats it (title and picker then share a row). */}
@@ -108,13 +116,14 @@ export default function Samples(props: SamplesProps) {
                   ]}
                 />
                 <Select size="sm" label="Epoch" bind:value={pick} options={options.get()} />
+                {wide.current ? confSlider() : null}
               </div>
             ) : null}
           </>
         )}
       >
-        {/* One toolbar row under the header: the key on the left, the confidence slider (label, track, value) on the
-            right. A narrow panel (the laptop column, phones) shortens the key instead of wrapping it. */}
+        {/* One toolbar row under the header: the key on the left and, below 1280 px, the confidence slider (label, track,
+            value) on the right. A narrow panel (the laptop column, phones) shortens the key instead of wrapping it. */}
         {props.epochsDone > 0 ? (
           <div class="bar-c">
             <div class="bar">
@@ -133,9 +142,7 @@ export default function Samples(props: SamplesProps) {
                   <span class="short">n/m = predicted / true</span>
                 </span>
               </div>
-              <div class="conf">
-                <Slider label="Min confidence" bind:value={conf} min={0.05} max={0.95} step={0.05} inline />
-              </div>
+              {!wide.current ? confSlider() : null}
             </div>
           </div>
         ) : null}

@@ -47,7 +47,6 @@ export const shortcutList: { keys: string; also?: string; label: string; group: 
   { keys: 'Enter', label: 'Open the row', group: 'Lists' },
   { keys: 'X', label: 'Select the run to compare (Runs)', group: 'Lists', single: true },
   { keys: 'ArrowLeft ArrowRight', label: 'Move the chart cursor (focused chart)', group: 'Charts' },
-  { keys: '1–6', label: 'Pick a metric tab (run page)', group: 'Charts', single: true },
   // Compare's side by side: B moves the baseline to the next run, as its Swap buttons do one column at a time.
   { keys: 'B', label: 'Make the next run the baseline (Compare)', group: 'Charts', single: true },
   // The confusion matrix's cells: arrows move the focused cell and the columns page with it, as its ‹ › do.

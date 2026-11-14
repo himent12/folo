@@ -10,18 +10,18 @@ import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
 import { paintOrder } from './layers';
 import { TouchGesture, type PinAction } from './pin';
 import { patternOf, dashOf, inkOf, seriesSummary, strokeWidth } from './lineSeries';
-import { capInPlotOf, marginOf, markOf, xExtentOf, xTicksOf, yExtentOf, yFormatOf, yTicksOf, type Margin, type Scale } from './lineAxes';
+import { capInPlotOf, futureOf, marginOf, markOf, xExtentOf, xTicksOf, yExtentOf, yFormatOf, yTicksOf, type Margin, type Scale } from './lineAxes';
 import { mergesOf } from './linePaths';
 import { memoPathsOf } from './linePathsMemo';
 import { endRadius, endsOf, placedEndsOf } from './lineEndLabels';
 import { hoverOf, pickNearest, pillOf } from './lineHover';
 import { textMeasurer } from './textWidth';
-import type { Marker, Series, XMark } from './lineSeries';
+import type { Future, Marker, Series, XMark } from './lineSeries';
 import ChartLegend from './ChartLegend';
 import ChartTooltip from './ChartTooltip';
 import LineEnds from './LineEnds';
 
-export type { Marker, Series, XMark };
+export type { Future, Marker, Series, XMark };
 
 export interface LineChartProps {
   series: Series[];
@@ -45,6 +45,18 @@ export interface LineChartProps {
   markers?: Marker[];
   /** A phase change on x (XMark). The plot keeps room for its label whenever it is set, in or out of the domain. */
   xMark?: XMark;
+  /**
+   * The part of a live run's planned axis not trained yet (DESIGN_DIRECTION §2.4): shaded from `x` (the latest point)
+   * to the axis's end behind a 1 px rule, with `label` (the ETA) over the rule in the band above the plot, beside the x
+   * mark's label (inside the plot's top when the two would touch). The plot keeps the band whenever a label is set.
+   */
+  future?: Future;
+  /** Keep the band above the plot without a label in it: charts side by side then share their plot tops. */
+  band?: boolean;
+  /** The plot as an inset well (`bg.inset`), its marks haloed in the well's colour. Default on. */
+  well?: boolean;
+  /** A last legend entry after the series: the best epoch, its ring glyph before it ("○ best 0.656 @ 41"). */
+  legendBest?: string;
   legend?: boolean;
   /** The most y ticks (3–5 are drawn; never more than five gridlines). */
   yTicks?: number;
@@ -114,6 +126,7 @@ export default function LineChart(props: LineChartProps) {
     highlight: null,
     recede: false,
     endDots: false,
+    well: true,
   });
   const cursor = bindable(props, 'cursor', null);
   const hint = bindable(props, 'hint', null);
@@ -146,9 +159,11 @@ export default function LineChart(props: LineChartProps) {
   // One rule for every chart (DESIGN_DIRECTION §2.4): a plot under 560 px (every phone) has no direct labels, short
   // names included, and keeps that width for data; its legend carries each line's name, value and how it ended.
   const showEnds = computed(() => p.endLabels && width.get() >= END_LABELS_MIN);
-  const capInPlot = computed(() => capInPlotOf(p.yLabel, p.xMark, p.yLog, yTickValues.get(), yExtent.get(), p.height, p.xLabel));
+  /** The band above the plot is kept for an x mark's label and for the future's (the ETA). */
+  const band = computed(() => !!p.band || !!p.xMark || !!p.future?.label);
+  const capInPlot = computed(() => capInPlotOf(p.yLabel, band.get(), p.yLog, yTickValues.get(), yExtent.get(), p.height, p.xLabel));
   const margin = computed(
-    () => marginOf(yTickValues.get(), yFormat.get(), xExtent.get(), p.series, textWidth, showEnds.get(), p.yLabel, capInPlot.get(), p.xMark, p.xLabel),
+    () => marginOf(yTickValues.get(), yFormat.get(), xExtent.get(), p.series, textWidth, showEnds.get(), p.yLabel, capInPlot.get(), band.get(), p.xLabel),
     { equals: sameMargin },
   );
 
@@ -196,6 +211,7 @@ export default function LineChart(props: LineChartProps) {
   );
   const ends = computed(() => endsOf(visible.get(), placedEnds.get(), y.get(), receding.get(), p.highlight, endR));
   const mark = computed(() => markOf(p.xMark, xExtent.get(), x.get(), width.get(), margin.get()));
+  const future = computed(() => futureOf(p.future, mark.get(), xExtent.get(), x.get(), width.get(), margin.get(), p.height));
 
   // ---- hover / keyboard cursor ----
   const keyed = computed(() => visible.get().filter((s) => !s.ghost && !s.context && !s.lower));
@@ -464,13 +480,14 @@ export default function LineChart(props: LineChartProps) {
   );
 
   return (
-    <div class="chart">
+    <div class="chart" class:well={p.well}>
       {p.legend && keyed.get().length > 0 ? (
         <ChartLegend
           hintText={hintText.get()}
           hover={hover.get()}
           compact={compact.get()}
           legendNote={p.legendNote}
+          best={p.legendBest}
           keyed={keyed.get()}
           fmtValue={fmtValue.get()}
         />
@@ -529,6 +546,23 @@ export default function LineChart(props: LineChartProps) {
               onfocus={onfocus}
               onblur={() => (cursor.set(null), spoken.set(''), keyFocus.set(false))}
             >
+              {p.well ? (
+                // The plot as an inset well: the data's own surface, under the gridlines.
+                <rect
+                  class="well"
+                  x={margin.get().left}
+                  y={margin.get().top}
+                  width={Math.max(0, width.get() - margin.get().right - margin.get().left)}
+                  height={Math.max(0, p.height - margin.get().bottom - margin.get().top)}
+                />
+              ) : null}
+              {future.get() ? (
+                // The epochs still to train: a faint shade behind a 1 px rule at the latest point.
+                <>
+                  <rect class="future" x={future.get()!.px} y={future.get()!.top} width={future.get()!.end - future.get()!.px} height={Math.max(0, future.get()!.bottom - future.get()!.top)} />
+                  <line class="future-rule" x1={future.get()!.px} x2={future.get()!.px} y1={future.get()!.top} y2={future.get()!.bottom} />
+                </>
+              ) : null}
               <g class="grid">
                 <For each={yMinor.get()} key={(t) => t}>
                   {(t) => <line class="minor" x1={margin.get().left} x2={width.get() - margin.get().right} y1={y.get()(t())} y2={y.get()(t())} />}
@@ -564,6 +598,11 @@ export default function LineChart(props: LineChartProps) {
                     {mark.get()!.label}
                   </text>
                 </>
+              ) : null}
+              {future.get()?.label ? (
+                <text class="mark-label" x={future.get()!.tx} y={future.get()!.ty}>
+                  {future.get()!.label}
+                </text>
               ) : null}
               <g class="ticks">
                 <For each={yTickValues.get()} key={(t) => t}>
@@ -669,11 +708,28 @@ export default function LineChart(props: LineChartProps) {
 }
 
 css`
+  /* What a mark's halo, a ring's fill and the empty line's plate take: the surface under the plot. */
   .chart {
+    --plot-bg: var(--bg-panel);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
     min-width: 0;
+  }
+  .chart.well {
+    --plot-bg: var(--bg-inset);
+  }
+  .well {
+    fill: var(--bg-inset);
+  }
+  /* The planned epochs: the hover overlay's faint tint (it reads on the well in both themes) and the rule at now. */
+  .future {
+    fill: var(--bg-hover);
+  }
+  .future-rule {
+    stroke: var(--line-default);
+    stroke-width: 1;
+    shape-rendering: crispEdges;
   }
   /* Axis names are labels, not ticks: 12 px. */
   .ticks .x-label {
@@ -759,7 +815,7 @@ css`
   }
   .halo {
     fill: none;
-    stroke: var(--bg-panel);
+    stroke: var(--plot-bg);
     stroke-linejoin: round;
     stroke-linecap: round;
   }
@@ -789,7 +845,7 @@ css`
     stroke-dasharray: none;
   }
   .dot {
-    stroke: var(--bg-panel);
+    stroke: var(--plot-bg);
     stroke-width: 2;
   }
   .pill rect {
@@ -814,6 +870,6 @@ css`
   /* The panel colour behind the line, so a gridline never runs through it. */
   .empty span {
     padding: 0 var(--space-2);
-    background: var(--bg-panel);
+    background: var(--plot-bg);
   }
 `;

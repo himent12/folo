@@ -33,6 +33,8 @@ export interface PageProps {
   moreLabel?: string;
   /** Something before the title, e.g. a status badge row. */
   lead?: JSX.Element;
+  /** On the title's line after it: a detail page's status badge (design/UNIFIED.md §2, Detail header). */
+  badge?: JSX.Element;
   children: JSX.Element;
   wide?: boolean;
   /** A form page (column and rail): the same content edge as every page, the column's measure set by the page. */
@@ -46,7 +48,7 @@ export default function Page(props: PageProps) {
 
   const hasActions = computed(() => !!p.actions || p.more.length > 0);
   /** Only the title: on phones the top bar shows it, so the header takes no room and content starts at the gutter. */
-  const bare = computed(() => !p.sub && !p.subPhone && !hasActions.get() && !p.lead);
+  const bare = computed(() => !p.sub && !p.subPhone && !hasActions.get() && !p.lead && !p.badge);
   // The app's first page fades in as Studio appears; moving between pages after that is immediate (a fade on every
   // route change decorates a move the person already made, and makes a list feel slow to arrive).
   const enter = !entered;
@@ -58,9 +60,18 @@ export default function Page(props: PageProps) {
         <div class="titles">
           {p.lead ? <div class="lead">{p.lead}</div> : null}
           {/* Route changes move focus here (App), so the new page is announced by its name. */}
-          <h1 tabindex={-1} data-route-focus>
-            {p.title}
-          </h1>
+          {p.badge ? (
+            <div class="title-line">
+              <h1 tabindex={-1} data-route-focus>
+                {p.title}
+              </h1>
+              <span class="title-badge">{p.badge}</span>
+            </div>
+          ) : (
+            <h1 tabindex={-1} data-route-focus>
+              {p.title}
+            </h1>
+          )}
           {p.sub ? (
             <div class="sub" class:wide-only={!!p.subPhone}>
               {p.sub}
@@ -133,8 +144,23 @@ css`
   .sub {
     grid-column: 1 / -1;
   }
-  h1 {
+  h1,
+  .title-line {
     grid-column: 1;
+  }
+  /* The name, then its status badge on the same line; a long name wraps before the badge leaves it. */
+  .title-line {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-3);
+    min-width: 0;
+  }
+  .title-badge {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
   }
   .lead {
     display: flex;

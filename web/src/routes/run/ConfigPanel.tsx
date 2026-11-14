@@ -15,6 +15,7 @@ import Button from '$lib/ui/Button';
 import CommandLine from '$lib/ui/CommandLine';
 import Lineage from '$lib/ui/Lineage';
 import Note from '$lib/ui/Note';
+import Ident from '$lib/ui/Ident';
 import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
 import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, resolvedRows, effectiveBatchSetting, type Setting } from './resolved';
@@ -32,6 +33,8 @@ export interface ConfigPanelProps {
   weights?: Origin | null;
   /** The run's `folo train` command, quoted for PowerShell (`GET /api/runs/{id}/cli`); null where the server has none. */
   cli?: string | null;
+  /** The run's server id (`run_7d1e`): in the header, never in the page's (design/UNIFIED.md §2, Detail header). */
+  runId?: string;
 }
 
 type Row = [string, Setting];
@@ -113,6 +116,15 @@ export default function ConfigPanel(props: ConfigPanelProps) {
     }
   }
 
+  async function copyCli() {
+    try {
+      await navigator.clipboard.writeText(props.cli ?? '');
+      toast.success('Command copied', "The run's folo train command, for the server's machine.");
+    } catch (e) {
+      toast.error(e, 'Could not copy');
+    }
+  }
+
   const list = (heading: string | null, items: () => Row[]) => (
     <dl>
       {/* A heading only beside another group's; alone in the rail it would name the panel twice. */}
@@ -150,7 +162,25 @@ export default function ConfigPanel(props: ConfigPanelProps) {
   );
 
   return (
-    <Panel title="Config" id="config" actions={() => <Button size="sm" variant="ghost" icon={Copy} onclick={copy}>Copy JSON</Button>}>
+    <Panel
+      title="Config"
+      id="config"
+      actions={() => (
+        // The run's server id, then the ways to take its settings elsewhere: its command (where the server gives one)
+        // and the request as JSON.
+        <>
+          {props.runId ? <Ident value={props.runId} class="run-id" /> : null}
+          {props.cli ? (
+            <Button size="sm" variant="ghost" icon={Copy} onclick={copyCli}>
+              Copy command
+            </Button>
+          ) : null}
+          <Button size="sm" variant="ghost" icon={Copy} onclick={copy}>
+            Copy JSON
+          </Button>
+        </>
+      )}
+    >
       {essential() ? (
         <>
           {list(null, () => core.get())}
@@ -183,6 +213,11 @@ export default function ConfigPanel(props: ConfigPanelProps) {
 }
 
 css`
+  /* The server id in the header: quiet, a 12 px identifier. */
+  :global(.ident.run-id) {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
   /* The run from a terminal: under the settings, across the panel's width, the command one line that never wraps. */
   .cli {
     display: grid;
