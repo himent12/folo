@@ -390,6 +390,12 @@ for the `rect` rows):
   give); with trained weights at 640×640 the saving does not show here. Lane lazy measured −14% at 32–55% CPU load;
   one reading is that the dense box branch is cheap while cores are free and costly when they compete, but that is
   not tested.
+  **Read again by lane cpufix** ([notes/hill/r3-cpufix.md](notes/hill/r3-cpufix.md), A): the tie was the spread of
+  60-call runs. With 200 calls the same two binaries read 13.88 ms (13.38–14.58) and 13.04 (12.36–13.45), −6%, in 4
+  rounds with 1.8–4.0 other cores. In one process, call by call, candidate-first against the dense head is −7% on
+  idle cores and −9 to −10% with 8 cores busy, so the load reading holds in part: the dense box branch costs about
+  7% of the step on idle cores too. The sparse box branch has no large fixed cost (about 0.3 ms from the first
+  candidate on). Row 8's cell keeps the fold-in's 60-call number.
 - **Batches of 1280×720 frames**: −28 to −36%, the rect canvas (#259, 60% of the pixels) and candidate-first
   together; a batch of val2017 images, padded square, gains −8 to −14% from candidate-first alone.
 - **folo-s's trained 1280×720 row is 24–29% slower on `main` in the whole bench** (22.08 → 27.29 ms in the evening's
@@ -399,6 +405,7 @@ for the `rect` rows):
   show it. A bisect with the same bench (3 rounds each): f04dce45 (candidate-first, before #258 and #259) 21.29 /
   21.45 ms, 25666428 (+ #259) 29.13, ffa0f8cb 26.92–27.29: it arrives with #259, whose CPU change is the rect batch
   the untrained model's `predict_batch` rows now run ([Rows worse than e5a6ccf0](#rows-worse-than-e5a6ccf0)).
+  Fixed in #264: it was the CPU buffer cache, not the rect batch itself.
 - The forward rows do not move: ties for folo-n and folo-m, and folo-s +3.1% (30.48 → 31.41 ms) inside overlapping
   ranges, −4.7% and −1.3% in the later bisect runs; CPU forward code did not change in the round.
 
@@ -474,7 +481,7 @@ Where a number here differs from a lane's by more than noise:
   quiet runs) it reads 2.78 ms against `main`'s 2.67, −4%.
 - **Lazy's CPU row 8** (lazy: folo-n 17.49 → 15.02 ms, −14%, at 32–55% CPU load; counsel's estimate before the round
   −9 to −12%): does not reproduce, a tie here on trained weights (13.58 → 13.57 ms with the rows alone, −2% in the
-  whole bench; 1.3–7.4 other cores). Its 1280×720 frame (−8%) is −5% here and its batch of 16 (−12%) −14%. folo-s,
+  whole bench; 1.3–7.4 other cores; lane cpufix later read −6% with 200 calls, above). Its 1280×720 frame (−8%) is −5% here and its batch of 16 (−12%) −14%. folo-s,
   which the lane could not read under load: −5% at 640×640 and on the 1280×720 frame with the rows alone.
 - **The plan's CPU batch of 1280×720 frames** (plan: −16.6%, #259 alone): −20% (untrained) and −21% (trained) here
   for #259 alone in the bisect (f04dce45 against 25666428, folo-s), −34% for folo-n against e5a6ccf0 with
@@ -494,8 +501,16 @@ number of lane fusion reproduces to four digits.
   model's rect `predict_batch` leaves behind in the process slows the next model's single 640×384 calls. Reproduce:
   `FOLO_BENCH_SCALE=s FOLO_BENCH_ITERS=40 FOLO_BENCH_BATCH=16 FOLO_BENCH_WEIGHTS=<dir>/folo-s-coco.folo
   FOLO_BENCH_IMAGES=<val2017> cargo bench -p folo-vision --bench cpu_e2e`, the `trained 1280x720 (rect 640x384)` row;
-  with `FOLO_BENCH_BATCH=0` or `FOLO_BENCH_UNTRAINED=0` it is fast. Not diagnosed; it does not change any prediction
-  (the same detections).
+  with `FOLO_BENCH_BATCH=0` or `FOLO_BENCH_UNTRAINED=0` it is fast. It does not change any prediction (the same
+  detections).
+  **Fixed in #264** ([notes/hill/r3-cpufix.md](notes/hill/r3-cpufix.md), B). The cause was the CPU buffer cache,
+  which never evicted: once the untrained rows' batches had filled it (1 GiB), the buffers the trained model's box
+  branch needs at 640×384 could never get in and were allocated fresh on every call. #259 added the lengths that
+  filled it; the cache's policy caused it. The cache now evicts lengths that have gone unused when it is full.
+  8ea21bab against #264 in the whole bench (4 to 8 rounds, 1.4–2.0 other cores): this row 26.36 → 21.26 ms (−19%;
+  20.95 with the cache cleared first, the new control row), folo-s's `predict_batch` of 16 × 1280×720 frames 264.2 →
+  194.6 ms (−26%), folo-n's 89.4 → 68.8 (−23%), row 8 in the whole bench 14.48 → 13.61 ms for folo-n (−6%) and
+  29.48 → 28.43 for folo-s (−3.6%). CPU training steps tie.
 - **folo-n f32 `predict_batch` of 16 × 1280×720 frames on the GPU, trained weights**: not slower at the median (14.13 →
   13.95 ms) but bimodal on `main` in the two evening passes (10.0 ms in 3 of 10 runs, 11–21 ms in the others;
   e5a6ccf0 13.4–15.1, one 25.5), and steady in the third pass (10.23 ms, 10.17–10.24, against 14.16: −28%). Not
@@ -1658,11 +1673,14 @@ none of the numbered items and adds the list after them):
    ([notes/hill/r2-gpu-dispatch.md](notes/hill/r2-gpu-dispatch.md)).
 
 From hill-climb 3's notebooks (not ranked against the list above):
-- **The CPU slowdown after a rect batch** ([Rows worse than e5a6ccf0](#rows-worse-than-e5a6ccf0)): folo-s single
-  1280×720 frames +24–29% after another model's rect `predict_batch` in the same process, since #259; and the access
-  violation seen once in `main`'s GPU bench ([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md), Leftovers).
-- **A quiet CPU repeat**: most CPU runs of hill-climb 3's fold-in were loaded and only three of row 8's were quiet;
-  row 8's tie for folo-n (lane lazy's −14% was measured under load) should be read again on an idle machine.
+- **The access violation seen once in `main`'s GPU bench** ([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md),
+  Leftovers): not reproduced in 4500 predictor lifetimes with forward plans and 4500 without, nor in 20 more runs of
+  that bench ([notes/hill/r3-cpufix.md](notes/hill/r3-cpufix.md), C). Unexplained. The CPU slowdown after a rect
+  batch that stood beside it here is fixed (#264, [Rows worse than e5a6ccf0](#rows-worse-than-e5a6ccf0)).
+- **The sparse box branch's fixed cost on the CPU**: about 0.3 ms from the first candidate on, 2% of folo-n's row 8
+  (`conv0`'s two-pass Winograd over a few tiles and the full-map outputs it allocates). A per-level pipeline and
+  single-threaded small passes were tried and tied ([notes/hill/r3-cpufix.md](notes/hill/r3-cpufix.md), A). The
+  quiet repeat of row 8 that stood here is done: −6% with 200 calls, not a tie.
 - **The GPU batch-1 floor** (rows 1, 2, 5): with plans, the folo-n batch-1 forward is about 1.0 ms of GPU time in
   f32 and 0.8 ms on tensor cores, in 138–146 dispatches. Fewer dispatches (fused small layers) and a look at the
   gaps between dependent dispatches; the device letterbox inside the plan (it uploads the image, which a plan

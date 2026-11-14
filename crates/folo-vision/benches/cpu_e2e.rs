@@ -18,10 +18,13 @@
 //! of images, e.g. COCO val2017; the first `FOLO_BENCH_IMAGES_N`, default 16, by name) the same rows run on real
 //! images with the trained model, cycling through the images: each letterboxed to 640×640, each resized to
 //! 1280×720 (rect, 640×384), and `predict_batch` of `FOLO_BENCH_BATCH` of them, as they are (padded square) and
-//! resized to 1280×720 (one rect canvas, 640×384). Untrained weights pass no
-//! candidate at `conf = 0.25`, so only these rows show what candidate-first prediction (MODEL.md §9.5) does.
-//! `FOLO_BENCH_UNTRAINED=0` skips the untrained rows. Only the predictor's public API is used, so the file builds
-//! against older trees for A/B runs.
+//! resized to 1280×720 (one rect canvas, 640×384). Untrained weights pass no candidate at `conf = 0.25`, so only
+//! these rows show what candidate-first prediction (MODEL.md §9.5) does.
+//! `FOLO_BENCH_UNTRAINED=0` skips the untrained rows. The 1280×720 row runs a second time after
+//! `folo_core::cpu::clear_buffer_cache()`: the two read the same unless what the earlier rows left in the CPU
+//! buffer cache slows the trained model (it did before the cache evicted stale lengths: docs/notes/hill/r3-cpufix.md).
+//! Only the predictor's public API (and `folo_core::cpu`) is used, so the file builds against older trees for A/B
+//! runs.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -185,9 +188,16 @@ fn trained(iters: usize, batch: usize) {
     let hd: Vec<folo_data::Image> = imgs.iter().map(|i| folo_data::resize::resize(i, 1280, 720)).collect();
     let mut pred = Predictor::open(&weights, PredictConfig::default()).expect("weights");
     println!("trained: {weights}, {} images from {dir}", imgs.len());
-    let rows = [("trained 640x640 (square)", &imgs, false), ("trained 1280x720 (rect 640x384)", &hd, true)];
-    for (name, set, rect) in rows {
+    let rows = [
+        ("trained 640x640 (square)", &imgs, false, false),
+        ("trained 1280x720 (rect 640x384)", &hd, true, false),
+        ("trained 1280x720, buffer cache cleared", &hd, true, true),
+    ];
+    for (name, set, rect, clear) in rows {
         pred.set_config(PredictConfig { rect, ..PredictConfig::default() }).expect("config");
+        if clear {
+            folo_core::cpu::clear_buffer_cache();
+        }
         for img in set.iter() {
             black_box(pred.predict(img).expect("predict"));
         }
