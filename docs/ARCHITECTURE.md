@@ -101,7 +101,9 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
   bit for bit BatchNorm then `Tensor::silu` / `relu` (`cpu::silu` / `cpu::silu_backward` are the shared formulas);
   its per-plane loops run as AVX2 when the CPU has it (the same loops compiled under `target_feature`, bit for bit). `f32` buffers from 16 KiB
   are recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one
-  to custom ops) so training and inference loops do not pay page faults every step. `cpu::in_pool` runs a closure on
+  to custom ops) so training and inference loops do not pay page faults every step. When it is full, lengths unused
+  for two limits of traffic are evicted for the ones now asked for, so a later workload (another model, another
+  input shape) gets cached too. `cpu::in_pool` runs a closure on
   a worker of a dedicated rayon pool (so the per-thread state cannot reach other jobs of the global pool) with the
   caller's grad mode and autocast state; CPU forwards and predictions use it so their many parallel kernels start
   inside a pool instead of each waking one from outside.
