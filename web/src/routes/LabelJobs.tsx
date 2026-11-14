@@ -1,3 +1,5 @@
+// The labeling jobs list (`#/datasets/label`), filtered by state (active, failed, idle), and the New labeling job
+// dialog (`?new=1`). The parts are in ./label/.
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Tags from '$icons/tags';

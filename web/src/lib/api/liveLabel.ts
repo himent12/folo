@@ -1,4 +1,4 @@
-// // A labeling job kept live (docs/API.md, Agent labeling): follows its SSE stream and loads the job, its images and its
+// A labeling job kept live (docs/API.md, Agent labeling): follows its SSE stream and loads the job, its images and its
 // log. As for a run (LiveRun), the stream replays nothing, so we subscribe *before* loading and merge the two: an
 // image event that arrived while the images were loading is applied over the answer, and a `job` event over the job
 // snapshot. An event may describe a state the answer already passed, but a newer event always follows it, so the view

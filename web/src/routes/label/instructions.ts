@@ -1,4 +1,4 @@
-// // The job's instructions for the agent, as the job page's field holds them: saved when the field is left and before a
+// The job's instructions for the agent, as the job page's field holds them: saved when the field is left and before a
 // run starts. One save runs at a time; a save asked while one runs waits for it and then sends the field's latest
 // text, so the latest text wins, and a run started after an edit starts once that text is saved. A change on the server
 // shows in the field unless the field holds an edit of its own.

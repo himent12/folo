@@ -1,3 +1,4 @@
+// Asking the server for every candidate of a busy image once the confidence drops to where the first answer was cut.
 import { computed, effect, signal, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Prediction } from '$lib/api/types';

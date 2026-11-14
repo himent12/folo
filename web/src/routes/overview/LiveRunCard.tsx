@@ -1,3 +1,4 @@
+// Overview's live run as one panel: header with progress, four KPI tiles, the validation chart, the machine's meters.
 import ArrowRight from '$icons/arrow-right';
 import { bindable, computed, css, effect, MediaQuery } from 'fw';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';

@@ -1,3 +1,5 @@
+// The Runs list (`#/runs`): every run, the waiting ones with their queue place and queue actions, and Stop and Delete.
+// The parts are in ./runs/.
 import Activity from '$icons/activity';
 import Box from '$icons/box';
 import CircleStop from '$icons/circle-stop';

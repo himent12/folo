@@ -1,3 +1,4 @@
+// Chart label widths as drawn, measured on a canvas (an estimate where there is none, as in tests).
 import { labelWidth } from './endLabels';
 
 /**

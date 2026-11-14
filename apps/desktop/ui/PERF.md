@@ -1,5 +1,8 @@
 # folo-ui: what FOLO Desktop costs, against the GPUI app
 
+Part of folo-ui ([README.md](README.md)). A record of one measurement; `apps/desktop/tools/perf.ps1` measures a
+build again.
+
 Measured 2026-11-11 on our test machine for the pull request that replaces GPUI 0.2.2 with folo-ui. "folo-ui" is
 `desktop/fw-finish` at its final head (the merged `desktop/framework` with the review fixes, plus the finish);
 "GPUI" is a reference build of the GPUI app, `folo-desktop-gpui.exe` (`origin/main` at

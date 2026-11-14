@@ -1,4 +1,4 @@
-// // Class colours for UI marks on page surfaces. Fills (swatches, chips, legend dots, bars, strips) use the exact
+// Class colours for UI marks on page surfaces. Fills (swatches, chips, legend dots, bars, strips) use the exact
 // palette hue in both themes so a class looks the same in a legend as on its box; they carry a 1 px
 // `--chart-swatch-edge` inset (global `.sw`, or set it yourself) for contrast on light surfaces. Thin strokes
 // (1-2 px curves) cannot carry an edge, so on light surfaces they use a darker ink of the same hue.

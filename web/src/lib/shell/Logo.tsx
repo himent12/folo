@@ -1,3 +1,4 @@
+// The FOLO logo: the wordmark with the product name, or the mark alone (design/README.md, Logo).
 import { css, defaults } from 'fw';
 
 export interface LogoProps {

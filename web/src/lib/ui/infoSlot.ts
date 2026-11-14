@@ -1,4 +1,4 @@
-// // Where a chart's ⓘ opens on a phone (ui/InfoButton `chart`): in place, between the chart's heading and its readout,
+// Where a chart's ⓘ opens on a phone (ui/InfoButton `chart`): in place, between the chart's heading and its readout,
 // never as a popover over the plot it explains (round 25: Box size's definition covered the histogram). A frame that
 // holds a chart (ui/Panel, Run's metrics chart) provides a slot and renders it (ui/InfoRegion) under its heading; a
 // `chart` InfoButton inside it fills the slot while open, as a disclosure (`aria-controls` the region).

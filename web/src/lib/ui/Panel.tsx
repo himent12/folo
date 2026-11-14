@@ -1,3 +1,4 @@
+// The panel: a header (title, a small note after it) over the body (design/UNIFIED.md §2, Panel).
 import { createUniqueId, css, defaults, Dynamic } from 'fw';
 import InfoRegion from './InfoRegion';
 import { provideInfoSlot } from './infoSlot';

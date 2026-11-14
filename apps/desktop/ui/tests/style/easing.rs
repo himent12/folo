@@ -1,3 +1,6 @@
+//! The easing functions (`easing.rs`): each curve starts at 0 and ends at 1 with GPUI's shape in between,
+//! and `bounce` and `pulsating_between`.
+
 use folo_ui::{bounce, ease_in_out, ease_out_quint, linear, pulsating_between, quadratic};
 
 fn close(a: f32, b: f32) -> bool {

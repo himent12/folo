@@ -1,3 +1,6 @@
+//! Style refinement (`style/refine.rs`): later refinements win, unset fields keep earlier values, and text styles
+//! refine as GPUI's do.
+
 use folo_ui::{
     Display, Fill, Length, Overflow, Refineable, Style, StyleRefinement, Styled, TextStyle,
     TextStyleRefinement, blue, green, px, red, rems,

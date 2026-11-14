@@ -1,3 +1,5 @@
+// One dataset (`#/datasets/<id>`): its images (a filtered grid and the image inspector), its stats, and the header's
+// actions (Train on this dataset, Copy path, Remove from FOLO). The parts are in ./dataset/.
 import ArrowLeft from '$icons/arrow-left';
 import Copy from '$icons/copy';
 import ImageOff from '$icons/image-off';

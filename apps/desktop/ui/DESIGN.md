@@ -314,6 +314,6 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
 - **Cost.** `tools/perf.ps1` measures time to first frame, working set and private bytes, GPU memory, idle CPU
   and CPU over a live run, off screen; compare two builds back to back on the same machine. `ui/PERF.md` has
   the numbers against the GPUI build, the frame bench (`tools/bench-frames.sh`) and the renderer bench.
-- **Platforms.** CI runs fmt, clippy and the tests on Windows and Linux, a headless `--shot` on Linux, and
+- **Platforms.** CI runs clippy and the tests on Windows and Linux, fmt on Windows, a headless `--shot` on Linux, and
   `tools/cross-check.sh` (check and clippy of the crate for Linux and both macOS targets). Nothing runs on
   macOS.

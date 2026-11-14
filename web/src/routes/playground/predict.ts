@@ -1,3 +1,4 @@
+// Server predictions for the Playground: asked once with loose settings (`FETCH`), then filtered in the browser.
 import { ApiError, type Api } from '$lib/api/client';
 import type { MockApi } from '$lib/api/mock';
 import type { PredictInput, Prediction } from '$lib/api/types';

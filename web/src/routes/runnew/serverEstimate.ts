@@ -1,3 +1,4 @@
+// The server's estimate of a run (POST /api/runs/estimate), asked again 300 ms after the settings stop changing.
 import { effect, signal, untrack, type ReadSignal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { RunEstimate, TrainConfig } from '$lib/api/types';

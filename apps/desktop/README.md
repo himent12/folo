@@ -1,12 +1,112 @@
 # FOLO Desktop
 
 The native FOLO app, built in Rust on [folo-ui](ui/README.md), its own UI framework (GPUI's API, rendered on the
-CPU; the UI uses no GPU). Same screens and design language as FOLO Studio (`web/`): Overview, Datasets, Runs (with a
-live training dashboard), Models, Benchmarks, Playground and Settings, plus a command palette, keyboard navigation,
-toasts, and dark and light themes.
+CPU; the UI uses no GPU). Same screens and design language as FOLO Studio ([web/](../../web/README.md)): Overview,
+Datasets, Runs (with a live training dashboard), Models, Benchmarks, Playground and Settings, plus a command palette,
+keyboard navigation, toasts, and dark and light themes.
 
-It is a separate cargo workspace with two members, the app and `ui/` (folo-ui), so the root workspace does not
-build them. See `docs/ARCHITECTURE.md` (Front ends, folo-ui) and `docs/API.md` (its data contract).
+It holds no data of its own: everything comes from a `folo serve` over [docs/API.md](../../docs/API.md) (Data,
+below), or from the built-in demo. The repository's [README](../../README.md) says what FOLO is;
+[docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) how the engine and the front ends fit together;
+[design/README.md](../../design/README.md) the design system both front ends share.
+
+## Where things are
+
+Two folders are called `ui`: `src/ui/` is a module of this app (its stateless building blocks), and `ui/` next to
+`src/` is the folo-ui crate, the UI framework underneath everything.
+
+| Path | What it holds |
+| --- | --- |
+| `src/main.rs` | arguments (`USAGE` is `--help`), the bundled fonts (`design/fonts`), the data source, the window, key bindings |
+| `src/app/` | `FoloApp`, the root view: `Route` and navigation, title bar, sidebar, routing a route to its page (`page.rs`), fetching and the live event pump (`data.rs`), finding or starting a server (`connection.rs`), actions and key bindings (`mod.rs`, `render.rs`), the forms' state; most of the app's behaviour tests (`tests.rs`, `*_tests.rs`) |
+| `src/screens/` | one folder per page, each `impl FoloApp` methods that return it: `overview/`, `datasets/` (the index, a dataset's images and statistics), `runs/` (the list, the live training dashboard), `models/` (the list, a model's evaluation and export), `bench/` (Benchmarks: the list, a benchmark's leaderboard, plan and loops, an entry), `playground/`, `settings/` (connection, throughput, cloud, appearance, shortcuts); `first_step.rs` is what an empty Runs or Models page asks for |
+| `src/overlays/` | what sits above the page: the command palette, the New run and Generate synthetic dialogs, the confirmations, the cloud dialogs, the image inspector, toasts |
+| `src/controls/` | focusable controls, each an `impl FoloApp` method taking a stable key: buttons, segmented, tabs, chips and switches, slider, select, tooltip, scroll |
+| `src/ui/` | the app's stateless pieces: type, surfaces, badges and status, metrics, legends, number and text formatting, motion |
+| `src/charts/` | canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram |
+| `src/viz.rs` | images with detection boxes and label chips (the box spec of design/README.md) |
+| `src/store/` | client state: fetched values (`Load<T>`), live run data from the SSE events, the decoded-image cache, the "best model" rule |
+| `src/api/` | the `Backend` trait (`mod.rs`) and the wire types (`types.rs`, from `crates/folo-api`); `http/`, the client of `folo serve` (transport, SSE streams, images, inference, and `server.rs`, which starts a local `folo serve`); `mock/` and `mock_bench/`, the built-in demo |
+| `src/bench/` | the state and actions behind the Benchmarks screens, and the open benchmark's event stream |
+| `src/cloud.rs` | cloud compute: the state and rules Settings › Cloud, New run and a cloud run's page share |
+| `src/local.rs` | Playground's local inference: folo-vision's predictor in this process, on folo-gpu or the CPU |
+| `src/input.rs` | the single-line text input (IME, selection, clipboard) and its key bindings |
+| `src/theme.rs` | the active theme over the generated token tables: the mode, colour helpers, the class palette |
+| `src/window_state.rs` | the window and theme remembered in `desktop.json`, and where a saved window reopens |
+| `src/scenario.rs` | `--scenario` states for screenshots (`ALL` is the review set) |
+| `src/synth.rs` | procedural "shapes" scenes behind the demo's images |
+| `build.rs` | generates the token tables from `design/tokens.json` (Design tokens, below), embeds `assets/icons/*.svg`, and on MSVC links `assets/folo.ico` and `assets/folo-desktop.manifest` into the executable |
+| `assets/` | the SVG icons (`LICENSE-lucide.txt` for the Lucide ones), the app icon, the application manifest (DPI awareness, Common Controls 6) |
+| `ui/` | folo-ui, the UI framework crate ([ui/README.md](ui/README.md)) |
+| `tools/` | developer scripts (Tools, below) |
+| `notes/` | the design review record: `REVIEW_RUBRIC.md` and `HILLCLIMB.md` |
+| `DIRECTION.md` | the design direction the screens are built against |
+
+## Workspace, build, test
+
+`apps/desktop` is its own cargo workspace with two members, the app (`folo-desktop`) and `ui/` (`folo-ui`), its own
+`Cargo.lock` and its own profiles. The root workspace excludes it (`exclude = ["apps/desktop"]` in the root
+`Cargo.toml`), so `cargo build` and `cargo test` at the root never build the app or folo-ui, which are a slow build;
+their CI (below) runs only when something they depend on changes. From `crates/` the app takes, by path, `folo-api`
+(the wire types), `folo-bench` (the demo's benchmarks), and `folo-core`, `folo-data`, `folo-gpu`, `folo-nn` and
+`folo-vision` (local inference, plus the engine's image decoding and its automatic optimizer choice, which New run
+shows); `folo-test-support` and `folo-cloud` (the real providers, which the demo's list must match) are
+dev-dependencies. The app does not link folo-server: it starts the `folo` binary instead.
+
+Run every command from `apps/desktop`. A bare `cargo test` there builds only the app, so pass `--workspace`:
+
+```powershell
+cargo run -- --mock                                             # the demo data (Run, below, for the other sources)
+cargo test --workspace                                          # the app and folo-ui
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo run -- --scenario overview --shot overview.png            # a headless screenshot, no window
+cargo build --profile dist                                      # the shipped build (thin LTO, one codegen unit)
+```
+
+Cargo features of the app: `bench-alloc` counts allocations for `--bench-frames`; `winit` and `portable-text` turn
+on folo-ui's features of the same names, so that on Windows the app runs on the Linux / macOS backend
+(`--features winit,portable-text`, then `FOLO_UI_PLATFORM=winit`). folo-ui's own features and tests are in
+[ui/README.md](ui/README.md).
+
+CI is `.github/workflows/desktop.yml`, on a pull request that touches `apps/desktop`, `design/`, the engine crates
+the app uses, or the shared build files, and on every push to main:
+
+- **Windows:** fmt, clippy of the workspace, clippy of folo-ui with `portable-text,winit,test-support`, the tests
+  of both (each through `tools/test-tmp.sh`), and the root workspace's temp-dir hygiene test.
+- **Linux:** clippy and the tests of the workspace, a headless `--shot` of `overview` checked to be a 1280 x 800
+  PNG, and `tools/cross-check.sh` for folo-ui on both macOS targets.
+
+The release workflow (`.github/workflows/release.yml`) builds `--profile dist` on Windows and ships
+`folo-desktop.exe`.
+
+## Common changes
+
+Each recipe names an existing example to copy.
+
+- **A screen.** Add a `Route` variant (and a `Section`, for a new sidebar entry) with its `--open` name in
+  `Route::parse` (`src/app/mod.rs`); a folder under `src/screens/` declared in `screens/mod.rs`, whose
+  `impl FoloApp` method returns the page; its arm in `FoloApp::page` (`src/app/page.rs`). The compiler lists every
+  other exhaustive `match` on `Route` or `Section`. Then the sidebar's `nav` list (`src/app/sidebar.rs`), the
+  palette's (`palette_items` in `src/overlays/palette.rs`), `USAGE` in `src/main.rs`, and a scenario in
+  `src/scenario.rs` (`ALL` and `apply`). Example: Benchmarks (`Route::Benches`, `screens/bench/`).
+- **An API call.** Check the endpoint in docs/API.md and its types in `crates/folo-api` (re-exported by
+  `src/api/types.rs`). Add the method to `Backend` (`src/api/mod.rs`), with a default that answers
+  `not_supported` when only some servers have it; implement it on `HttpBackend` (`src/api/http/`, through
+  `self.get` / `self.post`) and on `MockBackend` (`src/api/mock/backend.rs`). A page calls it on the background
+  executor with `FoloApp::fetch` (`src/app/data.rs`) and keeps the answer in a `Load<T>` (`src/store/mod.rs`).
+  Example: `throughput`, loaded by `load_throughput` in `src/screens/settings/throughput.rs`.
+- **A control.** An `impl FoloApp` method in a file under `src/controls/` that builds a `Stateful<Div>` with the
+  key as its id and passes it through `FoloApp::bind` (`controls/focus.rs`), which makes it focusable and
+  activatable by click, Enter and Space. Example: `chip` in `src/controls/toggle.rs`.
+- **A command-palette command.** Push a `PaletteItem` (group, icon, title, keys, and an `act(...)` closure) in
+  `palette_items` (`src/overlays/palette.rs`). Example: Toggle full screen. Icons are paths under
+  `assets/icons/`, which `build.rs` embeds.
+- **A key binding.** Declare the action in `actions!` and bind it in `bind_keys` (`src/app/mod.rs`; the text
+  input's own bindings are in `src/input.rs`, under its context), then handle it with `.on_action` on the root in
+  `src/app/render.rs`. List it in Settings' shortcuts (`src/screens/settings/page.rs`), on the palette item if
+  there is one, and in Run, below. Example: `ToggleFullscreen` on `F11`.
+- **A colour or size.** A token in `design/tokens.json`, never a literal (Design tokens, below).
 
 ## Run
 
@@ -75,31 +175,10 @@ tokens by `tools/make-icon.ps1` (run it again when either changes, and commit th
 1 from the executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to link.exe, so the
 build needs no resource compiler or extra crate (MSVC targets only).
 
-## Layout
+## Tools
 
-```
-build.rs          generates the theme tables from design/tokens.json and embeds assets/icons/*.svg
-src/main.rs       args, fonts (design/fonts), window, keymap
-src/window_state.rs  the remembered window and theme (desktop.json), where a saved window reopens
-src/theme.rs      the active theme (Colors from tokens, dark/light), class palette, shadows
-src/api/          Backend trait (the client seam), wire types for docs/API.md, the in-app mock
-src/synth.rs      procedural "shapes" scenes behind the mock's images
-src/local.rs      local inference: folo-vision's Predictor in process, on folo-gpu or the CPU
-src/store/        fetched state, live run data (SSE events), the decoded-image cache
-src/bench/        vision benchmarks: what the Benchmarks screens hold, the open benchmark's stream, their actions
-src/app/          root view: chrome, sidebar, routing, fetching, live event pump, actions
-src/controls/     focusable controls: buttons, segmented, tabs, chips, switch, slider, select, tooltip
-src/ui/           stateless pieces: type, panels, badges, status glyphs, metrics, progress, skeletons, empty states
-src/charts/       canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram
-src/viz.rs        images with detection boxes and label chips (design/README.md box spec)
-src/screens/      one module per screen
-src/overlays/     palette, dialogs, image inspector, toasts
-src/scenario.rs   `--scenario` states for screenshots
-ui/               folo-ui, the UI framework (ui/README.md)
-tools/            developer scripts (below)
-```
-
-Tools (`tools/`, PowerShell 5.1 unless noted; each has a usage header). Two of them can take over the screen
+The scripts in `tools/` are Windows PowerShell 5.1, and so Windows only, unless noted: `parity.py` is Python, and
+`bench-frames.sh` and `cross-check.sh` are bash. Each has a usage header. Two of them can take over the screen
 in their default mode: `window-check.ps1` without `-Sandbox` moves the real cursor and takes focus, and
 `chrome-check.ps1` without `-Offscreen` or `-Sandbox` opens a visible window and maximizes it. Every other tool,
 and those two in their `-Sandbox` / `-Offscreen` modes, never shows a window on your desktop, moves the cursor
@@ -155,8 +234,10 @@ on your desktop take the request and open their window on your screen.
 - `perf.ps1`: start-up, memory, CPU and GPU numbers of a build, off screen, as JSON (`ui/PERF.md` has them for
   this build and GPUI's).
 - `bench-frames.sh` (bash): the frame bench (`--bench-frames`: the time and allocations of each frame phase)
-  over the main screens at two window sizes; build with `--features bench-alloc` for allocation counts.
-- `cross-check.sh` (bash): type-checks and lints folo-ui for Linux and both macOS targets.
+  over the main screens at two window sizes; build with `--features bench-alloc` for allocation counts. Its default
+  executable is `$CARGO_TARGET_DIR/release/folo-desktop.exe`; pass another as the first argument.
+- `cross-check.sh` (bash, any host): type-checks and lints folo-ui for Linux and both macOS targets (CI runs it on
+  Linux).
 - `make-icon.ps1`: draws `assets/folo.ico`, the logo of `design/logo-icon.svg`, with the tokens.
 - `review-brief.md`: the brief a design reviewer gets with a round's shots.
 
@@ -181,6 +262,18 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
   going through every phase. `MockBackend::with_cloud_runs` adds one uploading its data and one training (the
   cloud scenarios: `+cloud`, `cloud-…`, `run-cloud+…`); `+empty` scenarios have no connection and `+trouble` ones
   a revoked key and a termination the provider hasn't confirmed.
+
+By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts a
+local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening
+bare against the real data dir (`$FOLO_HOME` or `~/.folo`). When that data dir already has a `folo serve` (another
+window's), it connects to that one instead (`data_dir_in_use`, docs/CLI.md). If that local server stops answering (the
+window that started it closed, or it crashed), the app finds or starts one again the same way and says so. Why a
+local server couldn't start stays on the pages' error panels. `--server URL` and `--mock` pick a source explicitly;
+Settings › Connection switches at runtime: an address on this machine that doesn't answer falls back to the local
+server with a note saying so, and another machine's address is never replaced by the local server. A server started
+with `--token` shows as needing one (the app can't send a token). `--open run:<id>` (or `dataset:`, `model:`, `runs`,
+…) starts on a screen. The deciding is `FoloApp::autoconnect` (`src/app/connection.rs`); finding the binary,
+starting and stopping it is `src/api/http/server.rs`.
 
 ## Benchmarks
 
@@ -213,17 +306,6 @@ status, and since when in the Cloud panel), and when a released run's instance i
 "Termination not confirmed: the instance may still be billed.", with Releasing still the current step and the
 instance's own cost so far. `src/cloud.rs` holds the state and the rules those surfaces share; the demo's
 `run-cloud+silent` and `run-cloud+trouble` scenarios show both.
-
-By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts a
-local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening
-bare against the real data dir (`$FOLO_HOME` or `~/.folo`). When that data dir already has a `folo serve` (another
-window's), it connects to that one instead (`data_dir_in_use`, docs/CLI.md). If that local server stops answering (the
-window that started it closed, or it crashed), the app finds or starts one again the same way and says so. Why a
-local server couldn't start stays on the pages' error panels. `--server URL` and `--mock` pick a source explicitly;
-Settings › Connection switches at runtime: an address on this machine that doesn't answer falls back to the local
-server with a note saying so, and another machine's address is never replaced by the local server. A server started
-with `--token` shows as needing one (the app can't send a token). `--open run:<id>` (or `dataset:`, `model:`, `runs`,
-…) starts on a screen.
 
 ## Design tokens
 
@@ -298,5 +380,6 @@ the rubric each round's shots were scored against, and the log of each round.
 `ui/` is the app's UI framework: GPUI's API for the subset the app uses, its own runtime, a CPU tile renderer,
 DirectWrite text on Windows and cosmic-text elsewhere, and Win32, winit and headless platforms. How to build and
 test it, what is verified on each platform and its developer switches (`FOLO_UI_OFFSCREEN`, `FOLO_UI_TRACE`,
-`FOLO_UI_PLATFORM`) are in `ui/README.md`; the design and its contracts in `ui/DESIGN.md`; the files adapted from
-GPUI in `ui/NOTICE.md`.
+`FOLO_UI_PLATFORM`) are in [ui/README.md](ui/README.md); the design and its contracts in
+[ui/DESIGN.md](ui/DESIGN.md); the pixel comparison with the GPUI app in [ui/PARITY.md](ui/PARITY.md), its cost
+against GPUI in [ui/PERF.md](ui/PERF.md), and the files adapted from GPUI in [ui/NOTICE.md](ui/NOTICE.md).

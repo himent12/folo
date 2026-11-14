@@ -1,3 +1,4 @@
+// The keys of New run: Mod+Enter starts the run, Enter in a field never does.
 import { onDocument } from 'fw';
 
 /** The shortcut that starts the run, as the Start buttons' tooltip and the shortcuts reference name it. */

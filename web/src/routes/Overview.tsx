@@ -1,3 +1,4 @@
+// Overview (`#/`): the run training now, recent runs, best models and datasets. The parts are in ./overview/.
 import Activity from '$icons/activity';
 import Plus from '$icons/plus';
 import WifiOff from '$icons/wifi-off';

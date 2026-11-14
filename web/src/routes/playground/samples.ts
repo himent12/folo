@@ -1,3 +1,4 @@
+// Sample images for the Playground's empty state, the selected model's own dataset first.
 import { computed, type ReadSignal } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';

@@ -1,3 +1,4 @@
+// The sidebar: the sections (./nav), the live run's row and the connection status; it collapses to icons.
 import PanelLeftClose from '$icons/panel-left-close';
 import PanelLeftOpen from '$icons/panel-left-open';
 import { computed, css, Dynamic, effect, For, signal, untrack } from 'fw';

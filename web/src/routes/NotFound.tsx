@@ -1,3 +1,4 @@
+// The page of a route that matches nothing. App renders it itself; it is not one of ../routes.ts's chunks.
 import Crosshair from '$icons/crosshair';
 import { effect } from 'fw';
 import { router, href } from '$lib/router';

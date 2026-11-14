@@ -1,3 +1,5 @@
+// Compare runs (`#/runs/compare?ids=a,b`): up to four runs' curves on one plot, and a table of the runs side by side.
+// The parts are in ./compare/.
 import GitCompare from '$icons/git-compare-arrows';
 import ChevronRight from '$icons/chevron-right';
 import { computed, css, effect, fade, Key, MediaQuery, signal, untrack } from 'fw';

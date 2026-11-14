@@ -1,3 +1,5 @@
+// The Benchmarks list (`#/benchmarks`): the server's vision benchmarks, filtered by source or by what is running, and
+// the New benchmark dialog (`?new=1`). The parts are in ./bench/.
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Target from '$icons/target';

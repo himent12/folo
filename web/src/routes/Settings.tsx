@@ -1,3 +1,5 @@
+// Settings (`#/settings`): appearance and units, the connection to the server, what the server can use, cloud
+// connections and measured throughput. The parts are in ./settings/.
 import ChevronRight from '$icons/chevron-right';
 import CircleCheck from '$icons/circle-check';
 import CircleMinus from '$icons/circle-minus';

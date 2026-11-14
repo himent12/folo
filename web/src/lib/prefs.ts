@@ -1,4 +1,4 @@
-// // User preferences, persisted to localStorage.
+// User preferences, persisted to localStorage.
 
 import { computed, signal, type Signal } from 'fw';
 import type { LabelAgentId } from './api/types';

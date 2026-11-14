@@ -1,3 +1,4 @@
+// The New run form's errors, one per field, and the way from a review row or an error back to its control.
 import type { Arch, Augment, Dataset, Model } from '$lib/api/types';
 import type { ListedDataset } from '../datasets/problem';
 import type { CloudPick } from './cloudPick';

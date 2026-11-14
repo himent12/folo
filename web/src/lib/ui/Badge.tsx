@@ -1,3 +1,4 @@
+// A small label in a tone (neutral, accent, success, warning, danger, info, outline), optionally in mono.
 import { css } from 'fw';
 
 type Tone = 'neutral' | 'accent' | 'success' | 'warning' | 'danger' | 'info' | 'outline';

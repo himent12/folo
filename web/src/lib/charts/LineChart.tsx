@@ -1,3 +1,5 @@
+// The line chart behind the run, compare and model screens: series on a linear or log y scale, with ticks, markers,
+// a hover tooltip and legend, and series the pointer can pick out.
 import { scaleLinear, scaleLog } from 'd3-scale';
 import { bindable, computed, createUniqueId, css, cubicOut, defaults, effect, For, MediaQuery, signal, tick, Tween, untrack } from 'fw';
 import { prefs } from '$lib/prefs';

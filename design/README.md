@@ -5,14 +5,26 @@ source of truth; both apps generate their theme from it and never hard-code a co
 is the reference for tokens, type and colour; `UNIFIED.md` is the one look both apps are built against, screen by
 screen (shell, page parts, charts, every screen).
 
-- Web: `cd web && npm run tokens` writes `web/src/lib/design/tokens.css` (CSS custom properties) and `tokens.ts`
-  (typed values for canvas/SVG code). `npm run check` fails if the generated files are stale.
+The folder is the source of truth for the tokens (`tokens.json`), the fonts (`fonts/`), the logo (the `logo*.svg`
+files) and the shared look (`UNIFIED.md`). How the tokens reach each consumer:
+
+- Web: `cd web && npm run tokens` (`web/scripts/tokens.mjs`) writes `web/src/lib/design/tokens.css` (CSS custom
+  properties, and `@font-face` rules for the `.woff2` files in `fonts/`) and `tokens.ts` (typed values for canvas/SVG
+  code). Both are committed; `web/src/main.tsx` imports the CSS. `npm run check` fails if the generated files are
+  stale.
+- Desktop: a Rust generator (`apps/desktop/build.rs`, which cargo runs again whenever `tokens.json` changes) reads
+  `tokens.json` and writes the theme's tables to `$OUT_DIR/tokens.rs`, which `apps/desktop/src/theme.rs` includes.
+- Docs site: `site/scripts/tokens.ts` turns `tokens.json` into CSS variables with the same names as Studio's, and
+  `@font-face` rules, each time the site is generated (`npm run dev`, `build` or `check` in `site/`).
 - Contrast: `node design/contrast.mjs` measures every colour pairing documented under Colour below (WCAG 2: text
   4.5:1, non-text marks 3:1), in both themes, with tints and overlays composited over each surface, and that colours
   documented as told apart stay apart under colour-vision deficiency (OKLab ΔE ≥ 7, ×100, under normal vision and
   simulated protan / deutan / tritan: adjacent chart series, the loss components). `npm run check` (CI's web job)
   runs it, so a token change that breaks a pairing fails CI. Add a rule there when you document a new pairing here.
-- Desktop: a Rust generator (`apps/desktop/build.rs`) reads `tokens.json` and writes the theme's tables.
+
+Related: [web/README.md](../web/README.md) (Studio; Common changes has "Add or change a token"),
+[apps/desktop/README.md](../apps/desktop/README.md) (Design tokens), [site/README.md](../site/README.md), the
+[root README](../README.md) and [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md).
 
 ## Character
 Precise, fast, instrument-grade: Linear × Vercel × a camera viewfinder. Dense but calm. The content (detection boxes,

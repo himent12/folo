@@ -1,3 +1,5 @@
+//! SVG icons (`svg.rs`): an icon rendered to a coverage mask at device size; missing assets and zero sizes.
+
 use folo_ui::{
     AssetSource, Bounds, DevicePixels, RenderSvgParams, SharedString, SvgRenderer, point, px, size,
 };

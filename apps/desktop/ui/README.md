@@ -5,8 +5,21 @@ and behaviour, so the app reads as it did on GPUI 0.2.2), and its own engine: it
 tiles, and redraws only the tiles that changed. The UI uses no GPU device, so the GPU and its memory stay free
 for training and inference.
 
-`DESIGN.md` is the design record: the decisions, the contracts between the parts, and how the port is verified.
-This file is how to work on the crate.
+What it is not: a general UI toolkit, or GPUI. Only what `apps/desktop/src` calls exists (a GPUI method the app
+does not use is not here), and there is no `gpui` dependency: the files that adapt GPUI source (Adapted from
+GPUI, below) are part of this crate. The crate is a member of the FOLO Desktop workspace
+([apps/desktop/README.md](../README.md)), not of the repository's root workspace ([README](../../../README.md),
+[docs/ARCHITECTURE.md](../../../docs/ARCHITECTURE.md)).
+
+This file is how to work on the crate. The others next to it:
+
+- [DESIGN.md](DESIGN.md): the design record: the decisions, the contracts between the parts (scene, renderer,
+  text, platform), and how the port is verified. When code and DESIGN.md disagree, fix one of them.
+- [PARITY.md](PARITY.md): how close the headless shots are to the GPUI app's, pixel by pixel, and why each
+  remaining difference stays.
+- [PERF.md](PERF.md): what FOLO Desktop costs on folo-ui against the GPUI build (start-up, memory, CPU and GPU,
+  frames, the renderer, the build), and how to measure it again.
+- [NOTICE.md](NOTICE.md): the attribution for GPUI (Apache-2.0) and every file adapted from it.
 
 ## The shape of it
 
@@ -28,7 +41,9 @@ Where things live, under `src/`:
 
 | Folder or file | What it holds |
 | --- | --- |
+| `lib.rs`, `prelude.rs` | the module list, and the flat re-exports of everything public; the traits app code imports with `use folo_ui::prelude::*` |
 | `geometry/`, `color.rs`, `shared_string.rs`, `input_events.rs`, `keystroke.rs` | value types, events, keystrokes |
+| `opacity.rs` | opacity groups: an opacity that changes after paint without repainting the UI |
 | `style/`, `styled/`, `layout.rs`, `path_builder.rs`, `svg.rs`, `image.rs`, `easing.rs`, `assets.rs` | `Style` and its refinement, the `Styled` methods, the mapping to taffy, paths, SVG icons, images |
 | `app/`, `executor.rs`, `action.rs`, `keymap/`, `view.rs` | the runtime: `Application`, `App`, entities, contexts, effects, tasks, actions and key bindings, `--shot` |
 | `window/`, `interactive/`, `element.rs`, `elements/` | the window and its frame pipeline, dispatch, focus, hit testing; the elements |
@@ -88,12 +103,36 @@ Examples (Windows, off screen, never focused, driven by posted window messages, 
 ```
 cargo run -p folo-ui --release --example win_smoke [-- --quick]            # the Win32 backend
 # on a private desktop only (they show windows, or would if off screen failed):
-..\tools\sandbox-run.ps1 -Exe <target>\release\examples\win_smoke.exe -ExeArgs "--dialog" -Env @{ FOLO_SMOKE_SANDBOX = "1" }
+tools\sandbox-run.ps1 -Exe <target>\release\examples\win_smoke.exe -ExeArgs "--dialog" -Env @{ FOLO_SMOKE_SANDBOX = "1" }
 #   --dialog: the modal file dialog keeps tasks and frames running; --offscreen-dialog: off screen
 #   the dialogs are refused and a stray window is moved off the displays
 cargo run -p folo-ui --example winit_smoke --features winit,portable-text   # the winit backend
 cargo run -p folo-ui --example text_probe -- <lines.txt> <out-dir> [scale]  # DirectWrite layout and masks
 ```
+
+Where the tests are:
+
+| Path | What it covers |
+| --- | --- |
+| `src/app/tests.rs`, `src/elements/tests/`, `src/window/tests/` | unit tests on the headless platform: the runtime (entities, effects, subscriptions, executors); the elements; the window's layout, frames, keys and mouse (asserting on the `Scene` and on callbacks, never on pixels) |
+| `src/text/tests/`, `src/geometry/tests.rs` | the text front against `FixedTextSystem` (layout cache, wrapping, truncation, painting); the geometry types |
+| `src/raster/quad_tests.rs` | the quads' span decomposition against the shader formula at every pixel |
+| `src/platform/windows/tests.rs` | the Win32 backend on real windows that are never shown, driven by their messages |
+| `tests/raster/` | the renderer: the incremental invariant on random scenes, exactness against GPUI's formulas, degenerate input, cache bounds |
+| `tests/style/` | style refinement, the `Styled` methods the app calls (`styled.rs` fails to compile if one is missing), the taffy mapping, painting, paths, SVG icons, images, easing |
+| `tests/portable_text.rs` | the cosmic-text backend with the bundled Geist fonts (off Windows, or with `portable-text`) |
+| `tests/text_dwrite.rs`, `tests/text_dwrite_startup.rs` | the DirectWrite backend (Windows); the start-up one is `#[ignore]`d, its own binary |
+| `tests/fonts_added_late.rs` | fonts added after a window has drawn |
+| `tests/windows_platform.rs` | the Win32 run loop with no window on screen (Windows) |
+| `benches/raster.rs` | the renderer on a synthetic busy frame (`cargo bench -p folo-ui --bench raster`) |
+| `examples/win_smoke/`, `examples/winit_smoke.rs`, `examples/text_probe.rs` | real-window checks of the Win32 and winit backends; DirectWrite layout and masks for comparison with GPUI captures (below) |
+
+A test opens a window on the headless platform through `HeadlessApp` (`src/headless_app.rs`): build state with
+`update`, feed input with `simulate_input`, move the fake clock with `advance_clock`, pump with `run_until_idle`,
+then draw with `frame` (the framebuffer) or read the `scene`. `open` in `src/window/tests/mod.rs` is the smallest
+example: a `HeadlessApp` with `HeadlessOptions { size, scale_factor, text: TextBackend::Fixed }`, one window
+whose view renders a closure, and its first frame drawn. The app's own tests use the same harness
+(`apps/desktop/src/app/tests.rs`).
 
 ## Platforms
 

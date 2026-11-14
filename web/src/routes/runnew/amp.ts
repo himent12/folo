@@ -1,3 +1,4 @@
+// Why mixed precision cannot be switched on for a device (New run's Mixed precision field), and how to enable it.
 import type { Capabilities, SystemInfo } from '$lib/api/types';
 import { VULKAN } from '../settings/capabilities';
 

@@ -1,5 +1,7 @@
 # folo-ui: pixel parity with the GPUI app
 
+Part of folo-ui ([README.md](README.md)); the verification it belongs to is in [DESIGN.md](DESIGN.md).
+
 How close `folo-desktop --shot` (headless, CPU renderer) is to the GPUI 0.2.2 app, what rule each part follows,
 and every pixel that still differs, with its cause. The reference is the GPUI build's off-screen captures
 (kept outside the repository: 98 pairs, scale 1.5; its own run-to-run noise is at most 6 levels, in

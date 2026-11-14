@@ -1,4 +1,4 @@
-// // Sidebar state. Below the desktop tier (tablets and laptops) the sidebar collapses to icons on its own, so content
+// Sidebar state. Below the desktop tier (tablets and laptops) the sidebar collapses to icons on its own, so content
 // keeps its width; toggling it there opens it for this session only and leaves the saved preference (which is about
 // desktop windows) alone. Phones have no sidebar (the tab bar).
 

@@ -1,3 +1,5 @@
+// One labeling job (`#/datasets/label/<id>`): its images, the instructions and the agent runs that label them, the box
+// editor, and Create dataset. The parts are in ./label/.
 import ArrowLeft from '$icons/arrow-left';
 import Database from '$icons/database';
 import ImagePlus from '$icons/image-plus';

@@ -7,23 +7,62 @@ Its Svelte-facing surface (attribute names, events, `class:`/`style:`/`bind:`/`u
 Svelte's exact selector rewriting) let the ~150 components port one-to-one: every screen and state of the app rendered
 pixel-identically to the Svelte app before that one was removed (CHANGELOG, "Studio on fw").
 
-- `runtime/` — the runtime, imported as `fw` (`fw/internal` is what compiled code calls).
-- `compiler/` — the Vite plugin: JSX transform (oxc-parser + magic-string, exact source maps), scoped CSS
-  (postcss + postcss-selector-parser, mirrors Svelte 5's analyzer and transformer), `$icons/<name>` lucide modules
-  (from `icons/lucide.json`, vendored under Lucide's ISC license in `icons/LICENSE-lucide.txt`;
-  `tools/icons.mjs --add` vendors a newly imported icon).
-- `jsx.d.ts`, `icons.d.ts` — JSX types (Svelte 5's element attribute types, vendored in `vendor/`, plus fw's
-  directives).
-- `testing.ts` — `render()` / `flush()` / `fromHTML()` for vitest + happy-dom.
-- `bench/` — the js-framework-benchmark operations (`run.mjs`) and the runtime's size (`size.mjs`).
-- `PORTING.md` — every construct, with the Svelte 5 one it replaced. **Read it before writing a component.**
+Related: [Studio's README](../README.md) (the app built on it, and how to add a screen or a component), the
+[root README](../../README.md) and [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md).
+**Read [PORTING.md](PORTING.md) before writing a component**: every construct, with the Svelte 5 one it replaced.
+
+## Where things are
+
+| Path | What it holds |
+|---|---|
+| `runtime/` | The runtime, imported as `fw` (`runtime/index.ts`, the public exports) |
+| `runtime/core.ts` | Signals, lazy computeds, effects, the owner tree, context and the scheduler |
+| `runtime/dom.ts` | Cloned templates, `insert` with the keyed list reconciler, attribute, property, class and style setters |
+| `runtime/events.ts` | Delegated events (one listener per type on each render root and the document) and direct ones |
+| `runtime/flow.ts` | `Show`, `For`, `Index`, `Switch`/`Match`, `Key`, `Dynamic`, `Portal` |
+| `runtime/component.ts` | Components and props helpers (`mergeProps`, `splitProps`, `defaults`, `bindable`, `field`) |
+| `runtime/bind.ts`, `spread.ts`, `text.ts` | `ref`, `use:` and `bind:`; `{...spread}` on an element; text runs |
+| `runtime/reactivity.ts` | `deep`, `ReactiveMap`, `ReactiveSet`, `MediaQuery` |
+| `runtime/transition.ts`, `tween.ts` | Transitions (`fade`, `fly`, easings) and `Tween` |
+| `runtime/icon.ts`, `render.ts`, `names.ts` | Lucide icons as components; `render`; names the compiler and the runtime share |
+| `runtime/internal.ts` | `fw/internal`: what compiled JSX calls, not for application code |
+| `compiler/index.ts` | The Vite plugin `fw()`: compiles `.tsx`, serves each file's scoped CSS and the `$icons/<name>` modules |
+| `compiler/jsx.ts`, `ast.ts`, `html.ts` | The JSX transform (oxc-parser + magic-string, exact source maps) and what it needs to know |
+| `compiler/css.ts` | Scoped CSS (postcss + postcss-selector-parser, mirrors Svelte 5's analyzer and transformer) |
+| `jsx.d.ts`, `icons.d.ts` | JSX types (Svelte 5's element attribute types from `vendor/`, plus fw's directives); `$icons/*` |
+| `icons/` | `lucide.json`, the icon data the plugin builds `$icons/<name>` from, and its licence |
+| `tools/icons.mjs` | Checks that every imported icon is vendored (`npm run check`); `--add` vendors the missing ones |
+| `vendor/` | `svelte-elements.d.ts` and its licence |
+| `testing.ts` | `render()` / `flush()` / `tick()` / `fromHTML()` for vitest + happy-dom |
+| `bench/` | The js-framework-benchmark operations (`run.mjs`) and the runtime's size (`size.mjs`) |
+| `PORTING.md` | Every construct, with the Svelte 5 one it replaced |
+
+Tests sit beside the code: `runtime/*.test.ts(x)` and `compiler/*.test.ts`.
 
 ```sh
-npx vitest run framework/             # runtime and compiler tests
+npx vitest run framework/             # runtime and compiler tests (npm test runs them with the app's)
 npx tsc -p tsconfig.json              # types of the app and the framework
 node framework/bench/run.mjs          # the benchmark operations, Chrome
 node framework/bench/size.mjs         # runtime size, min + gzip
 ```
+
+## How Studio uses it
+
+- **Vite:** `web/vite.config.ts` adds the plugin (`fw()` from `compiler/index.ts`) and aliases `fw` to
+  `runtime/index.ts` and `fw/<name>` to `runtime/<name>.ts`. The plugin compiles every `.tsx` outside `node_modules`
+  and imports the file's scoped CSS as the virtual module `<file>.fw.css`.
+- **TypeScript:** `web/tsconfig.json` has `"jsx": "preserve"` (the plugin compiles JSX, not tsc), the same `fw`
+  paths, and includes `jsx.d.ts` and `icons.d.ts`. The compiler is Node code, type-checked through
+  `tsconfig.node.json` and `vite.config.ts`.
+- **Tests:** vitest with `environment: 'node'` by default; a DOM test starts with `// @vitest-environment happy-dom`
+  and uses `testing.ts`.
+
+## Vendored code
+
+| Files | From | Licence |
+|---|---|---|
+| `vendor/svelte-elements.d.ts` | svelte@5.57.3 `elements.d.ts` (the one import it had, `Attachment`, is declared in the file) | MIT, `vendor/svelte-LICENSE.md` |
+| `icons/lucide.json` | Lucide's icon data, one entry per icon the app imports | ISC, `icons/LICENSE-lucide.txt` |
 
 ## Design
 
@@ -153,22 +192,22 @@ The scope class prefix is **`fw-`** (`fw-` + base-36 FNV-1a of the file's path r
 import { ... } from 'fw';
 ```
 
-| Area | API |
-|---|---|
-| State | `signal(v, { equals? })` → `{ get, set, peek }` (`state` alias) · `computed(fn, { equals? })` → `{ get, peek }` · `deep(obj)` (proxy) · `snapshot(x)` |
-| Effects | `effect(fn)` (after DOM updates; returns cleanup) · `effect.pre(fn)` · `renderEffect` (internal) · `onMount` · `onCleanup` / `onDestroy` · `untrack` · `isTracking` |
-| Scheduling | `flush()` (≙ `flushSync`) · `tick()` · `batch(fn)` |
-| Ownership | `createRoot((dispose) => …, parent?)` · `getOwner` · `runWithOwner` · `dispose` · `memo` |
-| Context | `setContext` · `getContext` · `hasContext` · `createContext(default)` |
-| Components | `Component<P>` · `ComponentProps<C>` · `ElementProps<'button'>` · `defaults(props, {...})` · `splitProps(props, keys)` · `mergeProps(...)` · `bindable(props, key, fallback?)` · `field(obj, key)` · `createUniqueId()` (`propsId`) |
-| Control flow | `<Show when keyed? fallback>` · `<For each key? fallback>{(item, i) => …}` · `<Index each fallback>` · `<Switch fallback><Match when>` · `<Key when>` · `<Dynamic component={tagOrComponent} …>` · `<Portal mount?>` |
-| DOM | `render(() => <App />, el)` → unmount · `on(target, type, fn)` · `onWindow` · `onDocument` · `clsx` |
-| Reactivity utils | `MediaQuery` / `mediaQuery(q)` (`.current`) · `ReactiveMap` · `ReactiveSet` · `createSubscriber` |
-| Motion | `fade` · `fly` · `linear` · `cubicOut` · `cubicInOut` · `Tween` |
-| Styles | `` css`...` `` (compile-time) |
-| Icons | `import X from '$icons/x'` (lucide, from @lucide/svelte's data) · `IconComponent` |
-| JSX attributes | `class` · `class:x` · `style` (string or object) · `style:prop` · `on<event>` / `on<event>capture` · `ref` · `use:action` / `use` · `bind:value/checked/group/open/this/clientWidth/clientHeight/offsetWidth/offsetHeight` · `transition:` / `in:` / `out:` · `{...spread}` · `innerHTML` |
-| Tests (`framework/testing`) | `render(() => <X />, target?)` → `{ container, unmount }` · `flush` · `tick` · `fromHTML(html)` |
+| Area | API | Defined in |
+|---|---|---|
+| State | `signal(v, { equals? })` → `{ get, set, peek }` (`state` alias) · `computed(fn, { equals? })` → `{ get, peek }` · `deep(obj)` (proxy) · `snapshot(x)` | `runtime/core.ts`; `deep`, `snapshot`: `runtime/reactivity.ts` |
+| Effects | `effect(fn)` (after DOM updates; returns cleanup) · `effect.pre(fn)` · `renderEffect` (internal) · `onMount` · `onCleanup` / `onDestroy` · `untrack` · `isTracking` | `runtime/core.ts` |
+| Scheduling | `flush()` (≙ `flushSync`) · `tick()` · `batch(fn)` | `runtime/core.ts` |
+| Ownership | `createRoot((dispose) => …, parent?)` · `getOwner` · `runWithOwner` · `dispose` · `memo` | `runtime/core.ts` |
+| Context | `setContext` · `getContext` · `hasContext` · `createContext(default)` | `runtime/core.ts` |
+| Components | `Component<P>` · `ComponentProps<C>` · `ElementProps<'button'>` · `defaults(props, {...})` · `splitProps(props, keys)` · `mergeProps(...)` · `bindable(props, key, fallback?)` · `field(obj, key)` · `createUniqueId()` (`propsId`) | `runtime/component.ts`; `ElementProps`: `runtime/index.ts` |
+| Control flow | `<Show when keyed? fallback>` · `<For each key? fallback>{(item, i) => …}` · `<Index each fallback>` · `<Switch fallback><Match when>` · `<Key when>` · `<Dynamic component={tagOrComponent} …>` · `<Portal mount?>` | `runtime/flow.ts` |
+| DOM | `render(() => <App />, el)` → unmount · `on(target, type, fn)` · `onWindow` · `onDocument` · `clsx` | `runtime/render.ts`, `runtime/events.ts`, `runtime/dom.ts` |
+| Reactivity utils | `MediaQuery` / `mediaQuery(q)` (`.current`) · `ReactiveMap` · `ReactiveSet` · `createSubscriber` | `runtime/reactivity.ts` |
+| Motion | `fade` · `fly` · `linear` · `cubicOut` · `cubicInOut` · `Tween` | `runtime/transition.ts`, `runtime/tween.ts` |
+| Styles | `` css`...` `` (compile-time) | `runtime/index.ts` (the marker), `compiler/css.ts` |
+| Icons | `import X from '$icons/x'` (lucide, from @lucide/svelte's data) · `IconComponent` | `runtime/icon.ts`, `compiler/index.ts` |
+| JSX attributes | `class` · `class:x` · `style` (string or object) · `style:prop` · `on<event>` / `on<event>capture` · `ref` · `use:action` / `use` · `bind:value/checked/group/open/this/clientWidth/clientHeight/offsetWidth/offsetHeight` · `transition:` / `in:` / `out:` · `{...spread}` · `innerHTML` | types `jsx.d.ts`; compiled by `compiler/jsx.ts` |
+| Tests (`framework/testing`) | `render(() => <X />, target?)` → `{ container, unmount }` · `flush` · `tick` · `fromHTML(html)` | `testing.ts` |
 
 ## Performance
 

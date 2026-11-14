@@ -1,3 +1,4 @@
+// Where the Playground's image comes from (a file or a dataset's image), and its bytes for the in-browser runtime.
 import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img } from '$lib/api/types';
 

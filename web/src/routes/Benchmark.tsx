@@ -1,3 +1,5 @@
+// One vision benchmark (`#/benchmarks/<id>`): its plan (edited here while the benchmark has no entries), its entries
+// and its loops. The parts are in ./bench/.
 import ArrowLeft from '$icons/arrow-left';
 import Copy from '$icons/copy';
 import GitCompare from '$icons/git-compare-arrows';

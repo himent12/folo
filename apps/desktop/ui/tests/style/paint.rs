@@ -1,3 +1,6 @@
+//! Painting a `Style` (`style/paint.rs`): a card's primitives at scale 1 and 1.5, radius clamping, opacity and
+//! content masks, the overflow mask, SVG sprite bounds and shadow culling.
+
 use folo_ui::{
     BorderStyle, Bounds, BoxShadow, ContentMask, Corners, DevicePixels, Edges, Hsla, Overflow, Pixels,
     Primitive, Refineable, ScaledPixels, Scene, Style, StylePaint, StyleRefinement, Styled, black, blue,
