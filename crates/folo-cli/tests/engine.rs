@@ -729,6 +729,8 @@ fn weights_names_export_and_coco_val() {
         "folo-n-coco-v2-f16",
         "folo-s-coco",
         "folo-s-coco-f16",
+        "folo-n-coco-v3",
+        "folo-n-coco-v3-f16",
     ] {
         assert!(names.contains(&name), "{name} missing from {names:?}");
     }

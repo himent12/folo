@@ -257,8 +257,10 @@ while the server runs lists at once; the server reads the same cache (`$FOLO_WEI
 | `folo-n-coco-v2-f16` | `weights-v2` | the same, fused and cast to f16 (`folo export`): inference only |
 | `folo-s-coco` | `weights-v3` | folo-s trained from scratch on COCO train2017 at 640 px, 56 epochs (EMA, f32, unfused): fine-tune or predict. val2017 AP 0.416. examples/coco/README.md, folo-s |
 | `folo-s-coco-f16` | `weights-v3` | the same, fused and cast to f16 (`folo export`): inference only |
+| `folo-n-coco-v3` | `weights-v4` | folo-n from scratch on COCO: `folo-n-coco-v2` annealed for 16 more epochs, 78 in all (EMA, f32, unfused): fine-tune or predict. val2017 AP 0.340, the best folo-n weights. examples/coco/README.md, v3 |
+| `folo-n-coco-v3-f16` | `weights-v4` | the same, fused and cast to f16 (`folo export`): inference only |
 
-`weights-v1`, `weights-v2` and `weights-v3` are published releases. `folo weights pull` downloads their files over plain
+`weights-v1` to `weights-v4` are published releases. `folo weights pull` downloads their files over plain
 HTTPS: no `gh`, no account, nothing but the `folo` binary. Only when that download is refused (`404` from a private
 fork or mirror, a draft) does the pull fall back to `gh release download`, which needs a logged-in
 [`gh`](https://cli.github.com) (`gh auth login`) with access to that repository. A progress line shows on a
@@ -275,8 +277,8 @@ A command that takes a published name that is not downloaded (`train --weights`,
 `export`) does not download it: it stops at once with `weights_not_found` (exit 3) and the hint
 ``run `folo weights pull NAME`, then this command again``, so a run never starts on a download it did not ask for. A
 first fine-tune is two commands ([QUICKSTART](QUICKSTART.md#fine-tune-from-pretrained-weights)):
-`folo weights pull folo-n-coco-v2`, then `folo train --data <dataset> --weights folo-n-coco-v2`. Without `folo`,
-`gh release download weights-v2 --repo himent12/folo --pattern 'folo-n-coco-v2*' --pattern SHA256SUMS` (or the
+`folo weights pull folo-n-coco-v3`, then `folo train --data <dataset> --weights folo-n-coco-v3`. Without `folo`,
+`gh release download weights-v4 --repo himent12/folo --pattern 'folo-n-coco-v3*' --pattern SHA256SUMS` (or the
 release URLs) then `sha256sum -c --ignore-missing SHA256SUMS` does the same by hand.
 
 ## Cloud

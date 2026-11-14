@@ -97,6 +97,10 @@ fixes.
   it shows the recipe works, not how much it gains over SGD on full COCO.
 - The 300-epoch folo-n COCO run stays paused at epoch 62 (`folo-n-coco-v2`, AP 0.317); it can be resumed from its
   checkpoint.
+- **folo-n COCO weights v3**: `folo-n-coco-v3` and `folo-n-coco-v3-f16` (release `weights-v4`), `folo-n-coco-v2`
+  annealed for 16 more epochs (SGD, learning rate decayed linearly to 1%, mosaic off for the last 8), 78 epochs in
+  all: val2017 **AP 0.340 / AP50 0.487** (pycocotools-exact; f16 0.339), the best folo-n weights
+  ([examples/coco](examples/coco/README.md#v3-v2-annealed-for-16-epochs)). `folo weights pull folo-n-coco-v3`.
 - **Fine-tuning benchmark** (`bench/finetune/`, docs/BENCHMARKS.md, Fine-tuning on small datasets): FOLO's COCO
   weights against Ultralytics' YOLO26 of the same size on four small public datasets, three seeds each, both trained
   on the same rented GPU type and scored by one pycocotools scorer. folo-n is level with YOLO26n on three of them
@@ -109,8 +113,8 @@ fixes.
   timeout, a server error or a cut download is the new `download_failed`, without a fallback. The checksum and
   `.folo` checks are unchanged: nothing is installed unless both pass. `--json` adds `via` (`https`, `gh`, `null`).
 - `FOLO_WEIGHTS_BASE_URL` downloads from a mirror (`<base>/<tag>/<file>`), `FOLO_GH` names the GitHub CLI program.
-- The QUICKSTART has the two-command path to a first fine-tune (`folo weights pull folo-n-coco-v2`, then
-  `folo train --weights folo-n-coco-v2`); `train` still never downloads by itself, and its hint says what to run.
+- The QUICKSTART has the two-command path to a first fine-tune (`folo weights pull folo-n-coco-v3`, then
+  `folo train --weights folo-n-coco-v3`); `train` still never downloads by itself, and its hint says what to run.
 
 #### Vision benchmarks
 - Make a benchmark from your own labeled images and run **any vision model** on it: a FOLO model, Claude Code or
