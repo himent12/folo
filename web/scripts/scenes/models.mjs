@@ -12,26 +12,26 @@ export const modelScenes = [
     // Phones open on the Curves section (the matrix is behind the section picker).
     name: 'model-detail',
     path: '/models/m_fast_n',
-    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    viewports: ['desktop', 'wide', 'laptop', 'tablet', 'mobile'],
     setup: (page, { vp }) => until(page, vp === 'mobile' ? '#pr svg' : '#cm .cell'),
   },
   {
-    // The Details rail is sticky (DESIGN_DIRECTION §2.2): scrolled to the per-class table, it holds under the top bar
-    // beside it, so the space under it in the full-page shot is the room it travels in.
-    name: 'model-detail-scrolled',
-    path: '/models/m_fast_n',
-    viewports: ['desktop', 'laptop'],
+    // 80 classes: the per-class table, the curves' legend, scrolls inside the Precision-recall panel at the plot's
+    // height (§4 Model), its head held at the top; scrolled to its last rows here.
+    name: 'model-coco-table-scrolled',
+    path: '/models/m_coco_s',
+    viewports: ['desktop', 'wide'],
     fullPage: false,
     keepScroll: true,
     setup: async (page) => {
       await until(page, '#cm .cell');
-      await page.locator('.cls-part').first().evaluate((el) => el.scrollIntoView({ block: 'end' }));
+      await page.locator('#pr').scrollIntoViewIfNeeded();
+      await page.locator('#pr .scroll').evaluate((el) => (el.scrollTop = el.scrollHeight));
       await page.mouse.move(0, 0);
     },
   },
   {
-    // Laptop: the details fold into one line above the matrix; opened here, they list in two columns. Phones: the
-    // Details section.
+    // Details is a full-width panel at every width (two columns on tablets, §4 Model); phones: the Details section.
     name: 'model-detail-details',
     path: '/models/m_fast_n',
     viewports: ['tablet', 'mobile'],
@@ -43,12 +43,11 @@ export const modelScenes = [
         return;
       }
       await until(page, '#cm .cell');
-      await page.locator('.d-line').click();
     },
   },
   {
     // An o2o model (shapes-s-best, as the server mock's m_31ab): Details says Head "End-to-end (no NMS)" and how it was
-    // trained. Tablets fold the details (laptops and desktops show the rail): opened. Phones: the Details section.
+    // trained. Phones: the Details section.
     name: 'model-o2o',
     path: '/models/m_shapes_s',
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
@@ -56,7 +55,6 @@ export const modelScenes = [
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
       if (vp === 'mobile') await page.getByRole('tab', { name: 'Details', exact: true }).click();
-      else if (vp === 'tablet') await page.locator('.d-line').click();
     },
   },
   {
@@ -84,7 +82,7 @@ export const modelScenes = [
   {
     name: 'model-coco',
     path: '/models/m_coco_s',
-    viewports: ['desktop', 'laptop'],
+    viewports: ['desktop', 'wide', 'laptop', 'tablet'],
     setup: (page) => until(page, '#cm .cell'),
   },
   {
@@ -327,15 +325,16 @@ export const modelScenes = [
     },
   },
   {
-    // Per-class rows trace curves: the hint above the table, two classes selected (bg.active + accent bar) and Clear.
+    // Per-class rows trace curves: the hint above the table, two classes selected (bg.active + accent bar) and Clear,
+    // their curves in their hues beside the table (under it on a laptop).
     name: 'model-classes-selected',
     path: '/models/m_fast_n',
     fullPage: true,
     viewports: ['desktop', 'laptop'],
     setup: async (page) => {
       await until(page, '#cm .cell');
-      await page.locator('#per-class button.cls').nth(1).click();
-      await page.locator('#per-class button.cls').nth(4).click();
+      await page.locator('#pr button.cls').nth(1).click();
+      await page.locator('#pr button.cls').nth(4).click();
       await page.mouse.move(0, 0);
     },
   },
