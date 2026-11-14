@@ -61,9 +61,10 @@ through the cache, and for twice the longest it ever went unused before being as
 until the soonest kept length can be stale. The second bound came from the review (below): with the first alone,
 a workload that cycles through more than twice the cache evicts each cached length just before it comes back and
 ends with no hits, where the old policy kept a cache-sized part. To learn that, a length's record (last use,
-longest idle stretch) outlives its buffers, and the records of lengths with no buffer are dropped after 16 limits
-unused. A return longer than the limit is refused before it counts as traffic. Changing the limit resets the
-scan deadline. Tests on the cache struct, each failing when its part is taken out:
+longest idle stretch) outlives its buffers, and the records of lengths with no buffer are dropped once unused for 16
+limits and stale (so for max(16 limits, twice the longest idle stretch)). A return longer than the limit is refused
+before it counts as traffic. Changing the limit resets the scan deadline. Tests on the cache struct, each failing
+when its part is taken out:
 - three workloads in turn, each admitted after about two limits of traffic (also fails with the old policy, and
   with the empty-cache bound bug the first version had);
 - cyclic workloads of 1.5, 3, 6 and 12 limits per cycle keep 4 of their lengths cached and evict nothing once
