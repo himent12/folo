@@ -209,6 +209,39 @@ fn letterbox_on_device_is_exact() {
     }
 }
 
+/// A batch of images that share their `rect` canvas is letterboxed on it on the GPU: each image's input is bit for
+/// bit its input alone, and the head outputs match within f32 summation-order noise (a kernel may split its sums
+/// differently at another batch size).
+#[test]
+fn rect_batch_on_device_matches_single_images() {
+    use folo_vision::predict::{PredictConfig, Predictor};
+    let dev = gpu!();
+    let _g = no_grad();
+    let mut m = model(2);
+    m.to_device(dev).unwrap();
+    let p = Predictor::new(m, PredictConfig { imgsz: 128, ..PredictConfig::default() }).unwrap();
+    // Three sizes with the same 128x96 canvas.
+    let imgs: Vec<_> = [(160, 90), (150, 84), (120, 66)]
+        .iter()
+        .enumerate()
+        .map(|(i, &(w, h))| noisy_image(w, h, i as u32))
+        .collect();
+    let batch = p.prepare(&imgs, true).unwrap();
+    assert_eq!(batch.input.dims(), [3, 3, 96, 128]);
+    let out = p.forward(&batch).unwrap();
+    for (i, img) in imgs.iter().enumerate() {
+        let one = p.prepare(std::slice::from_ref(img), true).unwrap();
+        let (a, b) = (
+            batch.input.narrow(0, i, 1).unwrap().to_vec::<f32>().unwrap(),
+            one.input.to_vec::<f32>().unwrap(),
+        );
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "image {i}: inputs differ");
+        let single = p.forward(&one).unwrap();
+        close(&out.box_raw.narrow(0, i, 1).unwrap(), &single.box_raw, 1e-3, 1e-3, "box_raw");
+        close(&out.cls_raw.narrow(0, i, 1).unwrap(), &single.cls_raw, 1e-3, 1e-3, "cls_raw");
+    }
+}
+
 /// A batch whose images fit the device's buffer limit one by one but not together still letterboxes (bit-exact
 /// with the host): the upload is split at the limit. Ignored by default: it needs a little more than the
 /// device's storage binding limit (about 2 GiB on desktop GPUs) of host and device memory.

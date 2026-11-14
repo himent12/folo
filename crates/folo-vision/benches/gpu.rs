@@ -195,12 +195,21 @@ fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, tc: 
     assert_eq!(pred.precision(), prec);
     let model = pred.model();
     let nms = folo_vision::nms::NmsConfig::default();
-    for batch in [1usize, 16] {
+    // Batches of 1280×720 frames (`predict_batch` runs them on their shared `rect` canvas) and of mixed shapes
+    // (padded square).
+    type Shape = fn(usize) -> (u32, u32);
+    let sizes: [(usize, &str, Shape); 4] = [
+        (1, "", |_| (640, 640)),
+        (16, "", |_| (640, 640)),
+        (16, " 1280x720", |_| (1280, 720)),
+        (16, " mixed", |i| [(1280, 720), (720, 1280), (640, 480), (640, 640)][i % 4]),
+    ];
+    for (batch, shape, wh) in sizes {
         let images: Vec<Image> = (0..batch)
-            .map(|_| {
-                let data =
-                    (0..640 * 640 * 3).map(|_| (rng.uniform(0.0, 256.0) as u32).min(255) as u8).collect();
-                Image::from_raw(640, 640, data).expect("image")
+            .map(|i| {
+                let (w, h) = wh(i);
+                let data = (0..w * h * 3).map(|_| (rng.uniform(0.0, 256.0) as u32).min(255) as u8).collect();
+                Image::from_raw(w, h, data).expect("image")
             })
             .collect();
         let mut dets = 0;
@@ -215,9 +224,12 @@ fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, tc: 
         };
         let iters = if batch == 1 { 50 } else { 15 };
         let s = latency(dev, 10, iters, &mut run);
-        row(&format!("predict b{batch} (e2e, {label})"), &s, batch);
+        row(&format!("predict b{batch}{shape} (e2e, {label})"), &s, batch);
         let t = throughput(dev, iters, &mut run);
         println!("    back to back {:.2} ms/call = {:.0} img/s", t, batch as f64 * 1e3 / t);
+        if !shape.is_empty() {
+            continue;
+        }
         // Where the time goes: each phase synchronised on its own.
         let opts = LetterboxOptions { stride: (batch == 1).then_some(32), ..LetterboxOptions::default() };
         let boxes: Vec<Letterbox> =

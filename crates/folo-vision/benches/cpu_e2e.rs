@@ -10,7 +10,8 @@
 //!
 //! `FOLO_BENCH_ITERS` (default 100) sets the calls per row; `RAYON_NUM_THREADS` pins the pool.
 //! `FOLO_BENCH_SCALE` (default `n`) picks the model (`n`, `s`, `m`, ...), `FOLO_BENCH_BATCH` (default 0: off)
-//! adds a `predict_batch` row of that many 640×640 images, and `FOLO_BENCH_LAYERS=1` prints the fastest and
+//! adds `predict_batch` rows of that many images (640×640, 1280×720 frames, and mixed shapes: 1280×720, 720×1280,
+//! 640×480 and 640×640 in turn), and `FOLO_BENCH_LAYERS=1` prints the fastest and
 //! median time of every layer of docs/MODEL.md §4 (the head is the forward minus the traced layers).
 //!
 //! Trained weights: with `FOLO_BENCH_WEIGHTS` (a `.folo` file, e.g. `folo-n-coco`) and `FOLO_BENCH_IMAGES` (a folder
@@ -123,8 +124,19 @@ fn main() {
             median(&mut post),
         );
     }
-    if batch > 0 {
-        let imgs: Vec<folo_data::Image> = (0..batch).map(|i| image(640, 640, 10 + i as u64)).collect();
+    type Shape = fn(usize) -> (u32, u32);
+    let sets: [(&str, Shape); 3] = [
+        ("640x640", |_| (640, 640)),
+        ("1280x720", |_| (1280, 720)),
+        ("mixed", |i| [(1280, 720), (720, 1280), (640, 480), (640, 640)][i % 4]),
+    ];
+    for (shape, wh) in sets.into_iter().filter(|_| batch > 0) {
+        let imgs: Vec<folo_data::Image> = (0..batch)
+            .map(|i| {
+                let (w, h) = wh(i);
+                image(w, h, 10 + i as u64)
+            })
+            .collect();
         for _ in 0..3 {
             black_box(pred.predict_batch(&imgs).expect("predict"));
         }
@@ -138,7 +150,7 @@ fn main() {
         let med = median(&mut wall);
         println!(
             "{:<38} median {med:>7.2} ms   min {:>7.2}   {:>6.1} img/s (best {:.1})",
-            format!("predict_batch {batch} x 640x640 u8"),
+            format!("predict_batch {batch} x {shape} u8"),
             wall[0],
             batch as f64 * 1e3 / med,
             batch as f64 * 1e3 / wall[0],

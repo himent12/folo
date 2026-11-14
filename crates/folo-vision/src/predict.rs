@@ -2,8 +2,8 @@
 //!
 //! [`Predictor::open`] loads the EMA weights when the file has them (a checkpoint or an export), fuses Conv+BN
 //! (§9.1) and keeps the model in eval mode. Each call letterboxes (§9.2: `rect` padding to multiples of 32 for
-//! single images, a square `imgsz` canvas for batches), runs the forward pass, decodes and NMSes (§9.3) and maps
-//! the boxes back through the letterbox, clipped to the image. [`Timing`] splits the wall time into
+//! single images and for batches whose images share that canvas, a square `imgsz` canvas for other batches), runs
+//! the forward pass, decodes and NMSes (§9.3) and maps the boxes back through the letterbox, clipped to the image. [`Timing`] splits the wall time into
 //! preprocess / inference / postprocess like docs/API.md's `/api/predict`.
 //!
 //! On a GPU the whole pipeline stays on the device: the decoded `u8` images are uploaded as they are and
@@ -52,7 +52,8 @@ pub struct PredictConfig {
     pub iou: f32,
     /// Detections kept per image.
     pub max_det: usize,
-    /// Single images: pad only to the next multiple of 32 (`rect`, the default) instead of `S × S`.
+    /// Pad only to the next multiple of 32 (`rect`, the default) instead of `S × S`: single images, and batches
+    /// whose images all get the same such canvas ([`Predictor::predict_batch`]).
     pub rect: bool,
     /// The head branch to predict with (docs/MODEL.md §6.6): `None` (the default) uses the model's
     /// ([`FoloModel::head_mode`]: `o2o`, no NMS, for a `head = "o2o"` model), `o2m` forces the one-to-many branch
@@ -350,15 +351,19 @@ impl Predictor {
         Ok(self.run(std::slice::from_ref(img), self.cfg.rect)?.pop().expect("one image in, one out"))
     }
 
-    /// A batch: every image is letterboxed to the square `imgsz × imgsz` canvas. On a GPU it is one forward
-    /// pass; on the CPU, chunks of two images run side by side (the same predictions as one pass). Each
-    /// prediction's timing is its pass's (or chunk's) divided by its size; with chunks side by side the images'
-    /// totals add up to more than the call's wall time (docs/API.md, `timing`).
+    /// A batch, in input order. With [`PredictConfig::rect`] (the default) a batch whose images all get the same
+    /// `rect` canvas (frames of one camera, say) is letterboxed to that canvas, the input [`Predictor::predict`]
+    /// gives each image alone (on the CPU the predictions are then the same bit for bit; on a GPU a kernel may sum
+    /// in another order at another batch size, so scores can differ in their last bits); any other batch is
+    /// letterboxed to the square `imgsz × imgsz` canvas. (Running each canvas as its own pass measured slower than one square pass for mixed shapes on the
+    /// CPU.) On a GPU it is one forward pass; on the CPU, chunks of two images run side by side (the same
+    /// predictions as one pass). Each prediction's timing is its pass's (or chunk's) divided by its size; with
+    /// chunks side by side the images' totals add up to more than the call's wall time (docs/API.md, `timing`).
     pub fn predict_batch(&self, imgs: &[Image]) -> Result<Vec<Prediction>> {
         if imgs.is_empty() {
             return Ok(Vec::new());
         }
-        self.run(imgs, false)
+        self.run(imgs, self.cfg.rect && one_canvas(imgs, self.cfg.imgsz))
     }
 
     fn run(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
@@ -375,7 +380,7 @@ impl Predictor {
             if imgs.len() > chunk {
                 return folo_core::cpu::in_pool(|| {
                     let parts: Vec<Vec<Prediction>> =
-                        imgs.par_chunks(chunk).map(|c| self.run_here(c, false)).collect::<Result<_>>()?;
+                        imgs.par_chunks(chunk).map(|c| self.run_here(c, rect)).collect::<Result<_>>()?;
                     Ok(parts.into_iter().flatten().collect())
                 });
             }
@@ -427,7 +432,8 @@ impl Predictor {
 
     /// The first step of a prediction, for callers that drive the steps themselves (the browser, which
     /// must await the GPU readback between [`Predictor::forward`] and [`Predictor::finish`]): letterbox the
-    /// images (`rect` padding for one image, else the square canvas) into the input tensor, on the model's
+    /// images (`rect` padding for one image or for images that share their `rect` canvas, else the square canvas)
+    /// into the input tensor, on the model's
     /// device (on a GPU from the raw `u8` images, [`letterbox_on_device`]). [`Predictor::predict`] is
     /// `prepare` → `forward` → [`HeadOutput::detections`] → [`Predictor::finish_detections`]; [`Predictor::finish`]
     /// takes decoded outputs instead.
@@ -435,8 +441,8 @@ impl Predictor {
         if imgs.is_empty() {
             return Err(Error::Config("cannot predict an empty batch".into()));
         }
-        let rect = rect && imgs.len() == 1;
         let s = self.cfg.imgsz;
+        let rect = rect && one_canvas(imgs, s);
         let opts = LetterboxOptions { stride: rect.then_some(32), ..LetterboxOptions::default() };
         for img in imgs {
             if img.width == 0 || img.height == 0 {
@@ -445,7 +451,7 @@ impl Predictor {
         }
         let letterboxes: Vec<Letterbox> =
             imgs.iter().map(|i| Letterbox::compute(i.width, i.height, s, s, &opts)).collect();
-        // `rect` is only used for one image, so every canvas of a call has the same size.
+        // `rect` is only used for images that share their canvas, so every canvas of a call has the same size.
         let (device, dtype) = (self.model.device(), self.model.dtype());
         let on_device =
             if device.is_cpu() { None } else { letterbox_on_device_as(imgs, &letterboxes, device, dtype)? };
@@ -530,11 +536,23 @@ impl PreparedBatch {
     }
 }
 
+/// Whether every image of `imgs` gets the same `rect` letterbox canvas for target `s` (§9.2: the smallest multiple
+/// of 32 around the resized image), so they can share one `rect` batch. An empty image never shares one.
+fn one_canvas(imgs: &[Image], s: u32) -> bool {
+    let opts = LetterboxOptions { stride: Some(32), ..LetterboxOptions::default() };
+    let canvas = |i: &Image| {
+        (i.width > 0 && i.height > 0).then(|| Letterbox::compute(i.width, i.height, s, s, &opts).out)
+    };
+    let Some((first, rest)) = imgs.split_first() else { return false };
+    let first = canvas(first);
+    first.is_some() && rest.iter().all(|i| canvas(i) == first)
+}
+
 /// `u8` pixel → network input. A product (not `/ 255`), so the device letterbox can match it bit for bit.
 const INV_255: f32 = 1.0 / 255.0;
 
 /// The `[B, 3, H, W]` network input (`0..1`) of `imgs` letterboxed with `boxes`, built on the host. Every
-/// geometry must have the same output size (the predictor uses `rect` only for single images).
+/// geometry must have the same output size (the predictor uses `rect` only for images that share their canvas).
 ///
 /// One fused pass per image ([`Letterbox::apply_planar_f32`]: resize, padding and the `u8` → `f32` scaling,
 /// rows in parallel) writes straight into the tensor's buffer, which comes from folo-core's buffer cache
