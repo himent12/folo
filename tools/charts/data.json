@@ -1,20 +1,20 @@
 {
   "$comment": "The numbers behind the charts in docs/img/charts, each copied from the document named in its `source`. Change a number there first, then here, then run `node tools/charts/render.mjs`. Values are [FOLO, the Ultralytics model of the same size] unless a key says otherwise.",
   "machine": "RTX 4080 SUPER, Core i7-14700KF, 640×640 input",
-  "method": "FOLO: medians of runs alternated with its previous build, 2026-11-12. YOLO26: its best configuration per row, measured 2026-11-07 (whole trainer: the best of 3 runs). Method and noise: docs/BENCHMARKS.md.",
+  "method": "FOLO: medians of runs alternated with its previous build, 2026-11-13 (the rows hill-climb 3 moved; end to end on trained weights) and 2026-11-12 (the rest). YOLO26: its best configuration per row, measured 2026-11-07 (whole trainer: the best of 3 runs). Method and noise: docs/BENCHMARKS.md.",
   "warmup": "GPU batch-1 latency: both warm up with 25 calls (forward) or 10 (end to end); FOLO's bench then keeps warming until a second has passed, YOLO26's does not.",
   "inference": {
-    "source": "docs/BENCHMARKS.md, FOLO targets, rows 1, 3, 4, 5, 6, 7 and 8 (folo-n, measured 2026-11-12)",
+    "source": "docs/BENCHMARKS.md, FOLO targets, rows 1, 3, 4, 5, 6, 7 and 8 (folo-n; rows 1, 5, 6 and 8 measured 2026-11-13, the others 2026-11-12)",
     "latency": [
-      { "label": "GPU forward", "detail": "f32, input already on the GPU", "values": [1.14, 4.95], "text": ["1.14", "4.95"] },
-      { "label": "GPU end to end", "detail": "decoded image in, boxes out", "values": [1.75, 6.92], "text": ["1.75", "6.92"] },
+      { "label": "GPU forward", "detail": "f32, input already on the GPU", "values": [1.09, 4.95], "text": ["1.09", "4.95"] },
+      { "label": "GPU end to end", "detail": "decoded image in, boxes out", "values": [1.6, 6.92], "text": ["1.60", "6.92"] },
       { "label": "CPU forward", "detail": "f32, best thread count of each", "values": [12.74, 22.8], "text": ["12.7", "22.8"] },
-      { "label": "CPU end to end", "detail": "decoded image in, boxes out", "values": [13.12, 24.8], "text": ["13.1", "24.8"] }
+      { "label": "CPU end to end", "detail": "decoded image in, boxes out", "values": [13.57, 24.8], "text": ["13.6", "24.8"] }
     ],
     "throughput": [
       { "label": "GPU forward, f32", "detail": "yolo26n with TF32 convolutions", "values": [2081, 1454], "text": ["2081", "1454"] },
       { "label": "GPU forward, f16", "detail": "both f16, FOLO on tensor cores", "values": [4159, 2370], "text": ["4159", "2370"] },
-      { "label": "GPU end to end", "detail": "both f16, decoded images in", "values": [2155, 615], "text": ["2155", "615"] }
+      { "label": "GPU end to end", "detail": "both f16, decoded images in", "values": [2428, 615], "text": ["2428", "615"] }
     ]
   },
   "training": {
@@ -33,14 +33,14 @@
   "by_size": {
     "source": "docs/BENCHMARKS.md, FOLO targets, rows 1 to 9: each pair is [FOLO, the YOLO26 bar], for folo-n against yolo26n and folo-s against yolo26s. The second row takes each side's fastest batch-1 precision: FOLO's f16 on tensor cores (row 2) against YOLO26's f32 (row 1), which is faster than its f16",
     "rows": [
-      { "label": "GPU forward, batch 1", "detail": "f32", "better": "lower", "n": [1.14, 4.95], "s": [2.24, 4.87] },
-      { "label": "GPU forward, batch 1", "detail": "the fastest precision of each", "better": "lower", "n": [0.95, 4.95], "s": [1.36, 4.87] },
+      { "label": "GPU forward, batch 1", "detail": "f32", "better": "lower", "n": [1.09, 4.95], "s": [2.16, 4.87] },
+      { "label": "GPU forward, batch 1", "detail": "the fastest precision of each", "better": "lower", "n": [0.845, 4.95], "s": [1.3, 4.87] },
       { "label": "GPU forward, batch 16", "detail": "f32", "better": "higher", "n": [2081, 1454], "s": [819, 627] },
       { "label": "GPU forward, batch 16", "detail": "both f16, FOLO on tensor cores", "better": "higher", "n": [4159, 2370], "s": [1799, 1159] },
-      { "label": "GPU end to end, batch 1", "detail": "f32", "better": "lower", "n": [1.75, 6.92], "s": [3.04, 8.59] },
-      { "label": "GPU end to end, batch 16", "detail": "both f16, FOLO on tensor cores", "better": "higher", "n": [2155, 615], "s": [1337, 446] },
+      { "label": "GPU end to end, batch 1", "detail": "f32", "better": "lower", "n": [1.6, 6.92], "s": [2.65, 8.59] },
+      { "label": "GPU end to end, batch 16", "detail": "both f16, FOLO on tensor cores", "better": "higher", "n": [2428, 615], "s": [1372, 446] },
       { "label": "CPU forward, batch 1", "detail": "f32", "better": "lower", "n": [12.74, 22.8], "s": [29.2, 42.5] },
-      { "label": "CPU end to end, batch 1", "detail": "f32", "better": "lower", "n": [13.12, 24.8], "s": [29.7, 51.1] },
+      { "label": "CPU end to end, batch 1", "detail": "f32", "better": "lower", "n": [13.57, 24.8], "s": [29.4, 51.1] },
       { "label": "Training step, batch 16", "detail": "f32", "better": "higher", "n": [380, 202], "s": [162, 105] },
       { "label": "Training step, batch 16", "detail": "AMP", "better": "higher", "n": [594, 252], "s": [299, 188] }
     ]
@@ -49,7 +49,7 @@
     "coco": {
       "source": "docs/BENCHMARKS.md, Accuracy (COCO val2017 AP; the YOLO26 numbers are Ultralytics' published ones)",
       "rows": [
-        { "label": "Nano", "detail": "folo-n: 62 epochs from scratch", "values": [0.317, 0.409], "text": ["0.317", "0.409"], "delta": "−0.092" },
+        { "label": "Nano", "detail": "folo-n v3: 78 epochs from scratch", "values": [0.34, 0.409], "text": ["0.340", "0.409"], "delta": "−0.069" },
         { "label": "Small", "detail": "folo-s: 56 epochs from scratch", "values": [0.416, 0.48], "text": ["0.416", "0.480"], "delta": "−0.064" }
       ]
     },
