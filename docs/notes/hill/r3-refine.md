@@ -113,8 +113,8 @@ The features hurt: c-base − c-nofeat −0.0054 [−0.0064, −0.0045], c-prim 
 
 **The refiner does learn something.** c-base closes 19% of the mean edge error of the dev boxes at IoU ≥ 0.5 with
 a truth (71,957 boxes, `evaluate.py`'s diagnostics; it trained on IoU ≥ 0.3), mean IoU with the truth 0.695 →
-0.740; by size S +1.3%, M +13%, L +22.5% (`logs/dev-c-base.log`). But AP is decided by the top-scoring box per truth,
-and the gain is on the many lower-ranked duplicates around it.
+0.740; by size S +1.3%, M +13%, L +22.5% (`logs/dev-c-base.log`). But AP weighs most the top-scoring box per
+truth, and most of the gain is on the many lower-ranked duplicates around it.
 
 **Attribution (c-base, `attribution.py`).** Refining only the boxes that have a truth at IoU ≥ 0.3 gives 0.3709, the
 unmatched only 0.3809 (untouched). By the true IoU of the B* box: refining only [0.3, 0.6) gives 0.3829 (+0.0020),
@@ -155,8 +155,9 @@ at IoU 0.5, unless another truth takes it first. Fraction of the primaries' mean
 
 Every refiner makes the primaries worse. Trained on primaries only, the training CIoU loss stays flat (0.2096 at
 the start, 0.2107 at the end of c-prim): the network cannot find a direction that helps those boxes, and goes
-nearly to identity. It can fit (p-ovf: training CIoU 0.209 → 0.079 on its 800 views), so it is not a capacity or
-optimisation failure. With P3–P5 (strides 8–32) the remaining error of a primary box is below what these probes
+nearly to identity. It can fit a smaller set (p-ovf: training CIoU 0.209 → 0.079 on the primaries of 800 views, with
+CIoU weight 5), so the flat loss is not a plain inability to fit; it does not rule out capacity or optimisation
+limits at 24k views and weight 1. With P3–P5 (strides 8–32) the remaining error of a primary box is below what these probes
 resolved.
 
 ## Part 4: experiment H, high-resolution probes
@@ -242,7 +243,8 @@ Where the primaries' error lives (`logs/primary-scale-dev.log`, dev primaries, n
 So the lane's answer: B*'s top boxes are already within about 1–3 px of their truths at the median, well inside
 the DFL width the probes were spaced by; no refiner tried here moved the medium and large ones toward their truths
 from any source (stride 8 down to 1 px); small boxes gain a little from the input image (+1.7% of their edge error,
-+0.0019 AP_S); and the duplicates a pyramid refiner can fix do not carry AP.
++0.0019 AP_S); and what a pyramid refiner gains on lower-ranked boxes (refining only the boxes at true IoU 0.3–0.6
+gives +0.0020) did not offset its losses on the tight top boxes under any gate tried.
 
 ## Negative results
 
