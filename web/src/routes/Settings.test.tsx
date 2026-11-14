@@ -81,12 +81,30 @@ describe('Settings', () => {
     expect(undescribedFields(target)).toEqual([]);
   });
 
+  // The field is a row (its name and hint on the left, the input on the right): it is labelled by its name, and an
+  // address that will not do is said under the row, as its description, and marks the input invalid.
+  it('labels the server URL by its row and describes it by the error while the address will not do', () => {
+    hub.api = new MockApi('normal', 0);
+    c = mount(Settings, { target });
+    flushSync();
+    const input = target.querySelector<HTMLInputElement>('#server-url')!;
+    expect(target.querySelector('label[for="server-url"]')?.textContent).toBe('Server URL');
+    input.value = 'ftp://x';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const err = target.querySelector('#server-url-error')!;
+    expect(err.getAttribute('role')).toBe('alert');
+    expect(err.textContent).toBe('The server URL must start with http:// or https://.');
+    expect(input.getAttribute('aria-describedby')).toBe('server-url-error');
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+  });
+
   it('jumps to a section from the strip below 1024 px: every section listed, focus moved onto its heading', async () => {
     hub.api = new MockApi('normal', 0);
     c = mount(Settings, { target });
     const jump = target.querySelector<HTMLElement>('nav.jump')!;
     await until(() => jump.textContent?.includes('System'), 'the System section');
-    expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).toEqual(['Connection', 'Cloud', 'Appearance', 'Units', 'Keyboard shortcuts', 'System', 'About']);
+    expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).toEqual(['Connection', 'Cloud', 'Appearance', 'Units', 'Keyboard shortcuts', 'System', 'Throughput', 'About']);
     const scroll = vi.fn();
     const system = target.querySelector<HTMLElement>('#system')!;
     system.scrollIntoView = scroll;
@@ -256,15 +274,27 @@ describe('Settings', () => {
     }
   });
 
-  it('says which theme is current in its own card and in its radio’s name', () => {
+  // design/UNIFIED.md §4: Theme is a row with a Dark / Light / System segmented control (the preview cards went).
+  it('sets the theme from one row: Dark, Light or System, the current one checked, and says what System follows', () => {
     hub.api = new MockApi('normal', 0);
     prefs.theme = 'light';
     c = mount(Settings, { target });
     flushSync();
-    const radios = [...target.querySelectorAll<HTMLInputElement>('input[name="theme"]')];
-    expect(radios.map((r) => r.getAttribute('aria-label'))).toEqual(['Dark', 'Light, current', 'System']);
-    // "Current" sits inside the chosen card's label.
-    expect(target.querySelector('.theme .current')!.closest('label')?.querySelector('input')?.value).toBe('light');
+    const group = target.querySelector<HTMLElement>('#appearance [role="radiogroup"][aria-label="Theme"]')!;
+    const radios = () => [...group.querySelectorAll<HTMLElement>('[role="radio"]')];
+    expect(radios().map((r) => r.textContent?.trim())).toEqual(['Dark', 'Light', 'System']);
+    expect(radios().map((r) => r.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false']);
+    expect(target.querySelector('#appearance .s-name')?.textContent).toBe('Theme');
+    expect(target.querySelector('#appearance')?.textContent).toContain('Cycle themes from the top bar or the command palette.');
+    radios()[2]!.click();
+    flushSync();
+    expect(prefs.theme).toBe('system');
+    expect(target.querySelector('#appearance')?.textContent).toContain(`Follows your operating system, currently ${prefs.resolvedTheme}.`);
+    // Changed elsewhere (the top bar, the palette): the control follows.
+    prefs.theme = 'dark';
+    flushSync();
+    expect(radios().map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
+    expect(target.querySelector('input[name="theme"], .theme .preview')).toBeNull();
   });
 
   it('gives each fix one remedy: the shell, the command on one unwrapped line, the driver report folded', async () => {
@@ -295,7 +325,7 @@ describe("Settings › System: FOLO's GPU memory (gpu_pool)", () => {
     hub.api = new MockApi('normal', 0);
     prefs.units = 'binary';
     c = mount(Settings, { target });
-    const row = await until(() => [...target.querySelectorAll('#system .setting')].find((r) => r.querySelector('p')?.textContent === "FOLO's GPU memory"), 'the GPU memory row');
+    const row = await until(() => [...target.querySelectorAll('#system .s-row')].find((r) => r.querySelector('.s-name')?.textContent === "FOLO's GPU memory"), 'the GPU memory row');
     // One meta item each (ui/Meta draws the separators); under 1 GiB the format steps down to MiB, as everywhere.
     expect([...row.querySelectorAll('.pool .ui-meta > span')].map((x) => x.textContent)).toEqual([
       '4.6 GiB in use',
@@ -336,11 +366,14 @@ describe('Settings › Throughput', () => {
     api.throughput = async () => ({ ...table, training: [], inference: [{ ...f16, tensor_cores: false }, { ...f16, tensor_cores: true, latency_ms: 2.5 }] });
     hub.api = api;
     c = mount(Throughput, { target });
+    // Only predictions measured: the panel opens on Inference.
     const rows = await until(() => {
-      const r = [...target.querySelectorAll('ul[aria-label="Predictions, end to end"] .tp-row')];
+      const r = [...target.querySelectorAll('table[aria-label="Predictions, end to end"] .tp-row')];
       return r.length ? r : null;
     }, 'the prediction rows');
-    expect(rows.map((r) => r.querySelector('.tp-set')?.textContent)).toEqual(['640 px · f16', '640 px · f16 · tensor cores']);
-    expect(rows.map((r) => r.querySelector('.tp-val p')?.textContent)).toEqual([expect.any(String), '2.50 ms']);
+    const col = (name: string) => [...target.querySelectorAll('#throughput thead th')].findIndex((th) => th.textContent?.trim() === name);
+    const cells = (name: string) => rows.map((r) => r.querySelectorAll('td')[col(name)]?.textContent?.trim());
+    expect(cells('Precision')).toEqual(['f16', 'f16 · tensor cores']);
+    expect(cells('Latency')).toEqual([expect.any(String), '2.50 ms']);
   });
 });
