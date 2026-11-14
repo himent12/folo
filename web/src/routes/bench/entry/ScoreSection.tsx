@@ -176,7 +176,9 @@ css`
     font-weight: var(--type-3xl-weight);
     font-variant-numeric: proportional-nums;
   }
+  /* The total's secondary part, "of 100": 12 px tertiary on its baseline, as a KPI tile's (design/UNIFIED.md §2). */
   .of {
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   /* 0–100 as a track, each axis's points a segment in ink, darker to lighter in the rows' order, 2 px apart. */

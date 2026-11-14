@@ -12,6 +12,7 @@ import { atBestF1, bytes, compact, conf, metric, num } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import InfoButton from '$lib/ui/InfoButton';
 import KpiStrip from '$lib/ui/KpiStrip';
+import { Figure } from '$lib/ui/Stat';
 
 export interface KpiSummaryProps {
   m: Model;
@@ -157,18 +158,7 @@ export default function KpiSummary(props: KpiSummaryProps) {
                     {i() === 0 ? kHelp() : null}
                   </span>
                   <span class="k-value num">
-                    {k().pair ? (
-                      <>
-                        {k().pair![0]}
-                        <span class="unit"> / </span>
-                        {k().pair![1]}
-                      </>
-                    ) : (
-                      <>
-                        {k().value}
-                        {k().unit ? <span class="unit"> {k().unit}</span> : null}
-                      </>
-                    )}
+                    <Figure value={k().pair ? k().pair!.join(' / ') : k().value!} unit={k().unit} />
                   </span>
                   <span class="k-sub" title={k().sub}>
                     {k().sub}
@@ -214,12 +204,6 @@ css`
     line-height: 32px;
     letter-spacing: var(--type-2xl-tracking);
     font-weight: var(--weight-semibold);
-  }
-  /* Units and the pair's slash one step smaller, in tertiary (README, Type). */
-  .k-value .unit {
-    font-size: var(--type-xl-size);
-    letter-spacing: var(--type-xl-tracking);
-    color: var(--text-tertiary);
   }
   /* The help toggle follows the first label, on its line: a 20 px box (the row is 16 px tall), with a 44 px target on
      touch screens. */

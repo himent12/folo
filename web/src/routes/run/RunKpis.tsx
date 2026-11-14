@@ -218,12 +218,6 @@ css`
     background: repeating-linear-gradient(135deg, transparent 0 3px, var(--bg-panel) 3px 4.5px);
     border-left-color: var(--bg-panel);
   }
-  /* Laptops: five tiles in 1024–1279 px leave no room beside the value for the trend (Throughput keeps its average). */
-  @media (min-width: 1024px) and (max-width: 1279px) {
-    .spark {
-      display: none;
-    }
-  }
   /* Tablets: three tiles over two, Throughput (whose trend fills it) two columns wide, so its divider lines up with
      the first row's second. */
   @media (max-width: 1023px) {
