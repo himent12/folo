@@ -195,7 +195,8 @@ fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, tc: 
     assert_eq!(pred.precision(), prec);
     let model = pred.model();
     let nms = folo_vision::nms::NmsConfig::default();
-    // Batches of 1280×720 frames and of mixed shapes (`predict_batch` groups them by their `rect` canvas).
+    // Batches of 1280×720 frames (`predict_batch` runs them on their shared `rect` canvas) and of mixed shapes
+    // (padded square).
     type Shape = fn(usize) -> (u32, u32);
     let sizes: [(usize, &str, Shape); 4] = [
         (1, "", |_| (640, 640)),

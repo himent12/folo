@@ -944,9 +944,10 @@ For an `h0 × w0` image and target `S` (default `imgsz = 640`): `r = min(S / h0,
 - **square** (validation; batches of mixed canvases; prediction with `rect` off): `S × S`;
 - **rect** (prediction, the default): the smallest size `≥ (nh, nw)` whose sides are multiples of 32
   (`dw = (S − nw) mod 32`, `dh = (S − nh) mod 32`). A batch (`Predictor::predict_batch`) whose images all get the
-  same such canvas runs on it, so every image gets the boxes single-image prediction gives it (until 2026-11-13
-  such batches were padded square, which moved scores and boxes slightly, in the third digit); a batch of mixed
-  canvases is padded square (one pass per canvas measured slower on the CPU).
+  same such canvas runs on it, so every image gets the input single-image prediction gives it (the same boxes on
+  the CPU; on a GPU a kernel may sum in another order at another batch size, last bits). Until 2026-11-13 such
+  batches were padded square, which moved scores and boxes slightly, in the third digit. A batch of mixed canvases
+  is padded square (one pass per canvas measured slower on the CPU).
 
 Padding is split `left = floor(dw / 2)`, `right = dw − left` (same for top/bottom). This is the same resize and
 pad as §8.6. Predicted boxes map back with the per-axis ratios, `x = (x' − left) · w0 / nw` and

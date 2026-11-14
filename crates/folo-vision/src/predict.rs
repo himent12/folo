@@ -352,9 +352,10 @@ impl Predictor {
     }
 
     /// A batch, in input order. With [`PredictConfig::rect`] (the default) a batch whose images all get the same
-    /// `rect` canvas (frames of one camera, say) is letterboxed to that canvas, so every image gets the
-    /// predictions [`Predictor::predict`] gives it; any other batch is letterboxed to the square `imgsz × imgsz`
-    /// canvas. (Running each canvas as its own pass measured slower than one square pass for mixed shapes on the
+    /// `rect` canvas (frames of one camera, say) is letterboxed to that canvas, the input [`Predictor::predict`]
+    /// gives each image alone (on the CPU the predictions are then the same bit for bit; on a GPU a kernel may sum
+    /// in another order at another batch size, so scores can differ in their last bits); any other batch is
+    /// letterboxed to the square `imgsz × imgsz` canvas. (Running each canvas as its own pass measured slower than one square pass for mixed shapes on the
     /// CPU.) On a GPU it is one forward pass; on the CPU, chunks of two images run side by side (the same
     /// predictions as one pass). Each prediction's timing is its pass's (or chunk's) divided by its size; with
     /// chunks side by side the images' totals add up to more than the call's wall time (docs/API.md, `timing`).

@@ -664,10 +664,13 @@ fn cpu_rect_batch_matches_predict() {
     }
     assert!(differs, "the square canvas gives the same predictions: the test cannot tell the two apart");
 
-    // Canvases 128x96, 96x128 and 128x128: square, image for image.
-    let mixed = images(&[(160, 90), (90, 160), (100, 100), (160, 90)]);
+    // Canvases 128x96 and 96x128, two of each side by side and one alone (the CPU's chunks of two each share a
+    // canvas): square, image for image, so the choice is made for the whole batch.
+    let mixed = images(&[(160, 90), (150, 84), (90, 160), (84, 150), (120, 66)]);
     let batch = p.predict_batch(&mixed).unwrap();
-    for (b, sq) in batch.iter().zip(square.predict_batch(&mixed).unwrap()) {
+    let padded = square.predict_batch(&mixed).unwrap();
+    assert_eq!((batch.len(), padded.len()), (mixed.len(), mixed.len()));
+    for (b, sq) in batch.iter().zip(&padded) {
         assert_eq!(b.detections, sq.detections);
     }
 }
