@@ -167,8 +167,9 @@ result is a new name.
 | `weights-v1` | `folo-n-coco`, `folo-n-coco-f16` | 2026-11-11 (created as a draft) |
 | `weights-v2` | `folo-n-coco-v2`, `folo-n-coco-v2-f16` | 2026-11-11 (created as a draft) |
 | `weights-v3` | `folo-s-coco`, `folo-s-coco-f16` | 2026-11-11 |
+| `weights-v4` | `folo-n-coco-v3`, `folo-n-coco-v3-f16` | 2026-11-14 |
 
-All three carry `--latest=false`.
+All four carry `--latest=false`.
 
 **If "latest" is a weights release.** When no published release is marked latest, GitHub picks one, which can be
 a weights release. Then `releases/latest/download/...` and `install.sh` without `--version` do not find the
