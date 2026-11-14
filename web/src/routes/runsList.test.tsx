@@ -3,7 +3,8 @@
 // The Runs list (Models and Datasets: listTables.test.tsx).
 // The list table at every width: a header cell and the cells under it hide together, so each value sits under its own
 // heading. Runs drops its columns by container queries on its frame (Runs.tsx `.cq-*`), which happy-dom does not
-// evaluate: a header and its cells carry one column class, and each class has its rule.
+// evaluate: the rules are read from the source (each threshold, its class and its `display: none`) and applied at both
+// sides of every threshold to the headers and every row's cells.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { flush as flushSync, type Component } from 'fw';
@@ -79,18 +80,50 @@ function columns(table: HTMLTableElement) {
   return { head, rows };
 }
 
-/** A header cell and every cell under it carry the same `.cq-*` column class, and each class hides under a container rule. */
+/**
+ * The Runs table's container rules, read from its source (happy-dom does not evaluate `@container`): each threshold
+ * with the column class it hides. A rule must be exactly `display: none` on one `.cq-*` class, so a wrong declaration
+ * or a rule that hides something else fails here.
+ */
+function containerRules(): [number, string][] {
+  const src = readFileSync(resolve(process.cwd(), 'src/routes/Runs.tsx'), 'utf8');
+  const out: [number, string][] = [];
+  for (const m of src.matchAll(/@container \(max-width: (\d+)px\) \{\s*\.runs :global\(\.(cq-[\w-]+)\) \{([^}]*)\}/g)) {
+    expect(m[3]!.trim(), `the declaration under ${m[1]} px`).toBe('display: none;');
+    out.push([Number(m[1]), m[2]!]);
+  }
+  return out;
+}
+/** The frame widths the columns leave at (Runs.tsx): the least important first, each with the heads it takes. */
+const DROPS: [number, string, string[]][] = [
+  [1139, 'cq-trend', ['Trend']],
+  [1023, 'cq-dur', ['Duration']],
+  [927, 'cq-created', ['Created']],
+  [831, 'cq-ctx', ['Architecture', 'Dataset']],
+];
+
+/**
+ * At each side of every container threshold the table uses: which headers show, and every body row shows exactly the
+ * cells under those headers, so a header never hides without its cells or the other way round.
+ */
 function expectSameColumns(table: HTMLTableElement) {
-  const cls = (el: Element) => [...el.classList].filter((c) => c.startsWith('cq-')).join(' ');
-  const heads = [...table.querySelectorAll('thead th')].map(cls);
+  expect(containerRules()).toEqual(DROPS.map(([w, c]) => [w, c]));
+  const cq = (el: Element) => [...el.classList].find((c) => c.startsWith('cq-'));
+  const heads = [...table.querySelectorAll('thead th')];
   const rows = [...table.querySelectorAll('tbody tr')].map((tr) => [...tr.children]).filter((cells) => cells.every((td) => span(td) === 1));
   expect(rows.length, 'rows').toBeGreaterThan(0);
-  for (const cells of rows) expect(cells.map(cls)).toEqual(heads);
-  const named = new Set(heads.filter(Boolean));
-  // The rule is in force (columns do drop as the frame narrows), so the check above is not vacuous.
-  expect(named.size).toBeGreaterThanOrEqual(4);
-  const src = readFileSync(resolve(process.cwd(), 'src/routes/Runs.tsx'), 'utf8');
-  for (const c of named) expect(src, `the rule for .${c}`).toMatch(new RegExp(`@container \\(max-width: \\d+px\\) \\{\\s*\\.runs :global\\(\\.${c}\\)`));
+  // Each class is on the headers it names and on no other.
+  for (const [, c, names] of DROPS) expect(heads.filter((th) => cq(th) === c).map((th) => th.textContent?.trim())).toEqual(names);
+  for (const cells of rows) expect(cells.length).toBe(heads.length);
+  const all = heads.map((th) => th.textContent?.trim());
+  for (const width of [1140, ...DROPS.flatMap(([w]) => [w + 1, w])]) {
+    const hidden = new Set(DROPS.filter(([w]) => width <= w).map(([, c]) => c));
+    const visible = (el: Element) => !hidden.has(cq(el) ?? '');
+    const shownHeads = heads.filter(visible).map((th) => th.textContent?.trim());
+    const gone = DROPS.filter(([w]) => width <= w).flatMap(([, , names]) => names);
+    expect(shownHeads, `heads at ${width} px`).toEqual(all.filter((h) => !gone.includes(h!)));
+    for (const cells of rows) expect(cells.map(visible), `cells at ${width} px`).toEqual(heads.map(visible));
+  }
 }
 
 /** The headers without a fixed width (the check column and the empty last one aside). */
