@@ -1,7 +1,7 @@
 //! Metrics: value pairs, KPI values and stats, durations and key/value rows.
 
 use folo_ui::prelude::FluentBuilder;
-use folo_ui::{Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px};
+use folo_ui::{Div, IntoElement, ParentElement, SharedString, Styled, div, px};
 
 use super::text::{StyledExt, text};
 use crate::theme::{Theme, TypeStep, ty};
@@ -13,13 +13,10 @@ pub const KPI_VALUE: TypeStep = ty::X2XL;
 pub const KPI_UNIT: TypeStep = ty::SM;
 pub const KPI_HEADLINE: TypeStep = ty::X3XL;
 
-/// A KPI tile's label over its value: `sm` 500 in `text.secondary`, one line. Every strip (Run,
+/// A KPI tile's label over its value: `sm` in `text.secondary`, one line. Every strip (Run,
 /// Model, Overview, a dataset's Statistics, a benchmark entry) takes it, so their tiles can't drift.
 pub fn kpi_label(t: &Theme, label: &str) -> Div {
-    text(ty::SM, t.text_secondary)
-        .font_weight(FontWeight::MEDIUM)
-        .whitespace_nowrap()
-        .child(label.to_string())
+    text(ty::SM, t.text_secondary).whitespace_nowrap().child(label.to_string())
 }
 
 /// A KPI tile's caption line under its value: `sm` in `text.secondary`, tabular.

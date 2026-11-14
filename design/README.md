@@ -49,7 +49,7 @@ boundaries, and each tier has one structure per page:
 |---|---|---|---|---|---|
 | Phone | < 768 | top bar (title, back) + bottom tab bar | one column; rails and secondary panels become sections behind a picker | bottom sheets | list toolbars two rows (filter, then the field; what the list holds is its footer line); KPI tiles 2 × 2 |
 | Tablet | 768–1023 | icon sidebar (56 px) | one column; rails and side panels stack under the main column | centred | list toolbars two rows; KPI strips wrap to two rows (Run's five tiles three over two); short KPI captions |
-| Laptop | 1024–1279 | icon sidebar (opens over the page) | main column + sticky rail (New run, Playground); Run's panels side by side in rows | centred | one row; KPI strips one row (Run's Throughput without its trend) |
+| Laptop | 1024–1279 | icon sidebar (opens over the page) | main column + sticky rail (New run, Playground); Run's panels side by side in rows | centred | one row; KPI strips one row |
 | Desktop | ≥ 1280 (designed at 1440) | full sidebar (232 px, collapsible) | the same, wider panels side by side (Overview's live run, Recent runs and Best models) | centred | one row; KPI tiles with every caption and trend; every table column |
 
 The web writes them as `(min-width: 768px)` / `(max-width: 767px)` (and 1024 / 1279, 1280 / 1279); `npm run tokens`
