@@ -5,7 +5,7 @@ use std::rc::Rc;
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
 
-use super::page::hero_height;
+use super::page::{hero_height, two_columns};
 use crate::api::{Run, RunExt, time};
 use crate::app::{FoloApp, Route, act};
 use crate::charts::{LineChart, Series, line_chart};
@@ -27,7 +27,7 @@ impl FoloApp {
         let id = r.id.clone();
         let open = self.button(
             "ov-dash",
-            "Open dashboard",
+            "Open run",
             Btn::Secondary,
             Some("icons/arrow-up-right.svg"),
             window,
@@ -161,26 +161,34 @@ impl FoloApp {
                 .child(value)
                 .when_some(detail, |d, s| d.child(text(ty::SM, t.text_tertiary).tnum().child(s)))
         };
-        // One row of four KPIs above a full-width chart: no column beside the chart to leave a
-        // gap in, whatever the chart's height. Four equal tracks (a grid, so a tile's padding and
-        // divider can't make it wider than the others) with 1 px dividers, like the run, model and
-        // dataset strips.
-        // Every tile insets its content by the card's padding (the strip itself has none at the
-        // sides), so the four labels step evenly across the card and the first lines up with the
-        // header's name.
-        let tile = |first: bool, body| {
+        // From 1280 px the four KPIs are a 2 x 2 block in the card's left third beside the chart;
+        // narrower, one row of four over a full-width chart. Equal tracks (a grid, so a tile's
+        // padding and divider can't make it wider than the others) with 1 px dividers, like the
+        // run, model and dataset strips. Every tile insets its content by the card's padding, so
+        // the first label lines up with the header's name.
+        let block = two_columns(window);
+        let tile = |i: usize, body| {
             div()
                 .min_w_0()
                 .pl(px(card_pad))
-                .when(!first, |d| d.border_l_1().border_color(t.line_subtle))
+                .when(block, |d| {
+                    d.pr(px(card_pad))
+                        .py(px(card_pad_y))
+                        .when(i % 2 == 1, |d| d.border_l_1())
+                        .when(i >= 2, |d| d.border_t_1())
+                        .border_color(t.line_subtle)
+                })
+                .when(!block && i > 0, |d| d.border_l_1().border_color(t.line_subtle))
                 .child(body)
         };
         let kpis = div()
             .w_full()
             .grid()
-            .grid_cols(4)
+            .grid_cols(if block { 2 } else { 4 })
+            // Beside the chart the two rows share its height, so the dividers run to the foot.
+            .when(block, |d| d.flex_1().grid_rows(2))
             .child(tile(
-                true,
+                0,
                 // Progress is drawn once, as the line under the card's header; here it's a
                 // number like the other tiles' detail lines.
                 kpi(
@@ -191,7 +199,7 @@ impl FoloApp {
                 ),
             ))
             .child(tile(
-                false,
+                1,
                 kpi(
                     // Named as on the run's dashboard.
                     "mAP50-95 · latest",
@@ -203,7 +211,7 @@ impl FoloApp {
                 ),
             ))
             .child(tile(
-                false,
+                2,
                 kpi(
                     "Throughput",
                     metric(&t, ips.map_or("–".into(), |v| format!("{v:.0}")), "img/s", ty::X2XL, ty::SM)
@@ -212,7 +220,7 @@ impl FoloApp {
                 ),
             ))
             .child(tile(
-                false,
+                3,
                 kpi("Time left", duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(), elapsed),
             ));
         let footer = self.system_footer(cx);
@@ -255,12 +263,41 @@ impl FoloApp {
                     div().h_full().w(folo_ui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill()),
                 ),
             )
-            .child(div().w_full().py(px(card_pad_y)).child(kpis))
-            // The chart section is the run page's chart card without its frame: a header row on a
-            // full-width rule, the legend row, then the plot, so the two screens' charts read alike.
-            .child(div().w_full().min_w_0().border_t_1().border_color(t.line_subtle).child(
-                crate::ui::chart_section(&t, self.map_title(r), "per epoch", legend_el, chart, hero_h < 120.),
-            ))
+            // The chart section is the run page's chart card without its frame: a header row, the
+            // legend row, then the plot, so the two screens' charts read alike. Beside the KPI block
+            // it opens on a 1 px rule at its left, else on a full-width rule under the tiles.
+            .map(|d| {
+                let section = crate::ui::chart_section(
+                    &t,
+                    self.map_title(r),
+                    "per epoch",
+                    legend_el,
+                    chart,
+                    hero_h < 120.,
+                );
+                if block {
+                    d.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .child(
+                                div().w(folo_ui::relative(1. / 3.)).flex_none().flex().flex_col().child(kpis),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .border_l_1()
+                                    .border_color(t.line_subtle)
+                                    .child(section),
+                            ),
+                    )
+                } else {
+                    d.child(div().w_full().py(px(card_pad_y)).child(kpis)).child(
+                        div().w_full().min_w_0().border_t_1().border_color(t.line_subtle).child(section),
+                    )
+                }
+            })
             .children(footer)
             .into_any_element()
     }

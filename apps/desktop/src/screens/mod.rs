@@ -258,7 +258,10 @@ pub fn cell2(t: &Theme, primary: impl Into<SharedString>, secondary: impl Into<S
         .child(text(ty::SM, t.text_tertiary).ellipsis().child(secondary.into()))
 }
 
-/// Table header cell.
+/// Table header cell (design §2 Tables: the head row in `sm` secondary ink).
 pub fn th(t: &Theme, label: &str) -> Div {
-    text(ty::SM, t.text_tertiary).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label.to_string())
+    text(ty::SM, t.text_secondary)
+        .font_weight(FontWeight::MEDIUM)
+        .whitespace_nowrap()
+        .child(label.to_string())
 }

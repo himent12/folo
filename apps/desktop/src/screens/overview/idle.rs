@@ -3,7 +3,7 @@
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
-use super::page::hero_height;
+use super::page::{hero_height, two_columns};
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
 use crate::theme::{theme, ty};
@@ -13,10 +13,75 @@ impl FoloApp {
     pub(super) fn idle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         if self.store.runs.is_loading() {
-            // Same anatomy and heights as the live panel: header, rail, a row of four KPIs above the
-            // chart (its title row, then the plot), meter footer. Nothing moves when data lands.
+            // Same anatomy and heights as the live panel: header, rail, the four KPIs (a 2 x 2 block
+            // beside the chart from 1280 px, else a row above it), the chart's title row and plot,
+            // meter footer. Nothing moves when data lands.
             let hero_h = hero_height(window);
             let sk = |id: &str| skeleton(&t, id.to_string());
+            let pad_y = if hero_h < 120. { 12. } else { 16. };
+            let chart = |t: &crate::theme::Theme| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(div().h(px(20.)).w(px(120.)).child(skeleton(t, "hero-chart-title")))
+                    .child(div().mt(px(2.)).h(px(18.)).w(px(220.)).child(skeleton(t, "hero-chart-legend")))
+                    .child(div().h(px(hero_h + 10.)).child(skeleton(t, "hero-chart")))
+            };
+            let body = if two_columns(window) {
+                div()
+                    .flex()
+                    .child(div().w(folo_ui::relative(1. / 3.)).flex_none().grid().grid_cols(2).children(
+                        (0..4).map(|c| {
+                            div()
+                                .min_w_0()
+                                .h(px(72. + 2. * pad_y))
+                                .px(px(16.))
+                                .py(px(pad_y))
+                                .when(c % 2 == 1, |d| d.border_l_1())
+                                .when(c >= 2, |d| d.border_t_1())
+                                .border_color(t.line_subtle)
+                                .child(skeleton(&t, format!("hero-kpi-{c}")))
+                        }),
+                    ))
+                    .child(
+                        chart(&t)
+                            .flex_1()
+                            .min_w_0()
+                            .px(px(16.))
+                            .py(px(pad_y))
+                            .border_l_1()
+                            .border_color(t.line_subtle),
+                    )
+            } else {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(if hero_h < 120. { 8. } else { 16. }))
+                    // 16 px at the sides always, as the live card's.
+                    .px(px(16.))
+                    .py(px(pad_y))
+                    // One strip with 1 px dividers, as the loaded tiles sit.
+                    .child(div().grid().grid_cols(4).children((0..4).map(|c| {
+                        div()
+                            .min_w_0()
+                            .h(px(72.))
+                            .pr(px(16.))
+                            .when(c > 0, |d| d.border_l_1().border_color(t.line_subtle).pl(px(16.)))
+                            .child(skeleton(&t, format!("hero-kpi-{c}")))
+                    })))
+                    .child(
+                        // The chart section opens on the same full-width rule and inset as the
+                        // live card's, so the loaded card is exactly this tall.
+                        chart(&t)
+                            .flex_1()
+                            .mx(px(-16.))
+                            .px(px(16.))
+                            .pt(px(pad_y))
+                            .border_t_1()
+                            .border_color(t.line_subtle),
+                    )
+            };
             return panel(&t)
                 .flex_1()
                 .flex()
@@ -30,41 +95,7 @@ impl FoloApp {
                         .child(div().w(px(260.)).h(px(18.)).child(sk("hero-title"))),
                 )
                 .child(div().h(px(2.)).bg(t.bg_inset))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(if hero_h < 120. { 8. } else { 16. }))
-                        // 16 px at the sides always, as the live card's.
-                        .px(px(16.))
-                        .py(px(if hero_h < 120. { 12. } else { 16. }))
-                        // One strip with 1 px dividers, as the loaded tiles sit.
-                        .child(div().grid().grid_cols(4).children((0..4).map(|c| {
-                            div()
-                                .min_w_0()
-                                .h(px(72.))
-                                .pr(px(16.))
-                                .when(c > 0, |d| d.border_l_1().border_color(t.line_subtle).pl(px(16.)))
-                                .child(skeleton(&t, format!("hero-kpi-{c}")))
-                        })))
-                        .child(
-                            // The chart section opens on the same full-width rule and inset as the
-                            // live card's, so the loaded card is exactly this tall.
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .mx(px(-16.))
-                                .px(px(16.))
-                                .pt(px(if hero_h < 120. { 12. } else { 16. }))
-                                .border_t_1()
-                                .border_color(t.line_subtle)
-                                .child(div().h(px(20.)).w(px(120.)).child(sk("hero-chart-title")))
-                                .child(div().mt(px(2.)).h(px(18.)).w(px(220.)).child(sk("hero-chart-legend")))
-                                .child(div().h(px(hero_h + 10.)).child(sk("hero-chart"))),
-                        ),
-                )
+                .child(body)
                 .child(
                     // The machine footer's meters, as placeholders.
                     div()

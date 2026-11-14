@@ -30,7 +30,10 @@ pub use legend::{class_swatch, legend_value, line_swatch, swatch};
 pub use metric::{baseline_lift, detail_line, duration_metric, kv, metric, metric_pair, stat_at, stat_sized};
 pub use motion::{appear, os_prefers_reduced_motion, reduce_motion, set_reduce_motion};
 pub use scroll::{ThumbGeo, paint_thumb, scroll_edges};
-pub use status::{Tone, badge, badge_icon, dot, e2e_tag, status_badge, status_dot, status_label};
+pub use status::{
+    StatusKind, Tone, badge, badge_icon, dot, e2e_tag, run_progress_cell, status_badge, status_badge_of,
+    status_cell, status_dot, status_label, status_mark,
+};
 pub use surface::{chart_section, empty_state, panel, panel_header, progress, select_bar, skeleton, vline};
 pub use text::{
     Ellipsis, StyledExt, caption, icon, inline_link, kbd, meta_row, overline, path_text, rich, shortcut, text,

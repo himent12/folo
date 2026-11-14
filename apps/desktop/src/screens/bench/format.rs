@@ -1,8 +1,8 @@
 //! Benchmarks as text: axis names and scores, contestants, sources, status tones, ranks and names.
 
 use crate::api::{
-    Bench, BenchAxis, BenchContestant, BenchEntry, BenchEntryStatus, BenchLoop, BenchLoopStatus, BenchSource,
-    Label, LabelAgentId,
+    Bench, BenchAxis, BenchContestant, BenchEntry, BenchEntryStatus, BenchLoop, BenchSource, Label,
+    LabelAgentId,
 };
 use crate::app::FoloApp;
 use crate::ui::*;
@@ -72,28 +72,6 @@ pub fn source_line(b: &Bench) -> String {
             format!("{} · {}", b.source_name, split.map_or("val", |s| s.as_str()))
         }
         BenchSource::LabelJob { .. } => format!("{} · labeling job", b.source_name),
-    }
-}
-
-/// The badge tone of an entry's status.
-pub fn entry_tone(s: BenchEntryStatus) -> Tone {
-    match s {
-        BenchEntryStatus::Queued | BenchEntryStatus::Stopping => Tone::Neutral,
-        BenchEntryStatus::Running => Tone::Accent,
-        BenchEntryStatus::Done => Tone::Success,
-        BenchEntryStatus::Failed => Tone::Danger,
-        BenchEntryStatus::Stopped => Tone::Warning,
-    }
-}
-
-/// The badge tone of a loop's status.
-pub fn loop_tone(s: BenchLoopStatus) -> Tone {
-    match s {
-        BenchLoopStatus::Running => Tone::Accent,
-        BenchLoopStatus::Stopping => Tone::Neutral,
-        BenchLoopStatus::Done => Tone::Success,
-        BenchLoopStatus::Failed => Tone::Danger,
-        BenchLoopStatus::Stopped => Tone::Warning,
     }
 }
 

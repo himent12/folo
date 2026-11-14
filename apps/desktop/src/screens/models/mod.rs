@@ -4,5 +4,6 @@
 mod class_table;
 mod confusion;
 mod detail;
+mod groups;
 mod list;
 mod pr;

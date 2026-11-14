@@ -6,8 +6,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::SIDE_W;
-use crate::api::{Run, RunExt, time};
+use crate::api::{Run, time};
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
 use crate::screens::{loading_rows, th};
@@ -18,31 +17,11 @@ use crate::ui::*;
 impl FoloApp {
     pub(super) fn recent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        // The list is never squeezed beside Best model (`tables_beside` stacks them first), so
-        // the architecture and dataset always have their column.
-        let created = true;
-        // The list's width: the content (stacked) or what Best model leaves beside it.
-        // The wider name and dataset columns need 918 px (812 of columns, six 12 px gaps, row
-        // padding, margins, borders); with less, the narrower set (798 px) keeps Created inside.
-        let content = self.content_width(window);
-        let beside = self.tables_beside(window);
-        let list_w = if beside { content - (SIDE_W + 40.) - 16. } else { content };
-        // 8 px of slack on every budget: a row exactly as wide as its slot can overflow it by a
-        // rounding error, and the layout then puts the whole page at its min-content width (the
-        // hero chart collapsed to its axis labels at 1680).
-        const SLACK: f32 = 8.;
-        let full = list_w >= 918. + SLACK;
-        let (name_w, prog_w, best_w, when_w) =
-            if full { (200., 160., 96., 80.) } else { (150., 120., 96., 80.) };
-        // At least its heading, "Architecture · dataset".
-        let meta_w = if full { 180. } else { 150. };
-        // Stacked, width past the set's need goes to the name, arch · dataset and
-        // progress (2 : 1 : 1, to their caps); only what's left opens before the numbers. Beside
-        // Best model the set stays as is: widened there, the layout puts the page at its
-        // min-content width (the hero chart collapsed to its axis at 1680).
-        let spare = if beside { 0. } else { list_w - SLACK - if full { 918. } else { 798. } };
-        let [name_w, meta_w, prog_w] =
-            crate::ui::share_spare(spare, [(name_w, 2., 280.), (meta_w, 1., 240.), (prog_w, 1., 200.)]);
+        // The list's width: the content (stacked) or the two thirds beside Best models.
+        let cols = RecentCols::fit(self.main_w(window));
+        let RecentCols { name: name_w, meta: meta_col, created } = cols;
+        let meta_w = meta_col.unwrap_or(0.);
+        let (prog_w, best_w, when_w) = (PROG_W, BEST_W, WHEN_W);
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
         let header = panel_header(&t, "Recent runs").child(all);
@@ -57,8 +36,8 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").w(px(name_w)).flex_none())
-            .child(th(&t, "Architecture · dataset").w(px(meta_w)).flex_none())
-            .child(th(&t, "Status").w(px(96.)).flex_none())
+            .when(meta_col.is_some(), |d| d.child(th(&t, "Architecture · dataset").w(px(meta_w)).flex_none()))
+            .child(th(&t, "Status").w(px(STATUS_W)).flex_none())
             .child(th(&t, "Progress").w(px(prog_w)).flex_none())
             .child(div().flex_1())
             .child(div().w(px(best_w)).flex_none().flex().justify_end().child(th(&t, "Best mAP50-95")))
@@ -85,38 +64,18 @@ impl FoloApp {
                     .children(runs.into_iter().map(|r| {
                         let created_at = time::parse(&r.created);
                         let when = created_at.map_or(String::new(), |c| time::ago(c, now));
-                        // Progress (training runs only) right after Status; best mAP50-95 at the end.
-                        let training = r.status.is_active() && r.status != crate::api::RunStatus::Queued;
-                        let progress_el =
-                            div().w(px(prog_w)).flex_none().flex().items_center().gap(px(8.)).map(|d| {
-                                if r.status == crate::api::RunStatus::Queued {
-                                    // The Runs table's phrase, so a queued run reads the same everywhere.
-                                    return d.child(
-                                        text(ty::SM, t.text_tertiary)
-                                            .whitespace_nowrap()
-                                            .child(waiting_text(&r)),
-                                    );
-                                }
-                                let fill = match r.status {
-                                    _ if training => t.accent_fill(),
-                                    crate::api::RunStatus::Failed => t.danger_solid,
-                                    _ => t.text_tertiary,
-                                };
-                                // A bar under 48 px reads as a stub: narrow columns keep the
-                                // number only.
-                                d.when(prog_w - 64. >= 48., |d| {
-                                    d.child(div().flex_1().child(progress(&t, r.progress(), fill, 4.)))
-                                })
-                                .child(
-                                    text(ty::SM, t.text_secondary)
-                                        .tnum()
-                                        .w(px(56.))
-                                        .flex_none()
-                                        .whitespace_nowrap()
-                                        .text_right()
-                                        .child(format!("{} / {}", r.epoch, r.epochs)),
+                        // Progress right after Status, as in the Runs table: the 2 px rail (lime only
+                        // while it trains) and "42 / 100"; best mAP50-95 at the end.
+                        let progress_el = div().w(px(prog_w)).flex_none().map(|d| {
+                            if r.status == crate::api::RunStatus::Queued {
+                                // The Runs table's phrase, so a queued run reads the same everywhere.
+                                d.child(
+                                    text(ty::SM, t.text_tertiary).whitespace_nowrap().child(waiting_text(&r)),
                                 )
-                            });
+                            } else {
+                                d.child(run_progress_cell(&t, &r, true, 56.))
+                            }
+                        });
                         let best = div().w(px(best_w)).flex_none().flex().justify_end().child(
                             text(ty::SM, if r.best.is_some() { t.text_primary } else { t.text_tertiary })
                                 .tnum()
@@ -170,8 +129,17 @@ impl FoloApp {
                                     .id(SharedString::from(format!("ov-rn-{}", r.id)))
                                     .w(px(name_w))
                                     .flex_none()
-                                    .when(crate::ui::may_overflow(&r.name, ty::SM.size, name_w), |d| {
-                                        d.tooltip(crate::controls::tip(r.name.clone(), None))
+                                    .map(|d| {
+                                        // Without its column, the architecture and dataset ride the
+                                        // name's tooltip.
+                                        if meta_col.is_none() {
+                                            let full = format!("{} · {}", r.name, self.run_meta(&r));
+                                            d.tooltip(crate::controls::tip(full, None))
+                                        } else if crate::ui::may_overflow(&r.name, ty::SM.size, name_w) {
+                                            d.tooltip(crate::controls::tip(r.name.clone(), None))
+                                        } else {
+                                            d
+                                        }
                                     })
                                     .child(
                                         text(ty::SM, t.text_primary)
@@ -181,9 +149,10 @@ impl FoloApp {
                                             .child(r.name.clone()),
                                     ),
                             )
-                            // Wide: the dataset and architecture in their own column.
-                            .child(meta(meta_w))
-                            .child(div().w(px(96.)).flex_none().child(status_dot(
+                            // Wide: the dataset and architecture in their own column (else in
+                            // the focus tip and on the Runs page).
+                            .when(meta_col.is_some(), |d| d.child(meta(meta_w)))
+                            .child(div().w(px(STATUS_W)).flex_none().child(status_dot(
                                 &t,
                                 &r,
                                 &format!("ov-{}", r.id),
@@ -235,7 +204,9 @@ impl FoloApp {
         let all = self.view_all("ov-models-all", Route::Models, window, cx);
         // mAP compares only within one dataset's validation split, so the card ranks within each
         // dataset and shows its best: one row per dataset, never one list across them.
-        let header = panel_header(&t, "Best model per dataset").child(all);
+        let header = panel_header(&t, "Best models").child(all);
+        // The dataset column: narrower in the one-third column at 1280.
+        let ds_w = if self.tables_beside(window) && self.side_w(window) < 400. { 96. } else { 120. };
         let body = match &self.store.models {
             Load::Ready(models) if models.is_empty() => div()
                 .child(empty_state(
@@ -299,7 +270,7 @@ impl FoloApp {
                     .border_b_1()
                     .border_color(t.line_subtle)
                     // The dataset leads: it's what the rows are, one each, in name order.
-                    .child(th(&t, "Dataset").w(px(120.)).flex_none())
+                    .child(th(&t, "Dataset").w(px(ds_w)).flex_none())
                     .child(th(&t, "Best model").flex_1())
                     .when(wide, |d| d.child(th(&t, "Architecture").w(px(120.)).flex_none()))
                     .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")))
@@ -319,8 +290,13 @@ impl FoloApp {
                         let map50 = m.metrics.as_ref().map(|m| m.map50);
                         let arch = format!("{} · {} px", m.arch.as_str(), m.imgsz);
                         let created = time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now));
+                        // Keyboard focus says what hover does: the model and its dataset in full.
+                        let focus_text = self
+                            .ring(&self.fh(key.clone(), cx), window)
+                            .then(|| format!("{} · {ds_name}", m.name));
                         let row = div()
                             .id(SharedString::from(key.clone()))
+                            .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
                             .h(px(36.))
                             .mx(px(4.))
                             .px(px(12.))
@@ -333,14 +309,17 @@ impl FoloApp {
                             .active(|s| s.bg(t.bg_active))
                             .child(
                                 text(ty::SM, t.text_secondary)
-                                    .w(px(120.))
+                                    .w(px(ds_w))
                                     .flex_none()
                                     .ellipsis()
                                     .child(ds_name.clone()),
                             )
-                            // Its best model, then the same compact e2e tag as the Models table.
+                            // Its best model, then the same compact e2e tag as the Models table; in
+                            // full on hover (the one-third column cuts long names).
                             .child(
                                 div()
+                                    .id(SharedString::from(format!("ov-mn-{}", m.id)))
+                                    .tooltip(crate::controls::tip(format!("{} · {ds_name}", m.name), None))
                                     .flex_1()
                                     .min_w_0()
                                     .flex()
@@ -432,5 +411,73 @@ impl FoloApp {
             .child(header)
             .child(body)
             .into_any_element()
+    }
+}
+
+/// Recent runs' fixed columns.
+const STATUS_W: f32 = 96.;
+const PROG_W: f32 = 120.;
+const BEST_W: f32 = 96.;
+const WHEN_W: f32 = 80.;
+/// The optional "Architecture · dataset" column, at least its heading.
+const META_W: f32 = 150.;
+const NAME_MIN: f32 = 140.;
+/// Between columns.
+const COL_GAP: f32 = 12.;
+/// A row's margins, padding and the panel's borders, plus 24 px of slack: a row within about 10 px
+/// of its slot (a rounding error, the page's scrollbar) overflows it, and the layout then puts the
+/// whole page at its min-content width (the Datasets cards drawn empty at 1680 px, measured).
+const ROW_EXTRA: f32 = 8. + 24. + 2. + 24.;
+
+/// Recent runs' columns for a list `list_w` wide: Run, Status, Progress and Best always; Created,
+/// then Architecture · dataset, each whole, as they fit; what is left widens the name and the
+/// meta column (2 : 1, to their caps).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct RecentCols {
+    pub name: f32,
+    pub meta: Option<f32>,
+    pub created: bool,
+}
+
+impl RecentCols {
+    pub fn fit(list_w: f32) -> Self {
+        // Name, status, progress, the spacer and best: four gaps.
+        let mut need = NAME_MIN + STATUS_W + PROG_W + BEST_W + 4. * COL_GAP + ROW_EXTRA;
+        let created = list_w >= need + WHEN_W + COL_GAP;
+        if created {
+            need += WHEN_W + COL_GAP;
+        }
+        let meta = created && list_w >= need + META_W + COL_GAP;
+        if meta {
+            need += META_W + COL_GAP;
+        }
+        let spare = (list_w - need).max(0.);
+        if meta {
+            let [name, meta_w] = crate::ui::share_spare(spare, [(NAME_MIN, 2., 280.), (META_W, 1., 240.)]);
+            RecentCols { name, meta: Some(meta_w), created }
+        } else {
+            RecentCols { name: (NAME_MIN + spare).min(280.).floor(), meta: None, created }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RecentCols;
+
+    #[test]
+    fn recent_runs_drop_whole_columns_in_the_two_thirds() {
+        // 1280: two thirds of 1,000 px; the meta column goes, Created stays.
+        let at_1280 = RecentCols::fit(656.);
+        assert!(at_1280.created && at_1280.meta.is_none(), "{at_1280:?}");
+        assert!(at_1280.name >= 140.);
+        // Stacked at 960 and in the two thirds at 1680: every column.
+        for w in [872., 917.] {
+            let c = RecentCols::fit(w);
+            assert!(c.created && c.meta.is_some(), "{w}: {c:?}");
+        }
+        // Narrower than the base set: the four columns alone.
+        let narrow = RecentCols::fit(520.);
+        assert!(!narrow.created && narrow.meta.is_none());
     }
 }

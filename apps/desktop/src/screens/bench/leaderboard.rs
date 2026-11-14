@@ -7,9 +7,7 @@ use folo_ui::{
 };
 
 use super::cells::{name_with_badges, num_cell};
-use super::format::{
-    agent_name, axis_short, axis_text, contestant_line, entry_frac, entry_tone, pct, ranks, score_text,
-};
+use super::format::{agent_name, axis_short, axis_text, contestant_line, entry_frac, pct, ranks, score_text};
 use crate::api::{Bench, BenchAxis, BenchEntry, BenchEntryStatus, Label};
 use crate::app::{FoloApp, Route, act};
 use crate::bench::{Contender, model_fits};
@@ -203,16 +201,14 @@ impl FoloApp {
             e.score.as_ref().and_then(|s| s.axes.iter().find(|x| x.axis == a)).and_then(|x| x.value)
         };
         let mut badges: Vec<(&str, Tone)> = Vec::new();
-        if !done {
-            badges.push((e.status.label(), entry_tone(e.status)));
-        }
+        let status = (!done).then(|| (StatusKind::of_entry(e.status), e.status.label()));
         if e.score.as_ref().is_some_and(|s| s.partial) {
             badges.push(("partial", Tone::Neutral));
         }
         if stale {
             badges.push(("earlier version", Tone::Warning));
         }
-        let name_line = name_with_badges(&t, window, &e.name, &badges, name_w);
+        let name_line = name_with_badges(&t, window, &e.name, status, &badges, name_w, &key);
         // The second line: who it is, or how far it is, or why it failed.
         let detail: AnyElement = match e.status {
             BenchEntryStatus::Running | BenchEntryStatus::Queued | BenchEntryStatus::Stopping => {
@@ -230,11 +226,12 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    // The table's 2 px rail, lime only while the entry runs (UNIFIED.md §2 Progress).
                     .child(div().w(px(120.)).flex_none().child(progress(
                         &t,
                         entry_frac(e),
-                        t.accent_fill(),
-                        4.,
+                        if e.status == BenchEntryStatus::Running { t.accent_fill() } else { t.text_tertiary },
+                        2.,
                     )))
                     .child(
                         text(ty::SM, t.text_tertiary)

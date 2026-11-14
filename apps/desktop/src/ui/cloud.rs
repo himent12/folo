@@ -113,7 +113,7 @@ mod cloud_format_tests {
     use crate::api::CloudAvailability;
     use crate::api::Run;
     use crate::ui::format::waiting_text;
-    use crate::ui::status::{Tone, status_label, status_tone};
+    use crate::ui::status::{StatusKind, Tone, status_label};
 
     fn offer(gpu: &str, vram: u64, detail: Option<&str>) -> CloudOffer {
         CloudOffer {
@@ -221,7 +221,7 @@ mod cloud_format_tests {
         phase(&mut r, CloudPhase::Booting);
         assert_eq!(status_label(&r), "Booting");
         // It still looks like a waiting run.
-        assert_eq!(status_tone(r.status), Tone::Neutral);
+        assert_eq!(StatusKind::of_run(r.status).tone(), Tone::Neutral);
         // Training (even before the status catches up), a newer server's phase, or not queued any
         // more: the status says it.
         for p in [CloudPhase::Training, CloudPhase::Unknown] {

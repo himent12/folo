@@ -88,8 +88,8 @@ src/local.rs      local inference: folo-vision's Predictor in process, on folo-g
 src/store/        fetched state, live run data (SSE events), the decoded-image cache
 src/bench/        vision benchmarks: what the Benchmarks screens hold, the open benchmark's stream, their actions
 src/app/          root view: chrome, sidebar, routing, fetching, live event pump, actions
-src/controls/     focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
-src/ui/           stateless pieces: type, panels, badges, metrics, progress, skeletons, empty states
+src/controls/     focusable controls: buttons, segmented, tabs, chips, switch, slider, select, tooltip
+src/ui/           stateless pieces: type, panels, badges, status glyphs, metrics, progress, skeletons, empty states
 src/charts/       canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram
 src/viz.rs        images with detection boxes and label chips (design/README.md box spec)
 src/screens/      one module per screen
@@ -186,7 +186,7 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
 
 With a server that lists the `vision_bench` feature (docs/BENCH.md), **Benchmarks** in the sidebar (`Ctrl 6`) lists
 the server's benchmarks and makes new ones (from a dataset split, or the labeled images of a labeling job, with the
-default plan). A benchmark's page has three tabs:
+default plan). A benchmark's page has three underline tabs, each with its count:
 
 - **Leaderboard**: the entries ranked by score, with the five axes on the score's 0–100 scale, running entries with
   their progress (live over the benchmark's event stream), and Run: a model of the server that knows the

@@ -4,7 +4,7 @@ use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, relative};
 
 use super::cells::bar_row;
-use super::format::{axis_name, axis_text, contestant_line, entry_frac, entry_tone, pct};
+use super::format::{axis_name, axis_text, contestant_line, entry_frac, pct};
 use crate::api::{Bench, BenchAxis, BenchEntryStatus, BenchReadiness, BenchResult, Label, time};
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
@@ -63,7 +63,12 @@ impl FoloApp {
             .gap(px(10.))
             .min_w_0()
             .child(text(ty::XL, t.text_primary).ellipsis().child(e.name.clone()))
-            .child(badge(&t, e.status.label(), entry_tone(e.status)));
+            .child(status_badge_of(
+                &t,
+                StatusKind::of_entry(e.status),
+                e.status.label(),
+                format!("entry-{}", e.id),
+            ));
         if e.score.as_ref().is_some_and(|s| s.partial) {
             title = title.child(badge(&t, "partial", Tone::Neutral));
         }

@@ -347,7 +347,7 @@ impl FoloApp {
             Some(if self.store.runs.error().is_some() {
                 "Not connected"
             } else {
-                "Models didn't load: retry under Best model per dataset"
+                "Models didn't load: retry under Best models"
             })
         } else if self.store.models.ready().is_none() {
             Some("Loading models…")

@@ -1,5 +1,5 @@
 //! Which model is "the best": the one rule every default pick and ranking uses (Playground,
-//! a benchmark's Run, Overview's Best model per dataset), the same as Studio's (`rankByContext`).
+//! a benchmark's Run, Overview's Best models), the same as Studio's (`rankByContext`).
 
 use std::cmp::Ordering;
 
