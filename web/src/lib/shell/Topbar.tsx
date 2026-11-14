@@ -2,18 +2,14 @@ import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import Monitor from '$icons/monitor';
 import Moon from '$icons/moon';
-import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Settings from '$icons/settings';
 import Sun from '$icons/sun';
 import { computed, css, Index } from 'fw';
-import { hub } from '$lib/api/index';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
-import Gate from '$lib/ui/Gate';
 import Kbd from '$lib/ui/Kbd';
-import { OFFLINE_REASON } from '$lib/ui/offline';
 import Logo from './Logo';
 import OfflineNotice from './OfflineNotice';
 import { page } from './crumbs';
@@ -35,9 +31,9 @@ export default function Topbar(props: { onsearch: () => void }) {
           <Logo wordmark={false} />
         </a>
       )}
-      {/* Every page has its trail, a top-level page its root crumb alone ("Datasets"), so the bar's left half is never
-          blank on one screen and filled on the next. Phones: the bar carries the page title (the H1 is visually hidden). */}
-      <ol class="crumbs" aria-label="Breadcrumb">
+      {/* Breadcrumbs on a nested page only (design/UNIFIED.md §1): a top-level page's own title says where you are, so
+          the bar's left stays empty there. Phones: the bar carries the page title (the H1 is visually hidden). */}
+      <ol class="crumbs" class:top={!parent.get()} aria-label="Breadcrumb">
         <Index each={page.crumbs}>
           {(c, i) => {
             const last = () => i === page.crumbs.length - 1;
@@ -48,7 +44,7 @@ export default function Topbar(props: { onsearch: () => void }) {
                 </li>
                 {!last() ? (
                   <li class="sep" aria-hidden="true">
-                    <ChevronRight size={14} strokeWidth={1.75} />
+                    <ChevronRight size={12} strokeWidth={1.75} />
                   </li>
                 ) : null}
               </>
@@ -71,21 +67,6 @@ export default function Topbar(props: { onsearch: () => void }) {
         <span class="mobile-only">
           <Button variant="ghost" icon={Settings} href={href('/settings')} aria-label="Settings" />
         </span>
-        {/* A global shortcut, so not lime: each page keeps a single lime primary of its own. */}
-        {/* A page with a create action of its own (Runs, Datasets, and New run itself: crumbs.ownCreateAction) has the one
-            in this corner, so the button steps aside there. */}
-        {!page.ownsCreate ? (
-          // Nothing answers: disabled with the reason, as the pages' own create actions are.
-          <span class="new-run">
-            <Gate reason={hub.offline ? OFFLINE_REASON : null}>
-              {(why) => (
-                <Button icon={Plus} disabled={!!why()} aria-describedby={why()} href={href('/runs/new')}>
-                  New run
-                </Button>
-              )}
-            </Gate>
-          </span>
-        ) : null}
       </div>
     </header>
   );
@@ -110,13 +91,13 @@ css`
   .mobile-only {
     display: none;
   }
+  /* Crumbs as Desktop's: 13 px, the parents in text.tertiary, the current page text.primary 500, 12 px chevrons. */
   .crumbs {
     display: flex;
     align-items: center;
-    gap: var(--space-1);
+    gap: var(--space-1-5);
     min-width: 0;
     flex: 1;
-    font-weight: var(--weight-medium);
   }
   .crumbs li {
     display: flex;
@@ -125,7 +106,7 @@ css`
     color: var(--text-tertiary);
   }
   .crumbs li a {
-    color: var(--text-secondary);
+    color: var(--text-tertiary);
     border-radius: var(--radius-sm);
     padding: 2px 4px;
     margin: -2px -4px;
@@ -136,6 +117,13 @@ css`
   }
   .crumbs li.last {
     color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  /* A top-level page: no trail from 768 px up (the list keeps its place, so the actions stay at the right). */
+  @media (min-width: 768px) {
+    .crumbs.top li {
+      display: none;
+    }
   }
   .crumbs li.last span {
     overflow: hidden;
@@ -144,6 +132,7 @@ css`
   }
   .sep {
     flex-shrink: 0;
+    color: var(--text-disabled);
   }
   .crumbs li:not(.last):not(.sep) {
     flex-shrink: 0;
@@ -158,12 +147,13 @@ css`
     align-items: center;
     gap: var(--space-2);
     height: var(--control-md);
-    width: 240px;
+    width: 280px;
     padding: 0 var(--space-1) 0 var(--space-2);
     border-radius: var(--radius-md);
     border: 1px solid var(--line-default);
-    background: var(--bg-panel);
+    background: var(--bg-raised);
     color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
     transition:
       border-color var(--dur-fast) var(--ease-standard),
       color var(--dur-fast) var(--ease-standard);
@@ -233,9 +223,6 @@ css`
       line-height: 20px;
       font-weight: var(--weight-semibold);
       letter-spacing: -0.005em;
-    }
-    .new-run {
-      display: none;
     }
   }
 `;

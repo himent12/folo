@@ -1,4 +1,9 @@
-/** A segmented control (radio group). Arrow keys move the selection, as in native radio groups. */
+/**
+ * A segmented control (radio group): a filter or a view option (design/UNIFIED.md §2). One outlined track, 28 high; its
+ * items in 12 px regular, the chosen one text.primary 500 on a raised fill with a hairline, a count after a label in
+ * text.tertiary. A page's sections are underline tabs (ui/Tabs), not this. Arrow keys move the selection, as in native
+ * radio groups.
+ */
 import { bindable, createUniqueId, css, defaults, Dynamic, For } from 'fw';
 import { describedBy, getField } from './field';
 import { tooltip } from './tooltip';
@@ -140,39 +145,38 @@ css`
     border-radius: var(--radius-md);
     background: var(--bg-inset);
     /* --seg-edge is set by an invalid group (base.css). */
-    border: 1px solid var(--seg-edge, var(--line-subtle));
+    border: 1px solid var(--seg-edge, var(--line-control));
     max-width: 100%;
     justify-self: start;
     overflow-x: auto;
     scrollbar-width: none;
   }
-  :global([data-theme='light']) .seg {
-    background: var(--bg-active);
-    border-color: var(--seg-edge, transparent);
-  }
   .seg:focus {
     outline: none;
   }
+  /* An item fills the track's inner height: 28 less its 1 px edges and 2 px padding. */
   button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 6px;
     height: calc(var(--control-md) - 6px);
-    padding: 0 8px;
+    padding: 0 var(--space-3);
     border-radius: var(--radius-sm);
+    border: 1px solid transparent;
     color: var(--text-secondary);
-    font-weight: var(--weight-medium);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    font-weight: var(--weight-regular);
     white-space: nowrap;
     transition:
       background-color var(--dur-fast) var(--ease-standard),
-      color var(--dur-fast) var(--ease-standard),
-      box-shadow var(--dur-fast) var(--ease-standard);
+      border-color var(--dur-fast) var(--ease-standard),
+      color var(--dur-fast) var(--ease-standard);
   }
   .sm button {
     height: calc(var(--control-sm) - 6px);
     padding: 0 8px;
-    font-size: var(--type-sm-size);
   }
   button.icon-only {
     width: calc(var(--control-md) - 6px);
@@ -181,8 +185,9 @@ css`
   .sm button.icon-only {
     width: calc(var(--control-sm) - 6px);
   }
-  button:hover:not(:disabled) {
+  button:hover:not(:disabled, .on) {
     color: var(--text-primary);
+    background: var(--bg-hover);
   }
   .tip {
     display: inline-flex;
@@ -197,13 +202,9 @@ css`
   }
   button.on {
     background: var(--bg-raised);
+    border-color: var(--line-control);
     color: var(--text-primary);
-    box-shadow:
-      0 0 0 1px var(--line-default),
-      var(--shadow-sm);
-  }
-  :global([data-theme='light']) button.on {
-    background: var(--bg-panel);
+    font-weight: var(--weight-medium);
   }
   .meta {
     color: var(--text-tertiary);

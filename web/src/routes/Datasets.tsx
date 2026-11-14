@@ -8,7 +8,7 @@ import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import ClassStrip from '$lib/detect/ClassStrip';
-import { ago, count, num } from '$lib/format';
+import { ago, count } from '$lib/format';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
@@ -18,22 +18,23 @@ import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
-import PathText from '$lib/ui/PathText';
 import Segmented from '$lib/ui/Segmented';
 import Skeleton from '$lib/ui/Skeleton';
-import TableState from '$lib/ui/TableState';
 import Gate from '$lib/ui/Gate';
 import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
 import Meta from '$lib/ui/Meta';
-import { rowNav } from '$lib/ui/rowNav';
+import { balanced } from '$lib/ui/balancedGrid';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
+import DatasetCard, { cardFacts, DatasetCardSkeleton } from './datasets/DatasetCard';
 import { imageCount } from './dataset/health';
 import { datasetChanges, generationEnded, landed, pendingGeneration } from './datasets/changes';
 import { datasetProblem, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
-/** Columns of the desktop table (for state rows that span it), the empty last one included. */
-const COLS = 10;
+/** A card's narrowest width (design/UNIFIED.md §4: at least 300). */
+const CARD_MIN = 300;
+/** The gap between cards. */
+const CARD_GAP = 16;
 /** How often the list reads itself again while a sample set this tab asked for still generates. */
 const GENERATION_POLL_MS = 3000;
 
@@ -139,20 +140,20 @@ export default function Datasets() {
     const f = format.get();
     return (datasets.data ?? []).filter((d) => (f === 'all' || d.format === f) && (!q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q)));
   });
-  // What the rows shown hold, said once at the list's end (base.css .list-foot).
-  const totals = computed(() => {
-    const list = shown.get();
-    return {
-      images: list.reduce((a, d) => a + imageCount(d), 0),
-      boxes: list.reduce((a, d) => a + (d.stats?.boxes ?? 0), 0),
-    };
+  // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "5 datasets · 9,400 images ·
+  // 64,086 boxes", whatever the filter; a narrowed list says what it shows under it.
+  const facts = computed(() => {
+    const list = datasets.data;
+    if (!list?.length) return null;
+    const boxes = list.reduce((a, d) => a + (d.stats?.boxes ?? 0), 0);
+    return [count(list.length, 'dataset'), count(list.reduce((a, d) => a + imageCount(d), 0), 'image'), boxes ? count(boxes, 'box') : ''].filter(Boolean).join(' · ');
   });
 
   // Nothing answers: adding a dataset needs the server, so the action is disabled and says why (as on Runs).
   const offline = computed(() => !datasets.data && isOffline(datasets.error));
   /** Datasets to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
   const hasData = computed(() => (datasets.data ? datasets.data.length > 0 : !datasets.error));
-  /** Rows to head (or their skeleton): the column heads show; with none the frame holds the state alone. */
+  /** Cards to show (or their skeleton); with none a panel holds the state alone, where the grid would be. */
   const hasRows = computed(() => (datasets.data ? shown.get().length > 0 : !datasets.error));
 
   // Labeling images (agent labeling) lives under Datasets: a secondary action beside Add dataset (the ⋯ on phones).
@@ -162,10 +163,10 @@ export default function Datasets() {
         title="Datasets"
         more={[{ label: 'Label images', icon: Tags, href: href('/datasets/label') }]}
         moreLabel="More dataset actions"
-        // One fixed line: the counts live at the list's end, so nothing here changes as the list loads.
-        sub={() => <span>YOLO and COCO folders registered with the server.</span>}
+        // What the page holds (what a dataset is, YOLO or COCO folders, is the empty state's).
+        sub={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
         // Phones: one header row, this line beside Add dataset.
-        subPhone={() => <span>YOLO and COCO folders.</span>}
+        subPhone={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
         actions={() => (
           <Gate reason={offline.get() ? OFFLINE_REASON : null}>
             {(why) => (
@@ -176,7 +177,7 @@ export default function Datasets() {
           </Gate>
         )}
       >
-        {/* Always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or failed list it
+        {/* Always here, so the grid never moves between states (DESIGN_DIRECTION §2.8): over an empty or failed list it
             is disabled and shows no counts. */}
         <div class="list-toolbar">
           <div class="lt-filter">
@@ -195,243 +196,138 @@ export default function Datasets() {
             <Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" disabled={!hasData.get()} />
           </div>
         </div>{' '}
-        <Panel pad="none">
-          {/* With no rows (empty, no match, an error) the frame drops its column heads and holds the state alone. */}
-          <div class="scroll" class:state={!hasRows.get()}>
-            <table class="table ds" aria-busy={!datasets.data} aria-label="Datasets" use:rowNav>
-              {hasRows.get() ? (
-                <thead>
-                  <tr>
-                    {/* One geometry in every state (DESIGN_DIRECTION 7): fixed widths on the header row that loading and
-                        loaded share. A few rows across a wide panel take bounded widths (the path 280 px, cut with
-                        its full path in the title) and leave the slack to an empty last column, as Model's per class does;
-                        below 1280, where the path and that column hide, the class balance takes what is left, at least
-                        160 px (minmax(160px, 1fr)). */}
-                    <th scope="col" style:width="160px">
-                      Dataset
-                    </th>
-                    <th scope="col" class="hide-md" style:width="80px">
-                      Format
-                    </th>
-                    <th scope="col" class="hide-lg" style:width="280px">
-                      Path
-                    </th>
-                    <th scope="col" class="r" style:width="80px">
-                      Train
-                    </th>
-                    <th scope="col" class="r" style:width="72px">
-                      Val
-                    </th>
-                    <th scope="col" class="r" style:width="72px">
-                      Test
-                    </th>
-                    <th scope="col" class="bal">
-                      <span class="bal-h">Class balance</span>
-                    </th>
-                    <th scope="col" class="r hide-md" style:width="88px">
-                      Boxes
-                    </th>
-                    <th scope="col" class="r hide-md" style:width="104px">
-                      Created
-                    </th>
-                    <th class="hide-lg rest" aria-hidden="true"></th>
-                  </tr>
-                </thead>
-              ) : null}
-              <tbody>
-                {datasets.error && !datasets.data ? (
-                  <TableState cols={COLS}>
-                    <ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} />
-                  </TableState>
-                ) : datasets.data?.length === 0 ? (
-                  // The header already holds the primary action (and the subtitle says what a dataset is): offer the quick start.
-                  <TableState cols={COLS}>
-                    <EmptyState
-                      icon={Images}
-                      title="No datasets yet"
-                      description="Register a folder of images you have labeled (YOLO or COCO), try FOLO in a minute with a generated set of shapes, or have an agent label your images."
-                      actions={() => (
-                        <>
-                          <Button icon={FolderOpen} onclick={() => add('folder')}>
-                            Register folder
-                          </Button>
-                          <Button icon={Sparkles} onclick={() => add('synthetic')}>
-                            Generate sample set
-                          </Button>
-                          <Button icon={Tags} href={href('/datasets/label')}>
-                            Label images
-                          </Button>
-                        </>
-                      )}
-                    />
-                  </TableState>
-                ) : datasets.data && shown.get().length === 0 ? (
-                  <TableState cols={COLS}>
-                    <EmptyState
-                      icon={Search}
-                      title="No datasets match"
-                      description="Try another format or search term."
-                      actions={() => (
-                        <Button
-                          size="sm"
-                          onclick={() => {
-                            query.set('');
-                            format.set('all');
-                          }}
-                        >
-                          Clear filters
-                        </Button>
-                      )}
-                    />
-                  </TableState>
-                ) : !datasets.data ? (
-                  <For each={[0, 1, 2]} key={(i) => i}>
-                    {() => (
-                      <tr aria-hidden="true">
-                        <td>
-                          <Skeleton w="96px" h="12px" />
-                        </td>
-                        <td class="hide-md">
-                          <Skeleton w="32px" h="12px" />
-                        </td>
-                        <td class="hide-lg">
-                          <Skeleton w="120px" h="12px" />
-                        </td>
-                        <td class="r">
-                          <Skeleton w="36px" h="12px" />
-                        </td>
-                        <td class="r">
-                          <Skeleton w="28px" h="12px" />
-                        </td>
-                        <td class="r">
-                          <Skeleton w="28px" h="12px" />
-                        </td>
-                        <td>
-                          <Skeleton h="6px" r="999px" />
-                        </td>
-                        <td class="r hide-md">
-                          <Skeleton w="36px" h="12px" />
-                        </td>
-                        <td class="r hide-md">
-                          <Skeleton w="44px" h="12px" />
-                        </td>
-                        <td class="hide-lg rest"></td>
-                      </tr>
-                    )}
-                  </For>
-                ) : (
+        {hasRows.get() ? (
+          <>
+            {/* The cards (design/UNIFIED.md §4, Datasets), as many columns of at least 300 px as fit, never one card
+                alone on the last row (ui/balancedGrid). */}
+            <ul class="cards" aria-label="Datasets" aria-busy={!datasets.data} use:balanced={{ n: datasets.data ? shown.get().length : 3, min: CARD_MIN, gap: CARD_GAP }}>
+              {datasets.data ? (
+                <For each={shown.get()} key={(d) => d.id}>
+                  {(d) => <DatasetCard dataset={d()} />}
+                </For>
+              ) : (
+                <For each={[0, 1, 2]} key={(i) => i}>
+                  {() => <DatasetCardSkeleton />}
+                </For>
+              )}
+            </ul>{' '}
+            {/* Phones: the same parts as rows (DESIGN_DIRECTION §12, one list concept): the name, its images and
+                classes, the format tag, the class balance on the right. */}
+            <div class="phone-list">
+              <Panel pad="none">
+              {datasets.data ? (
+                <ul class="rows" aria-label="Datasets">
                   <For each={shown.get()} key={(d) => d.id}>
                     {(d) => (
-                      <tr class="link" data-row data-id={d().id} aria-label={d().name} onclick={() => router.go(`/datasets/${d().id}`)}>
-                        <td class="name-cell">
-                          <a class="name truncate" href={href(`/datasets/${d().id}`)} title={d().name} onclick={(e) => e.stopPropagation()}>
-                            {d().name}
-                          </a>
-                        </td>
-                        <td class="hide-md faint">{d().format}</td>
-                        <td class="hide-lg path-cell">
-                          <PathText class="path" path={d().path} />
-                        </td>
-                        <td class="r num muted">{num(d().splits.train)}</td>
-                        <td class="r num muted">{num(d().splits.val)}</td>
-                        <td class="r num muted">{num(d().splits.test)}</td>
-                        <td>
-                          {d().problem ? (
+                      // The link covers the row (a stretched link); the class balance, its own disclosure, sits above it.
+                      <li class="m-row">
+                        <a href={href(`/datasets/${d().id}`)}>
+                          <span class="m-main">
+                            <span class="name truncate">{d().name}</span>{' '}
+                            <span class="m-meta m-total num">
+                              <Meta>
+                                <span>{cardFacts(d())}</span>
+                                <span>{d().format.toUpperCase()}</span>
+                              </Meta>
+                            </span>
+                          </span>
+                        </a>{' '}
+                        {d().problem ? (
+                          <span class="m-side">
                             <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge>
-                          ) : d().stats ? (
-                            <ClassStrip counts={d().stats!.class_counts} classes={d().classes} />
-                          ) : (
-                            <span class="faint">—</span>
-                          )}
-                        </td>
-                        {/* Full numbers, like the split columns beside it: one format per column. */}
-                        <td class="r num hide-md">{num(d().stats?.boxes)}</td>
-                        <td class="r faint hide-md">{ago(d().created)}</td>
-                        <td class="hide-lg rest" aria-hidden="true"></td>
-                      </tr>
+                          </span>
+                        ) : d().stats ? (
+                          <span class="m-side">
+                            <span class="m-strip">
+                              <ClassStrip counts={d().stats!.class_counts} classes={d().classes} height={4} named />
+                            </span>
+                          </span>
+                        ) : null}
+                      </li>
                     )}
                   </For>
-                )}
-              </tbody>
-            </table>
-          </div>{' '}
-          {/* Phones: the name, then the image total and the class count, then the splits (each line wraps whole items, so
-              no count is cut); the class balance on the right. */}
-          {shown.get().length ? (
-            <ul class="rows" aria-label="Datasets">
-              <For each={shown.get()} key={(d) => d.id}>
-                {(d) => (
-                  // The link covers the row (a stretched link); the class balance, its own disclosure, sits above it.
-                  <li class="m-row">
-                    <a href={href(`/datasets/${d().id}`)}>
-                      <span class="m-main">
-                        <span class="name truncate">{d().name}</span>{' '}
-                        <span class="m-meta m-total num">
-                          <Meta>
-                            <span>{count(imageCount(d()), 'image')}</span>
-                            <span>{count(d().classes.length, 'class')}</span>
-                          </Meta>
-                        </span>{' '}
-                        <span class="m-meta num">
-                          <Meta>
-                            <span>{num(d().splits.train)} train</span>
-                            <span>{num(d().splits.val)} val</span>
-                            <span>{num(d().splits.test)} test</span>
-                          </Meta>
+                </ul>
+              ) : (
+                // Phones, loading: the rows' shape (the name over its meta line, the class balance on the right).
+                <ul class="rows" aria-hidden="true">
+                  <For each={[0, 1, 2]} key={(i) => i}>
+                    {() => (
+                      <li>
+                        <span class="row-sk">
+                          <span class="m-main">
+                            <Skeleton w="55%" h="14px" />
+                            <Skeleton w="45%" h="10px" />
+                          </span>{' '}
+                          <span class="m-side">
+                            <Skeleton w="104px" h="4px" />
+                          </span>
                         </span>
-                      </span>
-                    </a>{' '}
-                    {d().problem ? (
-                      <span class="m-side">
-                        <Badge tone="warning">{PROBLEM_LABEL[d().problem!]}</Badge>
-                      </span>
-                    ) : d().stats ? (
-                      <span class="m-side">
-                        <span class="m-strip">
-                          <ClassStrip counts={d().stats!.class_counts} classes={d().classes} height={4} named />
-                        </span>
-                      </span>
-                    ) : null}
-                  </li>
-                )}
-              </For>
-            </ul>
-          ) : !datasets.data && !datasets.error ? (
-            // Phones, loading: the rows' shape (the name over two meta lines, the class balance on the right).
-            <ul class="rows" aria-hidden="true">
-              <For each={[0, 1, 2]} key={(i) => i}>
-                {() => (
-                  <li>
-                    <span class="row-sk">
-                      <span class="m-main">
-                        <Skeleton w="55%" h="14px" />
-                        <Skeleton w="45%" h="10px" />
-                        <Skeleton w="65%" h="10px" />
-                      </span>{' '}
-                      <span class="m-side">
-                        <Skeleton w="104px" h="4px" />
-                      </span>
-                    </span>
-                  </li>
-                )}
-              </For>
-            </ul>
-          ) : null}
-        </Panel>{' '}
-        {datasets.data && (shown.get().length || waiting.get()) ? (
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              )}
+              </Panel>
+            </div>
+          </>
+        ) : (
+          // No cards (an error, no datasets, none that match): one panel holds the state where the grid would be.
+          <Panel pad="none">
+            <div class="state" aria-label="Datasets">
+              {datasets.error && !datasets.data ? (
+                <ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} />
+              ) : datasets.data?.length === 0 ? (
+                // The header already holds the primary action: offer the quick start.
+                <EmptyState
+                  icon={Images}
+                  title="No datasets yet"
+                  description="Register a folder of images you have labeled (YOLO or COCO), try FOLO in a minute with a generated set of shapes, or have an agent label your images."
+                  actions={() => (
+                    <>
+                      <Button icon={FolderOpen} onclick={() => add('folder')}>
+                        Register folder
+                      </Button>
+                      <Button icon={Sparkles} onclick={() => add('synthetic')}>
+                        Generate sample set
+                      </Button>
+                      <Button icon={Tags} href={href('/datasets/label')}>
+                        Label images
+                      </Button>
+                    </>
+                  )}
+                />
+              ) : (
+                <EmptyState
+                  icon={Search}
+                  title="No datasets match"
+                  description="Try another format or search term."
+                  actions={() => (
+                    <Button
+                      size="sm"
+                      onclick={() => {
+                        query.set('');
+                        format.set('all');
+                      }}
+                    >
+                      Clear filters
+                    </Button>
+                  )}
+                />
+              )}
+            </div>
+          </Panel>
+        )}{' '}
+        {/* No totals line under the cards (they are the header's facts): only a narrowed list says what it shows, and a
+            sample set on its way says so (also after a reload: nothing else on screen tells that one is coming,
+            studio-data F1). */}
+        {datasets.data && ((shown.get().length && shown.get().length < datasets.data.length) || waiting.get()) ? (
           <p class="list-foot num">
             <Meta>
-              {shown.get().length ? (
-                <>
-                  <span>
-                    {shown.get().length < datasets.data.length ? `${shown.get().length} of ${datasets.data.length}` : shown.get().length}{' '}
-                    {datasets.data.length === 1 ? 'dataset' : 'datasets'}
-                  </span>{' '}
-                  <span>{count(totals.get().images, 'image')}</span>{' '}
-                  <span>{count(totals.get().boxes, 'box')}</span>
-                </>
+              {shown.get().length && shown.get().length < datasets.data.length ? (
+                <span>
+                  {shown.get().length} of {count(datasets.data.length, 'dataset')}
+                </span>
               ) : null}{' '}
-              {/* Said after a reload too: nothing else on screen tells that one is on its way (studio-data F1). */}
               {waiting.get() ? (
                 <span class="waiting" role="status">
                   {waiting.get()!.what}, started {ago(new Date(waiting.get()!.since).toISOString())}: it shows up here when it is done
@@ -447,107 +343,84 @@ export default function Datasets() {
 }
 
 css`
-  .scroll {
-    overflow-x: auto;
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+    gap: var(--space-4);
   }
-  /* The path in its bounded column, cut with an ellipsis (the full path is in the title). */
-  .path-cell {
-    max-width: 0;
+  .state {
+    display: flex;
+    flex-direction: column;
   }
-  /* The name too: a 61-character one took 429 px and left the path 55 px, every row reading "…/da…". */
-  .name-cell {
-    max-width: 0;
-  }
-  .name-cell .name {
+  .rows {
     display: block;
   }
-  /* From 1280 the class balance is bounded too (the empty last column takes the slack); below it, where that column
-     hides, it is the flexible one. */
-  @media (min-width: 1280px) {
-    .bal {
-      width: 184px;
-    }
+  .rows .name {
+    font-weight: var(--weight-medium);
   }
-  .rest {
-    padding: 0;
+  .rows li + li {
+    border-top: 1px solid var(--line-subtle);
   }
-  /* Cut in the middle (lib/ui/PathText): two folders of one name in different places read apart. */
-  .path-cell :global(.path) {
+  .rows .m-row,
+  .rows .row-sk {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 56px;
+    padding: var(--space-2) var(--space-4);
+  }
+  .m-row > a {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+  }
+  .m-row > a::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+  .m-row:has(> a:active) {
+    background: var(--bg-hover);
+  }
+  .m-main {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+  }
+  .row-sk .m-main {
+    gap: var(--space-2);
+  }
+  .m-meta {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
-  /* The class balance column: never under 160 px (the header holds it open in every state), the strip filling it. */
-  .bal-h {
-    display: block;
-    min-width: 160px;
+  /* The dataset's size, read first: secondary ink. */
+  .m-total {
+    color: var(--text-secondary);
   }
-
-  .rows {
-    display: none;
+  .m-side {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    justify-items: end;
+    gap: var(--space-1);
+    flex-shrink: 0;
   }
-  @media (max-width: 767px) {
-    /* Phones show the rows below; the table frame stays only to hold an empty or error state (no column heads at any width). */
-    .scroll:not(.state) {
+  /* Wide enough for the strip's "Class balance" words over it (no column heading names it on phones). */
+  .m-strip {
+    width: 104px;
+  }
+  /* From 768 px the cards; phones the rows. */
+  @media (min-width: 768px) {
+    .phone-list {
       display: none;
     }
-    .rows .name {
-      font-weight: var(--weight-medium);
-    }
-    .rows {
-      display: block;
-    }
-    .rows li + li {
-      border-top: 1px solid var(--line-subtle);
-    }
-    .rows .m-row,
-    .rows .row-sk {
-      position: relative;
-      display: flex;
-      align-items: center;
-      gap: var(--space-3);
-      min-height: 56px;
-      padding: var(--space-2) var(--space-4);
-    }
-    .m-row > a {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-    }
-    .m-row > a::after {
-      content: '';
-      position: absolute;
-      inset: 0;
-    }
-    .m-row:has(> a:active) {
-      background: var(--bg-hover);
-    }
-    .m-main {
-      flex: 1;
-      min-width: 0;
-      display: grid;
-    }
-    .row-sk .m-main {
-      gap: var(--space-2);
-    }
-    .m-meta {
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-      color: var(--text-tertiary);
-    }
-    /* The dataset's size, read first: secondary ink over the tertiary splits. */
-    .m-total {
-      color: var(--text-secondary);
-    }
-    .m-side {
-      position: relative;
-      z-index: 1;
-      display: grid;
-      justify-items: end;
-      gap: var(--space-1);
-      flex-shrink: 0;
-    }
-    /* Wide enough for the strip's "Class balance" words over it (no column heading names it on phones). */
-    .m-strip {
-      width: 104px;
+  }
+  @media (max-width: 767px) {
+    .cards {
+      display: none;
     }
   }
 `;

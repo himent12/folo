@@ -1,4 +1,8 @@
-/** A labelled metric: small label, big tabular value, optional unit and a secondary line. */
+/**
+ * A labelled metric, the KPI strip's tile (design/UNIFIED.md §2, KPI strip): its label in 12 px text.secondary, the
+ * value in 24 / 600 (`lg`: the page's one 32 px value) with its unit one type step smaller in text.tertiary, and one
+ * caption line in 12 px text.secondary. A tile is not a button. `sm` is the compact form for tight rails.
+ */
 import { css, defaults } from 'fw';
 import Skeleton from './Skeleton';
 
@@ -54,7 +58,7 @@ css`
   .label {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     white-space: nowrap;
   }
   /* Inline flow, not flex: a unit or a superscript never changes the line box, so every stat's value sits on the same
@@ -62,11 +66,11 @@ css`
   .value {
     display: block;
     /* A fixed row: glyphs from a fallback font (superscripts like ⁻³) cannot grow the line box. */
-    height: var(--type-lg-line);
-    font-size: var(--type-lg-size);
-    line-height: var(--type-lg-line);
-    letter-spacing: var(--type-lg-tracking);
-    font-weight: var(--weight-medium);
+    height: var(--type-2xl-line);
+    font-size: var(--type-2xl-size);
+    line-height: var(--type-2xl-line);
+    letter-spacing: var(--type-2xl-tracking);
+    font-weight: var(--weight-semibold);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     overflow: hidden;
@@ -76,6 +80,8 @@ css`
     height: var(--type-md-line);
     font-size: var(--type-md-size);
     line-height: var(--type-md-line);
+    letter-spacing: var(--type-md-tracking);
+    font-weight: var(--weight-medium);
   }
   .lg .value {
     height: var(--type-3xl-line);
@@ -95,13 +101,16 @@ css`
     /* line-height 1 keeps a smaller unit from growing the line box, so values with and without units share a baseline. */
     line-height: 1;
     margin-left: 4px;
-    font-size: 0.7em;
+    font-size: var(--type-xl-size);
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);
     letter-spacing: 0;
   }
   .lg .unit {
-    font-size: 0.5em;
+    font-size: var(--type-2xl-size);
+  }
+  .sm .unit {
+    font-size: var(--type-sm-size);
   }
   .sub {
     font-size: var(--type-sm-size);

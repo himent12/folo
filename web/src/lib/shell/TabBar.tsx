@@ -1,6 +1,7 @@
 import { computed, css, Dynamic, For } from 'fw';
 import { router, section, href } from '$lib/router';
 import { tabNav, tabOf } from './nav';
+import { activeRuns, runsBadgeText } from './runList';
 
 export default function TabBar() {
   // A section that lives under a tab (Benchmarks under Models) makes that tab current.
@@ -11,9 +12,15 @@ export default function TabBar() {
       <For each={tabNav} key={(n) => n.id}>
         {(n) => {
           const active = () => current.get() === n().id;
+          // The Runs badge has no room here: a lime dot on the icon while a run trains (the sidebar's live row), and
+          // the counts in the tab's name (design/UNIFIED.md §1).
+          const runs = () => n().id === 'runs' && runsBadgeText() !== '';
           return (
-            <a href={href(n().path)} class:active={active()} aria-current={active() ? 'page' : undefined}>
-              <Dynamic component={n().icon} size={20} strokeWidth={1.75} aria-hidden="true" />
+            <a href={href(n().path)} class:active={active()} aria-current={active() ? 'page' : undefined} aria-label={runs() ? `${n().label}, ${runsBadgeText()}` : undefined}>
+              <span class="icon">
+                <Dynamic component={n().icon} size={20} strokeWidth={1.75} aria-hidden="true" />
+                {n().id === 'runs' && activeRuns().live ? <span class="live-dot" aria-hidden="true"></span> : null}
+              </span>
               <span>{n().label}</span>
             </a>
           );
@@ -57,6 +64,20 @@ css`
       font-size: var(--type-sm-size);
       line-height: var(--type-sm-line);
       font-weight: var(--weight-medium);
+    }
+    .icon {
+      position: relative;
+      display: inline-flex;
+    }
+    .live-dot {
+      position: absolute;
+      top: -1px;
+      right: -4px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-line);
+      box-shadow: 0 0 0 2px var(--bg-app);
     }
     /* The current section: text.primary on bg.active, like the sidebar; lime is for action, focus and live only. */
     a.active {

@@ -1,4 +1,7 @@
-/** Where the data comes from: the live server or the built-in mock. Links to Settings. */
+/**
+ * The sidebar's foot (design/UNIFIED.md §1): one status line, a status dot, where the data comes from (the live server
+ * or the built-in mock) and the server's version ("Demo data · v0.1.0"). Links to Settings.
+ */
 import FlaskConical from '$icons/flask-conical';
 import WifiOff from '$icons/wifi-off';
 import { computed, css } from 'fw';
@@ -22,9 +25,12 @@ export default function ConnectionStatus(props: { collapsed: boolean }) {
           : 'Looking for folo serve…',
   );
 
+  // The version once a server (or the mock) has answered; never while offline, when it would be a guess.
+  const version = computed(() => (!hub.offline && (hub.mode === 'live' || hub.mode === 'mock') && hub.version ? `v${hub.version}` : null));
+
   // Collapsed, the state is a glyph as well as a colour (offline: no signal), named in the tooltip and the accessible
-  // name, so colour is never the only cue. Demo data is a mode, not a degraded state: a neutral flask at every width,
-  // never the warning hue (DESIGN_DIRECTION §2.6).
+  // name, so colour is never the only cue. Demo data is a mode, not a degraded state: a neutral dot on the line and a
+  // neutral flask in the icon rail, never the warning hue (DESIGN_DIRECTION §2.6).
   return (
     <a
       href={href('/settings')}
@@ -35,12 +41,17 @@ export default function ConnectionStatus(props: { collapsed: boolean }) {
     >
       {props.collapsed && hub.offline ? (
         <WifiOff class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
-      ) : hub.mode === 'mock' && !hub.offline ? (
+      ) : props.collapsed && hub.mode === 'mock' && !hub.offline ? (
         <FlaskConical class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
       ) : (
         <span class="dot" aria-hidden="true"></span>
       )}
-      {!props.collapsed ? <span class="label">{label.get()}</span> : null}
+      {!props.collapsed ? (
+        <span class="line">
+          <span class="label">{label.get()}</span>
+          {version.get() ? <span class="ver num">{` · ${version.get()}`}</span> : null}
+        </span>
+      ) : null}
       <span class="sr-only">{detail.get()}</span>
     </a>
   );
@@ -91,7 +102,8 @@ css`
     flex-shrink: 0;
     color: var(--text-tertiary);
   }
-  .label {
+  .line {
+    min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

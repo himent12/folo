@@ -10,7 +10,10 @@ export interface PanelProps {
   children?: JSX.Element;
   /** Inner padding of the body. */
   pad?: 'none' | 'sm' | 'md';
-  /** Hairline between header and body. */
+  /**
+   * Kept for callers: every header now has its hairline (design/UNIFIED.md §2, Panel), so this no longer changes the
+   * look.
+   */
   divided?: boolean;
   class?: string;
   id?: string;
@@ -28,7 +31,7 @@ export default function Panel(props: PanelProps) {
     <section class={`panel pad-${p.pad} ${p.class}`} aria-labelledby={p.title && p.id ? `${p.id}-title` : undefined} id={p.id}>
       {p.title || p.actions ? (
         <>
-          <header class:divided={p.divided}>
+          <header>
             {p.title ? (
               <Dynamic component={p.as} class="title" id={p.id ? `${p.id}-title` : undefined}>
                 {p.title}
@@ -57,14 +60,14 @@ css`
   :global([data-theme='dark']) .panel {
     box-shadow: inset 0 1px 0 #ffffff06;
   }
+  /* The header band (design/UNIFIED.md §2, Panel): 40 px, the title in 13 / 500, a qualifier after it in 12 px
+     text.tertiary, controls at the right, and a hairline under it; the body under it has 16 px all round. */
   header {
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    min-height: 40px;
+    min-height: var(--control-xl);
     padding: var(--space-1) var(--space-3) var(--space-1) var(--space-4);
-  }
-  header.divided {
     border-bottom: 1px solid var(--line-subtle);
   }
   .title {
@@ -73,9 +76,9 @@ css`
     display: flex;
     align-items: baseline;
     gap: var(--space-2);
-    font-size: var(--type-md-size);
-    line-height: var(--type-md-line);
-    letter-spacing: var(--type-md-tracking);
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
+    letter-spacing: var(--type-base-tracking);
     font-weight: var(--weight-medium);
     color: var(--text-primary);
     white-space: nowrap;
@@ -119,14 +122,14 @@ css`
   .pad-md .body {
     padding: 0 var(--space-4) var(--space-4);
   }
-  .pad-md header.divided ~ .body,
+  .pad-md header ~ .body,
   .pad-md > .body:first-child {
     padding-top: var(--space-4);
   }
   .pad-sm .body {
     padding: 0 var(--space-3) var(--space-3);
   }
-  .pad-sm header.divided ~ .body,
+  .pad-sm header ~ .body,
   .pad-sm > .body:first-child {
     padding-top: var(--space-3);
   }

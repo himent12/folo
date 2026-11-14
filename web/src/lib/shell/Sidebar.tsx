@@ -8,12 +8,13 @@ import { reducedMotion } from '$lib/ui/motion';
 import { tooltip } from '$lib/ui/tooltip';
 import Logo from './Logo';
 import { mainNav, settingsNav, type NavItem } from './nav';
+import { activeRuns, runsBadgeText } from './runList';
 import { sidebar } from './sidebarState';
 
 export interface SidebarProps {
   /** The rail's footer (the connection status), given whether the rail is collapsed. */
   footer?: (collapsed: () => boolean) => JSX.Element;
-  /** The live run's card, given whether the rail is collapsed. */
+  /** The live run's row (pinned above Settings), given whether the rail is collapsed. */
   live?: (collapsed: () => boolean) => JSX.Element;
 }
 
@@ -35,8 +36,16 @@ export default function Sidebar(props: SidebarProps) {
   // A snippet is called once (again only if the prop itself changes): what it reads is read where it is used.
   const snippet = (f: ((collapsed: () => boolean) => JSX.Element) | undefined) => (f ? untrack(() => f(isCollapsed)) : null);
 
+  // The Runs badge (design/UNIFIED.md §1): how many runs train or wait, at the row's right end; the icon rail has no
+  // room for it, so there a lime dot on the icon says one is training and the tooltip says the counts.
+  const badge = computed(() => {
+    const a = activeRuns();
+    return a.training + a.queued;
+  });
   const item = (n: () => NavItem) => {
     const active = () => current.get() === n().id;
+    const runs = () => n().id === 'runs';
+    const named = () => (runs() && badge.get() > 0 ? `${n().label}, ${runsBadgeText()}` : n().label);
     return (
       <li>
         <a
@@ -44,14 +53,22 @@ export default function Sidebar(props: SidebarProps) {
           class="item"
           class:active={active()}
           aria-current={active() ? 'page' : undefined}
-          aria-label={collapsed.get() ? n().label : undefined}
-          use:tooltip={collapsed.get() ? { text: n().label, keys: keyPrefs.singleKeys ? n().keys : undefined, side: 'right' } : null}
+          aria-label={collapsed.get() || (runs() && badge.get() > 0) ? named() : undefined}
+          use:tooltip={collapsed.get() ? { text: named(), keys: keyPrefs.singleKeys ? n().keys : undefined, side: 'right' } : null}
         >
-          <Dynamic component={n().icon} size={16} strokeWidth={1.75} aria-hidden="true" />
+          <span class="icon">
+            <Dynamic component={n().icon} size={16} strokeWidth={1.75} aria-hidden="true" />
+            {runs() && collapsed.get() && activeRuns().live ? <span class="live-dot" aria-hidden="true"></span> : null}
+          </span>
           <span class="label">{n().label}</span>
           {keyPrefs.singleKeys ? (
             <span class="keys">
               <Kbd keys={n().keys} subtle />
+            </span>
+          ) : null}
+          {runs() && badge.get() > 0 ? (
+            <span class="badge num" aria-hidden="true">
+              {badge.get()}
             </span>
           ) : null}
         </a>
@@ -82,9 +99,10 @@ export default function Sidebar(props: SidebarProps) {
           </For>
         </ul>
 
-        {props.live ? <div class="live">{snippet(props.live)}</div> : null}
-
         <div class="spacer"></div>
+
+        {/* The live run: one row pinned above Settings. */}
+        {props.live ? <div class="live">{snippet(props.live)}</div> : null}
 
         <ul class="nav">{item(() => settingsNav)}</ul>
         <div class="foot">
@@ -172,16 +190,20 @@ css`
     display: grid;
     gap: 1px;
   }
+  /* Nav rows (design/UNIFIED.md §1): 32 high, 14 px regular in text.secondary; the current row text.primary 500 on
+     bg.active. */
   .item {
     position: relative;
     display: flex;
     align-items: center;
-    gap: 8px;
-    height: var(--control-md);
+    gap: var(--space-2);
+    height: var(--control-lg);
     padding: 0 var(--space-2);
     border-radius: var(--radius-md);
     color: var(--text-secondary);
-    font-weight: var(--weight-medium);
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
+    letter-spacing: var(--type-md-tracking);
     white-space: nowrap;
     overflow: hidden;
     transition:
@@ -195,9 +217,39 @@ css`
   .item.active {
     background: var(--bg-active);
     color: var(--text-primary);
+    font-weight: var(--weight-medium);
   }
-  .item :global(svg) {
+  .icon {
+    position: relative;
+    display: inline-flex;
     flex-shrink: 0;
+  }
+  /* The icon rail's live mark: a lime dot on the Runs icon while a run trains. */
+  .live-dot {
+    position: absolute;
+    top: -2px;
+    right: -4px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-line);
+    box-shadow: 0 0 0 2px var(--bg-app);
+  }
+  /* The Runs badge: lime text on accent.muted, 20 high. */
+  .badge {
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    min-width: var(--control-xs);
+    height: var(--control-xs);
+    padding: 0 var(--space-1-5);
+    border-radius: var(--radius-full);
+    background: var(--accent-muted);
+    color: var(--accent-text);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    font-weight: var(--weight-medium);
+    letter-spacing: 0;
   }
   .label {
     flex: 1;
@@ -211,11 +263,12 @@ css`
     opacity: 1;
   }
   .collapsed .label,
-  .collapsed .keys {
+  .collapsed .keys,
+  .collapsed .badge {
     display: none;
   }
   .live {
-    margin-top: var(--space-4);
+    margin-bottom: 1px;
   }
   .spacer {
     flex: 1;

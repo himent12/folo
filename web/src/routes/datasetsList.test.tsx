@@ -55,9 +55,9 @@ const until = <T,>(f: () => T | null | undefined, what: string) =>
 describe('a dataset whose folder is missing', () => {
   it('is marked in the list, not shown as if nothing were wrong', async () => {
     open(Datasets, '/datasets');
-    const row = await until(() => target.querySelector('tr[aria-label="shapes"]'), 'the shapes row');
+    const row = await until(() => target.querySelector('.card[data-name="shapes"]'), 'the shapes row');
     expect(row.textContent).toContain('Folder missing');
-    expect(target.querySelector('tr[aria-label="fasteners"]')!.textContent).not.toContain('Folder missing');
+    expect(target.querySelector('.card[data-name="fasteners"]')!.textContent).not.toContain('Folder missing');
   });
 
   it('keeps its name on its page, says what is wrong, and can be removed from FOLO', async () => {
@@ -84,7 +84,7 @@ describe('a dataset whose folder is missing', () => {
     const issues = vi.spyOn(hub.api, 'datasetIssues');
     const asked = () => read.mock.calls.filter(([id]) => id === 'ds_shapes').length;
     open(Datasets, '/datasets');
-    await until(() => target.querySelector('tr[aria-label="shapes"]')?.textContent?.includes('Folder missing'), 'the mark');
+    await until(() => target.querySelector('.card[data-name="shapes"]')?.textContent?.includes('Folder missing'), 'the mark');
     expect(asked()).toBe(1);
     // Its page, then the list again: both say so from what the list found.
     c!.unmount();
@@ -92,7 +92,7 @@ describe('a dataset whose folder is missing', () => {
     await until(() => target.textContent?.includes('Put it back and press Retry'), 'the page');
     c!.unmount();
     open(Datasets, '/datasets');
-    await until(() => target.querySelector('tr[aria-label="shapes"]')?.textContent?.includes('Folder missing'), 'the mark again');
+    await until(() => target.querySelector('.card[data-name="shapes"]')?.textContent?.includes('Folder missing'), 'the mark again');
     expect(asked()).toBe(1);
     expect(issues.mock.calls.filter(([id]) => id === 'ds_shapes')).toHaveLength(0);
     // Back in the tab: the folder may be back.
@@ -112,7 +112,7 @@ describe('the Datasets list', () => {
   it('reads the datasets again after a dataset action in this tab and when the tab comes back', async () => {
     const list = vi.spyOn(hub.api, 'datasets');
     open(Datasets, '/datasets');
-    await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+    await until(() => target.querySelector('.card[data-name="fasteners"]'), 'the rows');
     const calls = list.mock.calls.length;
     datasetsChanged();
     await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 1));
@@ -125,7 +125,7 @@ describe('Add dataset from the URL', () => {
   it('offers a folder of labeled images first when there are no datasets yet (studio-data F4)', async () => {
     vi.spyOn(hub.api, 'datasets').mockResolvedValue([]);
     open(Datasets, '/datasets');
-    const empty = await until(() => target.querySelector('.ui-empty, [class*="empty"]')?.closest('td') ?? null, 'the empty state');
+    const empty = await until(() => target.querySelector('.ui-empty, [class*="empty"]')?.closest('section') ?? null, 'the empty state');
     expect(empty.textContent).toContain('Register a folder of images you have labeled (YOLO or COCO)');
     [...empty.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Register folder')!.click();
     const dialog = await until(() => document.querySelector<HTMLDialogElement>('dialog[open]'), 'the dialog');
@@ -137,7 +137,7 @@ describe('Add dataset from the URL', () => {
       router.route = parse(`#${path}`);
     });
     open(Datasets, '/datasets');
-    await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+    await until(() => target.querySelector('.card[data-name="fasteners"]'), 'the rows');
     expect(document.querySelector('dialog[open]')).toBeNull();
     // The palette, Overview's onboarding or New run's empty state links here while the list is on display.
     router.route = parse('#/datasets?add=synthetic');
@@ -160,13 +160,13 @@ describe('a sample set generating across a reload', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     try {
       open(Datasets, '/datasets');
-      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      await until(() => target.querySelector('.card[data-name="fasteners"]'), 'the rows');
       const calls = list.mock.calls.length;
       await vi.advanceTimersByTimeAsync(3000);
       await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 1));
       // It lands (numbered, as the server names a taken name).
       await hub.api.createSyntheticDataset({ name: 'shapes-synth', images: 10, classes: ['circle'], imgsz: 64, seed: 0 });
-      const shown = () => [...target.querySelectorAll('tr[aria-label]')].some((r) => !before.some((d) => d.name === r.getAttribute('aria-label')));
+      const shown = () => [...target.querySelectorAll('.card[data-name]')].some((r) => !before.some((d) => d.name === r.getAttribute('data-name')));
       for (let i = 0; i < 40 && !shown(); i++) {
         await vi.advanceTimersByTimeAsync(100);
         flushSync();
@@ -197,15 +197,15 @@ describe('a sample set generating across a reload', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     try {
       open(Datasets, '/datasets');
-      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      await until(() => target.querySelector('.card[data-name="fasteners"]'), 'the rows');
       const note = await until(() => target.querySelector('.waiting'), 'the note');
       expect(note.textContent).toBe('Reading coco, started just now: it shows up here when it is done');
       there = true;
-      for (let i = 0; i < 40 && !target.querySelector('tr[aria-label="COCO 2017"]'); i++) {
+      for (let i = 0; i < 40 && !target.querySelector('.card[data-name="COCO 2017"]'); i++) {
         await vi.advanceTimersByTimeAsync(250);
         flushSync();
       }
-      expect(target.querySelector('tr[aria-label="COCO 2017"]')).not.toBeNull();
+      expect(target.querySelector('.card[data-name="COCO 2017"]')).not.toBeNull();
       expect(target.querySelector('.waiting')).toBeNull();
       expect(pendingGeneration(hub.server)).toBeNull();
     } finally {
@@ -238,14 +238,14 @@ describe('a sample set generating across a reload', () => {
     );
     try {
       open(Datasets, '/datasets');
-      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      await until(() => target.querySelector('.card[data-name="fasteners"]'), 'the rows');
       slow = true;
       const calls = list.mock.calls.length;
       await read(undefined).then(() => api.createSyntheticDataset({ name: 'slow-synth', images: 10, classes: ['circle'], imgsz: 64, seed: 0 }));
       // 3 s to the first poll, 4 s for its read; the next goes out 3 s after that, not while it is out.
       await vi.advanceTimersByTimeAsync(3000 + 3900);
       expect([list.mock.calls.length - calls, aborted]).toEqual([1, 0]);
-      const shown = () => !!target.querySelector('tr[aria-label^="slow-synth"]');
+      const shown = () => !!target.querySelector('.card[data-name^="slow-synth"]');
       for (let i = 0; i < 40 && !shown(); i++) {
         await vi.advanceTimersByTimeAsync(250);
         flushSync();
@@ -266,7 +266,7 @@ describe('a sample set generating across a reload', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     try {
       open(Datasets, '/datasets');
-      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      await until(() => target.querySelector('.card[data-name="fasteners"]'), 'the rows');
       const calls = list.mock.calls.length;
       await vi.advanceTimersByTimeAsync(9000);
       expect(list.mock.calls.length).toBe(calls);
@@ -290,7 +290,7 @@ describe('a sample set generating across a reload', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     try {
       open(Datasets, '/datasets');
-      await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+      await until(() => target.querySelector('.card[data-name="fasteners"]'), 'the rows');
       const calls = list.mock.calls.length;
       await vi.advanceTimersByTimeAsync(9000);
       expect(list.mock.calls.length).toBe(calls);

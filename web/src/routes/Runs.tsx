@@ -38,7 +38,7 @@ import Ident from '$lib/ui/Ident';
 import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
 import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
-import { FROM_SCRATCH, origin } from '$lib/lineage';
+import { FROM_SCRATCH, origin, type Origin } from '$lib/lineage';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import SortHeader from '$lib/ui/SortHeader';
 import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
@@ -55,7 +55,7 @@ import { groups, leftForRun, readState, returnQuery, sortRuns, writeState, type 
 import { exactTime, tickingNow } from './runs/when';
 
 /** Columns of the desktop table (for state rows that span it). */
-const COLS = 12;
+const COLS = 11;
 const ACTIVE = ['queued', 'running', 'stopping'];
 
 export default function Runs() {
@@ -207,20 +207,6 @@ export default function Runs() {
     }
   }
   const dirOf = (k: SortKey) => (sortKey.get() === k ? sortDir.get() : null);
-  /** The order the rows are in, as the page's subtitle says it. */
-  const order = computed(() => {
-    const up = sortDir.get() === 'asc';
-    switch (sortKey.get()) {
-      case 'created':
-        return up ? 'oldest first' : 'newest first';
-      case 'map':
-        return up ? 'lowest best mAP50-95 first' : 'highest best mAP50-95 first';
-      case 'progress':
-        return up ? 'least progress first' : 'most progress first';
-      case 'duration':
-        return up ? 'shortest first' : 'longest first';
-    }
-  });
   // Relative times ("9m ago") and live durations move on without a reload.
   const now = tickingNow();
   /** Phones: checkboxes show in select mode (or once a run is selected), so rows keep their width otherwise. */
@@ -246,15 +232,31 @@ export default function Runs() {
   const comparing = computed(() => selected.get().length >= 2);
   /** Phones: every row keeps the ⋯ slot while any row shown has a menu, so all rows share one right edge. */
   const menuSlot = computed(() => shown.get().some((r) => rowItems(r).length > 0));
-  // What the rows shown hold, said once at the list's end (base.css .list-foot): how many, and their training time.
-  const trained = computed(() => shown.get().reduce((a, r) => a + (trainingSeconds(r, now.get()) ?? 0), 0));
+  // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds right now, "10 runs · 3 active ·
+  // 1 failed · 2h 15m of training", over every run whatever the filter; a filtered list says what it shows under it.
+  const trained = computed(() => (runs.data ?? []).reduce((a, r) => a + (trainingSeconds(r, now.get()) ?? 0), 0));
+  const facts = computed(() => {
+    const all = runs.data;
+    if (!all?.length) return null;
+    const n = (k: number, one: string, many = `${one}s`) => `${k.toLocaleString('en-US')} ${k === 1 ? one : many}`;
+    return [
+      n(all.length, 'run'),
+      count('active') ? `${count('active')} active` : '',
+      count('failed') ? `${count('failed')} failed` : '',
+      trained.get() > 0 ? `${duration(trained.get())} of training` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  });
 
   function toggle(id: string) {
     const cur = selected.get();
     selected.set(cur.includes(id) ? cur.filter((x) => x !== id) : cur.length >= 4 ? cur : [...cur, id]);
   }
 
-  // Progress bars stay neutral; only a live run's bar carries the accent ("now"). Status is the dot beside it.
+  /** Where a run started from, in words: the Architecture cell's tooltip (the column of its own went, UNIFIED §4). */
+  const startedFrom = (f: Origin) => (f.kind === 'scratch' ? FROM_SCRATCH : `From ${f.kind === 'file' ? f.path : f.label}`);
+  // Progress rails stay neutral; only a live run's rail carries the accent ("now"). Status is the mark beside it.
   const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
   // Nothing answers: the actions that need the server are disabled and say why (as on Datasets).
   const offline = computed(() => !runs.data && isOffline(runs.error));
@@ -279,8 +281,8 @@ export default function Runs() {
     <>
       <Page
         title="Runs"
-        sub={() => <span>Training runs, {order.get()}.</span>}
-        subPhone={() => <span>Training runs, {order.get()}.</span>}
+        sub={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
+        subPhone={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
         actions={() => (
           <>
             {runs.data?.length !== 0 ? (
@@ -337,12 +339,11 @@ export default function Runs() {
           {/* One table frame for every state: with no rows (empty, no match, an error) it drops its column heads and
               says so inside it, so no header row of eleven columns sits over a one-line message. */}
           <div class="scroll" class:state={!rowsOrLoading.get()}>
-            {/* Row checkboxes show on hover and focus, on selected rows, and on every row once one is selected (picking)
-                or two runs are listed (pickable: the header asks to select 2–4, as the benchmark's leaderboard does). */}
+            {/* Row checkboxes show on a hovered or focused row, and on every row once one is ticked (picking):
+                design/UNIFIED.md §4, Runs. */}
             <table
               class="table runs"
               class:picking={selected.get().length > 0}
-              class:pickable={shown.get().length >= 2}
               aria-label="Runs"
               aria-busy={!runs.data}
               use:rowNav={{ toggle: (row: HTMLElement) => toggle(row.dataset.id ?? '') }}
@@ -351,28 +352,26 @@ export default function Runs() {
                 <thead>
                   <tr>
                     {/* One geometry in every state (DESIGN_DIRECTION 7): each column's width is fixed here, on the
-                        header row that loading and loaded share; the run's name takes what is left. */}
+                        header row that loading and loaded share; the run's name takes what is left. The columns of
+                        design/UNIFIED.md §4 (Runs), one fact each; narrower frames drop them (the .cq-* rules). */}
                     <th class="check">
                       <span class="sr-only">Select for comparison</span>
                     </th>
                     <th>Run</th>
-                    <th style:width="128px">Status</th>
-                    <th class="hide-xl" style:width="112px">
+                    <th class="cq-ctx" style:width="96px">
+                      Architecture
+                    </th>
+                    <th class="cq-ctx" style:width="120px">
                       Dataset
                     </th>
-                    <th class="hide-xl" style:width="80px">
-                      Model
+                    <th style:width="112px">Status</th>
+                    <SortHeader label="Progress" width="144px" dir={dirOf('progress')} onsort={() => sortBy('progress')} disabled={!runs.data} />
+                    <SortHeader label="Best mAP50-95" align="right" width="128px" dir={dirOf('map')} onsort={() => sortBy('map')} disabled={!runs.data} />
+                    <th class="cq-trend" style:width="120px">
+                      Trend
                     </th>
-                    <th class="hide-xl" style:width="128px">
-                      Started from
-                    </th>
-                    <SortHeader label="Progress" width="136px" dir={dirOf('progress')} onsort={() => sortBy('progress')} disabled={!runs.data} />
-                    <SortHeader label="Best mAP50-95" align="right" width="136px" dir={dirOf('map')} onsort={() => sortBy('map')} disabled={!runs.data} />
-                    <th class="hide-lg" style:width="120px">
-                      mAP50-95 trend
-                    </th>
-                    <SortHeader label="Duration" align="right" width="104px" class="hide-lg" dir={dirOf('duration')} onsort={() => sortBy('duration')} disabled={!runs.data} />
-                    <SortHeader label="Created" align="right" width="104px" class="hide-md" dir={dirOf('created')} onsort={() => sortBy('created')} disabled={!runs.data} />
+                    <SortHeader label="Duration" align="right" width="96px" class="cq-dur" dir={dirOf('duration')} onsort={() => sortBy('duration')} disabled={!runs.data} />
+                    <SortHeader label="Created" align="right" width="104px" class="cq-created" dir={dirOf('created')} onsort={() => sortBy('created')} disabled={!runs.data} />
                     <th class="act" style:width="40px">
                       <span class="sr-only">Actions</span>
                     </th>
@@ -392,36 +391,33 @@ export default function Runs() {
                         <td class="lead">
                           <Skeleton w="112px" h="12px" />
                         </td>
+                        <td class="cq-ctx">
+                          <Skeleton w="48px" h="12px" />
+                        </td>
+                        <td class="cq-ctx">
+                          <Skeleton w="72px" h="12px" />
+                        </td>
                         <td>
                           <Skeleton w="72px" h="12px" />
                         </td>
-                        <td class="hide-xl">
-                          <Skeleton w="64px" h="12px" />
-                        </td>
-                        <td class="hide-xl">
-                          <Skeleton w="48px" h="12px" />
-                        </td>
-                        <td class="hide-xl">
-                          <Skeleton w="88px" h="12px" />
-                        </td>
                         <td>
                           <div class="prog">
-                            <Skeleton h="4px" />
+                            <Skeleton h="2px" />
                             <span>
-                              <Skeleton w="40px" h="10px" />
+                              <Skeleton w="48px" h="10px" />
                             </span>
                           </div>
                         </td>
                         <td class="r">
-                          <Skeleton w="72px" h="12px" />
-                        </td>
-                        <td class="hide-lg">
-                          <Skeleton w="96px" h="12px" />
-                        </td>
-                        <td class="r hide-lg">
                           <Skeleton w="48px" h="12px" />
                         </td>
-                        <td class="r hide-md">
+                        <td class="cq-trend">
+                          <Skeleton w="96px" h="12px" />
+                        </td>
+                        <td class="r cq-dur">
+                          <Skeleton w="48px" h="12px" />
+                        </td>
+                        <td class="r cq-created">
                           <Skeleton w="56px" h="12px" />
                         </td>
                         <td class="act"></td>
@@ -479,7 +475,8 @@ export default function Runs() {
                             <a class="name" href={href(`/runs/${r().id}`)} title={r().name} onclick={(e) => e.stopPropagation()}>
                               {r().name}
                             </a>{' '}
-                            {/* Whole items wrap: the name's column is what the fixed ones leave, and a fact is never cut. */}
+                            {/* A frame too narrow for the Architecture and Dataset columns (a tablet) keeps their facts
+                                on a second line under the name, with where the run started from; whole items wrap. */}
                             <span class="sub ctx">
                               <Meta>
                                 {/* A free-text name, the one item that may cut itself (ui/Meta), whole in its tooltip. */}
@@ -493,26 +490,17 @@ export default function Runs() {
                               </Meta>
                             </span>
                           </td>
+                          {/* Where the run started from is the architecture's tooltip (and the run's Config panel). */}
+                          <td class="cq-ctx muted" title={startedFrom(from.get())}>
+                            <Ident value={r().config.arch} />
+                          </td>
+                          <td class="cq-ctx muted">
+                            <span class="cell-cut" title={datasetName(r())}>
+                              {datasetName(r())}
+                            </span>
+                          </td>
                           <td use:tooltip={failureCause(r())}>
                             <StatusBadge run={r()} plain />
-                          </td>
-                          <td class="hide-xl muted">{datasetName(r())}</td>
-                          <td class="hide-xl">
-                            <Ident value={r().config.arch} class="muted" />
-                          </td>
-                          <td class="hide-xl from">
-                            {(() => {
-                              const f = from.get();
-                              return f.kind === 'model' && modelById.get().has(f.id) ? (
-                                <Ident value={f.label} href={href(`/models/${f.id}`)} onclick={(e) => e.stopPropagation()} />
-                              ) : f.kind === 'file' ? (
-                                <Ident value={f.label} title={f.path} />
-                              ) : f.kind === 'scratch' ? (
-                                <span class="faint">{FROM_SCRATCH}</span>
-                              ) : (
-                                <Ident value={f.label} class="faint" />
-                              );
-                            })()}
                           </td>
                           <td>
                             {placeOf(r()) !== null ? (
@@ -521,29 +509,18 @@ export default function Runs() {
                             ) : (
                               <div class="prog">
                                 <Progress value={runProgress(r())} size="xs" tone={tone(r())} label={`${r().name} progress`} />{' '}
-                                <span class="num faint">
-                                  {r().epoch}/{r().epochs}
-                                </span>
+                                <span class="num muted">{`${r().epoch} / ${r().epochs}`}</span>
                               </div>
                             )}
                           </td>
-                          <td class="r num best">
-                            {r().best ? (
-                              <>
-                                {metric(r().best!.map50_95)}{' '}
-                                <span class="faint" title="Best epoch">
-                                  ep {r().best!.epoch}
-                                </span>
-                              </>
-                            ) : (
-                              <NoValue />
-                            )}
+                          <td class="r num best" title={r().best ? `Best at epoch ${r().best!.epoch}` : undefined}>
+                            {r().best ? metric(r().best!.map50_95) : <NoValue />}
                           </td>
-                          <td class="hide-lg">
+                          <td class="cq-trend">
                             <RunSpark run={r()} width={96} />
                           </td>
-                          <td class="r num faint hide-lg">{trainingSeconds(r(), now.get()) === null ? <NoValue /> : duration(trainingSeconds(r(), now.get()))}</td>
-                          <td class="r faint hide-md">
+                          <td class="r num muted cq-dur">{trainingSeconds(r(), now.get()) === null ? <NoValue /> : duration(trainingSeconds(r(), now.get()))}</td>
+                          <td class="r muted cq-created">
                             <time datetime={r().created} title={exactTime(r().created)}>
                               {ago(r().created, now.get())}
                             </time>
@@ -577,14 +554,10 @@ export default function Runs() {
             now={now.get()}
           />
         </Panel>{' '}
-        {runs.data && shown.get().length ? (
+        {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
+        {runs.data && shown.get().length && shown.get().length < runs.data.length ? (
           <p class="list-foot num">
-            <Meta>
-              <span>
-                {shown.get().length < runs.data.length ? `${shown.get().length} of ${runs.data.length}` : shown.get().length} {runs.data.length === 1 ? 'run' : 'runs'}
-              </span>{' '}
-              <span>{duration(trained.get())} of training</span>
-            </Meta>
+            {shown.get().length} of {runs.data.length} {runs.data.length === 1 ? 'run' : 'runs'}
           </p>
         ) : null}
       </Page>{' '}
@@ -692,9 +665,9 @@ css`
     transition: opacity var(--dur-fast) var(--ease-standard);
   }
   /* Shown on the row under the pointer or the keyboard (so X is discoverable), on selected rows, and on every row once
-     any is selected or two runs are listed to pick from. */
+     any is selected. */
   .runs tbody tr:is(:hover, :focus-within, .on) .check input,
-  .runs:is(.picking, .pickable) .check input,
+  .runs.picking .check input,
   .runs .check input:focus-visible {
     opacity: 1;
   }
@@ -730,22 +703,28 @@ css`
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .from :global(.ident) {
-    color: var(--text-secondary);
+  /* A cell that may cut itself (a dataset's free-text name), whole in its tooltip. */
+  .cell-cut {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
+  /* The 2 px rail, then "42 / 100" (design/UNIFIED.md §2, Progress). */
   .prog {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-3);
     /* One width at every tier. */
-    width: 112px;
+    width: 120px;
   }
   .prog span {
-    font-size: var(--type-sm-size);
-    min-width: 50px;
+    flex-shrink: 0;
+    min-width: 56px;
     text-align: right;
   }
+  /* The number the list ranks runs by: text.primary 500; the other numbers are text.secondary (.muted). */
   .best {
+    color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
   .place {
@@ -758,34 +737,41 @@ css`
     padding: 0 var(--space-2) 0 0;
     text-align: right;
   }
-  .best span {
-    /* A fixed slot so 'ep 36' and 'ep 150' never shift the decimals. */
-    display: inline-block;
-    width: 6ch;
-    text-align: left;
-    font-weight: var(--weight-regular);
-    font-size: var(--type-sm-size);
-    margin-left: 6px;
-  }
   .ctx {
     display: none;
   }
-  /* In a frame under 1320 px the Dataset, Model and Started from columns hide (the name's second line has them): with
-     Duration in, the page's widest frame (--size-content-max) would leave the name under 80 px. Below 1280 the trend
-     and Duration hide too (.hide-lg, base.css), so the name keeps 160 px or more at every width. */
-  @container (max-width: 1319px) {
-    .runs :is(th, td).hide-xl {
+  /* The columns a frame cannot hold go right to left (the frame, not the viewport, decides: its width is the page's
+     less the sidebar): Trend under 1140 px, Duration under 1024, Created under 928 (a laptop's icon sidebar), and
+     under 832 (a tablet) Architecture and Dataset, whose facts then sit on a second line under the name with where
+     the run started from, so the name keeps 160 px or more at every width. SortHeader renders its own <th>, so the
+     classes are reached as globals. */
+  @container (max-width: 1139px) {
+    .runs :global(.cq-trend) {
+      display: none;
+    }
+  }
+  @container (max-width: 1023px) {
+    .runs :global(.cq-dur) {
+      display: none;
+    }
+  }
+  @container (max-width: 927px) {
+    .runs :global(.cq-created) {
+      display: none;
+    }
+  }
+  @container (max-width: 831px) {
+    .runs :global(.cq-ctx) {
       display: none;
     }
     .ctx {
       display: block;
     }
-    /* The name carries dataset, model and origin on a second line: the two-line row height. */
+    /* The name carries dataset, model and origin on a second line: the two-line row height of the smaller tiers. */
     .runs td {
       height: 48px;
     }
   }
-  /* Below 1024 Created hides too (.hide-md), so the table fits from 768 px up, checkbox gutter included. */
   @media (max-width: 767px) {
     /* Phones show the stacked rows below; the table frame stays only to hold an empty or error state (no column heads at any width). */
     .scroll:not(.state) {
