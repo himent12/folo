@@ -30,7 +30,7 @@ been measured again with that longer warm-up. The CPU rows warm up with 5 calls 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="img/charts/speed-by-size-dark.svg">
-    <img src="img/charts/speed-by-size-light.svg" alt="How many times faster FOLO is than the YOLO26 model of the same size, folo-n and folo-s. GPU forward at batch 1: 4.5 and 2.3 times in f32, 5.9 and 3.7 times with the fastest precision of each. GPU forward at batch 16: 1.4 and 1.3 times in f32, 1.8 and 1.6 times in f16. GPU end to end: 4.3 and 3.2 times at batch 1, 3.9 and 3.0 times at batch 16. CPU forward 1.8 and 1.5 times, CPU end to end 1.8 and 1.7 times. Training step: 1.9 and 1.5 times in f32, 2.4 and 1.6 times with mixed precision." width="720">
+    <img src="img/charts/speed-by-size-light.svg" alt="How many times faster FOLO is than the YOLO26 model of the same size, folo-n and folo-s. GPU forward at batch 1: 4.5 and 2.3 times in f32, 5.9 and 3.7 times with the fastest precision of each. GPU forward at batch 16: 1.4 and 1.3 times in f32, 1.8 and 1.6 times in f16. GPU end to end: 4.3 and 3.2 times at batch 1, 3.9 and 3.1 times at batch 16. CPU forward 1.8 and 1.5 times, CPU end to end 1.8 and 1.7 times. Training step: 1.9 and 1.5 times in f32, 2.4 and 1.6 times with mixed precision." width="720">
   </picture>
 </p>
 
@@ -228,9 +228,10 @@ e5a6ccf0's median in the same session; rows 1 and 2 also give `main` with plans 
 and 8 are measured on trained weights from this climb on (the published `folo-n-coco` / `folo-s-coco`, the first 16
 val2017 images, resized to 640×640 for rows 5 and 6): untrained weights pass no candidate at `conf` 0.25, so
 candidate-first would skip the whole box branch there. Load: 0–8% GPU from other processes and 1.3–3.3 other CPU
-cores for the GPU cells (row 6: 0–1% and 1.6–17.0, every run kept); the CPU cells are loaded (1.3–4.6 other cores
-for row 8, up to 7.4 for the regression checks).
-Rows 3, 4, 7 and 9 were re-measured as regression checks and tie, so they keep their 2026-11-12 cells with a note;
+cores for the GPU cells (row 6: 0–1% and 1.6–2.7, the quiet runs of its pass); the CPU cells are loaded (1.3–4.6
+other cores for row 8, up to 7.4 for the regression checks; row 8's three quiet runs tie too).
+Rows 3, 4, 7 and 9 were re-measured as regression checks and did not move (ties, or a few percent inside
+overlapping ranges), so they keep their 2026-11-12 cells with a note;
 rows 10 and 11 were not re-measured (row 9 did not move). Per section in [Hill-climb 3](#hill-climb-3-2026-11-13) and
 [notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md).
 
@@ -247,12 +248,12 @@ tie. The 2026-11-09 table (the first hill-climb's build against c50211ba) is in 
 | 1 | GPU forward latency, batch 1, f32 (median) | **4.95 ms** (best of TF32/strict, cudnn.benchmark on/off); 6.04 ms default | f32 | **1.09 ms** (1.08–1.13; e5a6ccf0 1.13; `main` with plans off 1.13), p90 1.11: beats, 4.5x | **2.16 ms** (2.11–2.18; e5a6ccf0 2.21; plans off 2.29): yolo26s 4.87, beats 2.3x |
 | 2 | GPU forward latency, batch 1, f16 (median) | **6.25 ms** | f16 | **0.845 ms** on tensor cores (0.82–1.01; e5a6ccf0 1.21, bimodal 0.86–1.31; plans off 0.94); regular f16 1.09 (e5a6ccf0 1.14): beats, 7.4x | **1.30 ms** on tensor cores (1.28–1.31; e5a6ccf0 1.65; plans off 1.41); regular f16 2.13 (2.16): yolo26s 7.47, beats 5.7x |
 | 3 | GPU forward throughput, batch 16, f32 | **1454 img/s** (TF32 convs); 1334 img/s strict fp32 | f32 | **2081 img/s** (2048–2098; 647b981f 1619): beats TF32 by 43%. 2026-11-13: a tie (synchronised median 7.81 vs 7.84 ms against e5a6ccf0) | **819 img/s** (743–826; 647b981f 624): yolo26s 627, beats by 31% (was a tie). 2026-11-13: a tie |
-| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **4159 img/s** on tensor cores (3127–4187; 647b981f 3081): beats, 1.75x. 2026-11-13: a tie (4148 vs 4166 img/s) | **1799 img/s** on tensor cores (1730–1825; 647b981f 1237): yolo26s 1159, beats 1.55x (was a tie). 2026-11-13: a tie (1738 vs 1800) |
-| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **1.60 ms** f32 (1.58–1.62; e5a6ccf0 1.77), p90 1.70; **1.33 ms** on tensor cores (1.28–1.35; e5a6ccf0 1.51), trained weights: beats, 4.3–5.3x | **2.65 ms** f32 (2.63–2.69; e5a6ccf0 4.57, bimodal; in a later pass 2.86 against its fast mode's 2.79, a tie); **1.82 ms** on tensor cores (1.80–1.84; e5a6ccf0 1.98): yolo26s 8.59, beats 3.2x |
-| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **2424 img/s** on tensor cores (6.60 ms, 6.57–7.10; e5a6ccf0 2171), trained weights; f32 1316 (e5a6ccf0 1186, bimodal): beats, 3.9x | **1355 img/s** on tensor cores (11.81 ms, 11.48–11.91; e5a6ccf0 1266); f32 755 (e5a6ccf0 704): yolo26s 446, beats, 3.0x |
+| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **4159 img/s** on tensor cores (3127–4187; 647b981f 3081): beats, 1.75x. 2026-11-13: a tie (4148 vs 4166 img/s) | **1799 img/s** on tensor cores (1730–1825; 647b981f 1237): yolo26s 1159, beats 1.55x (was a tie). 2026-11-13: not moved (1738 vs 1800, +3.6% inside overlapping ranges; no plan at batch 16) |
+| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **1.60 ms** f32 (1.58–1.62; e5a6ccf0 1.77), p90 1.70; **1.33 ms** on tensor cores (1.28–1.35; e5a6ccf0 1.51), trained weights: beats, 4.3–5.3x | **2.65 ms** f32 (2.63–2.69; e5a6ccf0 4.57, bimodal; in the later pass's quiet runs 2.67 against its fast mode's 2.78, −4%); **1.82 ms** on tensor cores (1.80–1.84; e5a6ccf0 1.98): yolo26s 8.59, beats 3.2x |
+| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **2428 img/s** on tensor cores (6.59 ms, 6.57–6.60; e5a6ccf0 2174), trained weights; f32 1281 (e5a6ccf0 1251, bimodal: a tie): beats, 3.9x | **1372 img/s** on tensor cores (11.66 ms, 11.48–11.84; e5a6ccf0 1265); f32 764 (e5a6ccf0 707): yolo26s 446, beats, 3.1x |
 | 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **12.74 ms** at 28 threads (12.63–12.75; 647b981f 15.23): beats, 1.8x. 2026-11-13: a tie under load (14.64 vs 14.46 ms, 3.7–7.4 other cores) | folo-s **29.2 ms** (27.9–29.6; 647b981f 33.3): yolo26s 42.5, beats; folo-m **68.9 ms** (68.7–70.3; 647b981f 77.7): yolo26m 106.6, beats (28 threads) |
 | 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | **13.57 ms** at 28 threads on trained weights (13.54–14.13; e5a6ccf0 13.58: a tie; 1.3–4.6 other cores): beats, 1.8x. Untrained (the 2026-11-12 protocol, where `main` now runs no box branch) 13.12 on 2026-11-12. The NMS-free head does not change it ([NMS-free head](#nms-free-head-o2o)) | folo-s **29.4 ms** trained (29.1–29.6; e5a6ccf0 31.0): yolo26s 51.1, beats; folo-m **68.8 ms** untrained (68.3–70.3; 647b981f 79.7, 2026-11-12; no folo-m weights): yolo26m 107.8, beats |
-| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **380 img/s** f32 (375–380; 647b981f 333), **594 img/s AMP** (591–609; 647b981f 544): beats, 1.9x / 2.4x. 2026-11-13: a tie (383 vs 382, 583 vs 608 img/s). With the trainer's gradient clipping (`FOLO_BENCH_CLIP=1`) 376 / 613 (647b981f 345 / 526); with MuSGD 366 / 592 (647b981f 316 / 443) | **162 img/s** f32 (162–162; 647b981f 151), **299 img/s AMP** (299–300; 647b981f 276): yolo26s 105 / 188, beats. With clipping 161 / 296 (647b981f 150 / 268) |
+| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **380 img/s** f32 (375–380; 647b981f 333), **594 img/s AMP** (591–609; 647b981f 544): beats, 1.9x / 2.4x. 2026-11-13: not moved (f32 383 vs 382 img/s, a tie; AMP 583 vs 608, +4% from one slow e5a6ccf0 round inside overlapping ranges, a tie in the one quiet round). With the trainer's gradient clipping (`FOLO_BENCH_CLIP=1`) 376 / 613 (647b981f 345 / 526); with MuSGD 366 / 592 (647b981f 316 / 443) | **162 img/s** f32 (162–162; 647b981f 151), **299 img/s AMP** (299–300; 647b981f 276): yolo26s 105 / 188, beats. With clipping 161 / 296 (647b981f 150 / 268) |
 | 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers | **199 img/s** fp32 / 224 img/s AMP (best of 3) | f32, and AMP | **388 img/s** f32 (388–391; 647b981f 358), **613 img/s AMP** (612–615; 647b981f 553), median of 5 quiet rounds: beats, 1.9x / 2.7x ([Hill-climb 2](#the-trainer-row-10-2026-11-12)) | not measured |
 | 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32, and AMP | **3467 MiB**, **2022 MiB AMP** (train step, as 647b981f; yolo26n train step 4517 / 2646, trainer 4353 / 2435): beats. The pool now keeps a step's buffers between steps: it holds up to 4196 MiB and wgpu reserves 4608 MiB in f32 | **6520 MiB**, **3713 MiB AMP** (as 647b981f; yolo26s train step 8245 / 4614): beats |
 
@@ -294,21 +295,22 @@ every cell. Inside ±3% with overlapping ranges is a tie.
 
 Trained weights (the `gpu_trained` bench, the public `Predictor` at `conf` 0.25), median of the runs (min–max): 6
 quiet pairs from two evening passes (4 for the 640×640 batch-1 row; 0–5% other GPU, 1.3–3.3 other cores), and for
-the 640×640 batch-16 rows (row 6, added after them) a third pass at 01:08–01:15 with every run kept (0–1% other GPU,
-1.6–17.0 other cores; the batch-16 rows of the loaded runs fall inside the quiet runs' range; one `main` run crashed
-after its folo-n rows, so folo-s has 4):
+the 640×640 batch-16 rows (row 6, added after them) a third pass at 01:08–01:15, its quiet runs only (0–1% other
+GPU, 1.6–2.7 other cores: e5a6ccf0 4 of 5; `main` 3 of 5 for folo-n and 2 for folo-s, since one `main` run crashed
+after its folo-n rows). The three loaded runs (10.4–17.0 other cores) are left out: on the tensor-core rows they
+read 7–9% slower, and one of `main`'s read faster on folo-n's f32 row (10.35 ms):
 
 | row | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` |
 |---|---|---|---|---|
-| f32 e2e b1, 640×640 images (row 5) | 1.77 ms (1.73–1.78) | **1.60** (1.58–1.62), −10% | 4.57 (3.16–4.58), bimodal; third pass 2.79 (2.75–3.47) | 2.65 (2.63–2.69); third pass 2.86 (2.62–3.16), a tie with e5a6ccf0's fast mode |
+| f32 e2e b1, 640×640 images (row 5) | 1.77 ms (1.73–1.78) | **1.60** (1.58–1.62), −10% | 4.57 (3.16–4.58), bimodal; third pass 2.78 (2.75–2.81) | 2.65 (2.63–2.69); third pass 2.67 (2.62–2.72), −4% against e5a6ccf0's fast mode |
 | f16 tensor cores e2e b1, 640×640 | 1.51 (1.46–1.52) | **1.33** (1.28–1.35), −12% | 1.98 (1.96–2.01) | **1.82** (1.80–1.84), −8% |
 | f32 e2e b1, val2017 images (`rect`) | 1.43 (1.42–1.44) | **1.38** (1.36–1.40), −4% | 2.42 (2.36–2.45) | **2.29** (2.27–2.40), −6% |
 | f16 tensor cores e2e b1, `rect` | 1.43 (1.36–1.57) | **1.24** (1.21–1.31), −13% | 1.69 (1.65–1.75) | 1.63 (1.60–1.67), −4% |
-| f32 e2e b16, 640×640 images (row 6) | 13.49 ms (11.38–16.72), 1186 img/s, bimodal | **12.16** (10.35–12.65), 1316 img/s, −10% | 22.74 (22.53–23.24), 704 img/s | **21.20** (20.89–21.43), 755 img/s, −7% |
-| f16 tensor cores e2e b16, 640×640 (row 6) | 7.37 (7.12–8.01), 2171 img/s | **6.60** (6.57–7.10), 2424 img/s, −10% | 12.64 (12.26–12.72), 1266 img/s | **11.81** (11.48–11.91), 1355 img/s, −7% |
+| f32 e2e b16, 640×640 images (row 6) | 12.79 ms (11.38–15.53), 1251 img/s, bimodal | 12.49 (12.16–12.65), 1281 img/s, −2%: a tie | 22.64 (22.53–22.76), 707 img/s | **20.94** (20.89–20.98), 764 img/s, −8% |
+| f16 tensor cores e2e b16, 640×640 (row 6) | 7.36 (7.12–7.41), 2174 img/s | **6.59** (6.57–6.60), 2428 img/s, −10% | 12.65 (12.26–12.72), 1265 img/s | **11.66** (11.48–11.84), 1372 img/s, −8% |
 | f32 e2e b16, val2017 images (padded square) | 10.46 ms (10.05–10.89), 1530 img/s | **9.30** (9.04–10.25), 1721 img/s, −11% | 22.37 (22.02–22.77), 715 img/s | 21.53 (20.41–22.45), 743 img/s, −4% |
 | f16 tensor cores e2e b16, val2017 images | 6.24 (6.16–6.30), 2566 img/s | **5.81** (5.74–6.06), 2754 img/s, −7% | 11.22 (11.18–11.45), 1427 img/s | **10.70** (10.64–10.93), 1496 img/s, −5% |
-| f32 `predict_batch` 16 × 1280×720 | 14.13 (13.43–25.49); third pass 14.10 | 13.95 (10.02–21.17), bimodal; third pass 10.24 (10.17–10.38) | 25.59 (25.37–25.83) | **17.44** (16.05–17.91), −32% |
+| f32 `predict_batch` 16 × 1280×720 | 14.13 (13.43–25.49); third pass 14.16 | 13.95 (10.02–21.17), bimodal; third pass 10.23 (10.17–10.24) | 25.59 (25.37–25.83) | **17.44** (16.05–17.91), −32% |
 | f16 tensor cores `predict_batch` 16 × 1280×720 | 9.67 (9.62–9.90) | **7.96** (7.90–8.10), −18% | 14.61 (14.55–14.85) | **11.01** (10.95–11.04), −25% |
 
 The forward rows, random weights (the `gpu` bench, 5 rounds: e5a6ccf0 all 5, `main` and `main` with
@@ -321,7 +323,7 @@ The forward rows, random weights (the `gpu` bench, 5 rounds: e5a6ccf0 all 5, `ma
 | f16 tensor cores forward b1 (row 2) | 1.21 (0.86–1.31), bimodal | **0.845** (0.82–1.01) | 0.94 (0.87–0.96) | 1.65 (1.32–1.95) | **1.30** (1.28–1.31) | 1.41 (1.38–1.57) |
 | f32 forward b16 (row 3), pipelined | 2064 img/s (1804–2083) | 1962 (1827–2089) | 1977 (1882–2074) | 767 (39–826) | 825 (97–828) | 822 (802–828) |
 | f32 forward b16, synchronised median | 7.81 ms (7.77–9.47) | 7.84 (7.78–8.76), tie | 8.63 (7.99–8.95) | 20.05 (19.63–22.31) | 19.65 (19.58–19.87), tie | 19.76 (19.62–20.62) |
-| f16 tensor cores forward b16 (row 4) | 4148 img/s (3685–4164) | 4166 (4144–4184), tie | 4093 (4052–4185) | 1738 (1493–1823) | 1800 (1626–1823), tie | 1654 (1573–1818) |
+| f16 tensor cores forward b16 (row 4) | 4148 img/s (3685–4164) | 4166 (4144–4184), tie | 4093 (4052–4185) | 1738 (1493–1823) | 1800 (1626–1823), +3.6%, ranges overlap | 1654 (1573–1818) |
 | f32 `predict_batch` 16 × 1280×720 | 14.16 ms (13.65–16.15) | **10.20** (9.62–10.97), −28% | 10.14 (9.77–10.41) | 25.92 (25.39–31.87) | **17.90** (17.87–18.03), −31% | 17.86 (17.76–19.55) |
 | f16 tensor cores `predict_batch` 16 × 1280×720 | 10.07 (9.49–11.52) | **7.98** (7.68–8.99), −21% | 8.22 (8.08–8.27) | 15.46 (14.50–18.02) | **11.64** (11.38–13.43), −25% | 11.29 (11.20–12.50) |
 
@@ -344,12 +346,14 @@ Where it comes from:
 
 `FOLO_GPU_TENSOR_CORES=1 FOLO_BENCH_SECTIONS=train`, batch 16 at 640, SGD, 5 rounds (one quiet: 1.4–1.7 other cores;
 the others 3.8–16.5, and a CI test on the GPU beside one e5a6ccf0 run; the GPU-bound medians held their range through
-it): a tie, as expected, since a training step records no plan and runs the same kernels.
+it): f32 ties; folo-n's AMP step is 4% faster at the median, from one slow e5a6ccf0 round, inside overlapping
+ranges and a tie in the quiet round (25.87 vs 26.03 ms). Neither is read as a gain: a training step records no plan
+and runs the same kernels.
 
 | row | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` |
 |---|---|---|---|---|
 | f32 | 41.73 ms (41.53–42.11), 383 img/s | 41.93 (41.67–42.01), 382 img/s: tie | 99.06 (97.79–99.19), 162 img/s | 98.22 (97.59–98.64), 163 img/s: tie |
-| AMP | 27.44 (25.87–36.58), 583 img/s | 26.30 (26.03–27.27), 608 img/s: tie | 53.82 (53.03–56.45), 297 img/s | 53.28 (53.20–54.69), 300 img/s: tie |
+| AMP | 27.44 (25.87–36.58), 583 img/s | 26.30 (26.03–27.27), 608 img/s: −4%, ranges overlap; the quiet round 26.03 against 25.87, a tie | 53.82 (53.03–56.45), 297 img/s | 53.28 (53.20–54.69), 300 img/s: tie |
 | dispatches, new bind groups, new pool buffers per f32 step | 1117, 0, 0 | the same | 1120, 0, 0 | the same |
 | peak memory f32 / AMP | 3467 / 2022 MiB | the same | 6520 / 3713 MiB | the same |
 
@@ -359,9 +363,13 @@ it): a tie, as expected, since a training step records no plan and runs the same
 (untrained rows, trained rows, batches of 16; folo-n 6 rounds, folo-s 5 and 3 more later, folo-m 3) with 3.7–7.4
 other cores busy (a game open until about 23:50; folo-m and the later folo-s rounds 1.8–4.4), and the trained rows
 alone (`FOLO_BENCH_BATCH=0 FOLO_BENCH_UNTRAINED=0`, 60 calls, folo-n 3 rounds with 1.3–4.6 other cores, folo-s 4
-rounds with 2.8–8.7 in runs of 4 s). No CPU run met the 3-core quiet rule, so every cell is loaded, and the trained
-1280×720 frames of folo-s are slower in the whole bench only (below). The trained rows cycle the first 16 val2017
-images (letterboxed square, or resized to 1280×720 for the `rect` rows):
+rounds with 2.8–8.7 in runs of 4 s). Most runs were above the 3-core quiet rule, so nothing was dropped and every
+cell gives its load; the trained 1280×720 frames of folo-s are slower in the whole bench only (below). The runs that
+met the rule agree with the cells: row 8 for folo-n with the rows alone reads 13.41 and 13.58 ms on e5a6ccf0 and
+13.54 on `main` (1.3–2.5 other cores), and folo-s's trained 1280×720 frame in the whole bench 21.05–22.80 ms
+without #259 (6 quiet runs of e5a6ccf0 and f04dce45) and 26.92–29.20 with it (7 of `main` and 25666428; 1.7–2.9
+other cores in both). The trained rows cycle the first 16 val2017 images (letterboxed square, or resized to 1280×720
+for the `rect` rows):
 
 | row (28 threads) | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` | folo-m e5a6ccf0 | folo-m `main` |
 |---|---|---|---|---|---|---|
@@ -457,8 +465,9 @@ Where a number here differs from a lane's by more than noise:
 - **Lazy's GPU batch 16** (lazy: folo-n f32 −10.5%, tensor cores −11.7%, folo-s f32 −8.9%, tensor cores −4.1%): −11%,
   −7%, −4% and −5% here; the folo-n tensor-core and folo-s f32 gains are smaller here.
 - **Lazy's "row 5 not established"**: established here for folo-n, −10% (f32) and −12% (tensor cores) at 640×640
-  (−9% and −8% in the third pass), and −8% for folo-s on tensor cores; folo-s f32 ties: e5a6ccf0 has a slow mode
-  (4.57 ms in three of five evening runs), and in its fast mode it reads 2.79 ms against `main`'s 2.86.
+  (−10% and −8% in the third pass), and −8% for folo-s on tensor cores; folo-s f32 is smaller than the evening's
+  −42%: e5a6ccf0 has a slow mode (4.57 ms in three of five evening runs), and in its fast mode (the third pass's
+  quiet runs) it reads 2.78 ms against `main`'s 2.67, −4%.
 - **Lazy's CPU row 8** (lazy: folo-n 17.49 → 15.02 ms, −14%, at 32–55% CPU load; counsel's estimate before the round
   −9 to −12%): does not reproduce, a tie here on trained weights (13.58 → 13.57 ms with the rows alone, −2% in the
   whole bench; 1.3–7.4 other cores). Its 1280×720 frame (−8%) is −5% here and its batch of 16 (−12%) −14%. folo-s,
@@ -484,7 +493,7 @@ number of lane fusion reproduces to four digits.
   diagnosed; it does not change any prediction (the same detections).
 - **folo-n f32 `predict_batch` of 16 × 1280×720 frames on the GPU, trained weights**: not slower at the median (14.13 →
   13.95 ms) but bimodal on `main` in the two evening passes (10.0 ms in 3 of 10 runs, 11–21 ms in the others;
-  e5a6ccf0 13.4–15.1, one 25.5), and steady in the third pass (10.24 ms, 10.17–10.38, against 14.10: −27%). Not
+  e5a6ccf0 13.4–15.1, one 25.5), and steady in the third pass (10.23 ms, 10.17–10.24, against 14.16: −28%). Not
   explained.
 - **folo-n f32 forward at batch 16, pipelined**: 2064 → 1962 img/s (−5%) with overlapping ranges, and the synchronised
   median ties (7.81 vs 7.84 ms); no plan is made at batch 16 and that path did not change, so it is read as noise.
@@ -917,11 +926,11 @@ reads a little lower than the pycocotools-exact AP of the tables):
   the last five. The longer v2 schedule passed v1 at epoch 58 and was still gaining about 0.0008 per epoch when it
   was paused at epoch 62, before its learning-rate decay and close-mosaic phases. **It is still paused**: all
   training for this round ran on rented GPUs with a fixed budget of about $9, and the remaining 238 epochs (about
-  29 h on the RTX 4080 SUPER, 25–45 h on what $9 rents) did not fit next to folo-s and the fine-tuning benchmark. It can be resumed from its checkpoint
-  ([examples/coco, Resume (v2)](../examples/coco/README.md#resume-v2)); what the full schedule reaches is not known.
-  v3 (2026-11-13) does not resume it: it gives v2's weights a short ending (the learning rate decayed to 1%, mosaic
-  off) and gains 0.023 AP over v2 (0.317 → 0.340), so most of v2's distance to v1's ending was the missing anneal,
-  not the epochs. folo-n v3 is **0.06–0.07 AP behind the published nano models** (v2 was 0.08–0.09, v1 0.08–0.10).
+  29 h on the RTX 4080 SUPER, 25–45 h on what $9 rents) did not fit next to folo-s and the fine-tuning benchmark.
+  It can be resumed from its checkpoint ([examples/coco, Resume (v2)](../examples/coco/README.md#resume-v2)); what
+  the full schedule reaches is not known. v3 (2026-11-13) does not resume it: it gives v2's weights a short ending
+  (the learning rate decayed to 1%, mosaic off) and gains 0.023 AP over v2 (0.317 → 0.340). folo-n v3 is **0.06–0.07
+  AP behind the published nano models** (v2 was 0.08–0.09, v1 0.08–0.10).
 - **folo-s.** 56 epochs (103,544 optimizer steps, 9.49 h of epochs on a 140 W card) reach **AP 0.416 / AP50 0.580**,
   **0.05–0.06 AP behind YOLO11s / YOLO26s** and above both published nano models. That is the epoch budget's floor,
   not a plateau: internal mAP50-95 rose in every one of the 56 epochs, and the last six gains (0.0007 to 0.0001)
@@ -1640,8 +1649,8 @@ From hill-climb 3's notebooks (not ranked against the list above):
 - **The CPU slowdown after a rect batch** ([Rows worse than e5a6ccf0](#rows-worse-than-e5a6ccf0)): folo-s single
   1280×720 frames +24–29% after another model's rect `predict_batch` in the same process, since #259; and the access
   violation seen once in `main`'s GPU bench ([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md), Leftovers).
-- **A quiet CPU repeat**: no CPU run of hill-climb 3's fold-in met the quiet rule; row 8's tie for folo-n (lane
-  lazy's −14% was measured under load) should be read again on an idle machine.
+- **A quiet CPU repeat**: most CPU runs of hill-climb 3's fold-in were loaded and only three of row 8's were quiet;
+  row 8's tie for folo-n (lane lazy's −14% was measured under load) should be read again on an idle machine.
 - **The GPU batch-1 floor** (rows 1, 2, 5): with plans, the folo-n batch-1 forward is about 1.0 ms of GPU time in
   f32 and 0.8 ms on tensor cores, in 138–146 dispatches. Fewer dispatches (fused small layers) and a look at the
   gaps between dependent dispatches; the device letterbox inside the plan (it uploads the image, which a plan

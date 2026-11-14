@@ -14,7 +14,7 @@
     "throughput": [
       { "label": "GPU forward, f32", "detail": "yolo26n with TF32 convolutions", "values": [2081, 1454], "text": ["2081", "1454"] },
       { "label": "GPU forward, f16", "detail": "both f16, FOLO on tensor cores", "values": [4159, 2370], "text": ["4159", "2370"] },
-      { "label": "GPU end to end", "detail": "both f16, decoded images in", "values": [2424, 615], "text": ["2424", "615"] }
+      { "label": "GPU end to end", "detail": "both f16, decoded images in", "values": [2428, 615], "text": ["2428", "615"] }
     ]
   },
   "training": {
@@ -38,7 +38,7 @@
       { "label": "GPU forward, batch 16", "detail": "f32", "better": "higher", "n": [2081, 1454], "s": [819, 627] },
       { "label": "GPU forward, batch 16", "detail": "both f16, FOLO on tensor cores", "better": "higher", "n": [4159, 2370], "s": [1799, 1159] },
       { "label": "GPU end to end, batch 1", "detail": "f32", "better": "lower", "n": [1.6, 6.92], "s": [2.65, 8.59] },
-      { "label": "GPU end to end, batch 16", "detail": "both f16, FOLO on tensor cores", "better": "higher", "n": [2424, 615], "s": [1355, 446] },
+      { "label": "GPU end to end, batch 16", "detail": "both f16, FOLO on tensor cores", "better": "higher", "n": [2428, 615], "s": [1372, 446] },
       { "label": "CPU forward, batch 1", "detail": "f32", "better": "lower", "n": [12.74, 22.8], "s": [29.2, 42.5] },
       { "label": "CPU end to end, batch 1", "detail": "f32", "better": "lower", "n": [13.57, 24.8], "s": [29.4, 51.1] },
       { "label": "Training step, batch 16", "detail": "f32", "better": "higher", "n": [380, 202], "s": [162, 105] },

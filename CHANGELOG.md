@@ -14,14 +14,18 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
 
 | | folo-n | yolo26n (best configuration) |
 |---|---:|---:|
-| GPU forward, batch 1 (median) | **1.14 ms** | 4.95 ms |
+| GPU forward, batch 1 (median) | **1.09 ms** | 4.95 ms |
 | GPU forward, batch 16 | **2081 img/s** | 1454 img/s (TF32) |
-| GPU end to end, batch 1 / batch 16 | **1.75 ms** (f32) / **2155 img/s** (f16 on tensor cores) | 6.92 ms / 615 img/s (fp16) |
+| GPU end to end, batch 1 / batch 16 | **1.60 ms** (f32) / **2428 img/s** (f16 on tensor cores) | 6.92 ms / 615 img/s (fp16) |
 | Training step, batch 16, f32 / AMP | **380** / **594 img/s** | 202 (TF32) / 252 img/s |
 | Training step peak memory allocated, f32 / AMP | **3467** / **2022 MiB** | 4517 / 2646 MiB |
 | CPU forward, batch 1 | **12.7 ms** | 22.8 ms |
-| CPU end to end, batch 1 | **13.1 ms** | 24.8 ms |
+| CPU end to end, batch 1 | **13.6 ms** | 24.8 ms |
 | COCO val2017 AP, from scratch (`folo-n-coco-v3`, 78 epochs) | 0.340 | 0.409 (Objects365 + 245 COCO epochs) |
+
+The end-to-end rows are on trained weights (`folo-n-coco-v3`) since the third optimisation round: random weights pass
+no candidate, so candidate-first prediction would skip the box branch. The CPU row's 13.1 ms before it was on random
+weights; on trained weights the round's starting build (e5a6ccf0) reads 13.58 ms and `main` 13.57, a tie.
 
 The entries are in two groups. **The foundation** is what the first internal build of 0.1.0 had. **Since the first
 build** is what landed after it and before the release went public; where it replaces something in the foundation
@@ -144,8 +148,8 @@ fixes.
   #260).
 - **Candidate-first prediction** (CPU and GPU): the class branches run on every pixel, the box branch only where a
   class passes `conf`, with the same detections bit for bit. On trained weights: on the GPU a batch of 16 is 4–11%
-  faster end to end; on the CPU 1280×720 frames 5% and a batch of 16 images 8–14%, while folo-n's 640×640 batch-1
-  row ties.
+  faster end to end (folo-n's f32 batch of 640×640 images ties); on the CPU 1280×720 frames 5% and a batch of 16
+  images 8–14%, while folo-n's 640×640 batch-1 row ties.
 - **Forward plans** on the GPU: a `Predictor` records its prediction once per input shape and replays it as a flat
   list of dispatches (`FOLO_GPU_NO_PLAN=1` turns it off). With candidate-first, folo-n end to end at batch 1 on
   640×640 images: 1.77 → 1.60 ms in f32, 1.51 → 1.33 ms in f16 on tensor cores (trained weights); the batch-1
@@ -155,8 +159,8 @@ fixes.
   square as before.
 - **Box fusion, opt-in** (`--fusion vote|dfl`, `--fusion-iou` on `folo val` and `folo predict`): moves each kept
   box's edges to a weighted mean of the candidates of its class that overlap it (IoU at least `--fusion-iou`),
-  `dfl` weighting each side by the certainty of its DFL distribution. `--fusion dfl --iou 0.65 --max-det 1000` adds 0.0025 to 0.0043 COCO AP on the
-  published weights (`folo-n-coco-v3` 0.340 → 0.343). Off by default.
+  `dfl` weighting each side by the certainty of its DFL distribution. `--fusion dfl --iou 0.65 --max-det 1000` adds
+  0.0025 to 0.0043 COCO AP on the published weights (`folo-n-coco-v3` 0.340 → 0.343). Off by default.
 - The validation metrics score boxes clipped to the image (the trainer's internal mAP; COCO numbers unchanged).
 - Slower: on the CPU, folo-s single 1280×720 frames run 24–29% slower when another model's rect `predict_batch` ran
   before them in the same process (since the rect batches; not diagnosed, docs/BENCHMARKS.md, Rows worse than

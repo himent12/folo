@@ -130,8 +130,8 @@ runs: 0–5% other GPU, 1.3–3.3 other cores.
 | f16 tensor cores b1, rect | 1.43 (1.36–1.57) | **1.24** (1.21–1.31), −13% | 1.69 (1.65–1.75) | 1.63 (1.60–1.67), −4% |
 | f32 b1 one | 1.47 (1.45–1.48) | **1.38** (1.36–1.47), −6% | 2.41 (2.35–2.86) | 2.30 (2.21–2.55), −4% |
 | f16 tensor cores b1 one | 1.47 (1.33–1.52) | **1.29** (1.26–1.40), −12% | 1.69 (1.65–2.13) | 1.62 (1.59–1.82), −4% |
-| f32 b16 (row 6) | 10.46 ms (10.05–10.89), 1530 img/s | **9.30** (9.04–10.25), 1721 img/s, −11% | 22.37 (22.02–22.77), 715 img/s | 21.53 (20.41–22.45), 743 img/s, −4% |
-| f16 tensor cores b16 (row 6) | 6.24 (6.16–6.30), 2566 img/s | **5.81** (5.74–6.06), 2754 img/s, −7% | 11.22 (11.18–11.45), 1427 img/s | **10.70** (10.64–10.93), 1496 img/s, −5% |
+| f32 b16, val2017 images (padded square) | 10.46 ms (10.05–10.89), 1530 img/s | **9.30** (9.04–10.25), 1721 img/s, −11% | 22.37 (22.02–22.77), 715 img/s | 21.53 (20.41–22.45), 743 img/s, −4% |
+| f16 tensor cores b16, val2017 images | 6.24 (6.16–6.30), 2566 img/s | **5.81** (5.74–6.06), 2754 img/s, −7% | 11.22 (11.18–11.45), 1427 img/s | **10.70** (10.64–10.93), 1496 img/s, −5% |
 | `predict_batch` 16 × 1280×720, f32 | 14.13 (13.43–25.49) | 13.95 (10.02–21.17), bimodal | 25.59 (25.37–25.83) | **17.44** (16.05–17.91), −32% |
 | `predict_batch` 16 × 1280×720, f16 tensor cores | 9.67 (9.62–9.90) | **7.96** (7.90–8.10), −18% | 14.61 (14.55–14.85) | **11.01** (10.95–11.04), −25% |
 | detections per image (b1 / b1 640 / b16) | 3.6 / 3.8 / 3.8 | the same | 4.6 / 5.3 / 4.8 | the same |
@@ -147,24 +147,30 @@ runs: 0–5% other GPU, 1.3–3.3 other cores.
 
 ### Third pass: row 6 (`trained3/`)
 
-The same bench with **b16 640**, 5 rounds, 01:08–01:15 (`logs/trained3/`, `logs/trained3-summary.txt`). Other GPU
-0–1% throughout; other cores 1.6–2.7 except `main` rounds 1 and 2 (17.0, 10.5) and e5a6ccf0 round 5 (10.4). Every
-run is kept: the batch-16 rows of the loaded runs sit inside the quiet runs' range (folo-n tensor cores: `main`
-6.57–6.60 ms quiet, 7.05–7.10 loaded; e5a6ccf0 7.12–7.41 quiet, 8.01 loaded). `main`'s round 4 **crashed** after
-its folo-n rows (exit 0xC0000005, an access violation, below), so its folo-s rows have 4 runs.
+The same bench with **b16 640**, 5 rounds, 01:08–01:15 (`logs/trained3/`). Other GPU 0–1% throughout; other cores
+1.6–2.7 except `main` rounds 1 and 2 (17.0, 10.5) and e5a6ccf0 round 5 (10.4). Those three loaded runs are left out
+(`logs/trained3-quiet-summary.txt`, `summ3.py ... --skip base-r5,new-r1,new-r2`): on the tensor-core rows they read
+7–9% slower (folo-n: `main` 6.57–6.60 ms quiet, 7.05–7.10 loaded; e5a6ccf0 7.12–7.41 quiet, 8.01 loaded), and on
+folo-n's f32 b16 640 row one of `main`'s read faster (10.35 ms). All five runs: `logs/trained3-summary.txt` (folo-n
+tensor cores 7.37 → 6.60 ms, f32 13.49 → 12.16, −10%). `main`'s round 4 **crashed** after its folo-n rows (exit
+0xC0000005, an access violation, below), so its folo-s rows have 2 quiet runs; e5a6ccf0 has 4, folo-n's `main` 3.
 
 | row | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` |
 |---|---|---|---|---|
-| f32 b16 640 (row 6) | 13.49 ms (11.38–16.72), 1186 img/s, p90 25–62 ms on both | **12.16** (10.35–12.65), 1316 img/s, −10% | 22.74 (22.53–23.24), 704 img/s | **21.20** (20.89–21.43), 755 img/s, −7% |
-| f16 tensor cores b16 640 (row 6) | 7.37 (7.12–8.01), 2171 img/s | **6.60** (6.57–7.10), 2424 img/s, −10% | 12.64 (12.26–12.72), 1266 img/s | **11.81** (11.48–11.91), 1355 img/s, −7% |
-| f32 b1 640 | 1.74 (1.71–2.20) | 1.59 (1.56–1.76), −9% | 2.79 (2.75–3.47) | 2.86 (2.62–3.16), tie |
-| f16 tensor cores b1 640 | 1.49 (1.45–1.52) | 1.37 (1.35–1.89), −8% | 1.96 (1.96–2.03) | 1.89 (1.83–1.97), −4% |
-| f32 b16 hd | 14.10 (14.00–14.26) | **10.24** (10.17–10.38), −27% | 24.98 (24.86–25.74) | **16.29** (16.03–16.61), −35% |
-| f16 tensor cores b16 hd | 9.96 (9.87–10.73) | **8.08** (7.98–8.41), −19% | 15.01 (14.84–15.15) | **11.26** (11.15–11.40), −25% |
+| f32 b16 640 (row 6) | 12.79 ms (11.38–15.53), 1251 img/s, p90 23–68 ms on both | 12.49 (12.16–12.65), 1281 img/s, −2%: a tie | 22.64 (22.53–22.76), 707 img/s | **20.94** (20.89–20.98), 764 img/s, −8% |
+| f16 tensor cores b16 640 (row 6) | 7.36 (7.12–7.41), 2174 img/s | **6.59** (6.57–6.60), 2428 img/s, −10% | 12.65 (12.26–12.72), 1265 img/s | **11.66** (11.48–11.84), 1372 img/s, −8% |
+| f32 b1 640 | 1.73 (1.71–2.20) | 1.56 (1.56–1.59), −10% | 2.78 (2.75–2.81) | 2.67 (2.62–2.72), −4% |
+| f16 tensor cores b1 640 | 1.48 (1.45–1.51) | 1.36 (1.35–1.40), −8% | 1.97 (1.96–2.03) | 1.86 (1.83–1.88), −6% |
+| f32 b16 hd | 14.16 (14.00–14.26) | **10.23** (10.17–10.24), −28% | 24.95 (24.86–25.17) | **16.06** (16.03–16.08), −36% |
+| f16 tensor cores b16 hd | 9.92 (9.87–10.02) | **8.02** (7.98–8.08), −19% | 15.05 (14.84–15.15) | **11.21** (11.15–11.27), −25% |
 
-- folo-s f32 b1 640: e5a6ccf0 ran in its fast mode in all five runs here (2.75–3.47 ms), and `main` ties it. The
-  evening's −42% is e5a6ccf0's slow mode; the targets cell keeps the evening's median and says so.
-- folo-n f32 b16 hd is steady here on `main` (10.17–10.38 ms in five runs), where the evening passes were bimodal.
+- folo-s f32 b1 640: e5a6ccf0 ran in its fast mode in all five runs here (2.75–2.81 ms quiet, 3.47 in the loaded
+  fifth), and `main` is 4% faster than that. The evening's −42% is e5a6ccf0's slow mode; the targets cell keeps the
+  evening's median and says so.
+- folo-n f32 b16 hd is steady here on `main` (10.17–10.24 ms quiet, 10.38 at most with the loaded two), where the
+  evening passes were bimodal.
+- folo-n f32 b16 640 is a tie on the quiet runs (−2%) and −10% on all five: e5a6ccf0 is bimodal on this row
+  (11.38–15.53 ms quiet, p90 25–62 ms), so it is not read as a gain.
 
 **Batch-1 synchronised latency, folo-n, the row-5 protocol**: f32 1.77 / 1.88 → 1.60 / 1.70 ms (p50 / p90); tensor
 cores 1.51 / 1.65 → 1.33 / 1.40.
@@ -179,7 +185,7 @@ through that load, so all 5 rounds are used (`logs/train-summary.txt`; round 3 a
 | row | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` |
 |---|---|---|---|---|
 | f32, median step | 41.73 ms (41.53–42.11), 383 img/s | 41.93 (41.67–42.01), 382 img/s: tie (+0.5%) | 99.06 (97.79–99.19), 162 img/s | 98.22 (97.59–98.64), 163 img/s: tie |
-| AMP, median step | 27.44 (25.87–36.58), 583 img/s | 26.30 (26.03–27.27), 608 img/s: tie (−4%, one slow e5a6ccf0 round) | 53.82 (53.03–56.45), 297 img/s | 53.28 (53.20–54.69), 300 img/s: tie |
+| AMP, median step | 27.44 (25.87–36.58), 583 img/s | 26.30 (26.03–27.27), 608 img/s: −4% inside overlapping ranges (one slow e5a6ccf0 round); the quiet round 3 a tie | 53.82 (53.03–56.45), 297 img/s | 53.28 (53.20–54.69), 300 img/s: tie |
 | round 3 only, f32 / AMP | 41.53 / 25.87 ms | 41.67 / 26.03 ms | 97.79 / 53.15 ms | 97.59 / 53.28 ms |
 | dispatches, new bind groups, new pool buffers per step (f32) | 1117, 0, 0 | 1117, 0, 0 | 1120, 0, 0 | 1120, 0, 0 |
 | peak live memory f32 / AMP | 3467 / 2022 MiB | the same | 6520 / 3713 MiB | the same |
@@ -204,8 +210,13 @@ FOLO_BENCH_IMAGES=D:/folo-data/coco/val2017` (the trained rows). Runs, all under
 | `cpu-s-late/` | whole bench, folo-s again | 3 | 00:37–00:42 | 1.8–4.2 |
 | `cpu-bisect-s/` | whole bench, folo-s, with f04dce45 (#254 + #255, before #258 / #259) as a third binary | 3 | 00:45– | see `cpu-bisect-s-summary.txt` |
 
-No run met the 3-core quiet rule (the machine's floor that night was 4–7 cores until about 23:50 and 2–4 after),
-so nothing was dropped and every cell below gives its load. Summaries `logs/<dir>-summary.txt`.
+Most runs were above the 3-core quiet rule (the machine's floor that night was 4–7 cores until about 23:50 and 2–4
+after), so nothing was dropped and every cell below gives its load. The runs that met it (the `# load:` header of
+each log, `other cores` ≤ 3) agree with the cells: row 8 for folo-n with the rows alone, e5a6ccf0 13.41 and 13.58 ms
+(`cpu-rect-n/base-r2`, `-r3`) against `main` 13.54 (`new-r3`); folo-s's trained 1280×720 frame in the whole bench
+21.05–22.80 ms without #259 (`cpu-s-late/base-r3`, `cpu-bisect-s/base-r2`, `f04-r2`, `cpu-bisect2-s/f04-r1..r3`)
+and 26.92–29.20 with it (`cpu-s-late/new-r3`, `cpu-bisect-s/new-r1`, `-r2`, `cpu-bisect2-s/new-r1`, `-r3`,
+`r259-r1`, `-r3`). Summaries `logs/<dir>-summary.txt`.
 
 | row (28 threads) | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` | folo-m e5a6ccf0 | folo-m `main` |
 |---|---|---|---|---|---|---|
@@ -280,7 +291,7 @@ Each lane's own number, then this notebook's (the cells above):
 | claim (notebook) | the lane | here | reading |
 |---|---|---|---|
 | plan: folo-n f32 training step (r3-plan.md, Training step) | 52.5 → 55.3 ms, +5.4%, beside another GPU process | 41.73 → 41.93 ms, +0.5% | **does not reproduce** (a tie) |
-| plan: AMP training step | 38.3 → 35.0 ms, −8.6% | 27.44 → 26.30 ms, −4% (one slow e5a6ccf0 round) | a tie |
+| plan: AMP training step | 38.3 → 35.0 ms, −8.6% | 27.44 → 26.30 ms, −4% inside overlapping ranges (one slow e5a6ccf0 round); 25.87 → 26.03 in the quiet round | does not reproduce |
 | plan: rows 1 / 2, two binaries | −23% / −35% at 5–88% CPU load | plans off → on on one binary: −3.5% (f32), −10% (tensor cores) | the lane's quieter `gpu_latency` rounds (−3.5% / −5.7%) and its in-process toggle (about −5% / −10%) agree; the loaded two-binary gains do not reproduce |
 | plan: folo-s b1, plans | a tie | −6% (f32), −8% (tensor cores), plans off → on | larger here |
 | plan: rows 3, 4, 6 at batch 16 | +2.4 to +5.3% slower | ties (forward); no plan at batch 16 | **does not reproduce** |
@@ -305,9 +316,9 @@ Each lane's own number, then this notebook's (the cells above):
   `main` (3 of 10 runs at 10.0 ms, the others 11–21).
 - **folo-n f32 forward b16, pipelined**: 2064 → 1962 img/s (−5%) with overlapping ranges; the synchronised median ties
   (7.81 / 7.84 ms) and the code path did not change (no plan at batch 16): noise.
-- **folo-s CPU forward b1**: +3.1% in the whole bench (30.48 → 31.41 ms, ranges overlap), −2.9% to −4.7% in the later
-  bisect runs (`cpu-bisect-s`: 29.52 → 28.14; `cpu-bisect2-s`: 28.86 → 28.49 against f04dce45): noise; the forward did
-  not change.
+- **folo-s CPU forward b1**: +3.1% in the whole bench (30.48 → 31.41 ms, ranges overlap), −4.7% and −1.3% in the later
+  bisect runs (`cpu-bisect-s`: 29.52 → 28.14 against e5a6ccf0; `cpu-bisect2-s`: 28.86 → 28.49 against f04dce45):
+  noise; the forward did not change.
 
 Nothing else measured is slower than e5a6ccf0.
 
@@ -318,7 +329,8 @@ Nothing else measured is slower than e5a6ccf0.
   where candidate-first runs no box branch.
 - Rows 10 and 11 (the trainer and its memory): not re-measured, since row 9 did not move.
 - A quiet training-step A/B: one quiet round of five (above).
-- A quiet CPU A/B: no CPU run met the 3-core rule (CPU section); every CPU cell gives its load.
+- A quiet CPU A/B: most CPU runs were above the 3-core rule and only a few of each row were quiet (CPU section);
+  every CPU cell gives its load.
 - Candidate-first's bit-identity and the plan's zero mismatches on val2017 were not re-tested; the detections per
   image of every trained row are the same on both builds.
 - The GPU clocks were not logged per run, so the bimodal rows above (e5a6ccf0's tensor-core forward b1, folo-s f32
@@ -349,8 +361,8 @@ Nothing else measured is slower than e5a6ccf0.
   folo-vision --bench cpu_e2e`, the `trained 1280x720 (rect 640x384)` row (about 27–29 ms on `main`, 21–22 ms on
   f04dce45); with `FOLO_BENCH_BATCH=0` or `FOLO_BENCH_UNTRAINED=0` it reads about 21 ms. A server holding several
   models (the LRU of predictors) can meet the same order. Not diagnosed.
-- **A quiet CPU repeat**: no CPU run met the 3-core rule. Row 8's tie and the folo-s numbers should be read again on
-  an idle machine, with the 8-pinned-P-core rows of the first fold-in.
+- **A quiet CPU repeat**: most CPU runs were loaded, only three of row 8's quiet. Row 8's tie and the folo-s numbers
+  should be read again on an idle machine, with the 8-pinned-P-core rows of the first fold-in.
 
 ## Logs
 
@@ -359,7 +371,7 @@ Every cell's log, under `D:/folo-data/runs-hill3/foldin/`:
 | cells | logs |
 |---|---|
 | GPU inference, random weights (forward, e2e, batches, plans off) | `logs/infer/{base,new,nop}-r1..5.txt`; `logs/infer-driver.txt` (the `# load:` lines); summary `logs/infer-summary.txt` |
-| GPU prediction, trained weights | `logs/trained/{base,new}-r1..5.txt`, `logs/trained2/{base,new}-r1..5.txt`, pooled quiet pairs `logs/trained-pooled/` (`SOURCES.txt`); summaries `logs/trained-summary.txt`, `logs/trained2-summary.txt`, `logs/trained-pooled-summary.txt`; row 6: `logs/trained3/`, `logs/trained3-summary.txt`, `logs/trained3-{driver,start,end}.txt` |
+| GPU prediction, trained weights | `logs/trained/{base,new}-r1..5.txt`, `logs/trained2/{base,new}-r1..5.txt`, pooled quiet pairs `logs/trained-pooled/` (`SOURCES.txt`); summaries `logs/trained-summary.txt`, `logs/trained2-summary.txt`, `logs/trained-pooled-summary.txt`; row 6: `logs/trained3/`, `logs/trained3-quiet-summary.txt` (the cells), `logs/trained3-summary.txt` (all five runs), `logs/trained3-{driver,start,end}.txt` |
 | GPU training step | `logs/train/{base,new}-r1..5.txt`; `logs/train-summary.txt`, `logs/train-quiet-r3-summary.txt` |
 | CPU rows | `logs/cpu-{n,s,m}/`, `logs/cpu-s-late/`, `logs/cpu-rect-{n,s}/`, `logs/cpu-rect2-s/`, `logs/cpu-bisect-s/`, `logs/cpu-bisect2-s/` (`{base,new,f04,r259,...}-rN.txt`), each with `logs/<dir>-summary.txt` and `logs/<dir>-driver.txt`; bisect binaries `bin/{f04,r259}-cpu_e2e.exe`, `bin/{f04,r259}-commit.txt`, `logs/build-{f04,r259}.log` |
 | accuracy | `logs/acc/*.json`, `logs/acc/*.err`, `logs/acc/summary.txt` |
