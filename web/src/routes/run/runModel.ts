@@ -190,26 +190,34 @@ export class RunModel {
   /**
    * How the focal line ends, in StatusBadge's marks (LineChart `end`): a filled lime dot with the heartbeat while the run
    * trains, a square once stopped, a cross when it failed, a plain dot when it completed. Every chart's first series
-   * takes it (mAP50-95, precision, total loss, the learning rate or the throughput); the others end in a dot of their
-   * own hue (design/UNIFIED.md §3, Marks).
+   * takes it (mAP50-95, precision, total loss, the learning rate or the throughput); see `trailMark` for the others
+   * (design/UNIFIED.md §3, Marks).
    */
   readonly endMark = computed(() => {
     const s = this.run().status;
     return s === 'running' ? ('live' as const) : s === 'stopped' ? ('stopped' as const) : s === 'failed' ? ('failed' as const) : undefined;
+  });
+  /**
+   * How a chart's other lines end: a dot of their own hue while the run trains (one lime dot per chart) and once it
+   * completed, the run's square or cross once it stopped or failed, as the first line.
+   */
+  readonly trailMark = computed(() => {
+    const end = this.endMark.get();
+    return end === 'live' ? undefined : end;
   });
   private ep = (f: EpochField): Pt[] => this.epochData.points(f).slice();
   readonly mapSeries = computed((): Series[] => {
     this.epochsRev();
     return [
       { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, end: this.endMark.get(), points: this.ep('map50_95') },
-      { id: 'm50', label: 'mAP50', color: 'var(--chart-2)', pattern: 'dash', points: this.ep('map50') },
+      { id: 'm50', label: 'mAP50', color: 'var(--chart-2)', pattern: 'dash', end: this.trailMark.get(), points: this.ep('map50') },
     ];
   });
   readonly prSeries = computed((): Series[] => {
     this.epochsRev();
     return [
       { id: 'p', label: 'precision', color: 'var(--chart-3)', end: this.endMark.get(), points: this.ep('precision') },
-      { id: 'r', label: 'recall', color: 'var(--chart-4)', pattern: 'dash', points: this.ep('recall') },
+      { id: 'r', label: 'recall', color: 'var(--chart-4)', pattern: 'dash', end: this.trailMark.get(), points: this.ep('recall') },
     ];
   });
   private alpha = () => Number(this.smoothing.get());
@@ -224,9 +232,9 @@ export class RunModel {
       { id: 'total', label: 'total', color: 'var(--text-primary)', emphasis: true, end: this.endMark.get(), points: d.smoothed('total', a).pts.slice() },
       // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted. Box
       // is painted over dfl's dots where they run together late in a run, and each line is labelled at its end.
-      { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, points: d.smoothed('box', a).pts.slice() },
-      { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: d.smoothed('cls', a).pts.slice() },
-      { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: d.smoothed('dfl', a).pts.slice() },
+      { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, end: this.trailMark.get(), points: d.smoothed('box', a).pts.slice() },
+      { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', end: this.trailMark.get(), points: d.smoothed('cls', a).pts.slice() },
+      { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', end: this.trailMark.get(), points: d.smoothed('dfl', a).pts.slice() },
     ];
   });
   readonly lrSeries = computed((): Series[] => {

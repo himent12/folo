@@ -272,16 +272,24 @@ describe('the four run charts', () => {
 
   it("end each chart's first line in the run's mark, the loss and the learning rate too (design/UNIFIED.md §3, Marks)", () => {
     const first = (m: RunModel) => [m.mapSeries.get()[0]!, m.prSeries.get()[0]!, m.lossSeries.get().find((s) => s.id === 'total')!, m.lrSeries.get()[0]!, m.ipsSeries.get()[0]!];
+    // The other drawn lines of the three charts that have any: mAP50, recall, and the loss components (not the raw ghost).
+    const rest = (m: RunModel) => [m.mapSeries.get()[1]!, m.prSeries.get()[1]!, ...m.lossSeries.get().filter((s) => s.id !== 'total' && !s.ghost)];
     const live = show({ ...base, status: 'running' }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });
     expect(first(live.model).map((s) => s.end)).toEqual(['live', 'live', 'live', 'live', 'live']);
-    // Every other series ends in a plain dot of its own hue.
-    expect(live.model.lossSeries.get().filter((s) => s.id !== 'total').map((s) => s.end)).toEqual([undefined, undefined, undefined, undefined]);
+    // One lime dot per chart: every other series ends in a plain dot of its own hue while the run trains.
+    expect(rest(live.model).map((s) => s.end)).toEqual([undefined, undefined, undefined, undefined, undefined]);
     live.c.unmount();
-    const stopped = show({ ...base, status: 'stopped' }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });
-    expect(first(stopped.model).map((s) => s.end)).toEqual(['stopped', 'stopped', 'stopped', 'stopped', 'stopped']);
-    stopped.c.unmount();
+    // A run that ended badly says so at the end of every line, not only the first.
+    for (const status of ['stopped', 'failed'] as const) {
+      const ended = show({ ...base, status }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });
+      expect(first(ended.model).map((s) => s.end)).toEqual([status, status, status, status, status]);
+      expect(rest(ended.model).map((s) => s.end)).toEqual([status, status, status, status, status]);
+      expect(ended.model.lossSeries.get().find((s) => s.ghost)!.end).toBeUndefined();
+      ended.c.unmount();
+    }
     const done = show({ ...base, status: 'completed' }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });
     expect(first(done.model).map((s) => s.end)).toEqual([undefined, undefined, undefined, undefined, undefined]);
+    expect(rest(done.model).map((s) => s.end)).toEqual([undefined, undefined, undefined, undefined, undefined]);
     done.c.unmount();
   });
 

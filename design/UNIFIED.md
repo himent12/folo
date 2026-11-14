@@ -138,8 +138,9 @@ links from Studio. Both change.*
 
 **Runs.** Columns: Run, Architecture, Dataset, Status, Progress, Best mAP50-95, Trend, Duration, Created. The
 trend is a 96 × 20 sparkline of mAP50-95, neutral, with a lime end dot while live. Studio's compare checkboxes
-appear on a hovered or focused row and stay once one is ticked. On a narrow window Duration leaves first, then
-Dataset (§2, Tables). *Single-line rows and columns from Desktop → Studio; the trend from Studio → Desktop.*
+appear on a hovered or focused row and stay once one is ticked. On a narrow window whole columns leave before a
+name is cut (§2, Tables): Trend and Duration first, then Created, the architecture and dataset last. *Single-line
+rows and columns from Desktop → Studio; the trend from Studio → Desktop.*
 
 **Run.** Header as §2. Then, top to bottom:
 1. One KPI strip of five tiles: Epoch (with the progress rail), mAP50-95 (the change against the last epoch, the

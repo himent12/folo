@@ -177,7 +177,7 @@ impl FoloApp {
             let stopped = d.loss[3].last().map_or(r.epoch as f32, |p| p.0);
             let fail = Marker {
                 x: stopped,
-                label: format!("failed during epoch {}", r.epoch).into(),
+                label: format!("failed during epoch {}", r.failed_epoch()).into(),
                 color: t.danger_text,
                 lane: Some(0),
             };

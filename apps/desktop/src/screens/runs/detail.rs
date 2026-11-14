@@ -386,11 +386,11 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(
-                        text(ty::BASE, t.text_primary)
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(format!("Failed in epoch {} of {}", r.epoch, r.epochs)),
-                    )
+                    .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(format!(
+                        "Failed in epoch {} of {}",
+                        r.failed_epoch(),
+                        r.epochs
+                    )))
                     .child(
                         div()
                             .font_family(crate::theme::MONO)
@@ -480,13 +480,15 @@ impl FoloApp {
                 ),
             )
         };
+        // A failed run's tile names the epoch it failed in, as its callout and its charts do.
+        let shown_epoch = if r.status == RunStatus::Failed { r.failed_epoch() } else { r.epoch };
         let tiles: Vec<folo_ui::Div> = vec![
             div()
                 .flex()
                 .flex_col()
                 .gap(px(6.))
                 .child(kpi_label(&t, "Epoch"))
-                .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, KPI_UNIT))
+                .child(metric(&t, shown_epoch.to_string(), &format!("/ {}", r.epochs), big, KPI_UNIT))
                 .child(div().pt(px(if compact { 4. } else { 6. })).child(progress(
                     &t,
                     r.progress(),
