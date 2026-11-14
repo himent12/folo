@@ -498,6 +498,7 @@ impl RecentCols {
 
 #[cfg(test)]
 mod tests {
+    use super::super::page::side_width;
     use super::{DS_MIN, RecentCols, best_dataset_w};
 
     #[test]
@@ -513,13 +514,21 @@ mod tests {
     }
 
     #[test]
-    fn recent_runs_drop_whole_columns_in_the_two_thirds() {
-        // 1280: two thirds of 1,000 px; the meta column goes, Created stays.
-        let at_1280 = RecentCols::fit(656.);
-        assert!(at_1280.created && at_1280.meta.is_none(), "{at_1280:?}");
+    fn best_models_take_a_third_of_the_row_but_at_least_380_px() {
+        // 1280 (1,000 px of content): a third would be 328, too little for its three columns.
+        assert_eq!(side_width(1000.), 380.);
+        // 1680 (1,392 px): a third of the row, as before.
+        assert_eq!(side_width(1392.), 458.);
+    }
+
+    #[test]
+    fn recent_runs_drop_whole_columns_beside_best_models() {
+        // 1280: what Best models' 380 px leave of 1,000 px; Created and the meta column go.
+        let at_1280 = RecentCols::fit(1000. - 16. - side_width(1000.));
+        assert!(!at_1280.created && at_1280.meta.is_none(), "{at_1280:?}");
         assert!(at_1280.name >= 140.);
         // Stacked at 960 and in the two thirds at 1680: every column.
-        for w in [872., 917.] {
+        for w in [872., 1392. - 16. - side_width(1392.)] {
             let c = RecentCols::fit(w);
             assert!(c.created && c.meta.is_some(), "{w}: {c:?}");
         }

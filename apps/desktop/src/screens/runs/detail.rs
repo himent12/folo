@@ -456,7 +456,7 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(6.))
                 .min_w_0()
-                .child(caption(&t, label))
+                .child(kpi_label(&t, label))
                 .child(duration_metric(&t, secs, big, KPI_UNIT))
                 .child(detail)
         };
@@ -485,7 +485,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(caption(&t, "Epoch"))
+                .child(kpi_label(&t, "Epoch"))
                 .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, KPI_UNIT))
                 .child(div().pt(px(if compact { 4. } else { 6. })).child(progress(
                     &t,
@@ -517,7 +517,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(caption(&t, "Precision / Recall"))
+                .child(kpi_label(&t, "Precision / Recall"))
                 .child(metric_pair(
                     &t,
                     big,
@@ -535,7 +535,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(caption(&t, if live || unstarted { "Throughput" } else { "Final throughput" }))
+                .child(kpi_label(&t, if live || unstarted { "Throughput" } else { "Final throughput" }))
                 .child(
                     div()
                         .flex()

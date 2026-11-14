@@ -190,7 +190,7 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(4.))
                 .min_w_0()
-                .child(caption(&t, label))
+                .child(kpi_label(&t, label))
                 .child(
                     div().h(px(KPI_HEADLINE.line)).flex().items_end().child(
                         metric(&t, value, unit, KPI_VALUE, KPI_UNIT)
@@ -213,7 +213,7 @@ impl FoloApp {
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .child(caption(&t, "mAP50-95"))
+                            .child(kpi_label(&t, "mAP50-95"))
                             .child(
                                 text(KPI_HEADLINE, t.text_primary)
                                     .h(px(KPI_HEADLINE.line))
@@ -244,7 +244,7 @@ impl FoloApp {
                     .flex_col()
                     .gap(px(4.))
                     .min_w_0()
-                    .child(caption(&t, "Precision / Recall"))
+                    .child(kpi_label(&t, "Precision / Recall"))
                     .child(
                         div().h(px(KPI_HEADLINE.line)).flex().items_end().child(
                             metric_pair(

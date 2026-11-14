@@ -33,7 +33,12 @@ The components are fine; the page structure is not.
 - **Numbers:**
   - Geist with tabular figures everywhere, chart ticks included; Mono only for paths, ids, code and logs.
   - Metrics 3 decimals.
-  - Units one step smaller and tertiary, 2 px gap; durations read "14m 55s".
+  - Units and the secondary part of a value ("img/s", "/ 100", a duration's "m" and "s") in `text.tertiary` on the
+    value's baseline: in a KPI tile `sm` (12) under its 24 or 32 px value, elsewhere one step smaller; durations read
+    "14m 55s".
+- **KPI tiles:** the label and the caption line in `sm` `text.secondary`, the value 24 px 600 (one 32 px headline per
+  page at most). Every strip (Run, Model, Overview's live panel, a dataset's Statistics, a benchmark entry) builds
+  its tiles from `ui::kpi_label`, `KPI_VALUE`, `KPI_UNIT`, `KPI_HEADLINE` and `kpi_note`, so they read the same.
 - **Charts:**
   - A 40 px header with title, subtitle, and a legend with values (the cursor's value while inspecting, else the
     latest).
@@ -72,8 +77,9 @@ The components are fine; the page structure is not.
   - The live panel shows a 48 px header with a 2 px progress rail, then from 1280 px a 2×2 KPI block on the left third
     beside the validation-mAP chart (one row of four tiles over the chart below 1280).
   - The machine is a 36 px footer of meters.
-  - From 1280 px Recent runs (two thirds) sits beside Best models (one third), both single-line rows above the fold;
-    narrower they stack. The Datasets cards come under them.
+  - From 1280 px Recent runs (two thirds) sits beside Best models (one third, at least 380 px, so its three columns
+    fit at 1280), both single-line rows above the fold; Recent runs drops whole columns by its own width. Narrower
+    they stack. The Datasets cards come under them.
 - **Run dashboard:**
   - One KPI row of five tiles (Epoch, mAP50-95, Precision / Recall, Throughput, Time left).
   - Row A: Validation mAP (3) beside Training loss (2) at 220.
@@ -92,8 +98,8 @@ The components are fine; the page structure is not.
   name.
 - **Datasets:** cards with a 2×2 mosaic and a class-balance strip along the bottom edge.
 - **Model detail:**
-  - mAP50-95 tile at twice the width, 32 px; the other tiles as the run page's (24 px values, `sm` units, captions
-    in `text.secondary`; `ui::KPI_VALUE`, `KPI_UNIT`, `kpi_note`, shared by both strips).
+  - mAP50-95 tile at twice the width, 32 px; the other tiles as the run page's (24 px values, `sm` units, labels
+    and captions in `text.secondary`).
   - One precision-recall panel: the plot (7/12) beside the per-class table (5/12), its legend. Every class is a thin
     context line, the mean in ink, a hovered, focused or pinned class in its hue.
   - The confusion matrix on one luminance ramp (the row's share in each cell), Most confused / Most missed beside it.

@@ -58,7 +58,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(5.))
                     .child(swatch(col, 6.))
-                    .child(text(ty::SM, t.text_tertiary).tnum().child(format!("{n} {}", int(c))))
+                    .child(kpi_note(&t).child(format!("{n} {}", int(c))))
             }),
         );
         let tile = |content: folo_ui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(pad)).child(content);
@@ -87,7 +87,7 @@ impl FoloApp {
                 "Boxes",
                 int(boxes),
                 "",
-                Some(text(ty::SM, t.text_tertiary).tnum().child(format!("{per:.1} per image"))),
+                Some(kpi_note(&t).child(format!("{per:.1} per image"))),
             )))
             .child(vline(&t))
             .child(tile(stat(
@@ -95,7 +95,7 @@ impl FoloApp {
                 "Classes",
                 ds.classes.len().to_string(),
                 "",
-                Some(text(ty::SM, t.text_tertiary).whitespace_nowrap().child(names_summary(&ds.classes, 24))),
+                Some(kpi_note(&t).whitespace_nowrap().child(names_summary(&ds.classes, 24))),
             )))
             .child(vline(&t))
             .child({
@@ -123,9 +123,9 @@ impl FoloApp {
                             }
                         } else if ds.splits.total() == 0 {
                             // Nothing to have labels: not "every image has labels" for no image.
-                            text(ty::SM, t.text_tertiary).child("no images")
+                            kpi_note(&t).child("no images")
                         } else {
-                            text(ty::SM, t.text_tertiary).child("every image has labels")
+                            kpi_note(&t).child("every image has labels")
                         }),
                     ));
                 if empty > 0 {

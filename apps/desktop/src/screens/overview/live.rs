@@ -150,9 +150,9 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(4.))
                 .min_w_0()
-                .child(caption(&t, label))
+                .child(kpi_label(&t, label))
                 .child(value)
-                .when_some(detail, |d, s| d.child(text(ty::SM, t.text_tertiary).tnum().child(s)))
+                .when_some(detail, |d, s| d.child(kpi_note(&t).child(s)))
         };
         // From 1280 px the four KPIs are a 2 x 2 block in the card's left third beside the chart;
         // narrower, one row of four over a full-width chart. Equal tracks (a grid, so a tile's
@@ -186,7 +186,7 @@ impl FoloApp {
                 // number like the other tiles' detail lines.
                 kpi(
                     "Epoch",
-                    metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM)
+                    metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), KPI_VALUE, KPI_UNIT)
                         .into_any_element(),
                     Some(format!("{:.0}% complete", r.progress() * 100.)),
                 ),
@@ -196,7 +196,7 @@ impl FoloApp {
                 kpi(
                     // Named as on the run's dashboard.
                     "mAP50-95 · latest",
-                    text(ty::X2XL, t.text_primary)
+                    text(KPI_VALUE, t.text_primary)
                         .tnum()
                         .child(map_now.map_or("–".into(), f3))
                         .into_any_element(),
@@ -207,14 +207,14 @@ impl FoloApp {
                 2,
                 kpi(
                     "Throughput",
-                    metric(&t, ips.map_or("–".into(), |v| format!("{v:.0}")), "img/s", ty::X2XL, ty::SM)
+                    metric(&t, ips.map_or("–".into(), |v| format!("{v:.0}")), "img/s", KPI_VALUE, KPI_UNIT)
                         .into_any_element(),
                     ips_avg.map(|a| format!("avg {a:.0}")),
                 ),
             ))
             .child(tile(
                 3,
-                kpi("Time left", duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(), elapsed),
+                kpi("Time left", duration_metric(&t, eta_s, KPI_VALUE, KPI_UNIT).into_any_element(), elapsed),
             ));
         let footer = self.system_footer(cx);
         panel(&t)

@@ -159,15 +159,15 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .child(caption(&t, "Score"))
+                .child(kpi_label(&t, "Score"))
                 .child(metric(
                     &t,
                     score.map_or("–".to_string(), |s| format!("{:.1}", s.total)),
                     "/ 100",
-                    ty::X3XL,
-                    ty::SM,
+                    KPI_HEADLINE,
+                    KPI_UNIT,
                 ))
-                .child(text(ty::SM, t.text_tertiary).child(if score.is_some_and(|s| s.partial) {
+                .child(kpi_note(&t).child(if score.is_some_and(|s| s.partial) {
                     "Partial: over what was measured"
                 } else {
                     "All five axes measured"
@@ -202,14 +202,17 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(caption(
+                    .child(kpi_label(
                         &t,
                         &format!("{} · {}", axis_name(a), pct(s.map_or(a.weight(), |s| s.weight))),
                     ))
-                    .child(div().h(px(ty::X3XL.line)).flex().items_end().child(
-                        metric(&t, axis_text(v), "", ty::XL, ty::SM).pb(px(baseline_lift(ty::X3XL, ty::XL))),
-                    ))
-                    .child(text(ty::SM, t.text_tertiary).ellipsis().child(detail)),
+                    .child(
+                        div().h(px(KPI_HEADLINE.line)).flex().items_end().child(
+                            metric(&t, axis_text(v), "", KPI_VALUE, KPI_UNIT)
+                                .pb(px(baseline_lift(KPI_HEADLINE, KPI_VALUE))),
+                        ),
+                    )
+                    .child(kpi_note(&t).ellipsis().child(detail)),
                 0.12,
             ));
         }

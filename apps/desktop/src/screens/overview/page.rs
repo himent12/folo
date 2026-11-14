@@ -152,8 +152,9 @@ impl FoloApp {
             .gap(px(16.))
             .child(div().flex().child(hero))
             .when_some(strip, |d, s| d.child(s))
-            // From 1280 px Recent runs (two thirds) sits beside Best models (one third); narrower
-            // windows stack the two lists full width rather than squeeze the runs table.
+            // From 1280 px Recent runs (two thirds) sits beside Best models (one third, at least
+            // 380 px); narrower windows stack the two lists full width rather than squeeze the
+            // runs table.
             .map(|d| {
                 if !self.tables_beside(window) {
                     d.child(div().flex().child(recent)).child(div().flex().child(models))
@@ -183,7 +184,7 @@ impl FoloApp {
 
     /// The one-third column's width (Best models), in whole pixels.
     pub(super) fn side_w(&self, window: &Window) -> f32 {
-        ((self.content_width(window) - COLUMN_GAP) / 3.).floor()
+        side_width(self.content_width(window))
     }
 
     /// Recent runs' width: the two thirds beside Best models, or the content when they stack.
@@ -195,6 +196,16 @@ impl FoloApp {
 
 /// Between the Overview's two columns.
 const COLUMN_GAP: f32 = 16.;
+
+/// Best models' least width beside Recent runs (UNIFIED.md §4): its three columns need a little
+/// more than a third of the row at 1280 px.
+const SIDE_MIN: f32 = 380.;
+
+/// Best models' column in a row `content` wide: a third of it, at least `SIDE_MIN`, in whole
+/// pixels. Recent runs takes the rest.
+pub(super) fn side_width(content: f32) -> f32 {
+    ((content - COLUMN_GAP) / 3.).floor().max(SIDE_MIN)
+}
 
 /// Whether the Overview has two columns (UNIFIED.md §4: from 1280 px).
 pub(super) fn two_columns(window: &Window) -> bool {
