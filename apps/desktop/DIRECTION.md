@@ -39,12 +39,16 @@ The components are fine; the page structure is not.
     latest).
   - No floating readout. The cursor is a line, dots and an x chip on the axis.
   - One 16 px annotation band for events (close mosaic, failure, warmup).
-  - The best epoch is a lime dot on its series, with its value in the legend; no lime text in plots.
+  - The best epoch is a hollow ring in `text.primary` on its series ("○ best 0.656 @ 41" in the legend). A line's end
+    says the run's status: a lime dot while live, a dot of its hue when completed, a square when stopped, a cross
+    when failed; a best ring at the end goes around the end mark. No lime text in plots.
+  - A 0–1 metric's axis runs from 0 to its highest value plus headroom, with 3 to 5 round gridlines; under 0.25 the
+    chart says it is zoomed in. Loss lines are named at their ends where there is room.
   - Fixed y gutter. Primary plots 220 px, secondary 140 px.
 - **Lime:**
   - At most one lime-filled button per screen.
   - The live run's dot, rail and badge.
-  - Focus rings and the best dot.
+  - Focus rings and the live end of a chart line.
   - Running in a table is a lime dot with plain text.
 - **Truncation:** every truncating element gets a fixed width per breakpoint; breakpoints drop whole columns rather
   than relying on flex shrink (text truncates against pre-shrink width).
@@ -63,11 +67,17 @@ The components are fine; the page structure is not.
   - One KPI row of five tiles (Epoch, mAP50-95, Precision / Recall, Throughput, Time left).
   - Row A: Validation mAP (3) beside Training loss (2) at 220.
   - Row B: Precision and recall beside Learning rate at 140.
-  - Row C: samples beside the log. Rows stack below 1120.
+  - "So far / All N" in the first chart's header fits every chart's x axis to the epochs trained or the planned run.
+  - Row C: validation samples (2/3; Both / Predicted / Truth, epoch, minimum confidence) beside Per class (1/3;
+    each class's AP50-95 and its change since the epoch before).
+  - Row D: the log (2/3; All / Warn / Error with counts) beside Config (1/3, one column). Rows stack below 1120.
 - **Runs / Models:** 36 px single-line tables with Model, Dataset and Size · batch columns, and dot-plus-text status.
 - **Model detail:**
   - mAP50-95 tile at twice the width, 32 px; other tiles at 20 px.
-  - The per-class table is the PR legend: a hovered or focused row isolates its curve and dims the others to 25 %.
+  - One precision-recall panel: the plot (7/12) beside the per-class table (5/12), its legend. Every class is a thin
+    context line, the mean in ink, a hovered, focused or pinned class in its hue.
+  - The confusion matrix on one luminance ramp (the row's share in each cell), Most confused / Most missed beside it.
+  - Details: the model's facts in three columns, full width.
 - **Dataset detail:** one 40 px line with tabs left, and split, Fit/Fill, Boxes and size right. The class chips row is
   below it, with the result count at its end.
 - **Settings:** one column of at most 880 px, centred in the page with its header.

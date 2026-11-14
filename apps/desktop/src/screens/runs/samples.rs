@@ -193,7 +193,7 @@ impl FoloApp {
                     })
                     .collect();
                 // A short last row keeps its tiles the grid's size.
-                while tiles.len() % PER_ROW != 0 {
+                while !tiles.len().is_multiple_of(PER_ROW) {
                     tiles.push(div().flex_1().min_w(px(0.)).into_any_element());
                 }
                 let mut rows = Vec::new();

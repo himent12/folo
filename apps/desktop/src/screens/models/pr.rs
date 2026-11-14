@@ -118,10 +118,10 @@ impl FoloApp {
         chart.x_ticks = Some(4);
         // The operating point (recall and precision at the one threshold with the best mean F1):
         // the lit classes' in their hue, else the whole model's in ink.
-        if lit.is_empty() {
-            if let Some(mm) = &m.metrics {
-                chart.dots.push((mm.recall, mm.precision, t.text_primary));
-            }
+        if lit.is_empty()
+            && let Some(mm) = &m.metrics
+        {
+            chart.dots.push((mm.recall, mm.precision, t.text_primary));
         }
         for c in ev.per_class.iter().filter(|c| lit.contains(&c.class)) {
             chart.dots.push((c.recall, c.precision, t.class_stroke(c.class)));

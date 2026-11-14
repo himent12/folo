@@ -33,7 +33,7 @@ pub const UNIT_ZOOM_NOTE: &str = "zoomed in · full scale 0–1";
 
 /// Decimals a tick step needs: 0.25 two, 0.2 one, 5 none (a tiny step as many as it takes).
 pub fn step_decimals(step: f64) -> usize {
-    if !(step > 0.) || !step.is_finite() {
+    if step.is_nan() || step <= 0. || !step.is_finite() {
         return 0;
     }
     let first = (-step.log10().floor()).max(0.) as usize;
