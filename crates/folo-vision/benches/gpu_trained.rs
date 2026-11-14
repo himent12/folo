@@ -12,10 +12,10 @@
 //! (rect letterbox, so the input shape changes with the image), **b1 one** `predict` on the first image only (one
 //! input shape), **b1 640** `predict` on each image resized to 640×640 in turn (the 640×640 decoded images of the
 //! targets table's end-to-end rows, docs/BENCHMARKS.md), **b16** `predict_batch` on all of them (square 640),
-//! **b16 hd** `predict_batch` on all of them
-//! resized to 1280×720 (one `rect` canvas, 640×384). Every call synchronised, after a second of
-//! warm-up calls; median, p90 and min, and the detections per image of the last pass. A row asked to run on tensor
-//! cores fails if they were off at its end (a cooperative kernel that fails to build turns them off).
+//! **b16 640** `predict_batch` on all of them resized to 640×640 (the targets table's batch-16 row), **b16 hd**
+//! `predict_batch` on all of them resized to 1280×720 (one `rect` canvas, 640×384). Every call synchronised, after a
+//! second of warm-up calls; median, p90 and min, and the detections per image of the last pass. A row asked to run
+//! on tensor cores fails if they were off at its end (a cooperative kernel that fails to build turns them off).
 //!
 //! `FOLO_BENCH_PLANS=toggle` instead compares forward plans on (a `Predictor`'s default) and off, in one process
 //! with two predictors of the same weights, alternated for `FOLO_BENCH_ROUNDS` (default 6) rounds of
@@ -227,6 +227,12 @@ fn main() {
                 last = r.iter().map(|r| r.detections.len()).sum();
                 black_box(r);
             });
+            let mut last_sq = 0;
+            let b16_sq = latency(dev, iters.div_ceil(3), || {
+                let r = pred.predict_batch(&sq).expect("predict");
+                last_sq = r.iter().map(|r| r.detections.len()).sum();
+                black_box(r);
+            });
             let mut last_hd = 0;
             let b16_hd = latency(dev, iters.div_ceil(3), || {
                 let r = pred.predict_batch(&hd).expect("predict");
@@ -239,6 +245,7 @@ fn main() {
                 ("b1 one", b1_one, 1, one as f64),
                 ("b1 640", b1_sq, 1, dets_sq as f64 / next_sq as f64),
                 ("b16", b16, images.len(), last as f64 / images.len() as f64),
+                ("b16 640", b16_sq, sq.len(), last_sq as f64 / sq.len() as f64),
                 ("b16 hd", b16_hd, hd.len(), last_hd as f64 / hd.len() as f64),
             ];
             for (name, (med, p90, min), batch, d) in rows {
