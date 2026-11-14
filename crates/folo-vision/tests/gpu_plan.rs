@@ -11,7 +11,9 @@ use folo_core::rng::Rng;
 use folo_core::{DType, Device, Tensor, no_grad};
 use folo_gpu::GpuContext;
 use folo_nn::Module;
-use folo_vision::model::{FoloModel, HeadMode, ModelConfig};
+use folo_vision::fusion::BoxFusion;
+use folo_vision::model::{FoloModel, HeadMode, ImageCandidates, ModelConfig};
+use folo_vision::nms::NmsConfig;
 use folo_vision::predict::{PredictConfig, Predictor, f16_unavailable};
 
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
@@ -371,4 +373,127 @@ fn a_model_on_its_own_does_not_plan_and_a_predictor_does() {
         pred.model().forward(&x).unwrap();
     }
     assert!(pred.model().plan_replays() > 0, "{:?}", pred.model().plan_refusal());
+}
+
+/// Every field of every candidate (and precision) as bits.
+fn cand_bits(c: &[ImageCandidates]) -> Vec<Vec<u32>> {
+    c.iter()
+        .map(|ic| {
+            let mut v = Vec::new();
+            for c in &ic.cands {
+                let b = c.bbox;
+                v.extend([c.anchor, c.class, c.score.to_bits(), b.x1.to_bits(), b.y1.to_bits()]);
+                v.extend([b.x2.to_bits(), b.y2.to_bits()]);
+            }
+            v.push(u32::MAX);
+            for p in ic.precisions.iter().flatten() {
+                v.extend(p.map(f32::to_bits));
+            }
+            v.push(ic.precisions.is_some() as u32);
+            v
+        })
+        .collect()
+}
+
+/// Candidate-first prediction until it is answered from a plan, every call's candidates checked against `want`.
+#[track_caller]
+fn cands_until_replayed(m: &FoloModel, x: &Tensor, nms: &NmsConfig, want: &[Vec<u32>]) {
+    let before = m.plan_replays();
+    for call in 0..3 {
+        assert_eq!(cand_bits(&m.predict_candidates(x, nms).unwrap()), want, "call {call}");
+    }
+    assert!(m.plan_replays() > before, "no replay after three calls: {:?}", m.plan_refusal());
+}
+
+/// A threshold and no candidate cap.
+fn low_conf(conf: f32, fusion: BoxFusion) -> NmsConfig {
+    NmsConfig { conf, fusion, max_candidates: usize::MAX, ..NmsConfig::default() }
+}
+
+/// `m` with zero class biases, so its scores spread around 0.5 (a fresh model's prior keeps them near 0.01).
+fn scored(m: FoloModel) -> FoloModel {
+    let _g = no_grad();
+    for t in m.named_tensors() {
+        if t.name.contains("cls") && t.name.ends_with(".out.bias") {
+            t.tensor.copy_from(&t.tensor.zeros_like().unwrap()).unwrap();
+        }
+    }
+    m
+}
+
+#[test]
+fn candidate_first_replays_are_bit_identical_with_and_without_dfl_precisions() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let Some((ctx, dev)) = gpu() else { return };
+    let _g = no_grad();
+    let tc = ctx.tensor_cores();
+    let mut configs = vec![(DType::F32, false)];
+    if f16_unavailable(dev).is_none() {
+        configs.push((DType::F16, false));
+        if ctx.can_enable_tensor_cores() {
+            configs.push((DType::F16, true));
+        }
+    }
+    for (dtype, cores) in configs {
+        ctx.set_tensor_cores(cores);
+        let (mut m, mut r) = (scored(model(dev, 4, 0)), scored(bare(dev, 4, 0)));
+        m.to_dtype(dtype).unwrap();
+        r.to_dtype(dtype).unwrap();
+        for dims in [[1, 3, 64, 96], [2, 3, 96, 64]] {
+            let x = input(dev, dims, dtype, 12);
+            for fusion in [BoxFusion::None, BoxFusion::Dfl] {
+                let nms = low_conf(0.3, fusion);
+                let want = cand_bits(&r.predict_candidates(&x, &nms).unwrap());
+                assert!(want.iter().all(|v| v.len() > 2), "{dtype:?} {dims:?}: no candidates to compare");
+                cands_until_replayed(&m, &x, &nms, &want);
+            }
+        }
+        assert_eq!(r.plan_replays(), 0);
+    }
+    ctx.set_tensor_cores(tc);
+}
+
+#[test]
+fn a_threshold_change_gets_its_own_candidate_plan() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let Some((_ctx, dev)) = gpu() else { return };
+    let _g = no_grad();
+    let (m, r) = (scored(model(dev, 4, 0)), scored(bare(dev, 4, 0)));
+    let x = input(dev, [1, 3, 64, 64], DType::F32, 13);
+    let (a, b) = (low_conf(0.45, BoxFusion::None), low_conf(0.5, BoxFusion::None));
+    let (want_a, want_b) = (
+        cand_bits(&r.predict_candidates(&x, &a).unwrap()),
+        cand_bits(&r.predict_candidates(&x, &b).unwrap()),
+    );
+    assert_ne!(
+        want_a, want_b,
+        "the two thresholds keep the same candidates: the test cannot tell them apart"
+    );
+    cands_until_replayed(&m, &x, &a, &want_a);
+    // The threshold is in a parameter block: another value is not answered by the first plan.
+    let before = m.plan_replays();
+    assert_eq!(cand_bits(&m.predict_candidates(&x, &b).unwrap()), want_b);
+    assert_eq!(m.plan_replays(), before, "the plan of another threshold answered");
+    cands_until_replayed(&m, &x, &b, &want_b);
+    // Both plans are kept.
+    let before = m.plan_replays();
+    assert_eq!(cand_bits(&m.predict_candidates(&x, &a).unwrap()), want_a);
+    assert_eq!(m.plan_replays(), before + 1);
+}
+
+#[test]
+fn an_image_over_its_slots_is_answered_by_the_dense_head_after_a_replay() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let Some((_ctx, dev)) = gpu() else { return };
+    let _g = no_grad();
+    let (m, r) = (model(dev, 4, 0), bare(dev, 4, 0));
+    // 320×320: 1600 P3 anchors, every one a candidate at `conf = 0`, over the 1024 slots.
+    let x = input(dev, [1, 3, 320, 320], DType::F32, 14);
+    for fusion in [BoxFusion::None, BoxFusion::Dfl] {
+        let nms = low_conf(0.0, fusion);
+        let want = cand_bits(&r.predict_candidates(&x, &nms).unwrap());
+        let got = r.predict_candidates(&x, &nms).unwrap();
+        assert!(got[0].cands.iter().filter(|c| c.anchor < 1600).count() > 1024, "the image fits its slots");
+        cands_until_replayed(&m, &x, &nms, &want);
+    }
 }

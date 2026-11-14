@@ -183,7 +183,13 @@ own, and `ctx.plan_stats()` reports how many and how many bytes. A `FoloModel` o
 layers' settings are public fields); `Predictor` turns them on for its model, which it never lends out mutably, so
 `folo predict`, the server and `predict_batch` use them and `folo val` and training do not.
 `model.set_forward_plans(true)` opts a bare model in; `ctx.set_forward_plans(false)` or `FOLO_GPU_NO_PLAN=1`
-(contexts created afterwards) turn them off for a context. On
+(contexts created afterwards) turn them off for a context. Two calls of a model are planned: its forward, and the
+device side of candidate-first prediction (docs/MODEL.md §9.5), which is what a `Predictor` runs. The latter's
+site lists have fixed capacities, so everything from the input to the decoded records (the features, the class
+branches, the class pass, the box branch at the sites, the decode, and with DFL fusion the moments) is one plan,
+keyed also by the head branch, `conf` (it sits in the class pass's parameter block), the slots and whether DFL
+fusion wants the moments; a replayed prediction is one flat list of dispatches and one readback. An image with more
+candidates than slots is answered by the dense head on features computed again, unplanned. On
 the test machine a plan halves the host's encode time of a synchronised folo-n batch-1 forward (0.42 → 0.21 ms in
 f32, 0.45 → 0.23 ms on tensor cores), which shortens the call by 3–6% in runs that started at a low CPU load (the GPU
 was not idle in them; the likely reading is that the call is then GPU-bound) and by 20–35% when other work loads

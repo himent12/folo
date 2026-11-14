@@ -550,13 +550,21 @@ impl FoloModel {
 /// `A > 1` every op runs column by column (an anchor's values read its own logits only, in the same order for
 /// any `A`), so any such `box_raw` holding an anchor's logits gives that anchor the same bits.
 pub(super) fn dfl_moments(box_raw: &Tensor, rm: usize) -> Result<Tensor> {
-    let _g = no_grad();
-    let (b, a) = (box_raw.dims()[0], box_raw.dims()[2]);
-    let dev = box_raw.device();
+    dfl_moments_with(box_raw, rm, &moment_bins(rm)?.to_device(box_raw.device())?)
+}
+
+/// The `[2 · reg_max]` bin values [`dfl_moments`] weighs the distribution with: `i`, then `i²`.
+pub(super) fn moment_bins(rm: usize) -> Result<Tensor> {
     let mut k = Vec::with_capacity(2 * rm);
     k.extend((0..rm).map(|i| i as f32));
     k.extend((0..rm).map(|i| (i * i) as f32));
-    let k = Tensor::from_vec(k, [2 * rm])?.to_device(dev)?;
+    Ok(Tensor::from_vec(k, [2 * rm])?)
+}
+
+/// [`dfl_moments`] with its bins `k` ([`moment_bins`]) already on the device, so it uploads nothing.
+pub(super) fn dfl_moments_with(box_raw: &Tensor, rm: usize, k: &Tensor) -> Result<Tensor> {
+    let _g = no_grad();
+    let (b, a) = (box_raw.dims()[0], box_raw.dims()[2]);
     let bins = k.narrow(0, 0, rm)?.reshape([1, 1, rm, 1])?;
     let bins2 = k.narrow(0, rm, rm)?.reshape([1, 1, rm, 1])?;
     let p = box_raw.to_dtype(DType::F32)?.reshape([b, 4, rm, a])?.softmax(2)?;

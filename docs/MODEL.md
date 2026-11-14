@@ -939,8 +939,9 @@ outputs. Its mAP must be within 0.002 of the f32 model's (docs/BENCHMARKS.md), w
 (`--tensor-cores`, docs/GPU.md).
 
 Inside a `Predictor` (or after `FoloModel::set_forward_plans(true)`), a fused eval-mode GPU forward under
-`no_grad` is recorded at the second call of an input shape (and head mode) and replayed from the third, with the
-same bits (forward plans, docs/GPU.md); any change to the model's tensors retires the plan. A plan does not see the
+`no_grad`, and the device side of candidate-first prediction (§9.5; keyed also by `conf` and DFL fusion), is
+recorded at the second call of an input shape (and head mode) and replayed from the third, with the same bits
+(forward plans, docs/GPU.md); any change to the model's tensors retires the plan. A plan does not see the
 layers' settings (activation, stride, `residual`, SPPF `k`), so a model on its own has plans off; turn them off
 before changing one. `FOLO_GPU_NO_PLAN=1` turns them off for the process.
 
@@ -1055,7 +1056,8 @@ raw outputs (§6.3, `HeadOutput`) are not made on these paths; training, validat
 the dense path: `vote` needs only the boxes and scores, and `dfl` takes each candidate's side precisions from its
 own box logits, which are the dense logits bit for bit, with the dense path's functions: on the CPU the same
 softmax moments per candidate; on a GPU the dense path's moment ops (`HeadOutput::moments_on_device`) over the
-candidates' columns, which compute each column on its own, so the same bits.
+candidates' columns, which compute each column on its own, so the same bits. With forward plans on (§9.1), the
+GPU path from the input to the records and moments is one recorded plan, replayed with one readback after it.
 
 ## 10. Verification plan
 

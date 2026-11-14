@@ -464,7 +464,7 @@ impl FoloModel {
         let (h, w) = self.check_input(x)?;
         let o2o = mode == HeadMode::O2o && self.has_o2o();
         let tensors = |f: &mut dyn FnMut(&Tensor)| each_tensor(self, f);
-        let mut out = self.plans.run(o2o as u64, x, &tensors, |x| {
+        let mut out = self.plans.run(&[o2o as u64], x, &tensors, |x| {
             let o = self.forward_impl(x, None, mode)?;
             Ok::<_, Error>(vec![o.box_raw, o.cls_raw])
         })?;

@@ -36,7 +36,7 @@ fn a_pure_call_replays_and_its_results_are_its_own() {
     };
     let mut held = Vec::new();
     for _ in 0..5 {
-        let out = plans.run(0, &x, &tensors, |x| call(x, &w, &b)).unwrap();
+        let out = plans.run(&[0], &x, &tensors, |x| call(x, &w, &b)).unwrap();
         held.push(out);
     }
     assert_eq!(plans.replays(), 3, "{:?}", plans.refusal());
@@ -45,7 +45,7 @@ fn a_pure_call_replays_and_its_results_are_its_own() {
     }
     // Another input of the same shape, through the same plan.
     let y = x.mul_scalar(-1.0).unwrap();
-    let out = plans.run(0, &y, &tensors, |y| call(y, &w, &b)).unwrap();
+    let out = plans.run(&[0], &y, &tensors, |y| call(y, &w, &b)).unwrap();
     assert_eq!(plans.replays(), 4);
     assert_eq!(vals(&out), vec![2.5, 0.0, 0.0, 0.0]);
     // The replay for y wrote none of the results held from x.
@@ -67,24 +67,24 @@ fn a_call_inside_a_recording_runs_as_part_of_it() {
     // The inner owner has a plan before the outer one records.
     let inner = ForwardPlans::new();
     for _ in 0..3 {
-        inner.run(0, &x, &tensors, |x| call(x, &w, &b)).unwrap();
+        inner.run(&[0], &x, &tensors, |x| call(x, &w, &b)).unwrap();
     }
     assert_eq!(inner.replays(), 1, "{:?}", inner.refusal());
     let outer = ForwardPlans::new();
     let twice = |x: &Tensor| -> folo_core::Result<Vec<Tensor>> {
-        let y = inner.run(0, x, &tensors, |x| call(x, &w, &b))?;
+        let y = inner.run(&[0], x, &tensors, |x| call(x, &w, &b))?;
         Ok(vec![y[0].mul_scalar(2.0)?])
     };
     for _ in 0..4 {
         assert_eq!(
-            vals(&outer.run(0, &x, &tensors, twice).unwrap()),
+            vals(&outer.run(&[0], &x, &tensors, twice).unwrap()),
             want.iter().map(|v| v * 2.0).collect::<Vec<_>>()
         );
     }
     assert_eq!(outer.replays(), 2, "{:?}", outer.refusal());
     // The outer replay carries the inner work: another input gives its own results.
     let y = x.mul_scalar(-1.0).unwrap();
-    assert_eq!(vals(&outer.run(0, &y, &tensors, twice).unwrap()), vec![5.0, 0.0, 0.0, 0.0]);
+    assert_eq!(vals(&outer.run(&[0], &y, &tensors, twice).unwrap()), vec![5.0, 0.0, 0.0, 0.0]);
     assert_eq!(outer.replays(), 3);
 }
 
@@ -102,7 +102,7 @@ fn uploads_and_unlisted_tensors_make_a_call_unplannable() {
     let plans = ForwardPlans::new();
     for _ in 0..4 {
         let out = plans
-            .run(0, &x, &both, |x| {
+            .run(&[0], &x, &both, |x| {
                 let b = Tensor::from_slice(&[0.5f32, 0.25, -1.0, 1.0], [4])?.to_device(x.device())?;
                 call(x, &w, &b)
             })
@@ -116,7 +116,7 @@ fn uploads_and_unlisted_tensors_make_a_call_unplannable() {
     let plans = ForwardPlans::new();
     let only_w = |f: &mut dyn FnMut(&Tensor)| f(&w);
     for _ in 0..4 {
-        assert_eq!(vals(&plans.run(0, &x, &only_w, |x| call(x, &w, &b)).unwrap()), want);
+        assert_eq!(vals(&plans.run(&[0], &x, &only_w, |x| call(x, &w, &b)).unwrap()), want);
     }
     assert_eq!(plans.replays(), 0);
     assert!(plans.refusal().is_some_and(|r| r.contains("not listed")), "{:?}", plans.refusal());
@@ -125,7 +125,7 @@ fn uploads_and_unlisted_tensors_make_a_call_unplannable() {
     let plans = ForwardPlans::new();
     for _ in 0..4 {
         let out = plans
-            .run(0, &x, &both, |x| Ok::<_, folo_core::Error>(vec![call(x, &w, &b)?[0].narrow(0, 1, 2)?]));
+            .run(&[0], &x, &both, |x| Ok::<_, folo_core::Error>(vec![call(x, &w, &b)?[0].narrow(0, 1, 2)?]));
         assert_eq!(out.unwrap()[0].to_vec::<f32>().unwrap(), want[1..3]);
     }
     assert_eq!(plans.replays(), 0);
@@ -134,7 +134,7 @@ fn uploads_and_unlisted_tensors_make_a_call_unplannable() {
     let plans = ForwardPlans::new();
     for _ in 0..4 {
         let out = plans
-            .run(0, &x, &both, |x| {
+            .run(&[0], &x, &both, |x| {
                 let _ = x.to_vec::<f32>()?;
                 call(x, &w, &b)
             })
@@ -149,7 +149,7 @@ fn uploads_and_unlisted_tensors_make_a_call_unplannable() {
     {
         let _a = folo_core::autocast();
         for _ in 0..4 {
-            assert_eq!(vals(&plans.run(0, &x, &both, |x| call(x, &w, &b)).unwrap()), want);
+            assert_eq!(vals(&plans.run(&[0], &x, &both, |x| call(x, &w, &b)).unwrap()), want);
         }
     }
     assert_eq!(plans.replays(), 0);
@@ -167,10 +167,10 @@ fn a_panic_while_recording_leaves_the_owner_usable() {
         f(&w);
         f(&b);
     };
-    plans.run(0, &x, &tensors, |x| call(x, &w, &b)).unwrap();
+    plans.run(&[0], &x, &tensors, |x| call(x, &w, &b)).unwrap();
     // The second call records, and panics half-way.
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        plans.run(0, &x, &tensors, |x| -> folo_core::Result<Vec<Tensor>> {
+        plans.run(&[0], &x, &tensors, |x| -> folo_core::Result<Vec<Tensor>> {
             let _ = x.mul(&w)?;
             panic!("inside the recorded call")
         })
@@ -180,7 +180,7 @@ fn a_panic_while_recording_leaves_the_owner_usable() {
     let ctx = crate::context_for(d).unwrap();
     assert!(!ctx.recording());
     for _ in 0..3 {
-        assert_eq!(vals(&plans.run(0, &x, &tensors, |x| call(x, &w, &b)).unwrap()), want);
+        assert_eq!(vals(&plans.run(&[0], &x, &tensors, |x| call(x, &w, &b)).unwrap()), want);
     }
     assert_eq!(plans.replays(), 1, "{:?}", plans.refusal());
 }
@@ -200,15 +200,15 @@ fn a_lost_device_is_an_error_not_a_replay() {
         f(&b);
     };
     for _ in 0..3 {
-        assert_eq!(vals(&plans.run(0, &x, &tensors, |x| call(x, &w, &b)).unwrap()), want);
+        assert_eq!(vals(&plans.run(&[0], &x, &tensors, |x| call(x, &w, &b)).unwrap()), want);
     }
     assert_eq!(plans.replays(), 1);
     ctx.destroy_device();
-    let read = plans.run(0, &x, &tensors, |x| call(x, &w, &b)).and_then(|out| out[0].to_vec::<f32>());
+    let read = plans.run(&[0], &x, &tensors, |x| call(x, &w, &b)).and_then(|out| out[0].to_vec::<f32>());
     assert!(read.as_ref().is_err_and(crate::is_device_lost), "{read:?}");
     // Once the loss is known no plan answers.
     let replays = plans.replays();
-    let again = plans.run(0, &x, &tensors, |x| call(x, &w, &b)).and_then(|out| out[0].to_vec::<f32>());
+    let again = plans.run(&[0], &x, &tensors, |x| call(x, &w, &b)).and_then(|out| out[0].to_vec::<f32>());
     assert!(again.is_err());
     assert_eq!(plans.replays(), replays);
 }

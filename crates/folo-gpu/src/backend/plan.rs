@@ -121,10 +121,11 @@ impl ForwardPlans {
     /// `f(x)`, replayed from this owner's plan for `key` when there is a valid one (see the type docs), recorded into
     /// one when `key` was seen once before, or just run. `tensors` lists every tensor `f` reads besides `x` (it is
     /// called once per replay to check them, so it should not allocate); `key` distinguishes calls whose work differs
-    /// otherwise (a head mode).
+    /// otherwise (a head mode, a threshold in a parameter block), and is compared whole. A call that returns no
+    /// results is not planned.
     pub fn run<E: From<folo_core::Error>>(
         &self,
-        key: u64,
+        key: &[u64],
         x: &Tensor,
         tensors: &Tensors<'_>,
         f: impl FnOnce(&Tensor) -> std::result::Result<Vec<Tensor>, E>,
@@ -137,7 +138,9 @@ impl ForwardPlans {
             // Inside another call's recording: run, so the outer recording sees this call's work.
             return f(x);
         }
-        let mut signature = vec![key, x.dtype() as u64, input.size(), ctx.tensor_cores() as u64];
+        let mut signature = vec![key.len() as u64];
+        signature.extend(key);
+        signature.extend([x.dtype() as u64, input.size(), ctx.tensor_cores() as u64]);
         signature.extend(x.dims().iter().map(|&d| d as u64));
         let key = crate::context::binds::id_of(&signature);
         let found = ctx.plans().get(self.id, key);
@@ -159,6 +162,9 @@ impl ForwardPlans {
         let rec = guard.finish();
         let out = out?;
         let plan = (|| {
+            if out.is_empty() {
+                return Err("the call returned no results".to_string());
+            }
             let outputs: Vec<wgpu::Buffer> = out
                 .iter()
                 .map(|t| whole_buffer(t).ok_or("a result is not a whole dense GPU tensor"))
