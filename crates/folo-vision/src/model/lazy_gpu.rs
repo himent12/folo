@@ -87,22 +87,27 @@ impl FoloModel {
         // the host's post-process.
         let [s3, s4, s5] = GPU_SITE_SLOTS.map(|s| s as u64);
         let key = [SITES_PLAN, o2o as u64, bins.is_some() as u64, nms.conf.to_bits() as u64, s3, s4, s5];
+        // The features of a call that found no site kernel, for the dense head. Such a call returns no results, so
+        // it is never a plan, and every call of it runs (and fills this).
+        let mut unsited = None;
         let out = self.plans.run(&key, x, &tensors, |x| {
             let feats = self.features(x, None)?;
-            Ok::<_, folo_nn::Error>(
-                self.sites_on_device(levels, &feats, nms.conf, bins.as_ref())?.unwrap_or_default(),
-            )
+            let out = self.sites_on_device(levels, &feats, nms.conf, bins.as_ref())?;
+            if out.is_none() {
+                unsited = Some(feats);
+            }
+            Ok::<_, folo_nn::Error>(out.unwrap_or_default())
         })?;
         if out.is_empty() {
-            // No site kernel on this device.
-            return self.dense_candidates(x, nms, h, w);
+            // No site kernel on this device: the dense head on the same features.
+            return self.dense_candidates(x, unsited, nms, h, w);
         }
         let (cands, fits) = self.read_sites(&out, levels, h, w)?;
         if fits.iter().all(|&f| f) {
             return Ok(cands);
         }
         // The images that did not fit, from the dense head (the features again, unplanned).
-        let dense = self.dense_candidates(x, nms, h, w)?;
+        let dense = self.dense_candidates(x, None, nms, h, w)?;
         Ok(cands.into_iter().zip(fits).zip(dense).map(|((c, f), d)| if f { c } else { d }).collect())
     }
 
@@ -114,16 +119,20 @@ impl FoloModel {
         }
     }
 
-    /// Every image's candidates from the dense head ([`HeadOutput::candidates_on_device`]) on freshly computed
-    /// features.
+    /// Every image's candidates from the dense head ([`HeadOutput::candidates_on_device`]) on `feats`, the features
+    /// of `x` (computed here when `None`).
     fn dense_candidates(
         &self,
         x: &Tensor,
+        feats: Option<[Tensor; 3]>,
         nms: &NmsConfig,
         h: usize,
         w: usize,
     ) -> Result<Vec<ImageCandidates>> {
-        let feats = self.features(x, None)?;
+        let feats = match feats {
+            Some(f) => f,
+            None => self.features(x, None)?,
+        };
         let feats = [&feats[0], &feats[1], &feats[2]];
         let mode = self.head_mode;
         let (box_raw, cls_raw) = match mode {
