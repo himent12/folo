@@ -259,7 +259,7 @@ export default function Settings() {
   );
 
   return (
-    <Page title="Settings" narrow sub={() => <span>Preferences are stored in this browser.</span>}>
+    <Page title="Settings" narrow>
       {/* Below 1024 px the sections are one sticky strip under the top bar, so System and About are a tap away from the
           top of a long page. It scrolls sideways where the links do not fit (a phone): the clipped edge fades and
           carries a chevron, so the sections past it read as more to scroll to, never as a cut label. */}
@@ -281,7 +281,7 @@ export default function Settings() {
 
         {cloud.get() ? <Cloud /> : null}
 
-        <Panel title="Appearance" id="appearance" divided pad="none">
+        <Panel title="Appearance" meta="saved in this browser" id="appearance" divided pad="none">
           <Row
             name="Theme"
             desc={prefs.theme === 'system' ? <>Follows your operating system, currently {prefs.resolvedTheme}.</> : 'Cycle themes from the top bar or the command palette.'}
@@ -289,7 +289,7 @@ export default function Settings() {
           />
         </Panel>
 
-        <Panel title="Units" id="units" divided pad="none">
+        <Panel title="Units" meta="saved in this browser" id="units" divided pad="none">
           <Row
             name="File and memory sizes"
             desc="Binary units match what operating systems and GPU drivers report."
@@ -307,7 +307,7 @@ export default function Settings() {
           />
         </Panel>
 
-        <Panel title="Keyboard shortcuts" id="shortcuts" divided pad="none">
+        <Panel title="Keyboard shortcuts" meta="saved in this browser" id="shortcuts" divided pad="none">
           {/* Touch-only devices have no keyboard to look shortcuts up for (the switch stays, for a paired one). */}
           <Row
             class="has-keys"

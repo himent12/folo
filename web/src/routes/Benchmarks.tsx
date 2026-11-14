@@ -50,7 +50,7 @@ const cols: Col[] = [
   { key: 'classes', label: 'Classes', num: true, get: (b) => b.classes.length, hide: 'lg', w: '88px' },
   { key: 'conditions', label: 'Conditions', num: true, get: (b) => b.plan.conditions.length, hide: 'lg', w: '104px' },
   { key: 'entries', label: 'Entries', num: true, get: (b) => b.entries, w: '88px' },
-  { key: 'leader', label: 'Leader', get: (b) => b.best?.score ?? -1, w: '232px' },
+  { key: 'leader', label: 'Leader', get: (b) => b.best?.score ?? -1, w: '256px' },
   { key: 'created', label: 'Created', num: true, get: (b) => Date.parse(b.created), hide: 'md', w: '104px' },
 ];
 const COLS = cols.length;

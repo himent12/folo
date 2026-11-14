@@ -672,7 +672,7 @@ function RunNewForm() {
   const Why = (p: { id: string; cls?: string }) => <WhyLine id={p.id} cls={p.cls} why={showWhy.get() ? why.get() : null} jump={jump} />;
 
   return (
-    <Page title="New training run" sub={() => <span>Pick data and a model size; the defaults are tuned to work well. Everything else is optional.</span>}>
+    <Page title="New training run">
       {datasets.error && !datasets.data ? (
         <ErrorState error={datasets.error} retry={() => datasets.refresh()} title="Could not load datasets" />
       ) : datasets.data && datasets.data.length === 0 ? (
