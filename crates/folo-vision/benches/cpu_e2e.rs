@@ -18,8 +18,8 @@
 //! of images, e.g. COCO val2017; the first `FOLO_BENCH_IMAGES_N`, default 16, by name) the same rows run on real
 //! images with the trained model, cycling through the images: each letterboxed to 640×640, each resized to
 //! 1280×720 (rect, 640×384), and `predict_batch` of `FOLO_BENCH_BATCH` of them, as they are (padded square) and
-//! resized to 1280×720 (one rect canvas, 640×384). Untrained weights pass no
-//! candidate at `conf = 0.25`, so only these rows show what candidate-first prediction (MODEL.md §9.5) does.
+//! resized to 1280×720 (one rect canvas, 640×384). Untrained weights pass no candidate at `conf = 0.25`, so only
+//! these rows show what candidate-first prediction (MODEL.md §9.5) does.
 //! `FOLO_BENCH_UNTRAINED=0` skips the untrained rows. The 1280×720 row runs a second time after
 //! `folo_core::cpu::clear_buffer_cache()`: the two read the same unless what the earlier rows left in the CPU
 //! buffer cache slows the trained model (it did before the cache evicted stale lengths: docs/notes/hill/r3-cpufix.md).

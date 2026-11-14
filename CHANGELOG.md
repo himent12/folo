@@ -26,7 +26,7 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
 The end-to-end rows are on trained weights (the published `folo-n-coco`, 50 epochs) since the third optimisation
 round: random weights pass no candidate, so candidate-first prediction would skip the box branch. The CPU row's 13.1
 ms before it was on random weights; on trained weights the round's starting build (e5a6ccf0) reads 13.58 ms and `main`
-13.57, a tie.
+13.57 at 60 calls per run, a tie, and 13.88 and 13.04 at 200 calls (−6%).
 
 The entries are in two groups. **The foundation** is what the first internal build of 0.1.0 had. **Since the first
 build** is what landed after it and before the release went public; where it replaces something in the foundation
@@ -150,7 +150,7 @@ fixes.
 - **Candidate-first prediction** (CPU and GPU): the class branches run on every pixel, the box branch only where a
   class passes `conf`, with the same detections bit for bit. On trained weights: on the GPU a batch of 16 is 4–11%
   faster end to end (folo-n's f32 batch of 640×640 images ties); on the CPU 1280×720 frames 5% and a batch of 16
-  images 8–14%, while folo-n's 640×640 batch-1 row ties.
+  images 8–14%, while folo-n's 640×640 batch-1 row ties at 60 calls per run and is 6% faster at 200.
 - **Forward plans** on the GPU: a `Predictor` records its prediction once per input shape and replays it as a flat
   list of dispatches (`FOLO_GPU_NO_PLAN=1` turns it off). With candidate-first, folo-n end to end at batch 1 on
   640×640 images: 1.77 → 1.60 ms in f32, 1.51 → 1.33 ms in f16 on tensor cores (trained weights); the batch-1
@@ -163,9 +163,11 @@ fixes.
   `dfl` weighting each side by the certainty of its DFL distribution. `--fusion dfl --iou 0.65 --max-det 1000` adds
   0.0025 to 0.0043 COCO AP on the published weights (`folo-n-coco-v3` 0.340 → 0.343). Off by default.
 - The validation metrics score boxes clipped to the image (the trainer's internal mAP; COCO numbers unchanged).
-- Slower: on the CPU, folo-s single 1280×720 frames run 24–29% slower when another model's rect `predict_batch` ran
-  before them in the same process (since the rect batches; not diagnosed, docs/BENCHMARKS.md, Rows worse than
-  e5a6ccf0).
+- **The CPU buffer cache evicts lengths that have gone unused** when it is full. Before, a process that had filled it
+  (1 GiB) allocated every buffer of a later workload fresh on each call: with the rect batches, folo-s single
+  1280×720 frames ran 24–29% slower after another model's `predict_batch` in the same process. Now 26.4 → 21.3 ms for
+  those frames, and a batch of 16 such frames after other batches 264 → 195 ms (folo-n 89 → 69 ms)
+  (docs/BENCHMARKS.md, Rows worse than e5a6ccf0).
 
 #### Engine: second optimisation round
 - Faster again, measured against the build before it with the two alternated run by run

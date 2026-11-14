@@ -211,5 +211,6 @@ Reproduce: `bin/stress.sh <cycles> <tag>` (builds `gpu_stress` from `scripts/`).
   only records.
 - A per-length cache does not help shapes that vary per call (the `_at` passes' gathered columns, Winograd's `V` per
   block count). They are small and bypass or barely touch the cache today.
-- The BENCHMARKS.md fold-in entries that this resolves ("Rows worse than e5a6ccf0": the folo-s 1280×720 row; "Next
-  optimisations") are in #262; updated once it is on `main`.
+- The fold-in's entries that this resolves (docs/BENCHMARKS.md: row 8's bullet in "Hill-climb 3", "Rows worse than
+  e5a6ccf0", "Next optimisations"; CHANGELOG.md; docs/ROADMAP.md) were updated by the lead in #264 after #262 merged,
+  with this notebook's numbers. Row 8's cell keeps the fold-in's 60-call number.
