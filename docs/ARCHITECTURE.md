@@ -3,216 +3,260 @@
 FOLO ("**F**OLO **O**nly **L**ooks **O**nce" — a play on YOLO) is a vision framework written from scratch in Rust: a
 tensor engine with autograd, CPU and GPU kernels, neural-network layers, a YOLO-style real-time object detector, a
 training and evaluation pipeline, a server, a CLI, a web studio and a native desktop app on its own UI framework.
+This file is the map: how the parts fit, how a request travels through them and which files to open for a change.
+Each crate's details are in its deep-dive doc and its README, linked from [The crates](#the-crates).
 
+## Design principles
+These are stated in [AGENTS.md](../AGENTS.md) and in the code, and they explain most of the layout.
+- **The ML stack is FOLO's own.** Tensors, kernels, autograd, layers, optimizers, the detector, losses, assigners,
+  NMS, metrics, augmentation and the GPU kernels are written here; no ML framework is a dependency. Commodity crates
+  do commodity jobs (`image` / `zune-jpeg`, `wgpu`, `rayon`, `serde`, `axum` / `tokio`, `clap`).
+- **The CPU backend is the reference.** folo-core's CPU kernels define the results; every GPU kernel is tested
+  against them within a stated tolerance, and every differentiable op has a finite-difference gradient check.
+- **Deterministic by construction.** CPU results are bitwise identical for every thread count, randomness comes from
+  a seeded RNG, data-loader batches do not depend on the worker count, resuming a run is bit-exact, and a benchmark
+  variant has the same bytes on every machine.
+- **Plain data at the edges.** folo-data does not depend on folo-core: it produces plain buffers that the trainer wraps
+  in tensors. folo-vision's detection math (boxes, decode, NMS, metrics, assigner) works on plain slices, so the
+  trainer, the predictor, the server and the browser share it.
+- **Front ends talk to the HTTP API.** Studio uses only [API.md](API.md). FOLO Desktop uses the same API through a
+  local `folo serve`; it links the engine crates only to run a model in process in its Playground and to grade its
+  built-in demo benchmarks.
+- **Agent-first.** Every command takes `--json`, errors carry stable codes, and `folo mcp` exposes the same `Store`
+  the HTTP handlers use ([Agent-first design](#agent-first-design)).
+
+## System diagram
+The crates and their cargo dependencies. An arrow points at a direct dependency; not every edge is drawn (the
+table in [The crates](#the-crates) lists them all).
+
+```text
+ folo-cli ─────────────────────► folo-mcp
+ (the `folo` binary)                 │
+     │                               │
+     ▼                               │
+ folo-server ◄───────────────────────┘
+     │   │                 │
+     │   │                 └──► folo-cloud ──► folo-client ──► folo-api
+     │   └──► folo-bench
+     │            │                folo-wasm        folo-desktop (apps/desktop/, on folo-ui)
+     ▼            ▼                    │                 │
+ folo-vision ◄────┴────────────────────┴─────────────────┘
+     │
+     ├──► folo-data
+     ├──► folo-nn ───┐
+     └──► folo-gpu ──┴──► folo-core
+
+ Among the edges not drawn: folo-api is a direct dependency of folo-cli, folo-mcp, folo-server, folo-cloud,
+ folo-bench, folo-vision, folo-wasm and folo-desktop; folo-wasm and folo-desktop also use folo-nn, folo-gpu,
+ folo-data and folo-core. folo-test-support is a dev-dependency only.
 ```
-            folo-cli  ──────────────┐            web/ (FOLO Studio)
-                │                   │                   │ HTTP + SSE (docs/API.md)
-                ▼                   ▼                   ▼
-          folo-vision ◄──────── folo-server ◄───────────┘
-         ╱     │     ╲              │  ╲
-   folo-nn  folo-data  (box ops)    │   folo-cloud ──► a provider's API (launch, look up, terminate)
-      │                             ▼
-  folo-core ◄── folo-gpu       folo-client ══► another folo serve (a cloud worker), over docs/API.md
+
+The running processes. `┄` lines are not cargo dependencies: they are HTTP, SSE, stdio or spawned processes.
+
+```text
+ web/ FOLO Studio (in a browser) ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ HTTP + SSE ┄┄┐
+   runs models in the page with folo-wasm                        ┊
+ apps/desktop/ FOLO Desktop ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ HTTP + SSE ┄┄┤  Desktop can spawn the server it talks to
+   runs models in process with folo-vision                       ┊
+                                                                 ▼
+ an MCP client ┄┄ stdio ┄┄► folo mcp ┄┄ HTTP, with --server ┄┄► folo serve ┄┄ HTTP (folo-client) ┄┄► folo serve
+                            (else embedded)                      ┊      ┊                            on a cloud worker
+                                                                 ┊      └┄┄ HTTP (folo-cloud) ┄┄► a provider's API
+                                                                 └┄┄ spawns ┄┄► claude -p / codex exec (agent labeling)
 ```
 
-## folo-core — tensors and autograd
-- `Tensor` is a cheap-to-clone handle (`Arc` inside) over shared storage plus a `Layout` (shape, strides, offset).
-  Views (reshape of compatible layouts, transpose/permute, narrow/slice with step, broadcast/expand,
-  squeeze/unsqueeze, flatten) do not copy. Ops return `Result`; `+ - * /` (on `Tensor`, `&Tensor`, `f32`) return
-  `Result<Tensor>` too. Errors name the op and both shapes.
-- `DType`: `F32` (compute), `F16` (storage / GPU inference), `U8` (images), `U32`/`I64` (indices). Arithmetic is `F32`;
-  copies, views, `cat`, `index_select`, `gather` and casts work for every dtype. Comparisons return 0/1 masks of their
-  operands' dtype. On a backend that computes in f16 (`Backend::computes_f16`: the GPU with `shader-f16`) the forward
-  ops also take `F16` operands and return `F16` (half-precision inference); every float operand of an op has one dtype.
-  The dtype lives with the storage, like the device, so `Tensor::to_dtype_` / `Module::to_dtype` convert in place.
-- `Device`: `Cpu` or `Gpu(ordinal)`. Kernels sit behind the `Backend` trait (below); the CPU backend lives in folo-core.
-- CPU kernels: contiguous fast paths with rayon above ~32K elements; strided inputs are walked row by row after merging
-  dimensions, or made contiguous once. A BLIS-style GEMM (`cpu::gemm`, packed panels, 6x16 AVX2/FMA micro-kernel
-  chosen at runtime, tile- or K-split parallelism) backs `matmul` and conv2d. Each GEMM task packs the B panels of
-  its own columns into an L2-sized buffer one `KC` block at a time, reading row-contiguous operands row by row so
-  the prefetcher can follow (column tiles first, rows only when there are too few columns, about three tasks per
-  thread and none under ~1 MFLOP). A row-major A whose packed form fits one K super-block (16 MiB: every conv
-  weight) is not packed at all: the micro-kernels broadcast its six rows through row pointers, the same FMAs in
-  the same order (bit for bit the packed path), so a conv forward has no serial packing pass. conv2d (any kernel, stride, padding or
-  dilation, not depthwise) never builds an im2col matrix: the input is copied once, zero-padded and split into its
-  stride phases, so every `(channel, ky, kx)` row of B is a contiguous run of that copy, read in place by a variant
-  of the micro-kernel through a row-pointer table (a few dropped columns per output row; planes are spaced an odd
-  number of cache lines apart so the rows do not alias in L1; stride-2 rows are padded once and both column phases
-  dealt out in one pass). Pointwise convs pack B as a plain copy; depthwise convs have a direct kernel (with AVX2 at
-  stride 1: the plane copied once with its padding, every output vector its taps' FMAs in registers), and so do convs with at most 4 input channels (the 3-channel stem:
-  per output row the `c·kh·kw` taps are gathered into L1 and every output channel is that many FMAs per pixel in
-  the GEMM's order, bit for bit the GEMM result, without the per-channel phase copy). Bias and activation run as an
-  epilogue on each finished output (`Tensor::conv2d_act`, used by fused `ConvBnAct` blocks and by eval-mode blocks
-  under `no_grad`): bias and SiLU on the micro-kernel's accumulators before they are stored, other activations as
-  a pass over each finished block; SiLU there is an 8-lane AVX2 `x · sigmoid(x)` with relative error below
-  `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
-  These fused entry points (`conv2d_act`, `conv2d_act_cat`: nothing is recorded) run a dense 3x3 stride-1 conv with
-  at least 16 input and 8 output channels (at most 4096 together, which bounds the per-thread scratch), and a
-  32x32 or larger output or `c · o >= 4096`, as Winograd F(2x2, 3x3) (`cpu/conv/winograd.rs`): 16 multiplies per
-  2x2 output tile and channel pair instead of 36. The weights are transformed once per weight tensor and kept
-  with its storage until the storage is next written (`View::derived`: every write lock clears it; a view whose
-  `storage` field was pointed elsewhere neither uses nor fills it). The tiles are cut into blocks; a block transforms its input
-  patches, runs 16 small GEMMs through the row-pointer micro-kernel and transforms the results into its output
-  tiles while they are in L2 (an image with too few blocks for the pool runs in two passes, the input transforms
-  split by input channels, then the GEMMs and output transforms by output channels). Not bit for bit the direct
-  conv: an output is within `(C + 8) · 2^-23 · 9 · Σ_c D_c · G_c` of the exact sum (`D_c`, `G_c`: the sums of
-  |inputs| over its tile's 4x4 input patch and of |weights| over its 3x3 kernel in channel c; derived in the
-  module doc, tested; it assumes no step overflows or underflows, and inputs within a factor ~4 of `f32::MAX` can
-  overflow in the input transform where the direct sum would not), an error that grows with C like the direct
-  conv's `K · 2^-23 · Σ|terms|`; COCO val AP of
-  folo-n-coco changed by less than 1e-6. The same
-  bits for any thread count or batch. The autograd conv (`conv2d_with`) keeps the direct conv.
-  `Tensor::conv2d_act_at` (`Backend::conv2d_act_at`) is the same inference conv needed only at some output sites
-  (flat `n · OH·OW + oy · OW + ox`, a `U32` vector): the result has the full output shape, the sites hold the dense
-  conv's values and every other element is unspecified. On the CPU a Winograd conv runs the block code over the
-  list of 2x2 tiles that hold a site (`winograd_forward_at`: a tile's arithmetic and its GEMM sums do not depend
-  on which tiles share its block) and a pointwise conv runs the dense GEMM over the sites' columns gathered into
-  planes of their own (`cpu/conv/sites.rs`), both bit for bit the dense values; any other conv runs densely, as
-  does a backend without the kernel. A site reads only its receptive field: in Winograd F(2x2, 3x3) each output
-  of a tile reads only its own 3x3 window of the 4x4 patch (tested with NaN everywhere else). On the GPU,
-  `Tensor::conv2d_act_sites` takes per image a fixed-capacity list of output pixels (a count, then the pixels):
-  folo-gpu's implicit GEMM with `SITES` (`kernels/conv/sites.rs`; regular and tensor-core generators) maps column
-  `j` to the image's `j`-th listed pixel, runs the dense conv's tile config and split-K chunks (planned for the
-  full output, so each value is the dense one bit for bit) and retires workgroups past the image's count; the
-  result is compact `[N, O, cap]` or scattered back into a full map. `detect_class_sites` and
-  `detect_decode_sites` (`kernels/detect_sites.rs`) are the head's class pass into such lists and the decode of
-  the boxes computed there.
-  `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
-  (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
-  separable (row pass, then column pass; same first-maximum argmax as a direct scan); when nothing is recorded
-  (`no_grad`, or an input that does not require grad) it makes no index tensor (`Backend::max_pool2d_values`,
-  on the CPU a select over `-inf`-padded rows, the same bits; a window far wider than the plane takes the clipped
-  indexed scan instead). A batched `matmul` splits the pool between its
-  matrices. A batch of several images
-  splits the pool between them: only as many images run at once (`lanes`) as their shifted-rows copies or unfolded
-  gradients fit in 16 MiB, each lane taking its images one after another, and each image's GEMMs get
-  `threads / lanes` threads (work stealing spreads the tiles); the weight gradient makes its images' operands in
-  waves of that size, each wave tiling its rows over the K parts it touches. On the CPU,
-  `Predictor::predict_batch` runs chunks of two images as concurrent forwards, the same predictions as one pass. The stride-1 input gradient is the forward kernel run on the output gradient with the flipped,
-  channel-swapped kernel (no col2im); strided convs use an unfolded gradient and col2im. The weight gradient of a
-  stride-1 conv (or a pointwise one with at least 64 input channels) is `dWᵀ = X_unfolded · gyᵀ` with the input's
-  shifted rows as A, read in place by a 6x16 micro-kernel through six row pointers (`gemm_arows`), and the output
-  gradient transposed once per image into packed B panels (zeros in the dropped columns); K is cut into parts
-  and the rows into tiles by shape alone, partials added in order. Other convs pack the unfolded input as they
-  go. folo-nn's train-mode BatchNorm on the CPU takes its statistics in one read of x, in `f64` and in
-  blocks of 256 floats per plane: the 8-lane plane sums of the old two-pass code (so the mean is bit for bit
-  its mean), and each block's sum of squared deviations from its own mean, merged per plane and per channel
-  with Chan's formula (no cancellation). It applies SiLU / ReLU in its own passes (forward and backward),
-  bit for bit BatchNorm then `Tensor::silu` / `relu` (`cpu::silu` / `cpu::silu_backward` are the shared formulas);
-  its per-plane loops run as AVX2 when the CPU has it (the same loops compiled under `target_feature`, bit for bit). `f32` buffers from 16 KiB
-  are recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one
-  to custom ops) so training and inference loops do not pay page faults every step. When it is full, lengths unused
-  for two limits of traffic, and for twice the longest they ever went unused before coming back, are evicted for the
-  ones now asked for, so a later workload (another model, another input shape) gets cached too while one that cycles
-  through more than the cache holds keeps a cache-sized part. `cpu::in_pool` runs a closure on
-  a worker of a dedicated rayon pool (so the per-thread state cannot reach other jobs of the global pool) with the
-  caller's grad mode and autocast state; CPU forwards and predictions use it so their many parallel kernels start
-  inside a pool instead of each waking one from outside.
-- Determinism: CPU results are bitwise identical from run to run and for every rayon thread count. Full and
-  long-row reductions use fixed blocks (8192 elements) combined by a fixed-order pairwise tree; reductions over
-  inner dims give each output element to one task; the GEMM's K split depends only on the shape; accumulating
-  scatters (`index_add`, `scatter_add` and the `index_select` / `gather` / `topk` gradients) partition work by
-  destination and add sources in index order. `crates/folo-core/tests/determinism.rs` checks this across pool
-  sizes.
-- Autograd: define-by-run, reverse mode. An op whose input requires grad records a node (inputs, their storage
-  versions, a backward closure built from ordinary tensor ops) on the result. `loss.backward()` returns `Grads` (keyed
-  by tensor id, leaves only) via a topological sort; graphs are retained, so backward can run twice. Graph teardown is
-  iterative (deep graphs do not overflow the stack). A thread-local `no_grad()` guard disables recording. Fan-in
-  gradients are summed in place when the running sum is a fresh tensor nothing else holds.
-- In-place updates for optimizers (`sub_assign`, `add_scaled_assign`, `copy_from`, `fill_assign`, `update_f32`, ...)
-  refuse to touch a tensor that requires grad unless `no_grad` is active, and bump the storage version: backward
-  through a graph that saved the old values fails with `Error::ModifiedInPlace` instead of using stale data.
-- `testing::grad_check` compares autograd against central finite differences (f64 loss accumulation); every
-  differentiable op has a check in `crates/folo-core/tests/grad.rs`.
-- Custom ops: `Tensor::custom_op(name, inputs, output, backward)` lets downstream crates record fused kernels
-  (Conv+BN+SiLU, BatchNorm, DFL / CIoU losses) with a hand-written backward; inputs and output are version-checked
-  like built-in ops and a wrong gradient count or shape is an error at `backward()`.
-- Fused ops with composite fallbacks (`ops/fused.rs`): `Tensor::conv2d_act` (conv + bias + activation),
-  `Tensor::conv2d_act_cat` (the same over a channel concatenation, without writing it),
-  `Tensor::batch_norm_act_train` / `batch_norm_act_train_backward` (train-mode BatchNorm + activation, running
-  update in place) and `Tensor::optimizer_step_` (in-place SGD / AdamW / EMA update) call optional `Backend` hooks;
-  folo-gpu implements them, the CPU backend implements `conv2d_act` and `conv2d_act_cat`, other backends fall
-  back.
-- Detector pre- and post-processing hooks (`ops/vision.rs`, `Ok(None)` without a kernel so callers keep their host
-  code): `Tensor::letterbox_rgb8` (raw `u8` images → letterboxed `f32` NCHW input, sampled with folo-data's exact
-  resize taps) and `Tensor::detect_candidates` (head → per-anchor best class above `conf` with its decoded box, as
-  a compact list). folo-gpu implements both.
-- `Tensor::to_device_(device)` moves a storage to another device **in place**: the device lives on the shared storage
-  cell, so every clone and view follows and the tensor keeps its id (gradients and optimizer state stay keyed). This
-  is how whole models move (`Module::to_device`).
-- Mixed precision (`folo_core::autocast`, like `torch.autocast`): while an `autocast()` guard is alive on the thread,
-  `conv2d_with` and `matmul` of tensors on a backend that computes in f16 run in f16 (`F32` operands cast by
-  recorded casts; a conv uses f16 copies of its weight and bias but is recorded against the f32 ones, and its
-  backward writes the weight gradient straight to f32 with `Backend::conv2d_backward_weight_as`), and softmax runs
-  in f32. Everything downstream runs in the dtype it receives; the fused train-mode BatchNorm takes f16 data with
-  f32 parameters and statistics. `Tensor::unscale_check_` (a `Backend::unscale_check` hook) is the loss scaler's
-  fused unscale and overflow flag.
-- Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests. `Rng::ALGO`
-  (`"xoshiro256pp"`), `state()` and `from_state()` save and resume the exact stream (the `folo.rng` checkpoint entry).
+## Repository map
 
-### Backend integration contract (for folo-gpu and other devices)
-- Implement `folo_core::backend::Backend` and call `register_backend(Device::Gpu(i), Arc::new(backend))` at startup
-  (for example from `folo_gpu::init()`). `backend(device)` looks it up; tensors on an unregistered device fail with
-  `Error::BackendNotRegistered`.
-- Device memory is `Storage::Device(DeviceStorage)`: folo-core stores the device, dtype and element count and an opaque
-  `Box<dyn Any + Send + Sync>` buffer that only the backend downcasts. Build results with `DeviceStorage::new` and
-  wrap foreign buffers into tensors with `Tensor::from_storage`.
-- Every method receives `View`s (storage + `Layout`). Layouts may be strided or broadcast (stride 0); outputs are fresh
-  contiguous storages on the same device. folo-core validates shapes, dtypes and devices before calling; binary,
-  `where_cond` and `matmul` operands arrive already broadcast to the output shape.
-- Required: `name`, `full`, `upload`, `download` (to host, logical order), `copy_strided`, `copy_into` (strided write
-  used by `cat`, `pad`, view gradients and `copy_from`), `cast`. Everything else (unary + `unary_backward`, binary,
-  `where_cond`, `reduce`, `softmax`, `matmul`, conv2d forward / backward-input / backward-weight, pooling and
-  upsampling with their backwards, `index_select`/`index_add`/`gather`/`scatter_add`, `topk`) defaults to
-  `Error::NotSupported { op, backend }`, so a backend can grow op by op. Gradients are composed from the same methods,
-  so an op is trainable on a device once its forward and `*_backward` methods exist.
-- Optional gradient fast paths with composing defaults: `index_select_backward` and `gather_backward` (default
-  `full` zeros then `index_add` / `scatter_add`).
-- `max_pool2d_backward` also receives the pooling window (`Pool2dParams`), so a backend can compute the gradient as a
-  gather (each input element visits only the windows that cover it) instead of a scatter with float atomics; the
-  CPU backend ignores it.
-- Optional fused hooks (`conv2d_act`, `conv2d_act_cat`, `batch_norm_act`, `batch_norm_act_backward`,
-  `optimizer_step`, `letterbox_rgb8`, `detect_candidates`) default to
-  `NotSupported`; folo-core's fused entry points then compose ordinary ops (or report "not available" so folo-nn
-  uses its own path). `batch_norm_act` and `optimizer_step` write into `&mut Storage` arguments (running statistics,
-  parameters, optimizer state) that folo-core has write-locked, checked to be contiguous and distinct.
-- `synchronize` (default no-op) waits for queued device work and reports asynchronous errors;
-  `folo_core::backend::synchronize(device)` calls it. Backends may queue work lazily: only `download` (`to_vec`,
-  `to_device(Cpu)`, `item`) and `synchronize` have to wait.
-- Tensors move between devices with `to_device` (autograd flows back across the transfer). The CPU backend is the
-  reference: each GPU kernel should be tested against it within a stated tolerance.
+| path | what it is | read more |
+|---|---|---|
+| `crates/` | the cargo workspace of the engine and services: the 14 crates below | [The crates](#the-crates) |
+| `web/` | FOLO Studio: TypeScript + Vite on fw, FOLO's own UI framework (`web/framework/`) | [web/README.md](../web/README.md) |
+| `apps/desktop/` | FOLO Desktop, its own cargo workspace: the app and `ui/` (folo-ui, its UI framework) | [apps/desktop/README.md](../apps/desktop/README.md) |
+| `design/` | the design system both apps share: `tokens.json`, fonts, the logo, `UNIFIED.md` (screen by screen) | [design/README.md](../design/README.md) |
+| `docs/` | the documentation; `docs/notes/` holds the engineering notebooks, `docs/img/` the README's images | [docs/README.md](README.md) |
+| `site/` | the docs website, generated from `docs/*.md`, `README.md` and `examples/*/README.md` | [site/README.md](../site/README.md) |
+| `examples/` | the shapes and COCO walkthroughs, and `bench_external.py` (any model on a FOLO benchmark) | [examples/README.md](../examples/README.md) |
+| `bench/` | measurement scripts outside cargo: incumbent baselines, fine-tuning comparisons, ONNX parity | [bench/README.md](../bench/README.md), [BENCHMARKS.md](BENCHMARKS.md) |
+| `tools/` | CI and development helpers: `file-size.sh`, `test-tmp.sh`, `ci-retry.sh`, `bench-ab.ps1`, `boat.py`, `charts/` | [tools/README.md](../tools/README.md) |
+| `scripts/` | `build-wasm.sh` / `.ps1` (folo-wasm into `web/public/folo-wasm/`), `install.sh` / `.ps1` (the CLI from a release) | [scripts/README.md](../scripts/README.md) |
+| `.github/` | CI workflows (`ci`, `web`, `wasm`, `desktop`, `site`, `release`), issue and PR templates | [CI.md](CI.md), [RELEASE.md](RELEASE.md) |
+| `Cargo.toml`, `.cargo/`, `rust-toolchain.toml`, `rustfmt.toml` | the workspace and its build settings | [AGENTS.md](../AGENTS.md) |
+| `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `llms.txt` | rules and entry points for contributors and agents | [AGENTS.md](../AGENTS.md) |
 
-## folo-gpu — wgpu backend
-- One `GpuDevice` per adapter (Vulkan / DX12 / Metal natively; WebGPU in the browser through wasm). Buffer pool with
-  size buckets to avoid allocation churn; command batching so a forward pass is a few submissions, not hundreds.
-  Forward plans (`folo_gpu::ForwardPlans`) record an inference call once (a forward, or the whole device side of
-  candidate-first prediction) and replay it as a flat list of dispatches over buffers the plan owns, bit-identically,
-  retired when a listed tensor changes; `Predictor` turns them on for its model (docs/GPU.md).
-- Kernels in WGSL: tiled GEMM (shared-memory tiles, vec4 loads), im2col / direct conv, elementwise + fused activations,
-  reductions, softmax, pooling, upsample, concat. Each kernel is tested against the CPU reference.
-- f16 storage/compute when the adapter supports `shader-f16`, with f32 accumulation.
-- Implements folo-core's `Backend` (`folo_gpu::GpuBackend`): `folo_gpu::init()` registers the default adapter as
+## The crates
+
+| crate | responsibility | depends on | entry points | read more |
+|---|---|---|---|---|
+| folo-core | tensors, dtypes, CPU kernels, autograd, autocast, RNG, the `Backend` trait | none | `Tensor`, `backend::Backend`, `no_grad`, `autocast`, `rng::Rng`, `testing::grad_check` | [CORE.md](CORE.md), [README](../crates/folo-core/README.md) |
+| folo-gpu | wgpu device, buffer pool, WGSL kernels; implements `Backend` | core | `GpuContext`, `GpuBackend`, `init`, `GpuTensor`, `ForwardPlans`, `kernels` | [GPU.md](GPU.md), [README](../crates/folo-gpu/README.md) |
+| folo-nn | modules, layers, init, optimizers, schedules, EMA, loss scaling, `.folo` files | core | `Module`, `Forward`, `ConvBnAct`, `optim`, `LrSchedule`, `ModelEma`, `GradScaler`, `io::ModelFile` | [NN.md](NN.md), [FORMAT.md](FORMAT.md), [README](../crates/folo-nn/README.md) |
+| folo-data | image IO, YOLO / COCO datasets, augmentation, the data loader, synthetic data | none | `open`, `open_with`, `Dataset`, `DataLoader`, `AugmentConfig`, `synthetic`, `pack` | [DATA.md](DATA.md), [README](../crates/folo-data/README.md) |
+| folo-vision | the detector, loss, assigner, box ops, NMS, metrics, trainer, predictor, ONNX export | api, core, data, gpu, nn | `FoloModel`, `detection_loss`, `Evaluator`, `Trainer`, `Predictor`, `export::onnx` | [VISION.md](VISION.md), [MODEL.md](MODEL.md), [README](../crates/folo-vision/README.md) |
+| folo-bench | stress conditions, plans and scores of vision benchmarks | api, core, data, vision | `Condition`, `plan`, `score`, `ENGINE_VERSION` | [BENCH.md](BENCH.md), [README](../crates/folo-bench/README.md) |
+| folo-wasm | detectors in the browser (wasm-bindgen) | api, core, data, gpu, nn, vision | `FoloDetector` (JS), `detector::Detector` | [WASM.md](WASM.md), [README](../crates/folo-wasm/README.md) |
+| folo-api | the serde types of API.md and the error codes, shared by every service and Desktop | none | `TrainConfig`, `Run`, `RunEvent`, `codes::CODES` | [API.md](API.md), [README](../crates/folo-api/README.md) |
+| folo-server | the HTTP + SSE server, the `Store` trait and the services behind it | api, bench, client, cloud, core, data, gpu, nn, vision | `Server`, `Store`, `RealStore`, `MockStore` | [SERVER.md](SERVER.md), [README](../crates/folo-server/README.md) |
+| folo-client | blocking HTTP client of API.md; transfers in parts | api | `Client`, `transfer` | [SERVER.md](SERVER.md), [README](../crates/folo-client/README.md) |
+| folo-cloud | cloud compute providers behind one trait | api, client | `Provider`, `providers()`, `runpod`, `remote`, `bootstrap` | [CLOUD.md](CLOUD.md), [README](../crates/folo-cloud/README.md) |
+| folo-mcp | the MCP server (rmcp, stdio) over the server's `Store` | api, client, data, server | `build`, `serve_stdio`, `Backend`, `proxy::HttpStore` | [MCP.md](MCP.md), [README](../crates/folo-mcp/README.md) |
+| folo-cli | the `folo` binary | api, client, data, gpu, mcp, nn, server, vision | `cli::Command`, `main.rs` (`run`) | [CLI.md](CLI.md), [README](../crates/folo-cli/README.md) |
+| folo-test-support | test-only helpers (a dev-dependency) | none | `TestDir`, `TestFile`, `ChildGuard`, `FOLO_TEST_TMP` | [CI.md](CI.md#test-temp-dirs), [README](../crates/folo-test-support/README.md) |
+
+FOLO Desktop (`apps/desktop/`, crate `folo-desktop`) depends on folo-ui, folo-api, folo-bench, folo-core, folo-data,
+folo-gpu, folo-nn and folo-vision by path.
+
+## How things flow
+Each step names the file and the function or type that does it. Paths are under `crates/` unless they start with
+`web/`.
+
+### `folo train`
+1. `folo-cli/src/main.rs`: `parse` (also records which flags were given explicitly), then `run` →
+   `train::train` (`folo-cli/src/train/mod.rs`).
+2. `train::start`: `open_dataset` (`engine.rs`), `config_of` + `apply_sets` (`train/config.rs`), `cfg.validate()`
+   before anything is written, then `reserve_dir` (`<project>/<name>`, or `<name>2`, ...).
+3. `TrainOptions { run_dir, events: progress_sink(..) }` → `folo_vision::Trainer::new`
+   (`folo-vision/src/train/setup.rs`) → `Trainer::run` (`train/run.rs`), which runs the epochs (`train/epoch.rs`)
+   and writes `config.json`, `metrics.jsonl`, `weights/{last,best}.folo` and `samples/` (`train/writer/`).
+4. Every `RunEvent` reaches `progress_sink` (`folo-cli/src/train/progress.rs`): a progress view, or JSON lines with
+   `--json`; `finish` prints the summary.
+
+### `folo predict`
+1. `main.rs` `run` → `infer::predict` (`folo-cli/src/infer.rs`).
+2. `open_model`: resolves the weights (`weights::resolve`), the device (`resolve_device`, `can_place`) and the
+   precision, starts the GPU precompile (`folo_vision::precompile`), then `FoloModel::from_file_for_inference`.
+3. `Predictor::new(model, PredictConfig { .. })` (`folo-vision/src/predict.rs`).
+4. Per image: `folo_data::read_image` → `Predictor::predict` → optional `annotate` and `write_new` → a `prediction`
+   record; a `done` record at the end.
+
+### A training run started from Studio
+1. `web/src/lib/api/client.ts` `createRun` → `POST /api/runs`.
+2. `folo-server/src/routes/runs.rs` `create_run` (also handles `resume_run_id` and `checkpoint`) → `Store::create_run`
+   on the blocking pool.
+3. `RealStore::create_run` (`real/store.rs`) → `RealStore::start_run` (`real/training.rs`: checks, then the target)
+   → `Runs::create` (`runs/queue.rs`): register the run, enqueue it, start the worker if needed.
+4. The `folo-runs` worker thread (`Runs::work`) takes the run, `RunEntry::claim` and `RunEntry::execute` →
+   `runs/train.rs` `execute` → `build` → `Trainer::new` (or `Trainer::resume` from `weights/last.folo`) with
+   `events` set to `RunEntry::on_event` → `Trainer::run`.
+5. `RunEntry::on_event` (`runs/entry.rs`) updates and persists the run and sends each event on the run's broadcast
+   channel.
+6. The page follows: `client.ts` `runEvents` → `openEventStream` (`web/src/lib/api/sse.ts`, an `EventSource`) →
+   `GET /api/runs/{id}/events` → `routes/runs.rs` `run_events` → `Runs::subscribe` (`runs/history.rs`): the run's
+   `status` first, then live events. `web/src/lib/api/live.ts` keeps the open run's view current from them.
+
+### An MCP tool call
+1. `folo mcp` (`folo-cli/src/mcp.rs`) picks a `folo_mcp::Backend`: `Real` (embedded), `Mock` or `Proxy` (`--server`);
+   an embedded start becomes `Proxy` when a `folo serve` already owns the data dir (`serve_lock.rs`) and `--confine`
+   is off. `folo_mcp::build` → `serve_stdio`.
+2. `FoloMcp::call_tool` (`folo-mcp/src/server.rs`) → `Inner::call` (`tools/dispatch.rs`: read-only and
+   unknown-argument checks, then a match on the tool name) → for `train`, `Inner::train` (`tools/runs.rs`) →
+   `Store::create_run` on the blocking pool.
+3. Embedded, that is `RealStore::create_run` and the rest of the Studio flow from step 3; a local run is remembered
+   and stopped when the client disconnects. With `--server`, `proxy::HttpStore::create_run` (`folo-mcp/src/proxy.rs`)
+   sends `POST /runs` through folo-client to the running server, whose runs outlive the session.
+
+### In-browser inference
+1. `scripts/build-wasm.sh` builds `crates/folo-wasm` into `web/public/folo-wasm/`; a server whose web app includes
+   it lists the `web_wasm` feature in `GET /api/system`.
+2. Studio's Playground (`web/src/routes/Playground.tsx`) uses `BrowserEngine` (`web/src/lib/inference/browser.ts`),
+   which imports `folo-wasm/folo_wasm.js` and gets the weights with `client.ts` `modelWeights`
+   (`GET /api/models/{id}/weights?format=f16`).
+3. `FoloDetector.load` (`folo-wasm/src/lib.rs`) → `Detector::load` (`detector.rs`): parse the `.folo` file, build the
+   fused eval-mode model, place it on WebGPU or the CPU (`auto` checks WebGPU with one small forward pass).
+4. `FoloDetector.detect` → `Detector::detect`: folo-vision's `Predictor` steps (letterbox, forward, decode, NMS,
+   unmap), with the GPU readback awaited (`folo_gpu::download_async`); the result is `/api/predict`'s response shape
+   plus `backend`.
+
+### A cloud run
+1. `POST /api/runs` with `compute` → `RealStore::start_run` → `run_settings`: `cloud::check_device` and
+   `Cloud::target` (`folo-server/src/cloud/mod.rs`) choose the connection and the offer.
+2. `Runs::create_cloud` registers the run, claimed and outside the queue → `RealStore::start_cloud` → `Cloud::start`
+   (takes the run's `cloud.lock`) → `executor::spawn` (`cloud/executor/mod.rs`): a `folo-cloud-<id>` thread runs
+   `Exec::drive` inside `RunEntry::execute`.
+3. `Exec::start` (`executor/launch.rs`): `open_dataset` (before anything is rented) → `provision` (a ledger record,
+   then the provider's launch) → `boot` (the instance, its worker, the worker check) → `sync` (`executor/sync.rs`:
+   dataset and starting weights) → `start_worker_run` → `train` (`executor/train.rs`: the worker's run mirrored into
+   the local run folder, then `collect`, `executor/mirror.rs`).
+4. A `Release` guard terminates the instance through the ledger on every way out; the run's events reach Studio
+   exactly as for a local run.
+
+## Where do I change ...?
+Paths are under `crates/` unless they start with `web/`, `apps/` or `site/`. Each row follows an existing example.
+
+| task | change | test | docs |
+|---|---|---|---|
+| add a tensor op | `folo-core/src/ops/<area>.rs` (the `Tensor` method, its checks and its backward), `backend.rs` (a `Backend` method or an op enum such as `UnaryOp`), the CPU kernel in `folo-core/src/cpu/`; for the GPU, `folo-gpu/src/backend/ops.rs` and `convert.rs` | a finite-difference check in `folo-core/tests/grad.rs`; `tests/determinism.rs` for a reduction or scatter; `folo-gpu/src/tests/backend/` against the CPU | [CORE.md](CORE.md), [GPU.md](GPU.md) |
+| add a GPU kernel | `folo-gpu/src/shaders/<name>.wgsl`, a `KernelDef` (listed in the module's `DEFS`) and entry point in `folo-gpu/src/kernels/<area>.rs`, a `GpuTensor` method if tensor-level | `folo-gpu/src/tests/<area>.rs` against a CPU loop | [GPU.md](GPU.md#adding-a-kernel) |
+| add a layer | `folo-nn/src/layers/<file>.rs` (`Module`, plus `Forward` for one-in, one-out), re-exported from `layers/mod.rs` and `lib.rs` | `folo-nn/tests/modules.rs` | [NN.md](NN.md) |
+| add an optimizer | `folo-nn/src/optim/<name>.rs` (as `sgd.rs`, `adamw.rs`, `musgd.rs`) and `OptimKind` in `optim/mod.rs`; to make it selectable: `Optimizer` / `ResolvedOptimizer` in `folo-api/src/runs.rs`, `OptimizerChoice` in `folo-vision/src/train/config.rs`, the CLI's value in `folo-cli/src/cli.rs`, `folo-server/src/cli.rs` | `folo-nn/tests/optim.rs` | [NN.md](NN.md), [FORMAT.md](FORMAT.md) (`folo.optim`), [MODEL.md](MODEL.md) §8.2 |
+| add an augmentation | `folo-data/src/augment/` (the transform, its knob in `AugmentConfig` and `validate`, the chain in `pipeline.rs`); `Augment` in `folo-api/src/runs.rs`, `AugmentConfig` use in `folo-vision/src/train/config.rs`, the flag in `folo-cli/src/cli.rs` and `train/config.rs`, `folo-server/src/cli.rs` | `folo-data/tests/augment.rs`; `train_defaults_match_the_api` in `folo-cli/src/main.rs` | [DATA.md](DATA.md), [API.md](API.md), [CLI.md](CLI.md) |
+| add a dataset format | a reader in `folo-data/src/dataset/` (as `yolo.rs`, `coco.rs`), `Format` and `detect_format` in `dataset/mod.rs`, `check.rs`, `convert.rs`; `DatasetFormat` in `folo-api/src/datasets.rs` | `folo-data/tests/formats.rs` | [DATA.md](DATA.md), [API.md](API.md) |
+| change the detector | `folo-vision/src/model/` (`blocks.rs`, `head.rs`, `mod.rs`); the ONNX graph mirrors `forward` in `export/onnx/blocks.rs` | `folo-vision/tests/model.rs`; ONNX parity `folo-cli/tests/onnx.rs` | [MODEL.md](MODEL.md) (normative), [VISION.md](VISION.md) |
+| change the loss or assigner | `folo-vision/src/loss/` and `assign.rs`; the GPU path in `folo-gpu/src/detect.rs`, `kernels/detect.rs` and the `det_*` / `tal_*` shaders | `folo-vision/tests/loss_cases.rs`, `assign_cases.rs`, `gpu_loss.rs` | [MODEL.md](MODEL.md) §7, [VISION.md](VISION.md) |
+| change the `.folo` format | `folo-nn/src/io/` (`safetensors.rs`, `meta.rs`, `file.rs`, `checkpoint.rs`, `export.rs`); the trainer's side in `folo-vision/src/train/checkpoint.rs` | `folo-nn/tests/folo_io.rs` | [FORMAT.md](FORMAT.md), [NN.md](NN.md) |
+| add a metric | `folo-vision/src/metrics.rs` (`Evaluator`), `cocoeval.rs` for COCOeval numbers | `folo-vision/tests/metrics_known.rs`, `coco_parity.rs` | [METRICS.md](METRICS.md) |
+| add a CLI command | a variant and `Args` in `folo-cli/src/cli.rs` (its help is the `folo describe` output), dispatch in `main.rs` `run`, a module of its own | the name in `describe_covers_every_command` (`main.rs`); `folo-cli/tests/cli.rs` | [CLI.md](CLI.md#adding-a-command) |
+| add an HTTP route | the wire type in `folo-api` (a `FEATURE_*` constant in `system.rs` if clients must detect it, listed in `routes/system.rs`); the handler in `folo-server/src/routes/<area>.rs`, wired in `routes/mod.rs`; a `Store` method in `store.rs` with `real/store.rs` and `mock/store.rs`; `proxy.rs` in folo-mcp if MCP needs it; Studio: `web/src/lib/api/client.ts`, `types/`, `mock/`, `share.ts`; Desktop: `apps/desktop/src/api/mod.rs`, `http/mod.rs`, `mock/backend.rs`. folo-client has no per-route code | `folo-server/tests/api/` | [API.md](API.md) |
+| add an SSE run event | a `RunEvent` variant in `folo-api/src/run_events.rs` (`name`, `data_json`, `from_sse`); emit it from `folo-server/src/runs/` and `mock/runs/events.rs`; the exhaustive matches in `runs/entry.rs` and `folo-cli/src/train/progress.rs`; `RUN_EVENTS` in `web/src/lib/api/sse.ts` and `types/runs.ts`; `apps/desktop/src/store/live.rs` | `folo-server/tests/api/` (SSE) | [API.md](API.md) |
+| add an error code | `c(code, status, exit, meaning)` in `CODES` (`folo-api/src/codes.rs`); raise it with `Error::new(status, code, message).hint(..)` | `folo-cli/tests/codes.rs` fails until it is listed | [API.md](API.md#errors), [CLI.md](CLI.md) |
+| add an MCP tool | a `ToolDef` in `TOOLS` (`folo-mcp/src/tools/mod.rs`), its types in `types.rs` or `folo-api`, a match arm in `tools/dispatch.rs`, a handler in `tools/<area>.rs` | `folo-mcp/src/tools/tests.rs` checks the tool count and list stated in README.md, QUICKSTART.md, MCP.md and `llms.txt` | [MCP.md](MCP.md) |
+| add a cloud provider | a type implementing `Provider` in `folo-cloud`, listed in `providers()` (`lib.rs`); mock offers in `folo-server/src/mock/`; Desktop's demo list in `apps/desktop/src/api/mock/cloud.rs` | the provider id lists asserted in `folo-cloud/src/lib.rs`, `folo-cli/tests/cloud.rs`, `folo-server/tests/mock_cloud.rs` | [CLOUD.md](CLOUD.md#adding-a-provider) |
+| add a labeling agent | a `LabelAgentId` variant (`folo-api/src/label.rs`); an `Agent` (`folo-server/src/label/agent.rs`) as `claude.rs` / `codex.rs`, added in `label/mod.rs` | `folo-server/tests/label/` (scripted agents) | [LABELING.md](LABELING.md), [API.md](API.md) |
+| add a benchmark condition | `Condition` and its parameter table in `folo-bench/src/conditions/mod.rs`, `transform.rs`, `catalog.rs`; bump `ENGINE_VERSION` (`lib.rs`); the mock catalogs in `web/src/lib/api/mock/benchCatalog.ts` and `apps/desktop/src/api/mock_bench/` | `folo-bench/tests/golden.rs`; `conditions/tests.rs` checks BENCH.md's table | [BENCH.md](BENCH.md) |
+| add a Studio screen | `RouteName` and its pattern in `web/src/lib/router.ts`, a line in `ROUTES` (`web/src/routes.ts`), `web/src/routes/<Name>.tsx`; `web/src/lib/shell/nav.ts` for a top-level entry | `web/src/routes/<Name>.test.tsx` | [web/README.md](../web/README.md), `design/UNIFIED.md` |
+| add a Desktop screen | `Route` (with `parse` and `section`) in `apps/desktop/src/app/mod.rs`, `FoloApp::page` in `app/page.rs`, a module in `apps/desktop/src/screens/` | a `--scenario` state in `apps/desktop/src/scenario.rs` and its screenshot (`apps/desktop/tools/shoot.ps1`) | [apps/desktop/README.md](../apps/desktop/README.md), `design/UNIFIED.md` |
+| add a docs page | `docs/<NAME>.md`, its entry in `NAV` (`site/scripts/config.ts`), the docs table of `README.md`, `docs/README.md`, `llms.txt` | `npm run check` in `site/` (links, anchors, images) | [site/README.md](../site/README.md) |
+
+## The engine crates
+
+### folo-core
+The tensor engine: `Tensor` is a cheap `Arc` handle over shared storage plus a `Layout`; views do not copy; ops return
+`Result` with errors that name the op and both shapes. Kernels sit behind the `Backend` trait, and the CPU backend
+(BLIS-style GEMM, im2col-free convolution, Winograd for 3x3 inference convs, a buffer cache, a dedicated rayon pool)
+is built in. Autograd is define-by-run with `Grads` keyed by tensor id; `autocast` adds f16 mixed precision on
+backends that compute in f16.
+- **Backend integration contract, in short:** implement `Backend` and register it with `register_backend`; only
+  `name` and the memory methods are required, every compute op and fused hook defaults to `NotSupported` so a
+  backend grows op by op, and the CPU backend is the reference each GPU kernel is tested against. Full text:
+  [CORE.md](CORE.md#backend-integration-contract).
+- Determinism, autograd, in-place updates, custom ops and the RNG: [CORE.md](CORE.md).
+
+### folo-gpu
+The wgpu backend ([GPU.md](GPU.md)).
+- One `GpuContext` per adapter (Vulkan / DX12 / Metal natively; WebGPU in the browser through wasm), with a buffer
+  pool in size classes to avoid allocation churn and command batching, so a forward pass is a few submissions, not
+  hundreds. Forward plans (`folo_gpu::ForwardPlans`) record an inference call once (a forward, or the whole device
+  side of candidate-first prediction) and replay it as a flat list of dispatches over buffers the plan owns,
+  bit-identically, retired when a listed tensor changes; `Predictor` turns them on for its model.
+- Kernels in WGSL: tiled GEMM (shared-memory tiles, vec4 loads), convolution as implicit GEMM (no im2col buffer) with
+  direct depthwise kernels, elementwise + fused activations, reductions, softmax, pooling, upsample, concat. Each
+  kernel is tested against the CPU reference. f16 storage and compute when the adapter supports `shader-f16`, with
+  f32 accumulation.
+- `folo_gpu::GpuBackend` implements folo-core's `Backend`: `folo_gpu::init()` registers the default adapter as
   `Device::Gpu(0)`, after which `tensor.to_device(Device::Gpu(0))` keeps data and every op (forward and the gradient
-  ops autograd records) on the GPU. It also implements the fused hooks: Conv + bias + activation in the conv
-  epilogue, train-mode BatchNorm + activation forward / backward kernels, and in-place optimizer updates. Work is encoded into the context's open batch and only waits on readback, so
-  a forward + backward pass is a handful of queue submissions. Every dtype is stored (`u8` / `f16` packed into
-  words, `i64` as word pairs); strided views are read in place by elementwise ops, copies and matmul.
-- A standalone `GpuTensor` over the same kernel layer stays for kernel-level work. Kernel list, layout
-  conventions, the backend's op mapping, GEMM tuning notes and benchmarks: `docs/GPU.md`.
+  ops autograd records) on the GPU. It also implements the fused hooks: Conv + bias + activation in the conv epilogue,
+  train-mode BatchNorm + activation forward / backward kernels, and in-place optimizer updates. Work is encoded into
+  the context's open batch and only waits on readback, so a forward + backward pass is a handful of queue
+  submissions. Every dtype is stored (`u8` / `f16` packed into words, `i64` as word pairs); strided views are read in
+  place by elementwise ops, copies and matmul.
+- A standalone `GpuTensor` over the same kernel layer stays for kernel-level work. Kernel list, layout conventions,
+  the backend's op mapping, GEMM tuning notes and benchmarks: [GPU.md](GPU.md).
 
-## folo-nn — layers and training utilities
-- `Module` trait: `parameters()`/`named_parameters()`/`named_buffers()` (stable, dotted names like
-  `backbone.stem.conv.weight`), `train()`/`eval()` mode, submodule visitor, `to_device()` (in place, identities
-  kept; optimizers and EMAs have their own `to_device`); `Forward` adds `forward` for one-in, one-out layers. Overview: [docs/NN.md](NN.md). Layers: `Conv2d` (groups, stride, padding, dilation), `BatchNorm2d` (running stats,
-  momentum; fused into the conv for inference), `Linear`, activations (SiLU, ReLU, LeakyReLU, Sigmoid, Hardswish),
-  `MaxPool2d`, `Upsample` (nearest), `Concat`, `Sequential`.
-- Init: Kaiming / Xavier uniform/normal, seeded. Optimizers: SGD (momentum, Nesterov, weight decay) and AdamW, with
-  parameter groups (no decay for BN and bias). Schedules: warmup + cosine / linear, EMA of weights.
-- `.folo` weight files (`docs/FORMAT.md`): safetensors-compatible layout (u64 header length, JSON header, raw
+### folo-nn
+Layers and training utilities ([NN.md](NN.md)).
+- `Module` trait: `parameters()` / `named_parameters()` / `named_buffers()` (stable, dotted names like
+  `backbone.stem.conv.weight`), `train()` / `eval()` mode, a submodule visitor, `to_device()` (in place, identities
+  kept; optimizers and EMAs have their own `to_device`); `Forward` adds `forward` for one-in, one-out layers.
+- Layers: `Conv2d` (groups, stride, padding, dilation), `BatchNorm2d` (running stats, momentum; fused into the conv
+  for inference), `Linear`, activations (SiLU, ReLU, LeakyReLU, Sigmoid, Hardswish, ...), `MaxPool2d`, `Upsample`
+  (nearest), `Concat`, `Sequential`.
+- Init: Kaiming / Xavier uniform / normal, seeded. Optimizers: SGD (momentum, Nesterov, weight decay), AdamW and
+  MuSGD, with parameter groups (no decay for BN and bias). Schedules: warmup + cosine / linear, EMA of weights.
+- `.folo` weight files ([FORMAT.md](FORMAT.md)): a safetensors-compatible layout (u64 header length, JSON header, raw
   little-endian tensor data) with a `__metadata__` block holding the model config, class names and training info, so
   standard safetensors tools can read FOLO weights.
 
-## folo-data — data pipeline
+### folo-data
+The data pipeline ([DATA.md](DATA.md): formats, augmentation parameters, determinism).
 - Formats: YOLO txt (`images/` + `labels/`, `data.yaml`), COCO JSON; auto-detected. Dataset statistics (class counts,
   box-size distribution, empty images, broken labels) for Studio and `folo dataset stats`; a line-level checker
   (`check`) for `folo dataset check` and YOLO / COCO conversion (`convert`).
@@ -222,181 +266,110 @@ training and evaluation pipeline, a server, a CLI, a web studio and a native des
 - `DataLoader`: worker threads that decode + augment ahead, a bounded channel, batches as contiguous `NCHW f32`
   (`0..1`) plus targets `[batch_idx, class, cx, cy, w, h]` (normalised). folo-data does not depend on folo-core; the
   trainer wraps the buffers in tensors.
-- `synthetic` module: procedurally generated shapes datasets (circles / squares / triangles / stars on textured
-  backgrounds, random colour, scale, occlusion) for tests, demos and benchmarks with no downloads.
-- Details (formats, augmentation parameters, determinism): `docs/DATA.md`.
+- `synthetic`: procedurally generated shapes datasets (circles / squares / triangles / stars on textured backgrounds,
+  random colour, scale, occlusion) for tests, demos and benchmarks with no downloads.
 
-## folo-vision — the detector
-The exact block definitions, layer tables, parameter names, head, loss, training recipe and verification plan are in
-**[docs/MODEL.md](MODEL.md)**, the normative spec for the detector. In short:
-- **Architecture** (per scale `n/s/m/l/x` via depth and width multipliers): a CSP-style backbone (Conv-BN-SiLU stem,
-  C3k2 blocks with split + bottlenecks + concat), SPPF, one C2PSA attention block at P5, a PAN-FPN neck, and an
-  anchor-free decoupled head on three scales (strides 8 / 16 / 32). Box regression uses distribution focal loss bins
-  (`reg_max`, default 16). `head = "o2o"` adds the NMS-free one-to-one branch (`head.o2o.*`, MODEL.md §6.6, as in
-  YOLOv10 / YOLO26): trained with dual assignment on detached features, it predicts with a top-k selection instead
-  of NMS (`nms::topk_detections`), and only the predicting branch runs in eval mode (`FoloModel::head_mode`).
-  Implemented in `folo_vision::model`: `FoloModel::new(config)` for
-  any scale and class count, `forward` → `HeadOutput { box_raw [B, 64, A], cls_raw [B, nc, A], anchors }`, `fuse()`,
-  `predict_raw` (forward + decode + NMS; decode runs on the outputs' device, NMS on the CPU),
-  `predict_detections` / `HeadOutput::detections` (on a GPU the decode runs in one kernel that keeps only the
-  candidates above `conf`, and only those are downloaded), `to_device()`, and
-  `.folo` save / load (`open_on(path, device)`) / transfer through folo-nn.
-- **Loss**: task-aligned assigner (TAL: `score^alpha * IoU^beta`, top-k), BCE classification on aligned targets,
-  CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default. On the CPU `folo_vision::loss` runs the assigner on the
-  detached head outputs, then builds the terms from folo-core tensor ops (fused custom ops for the full-size BCE and
-  gather), so gradients flow into both head branches. On a GPU the whole loss runs as folo-gpu kernels
-  (`folo_gpu::detect`: assigner, fused BCE, fused CIoU + DFL with a hand-written backward, as one custom op) and
-  only the reported items are read back.
-- **Box ops, NMS, metrics** work on plain slices so they are reusable everywhere: IoU / GIoU / DIoU / CIoU,
-  xywh↔xyxy, class-aware batched NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision /
-  recall / F1 curves, confusion matrix. `docs/METRICS.md` defines exactly how mAP is computed.
-- **Trainer** (`folo_vision::train::Trainer`, MODEL.md §8): folo-data's `DataLoader` (seeded per epoch and sample, so
-  batches do not depend on the worker count) → tensors → train-mode forward → loss → backward into a
-  `GradAccumulator` (nominal batch 64) → schedule (warmup + linear / cosine, in optimizer steps), global-norm
-  clipping, SGD / AdamW with `decay` / `bn` / `bias` groups (`auto` picks per §8.2), EMA. Batches with a non-finite
-  loss or BatchNorm statistic are skipped and their running statistics restored. After every epoch: validation of the
-  EMA model with `metrics::Evaluator`, fitness mAP@0.5:0.95, `last.folo` / `best.folo` checkpoints (complete
-  FORMAT.md state, atomic), early stopping. Resume from a checkpoint is bit-exact. Events (`status`, rate-limited
-  `step`, `epoch`, `log`: the API.md payloads as `folo_api::RunEvent`) go to a callback and to the run's
-  `metrics.jsonl`; the CLI's progress view, `--json` and the server consume them. The device is a parameter:
-  on a GPU (`place_model` moves the model; optimizer, EMA and gradient buffers follow) a feeder thread stages each
-  `u8` batch for upload while the previous step runs, accumulation and clipping stay on the device, and the step
-  waits only for the loss items and one BatchNorm finiteness check. Mixed precision (`amp`, MODEL.md §8.8; GPU
-  tensor cores only, else `not_supported`): the forward under `autocast` (f16 convs and products on tensor cores),
-  the loss in f32 on f32 copies of the head, backward of the loss times folo-nn's `GradScaler` scale, and at the end
-  of a window the unscale, clip and overflow check with one flag readback (an overflowing window skips its step and
-  backs the scale off); master weights, optimizer state, EMA and BatchNorm statistics stay f32, and the scaler is
-  the checkpoint's `folo.amp`. `folo_vision::val::validate`
-  is the same validation for `folo val`.
-- **Predictor** (`folo_vision::predict::Predictor`): loads `.folo` (EMA when present), fuses BN, letterboxes (rect for
-  one image and for a batch whose images share a rect canvas, square for a batch of mixed canvases), forward
-  (candidate-first: the box branch only at the candidates, docs/MODEL.md §9.5), decode, NMS, rescale to the
-  original image, with a preprocess / inference / postprocess timing split. On a GPU the raw `u8` images are uploaded and letterboxed there
-  (bit-exact with the CPU letterbox) and only the decoded candidates come back: one upload per image, one queue of
-  work, one small readback. On the CPU the whole prediction runs inside the rayon pool (`cpu::in_pool`), the
-  letterbox is one fused pass per image (`Letterbox::apply_planar_f32`: resize, padding and `/ 255` straight into
-  planar f32, rows in parallel) into an input buffer from folo-core's
-  buffer cache, the neck's Concat layers are never written (`C3k2::forward_cat`), and the head is evaluated
-  candidate-first (MODEL.md §9.5, `FoloModel::predict_candidates`, `model/lazy.rs`): the three class branches run
-  side by side, each level's candidates come straight from its class map (blocks of 1024 anchors in parallel),
-  and the three box branches then run only at the candidates (`conv2d_act_at`; `conv0` on their 3x3 receptive
-  fields; with DFL box fusion also the candidates' side precisions), so the dense box outputs and the head's `cat`
-  are never made; the detections are the dense path's bit for bit. The candidate extraction and the box branch count
-  as inference, NMS and the letterbox inverse as postprocess. On a GPU the head is candidate-first too
-  (`model/lazy_gpu.rs`): per level the class branch, the class pass into fixed-capacity site lists, `conv0` on the
-  listed windows (scattered back into a map), `conv1` and `out` at the candidates, then one decode of every level and
-  one readback of the records; the dispatches do not depend on the candidates, and an image whose candidates overflow
-  a list takes the dense head on the same features. With DFL box fusion the dense path's moment ops also run on the
-  candidates' box-logit columns (the moments and the site lists are read back too). An unfused model, multi-label
-  settings or f16 on the CPU take the dense forward (the six branch chains side by side) and `HeadOutput::detections`,
-  which reads the head outputs in place and extracts candidates the same way.
-- **ONNX export** (`folo_vision::export::onnx`): `FoloModel::to_onnx` turns a fused model into an opset-17 graph
-  that mirrors `forward` op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o`
-  model ends in the §6.6 top-k: end-to-end `[B, K, 6]` detections; fixed or dynamic
-  shapes; f32 or f16), encoded by a small hand-written protobuf writer (`export::onnx::proto`), with the class names
-  and `folo.*` metadata in `metadata_props`. Any model tensor no node consumed, or an unfused BatchNorm, is an error
-  naming it. `folo export --format onnx` and `POST /api/models/{id}/export` call `export_file`; parity with
-  onnxruntime is `crates/folo-cli/tests/onnx.rs` + `bench/parity/onnx_check.py` (docs/CLI.md, ONNX export).
+### folo-vision
+The detector ([VISION.md](VISION.md) for the implementation, [MODEL.md](MODEL.md) for the normative spec). A CSP-style
+backbone, SPPF, C2PSA, a PAN-FPN neck and an anchor-free decoupled head on strides 8 / 16 / 32, per scale
+`n/s/m/l/x`; `head = "o2o"` adds the NMS-free one-to-one branch. The loss is TAL + BCE + CIoU + DFL, on folo-core ops
+on the CPU and as folo-gpu kernels on a GPU. Box ops, NMS and metrics work on plain slices
+([METRICS.md](METRICS.md) defines mAP). The `Trainer` runs MODEL.md §8 end to end and reports through docs/API.md's
+event types; the `Predictor` evaluates the head candidate-first on both devices; `export::onnx` writes an opset-17
+graph that mirrors `forward`.
 
-## folo-bench — vision benchmarks
-- The engine of [docs/BENCH.md](BENCH.md), a pure library (no files, no server types) that `folo-server`'s
-  `/api/bench` builds on. `conditions`: the twelve stress conditions (`Condition`, ids as in the catalog), each a
-  deterministic, size-keeping change at severities 1 to 5, with pixel sizes given at a 640 px long side and scaled
-  with the image; `apply` makes a variant (only `distance` moves the true boxes), `render` goes from an image file
-  (decoded as datasets are, `folo_data::decode`) to the canonical quality-95 JPEG. Pixels touch only IEEE basic
-  operations (the sRGB curve and Gaussian weights come from tables built without libm) and noise is seeded per row,
-  so a variant has the same bytes on every machine and thread count: `tests/golden.rs` pins a digest of every
-  condition, two canonical JPEGs and a score, on the Linux and Windows CI runners. `ENGINE_VERSION` names what
-  the crate computes and goes into every benchmark's fingerprint; a change the golden tests catch is a bump.
-- `plan`: the catalog, the default plan, `check_plan` (docs/API.md's rules) and `variants`. `score`: every number
-  of BENCH.md's *Definitions* from plain per-image truths and detections, returned as the `folo_api` wire types.
-  AP is folo-vision's `Evaluator` (and `CocoEval` for the size buckets), never a second implementation; the
-  bootstrap interval reruns it on 200 seeded resamples in parallel.
+### folo-bench
+Vision benchmarks ([BENCH.md](BENCH.md)): a pure library (no files, no server types) that folo-server's `/api/bench`
+builds on.
+- `conditions`: the twelve stress conditions (`Condition`, ids as in the catalog), each a deterministic, size-keeping
+  change at severities 1 to 5, with pixel sizes given at a 640 px long side and scaled with the image; `apply` makes a
+  variant (only `distance` moves the true boxes), `render` goes from an image file (decoded as datasets are,
+  `folo_data::decode`) to the canonical quality-95 JPEG.
+- Pixels touch only IEEE basic operations (the sRGB curve and Gaussian weights come from tables built without libm)
+  and noise is seeded per row, so a variant has the same bytes on every machine and thread count: `tests/golden.rs`
+  pins a digest of every condition, two canonical JPEGs and a score, on the Linux and Windows CI runners.
+  `ENGINE_VERSION` names what the crate computes and goes into every benchmark's fingerprint; a change the golden
+  tests catch is a bump.
+- `plan`: the catalog, the default plan, `check_plan` (docs/API.md's rules) and `variants`. `score`: every number of
+  BENCH.md's *Definitions* from plain per-image truths and detections, returned as the `folo_api` wire types. AP is
+  folo-vision's `Evaluator` (and `CocoEval` for the size buckets), never a second implementation; the bootstrap
+  interval reruns it on 200 seeded resamples in parallel.
 
-## folo-wasm — FOLO in the browser
-- `crates/folo-wasm` (wasm-bindgen) loads a `.folo` file from bytes and runs `folo_vision::Predictor`'s steps on
-  WebGPU (folo-gpu's browser backend, async device creation and readback) or on folo-core's CPU kernels compiled to
-  wasm (single-threaded, built with SIMD128). `detect` resolves to `/api/predict`'s response shape plus the
-  backend, so Studio can run models in the page. `scripts/build-wasm.sh` builds it into `web/public/folo-wasm/`.
-  JS API, build and limits: `docs/WASM.md`.
+### folo-wasm
+FOLO in the browser ([WASM.md](WASM.md): JS API, build and limits). `crates/folo-wasm` (wasm-bindgen) loads a `.folo`
+file from bytes and runs `folo_vision::Predictor`'s steps on WebGPU (folo-gpu's browser backend, async device
+creation and readback) or on folo-core's CPU kernels compiled to wasm (single-threaded, built with SIMD128). `detect`
+resolves to `/api/predict`'s response shape plus the backend, so Studio can run models in the page.
+`scripts/build-wasm.sh` builds it into `web/public/folo-wasm/`.
 
-## folo-server and folo-cli
-- `folo-server` (axum + tokio) implements `docs/API.md`: datasets, models, training runs with live SSE metrics, and
-  inference. Handlers sit on a `Store` trait (`MockStore` for `--mock`, `RealStore` for the engine; its datasets
-  are read with folo-data and indexed into a JSON cache under the data dir, invalidated by file mtimes). The real
-  store trains with folo-vision's `Trainer` on one background worker thread (a FIFO queue, one run at a time), fans
-  the trainer's events out to SSE subscribers through a per-run broadcast channel and persists each run under
-  `<data dir>/runs/<id>/`; finished runs' checkpoints and `.folo` files under `<data dir>/models` are its models
-  (`/eval` runs folo-vision's validator, cached); `/predict` keeps an LRU of loaded, fused `Predictor`s. Devices go
-  through folo-vision's `resolve_device` / `can_place` (`auto` is the GPU when folo-gpu finds an adapter, else the CPU) and GPU info
-  comes from folo-gpu. The request and response types live in `folo-api`, a dependency-light crate (serde only) that
-  FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`, or from the copy compiled into the binary by
-  the `embed-web` feature (release builds, see `docs/RELEASE.md`). `folo serve --mock` serves realistic
-  synthetic data for UI work before or without a trained model.
-- **Cloud compute** (`folo_server::cloud`, docs/CLOUD.md): a run with `TrainConfig.compute` trains on another
-  machine's GPU and stays a run of this server. The worker is an ordinary `folo serve` reached through
-  `folo-client` with the public API: a token (`--token`), uploads in parts (`/api/uploads`, a dataset as the tar
-  stream `folo_data::pack` writes), cursors on a run's history and `Range` downloads of its weights are all it
-  needs, so any FOLO server can be one. `folo-cloud` holds the providers behind one trait (`Provider`: check
-  credentials, list offers, launch, look up, find by name, terminate): `RunPod` rents a pod per run and starts the
-  worker with a bootstrap script; `Remote` is a server that already runs. `Cloud` is the control plane of a data
-  dir: connections (`cloud/connections.json`, owner-only, never served), the instance ledger
-  (`cloud/instances/<id>.json`, written before the provider is called), a reaper thread that retries terminations
-  and cleans up after crashes, and one executor thread per cloud run through the phases provisioning → booting →
-  syncing → training → collecting → releasing. A cloud run shares the run registry, folder and event sink with
-  local runs (`RunEntry::execute` is the one claim-execute-publish path) but not the queue or the device; its
-  worker's history is mirrored poll by poll into the same `metrics.jsonl`, `log.jsonl` and `samples/`, so everything
-  downstream of a run is unchanged. A guard releases the instance on every way out, including a panic; a run that
-  trains survives this server (`runs/<id>/cloud.json` and an OS lock on `cloud.lock` let the next process follow it
-  again). Tests drive the whole lifecycle against an in-process worker (`tests/cloud/`).
-- **Agent labeling** (`folo_server::label`, docs/LABELING.md): labeling jobs under `<data dir>/label/<id>/`
-  (unlabeled images, classes, instructions, boxes so far), labeled by a coding-agent CLI on the server's machine
-  and exported as a YOLO dataset that the store registers. `Labeler` is the service behind `/api/label` (the
-  store hands it out through `Store::labeler`; the mock has none). Agents sit behind the `Agent` trait:
-  `ClaudeCode` runs `claude -p` and `Codex` runs `codex exec` as child processes, one model request per batch of
-  images with every tool, config file and session switched off, so a call costs little more than its images; a
-  run thread feeds batches to a few workers, checks each reply (JSON shape, class names, boxes clipped to the
-  image) before storing it, and ends the run at once on a failure that another call would repeat. Events (`job`,
-  `image`, `log`) fan out to SSE subscribers through a per-job broadcast channel, as for runs. Tests script
-  the agents; `tests/label_live.rs` (ignored by default) runs the real CLIs against synthetic shapes.
-- **Vision benchmarks** (`folo_server::bench`, docs/BENCH.md): benchmarks under `<data dir>/bench/<id>/` (the
-  definition with every image's SHA-256 and truth, the copied images, one file per entry and per loop), made
-  from a dataset split or a labeling job read through the `Store` and graded by folo-bench. `Benches` is the
-  service behind `/api/bench` (`Store::benches`; the mock has none). Model entries queue for one worker thread
-  that runs them on the store's inference device with validation's predictor settings, a preparing thread making
-  the next batch of variants (decode, condition, canonical JPEG, decode) on the rayon pool while one is
-  predicted, each variant graded (to its mAP pair) as soon as its pass ends; agent entries ask the labeler's
-  agents (so scripted agents script them too) with the labeling prompt and failure policy, a thread each;
-  external entries come in one request or in parts (an open entry: each part checked whole and taken, repeats
-  of the same content ignored, a variant graded and dropped once all its images are in; a sweeper thread fails
-  open entries that get no part for 30 minutes). Every contestant is graded by the same code
-  (`bench::results`). A self-improvement loop is a thread of its own that
-  drives everything else through what exists: its entries go through the model queue, its datasets and training
-  runs through the `Store` (held weakly, so a loop never keeps the store alive), so the student's run is an
-  ordinary run. Events (`bench`, `entry`, `loop`, `removed`) fan out through a per-benchmark broadcast channel;
-  shutdown fails the active entries and loops and joins their threads.
-- `folo` CLI (`docs/CLI.md`): `train`, `val`, `predict`, `export`, `bench`, `dataset check|stats|synth|convert`, `serve`,
-  `mcp` (Model Context Protocol server over stdio so agents can train and run models), `doctor`. Every command takes
-  `--json` (one JSON object per line on stdout, human text on stderr) and uses stable exit codes.
+## The service crates
+How they fit together, with the server's internals: [SERVER.md](SERVER.md).
+
+### folo-api
+The request and response types of [API.md](API.md), a dependency-light crate (serde and serde_json, with schemars
+behind its `schema` feature for the MCP tool schemas) that folo-server, folo-cli, folo-mcp, folo-vision (its run
+events) and FOLO Desktop share. `codes::CODES` lists every error code with its HTTP status and the CLI's exit code.
+
+### folo-server
+axum + tokio, implementing [API.md](API.md): datasets, models, training runs with live SSE metrics, inference, cloud
+compute, agent labeling and vision benchmarks. Handlers sit on a `Store` trait: `MockStore` for `--mock`, `RealStore`
+for the engine, and folo-mcp's HTTP-backed store. The real store trains with folo-vision's `Trainer` on one background
+worker thread (a FIFO queue, one run at a time), fans the trainer's events out to SSE subscribers through a per-run
+broadcast channel and persists each run under `<data dir>/runs/<id>/`. `folo serve` runs it and serves the built
+Studio; `folo serve --mock` serves realistic synthetic data for UI work before or without a trained model.
+Internals, the data dir, cloud compute, labeling and benchmarks: [SERVER.md](SERVER.md).
+
+### folo-client
+The blocking HTTP client of [API.md](API.md), with uploads and downloads in parts (`transfer`). It knows nothing about
+individual routes. `folo mcp --server` (through `proxy::HttpStore`) and the cloud control plane (talking to a worker)
+use it.
+
+### folo-cloud
+Cloud compute providers behind one trait ([CLOUD.md](CLOUD.md)): `Provider` (check credentials, list offers, launch,
+look up, find by name, terminate), with `RunPod`, which rents a pod per run and starts the worker with a bootstrap
+script, and `Remote`, a server that already runs. `providers()` lists them. The control plane that uses them is
+`folo_server::cloud`.
+
+### folo-mcp
+`folo mcp` ([MCP.md](MCP.md)): an MCP server over stdio on the official `rmcp` SDK, with tools for datasets, training,
+runs, validation, prediction, export and cloud compute, `folo://` resources and prompts. It sits on the same `Store`
+trait as the HTTP handlers: the embedded `RealStore` / `MockStore`, or `proxy::HttpStore`, which forwards to a running
+`folo serve` (`--server`).
+
+### folo-cli
+The `folo` binary ([CLI.md](CLI.md)): `serve`, `describe`, `doctor`, `train`, `stop`, `val`, `predict`, `export`,
+`bench`, `dataset check|stats|synth|convert`, `weights`, `cloud` and `mcp` (Model Context Protocol server over stdio
+so agents can train and run models). `folo bench` is a placeholder that answers `not_implemented`. Every command takes
+`--json` (one JSON object per line on stdout, human text on stderr) and uses stable exit codes. `cli.rs` is the clap
+tree, `main.rs` dispatches, and each command has its own module.
+
+### folo-test-support
+Test-only helpers, used as a dev-dependency: `TestDir`, `TestFile` and `ChildGuard`, which keep test scratch folders
+under `FOLO_TEST_TMP` and remove them, also when a test fails ([CI.md](CI.md#test-temp-dirs)).
 
 ## Front ends
-- **FOLO Studio** (`web/`): TypeScript + Vite on fw, our own UI framework (`web/framework/`: JSX compiled to cloned
-  DOM templates with fine-grained signals, scoped CSS; it replaced Svelte 5), a custom design system (tokens,
-  components) and no UI kit.
-  Talks only to `docs/API.md`; `web/src/lib/api/` holds the typed client and a dev mock.
-- **FOLO Desktop** (`apps/desktop/`): native Rust app on folo-ui, its own UI framework (below). Same screens and
-  design language as Studio. It talks to a local `folo serve` over the same API (it can spawn one), so the engine and
-  the UI stay decoupled. Its Playground can also run a model in process ("Run on: Local GPU / Local CPU"): it fetches
-  the f16 weights from `GET /api/models/{id}/weights` (revalidated by ETag) and runs folo-vision's `Predictor` on
-  folo-gpu or the CPU. Its Benchmarks screens use `folo-bench` only in the built-in demo, to grade its fixtures as the
-  server would. It is a separate cargo workspace (the app and folo-ui) so the main workspace does not build the UI.
 
-## folo-ui — FOLO Desktop's UI framework
-- `apps/desktop/ui` (crate `folo-ui`, a member of the desktop workspace; design record `ui/DESIGN.md`, how to work
-  on it `ui/README.md`). Its public API is GPUI 0.2.2's for exactly the subset the app uses (same names, signatures
-  and behaviour, re-exported flat from the crate root), so the app reads as it did on GPUI; the engine under it is
-  its own. Layers, bottom up: platform (Win32, winit + softbuffer, headless), raster (the renderer), text, the app
-  runtime, the window, the elements and styles.
+### FOLO Studio
+`web/`: TypeScript + Vite on fw, FOLO's own UI framework (`web/framework/`: JSX compiled to cloned DOM templates with
+fine-grained signals, scoped CSS; it replaced Svelte 5), a custom design system (tokens, components) and no UI kit.
+It talks only to [API.md](API.md); `web/src/lib/api/` holds the typed client and a dev mock, `web/src/routes/` the
+screens. See [web/README.md](../web/README.md).
+
+### FOLO Desktop
+`apps/desktop/`: a native Rust app on folo-ui, its own UI framework (below), with the same screens and design language
+as Studio. It talks to a local `folo serve` over the same API (it can spawn one), so the engine and the UI stay
+decoupled. Its Playground can also run a model in process ("Run on: Local GPU / Local CPU"): it fetches the f16
+weights from `GET /api/models/{id}/weights` (revalidated by ETag) and runs folo-vision's `Predictor` on folo-gpu or
+the CPU. Its Benchmarks screens use `folo-bench` only in the built-in demo, to grade its fixtures as the server would.
+It is a separate cargo workspace (the app and folo-ui) so the main workspace does not build the UI. See
+[apps/desktop/README.md](../apps/desktop/README.md).
+
+### folo-ui — FOLO Desktop's UI framework
+`apps/desktop/ui` (crate `folo-ui`, a member of the desktop workspace; design record
+[ui/DESIGN.md](../apps/desktop/ui/DESIGN.md), how to work on it [ui/README.md](../apps/desktop/ui/README.md)). Its
+public API is GPUI 0.2.2's for exactly the subset the app uses (same names, signatures and behaviour, re-exported flat
+from the crate root), so the app reads as it did on GPUI; the engine under it is its own. Layers, bottom up:
+platform, raster (the renderer), text, the app runtime, the window, the elements and styles.
 - Runtime (`app/`): one UI thread; `App` in an `Rc<RefCell<…>>` holds entities, globals, observers and the effect
   queue, flushed after every platform callback. Tasks are `async-task` runnables on the platform's dispatcher, so an
   idle app has no timer and no thread awake.
@@ -407,26 +380,25 @@ The exact block definitions, layer tables, parameter names, head, loss, training
 - Renderer (`raster/`): the scene (quads, shadows, glyph and SVG sprites, images, paths, underlines, each with its
   clip) is binned into 64 px tiles; each tile's ordered primitives are hashed, cut at the topmost opaque cover, and
   only tiles whose hash changed are rasterized, on the calling thread or on the renderer's own small pool (not
-  rayon's, which belongs to the engine). Coverage formulas are GPUI's; blending is 8-bit source-over in gamma space
-  as GPUI's DX11 renderer did. Rendering frame A then B into one buffer gives the same bytes as B into a fresh one,
-  for every thread count (tested on random scenes). Caches (shadows, paths, resampled images, glyph masks) are
-  bounded in bytes. No GPU device, swap chain or shader: the GPU stays with training and inference.
+  rayon's, which belongs to the engine). Coverage formulas are GPUI's; blending is 8-bit source-over in gamma space as
+  GPUI's DX11 renderer did. Rendering frame A then B into one buffer gives the same bytes as B into a fresh one, for
+  every thread count (tested on random scenes). Caches (shadows, paths, resampled images, glyph masks) are bounded in
+  bytes. No GPU device, swap chain or shader: the GPU stays with training and inference.
 - Text (`text/`): line layout, wrapping and truncation with GPUI's rules, a per-window line layout cache; glyphs from
   DirectWrite on Windows (as GPUI used it: same masks, subpixel variants, contrast and gamma) and from cosmic-text
   elsewhere and in deterministic tests (feature `portable-text`).
-- Platforms (`platform/`): Win32 (own window class and message loop, custom title bar through
-  `WM_NCCALCSIZE` / `WM_NCHITTEST`, IME, clipboard, file dialogs, per-monitor DPI, presenting damage rectangles with
-  GDI); winit + softbuffer on Linux and macOS (also built on Windows with feature `winit`); headless, driven by
-  `HeadlessApp` (fake clock, synthetic input, a framebuffer to read back), which the tests and
-  `folo-desktop --shot <png>` use. Windows is where it runs; Linux runs the headless tests in CI; macOS is
-  type-checked (`apps/desktop/tools/cross-check.sh`).
+- Platforms (`platform/`): Win32 (own window class and message loop, custom title bar through `WM_NCCALCSIZE` /
+  `WM_NCHITTEST`, IME, clipboard, file dialogs, per-monitor DPI, presenting damage rectangles with GDI); winit +
+  softbuffer on Linux and macOS (also built on Windows with feature `winit`); headless, driven by `HeadlessApp` (fake
+  clock, synthetic input, a framebuffer to read back), which the tests and `folo-desktop --shot <png>` use. Windows is
+  where it runs; Linux runs the headless tests in CI; macOS is type-checked (`apps/desktop/tools/cross-check.sh`).
 
 ## Agent-first design
 - Machine-readable everything: `--json`, JSON Schemas for configs, `folo describe` prints the CLI surface as JSON.
 - `folo mcp` (crate `folo-mcp`, on the official `rmcp` SDK) is an MCP server over stdio with tools for datasets,
-  training, runs, validation, prediction and export, `folo://` resources and prompts (`docs/MCP.md`). It sits on
+  training, runs, validation, prediction and export, `folo://` resources and prompts ([MCP.md](MCP.md)). It sits on
   the same `Store` trait as the HTTP handlers: the embedded `RealStore` / `MockStore`, or an HTTP-backed store that
-  forwards to a running `folo serve` (`--server`). Tool schemas come from the `folo-api` types through schemars
-  (the crate's `schema` feature), so they match the HTTP API.
+  forwards to a running `folo serve` (`--server`). Tool schemas come from the `folo-api` types through schemars (the
+  crate's `schema` feature), so they match the HTTP API.
 - Errors carry a stable `code`, a human message and a hint.
 - `llms.txt` at the repo root summarises the project for agents.
