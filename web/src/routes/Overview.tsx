@@ -303,7 +303,10 @@ css`
      loaded, loading, empty, error), and Datasets runs across the full width under both, its datasets side by side,
      instead of hanging below the side column alone. */
   @media (min-width: 1280px) {
+    /* Best models takes its third but never less than 380 px (design/UNIFIED.md §4 Overview), so its rows stay one
+       line; Recent runs takes the rest and drops whole columns by its own width. */
     .cols {
+      grid-template-columns: minmax(0, 2fr) minmax(380px, 1fr);
       align-items: stretch;
     }
     .col-main,

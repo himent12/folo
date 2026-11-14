@@ -2,6 +2,9 @@
 // Overview against the mock server: it reads the run list the sidebar reads (shell/runList), so the Training card
 // never says "Nothing is training" beside the sidebar's "Training" (shell F13), and Best models catches up when a run
 // ends (runs F4). That list is the server's in use: after a switch, nothing of the server before shows (review R4).
+/// <reference types="node" />
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { flush } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
@@ -434,6 +437,14 @@ describe('Overview', () => {
     // The cards, one row of up to four.
     const datasets = await api.datasets();
     expect(target.querySelectorAll('#datasets li.card[data-id]')).toHaveLength(Math.min(4, datasets.length));
+    // From 1280 px the panel takes its third but at least 380 px (design/UNIFIED.md §4 Overview); in a narrow panel the
+    // dataset's name is cut last (its whole name in the tooltip), never wrapped, and only the split tag goes under it.
+    expect(row.querySelector('td.ds .cut')).not.toBeNull();
+    const src = (f: string) => readFileSync(resolve(process.cwd(), f), 'utf8');
+    expect(src('src/routes/Overview.tsx')).toMatch(/@media \(min-width: 1280px\) \{[^@]*grid-template-columns: minmax\(0, 2fr\) minmax\(380px, 1fr\);/);
+    const narrow = src('src/routes/overview/BestModels.tsx').match(/@container \(max-width: 479\.98px\) \{([\s\S]*?)\n {2}\}/)![1]!;
+    expect(narrow).toContain('.m-tag');
+    expect(narrow).not.toMatch(/white-space: normal|overflow-wrap/);
   });
 
   it('shows the live run as one panel: the rail under its header, four tiles beside the chart, the machine at its foot', async () => {

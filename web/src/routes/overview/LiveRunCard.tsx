@@ -42,6 +42,9 @@ export interface LiveRunCardProps {
  * answering from lists that alone failed to refresh. `dataset`: undefined while the datasets load, null when the run's
  * is not to be had (its split then unknown: "Evaluation").
  */
+/** The chart's height beside the tiles (legend and plot): with its 40 px header and 16 px insets, a 257 px body. */
+const SIDE_CHART_H = 166;
+
 export default function LiveRunCard(props: LiveRunCardProps) {
   const lost = bindable(props, 'lost', null);
   // What the scores are on (lib/evaluated `scoresTitle`), one word in every state: until the dataset is known it is a
@@ -75,7 +78,10 @@ export default function LiveRunCard(props: LiveRunCardProps) {
 
   // Phones: a shorter plot, so the recent runs below start on the first screen.
   const phoneQuery = new MediaQuery(media.phone, false);
-  const chartH = computed(() => (phoneQuery.current ? 186 : 246));
+  const sideQuery = new MediaQuery(media.desktop, false);
+  // From 1280 px the chart sits beside the 2 × 2 tiles and its height is theirs: a plot that makes each tile about
+  // 128 px high (Desktop's are 120), never tiles stretched half empty to a tall chart. Below, the tiles are a row over it.
+  const chartH = computed(() => (phoneQuery.current ? 186 : sideQuery.current ? SIDE_CHART_H : 246));
   const fit = model.unitFit(() => model.mapSeries.get(), () => chartH.get());
   const zoomed = computed(() => unitZoomed(fit.get()));
   // A quiet stream: the line ends without the live mark.

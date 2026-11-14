@@ -179,12 +179,9 @@ css`
   .m-tag {
     color: var(--text-tertiary);
   }
-  /* A phone-wide panel: the split goes under the dataset's name, never cut after it. */
+  /* A narrow panel (a 1280 px window's third, a phone): the split goes under the dataset's name, never cut after it;
+     the name itself stays on one line, cut last with its whole name in the tooltip. */
   @container (max-width: 479.98px) {
-    .ds .cut {
-      white-space: normal;
-      overflow-wrap: anywhere;
-    }
     .m-tag {
       display: block;
     }
