@@ -37,8 +37,9 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Version v0.2.0 -De
   leaves a half-written file, runs `folo --version`, and says when the folder is not on `PATH`.
 - `install.ps1` installs the x64 build on ARM64 Windows too (which runs it emulated). It moves a running `folo.exe`
   aside before replacing it, and adds the folder to the user `PATH` unless `-NoModifyPath` is given.
-- A token from `GH_TOKEN` or `GITHUB_TOKEN`, else `gh auth token` when `gh` is logged in, makes both read the release
-  through the GitHub API, for private forks and mirrors.
+- A token from `GH_TOKEN` or `GITHUB_TOKEN`, else `gh auth token` when `gh` is logged in, makes both read the GitHub
+  release through the GitHub API, so a private repository or fork works. Downloads from `--base-url` / `-BaseUrl`
+  never send it, and with a base URL neither script asks `gh` for a token.
 
 ## build-wasm.sh and build-wasm.ps1
 

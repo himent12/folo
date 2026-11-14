@@ -17,7 +17,9 @@ Desktop and folo-ui in `apps/desktop`.
 - `root()`: the folder test directories go in: `FOLO_TEST_TMP` when it is set and not empty (created if missing;
   it must be an absolute path), else the system temp dir.
 - `TestDir::new(tag)`: a fresh `folo-<tag>-<pid>-<n>` directory under `root()`, removed with everything in it when
-  the guard drops, also when the test panics. `TestDir::at(path)` is the same for a directory outside `root()`.
+  the guard drops, also when the test panics.
+- `TestDir::at(path)`: a guard for a directory at `path`, outside `root()`. It first deletes whatever already exists
+  at `path`, then creates the directory fresh, so never point it at a directory whose contents you need.
 - `TestFile::new(tag, name)`: the path of a file `name` in its own `TestDir` (the file is not created).
 - `ChildGuard`: a spawned process that is killed and reaped when the guard drops. Declare it after the `TestDir`
   the process uses, so the process ends before the directory is removed (on Windows an open file cannot be deleted).
