@@ -102,6 +102,7 @@ describe('Outcome', () => {
     const r = render(failed(OOM));
     expect(r.target.querySelector('.c-title')?.textContent).toBe('Ran out of GPU memory');
     expect(r.target.querySelector('.c-msg')?.textContent).toContain('Batch 32 at 960 px');
+    expect(r.target.querySelector('.c-msg')?.textContent).toContain('did not fit, at epoch 23.');
     // One action (half the batch, primary) and the disclosure; each fix opens New run from this run with it applied.
     expect(r.labels).toEqual(['Retry with batch 16', 'More fixes']);
     expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&batch=16');
@@ -117,6 +118,13 @@ describe('Outcome', () => {
     expect(r.labels).not.toContain('Resume');
     expect(r.target.querySelector('.c-detail code')?.textContent).toBe('wgpu backend: Out of Memory');
     expect(r.target.querySelector('.c-msg')?.textContent).not.toContain('wgpu');
+    r.done();
+  });
+
+  it('names the epoch its last step was in, as the Epoch tile and the charts\' "failed during epoch" do', () => {
+    // An older server reports the last finished epoch (23) for a run that died 25 steps into epoch 24.
+    const r = render({ ...failed(OOM), step: 2900 });
+    expect(r.target.querySelector('.c-msg')?.textContent).toContain('did not fit, at epoch 24.');
     r.done();
   });
 

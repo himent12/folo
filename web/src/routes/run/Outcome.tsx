@@ -246,7 +246,7 @@ export default function Outcome(props: OutcomeProps) {
             </>
           )}
         >
-          Batch {props.run.config.batch} at {props.run.config.imgsz} px with <Ident value={props.run.config.arch} /> did not fit, at epoch {props.run.epoch}.
+          Batch {props.run.config.batch} at {props.run.config.imgsz} px with <Ident value={props.run.config.arch} /> did not fit{failedEpoch(props.run) === null ? ' before its first step' : `, at epoch ${failedEpoch(props.run)}`}.
         </Callout>
       ) : status() === 'failed' ? (
         // What went wrong in plain words by its error code, the server's own message under Details. A failure is not
