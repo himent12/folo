@@ -15,6 +15,7 @@ use folo_nn::optim::{
 use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module};
 
 use super::events::Emitter;
+use super::teacher::Teacher;
 use super::{
     AMP_KEY, CLOSE_MOSAIC_KEY, NONFINITE_STREAK_KEY, ResumeOverrides, SHORT_RUN_STEPS, TRAIN_IMAGES_KEY,
     TrainConfig, TrainData, TrainOptions, Trainer, amp_support, can_place, place_model, resolve_device,
@@ -136,6 +137,9 @@ impl Trainer {
         }
         if let Some(f) = overrides.data_format {
             cfg.data_format = f;
+        }
+        if let Some(d) = overrides.distill {
+            cfg.distill = Some(d);
         }
         cfg.augment.close_mosaic_fixed = Some(resumed_close_mosaic(&c.train, &cfg));
         if let Some(n) = c.train.get(TRAIN_IMAGES_KEY).and_then(|v| v.as_u64())
@@ -278,6 +282,15 @@ impl Trainer {
         } else {
             None
         };
+        // The frozen teacher of §8.9, if the run has one (a new run and a resume alike load it here).
+        let teacher = match &cfg.distill {
+            Some(d) => {
+                let (t, logs) = Teacher::load(d, &model, device, cfg.amp)?;
+                pending_logs.extend(logs);
+                Some(t)
+            }
+            None => None,
+        };
 
         let accumulate = cfg.accumulate();
         let wd = effective_weight_decay(cfg.weight_decay, cfg.batch, accumulate, cfg.nbs);
@@ -353,6 +366,7 @@ impl Trainer {
             device,
             model,
             ema,
+            teacher,
             opt,
             sched,
             acc,

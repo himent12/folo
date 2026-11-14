@@ -18,12 +18,12 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/boxes.rs` | `Xyxy` / `Cxcywh`, letterbox mapping, IoU / GIoU / DIoU / CIoU |
 | `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs |
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
-| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `dual_loss`), `assignment.rs` (host assignment), `terms.rs` (BCE, CIoU, DFL), `device.rs` (the folo-gpu kernels), `tests.rs` |
+| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `dual_loss`), `assignment.rs` (host assignment), `terms.rs` (BCE, CIoU, DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term, its flip map and tests), `tests.rs` |
 | `src/nms.rs` | Class-aware batched NMS, the full post-process, and the top-k of the `o2o` head |
 | `src/fusion.rs` | Cluster box fusion after NMS (opt-in through `NmsConfig::fusion`) |
 | `src/metrics.rs` | `Evaluator`: mAP, precision / recall / F1, PR curves, confusion matrix |
 | `src/cocoeval.rs` | `CocoEval`: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) |
-| `src/train/` | `mod.rs` (`Trainer`), `config.rs` (`TrainConfig`), `setup.rs` (new and resumed runs), `epoch.rs` (one epoch), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `tests.rs` |
+| `src/train/` | `mod.rs` (`Trainer`), `config.rs` (`TrainConfig`), `setup.rs` (new and resumed runs), `epoch.rs` (one epoch), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `teacher.rs` (the distillation teacher), `tests.rs` |
 | `src/val.rs` | `validate`: a model on a dataset split, scored with `Evaluator` |
 | `src/predict.rs` | `Predictor`: `.folo` weights to detections in image pixels, with a timing breakdown |
 | `src/export/` | `onnx/`: `mod.rs` (`export`, `OnnxOptions`, the op table), `graph.rs`, `blocks.rs`, `decode.rs`, `proto.rs` (protobuf encoder) |
@@ -56,6 +56,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | §8.6 Data and augmentation | folo-data `src/augment/`, `src/loader.rs` |
 | §8.7 Validation and checkpoints | `src/val.rs`, `src/train/run.rs`, `src/train/checkpoint.rs`, `src/train/writer/` |
 | §8.8 Mixed precision | `src/train/epoch.rs`; folo-nn `src/amp.rs` |
+| §8.9 Distillation | `src/loss/distill/`, `src/train/teacher.rs`, `src/train/epoch.rs` |
 | §9.1 Fusion | `FoloModel::fuse` in `src/model/mod.rs`; folo-nn `fuse_conv_bn` |
 | §9.2 Letterbox | `src/predict.rs`; folo-data `src/letterbox.rs` |
 | §9.3 NMS, §9.4 Box fusion | `src/nms.rs`, `src/fusion.rs` |
@@ -98,7 +99,8 @@ cargo test -p folo-vision --test train       # one integration test binary
 | `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs` | The evaluator against hand-computed answers and against pycocotools |
 | `lazy_head.rs` | Candidate-first prediction on the CPU, bit for bit against the dense path |
 | `train.rs` | The trainer on tiny synthetic sets: learning, checkpoints, bit-exact resume, the predictor on trained weights |
-| `gpu.rs`, `gpu_f16.rs`, `gpu_tensor_cores.rs`, `gpu_in_place.rs`, `gpu_plan.rs`, `gpu_lazy_head.rs`, `gpu_loss.rs`, `gpu_train.rs`, `gpu_amp.rs` | The same on the GPU against the CPU: forward, f16, tensor cores, forward plans, candidate-first, the loss, training, mixed precision |
+| `distill.rs` | Distillation in the trainer: a run without a teacher pinned to its pre-distillation weights, determinism, resume with the teacher, incompatible teachers |
+| `gpu.rs`, `gpu_f16.rs`, `gpu_tensor_cores.rs`, `gpu_in_place.rs`, `gpu_plan.rs`, `gpu_lazy_head.rs`, `gpu_loss.rs`, `gpu_train.rs`, `gpu_amp.rs`, `gpu_distill.rs` | The same on the GPU against the CPU: forward, f16, tensor cores, forward plans, candidate-first, the loss, training, mixed precision, distillation |
 
 The `gpu*.rs` tests need a hardware GPU adapter and skip with a note without one (`FOLO_GPU_TEST_SOFTWARE=1` runs
 most of them on a software adapter); `gpu_f16.rs` also skips without f16 compute, and `gpu_tensor_cores.rs` and the

@@ -29,6 +29,7 @@ Conventions used throughout:
 | schedule | linear LR decay to `lrf = 0.01`, 3 warmup epochs (bias LR 0.1 → lr0, momentum 0.8 → 0.937), nominal batch 64 via gradient accumulation |
 | EMA | `d = 0.9999 · (1 − exp(−updates / 2000))`, over parameters and BN running stats |
 | precision | f32 training (no AMP); f32 or f16 inference after Conv+BN fusion |
+| distillation | opt-in (`distill`, §8.9): a frozen teacher's class probabilities and DFL distributions at the shared anchors, optionally a flip consensus of two views; off by default, training-only |
 
 ## 1. Design rationale
 
@@ -640,6 +641,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `clip_grad_norm` | 10.0 | max global gradient L2 norm; `0` disables clipping |
 | `patience` | 100 | early stop after this many epochs without a fitness gain |
 | `seed` | 0 | |
+| `distill` | none | distillation from a frozen teacher (§8.9); absent: none |
 
 ### 8.2 Optimizer and parameter groups
 Three groups, assigned by tensor name:
@@ -924,6 +926,72 @@ Opt-in (`amp = true`, `folo train --amp`; default `false`), as `torch.autocast` 
   f16 without tensor cores computes no faster than f32 on current GPUs, so AMP does not silently fall back.
 - **Accuracy**: on the §10.6 shapes run, AMP reaches the same mAP as f32 (docs/BENCHMARKS.md has the curves). The
   first steps of a run usually overflow at `2^16` and are skipped while the scale backs off (2–5 steps).
+
+### 8.9 Distillation (`distill`, opt-in)
+Dense consensus distillation from a frozen teacher: `TrainConfig.distill = { teacher, cls_gain, dfl_gain,
+temperature, consensus }` (`folo train --teacher <file or published name>`, `--set distill.<key>=<value>`). Absent (the
+default, and not written to `folo.train` or `config.json`), training is §8.3 exactly. Inference, export, `.folo` files
+and the HTTP API do not change: the teacher exists only in the trainer.
+
+| key | default | notes |
+|---|---|---|
+| `teacher` | (required) | a `.folo` file or a published name (`folo weights pull`); same `nc`, `reg_max` and strides as the student |
+| `cls_gain` | 0.5 | `λc`, finite, `>= 0` |
+| `dfl_gain` | 1.5 | `λd`, finite, `>= 0` |
+| `temperature` | 1.0 | `T`, finite, `> 0` (DFL term only) |
+| `consensus` | `none` | `none`: one teacher view; `flip`: the batch and its mirror image, averaged |
+
+**Teacher.** Loaded once when the trainer is built (a new run and a resume alike; a missing file fails the run with
+an error naming `distill.teacher`; a resume may also turn distillation on or change it, `ResumeOverrides::distill`,
+`folo train --resume --teacher`, from the resumed epoch on, recorded in the run's config: the teacher holds no
+optimizer state), fused (§9.1), eval mode, on the trainer's device, in f16 on a GPU when `amp` is on
+and in f32 otherwise; its one-to-many branch is used whatever its `head`. A teacher with another `nc`, `reg_max` or
+strides is refused (both heads must have the same anchors, §6.2, and channels, §6.3, so the raw outputs align element
+by element). Class names that differ are only warned about: classes match by index.
+
+**Targets (constants, no autograd).** Each training batch `x` (`[B, 3, H, W]`, the augmented batch the student sees)
+goes through the teacher before the student's forward, under `no_grad`; its outputs are cast to f32 and:
+- `p = sigmoid(cls_raw_T)`, `[B, nc, A]`; `s = softmax(box_raw_T / T)` over the `reg_max` bins of each side,
+  `[B, 4, reg_max, A]` (§6.3 layout, side order `l t r b`).
+- `consensus = "flip"`: the teacher also sees `x'`, `x` reversed along `W`, giving `p'` and `s'`, which are mapped back
+  by `M`: in every level `l` of width `W_l = W / stride_l` the anchor `(y, x)` takes the value at `(y, W_l − 1 − x)`
+  (anchor indices level-major, row-major, §6.2), and the box sides `l` and `r` trade places (`M` maps side `i` to
+  side `[2, 1, 0, 3][i]`). The map is exact because anchor centres `x + 0.5` mirror to `W_l − x − 0.5` when `W` is a
+  multiple of every stride, and it is its own inverse. Then `p~ = (p + M p') / 2`, `s~ = (s + M s') / 2`: averaged
+  in probability space, so where the views disagree about an edge `s~` is wider (the DFL target then carries real
+  uncertainty) and where they agree it stays sharp. With `consensus = "none"`, `p~ = p` and `s~ = s`.
+- `q_a = max_c p~[b, c, a]`, the teacher's confidence that anchor `a` matters.
+- Logarithms of the targets are taken at `max(v, f32::MIN_POSITIVE)`, so a probability of 0 or 1 contributes 0.
+
+**Loss.** With the student's one-to-many raw outputs `x = cls_raw`, `z = box_raw` (the f32 copies §7 uses) and
+`N = max(tss, 1)`, `tss` the unfloored target-score sum of the same batch's supervised one-to-many loss (§7.4; its
+normaliser):
+```
+L_kc = (1 / N) · Σ_{b,c,a} [ softplus(x) − x · p~ − H(p~) ],   H(p) = −p ln p − (1 − p) ln(1 − p)
+L_kd = (T² / N) · Σ_{b,a} q_a · (1/4) Σ_side Σ_i s~_i · (ln s~_i − log_softmax(z / T)_i)
+L    = B · (7.5 L_box + 0.5 L_cls + 1.5 L_dfl + λc · L_kc + λd · L_kd)
+```
+`L_kc` is the Bernoulli KL from `p~` to `sigmoid(x)`: the BCE against `p~` minus the teacher's entropy, a constant,
+so its gradient is the BCE's and it is 0 when the student equals the teacher. The gradients are
+`dL/dx = B · λc · (sigmoid(x) − p~) / N` and `dL/dz = B · λd · T · q_a · (softmax(z / T) − s~) / (4 N)`. Because the
+class term shares the supervised normaliser, supervised BCE at class gain `g` plus `λc · L_kc` is exactly BCE against
+the blended target `(g · T + λc · p~) / (g + λc)` at gain `g + λc` (background pairs where both models say about 0
+give no gradient); the fair control of a distillation run is the same total class gain without a teacher.
+
+Every element (`softplus(x) − x · p~ − H(p~)`, and `q_a · s~_i · (ln s~_i − log_softmax(z / T)_i)`) is formed before
+it is summed; the class elements are summed over `a` per `(b, c)` and the DFL elements over `a` per `(b, side, bin)`,
+then those row sums in the fixed-order tree of §7 (rows of 4096), so the term is bit-reproducible on the CPU.
+`T = 1` divides by nothing. For a `head = "o2o"` student the term is computed on the one-to-many outputs and added to
+the dual loss (§6.6) unweighted by `w_m`.
+
+**Reported.** `λc · L_kc` and `λd · L_kd` (without `B`, like §7.4's items) are read back once per batch; the epoch
+logs one line, `epoch E: distillation cls … dfl … over n batches (first quarter …, last quarter …)`, the means over
+its finite batches and over their first and last quarter. `LossItems`, the `step` and `epoch` events and the API's
+loss object do not change. A batch whose distillation terms are not finite is a non-finite batch (§8.3).
+
+**Mixed precision.** The teacher runs in f16 (its own fused f16 weights, f16 input; no autocast needed) and its
+outputs are cast to f32 before the sigmoid and softmax; the targets and the term are f32, computed outside autocast
+on the f32 copies of the student's head (§8.8).
 
 ## 9. Inference
 

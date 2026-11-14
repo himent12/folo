@@ -115,6 +115,11 @@ pub struct TrainConfig {
     /// [`super::TrainOptions::weights`], whatever is given here, and stored with the run, so a resume resolves `auto`
     /// as the run started. Missing in configs from before it: `false`.
     pub transfer: bool,
+    /// Dense consensus distillation from a frozen teacher (docs/MODEL.md §8.9; `folo train --teacher`). `None`, the
+    /// default, trains without one and is not written, so such a run's `folo.train` and `config.json` are those
+    /// of a build without the key. Stored with the run, so a resume loads the same teacher.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distill: Option<crate::loss::DistillConfig>,
 }
 
 /// `musgd.*` (docs/MODEL.md §8.2): `p −= muon · lr · O`, the SGD half of a conv weight at `sgd · lr`, and the
@@ -173,6 +178,7 @@ impl Default for TrainConfig {
             loss: LossConfig::default(),
             musgd: MuSgdConfig::default(),
             transfer: false,
+            distill: None,
         }
     }
 }
@@ -344,6 +350,9 @@ impl TrainConfig {
         }
         if l.tal.topk == 0 || l.tal.topk2 == Some(0) {
             return bad("loss.tal.topk and loss.tal.topk2 must be at least 1".into());
+        }
+        if let Some(d) = &self.distill {
+            d.validate().map_err(Error::Config)?;
         }
         let device = resolve_device(&self.device)?;
         if !self.device.trim().eq_ignore_ascii_case("auto") {
