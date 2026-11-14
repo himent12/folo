@@ -1,15 +1,17 @@
 # AGENTS.md — how to work on FOLO
 
 FOLO is built almost entirely by AI coding agents, and every change lands as a reviewed pull request. These rules
-apply to every contributor, agent or human. Read this file, then `docs/ARCHITECTURE.md`, then the README of the crate
-you are touching. `CONTRIBUTING.md` is the short version for a first pull request.
+apply to every contributor, agent or human. Read this file, then [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), then
+the README of the crate you are touching. [CONTRIBUTING.md](CONTRIBUTING.md) is the short version for a first pull
+request.
 
 ## Finding your way
-- `docs/ARCHITECTURE.md`: the map of the repository and the crates, the main flows, and the "Where do I change ...?"
-  table from a change to the files it touches.
-- `crates/README.md`: the crates in dependency order and the dependency rules; each `crates/<name>/README.md` maps
-  that crate's modules to what they hold. Most top-level folders have a README too (listed under Layout).
-- `docs/README.md`: every doc, grouped by what you want to do.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the map of the repository and the crates, the main flows, and the
+  "Where do I change ...?" table from a change to the files it touches.
+- [crates/README.md](crates/README.md): the crates in dependency order and the dependency rules; each
+  `crates/<name>/README.md` maps that crate's modules to what they hold. Most top-level folders have a README too
+  (listed under Layout).
+- [docs/README.md](docs/README.md): every doc, grouped by what you want to do.
 
 ## What FOLO is
 A from-scratch, very fast vision framework in Rust (a YOLO-style object detector, plus training, evaluation and export)

@@ -85,7 +85,8 @@ preprocess / inference / postprocess timing split.
 
 ### On a GPU
 - The raw `u8` images are uploaded and letterboxed there (bit-exact with the CPU letterbox) and only the decoded
-  candidates come back: one upload per image, one queue of work, one small readback.
+  candidates come back: the images of a batch share one upload (a batch larger than the device's largest storage
+  buffer takes several), one queue of work, one small readback.
 - The head is candidate-first too (`model/lazy_gpu.rs`): per level the class branch, the class pass into
   fixed-capacity site lists, `conv0` on the listed windows (scattered back into a map), `conv1` and `out` at the
   candidates, then one decode of every level and one readback of the records. The dispatches do not depend on the

@@ -77,7 +77,7 @@ when the site, a Markdown file or an example changes.
 2. Add it to `NAV` in `scripts/config.ts` under the right group with a short sidebar label; the build fails while a
    doc is missing from `NAV`.
 3. Link it from the Docs table of the root `README.md` (the landing page's docs index) and from `docs/README.md`,
-   the docs grouped by task.
+   the docs grouped by task, and give it its entry in `llms.txt`.
 4. Run `npm run check` here: it fails on a broken link, anchor or image.
 
 Related: the [root README](../README.md), [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md), and
