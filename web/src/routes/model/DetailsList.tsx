@@ -376,8 +376,5 @@ css`
     .details {
       grid-template-columns: minmax(0, 1fr);
     }
-    .kv {
-      grid-template-columns: 96px minmax(0, 1fr);
-    }
   }
 `;

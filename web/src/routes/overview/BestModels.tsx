@@ -98,7 +98,7 @@ export default function BestModels(props: BestModelsProps) {
                               {t().ctx.datasetName}
                               {tag() ? (
                                 <span class="m-tag" data-fact>
-                                  {' · '}
+                                  <span class="sep">{' · '}</span>
                                   {tag()}
                                 </span>
                               ) : null}
@@ -178,6 +178,19 @@ css`
   }
   .m-tag {
     color: var(--text-tertiary);
+  }
+  /* A phone-wide panel: the split goes under the dataset's name, never cut after it. */
+  @container (max-width: 479.98px) {
+    .ds .cut {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .m-tag {
+      display: block;
+    }
+    .sep {
+      display: none;
+    }
   }
   /* The list's foot: on the panel's bottom edge (the body is a flex column, ui/Panel), so a panel stretched to Recent
      runs' height ends on its note, never on 70 px of nothing under it. */
