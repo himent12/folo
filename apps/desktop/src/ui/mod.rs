@@ -27,7 +27,10 @@ pub use format::{
     queue_text, queue_wait_text, sci, score_delta, share_spare, short_gpu, split_label, waiting_text,
 };
 pub use legend::{best_legend, class_swatch, legend_value, line_swatch, swatch};
-pub use metric::{baseline_lift, detail_line, duration_metric, kv, metric, metric_pair, stat_at, stat_sized};
+pub use metric::{
+    KPI_HEADLINE, KPI_UNIT, KPI_VALUE, baseline_lift, detail_line, duration_metric, kpi_note, kv, metric,
+    metric_pair, stat_at, stat_sized,
+};
 pub use motion::{appear, os_prefers_reduced_motion, reduce_motion, set_reduce_motion};
 pub use scroll::{ThumbGeo, paint_thumb, scroll_edges};
 pub use status::{

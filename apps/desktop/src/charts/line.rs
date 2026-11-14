@@ -278,6 +278,8 @@ fn paint_line_chart(
         plot.bottom() - plot.size.height * ((v - ly0) / (ly1 - ly0)).clamp(-0.05, 1.05)
     };
 
+    // The plot is an inset well (design/UNIFIED §3, Frame): the data's own surface, under the grid.
+    window.paint_quad(fill(plot, t.bg_inset));
     // Grid + y labels.
     if let Some(p) = ypow.filter(|_| spec.pow_caption) {
         // The shared factor, once, above the axis labels.
@@ -315,7 +317,8 @@ fn paint_line_chart(
         t.chart_axis,
     ));
     // X ticks.
-    // Remaining epochs read as planned, not empty: a faint tint and the time left.
+    // Remaining epochs read as planned, not empty: a faint tint (the hover overlay's, which reads on
+    // the well in both themes, as Studio's) and the time left.
     if let Some((from, label)) = &spec.future
         && *from < x1
     {
@@ -329,7 +332,7 @@ fn paint_line_chart(
         let fx = sx(from).max(plot.left());
         window.paint_quad(fill(
             Bounds::new(point(fx, plot.top()), size(plot.right() - fx, plot.size.height)),
-            alpha(t.text_primary, 0.025),
+            t.bg_hover,
         ));
         window.paint_quad(fill(
             Bounds::new(point(fx, plot.top()), size(px(1.), plot.size.height)),
@@ -509,7 +512,7 @@ fn paint_line_chart(
                 .unwrap_or(at);
             placed.push(p);
             window.paint_quad(
-                fill(Bounds::centered_at(p, size(px(10.), px(10.))), t.bg_panel).corner_radii(px(5.)),
+                fill(Bounds::centered_at(p, size(px(10.), px(10.))), t.bg_inset).corner_radii(px(5.)),
             );
             window.paint_quad(fill(Bounds::centered_at(p, size(px(7.), px(7.))), c).corner_radii(px(3.5)));
         }

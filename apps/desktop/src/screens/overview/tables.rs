@@ -50,7 +50,7 @@ impl FoloApp {
                     &t,
                     "icons/activity.svg",
                     "No runs yet",
-                    "Training runs appear here with their status and best mAP.",
+                    "Runs you start appear here with their progress and best mAP.",
                     Tone::Neutral,
                 ))
                 .into_any_element(),

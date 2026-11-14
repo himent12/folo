@@ -52,6 +52,7 @@ pub const ALL: &[&str] = &[
     "run-done+bottom",
     "run-done+sample-focus",
     "run-failed",
+    "run-done+no-history",
     "new-run",
     "new-run+amp",
     "new-run+light",
@@ -456,6 +457,14 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.focus_key(key, window, cx);
         // Enough frames for the async lists (samples, the eval) to land and lay out.
         app.reveal_pending = 90;
+    }
+    // `+no-history`: the run's history couldn't be read (the charts' error panel, Per class's).
+    if s.has("no-history")
+        && let Route::Run(id) = &app.route
+    {
+        let down =
+            crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878");
+        app.store.run_data.insert(id.clone(), Load::Failed(down));
     }
     // `+lost`: the server stopped answering mid-session (the banner over the page, Overview's strip).
     if s.has("lost") {

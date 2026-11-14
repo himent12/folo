@@ -8,9 +8,10 @@ use folo_ui::{
 };
 
 use crate::api::{ClassMetrics, Epoch, Run};
-use crate::app::FoloApp;
+use crate::app::{FoloApp, act};
+use crate::controls::Btn;
 use crate::screens::{loading_rows, th};
-use crate::store::Load;
+use crate::store::{Load, RunData};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
@@ -38,6 +39,35 @@ pub(super) fn class_rows(epochs: &[Epoch]) -> Vec<ClassRow> {
         .collect();
     rows.sort_by(|a, b| b.ap.total_cmp(&a.ap).then(a.class.cmp(&b.class)));
     rows
+}
+
+/// What the panel's body shows, from the run's history as loaded.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum PerClass {
+    Loading,
+    /// The history couldn't be read: the server's words (the charts above say the same, with
+    /// the page's retry).
+    Failed(String),
+    /// No epoch validated yet.
+    NoEval,
+    /// The latest epoch, which reported no classes.
+    NoMetrics(u32),
+    /// The latest epoch and its classes.
+    Rows(u32, Vec<ClassRow>),
+}
+
+pub(super) fn per_class_state(load: Option<&Load<RunData>>) -> PerClass {
+    match load {
+        Some(Load::Ready(d)) => match d.metrics.epochs.last() {
+            None => PerClass::NoEval,
+            Some(last) => match class_rows(&d.metrics.epochs) {
+                rows if rows.is_empty() => PerClass::NoMetrics(last.epoch),
+                rows => PerClass::Rows(last.epoch, rows),
+            },
+        },
+        Some(Load::Failed(e)) => PerClass::Failed(e.message.clone()),
+        _ => PerClass::Loading,
+    }
 }
 
 /// A change as the panel writes it: "▲0.003", "▼0.013", "0.000" when it rounds to none.
@@ -73,13 +103,34 @@ impl FoloApp {
             .map(|d| d.classes.clone())
             .or_else(|| self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()))
             .unwrap_or_default();
-        let data = self.store.run_data.get(&r.id).map(|l| match l {
-            Load::Ready(d) => Some((d.metrics.epochs.last().map(|e| e.epoch), class_rows(&d.metrics.epochs))),
+        let state = per_class_state(self.store.run_data.get(&r.id));
+        let epoch = match &state {
+            PerClass::NoMetrics(e) | PerClass::Rows(e, _) => Some(*e),
             _ => None,
-        });
-        let epoch = data.as_ref().and_then(|d| d.as_ref()?.0);
-        let body = match data {
-            Some(Some((None, _))) => empty_state(
+        };
+        let body = match state {
+            // The same retry as the charts' error panel above (it reloads the history).
+            PerClass::Failed(message) => {
+                let retry = self.button(
+                    "per-class-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.retry_all(cx)),
+                );
+                empty_state(
+                    &t,
+                    "icons/chart-line.svg",
+                    "Per-class metrics unavailable",
+                    &message,
+                    Tone::Danger,
+                )
+                .child(retry)
+                .into_any_element()
+            }
+            PerClass::NoEval => empty_state(
                 &t,
                 "icons/chart-line.svg",
                 "No evaluation yet",
@@ -87,7 +138,7 @@ impl FoloApp {
                 Tone::Neutral,
             )
             .into_any_element(),
-            Some(Some((Some(_), rows))) if rows.is_empty() => empty_state(
+            PerClass::NoMetrics(_) => empty_state(
                 &t,
                 "icons/chart-line.svg",
                 "No per-class metrics",
@@ -95,8 +146,8 @@ impl FoloApp {
                 Tone::Neutral,
             )
             .into_any_element(),
-            Some(Some((Some(_), rows))) => self.per_class_list(&rows, &names, beside, window, cx),
-            _ => loading_rows(&t, "per-class", 6).into_any_element(),
+            PerClass::Rows(_, rows) => self.per_class_list(&rows, &names, beside, window, cx),
+            PerClass::Loading => loading_rows(&t, "per-class", 6).into_any_element(),
         };
         let qualifier = epoch.map(|e| format!("epoch {e}"));
         panel(&t)
@@ -264,6 +315,24 @@ mod tests {
     fn no_per_class_metrics_is_an_empty_list() {
         assert!(class_rows(&[]).is_empty());
         assert!(class_rows(&[epoch(4, &[])]).is_empty());
+    }
+
+    #[test]
+    fn a_history_that_failed_to_load_says_so_instead_of_loading() {
+        let down = crate::api::ApiError::new("server_unreachable", "Could not reach folo serve");
+        assert_eq!(
+            per_class_state(Some(&Load::Failed(down))),
+            PerClass::Failed("Could not reach folo serve".into())
+        );
+        assert_eq!(per_class_state(Some(&Load::Loading)), PerClass::Loading);
+        assert_eq!(per_class_state(None), PerClass::Loading);
+        let m = MockBackend::new(4200, true).metrics("run_52e8").unwrap();
+        let last = m.epochs.last().unwrap().epoch;
+        let PerClass::Rows(e, rows) = per_class_state(Some(&Load::Ready(RunData::new(m, 1)))) else {
+            panic!("rows")
+        };
+        assert_eq!(e, last);
+        assert!(!rows.is_empty());
     }
 
     #[test]

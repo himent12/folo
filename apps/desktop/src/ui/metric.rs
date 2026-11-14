@@ -6,6 +6,18 @@ use folo_ui::{Div, IntoElement, ParentElement, SharedString, Styled, div, px};
 use super::text::{StyledExt, caption, text};
 use crate::theme::{Theme, TypeStep, ty};
 
+/// A KPI tile's value (design/UNIFIED §2, KPI strip: `2xl` 600), its unit, and the one headline
+/// value a page may hold (`3xl`). The Run and Model pages' strips both take these, so the two read
+/// the same.
+pub const KPI_VALUE: TypeStep = ty::X2XL;
+pub const KPI_UNIT: TypeStep = ty::SM;
+pub const KPI_HEADLINE: TypeStep = ty::X3XL;
+
+/// A KPI tile's caption line under its value: `sm` in `text.secondary`, tabular.
+pub fn kpi_note(t: &Theme) -> Div {
+    text(ty::SM, t.text_secondary).tnum()
+}
+
 /// Two values as one figure, "0.861 / 0.792": both at `size`, the slash a step down in tertiary
 /// ink. The run and model pages' Precision / Recall both use it.
 pub fn metric_pair(t: &Theme, size: TypeStep, a: String, b: String) -> Div {

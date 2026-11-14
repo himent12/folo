@@ -68,7 +68,8 @@ pub fn panel_header(t: &Theme, title: &str) -> Div {
         .px(px(16.))
         .border_b_1()
         .border_color(t.line_subtle)
-        .child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).child(title.to_string()))
+        // The title in `base` (13) 500 (design/UNIFIED §2, Panel).
+        .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(title.to_string()))
 }
 
 pub fn vline(t: &Theme) -> Div {

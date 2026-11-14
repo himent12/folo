@@ -101,22 +101,22 @@ fn disc(window: &mut Window, c: Point<Pixels>, r: f32, color: Hsla) {
     window.paint_quad(fill(Bounds::centered_at(c, size(px(2. * r), px(2. * r))), color).corner_radii(px(r)));
 }
 
-/// Paints a line's end mark at `c`, over a halo in the panel colour.
+/// Paints a line's end mark at `c`, over a halo in the plot well's colour.
 pub fn paint_end(window: &mut Window, t: &Theme, c: Point<Pixels>, end: End, color: Hsla) {
     let r = end_radius(end);
     match end {
         End::None => {}
         End::Live | End::Done => {
-            disc(window, c, r + 1.5, t.bg_panel);
+            disc(window, c, r + 1.5, t.bg_inset);
             disc(window, c, r, color);
         }
         End::Stopped => {
             let halo = Bounds::centered_at(c, size(px(2. * r + 3.), px(2. * r + 3.)));
-            window.paint_quad(fill(halo, t.bg_panel));
+            window.paint_quad(fill(halo, t.bg_inset));
             window.paint_quad(fill(Bounds::centered_at(c, size(px(2. * r), px(2. * r))), color));
         }
         End::Failed => {
-            for (w, ink) in [(4.5, t.bg_panel), (2., color)] {
+            for (w, ink) in [(4.5, t.bg_inset), (2., color)] {
                 for (a, b) in [((-r, -r), (r, r)), ((r, -r), (-r, r))] {
                     let mut p = PathBuilder::stroke(px(w));
                     p.move_to(point(c.x + px(a.0), c.y + px(a.1)));
@@ -130,12 +130,12 @@ pub fn paint_end(window: &mut Window, t: &Theme, c: Point<Pixels>, end: End, col
     }
 }
 
-/// Paints the best ring: on its own (filled with the panel, so the line doesn't run through it), or
+/// Paints the best ring: on its own (filled with the well, so the line doesn't run through it), or
 /// around the end mark of radius `around` it merged with.
 pub fn paint_best(window: &mut Window, t: &Theme, c: Point<Pixels>, around: Option<f32>) {
     let r = around.map_or(4.5, |r| r + 3.);
     let b = Bounds::centered_at(c, size(px(2. * r), px(2. * r)));
-    let bg = if around.is_some() { folo_ui::transparent_black() } else { t.bg_panel };
+    let bg = if around.is_some() { folo_ui::transparent_black() } else { t.bg_inset };
     window.paint_quad(folo_ui::quad(b, px(r), bg, px(1.5), t.text_primary, folo_ui::BorderStyle::Solid));
 }
 

@@ -365,13 +365,8 @@ impl FoloApp {
         });
         // A filter that narrows the list says what is shown, under the table (§2: no totals line
         // otherwise).
-        let shown = ids.len();
-        let narrowed = (shown > 0 && shown < total).then(|| {
-            text(ty::SM, t.text_tertiary)
-                .tnum()
-                .px(px(16.))
-                .child(format!("{shown} of {}", plural(total, "run")))
-        });
+        let narrowed = shown_line(ids.len(), total)
+            .map(|line| text(ty::SM, t.text_tertiary).tnum().px(px(16.)).child(line));
         let body = div()
             .flex()
             .flex_col()
@@ -381,6 +376,12 @@ impl FoloApp {
             .children(narrowed);
         self.page_frame(&t, header, body, cx)
     }
+}
+
+/// The line under a narrowed list: "3 of 10 runs", "0 of 10 runs" when nothing matches; none
+/// when everything is shown.
+fn shown_line(shown: usize, total: usize) -> Option<String> {
+    (shown < total).then(|| format!("{shown} of {}", plural(total, "run")))
 }
 
 fn matches_filter(r: &Run, f: RunFilter) -> bool {
@@ -497,7 +498,16 @@ fn run_trend(t: &crate::theme::Theme, values: Vec<f32>, epochs: u32, live: bool)
 
 #[cfg(test)]
 mod tests {
-    use super::RunCols;
+    use super::{RunCols, shown_line};
+
+    #[test]
+    fn a_narrowed_list_says_what_it_shows_even_when_nothing_matches() {
+        assert_eq!(shown_line(3, 10).as_deref(), Some("3 of 10 runs"));
+        assert_eq!(shown_line(0, 10).as_deref(), Some("0 of 10 runs"), "Failed on a server with no failures");
+        assert_eq!(shown_line(0, 1).as_deref(), Some("0 of 1 run"));
+        assert_eq!(shown_line(10, 10), None, "the whole list: no totals line");
+        assert_eq!(shown_line(0, 0), None, "an empty server says so in its empty state");
+    }
 
     #[test]
     fn columns_drop_whole_and_in_order() {

@@ -39,11 +39,9 @@ impl FoloApp {
         let header = page_header(
             &t,
             "Settings",
-            if self.cloud_on() {
-                "Connection, cloud compute, this machine's speed, appearance and keyboard shortcuts."
-            } else {
-                "Connection, this machine's speed, appearance and keyboard shortcuts."
-            },
+            // Studio's fact, for this app: where what is picked here is kept (desktop.json in
+            // FOLO's home folder, `window_state`).
+            "Preferences are stored on this computer.",
             vec![],
         )
         // The header sits on the column's edges, so the two centre together.

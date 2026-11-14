@@ -124,6 +124,25 @@ fn a_final_read_that_fails_does_not_leave_the_history_loading() {
 }
 
 #[test]
+fn a_history_that_failed_to_load_draws_its_failure_in_per_class_with_the_retry() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| this.navigate(crate::app::Route::Run("run_52e8".into()), w, cx));
+    app.frame(window.into());
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.focus.borrow().contains_key("per-class-retry"), "loaded: the classes, no retry");
+        let down = crate::api::ApiError::new("server_unreachable", "Could not reach folo serve");
+        this.store.run_data.insert("run_52e8".into(), Load::Failed(down));
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let drawn = this.focus.borrow();
+        assert!(drawn.contains_key("run-data-retry"), "the charts say it");
+        assert!(drawn.contains_key("per-class-retry"), "and Per class, not skeletons for good");
+    });
+}
+
+#[test]
 fn a_released_runs_instance_not_confirmed_terminated_says_it_may_still_be_billed() {
     use PhaseState::*;
     // RunPod hasn't confirmed the termination of the training run's instance (the demo's +trouble).

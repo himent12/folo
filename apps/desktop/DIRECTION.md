@@ -37,6 +37,8 @@ The components are fine; the page structure is not.
 - **Charts:**
   - A 40 px header with title, subtitle, and a legend with values (the cursor's value while inspecting, else the
     latest).
+  - The plot is an inset well (`bg.inset`) under the grid; end marks, the best ring and dots are haloed in its
+    colour, and the epochs not trained yet are shaded with the hover tint. The sparkline has no well.
   - No floating readout. The cursor is a line, dots and an x chip on the axis.
   - One 16 px annotation band for events (close mosaic, failure, warmup).
   - The best epoch is a hollow ring in `text.primary` on its series ("○ best 0.656 @ 41" in the legend). A line's end
@@ -90,7 +92,8 @@ The components are fine; the page structure is not.
   name.
 - **Datasets:** cards with a 2×2 mosaic and a class-balance strip along the bottom edge.
 - **Model detail:**
-  - mAP50-95 tile at twice the width, 32 px; other tiles at 20 px.
+  - mAP50-95 tile at twice the width, 32 px; the other tiles as the run page's (24 px values, `sm` units, captions
+    in `text.secondary`; `ui::KPI_VALUE`, `KPI_UNIT`, `kpi_note`, shared by both strips).
   - One precision-recall panel: the plot (7/12) beside the per-class table (5/12), its legend. Every class is a thin
     context line, the mean in ink, a hovered, focused or pinned class in its hue.
   - The confusion matrix on one luminance ramp (the row's share in each cell), Most confused / Most missed beside it.

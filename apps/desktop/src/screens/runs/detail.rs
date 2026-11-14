@@ -420,7 +420,7 @@ impl FoloApp {
         let narrow = window_w < 1000.;
         // Short windows: tighter tiles (padding only; every value keeps its detail line).
         let compact = short;
-        let big = if narrow { ty::XL } else { ty::X2XL };
+        let big = if narrow { ty::XL } else { KPI_VALUE };
         let live = r.status == RunStatus::Running;
         // Waiting to train for the first time: nothing is "final" or "last" yet.
         let unstarted = r.status == RunStatus::Queued && r.epoch == 0;
@@ -440,7 +440,7 @@ impl FoloApp {
                         .flex()
                         .gap(px(4.))
                         .child(text(ty::SM, c).tnum().child(format!("{s} vs last")))
-                        .child(text(ty::SM, t.text_tertiary).tnum().child(best)),
+                        .child(kpi_note(&t).child(best)),
                 )
             }
             _ => None,
@@ -457,14 +457,14 @@ impl FoloApp {
                 .gap(px(6.))
                 .min_w_0()
                 .child(caption(&t, label))
-                .child(duration_metric(&t, secs, big, ty::SM))
+                .child(duration_metric(&t, secs, big, KPI_UNIT))
                 .child(detail)
         };
         let time_tile = if live || r.status == RunStatus::Queued {
             duration_tile(
                 "Time left",
                 r.eta_s,
-                text(ty::SM, t.text_tertiary).tnum().child(
+                kpi_note(&t).child(
                     duration_of(r, now).map_or(String::new(), |d| format!("{} elapsed", time::duration(d))),
                 ),
             )
@@ -472,7 +472,7 @@ impl FoloApp {
             duration_tile(
                 "Duration",
                 duration_of(r, now),
-                text(ty::SM, t.text_tertiary).child(
+                kpi_note(&t).child(
                     r.finished
                         .as_deref()
                         .and_then(time::parse)
@@ -486,7 +486,7 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(6.))
                 .child(caption(&t, "Epoch"))
-                .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, ty::SM))
+                .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, KPI_UNIT))
                 .child(div().pt(px(if compact { 4. } else { 6. })).child(progress(
                     &t,
                     r.progress(),
@@ -508,13 +508,9 @@ impl FoloApp {
                 last.map_or("–".into(), |e| f3(e.val.map50_95)),
                 big,
                 delta.or_else(|| {
-                    r.best.as_ref().map(|b| {
-                        text(ty::SM, t.text_tertiary).tnum().child(format!(
-                            "best {} @ {}",
-                            f3(b.map50_95),
-                            b.epoch
-                        ))
-                    })
+                    r.best
+                        .as_ref()
+                        .map(|b| kpi_note(&t).child(format!("best {} @ {}", f3(b.map50_95), b.epoch)))
                 }),
             ),
             div()
@@ -530,7 +526,7 @@ impl FoloApp {
                 ))
                 // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
                 // P/R chart below states the match rule, so the tile's line fits at 1280.
-                .child(text(ty::SM, t.text_tertiary).ellipsis().child(pr_caption(
+                .child(kpi_note(&t).ellipsis().child(pr_caption(
                     last.and_then(|e| operating_conf(e.val.best_f1_conf, e.val.precision, e.val.recall)),
                     self.eval_split(r),
                     false,
@@ -550,7 +546,7 @@ impl FoloApp {
                             ips_now.map_or("–".into(), |v| format!("{v:.0}")),
                             "img/s",
                             big,
-                            ty::SM,
+                            KPI_UNIT,
                         ))
                         .child(
                             // A glance, not a chart: 160 px in the one-row strip; in the wrapped
@@ -573,7 +569,7 @@ impl FoloApp {
                                 }),
                         ),
                 )
-                .child(text(ty::SM, t.text_tertiary).tnum().child(
+                .child(kpi_note(&t).child(
                     ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
                 )),
             time_tile,
