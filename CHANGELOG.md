@@ -23,9 +23,10 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
 | CPU end to end, batch 1 | **13.6 ms** | 24.8 ms |
 | COCO val2017 AP, from scratch (`folo-n-coco-v3`, 78 epochs) | 0.340 | 0.409 (Objects365 + 245 COCO epochs) |
 
-The end-to-end rows are on trained weights (`folo-n-coco-v3`) since the third optimisation round: random weights pass
-no candidate, so candidate-first prediction would skip the box branch. The CPU row's 13.1 ms before it was on random
-weights; on trained weights the round's starting build (e5a6ccf0) reads 13.58 ms and `main` 13.57, a tie.
+The end-to-end rows are on trained weights (the published `folo-n-coco`, 50 epochs) since the third optimisation
+round: random weights pass no candidate, so candidate-first prediction would skip the box branch. The CPU row's 13.1
+ms before it was on random weights; on trained weights the round's starting build (e5a6ccf0) reads 13.58 ms and `main`
+13.57, a tie.
 
 The entries are in two groups. **The foundation** is what the first internal build of 0.1.0 had. **Since the first
 build** is what landed after it and before the release went public; where it replaces something in the foundation

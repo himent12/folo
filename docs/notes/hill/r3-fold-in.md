@@ -220,7 +220,7 @@ and 26.92–29.20 with it (`cpu-s-late/new-r3`, `cpu-bisect-s/new-r1`, `-r2`, `c
 
 | row (28 threads) | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` | folo-m e5a6ccf0 | folo-m `main` |
 |---|---|---|---|---|---|---|
-| forward b1 (row 7), whole bench | 14.64 ms (13.61–15.09) | 14.46 (14.16–14.90), tie | 30.48 (29.76–30.70) | 31.41 (30.28–31.75), tie (+3.1%, ranges overlap) | 75.32 (74.71–75.76) | 75.47 (75.20–76.07), tie |
+| forward b1 (row 7), whole bench | 14.64 ms (13.61–15.09) | 14.46 (14.16–14.90), tie | 30.48 (29.76–30.70) | 31.41 (30.28–31.75), +3.1%, ranges overlap (noise: Rows worse) | 75.32 (74.71–75.76) | 75.47 (75.20–76.07), tie |
 | e2e b1, trained, 640×640 (row 8), rows alone | 13.58 (13.41–14.87) | 13.57 (13.54–14.13), tie | 31.00 (30.30–31.48) | 29.40 (29.05–29.64), −5% | | |
 | the same, whole bench | 15.65 (14.39–15.79) | 15.36 (14.73–16.13), tie | 31.37 (30.97–32.92) | 31.19 (30.16–31.70), tie | | |
 | e2e b1, trained, 1280×720 (`rect` 640×384), rows alone | 11.73 (10.88–11.94) | 11.10 (10.82–11.40), −5% | 22.27 (21.08–22.97) | 21.25 (20.48–21.40), −5% | | |
@@ -294,7 +294,7 @@ Each lane's own number, then this notebook's (the cells above):
 | plan: AMP training step | 38.3 → 35.0 ms, −8.6% | 27.44 → 26.30 ms, −4% inside overlapping ranges (one slow e5a6ccf0 round); 25.87 → 26.03 in the quiet round | does not reproduce |
 | plan: rows 1 / 2, two binaries | −23% / −35% at 5–88% CPU load | plans off → on on one binary: −3.5% (f32), −10% (tensor cores) | the lane's quieter `gpu_latency` rounds (−3.5% / −5.7%) and its in-process toggle (about −5% / −10%) agree; the loaded two-binary gains do not reproduce |
 | plan: folo-s b1, plans | a tie | −6% (f32), −8% (tensor cores), plans off → on | larger here |
-| plan: rows 3, 4, 6 at batch 16 | +2.4 to +5.3% slower | ties (forward); no plan at batch 16 | **does not reproduce** |
+| plan: rows 3, 4, 6 at batch 16 | +2.4 to +5.3% slower | ties (forward), but folo-s tensor cores +3.6% inside overlapping ranges; no plan at batch 16 | **does not reproduce** |
 | plan: mixed-batch slow mode "no longer on `main`" | not reproduced on `main` | 35–39 ms in 3 of 9 runs, on both builds | **reproduces**, predates the round |
 | plan: GPU 16 × 1280×720 (#259 alone, on ca37efc5) | −21 / −14 / −32 / −21% (n f32, n tc, s f32, s tc) | against e5a6ccf0 (with candidate-first): random weights −28 / −21 / −31 / −25%; trained n tc −18%, s −32 / −25%, n f32 bimodal | consistent (this includes candidate-first) |
 | plan: CPU 16 × 1280×720 (#259 alone) | −16.6% (155.2 → 129.5 ms, 4–100% CPU load) | −20% untrained, −21% trained (bisect, f04dce45 → 25666428, folo-s) | agrees, a little larger |
@@ -311,7 +311,7 @@ Each lane's own number, then this notebook's (the cells above):
 ## Rows worse than e5a6ccf0
 
 - **folo-s, CPU, a trained 1280×720 frame after an untrained model's rect `predict_batch` in the same process**:
-  +24 to +29% (CPU section), from #259 (bisect). The only row slower than e5a6ccf0 at its median.
+  +24 to +29% (CPU section), from #259 (bisect). The only row slower than e5a6ccf0 in every run.
 - **folo-n f32 `predict_batch` 16 × 1280×720, GPU, trained**: a tie at the median (14.13 → 13.95 ms), bimodal on
   `main` (3 of 10 runs at 10.0 ms, the others 11–21).
 - **folo-n f32 forward b16, pipelined**: 2064 → 1962 img/s (−5%) with overlapping ranges; the synchronised median ties
@@ -319,6 +319,10 @@ Each lane's own number, then this notebook's (the cells above):
 - **folo-s CPU forward b1**: +3.1% in the whole bench (30.48 → 31.41 ms, ranges overlap), −4.7% and −1.3% in the later
   bisect runs (`cpu-bisect-s`: 29.52 → 28.14 against e5a6ccf0; `cpu-bisect2-s`: 28.86 → 28.49 against f04dce45):
   noise; the forward did not change.
+- **folo-n f32 `predict_batch` of 16 mixed shapes, GPU, random weights**: 14.53 → 23.46 ms at the median (+61%),
+  because 2 of `main`'s 4 runs fell in a 35–39 ms slow mode that e5a6ccf0 shows too (1 of 5 runs); the fast mode is
+  10.5–14.6 ms on both builds, and `main` with plans off reads 12.28 ms (11.27–13.59). Not read as a regression of
+  the round (the mode predates it), and not explained.
 
 Nothing else measured is slower than e5a6ccf0.
 

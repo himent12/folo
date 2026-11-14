@@ -335,7 +335,8 @@ Where it comes from:
 - **The forward rows** do not run candidate-first (they are dense by definition), so rows 1 and 2 move by the plan
   alone: folo-n f32 1.13 → 1.09 ms, tensor cores 0.94 → 0.845 ms with plans on, and e5a6ccf0's tensor-core row is
   bimodal (0.86–0.91 ms in two runs, 1.21–1.31 in three).
-- **Batch 16**: no plan is made, so the forward rows 3 and 4 tie; candidate-first gives −4 to −11% end to end on
+- **Batch 16**: no plan is made, so the forward rows 3 and 4 do not move (ties, but folo-s on tensor cores +3.6%
+  inside overlapping ranges); candidate-first gives −4 to −11% end to end on
   trained weights.
 - **1280×720 batches** (−18 to −35%): #259 runs them at 640×384, 60% of the pixels, plus candidate-first.
 - The random-weight bench's end-to-end rows are not used for rows 5 and 6: random weights pass no candidate at
@@ -373,7 +374,7 @@ for the `rect` rows):
 
 | row (28 threads) | folo-n e5a6ccf0 | folo-n `main` | folo-s e5a6ccf0 | folo-s `main` | folo-m e5a6ccf0 | folo-m `main` |
 |---|---|---|---|---|---|---|
-| forward b1 (row 7), whole bench | 14.64 ms (13.61–15.09) | 14.46 (14.16–14.90), tie | 30.48 (29.76–30.70) | 31.41 (30.28–31.75), tie | 75.32 (74.71–75.76) | 75.47 (75.20–76.07), tie |
+| forward b1 (row 7), whole bench | 14.64 ms (13.61–15.09) | 14.46 (14.16–14.90), tie | 30.48 (29.76–30.70) | 31.41 (30.28–31.75), +3.1%, ranges overlap | 75.32 (74.71–75.76) | 75.47 (75.20–76.07), tie |
 | e2e b1, trained, 640×640 (row 8), trained rows alone | 13.58 ms (13.41–14.87) | 13.57 (13.54–14.13), **tie** | 31.00 (30.30–31.48) | **29.40** (29.05–29.64), −5% | no weights | |
 | the same, whole bench | 15.65 (14.39–15.79) | 15.36 (14.73–16.13), tie | 31.37 (30.97–32.92) | 31.19 (30.16–31.70), tie | | |
 | e2e b1, trained, 1280×720 (`rect` 640×384), trained rows alone | 11.73 (10.88–11.94) | **11.10** (10.82–11.40), −5% | 22.27 (21.08–22.97) | **21.25** (20.48–21.40), −5% | | |
@@ -484,19 +485,27 @@ number of lane fusion reproduces to four digits.
 
 ### Rows worse than e5a6ccf0
 
-- **folo-s on the CPU, a trained 1280×720 frame after the untrained model's rows in one process**: +24 to +29%
-  (22.08 → 27.29 and 21.88 → 28.21 ms, every run), and 5% faster than e5a6ccf0 when those rows did not run first.
-  It arrives with #259 (f04dce45 21.29 / 21.45 ms, 25666428 29.13), so something the untrained model's rect
-  `predict_batch` leaves behind in the process slows the next model's single 640×384 calls. Reproduce: `FOLO_BENCH_SCALE=s FOLO_BENCH_ITERS=40 FOLO_BENCH_BATCH=16
-  FOLO_BENCH_WEIGHTS=<dir>/folo-s-coco.folo FOLO_BENCH_IMAGES=<val2017> cargo bench -p folo-vision --bench cpu_e2e`,
-  the `trained 1280x720 (rect 640x384)` row; with `FOLO_BENCH_BATCH=0` or `FOLO_BENCH_UNTRAINED=0` it is fast. Not
-  diagnosed; it does not change any prediction (the same detections).
+- **folo-s on the CPU, a trained 1280×720 frame after the untrained model's rows in one process**: +24 to +29% (22.08
+  → 27.29 and 21.88 → 28.21 ms, every run; the only row slower in every run), and 5% faster than e5a6ccf0 when those
+  rows did not run first. It arrives with #259 (f04dce45 21.29 / 21.45 ms, 25666428 29.13), so something the untrained
+  model's rect `predict_batch` leaves behind in the process slows the next model's single 640×384 calls. Reproduce:
+  `FOLO_BENCH_SCALE=s FOLO_BENCH_ITERS=40 FOLO_BENCH_BATCH=16 FOLO_BENCH_WEIGHTS=<dir>/folo-s-coco.folo
+  FOLO_BENCH_IMAGES=<val2017> cargo bench -p folo-vision --bench cpu_e2e`, the `trained 1280x720 (rect 640x384)` row;
+  with `FOLO_BENCH_BATCH=0` or `FOLO_BENCH_UNTRAINED=0` it is fast. Not diagnosed; it does not change any prediction
+  (the same detections).
 - **folo-n f32 `predict_batch` of 16 × 1280×720 frames on the GPU, trained weights**: not slower at the median (14.13 →
   13.95 ms) but bimodal on `main` in the two evening passes (10.0 ms in 3 of 10 runs, 11–21 ms in the others;
   e5a6ccf0 13.4–15.1, one 25.5), and steady in the third pass (10.23 ms, 10.17–10.24, against 14.16: −28%). Not
   explained.
 - **folo-n f32 forward at batch 16, pipelined**: 2064 → 1962 img/s (−5%) with overlapping ranges, and the synchronised
   median ties (7.81 vs 7.84 ms); no plan is made at batch 16 and that path did not change, so it is read as noise.
+- **folo-s CPU forward b1**: +3.1% in the whole bench (30.48 → 31.41 ms) with overlapping ranges, and −4.7% and
+  −1.3% in the later bisect runs (29.52 → 28.14 against e5a6ccf0, 28.86 → 28.49 against f04dce45): noise; the
+  forward did not change.
+- **folo-n f32 `predict_batch` of 16 mixed shapes, GPU, random weights**: 14.53 → 23.46 ms at the median (+61%),
+  because 2 of `main`'s 4 runs fell in a 35–39 ms slow mode that e5a6ccf0 shows too (1 of 5 runs); the fast mode is
+  10.5–14.6 ms on both builds, and `main` with plans off reads 12.28 ms (11.27–13.59). Not read as a regression of
+  the round (the mode predates it), and not explained.
 
 Nothing else measured is slower than e5a6ccf0. One `main` run of the `gpu_trained` bench crashed with an access
 violation at the switch from folo-n's predictors to folo-s's, once in 30 runs of `main`'s GPU benches and in none of
