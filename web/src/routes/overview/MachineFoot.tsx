@@ -23,6 +23,12 @@ export default function MachineFoot(props: { run: Run }) {
     const s = info.get();
     return s ? runGpu(props.run, s.gpus) : null;
   });
+  /** A GPU run whose adapter cannot be told: its device still named (as the run says it), with no load beside it. */
+  const unmatched = computed(() => {
+    const d = props.run.device;
+    const cpu = props.run.config.device === 'cpu' || d.toLowerCase().startsWith('cpu');
+    return !gpu.get() && !cpu && d ? deviceName(d) : null;
+  });
   const mem = computed(() => {
     const m = info.get()?.memory;
     return m && m.total_bytes > 0 ? { frac: m.used_bytes / m.total_bytes, text: `${bytes(m.used_bytes, prefs.units)} / ${bytes(m.total_bytes, prefs.units)}` } : null;
@@ -46,6 +52,10 @@ export default function MachineFoot(props: { run: Run }) {
                   <span class="m-val num">{pct(gpu.get()!.util, 0)} load</span>
                 </>
               ) : null}
+            </span>
+          ) : unmatched.get() ? (
+            <span class="meter">
+              <span class="m-label truncate">{unmatched.get()}</span>
             </span>
           ) : null}
           <span class="meter">

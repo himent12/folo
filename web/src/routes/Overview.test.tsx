@@ -435,4 +435,22 @@ describe('Overview', () => {
     // The chart in the series hues: mAP50-95 and mAP50, with the best in the legend.
     expect([...card.querySelectorAll('.legend li .name')].map((n) => n.textContent)).toEqual(['mAP50-95', 'mAP50', 'best']);
   });
+
+  it("names a cloud run's GPU in its meta line and has no machine foot (this server does not read that machine)", async () => {
+    const api = new MockApi('cloud-training', 0);
+    const runs = await api.runs();
+    const cloud = runs.find((r) => r.id === 'run_c7b1')!;
+    watched.runs = runs.map((r) => (r.id === cloud.id ? r : r.status === 'running' || r.status === 'queued' ? { ...r, status: 'completed', queue_position: null } : r));
+    open(api);
+    const card = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.live .card');
+      if (el?.querySelector('header h2')?.textContent !== cloud.name || !el.querySelector('.legend')) throw new Error('still waiting for the cloud run');
+      return el;
+    });
+    expect(card.querySelector('header .meta')?.textContent).toContain('RTX 4090');
+    await new Promise((ok) => setTimeout(ok, 50));
+    flush();
+    expect(card.querySelector('.foot')).toBeNull();
+  });
 });

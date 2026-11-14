@@ -54,10 +54,13 @@ describe('MachineFoot', () => {
     expect(el.querySelector('.meter .m-label')?.textContent).toMatch(/^CPU · \d+ threads$/);
   });
 
-  it('shows no GPU when the run names one this machine does not have', async () => {
-    await mount((r) => ({ ...r, config: { ...r.config, device: 'gpu:99' } }));
+  it("names the run's GPU, without another adapter's load, when it cannot tell which adapter that is", async () => {
+    await mount((r) => ({ ...r, device: 'Some Other GPU (vulkan)', config: { ...r.config, device: 'gpu:99' } }));
     const el = await foot();
-    expect(el.querySelectorAll('.meter').length).toBe(2);
+    expect(el.querySelectorAll('.meter').length).toBe(3);
+    const first = el.querySelector('.meter')!;
+    expect(first.textContent).toContain('Some Other GPU');
+    expect(first.querySelector('[role=progressbar], .m-bar')).toBeNull();
   });
 
   it("has no foot for a cloud run: this server has no readings of the rented machine", async () => {
