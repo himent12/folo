@@ -17,12 +17,13 @@
 //! Everything from the input to the records (and the moments) is a pure function of the input with a fixed
 //! dispatch list, so with the model's forward plans on ([`FoloModel::set_forward_plans`], as in a `Predictor`) the
 //! whole device side is one recorded plan ([`folo_gpu::ForwardPlans`]): a replayed prediction is one flat list of
-//! dispatches and the one readback after it.
+//! dispatches, then the readbacks (the records; with DFL fusion also the moments and the three site lists).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use folo_core::{ClassSites, Device, Tensor, no_grad};
+use folo_gpu::GpuContext;
 use folo_nn::{ConvBnAct, Forward, Result};
 
 use super::head::{HeadLevel, HeadMode};
@@ -50,16 +51,20 @@ fn conv_sites(c: &ConvBnAct, x: &Tensor, sites: &Tensor, to_map: bool) -> Result
     Ok(x.conv2d_act_sites(&c.conv.weight, c.conv.bias.as_ref(), &p, c.act.unary_op(), sites, to_map)?)
 }
 
-/// [`moment_bins`] on `dev`, one tensor per device and `reg_max` for the process: a planned call reads it (listed
-/// with the model's tensors) instead of uploading it.
+/// [`moment_bins`] on `dev`, one tensor per registered context and `reg_max` for the process: a planned call reads
+/// it (listed with the model's tensors) instead of uploading it. Keyed by the context serving `dev`, not by the
+/// ordinal: a context registered again at the same device ([`folo_gpu::register`]) gets bins of its own, and the
+/// replaced context's are dropped. Without a registered context the bins are uploaded for the call.
 fn device_bins(dev: Device, rm: usize) -> Result<Tensor> {
-    static BINS: Mutex<Vec<(Device, usize, Tensor)>> = Mutex::new(Vec::new());
+    static BINS: Mutex<Vec<(Device, GpuContext, usize, Tensor)>> = Mutex::new(Vec::new());
+    let Some(ctx) = folo_gpu::context_for(dev) else { return Ok(moment_bins(rm)?.to_device(dev)?) };
     let mut bins = BINS.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some((_, _, k)) = bins.iter().find(|(d, r, _)| *d == dev && *r == rm) {
+    bins.retain(|(d, c, _, _)| *d != dev || c.same_device(&ctx));
+    if let Some((.., k)) = bins.iter().find(|(d, _, r, _)| *d == dev && *r == rm) {
         return Ok(k.clone());
     }
     let k = moment_bins(rm)?.to_device(dev)?;
-    bins.push((dev, rm, k.clone()));
+    bins.push((dev, ctx, rm, k.clone()));
     Ok(k)
 }
 

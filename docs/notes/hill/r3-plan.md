@@ -313,8 +313,8 @@ branch was rebased onto it and a second planned call added; the forward's hook s
 `ForwardPlans::run`: the features, the class branches, the class pass (`detect_class_sites`), the box branch at the
 sites (`conv2d_act_sites`), the decode (`detect_decode_sites`), and with DFL fusion `dfl_moments` of the site
 raws. Its results are the record tensor and, with DFL fusion, what `site_precisions` reads: the moments and the
-three site lists. A replayed prediction is one flat list of dispatches, then the host reads the records (and the
-moments) back.
+three site lists. A replayed prediction is one flat list of dispatches, then the host reads the records back (with DFL fusion
+also the moments and the three site lists: five readbacks).
 
 That is possible because the site lists have fixed capacities (`GPU_SITE_SLOTS`, 1024 / 512 / 256 per level): the
 dispatches do not depend on the image, only the counts in the lists do, and those live in buffers.
@@ -331,8 +331,10 @@ dispatches do not depend on the image, only the counts in the lists do, and thos
   as a plan ("the call returned no results"), and the dense path runs. The features are not a plan result just for
   the rare overflow.
 - **One fix so the recording is accepted**: `dfl_moments` uploaded its bins (`0..rm` and their squares) every call,
-  and a plan refuses an upload. The bins are now made once per (device, `rm`) (`device_bins`, a small static list)
-  and listed with the model's tensors, so a change to them would retire the plan like any other. No other refusal
+  and a plan refuses an upload. The bins are now made once per registered context and `rm` (`device_bins`, a small
+  static list keyed by the context serving the device, so a context registered again at the same ordinal gets its
+  own; review round 3 found the first version keyed by the ordinal) and listed with the model's tensors, so a
+  change to them would retire the plan like any other. No other refusal
   came up: `plan_refusal()` read `None` in every run below.
 
 ### Proof
@@ -346,7 +348,8 @@ dispatches do not depend on the image, only the counts in the lists do, and thos
   for it (127 from bash is "command not found", which the identical command just before and after was not).
 - **Tests** (`tests/gpu_plan.rs`): candidate replays bit-identical with and without DFL precisions (f32 / f16 /
   f16 tc, two shapes, batches 1 and 2); a `conf` change gets its own plan (0.45 against 0.5, both replayed and
-  both right); an image over its slots after a replay is answered by the dense head and matches plans off.
+  both right); an image over its slots after a replay is answered by the dense head and matches plans off; DFL bins follow a
+  context registered again at the same device (fails on the ordinal-keyed cache, `predict_candidates` errors).
 
 ### Numbers
 
@@ -394,13 +397,15 @@ interleave the two models more finely, and there the whole distribution moved fo
 this machine I call it a tie.
 
 Tails: in `gpu_latency` p90 and p99 are better with plans in every configuration. In the toggle (600 calls a side,
-so a p99 is the 6 slowest calls) four tail readings are worse with plans: folo-n f16 tc b1 p99 +11.6% (1.968 against
-1.763) and step p99 +65% (1.960 against 1.189), folo-s f32 b1 p99 +13.4% (3.168 against 2.794), folo-s f16 tc step
-p90 +13.2% (1.539 against 1.360); the same configurations' other tails read better (folo-n f16 tc b1 one p99 1.492
+so a p99 is the 6 slowest calls) seven tail readings are worse with plans: folo-n f16 tc b1 p99 +11.6% (1.968
+against 1.763) and step p99 +65% (1.960 against 1.189), folo-s f32 b1 p99 +13.4% (3.168 against 2.794), folo-s f16
+tc step p90 +13.2% (1.539 against 1.360) and p99 +7.5% (1.587 against 1.476), folo-s f16 tc b1 one p99 +8.5% (2.090
+against 1.927), folo-n f32 b1 one p90 +7.8% (1.703 against 1.580); the same configurations' other tails read better (folo-n f16 tc b1 one p99 1.492
 against 1.835). I read them as a few slow calls, not a pattern, but that is not shown.
 
 Summary: **about 10% for folo-n on tensor cores (−9 to −11% at p50 in both benches), about 5% for folo-n f32, a tie
-for folo-s**; no p50 is slower. Rows 1 and 2's 0.8 / 0.65 ms are not reached: the quiet candidate call is 1.05 /
+for folo-s**; the one p50 that reads slower, folo-s f16 tc b1 (+0.7%, 1.665 against 1.654), is a tie
+(its round-median ranges overlap). Rows 1 and 2's 0.8 / 0.65 ms are not reached: the quiet candidate call is 1.05 /
 0.88 ms for folo-n, and, as in step 1, what is left is mostly the GPU's own time.
 
 ## Training steps (not in this lane)

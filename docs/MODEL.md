@@ -1057,7 +1057,7 @@ the dense path: `vote` needs only the boxes and scores, and `dfl` takes each can
 own box logits, which are the dense logits bit for bit, with the dense path's functions: on the CPU the same
 softmax moments per candidate; on a GPU the dense path's moment ops (`HeadOutput::moments_on_device`) over the
 candidates' columns, which compute each column on its own, so the same bits. With forward plans on (§9.1), the
-GPU path from the input to the records and moments is one recorded plan, replayed with one readback after it.
+GPU path from the input to the records and moments is one recorded plan; the readbacks follow the replay.
 
 ## 10. Verification plan
 

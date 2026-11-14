@@ -188,7 +188,8 @@ device side of candidate-first prediction (docs/MODEL.md §9.5), which is what a
 site lists have fixed capacities, so everything from the input to the decoded records (the features, the class
 branches, the class pass, the box branch at the sites, the decode, and with DFL fusion the moments) is one plan,
 keyed also by the head branch, `conf` (it sits in the class pass's parameter block), the slots and whether DFL
-fusion wants the moments; a replayed prediction is one flat list of dispatches and one readback. An image with more
+fusion wants the moments; a replayed prediction is one flat list of dispatches, then the readback of the records
+(with DFL fusion also the moments and the three site lists, read one by one). An image with more
 candidates than slots is answered by the dense head on features computed again, unplanned. Measured on the
 published weights at 640×640, plans on against off in one process, a quiet GPU: folo-n b1 candidate-first calls
 1.12 → 1.05 ms in f32 and 0.97 → 0.88 ms on tensor cores, folo-s about 2% (a tie); docs/notes/hill/r3-plan.md. On

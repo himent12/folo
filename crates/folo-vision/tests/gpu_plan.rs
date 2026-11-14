@@ -497,3 +497,27 @@ fn an_image_over_its_slots_is_answered_by_the_dense_head_after_a_replay() {
         cands_until_replayed(&m, &x, &nms, &want);
     }
 }
+
+/// DFL fusion's cached bins follow the context serving a device: a context registered again at the same ordinal
+/// (`folo_gpu::register`) gets its own, so a model there predicts as on the first one (a private ordinal, so the
+/// shared context the other tests use is untouched).
+#[test]
+fn dfl_bins_follow_a_context_registered_again_at_the_same_device() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(_) = gpu() else { return };
+    let _g = no_grad();
+    let dev = Device::Gpu(7);
+    let nms = low_conf(0.3, BoxFusion::Dfl);
+    let mut first = None;
+    for round in 0..2 {
+        folo_gpu::register(GpuContext::new().unwrap(), dev).unwrap();
+        let m = scored(model(dev, 4, 0));
+        let x = input(dev, [1, 3, 64, 96], DType::F32, 12);
+        let got = cand_bits(&m.predict_candidates(&x, &nms).unwrap());
+        assert!(got[0].len() > 2, "round {round}: no candidates to compare");
+        match &first {
+            None => first = Some(got),
+            Some(want) => assert_eq!(&got, want, "the second context's candidates"),
+        }
+    }
+}
