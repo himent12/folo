@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, atBestF1, bytes, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
+import { ago, atBestF1, bytes, sizeParts, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
@@ -30,6 +30,14 @@ describe('format', () => {
     expect(bytes(2 ** 30 - 1)).toBe('1.0 GiB');
     expect(bytes(999_999, 'metric')).toBe('1.0 MB');
     expect(bytes(1023)).toBe('1,023 B');
+  });
+  it("splits a size into its number and its own unit at Desktop's steps (Models' Size cells)", () => {
+    expect(sizeParts(38_797_312)).toEqual(['37.0', 'MiB']);
+    expect(sizeParts(1.25 * 2 ** 30)).toEqual(['1.3', 'GiB']);
+    expect(sizeParts(300 * 1024 + 300)).toEqual(['300', 'KiB']);
+    expect(sizeParts(512)).toEqual(['512', 'B']);
+    expect(sizeParts(5_400_000, 'metric')).toEqual(['5.4', 'MB']);
+    expect(sizeParts(null)).toEqual(['—', '']);
   });
   it('formats durations', () => {
     expect(duration(42)).toBe('42s');

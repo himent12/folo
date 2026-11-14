@@ -337,6 +337,31 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
     expect(mark('fasteners-n-best')).toBe('joint best'); // still tied with fasteners-n-f16, a different file
   });
 
+  it('heads Size plainly and gives each cell its own unit, sorted by bytes (design: as Desktop)', async () => {
+    const api = new MockApi('normal', 0);
+    const bytesOf = new Map((await api.models()).map((m) => [m.name, m.bytes]));
+    await open(Models, '/models', api);
+    await table('table.models', () => !!groups()[0]?.textContent?.includes('split of'), 'the groups');
+    const heads = [...target.querySelectorAll('table.models thead th')];
+    const at = heads.findIndex((th) => th.textContent?.trim() === 'Size');
+    expect(at).toBeGreaterThan(0);
+    const rows = () => [...target.querySelectorAll<HTMLTableRowElement>('table.models tbody tr[data-row]')];
+    for (const tr of rows()) {
+      const cell = tr.cells[at]!;
+      const unit = cell.querySelector('.size-unit')?.textContent;
+      expect(['B', 'KiB', 'MiB', 'GiB']).toContain(unit);
+      expect(cell.textContent!.trim()).toMatch(new RegExp(`^[0-9,.]+ ${unit}$`));
+    }
+    heads[at]!.querySelector('button')!.click();
+    await vi.waitFor(() => expect(heads[at]!.getAttribute('aria-sort')).not.toBeNull());
+    // Within each group the rows follow their bytes, not the figures shown (1.0 GiB after 900.0 MiB).
+    for (const body of target.querySelectorAll('table.models tbody')) {
+      const sizes = [...body.querySelectorAll('tr[data-row] a.name')].map((a) => bytesOf.get(a.textContent!)!);
+      const sorted = [...sizes].sort((a, b) => a - b);
+      expect([sizes, sizes.slice().reverse()]).toContainEqual(sorted);
+    }
+  });
+
   it('ranks a training-split model apart from the validation ones, under its own heading', async () => {
     await loaded('train-split');
     expect(groups().map((th) => th.firstElementChild?.textContent)).toContain('Training split of fasteners-mini');

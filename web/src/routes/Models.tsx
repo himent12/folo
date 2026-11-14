@@ -7,7 +7,7 @@ import { bestMark, bestWord } from '$lib/bestMark';
 import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run } from '$lib/api/types';
-import { ago, bytes, compact, date, metric, sizeIn, sizeUnit } from '$lib/format';
+import { ago, bytes, compact, date, metric, sizeParts } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
@@ -118,12 +118,13 @@ export default function Models() {
   // Source run: a run's name ends in what tells it from its siblings ("shapes-hard-s" beside "shapes-hard-m"), so it is
   // never cut (DESIGN_DIRECTION §2.3); a longer one wraps at its hyphens. A longer model name is cut with an ellipsis
   // (.name-cell), whole in its tooltip. Tablets drop Classes, Size and Source run (the phone rows keep their facts).
-  // Sizes in one unit for the column, named in its header (prefs.units: MiB or MB).
+  // Size as Desktop's: each cell its number with its own unit ("37.0 MiB", "1.2 GiB"), the unit one step smaller in
+  // tertiary, the heading plain "Size"; sorted by bytes (prefs.units: MiB or MB).
   const cols = computed<Col[]>(() => [
     { key: 'name', label: 'Model', get: (m) => m.name.toLowerCase() },
     { key: 'arch', label: 'Architecture', get: (m) => m.arch, w: '112px' },
     { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'md', w: '88px' },
-    { key: 'bytes', label: `Size, ${sizeUnit(prefs.units)}`, num: true, get: (m) => m.bytes, hide: 'md', w: '96px' },
+    { key: 'bytes', label: 'Size', num: true, get: (m) => m.bytes, hide: 'md', w: '96px' },
     { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '136px' },
     { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1, w: '88px' },
     { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: '144px' },
@@ -430,7 +431,10 @@ export default function Models() {
                             <td class="r spec hide-md" title={m().classes.slice(0, 12).join(', ') + (m().classes.length > 12 ? ', …' : '')}>
                               {m().classes.length}
                             </td>
-                            <td class="r spec hide-md">{sizeIn(m().bytes, prefs.units)}</td>
+                            <td class="r spec hide-md">
+                              {sizeParts(m().bytes, prefs.units)[0]}{' '}
+                              <span class="size-unit">{sizeParts(m().bytes, prefs.units)[1]}</span>
+                            </td>
                             <td class="r score" class:strong={strongScore.get() === 'map50_95'}>
                               {bestText(m)}
                               {score(m())}
@@ -643,6 +647,11 @@ css`
   .score.strong {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
+  }
+  /* A size's own unit, one step under the cell's figure in tertiary (design/README.md, Type), as Desktop's "37.0 MiB". */
+  .size-unit {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
   /* The group's top model: a word in tertiary, never a colour (scores compare only within a dataset). */
   .best {
