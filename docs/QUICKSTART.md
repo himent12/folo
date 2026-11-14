@@ -150,20 +150,20 @@ are re-initialised, and everything else is kept. As a check: fine-tuning the sha
 
 ### Fine-tune from pretrained weights
 
-`folo-n-coco-v2` is folo-n trained from scratch on COCO ([examples/coco](../examples/coco/README.md)): val2017 AP
-0.317, from a 300-epoch run paused at epoch 62 (`folo-n-coco`, AP 0.314 after 50 epochs, is the first one).
-`folo-s-coco` is the larger folo-s, trained from scratch on COCO for 56 epochs: val2017 AP 0.416 (fine-tuning from
+`folo-n-coco-v3` is folo-n trained from scratch on COCO ([examples/coco](../examples/coco/README.md)): val2017 AP
+0.340 after 78 epochs (`folo-n-coco`, AP 0.314 after 50 epochs, and `folo-n-coco-v2`, AP 0.317, are the earlier
+ones). `folo-s-coco` is the larger folo-s, trained from scratch on COCO for 56 epochs: val2017 AP 0.416 (fine-tuning from
 it takes the weights' architecture, folo-s). `folo weights list` shows every published name. Two commands fine-tune
 one on your dataset:
 
 ```sh
-folo weights pull folo-n-coco-v2                                  # into ~/.folo/weights/, checksum verified
-folo train --data my-data --weights folo-n-coco-v2 --epochs 20    # takes the weights' architecture (folo-n)
+folo weights pull folo-n-coco-v3                                  # into ~/.folo/weights/, checksum verified
+folo train --data my-data --weights folo-n-coco-v3 --epochs 20    # takes the weights' architecture (folo-n)
 ```
 
 The weights are published GitHub releases, and `folo weights pull` downloads them over HTTPS: the `folo` binary is
 all it takes. `train` never downloads by itself: without the pull it stops with
-`weights_not_found` and the hint to run `folo weights pull folo-n-coco-v2` first.
+`weights_not_found` and the hint to run `folo weights pull folo-n-coco-v3` first.
 
 Studio and MCP list downloaded published weights as models once pulled (`folo weights pull`), or you can copy a `.folo`
 file into `<data dir>/models/` ([CLI.md, Weights](CLI.md#weights)).
