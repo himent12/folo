@@ -252,7 +252,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                       {props.pred ? <span class="fi">{ms(props.pred.timing.total_ms)}</span> : null}
                     </>
                   ) : props.notice === 'error' ? (
-                    <span class="fi">
+                    <span class="fi truncate" title={`${props.model?.name} on ${runOn.get() === 'server' ? 'the server' : `this browser · ${BACKEND_NAME[runOn.get() as Backend]}`}`}>
                       {props.model?.name} on {runOn.get() === 'server' ? 'the server' : `this browser · ${BACKEND_NAME[runOn.get() as Backend]}`}
                     </span>
                   ) : (
@@ -447,13 +447,19 @@ css`
     padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
     border-bottom: 1px solid var(--line-subtle);
   }
+  /* It yields to the header's room (a long model name after a failure, a laptop's column beside the rail): its last
+     fact truncates, whole in its title, rather than push the header past the image. */
   .vb-facts {
     display: flex;
-    flex-shrink: 0;
+    flex-shrink: 1;
+    min-width: 0;
     gap: var(--space-2);
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
     white-space: nowrap;
+  }
+  .vb-facts .truncate {
+    min-width: 0;
   }
   .vb-facts b {
     color: var(--text-primary);

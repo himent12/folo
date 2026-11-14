@@ -106,7 +106,7 @@ export default function Throughput(props: { benchmark?: boolean }) {
 
   const source = (r: Row) => {
     const other = elsewhere(r);
-    return other ? `Measured on ${other} · not used here` : `Measured · ${samples(r)}`;
+    return other ? `Measured on ${other} · ${samples(r)} · not used here` : `Measured · ${samples(r)}`;
   };
   const range = (r: Row) => {
     if ('amp' in r) return r.mosaic && r.mosaic.samples > 1 ? `${num(r.mosaic.low)}–${num(r.mosaic.high)}` : null;
@@ -317,18 +317,18 @@ css`
   .tp-scroll .tp-dev {
     font-weight: var(--weight-regular);
   }
-  /* Below 1024 px the nine columns take 8 px gaps and the source wraps, so the table fits a tablet's column. */
+  /* Below 1024 px the nine columns take 8 px gaps, so the table fits a tablet's column. */
   @media (max-width: 1023px) {
     .tp-scroll .table :is(th, td):not(:first-child):not(:last-child) {
       padding: 0 var(--space-2);
     }
-    /* The source is a phrase: it wraps (the row grows) before Updated leaves the panel. */
-    .tp-scroll .table td.tp-src {
-      min-width: 120px;
-      padding-top: var(--space-1);
-      padding-bottom: var(--space-1);
-      white-space: normal;
-    }
+  }
+  /* The source is a phrase: it wraps (the row grows) before Updated leaves the panel. */
+  .tp-scroll .table td.tp-src {
+    min-width: 120px;
+    padding-top: var(--space-1);
+    padding-bottom: var(--space-1);
+    white-space: normal;
   }
   .tp-fig {
     color: var(--text-primary);

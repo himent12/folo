@@ -4,7 +4,7 @@
  * coordinates on a line under the list, and the classes found (each a show / hide toggle) as a tab between the two;
  * below 1024 px it is a panel under the image with the coordinates as columns.
  */
-import { bindable, css, Dynamic, For, type Signal } from 'fw';
+import { bindable, css, Dynamic, effect, For, type Signal } from 'fw';
 import type { Prediction } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
 import Panel from '$lib/ui/Panel';
@@ -47,6 +47,11 @@ export default function ResultsPanel(props: ResultsPanelProps) {
   const picked = bindable(props, 'picked');
   /** The view shown: Classes is the rail's tab only (a panel under the image has its own Classes panel). */
   const view = () => (!props.rail && tab.get() === 'classes' ? 'detections' : tab.get());
+  // Leaving the rail (the window narrowed below 1024 px) on Classes selects Detections, so the tab list always has its
+  // selected, focusable tab.
+  effect(() => {
+    if (!props.rail && tab.get() === 'classes') tab.set('detections');
+  });
   const sel = () => (props.selectedIdx === null ? null : (props.rows.find((r) => r.i === props.selectedIdx)?.b ?? null));
 
   return (

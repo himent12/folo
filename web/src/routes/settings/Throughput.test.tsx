@@ -84,7 +84,8 @@ describe('Settings › Throughput', () => {
     expect([...target.querySelectorAll('#throughput thead th')].map((th) => th.textContent?.trim())).toContain('Latency');
     const other = [...target.querySelectorAll<HTMLElement>('.tp-row')].find((r) => r.textContent?.includes('RTX 3060'))!;
     expect(other.classList.contains('other')).toBe(true);
-    expect(other.textContent).toContain('Measured on RTX 3060 · not used here');
+    // Its samples are said too (as on phones): a row from another adapter loses no fact.
+    expect(other.textContent).toMatch(/Measured on RTX 3060 · \d+ samples?( \(probes\))? · not used here/);
     expect(other.querySelector('[title]')?.getAttribute('title')).toContain('Measured on another GPU (RTX 3060), so not used for this one');
   });
 

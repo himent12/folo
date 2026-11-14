@@ -707,6 +707,25 @@ describe('Playground: the rail (from 1024 px)', () => {
     expect(target.querySelectorAll('#pg-panel tbody tr').length).toBeLessThan(rows);
   });
 
+  it('selects Detections when the window narrows below 1024 px on the rail-only Classes tab, so a tab stays focusable', async () => {
+    const width = window.innerWidth;
+    const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
+    try {
+      await run('normal', 'm_hard_s');
+      await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+      tab('Classes').click();
+      flushSync();
+      setWidth(820);
+      await until(() => !target.querySelector('aside.rail'), 'the panels under the image');
+      const tabs = [...target.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Result views"] [role="tab"]')];
+      expect(tabs.map((t) => t.textContent?.replace(/\d+/g, '').trim())).toEqual(['Detections', 'JSON']);
+      expect(tabs.map((t) => t.getAttribute('aria-selected'))).toEqual(['true', 'false']);
+      expect(tabs.map((t) => t.getAttribute('tabindex'))).toEqual(['0', '-1']);
+    } finally {
+      setWidth(width);
+    }
+  });
+
   it('says an end-to-end model does not use the overlap threshold instead of offering its slider', async () => {
     await run('normal', 'm_shapes_s');
     await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
