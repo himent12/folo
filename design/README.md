@@ -39,7 +39,7 @@ live state and the primary action; status colours for status; the class palette 
   naming which (`web/scripts/lint-spacing.mjs`).
 - Every metric uses tabular numerals (`font-variant-numeric: tabular-nums`, OpenType `tnum`), so counters that tick
   live never jitter. Units and secondary parts of a number (`%`, `ms`, `/100`) are set one step smaller in
-  `text.tertiary`.
+  `text.tertiary`; beside a KPI tile's large value they are `sm` (`UNIFIED.md` §2, KPI strip).
 
 ## Layout tiers
 Four viewport tiers (`breakpoint` in `tokens.json`; a tier starts at its width). Layouts change only at these

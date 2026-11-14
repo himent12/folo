@@ -57,8 +57,11 @@ in `sm` `text.tertiary` after it or at the right, controls at the right; a hairl
 body. *Header band from Desktop → Studio* (its titles were 14 / 600 with no hairline).
 
 **KPI strip.** One panel cut into tiles by hairlines. A tile: its label in `sm` `text.secondary`, the value in
-`2xl` (24) 600 with units one step smaller in `text.tertiary`, one caption line in `sm` `text.secondary`. At most
-one tile per page holds a `3xl` (32) value. A tile is not a button. *From Desktop → Studio* (Run's tabs go, §3).
+`2xl` (24) 600, its unit and the secondary part of the value ("img/s", "/ 100", the "m" and "s" of a duration) in
+`sm` `text.tertiary` on the value's baseline, one caption line in `sm` `text.secondary`. The slash of a pair
+("0.849 / 0.762") sits between two full-size values, in `text.tertiary`. At most one tile per page holds a `3xl`
+(32) value. A tile is not a button, and no fact in a tile is ever cut. *From Desktop → Studio* (Run's tabs go, §4;
+its units were one step under the value, which made the same tile heavier).
 
 **Tables.** 36 px single-line rows; the head row in `sm` `text.secondary`, sortable heads with a chevron. The
 first column is the row's name in `text.primary` 500. Numbers are tabular and right-aligned: the one a list is
@@ -127,7 +130,7 @@ bottom edge is the 2 px progress rail; under it four KPI tiles (Epoch, mAP50-95,
 2 × 2 block on the left third and the validation chart on the right two thirds, the two flush and divided by
 hairlines (one row of four tiles over the chart below 1280 px); a 36 px foot with the machine's meters (GPU
 load, CPU, memory) where the server reports them. Under it Recent runs (two thirds: Run, Architecture · dataset
-where it fits, Status, Progress, Best mAP50-95, Created) beside Best models (one third: Dataset, Best model,
+where it fits, Status, Progress, Best mAP50-95, Created) beside Best models (one third, at least 380 px: Dataset, Best model,
 mAP50-95, one row per evaluation dataset), both single-line rows, then Datasets as the cards below. A panel's
 link to its full list is quiet text that names where it goes ("All runs →", "Open run →"), not a button.
 *Header rail, machine foot and the Best models table from Desktop; the side-by-side body, the lower grid and the
