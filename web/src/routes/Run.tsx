@@ -202,12 +202,13 @@ export default function Run() {
     return warningsLog.sync(live.logsLog);
   });
 
-  // Below 1024 px one section shows at a time (phones add Precision / Recall and Learning rate to them). A queued run has nothing to sample yet, so it opens on its Config (the
-  // dependency and start estimate are in the banner above); once picked, the choice holds.
+  // Phones show one section at a time, Precision / Recall and Learning rate among them (design/UNIFIED.md §4 Run); a
+  // tablet stacks them. A run that never trained opens on its log; once picked, the choice holds.
   const picked = signal<Section | null>(null);
   const models = modelsResource();
-  /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
+  /** Below 1024 px the parts stack in one column: Config then takes the panel's width. */
   const stacked = new MediaQuery(media.upToLaptop, false);
+  /** Phones: the parts are one section at a time behind tabs, and the parts' frame is their tab panel. */
   const phone = new MediaQuery(media.phone, false);
   /** Phones: Precision / Recall and Learning rate are sections of the picker, not a row of charts. */
   const phoneCharts = computed(() => phone.current && !neverTrained.get() && historyError.get() === undefined);
@@ -543,7 +544,7 @@ export default function Run() {
               // show the config's essentials, the rest folded (the work before the reference).
               <div class="waiting">
                 <div class="w-main">
-                  <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={datasetName.get()} weights={lineage.get()} essential={phone.current} cli={runCli.get()} />
+                  <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={datasetName.get()} weights={lineage.get()} essential={phone.current} cli={runCli.get()} runId={R().id} />
                 </div>
                 <div class="w-side">
                   {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} /> : null}
@@ -570,8 +571,9 @@ export default function Run() {
 
                 {/* Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right,
                     the two columns ending together. */}
-                {/* Below 1024 px one of these shows at a time, chosen here; wider screens show them all beside a rail.
-                    They switch content, so they are underline tabs (DESIGN_DIRECTION §2.22), not a segmented control. */}
+                {/* Phones show one of these at a time, chosen here; a tablet stacks them, wider screens show them beside
+                    a rail. They switch content, so they are underline tabs (DESIGN_DIRECTION §2.22), not a segmented
+                    control. */}
                 {/* A deliberate scroller (`data-scrolls`): a cloud run's seven sections do not fit a 320 px phone. */}
                 <div class="phone-pick" data-scrolls>
                   <Tabs
@@ -605,8 +607,8 @@ export default function Run() {
                   class:never={neverTrained.get()}
                   data-show={section.get()}
                   id="run-sec-panel"
-                  role={stacked.current ? 'tabpanel' : undefined}
-                  aria-labelledby={stacked.current ? `run-sec-${section.get()}` : undefined}
+                  role={phone.current ? 'tabpanel' : undefined}
+                  aria-labelledby={phone.current ? `run-sec-${section.get()}` : undefined}
                 >
                   <div class="main-col">
                     {phoneCharts.get() ? (
@@ -648,7 +650,7 @@ export default function Run() {
                         <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} />
                       </div>
                     ) : null}
-                    {/* One column in the rail (laptops up) and on phones; on a tablet the section is the panel's full
+                    {/* One column in the rail (laptops up) and on phones; on a tablet it is stacked at the panel's full
                         width, so it takes the two columns it has on a queued run's page (a panel at 768–1279 px uses
                         its width). */}
                     <div class="part" data-part="config">
@@ -837,14 +839,39 @@ css`
       grid-row: 1 / 3;
     }
   }
+  /* Tablets: rows 4 and 5 stack (design/UNIFIED.md §4 Run): Validation samples, Per class, Logs, a cloud run's Cloud,
+     then Config, each at the full width. */
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .detail {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .main-col,
+    .rail {
+      display: contents;
+    }
+    [data-part='samples'] {
+      order: 1;
+    }
+    [data-part='classes'] {
+      order: 2;
+    }
+    [data-part='logs'] {
+      order: 3;
+    }
+    [data-part='cloud'] {
+      order: 4;
+    }
+    [data-part='config'] {
+      order: 5;
+    }
+  }
   .phone-pick {
     display: none;
   }
-  @media (max-width: 1023px) {
-    /* Tablets and phones: the rail no longer fits beside the samples, so one section at a time, picked above. */
+  @media (max-width: 767px) {
+    /* Phones: one section at a time, picked above. */
     /* The section picker stays reachable while the section scrolls (just under the top bar). */
-    /* Flex, not block: the segmented group is inline, and a line box would add its descender under it (16 px to the
-       section at the tablet tier instead of 12). */
+    /* Flex, not block: the segmented group is inline, and a line box would add its descender under it. */
     .phone-pick {
       display: flex;
       position: sticky;
@@ -852,8 +879,8 @@ css`
       z-index: var(--z-sticky);
       margin-top: calc(-1 * var(--space-2));
       background: var(--bg-app);
-      /* 12 px to the section under the page's 20 px gap (16 on phones, below). */
-      margin-bottom: calc(var(--space-3) - var(--space-5));
+      /* 12 px to the section under the page's 16 px gap. */
+      margin-bottom: calc(var(--space-3) - var(--space-4));
     }
     /* One part is visible at a time, so the empty columns must not add gaps. */
     .detail,
@@ -896,9 +923,6 @@ css`
     }
   }
   @media (max-width: 767px) {
-    .phone-pick {
-      margin-bottom: calc(var(--space-3) - var(--space-4));
-    }
     .phone-pick :global([role='tab']) {
       flex: 1;
       justify-content: center;

@@ -223,6 +223,25 @@ describe('the four run charts', () => {
     c.unmount();
   });
 
+  it("show the throughput's whole history in the fourth chart, picked in its header", () => {
+    const steps = Array.from({ length: 300 }, (_, i) => ({ ...step(i + 1), imgs_per_s: i < 100 ? 20 : 40 }));
+    const { c, model } = show({ ...base, status: 'completed', epochs: 6, epoch: 6, step: 300 }, { steps, epochs: [epoch(1), epoch(2)] });
+    const chart = () => target.querySelector('#chart-lr')!;
+    const title = () => chart().querySelector('.title')!.firstChild?.textContent?.trim();
+    expect(title()).toBe('Learning rate');
+    [...chart().querySelectorAll<HTMLElement>('[role=radio], button')].find((b) => b.textContent?.trim() === 'Throughput')!.click();
+    flushSync();
+    expect(model.lrView.get()).toBe('ips');
+    expect(title()).toBe('Throughput');
+    expect([...chart().querySelectorAll('.legend li .name')].map((n) => n.textContent?.trim())).toEqual(['img/s']);
+    // Every step from the first, not the tile's last 120: the slow start is in it.
+    const pts = model.ipsSeries.get()[0]!.points;
+    expect(pts[0]!.y).toBe(20);
+    expect(pts.length).toBe(300);
+    expect(model.ips.get().n).toBe(120);
+    c.unmount();
+  });
+
   it('share one cursor: arrowing through one reads every one', async () => {
     // happy-dom lays nothing out: every plot is 600 px wide from its first read.
     const proto = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');

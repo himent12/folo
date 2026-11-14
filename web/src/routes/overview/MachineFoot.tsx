@@ -1,7 +1,8 @@
 /**
  * The live panel's foot (design/UNIFIED.md §4 Overview): the machine at a glance in one 36 px row of meters, the GPU
  * the run trains on (its load, where the driver reports it), the CPU and the memory, from `/api/system` (polled). A
- * reading the server no longer answers for is dropped, never shown as current; with none, there is no foot.
+ * reading the server no longer answers for is dropped, never shown as current; with none, there is no foot. A cloud run
+ * trains on a rented machine whose readings this server does not have, so it has no foot (its Cloud section says where).
  */
 import { computed, css } from 'fw';
 import { hub } from '$lib/api/index';
@@ -15,12 +16,12 @@ import { runGpu } from './device';
 export default function MachineFoot(props: { run: Run }) {
   const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
   /** Live readings only: once the server stops answering the foot goes, rather than show a stale load. */
-  const info = computed(() => (sys.stale === undefined ? sys.data : undefined));
-  // The run's own GPU (./device), or the first one when it cannot be told; none for a CPU run.
+  const info = computed(() => (sys.stale === undefined && !props.run.cloud ? sys.data : undefined));
+  // The run's own GPU (./device) only: none for a CPU run (asked for or resolved from auto) or when it cannot be told,
+  // rather than another adapter's load beside this run.
   const gpu = computed(() => {
     const s = info.get();
-    if (!s || props.run.config.device === 'cpu') return null;
-    return runGpu(props.run, s.gpus) ?? s.gpus[0] ?? null;
+    return s ? runGpu(props.run, s.gpus) : null;
   });
   const mem = computed(() => {
     const m = info.get()?.memory;

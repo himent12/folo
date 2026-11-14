@@ -220,6 +220,17 @@ export class RunModel {
     for (let i = 0; i < all.length; i += k) points.push(all[i]!);
     return [{ id: 'lr', label: 'lr', color: 'var(--text-secondary)', points }];
   });
+  /** The fourth chart's view: the learning rate, or the throughput over the whole run (the tile keeps the last steps). */
+  readonly lrView = signal<'lr' | 'ips'>('lr');
+  /** Throughput at every k-th step, smoothed as the tile's sparkline is: the run's whole history, read by the cursor. */
+  readonly ipsSeries = computed((): Series[] => {
+    this.stepsRev();
+    const all = this.stepData.smoothed('ips', 0.9).pts;
+    const k = Math.max(1, Math.floor(this.stepData.steps.length / 600));
+    const points: Pt[] = [];
+    for (let i = 0; i < all.length; i += k) points.push(all[i]!);
+    return [{ id: 'ips', label: 'img/s', color: 'var(--text-secondary)', points }];
+  });
   /** The throughput of the last steps (the tile's sparkline, smoothed as the old chart drew it) and their average. */
   readonly ips = computed(() => {
     this.stepsRev();
@@ -278,6 +289,16 @@ export class RunModel {
       () => {
         const e = extentOf(this.lrSeries.get());
         return e ? niceDomain(e[0], e[1]) : null;
+      },
+    );
+  }
+  /** Throughput from 0, so a slowdown reads at its true size. */
+  ipsFit(height: () => number) {
+    return held(
+      () => `ips|${height()}|${this.epochKey()}`,
+      () => {
+        const e = extentOf(this.ipsSeries.get());
+        return e ? niceDomain(0, e[1]) : null;
       },
     );
   }

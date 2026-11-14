@@ -1,15 +1,17 @@
 /**
  * One of a run's four charts (design/UNIFIED.md §3, §4 Run): Validation mAP, Training loss, Precision / Recall and
- * Learning rate, each a panel whose header holds the title, the qualifier (what x is, what the values are) and the
- * chart's controls, then the legend as the readout and the plot in its inset well. They share one x axis and one
+ * Learning rate (or, picked in its header, the throughput over the whole run), each a panel whose header holds the
+ * title, the qualifier (what x is, what the values are) and the chart's controls, then the legend as the readout and
+ * the plot in its inset well. They share one x axis and one
  * cursor (./runModel): hovering or arrowing through one reads every one, and "So far / All N", in the first chart's
  * header while the run trains, fits all of them.
  */
-import { computed, css, For } from 'fw';
+import { computed, css, For, MediaQuery } from 'fw';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';
 import LineChart from '$lib/charts/LineChart';
 import LossOptions from '$lib/charts/LossOptions';
 import { UNIT_ZOOM_NOTE, unitZoomed } from '$lib/charts/domain';
+import { media } from '$lib/design/tokens';
 import { scoresTitle, type EvalSource } from '$lib/evaluated';
 import { conf, metric, num, pow10 } from '$lib/format';
 import InfoButton from '$lib/ui/InfoButton';
@@ -39,19 +41,26 @@ export default function RunChart(props: RunChartProps) {
   const kind = props.kind;
   const height = () => props.height;
   const unit = kind === 'map' || kind === 'pr';
-  const series = kind === 'map' ? m.mapSeries : kind === 'pr' ? m.prSeries : kind === 'loss' ? m.lossSeries : m.lrSeries;
-  const fit = kind === 'loss' ? m.lossFit(height) : kind === 'lr' ? m.lrFit(height) : m.unitFit(() => series.get(), height);
+  /** The fourth chart showing the throughput instead of the learning rate. */
+  const ips = () => kind === 'lr' && m.lrView.get() === 'ips';
+  const series = kind === 'map' ? m.mapSeries : kind === 'pr' ? m.prSeries : kind === 'loss' ? m.lossSeries : computed(() => (ips() ? m.ipsSeries : m.lrSeries).get());
+  const lrFits = kind === 'lr' ? { lr: m.lrFit(height), ips: m.ipsFit(height) } : null;
+  const fit = kind === 'loss' ? m.lossFit(height) : lrFits ? computed(() => (ips() ? lrFits.ips : lrFits.lr).get()) : m.unitFit(() => series.get(), height);
   const zoomed = computed(() => unit && unitZoomed(fit.get()));
   const live = computed(() => m.live.get() && m.run().status !== 'queued');
+  /** Phones: the qualifiers in fewer words, so the header's line holds them whole. */
+  const phone = new MediaQuery(media.phone, false);
 
-  const title = computed(() => (kind === 'map' ? `${scoresTitle(props.evalOn ?? null)} mAP` : kind === 'loss' ? 'Training loss' : kind === 'pr' ? 'Precision / Recall' : 'Learning rate'));
+  const title = computed(() => (kind === 'map' ? `${scoresTitle(props.evalOn ?? null)} mAP` : kind === 'loss' ? 'Training loss' : kind === 'pr' ? 'Precision / Recall' : ips() ? 'Throughput' : 'Learning rate'));
   /** The header's qualifier: what x is and what the values are; the loss's last raw step beside its smoothed total. */
   const qualifier = computed(() => {
     if (kind === 'map') return 'by epoch';
     if (kind === 'pr') {
       const pc = m.prConf.get();
+      if (phone.current) return pc != null ? `best-F1 conf ${conf(pc)}` : 'at best-F1 conf';
       return pc != null ? `by epoch · at best-F1 conf (latest ${conf(pc)})` : "by epoch · at each epoch's best-F1 conf";
     }
+    if (ips()) return 'images/s · smoothed';
     if (kind === 'lr') return m.lrExp.get() ? `${m.schedule.get()} · × ${pow10(m.lrExp.get())}` : m.schedule.get();
     const raw = m.lastStep.get()?.loss.total;
     const sl = m.smoothedLast.get();
@@ -111,7 +120,20 @@ export default function RunChart(props: RunChartProps) {
                   <LossOptions bind:smoothing={m.smoothing} bind:scale={m.scale} />
                 </>
               )
-            : undefined
+            : kind === 'lr'
+              ? () => (
+                  // The throughput's whole history: the tile's sparkline is its last 120 steps only.
+                  <Segmented
+                    size="sm"
+                    label="Chart"
+                    bind:value={m.lrView}
+                    options={[
+                      { value: 'lr', label: 'LR' },
+                      { value: 'ips', label: 'Throughput' },
+                    ]}
+                  />
+                )
+              : undefined
       }
     >
       {props.loading ? (
@@ -132,8 +154,8 @@ export default function RunChart(props: RunChartProps) {
             yTickValues={fit.get() && !fit.get()!.log ? fit.get()!.ticks : undefined}
             yDecimals={fit.get() && !fit.get()!.log ? fit.get()!.decimals : undefined}
             yLog={!!fit.get()?.log}
-            yFormat={kind === 'lr' ? (v) => String(+(v / lrScale()).toFixed(2)) : undefined}
-            valueFormat={kind === 'lr' ? (v) => (v / lrScale()).toFixed(2) : (v) => metric(v)}
+            yFormat={ips() ? (v) => num(v, 0) : kind === 'lr' ? (v) => String(+(v / lrScale()).toFixed(2)) : undefined}
+            valueFormat={ips() ? (v) => num(v, 0) : kind === 'lr' ? (v) => (v / lrScale()).toFixed(2) : (v) => metric(v)}
             xTitle={epochTitle}
             curve={unit ? 'monotone' : 'linear'}
             markers={kind === 'map' ? m.best.get() : undefined}

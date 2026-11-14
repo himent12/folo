@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 // A run page's layout (design/UNIFIED.md §4 Run): no completed banner (Open model is the header's primary, Try in
 // Playground beside Compare), the status badge on the title's line, the run's id in Config's header, the four charts in
-// two rows, and on phones Precision / Recall and Learning rate as sections of the picker.
+// two rows, on a tablet the sections stacked, and on phones Precision / Recall and Learning rate as sections of the
+// picker; a queued run's Config has the id too.
 import { flush as flushSync } from 'fw';
 import { render, type Rendered } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,9 +26,12 @@ afterEach(() => {
   window.matchMedia = real;
 });
 
-/** Opens a run's page at a width (`phone`: under 768 px), the run changed by `change`. */
-async function open(pick: (rs: RunT[]) => RunT, change: Partial<RunT> = {}, phone = false, nothing = false) {
-  window.matchMedia = ((q: string) => ({ matches: phone && q.includes('max-width: 767px') ? true : phone && q.includes('max-width: 1023px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
+type Tier = 'wide' | 'tablet' | 'phone';
+
+/** Opens a run's page at a tier (a tablet: 768–1023 px; a phone: under 768), the run changed by `change`. */
+async function open(pick: (rs: RunT[]) => RunT, { change = {}, tier = 'wide', nothing = false, ready = '#chart-map .legend' }: { change?: Partial<RunT>; tier?: Tier; nothing?: boolean; ready?: string } = {}) {
+  const narrow = (q: string) => (q.includes('max-width: 767px') ? tier === 'phone' : q.includes('max-width: 1023px') ? tier !== 'wide' : false);
+  window.matchMedia = ((q: string) => ({ matches: narrow(q), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
   const api = new MockApi('normal', 0);
   const run = { ...pick(await api.runs()), ...change };
   const get = api.run.bind(api);
@@ -48,7 +52,7 @@ async function open(pick: (rs: RunT[]) => RunT, change: Partial<RunT> = {}, phon
   await vi.waitFor(
     () => {
       flushSync();
-      if (!target.querySelector('#chart-map .legend')) throw new Error('not loaded');
+      if (!target.querySelector(ready)) throw new Error('not loaded');
     },
     { timeout: 4000, interval: 10 },
   );
@@ -75,7 +79,7 @@ describe('a completed run', () => {
   });
 
   it('leaves Try in Playground out when the model detected nothing', async () => {
-    await open((rs) => rs.find((r) => r.status === 'completed' && r.model_id)!, { best: { epoch: 1, map50_95: 0 } }, false, true);
+    await open((rs) => rs.find((r) => r.status === 'completed' && r.model_id)!, { change: { best: { epoch: 1, map50_95: 0 } }, nothing: true });
     expect(headerButtons()).toContain('Open model');
     expect(headerButtons()).not.toContain('Try in Playground');
     expect(target.textContent).not.toContain('Try in Playground');
@@ -84,7 +88,7 @@ describe('a completed run', () => {
 
 describe('a run on a phone', () => {
   it('puts Precision / Recall and Learning rate in the section picker, under the KPI tiles, mAP and loss', async () => {
-    await open((rs) => rs.find((r) => r.status === 'completed')!, {}, true);
+    await open((rs) => rs.find((r) => r.status === 'completed')!, { tier: 'phone' });
     const tabs = [...target.querySelectorAll('.phone-pick [role=tab]')].map((t) => t.textContent?.trim());
     expect(tabs.slice(0, 4)).toEqual(['P / R', 'LR', 'Samples', 'Classes']);
     expect(tabs).toContain('Logs');
@@ -98,5 +102,25 @@ describe('a run on a phone', () => {
     [...target.querySelectorAll<HTMLElement>('.phone-pick [role=tab]')].find((t) => t.textContent?.trim() === 'P / R')!.click();
     flushSync();
     expect(target.querySelector('.detail')?.getAttribute('data-show')).toBe('pr');
+  });
+});
+
+describe('a run on a tablet', () => {
+  it('stacks its sections rather than show one at a time (design/UNIFIED.md §4 Run: rows 2 to 5 stack below 1024 px)', async () => {
+    await open((rs) => rs.find((r) => r.status === 'completed')!, { tier: 'tablet' });
+    // The picker is phones' only: here the detail is no tab panel, and every section is in it.
+    const detail = target.querySelector('.detail')!;
+    expect(detail.getAttribute('role')).toBeNull();
+    expect(detail.getAttribute('aria-labelledby')).toBeNull();
+    expect([...detail.querySelectorAll('[data-part]')].map((p) => p.getAttribute('data-part'))).toEqual(['samples', 'logs', 'classes', 'config']);
+    // All four charts stay in the metrics (stacked by its CSS), none in the sections.
+    expect([...target.querySelectorAll('.metrics .run-chart')].map((p) => p.id)).toEqual(['chart-map', 'chart-loss', 'chart-pr', 'chart-lr']);
+  });
+});
+
+describe('a queued run', () => {
+  it("has the run's id in its Config's header", async () => {
+    const run = await open((rs) => rs.find((r) => r.status === 'queued' && !r.cloud)!, { ready: '.waiting #config' });
+    expect(target.querySelector('.waiting #config .run-id')?.textContent).toBe(run.id);
   });
 });

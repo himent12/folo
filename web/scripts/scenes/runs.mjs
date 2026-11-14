@@ -97,7 +97,7 @@ export const runScenes = [
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
-      if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
+      if (vp !== 'mobile') await until(page, '#config dd');
       else await page.getByRole('tab', { name: 'Config' }).click();
       await page.locator('#config').scrollIntoViewIfNeeded();
       await page.mouse.move(0, 0);
@@ -105,14 +105,14 @@ export const runScenes = [
   },
   {
     // Server PR #140 (`run_cli`): the run's `folo train` command (GET /api/runs/{id}/cli) closes its Config, under
-    // "In PowerShell:" on one copyable line. Phones and tablets: the Config section. The whole page: the harness shoots
+    // "In PowerShell:" on one copyable line. Phones: the Config section. The whole page: the harness shoots
     // from the top, and Config sits below the charts.
     name: 'run-cli',
     path: '/runs/run_c19a',
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
-      if (vp !== 'desktop' && vp !== 'laptop') await page.getByRole('tab', { name: 'Config' }).click();
+      if (vp === 'mobile') await page.getByRole('tab', { name: 'Config' }).click();
       await until(page, '#config .cli pre.line');
       await page.mouse.move(0, 0);
     },
@@ -125,7 +125,7 @@ export const runScenes = [
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
-      if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
+      if (vp !== 'mobile') await until(page, '#config dd');
       else await page.getByRole('tab', { name: 'Config' }).click();
       // The rail's Config folds Augmentation, where Close mosaic is.
       const fold = page.locator('#config details > summary');
@@ -169,11 +169,28 @@ export const runScenes = [
     name: 'run-phone-pr',
     path: '/runs/run_c19a',
     fullPage: false,
+    keepScroll: true,
     viewports: ['mobile'],
     setup: async (page) => {
       await page.getByRole('tab', { name: 'P / R', exact: true }).click();
       await page.locator('#chart-pr .legend').waitFor();
       await page.locator('.phone-pick').scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The fourth chart's Throughput view: the throughput over the whole run (the tile's sparkline is the last 120 steps).
+    name: 'chart-throughput',
+    path: '/runs/run_7d1e',
+    advance: 4000,
+    fullPage: false,
+    keepScroll: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') await page.getByRole('tab', { name: 'LR', exact: true }).click();
+      await page.locator('#chart-lr').getByText('Throughput', { exact: true }).click();
+      await page.locator('#chart-lr .legend').waitFor();
+      await page.locator(vp === 'mobile' ? '.phone-pick' : '#chart-lr').scrollIntoViewIfNeeded();
       await page.mouse.move(0, 0);
     },
   },
@@ -367,7 +384,7 @@ export const runScenes = [
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
-      if (vp === 'desktop' || vp === 'laptop') await until(page, '#cloud dd');
+      if (vp !== 'mobile' && vp !== 'small') await until(page, '#cloud dd');
       else {
         await until(page, '[role="tab"][data-value="cloud"], [role="tab"]:has-text("Cloud")');
         await page.getByRole('tab', { name: 'Cloud', exact: true }).click();
@@ -382,7 +399,7 @@ export const runScenes = [
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile', 'small'],
     setup: async (page, { vp }) => {
-      if (vp === 'desktop' || vp === 'laptop') await until(page, '#cloud dd');
+      if (vp !== 'mobile' && vp !== 'small') await until(page, '#cloud dd');
       else {
         await until(page, '[role="tab"]:has-text("Cloud")');
         await page.getByRole('tab', { name: 'Cloud', exact: true }).click();
