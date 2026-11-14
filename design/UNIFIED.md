@@ -107,10 +107,10 @@ the axis to the epochs trained, for all of the page's charts. *Planned axis from
 was So far); the switch from Studio → Desktop.*
 
 **Frame.** The panel header holds the title and, at the right, a qualifier ("per epoch", "log scale"). The legend
-row under it is the readout: the latest values at rest, the cursor's while inspecting. Events ("close mosaic") are
-labels in one band over the plot; where a run failed is its line's cross. The plot is an inset well (`bg.inset`).
-Loss lines are named at their ends where there is room (Studio's direct labels). *Both; wells from Desktop →
-Studio.*
+row under it is the readout: the latest values at rest, the cursor's while inspecting. Events ("close mosaic",
+"failed during epoch 3") are labels in one band over the plot: the cross at a failed line's end says that it
+failed, the label says in which epoch. The plot is an inset well (`bg.inset`). Loss lines are named at their ends
+where there is room (Studio's direct labels). *Both.*
 
 **Precision-recall.** Every class a thin context line, the mean in ink, a hovered or pinned class in its class
 hue. One rule at 3 classes and at 80. *From Studio → Desktop* (it drew every class in its hue).
