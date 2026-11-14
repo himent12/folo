@@ -7,7 +7,7 @@ use super::format::source_line;
 use crate::api::time;
 use crate::app::{FoloApp, act};
 use crate::bench::BenchTab;
-use crate::controls::Btn;
+use crate::controls::{Btn, Tab};
 use crate::screens::{detail_header, loading_rows, page_header};
 use crate::theme::{theme, ty};
 use crate::ui::*;
@@ -50,7 +50,9 @@ impl FoloApp {
             .gap(px(10.))
             .min_w_0()
             .child(text(ty::XL, t.text_primary).ellipsis().child(b.name.clone()))
-            .when(b.active, |d| d.child(badge(&t, "Running", Tone::Accent)));
+            .when(b.active, |d| {
+                d.child(status_badge_of(&t, StatusKind::Running, "Running", format!("bench-hdr-{}", b.id)))
+            });
         let subtitle = format!(
             "{} · {} images · {} boxes · {} · created {created}",
             source_line(&b),
@@ -126,21 +128,19 @@ impl FoloApp {
         let n_entries = entries.ready().map_or(b.entries as usize, |l| l.len());
         let n_loops = loops.ready().map(|l| l.len());
         let tab = self.bench.tab;
-        let tab_names = [
-            format!("Leaderboard · {n_entries}"),
-            format!("Plan · {}", b.plan.conditions.len()),
-            n_loops.map_or_else(|| "Loops".to_string(), |n| format!("Loops · {n}")),
-        ];
-        let tab_refs: Vec<&str> = tab_names.iter().map(String::as_str).collect();
-        let tabs = self.segmented(
-            "bench-tabs",
-            &tab_refs,
+        // The page's sections are underline tabs with their counts (a segmented control is a filter).
+        let tabs = self.tabs(
+            "bench-tab",
+            vec![
+                Tab::new("Leaderboard", Some(n_entries.to_string())),
+                Tab::new("Plan", Some(b.plan.conditions.len().to_string())),
+                Tab::new("Loops", n_loops.map(|n| n.to_string())),
+            ],
             tab as usize,
             window,
             cx,
-            std::rc::Rc::new(|this, i, _, cx| {
+            std::rc::Rc::new(|this, i, _, _| {
                 this.bench.tab = [BenchTab::Leaderboard, BenchTab::Plan, BenchTab::Loops][i.min(2)];
-                cx.notify();
             }),
         );
         let description = (!b.description.is_empty())
@@ -175,5 +175,22 @@ mod tests {
         );
         assert_eq!(Route::parse("bench-entry:bn_1"), None);
         assert_eq!(Route::BenchEntry("b".into(), "e".into()).section(), crate::app::Section::Benchmarks);
+    }
+
+    #[test]
+    fn a_benchmark_opens_on_three_underline_tabs() {
+        use crate::app::tests::{drive, open};
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Bench("bn_3c90".into()), w, cx));
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+        drive(&mut app, window, |this, _, _| {
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            // Leaderboard, Plan and Loops are tabs (each a Tab stop), no longer one segmented control.
+            for k in ["bench-tab-0", "bench-tab-1", "bench-tab-2"] {
+                assert!(keys.iter().any(|x| x == k), "{k}: {keys:?}");
+            }
+        });
     }
 }

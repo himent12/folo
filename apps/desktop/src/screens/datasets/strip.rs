@@ -1,4 +1,5 @@
-//! A dataset's stat strip: counts, splits and label health.
+//! A dataset's stat strip (the Statistics tab's KPI strip): counts, splits and label health. Its
+//! Empty images tile shows them in the grid and its Broken labels tile copies the check command.
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
@@ -20,9 +21,9 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        // Short windows: XL values and 8 px padding (see `dataset`).
-        let short = window.viewport_size().height < px(700.);
-        let (step, pad) = if short { (ty::XL, 8.) } else { (ty::X2XL, 12.) };
+        // In the Statistics tab, under the health line (it no longer sits above the image grid, so
+        // it keeps its full size in short windows too).
+        let (step, pad) = (ty::X2XL, 12.);
         let stat = |t: &Theme, label: &str, value: String, unit: &str, detail: Option<Div>| {
             stat_at(t, label, value, unit, detail, step)
         };
@@ -170,7 +171,7 @@ impl FoloApp {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(if short { 4. } else { 6. }))
+                            .gap(px(6.))
                             .min_w_0()
                             .child(
                                 div()

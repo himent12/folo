@@ -186,3 +186,29 @@ fn closing_generate_while_it_works_says_it_goes_on() {
     });
     assert_eq!(toasts(&mut app), before + 1);
 }
+
+#[test]
+fn a_dataset_page_has_its_tabs_and_one_toolbar_and_statistics_holds_the_strip() {
+    let (mut app, window) = super::tests::open();
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Dataset("ds_3b91".into()), w, cx));
+    let images = drawn_keys(&mut app, window);
+    // Images / Statistics as underline tabs; the split, the class picker (a select, not a chip per
+    // class), Boxes, S / M / L (not a slider) and Fit / Fill on one toolbar.
+    for k in ["ds-tab-0", "ds-tab-1", "ds-split", "ds-class", "ds-boxes", "ds-size", "ds-fit"] {
+        assert!(images.iter().any(|x| x == k), "{k}: {images:?}");
+    }
+    assert!(!images.iter().any(|k| k == "ds-tile" || k.starts_with("ds-class-")), "{images:?}");
+    // The empty-images and broken-labels tiles moved into Statistics with the rest of the strip.
+    assert!(!images.iter().any(|k| k == "ds-empty-tile"), "{images:?}");
+    drive(&mut app, window, |this, _, _| this.ds_tab = super::DsTab::Statistics);
+    let stats = drawn_keys(&mut app, window);
+    assert!(stats.iter().any(|k| k == "ds-empty-tile"), "Show them stays: {stats:?}");
+}
+
+/// The focus keys a page draws, once what it asked for has come.
+fn drawn_keys(app: &mut folo_ui::HeadlessApp, window: folo_ui::WindowHandle<super::FoloApp>) -> Vec<String> {
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(app, window, |this, _, _| this.focus.borrow().keys().map(|k| k.to_string()).collect())
+}

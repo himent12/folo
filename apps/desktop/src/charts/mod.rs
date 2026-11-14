@@ -21,7 +21,7 @@ pub use ease::{Points, ease_key};
 pub use histogram::histogram;
 pub use line::{DASH_DOT, LONG_DASH, line_chart};
 pub use smooth::{ema, smoothed};
-pub use sparkline::sparkline;
+pub use sparkline::{sparkline, sparkline_in};
 pub use spec::{LineChart, Marker, Series};
 pub use text::{mono_width, text_width};
 

@@ -1,4 +1,5 @@
-//! The image browser: the virtualised grid of a dataset's images.
+//! The image browser: one toolbar (the split, the class, the count; Boxes, the size, Fit / Fill)
+//! and straight under it the virtualised grid of a dataset's images.
 
 use std::rc::Rc;
 
@@ -14,6 +15,8 @@ use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
 const GAP: f32 = 8.;
+/// The thumbnail widths behind S / M / L.
+const TILE_SIZES: [f32; 3] = [120., 168., 240.];
 
 impl FoloApp {
     pub(super) fn image_browser(
@@ -27,7 +30,14 @@ impl FoloApp {
         let total = self.store.images.get(&id).and_then(|l| l.ready()).map_or(0, |v| v.len());
         let count = self.filtered_indices(&id).len();
         let splits = [None, Some(Split::Train), Some(Split::Val), Some(Split::Test)];
-        let labels: Vec<String> = ["All", "Train", "Val", "Test"].iter().map(|s| s.to_string()).collect();
+        let split_n = [ds.splits.total(), ds.splits.train, ds.splits.val, ds.splits.test];
+        // Each split with its images; a dataset without a test split offers none. A no-break space
+        // marks the count for the segmented control's quieter style.
+        let labels: Vec<String> = ["All", "Train", "Val", "Test"]
+            .iter()
+            .zip(split_n)
+            .map(|(s, n)| format!("{s}\u{a0}{}", int(n)))
+            .collect();
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let usable: Vec<&str> =
             if ds.splits.test == 0 { label_refs[..3].to_vec() } else { label_refs.clone() };
@@ -48,40 +58,45 @@ impl FoloApp {
             None => ds.stats.as_ref().map(|s| s.class_counts.clone()).unwrap_or_default(),
             Some(split) => self.split_class_counts(&ds.id, split, ds.classes.len()),
         };
-        let chips: Vec<AnyElement> = ds
-            .classes
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                let on = self.ds_class == Some(i as u32);
-                // The count is boxes; the chip filters images (the tooltip says both).
-                let n = counts.get(i).copied();
-                let tip_text = if on {
-                    format!("{} {name} boxes · showing images with one; click to clear", int(n.unwrap_or(0)))
-                } else {
-                    format!("{} {name} boxes · click to show only images with one", int(n.unwrap_or(0)))
-                };
-                self.chip(
-                    &format!("ds-class-{i}"),
-                    name.clone(),
-                    on,
-                    Some(i as u32),
-                    counts.get(i).copied(),
-                    window,
-                    cx,
-                    act(move |this, _, cx| {
-                        this.ds_class = if this.ds_class == Some(i as u32) { None } else { Some(i as u32) };
-                        if this.ds_class.is_some() {
-                            this.ds_empty_only = false;
-                        }
-                        this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
-                        cx.notify();
-                    }),
-                )
-                .tooltip(crate::controls::tip(tip_text, None))
-                .into_any_element()
-            })
-            .collect();
+        // The class filter: a select that holds 80 classes as well as 3, each with its swatch and
+        // its boxes (it filters images with one).
+        let mut options: Vec<(SharedString, Option<SharedString>)> =
+            vec![("All classes".into(), Some(counted(counts.iter().sum(), "box", "boxes").into()))];
+        options.extend(
+            ds.classes.iter().enumerate().map(|(i, name)| {
+                (name.clone().into(), Some(int(counts.get(i).copied().unwrap_or(0)).into()))
+            }),
+        );
+        let classes: Vec<Option<u32>> =
+            std::iter::once(None).chain((0..ds.classes.len() as u32).map(Some)).collect();
+        let picked = self.ds_class.filter(|&c| (c as usize) < ds.classes.len());
+        let current: SharedString =
+            picked.map_or("All classes".into(), |c| ds.classes[c as usize].clone().into());
+        // The 960 px window: a narrower picker and tighter gaps, so the count keeps its room.
+        let narrow = window.viewport_size().width < px(1120.);
+        let picker = div()
+            .id("ds-class-pick")
+            .w(px(if narrow { 160. } else { 184. }))
+            .flex_none()
+            .tooltip(crate::controls::tip("Show only images with a box of this class", None))
+            .child(self.class_select(
+                "ds-class",
+                current,
+                options,
+                &classes,
+                picked.map_or(0, |c| c as usize + 1),
+                window,
+                cx,
+                Rc::new(|this, i, _, cx| {
+                    this.ds_class = i.checked_sub(1).map(|c| c as u32);
+                    // Empty images have no class: the two filters can't both apply.
+                    if this.ds_class.is_some() {
+                        this.ds_empty_only = false;
+                    }
+                    this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+                    cx.notify();
+                }),
+            ));
         let boxes_on = self.ds_boxes;
         let boxes_switch = self.switch(
             "ds-boxes",
@@ -93,10 +108,21 @@ impl FoloApp {
                 cx.notify();
             }),
         );
-        let size_slider = self.slider("ds-tile", self.ds_tile, 112., 272., 8., window, cx);
-        // What the slider sets and its value, on hover and on keyboard focus.
-        let tile_tip = format!("Thumbnail size · {:.0} px", self.ds_tile);
-        let tile_ring = self.ring(&self.fh("ds-tile", cx), window);
+        // Thumbnail size, not image zoom: three steps.
+        let size_at = TILE_SIZES.iter().position(|&w| w >= self.ds_tile).unwrap_or(1);
+        let size_seg = self
+            .segmented(
+                "ds-size",
+                &["S", "M", "L"],
+                size_at,
+                window,
+                cx,
+                Rc::new(|this, i, _, cx| {
+                    this.ds_tile = TILE_SIZES[i.min(2)];
+                    cx.notify();
+                }),
+            )
+            .tooltip(crate::controls::tip("Thumbnail size", None));
         // Fit shows every pixel (boxes at the edge stay visible); Fill crops for a denser look.
         let fit_seg = self.segmented(
             "ds-fit",
@@ -128,19 +154,18 @@ impl FoloApp {
         } else if count == total {
             format!("{} {of}", int(total as u64))
         } else {
-            format!("{} of {} {of} match", int(count as u64), int(total as u64))
+            format!("{} of {} {of}", int(count as u64), int(total as u64))
         };
-        // The split filter joins the view controls on the tab line; the class chips get one row
-        // below it, with the result count at its end.
+        // One toolbar over the grid: what is shown (the split, the class, the count) on the left,
+        // how it is drawn (Boxes, the size, Fit / Fill) on the right.
         let toolbar = div()
-            .min_h(px(32.))
-            .flex_wrap()
+            .h(px(32.))
             .mb(px(12.))
             .flex()
             .items_center()
-            .gap(px(6.))
-            .child(text(ty::SM, t.text_tertiary).mr(px(2.)).child("Classes · box counts"))
-            .children(chips)
+            .gap(px(if narrow { 8. } else { 12. }))
+            .child(seg)
+            .child(picker)
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(
                     "ds-empty-chip",
@@ -156,46 +181,32 @@ impl FoloApp {
                     }),
                 ))
             })
+            // A count cut short says itself in full on hover.
+            .child(
+                div()
+                    .id("ds-count")
+                    .min_w_0()
+                    .tooltip(crate::controls::tip(count_label.clone(), None))
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .tnum()
+                            .whitespace_nowrap()
+                            .ellipsis()
+                            .child(count_label),
+                    ),
+            )
             .child(div().flex_1())
-            .child(text(ty::SM, t.text_tertiary).tnum().whitespace_nowrap().child(count_label));
-        let view_controls = div()
-            .flex()
-            .items_center()
-            .gap(px(16.))
-            .child(seg)
-            .child(div().w(px(1.)).h(px(20.)).bg(t.line_subtle))
-            .child(fit_seg)
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(8.))
                     .child(text(ty::SM, t.text_secondary).child("Boxes"))
                     .child(boxes_switch),
             )
-            // Thumbnail size, not image zoom: a small and a large tile at the ends.
-            .child(
-                div()
-                    .id("ds-tile-size")
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .w(px(140.))
-                    .flex_none()
-                    .relative()
-                    .tooltip(crate::controls::tip(tile_tip.clone(), Some("← →")))
-                    .when(tile_ring, |d| {
-                        d.child(crate::controls::focus_tip(&t, format!("{tile_tip} · ← → adjust"), 20.))
-                    })
-                    .child(div().w(px(14.)).flex().justify_center().child(icon(
-                        "icons/image.svg",
-                        9.,
-                        t.text_tertiary,
-                    )))
-                    .child(size_slider)
-                    .child(icon("icons/image.svg", 14., t.text_tertiary)),
-            );
-        self.ds_view_controls = Some(view_controls.into_any_element());
+            .child(size_seg)
+            .child(fit_seg);
         if loading || (more && count == 0) {
             return div()
                 .flex()

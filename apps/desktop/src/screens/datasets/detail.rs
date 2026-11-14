@@ -2,18 +2,19 @@
 
 use std::rc::Rc;
 
-use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    Window, div, px,
 };
 
+use super::health::{finding_count, health_checks};
+use crate::api::SplitsExt;
 use crate::api::{ImageInfo, Label, Split};
 use crate::app::{DsTab, FoloApp, act};
-use crate::controls::Btn;
+use crate::controls::{Btn, Tab};
 use crate::screens::{detail_header, loading_rows, page_header};
 use crate::store::Load;
-use crate::theme::{radius, theme, ty};
+use crate::theme::{theme, ty};
 use crate::ui::*;
 
 impl FoloApp {
@@ -158,18 +159,8 @@ impl FoloApp {
                 act(move |_, _, cx| cx.reveal_path(std::path::Path::new(&path))),
             )
             .into_any_element();
-        // Short windows (the 620 px minimum): the path joins the title line, gaps tighten and the
-        // stats strip compacts, so the first image row starts near 300 px.
+        // Short windows (the 620 px minimum): gaps tighten, so the first image row starts high.
         let short = window.viewport_size().height < px(700.);
-        // Cut short in a narrow window: the full path on hover, as the cut name above has.
-        let path_el = || {
-            div().id("ds-path").min_w_0().tooltip(crate::controls::tip(display_path(&ds.path), None)).child(
-                text(ty::SM, t.text_tertiary)
-                    .font_family(crate::theme::MONO)
-                    .ellipsis()
-                    .child(display_path(&ds.path)),
-            )
-        };
         let title = div()
             .flex()
             .items_center()
@@ -190,72 +181,76 @@ impl FoloApp {
                             .child(ds.name.clone()),
                     ),
             )
-            .child(div().flex_none().child(badge(&t, ds.format.label(), Tone::Neutral)))
-            .when(short, |d| d.child(div().flex_1().min_w_0().ml(px(4.)).child(path_el())));
-        let header = detail_header(
-            &t,
-            title,
-            if short { div().into_any_element() } else { path_el().into_any_element() },
-            vec![delete, reveal.into_any_element(), train.into_any_element()],
-        );
+            .child(div().flex_none().child(badge(&t, ds.format.label(), Tone::Neutral)));
+        // One meta line: where it is (cut short in a narrow window, the full path on hover), its
+        // splits, its classes and when it was added. Below 1280 px the splits leave it for the path:
+        // the toolbar's split filter counts them.
+        let now = self.store.api.now();
+        let mut facts: Vec<String> = if window.viewport_size().width < px(1280.) {
+            Vec::new()
+        } else {
+            [("train", ds.splits.train), ("val", ds.splits.val), ("test", ds.splits.test)]
+                .into_iter()
+                .filter(|(_, n)| *n > 0)
+                .map(|(s, n)| format!("{} {s}", int(n)))
+                .collect()
+        };
+        facts.push(counted(ds.classes.len() as u64, "class", "classes"));
+        if let Some(c) = crate::api::time::parse(&ds.created) {
+            facts.push(format!("added {}", crate::api::time::ago(c, now)));
+        }
+        let meta = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .min_w_0()
+            .child(
+                div()
+                    .id("ds-path")
+                    .min_w_0()
+                    .flex_shrink()
+                    .tooltip(crate::controls::tip(display_path(&ds.path), None))
+                    .child(
+                        text(ty::SM, t.text_secondary)
+                            .font_family(crate::theme::MONO)
+                            .max_w(px(if window.viewport_size().width < px(1280.) { 220. } else { 420. }))
+                            .ellipsis()
+                            .child(display_path(&ds.path)),
+                    ),
+            )
+            .child(
+                text(ty::SM, t.text_secondary)
+                    .tnum()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .child(format!("· {}", facts.join(" · "))),
+            );
+        let header = detail_header(&t, title, meta, vec![delete, reveal, train]);
 
         if ds.stats.as_ref().is_some_and(|s| s.broken_labels > 0) {
             self.ensure_issues(&ds.id, cx);
         }
-        let strip = self.dataset_strip_stats(&ds, window, cx);
-        // A view switch, so underline tabs: the segmented control below is the split filter.
-        let tab = |this: &Self,
-                   key: &str,
-                   label: &str,
-                   on: bool,
-                   which: DsTab,
-                   window: &Window,
-                   cx: &mut Context<Self>| {
-            let el = div()
-                .id(SharedString::from(key.to_string()))
-                .h(px(32.))
-                .flex()
-                .items_center()
-                .border_b_2()
-                .border_color(if on { t.text_primary } else { folo_ui::transparent_black() })
-                .cursor_pointer()
-                .child(
-                    div()
-                        .id(SharedString::from(format!("{key}-in")))
-                        .h(px(26.))
-                        .px(px(6.))
-                        .flex()
-                        .items_center()
-                        .rounded(px(radius::SM))
-                        .hover(|s| s.bg(t.bg_hover))
-                        .active(|s| s.bg(t.bg_active))
-                        .child(
-                            text(ty::BASE, if on { t.text_primary } else { t.text_secondary })
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(label.to_string()),
-                        ),
-                );
-            this.bind(
-                el,
-                key,
-                radius::SM,
-                window,
-                cx,
-                act(move |this, _, cx| {
-                    this.ds_tab = which;
-                    cx.notify();
-                }),
-            )
-        };
-        let on_images = self.ds_tab == DsTab::Images;
-        let tabs = div()
-            .flex()
-            .gap(px(12.))
-            .child(tab(self, "ds-tab-images", "Images", on_images, DsTab::Images, window, cx))
-            .child(tab(self, "ds-tab-stats", "Statistics", !on_images, DsTab::Statistics, window, cx));
+        // Each section with what it holds: the images, and how many findings the statistics have.
+        let issues = self.store.issues.get(&ds.id).and_then(|l| l.ready()).cloned();
+        let health = ds.stats.as_ref().map(|s| health_checks(&ds, s, issues.as_ref())).unwrap_or_default();
+        let findings = finding_count(&health);
+        let tabs = self.tabs(
+            "ds-tab",
+            vec![
+                Tab::new("Images", Some(int(ds.splits.total()))),
+                Tab::new(
+                    "Statistics",
+                    (findings > 0).then(|| format!("· {}", counted(findings as u64, "finding", "findings"))),
+                ),
+            ],
+            usize::from(self.ds_tab == DsTab::Statistics),
+            window,
+            cx,
+            Rc::new(|this, i, _, _| this.ds_tab = if i == 0 { DsTab::Images } else { DsTab::Statistics }),
+        );
         let content = match self.ds_tab {
             DsTab::Images => self.image_browser(&ds, window, cx),
-            DsTab::Statistics => self.dataset_stats(&ds, window, cx),
+            DsTab::Statistics => self.dataset_stats(&ds, &health, window, cx),
         };
         div()
             .size_full()
@@ -268,16 +263,7 @@ impl FoloApp {
             // ends above it, so a focused bottom row is never under it.
             .pb(px(if self.kb { 48. } else { 16. }))
             .child(header)
-            .child(strip)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.))
-                    .child(tabs)
-                    .children(self.ds_view_controls.take().filter(|_| self.ds_tab == DsTab::Images)),
-            )
+            .child(div().flex().child(tabs))
             .child(div().flex_1().min_h_0().flex().flex_col().child(content))
             .into_any_element()
     }

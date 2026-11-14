@@ -59,7 +59,8 @@ impl FoloApp {
             .into_any_element()
     }
 
-    /// Dataset card: a 2×2 mosaic of its first images, name and counts.
+    /// Dataset card: a 2×2 mosaic of its first images, name and counts, and its class balance along
+    /// the bottom edge.
     pub fn dataset_card(
         &mut self,
         d: &crate::api::Dataset,
@@ -90,8 +91,22 @@ impl FoloApp {
         let row2: Vec<AnyElement> = it.collect();
         let id = d.id.clone();
         let key = format!("ds-card-{}", d.id);
-        // The card in full: its name, size and every class, on hover and on keyboard focus.
-        let full = format!("{} · {} images · {}", d.name, int(d.splits.total()), d.classes.join(", "));
+        // Boxes per class, from the dataset's own record (the list has no stats).
+        let counts = self
+            .store
+            .dataset
+            .get(&d.id)
+            .and_then(|l| l.ready())
+            .and_then(|x| x.stats.as_ref())
+            .map(|s| s.class_counts.clone());
+        // The card in full: its name, size and every class with its boxes (the strip's breakdown), on
+        // hover and on keyboard focus.
+        let full = format!(
+            "{} · {} images · {}",
+            d.name,
+            int(d.splits.total()),
+            counts.as_deref().map_or_else(|| d.classes.join(", "), |c| balance_text(&d.classes, c))
+        );
         let focused = self.ring(&self.fh(key.clone(), cx), window);
         let card = div()
             .id(SharedString::from(key.clone()))
@@ -145,7 +160,8 @@ impl FoloApp {
                         ),
                     ))
                     .child(badge(&t, d.format.label(), Tone::Neutral)),
-            );
+            )
+            .child(class_strip(&t, counts.as_deref()));
         self.bind(
             card,
             &key,
@@ -182,5 +198,64 @@ impl FoloApp {
             act(move |this, w, cx| this.navigate(route.clone(), w, cx)),
         )
         .into_any_element()
+    }
+}
+
+/// The class-balance strip along a dataset card's bottom edge: one segment per class with boxes,
+/// as wide as its share, in the class's colour, 1 px of the card between segments (Studio's
+/// `ClassStrip`). An empty track until the stats are in, and for a dataset without boxes.
+fn class_strip(t: &crate::theme::Theme, counts: Option<&[u64]>) -> folo_ui::Div {
+    let strip = div().h(px(STRIP_H)).w_full().flex().gap(px(1.)).bg(t.bg_active);
+    match counts.filter(|c| c.iter().any(|&n| n > 0)) {
+        None => strip,
+        Some(c) => {
+            strip.bg(t.bg_panel).children(c.iter().enumerate().filter(|(_, n)| **n > 0).map(|(i, &n)| {
+                grow(div().h_full().flex_basis(px(0.)).min_w(px(1.)).bg(t.class(i as u32)), n)
+            }))
+        }
+    }
+}
+
+/// The strip's height: a hairline you can read at a glance, flush with the card's edge.
+const STRIP_H: f32 = 4.;
+
+/// A segment's share of the strip: flex-grow by its box count.
+fn grow(d: folo_ui::Div, n: u64) -> folo_ui::Div {
+    let mut d = d;
+    d.style().flex_grow = Some(n as f32);
+    d
+}
+
+/// The breakdown in words: classes largest first, "circle 5,523 · square 5,533", the first ten and
+/// the rest summed.
+pub(crate) fn balance_text(classes: &[String], counts: &[u64]) -> String {
+    let mut ranked: Vec<(usize, u64)> = counts.iter().copied().enumerate().filter(|(_, n)| *n > 0).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if ranked.is_empty() {
+        return "no boxes yet".to_string();
+    }
+    let name = |i: usize| classes.get(i).cloned().unwrap_or_else(|| format!("class {i}"));
+    let mut parts: Vec<String> =
+        ranked.iter().take(10).map(|&(i, n)| format!("{} {}", name(i), int(n))).collect();
+    let rest = &ranked[ranked.len().min(10)..];
+    if !rest.is_empty() {
+        let sum: u64 = rest.iter().map(|r| r.1).sum();
+        parts.push(format!("{} more classes {}", rest.len(), int(sum)));
+    }
+    parts.join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::balance_text;
+
+    #[test]
+    fn the_balance_reads_largest_first_and_sums_past_ten() {
+        let names: Vec<String> = ["circle", "square", "star"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(balance_text(&names, &[10, 1200, 0]), "square 1,200 · circle 10");
+        let many: Vec<String> = (0..12).map(|i| format!("c{i}")).collect();
+        let counts: Vec<u64> = (0..12).map(|i| 100 - i).collect();
+        assert!(balance_text(&many, &counts).ends_with("· 2 more classes 179"));
+        assert_eq!(balance_text(&names, &[0, 0, 0]), "no boxes yet");
     }
 }

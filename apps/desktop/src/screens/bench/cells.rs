@@ -5,19 +5,23 @@ use folo_ui::{FontWeight, IntoElement, ParentElement, SharedString, Styled, Wind
 use crate::theme::{Theme, ty};
 use crate::ui::*;
 
-/// A name and its badges on one line `width` px wide. folo-ui truncates text only against a width it
-/// knows, so the name gets one: its own width, or what the badges leave of the line.
+/// A name, its status (the table form: glyph and plain word) and its badges on one line `width` px
+/// wide. folo-ui truncates text only against a width it knows, so the name gets one: its own width,
+/// or what the status and badges leave of the line. `id` keys the status mark's animation.
 pub(super) fn name_with_badges(
     t: &Theme,
     window: &mut Window,
     name: &str,
+    status: Option<(StatusKind, &str)>,
     badges: &[(&str, Tone)],
     width: f32,
+    id: &str,
 ) -> folo_ui::Div {
     use crate::charts::text_width;
     // Medium weight runs a little wider than the regular face text_width measures.
     let mut measure = |s: &str| f32::from(text_width(window, s, ty::SM.size)) * 1.04;
-    let badge_w: f32 = badges.iter().map(|(l, _)| measure(l) + 12. + 8.).sum();
+    let status_w = status.map_or(0., |(_, w)| measure(w) + 8. + 6. + 8.);
+    let badge_w: f32 = badges.iter().map(|(l, _)| measure(l) + 12. + 8.).sum::<f32>() + status_w;
     let name_w = (measure(name) + 2.).min((width - badge_w).max(48.));
     div()
         .flex()
@@ -31,6 +35,7 @@ pub(super) fn name_with_badges(
                 .ellipsis()
                 .child(name.to_string()),
         )
+        .children(status.map(|(k, w)| status_cell(t, k, w.to_string(), format!("nb-{id}")).flex_none()))
         .children(badges.iter().map(|(l, tone)| badge(t, l.to_string(), *tone)))
 }
 

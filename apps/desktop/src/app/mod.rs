@@ -39,8 +39,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use folo_ui::{
-    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, ScrollHandle,
-    SharedString, Subscription, Task, Window, actions, px,
+    App, AppContext, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, ScrollHandle, SharedString,
+    Subscription, Task, Window, actions, px,
 };
 
 use crate::api::*;
@@ -240,8 +240,6 @@ pub struct Inspector {
     pub sample: Option<(String, SampleView)>,
 }
 
-pub type ModelsOrderKey = (usize, usize, &'static str, bool);
-
 pub struct PlayImage {
     pub name: SharedString,
     pub input: PredictInput,
@@ -337,8 +335,6 @@ pub struct FoloApp {
     /// Where focus was before the inspector opened, restored on close.
     inspector_return: Option<FocusHandle>,
     pub hist_hover: HashMap<&'static str, f32>,
-    /// Grid view controls built by the image browser, placed on the tab row.
-    pub ds_view_controls: Option<AnyElement>,
 
     // Runs
     pub run_filter: RunFilter,
@@ -366,12 +362,11 @@ pub struct FoloApp {
     pub pr_pin: Option<u32>,
     /// Highlighted option while the Export menu is open.
     pub export_hl: usize,
-    /// Models table order: column key and descending; None keeps the server's order.
+    /// The Models table's sort inside each evaluation group: column key and descending; None keeps
+    /// the server's order.
     pub models_sort: Option<(&'static str, bool)>,
     /// The Runs table's sort: column key and descending.
     pub runs_sort: Option<(&'static str, bool)>,
-    /// The sorted order of the models list, for (list allocation, length, column, descending).
-    pub models_order: RefCell<Option<(ModelsOrderKey, Vec<usize>)>>,
     pub confusion_norm: bool,
     /// The confusion-matrix cell (row, column) under the pointer or the keyboard cursor.
     pub cm_cell: Option<(usize, usize)>,
@@ -601,7 +596,6 @@ impl FoloApp {
             overlay_return: None,
             inspector_return: None,
             hist_hover: HashMap::new(),
-            ds_view_controls: None,
             run_filter: RunFilter::All,
             chart_hover: None,
             sample_view: SampleView::Predictions,
@@ -618,9 +612,9 @@ impl FoloApp {
             pr_pin: None,
             export_hl: 0,
             // Newest first, shown on the Created header, which is also how the server lists them.
-            models_sort: Some(("created", true)),
+            // Ranked within each group, best first (as Studio's list opens).
+            models_sort: Some(("map", true)),
             runs_sort: Some(("created", true)),
-            models_order: RefCell::new(None),
             confusion_norm: true,
             cm_cell: None,
             play_model: None,

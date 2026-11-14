@@ -38,6 +38,7 @@ pub const ALL: &[&str] = &[
     "dataset",
     "dataset+light",
     "dataset+filter",
+    "dataset+stats",
     "inspector",
     "inspector+light",
     "inspector+sample",
@@ -183,6 +184,10 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             if s.has("filter") {
                 app.ds_split = Some(crate::api::Split::Val);
                 app.ds_class = Some(3);
+            }
+            // The Statistics tab: the health line over the KPI strip and the charts.
+            if s.has("stats") {
+                app.ds_tab = crate::app::DsTab::Statistics;
             }
         }
         // Opened from a finished run's sample: its predictions over the dashed labels.

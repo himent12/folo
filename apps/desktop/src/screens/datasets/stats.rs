@@ -9,6 +9,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+use super::health::{Finding, health_line};
 use crate::api::Dataset;
 use crate::app::FoloApp;
 use crate::charts::{HoverFn, histogram};
@@ -16,9 +17,12 @@ use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
 impl FoloApp {
+    /// The Statistics tab: the one-line health summary (`health`), the stat strip under it, the class
+    /// balance and the two histograms.
     pub(super) fn dataset_stats(
         &mut self,
         ds: &Dataset,
+        health: &[Finding],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -130,6 +134,8 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(16.))
+                    .child(health_line(&t, health))
+                    .child(self.dataset_strip_stats(ds, window, cx))
                     .child(
                         panel(&t)
                             .child(panel_header(&t, "Class balance").child(

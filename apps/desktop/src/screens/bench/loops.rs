@@ -3,7 +3,7 @@
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::cells::{name_with_badges, num_cell};
-use super::format::{loop_tone, loop_trend};
+use super::format::loop_trend;
 use crate::api::{Bench, BenchLoop, BenchLoopStatus, BenchLoopVerdict, Label, time};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -193,9 +193,9 @@ impl FoloApp {
                             .flex_col()
                             .gap(px(2.))
                             .child({
-                                let mut badges = vec![(l.status.label(), loop_tone(l.status))];
-                                badges.extend(verdict);
-                                name_with_badges(&t, window, &l.name, &badges, name_w)
+                                let status = (StatusKind::of_loop(l.status), l.status.label());
+                                let badges: Vec<(&str, Tone)> = verdict.into_iter().collect();
+                                name_with_badges(&t, window, &l.name, Some(status), &badges, name_w, &key)
                             })
                             .child(if l.status == BenchLoopStatus::Failed {
                                 text(ty::SM, t.danger_text).child(state)

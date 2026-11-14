@@ -56,7 +56,45 @@ impl FoloApp {
         cx: &mut Context<Self>,
         on_select: OnSelect,
     ) -> AnyElement {
+        self.select_full(key, current, options, selected, disabled, &[], false, window, cx, on_select)
+    }
+
+    /// A compact (28 px) select of classes, for a toolbar: `classes[i]` is option `i`'s class (its
+    /// swatch before the name; `None` for an option that is no class, "All classes"), and the trigger
+    /// shows the chosen one's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn class_select(
+        &self,
+        key: &'static str,
+        current: SharedString,
+        options: Vec<(SharedString, Option<SharedString>)>,
+        classes: &[Option<u32>],
+        selected: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> AnyElement {
+        self.select_full(key, current, options, selected, &[], classes, true, window, cx, on_select)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn select_full(
+        &self,
+        key: &'static str,
+        current: SharedString,
+        options: Vec<(SharedString, Option<SharedString>)>,
+        selected: usize,
+        disabled: &[Option<SharedString>],
+        classes: &[Option<u32>],
+        compact: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> AnyElement {
         let t = theme(cx);
+        let trigger_h = if compact { tsize::CONTROL_MD } else { tsize::CONTROL_LG };
+        let class_of = |i: usize| classes.get(i).copied().flatten();
+        let trigger_class = class_of(selected);
         let open = self.menu_open == Some(key);
         let fh = self.fh(key, cx);
         let ring = self.ring(&fh, window);
@@ -80,7 +118,7 @@ impl FoloApp {
             .id(key)
             .track_focus(&fh)
             .relative()
-            .h(px(tsize::CONTROL_LG))
+            .h(px(trigger_h))
             .w_full()
             .px(px(10.))
             .flex()
@@ -169,7 +207,13 @@ impl FoloApp {
                 cx.notify();
             }))
             .when(ring, |d| d.child(focus_ring(&t, radius::MD)))
-            .child(text(ty::BASE, t.text_primary).flex_1().ellipsis().child(current))
+            .children(trigger_class.map(|c| class_swatch(&t, c, 8.)))
+            .child(
+                text(if compact { ty::SM } else { ty::BASE }, t.text_primary)
+                    .flex_1()
+                    .ellipsis()
+                    .child(current),
+            )
             .child(icon(
                 if open { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" },
                 14.,
@@ -203,8 +247,8 @@ impl FoloApp {
             folo_ui::deferred(
                 div()
                     .absolute()
-                    .when(!up, |d| d.top(px(tsize::CONTROL_LG + 4.)))
-                    .when(up, |d| d.bottom(px(tsize::CONTROL_LG + 4.)))
+                    .when(!up, |d| d.top(px(trigger_h + 4.)))
+                    .when(up, |d| d.bottom(px(trigger_h + 4.)))
                     .map(|d| match wide {
                         Some((w, true)) => d.right_0().w(px(w)),
                         Some((w, false)) => d.left_0().w(px(w)),
@@ -240,6 +284,7 @@ impl FoloApp {
                                 let why = off[i].clone();
                                 let dead = why.is_some();
                                 let has_detail = detail.is_some();
+                                let class = class_of(i);
                                 div()
                                     .id(SharedString::from(format!("{key}-opt-{i}")))
                                     .flex_none()
@@ -263,6 +308,7 @@ impl FoloApp {
                                                 cx.notify();
                                             }))
                                     })
+                                    .children(class.map(|c| class_swatch(&t, c, 8.)))
                                     // The name is what you choose by: it keeps its width (up to most
                                     // of the row) and the detail beside it is cut first.
                                     .child(

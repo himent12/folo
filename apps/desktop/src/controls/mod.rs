@@ -10,9 +10,11 @@ mod scroll;
 mod segmented;
 mod select;
 mod slider;
+mod tabs;
 mod toggle;
 mod tooltip;
 
 pub use button::Btn;
 pub use chart_group::Cursor;
+pub use tabs::Tab;
 pub use tooltip::{focus_tip, tip};
