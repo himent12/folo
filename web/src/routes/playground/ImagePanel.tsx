@@ -236,7 +236,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                 // What the footer says under the image on smaller screens: the count shown (and of what), the classes
                 // hidden, the time the prediction took; or, with no result, which model failed where, or what it waits
                 // for. The thresholds are the rail's, the re-filter time its Timing section's.
-                <span class="vb-facts num">
+                <span class="vb-facts num" class:gives={!props.result && props.notice === 'error'}>
                   {props.result ? (
                     <>
                       <span class="fi">
@@ -447,16 +447,19 @@ css`
     padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
     border-bottom: 1px solid var(--line-subtle);
   }
-  /* It yields to the header's room (a long model name after a failure, a laptop's column beside the rail): its last
-     fact truncates, whole in its title, rather than push the header past the image. */
+  /* The counts and the time keep their width (the file name truncates first); a failure's caption, a long model name,
+     yields to the header's room instead, whole in its title, rather than push the header past the image. */
   .vb-facts {
     display: flex;
-    flex-shrink: 1;
-    min-width: 0;
+    flex-shrink: 0;
     gap: var(--space-2);
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
     white-space: nowrap;
+  }
+  .vb-facts.gives {
+    flex-shrink: 1;
+    min-width: 0;
   }
   .vb-facts .truncate {
     min-width: 0;
