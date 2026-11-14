@@ -3,6 +3,9 @@
 // Playground beside Compare), the status badge on the title's line, the run's id in Config's header, the four charts in
 // two rows, on a tablet the sections stacked, and on phones Precision / Recall and Learning rate as sections of the
 // picker; a queued run's Config has the id too.
+/// <reference types="node" />
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { flush as flushSync } from 'fw';
 import { render, type Rendered } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -115,10 +118,55 @@ describe('a run on a tablet', () => {
     const detail = target.querySelector('.detail')!;
     expect(detail.getAttribute('role')).toBeNull();
     expect(detail.getAttribute('aria-labelledby')).toBeNull();
-    expect([...detail.querySelectorAll('[data-part]')].map((p) => p.getAttribute('data-part'))).toEqual(['samples', 'logs', 'classes', 'config']);
+    expect([...detail.querySelectorAll('[data-part]')].map((p) => p.getAttribute('data-part'))).toEqual(['samples', 'classes', 'logs', 'config']);
     // All four charts stay in the metrics (stacked by its CSS), none in the sections.
     expect([...target.querySelectorAll('.metrics .run-chart')].map((p) => p.id)).toEqual(['chart-map', 'chart-loss', 'chart-pr', 'chart-lr']);
   });
+});
+
+describe("a run's sections, in the order they are seen", () => {
+  // Reading order at every tier: from 1024 px two to a row (Samples | Per class, Logs | Cloud over Config), on a tablet
+  // stacked, on a phone the picker's order. Tab follows the DOM, so the DOM is that order.
+  const READ = ['samples', 'classes', 'logs', 'cloud', 'config'];
+  const parts = () => [...target.querySelectorAll('.detail > [data-part]')].map((p) => p.getAttribute('data-part'));
+
+  it('puts them in the DOM in reading order, which the CSS keeps (no `order`, no explicit grid placement)', () => {
+    const src = readFileSync(resolve(process.cwd(), 'src/routes/Run.tsx'), 'utf8');
+    const css = src.slice(src.lastIndexOf('css`'));
+    for (const rule of css.matchAll(/\[data-part='(\w+)'\]\s*\{([^}]*)\}/g)) {
+      expect(rule[2], `[data-part=${rule[1]}]`).not.toMatch(/(^|[\s;])order\s*:|grid-(area|column|row-start)\s*:/);
+    }
+    // From 1024 px two columns filled row by row: what the reading order above assumes.
+    expect(css).toMatch(/@media \(min-width: 1024px\) \{\s*\.detail \{\s*grid-template-columns: minmax\(0, 2fr\) minmax\(0, 1fr\);/);
+    expect(css).not.toMatch(/grid-auto-flow/);
+  });
+
+  for (const tier of ['wide', 'tablet', 'phone'] as const) {
+    it(`follows it on a ${tier === 'wide' ? 'laptop or desktop' : tier}, for a local and a cloud run`, async () => {
+      for (const cloud of [false, true]) {
+        await open((rs) => rs.find((r) => (cloud ? !!r.cloud && r.status === 'completed' : !r.cloud && r.status === 'completed'))!, { tier });
+        await vi.waitFor(() => {
+          flushSync();
+          if (cloud && !target.querySelector('[data-part="cloud"]')) throw new Error('no cloud panel yet');
+        });
+        const seen = parts();
+        const want = [...(tier === 'phone' ? ['pr', 'lr'] : []), ...READ.filter((p) => cloud || p !== 'cloud')];
+        expect(seen, `${cloud ? 'cloud' : 'local'} run`).toEqual(want);
+        if (tier === 'phone') {
+          // The picker lists the sections in the same order.
+          expect([...target.querySelectorAll('.phone-pick [role=tab]')].map((t) => t.id.replace('run-sec-', ''))).toEqual(seen);
+        }
+        // Per class and Config stay named regions of their own (what the old rail's label grouped).
+        for (const id of ['per-class', 'config']) {
+          const region = target.querySelector(`.detail section#${id}`)!;
+          expect(document.getElementById(region.getAttribute('aria-labelledby')!)?.textContent).toBeTruthy();
+        }
+        c?.unmount();
+        c = undefined;
+        target.remove();
+      }
+    });
+  }
 });
 
 describe('a queued run', () => {

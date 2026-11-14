@@ -570,10 +570,10 @@ export default function Run() {
                   phone={phone.current}
                 />
 
-                {/* Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right,
-                    the two columns ending together. */}
-                {/* Phones show one of these at a time, chosen here; a tablet stacks them, wider screens show them beside
-                    a rail. They switch content, so they are underline tabs (DESIGN_DIRECTION §2.22), not a segmented
+                {/* Evidence on the left (what the model sees, what the trainer says); reference on the right (Per class,
+                    Config), the two columns ending together. */}
+                {/* Phones show one of these at a time, chosen here; a tablet stacks them, wider screens show them two to
+                    a row. They switch content, so they are underline tabs (DESIGN_DIRECTION §2.22), not a segmented
                     control. */}
                 {/* A deliberate scroller (`data-scrolls`): a cloud run's seven sections do not fit a 320 px phone. */}
                 <div class="phone-pick" data-scrolls>
@@ -611,19 +611,22 @@ export default function Run() {
                   role={phone.current ? 'tabpanel' : undefined}
                   aria-labelledby={phone.current ? `run-sec-${section.get()}` : undefined}
                 >
-                  <div class="main-col">
-                    {phoneCharts.get() ? (
-                      <>
-                        <div class="part" data-part="pr">
-                          <RunChart kind="pr" model={model} height={SHORT} loading={live.loading} />
-                        </div>
-                        <div class="part" data-part="lr">
-                          <RunChart kind="lr" model={model} height={SHORT} loading={live.loading} />
-                        </div>
-                      </>
-                    ) : null}
-                    {/* A run that never trained has no samples or per-class results: the log and Config are its row. */}
-                    {!neverTrained.get() ? (
+                  {/* The parts in reading order, the order a phone's picker lists them and a tablet stacks them: from
+                      1024 px the grid places them two to a row (Samples | Per class, Logs | Config), so Tab follows
+                      what is seen at every tier. Each is a named region (its panel's title). */}
+                  {phoneCharts.get() ? (
+                    <>
+                      <div class="part" data-part="pr">
+                        <RunChart kind="pr" model={model} height={SHORT} loading={live.loading} />
+                      </div>
+                      <div class="part" data-part="lr">
+                        <RunChart kind="lr" model={model} height={SHORT} loading={live.loading} />
+                      </div>
+                    </>
+                  ) : null}
+                  {/* A run that never trained has no samples or per-class results: the log and Config are its row. */}
+                  {!neverTrained.get() ? (
+                    <>
                       <div class="part" data-part="samples">
                         <Samples
                           runId={R().id}
@@ -635,37 +638,33 @@ export default function Run() {
                           unavailable={historyError.get() !== undefined}
                         />
                       </div>
-                    ) : null}
-                    <div class="part" data-part="logs">
-                      <Logs log={live.logsLog} version={live.version} live={active.get()} earlier={live.logsEarlier} />
-                    </div>
-                  </div>
-                  <aside class="rail" aria-label="Per-class results and config">
-                    {!neverTrained.get() ? (
                       <div class="part" data-part="classes">
                         <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact unavailable={historyError.get() !== undefined} ended={!!status.get() && !active.get()} />
                       </div>
-                    ) : null}
-                    {cloud.get() ? (
-                      <div class="part" data-part="cloud">
-                        <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} />
-                      </div>
-                    ) : null}
-                    {/* One column in the rail (laptops up) and on phones; on a tablet it is stacked at the panel's full
-                        width, so it takes the two columns it has on a queued run's page (a panel at 768–1279 px uses
-                        its width). */}
-                    <div class="part" data-part="config">
-                      <ConfigPanel
-                        config={config.get()!}
-                        resolved={resolved.get()}
-                        datasetName={datasetName.get()}
-                        weights={lineage.get()}
-                        compact={!stacked.current || phone.current}
-                        cli={runCli.get()}
-                        runId={R().id}
-                      />
+                    </>
+                  ) : null}
+                  <div class="part" data-part="logs">
+                    <Logs log={live.logsLog} version={live.version} live={active.get()} earlier={live.logsEarlier} />
+                  </div>
+                  {cloud.get() ? (
+                    <div class="part" data-part="cloud">
+                      <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} />
                     </div>
-                  </aside>
+                  ) : null}
+                  {/* One column beside the log (laptops up) and on phones; on a tablet it is stacked at the panel's full
+                      width, so it takes the two columns it has on a queued run's page (a panel at 768–1279 px uses its
+                      width). */}
+                  <div class="part" data-part="config">
+                    <ConfigPanel
+                      config={config.get()!}
+                      resolved={resolved.get()}
+                      datasetName={datasetName.get()}
+                      weights={lineage.get()}
+                      compact={!stacked.current || phone.current}
+                      cli={runCli.get()}
+                      runId={R().id}
+                    />
+                  </div>
                 </div>
               </>
             )}
@@ -784,47 +783,32 @@ css`
       display: none;
     }
   }
-  /* The two columns end together: each column's last panel takes what the other column adds. Usually the rail is the
-     taller, and the log (at least 200 px) grows to its bottom; under a short rail (few classes) Config's frame runs
-     down to the log's end, as a properties rail runs the page's height. No fixed heights. */
+  /* Rows 4 and 5 (design/UNIFIED.md §4 Run): one grid of the parts in reading order. From 1024 px it is two columns,
+     filled row by row, so Validation samples and Per class start and end together (the shorter frame stretches, as
+     panels side by side do, DESIGN_DIRECTION §2.8), then the log and Config share the rest, so no panel bottom sits
+     100 px off its neighbour's (round 26): the log (at least 200 px) grows to Config's bottom, or Config's frame runs
+     down to the log's end. No fixed heights. Below 1024 px one column, the DOM's order: Validation samples, Per class,
+     Logs, a cloud run's Cloud, Config. */
   .detail {
     --log-h: 200px;
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-4);
     align-items: stretch;
-  }
-  .main-col,
-  .rail {
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
-    gap: var(--space-4);
-    min-width: 0;
   }
   .part {
     display: grid;
     min-width: 0;
   }
-  /* Beside the rail, the two columns share their rows (subgrid): Validation samples and Per class start and end
-     together (the shorter one's frame stretches, as panels side by side do, DESIGN_DIRECTION §2.8), then the log and
-     Config share the rest, so no panel bottom sits 100 px off its neighbour's (round 26). */
   @media (min-width: 1024px) {
     .detail {
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
       grid-template-rows: auto minmax(0, 1fr);
     }
-    .main-col,
-    .rail {
-      grid-row: 1 / 3;
-      grid-template-rows: subgrid;
-    }
-    /* A cloud run's rail has its Cloud panel between Per class and Config: the log spans it and Config, so the two
-       columns still start and end together (the log is the part that grows). */
+    /* A cloud run has its Cloud panel between Per class and Config: the log spans it and Config, so the two columns
+       still start and end together (the log is the part that grows). */
     .detail.cloud {
       grid-template-rows: auto auto minmax(0, 1fr);
-    }
-    .detail.cloud .main-col,
-    .detail.cloud .rail {
-      grid-row: 1 / 4;
     }
     .detail.cloud [data-part='logs'] {
       grid-row: span 2;
@@ -834,42 +818,8 @@ css`
     .detail.never {
       grid-template-rows: minmax(0, 1fr);
     }
-    .detail.never .main-col,
-    .detail.never .rail {
-      grid-row: 1 / 2;
-    }
     .detail.cloud.never {
       grid-template-rows: auto minmax(0, 1fr);
-    }
-    .detail.cloud.never .main-col,
-    .detail.cloud.never .rail {
-      grid-row: 1 / 3;
-    }
-  }
-  /* Tablets: rows 4 and 5 stack (design/UNIFIED.md §4 Run): Validation samples, Per class, Logs, a cloud run's Cloud,
-     then Config, each at the full width. */
-  @media (min-width: 768px) and (max-width: 1023px) {
-    .detail {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .main-col,
-    .rail {
-      display: contents;
-    }
-    [data-part='samples'] {
-      order: 1;
-    }
-    [data-part='classes'] {
-      order: 2;
-    }
-    [data-part='logs'] {
-      order: 3;
-    }
-    [data-part='cloud'] {
-      order: 4;
-    }
-    [data-part='config'] {
-      order: 5;
     }
   }
   .phone-pick {
@@ -889,10 +839,8 @@ css`
       /* 12 px to the section under the page's 16 px gap. */
       margin-bottom: calc(var(--space-3) - var(--space-4));
     }
-    /* One part is visible at a time, so the empty columns must not add gaps. */
-    .detail,
-    .main-col,
-    .rail {
+    /* One part is visible at a time, so the hidden ones must not add gaps. */
+    .detail {
       gap: 0;
     }
     .detail:not([data-show='pr']) [data-part='pr'],
@@ -903,9 +851,6 @@ css`
     .detail:not([data-show='cloud']) [data-part='cloud'],
     .detail:not([data-show='config']) [data-part='config'] {
       display: none;
-    }
-    .detail {
-      grid-template-columns: minmax(0, 1fr);
     }
     /* One section at a time: the log keeps its own height. */
     .detail {
