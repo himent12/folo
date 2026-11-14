@@ -1,3 +1,5 @@
+// Playground (`#/playground`): a model's detections on an image, run on the server or in this browser through
+// folo-wasm, with the thresholds, the detections and their timing. The parts are in ./playground/.
 import Box from '$icons/box';
 import ImagePlus from '$icons/image-plus';
 import Plus from '$icons/plus';

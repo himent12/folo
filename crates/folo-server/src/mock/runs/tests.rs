@@ -1,3 +1,5 @@
+//! Unit tests of the simulated runs: checkpoints of stopped runs, the curves, the live clock and stopping.
+
 use super::*;
 
 fn config(epochs: u32) -> TrainConfig {

@@ -1,4 +1,4 @@
-// // The run list as the shell polls it (RunWatch, every 2 s): the sidebar's live row and the Runs badge read it, so
+// The run list as the shell polls it (RunWatch, every 2 s): the sidebar's live row and the Runs badge read it, so
 // the shell asks once. It belongs to the server it came from (`hub.epoch` when it was published): after a reconnect, which may be to another
 // server or the mock, it reads as no list until the server in use has sent its own.
 

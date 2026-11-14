@@ -30,15 +30,19 @@
 //! ```
 //!
 //! # Map
-//! - [`Tensor`]: construction, views, elementwise / reduction / linear-algebra / conv ops, in-place updates.
-//! - [`Shape`], [`Layout`], [`DType`], [`Device`]: what a tensor is.
+//! - [`Tensor`] (`tensor.rs`): construction, inspection, data access. Its ops are methods defined in the private
+//!   `ops/` folder (elementwise, reductions, matmul and conv, views, copies, in-place updates, fused ops).
+//! - [`Shape`], [`Layout`], [`DType`], [`Device`], [`Storage`]: what a tensor is (`shape.rs`, `layout.rs`,
+//!   `dtype.rs`, `device.rs`, `storage.rs`); [`Error`] in `error.rs`.
 //! - [`autograd`]: [`no_grad`], [`Grads`]. [`testing::grad_check`] verifies gradients numerically.
+//! - [`autocast`](mod@autocast): mixed precision for the forward pass.
 //! - [`backend`]: the [`backend::Backend`] trait device kernels implement and the runtime registry
 //!   (folo-gpu registers itself there). [`cpu`] is the built-in implementation; [`cpu::gemm`] exposes the
 //!   GEMM for raw slices.
 //! - [`rng`]: the seeded generator every random op takes.
 //!
-//! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
+//! See `crates/folo-core/README.md` for where things are, and `docs/ARCHITECTURE.md` for how this crate fits into
+//! FOLO.
 
 pub mod autocast;
 pub mod autograd;

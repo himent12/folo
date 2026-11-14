@@ -1,3 +1,5 @@
+// The top bar: the page's breadcrumbs (./crumbs), the offline notice (./OfflineNotice), Search and commands, and the
+// theme; phones add a back (or home) link and Settings.
 import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import Monitor from '$icons/monitor';

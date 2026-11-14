@@ -1,3 +1,5 @@
+// One model (`#/models/<id>`): its scores, PR curves, confusion matrix and per-class metrics
+// (GET /api/models/{id}/eval), where it came from, and export. The parts are in ./model/.
 import ArrowLeft from '$icons/arrow-left';
 import ChevronDown from '$icons/chevron-down';
 import Download from '$icons/download';

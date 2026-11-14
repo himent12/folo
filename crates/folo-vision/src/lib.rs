@@ -7,6 +7,7 @@
 //! - [`boxes`]: `xyxy` / `cxcywh` boxes, letterbox mapping, IoU / GIoU / DIoU / CIoU.
 //! - [`decode`]: anchor grids and DFL decoding of raw head outputs.
 //! - [`nms`]: class-aware batched NMS and the full detector post-process.
+//! - [`fusion`]: cluster box fusion after NMS (docs/MODEL.md §9.4), opt-in through [`NmsConfig`].
 //! - [`metrics`]: COCO-style mAP, precision / recall / F1, PR curves and a confusion matrix (`docs/METRICS.md`).
 //! - [`cocoeval`]: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) for reporting on COCO splits.
 //! - [`assign`]: the task-aligned assigner and DFL target encoding.
@@ -21,6 +22,8 @@
 //! - [`val`]: validation of a model on a dataset split.
 //! - [`predict`]: the [`Predictor`] (letterbox, forward, decode, NMS, rescale, with a timing breakdown).
 //! - [`export`]: ONNX export of a fused model ([`export::onnx`]).
+//! - [`precompile`]: precompiles, on worker threads, the GPU kernels an earlier run of the same kind and shape
+//!   used (docs/GPU.md, Pipeline cache).
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 

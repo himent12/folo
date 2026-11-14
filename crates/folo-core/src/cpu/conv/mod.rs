@@ -1,4 +1,14 @@
 //! conv2d forward and backward: implicit-im2col GEMM, with direct paths for 1x1 and depthwise convolutions.
+//!
+//! - `mod.rs`: the shared geometry (`ConvGeom`) and the forward entry points that pick a path.
+//! - `shifted.rs`: the input zero-padded and split into its stride phases once, read in place as GEMM rows.
+//! - `im2col.rs`: the packed B operands read from the input planes (strided and accumulating convs).
+//! - `small_c.rs`: the direct forward for few input channels (the 3-channel stem).
+//! - `depthwise.rs`: depthwise convs (groups = channels), forward and gradients.
+//! - `winograd.rs`: Winograd F(2x2, 3x3) for dense 3x3 stride-1 inference convs.
+//! - `sites.rs`: inference convs evaluated only at some output sites (`Backend::conv2d_act_at`).
+//! - `backward_input.rs`, `backward_weight.rs`: the input and weight gradients.
+//! - `kernel_tests.rs`: unit tests of these paths against an `f64` reference.
 
 mod backward_input;
 mod backward_weight;

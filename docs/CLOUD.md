@@ -218,7 +218,10 @@ A FOLO server you run yourself: `folo serve --host 0.0.0.0 --token <secret>` on 
 A provider is one type implementing `folo_cloud::Provider` (check credentials, list offers, launch, look up, find
 by name, terminate) plus an entry in `folo_cloud::providers()`. The lifecycle above is provider-agnostic
 (`folo_server::cloud`), and tests run it against an in-process worker. Providers that expose a raw TCP port
-instead of an HTTPS endpoint (Vast.ai, Lambda) need TLS on the worker first and are not included yet.
+instead of an HTTPS endpoint (Vast.ai, Lambda) need TLS on the worker first and are not included yet. A new id
+also goes into the provider lists that tests assert (`crates/folo-cloud/src/lib.rs`, `crates/folo-cli/tests/cloud.rs`
+and `crates/folo-server/tests/mock_cloud.rs`), and its mock offers into `MockStore::offers_of`
+(`crates/folo-server/src/mock/mod.rs`).
 
 ## Securing a server (`--token`)
 `folo serve --token <secret>` (or `FOLO_TOKEN`) requires `Authorization: Bearer <secret>` on every `/api` request

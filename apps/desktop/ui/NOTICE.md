@@ -1,5 +1,7 @@
 # NOTICE
 
+The attribution for the GPUI source folo-ui adapts ([README.md](README.md), Adapted from GPUI).
+
 folo-ui adapts parts of GPUI, the UI framework of the Zed editor:
 
 > GPUI, Copyright 2022 - 2025 Zed Industries, Inc. Licensed under the Apache License, Version 2.0

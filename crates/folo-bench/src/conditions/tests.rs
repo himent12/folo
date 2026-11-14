@@ -1,3 +1,7 @@
+//! Condition tests: ids, sizes kept, the severity range, seeded noise, boxes (kept, or moved by `distance`), effects
+//! growing with severity, pixel sizes scaling with the long side, occlusion shares, rendering, and the
+//! docs/BENCH.md table kept in step with the code.
+
 use super::*;
 use folo_api::{BBox, BENCH_SEVERITIES};
 use image::RgbImage;

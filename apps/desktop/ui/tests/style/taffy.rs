@@ -1,3 +1,6 @@
+//! The style-to-taffy mapping (`style/to_taffy.rs`): GPUI's defaults, lengths and rems, fields set directly, and
+//! available space both ways.
+
 use folo_ui::{
     AlignItems, Display, Overflow, Position, Style, StyleRefinement, Styled, auto, px, relative, rems,
 };

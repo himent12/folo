@@ -1,5 +1,9 @@
 //! The `folo` binary's command tree as a library: the binary (`src/main.rs`) and the tests that parse commands with
-//! the real clap parser (tests/studio_cli.rs) share it.
+//! the real clap parser (tests/studio_cli.rs, tests/cli_values.rs) share it.
+//!
+//! Only the parts those tests need live here: [`cli`] (the clap definitions, which `folo describe` serialises),
+//! [`VERSION`] and [`WEIGHTS_REPO`]. Every command's implementation is a private module of the binary; its
+//! `src/main.rs` doc lists them, and `crates/folo-cli/README.md` maps each subcommand to its file.
 
 pub mod cli;
 

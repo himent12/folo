@@ -7,6 +7,8 @@
 //!
 //! Use [`write_yolo`] to write a standard YOLO folder (`images/`, `labels/`, `data.yaml`) or [`SyntheticDataset`]
 //! to render samples on demand in memory.
+//!
+//! `raster.rs` holds the anti-aliased signed-distance rasteriser and the procedural backgrounds.
 
 mod raster;
 

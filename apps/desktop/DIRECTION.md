@@ -1,5 +1,8 @@
 # FOLO Desktop: design direction
 
+The page structure FOLO Desktop's screens are built against. [README.md](README.md) is the app; `notes/` holds
+the review rounds this came out of.
+
 Written by a design-director pass after round 11, when two reviewers had held at 7.8–8.2 for six rounds. Per-issue
 fixes had stopped moving the score; this document sets the structure the screens are built against. Values are
 logical px.

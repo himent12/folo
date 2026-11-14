@@ -1,3 +1,6 @@
+//! Unit tests of the real store's runs: metrics and step cursors, the queue (positions, shutdown, early stops),
+//! log lines, throughput samples, model ids, resumes and runs left behind by a previous process.
+
 use super::*;
 use axum::http::StatusCode;
 use folo_api::{Epoch, LogLevel, LogLine, StatusEvent, TrainConfig};

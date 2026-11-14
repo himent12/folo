@@ -1,4 +1,12 @@
 //! `folo train`: a run under `<project>/<name>/` with a live progress view (or JSON lines with `--json`).
+//!
+//! This file checks the flags, reserves the run folder and starts the trainer. The rest of the folder:
+//!
+//! - `config.rs`: the trainer config of a new run, from the flags and `--set KEY=VALUE`.
+//! - `resume.rs`: `--resume`, and which flags a resumed run may change.
+//! - `progress.rs`: the live view or JSON lines while it trains, and the summary at the end.
+//! - `stop.rs`: `folo stop` (the stop file) and Ctrl+C.
+//! - `tests.rs`: unit tests of `--set`, `--resume` and run-folder reservation.
 
 mod config;
 mod progress;

@@ -1,3 +1,5 @@
+//! Unit tests of the benchmark types: axis weights and names, request defaults and events by name.
+
 use super::*;
 use crate::LabelAgentId;
 

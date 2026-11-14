@@ -7,6 +7,9 @@
 //! `http://` and `https://` (rustls, the bundled web PKI roots) both work.
 //!
 //! Calls block; async callers run them on a blocking pool. [`transfer`] moves files in parts on top of it.
+//!
+//! This file holds [`Client`] (JSON calls, raw bytes, `Range` parts), [`Error`] and its codes ([`UNREACHABLE`],
+//! [`NOT_FOLO`]) and [`encode`] for path segments.
 
 pub mod transfer;
 

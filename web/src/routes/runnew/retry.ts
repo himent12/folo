@@ -1,3 +1,4 @@
+// A retry of a run that ran out of GPU memory: what changed since.
 import type { Arch, Run } from '$lib/api/types';
 
 /** A retry of a run that ran out of GPU memory: each setting changed since, as it was and as it is now. */

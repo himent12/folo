@@ -1,4 +1,4 @@
-// // Which agent, model and effort a labeling run asks for: picked in the job page's Agent panel and used by every run
+// Which agent, model and effort a labeling run asks for: picked in the job page's Agent panel and used by every run
 // started there (the panel's, and the editor's "Ask the agent again"). The agent is remembered per browser (prefs).
 
 import { signal } from 'fw';

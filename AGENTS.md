@@ -1,8 +1,17 @@
 # AGENTS.md — how to work on FOLO
 
 FOLO is built almost entirely by AI coding agents, and every change lands as a reviewed pull request. These rules
-apply to every contributor, agent or human. Read this file, then `docs/ARCHITECTURE.md`, then the crate you are
-touching. `CONTRIBUTING.md` is the short version for a first pull request.
+apply to every contributor, agent or human. Read this file, then [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), then
+the README of the crate you are touching. [CONTRIBUTING.md](CONTRIBUTING.md) is the short version for a first pull
+request.
+
+## Finding your way
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the map of the repository and the crates, the main flows, and the
+  "Where do I change ...?" table from a change to the files it touches.
+- [crates/README.md](crates/README.md): the crates in dependency order and the dependency rules; each
+  `crates/<name>/README.md` maps that crate's modules to what they hold. Most top-level folders have a README too
+  (listed under Layout).
+- [docs/README.md](docs/README.md): every doc, grouped by what you want to do.
 
 ## What FOLO is
 A from-scratch, very fast vision framework in Rust (a YOLO-style object detector, plus training, evaluation and export)
@@ -27,7 +36,8 @@ be pleasant for people and easy for agents to drive (`--json` everywhere, an MCP
   there because it protects something that matters (docs/CI.md, Keeping CI fast). `#[ignore]` is for a test that
   needs what CI does not have, or a documented manual acceptance run, not for a slow one.
 - **Docs as you go.** Public items get a doc comment. When you change behaviour or an interface, update the matching file
-  in `docs/` in the same PR.
+  in `docs/` in the same PR. A change that adds, moves or removes a module updates that crate's (or folder's) README
+  in the same PR, and `docs/ARCHITECTURE.md` when the map or the change table no longer matches.
 - **No god files.** A source file stays under 1000 lines, every line counted (`bash tools/file-size.sh`, which CI runs
   on every pull request; docs and data are exempt). Before a file gets there, split it by responsibility
   into a folder of modules named for what they hold (`runs.rs` → `runs/mod.rs` + `runs/queue.rs`, a route's parts in
@@ -57,8 +67,8 @@ The maintainers' agents run this loop with a fixed pair of models, one that impl
   `bash tools/test-tmp.sh cargo test --workspace` runs the tests the way CI does and fails if they leave anything
   behind (docs/CI.md, Test temp dirs).
 - Keep the default `jobs = 8` from `.cargo/config.toml`, and don't run more than one heavy build at a time from one
-  agent: several agents often build on one machine.
-- GPU test runs should be short (< 2 min) unless your task says otherwise: the GPU is usually shared.
+  agent: when several agents build on one machine, they share its cores.
+- GPU test runs should be short (< 2 min) unless your task says otherwise: a GPU is often shared.
 
 ## On the maintainers' machine
 These apply to agents working on the maintainers' Windows machine (an RTX 4080 SUPER and an i7-14700KF, shared by
@@ -71,30 +81,44 @@ many agents); skip them anywhere else.
   allowed: see `docs/notes/BOAT.md`.
 
 ## Layout
+Every crate has a README, and so do `crates/`, `web/`, `apps/desktop/`, `design/`, `examples/`, `bench/`, `tools/`,
+`scripts/`, `site/` and `docs/`; `crates/README.md` gives the crates' dependency edges and rules.
 ```
-crates/folo-core     tensors, dtypes, shapes, CPU kernels, autograd tape
+crates/              the root cargo workspace (members = crates/*), engine at the bottom, services on top
+crates/folo-core     tensors, dtypes, shapes, CPU kernels, autograd tape, the Backend trait
 crates/folo-gpu      wgpu device, buffer pool, WGSL kernels; implements the core Backend trait
 crates/folo-nn       modules (Conv2d, BatchNorm2d, ...), init, optimizers, LR schedules, .folo weight files
 crates/folo-data     image IO, YOLO/COCO dataset formats, augmentation, batching data loader, synthetic datasets
-crates/folo-vision   FOLO detector (n/s/m/l/x), loss, task-aligned assigner, box ops, NMS, mAP, trainer, predictor
-crates/folo-api      serde types of docs/API.md, shared by the server, the CLI and FOLO Desktop
-crates/folo-server   axum HTTP + SSE API used by Studio and by agents; serves the built web app
+crates/folo-vision   FOLO detector (n/s/m/l/x), loss, task-aligned assigner, box ops, NMS, mAP, trainer, predictor,
+                     val, ONNX export
+crates/folo-api      serde types of docs/API.md, shared by folo-vision, the service crates, the CLI and FOLO Desktop
+crates/folo-server   axum HTTP + SSE API used by Studio and by agents: the Store, the run queue, labeling, cloud
+                     runs, benchmarks; serves the built web app; docs/SERVER.md
 crates/folo-client   blocking HTTP client of docs/API.md: `folo mcp --server`, cloud workers; transfers in parts
 crates/folo-cloud    cloud compute providers behind one trait (RunPod, a remote FOLO server), docs/CLOUD.md
 crates/folo-bench    vision benchmarks, docs/BENCH.md: stress conditions, plans, every number of an entry's score
 crates/folo-mcp      `folo mcp`: the MCP server (rmcp, stdio) over the server's Store, embedded or proxying folo serve
-crates/folo-cli      the `folo` binary (train / val / predict / export / serve / cloud / mcp / doctor)
+crates/folo-cli      the `folo` binary (serve / describe / doctor / train / stop / val / predict / export / bench /
+                     dataset / weights / cloud / mcp), docs/CLI.md
 crates/folo-wasm     FOLO detectors in the browser (wasm-bindgen; WebGPU or the wasm CPU), docs/WASM.md
 crates/folo-test-support  test-only helpers (a dev-dependency): TestDir / TestFile / ChildGuard, FOLO_TEST_TMP
 web/                 FOLO Studio (TypeScript + Vite on fw, our own UI framework in web/framework; custom design system, no UI kit)
 apps/desktop/        FOLO Desktop (Rust, its own cargo workspace: the app and ui/ = folo-ui, its UI framework;
                      talks to folo-server over docs/API.md)
 design/              the design system both apps share: tokens.json, fonts, the logo
+examples/            shapes (the convergence test), coco (COCO pretraining), bench_external.py (an external
+                     benchmark entry, docs/BENCH.md)
+bench/               Python harnesses outside cargo; bench/README.md says what each folder holds:
 bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md
-bench/finetune/      fine-tuning accuracy: folo-n vs yolo26n on small public datasets, one pycocotools scorer
+bench/finetune/      fine-tuning accuracy: folo-n vs yolo26n and folo-s vs yolo26s on small public datasets, one
+                     pycocotools scorer
+bench/...            fusion/, learn/, parity/, refine/, trainer/
 tools/               CI and development helpers; tools/charts draws the charts of the README and docs
+scripts/             build-wasm.sh / build-wasm.ps1 (the browser module), install.sh / install.ps1 (the release installers)
 site/                the docs website, generated from docs/, README.md and the examples
-docs/                QUICKSTART, ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, MCP, FORMAT (.folo), ROADMAP,
-                     BENCHMARKS, WASM, CLOUD (training on rented or remote GPUs), ...; docs/img holds the README's
-                     screenshots and charts; docs/notes holds the engineering notebooks and the agents' process
+.github/             the CI workflows (docs/CI.md), the issue and pull request templates
+docs/                README (the index), QUICKSTART, ARCHITECTURE, CORE, VISION, SERVER, MODEL (detector spec), API (HTTP
+                     contract), CLI, MCP, FORMAT (.folo), ROADMAP, BENCHMARKS, WASM, CLOUD (training on rented or
+                     remote GPUs), ...; docs/img holds the README's screenshots and charts; docs/notes holds the
+                     engineering notebooks and the agents' process
 ```

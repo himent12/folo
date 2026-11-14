@@ -1,3 +1,5 @@
+// New run (`#/runs/new`): the training form (dataset, model, training, augmentation), its estimate, the matching
+// `folo train` command, and Start. The parts are in ./runnew/.
 import Images from '$icons/images';
 import Play from '$icons/play';
 import Plus from '$icons/plus';

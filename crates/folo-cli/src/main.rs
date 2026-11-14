@@ -1,42 +1,48 @@
 //! The `folo` command-line tool. See `docs/CLI.md`.
+//!
+//! This file parses the command line, dispatches each subcommand (`run`), turns on the shared caches and resolves
+//! the data dir. The command tree is `folo_cli::cli` (src/cli.rs). The modules:
+//!
+//! - `serve`: `folo serve`, plus the tracing setup and data-dir lock errors `mcp` and `doctor` share.
+//! - `mcp`: `folo mcp` (the folo-mcp server on stdio).
+//! - `doctor`: `folo doctor`.
+//! - `describe`: `folo describe` (the clap tree as JSON).
+//! - `train`: `folo train` and `folo stop` (folder: config, progress, resume, stop).
+//! - `infer`: `folo val`, `folo predict` and `folo export`; `coco` (`val --coco` / `--save-json`) and `draw`
+//!   (`predict --save` images) serve it.
+//! - `dataset`: `folo dataset check | stats | synth | convert`.
+//! - `weights`: `folo weights list | pull` and published-name resolution (folder: download).
+//! - `cloud`: `folo cloud ...` through `folo_server::cloud`.
+//! - `engine`: opening datasets, registering the GPU backend, engine errors as CLI errors.
+//! - `output`: `--json` records, the error envelope and the exit codes.
+//! - `serve_lock`: one owner per data dir (`serve.lock`, `serve.json`).
+//!
+//! `folo bench` answers `not_implemented` (exit 4).
 
 mod cloud;
 mod coco;
 mod dataset;
 mod describe;
+mod doctor;
 mod draw;
 mod engine;
 mod infer;
+mod mcp;
 mod output;
+mod serve;
 mod serve_lock;
 mod train;
 mod weights;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::CommandFactory;
-use folo_server::{Cors, MockStore, Options, RealStore, Server, Store, WebSource};
-use serde_json::json;
 
 // The command tree is the library's (src/lib.rs), so tests parse commands with it.
-use folo_cli::{VERSION, cli};
+use folo_cli::cli;
 
-use cli::{Cli, Command, DoctorArgs, McpArgs, ServeArgs};
+use cli::{Cli, Command};
 use output::{CliError, ExitCode, Out};
-
-/// The web app folder used when `--web-dir` is not given and nothing is embedded.
-const DEFAULT_WEB_DIR: &str = "web/dist";
-
-/// What `folo serve` serves outside `/api`: an explicit `--web-dir`, else the embedded Studio (`embed-web`
-/// builds), else `web/dist`.
-fn resolve_web(web_dir: Option<PathBuf>) -> WebSource {
-    match web_dir {
-        Some(dir) => WebSource::Dir(dir),
-        None if folo_server::web::embedded().is_some() => WebSource::Embedded,
-        None => WebSource::Dir(PathBuf::from(DEFAULT_WEB_DIR)),
-    }
-}
 
 fn main() -> std::process::ExitCode {
     let json = std::env::args_os().skip(1).any(|a| a == "--json");
@@ -102,7 +108,7 @@ fn usage_error(out: Out, e: clap::Error) -> std::process::ExitCode {
 
 fn run(cli: Cli, out: Out) -> Result<(), CliError> {
     match cli.command {
-        Command::Serve(args) => serve(args, out),
+        Command::Serve(args) => serve::serve(args, out),
         Command::Describe(args) => {
             let surface = describe::describe(&Cli::command(), &args.command, !args.no_mcp_tools)?;
             if out.json {
@@ -112,7 +118,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
             }
             Ok(())
         }
-        Command::Doctor(args) => doctor(args, out),
+        Command::Doctor(args) => doctor::doctor(args, out),
         Command::Train(args) => train::train(args, out),
         Command::Stop(args) => train::request_stop(&args.run_dir, out),
         Command::Val(args) => infer::val(args, out),
@@ -122,7 +128,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
         Command::Dataset(cmd) => dataset::run(cmd, out),
         Command::Weights(cmd) => weights::run(cmd, out),
         Command::Cloud(cmd) => cloud::run(cmd, out),
-        Command::Mcp(args) => mcp(args),
+        Command::Mcp(args) => mcp::mcp(args),
     }
 }
 
@@ -170,379 +176,11 @@ pub(crate) fn data_dir(given: Option<PathBuf>) -> Result<PathBuf, CliError> {
     Ok(std::path::absolute(&dir).unwrap_or(dir))
 }
 
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    // Logs always go to stderr so stdout stays clean for `--json` records.
-    let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(ansi)
-        .try_init();
-}
-
-fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
-    init_tracing();
-    let precision: folo_vision::Precision = args
-        .precision
-        .parse()
-        .map_err(|e: folo_vision::Error| CliError::new(ExitCode::Usage, "usage", e.to_string()))?;
-    if args.tensor_cores {
-        // Before anything creates the GPU context: the device has to be created with them.
-        folo_gpu::context::request_tensor_cores();
-    }
-    let data_dir = if args.mock {
-        args.data_dir.clone().unwrap_or_else(default_data_dir)
-    } else {
-        data_dir(args.data_dir.clone())?
-    };
-    // One owner per data dir (the mock writes nothing): a second would stop the first one's active runs.
-    let serve_lock = if args.mock {
-        None
-    } else {
-        match serve_lock::acquire(&data_dir) {
-            Ok(serve_lock::Acquire::Held(lock)) => Some(lock),
-            Ok(serve_lock::Acquire::InUse { url }) => {
-                out.record(&json!({
-                    "event": "data_dir_in_use",
-                    "data_dir": folo_api::json::path(&data_dir),
-                    "url": url,
-                }));
-                return Err(data_dir_in_use(&data_dir, url.as_deref()));
-            }
-            Err(e) => return Err(data_dir_lock_failed(&data_dir, e)),
-        }
-    };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| CliError::new(ExitCode::Runtime, "runtime", format!("could not start tokio: {e}")))?;
-    runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind((args.host.as_str(), args.port)).await.map_err(|e| {
-            CliError::new(
-                ExitCode::Runtime,
-                "bind_failed",
-                format!("could not bind {}:{}: {e}", args.host, args.port),
-            )
-            .hint("is another `folo serve` running? pick another --port (0 chooses a free one)")
-        })?;
-        let addr = listener
-            .local_addr()
-            .map_err(|e| CliError::new(ExitCode::Runtime, "bind_failed", e.to_string()))?;
-        let url = format!("http://{addr}");
-        // Before the store opens (it can take a while): a second start can say where this one is.
-        if let Some(lock) = &serve_lock
-            && let Err(e) = lock.publish(&url)
-        {
-            tracing::warn!("could not record the address in the data dir: {e}");
-        }
-        let store: Arc<dyn Store> = if args.mock {
-            Arc::new(MockStore::new())
-        } else {
-            Arc::new(
-                RealStore::open(data_dir.clone())
-                    .device(args.device.clone())
-                    .precision(precision)
-                    .published_weights(folo_api::weights::cache_dir()),
-            )
-        };
-        let web = resolve_web(args.web_dir.clone());
-        let (web_dir, web_ready) = match &web {
-            WebSource::Dir(dir) => (Some(dir.clone()), folo_server::web_dir_ready(dir)),
-            _ => (None, true),
-        };
-        let cors = if args.cors_any { Cors::Any } else { Cors::Loopback };
-        let token = args.token.clone().and_then(folo_server::Token::new);
-        let token_set = token.is_some();
-        let server = Server::new(
-            store,
-            Options {
-                web: web.clone(),
-                cors,
-                token,
-                bind: Some(addr.ip()),
-                allow_hosts: args.allow_host.clone(),
-            },
-        );
-        out.human(format!(
-            "FOLO {VERSION} serving {} on {url}",
-            if args.mock { "mock data" } else { "the real store" }
-        ));
-        out.human(format!("  API:    {url}/api/health"));
-        match &web_dir {
-            None => out.human(format!("  Studio: {url}/  (embedded)")),
-            Some(dir) if web_ready => {
-                out.human(format!("  Studio: {url}/  (from {})", folo_api::json::path(dir)))
-            }
-            Some(dir) => out.human(format!(
-                "  Studio: not built ({} has no index.html); build web/ or use the Vite dev server on :5173",
-                folo_api::json::path(dir)
-            )),
-        }
-        if !args.mock {
-            out.human(format!("  Data:   {}", folo_api::json::path(&data_dir)));
-        }
-        if token_set {
-            out.human("  Token:  required on /api (Authorization: Bearer)");
-        }
-        out.human("Press Ctrl+C to stop.");
-        out.record(&json!({
-            "event": "listening",
-            "url": url,
-            "api": format!("{url}/api"),
-            "mock": args.mock,
-            "web_source": if web_dir.is_some() { "dir" } else { "embedded" },
-            "web_dir": web_dir,
-            "web_ready": web_ready,
-            "data_dir": if args.mock { None } else { Some(&data_dir) },
-            "token": token_set,
-        }));
-        server
-            .serve(listener, folo_server::shutdown_signal())
-            .await
-            .map_err(|e| CliError::new(ExitCode::Runtime, "serve_failed", e.to_string()))?;
-        out.record(&json!({ "event": "stopped" }));
-        out.human("Stopped.");
-        Ok(())
-    })
-}
-
-/// Another process (`folo serve`, or an embedded `folo mcp`) owns `dir`; `url` is where it listens, when it says.
-fn data_dir_in_use(dir: &std::path::Path, url: Option<&str>) -> CliError {
-    let dir = folo_api::json::path(dir);
-    let hint = match url {
-        Some(url) => format!("a folo serve listens on {url}; use that one, or pass another --data-dir"),
-        None => "stop the other folo serve or folo mcp first, or pass another --data-dir".into(),
-    };
-    CliError::new(ExitCode::Runtime, "data_dir_in_use", format!("another FOLO process is using {dir}"))
-        .hint(hint)
-}
-
-/// The data dir's lock could not be taken (not merely held elsewhere): refuse rather than share the store.
-fn data_dir_lock_failed(dir: &std::path::Path, e: std::io::Error) -> CliError {
-    let lock = folo_api::json::path(dir.join("serve.lock"));
-    CliError::new(ExitCode::Runtime, "data_dir_lock_failed", format!("could not lock {lock}: {e}"))
-        .hint("the data dir must be writable and support file locks; pass another --data-dir")
-}
-
-/// `folo mcp`: MCP over stdio. stdout belongs to the protocol, so nothing else is printed there (not even with
-/// `--json`); logs go to stderr.
-fn mcp(args: McpArgs) -> Result<(), CliError> {
-    init_tracing();
-    if args.tensor_cores && args.server.is_none() {
-        // As `folo serve --tensor-cores`: before anything creates the GPU context.
-        folo_gpu::context::request_tensor_cores();
-    }
-    // Embedded mode writes there; a mock or proxying server does not.
-    let data_dir = if args.server.is_none() && !args.mock {
-        data_dir(args.data_dir.clone())?
-    } else {
-        args.data_dir.clone().unwrap_or_else(default_data_dir)
-    };
-    let mut backend = match (&args.server, args.mock) {
-        (Some(url), _) => folo_mcp::Backend::Proxy { url: url.clone(), token: args.token.clone() },
-        (None, true) => folo_mcp::Backend::Mock,
-        (None, false) => folo_mcp::Backend::Real,
-    };
-    // Embedded, it owns the data dir as `folo serve` does. When a `folo serve` (FOLO Desktop's, say) already
-    // owns it, it goes through that server instead (not with --confine: the server reads datasets unconfined).
-    let _data_lock = match backend {
-        folo_mcp::Backend::Real => match serve_lock::acquire(&data_dir) {
-            Ok(serve_lock::Acquire::Held(lock)) => Some(lock),
-            Ok(serve_lock::Acquire::InUse { url: Some(url) })
-                if !args.confine && serve_lock::serves(&url, &data_dir, args.token.as_deref()) =>
-            {
-                tracing::info!(%url, "a folo serve owns the data dir: using it (as --server)");
-                backend = folo_mcp::Backend::Proxy { url, token: args.token.clone() };
-                None
-            }
-            Ok(serve_lock::Acquire::InUse { url }) => return Err(data_dir_in_use(&data_dir, url.as_deref())),
-            Err(e) => return Err(data_dir_lock_failed(&data_dir, e)),
-        },
-        _ => None,
-    };
-    let opts = folo_mcp::Options {
-        data_dir: data_dir.clone(),
-        read_only: args.read_only,
-        confine: args.confine,
-        device: args.device.clone(),
-        published_weights: Some(folo_api::weights::cache_dir()),
-    };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| CliError::new(ExitCode::Runtime, "runtime", format!("could not start tokio: {e}")))?;
-    let result = runtime.block_on(async move {
-        let server = folo_mcp::build(backend.clone(), opts)
-            .map_err(|e| CliError::new(ExitCode::Usage, "usage", e).hint("see `folo mcp --help`"))?;
-        tracing::info!(?backend, data_dir = %folo_api::json::path(&data_dir), read_only = args.read_only, confine = args.confine, "folo mcp on stdio");
-        folo_mcp::serve_stdio(server, folo_server::shutdown_signal())
-            .await
-            .map_err(|e| CliError::new(ExitCode::Runtime, "mcp_failed", e))
-    });
-    // tokio's stdin reader sits on a blocking thread that cannot be interrupted; do not wait for it.
-    runtime.shutdown_background();
-    result
-}
-
-fn gib(bytes: u64) -> String {
-    format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
-}
-
-fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
-    let host = folo_server::system::host_info();
-    let web_dir = args.web_dir.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_WEB_DIR));
-    let web_exists = web_dir.is_dir();
-    let web_ready = folo_server::web_dir_ready(&web_dir);
-    let web_wasm = folo_server::web::dir_has_folo_wasm(&web_dir);
-    let embedded = folo_server::web::embedded();
-    let embedded_wasm = embedded.is_some_and(folo_server::web::has_folo_wasm);
-    let embedded = embedded.map(<[_]>::len);
-    let web_source = match resolve_web(args.web_dir.clone()) {
-        WebSource::Embedded => "embedded",
-        _ => "dir",
-    };
-    // Whether the Studio `folo serve` would serve can run models in the browser (its Playground's WebGPU / CPU).
-    // (`folo serve` does not serve a folder without index.html at all.)
-    let served_wasm = if web_source == "embedded" { embedded_wasm } else { web_ready && web_wasm };
-    if args.tensor_cores {
-        folo_gpu::context::request_tensor_cores();
-    }
-    let options = folo_gpu::GpuOptions::from_env();
-    let adapters = folo_gpu::GpuContext::enumerate(&options);
-    // Creating the device (the shared one, as `folo serve` does for `device: auto`) proves the default adapter
-    // works and shows which one FOLO picks.
-    let capabilities = folo_server::system::capabilities();
-    let selected = folo_gpu::GpuContext::shared().map(|c| (c.summary().clone(), c.tensor_cores_status()));
-    let gpus: Vec<_> = adapters
-        .iter()
-        .map(|a| {
-            json!({
-                "index": a.index,
-                "name": a.name,
-                "backend": a.backend.to_ascii_lowercase(),
-                "device_type": a.device_type,
-                "vendor": a.vendor,
-                "device": a.device,
-                "driver": a.driver,
-                "driver_info": a.driver_info,
-                "shader_f16": a.shader_f16,
-                "tensor_cores": a.tensor_cores,
-                "memory_bytes": a.memory_bytes,
-                "max_buffer_bytes": a.max_buffer_size,
-                "max_storage_binding_bytes": a.max_storage_buffer_binding_size,
-                "workgroup_storage_bytes": a.max_compute_workgroup_storage_size,
-                "max_invocations_per_workgroup": a.max_compute_invocations_per_workgroup,
-                "subgroup_size": [a.subgroup_size.0, a.subgroup_size.1],
-            })
-        })
-        .collect();
-    let selected_json = match &selected {
-        Ok((s, tc)) => json!({
-            "index": s.index,
-            "name": s.name,
-            "backend": s.backend.to_ascii_lowercase(),
-            "tensor_cores": tc,
-        }),
-        Err(e) => json!({ "error": e.to_string() }),
-    };
-    let report = json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "git_sha": env!("FOLO_GIT_SHA"),
-        "build_date": env!("FOLO_BUILD_DATE"),
-        "os": host.os,
-        "arch": host.arch,
-        "cpu": { "name": host.cpu_name, "threads": host.cpu_threads },
-        "memory": { "total_bytes": host.memory_total_bytes, "available_bytes": host.memory_available_bytes },
-        "gpus": gpus,
-        "gpu_detection": "wgpu",
-        "gpu_selected": selected_json,
-        "capabilities": capabilities,
-        "web_dist": { "path": web_dir, "exists": web_exists, "index_html": web_ready, "folo_wasm": web_wasm },
-        "web_embedded": { "present": embedded.is_some(), "files": embedded.unwrap_or(0), "folo_wasm": embedded_wasm },
-        "web_source": web_source,
-        "web_folo_wasm": served_wasm,
-    });
-    out.record(&report);
-    out.human(format!("folo      {VERSION}"));
-    out.human(format!("os        {} ({})", host.os, host.arch));
-    out.human(format!("cpu       {} ({} threads)", host.cpu_name, host.cpu_threads));
-    out.human(format!(
-        "memory    {} total, {} available",
-        gib(host.memory_total_bytes),
-        gib(host.memory_available_bytes)
-    ));
-    if adapters.is_empty() {
-        out.human("gpu       no adapters found (Vulkan / DX12 / Metal); FOLO runs on the CPU");
-    }
-    for a in &adapters {
-        out.human(format!("gpu       {a}"));
-    }
-    match &selected {
-        Ok((s, tc)) => {
-            out.human(format!(
-                "gpu       FOLO uses [{}] {} ({}); set {} to pick another",
-                s.index,
-                s.name,
-                s.backend,
-                folo_gpu::context::ENV_ADAPTER
-            ));
-            out.human(format!("gpu       tensor cores (f16): {tc}"));
-        }
-        Err(e) => out.human(format!("gpu       no usable adapter: {e}")),
-    }
-    let tc = &capabilities.tensor_cores;
-    let amp = match &capabilities.amp.reason {
-        None => format!("mixed-precision training (amp) available on {}", capabilities.device),
-        // The adapter has them, only this process did not ask: `folo train --amp` does.
-        Some(_)
-            if tc.available
-                && tc.reason.as_deref() == Some(folo_gpu::context::TENSOR_CORES_NOT_REQUESTED) =>
-        {
-            format!(
-                "available on {}: `folo train --amp` asks for tensor cores itself; `folo serve` and `folo mcp` need \
-                 `--tensor-cores` for amp runs",
-                capabilities.device
-            )
-        }
-        Some(why) => format!("not available: {why}"),
-    };
-    out.human(format!("amp       {amp}"));
-    let web = if web_ready {
-        "built".to_string()
-    } else if web_exists {
-        "folder exists but has no index.html".to_string()
-    } else {
-        "not built (run `npm ci && npm run build` in web/)".to_string()
-    };
-    out.human(format!("web/dist  {} — {web}", folo_api::json::path(&web_dir)));
-    let studio = match embedded {
-        Some(n) if web_source == "embedded" => format!("embedded ({n} files); `folo serve` uses it"),
-        Some(n) => format!("embedded ({n} files); `folo serve --web-dir` overrides it"),
-        None => "not embedded (build with --features embed-web)".to_string(),
-    };
-    out.human(format!("studio    {studio}"));
-    let source = if web_source == "embedded" {
-        "the embedded Studio".to_string()
-    } else {
-        folo_api::json::path(&web_dir)
-    };
-    let wasm = if served_wasm {
-        format!("folo-wasm in {source}; the Playground can run models in the browser (WebGPU or CPU)")
-    } else {
-        format!(
-            "no folo-wasm in {source}; the Playground runs models on the server only (build it with scripts/build-wasm before `npm run build`)"
-        )
-    };
-    out.human(format!("browser   {wasm}"));
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+    use serde_json::json;
 
     #[test]
     fn clap_tree_is_valid() {

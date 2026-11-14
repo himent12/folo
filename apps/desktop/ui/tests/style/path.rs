@@ -1,3 +1,6 @@
+//! Paths (`path_builder.rs`): lyon's strokes and fills, dashes, curve flattening, and `paint_path` scaling,
+//! clipping and fading.
+
 use folo_ui::{
     Bounds, BuiltPath, ContentMask, PathBuilder, PathKind, Pixels, Point, Primitive, Scene, StylePaint,
     linear_color_stop, linear_gradient, paint_path, point, px, red, size,

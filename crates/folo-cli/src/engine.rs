@@ -1,4 +1,5 @@
-//! Glue between the CLI and the engine: opening datasets and mapping engine errors to CLI errors.
+//! Glue between the CLI and the engine: opening datasets, registering the GPU backend for `--device`, and mapping
+//! engine errors to CLI errors.
 
 use std::path::Path;
 

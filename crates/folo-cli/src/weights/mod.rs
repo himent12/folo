@@ -1,5 +1,8 @@
 //! `folo weights`: published pretrained weights, downloaded from a GitHub release into a local cache, and the
 //! name → path resolution behind `folo train --weights <name>` and `--model <name>` (docs/CLI.md, Weights).
+//!
+//! This file holds `list`, `pull` (checksum check and install) and the resolution; `download.rs` fetches a
+//! release's files (HTTPS first, the GitHub CLI as the fallback). The published names are `folo_api::weights`.
 
 mod download;
 

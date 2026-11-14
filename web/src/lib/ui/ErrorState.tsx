@@ -1,3 +1,5 @@
+// How a screen or a panel shows an error: what went wrong, what to do and Retry; a 404 for something deleted since
+// says it is gone and links to its list.
 import Crosshair from '$icons/crosshair';
 import TriangleAlert from '$icons/triangle-alert';
 import RotateCw from '$icons/rotate-cw';

@@ -1,11 +1,13 @@
+// Sample images for the Playground's empty state: from the first four datasets, those with the selected model's class
+// list first.
 import { computed, type ReadSignal } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, DatasetImage as Img, Model } from '$lib/api/types';
 
 /**
- * Sample images for the empty state: a few from each dataset, the selected model's own dataset first. Undefined while
- * they load. Call in a component's body.
+ * Sample images for the empty state: a few from each of the first four datasets, those with the selected model's class
+ * list first. Undefined while they load. Call in a component's body.
  */
 export function sampleImages(model: ReadSignal<Model | null>): ReadSignal<{ ds: Dataset; img: Img }[] | undefined> {
   const pool = new Resource(async (s) => {

@@ -9,6 +9,8 @@
 //! - [`plan`]: the catalog, the default plan and plan validation.
 //! - [`score`]: every number of docs/BENCH.md's *Definitions*: accuracy with its bootstrap interval, robustness,
 //!   self-labeling, calibration, localization and the total, returned as the [`folo_api`] wire types.
+//! - `pixels.rs` (private): the pixel kernels behind the conditions (sRGB tables, seeded noise, convolution,
+//!   resampling).
 //!
 //! It is a pure library: no files, no threads of its own (rayon data parallelism only), no server types. AP comes
 //! from [`folo_vision::Evaluator`] and [`folo_vision::cocoeval::CocoEval`]; there is no second AP here. Every

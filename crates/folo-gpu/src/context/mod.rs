@@ -1,4 +1,16 @@
 //! [`GpuContext`]: adapter selection, device + queue, buffer pool, pipeline cache and command batching.
+//!
+//! - `mod.rs`: [`GpuContext`], [`GpuOptions`], [`Capabilities`], the `FOLO_GPU_*` environment variables and the
+//!   shared context.
+//! - `device.rs`: adapter selection and device creation ([`AdapterSummary`], [`GpuContext::enumerate`]).
+//! - `memory.rs`: allocation from the buffer pool and uploads.
+//! - `batch.rs`: the open command batch: `GpuContext::kernel` (compile or fetch a pipeline) and
+//!   `GpuContext::dispatch`, which encode into it, and its submission.
+//! - `binds.rs`: the bind-group cache.
+//! - `readback.rs`: reading buffers back to the host; `wait.rs`: [`GpuContext::sync`] and device-loss handling.
+//! - `plan.rs`: frozen dispatch lists and forward plans ([`Frozen`]).
+//! - `precompile.rs`: [`GpuContext::precompile`], compiling a recorded kernel list on worker threads.
+//! - `trace.rs`: recording a pass's operations ([`TracedOp`]) and the per-kernel timestamps.
 
 mod batch;
 pub(crate) mod binds;

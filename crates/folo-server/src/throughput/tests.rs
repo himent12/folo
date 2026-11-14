@@ -1,3 +1,6 @@
+//! Unit tests of the throughput table and estimates: series, estimates against hand-computed cases and the
+//! reference, the API table's rows and the table's file.
+
 use super::*;
 use folo_api::{Confidence, ThroughputSource};
 use folo_test_support::TestDir;

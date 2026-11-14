@@ -1,4 +1,4 @@
-// // A tiny hash router. Hash URLs (`#/runs/run_7d1e`) work behind any static file server, including `folo serve`; a
+// A tiny hash router. Hash URLs (`#/runs/run_7d1e`) work behind any static file server, including `folo serve`; a
 // path URL (`/runs/run_7d1e`) is moved to its hash route on load.
 
 import { computed, signal } from 'fw';

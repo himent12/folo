@@ -1,3 +1,6 @@
+//! Unit tests of `folo train`: `--set` overrides, what `--resume` refuses, distinct run folders for concurrent
+//! runs, and the server's CLI commands parsing into the server's config.
+
 use super::config::apply_sets;
 use super::resume::same;
 use folo_test_support::TestDir;

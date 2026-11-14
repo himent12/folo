@@ -1,5 +1,16 @@
 //! HTTP handlers for every endpoint of `docs/API.md`.
+//!
+//! [`api`] is the `/api` router: every path and the handler it calls. A handler parses the request, calls the
+//! [`Store`] (through [`blocking`] when the call may read files or burn CPU) and turns the answer into JSON, SSE or
+//! bytes; errors leave as [`Error`]. One file per area, named for the `docs/API.md` section it serves:
+//! - `system`: *System* (`/health`, `/system`) and *Throughput and estimates* (`/system/throughput`,
+//!   `/system/benchmark`);
+//! - `datasets`: *Datasets*; `models`: *Models* (`/models`) and *Validation* (`/val`); `inference`: *Inference*;
+//! - `runs`: *Training runs* (also `/runs/estimate` of *Throughput and estimates*), with the SSE stream of a run;
+//! - `uploads`: *Uploads*; `cloud`: *Cloud compute*; `label`: *Agent labeling*;
+//! - `bench`: *Vision benchmarks* (its own [`Router`], merged into [`api`]).
 
+mod bench;
 mod cloud;
 mod datasets;
 mod inference;
@@ -114,7 +125,7 @@ pub fn api() -> Router<AppState> {
         .route("/label/jobs/{id}/events", get(label_events))
         .route("/label/jobs/{id}/logs", get(label_logs))
         .route("/label/jobs/{id}/dataset", post(label_dataset))
-        .merge(crate::bench::http::routes())
+        .merge(bench::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }

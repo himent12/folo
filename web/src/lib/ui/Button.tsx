@@ -1,3 +1,4 @@
+// The button (or, with `href`, a link drawn as one): variants, sizes, icons and a loading state.
 import { computed, css, defaults, Dynamic, splitProps, type ElementProps } from 'fw';
 import Spinner from './Spinner';
 import type { IconType } from './types';

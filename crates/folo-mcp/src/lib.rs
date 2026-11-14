@@ -6,6 +6,18 @@
 //! rules. This crate adds the FOLO tools, resources and prompts on top of a [`Store`]: the embedded
 //! [`RealStore`] or [`MockStore`], or [`proxy::HttpStore`], which forwards to a running `folo serve`. Tool
 //! schemas are generated with schemars from the `folo-api` types, so they match the HTTP API.
+//!
+//! [`build`] picks the store for a [`Backend`] and [`serve_stdio`] runs the session; `folo mcp`
+//! (crates/folo-cli/src/mcp.rs) calls both. The modules:
+//!
+//! - `server`: the rmcp `ServerHandler` ([`FoloMcp`]): tools, resources and subscriptions, prompts, logging.
+//! - `tools/`: the tool table, its schemas and argument checks, and one handler file per area.
+//! - `resources`: `folo://` URIs, listing and templates; `render`: the sample-grid JPEG of
+//!   `folo://runs/{id}/samples/{epoch}`.
+//! - `prompts`: `train_on_folder` and `diagnose_run`.
+//! - [`proxy`]: `--server`, a `Store` over the HTTP API through `folo-client`.
+//! - `paths` and `confine`: relative input paths and `--confine`.
+//! - `errors`: tool errors (the server's error type); [`types`]: the MCP-only argument and result types.
 
 mod confine;
 mod errors;

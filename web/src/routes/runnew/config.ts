@@ -1,3 +1,4 @@
+// The New run form as a `TrainConfig`: the request the estimate, the CLI command and Start send.
 import type { Arch, Augment, Capabilities, Device, Optimizer, TrainConfig } from '$lib/api/types';
 import type { CloudPick } from './cloudPick';
 import { runName } from './name';

@@ -1,12 +1,31 @@
 //! FOLO Studio server: HTTP + SSE API for datasets, training runs and inference.
 //!
-//! Implements the contract in `docs/API.md` on axum. Handlers sit on a [`Store`]: [`MockStore`] serves deterministic
-//! synthetic data (`folo serve --mock`), [`RealStore`] serves datasets from disk (read with folo-data, indexed and
-//! cached under the data dir), trains runs with folo-vision's trainer on a background worker, lists their models,
-//! runs inference, has coding agents label images ([`label`]) and runs vision benchmarks ([`bench`]). The request / response types live in the `folo-api` crate (re-exported as [`api`]) so the CLI and
-//! FOLO Desktop share them.
+//! Implements the contract in `docs/API.md` on axum. `folo serve` (crates/folo-cli) runs it, and `folo mcp`
+//! (crates/folo-mcp) calls the same [`Store`] without HTTP. [`Server::new`] builds the router: `routes::api()` nested
+//! under `/api` (behind the token check when there is a token), the web app as the fallback ([`WebSource`]: a folder
+//! such as `web/dist`, or the copy compiled in by the `embed-web` feature, [`web`]), wrapped from the inside out in
+//! the origin guard, compression, CORS, the `Host` guard (on loopback) and request logging.
 //!
-//! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
+//! Handlers sit on a [`Store`]: [`MockStore`] serves deterministic synthetic data (`folo serve --mock`),
+//! [`RealStore`] serves datasets from disk (read with folo-data, indexed and cached under the data dir), trains runs
+//! with folo-vision's trainer on a background worker, lists their models, runs inference, has coding agents label
+//! images ([`label`]), runs vision benchmarks ([`bench`](mod@bench)) and sends runs to other machines' GPUs
+//! ([`cloud`]). The request / response types live in the `folo-api` crate (re-exported as [`api`]) so the CLI, the
+//! MCP server, the client and FOLO Desktop share them.
+//!
+//! Modules:
+//! - `routes`: the `/api` router and one handler file per area of `docs/API.md`.
+//! - [`store`]: the [`Store`] trait; [`mock`] and [`real`]: its two implementations.
+//! - `runs`: the real store's training runs (registry, FIFO queue, worker thread, run folders).
+//! - [`cloud`]: the cloud control plane; [`label`]: agent labeling; [`bench`](mod@bench): vision benchmarks.
+//! - [`throughput`]: the measured throughput table and run-time estimates; `probe`: `POST /api/system/benchmark`.
+//! - `index`: dataset indexes and thumbnails on disk; `stats`: dataset statistics; `models`: the real store's models;
+//!   `uploads`: upload sessions; `engine`: devices, GPU info, engine error mapping and the predictor cache.
+//! - [`error`]: the error envelope and the extractors that use it; [`web`]: the embedded Studio; [`cli`]: the
+//!   `folo train` command of a run; [`system`]: host CPU and memory.
+//! - `raster`: the rasteriser of mock images; `util`: small helpers.
+//!
+//! `crates/folo-server/README.md` maps the crate; `docs/ARCHITECTURE.md` shows how it fits into FOLO.
 
 pub mod bench;
 pub mod cli;

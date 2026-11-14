@@ -5,9 +5,14 @@
 //! - Layers: [`Conv2d`], [`BatchNorm2d`], [`Linear`], [`Activation`], [`MaxPool2d`], [`Upsample`],
 //!   [`Concat`], [`Identity`], [`Sequential`], [`ModuleList`], and [`ConvBnAct`] (docs/MODEL.md's `Conv`).
 //! - [`init`]: seeded Kaiming / Xavier and the head priors.
-//! - [`optim`]: [`optim::Sgd`], [`optim::AdamW`], parameter groups, gradient accumulation and clipping.
+//! - [`optim`]: [`optim::Sgd`], [`optim::AdamW`], [`optim::MuSgd`], parameter groups, gradient accumulation and
+//!   clipping.
 //! - [`LrSchedule`] (warmup + linear / cosine) and [`ModelEma`].
+//! - [`amp`]: [`GradScaler`], the dynamic loss scaling of mixed-precision training.
 //! - [`io`]: `.folo` read / write, strict and partial loading, checkpoints, export with Conv+BN fusion.
+//!
+//! Files: `module.rs` ([`Module`], [`Forward`]), `layers/`, `init.rs`, `optim/`, `sched.rs` ([`LrSchedule`]),
+//! `ema.rs` ([`ModelEma`]), `amp.rs`, `io/` and `error.rs` ([`Error`]). `crates/folo-nn/README.md` maps them.
 //!
 //! ```
 //! use folo_core::{rng::Rng, Tensor};

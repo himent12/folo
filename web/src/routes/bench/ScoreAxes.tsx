@@ -1,3 +1,4 @@
+// An entry's five score axes at a glance (one small bar each), and the same axes in words.
 import { computed, css, For } from 'fw';
 import type { BenchAxisScore } from '$lib/api/types';
 import { AXIS_NAME } from '$lib/bench/rules';

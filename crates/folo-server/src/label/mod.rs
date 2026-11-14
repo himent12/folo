@@ -6,6 +6,12 @@
 //! [`ClaudeCode`] and [`Codex`] drive the two CLIs as child processes, one model request per call, and tests put
 //! scripted agents in their place ([`Labeler::set_agents`]). How a call is kept cheap is in [`claude`] and
 //! [`codex`]; what a run does when calls fail is in the `run` module.
+//!
+//! Files: this one holds [`Labeler`]; `job` (one job: `job.json`, its state and events), `images` (adding, listing,
+//! editing and removing a job's images), `labeling` (starting and stopping a run), `run` (a run, batch by batch),
+//! [`agent`] (the [`Agent`] trait and running a CLI with a deadline), [`claude`] and [`codex`] (the two agents),
+//! `tree` (a child process with everything it starts), [`prompt`] (what an agent is asked and how its reply is read),
+//! `validate` (checks of what clients send), `export` and `dataset` (the YOLO dataset a job becomes).
 
 pub mod agent;
 pub mod claude;

@@ -1,3 +1,5 @@
+// The Datasets list (`#/datasets`): every registered dataset with its class balance and box count, and adding one
+// (a folder to register, or a generated sample set). The parts are in ./datasets/.
 import FolderOpen from '$icons/folder-open';
 import Images from '$icons/images';
 import Plus from '$icons/plus';

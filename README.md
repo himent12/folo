@@ -259,20 +259,44 @@ Read on in [docs/AGENT_COOKBOOK.md](docs/AGENT_COOKBOOK.md) (recipes for both fo
 ## Architecture at a glance
 
 ```
- folo (CLI) ─────┬──────────────► folo-server (axum, HTTP + SSE) ◄── FOLO Studio (web/), FOLO Desktop (apps/desktop/)
- folo mcp ───────┘                     │  docs/API.md, types in folo-api
-                                       ▼
-                folo-vision: detector (folo-n/s/m/l/x), loss, assigner, NMS, mAP, trainer, predictor
-                  │                      │                        │
-             folo-nn: layers,       folo-data: YOLO / COCO,   folo-wasm: the predictor in the
-             optimizers, .folo      augmentation, loader      browser (WebGPU or wasm CPU)
-                  │
-             folo-core: tensors, autograd, CPU kernels ◄── folo-gpu: wgpu device, WGSL kernels
+ FOLO Studio (web/)   FOLO Desktop (apps/desktop/)     the apps: HTTP + SSE to folo-server (docs/API.md)
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ folo-cli      the `folo` binary: train, val, predict, export, serve, mcp, dataset, weights, cloud, ...
+ folo-mcp      `folo mcp`: MCP over stdio, on the server's Store (in process, or proxying `folo serve`)
+ folo-server   axum HTTP + SSE: datasets, runs and their queue, models, labeling, cloud runs; serves Studio
+ folo-bench    vision benchmarks       folo-cloud    RunPod, remote servers   folo-wasm    the browser build
+ folo-client   blocking HTTP client of the API
+ folo-vision   detector (folo-n/s/m/l/x), loss, assigner, NMS, mAP, trainer, predictor, ONNX export
+ folo-nn       layers, optimizers      folo-data     datasets, augmentation   folo-gpu     wgpu, WGSL kernels
+ folo-core     tensors, autograd, CPU kernels, the Backend trait              folo-api     the wire types
 ```
+
+Each crate uses only crates on the rows below it (dev-dependencies aside), and folo-test-support, temporary
+directories for tests, is only ever a dev-dependency. FOLO Desktop also links folo-vision and the engine crates to run
+models in its Playground. [crates/README.md](crates/README.md) lists every crate with its exact dependencies.
 
 Everything ML is written here: the kernels, autograd, layers, optimizers, detector, loss, assigner, NMS, metrics,
 augmentation and GPU kernels. Commodity crates do the commodity jobs: wgpu, rayon, image decoding, serde, axum and
 clap. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the full picture.
+
+### Where things are
+
+| folder | what is there |
+|---|---|
+| [crates/](crates/README.md) | The cargo workspace: the engine and the services above, with a README per crate |
+| [web/](web/README.md) | FOLO Studio (TypeScript + Vite) and, in `web/framework/`, its own UI framework |
+| [apps/desktop/](apps/desktop/README.md) | FOLO Desktop and folo-ui (`ui/`), its UI framework: their own cargo workspace |
+| [design/](design/README.md) | The design tokens, fonts and logos both apps share |
+| [docs/](docs/README.md) | The documentation, grouped by task; `docs/notes/` holds the engineering notebooks |
+| [examples/](examples/README.md) | The shapes convergence test, the COCO pretraining runs, an external benchmark entry |
+| [bench/](bench/README.md) | Python harnesses outside cargo: the Ultralytics baselines, fine-tuning accuracy and more |
+| [tools/](tools/README.md) | CI and development helpers, and the chart generator |
+| [scripts/](scripts/README.md) | The wasm build and the install scripts |
+| [site/](site/README.md) | The generator of the docs website |
+| [.github/](.github/) | The CI workflows ([docs/CI.md](docs/CI.md)) and the issue and pull request templates |
+
+To find the files for a change, start at the "Where do I change ...?" table in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Project status
 
@@ -320,17 +344,22 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 | [AGENT_COOKBOOK](docs/AGENT_COOKBOOK.md) | Recipes for agents, as MCP tool calls and as `--json` commands |
 | [MCP](docs/MCP.md) | The `folo mcp` contract: tools, resources, prompts, errors |
 | [API](docs/API.md) | The HTTP + SSE API behind Studio and Desktop |
+| [SERVER](docs/SERVER.md) | Inside folo-server: the router, the Store and the services behind the API |
 | [BENCHMARKS](docs/BENCHMARKS.md) | FOLO against Ultralytics on one machine: method, numbers, accuracy |
-| [ARCHITECTURE](docs/ARCHITECTURE.md) | The crates and how they fit together |
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | A map of the repository: the crates, how they fit together, where to change what |
 | [MODEL](docs/MODEL.md) | The detector, loss and training recipe (normative spec) |
+| [VISION](docs/VISION.md) | A tour of folo-vision's code: the model, loss, assigner, trainer and predictor |
 | [DATA](docs/DATA.md) | Dataset formats, augmentation, the data loader |
 | [WASM](docs/WASM.md) | FOLO in the browser: the build, JS API, performance |
+| [CORE](docs/CORE.md) | folo-core in depth: tensors, CPU kernels, autograd |
 | [GPU](docs/GPU.md) | The wgpu backend, the buffer pool, the WGSL kernels |
 | [NN](docs/NN.md) | Layers, optimizers, LR schedules, `.folo` IO |
 | [FORMAT](docs/FORMAT.md) | The `.folo` weights and checkpoint format |
 | [METRICS](docs/METRICS.md) | How mAP, precision and recall are computed |
 | [ROADMAP](docs/ROADMAP.md) | What is done, in progress and next |
 | [CHANGELOG](CHANGELOG.md) · [RELEASE](docs/RELEASE.md) · [CI](docs/CI.md) | What each release changed, how releases are cut, what CI checks |
+
+[docs/README.md](docs/README.md) groups every doc by what you want to do, with a reading order for new contributors.
 
 Examples: [shapes](examples/shapes/README.md) (the convergence test, on CPU and GPU) and
 [coco](examples/coco/README.md) (folo-n and folo-s pretrained from scratch on COCO 2017).

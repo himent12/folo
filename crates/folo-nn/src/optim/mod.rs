@@ -1,8 +1,15 @@
-//! Optimizers (SGD with Nesterov momentum, AdamW), parameter groups, gradient accumulation and clipping.
+//! Optimizers (SGD with Nesterov momentum, AdamW, MuSGD), parameter groups, gradient accumulation and clipping.
 //!
 //! Update rules are exactly docs/MODEL.md §8.2. Hyperparameters are `f64`; the per-element arithmetic is
 //! `f32`, like the tensors. A parameter with no gradient in a step is skipped entirely (no decay, no state
 //! change), as in PyTorch.
+//!
+//! - `sgd.rs`: [`Sgd`]. `adamw.rs`: [`AdamW`].
+//! - `musgd.rs`: [`MuSgd`], SGD plus the Muon update, and its Newton–Schulz [`orthogonalize`].
+//! - `grads.rs`: [`GradAccumulator`] (accumulation over several backward passes, clipping) and
+//!   [`global_grad_norm`].
+//! - This file: the [`Optimizer`] trait, [`OptimKind`], [`ParamGroup`], [`StandardGroups`],
+//!   [`effective_weight_decay`] and the `auto` optimizer rule ([`auto_optimizer_rule`]).
 //!
 //! ```
 //! use folo_core::{rng::Rng, Tensor};
@@ -58,7 +65,7 @@ pub enum OptimKind {
 }
 
 impl OptimKind {
-    /// `"sgd"` or `"adamw"`.
+    /// `"sgd"`, `"adamw"` or `"musgd"`.
     pub fn as_str(self) -> &'static str {
         match self {
             OptimKind::Sgd => "sgd",
@@ -191,7 +198,7 @@ impl GradSource for Grads {
 
 /// An optimizer over [`ParamGroup`]s.
 pub trait Optimizer: Send {
-    /// SGD or AdamW.
+    /// SGD, AdamW or MuSGD.
     fn kind(&self) -> OptimKind;
 
     /// The groups.

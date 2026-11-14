@@ -1,4 +1,11 @@
 //! Datasets: the [`Dataset`] trait, YOLO and COCO readers with format auto-detection, and the load report.
+//!
+//! - `yolo.rs`: the YOLO reader (`data.yaml`, `images/` + `labels/`) and [`label_path_for`]; `labels.rs`: YOLO
+//!   label text parsing (boxes and segment polygons).
+//! - `coco.rs`: COCO instances JSON, and the ground-truth reader [`open_coco_ground_truth`].
+//! - `cache/`: the on-disk scan cache (docs/DATA.md, Scan cache).
+//! - This file: [`Dataset`], [`FileDataset`], [`InMemoryDataset`], [`Split`], [`Format`], [`LoadReport`],
+//!   [`open`] / [`open_with`] / [`open_splits`] and [`detect_format`].
 
 pub(crate) mod cache;
 mod coco;

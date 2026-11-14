@@ -1,3 +1,4 @@
+// The phone tab bar: one tab per section of `tabNav` (./nav).
 import { computed, css, Dynamic, For } from 'fw';
 import { router, section, href } from '$lib/router';
 import { tabNav, tabOf } from './nav';

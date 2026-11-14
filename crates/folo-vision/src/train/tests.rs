@@ -1,3 +1,6 @@
+//! Unit tests of the trainer's internals on a micro run: the prefetched epoch, chunked downloads, the ETA by
+//! mosaic phase, `close_mosaic` across resumes, lost-device messages and early stopping.
+
 use std::path::Path;
 
 use folo_api::RunEvent;

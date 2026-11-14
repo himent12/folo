@@ -1,4 +1,4 @@
-// // Paged, cached access to a dataset's image list for one filter (split, class). The virtualised grid asks for the
+// Paged, cached access to a dataset's image list for one filter (split, class). The virtualised grid asks for the
 // rows it shows; the inspector asks for neighbours and resolves linked image ids. Pages load once and stay cached,
 // until `reload()` says the dataset changed on disk.
 

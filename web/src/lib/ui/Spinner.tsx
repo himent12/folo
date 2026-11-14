@@ -1,3 +1,4 @@
+// The small spinning ring; with a `label` it is a status that screen readers announce.
 import { css, defaults } from 'fw';
 
 export default function Spinner(props: { size?: number; label?: string }) {

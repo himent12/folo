@@ -1,3 +1,4 @@
+// The keyboard shortcuts dialog: every shortcut, by group.
 import { bindable, computed, css, For } from 'fw';
 import { isApple } from '$lib/keys';
 import Dialog from '$lib/ui/Dialog';

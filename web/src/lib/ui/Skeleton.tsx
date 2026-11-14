@@ -1,3 +1,4 @@
+// A loading placeholder: a block, a stand-in in a line of text, or a photo's place with viewfinder corners.
 import { css, defaults } from 'fw';
 
 export interface SkeletonProps {

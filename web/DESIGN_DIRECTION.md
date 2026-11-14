@@ -1,5 +1,9 @@
 # FOLO Studio design direction
 
+The design rules FOLO Studio's code follows. [README.md](README.md) maps Studio's code,
+[design/README.md](../design/README.md) the tokens, and [design/UNIFIED.md](../design/UNIFIED.md) the look Studio
+shares with FOLO Desktop.
+
 Written after round 4 by a design-director pass (Claude Opus 5.5) over every round-4 screenshot and the source.
 Round 5 onwards is implemented against this document; per-issue fixes come after the system changes in §5.
 

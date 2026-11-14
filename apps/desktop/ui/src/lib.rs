@@ -1,5 +1,17 @@
 //! folo-ui: FOLO Desktop's own UI framework (`ui/DESIGN.md`). GPUI's API for the subset the app uses,
 //! rendered on the CPU in tiles, with Win32, winit and headless platforms.
+//!
+//! Everything public is re-exported flat from the crate root (and `prelude`), as GPUI does. The modules,
+//! bottom-up (`ui/README.md` has the table with what each holds):
+//!
+//! - foundation: `geometry`, `color`, `shared_string`, `input_events`, `keystroke`, `scene`, `opacity`;
+//!   the platform contract (`platform`, backends in `platform/windows`, `platform/winit`,
+//!   `platform/headless`) and the text system ([`text`], backends in `text/dwrite` and `text/portable`);
+//! - style and layout: `style`, `styled`, `layout`, `path_builder`, `svg`, `image`, `easing`, `assets`;
+//! - the renderer: [`raster`], the CPU tile renderer that turns a `Scene` into a `Framebuffer`;
+//! - the runtime: `app`, `executor`, `action`, `keymap`, `view`;
+//! - the window and elements: `window`, `interactive`, `element`, `elements`;
+//! - `headless_app`: `HeadlessApp`, the harness over the headless platform for tests and `--shot`.
 
 // Foundation: value types, events, the platform and text contracts, the scene.
 mod color;

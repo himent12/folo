@@ -18,6 +18,18 @@
 //! Cloud runs (`config.compute`, docs/CLOUD.md) share the registry, the run folder and the event sink, but not the
 //! queue, the worker thread or the device: [`crate::cloud`] claims such a run when it registers it and executes it
 //! on a thread of its own through the same [`RunEntry::execute`]. They do not feed the throughput table.
+//!
+//! Files:
+//! - `queue`: creating runs, the FIFO queue and its worker thread (`folo-runs`), stops and shutdown;
+//! - `train`: the worker's training of one run (building its [`Trainer`](folo_vision::Trainer), measuring its
+//!   throughput);
+//! - `entry`: one run: its record, its log, its events (the trainer's sink, [`RunEntry::on_event`]) and how its
+//!   execution ends;
+//! - `history`: event subscriptions, metrics and logs, and bringing `run.json` up to the files after a crash;
+//! - `registry`: loading the registry from disk, looking runs up, listing and deleting them, the device gate of
+//!   benchmark probes;
+//! - `resume`: resuming a stopped or failed run, here or on a cloud connection;
+//! - `tests`: unit tests of the above.
 
 mod entry;
 mod history;

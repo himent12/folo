@@ -1,3 +1,4 @@
+// The loss chart's control: smoothing (raw or an EMA) and the y scale, in a popover, or a sheet on phones.
 import ChevronDown from '$icons/chevron-down';
 import Check from '$icons/check';
 import { bindable, createUniqueId, css, effect, For, MediaQuery, signal, tick } from 'fw';

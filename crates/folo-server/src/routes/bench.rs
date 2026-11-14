@@ -1,4 +1,4 @@
-//! The `/api/bench` handlers (docs/API.md, *Vision benchmarks*): glue between HTTP and [`super::Benches`],
+//! The `/api/bench` handlers (docs/API.md, *Vision benchmarks*): glue between HTTP and [`Benches`],
 //! which every store that has benchmarks hands out ([`crate::Store::benches`]; the mock has none: `501`).
 
 use std::convert::Infallible;
@@ -23,6 +23,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
+use crate::bench::Benches;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
 use crate::routes::{DEFAULT_LIMIT, KEEP_ALIVE, MAX_LIMIT, MAX_UPLOAD_BYTES, blocking, image_response};
 
@@ -291,7 +292,7 @@ async fn events(
     let rest = BroadcastStream::new(rx).map(move |r| match r {
         Ok(ev) => Some(ev),
         Err(BroadcastStreamRecvError::Lagged(_)) => {
-            super::Benches::current(&slot).map(|b| BenchEvent::Bench(Box::new(b)))
+            Benches::current(&slot).map(|b| BenchEvent::Bench(Box::new(b)))
         }
     });
     let stopped = async move {

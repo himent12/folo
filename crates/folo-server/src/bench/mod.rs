@@ -8,6 +8,8 @@
 //!
 //! - `state`: a benchmark's files (`bench.json`, `images/`, `entries/<id>.json`, `loops/<id>.json`, all written
 //!   atomically), its state in memory and its event channel;
+//! - `benchmarks`: making a benchmark, editing and deleting it, serving its images; `entries`: starting, stopping,
+//!   reading and deleting entries, and what every kind of entry shares;
 //! - `source`: where images and truth come from; `images`: serving images and variants;
 //! - `model`: the model-entry queue (one worker thread) and the predictor pipeline; `agent`: agent entries (a
 //!   thread each, as labeling runs); `external`: predictions made elsewhere, in one request or in parts (open
@@ -19,7 +21,6 @@ mod benchmarks;
 mod design;
 mod entries;
 mod external;
-pub mod http;
 mod images;
 mod loops;
 mod model;

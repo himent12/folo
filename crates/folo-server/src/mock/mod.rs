@@ -3,6 +3,12 @@
 //! Three procedural datasets, six models, six finished runs (one stopped, one failed) with full metric histories,
 //! and one live run that advances in real time (100 epochs in ~10 minutes, then it loops). Runs created through the
 //! API are simulated the same way. Datasets registered from disk are scanned for real.
+//!
+//! Files: `store` is the [`Store`] implementation; `catalog` seeds the datasets, runs and models; `datasets`
+//! (procedural and registered datasets), `scene` (procedural images and their exact labels), `runs/` (simulated
+//! runs: curves, clock, events, the shared training slot), `models` (fake detections and evaluations), `val`
+//! (`POST /api/val`), `weights` (generated `.folo` files for `GET /api/models/{id}/weights`), `throughput` (a fixed
+//! throughput table) and `cloud` (simulated cloud compute, [`MockCloud`]) hold the rest.
 
 mod catalog;
 mod cloud;

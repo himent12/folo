@@ -1,4 +1,22 @@
 //! Tensor ops. Each op validates its arguments, calls the device backend, and records autograd.
+//!
+//! Every op is a method on [`Tensor`]; the files only group them. An op that takes part in autograd records its
+//! backward closure on the result with `Tensor::track` or `Tensor::track_saved` (`tensor.rs`), next to the
+//! backend call; the closure builds the input gradients from ordinary ops (often a `*_backward` backend method).
+//!
+//! - `mod.rs`: shared helpers: read views of several tensors, the `grads!` macro, dtype and device checks.
+//! - `elementwise.rs`: unary and broadcasting binary ops, and comparisons.
+//! - `reduce.rs`: reductions, the softmax family and top-k.
+//! - `nn.rs`: matrix products, convolution, pooling and upsampling.
+//! - `view.rs`: views that only change the layout, and `contiguous`.
+//! - `copy.rs`: ops that build new storage: concatenation, splitting, indexing, selection (`where_cond`),
+//!   padding, conversion.
+//! - `inplace.rs`: in-place updates for optimizers and buffers.
+//! - `overload.rs`: the `+ - * /` and unary `-` operators.
+//! - `fused.rs`: fused ops behind optional `Backend` hooks (conv + bias + activation, train-mode BatchNorm,
+//!   optimizer steps, the loss scaler's unscale), with composite fallbacks.
+//! - `muon.rs`: MuSGD's fused Muon update.
+//! - `vision.rs`: detector pre- and post-processing hooks (letterboxing, detection candidates).
 
 mod copy;
 mod elementwise;

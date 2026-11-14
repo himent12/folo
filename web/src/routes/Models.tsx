@@ -1,3 +1,6 @@
+// The Models list (`#/models`): every model, grouped by the dataset and split its score is on (published weights and
+// imported files in groups of their own). Each comparable group is ranked on its own; the published, imported and
+// unknown-split groups are not ranked. The parts are in ./models/.
 import Box from '$icons/box';
 import Plus from '$icons/plus';
 import Search from '$icons/search';

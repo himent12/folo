@@ -1,3 +1,4 @@
+// What New run's Summary and its dock show: the server's estimate when there is one, else the reference figures.
 import type { Augment, Capabilities, Dataset, Model, Optimizer, RunEstimate } from '$lib/api/types';
 import { compact, deviceName, num, sentence } from '$lib/format';
 import { FROM_SCRATCH } from '$lib/lineage';

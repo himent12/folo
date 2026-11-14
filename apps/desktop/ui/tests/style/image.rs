@@ -1,3 +1,6 @@
+//! Images (`image.rs`): a `RenderImage` holds BGRA frames with unique ids, and each `ObjectFit` places an image
+//! as GPUI does.
+
 use folo_ui::{Bounds, DevicePixels, ObjectFit, Pixels, RenderImage, point, px, size};
 use std::time::Duration;
 

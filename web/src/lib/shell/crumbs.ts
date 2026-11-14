@@ -1,4 +1,4 @@
-// // Per-page chrome: breadcrumbs shown in the top bar, and whether the page owns a create action. Pages call
+// Per-page chrome: breadcrumbs shown in the top bar, and whether the page owns a create action. Pages call
 // `setCrumbs` (and `ownCreateAction`) from their body.
 
 import { effect, signal, untrack } from 'fw';

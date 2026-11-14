@@ -423,7 +423,7 @@ jobs:
         with:
           name: wasm
           path: dist
-      # The install scripts ship as assets too, so a user can fetch one without cloning (README.md, Install).
+      # The install scripts ship as assets too, so a user can fetch one without cloning (README.md, Quickstart).
       - name: install scripts
         run: |
           set -euo pipefail

@@ -49,18 +49,21 @@ npm run shoot      # screenshots of the built site into site/shots (installed Ch
   a drawer. Every control has a visible focus ring, there is a skip link, and wide tables and code blocks become
   keyboard-scrollable regions when they overflow.
 
-## Layout of this folder
+## Where things are
 ```
-scripts/config.ts     sources, sidebar groups, URL scheme
+scripts/config.ts     sources, sidebar groups (NAV), URL scheme
 scripts/generate.ts   Markdown -> .gen/ (pages, search.json, llms*.txt, media); throws on any broken link
 scripts/markdown.ts   markdown-it setup: heading ids, highlighting, copy buttons, tables, status markers
 scripts/links.ts      link and image resolution and checking
+scripts/media.ts      intrinsic image sizes (PNG, JPEG, WebP), so every <img> gets width and height
 scripts/landing.ts    the landing page from README.md
 scripts/layout.ts     the HTML shell (top bar, sidebar, table of contents, search dialog)
-scripts/tokens.ts     design/tokens.json -> CSS variables
+scripts/tokens.ts     design/tokens.json -> CSS variables and @font-face rules
 scripts/check.ts      `npm run check`
 scripts/shoot.ts      `npm run shoot`
-src/                  the client script and styles
+src/main.ts           the client: theme switch, mobile navigation, search, contents tracking, copy buttons
+src/search.ts         search over the prebuilt index (search.json), loaded on first use
+src/styles/           base, layout (the shell and its tiers), prose (rendered Markdown), landing, search
 vite.config.ts        runs the generator; .gen/ is Vite's root, dist/ the output
 ```
 `.gen/`, `dist/` and `shots/` are generated and ignored by git.
@@ -69,6 +72,13 @@ CI's `site` workflow (`.github/workflows/site.yml`, docs/CI.md) runs `npm ci && 
 when the site, a Markdown file or an example changes.
 
 ## Adding a page
-Add the Markdown file under `docs/` (or an `examples/<name>/README.md`), then add it to `NAV` in `scripts/config.ts`
-under the right group with a short sidebar label. Its H1 is the page title and its first paragraph the page
-description.
+1. Write the Markdown file under `docs/` (or an `examples/<name>/README.md`). Its H1 is the page title and its first
+   paragraph the page description. Links are relative, GitHub-style, with the exact path case.
+2. Add it to `NAV` in `scripts/config.ts` under the right group with a short sidebar label; the build fails while a
+   doc is missing from `NAV`.
+3. Link it from the Docs table of the root `README.md` (the landing page's docs index) and from `docs/README.md`,
+   the docs grouped by task, and give it its entry in `llms.txt`.
+4. Run `npm run check` here: it fails on a broken link, anchor or image.
+
+Related: the [root README](../README.md), [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md), and
+[design/README.md](../design/README.md) for the tokens the site's theme is generated from.

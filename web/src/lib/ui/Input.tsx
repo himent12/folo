@@ -1,3 +1,5 @@
+// The text and number input, with an optional unit inside its right edge; an enclosing Field's hint and error
+// describe it.
 import { bindable, css, defaults, Dynamic, splitProps, type ElementProps } from 'fw';
 import { describedBy, getField } from './field';
 import type { IconType } from './types';

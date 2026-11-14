@@ -90,7 +90,7 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   are finite. On a device the buffers take one multi-tensor `Tensor::unscale_check_many_` call (16 per dispatch,
   else one `Tensor::unscale_check_` kernel each) that also raises a shared device flag, read back once; elsewhere
   tensor ops.
-- The forward side is folo-core's `autocast` (docs/ARCHITECTURE.md); layers need no changes: `Conv2d` and
+- The forward side is folo-core's `autocast` ([CORE.md](CORE.md#mixed-precision)); layers need no changes: `Conv2d` and
   `ConvBnAct` call `conv2d_with`, which autocast runs in f16 against the f32 weights, and `BatchNorm2d`'s fused GPU
   path takes f16 activations with its f32 parameters and statistics (its dγ, dβ are f32, dx f16).
 

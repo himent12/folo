@@ -15,6 +15,10 @@
 //! drawn per row from the seed, patches per box, and no value depends on the platform's libm or on the thread
 //! count (see the `pixels` module). [`variant_seed`] derives the seed from the benchmark's seed, the image and the
 //! variant, so every image and every variant has its own noise.
+//!
+//! Files: `catalog.rs` (each condition's id, name, group, description and the docs table), `transform.rs`
+//! ([`apply`]: pixels and boxes), `encoding.rs` ([`variant_seed`], decoding, the canonical JPEG), `render.rs`
+//! ([`render`]) and `tests.rs`. This file: [`Condition`] and the parameter tables.
 
 mod catalog;
 mod encoding;

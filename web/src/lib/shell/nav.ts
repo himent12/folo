@@ -1,3 +1,5 @@
+// The app's sections: the sidebar, the phone tab bar, the palette's navigation and the G shortcuts all read
+// `mainNav` and `settingsNav`.
 import LayoutDashboard from '$icons/layout-dashboard';
 import Images from '$icons/images';
 import Activity from '$icons/activity';
