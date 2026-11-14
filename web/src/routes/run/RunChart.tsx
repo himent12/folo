@@ -170,6 +170,7 @@ export default function RunChart(props: RunChartProps) {
             legendBest={kind === 'map' ? m.bestLegend.get() : undefined}
             endDots
             xMark={m.xMark.get()}
+            xEvent={kind === 'map' || kind === 'loss' ? m.failEvent.get() : undefined}
             yLabel={zoomed.get() ? UNIT_ZOOM_NOTE : undefined}
             legendNote={unit ? m.latestEp.get() : m.stepEp.get()}
             label={`${title.get()} by epoch`}

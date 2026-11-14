@@ -21,6 +21,7 @@ import type { Future, Marker, Series, XMark } from '$lib/charts/LineChart';
 import { DEFAULT_SMOOTHING, type Scale, type Smoothing } from '$lib/charts/LossOptions';
 import { eta, metric } from '$lib/format';
 import { EpochSeries, joinExtents, liveHorizon, StepSeries } from './metricSeries';
+import { failedEpoch } from './failure';
 import { mosaicOffText, stepEpoch } from './readings';
 import { effectiveCloseMosaic, warmupEpochs } from './resolved';
 
@@ -169,6 +170,21 @@ export class RunModel {
   readonly xMark = computed((): XMark | undefined => (this.mosaicOff.get() ? { x: this.run().epochs - this.closeN.get(), label: 'mosaic off' } : undefined), {
     equals: (a, b) => a === b || (!!a && !!b && a.x === b.x),
   });
+
+  /**
+   * Where a failed run stopped, on Validation mAP and Training loss (design/UNIFIED.md §3 Frame, Desktop's words): its
+   * cross says that it failed, this label in which epoch ("failed during epoch 24": the one the Epoch tile and the
+   * callout name, ./failure). At the last step, the end of what it ran: the loss line's cross.
+   */
+  readonly failEvent = computed(
+    (): XMark | undefined => {
+      const r = this.run();
+      const e = r.status === 'failed' ? failedEpoch(r) : null;
+      const x = this.observed.get();
+      return e !== null && x > 0 ? { x, label: `failed during epoch ${e}` } : undefined;
+    },
+    { equals: (a, b) => a === b || (!!a && !!b && a.x === b.x && a.label === b.label) },
+  );
 
   // ---- the series ----
   /**

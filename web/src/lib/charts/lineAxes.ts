@@ -146,6 +146,35 @@ export function markOf(xMark: XMark | undefined, xExtent: [number, number], x: S
 }
 
 /**
+ * An event on x (a failed run's "failed during epoch 3"): a hairline at `x`, which may be the domain's end, where the
+ * line stopped, and its label in the band above the plot beside it (on its left when the right has no room). Where it
+ * would touch the x mark's label it goes inside the plot's top, as the future's does (both 12 px captions; 6 px apart).
+ */
+export function eventOf(
+  xEvent: XMark | undefined,
+  mark: { tx: number; anchor: string; label: string } | null,
+  xExtent: [number, number],
+  x: Scale,
+  width: number,
+  margin: Margin,
+) {
+  if (!xEvent || !(xEvent.x > xExtent[0] && xEvent.x <= xExtent[1])) return null;
+  const px = x(xEvent.x);
+  const end = width - margin.right;
+  const w = labelWidth(xEvent.label);
+  const before = px + 4 + w > end;
+  const tx = before ? px - 4 : px + 4;
+  let inBand = true;
+  if (mark) {
+    const mw = labelWidth(mark.label);
+    const m0 = mark.anchor === 'end' ? mark.tx - mw : mark.tx;
+    const e0 = before ? tx - w : tx;
+    inBand = e0 + w + 6 <= m0 || m0 + mw + 6 <= e0;
+  }
+  return { px, label: xEvent.label, tx, anchor: before ? 'end' : 'start', ty: inBand ? margin.top - 8 : margin.top + 14 };
+}
+
+/**
  * The future's shade (a live run's epochs still to train): from the latest point to the end of the plot, its label
  * after the rule in the band above the plot, or inside the plot's top where the x mark's label already holds that
  * spot (both are 12 px captions; 6 px between them).

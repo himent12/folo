@@ -10,7 +10,7 @@ import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
 import { paintOrder } from './layers';
 import { TouchGesture, type PinAction } from './pin';
 import { patternOf, dashOf, inkOf, seriesSummary, strokeWidth } from './lineSeries';
-import { capInPlotOf, futureOf, marginOf, markOf, xExtentOf, xTicksOf, yExtentOf, yFormatOf, yTicksOf, type Margin, type Scale } from './lineAxes';
+import { capInPlotOf, eventOf, futureOf, marginOf, markOf, xExtentOf, xTicksOf, yExtentOf, yFormatOf, yTicksOf, type Margin, type Scale } from './lineAxes';
 import { mergesOf } from './linePaths';
 import { memoPathsOf } from './linePathsMemo';
 import { endRadius, endsOf, placedEndsOf } from './lineEndLabels';
@@ -45,6 +45,12 @@ export interface LineChartProps {
   markers?: Marker[];
   /** A phase change on x (XMark). The plot keeps room for its label whenever it is set, in or out of the domain. */
   xMark?: XMark;
+  /**
+   * An event on x (a failed run's "failed during epoch 3", design/UNIFIED.md §3 Frame): a hairline at `x` and its label
+   * in the band above the plot, in the x mark's style but with no span; inside the plot's top where the x mark's label
+   * holds its spot. The end mark says how the line ended; this says where.
+   */
+  xEvent?: XMark;
   /**
    * The part of a live run's planned axis not trained yet (DESIGN_DIRECTION §2.4): shaded from `x` (the latest point)
    * to the axis's end behind a 1 px rule, with `label` (the ETA) over the rule in the band above the plot, beside the x
@@ -159,8 +165,8 @@ export default function LineChart(props: LineChartProps) {
   // One rule for every chart (DESIGN_DIRECTION §2.4): a plot under 560 px (every phone) has no direct labels, short
   // names included, and keeps that width for data; its legend carries each line's name, value and how it ended.
   const showEnds = computed(() => p.endLabels && width.get() >= END_LABELS_MIN);
-  /** The band above the plot is kept for an x mark's label and for the future's (the ETA). */
-  const band = computed(() => !!p.band || !!p.xMark || !!p.future?.label);
+  /** The band above the plot is kept for an x mark's label, an event's and the future's (the ETA). */
+  const band = computed(() => !!p.band || !!p.xMark || !!p.xEvent || !!p.future?.label);
   const capInPlot = computed(() => capInPlotOf(p.yLabel, band.get(), p.yLog, yTickValues.get(), yExtent.get(), p.height, p.xLabel));
   const margin = computed(
     () => marginOf(yTickValues.get(), yFormat.get(), xExtent.get(), p.series, textWidth, showEnds.get(), p.yLabel, capInPlot.get(), band.get(), p.xLabel),
@@ -212,6 +218,7 @@ export default function LineChart(props: LineChartProps) {
   const ends = computed(() => endsOf(visible.get(), placedEnds.get(), y.get(), receding.get(), p.highlight, endR));
   const mark = computed(() => markOf(p.xMark, xExtent.get(), x.get(), width.get(), margin.get()));
   const future = computed(() => futureOf(p.future, mark.get(), xExtent.get(), x.get(), width.get(), margin.get(), p.height));
+  const event = computed(() => eventOf(p.xEvent, mark.get(), xExtent.get(), x.get(), width.get(), margin.get()));
 
   // ---- hover / keyboard cursor ----
   const keyed = computed(() => visible.get().filter((s) => !s.ghost && !s.context && !s.lower));
@@ -597,6 +604,14 @@ export default function LineChart(props: LineChartProps) {
                   <line class="mark-line" x1={mark.get()!.px} x2={mark.get()!.px} y1={margin.get().top - 4} y2={p.height - margin.get().bottom} />
                   <text class="mark-label" x={mark.get()!.tx} y={margin.get().top - 8} text-anchor={mark.get()!.anchor as 'start' | 'end'}>
                     {mark.get()!.label}
+                  </text>
+                </>
+              ) : null}
+              {event.get() ? (
+                <>
+                  <line class="mark-line" x1={event.get()!.px} x2={event.get()!.px} y1={margin.get().top - 4} y2={p.height - margin.get().bottom} />
+                  <text class="mark-label" x={event.get()!.tx} y={event.get()!.ty} text-anchor={event.get()!.anchor as 'start' | 'end'}>
+                    {event.get()!.label}
                   </text>
                 </>
               ) : null}

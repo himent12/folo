@@ -193,6 +193,32 @@ describe('LineChart ticks', () => {
     expect(out.target.querySelector('.mark-line')).toBeNull();
     unmount(out.c);
   });
+
+  it("says where a failed line stopped in the event band, at the domain's end, beside the mosaic label or under it", () => {
+    const series = [{ id: 'a', label: 'a', color: 'red', points: pts((x) => x), end: 'failed' }];
+    const labels = (t: Element) => [...t.querySelectorAll('text.mark-label')].map((l) => ({ text: l.textContent, y: Number(l.getAttribute('y')), anchor: l.getAttribute('text-anchor') }));
+    // Alone: a hairline at the last point and its label in the band, before the line (no room after it).
+    const alone = mountAt({ series, label: 't', xDomain: [0, 29], xEvent: { x: 29, label: 'failed during epoch 30' } });
+    expect(alone.target.querySelectorAll('.mark-line').length).toBe(1);
+    const [e] = labels(alone.target);
+    expect(e).toMatchObject({ text: 'failed during epoch 30', anchor: 'end' });
+    unmount(alone.c);
+    // Far from the mosaic label: both in the band, on one baseline.
+    const apart = mountAt({ series, label: 't', xDomain: [0, 29], xMark: { x: 3, label: 'mosaic off' }, xEvent: { x: 29, label: 'failed during epoch 30' } });
+    const [m1, e1] = labels(apart.target);
+    expect(m1!.text).toBe('mosaic off');
+    expect(e1!.y).toBe(m1!.y);
+    unmount(apart.c);
+    // Where the two would touch, the event's label goes inside the plot's top, as the ETA's does.
+    const near = mountAt({ series, label: 't', xDomain: [0, 29], xMark: { x: 26, label: 'mosaic off' }, xEvent: { x: 29, label: 'failed during epoch 30' } });
+    const [m2, e2] = labels(near.target);
+    expect(e2!.y).toBeGreaterThan(m2!.y);
+    unmount(near.c);
+    // No event outside the domain.
+    const out = mountAt({ series, label: 't', xDomain: [0, 29], xEvent: { x: 40, label: 'failed during epoch 41' } });
+    expect(labels(out.target)).toEqual([]);
+    unmount(out.c);
+  });
 });
 
 describe('LineChart end labels and marks', () => {

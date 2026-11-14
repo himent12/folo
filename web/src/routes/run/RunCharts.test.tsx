@@ -242,6 +242,19 @@ describe('the four run charts', () => {
     c.unmount();
   });
 
+  it('say in which epoch a failed run stopped, at its last step, and only for a failed run', () => {
+    // Failed during epoch 3 after validating epoch 2: the crosses sit at epoch 2 (mAP) and 2.6 (loss).
+    const steps = Array.from({ length: 130 }, (_, i) => step(i + 1));
+    const failed = show({ ...base, status: 'failed', epochs: 5, epoch: 2, step: 130, steps_per_epoch: 50 }, { steps, epochs: [epoch(1), epoch(2)] });
+    expect(failed.model.failEvent.get()).toEqual({ x: 2.6, label: 'failed during epoch 3' });
+    failed.c.unmount();
+    for (const status of ['completed', 'stopped', 'running'] as const) {
+      const other = show({ ...base, status, epochs: 5, epoch: 2, step: 130, steps_per_epoch: 50 }, { steps, epochs: [epoch(1), epoch(2)] });
+      expect(other.model.failEvent.get()).toBeUndefined();
+      other.c.unmount();
+    }
+  });
+
   it('end the learning rate and the throughput on the last step of a long run, as the tiles do', () => {
     // 1,201 steps: the learning rate's stride is 2 and its picks (0, 2, …, 1200) would stop a step short on 1,202.
     for (const n of [1201, 1202, 1999]) {
