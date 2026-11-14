@@ -399,7 +399,8 @@ for the `rect` rows):
   show it. A bisect with the same bench (3 rounds each): f04dce45 (candidate-first, before #258 and #259) 21.29 /
   21.45 ms, 25666428 (+ #259) 29.13, ffa0f8cb 26.92–27.29: it arrives with #259, whose CPU change is the rect batch
   the untrained model's `predict_batch` rows now run ([Rows worse than e5a6ccf0](#rows-worse-than-e5a6ccf0)).
-- The forward rows tie: CPU forward code did not change in the round.
+- The forward rows do not move: ties for folo-n and folo-m, and folo-s +3.1% (30.48 → 31.41 ms) inside overlapping
+  ranges, −4.7% and −1.3% in the later bisect runs; CPU forward code did not change in the round.
 
 ### Accuracy (2026-11-13)
 
@@ -449,12 +450,14 @@ From the lead's counsel before the round, not built:
 The lanes measured under each other's load (often 30–100% CPU) and, late in the day, beside a game on the GPU.
 Where a number here differs from a lane's by more than noise:
 - **The plan's +5.4% on the folo-n f32 training step** (plan: 52.5 → 55.3 ms beside another GPU process, unresolved):
-  does not reproduce, +0.5% here (41.73 → 41.93 ms, inside both builds' range). Its AMP −8.6% is a tie here too.
+  does not reproduce, +0.5% here (41.73 → 41.93 ms, inside both builds' range). Its AMP −8.6% is −4% here (27.44 → 26.30 ms, from one slow e5a6ccf0 round, inside
+  overlapping ranges) and a tie in the quiet round (25.87 → 26.03 ms).
 - **The plan's batch-1 gains** (plan: row 1 −23%, row 2 −35% with two binaries under 5–88% CPU load; −3.5% / −5.7%
   in its quieter `gpu_latency` rounds; about −5% f32 and −10% tensor cores for folo-n and a tie for folo-s with plans
   toggled in one process): plans off against on on `main`'s binary here read −3.5% and −10% for folo-n, as its
   quiet numbers, and −6% / −8% for folo-s, where the lane had a tie.
-- **The plan's slower batch-16 rows** (plan: +2.4 to +5.3% under load): ties here, and no plan is made at batch 16.
+- **The plan's slower batch-16 rows** (plan: +2.4 to +5.3% under load): not slower here (ties, and folo-s on tensor
+  cores +3.6% faster inside overlapping ranges, 1738 → 1800 img/s); no plan is made at batch 16.
 - **"The mixed-batch slow mode no longer reproduces on `main`"** (plan): it does, on both builds (folo-n f32
   `predict_batch` of 16 mixed shapes, 35–39 ms in 3 of 9 runs against 10.5–14.6; random weights), so it predates
   the round. A leftover ([Next optimisations](#next-optimisations)).
