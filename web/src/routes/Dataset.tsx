@@ -343,7 +343,7 @@ export default function Dataset() {
         <>
           <Page
             title={dd().name}
-            titleTag={phone() ? undefined : () => <Badge>{dd()?.format}</Badge>}
+            badge={phone() ? undefined : () => <Badge>{dd()?.format}</Badge>}
             sub={() => (
               <>
                 {phone() ? (

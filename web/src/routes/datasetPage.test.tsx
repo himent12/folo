@@ -160,8 +160,8 @@ describe('Dataset page', () => {
   it('tags the name with the format and gives the tabs their counts ("Images 2,400", "Statistics · 3 findings")', async () => {
     const ds = await api.dataset('ds_shapes_hard');
     open('/datasets/ds_shapes_hard');
-    const h1 = await until(() => target.querySelector('h1 .title-tag'), 'the format tag');
-    expect(h1.textContent).toBe(ds.format);
+    const tag = await until(() => target.querySelector('.page header .title-line .badge-slot'), 'the format tag');
+    expect(tag.textContent).toBe(ds.format);
     expect(target.querySelector('.page header .sub')?.textContent).not.toContain(ds.format);
     const tabs = await until(() => {
       const t = [...target.querySelectorAll('[role="tab"]')].map((x) => x.textContent?.replace(/\s+/g, ' ').trim());
