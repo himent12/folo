@@ -134,7 +134,7 @@ impl Pool {
         {
             self.scans += 1;
         }
-        let age = STALE_LIMITS * limit as u64;
+        let age = limits(STALE_LIMITS, limit);
         // A length cached later starts at the current traffic, so this bounds an empty cache too.
         let (traffic, mut soonest) = (self.traffic, self.traffic.saturating_add(age));
         let mut freed = 0;
@@ -155,12 +155,12 @@ impl Pool {
     /// of traffic, so lengths that come and go (one input shape, then another) do not pile up.
     fn forget(&mut self, limit: usize) {
         let traffic = self.traffic;
-        let age = STALE_LIMITS * limit as u64;
-        let forget = FORGET_LIMITS * limit as u64;
+        let age = limits(STALE_LIMITS, limit);
+        let forget = limits(FORGET_LIMITS, limit);
         self.free.retain(|_, c| {
             !c.bufs.is_empty() || c.used.saturating_add(forget) > traffic || c.stale_at(age) > traffic
         });
-        self.next_forget = traffic + limit as u64;
+        self.next_forget = traffic.saturating_add(limit as u64);
     }
 
     /// The limit changed to `bytes`: drop everything if it no longer fits, and rescan on the next full return,
@@ -173,6 +173,11 @@ impl Pool {
         self.next_stale = 0;
         self.next_forget = 0;
     }
+}
+
+/// `k` limits of traffic, saturating: a limit of `usize::MAX` means no limit.
+fn limits(k: u64, limit: usize) -> u64 {
+    k.saturating_mul(limit as u64)
 }
 
 static POOL: Mutex<Option<Pool>> = Mutex::new(None);
@@ -387,6 +392,21 @@ mod tests {
             assert!(p.traffic < last + 2 * small as u64 + small as u64, "still refused at {}", p.traffic);
         }
         assert_eq!(cached(&p), [2 * N]);
+    }
+
+    /// A limit of `usize::MAX` (no limit) caches everything and never overflows the traffic arithmetic.
+    #[test]
+    fn an_unbounded_limit_caches_everything() {
+        let mut p = Pool::new();
+        for i in 0..64 {
+            assert_eq!(put(&mut p, N + i, usize::MAX), 0);
+        }
+        assert!(p.take(N).is_some());
+        p.forget(usize::MAX);
+        let mut out = Vec::new();
+        p.evict_stale(usize::MAX, &mut out);
+        assert!(out.is_empty());
+        assert_eq!((p.bytes, p.next_forget, p.next_stale), ((63 * N + 64 * 63 / 2) * 4, u64::MAX, u64::MAX));
     }
 
     /// Records of lengths that come and go (each new input shape) are dropped once forgotten.
