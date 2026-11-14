@@ -19,7 +19,6 @@ mod benchmarks;
 mod design;
 mod entries;
 mod external;
-pub mod http;
 mod images;
 mod loops;
 mod model;

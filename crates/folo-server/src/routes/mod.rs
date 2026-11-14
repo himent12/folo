@@ -1,5 +1,6 @@
 //! HTTP handlers for every endpoint of `docs/API.md`.
 
+mod bench;
 mod cloud;
 mod datasets;
 mod inference;
@@ -114,7 +115,7 @@ pub fn api() -> Router<AppState> {
         .route("/label/jobs/{id}/events", get(label_events))
         .route("/label/jobs/{id}/logs", get(label_logs))
         .route("/label/jobs/{id}/dataset", post(label_dataset))
-        .merge(crate::bench::http::routes())
+        .merge(bench::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }
