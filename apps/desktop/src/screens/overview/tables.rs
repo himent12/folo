@@ -309,9 +309,12 @@ impl FoloApp {
                                     .ellipsis()
                                     .child(ds_name.clone()),
                             )
-                            // Its best model, then the same compact e2e tag as the Models table.
+                            // Its best model, then the same compact e2e tag as the Models table; in
+                            // full on hover (the one-third column cuts long names).
                             .child(
                                 div()
+                                    .id(SharedString::from(format!("ov-mn-{}", m.id)))
+                                    .tooltip(crate::controls::tip(format!("{} · {ds_name}", m.name), None))
                                     .flex_1()
                                     .min_w_0()
                                     .flex()
