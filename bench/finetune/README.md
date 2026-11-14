@@ -205,3 +205,5 @@ with crowd regions) through exactly the paths the runners use (2026-11-10, RTX 4
 FOLO's detections score identically (to 1e-16); Ultralytics' detections score within 0.001 of its published
 COCO AP. Its own metric is lower by 0.006 because it is computed differently (YOLO labels without crowd regions,
 its own matching), which is why the comparison never uses either tool's own number.
+
+[Up: bench/](../README.md)
