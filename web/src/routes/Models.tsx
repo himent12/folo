@@ -538,7 +538,7 @@ export default function Models() {
         </div>
       </Panel>{' '}
       {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
-      {models.data && shownCount.get() && shownCount.get() < models.data.length ? (
+      {models.data && shownCount.get() < models.data.length ? (
         <p class="list-foot num">
           {shownCount.get()} of {models.data.length} {models.data.length === 1 ? 'model' : 'models'}
         </p>

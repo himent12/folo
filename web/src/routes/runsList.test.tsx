@@ -450,5 +450,11 @@ describe('Runs: one fact per column (design/UNIFIED.md §4)', () => {
     });
     const failed = runs.filter((r) => r.status === 'failed').length;
     expect(foot.textContent?.trim()).toBe(`${failed} of ${runs.length} runs`);
+    // A search that matches nothing still says what is shown.
+    const input = target.querySelector<HTMLInputElement>('.lt-search input')!;
+    input.value = 'zzz-no-such-run';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.list-foot')?.textContent?.trim()).toBe(`0 of ${runs.length} runs`);
   });
 });

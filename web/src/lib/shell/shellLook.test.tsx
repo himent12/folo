@@ -29,6 +29,7 @@ afterEach(() => {
   view = undefined;
   target?.remove();
   watched.runs = undefined;
+  watched.since = null;
   prefs.sidebarCollapsed = false;
 });
 
@@ -80,6 +81,33 @@ describe('the Runs badge', () => {
     flush();
     expect(runsRow().querySelector('.live-dot')).not.toBeNull();
     expect(runsRow().getAttribute('aria-label')).toBe('Runs, 1 training');
+  });
+
+  it('says its counts are the last known once the list stops refreshing, with no lime dot', async () => {
+    router.route = parse('#/');
+    sidebar.narrow = false;
+    prefs.sidebarCollapsed = true;
+    const rail = mount(() => <Sidebar />);
+    watched.runs = await someRuns(1, 1);
+    flush();
+    const runsRow = () => rail.querySelector<HTMLAnchorElement>('a[href="#/runs"]')!;
+    expect(runsRow().querySelector('.live-dot')).not.toBeNull();
+    // The polls fail: the list is a snapshot from a minute ago, and no page streams the run.
+    watched.since = Date.now() - 60_000;
+    flush();
+    expect(runsRow().querySelector('.live-dot')).toBeNull();
+    expect(runsRow().getAttribute('aria-label')).toBe('Runs, 1 training, 1 queued (last known)');
+    view!.unmount();
+    target!.remove();
+    // Expanded, the badge keeps its count in neutral ink.
+    prefs.sidebarCollapsed = false;
+    const shell = mount(() => <Sidebar />);
+    const badge = shell.querySelector('a[href="#/runs"] .badge')!;
+    expect(badge.textContent).toBe('2');
+    expect(badge.classList.contains('held')).toBe(true);
+    watched.since = null;
+    flush();
+    expect(badge.classList.contains('held')).toBe(false);
   });
 
   it('marks the tab bar the same way', async () => {

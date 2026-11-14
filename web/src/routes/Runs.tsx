@@ -555,7 +555,7 @@ export default function Runs() {
           />
         </Panel>{' '}
         {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
-        {runs.data && shown.get().length && shown.get().length < runs.data.length ? (
+        {runs.data && shown.get().length < runs.data.length ? (
           <p class="list-foot num">
             {shown.get().length} of {runs.data.length} {runs.data.length === 1 ? 'run' : 'runs'}
           </p>

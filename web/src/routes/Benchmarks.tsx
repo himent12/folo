@@ -364,7 +364,7 @@ export default function Benchmarks() {
               ) : null}
             </Panel>{' '}
             {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
-            {benches.data && shown.get().length && shown.get().length < benches.data.length ? (
+            {benches.data && shown.get().length < benches.data.length ? (
               <p class="list-foot num">
                 {shown.get().length} of {benches.data.length} {benches.data.length === 1 ? 'benchmark' : 'benchmarks'}
               </p>

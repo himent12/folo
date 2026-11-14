@@ -253,6 +253,12 @@ describe('Datasets: cards in every state', () => {
     const n = cards().length;
     expect(n).toBeLessThan(list.length);
     expect(target.querySelector('.list-foot')?.textContent).toContain(`${n} of ${list.length} datasets`);
+    // Nothing matches: the state says so where the cards were, and the line still counts what is shown.
+    input.value = 'zebra';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(cards()).toHaveLength(0);
+    expect(target.querySelector('.list-foot')?.textContent).toContain(`0 of ${list.length} datasets`);
   });
 
   it('empty or failed: the toolbar stays, disabled, one panel holds the state, and offline Add dataset says why it is off', async () => {

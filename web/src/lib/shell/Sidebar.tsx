@@ -67,7 +67,7 @@ export default function Sidebar(props: SidebarProps) {
             </span>
           ) : null}
           {runs() && badge.get() > 0 ? (
-            <span class="badge num" aria-hidden="true">
+            <span class="badge num" class:held={activeRuns().held} aria-hidden="true">
               {badge.get()}
             </span>
           ) : null}
@@ -235,7 +235,8 @@ css`
     background: var(--accent-line);
     box-shadow: 0 0 0 2px var(--bg-app);
   }
-  /* The Runs badge: lime text on accent.muted, 20 high. */
+  /* The Runs badge: lime text on accent.muted, 20 high; neutral while its counts are the last known (the list stopped
+     refreshing), as the live row's rail is. */
   .badge {
     display: inline-grid;
     place-items: center;
@@ -261,6 +262,10 @@ css`
   }
   .item:hover .keys {
     opacity: 1;
+  }
+  .badge.held {
+    background: var(--bg-active);
+    color: var(--text-secondary);
   }
   .collapsed .label,
   .collapsed .keys,

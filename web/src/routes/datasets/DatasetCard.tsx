@@ -5,11 +5,12 @@
  * path, the splits and the box count are on the dataset's page.
  *
  * The mosaic loads when the card comes into view (`GET /api/datasets/{id}/images?limit=4`, each image as a 256 px
- * thumbnail); an image that fails shows the tile's own unavailable state, with Retry. The name is a stretched link over
+ * thumbnail), and again when the list's refresh changes the dataset; an image that fails shows the tile's own
+ * unavailable state, with Retry. The name is a stretched link over
  * the card; the strip and a Retry sit above it, so each keeps its own click.
  */
 import ImageOff from '$icons/image-off';
-import { computed, css, For, onCleanup, onMount, signal } from 'fw';
+import { computed, css, effect, For, onCleanup, onMount, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import type { DatasetImage as ImageInfo } from '$lib/api/types';
 import ClassStrip from '$lib/detect/ClassStrip';
@@ -34,25 +35,46 @@ export default function DatasetCard(props: { dataset: ListedDataset }) {
   const failed = signal(false);
   let el!: HTMLElement;
 
-  const ctl = new AbortController();
-  onCleanup(() => ctl.abort());
+  /** The read in flight, cancelled by the next one and when the card goes. */
+  let ctl: AbortController | undefined;
+  onCleanup(() => ctl?.abort());
+  /** The card has been in view: from then on a change in the dataset reads its mosaic again. */
+  let seen = false;
   function load() {
-    hub.api.datasetImages(d().id, { limit: MOSAIC }, ctl.signal).then(
-      (r) => images.set(r.images.slice(0, MOSAIC)),
+    ctl?.abort();
+    const c = (ctl = new AbortController());
+    images.set(null);
+    failed.set(false);
+    // A folder found missing has none to read.
+    if (d().problem) return;
+    hub.api.datasetImages(d().id, { limit: MOSAIC }, c.signal).then(
+      (r) => {
+        if (!c.signal.aborted) images.set(r.images.slice(0, MOSAIC));
+      },
       () => {
-        if (!ctl.signal.aborted) failed.set(true);
+        if (!c.signal.aborted) failed.set(true);
       },
     );
   }
-  // Lazily: a long list reads only the mosaics in view (and a little ahead). A folder found missing has none to read.
+  function show() {
+    seen = true;
+    load();
+  }
+  // What the mosaic is drawn from: when the list's refresh brings a change (a missing folder found again, images added
+  // or relabelled), a card already read reads it again, so its tiles and boxes are never the old set's.
+  const source = computed(() => [d().problem ?? '', imageCount(d()), d().stats?.boxes ?? '', d().classes.join('\n')].join('|'));
+  effect(() => {
+    source.get();
+    if (seen) untrack(load);
+  });
+  // Lazily: a long list reads only the mosaics in view (and a little ahead).
   onMount(() => {
-    if (d().problem) return;
-    if (typeof IntersectionObserver === 'undefined') return void load();
+    if (typeof IntersectionObserver === 'undefined') return void show();
     const io = new IntersectionObserver(
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
         io.disconnect();
-        load();
+        show();
       },
       { rootMargin: '200px' },
     );

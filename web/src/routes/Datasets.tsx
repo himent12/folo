@@ -320,10 +320,10 @@ export default function Datasets() {
         {/* No totals line under the cards (they are the header's facts): only a narrowed list says what it shows, and a
             sample set on its way says so (also after a reload: nothing else on screen tells that one is coming,
             studio-data F1). */}
-        {datasets.data && ((shown.get().length && shown.get().length < datasets.data.length) || waiting.get()) ? (
+        {datasets.data && (shown.get().length < datasets.data.length || waiting.get()) ? (
           <p class="list-foot num">
             <Meta>
-              {shown.get().length && shown.get().length < datasets.data.length ? (
+              {shown.get().length < datasets.data.length ? (
                 <span>
                   {shown.get().length} of {count(datasets.data.length, 'dataset')}
                 </span>
