@@ -40,8 +40,9 @@ export interface ConfigPanelProps {
 
 type Row = [string, Setting];
 
-// Identifiers (weight paths, devices) are mono; an architecture and a checkpoint named for one are names, in sans
-// (design/UNIFIED.md §2, ui/Ident `identKind`), as are numbers, prose ("From scratch") and named optimizers ("AdamW").
+// Identifiers (weight paths) are mono; an architecture and a checkpoint named for one are names, in sans (design/UNIFIED.md
+// §2, ui/Ident `identKind`), as are a device ("gpu:0", a device's name, as Desktop shows it), numbers, prose ("From
+// scratch") and named optimizers ("AdamW").
 const id = (value: string): Setting => ({ value, ident: identKind(value) === 'id' });
 const plain = (value: string): Setting => ({ value });
 
@@ -72,7 +73,7 @@ export default function ConfigPanel(props: ConfigPanelProps) {
       ['Batch', batchSetting(config, resolved())],
       ...(essential() ? [] : effective.get()),
       ['Image size', plain(`${config.imgsz} px`)],
-      ['Device', config.device === 'auto' ? plain('auto') : id(config.device)],
+      ['Device', plain(config.device)],
     ];
   });
   // Under its own group heading ("Optimizer settings") the optimizer's row is "Type", never "Optimizer" twice; in one

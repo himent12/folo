@@ -63,6 +63,14 @@ describe('ConfigPanel', () => {
     expect(r['Weight decay']?.textContent).toBe('0.0005');
   });
 
+  it('sets the architecture and the device in sans: names, not identifiers (design/README.md, Type)', () => {
+    const r = rows(null, { ...config, weights: 'D:/runs/shapes/best.folo' });
+    expect(r['Model']?.textContent).toBe('folo-s');
+    expect(r['Device']?.textContent).toBe('gpu:0');
+    const mono = (k: string) => !!r[k]?.querySelector('.mono');
+    expect([mono('Model'), mono('Device'), mono('Dataset')]).toEqual([false, false, false]);
+  });
+
   it('keeps the request as today without a resolution', () => {
     const r = rows(null);
     // One short value; what Auto picks is a line under the label, never a long value wrapping in the value column.
