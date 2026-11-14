@@ -621,7 +621,11 @@ build:
    for you. For a launch over many elements use `@workgroup_size(256)` and `linear_id(wid, nwg, lid, 256u)`.
 2. **Declare it** in the matching `src/kernels/*.rs` as a `static KernelDef { name, storage, source }`.
    `storage` lists `Access::Read` / `Access::ReadWrite` per binding. `source` is `Source::Static(include_str!(..))`,
-   or `Source::Generated(fn)` when the code depends on the spec, like GEMM.
+   or `Source::Generated(fn)` when the code depends on the spec, like GEMM. List it in that module's `DEFS` (a new
+   module also goes into `all_defs` in `src/kernels/mod.rs`): kernel lists can only precompile registered kernels,
+   and the tests that assert `kernels_without_registry()` is empty (`src/tests/precompile.rs`, the folo-nn and
+   folo-vision GPU training tests) fail on a kernel they use that is missing. A generated source that grows with a
+   spec constant also gets a bound in `precompilable` (`src/kernels/bounds.rs`).
 3. **Add the Rust entry point.** Validate sizes with `check_buf`, check dtype support with `check_dtype`, return
    early on empty problems, then:
    ```rust

@@ -312,7 +312,9 @@ folo cloud instances
 
 ## Adding a command
 1. Add the clap `Args` struct in `crates/folo-cli/src/cli.rs` with doc comments on every field (they become the help
-   text and `describe` output) and accurate defaults.
-2. Return `Result<(), CliError>`; pick the exit code from the table above. Emit machine records with `Out::record`
+   text and `describe` output) and accurate defaults, and its variant in the `Command` enum there.
+2. Put the implementation in a module of its own, declare it in `crates/folo-cli/src/main.rs` and add its arm to
+   `run` there. List the command in the [Commands](#commands) table above.
+3. Return `Result<(), CliError>`; pick the exit code from the table above. Emit machine records with `Out::record`
    and human text with `Out::human`, never `println!` directly.
-3. Add a test in `crates/folo-cli/tests/cli.rs` that runs it with `--json` and checks stdout parses line by line.
+4. Add a test in `crates/folo-cli/tests/cli.rs` that runs it with `--json` and checks stdout parses line by line.

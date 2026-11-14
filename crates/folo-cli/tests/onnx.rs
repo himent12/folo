@@ -5,7 +5,7 @@
 //!
 //! Needs a Python with `onnx`, `onnxruntime` and `numpy`: `FOLO_ONNX_PYTHON`, else the venv at `FOLO_ONNX_VENV`
 //! (default `D:/folo-venvs/onnx`). Without one the test prints why and passes, unless `FOLO_ONNX_REQUIRED=1`
-//! (CI's `onnx` job sets it, so a broken Python setup fails there instead of skipping).
+//! (CI's `rust (linux)` job sets it, so a broken Python setup fails there instead of skipping).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
