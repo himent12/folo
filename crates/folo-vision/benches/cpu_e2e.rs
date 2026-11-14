@@ -17,7 +17,8 @@
 //! Trained weights: with `FOLO_BENCH_WEIGHTS` (a `.folo` file, e.g. `folo-n-coco`) and `FOLO_BENCH_IMAGES` (a folder
 //! of images, e.g. COCO val2017; the first `FOLO_BENCH_IMAGES_N`, default 16, by name) the same rows run on real
 //! images with the trained model, cycling through the images: each letterboxed to 640×640, each resized to
-//! 1280×720 (rect, 640×384), and `predict_batch` of `FOLO_BENCH_BATCH` of them. Untrained weights pass no
+//! 1280×720 (rect, 640×384), and `predict_batch` of `FOLO_BENCH_BATCH` of them, as they are (padded square) and
+//! resized to 1280×720 (one rect canvas, 640×384). Untrained weights pass no
 //! candidate at `conf = 0.25`, so only these rows show what candidate-first prediction (MODEL.md §9.5) does.
 //! `FOLO_BENCH_UNTRAINED=0` skips the untrained rows. Only the predictor's public API is used, so the file builds
 //! against older trees for A/B runs.
@@ -213,8 +214,8 @@ fn trained(iters: usize, batch: usize) {
             dets as f64 / iters as f64,
         );
     }
-    if batch > 0 {
-        let set: Vec<folo_data::Image> = (0..batch).map(|i| imgs[i % imgs.len()].clone()).collect();
+    for (shape, src) in [("640x640", &imgs), ("1280x720", &hd)].into_iter().filter(|_| batch > 0) {
+        let set: Vec<folo_data::Image> = (0..batch).map(|i| src[i % src.len()].clone()).collect();
         for _ in 0..3 {
             black_box(pred.predict_batch(&set).expect("predict"));
         }
@@ -228,7 +229,7 @@ fn trained(iters: usize, batch: usize) {
         let med = median(&mut wall);
         println!(
             "{:<38} median {med:>7.2} ms   min {:>7.2}   {:>6.1} img/s (best {:.1})",
-            format!("trained predict_batch {batch} x 640x640"),
+            format!("trained predict_batch {batch} x {shape}"),
             wall[0],
             batch as f64 * 1e3 / med,
             batch as f64 * 1e3 / wall[0],

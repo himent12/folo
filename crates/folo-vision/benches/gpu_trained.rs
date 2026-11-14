@@ -10,7 +10,10 @@
 //!
 //! Rows, through the public `Predictor` with its defaults (conf 0.25): **b1** `predict` on each image in turn
 //! (rect letterbox, so the input shape changes with the image), **b1 one** `predict` on the first image only (one
-//! input shape), **b16** `predict_batch` on all of them (square 640). Every call synchronised, after a second of
+//! input shape), **b1 640** `predict` on each image resized to 640×640 in turn (the 640×640 decoded images of the
+//! targets table's end-to-end rows, docs/BENCHMARKS.md), **b16** `predict_batch` on all of them (square 640),
+//! **b16 hd** `predict_batch` on all of them
+//! resized to 1280×720 (one `rect` canvas, 640×384). Every call synchronised, after a second of
 //! warm-up calls; median, p90 and min, and the detections per image of the last pass. A row asked to run on tensor
 //! cores fails if they were off at its end (a cooperative kernel that fails to build turns them off).
 //!
@@ -159,6 +162,8 @@ fn main() {
     paths.sort();
     paths.truncate(env("FOLO_BENCH_IMAGES_N").unwrap_or(16));
     let images: Vec<Image> = paths.iter().map(|p| folo_data::read_image(p).expect("image")).collect();
+    let hd: Vec<Image> = images.iter().map(|i| folo_data::resize::resize(i, 1280, 720)).collect();
+    let sq: Vec<Image> = images.iter().map(|i| folo_data::resize::resize(i, 640, 640)).collect();
     let iters: usize = env("FOLO_BENCH_ITERS").unwrap_or(100);
     println!(
         "gpu_trained bench on {} ({}, driver {}): {} images from {dir}",
@@ -209,17 +214,32 @@ fn main() {
                 one = r.detections.len();
                 black_box(r);
             });
+            let (mut next_sq, mut dets_sq) = (0, 0);
+            let b1_sq = latency(dev, iters, || {
+                let r = pred.predict(&sq[next_sq % sq.len()]).expect("predict");
+                next_sq += 1;
+                dets_sq += r.detections.len();
+                black_box(r);
+            });
             let mut last = 0;
             let b16 = latency(dev, iters.div_ceil(3), || {
                 let r = pred.predict_batch(&images).expect("predict");
                 last = r.iter().map(|r| r.detections.len()).sum();
                 black_box(r);
             });
+            let mut last_hd = 0;
+            let b16_hd = latency(dev, iters.div_ceil(3), || {
+                let r = pred.predict_batch(&hd).expect("predict");
+                last_hd = r.iter().map(|r| r.detections.len()).sum();
+                black_box(r);
+            });
             assert_eq!(ctx.tensor_cores(), on, "folo-{scale} {p}: {}", ctx.tensor_cores_status());
             let rows = [
                 ("b1", b1, 1, b1_dets),
                 ("b1 one", b1_one, 1, one as f64),
+                ("b1 640", b1_sq, 1, dets_sq as f64 / next_sq as f64),
                 ("b16", b16, images.len(), last as f64 / images.len() as f64),
+                ("b16 hd", b16_hd, hd.len(), last_hd as f64 / hd.len() as f64),
             ];
             for (name, (med, p90, min), batch, d) in rows {
                 println!(
