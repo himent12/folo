@@ -301,6 +301,108 @@ plans at all (a bare model has them off).
   held at 13:39 was left with an empty owner file, which `lock.sh` would have treated as fresh forever, and was
   removed by hand).
 
+## Step 2: the candidate-first plan
+
+Main moved under the branch: since f04dce45 (#254, #255) a `Predictor` on a GPU calls
+`FoloModel::predict_candidates`, not `forward`, so the forward's plan no longer ran inside a predictor. The
+branch was rebased onto it and a second planned call added; the forward's hook stays for callers of `forward`.
+
+### What one plan holds
+
+`predict_candidates_gpu` (model/lazy_gpu.rs) puts the whole device side of a prediction through one
+`ForwardPlans::run`: the features, the class branches, the class pass (`detect_class_sites`), the box branch at the
+sites (`conv2d_act_sites`), the decode (`detect_decode_sites`), and with DFL fusion `dfl_moments` of the site
+raws. Its results are the record tensor and, with DFL fusion, what `site_precisions` reads: the moments and the
+three site lists. A replayed prediction is one flat list of dispatches, then the host reads the records (and the
+moments) back.
+
+That is possible because the site lists have fixed capacities (`GPU_SITE_SLOTS`, 1024 / 512 / 256 per level): the
+dispatches do not depend on the image, only the counts in the lists do, and those live in buffers.
+
+- **Key**: `[SITES_PLAN, o2o branch, moments wanted, conf bits, the three slots]`. What of `NmsConfig` reaches a
+  kernel before the readback is only `conf` (the class pass's parameter block); the IoU, `max_det`, the class
+  filter, class-agnostic NMS and the fusion settings act on the host after it, except whether DFL fusion wants the
+  moments (`wants_precisions(nms)`), which adds dispatches. The slots are constants; they are in the key so that a
+  change to them cannot meet an old plan. `ForwardPlans::run` now takes the key as a slice whose length is part of
+  the signature, so the forward's one-word key and this one cannot collide.
+- **Fallback**: an image with more candidates than slots on some level is answered by the dense head on features
+  computed again, unplanned, and merged per image with the plan's answers for the others (as before the plan). A
+  device without the site kernels returns no results from the recorded call; a call with no results is now refused
+  as a plan ("the call returned no results"), and the dense path runs. The features are not a plan result just for
+  the rare overflow.
+- **One fix so the recording is accepted**: `dfl_moments` uploaded its bins (`0..rm` and their squares) every call,
+  and a plan refuses an upload. The bins are now made once per (device, `rm`) (`device_bins`, a small static list)
+  and listed with the model's tensors, so a change to them would retire the plan like any other. No other refusal
+  came up: `plan_refusal()` read `None` in every run below.
+
+### Proof
+
+- **val2017, plans on against off** (`FOLO_BENCH_VERIFY=plan` on the `candidates` bench, `verify-plan.sh`):
+  the predictor's model (plans on) against a copy with plans off, every candidate field and every precision
+  compared as bits, all 5000 images, published folo-n weights. **0 mismatched in all six configurations** (f32, f16,
+  f16 on tensor cores, each with `--fusion none` and `dfl`), 4397 of the 5000 answered from a plan in each, no
+  refusal. The first run of f16 tc `dfl`
+  exited with status 127 right after its header line, with no message; the rerun passed. I have no explanation
+  for it (127 from bash is "command not found", which the identical command just before and after was not).
+- **Tests** (`tests/gpu_plan.rs`): candidate replays bit-identical with and without DFL precisions (f32 / f16 /
+  f16 tc, two shapes, batches 1 and 2); a `conf` change gets its own plan (0.45 against 0.5, both replayed and
+  both right); an image over its slots after a replay is answered by the dense head and matches plans off.
+
+### Numbers
+
+Measured once at the end, as asked, after the integration. The owner was expected to game on the GPU tonight;
+in fact no other GPU process ran in either measurement (the `nvidia-smi` snapshots list none; GPU 0% / P5–P8
+before), and the CPU read 2–21% before them. A first toggle run was contaminated (an orphaned A/B job of this
+lane, which survived a `TaskStop`, took the lock as "already held" and ran beside it); it is kept as
+`toggle-cand-contended/` and not used.
+
+**`gpu_latency` on the candidate-first path** (`FOLO_BENCH_CALL=candidates FOLO_BENCH_PLANS=toggle`, published
+weights, 640×640, 1000 synchronised calls per side, the two models interleaved in blocks of 50; CPU 2% before,
+13% after; `latency-cand/`). The call reads its candidates back, so it is all "encode":
+
+| config | p50 on / off | | p90 | p99 |
+|---|---|---|---|---|
+| folo-n f32 | 1.05 / 1.12 | −6.3% | −7.5% | −6.8% |
+| folo-n f16 tc | 0.88 / 0.97 | −9.3% | −14.0% | −19.0% |
+| folo-s f32 | 2.06 / 2.10 | −1.9% | −2.3% | −3.0% |
+| folo-s f16 tc | 1.35 / 1.37 | −1.5% (about a tie) | −0.7% | −3.0% |
+
+**`gpu_trained` toggle** (`FOLO_BENCH_PLANS=toggle`, two predictors of the published weights, 6 rounds of 100
+calls per row and side, order alternated; CPU 21% before, 15% after; `toggle-cand/`). **b1** is `Predictor::predict`
+over the first 16 val2017 images (row 5), **b1 one** the same image every call, **step** `predict_candidates` on a
+prepared input. p50 of all calls, ms, and the median and range of the round medians:
+
+| config | row | on | off | change | round medians on / off |
+|---|---|---|---|---|---|
+| folo-n f32 | b1 | 1.458 | 1.483 | −1.7%, overlap | 1.458 (1.375–1.582) / 1.511 (1.404–1.518) |
+| folo-n f32 | b1 one | 1.415 | 1.480 | −4.4%, overlap | 1.436 (1.329–1.708) / 1.505 (1.397–1.522) |
+| folo-n f32 | step | 1.095 | 1.141 | −4.0%, overlap | 1.103 (1.044–1.201) / 1.143 (1.083–1.166) |
+| folo-n f16 tc | b1 | 1.232 | 1.365 | −9.8% | 1.232 (1.205–1.255) / 1.379 (1.339–1.395) |
+| folo-n f16 tc | b1 one | 1.231 | 1.377 | −10.6% | 1.232 (1.215–1.259) / 1.375 (1.349–1.450) |
+| folo-n f16 tc | step | 0.894 | 1.001 | −10.6% | 0.888 (0.879–0.914) / 1.012 (0.978–1.028) |
+| folo-s f32 | b1 | 2.262 | 2.294 | −1.4%, overlap | 2.271 (2.211–2.365) / 2.309 (2.255–2.371) |
+| folo-s f32 | b1 one | 2.264 | 2.317 | −2.3%, overlap | 2.267 (2.222–2.331) / 2.335 (2.276–2.375) |
+| folo-s f32 | step | 1.914 | 1.945 | −1.6%, overlap | 1.908 (1.865–1.991) / 1.943 (1.921–3.176) |
+| folo-s f16 tc | b1 | 1.665 | 1.654 | +0.7%, overlap | 1.657 (1.630–1.742) / 1.658 (1.618–1.677) |
+| folo-s f16 tc | b1 one | 1.622 | 1.664 | −2.6%, barely overlap | 1.628 (1.592–1.636) / 1.669 (1.632–1.676) |
+| folo-s f16 tc | step | 1.252 | 1.315 | −4.8%, overlap | 1.258 (1.222–1.541) / 1.319 (1.285–1.322) |
+
+"Overlap": the two sides' round-median ranges overlap. Only folo-n f16 tc separates cleanly in this toggle
+(all three rows, ranges apart); every other row, taken alone, is a tie leaning faster. `gpu_latency`'s blocks
+interleave the two models more finely, and there the whole distribution moved for folo-n f32 too (p10 1.03 against
+1.09, p50 −6.3%), so I count folo-n f32 at about −4 to −6%. folo-s reads −1.5 to −2.6% in both benches: small, and on
+this machine I call it a tie.
+
+Tails: in `gpu_latency` p90 and p99 are better with plans in every configuration. In the toggle (600 calls a side,
+so a p99 is the 6 slowest calls) four tail readings are worse with plans: folo-n f16 tc b1 p99 +11.6% (1.968 against
+1.763) and step p99 +65% (1.960 against 1.189), folo-s f32 b1 p99 +13.4% (3.168 against 2.794), folo-s f16 tc step
+p90 +13.2% (1.539 against 1.360); the same configurations' other tails read better (folo-n f16 tc b1 one p99 1.492
+against 1.835). I read them as a few slow calls, not a pattern, but that is not shown.
+
+Summary: **about 10% for folo-n on tensor cores (−9 to −11% at p50 in both benches), about 5% for folo-n f32, a tie
+for folo-s**; no p50 is slower. Rows 1 and 2's 0.8 / 0.65 ms are not reached: the quiet candidate call is 1.05 /
+0.88 ms for folo-n, and, as in step 1, what is left is mostly the GPU's own time.
+
 ## Training steps (not in this lane)
 
 A training step at a fixed batch shape (about 1100 dispatches) has the same structure every step, but a plan of it
@@ -321,7 +423,46 @@ would need:
 
 ## Second item: shape-bucketed batches
 
-In its own PR (`gpu/rect-batches`), with its own section added there.
+In its own PR (#259, `gpu/rect-batches`). `Predictor::predict_batch` padded every batch to the square
+`imgsz × imgsz` canvas. Now a batch whose images all get the same `rect` canvas (frames of one camera) runs on it:
+16 frames of 1280×720 at `imgsz` 640 run on 640×384 instead of 640×640. Any other batch is padded square as before.
+
+- **A first version grouped a mixed batch by canvas**, one pass per group. On the CPU four passes of four images
+  read slower than one square pass of sixteen (+4.7% median, +11.5% best run, 6 rounds; `ab-rect-cpu-v1/`), so
+  mixed batches stay square.
+- **Results.** Every image of a same-canvas batch gets the input `predict` gives it alone: on the CPU the
+  predictions are then identical to `predict`'s; on a GPU the last bits can differ (a kernel may sum in another
+  order at another batch size). Validation pads square, so mAP does not move.
+
+**CPU** (`cpu_e2e`, folo-n, batch 16, two binaries alternated, 6 rounds under the `cpu` lock, CPU 4–100% at the
+starts; `ab-rect-cpu/`): 16 × 1280×720 155.2 → 129.5 ms (**−16.6%**, best run 140.3 → 104.2). The 640×640 (+3.4%)
+and mixed (+5.9%) rows run the same code on both sides, with ranges overlapping; they are in line with the
+unchanged single-image rows on the same runs (+2–4%), so I read them as the loaded machine.
+
+**GPU** (`gpu` bench predict section, RTX 4080 SUPER, random weights; `ab-rect-gpu-main/`): two
+binaries on origin/main ca37efc5 (candidate-first), the base with only the new bench rows, alternated, 3 rounds,
+GPU idle and CPU 1–13% at every start. Median over runs of the runs' medians, ms:
+
+| config | 16 × 1280×720 base → new | 16 × 640×640 | 16 × mixed | b1 |
+|---|---|---|---|---|
+| folo-n f32 | 11.90 → 9.35 (**−21.4%**) | −0.1% | −0.1% | −0.7% |
+| folo-n f16 tc | 8.93 → 7.70 (**−13.8%**) | −1.3% | −0.9% | −2.1% |
+| folo-s f32 | 22.86 → 15.52 (**−32.1%**) | +0.1% | +0.3% | +0.0% |
+| folo-s f16 tc | 13.67 → 10.77 (**−21.2%**) | −0.5% | +0.4% | −1.7% |
+
+Every row but the 1280×720 one is a tie (the ranges over runs are 0.01–0.1 ms wide). Two earlier GPU A/Bs are
+not used: one ran beside a game (`ab-rect-gpu-contended/`), and one quiet one (`ab-rect-gpu/`, `ab-rect-gpu-nf32/`)
+used binaries built before #255 and showed a slow mode on the new side's mixed row (27–38 ms against 12 ms in 3 of
+7 runs; the same ~27 ms mode once on the base's 1280×720 row). On current main the mixed row read 10.4–10.5 ms in
+6 of 6 diagnostic runs, with no buffer created during the row (pool counters), and the A/B above ties it. I did
+not find the old binaries' cause; it no longer reproduces.
+
+## Files touched outside the lane
+
+At the lead's direction (step 2): lane `lazy`'s `model/lazy_gpu.rs` (the planned call, its key and fallback),
+`model/predict.rs` (`dfl_moments` split so the bins can be made once) and the benches `candidates.rs`
+(`FOLO_BENCH_VERIFY=plan`) and `gpu_trained.rs` (`FOLO_BENCH_PLANS=toggle`); `gpu_latency.rs`
+(`FOLO_BENCH_CALL=candidates`, the toggle, `FOLO_BENCH_WEIGHTS`) was this lane's bench already.
 
 ## Leftovers
 
@@ -330,10 +471,11 @@ By expected gain:
   tensor cores): fewer dispatches (138–146 per call; lane `lazy`'s fused head), and a look at what the GPU does
   between dependent dispatches (`gpu_profile` sums kernel times; the gap between that sum and the wait is the
   barriers and submission boundaries). Not in this lane.
-- **Plan the whole predictor call** (device letterbox, forward, candidate kernel): the letterbox uploads the image,
-  which a plan refuses; with the upload moved before the planned part (the image into a staging buffer the plan
-  binds as its input) the predict b1 rows would get the forward's gain plus the decode's dispatches. Worth it only
-  where the host is loaded; measure on a quiet machine first.
+- **The device letterbox in the plan**: step 2 plans everything from the letterboxed input to the records; the
+  letterbox itself still runs unplanned because it uploads the image, which a plan refuses. With the upload moved
+  before the planned part (the image into a staging buffer the plan binds as its input) its few dispatches would
+  join the plan. b1 and step differ by 0.3–0.4 ms in the toggle (the letterbox, the host's preparation and the
+  NMS); how much of that is the letterbox's encoding is not measured.
 - **Fewer per-replay checks**: 0.03–0.09 ms of a replay is the plan's own work (300–400 tensors' versions checked,
   results allocated, the last dispatches' bind groups made). A model-wide version counter bumped by every write would
   replace the walk.

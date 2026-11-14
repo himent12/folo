@@ -189,7 +189,9 @@ site lists have fixed capacities, so everything from the input to the decoded re
 branches, the class pass, the box branch at the sites, the decode, and with DFL fusion the moments) is one plan,
 keyed also by the head branch, `conf` (it sits in the class pass's parameter block), the slots and whether DFL
 fusion wants the moments; a replayed prediction is one flat list of dispatches and one readback. An image with more
-candidates than slots is answered by the dense head on features computed again, unplanned. On
+candidates than slots is answered by the dense head on features computed again, unplanned. Measured on the
+published weights at 640×640, plans on against off in one process, a quiet GPU: folo-n b1 candidate-first calls
+1.12 → 1.05 ms in f32 and 0.97 → 0.88 ms on tensor cores, folo-s about 2% (a tie); docs/notes/hill/r3-plan.md. On
 the test machine a plan halves the host's encode time of a synchronised folo-n batch-1 forward (0.42 → 0.21 ms in
 f32, 0.45 → 0.23 ms on tensor cores), which shortens the call by 3–6% in runs that started at a low CPU load (the GPU
 was not idle in them; the likely reading is that the call is then GPU-bound) and by 20–35% when other work loads
