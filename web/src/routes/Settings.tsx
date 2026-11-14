@@ -533,8 +533,8 @@ css`
     display: none;
   }
   @media (max-width: 1023px) {
-    /* A full-bleed strip on the page's background, just under the top bar: the sections as links, the current one
-       neutral (bg.active), a hairline under it once content scrolls beneath. */
+    /* A full-bleed strip on the page's background, just under the top bar: the sections as underline tabs, a
+       hairline under it once content scrolls beneath. */
     .jump-bar {
       position: sticky;
       top: var(--size-topbar);
@@ -547,10 +547,10 @@ css`
     }
     .jump {
       display: flex;
-      align-items: center;
-      gap: var(--space-1);
+      align-items: stretch;
+      gap: var(--space-4);
       height: 44px;
-      padding: 0 var(--space-5);
+      padding: 0 var(--space-6);
       overflow-x: auto;
       scrollbar-width: none;
     }
@@ -583,22 +583,38 @@ css`
       display: flex;
     }
     .jump a {
+      position: relative;
       flex-shrink: 0;
       display: flex;
       align-items: center;
-      height: 32px;
-      padding: 0 var(--space-3);
-      border-radius: var(--radius-md);
+      height: 100%;
       color: var(--text-secondary);
+      font-weight: var(--weight-medium);
       white-space: nowrap;
+      transition: color var(--dur-fast) var(--ease-standard);
+    }
+    /* A page's sections are underline tabs (design/UNIFIED.md §2, ui/Tabs): the current one in ink with a 2 px line on
+       the bar's hairline, no fill. */
+    .jump a::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 2px;
+      border-radius: 2px 2px 0 0;
+      background: var(--text-primary);
+      transform: scaleX(0);
+      transition: transform var(--dur-base) var(--ease-out);
     }
     .jump a.on {
-      background: var(--bg-active);
       color: var(--text-primary);
+    }
+    .jump a.on::after {
+      transform: scaleX(1);
     }
     @media (hover: hover) {
       .jump a:hover {
-        background: var(--bg-hover);
         color: var(--text-primary);
       }
     }
@@ -612,16 +628,13 @@ css`
       margin: 0 calc(-1 * var(--space-4));
     }
     .jump {
-      padding: 0 var(--space-3);
+      padding: 0 var(--space-4);
     }
   }
   /* Touch: 44 px targets, so the strip is 52 px. */
   @media (max-width: 1023px) and (pointer: coarse) {
     .jump {
       height: 52px;
-    }
-    .jump a {
-      height: 44px;
     }
     .col :global(section.panel) {
       scroll-margin-top: calc(var(--size-topbar) + 52px + var(--space-4));

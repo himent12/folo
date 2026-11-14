@@ -116,7 +116,8 @@ export function reviewRows(
 ): { key: Jump; label: string; value: string; mono?: boolean; warn?: boolean }[] {
   return [
     { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—', warn: !!errors.dataset },
-    { key: 'model', label: 'Model', value: arch, mono: true },
+    // An architecture is a name, in sans like a run's (design/UNIFIED.md §2); a weights path is an identifier, in mono.
+    { key: 'model', label: 'Model', value: arch },
     { key: 'epochs', label: 'Epochs', value: errors.epochs ? '—' : num(epochs), warn: !!errors.epochs },
     { key: 'batch', label: 'Batch', value: String(batchN) },
     { key: 'imgsz', label: 'Image size', value: `${imgszN} px` },
@@ -129,7 +130,7 @@ export function reviewRows(
       key: 'weights',
       label: 'Start from',
       value: weights === 'none' ? FROM_SCRATCH : (picked?.name ?? weights),
-      mono: weights !== 'none',
+      mono: weights !== 'none' && !picked,
       warn: !!errors.weights,
     },
     ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizerLabel(optimizer) }] : []),
