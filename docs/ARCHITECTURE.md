@@ -113,7 +113,7 @@ Each step names the file and the function or type that does it. Paths are under 
 1. `folo-cli/src/main.rs`: `parse` (also records which flags were given explicitly), then `run` →
    `train::train` (`folo-cli/src/train/mod.rs`).
 2. `train::start`: `open_dataset` (`engine.rs`), `config_of` + `apply_sets` (`train/config.rs`), `cfg.validate()`
-   before anything is written, then `reserve_dir` (`<project>/<name>`, or `<name>2`, ...).
+   before the run folder is created, then `reserve_dir` (`<project>/<name>`, or `<name>2`, ...).
 3. `TrainOptions { run_dir, events: progress_sink(..) }` → `folo_vision::Trainer::new`
    (`folo-vision/src/train/setup.rs`) → `Trainer::run` (`train/run.rs`), which runs the epochs (`train/epoch.rs`)
    and writes `config.json`, `metrics.jsonl`, `weights/{last,best}.folo` and `samples/` (`train/writer/`).

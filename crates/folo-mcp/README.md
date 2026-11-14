@@ -25,7 +25,7 @@ server from the `folo mcp` flags, and `folo describe` includes the tool schemas.
 
 ### `src/tools/`
 
-There are 22 tools, one `ToolDef` each in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `src/tools/dispatch.rs`.
+One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `src/tools/dispatch.rs`.
 
 | file | what it holds |
 |---|---|

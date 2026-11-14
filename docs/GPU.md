@@ -634,7 +634,9 @@ build:
    ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(n as u64, 256)?)
    ```
 4. **Expose it on `GpuTensor`** if it is a tensor-level op: validate shapes, allocate the output with
-   `GpuTensor::empty`, and call the entry point.
+   `GpuTensor::empty`, and call the entry point. For a folo-core op to run on the kernel, the `GpuBackend` method in
+   `src/backend/ops.rs` must call it, tested with `check` (`src/tests/backend/fixtures.rs`) against the CPU backend;
+   see "Run a folo-core op on the GPU" in the [folo-gpu README](../crates/folo-gpu/README.md).
 5. **Test it** in `src/tests/<area>.rs` against a straightforward CPU loop. Use seeded random data
    (`tests::Rng`), include sizes that are not multiples of the tile or vector width, and state the tolerance. Start
    each test with `let ctx = gpu!();` so it skips when there is no adapter. Avoid WGSL loops in hot paths when the
