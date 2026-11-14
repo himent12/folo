@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { deviceName } from '$lib/format';
 import type { Run, SystemInfo } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import RunWatch from '$lib/shell/RunWatch.tsx';
@@ -401,5 +402,78 @@ describe('Overview', () => {
     expect(strip.textContent).not.toContain('gone');
     expect(strip.querySelector('a')!.getAttribute('href')).toBe('#/settings?section=cloud');
   });
-});
 
+  it('says what is there in its header facts line, beside New run (design/UNIFIED.md §4 Overview)', async () => {
+    watched.runs = await idleRuns();
+    const api = new MockApi('normal', 0);
+    open(api);
+    const [ds, models] = await Promise.all([api.datasets(), api.models()]);
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toBe(`${ds.length} datasets · ${models.length} models · nothing training`);
+    });
+    const primary = [...target.querySelectorAll<HTMLAnchorElement>('header a')].find((a) => a.textContent?.trim() === 'New run');
+    expect(primary?.getAttribute('href')).toBe('#/runs/new');
+  });
+
+  it('shows the live run as one panel: the rail under its header, four tiles beside the chart, the machine at its foot', async () => {
+    const api = new MockApi('normal', 0);
+    const running = (await api.runs()).find((r) => r.status === 'running')!;
+    open(api);
+    const card = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.live .card');
+      if (!el?.querySelector('.foot') || !el.querySelector('.legend')) throw new Error('still waiting for the live panel');
+      return el;
+    });
+    expect(card.querySelector('header h2')?.textContent).toBe(running.name);
+    expect(card.querySelector('header .rail[role=progressbar]')).not.toBeNull();
+    expect([...card.querySelectorAll('.kpis .tile .label')].map((l) => l.textContent)).toEqual(['Epoch', 'mAP50-95 · latest', 'Throughput', 'Time left']);
+    expect(card.querySelector('.kpis .tile .sub')?.textContent).toMatch(/^\d+% complete$/);
+    // The run's device in the meta line, whatever the foot's readings.
+    expect(card.querySelector('header .meta')?.textContent).toContain(deviceName(running.device));
+    const sys = await api.system();
+    expect(card.querySelector('.foot')?.textContent).toContain(`CPU · ${sys.cpu.threads} threads`);
+    expect(card.querySelector('.foot')?.textContent).toContain('Memory');
+    // The chart in the series hues: mAP50-95 and mAP50, with the best in the legend.
+    expect([...card.querySelectorAll('.legend li .name')].map((n) => n.textContent)).toEqual(['mAP50-95', 'mAP50', 'best']);
+  });
+
+  it("names a cloud run's GPU in its meta line and has no machine foot (this server does not read that machine)", async () => {
+    const api = new MockApi('cloud-training', 0);
+    const runs = await api.runs();
+    const cloud = runs.find((r) => r.id === 'run_c7b1')!;
+    watched.runs = runs.map((r) => (r.id === cloud.id ? r : r.status === 'running' || r.status === 'queued' ? { ...r, status: 'completed', queue_position: null } : r));
+    open(api);
+    const card = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.live .card');
+      if (el?.querySelector('header h2')?.textContent !== cloud.name || !el.querySelector('.legend')) throw new Error('still waiting for the cloud run');
+      return el;
+    });
+    expect(card.querySelector('header .meta')?.textContent).toContain('RTX 4090');
+    await new Promise((ok) => setTimeout(ok, 50));
+    flush();
+    expect(card.querySelector('.foot')).toBeNull();
+  });
+
+  it("names a CPU run's processor in its meta line, and still when the machine's readings are gone", async () => {
+    const api = new MockApi('normal', 0);
+    const runs = await api.runs();
+    const running = runs.find((r) => r.status === 'running')!;
+    const cpu: Run = { ...running, device: 'AMD Ryzen 9 7950X (cpu)', config: { ...running.config, device: 'cpu' } };
+    const get = api.run.bind(api);
+    api.run = (id, ...rest) => (id === cpu.id ? Promise.resolve(cpu) : get(id, ...rest));
+    api.system = () => Promise.reject(new Error('down'));
+    watched.runs = runs.map((r) => (r.id === cpu.id ? cpu : r));
+    open(api);
+    const card = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.live .card');
+      if (!el?.querySelector('.legend')) throw new Error('still waiting for the live panel');
+      return el;
+    });
+    expect(card.querySelector('header .meta')?.textContent).toContain('Ryzen 9 7950X');
+    expect(card.querySelector('.foot')).toBeNull();
+  });
+});

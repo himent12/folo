@@ -15,6 +15,8 @@ export interface ChartLegendProps {
   legendNote: string | undefined;
   keyed: Series[];
   fmtValue: (y: number) => string;
+  /** The best epoch after the series: the ring glyph (the plot's hollow ink ring), "best" and its value. */
+  best?: string;
 }
 
 export default function ChartLegend(props: ChartLegendProps) {
@@ -44,6 +46,15 @@ export default function ChartLegend(props: ChartLegendProps) {
           );
         }}
       </For>
+      {props.best ? (
+        <li class="best">
+          <svg class="ring" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <circle cx="5" cy="5" r="3.75" />
+          </svg>
+          <span class="name">best</span>
+          <span class="val">{props.best}</span>
+        </li>
+      ) : null}
     </ul>
   );
 }
@@ -79,6 +90,12 @@ css`
   }
   .name {
     color: var(--text-secondary);
+  }
+  /* The best epoch's key: the plot's hollow ink ring, 1.5 px. */
+  .ring circle {
+    fill: none;
+    stroke: var(--text-primary);
+    stroke-width: 1.5;
   }
   .val {
     color: var(--text-primary);

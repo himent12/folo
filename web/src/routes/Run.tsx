@@ -1,7 +1,9 @@
 //
-// A run's page. While the run trains its stream updates `live.run` and the step / epoch / log lists several times a
-// second; what reads them here does work in proportion to what changed, not to the run's history: the charts read the
-// append logs (run/metricSeries), the log keeps its level lists as lines arrive (run/Logs), the schedule warnings are
+// A run's page (design/UNIFIED.md §4 Run): the header, the outcome callout, the KPI strip, Validation mAP beside
+// Training loss, Precision / Recall beside Learning rate, Validation samples beside Per class, Logs beside Config. While
+// the run trains its stream updates `live.run` and the step / epoch / log lists several times a second; what reads them
+// here does work in proportion to what changed, not to the run's history: the charts read the append logs
+// (run/runModel, run/metricSeries), the log keeps its level lists as lines arrive (run/Logs), the schedule warnings are
 // looked for in new lines only (run/warningsLog, the Svelte page scanned the whole log on every step), and the parts
 // that depend on the run's settings (Config, lineage, the dataset, the menus) get values that keep their identity
 // while only its progress moves, so a step re-renders the progress and nothing else.
@@ -25,8 +27,7 @@ import { LiveRun } from '$lib/api/live';
 import { modelsResource } from '$lib/api/models';
 import { settledEta, trainingSeconds } from '$lib/api/progress';
 import { Resource } from '$lib/api/resource';
-import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
-import type { QueueRequest } from '$lib/api/types';
+import { hasFeature, queuePlace } from '$lib/api/queue';
 import { media } from '$lib/design/tokens';
 import { ago, deviceName, eta } from '$lib/format';
 import { timeRange } from '$lib/throughput';
@@ -43,6 +44,7 @@ import Tabs from '$lib/ui/Tabs';
 import ErrorState from '$lib/ui/ErrorState';
 import StatusBadge from '$lib/ui/StatusBadge';
 import Ident from '$lib/ui/Ident';
+import { SHORT } from './run/RunCharts';
 import { toast } from '$lib/ui/toast';
 import { tooltip } from '$lib/ui/tooltip';
 import ConfigPanel from './run/ConfigPanel';
@@ -54,9 +56,12 @@ import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
 import PerClass from './run/PerClass';
 import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
-import RunMetrics from './run/RunMetrics';
+import RunCharts from './run/RunCharts';
+import RunChart from './run/RunChart';
+import { ACTIVE, RunModel } from './run/runModel';
 import Samples from './run/Samples';
-import { moveQueued, queueItems, queueWait, REMOVE_LABEL, removedToast, removeDescription, removeQueued, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
+import { queueItems, REMOVE_LABEL, removedToast, removeDescription, removeQueued, removeTitle, startHint, startLabel } from './run/queueActions';
+import { queueState } from './run/queueState';
 import { WarningsLog } from './run/warningsLog';
 import { beforeTraining, cloudGpu, phaseTitle, phaseWhat, providerName } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
@@ -70,9 +75,8 @@ import DeleteRun from './run/DeleteRun';
 import { goneEvalOn } from './run/goneEvalOn';
 import { stopDescription, stoppedToast } from './run/StopRun';
 
-type Section = 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
+type Section = 'pr' | 'lr' | 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
 const NO_CLASSES: string[] = [];
-const ACTIVE = ['queued', 'running', 'stopping'];
 
 /** Two menus' items are the same when they show the same entries (their actions read the page's state when used). */
 const sameItems = (a: MenuItem[], b: MenuItem[]) =>
@@ -130,6 +134,17 @@ export default function Run() {
    */
   const historyError = computed(() => (run.get() ? live.error : undefined));
   const retryHistory = () => live.retry();
+  // What the KPI strip and the four charts read, once for all of them: their series, the one x axis and the one cursor.
+  const model = new RunModel({
+    get run() {
+      return live.run;
+    },
+    steps: live.stepsLog,
+    epochs: live.epochsLog,
+    get version() {
+      return live.version;
+    },
+  });
 
   // A cloud run (docs/CLOUD.md): where it runs, said by its provider's name ("RunPod · RTX 4090"), and its hand-over
   // in the waiting state's place while nothing trains yet.
@@ -145,11 +160,8 @@ export default function Run() {
   const handover = computed(() => (cloud.get() && status.get() === 'queued' ? cloud.get()! : null));
   /** Stop on a run waiting in the training queue takes it out of the queue (a cloud run waits in none here). */
   const removing = computed(() => status.get() === 'queued' && !cloud.get());
-  const ahead = computed(() => others.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
-
   // Queue control (servers that list `queue_control`, docs/API.md): the run's place, Start next, Move up / down.
   const system = new Resource((s) => hub.api.system(s));
-  const queueCtl = computed(() => hasFeature(system.data, 'queue_control'));
   // The run's `folo train` command on the server's machine (servers that list `run_cli`): Config shows it under "In
   // PowerShell:", and the palette copies it. Keyed by run, so another run's command never shows while it loads.
   const cli = new Resource(async (s) => {
@@ -158,101 +170,8 @@ export default function Run() {
     return { id: rid, cli: (await hub.api.runCli(rid, s)).cli };
   });
   const runCli = computed(() => (cli.data && cli.data.id === id.get() ? cli.data.cli : null));
-  const place = computed(() => {
-    const r = run.get();
-    return r?.status === 'queued' && queueCtl.get() ? (r.queue_position ?? null) : null;
-  });
-  /** The runs waiting, front first (this one among them). */
-  const queue = computed(() =>
-    (others.data ?? []).filter((r) => r.status === 'queued' && r.queue_position != null).sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0)),
-  );
-  const waitingCount = computed(() => Math.max(live.waiting ?? 0, queue.get().length, place.get() ?? 0));
-  /** The waiting run just in front of this one. */
-  const before = computed(() => {
-    const p = place.get();
-    return p && p > 1 ? queue.get().find((r) => r.id !== run.get()?.id && r.queue_position === p - 1) : undefined;
-  });
-  /** The waiting runs in front of this one, front first; keyed by their ids, so a poll that changes nothing asks nothing. */
-  const inFront = computed(() => {
-    const p = place.get();
-    return p && p > 1 ? queue.get().filter((r) => r.id !== run.get()?.id && (r.queue_position ?? 0) < p) : [];
-  });
-  const frontKey = computed(() => inFront.get().map((r) => r.id).join(' '));
-  // Their lengths, from the server's estimate of each one's settings (servers with `run_estimate`): what makes "starts
-  // in about …" an estimate rather than a guess. One that cannot be estimated stays unknown, and the page says so.
-  const frontLengths = new Resource(async (s) => {
-    const key = frontKey.get();
-    const rs = untrack(() => inFront.get());
-    // No estimates on this server: every run in front stays unknown (one null each), never "nothing in front".
-    if (!key || !hasFeature(system.data, 'run_estimate')) return { key, lengths: rs.map((): Length => null) };
-    const lengths = await Promise.all(
-      rs.map((r) =>
-        hub.api.estimateRun({ ...r.config, name: r.name }, s).then(
-          (e): Length => ({ lo: e.est_total_s_low, hi: e.est_total_s_high }),
-          (): Length => null,
-        ),
-      ),
-    );
-    return { key, lengths };
-  });
-  /** Each run in front's length, in queue order (null: unknown, or not asked yet). */
-  const lengths = computed<Length[]>(() => (frontLengths.data?.key === frontKey.get() ? frontLengths.data.lengths : inFront.get().map(() => null)));
-  /** The wait: what the training run has left plus the lengths in front (`queueWait`); a floor when any is unknown. */
-  const wait = computed(() => {
-    const a = ahead.get();
-    return queueWait(a ? settledEta(a) : undefined, lengths.get());
-  });
-  /** The queued runs in front, together: one run's estimate, or their sum when every one is known. */
-  const frontTime = computed(() => {
-    const all = queueWait(undefined, lengths.get());
-    return all?.known ? timeRange(all.lo, all.hi) : inFront.get().length > 1 ? 'lengths not known yet' : 'length not known yet';
-  });
-  /** Start next is a move only when something is in front (or nothing trains, and it starts at once). */
-  const canStart = computed(() => place.get() !== null && (place.get()! > 1 || !ahead.get()) && !starting.get());
-  /**
-   * Nothing trains and the run is at the front of the queue (or the worker has taken it off): the worker is reading
-   * its dataset and building its model, until the server reports it `running`.
-   */
-  const starting = computed(() => !cloud.get() && status.get() === 'queued' && !!others.data && !ahead.get() && (place.get() ?? 1) === 1);
-
-  /** Moves this run in the queue: the new order at once (here and in the queue list), the old one back on a refusal. */
-  async function move(req: QueueRequest) {
-    const cur = run.peek();
-    if (!cur) return;
-    const id = cur.id;
-    const refresh = () => {
-      void others.refresh();
-      hub.api.run(id).then(
-        (r) => {
-          // Asked for while the trainer was being built: a stream that has since said the run left the queue is newer,
-          // and a run that left it never goes back (no status event would correct it until the run ends).
-          if (r.status === 'queued' && live.run?.status !== 'queued') return;
-          if (live.run?.id === id) live.run = { ...live.run, status: r.status, started: r.started, queue_position: r.queue_position ?? null, resolved: r.resolved ?? live.run.resolved };
-        },
-        () => {},
-      );
-    };
-    const r = await moveQueued(
-      cur,
-      req,
-      () => {
-        const list = others.data;
-        const prev = live.run?.queue_position ?? null;
-        if (list) others.set(withQueueMove(list, id, req));
-        const next = others.data?.find((x) => x.id === id)?.queue_position;
-        if (live.run?.id === id && next != null) live.run = { ...live.run, queue_position: next };
-        return () => {
-          if (list) others.set(list);
-          if (live.run?.id === id) live.run = { ...live.run, queue_position: prev };
-        };
-      },
-      refresh,
-      untrack(() => ahead.get()),
-    );
-    if (!r) return;
-    if (live.run?.id === id) live.run = { ...live.run, queue_position: r.queue_position ?? null };
-    void others.refresh();
-  }
+  // Its place in the training queue, what trains ahead and when it should start; Start next and the moves (./run/queueState).
+  const { ahead, place, queue, waitingCount, before, wait, frontTime, starting, canStart, move } = queueState({ run: () => run.get(), live, others, system });
 
   // A queued run waits in a layout of its own at every width: its place and the way to the front, what it waits for,
   // then its config; the outputs it will have are one quiet list instead of empty frames. Phones show the callout and
@@ -283,19 +202,29 @@ export default function Run() {
     return warningsLog.sync(live.logsLog);
   });
 
-  // Below 960 px one section shows at a time. A queued run has nothing to sample yet, so it opens on its Config (the
-  // dependency and start estimate are in the banner above); once picked, the choice holds.
+  // Phones show one section at a time, Precision / Recall and Learning rate among them (design/UNIFIED.md §4 Run); a
+  // tablet stacks them. A run that never trained opens on its log; once picked, the choice holds.
   const picked = signal<Section | null>(null);
-  const section = computed<Section>(() => picked.get() ?? (queuedOnly.get() ? 'config' : neverTrained.get() ? 'logs' : 'samples'));
   const models = modelsResource();
-  /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
+  /** Below 1024 px the parts stack in one column: Config then takes the panel's width. */
   const stacked = new MediaQuery(media.upToLaptop, false);
+  /** Phones: the parts are one section at a time behind tabs, and the parts' frame is their tab panel. */
   const phone = new MediaQuery(media.phone, false);
+  /** Phones: Precision / Recall and Learning rate are sections of the picker, not a row of charts. */
+  const phoneCharts = computed(() => phone.current && !neverTrained.get() && historyError.get() === undefined);
+  // A chart section picked on a phone falls back to the default once the page is wider (the charts are in their row).
+  const section = computed<Section>(() => {
+    const p = picked.get();
+    if (p && ((p !== 'pr' && p !== 'lr') || phoneCharts.get())) return p;
+    return queuedOnly.get() ? 'config' : neverTrained.get() ? 'logs' : 'samples';
+  });
   /** Where the run started: "From scratch", or the model / file it was fine-tuned from (one reading, $lib/lineage). */
   const lineage = computed(() => {
     const c = config.get();
     return c ? origin(c.weights, models.data ?? []) : null;
   });
+  /** A completed run's model: the header's primary (Open model), Try in Playground beside it. */
+  const headerModel = computed(() => (status.get() === 'completed' ? (run.get()?.model_id ?? null) : null));
   const stopOpen = signal(false);
   const deleteOpen = signal(false);
   const busy = signal(false);
@@ -332,16 +261,19 @@ export default function Run() {
   /**
    * The header's ⋯ (DESIGN_DIRECTION §13, one action set): the header shows one secondary, Compare (in the menu on
    * phones), and a running run's state action, Stop; the rest is here, the destructive action last on every detail
-   * page (Remove from queue for a waiting run, Delete run for a finished one), each behind its confirm dialog. A run
-   * with a model has Open model and Try in Playground here whatever its status, as its callout does.
+   * page (Remove from queue for a waiting run, Delete run for a finished one), each behind its confirm dialog. A
+   * completed run with a model has Open model as the header's primary and Try in Playground beside Compare (in place of
+   * the completed banner, design/UNIFIED.md §4 Run); any other run with a model has both here. Phones keep the primary
+   * and put Try in Playground in the ⋯.
    */
-  const menuItems = (compare: boolean): MenuItem[] => {
+  const menuItems = (wide: boolean): MenuItem[] => {
     const r = run.get();
     if (!r) return [];
-    const out: MenuItem[] = compare ? [{ label: 'Compare', icon: GitCompare, href: href(`/runs/compare?ids=${r.id}`) }] : [];
+    const out: MenuItem[] = wide ? [] : [{ label: 'Compare', icon: GitCompare, href: href(`/runs/compare?ids=${r.id}`) }];
     if (r.model_id) {
-      out.push({ label: 'Open model', icon: Box, href: href(`/models/${r.model_id}`) });
-      out.push({ label: 'Try in Playground', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
+      if (!headerModel.get()) out.push({ label: 'Open model', icon: Box, href: href(`/models/${r.model_id}`) });
+      // Wherever the header does not show it (phones; a model that detected nothing, where the header leaves it out).
+      if (!headerModel.get() || !wide || r.best?.map50_95 === 0) out.push({ label: 'Try in Playground', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
     }
     // The queue's one action set (`queueItems`), whole, as on the Runs list: the open menu covers the callout's Start
     // next, so the menu never relies on it. Remove from queue last.
@@ -354,8 +286,8 @@ export default function Run() {
     return out;
   };
   // The same entries keep the same list: a step (which replaces the run) re-renders no menu.
-  const moreItems = computed(() => menuItems(true), { equals: sameItems });
-  const wideItems = computed(() => menuItems(false), { equals: sameItems });
+  const moreItems = computed(() => menuItems(false), { equals: sameItems });
+  const wideItems = computed(() => menuItems(true), { equals: sameItems });
 
   /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
   const later = computed(() => [
@@ -474,10 +406,11 @@ export default function Run() {
           <Page
             title={R().name}
             inlineActions
-            lead={() => (
-              <>
+            badge={() => (
+              // The status on the title's line (design/UNIFIED.md §2, Detail header); the run's id is in Config's header.
+              // Its own row of items (the status, a phone's time, a connection warning), spaced and wrapping here.
+              <span class="status-row">
                 <StatusBadge run={R()} />
-                <Ident value={R().id} class="faint id" />
                 {/* Phones: the time joins the status, so the meta line below fits one row. */}
                 <span class="faint when-phone">{when()}</span>
                 {live.connection === 'reconnecting' ? (
@@ -490,7 +423,7 @@ export default function Run() {
                     <WifiOff size={12} /> Worker not answering
                   </Badge>
                 ) : null}
-              </>
+              </span>
             )}
             sub={() => (
               // One line from 1024 px up, its last item ("started yesterday") never alone on a second one: below 1280
@@ -539,13 +472,19 @@ export default function Run() {
               </Meta>
             )}
             actions={() => (
-              // One secondary (Compare), a running run's state action (Stop), and ⋯ with the rest, the destructive
-              // action last (DESIGN_DIRECTION §13). Phones: Compare joins the ⋯.
+              // Compare (and a completed run's Try in Playground), a running run's state action (Stop), ⋯ with the rest,
+              // the destructive action last (DESIGN_DIRECTION §13), and a completed run's Open model as the primary.
+              // Phones: Compare and Try in Playground join the ⋯; the primary stays.
               <>
                 <span class="wide-only">
                   <Button icon={GitCompare} href={href(`/runs/compare?ids=${R().id}`)}>
                     Compare
                   </Button>
+                  {headerModel.get() && R().best?.map50_95 !== 0 ? (
+                    <Button icon={ScanSearch} href={href(`/playground?model=${headerModel.get()}`)}>
+                      Try in Playground
+                    </Button>
+                  ) : null}
                 </span>
                 {status.get() === 'running' || (cloud.get() && status.get() === 'queued') ? (
                   // Phones: a quiet icon button the size of ⋯ beside it, so Stop is never the largest control above the
@@ -561,6 +500,11 @@ export default function Run() {
                       <Button variant="danger" icon={CircleStop} aria-label={`Stop ${R().name}`} title="Stop run" onclick={() => stopOpen.set(true)} />
                     </span>
                   </>
+                ) : null}
+                {headerModel.get() ? (
+                  <Button variant="primary" icon={Box} href={href(`/models/${headerModel.get()}`)}>
+                    Open model
+                  </Button>
                 ) : null}
                 {wideItems.get().length ? (
                   <span class="wide-only">
@@ -601,7 +545,7 @@ export default function Run() {
               // show the config's essentials, the rest folded (the work before the reference).
               <div class="waiting">
                 <div class="w-main">
-                  <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={datasetName.get()} weights={lineage.get()} essential={phone.current} cli={runCli.get()} />
+                  <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={datasetName.get()} weights={lineage.get()} essential={phone.current} cli={runCli.get()} runId={R().id} />
                 </div>
                 <div class="w-side">
                   {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} /> : null}
@@ -616,32 +560,36 @@ export default function Run() {
               </div>
             ) : (
               <>
-                {/* Phones: the chart is open or folded to its one-line readout by one remembered state, the same in
-                    every section (RunMetrics chartFold). */}
-                <RunMetrics
-                  run={R()}
-                  steps={live.stepsLog}
-                  epochs={live.epochsLog}
-                  version={live.version}
+                <RunCharts
+                  model={model}
                   loading={live.loading}
-                  queued={queuedOnly.get()}
                   evalOn={evalOn.get()}
                   error={historyError.get()}
                   retry={retryHistory}
                   never={neverTrained.get()}
+                  phone={phone.current}
                 />
 
                 {/* Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right,
                     the two columns ending together. */}
-                {/* Below 1024 px one of these shows at a time, chosen here; wider screens show them all beside a rail.
-                    They switch content, so they are underline tabs (DESIGN_DIRECTION §2.22), not a segmented control. */}
-                <div class="phone-pick">
+                {/* Phones show one of these at a time, chosen here; a tablet stacks them, wider screens show them beside
+                    a rail. They switch content, so they are underline tabs (DESIGN_DIRECTION §2.22), not a segmented
+                    control. */}
+                {/* A deliberate scroller (`data-scrolls`): a cloud run's seven sections do not fit a 320 px phone. */}
+                <div class="phone-pick" data-scrolls>
                   <Tabs
                     label="Run sections"
                     idPrefix="run-sec"
                     value={section.get()}
                     onchange={(v) => picked.set(v)}
                     tabs={[
+                      // Phones: the second row of charts is two sections here (design/UNIFIED.md §4 Run, smaller tiers).
+                      ...(phoneCharts.get()
+                        ? [
+                            { value: 'pr' as const, label: 'P / R' },
+                            { value: 'lr' as const, label: 'LR' },
+                          ]
+                        : []),
                       ...(neverTrained.get()
                         ? []
                         : [
@@ -660,10 +608,20 @@ export default function Run() {
                   class:never={neverTrained.get()}
                   data-show={section.get()}
                   id="run-sec-panel"
-                  role={stacked.current ? 'tabpanel' : undefined}
-                  aria-labelledby={stacked.current ? `run-sec-${section.get()}` : undefined}
+                  role={phone.current ? 'tabpanel' : undefined}
+                  aria-labelledby={phone.current ? `run-sec-${section.get()}` : undefined}
                 >
                   <div class="main-col">
+                    {phoneCharts.get() ? (
+                      <>
+                        <div class="part" data-part="pr">
+                          <RunChart kind="pr" model={model} height={SHORT} loading={live.loading} />
+                        </div>
+                        <div class="part" data-part="lr">
+                          <RunChart kind="lr" model={model} height={SHORT} loading={live.loading} />
+                        </div>
+                      </>
+                    ) : null}
                     {/* A run that never trained has no samples or per-class results: the log and Config are its row. */}
                     {!neverTrained.get() ? (
                       <div class="part" data-part="samples">
@@ -693,7 +651,7 @@ export default function Run() {
                         <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} />
                       </div>
                     ) : null}
-                    {/* One column in the rail (laptops up) and on phones; on a tablet the section is the panel's full
+                    {/* One column in the rail (laptops up) and on phones; on a tablet it is stacked at the panel's full
                         width, so it takes the two columns it has on a queued run's page (a panel at 768–1279 px uses
                         its width). */}
                     <div class="part" data-part="config">
@@ -704,6 +662,7 @@ export default function Run() {
                         weights={lineage.get()}
                         compact={!stacked.current || phone.current}
                         cli={runCli.get()}
+                        runId={R().id}
                       />
                     </div>
                   </aside>
@@ -749,8 +708,11 @@ css`
     overflow: hidden;
     overflow-wrap: anywhere;
   }
-  :global(.ident.id) {
-    font-size: var(--type-sm-size);
+  .status-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-2);
   }
   .when-phone {
     display: none;
@@ -884,14 +846,39 @@ css`
       grid-row: 1 / 3;
     }
   }
+  /* Tablets: rows 4 and 5 stack (design/UNIFIED.md §4 Run): Validation samples, Per class, Logs, a cloud run's Cloud,
+     then Config, each at the full width. */
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .detail {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .main-col,
+    .rail {
+      display: contents;
+    }
+    [data-part='samples'] {
+      order: 1;
+    }
+    [data-part='classes'] {
+      order: 2;
+    }
+    [data-part='logs'] {
+      order: 3;
+    }
+    [data-part='cloud'] {
+      order: 4;
+    }
+    [data-part='config'] {
+      order: 5;
+    }
+  }
   .phone-pick {
     display: none;
   }
-  @media (max-width: 1023px) {
-    /* Tablets and phones: the rail no longer fits beside the samples, so one section at a time, picked above. */
+  @media (max-width: 767px) {
+    /* Phones: one section at a time, picked above. */
     /* The section picker stays reachable while the section scrolls (just under the top bar). */
-    /* Flex, not block: the segmented group is inline, and a line box would add its descender under it (16 px to the
-       section at the tablet tier instead of 12). */
+    /* Flex, not block: the segmented group is inline, and a line box would add its descender under it. */
     .phone-pick {
       display: flex;
       position: sticky;
@@ -899,8 +886,8 @@ css`
       z-index: var(--z-sticky);
       margin-top: calc(-1 * var(--space-2));
       background: var(--bg-app);
-      /* 12 px to the section under the page's 20 px gap (16 on phones, below). */
-      margin-bottom: calc(var(--space-3) - var(--space-5));
+      /* 12 px to the section under the page's 16 px gap. */
+      margin-bottom: calc(var(--space-3) - var(--space-4));
     }
     /* One part is visible at a time, so the empty columns must not add gaps. */
     .detail,
@@ -908,6 +895,8 @@ css`
     .rail {
       gap: 0;
     }
+    .detail:not([data-show='pr']) [data-part='pr'],
+    .detail:not([data-show='lr']) [data-part='lr'],
     .detail:not([data-show='samples']) [data-part='samples'],
     .detail:not([data-show='classes']) [data-part='classes'],
     .detail:not([data-show='logs']) [data-part='logs'],
@@ -941,17 +930,13 @@ css`
     }
   }
   @media (max-width: 767px) {
-    .phone-pick {
-      margin-bottom: calc(var(--space-3) - var(--space-4));
-    }
     .phone-pick :global([role='tab']) {
       flex: 1;
       justify-content: center;
     }
     .dev,
     .cfg,
-    .when,
-    :global(.ident.id) {
+    .when {
       display: none;
     }
     .when-phone {

@@ -6,7 +6,7 @@ import { ticks as niceTicks } from './downsample';
 import { capTicks, logTicks, MAX_TICKS, stepDecimals } from './domain';
 import { KEY_W, labelWidth } from './endLabels';
 import { GUTTER_MAX, LEAD } from './lineEndLabels';
-import { endShown, type Series, type XMark } from './lineSeries';
+import { endShown, type Future, type Series, type XMark } from './lineSeries';
 
 /** The space around the plot, px: tick labels, captions and the end labels' column. */
 export interface Margin {
@@ -79,7 +79,7 @@ export function marginOf(
   showEnds: boolean,
   yLabel: string | undefined,
   capInPlot: boolean,
-  xMark: XMark | undefined,
+  band: boolean,
   xLabel: string | undefined,
 ): Margin {
   const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
@@ -91,26 +91,27 @@ export function marginOf(
   // The gutter column holds the widest label whole.
   const labelW = showEnds ? Math.min(GUTTER_MAX, widest + 6) + LEAD - 6 : 0;
   const left = Math.ceil(longest * 7) + 14;
-  // An x-axis title gets its own line under the tick labels; a y-axis name or an x mark's label one above the plot,
-  // unless the y caption fits over the top tick (capInPlot).
-  return { top: (yLabel && !capInPlot) || xMark ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
+  // An x-axis title gets its own line under the tick labels; a y-axis name or the band of an x mark's or the future's
+  // label one above the plot, unless the y caption fits over the top tick (capInPlot).
+  return { top: (yLabel && !capInPlot) || band ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
 }
 
 /**
  * A y caption ("y from 0.40", the zoom note) sits right over its axis's top tick label, never a row higher with the
  * plot's headroom between them: where the domain leaves at least a line (16 px) above the top tick, the caption goes
- * there and the plot keeps the row. Linear axes only; an x mark's label keeps the row above the plot.
+ * there and the plot keeps the row. Linear axes only; the band of an x mark's (or the future's) label keeps the row
+ * above the plot.
  */
 export function capInPlotOf(
   yLabel: string | undefined,
-  xMark: XMark | undefined,
+  band: boolean,
   yLog: boolean,
   yTickValues: number[],
   yExtent: [number, number],
   height: number,
   xLabel: string | undefined,
 ): boolean {
-  if (!yLabel || xMark || yLog || !yTickValues.length) return false;
+  if (!yLabel || band || yLog || !yTickValues.length) return false;
   const span = yExtent[1] - yExtent[0];
   const room = span > 0 ? ((yExtent[1] - Math.max(...yTickValues)) / span) * (height - 8 - (xLabel ? 36 : 22)) : 0;
   return room >= 16;
@@ -142,4 +143,34 @@ export function markOf(xMark: XMark | undefined, xExtent: [number, number], x: S
   const end = width - margin.right;
   const before = px + 4 + labelWidth(xMark.label) > end;
   return { px, end, label: xMark.label, tx: before ? px - 4 : px + 4, anchor: before ? 'end' : 'start' };
+}
+
+/**
+ * The future's shade (a live run's epochs still to train): from the latest point to the end of the plot, its label
+ * after the rule in the band above the plot, or inside the plot's top where the x mark's label already holds that
+ * spot (both are 12 px captions; 6 px between them).
+ */
+export function futureOf(
+  future: Future | undefined,
+  mark: { tx: number; anchor: string; label: string } | null,
+  xExtent: [number, number],
+  x: Scale,
+  width: number,
+  margin: Margin,
+  height: number,
+) {
+  if (!future || !(future.x < xExtent[1])) return null;
+  const end = width - margin.right;
+  const px = Math.max(margin.left, x(Math.max(xExtent[0], future.x)));
+  if (px >= end) return null;
+  const label = future.label ?? '';
+  const w = label ? labelWidth(label) : 0;
+  const tx = Math.max(margin.left, Math.min(px + 6, end - w - 4));
+  let inBand = true;
+  if (mark && label) {
+    const mw = labelWidth(mark.label);
+    const m0 = mark.anchor === 'end' ? mark.tx - mw : mark.tx;
+    inBand = tx + w + 6 <= m0 || m0 + mw + 6 <= tx;
+  }
+  return { px, end, top: margin.top, bottom: height - margin.bottom, label, tx, ty: inBand ? margin.top - 8 : margin.top + 14 };
 }

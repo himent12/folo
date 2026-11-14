@@ -1,0 +1,337 @@
+/**
+ * What a run's page reads from its history, once, for the KPI strip and the four charts (./RunKpis, ./RunChart): the
+ * series in the series hues (mAP50-95 sky with the page's one area fill, mAP50 amber dashed, precision magenta, recall
+ * teal dashed, the learning rate neutral, the loss terms in their README hues), their fitted y domains, the one x axis
+ * the charts share (the planned run while it trains, its future shaded with the ETA over the boundary; "So far" fits
+ * every chart to the epochs trained) and the one cursor they share.
+ *
+ * Streaming cost: the points come from the run's append logs through ./metricSeries, so a new step maps and smooths
+ * that step alone, the per-epoch series change only when an epoch finishes (not on every step), and the loss y extent
+ * is a running bound instead of a loop over every point.
+ */
+import { computed, effect, signal, untrack } from 'fw';
+import type { AppendLog } from '$lib/api/appendLog';
+import type { Epoch, Run, Step } from '$lib/api/types';
+import { etaSettled, runProgress, stoppedEarly, trainingSeconds } from '$lib/api/progress';
+import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
+import { holdDomain, logDomain, niceDomain, unitDomain, type Fit, type Held } from '$lib/charts/domain';
+import type { Pt } from '$lib/charts/downsample';
+import { runHorizon } from '$lib/charts/horizon';
+import type { Future, Marker, Series, XMark } from '$lib/charts/LineChart';
+import { DEFAULT_SMOOTHING, type Scale, type Smoothing } from '$lib/charts/LossOptions';
+import { eta, metric } from '$lib/format';
+import { EpochSeries, joinExtents, liveHorizon, StepSeries } from './metricSeries';
+import { mosaicOffText, stepEpoch } from './readings';
+import { effectiveCloseMosaic, warmupEpochs } from './resolved';
+
+export const ACTIVE = ['queued', 'running', 'stopping'];
+/** The steps the Throughput tile's sparkline and average read: the last 120, as Desktop's tile. */
+export const IPS_WINDOW = 120;
+
+/** What the model reads; getters, so it follows the page's live run (read only once it has loaded). */
+export interface RunSource {
+  readonly run: Run | undefined;
+  /** The run's steps (`live.stepsLog`), read after `version` bumps: only what was added since. */
+  readonly steps: AppendLog<Step>;
+  /** The run's finished epochs (`live.epochsLog`). */
+  readonly epochs: AppendLog<Epoch>;
+  readonly version: number;
+}
+
+type EpochField = 'map50_95' | 'map50' | 'precision' | 'recall';
+export type ChartFit = Fit & { log?: boolean };
+
+/** A y domain fitted to one chart's data and held between epochs (lib/charts/domain holdDomain). */
+function held(key: () => string, next: () => ChartFit | null) {
+  let h: Held<ChartFit> | null = null;
+  return computed((): ChartFit | null => {
+    const n = next();
+    if (!n) return null;
+    h = holdDomain(h, key(), n);
+    return h.value;
+  });
+}
+
+/** The [lo, hi] of some series' finite values (a log axis skips values at or under 0); null without one. */
+function extentOf(series: Series[], log = false): [number, number] | null {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const s of series)
+    for (const p of s.points) {
+      if (!Number.isFinite(p.y) || (log && p.y <= 0)) continue;
+      if (p.y < lo) lo = p.y;
+      if (p.y > hi) hi = p.y;
+    }
+  return Number.isFinite(lo) ? [lo, hi] : null;
+}
+
+export class RunModel {
+  readonly run: () => Run;
+  readonly live = computed(() => ACTIVE.includes(this.run().status));
+  readonly progress = computed(() => runProgress(this.run()));
+  readonly elapsed = computed(() => trainingSeconds(this.run()));
+
+  // ---- the series, from the append logs ----
+  private readonly stepData: StepSeries;
+  private readonly epochData: EpochSeries;
+  /** Moves when the steps (or their x, steps per epoch) changed: what a per-step reading depends on. */
+  readonly stepsRev: () => number;
+  /** Moves when the epochs changed (once an epoch, not on every step). */
+  readonly epochsRev: () => number;
+  readonly lastStep = computed(() => {
+    this.stepsRev();
+    return this.stepData.steps[this.stepData.steps.length - 1];
+  });
+  readonly lastEpoch = computed(() => {
+    this.epochsRev();
+    return this.epochData.epochs[this.epochData.epochs.length - 1];
+  });
+  /** The epoch before the last one: what the mAP tile's change is against. */
+  readonly prevEpoch = computed(() => {
+    this.epochsRev();
+    return this.epochData.epochs[this.epochData.epochs.length - 2];
+  });
+  /** The furthest x with data, in epochs (fractional while a live run is mid-epoch). */
+  readonly observed = computed(() => {
+    this.stepsRev();
+    const ls = this.lastStep.get();
+    const le = this.lastEpoch.get();
+    return Math.max(ls ? ls.step / this.stepData.spe : 0, le ? le.epoch : 0);
+  });
+
+  // ---- what the charts' controls set ----
+  /** The loss lines' EMA and y scale (LossOptions). Log by default: the total starts near 8, the terms near 0.4–3. */
+  readonly smoothing = signal<Smoothing>(DEFAULT_SMOOTHING);
+  readonly scale = signal<Scale>('log');
+  /** "So far / All N" in the first chart's header, for every chart of the page. While a run trains: the plan. */
+  readonly horizon = signal<'observed' | 'full'>('full');
+  /** The one cursor of the page's charts (data x, epochs): hovering one reads every one. */
+  readonly cursor = signal<number | null>(null);
+
+  constructor(src: RunSource) {
+    this.run = () => src.run!;
+    this.stepData = new StepSeries(untrack(() => src.steps));
+    this.epochData = new EpochSeries(untrack(() => src.epochs));
+    const stepsRev = computed(() => {
+      void src.version;
+      this.stepData.sync(src.run?.steps_per_epoch ?? 0);
+      return this.stepData.rev;
+    });
+    const epochsRev = computed(() => {
+      void src.version;
+      this.epochData.sync();
+      return this.epochData.rev;
+    });
+    this.stepsRev = () => stepsRev.get();
+    this.epochsRev = () => epochsRev.get();
+    // A new best while the run trains pulses its ring once; the run completing while the page is open focuses it.
+    const pulser = new BestPulse();
+    const focuser = new CompleteFocus();
+    effect.pre(() => {
+      const r = src.run;
+      if (r) this.pulse.set(pulser.see(r.best?.epoch ?? null, r.status === 'running'));
+    });
+    effect.pre(() => {
+      const r = src.run;
+      if (r) this.focus.set(focuser.see(r.status));
+    });
+  }
+
+  private readonly pulse = signal(0);
+  private readonly focus = signal(0);
+
+  // ---- the x axis, shared ----
+  /**
+   * The first epoch carries the start (loading, compiling the GPU pipelines): its time left swings by minutes. The ETA
+   * shows once an epoch has finished, or halfway through a one-epoch run (lib/api/progress etaSettled).
+   */
+  readonly etaReady = computed(() => !!this.lastEpoch.get() || etaSettled(this.run()) || (this.run().epochs === 1 && this.observed.get() >= 0.5));
+  /** While it trains, the planned run (or "So far", in steps, ./metricSeries liveHorizon); once ended, what it ran. */
+  readonly xDomain = computed(
+    (): [number, number] => (this.live.get() ? liveHorizon(this.observed.get(), this.run().epochs, this.horizon.get()) : runHorizon(this.observed.get(), this.run().epochs, 'observed')),
+    { equals: (a, b) => a[0] === b[0] && a[1] === b[1] },
+  );
+  /** A training run's epochs still to come, shaded from the latest point; the first chart says when they end. */
+  readonly future = computed((): Future | undefined => {
+    const r = this.run();
+    if (r.status !== 'running' && r.status !== 'stopping') return undefined;
+    return { x: this.observed.get(), label: this.etaReady.get() && r.eta_s !== null ? `ETA ${eta(r.eta_s)}` : 'remaining' };
+  });
+
+  // ---- mosaic off: the rail's hatched end, a mark on every chart ----
+  /** Epochs without mosaic as the trainer runs them (capped at half the run: 7 of a 15-epoch run asked for 10). */
+  readonly closeN = computed(() => effectiveCloseMosaic(this.run()));
+  readonly closeFrom = computed(() => 1 - this.closeN.get() / this.run().epochs);
+  readonly mosaicOff = computed(() => this.closeFrom.get() > 0 && this.closeFrom.get() < 1);
+  readonly closeText = computed(() => mosaicOffText(this.closeN.get(), this.run().epochs, this.run().epoch, this.live.get(), stoppedEarly(this.run())), {
+    equals: (a, b) => a.cap === b.cap && a.full === b.full,
+  });
+  readonly xMark = computed((): XMark | undefined => (this.mosaicOff.get() ? { x: this.run().epochs - this.closeN.get(), label: 'mosaic off' } : undefined), {
+    equals: (a, b) => a === b || (!!a && !!b && a.x === b.x),
+  });
+
+  // ---- the series ----
+  /**
+   * How the focal line ends, in StatusBadge's marks (LineChart `end`): a filled lime dot with the heartbeat while the run
+   * trains, a square once stopped, a cross when it failed, a plain dot when it completed.
+   */
+  readonly endMark = computed(() => {
+    const s = this.run().status;
+    return s === 'running' ? ('live' as const) : s === 'stopped' ? ('stopped' as const) : s === 'failed' ? ('failed' as const) : undefined;
+  });
+  private ep = (f: EpochField): Pt[] => this.epochData.points(f).slice();
+  readonly mapSeries = computed((): Series[] => {
+    this.epochsRev();
+    return [
+      { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, end: this.endMark.get(), points: this.ep('map50_95') },
+      { id: 'm50', label: 'mAP50', color: 'var(--chart-2)', pattern: 'dash', points: this.ep('map50') },
+    ];
+  });
+  readonly prSeries = computed((): Series[] => {
+    this.epochsRev();
+    return [
+      { id: 'p', label: 'precision', color: 'var(--chart-3)', end: this.endMark.get(), points: this.ep('precision') },
+      { id: 'r', label: 'recall', color: 'var(--chart-4)', pattern: 'dash', points: this.ep('recall') },
+    ];
+  });
+  private alpha = () => Number(this.smoothing.get());
+  readonly lossSeries = computed((): Series[] => {
+    this.stepsRev();
+    const a = this.alpha();
+    const d = this.stepData;
+    return [
+      { id: 'raw', label: 'total (raw)', color: 'var(--text-primary)', ghost: true, points: a > 0 ? d.raw('total').pts.slice() : [] },
+      // One name per series (DESIGN_DIRECTION §2.23): the legend, the end labels and the phone legend all say total,
+      // box, cls and dfl, with the full names under ⓘ (./readings LOSS_TERMS).
+      { id: 'total', label: 'total', color: 'var(--text-primary)', emphasis: true, points: d.smoothed('total', a).pts.slice() },
+      // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted. Box
+      // is painted over dfl's dots where they run together late in a run, and each line is labelled at its end.
+      { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, points: d.smoothed('box', a).pts.slice() },
+      { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: d.smoothed('cls', a).pts.slice() },
+      { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: d.smoothed('dfl', a).pts.slice() },
+    ];
+  });
+  readonly lrSeries = computed((): Series[] => {
+    this.stepsRev();
+    // Every k-th step: at most about 1,200 points, whatever the run's length.
+    const all = this.stepData.raw('lr').pts;
+    const k = Math.max(1, Math.floor(this.stepData.steps.length / 600));
+    const points: Pt[] = [];
+    for (let i = 0; i < all.length; i += k) points.push(all[i]!);
+    return [{ id: 'lr', label: 'lr', color: 'var(--text-secondary)', points }];
+  });
+  /** The fourth chart's view: the learning rate, or the throughput over the whole run (the tile keeps the last steps). */
+  readonly lrView = signal<'lr' | 'ips'>('lr');
+  /** Throughput at every k-th step, smoothed as the tile's sparkline is: the run's whole history, read by the cursor. */
+  readonly ipsSeries = computed((): Series[] => {
+    this.stepsRev();
+    const all = this.stepData.smoothed('ips', 0.9).pts;
+    const k = Math.max(1, Math.floor(this.stepData.steps.length / 600));
+    const points: Pt[] = [];
+    for (let i = 0; i < all.length; i += k) points.push(all[i]!);
+    return [{ id: 'ips', label: 'img/s', color: 'var(--text-secondary)', points }];
+  });
+  /** The throughput of the last steps (the tile's sparkline, smoothed as the old chart drew it) and their average. */
+  readonly ips = computed(() => {
+    this.stepsRev();
+    const pts = this.stepData.smoothed('ips', 0.9).pts;
+    const raw = this.stepData.raw('ips').pts;
+    const last = raw.slice(-IPS_WINDOW);
+    const avg = last.length ? last.reduce((s, p) => s + p.y, 0) / last.length : null;
+    return { trend: pts.slice(-IPS_WINDOW).map((p) => p.y), avg, n: last.length };
+  });
+  /** The total loss as the chart draws it (smoothed at the chosen EMA): the loss chart's header says it beside the raw step. */
+  readonly smoothedLast = computed(() => {
+    this.stepsRev();
+    return this.smoothing.get() !== '0' ? this.stepData.smoothed('total', this.alpha()).pts.at(-1)?.y : undefined;
+  });
+  /** The learning rate's power of ten, stated once in its header: ticks "2" "4" with "× 10⁻³". */
+  readonly lrExp = computed(() => {
+    this.stepsRev();
+    const m = this.stepData.lrMax();
+    return m > 0 ? Math.floor(Math.log10(m)) : 0;
+  });
+
+  // ---- y domains ----
+  /** The plot's height inside LineChart's margins, for the tick count: `height` less the band and the x ticks. */
+  readonly plotPx = (height: number) => height - 46;
+  /** Re-fit at most once per epoch while it trains (values never tween). */
+  private epochKey = () => (this.live.get() ? Math.floor(this.observed.get()) : -1);
+  /** A 0–1 metric's domain: 0 to its top plus headroom; zoomed under 0.25 (the y caption says so). */
+  unitFit(series: () => Series[], height: () => number) {
+    return held(
+      () => `${height()}|${this.epochKey()}`,
+      () => {
+        const e = extentOf(series());
+        return e ? unitDomain(e[1], this.plotPx(height())) : null;
+      },
+    );
+  }
+  lossFit(height: () => number) {
+    const tracks = computed(() => {
+      this.stepsRev();
+      const a = this.alpha();
+      return [...(a > 0 ? [this.stepData.raw('total').ext] : []), ...(['total', 'box', 'cls', 'dfl'] as const).map((f) => this.stepData.smoothed(f, a).ext)];
+    });
+    return held(
+      () => `${this.scale.get()}|${this.smoothing.get()}|${height()}|${this.epochKey()}`,
+      () => {
+        const log = this.scale.get() === 'log';
+        const e = joinExtents(tracks.get(), log);
+        if (!e) return null;
+        return log ? { domain: logDomain(e[0], e[1]), ticks: [], decimals: 0, log: true } : niceDomain(e[0], e[1]);
+      },
+    );
+  }
+  lrFit(height: () => number) {
+    return held(
+      () => `${height()}|${this.epochKey()}`,
+      () => {
+        const e = extentOf(this.lrSeries.get());
+        return e ? niceDomain(e[0], e[1]) : null;
+      },
+    );
+  }
+  /** Throughput from 0, so a slowdown reads at its true size. */
+  ipsFit(height: () => number) {
+    return held(
+      () => `ips|${height()}|${this.epochKey()}`,
+      () => {
+        const e = extentOf(this.ipsSeries.get());
+        return e ? niceDomain(0, e[1]) : null;
+      },
+    );
+  }
+  // ---- the best epoch: a hollow ink ring on mAP50-95, the legend's "○ best 0.656 @ 41" ----
+  readonly best = computed((): Marker[] => {
+    const b = this.run().best;
+    return b ? [{ x: b.epoch, y: b.map50_95, label: 'best', quiet: true, pulse: this.pulse.get(), focus: this.focus.get() }] : [];
+  });
+  readonly bestLegend = computed(() => {
+    const b = this.run().best;
+    return b && b.map50_95 !== 0 ? `${metric(b.map50_95)} @ ${b.epoch}` : undefined;
+  });
+
+  // ---- the words of the readings ----
+  /**
+   * It ended (stopped, failed) after training steps but before its first validation: the per-epoch readings will never
+   * come, so they say so instead of "after the first epoch" and "Waiting for the first validation…".
+   */
+  readonly unvalidated = computed(() => !this.live.get() && !this.lastEpoch.get());
+  readonly firstEpoch = computed(() => (this.unvalidated.get() ? 'not validated' : 'after the first epoch'));
+  /** "Latest · ep 37", the per-epoch legends' note; per-step readings name the epoch the last step is in. */
+  readonly latestEp = computed(() => (this.lastEpoch.get() ? `Latest · ep ${this.lastEpoch.get()!.epoch}` : undefined));
+  readonly stepEpWord = computed(() => stepEpoch(this.run().status, this.observed.get(), this.lastEpoch.get()?.epoch ?? 0));
+  readonly stepEp = computed(() => (this.lastStep.get() ? `Latest · ${this.stepEpWord.get()}` : undefined));
+  /** Precision and recall are read at each epoch's best-F1 confidence (docs/API.md, Operating point): the latest one. */
+  readonly prConf = computed(() => this.lastEpoch.get()?.val.best_f1_conf);
+  /** The LR schedule the trainer resolved (`Run.resolved`), else what the recipe defaults to, in epochs. */
+  readonly schedule = computed(() => {
+    const r = this.run().resolved;
+    if (!r) return 'warmup 3 epochs · linear';
+    const e = warmupEpochs(r);
+    return `${r.warmup_iters <= 0 ? 'no warmup' : `warmup ${e} ${e === 1 ? 'epoch' : 'epochs'}`} · ${r.cos_lr ? 'cosine' : 'linear'}`;
+  });
+  /** Nothing detected yet (a best mAP of exactly 0): said in words, never "best 0.000 at epoch 1" or "conf 1.00". */
+  readonly noneYet = computed(() => (this.live.get() ? 'no detections yet' : 'no detections'));
+}

@@ -46,7 +46,7 @@ describe('a run whose dataset was removed', () => {
     expect(names.sort()).toEqual(['circle', 'square', 'triangle']);
     // Its panels keep the split the log says it validated on (v-data-runs N7), not "Evaluation".
     expect(target.querySelector('#samples')?.textContent).toContain('Validation samples');
-    expect(target.querySelector('.metrics')?.textContent).toContain('Validation mAP50-95');
+    expect(target.querySelector('#chart-map-title')?.firstChild?.textContent?.trim()).toBe('Validation mAP');
     expect(target.textContent).not.toContain('Evaluation');
   });
 });

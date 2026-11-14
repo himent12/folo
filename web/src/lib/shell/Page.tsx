@@ -143,16 +143,20 @@ css`
   .sub {
     grid-column: 1 / -1;
   }
+  /* The name, then its status badge on the same line; a long name wraps before the badge leaves it. */
   .title-line {
     grid-column: 1;
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-3);
     min-width: 0;
   }
   .badge-slot {
-    display: inline-flex;
-    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
   }
   .lead {
     display: flex;

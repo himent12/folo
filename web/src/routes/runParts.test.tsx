@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { startFrom } from './RunCompare';
-import { lrParts, mosaicOffText, stepEpoch } from './run/RunMetrics';
+import { lrParts, mosaicOffText, stepEpoch } from './run/readings';
 
 describe('Compare: startFrom', () => {
   const models = [{ id: 'm_shapes_n', name: 'shapes-n' }];
