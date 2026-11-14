@@ -1,7 +1,8 @@
 /**
  * The image and its boxes: where it came from (the toolbar), what stands between it and its boxes (the notice),
  * the canvas, the thresholds pinned under it on phones and tablets, and its footer with the settings sheet (phones)
- * or popover (tablets).
+ * or popover (tablets). Beside the rail (`rail`, from 1024 px) there is no footer: the 40 px header holds the file,
+ * the count shown and the time, and the rail the thresholds.
  */
 import FileUp from '$icons/file-up';
 import TriangleAlert from '$icons/triangle-alert';
@@ -17,7 +18,7 @@ import type { Dataset, DatasetImage as Img, Model, Prediction } from '$lib/api/t
 import { classColor } from '$lib/design/tokens';
 import DetectionView from '$lib/detect/DetectionView';
 import { PHASE_TEXT, type Backend, type BrowserEngine } from '$lib/inference/browser';
-import { num } from '$lib/format';
+import { ms, num } from '$lib/format';
 import SheetHandle from '$lib/ui/SheetHandle';
 import { sheetDrag } from '$lib/ui/sheetDrag';
 import Button from '$lib/ui/Button';
@@ -83,6 +84,8 @@ export interface ImagePanelProps {
   engine: BrowserEngine;
   sheetShown: boolean;
   tablet: boolean;
+  /** Beside the rail (from 1024 px): the count and the time in the header, no footer. */
+  rail: boolean;
   conf?: number;
   iou?: number;
   result: { boxes: Det[]; ms: number } | null;
@@ -229,6 +232,36 @@ export default function ImagePanel(props: ImagePanelProps) {
                 </span>
               ) : null}
               <span class="vbar-gap"></span>
+              {props.rail ? (
+                // What the footer says under the image on smaller screens: the count shown (and of what), the classes
+                // hidden, the time the prediction took; or, with no result, which model failed where, or what it waits
+                // for. The thresholds are the rail's, the re-filter time its Timing section's.
+                <span class="vb-facts num">
+                  {props.result ? (
+                    <>
+                      <span class="fi">
+                        <b>{props.rows.length}</b> shown of {num(props.pred?.boxes.length)}
+                        {props.cut ? '+' : ''}
+                        <span class="cand"> candidates</span>
+                      </span>
+                      {props.hidden.size ? (
+                        <span class="fi">
+                          {props.hidden.size} {props.hidden.size === 1 ? 'class' : 'classes'} hidden
+                        </span>
+                      ) : null}
+                      {props.pred ? <span class="fi">{ms(props.pred.timing.total_ms)}</span> : null}
+                    </>
+                  ) : props.notice === 'error' ? (
+                    <span class="fi">
+                      {props.model?.name} on {runOn.get() === 'server' ? 'the server' : `this browser · ${BACKEND_NAME[runOn.get() as Backend]}`}
+                    </span>
+                  ) : (
+                    <span class="fi">
+                      {props.predicting ? 'Running inference…' : props.weightsMissing ? 'Waiting for the model file' : 'Waiting for a model'}
+                    </span>
+                  )}
+                </span>
+              ) : null}
               <Button
                 size="sm"
                 variant="ghost"
@@ -325,7 +358,7 @@ export default function ImagePanel(props: ImagePanelProps) {
             </Show>
           </p>
         ) : null}
-        {props.source ? (
+        {props.source && !props.rail ? (
           <>
             <div class="vfoot num">
               {props.result ? (
@@ -405,13 +438,39 @@ export default function ImagePanel(props: ImagePanelProps) {
 }
 
 css`
+  /* The panel's 40 px header (a coarse pointer's 44 px controls grow it). */
   .vbar {
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    min-height: 44px;
-    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    min-height: 40px;
+    padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
     border-bottom: 1px solid var(--line-subtle);
+  }
+  .vb-facts {
+    display: flex;
+    flex-shrink: 0;
+    gap: var(--space-2);
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .vb-facts b {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  /* Beside the rail on a laptop the header is narrow: Replace keeps its icon (and name), the file name the room. */
+  @media (min-width: 1024px) and (max-width: 1279px) {
+    .vb-facts .cand {
+      display: none;
+    }
+    .vbar :global(.replace .label) {
+      display: none;
+    }
+    .vbar :global(.replace) {
+      width: var(--control-sm);
+      padding: 0;
+    }
   }
   .seg {
     flex-shrink: 0;

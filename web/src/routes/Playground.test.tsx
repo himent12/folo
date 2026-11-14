@@ -67,7 +67,7 @@ describe('Playground: a failed prediction', () => {
     expect(title.textContent).toBe('Prediction failed');
     expect(document.activeElement).toBe(title);
     // One authoritative block: the caption under it adds only which model ran where.
-    const foot = target.querySelector('.vfoot')?.textContent?.replace(/\s+/g, ' ').trim();
+    const foot = target.querySelector('.vfoot, .vb-facts')?.textContent?.replace(/\s+/g, ' ').trim();
     expect(foot).not.toContain('Prediction failed');
     expect(foot).not.toContain('out of GPU memory');
     expect(foot).toContain('shapes-s-best on the server');
@@ -277,7 +277,7 @@ describe('Playground: a busy image (more candidates than the first answer holds)
     return asked;
   }
   const rows = () => target.querySelectorAll('#pg-panel tbody tr').length;
-  const foot = () => target.querySelector('.vfoot')?.textContent?.replace(/\s+/g, ' ') ?? '';
+  const foot = () => target.querySelector('.vfoot, .vb-facts')?.textContent?.replace(/\s+/g, ' ') ?? '';
   function setConf(v: number) {
     const conf = target.querySelector<HTMLInputElement>('.slider input[type="range"]')!;
     conf.value = String(v);
@@ -652,5 +652,66 @@ describe('Playground: which model it opens on', () => {
     await run('normal', 'm_shapes_s');
     expect(toast.items.map((t) => t.title)).toEqual(['Something else']);
     toast.items = [];
+  });
+});
+
+describe('Playground: the rail (from 1024 px)', () => {
+  const text = (el: Element | null | undefined) => el?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+  const tab = (name: string) => [...target.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((t) => t.textContent?.includes(name))!;
+
+  it('holds the model, thresholds, what is drawn, the detections and the timing; the header has Open image', async () => {
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const rail = target.querySelector('aside.rail')!;
+    expect(rail.getAttribute('aria-label')).toBe('Model and results');
+    // The model picker left the page header for the rail.
+    expect(target.querySelector('.page header select')).toBeNull();
+    expect(rail.querySelector('select')).not.toBeNull();
+    expect([...rail.querySelectorAll('.slider')].length).toBe(3);
+    expect(text(rail.querySelector('#pg-thresholds'))).toBe('Thresholds');
+    expect(rail.querySelector('[role="group"][aria-label="Show on the image"]')).not.toBeNull();
+    expect(rail.querySelector('#pg-panel')).not.toBeNull();
+    expect(text(rail.querySelector('#pg-timing'))).toContain('Timing');
+    const open = [...target.querySelectorAll('.page header button')].find((b) => b.textContent?.includes('Open image'));
+    expect(open).toBeDefined();
+    // No footer under the image: its count and time are in the image's header, its thresholds in the rail.
+    expect(target.querySelector('.vfoot')).toBeNull();
+    const facts = [...target.querySelectorAll('.vb-facts .fi')].map((f) => text(f));
+    expect(facts[0]).toMatch(/^\d+ shown of [\d,]+\+? candidates$/);
+    expect(facts.at(-1)).toMatch(/^[\d.]+ ms$/);
+  });
+
+  it("drops the coordinate columns but gives the selected box's coordinates under the list", async () => {
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelectorAll('#pg-panel tbody tr').length > 1, 'the detections');
+    expect([...target.querySelectorAll('#pg-panel thead th')].map((th) => text(th))).toEqual(['Class', 'Size (px)', 'Confidence']);
+    expect(text(target.querySelector('.sel-line'))).toBe('Select a box for its coordinates');
+    target.querySelectorAll<HTMLTableRowElement>('#pg-panel tbody tr')[1]!.click();
+    flushSync();
+    expect(text(target.querySelector('.sel-line'))).toMatch(/^Box x1 \d+ · y1 \d+ · x2 \d+ · y2 \d+$/);
+  });
+
+  it('lists the classes found as a tab, each one a show / hide toggle', async () => {
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const rows = target.querySelectorAll('#pg-panel tbody tr').length;
+    tab('Classes').click();
+    flushSync();
+    const toggles = [...target.querySelectorAll<HTMLButtonElement>('#pg-panel ul.counts button[aria-pressed]')];
+    expect(toggles.length).toBeGreaterThan(1);
+    toggles[0]!.click();
+    flushSync();
+    expect(text(target.querySelector('.vb-facts'))).toContain('1 class hidden');
+    tab('Detections').click();
+    flushSync();
+    expect(target.querySelectorAll('#pg-panel tbody tr').length).toBeLessThan(rows);
+  });
+
+  it('says an end-to-end model does not use the overlap threshold instead of offering its slider', async () => {
+    await run('normal', 'm_shapes_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const rail = target.querySelector('aside.rail')!;
+    expect([...rail.querySelectorAll('.no-nms span')].map((s) => text(s))).toEqual(['Overlap (IoU)', 'Not used · end-to-end model']);
+    expect([...rail.querySelectorAll('.slider')].length).toBe(2);
   });
 });

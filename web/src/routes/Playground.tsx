@@ -1,5 +1,5 @@
 import Box from '$icons/box';
-import Check from '$icons/check';
+import ImagePlus from '$icons/image-plus';
 import Plus from '$icons/plus';
 import RotateCcw from '$icons/rotate-ccw';
 import { computed, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack, type Signal } from 'fw';
@@ -22,8 +22,8 @@ import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Panel from '$lib/ui/Panel';
 import Skeleton from '$lib/ui/Skeleton';
-import Slider from '$lib/ui/Slider';
 import { toast } from '$lib/ui/toast';
+
 import DatasetPicker from './playground/DatasetPicker';
 import { looksLikeFolo } from './playground/folo';
 import { holdNoticeFocus } from './playground/noticeFocus';
@@ -34,6 +34,9 @@ import ResultsPanel from './playground/ResultsPanel';
 import ClassList from './playground/ClassList';
 import PhoneDetails from './playground/PhoneDetails';
 import SidePanels from './playground/SidePanels';
+import Rail from './playground/Rail';
+import DisplayToggles from './playground/DisplayToggles';
+import { MoreBody, RailThresholds, SecondarySliders } from './playground/Thresholds';
 import { ask, BACKEND_NAME, DEFAULTS, FETCH, noServerWeights, type RunOn } from './playground/predict';
 import { askAllWhenCut } from './playground/allCandidates';
 import { ACCEPT, droppedImages, takeImage } from './playground/intake';
@@ -48,8 +51,7 @@ type Det = Prediction['boxes'][number];
 
 /** Model sizes, smallest first: a smaller model of the same classes may fit where this one does not. */
 const ARCH_ORDER = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'];
-const NMS_TIP = 'Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.';
-const round = (v: number) => String(Math.round(v));
+
 
 export default function Playground() {
   setCrumbs({ label: 'Playground' });
@@ -59,7 +61,9 @@ export default function Playground() {
   // classes and timing fold into two disclosures under the detections. Bottom sheets are for phones only
   // (DESIGN_DIRECTION 9): a tablet's "More settings" is a popover anchored under its button.
   const phone = new MediaQuery(media.phone, false);
-  // Below 1024 px the model and Run on leave the title row for a toolbar row of their own under it, full width.
+  // From 1024 px the page is one screen (design/UNIFIED.md §4 Playground): the image as tall as the window allows and
+  // a 320 px rail beside it (the model, the thresholds, the detections, the timing). Below, the model and Run on are a
+  // toolbar row under the title and the panels follow the image.
   const narrow = new MediaQuery(media.upToLaptop, false);
   // Tablets with an image: the canvas capped at half the viewport, Confidence and Overlap in a strip right under it,
   // Max detections and the display toggles in the same sheet, so the image and the controls that redraw it share
@@ -339,7 +343,7 @@ export default function Playground() {
   const hover = signal<Det | null>(null);
   const picked = signal<Det | null>(null);
   const tbody = signal<HTMLTableSectionElement>();
-  const tab = signal<'detections' | 'json'>('detections');
+  const tab = signal<'detections' | 'classes' | 'json'>('detections');
 
   // The image, its result and the thresholds outlive the page for the tab; a dataset image and the thresholds are in
   // the URL (./playground/session).
@@ -495,6 +499,8 @@ export default function Playground() {
     const next = picked.peek() === b ? null : b;
     picked.set(next);
     const row = next && rowEl(i);
+    // The rail scrolls as a whole (the page does not): the row comes into view in it.
+    if (row && !narrow.peek()) return row.scrollIntoView({ block: 'nearest' });
     const box = row?.closest<HTMLElement>('.scroll');
     if (!row || !box) return;
     const head = box.querySelector('thead')?.offsetHeight ?? 0;
@@ -575,47 +581,11 @@ export default function Playground() {
   const isDefault = computed(() => conf.get() === DEFAULTS.conf && iou.get() === DEFAULTS.iou && maxDet.get() === DEFAULTS.maxDet);
 
   // ---------- snippets ----------
-  const toggle = (label: string, on: () => boolean, set: (v: boolean) => void) => (
-    <button type="button" class="tog" class:on={on()} aria-pressed={on()} onclick={() => set(!on())}>
-      <span class="tog-box" aria-hidden="true">
-        {on() ? <Check size={10} strokeWidth={3} /> : null}
-      </span>
-      {label}
-    </button>
-  );
+  const displayToggles = () => <DisplayToggles bind:labels={labels} bind:scores={scores} bind:truth={truth} dataset={source.get()?.kind === 'dataset'} />;
 
-  const displayToggles = () => (
-    <>
-      {toggle('Labels', () => labels.get(), (v) => labels.set(v))}
-      {toggle('Scores', () => scores.get(), (v) => scores.set(v))}
-      {source.get()?.kind === 'dataset' ? toggle('Ground truth', () => truth.get(), (v) => truth.set(v)) : null}
-    </>
-  );
-
-  const secondarySliders = (inline: boolean) => (
-    <>
-      <div title={NMS_TIP}>
-        <Slider inline={inline} label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Suppress same-class overlaps above this." />
-      </div>
-      <Slider inline={inline} label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={round} hint="Keep at most this many boxes." />
-    </>
-  );
-
-  const moreBody = () => (
-    <div class="sheet-body">
-      <div class="more-sliders">
-        {tablet.get() ? (
-          <Slider inline label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={round} />
-        ) : (
-          <>
-            <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
-            {secondarySliders(true)}
-          </>
-        )}
-      </div>
-      <div class="more-toggles">{displayToggles()}</div>
-    </div>
-  );
+  const secondarySliders = (inline: boolean) => <SecondarySliders inline={inline} bind:iou={iou} bind:maxDet={maxDet} />;
+  const railThresholds = () => <RailThresholds bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} o2o={model.get()?.head === 'o2o'} />;
+  const moreBody = () => <MoreBody tablet={tablet.get()} bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} toggles={displayToggles} />;
 
   const resetButton = () => (
     <Button size="sm" variant="ghost" icon={RotateCcw} disabled={isDefault.get()} onclick={resetThresholds}>
@@ -648,7 +618,13 @@ export default function Playground() {
   const timingBody = () => (
     <>
       {pred.get() ? (
-        <TimingBar timing={pred.get()!.timing} device={deviceText.get()} cold={pred.get()!.cold} />
+        <>
+          <TimingBar timing={pred.get()!.timing} device={deviceText.get()} cold={pred.get()!.cold} />
+          {/* Beside the rail the image has no footer: the browser's re-filter time is here. */}
+          {!narrow.current && result.get() ? (
+            <p class="refilter num">Thresholds re-filtered in {result.get()!.ms < 0.01 ? '<0.01' : result.get()!.ms.toFixed(2)} ms</p>
+          ) : null}
+        </>
       ) : predicting.get() ? (
         <div class="t-sk">
           <Skeleton h="28px" w="50%" />
@@ -664,9 +640,10 @@ export default function Playground() {
 
   const intro = () => <span>Run a model on any image. Thresholds re-filter instantly in the browser.</span>;
 
-  // The model and where it runs: on the title row from 1024 px up, a toolbar row under the title below that.
+  // The model and where it runs: the rail's first section from 1024 px up, a toolbar row under the title below that.
   const pickers = () => (
     <ModelPickers
+      rail
       ranked={ranked.get()}
       modelId={modelId.get()}
       choices={choices.get()}
@@ -677,6 +654,32 @@ export default function Playground() {
       webgpu={webgpu}
       browserOff={browserOff.get()}
       runOnNote={runOnNote.get()}
+    />
+  );
+
+  // The detections: a panel under the image below 1024 px, the rail's Detections section (with a Classes tab) above.
+  const results = (rail: boolean) => (
+    <ResultsPanel
+      rail={rail}
+      classCount={counts.get().length}
+      classList={classList}
+      showAllButton={showAllButton}
+      result={result.get()}
+      bind:tab={tab}
+      rows={rows.get()}
+      predicting={predicting.get()}
+      notice={notice.get()}
+      json={json.get()}
+      pred={pred.get()}
+      bind:conf={conf}
+      hidden={hidden.get()}
+      bind:tbody={tbody}
+      tabRow={tabRow.get()}
+      activeIdx={activeIdx.get()}
+      selectedIdx={selectedIdx.get()}
+      bind:hover={hover}
+      bind:picked={picked}
+      onrowkey={onrowkey}
     />
   );
 
@@ -710,7 +713,15 @@ export default function Playground() {
         title="Playground"
         wide
         sub={source.get() && phone.current ? undefined : intro}
-        actions={narrow.current || !ranked.get().length ? undefined : pickers}
+        actions={() => (
+          <>
+            {ranked.get().length && !phone.current ? (
+              <Button icon={ImagePlus} onclick={() => fileInput.click()}>
+                Open image
+              </Button>
+            ) : null}
+          </>
+        )}
       >
         {narrow.current && ranked.get().length ? (
           <ModelPickers
@@ -746,7 +757,7 @@ export default function Playground() {
             />
           </Panel>
         ) : (
-          /* 8 + 4 columns; in one column (below 1024 px) the canvas takes the image's aspect (see .layout.fit). */
+          /* The image and the 320 px rail; in one column (below 1024 px) the canvas takes the image's aspect (see .layout.fit). */
           <div class="layout" class:fit={!!source.get() && !!dims.get()}>
             <div class="main">
               <ImagePanel
@@ -796,6 +807,7 @@ export default function Playground() {
                 engine={engine}
                 sheetShown={sheetShown.get()}
                 tablet={tablet.get()}
+                rail={!narrow.current}
                 bind:conf={conf}
                 bind:iou={iou}
                 result={result.get()}
@@ -812,24 +824,7 @@ export default function Playground() {
                 moreBody={moreBody}
               />
 
-              <ResultsPanel
-                result={result.get()}
-                bind:tab={tab}
-                rows={rows.get()}
-                predicting={predicting.get()}
-                notice={notice.get()}
-                json={json.get()}
-                pred={pred.get()}
-                bind:conf={conf}
-                hidden={hidden.get()}
-                bind:tbody={tbody}
-                tabRow={tabRow.get()}
-                activeIdx={activeIdx.get()}
-                selectedIdx={selectedIdx.get()}
-                bind:hover={hover}
-                bind:picked={picked}
-                onrowkey={onrowkey}
-              />
+              {narrow.current ? results(false) : null}
 
               {source.get() && phone.current ? (
                 <PhoneDetails
@@ -845,20 +840,32 @@ export default function Playground() {
               ) : null}
             </div>
 
-            <SidePanels
-              source={source.get()}
-              result={result.get()}
-              counts={counts.get()}
-              pred={pred.get()}
-              where={where.get()}
-              bind:conf={conf}
-              resetButton={resetButton}
-              secondarySliders={secondarySliders}
-              displayToggles={displayToggles}
-              showAllButton={showAllButton}
-              classList={classList}
-              timingBody={timingBody}
-            />
+            {narrow.current ? (
+              <SidePanels
+                source={source.get()}
+                result={result.get()}
+                counts={counts.get()}
+                pred={pred.get()}
+                where={where.get()}
+                bind:conf={conf}
+                resetButton={resetButton}
+                secondarySliders={secondarySliders}
+                displayToggles={displayToggles}
+                showAllButton={showAllButton}
+                classList={classList}
+                timingBody={timingBody}
+              />
+            ) : (
+              <Rail
+                pickers={pickers}
+                thresholds={railThresholds}
+                resetButton={resetButton}
+                toggles={source.get() ? displayToggles : null}
+                detections={() => results(true)}
+                timing={timingBody}
+                where={pred.get() ? where.get() : null}
+              />
+            )}
           </div>
         )}
       </Page>
@@ -874,58 +881,27 @@ export default function Playground() {
 }
 
 css`
-  /* The page grid's 8 + 4 split (the rail is always 4 columns), the same with or without an image. */
+  /* The image beside the 320 px rail, the same with or without an image. One screen: the layout is the window less
+     the top bar, the page's padding (24 above, 48 below) and its header with the gap under it (76), so neither the
+     image nor the rail scrolls the page; the canvas is that less its 40 px header and the panel's edges. */
   .layout {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) 320px;
     gap: var(--space-4);
     align-items: start;
-    --stage-h: max(360px, calc(100dvh - 220px));
+    --fit-h: max(420px, calc(100dvh - var(--size-topbar) - 148px));
+    --stage-h: calc(var(--fit-h) - 42px);
+  }
+  .refilter {
+    margin-top: var(--space-3);
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
   .main {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-4);
     min-width: 0;
-  }
-  /* The first toggle's box lines up with the slider labels above. */
-  :global(.show) .tog:first-child {
-    margin-left: calc(-1 * var(--space-2));
-  }
-  .tog {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: var(--control-sm);
-    padding: 0 var(--space-2);
-    border-radius: var(--radius-sm);
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    white-space: nowrap;
-    transition:
-      background-color var(--dur-fast) var(--ease-standard),
-      color var(--dur-fast) var(--ease-standard);
-  }
-  .tog:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-  .tog.on {
-    color: var(--text-primary);
-  }
-  .tog-box {
-    display: grid;
-    place-items: center;
-    width: 12px;
-    height: 12px;
-    border-radius: 3px;
-    /* The empty box's edge is line.control (>= 3:1); checked is neutral (lime is for actions, focus and live). */
-    box-shadow: inset 0 0 0 1px var(--line-control);
-  }
-  .tog.on .tog-box {
-    background: var(--text-primary);
-    color: var(--text-inverse);
-    box-shadow: none;
   }
   .hint {
     color: var(--text-tertiary);
@@ -935,35 +911,11 @@ css`
     display: grid;
     gap: var(--space-3);
   }
-  .sheet-body {
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: 0 var(--space-4) var(--space-3);
-  }
-  /* One label column and one value column: every track (the pinned Confidence, the sheet's three) starts and ends at
-     the same x. */
-  .more-sliders :global(.slider.inline) {
-    grid-template-columns: 112px minmax(0, 1fr) 40px;
-  }
-  .more-sliders :global(.slider.inline) {
-    min-height: 44px;
-  }
-  .more-toggles {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 2px;
-    min-height: 44px;
-    margin-left: calc(-1 * var(--space-2));
-  }
-  @media (pointer: coarse) {
-    .more-toggles .tog {
-      height: 44px;
-    }
-  }
+
   @media (max-width: 1023px) {
     .layout {
       grid-template-columns: minmax(0, 1fr);
+      --stage-h: max(360px, calc(100dvh - 220px));
     }
     /* One column: interleave the panels so the controls sit right under the image. */
     .main {

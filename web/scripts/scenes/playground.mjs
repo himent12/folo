@@ -48,7 +48,7 @@ export const playgroundScenes = [
     },
   },
   // Tablet: the model and Run on in a toolbar row under the title, the rail a two-column block under the image.
-  { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: playgroundResult },
+  { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'wide', 'laptop', 'tablet', 'mobile'], setup: playgroundResult },
   {
     // A browser without WebGPU: the option is off and the header says why, and what is left.
     name: 'playground-no-webgpu',
