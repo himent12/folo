@@ -65,7 +65,7 @@ export default function Page(props: PageProps) {
               <h1 tabindex={-1} data-route-focus>
                 {p.title}
               </h1>
-              <span class="title-badge">{p.badge}</span>
+              <span class="badge-slot">{p.badge}</span>
             </div>
           ) : (
             <h1 tabindex={-1} data-route-focus>
@@ -156,7 +156,7 @@ css`
     gap: var(--space-1) var(--space-3);
     min-width: 0;
   }
-  .title-badge {
+  .badge-slot {
     display: flex;
     align-items: center;
     flex-wrap: wrap;

@@ -408,7 +408,8 @@ export default function Run() {
             inlineActions
             badge={() => (
               // The status on the title's line (design/UNIFIED.md §2, Detail header); the run's id is in Config's header.
-              <>
+              // Its own row of items (the status, a phone's time, a connection warning), spaced and wrapping here.
+              <span class="status-row">
                 <StatusBadge run={R()} />
                 {/* Phones: the time joins the status, so the meta line below fits one row. */}
                 <span class="faint when-phone">{when()}</span>
@@ -422,7 +423,7 @@ export default function Run() {
                     <WifiOff size={12} /> Worker not answering
                   </Badge>
                 ) : null}
-              </>
+              </span>
             )}
             sub={() => (
               // One line from 1024 px up, its last item ("started yesterday") never alone on a second one: below 1280
@@ -706,6 +707,12 @@ css`
     line-clamp: 2;
     overflow: hidden;
     overflow-wrap: anywhere;
+  }
+  .status-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-2);
   }
   .when-phone {
     display: none;

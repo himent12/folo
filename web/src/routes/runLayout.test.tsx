@@ -71,7 +71,7 @@ describe('a completed run', () => {
     expect(headerButtons()).toContain('Try in Playground');
     expect(headerButtons()).toContain('Compare');
     expect(target.querySelector('.title-line h1')?.textContent?.trim()).toBe(run.name);
-    expect(target.querySelector('.title-line .title-badge')?.textContent).toContain('Completed');
+    expect(target.querySelector('.title-line .badge-slot')?.textContent).toContain('Completed');
     // Its id moved from the header to Config's.
     expect(target.querySelector('#config .run-id')?.textContent).toBe(run.id);
     // The four charts, in two rows.
