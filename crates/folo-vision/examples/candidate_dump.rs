@@ -7,7 +7,8 @@
 //! ```text
 //! cargo run --release -p folo-vision --example candidate_dump -- \
 //!     --model <weights.folo> --data D:/folo-data/coco --split val --out <dir> \
-//!     [--list <file of image file names>] [--half] [--batch 32] [--conf 0.001] [--device gpu:0]
+//!     [--list <file of image file names>] [--half] [--batch 32] [--conf 0.001] [--device gpu:0] \
+//!     [--features] [--aug <seed>] [--input] [--stem]
 //! ```
 //!
 //! Output folder:
@@ -19,6 +20,18 @@
 //!   original-image box (f32, `ImageMeta::unmap_xyxy`, clipped), then the logits (f32).
 //! - `pairs.bin`: per pair 3 words: the anchor's position in the image's anchor list (u32), class (u32), score
 //!   (f32); in `(anchor, class)` order.
+//! - `feats.bin` (with `--features`, lane `refine`, docs/notes/hill/r3-refine.md): per image the head's three
+//!   inputs (MODEL.md §4 rows 16, 19, 22: P3, P4, P5) as f16, `[C, H, W]` each, one level after the other.
+//! - `input.bin` (with `--input`): per image the network input as u8 `[3, H, W]` (`R G B`, after `--aug`'s
+//!   flip and zoom): what the refiner's high-resolution probes read.
+//! - `stem.bin` (with `--stem`, to check a re-implementation): per image layers 0 and 1 (the stem convs) as f32
+//!   `[C, H, W]`, one after the other.
+//!
+//! `--aug <seed>` (lane `refine`'s training views): before the forward, each letterboxed image is flipped
+//! horizontally with probability 1/2 and zoomed about the input's centre by `z` drawn uniformly from 0.75..1.25
+//! (bilinear, gray 114 outside), both drawn from `(seed, dataset index)`. `images.jsonl` then also has `flip`,
+//! `zoom` and `targets` (the loader's boxes after the same transform, `[class, x1, y1, x2, y2]` in network
+//! pixels, unclipped); the original-image boxes in `anchors.bin` are meaningless for such a view.
 
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -47,6 +60,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conf: f32 = arg(&args, "--conf").map_or(Ok(0.001), |s| s.parse())?;
     let device = arg(&args, "--device").unwrap_or_else(|| "gpu:0".into());
     let half = args.iter().any(|a| a == "--half");
+    let features = args.iter().any(|a| a == "--features");
+    let aug: Option<u64> = arg(&args, "--aug").map(|s| s.parse()).transpose()?;
+    let input = args.iter().any(|a| a == "--input");
+    let stem = args.iter().any(|a| a == "--stem");
 
     if device.starts_with("gpu") {
         folo_gpu::init()?;
@@ -94,6 +111,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut anchors_f = BufWriter::new(std::fs::File::create(out.join("anchors.bin"))?);
     let mut pairs_f = BufWriter::new(std::fs::File::create(out.join("pairs.bin"))?);
     let mut images_f = BufWriter::new(std::fs::File::create(out.join("images.jsonl"))?);
+    let mut input_f =
+        if input { Some(BufWriter::new(std::fs::File::create(out.join("input.bin"))?)) } else { None };
+    let mut stem_f =
+        if stem { Some(BufWriter::new(std::fs::File::create(out.join("stem.bin"))?)) } else { None };
+    let mut feats_f =
+        if features { Some(BufWriter::new(std::fs::File::create(out.join("feats.bin"))?)) } else { None };
     let (mut n_anchors, mut n_pairs, mut n_images) = (0u64, 0u64, 0usize);
     let mut header = None;
     let t0 = std::time::Instant::now();
@@ -101,6 +124,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut b = b?;
         // As `folo_vision::val`: bytes are converted on the device, `value / 255` after the cast.
         let bytes = !b.images_u8.is_empty();
+        let views: Vec<(bool, f32)> = match aug {
+            None => vec![(false, 1.0); b.meta.len()],
+            Some(seed) => {
+                if !bytes {
+                    return Err("--aug needs a GPU device (u8 images)".into());
+                }
+                let [n, c, h, w] = b.shape;
+                let plane = c * h * w;
+                (0..n)
+                    .map(|i| {
+                        let r = splitmix(seed ^ (b.meta[i].index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                        let flip = r & 1 == 1;
+                        let zoom = 0.75 + 0.5 * ((r >> 11) as f64 / (1u64 << 53) as f64) as f32;
+                        let src = b.images_u8[i * plane..(i + 1) * plane].to_vec();
+                        warp(&src, &mut b.images_u8[i * plane..(i + 1) * plane], c, h, w, flip, zoom);
+                        (flip, zoom)
+                    })
+                    .collect()
+            }
+        };
+        if input && !bytes {
+            return Err("--input needs a GPU device (u8 images)".into());
+        }
+        let input_bytes = if input { b.images_u8.clone() } else { Vec::new() };
         let x = if bytes {
             Tensor::from_vec(std::mem::take(&mut b.images_u8), b.shape)?
         } else {
@@ -109,10 +156,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let x = if device.is_cpu() { x } else { x.to_device(device)? };
         let x = x.to_dtype(model.dtype())?;
         let x = if bytes { x.div_scalar(255.0)? } else { x };
+        let mut pyramid: Vec<Tensor> = Vec::new();
+        let mut stem_out: Vec<Tensor> = Vec::new();
         let output = {
             let _g = folo_core::no_grad();
-            model.forward_head(&x, HeadMode::O2m)?
+            if features || stem {
+                assert_eq!(model.head_mode(), HeadMode::O2m, "--features needs the o2m branch");
+                model.forward_traced(&x, &mut |l, t| {
+                    if features && matches!(l, 16 | 19 | 22) {
+                        pyramid.push(t.clone());
+                    }
+                    if stem && l <= 1 {
+                        stem_out.push(t.clone());
+                    }
+                })?
+            } else {
+                model.forward_head(&x, HeadMode::O2m)?
+            }
         };
+        // The pyramid as f16 on the host, per level [B, C, H, W].
+        let pyramid: Vec<(Vec<folo_core::f16>, usize)> = pyramid
+            .iter()
+            .map(|t| {
+                let per = t.shape().dims()[1..].iter().product::<usize>();
+                let v = t.to_dtype(DType::F16)?.to_device(folo_core::Device::Cpu)?.to_vec()?;
+                Ok::<_, folo_core::Error>((v, per))
+            })
+            .collect::<Result<_, _>>()?;
+        let stem_out: Vec<(Vec<f32>, usize)> = stem_out
+            .iter()
+            .map(|t| {
+                let per = t.shape().dims()[1..].iter().product::<usize>();
+                let v = t.to_dtype(DType::F32)?.to_device(folo_core::Device::Cpu)?.to_vec()?;
+                Ok::<_, folo_core::Error>((v, per))
+            })
+            .collect::<Result<_, _>>()?;
         let (a, nc, rm) = (output.num_anchors(), output.num_classes, output.reg_max);
         if header.is_none() {
             header = Some(serde_json::json!({
@@ -171,7 +249,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 local += 1;
                 n_anchors += 1;
             }
-            let line = serde_json::json!({
+            if let Some(f) = input_f.as_mut() {
+                let plane = b.shape[1] * b.shape[2] * b.shape[3];
+                f.write_all(&input_bytes[i * plane..(i + 1) * plane])?;
+            }
+            if let Some(f) = stem_f.as_mut() {
+                for (v, per) in &stem_out {
+                    for x in &v[i * per..(i + 1) * per] {
+                        f.write_all(&x.to_le_bytes())?;
+                    }
+                }
+            }
+            if let Some(f) = feats_f.as_mut() {
+                for (v, per) in &pyramid {
+                    for x in &v[i * per..(i + 1) * per] {
+                        f.write_all(&x.to_bits().to_le_bytes())?;
+                    }
+                }
+            }
+            let mut line = serde_json::json!({
                 "index": meta.index,
                 "file": part.entries()[meta.index].image.file_name().map(|n| n.to_string_lossy().to_string()),
                 "orig": meta.orig_size,
@@ -180,6 +276,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "anchor_start": a0, "anchors": n_anchors - a0,
                 "pair_start": p0, "pairs": n_pairs - p0,
             });
+            if aug.is_some() {
+                let (flip, zoom) = views[i];
+                let (w, h) = (b.shape[3] as f32, b.shape[2] as f32);
+                let tx = |x: f32| {
+                    let x = if flip { w - x } else { x };
+                    zoom * (x - w / 2.0) + w / 2.0
+                };
+                let ty = |y: f32| zoom * (y - h / 2.0) + h / 2.0;
+                let targets: Vec<[f32; 5]> = b
+                    .targets
+                    .iter()
+                    .filter(|t| t[0] as usize == i)
+                    .map(|t| {
+                        let (cx, cy, bw, bh) = (t[2] * w, t[3] * h, t[4] * w, t[5] * h);
+                        let (xa, xb) = (tx(cx - bw / 2.0), tx(cx + bw / 2.0));
+                        [t[1], xa.min(xb), ty(cy - bh / 2.0), xa.max(xb), ty(cy + bh / 2.0)]
+                    })
+                    .collect();
+                line["flip"] = flip.into();
+                line["zoom"] = zoom.into();
+                line["targets"] = serde_json::to_value(targets)?;
+            }
             writeln!(images_f, "{line}")?;
             n_images += 1;
         }
@@ -190,6 +308,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    for f in [input_f.as_mut(), stem_f.as_mut(), feats_f.as_mut()].into_iter().flatten() {
+        f.flush()?;
+    }
     anchors_f.flush()?;
     pairs_f.flush()?;
     images_f.flush()?;
@@ -198,10 +319,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     header["anchor_records"] = n_anchors.into();
     header["pair_records"] = n_pairs.into();
     header["anchor_words"] = (12 + 4 * model.config().reg_max).into();
+    header["features"] = features.into();
+    header["input"] = input.into();
+    header["stem"] = stem.into();
+    header["aug"] = aug.into();
     std::fs::write(out.join("dump.json"), serde_json::to_string_pretty(&header)?)?;
     eprintln!(
         "done: {n_images} images, {n_anchors} anchors, {n_pairs} pairs in {:.0} s",
         t0.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// SplitMix64: one well-mixed 64-bit value from a seed.
+fn splitmix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// `dst = src` flipped horizontally (if `flip`), then zoomed by `zoom` about the centre: the network-pixel point
+/// `x` of `src` lands at `zoom · (x' − w/2) + w/2` (`x' = w − x` when flipped), bilinear, gray 114 outside.
+fn warp(src: &[u8], dst: &mut [u8], c: usize, h: usize, w: usize, flip: bool, zoom: f32) {
+    let (wf, hf) = (w as f32, h as f32);
+    for y in 0..h {
+        let sy = ((y as f32 + 0.5) - hf / 2.0) / zoom + hf / 2.0 - 0.5;
+        for x in 0..w {
+            let mut sx = ((x as f32 + 0.5) - wf / 2.0) / zoom + wf / 2.0;
+            if flip {
+                sx = wf - sx;
+            }
+            let sx = sx - 0.5;
+            let (x0, y0) = (sx.floor(), sy.floor());
+            let (fx, fy) = (sx - x0, sy - y0);
+            for ch in 0..c {
+                let px = |xx: f32, yy: f32| -> f32 {
+                    if xx < 0.0 || yy < 0.0 || xx >= wf || yy >= hf {
+                        114.0
+                    } else {
+                        src[ch * h * w + yy as usize * w + xx as usize] as f32
+                    }
+                };
+                let v = (1.0 - fy) * ((1.0 - fx) * px(x0, y0) + fx * px(x0 + 1.0, y0))
+                    + fy * ((1.0 - fx) * px(x0, y0 + 1.0) + fx * px(x0 + 1.0, y0 + 1.0));
+                dst[ch * h * w + y * w + x] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
 }
