@@ -118,6 +118,23 @@ describe("ConfigPanel: the run's CLI command (servers that list run_cli)", () =>
     mountWith({ cli: null });
     expect(target.querySelector('.cli')).toBeNull();
   });
+
+  it("puts the run's id and Copy command in the header (design/UNIFIED.md §4 Run), Copy command where the server has one", async () => {
+    mountWith({ cli: line, runId: 'run_7d1e' });
+    const header = target.querySelector('#config header')!;
+    expect(header.querySelector('.run-id')?.textContent).toBe('run_7d1e');
+    const write = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+    const copy = [...header.querySelectorAll<HTMLButtonElement>('button')].find((b) => (b.getAttribute('aria-label') ?? b.textContent?.trim()) === 'Copy command')!;
+    copy.click();
+    await Promise.resolve();
+    expect(write).toHaveBeenCalledWith(line);
+    unmount(c!);
+    target.remove();
+    mountWith({ cli: null, runId: 'run_7d1e' });
+    const labels = [...target.querySelectorAll('#config header button')].map((b) => b.getAttribute('aria-label') ?? b.textContent?.trim());
+    expect(labels).toEqual(['Copy JSON']);
+  });
 });
 
 describe('ConfigPanel: the work before the reference', () => {

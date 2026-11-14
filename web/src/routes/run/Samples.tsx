@@ -95,10 +95,11 @@ export default function Samples(props: SamplesProps) {
 
   return (
     <>
-      {/* The epoch picker names the epoch, so phones drop the meta that repeats it (title and picker then share a row). */}
+      {/* The epoch picker names the epoch, so phones (and wide screens, whose header holds every control) drop the meta
+          that repeats it. */}
       <Panel
         title={props.title ?? `${scoresTitle(null)} samples`}
-        meta={samples.data && !phone.current ? `epoch ${samples.data.epoch}` : undefined}
+        meta={samples.data && !phone.current && !wide.current ? `epoch ${samples.data.epoch}` : undefined}
         id="samples"
         actions={() => (
           // Before the first validation there is nothing to filter: the frame holds only its one line.

@@ -55,9 +55,9 @@ export default function RunChart(props: RunChartProps) {
     if (kind === 'lr') return m.lrExp.get() ? `${m.schedule.get()} · × ${pow10(m.lrExp.get())}` : m.schedule.get();
     const raw = m.lastStep.get()?.loss.total;
     const sl = m.smoothedLast.get();
-    const scale = m.scale.get() === 'log' ? 'log scale' : 'linear';
-    if (raw === undefined) return `by epoch · ${scale}`;
-    return sl !== undefined ? `raw ${num(raw, 3)} · smoothed ${num(sl, 3)} · ${scale}` : `raw ${num(raw, 3)} · ${scale}`;
+    // The scale and the smoothing are the options button's own label ("EMA 0.98 · Log"), beside this.
+    if (raw === undefined) return 'by epoch';
+    return sl !== undefined ? `raw ${num(raw, 3)} · smoothed ${num(sl, 3)}` : `raw ${num(raw, 3)}`;
   });
   const empty = computed(() =>
     props.queued

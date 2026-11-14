@@ -98,11 +98,31 @@ css`
   .m-val {
     color: var(--text-secondary);
   }
-  /* Phones: the meters' values alone would still overflow; the GPU's name gives way first. */
+  .meter {
+    flex: none;
+  }
+  /* Below 1280 px the meters wrap to a second line rather than run past the panel (the 36 px row is the floor). */
+  @media (max-width: 1279px) {
+    .foot {
+      flex-wrap: wrap;
+      height: auto;
+      min-height: 36px;
+      gap: var(--space-1) var(--space-5);
+      padding: var(--space-2) var(--space-4);
+      white-space: normal;
+    }
+    .meter {
+      white-space: nowrap;
+    }
+  }
+  /* Phones: the values without their bars, the GPU's name cut first. */
   @media (max-width: 767px) {
     .foot {
-      gap: var(--space-4);
-      padding: 0 var(--space-3);
+      gap: var(--space-1) var(--space-4);
+      padding: var(--space-2) var(--space-3);
+    }
+    .meter:first-child {
+      flex: 0 1 auto;
     }
     .m-bar {
       display: none;

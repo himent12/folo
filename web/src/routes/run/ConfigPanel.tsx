@@ -8,7 +8,8 @@
  * command on one copyable line (ui/CommandLine).
  */
 import Copy from '$icons/copy';
-import { computed, css, For } from 'fw';
+import { computed, css, For, MediaQuery } from 'fw';
+import { media } from '$lib/design/tokens';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { FROM_SCRATCH, type Origin } from '$lib/lineage';
 import Button from '$lib/ui/Button';
@@ -161,6 +162,12 @@ export default function ConfigPanel(props: ConfigPanelProps) {
     </details>
   );
 
+  // The 1/3 rail from 1024 to 1279 px, and phones: too narrow for the id and two labelled buttons beside the title.
+  const laptop = new MediaQuery(media.laptopUp, false);
+  const belowDesktop = new MediaQuery(media.upToDesktop, false);
+  const phone = new MediaQuery(media.phone, false);
+  const tight = () => (laptop.current && belowDesktop.current) || phone.current;
+
   return (
     <Panel
       title="Config"
@@ -170,14 +177,23 @@ export default function ConfigPanel(props: ConfigPanelProps) {
         // and the request as JSON.
         <>
           {props.runId ? <Ident value={props.runId} class="run-id" /> : null}
+          {/* Where the column is narrow (the laptop rail, phones) the two are icons, named and titled. */}
           {props.cli ? (
-            <Button size="sm" variant="ghost" icon={Copy} onclick={copyCli}>
-              Copy command
-            </Button>
+            tight() ? (
+              <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={copyCli} />
+            ) : (
+              <Button size="sm" variant="ghost" icon={Copy} onclick={copyCli}>
+                Copy command
+              </Button>
+            )
           ) : null}
-          <Button size="sm" variant="ghost" icon={Copy} onclick={copy}>
-            Copy JSON
-          </Button>
+          {tight() ? (
+            <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy JSON" title="Copy JSON" onclick={copy} />
+          ) : (
+            <Button size="sm" variant="ghost" icon={Copy} onclick={copy}>
+              Copy JSON
+            </Button>
+          )}
         </>
       )}
     >

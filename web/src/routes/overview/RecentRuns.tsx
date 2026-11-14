@@ -58,11 +58,11 @@ export default function RecentRuns(props: RecentRunsProps) {
               <tr>
                 <th>Run</th>
                 <th class="hide-sm">Architecture · dataset</th>
-                <th style:width="120px">Status</th>
+                <th style:width="112px">Status</th>
                 <th class="hide-sm" style:width="120px">
                   Progress
                 </th>
-                <th class="r" style:width="112px">
+                <th class="r" style:width="128px">
                   Best mAP50-95
                 </th>
                 <th class="r hide-sm" style:width="88px">
@@ -81,30 +81,30 @@ export default function RecentRuns(props: RecentRunsProps) {
                 {() => (
                   <tr aria-hidden="true">
                     <td>
-                      <Skeleton w="112px" h="12px" />
+                      <Skeleton w="min(112px, 100%)" h="12px" />
                     </td>
                     <td class="hide-sm">
-                      <Skeleton w="128px" h="12px" />
+                      <Skeleton w="min(128px, 100%)" h="12px" />
                     </td>
                     <td>
-                      <Skeleton w="72px" h="12px" />
+                      <Skeleton w="min(72px, 100%)" h="12px" />
                     </td>
                     <td class="hide-sm">
                       <div class="prog">
                         <Skeleton h="4px" />
                         <span>
-                          <Skeleton w="40px" h="10px" />
+                          <Skeleton w="min(40px, 100%)" h="10px" />
                         </span>
                       </div>
                     </td>
                     <td class="r">
                       <span class="end">
-                        <Skeleton w="40px" h="12px" />
+                        <Skeleton w="min(40px, 100%)" h="12px" />
                       </span>
                     </td>
                     <td class="r hide-sm">
                       <span class="end">
-                        <Skeleton w="56px" h="12px" />
+                        <Skeleton w="min(56px, 100%)" h="12px" />
                       </span>
                     </td>
                   </tr>
@@ -171,6 +171,11 @@ css`
   }
   .scroll :global(table) {
     table-layout: fixed;
+  }
+  /* A head longer than its column ("Architecture · dataset" beside Best models) ends in an ellipsis. */
+  .scroll :global(th) {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .cut {
     display: block;

@@ -60,7 +60,8 @@ export default function RunKpis(props: RunKpisProps) {
   });
   const ipsCap = computed(() => {
     const t = m.ips.get();
-    return t.avg !== null ? `avg ${num(t.avg, 0)} · last ${t.n} ${t.n === 1 ? 'step' : 'steps'}` : waiting() ? 'Not started' : 'after the first step';
+    // The average over the sparkline's window (the last 120 steps, as Desktop's tile), said as Desktop says it.
+    return t.avg !== null ? `avg ${num(t.avg, 0)}` : waiting() ? 'Not started' : 'after the first step';
   });
   const ended = () => !m.live.get();
   const timeValue = computed(() => {
@@ -203,6 +204,12 @@ css`
   .close.over {
     background: repeating-linear-gradient(135deg, transparent 0 3px, var(--bg-panel) 3px 4.5px);
     border-left-color: var(--bg-panel);
+  }
+  /* Laptops: five tiles in 1024–1279 px leave no room beside the value for the trend (Throughput keeps its average). */
+  @media (min-width: 1024px) and (max-width: 1279px) {
+    .spark {
+      display: none;
+    }
   }
   /* Tablets: three tiles over two, Throughput (whose trend fills it) two columns wide, so its divider lines up with
      the first row's second. */

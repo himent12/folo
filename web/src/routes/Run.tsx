@@ -572,7 +572,8 @@ export default function Run() {
                     the two columns ending together. */}
                 {/* Below 1024 px one of these shows at a time, chosen here; wider screens show them all beside a rail.
                     They switch content, so they are underline tabs (DESIGN_DIRECTION §2.22), not a segmented control. */}
-                <div class="phone-pick">
+                {/* A deliberate scroller (`data-scrolls`): a cloud run's seven sections do not fit a 320 px phone. */}
+                <div class="phone-pick" data-scrolls>
                   <Tabs
                     label="Run sections"
                     idPrefix="run-sec"
