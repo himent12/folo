@@ -6,7 +6,7 @@
  *
  * The mosaic loads when the card comes into view (`GET /api/datasets/{id}/images?limit=4`, each image as a 256 px
  * thumbnail), and again when the list's refresh changes the dataset; an image that fails shows the tile's own
- * unavailable state, with Retry. The name is a stretched link over
+ * unavailable state, with Retry, and a read that fails the mosaic's, with Retry. The name is a stretched link over
  * the card; the strip and a Retry sit above it, so each keeps its own click.
  */
 import ImageOff from '$icons/image-off';
@@ -18,6 +18,7 @@ import DatasetImage from '$lib/detect/DatasetImage';
 import { count } from '$lib/format';
 import { href } from '$lib/router';
 import Badge from '$lib/ui/Badge';
+import Button from '$lib/ui/Button';
 import Skeleton from '$lib/ui/Skeleton';
 import { imageCount } from '../dataset/health';
 import { PROBLEM_LABEL, type ListedDataset } from './problem';
@@ -61,11 +62,17 @@ export default function DatasetCard(props: { dataset: ListedDataset }) {
     load();
   }
   // What the mosaic is drawn from: when the list's refresh brings a change (a missing folder found again, images added
-  // or relabelled), a card already read reads it again, so its tiles and boxes are never the old set's.
+  // or relabelled), a card already read reads it again, so its tiles and boxes are never the old set's; a mosaic whose
+  // read failed tries again with every refresh (the list answered, so the server is back), as well as on Retry.
   const source = computed(() => [d().problem ?? '', imageCount(d()), d().stats?.boxes ?? '', d().classes.join('\n')].join('|'));
+  let last: string | undefined;
   effect(() => {
-    source.get();
-    if (seen) untrack(load);
+    const key = source.get();
+    d();
+    untrack(() => {
+      if (seen && (key !== last || failed.get())) load();
+      last = key;
+    });
   });
   // Lazily: a long list reads only the mosaics in view (and a little ahead).
   onMount(() => {
@@ -95,6 +102,12 @@ export default function DatasetCard(props: { dataset: ListedDataset }) {
                   i() === 0 ? (
                     <span class="none">
                       <ImageOff size={16} strokeWidth={1.75} aria-hidden="true" />
+                      {/* A read that failed (not a missing folder, which its badge says) is the card's to retry. */}
+                      {!d().problem ? (
+                        <Button size="sm" variant="ghost" class="retry" aria-label={`Retry the images of ${d().name}`} onclick={load}>
+                          Retry
+                        </Button>
+                      ) : null}
                     </span>
                   ) : null
                 ) : images.get() === null ? (
@@ -213,10 +226,12 @@ css`
     position: absolute;
     inset: 0;
     display: grid;
-    place-items: center;
+    place-content: center;
+    justify-items: center;
+    gap: var(--space-1);
     color: var(--text-tertiary);
   }
-  /* An unavailable image's Retry stays its own target, above the card's stretched link. */
+  /* An unavailable image's Retry (or the mosaic's) stays its own target, above the card's stretched link. */
   .tile :global(.retry) {
     position: relative;
     z-index: 2;

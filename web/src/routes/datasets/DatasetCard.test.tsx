@@ -56,4 +56,50 @@ describe('DatasetCard', () => {
     flush();
     expect(asked).toHaveBeenCalledTimes(2);
   });
+
+  it('offers Retry when its read fails, and tries again by itself on the next refresh', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    const api = new MockApi('normal', 0);
+    hub.api = api;
+    hub.mode = 'mock';
+    const [first] = await api.datasets();
+    const real = api.datasetImages.bind(api);
+    let down = true;
+    const asked = vi.spyOn(api, 'datasetImages').mockImplementation((...a) => (down ? Promise.reject(new Error('offline')) : real(...a)));
+    const ds = signal<ListedDataset>({ ...first! });
+    target = document.body.appendChild(document.createElement('div'));
+    view = render(() => <DatasetCard dataset={ds.get()} />, target);
+    flush();
+    const retry = await vi.waitFor(() => {
+      flush();
+      const b = target!.querySelector<HTMLButtonElement>('.mosaic .none button');
+      if (!b) throw new Error('no Retry yet');
+      return b;
+    });
+    expect(retry.getAttribute('aria-label')).toBe(`Retry the images of ${first!.name}`);
+    expect(asked).toHaveBeenCalledTimes(1);
+
+    // Retry while the server is still down: asked again, still failed.
+    retry.click();
+    flush();
+    expect(asked).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      flush();
+      if (!target!.querySelector('.mosaic .none button')) throw new Error('not failed again yet');
+    });
+
+    // The list refreshes (the server answers again) with the same dataset: the failed mosaic reads again and fills.
+    down = false;
+    ds.set({ ...first! });
+    flush();
+    expect(asked).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() => {
+      flush();
+      if (!target!.querySelector('.mosaic .dsimg')) throw new Error('still waiting for the mosaic');
+    });
+    expect(target.querySelector('.mosaic .none')).toBeNull();
+  });
 });
