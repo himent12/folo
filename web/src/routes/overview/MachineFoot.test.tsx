@@ -40,11 +40,13 @@ const foot = () =>
   });
 
 describe('MachineFoot', () => {
-  it("shows the GPU the run's device names", async () => {
-    const { sys } = await mount((r) => ({ ...r, config: { ...r.config, device: 'gpu:0' } }));
+  it("shows the load of the GPU the run's device names, as \"GPU\" and its memory (the panel's meta names the device)", async () => {
+    await mount((r) => ({ ...r, config: { ...r.config, device: 'gpu:0' } }));
     const el = await foot();
     expect(el.querySelectorAll('.meter').length).toBe(3);
-    expect(el.querySelector('.meter .m-label')?.textContent).toContain(sys.gpus.find((g) => g.ordinal === 0)!.name.replace(/^NVIDIA (GeForce )?/, ''));
+    const first = el.querySelector('.meter')!;
+    expect(first.querySelector('.m-label')?.textContent).toMatch(/^GPU · /);
+    expect(first.querySelector('.m-bar')).not.toBeNull();
   });
 
   it('shows no GPU for a run that auto resolved to the CPU', async () => {
@@ -54,13 +56,11 @@ describe('MachineFoot', () => {
     expect(el.querySelector('.meter .m-label')?.textContent).toMatch(/^CPU · \d+ threads$/);
   });
 
-  it("names the run's GPU, without another adapter's load, when it cannot tell which adapter that is", async () => {
+  it("shows no other adapter's load when it cannot tell which adapter the run's is", async () => {
     await mount((r) => ({ ...r, device: 'Some Other GPU (vulkan)', config: { ...r.config, device: 'gpu:99' } }));
     const el = await foot();
-    expect(el.querySelectorAll('.meter').length).toBe(3);
-    const first = el.querySelector('.meter')!;
-    expect(first.textContent).toContain('Some Other GPU');
-    expect(first.querySelector('[role=progressbar], .m-bar')).toBeNull();
+    expect(el.querySelectorAll('.meter').length).toBe(2);
+    expect(el.textContent).not.toMatch(/GPU/);
   });
 
   it("has no foot for a cloud run: this server has no readings of the rented machine", async () => {

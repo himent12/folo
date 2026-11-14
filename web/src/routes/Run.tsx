@@ -272,8 +272,8 @@ export default function Run() {
     const out: MenuItem[] = wide ? [] : [{ label: 'Compare', icon: GitCompare, href: href(`/runs/compare?ids=${r.id}`) }];
     if (r.model_id) {
       if (!headerModel.get()) out.push({ label: 'Open model', icon: Box, href: href(`/models/${r.model_id}`) });
-      // Beside the primary, Try in Playground is left out when the model detected nothing (as the banner left it out).
-      if (!headerModel.get() || (!wide && r.best?.map50_95 !== 0)) out.push({ label: 'Try in Playground', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
+      // Wherever the header does not show it (phones; a model that detected nothing, where the header leaves it out).
+      if (!headerModel.get() || !wide || r.best?.map50_95 === 0) out.push({ label: 'Try in Playground', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
     }
     // The queue's one action set (`queueItems`), whole, as on the Runs list: the open menu covers the callout's Start
     // next, so the menu never relies on it. Remove from queue last.

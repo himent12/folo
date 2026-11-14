@@ -78,11 +78,14 @@ describe('a completed run', () => {
     expect([...target.querySelectorAll('.run-chart')].map((p) => p.id)).toEqual(['chart-map', 'chart-loss', 'chart-pr', 'chart-lr']);
   });
 
-  it('leaves Try in Playground out when the model detected nothing', async () => {
+  it('moves Try in Playground to the ⋯ when the model detected nothing', async () => {
     await open((rs) => rs.find((r) => r.status === 'completed' && r.model_id)!, { change: { best: { epoch: 1, map50_95: 0 } }, nothing: true });
     expect(headerButtons()).toContain('Open model');
     expect(headerButtons()).not.toContain('Try in Playground');
-    expect(target.textContent).not.toContain('Try in Playground');
+    // Still one click away: the header leaves it out, the menu keeps it.
+    target.querySelector<HTMLButtonElement>('header button[aria-label="More run actions"]')!.click();
+    flushSync();
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((e) => e.textContent?.trim())).toContain('Try in Playground');
   });
 });
 

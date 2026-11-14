@@ -2,13 +2,14 @@
  * The live panel's foot (design/UNIFIED.md §4 Overview): the machine at a glance in one 36 px row of meters, the GPU
  * the run trains on (its load, where the driver reports it), the CPU and the memory, from `/api/system` (polled). A
  * reading the server no longer answers for is dropped, never shown as current; with none, there is no foot. A cloud run
- * trains on a rented machine whose readings this server does not have, so it has no foot (its Cloud section says where).
+ * trains on a rented machine whose readings this server does not have, so it has no foot. The run's device is named in
+ * the panel's meta line (./LiveRunCard), whatever the readings, so the GPU meter says only "GPU" and its memory.
  */
 import { computed, css } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Run } from '$lib/api/types';
-import { bytes, deviceName, pct } from '$lib/format';
+import { bytes, pct } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import Progress from '$lib/ui/Progress';
 import { runGpu } from './device';
@@ -23,12 +24,6 @@ export default function MachineFoot(props: { run: Run }) {
     const s = info.get();
     return s ? runGpu(props.run, s.gpus) : null;
   });
-  /** A GPU run whose adapter cannot be told: its device still named (as the run says it), with no load beside it. */
-  const unmatched = computed(() => {
-    const d = props.run.device;
-    const cpu = props.run.config.device === 'cpu' || d.toLowerCase().startsWith('cpu');
-    return !gpu.get() && !cpu && d ? deviceName(d) : null;
-  });
   const mem = computed(() => {
     const m = info.get()?.memory;
     return m && m.total_bytes > 0 ? { frac: m.used_bytes / m.total_bytes, text: `${bytes(m.used_bytes, prefs.units)} / ${bytes(m.total_bytes, prefs.units)}` } : null;
@@ -41,9 +36,7 @@ export default function MachineFoot(props: { run: Run }) {
           {gpu.get() ? (
             <span class="meter">
               {/* Its memory named, so the meter reads as load, not memory use; no meter where the driver has no load. */}
-              <span class="m-label truncate">
-                {deviceName(gpu.get()!.name)} · {bytes(gpu.get()!.memory_bytes, prefs.units)}
-              </span>
+              <span class="m-label">GPU · {bytes(gpu.get()!.memory_bytes, prefs.units)}</span>
               {gpu.get()!.util !== null ? (
                 <>
                   <span class="m-bar">
@@ -52,10 +45,6 @@ export default function MachineFoot(props: { run: Run }) {
                   <span class="m-val num">{pct(gpu.get()!.util, 0)} load</span>
                 </>
               ) : null}
-            </span>
-          ) : unmatched.get() ? (
-            <span class="meter">
-              <span class="m-label truncate">{unmatched.get()}</span>
             </span>
           ) : null}
           <span class="meter">
@@ -126,7 +115,7 @@ css`
       white-space: nowrap;
     }
   }
-  /* Phones: the values without their bars, the GPU's name cut first. */
+  /* Phones: the values without their bars. */
   @media (max-width: 767px) {
     .foot {
       gap: var(--space-1) var(--space-4);

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { deviceName } from '$lib/format';
 import type { Run, SystemInfo } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import RunWatch from '$lib/shell/RunWatch.tsx';
@@ -429,6 +430,8 @@ describe('Overview', () => {
     expect(card.querySelector('header .rail[role=progressbar]')).not.toBeNull();
     expect([...card.querySelectorAll('.kpis .tile .label')].map((l) => l.textContent)).toEqual(['Epoch', 'mAP50-95 · latest', 'Throughput', 'Time left']);
     expect(card.querySelector('.kpis .tile .sub')?.textContent).toMatch(/^\d+% complete$/);
+    // The run's device in the meta line, whatever the foot's readings.
+    expect(card.querySelector('header .meta')?.textContent).toContain(deviceName(running.device));
     const sys = await api.system();
     expect(card.querySelector('.foot')?.textContent).toContain(`CPU · ${sys.cpu.threads} threads`);
     expect(card.querySelector('.foot')?.textContent).toContain('Memory');
@@ -451,6 +454,26 @@ describe('Overview', () => {
     expect(card.querySelector('header .meta')?.textContent).toContain('RTX 4090');
     await new Promise((ok) => setTimeout(ok, 50));
     flush();
+    expect(card.querySelector('.foot')).toBeNull();
+  });
+
+  it("names a CPU run's processor in its meta line, and still when the machine's readings are gone", async () => {
+    const api = new MockApi('normal', 0);
+    const runs = await api.runs();
+    const running = runs.find((r) => r.status === 'running')!;
+    const cpu: Run = { ...running, device: 'AMD Ryzen 9 7950X (cpu)', config: { ...running.config, device: 'cpu' } };
+    const get = api.run.bind(api);
+    api.run = (id, ...rest) => (id === cpu.id ? Promise.resolve(cpu) : get(id, ...rest));
+    api.system = () => Promise.reject(new Error('down'));
+    watched.runs = runs.map((r) => (r.id === cpu.id ? cpu : r));
+    open(api);
+    const card = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.live .card');
+      if (!el?.querySelector('.legend')) throw new Error('still waiting for the live panel');
+      return el;
+    });
+    expect(card.querySelector('header .meta')?.textContent).toContain('Ryzen 9 7950X');
     expect(card.querySelector('.foot')).toBeNull();
   });
 });

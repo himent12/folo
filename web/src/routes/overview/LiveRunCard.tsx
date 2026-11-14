@@ -7,7 +7,7 @@ import LineChart from '$lib/charts/LineChart';
 import { UNIT_ZOOM_NOTE, unitZoomed } from '$lib/charts/domain';
 import { ETA_PENDING, etaSettled, progressText, runProgress, trainingSeconds } from '$lib/api/progress';
 import { cloudGpu } from '$lib/cloud';
-import { duration, eta, metric, num } from '$lib/format';
+import { deviceName, duration, eta, metric, num } from '$lib/format';
 import { asOf, lastKnown, Now } from '$lib/api/freshness';
 import StatusBadge, { statusWord } from '$lib/ui/StatusBadge';
 import { starting, STARTING } from './slot';
@@ -120,8 +120,9 @@ export default function LiveRunCard(props: LiveRunCardProps) {
             <Ident value={r().config.arch} />
             <span class="num">{r().config.imgsz} px</span>
             <span class="num">batch {r().config.batch}</span>
-            {/* A cloud run has no machine foot (this server does not read the rented machine): its GPU is named here. */}
-            {r().cloud ? <span>{cloudGpu({ device: r().device, cloud: r().cloud! })}</span> : null}
+            {/* The run's device as it recorded it, whatever the foot's readings (a cloud run has no foot: this server
+                does not read the rented machine). */}
+            {r().cloud ? <span>{cloudGpu({ device: r().device, cloud: r().cloud! })}</span> : r().device ? <span>{deviceName(r().device)}</span> : null}
           </Meta>
         </span>
         <span class="cta">
