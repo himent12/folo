@@ -161,14 +161,27 @@ css`
     background: var(--bg-panel);
     min-width: 0;
   }
-  /* The throughput's trend beside its value, right-aligned in the tile. */
+  /* A caption is a fact: where a tile is too narrow for it (the Epoch's "37% · Mosaic off after epoch 90" on a phone)
+     it wraps, never ends in an ellipsis. */
+  .tile :global(.sub) {
+    white-space: normal;
+  }
+  /* The throughput's trend beside its value, right-aligned in the tile. The value and its unit never give way: where
+     the tile is short of room the trend narrows to its latest steps (clipped on the left, its end kept). */
   .tile.ips {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: max-content minmax(0, 96px);
+    justify-content: space-between;
     column-gap: var(--space-3);
   }
   .spark {
     align-self: center;
     display: flex;
+    justify-content: flex-end;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .spark :global(svg) {
+    flex-shrink: 0;
   }
   .bar {
     position: relative;

@@ -129,7 +129,7 @@ css`
   .shell-rail {
     width: var(--size-sidebar);
     flex-shrink: 0;
-    background: var(--bg-app);
+    background: var(--bg-panel);
     border-right: 1px solid var(--line-subtle);
     z-index: var(--z-sidebar);
   }
@@ -143,7 +143,7 @@ css`
   }
   .anim-close .sidebar {
     width: var(--size-sidebar);
-    background: var(--bg-app);
+    background: var(--bg-panel);
     border-right: 1px solid var(--line-subtle);
     animation: rail-close var(--dur-slow) var(--ease-standard) forwards;
   }
@@ -233,7 +233,7 @@ css`
     height: 6px;
     border-radius: 50%;
     background: var(--accent-line);
-    box-shadow: 0 0 0 2px var(--bg-app);
+    box-shadow: 0 0 0 2px var(--bg-panel);
   }
   /* The Runs badge: lime text on accent.muted, 20 high; neutral while its counts are the last known (the list stopped
      refreshing), as the live row's rail is. */

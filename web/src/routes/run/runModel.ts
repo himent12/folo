@@ -173,7 +173,9 @@ export class RunModel {
   // ---- the series ----
   /**
    * How the focal line ends, in StatusBadge's marks (LineChart `end`): a filled lime dot with the heartbeat while the run
-   * trains, a square once stopped, a cross when it failed, a plain dot when it completed.
+   * trains, a square once stopped, a cross when it failed, a plain dot when it completed. Every chart's first series
+   * takes it (mAP50-95, precision, total loss, the learning rate or the throughput); the others end in a dot of their
+   * own hue (design/UNIFIED.md §3, Marks).
    */
   readonly endMark = computed(() => {
     const s = this.run().status;
@@ -203,7 +205,7 @@ export class RunModel {
       { id: 'raw', label: 'total (raw)', color: 'var(--text-primary)', ghost: true, points: a > 0 ? d.raw('total').pts.slice() : [] },
       // One name per series (DESIGN_DIRECTION §2.23): the legend, the end labels and the phone legend all say total,
       // box, cls and dfl, with the full names under ⓘ (./readings LOSS_TERMS).
-      { id: 'total', label: 'total', color: 'var(--text-primary)', emphasis: true, points: d.smoothed('total', a).pts.slice() },
+      { id: 'total', label: 'total', color: 'var(--text-primary)', emphasis: true, end: this.endMark.get(), points: d.smoothed('total', a).pts.slice() },
       // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted. Box
       // is painted over dfl's dots where they run together late in a run, and each line is labelled at its end.
       { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, points: d.smoothed('box', a).pts.slice() },
@@ -218,7 +220,7 @@ export class RunModel {
     const k = Math.max(1, Math.floor(this.stepData.steps.length / 600));
     const points: Pt[] = [];
     for (let i = 0; i < all.length; i += k) points.push(all[i]!);
-    return [{ id: 'lr', label: 'lr', color: 'var(--text-secondary)', points }];
+    return [{ id: 'lr', label: 'lr', color: 'var(--text-secondary)', end: this.endMark.get(), points }];
   });
   /** The fourth chart's view: the learning rate, or the throughput over the whole run (the tile keeps the last steps). */
   readonly lrView = signal<'lr' | 'ips'>('lr');
@@ -229,7 +231,7 @@ export class RunModel {
     const k = Math.max(1, Math.floor(this.stepData.steps.length / 600));
     const points: Pt[] = [];
     for (let i = 0; i < all.length; i += k) points.push(all[i]!);
-    return [{ id: 'ips', label: 'img/s', color: 'var(--text-secondary)', points }];
+    return [{ id: 'ips', label: 'img/s', color: 'var(--text-secondary)', end: this.endMark.get(), points }];
   });
   /** The throughput of the last steps (the tile's sparkline, smoothed as the old chart drew it) and their average. */
   readonly ips = computed(() => {

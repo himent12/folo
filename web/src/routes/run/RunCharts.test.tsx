@@ -242,6 +242,21 @@ describe('the four run charts', () => {
     c.unmount();
   });
 
+  it("end each chart's first line in the run's mark, the loss and the learning rate too (design/UNIFIED.md §3, Marks)", () => {
+    const first = (m: RunModel) => [m.mapSeries.get()[0]!, m.prSeries.get()[0]!, m.lossSeries.get().find((s) => s.id === 'total')!, m.lrSeries.get()[0]!, m.ipsSeries.get()[0]!];
+    const live = show({ ...base, status: 'running' }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });
+    expect(first(live.model).map((s) => s.end)).toEqual(['live', 'live', 'live', 'live', 'live']);
+    // Every other series ends in a plain dot of its own hue.
+    expect(live.model.lossSeries.get().filter((s) => s.id !== 'total').map((s) => s.end)).toEqual([undefined, undefined, undefined, undefined]);
+    live.c.unmount();
+    const stopped = show({ ...base, status: 'stopped' }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });
+    expect(first(stopped.model).map((s) => s.end)).toEqual(['stopped', 'stopped', 'stopped', 'stopped', 'stopped']);
+    stopped.c.unmount();
+    const done = show({ ...base, status: 'completed' }, { steps: [step(50), step(100)], epochs: [epoch(1), epoch(2)] });
+    expect(first(done.model).map((s) => s.end)).toEqual([undefined, undefined, undefined, undefined, undefined]);
+    done.c.unmount();
+  });
+
   it('share one cursor: arrowing through one reads every one', async () => {
     // happy-dom lays nothing out: every plot is 600 px wide from its first read.
     const proto = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');

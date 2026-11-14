@@ -11,6 +11,7 @@ import { evaluatedOn, metricsLabel, sourceShort, type EvalSource } from '$lib/ev
 import { atBestF1, bytes, compact, conf, metric, num } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import InfoButton from '$lib/ui/InfoButton';
+import KpiStrip from '$lib/ui/KpiStrip';
 
 export interface KpiSummaryProps {
   m: Model;
@@ -144,35 +145,39 @@ export default function KpiSummary(props: KpiSummaryProps) {
           ) : null}
         </section>
       ) : (
+        // The Run page's strip (ui/KpiStrip: its frame, hairlines and tile padding), on this page's columns: the headline
+        // twice as wide, its 32 px value on the same baseline as the others' 24 px ones.
         <section class="kpis" aria-label={label()}>
-          <For each={tiles()} key={(k) => k.key}>
-            {(k, i) => (
-              <div class={`kpi ${k().key}`} class:hero={i() === 0}>
-                <span class="k-label">
-                  <span class="truncate">{k().label}</span>
-                  {i() === 0 ? kHelp() : null}
-                </span>
-                <span class="k-value num">
-                  {k().pair ? (
-                    <>
-                      {k().pair![0]}
-                      <span class="unit"> / </span>
-                      {k().pair![1]}
-                    </>
-                  ) : (
-                    <>
-                      {k().value}
-                      {k().unit ? <span class="unit"> {k().unit}</span> : null}
-                    </>
-                  )}
-                </span>
-                <span class="k-sub" title={k().sub}>
-                  {k().sub}
-                </span>
-              </div>
-            )}
-          </For>
-          {helpOpen.get() ? metricHelp() : null}
+          <KpiStrip>
+            <For each={tiles()} key={(k) => k.key}>
+              {(k, i) => (
+                <div class={`kpi ${k().key}`} class:hero={i() === 0}>
+                  <span class="k-label">
+                    <span class="truncate">{k().label}</span>
+                    {i() === 0 ? kHelp() : null}
+                  </span>
+                  <span class="k-value num">
+                    {k().pair ? (
+                      <>
+                        {k().pair![0]}
+                        <span class="unit"> / </span>
+                        {k().pair![1]}
+                      </>
+                    ) : (
+                      <>
+                        {k().value}
+                        {k().unit ? <span class="unit"> {k().unit}</span> : null}
+                      </>
+                    )}
+                  </span>
+                  <span class="k-sub" title={k().sub}>
+                    {k().sub}
+                  </span>
+                </div>
+              )}
+            </For>
+            {helpOpen.get() ? metricHelp() : null}
+          </KpiStrip>
         </section>
       )}
     </>
@@ -180,25 +185,15 @@ export default function KpiSummary(props: KpiSummaryProps) {
 }
 
 css`
-  /* 1 px gaps over a hairline-coloured background draw the dividers in any column count. */
   /* Five tiles: the headline twice as wide as a plain one, the precision / recall pair a little wider (two values). */
   .kpis {
-    display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr);
-    gap: 1px;
-    background: var(--line-subtle);
-    background-clip: padding-box;
-    border: 1px solid var(--line-panel);
-    border-radius: var(--radius-lg);
-    overflow: hidden;
+    --kpi-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr);
   }
   .kpi {
     display: grid;
     grid-template-rows: 16px 40px 16px;
     gap: 6px;
     align-content: start;
-    padding: var(--space-4);
-    background: var(--bg-panel);
     min-width: 0;
   }
   .k-label,
@@ -388,7 +383,7 @@ css`
   @media (max-width: 1023px) {
     /* Tablets: the three metrics on one row, the model's size under them (a 680 px strip holds no five tiles). */
     .kpis {
-      grid-template-columns: repeat(6, minmax(0, 1fr));
+      --kpi-columns: repeat(6, minmax(0, 1fr));
     }
     .kpi {
       grid-column: span 2;

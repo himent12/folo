@@ -1,6 +1,8 @@
 /**
  * Overview's Recent runs (design/UNIFIED.md §4 Overview): single-line rows, Run, Architecture · dataset, Status,
- * Progress, Best mAP50-95, Created. The table frame holds in every state: placeholder rows while loading, the message
+ * Progress, Best mAP50-95, Created. A run's name is never cut while a less important column has room: where the panel
+ * is too narrow for every column, Architecture · dataset goes first (Desktop's Overview has no such column), then
+ * Created. The table frame holds in every state: placeholder rows while loading, the message
  * inside it when there is nothing (without column heads over it, as on the list pages). The mAP trend is the Runs
  * list's column.
  */
@@ -57,7 +59,7 @@ export default function RecentRuns(props: RecentRunsProps) {
                   rest, each cut with an ellipsis (whole in its tooltip). */}
               <tr>
                 <th>Run</th>
-                <th class="hide-sm">Architecture · dataset</th>
+                <th class="hide-sm c-arch">Architecture · dataset</th>
                 <th style:width="112px">Status</th>
                 <th class="hide-sm" style:width="120px">
                   Progress
@@ -65,7 +67,7 @@ export default function RecentRuns(props: RecentRunsProps) {
                 <th class="r" style:width="128px">
                   Best mAP50-95
                 </th>
-                <th class="r hide-sm" style:width="88px">
+                <th class="r hide-sm c-created" style:width="88px">
                   Created
                 </th>
               </tr>
@@ -83,7 +85,7 @@ export default function RecentRuns(props: RecentRunsProps) {
                     <td>
                       <Skeleton w="min(112px, 100%)" h="12px" />
                     </td>
-                    <td class="hide-sm">
+                    <td class="hide-sm c-arch">
                       <Skeleton w="min(128px, 100%)" h="12px" />
                     </td>
                     <td>
@@ -102,7 +104,7 @@ export default function RecentRuns(props: RecentRunsProps) {
                         <Skeleton w="min(40px, 100%)" h="12px" />
                       </span>
                     </td>
-                    <td class="r hide-sm">
+                    <td class="r hide-sm c-created">
                       <span class="end">
                         <Skeleton w="min(56px, 100%)" h="12px" />
                       </span>
@@ -123,7 +125,7 @@ export default function RecentRuns(props: RecentRunsProps) {
                         {r().name}
                       </a>
                     </td>
-                    <td class="hide-sm">
+                    <td class="hide-sm c-arch">
                       <span class="cut faint">
                         <Ident value={r().config.arch} />
                         {props.dsLabel(r()) === undefined ? (
@@ -151,7 +153,7 @@ export default function RecentRuns(props: RecentRunsProps) {
                       </div>
                     </td>
                     <td class="r num">{r().best ? metric(r().best!.map50_95) : <NoValue />}</td>
-                    <td class="r faint hide-sm">{ago(r().created)}</td>
+                    <td class="r faint hide-sm c-created">{ago(r().created)}</td>
                   </tr>
                 )}
               </For>
@@ -168,6 +170,18 @@ css`
      leave, a long run name or dataset ending in an ellipsis rather than widen its column. */
   .scroll {
     overflow-x: auto;
+    container-type: inline-size;
+  }
+  /* Narrower than every column needs (1280 px windows, tablets): the less important columns go before a name is cut. */
+  @container (max-width: 719.98px) {
+    .c-arch {
+      display: none;
+    }
+  }
+  @container (max-width: 539.98px) {
+    .c-created {
+      display: none;
+    }
   }
   .scroll :global(table) {
     table-layout: fixed;

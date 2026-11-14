@@ -50,6 +50,13 @@ export default function RunChart(props: RunChartProps) {
   const live = computed(() => m.live.get() && m.run().status !== 'queued');
   /** Phones: the qualifiers in fewer words, so the header's line holds them whole. */
   const phone = new MediaQuery(media.phone, false);
+  /**
+   * Laptops (1024–1279 px): the two-fifths panels' headers hold the qualifier's essential words only, never cut: the
+   * loss's raw step (its smoothed total is the legend's), the learning rate's power of ten (its schedule is Config's).
+   */
+  const laptopUp = new MediaQuery(media.laptopUp, false);
+  const desktop = new MediaQuery(media.desktop, false);
+  const tight = () => laptopUp.current && !desktop.current;
 
   const title = computed(() => (kind === 'map' ? `${scoresTitle(props.evalOn ?? null)} mAP` : kind === 'loss' ? 'Training loss' : kind === 'pr' ? 'Precision / Recall' : ips() ? 'Throughput' : 'Learning rate'));
   /** The header's qualifier: what x is and what the values are; the loss's last raw step beside its smoothed total. */
@@ -61,12 +68,13 @@ export default function RunChart(props: RunChartProps) {
       return pc != null ? `by epoch · at best-F1 conf (latest ${conf(pc)})` : "by epoch · at each epoch's best-F1 conf";
     }
     if (ips()) return 'images/s · smoothed';
+    if (kind === 'lr' && tight()) return m.lrExp.get() ? `× ${pow10(m.lrExp.get())}` : m.schedule.get().split(' · ').at(-1)!;
     if (kind === 'lr') return m.lrExp.get() ? `${m.schedule.get()} · × ${pow10(m.lrExp.get())}` : m.schedule.get();
     const raw = m.lastStep.get()?.loss.total;
     const sl = m.smoothedLast.get();
     // The scale and the smoothing are the options button's own label ("EMA 0.98 · Log"), beside this.
     if (raw === undefined) return 'by epoch';
-    return sl !== undefined ? `raw ${num(raw, 3)} · smoothed ${num(sl, 3)}` : `raw ${num(raw, 3)}`;
+    return sl !== undefined && !tight() ? `raw ${num(raw, 3)} · smoothed ${num(sl, 3)}` : `raw ${num(raw, 3)}`;
   });
   const empty = computed(() =>
     props.queued
@@ -160,7 +168,7 @@ export default function RunChart(props: RunChartProps) {
             curve={unit ? 'monotone' : 'linear'}
             markers={kind === 'map' ? m.best.get() : undefined}
             legendBest={kind === 'map' ? m.bestLegend.get() : undefined}
-            endDots={unit}
+            endDots
             xMark={m.xMark.get()}
             yLabel={zoomed.get() ? UNIT_ZOOM_NOTE : undefined}
             legendNote={unit ? m.latestEp.get() : m.stepEp.get()}

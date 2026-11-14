@@ -490,6 +490,7 @@ export default function LineChart(props: LineChartProps) {
           best={p.legendBest}
           keyed={keyed.get()}
           fmtValue={fmtValue.get()}
+          width={width.get()}
         />
       ) : null}
 

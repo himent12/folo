@@ -23,7 +23,6 @@ import Skeleton from '$lib/ui/Skeleton';
 import Gate from '$lib/ui/Gate';
 import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
 import Meta from '$lib/ui/Meta';
-import { balanced } from '$lib/ui/balancedGrid';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import DatasetCard, { cardFacts, DatasetCardSkeleton } from './datasets/DatasetCard';
 import { imageCount } from './dataset/health';
@@ -31,10 +30,6 @@ import { datasetChanges, generationEnded, landed, pendingGeneration } from './da
 import { datasetProblem, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
-/** A card's narrowest width (design/UNIFIED.md §4: at least 300). */
-const CARD_MIN = 300;
-/** The gap between cards. */
-const CARD_GAP = 16;
 /** How often the list reads itself again while a sample set this tab asked for still generates. */
 const GENERATION_POLL_MS = 3000;
 
@@ -198,9 +193,9 @@ export default function Datasets() {
         </div>{' '}
         {hasRows.get() ? (
           <>
-            {/* The cards (design/UNIFIED.md §4, Datasets), as many columns of at least 300 px as fit, never one card
-                alone on the last row (ui/balancedGrid). */}
-            <ul class="cards" aria-label="Datasets" aria-busy={!datasets.data} use:balanced={{ n: datasets.data ? shown.get().length : 3, min: CARD_MIN, gap: CARD_GAP }}>
+            {/* The cards (design/UNIFIED.md §4, Datasets), as many columns of at least 300 px as fit, as Desktop's: three
+                at 1440 px, four on a wide content column; a short last row keeps the columns' width. */}
+            <ul class="cards" aria-label="Datasets" aria-busy={!datasets.data}>
               {datasets.data ? (
                 <For each={shown.get()} key={(d) => d.id}>
                   {(d) => <DatasetCard dataset={d()} />}
@@ -345,7 +340,7 @@ export default function Datasets() {
 css`
   .cards {
     display: grid;
-    grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
     gap: var(--space-4);
   }
   .state {

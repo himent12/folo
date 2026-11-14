@@ -16,7 +16,7 @@ import Button from '$lib/ui/Button';
 import CommandLine from '$lib/ui/CommandLine';
 import Lineage from '$lib/ui/Lineage';
 import Note from '$lib/ui/Note';
-import Ident from '$lib/ui/Ident';
+import Ident, { identKind } from '$lib/ui/Ident';
 import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
 import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, resolvedRows, effectiveBatchSetting, type Setting } from './resolved';
@@ -40,9 +40,9 @@ export interface ConfigPanelProps {
 
 type Row = [string, Setting];
 
-// Identifiers (model names, weight paths, devices) are mono; numbers, prose ("From scratch") and named optimizers
-// ("AdamW", a name) are sans with tabular numerals (design/README.md, Type).
-const id = (value: string): Setting => ({ value, ident: true });
+// Identifiers (weight paths, devices) are mono; an architecture and a checkpoint named for one are names, in sans
+// (design/UNIFIED.md §2, ui/Ident `identKind`), as are numbers, prose ("From scratch") and named optimizers ("AdamW").
+const id = (value: string): Setting => ({ value, ident: identKind(value) === 'id' });
 const plain = (value: string): Setting => ({ value });
 
 /** A value too long to sit beside its label in a narrow column ("Auto (MuSGD for every run)"): in a

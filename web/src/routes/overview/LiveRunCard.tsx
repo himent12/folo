@@ -15,6 +15,7 @@ import { runEvalSource, scoresTitle } from '$lib/evaluated';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
 import Skeleton from '$lib/ui/Skeleton';
+import KpiStrip from '$lib/ui/KpiStrip';
 import Stat from '$lib/ui/Stat';
 import { media } from '$lib/design/tokens';
 import Ident from '$lib/ui/Ident';
@@ -136,61 +137,69 @@ export default function LiveRunCard(props: LiveRunCardProps) {
         </div>
       </header>
       <div class="body">
+        {/* Two flush regions divided by a hairline: the tiles, then the chart with a chart panel's header band. */}
         <div class="kpis">
-          <div class="tile">
-            <Stat label="Epoch" value={num(r().epoch)} unit={`/ ${r().epochs}`} sub={`${progressText(r())} complete`} />
-          </div>
-          <div class="tile">
-            <Stat
-              label="mAP50-95 · latest"
-              value={metric(model.lastEpoch.get()?.val.map50_95)}
-              sub={r().best ? (r().best!.map50_95 === 0 ? 'no detections yet' : `best ${metric(r().best!.map50_95)} @ ${r().best!.epoch}`) : 'after the first epoch'}
-              loading={live.loading}
-            />
-          </div>
-          <div class="tile">
-            <Stat
-              label="Throughput"
-              value={num(model.lastStep.get()?.imgs_per_s, 0)}
-              unit="img/s"
-              sub={model.ips.get().avg !== null ? `avg ${num(model.ips.get().avg, 0)}` : 'after the first step'}
-              loading={live.loading}
-            />
-          </div>
-          <div class="tile">
-            <Stat label="Time left" value={timeLeft.get()} sub={timeCap.get()} />
-          </div>
+          <KpiStrip flush label="Training summary">
+            <div class="tile">
+              <Stat label="Epoch" value={num(r().epoch)} unit={`/ ${r().epochs}`} sub={`${progressText(r())} complete`} />
+            </div>
+            <div class="tile">
+              <Stat
+                label="mAP50-95 · latest"
+                value={metric(model.lastEpoch.get()?.val.map50_95)}
+                sub={r().best ? (r().best!.map50_95 === 0 ? 'no detections yet' : `best ${metric(r().best!.map50_95)} @ ${r().best!.epoch}`) : 'after the first epoch'}
+                loading={live.loading}
+              />
+            </div>
+            <div class="tile">
+              <Stat
+                label="Throughput"
+                value={num(model.lastStep.get()?.imgs_per_s, 0)}
+                unit="img/s"
+                sub={model.ips.get().avg !== null ? `avg ${num(model.ips.get().avg, 0)}` : 'after the first step'}
+                loading={live.loading}
+              />
+            </div>
+            <div class="tile">
+              <Stat label="Time left" value={timeLeft.get()} sub={timeCap.get()} />
+            </div>
+          </KpiStrip>
         </div>
         <div class="chart">
-          {/* The chart section as on the run page: its title and qualifier over the legend (the readout) and the plot. */}
-          <p class="chart-title">
-            {scores.get() ? scores.get() : <Skeleton inline w="72px" h="12px" />} mAP <span class="faint">by epoch</span>
-          </p>
-          {live.loading ? (
-            <ChartSkeleton height={chartH.get()} />
-          ) : (
-            <LineChart
-              series={series.get()}
-              height={chartH.get()}
-              xDomain={model.xDomain.get()}
-              xInteger
-              band
-              future={model.future.get()}
-              yDomain={fit.get()?.domain ?? [0, 1]}
-              yTickValues={fit.get()?.ticks}
-              yDecimals={fit.get()?.decimals}
-              yLabel={zoomed.get() ? UNIT_ZOOM_NOTE : undefined}
-              valueFormat={(v) => metric(v)}
-              xTitle={(x) => `Epoch ${Math.round(x)}`}
-              curve="monotone"
-              markers={model.best.get()}
-              legendBest={phoneQuery.current ? undefined : model.bestLegend.get()}
-              endDots
-              legendNote={phoneQuery.current ? undefined : latest.get() ? `Latest · ep ${latest.get()}` : 'Latest'}
-              label={`${scores.get() ?? 'Evaluation'} mAP by epoch`}
-              empty="Waiting for the first validation…"
-            />
-          )}
+          {/* The chart panel's header band (design/UNIFIED.md §3 Frame): the title and its qualifier, a hairline under
+              it, then the legend (the readout) and the plot in its well. */}
+          <div class="chart-head">
+            <h3 class="chart-title">
+              {scores.get() ? scores.get() : <Skeleton inline w="72px" h="12px" />} mAP <span class="faint">by epoch</span>
+            </h3>
+          </div>
+          <div class="chart-body">
+            {live.loading ? (
+              <ChartSkeleton height={chartH.get()} />
+            ) : (
+              <LineChart
+                series={series.get()}
+                height={chartH.get()}
+                xDomain={model.xDomain.get()}
+                xInteger
+                band
+                future={model.future.get()}
+                yDomain={fit.get()?.domain ?? [0, 1]}
+                yTickValues={fit.get()?.ticks}
+                yDecimals={fit.get()?.decimals}
+                yLabel={zoomed.get() ? UNIT_ZOOM_NOTE : undefined}
+                valueFormat={(v) => metric(v)}
+                xTitle={(x) => `Epoch ${Math.round(x)}`}
+                curve="monotone"
+                markers={model.best.get()}
+                legendBest={phoneQuery.current ? undefined : model.bestLegend.get()}
+                endDots
+                legendNote={phoneQuery.current ? undefined : latest.get() ? `Latest · ep ${latest.get()}` : 'Latest'}
+                label={`${scores.get() ?? 'Evaluation'} mAP by epoch`}
+                empty="Waiting for the first validation…"
+              />
+            )}
+          </div>
         </div>
       </div>
       <MachineFoot run={r()} />
@@ -256,53 +265,62 @@ css`
   .rail.quiet .fill {
     background: var(--text-tertiary);
   }
-  /* The tiles on the left third, the chart on the right two thirds. */
+  /* The tiles on the left third, the chart on the right two thirds: two flush regions, a hairline between them, no
+     padding around either (design/UNIFIED.md §4 Overview). */
   .body {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
-    gap: var(--space-5);
-    padding: var(--space-4);
   }
-  /* 2 × 2, cut by hairlines (1 px gaps over the line colour), as the run page's strip. */
+  /* 2 × 2, cut by hairlines (ui/KpiStrip), filling the third top to bottom. */
   .kpis {
+    --kpi-columns: repeat(2, minmax(0, 1fr));
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-auto-rows: 1fr;
-    gap: 1px;
-    align-self: start;
-    background: var(--line-subtle);
-    border: 1px solid var(--line-subtle);
-    border-radius: var(--radius-md);
-    overflow: hidden;
+    min-width: 0;
+    border-right: 1px solid var(--line-subtle);
   }
   .tile {
-    padding: var(--space-3);
-    background: var(--bg-panel);
     min-width: 0;
   }
   .chart {
     min-width: 0;
-    display: grid;
-    gap: var(--space-2);
-    align-content: start;
+    display: flex;
+    flex-direction: column;
+  }
+  /* As ui/Panel's header: 40 px, the title in 13 / 500 and its qualifier in 12 px tertiary, a hairline under it. */
+  .chart-head {
+    display: flex;
+    align-items: center;
+    min-height: var(--control-xl);
+    padding: var(--space-1) var(--space-3) var(--space-1) var(--space-4);
+    border-bottom: 1px solid var(--line-subtle);
   }
   .chart-title {
-    font-size: var(--type-md-size);
-    line-height: var(--type-md-line);
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
+    letter-spacing: var(--type-base-tracking);
     font-weight: var(--weight-medium);
+    white-space: nowrap;
   }
   .chart-title .faint {
+    margin-left: var(--space-1);
     font-size: var(--type-sm-size);
+    letter-spacing: 0;
     font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
   }
-  /* Below 1280 px: one row of four tiles over the chart. */
+  .chart-body {
+    flex: 1;
+    padding: var(--space-4);
+  }
+  /* Below 1280 px: one row of four tiles over the chart, a hairline between them. */
   @media (max-width: 1279px) {
     .body {
       grid-template-columns: minmax(0, 1fr);
-      gap: var(--space-4);
     }
     .kpis {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      --kpi-columns: repeat(4, minmax(0, 1fr));
+      border-right: 0;
+      border-bottom: 1px solid var(--line-subtle);
     }
   }
   /* Tablets and phones: the meta line (with the device) on a row of its own under the name, never cut. */
@@ -328,11 +346,11 @@ css`
       padding: var(--space-2) var(--space-1) var(--space-2) var(--space-3);
       gap: var(--space-1) var(--space-2);
     }
-    .body {
-      padding: var(--space-3);
-    }
     .kpis {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      --kpi-columns: repeat(2, minmax(0, 1fr));
+    }
+    .chart-body {
+      padding: var(--space-3);
     }
   }
 `;

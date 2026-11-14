@@ -29,7 +29,13 @@ export const MOSAIC = 4;
 /** What a card says under its name: "2,400 images · 8 classes". */
 export const cardFacts = (d: ListedDataset) => `${count(imageCount(d), 'image')} · ${count(d.classes.length, 'class')}`;
 
-export default function DatasetCard(props: { dataset: ListedDataset }) {
+export interface DatasetCardProps {
+  dataset: ListedDataset;
+  /** Overview's form: a shorter mosaic and tighter padding, read at once; on phones the parts without the mosaic. */
+  compact?: boolean;
+}
+
+export default function DatasetCard(props: DatasetCardProps) {
   const d = () => props.dataset;
   /** The first images, once the card has been in view; null while they load, [] when none could be read. */
   const images = signal<ImageInfo[] | null>(null);
@@ -74,9 +80,10 @@ export default function DatasetCard(props: { dataset: ListedDataset }) {
       last = key;
     });
   });
-  // Lazily: a long list reads only the mosaics in view (and a little ahead).
+  // Lazily: a long list reads only the mosaics in view (and a little ahead). Overview's row of at most four reads at
+  // once, so the cards under the fold are whole when scrolled to.
   onMount(() => {
-    if (typeof IntersectionObserver === 'undefined') return void show();
+    if (props.compact || typeof IntersectionObserver === 'undefined') return void show();
     const io = new IntersectionObserver(
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
@@ -91,7 +98,7 @@ export default function DatasetCard(props: { dataset: ListedDataset }) {
   const tiles = computed(() => Array.from({ length: MOSAIC }, (_, i) => i));
 
   return (
-    <li class="card" data-id={d().id} data-name={d().name} ref={(node) => (el = node)}>
+    <li class="card" class:compact={props.compact} data-id={d().id} data-name={d().name} ref={(node) => (el = node)}>
       <div class="mosaic">
         <For each={tiles.get()} key={(i) => i}>
           {(i) => {
@@ -154,9 +161,9 @@ export default function DatasetCard(props: { dataset: ListedDataset }) {
 }
 
 /** A card's shape while the list loads: the mosaic's well, the name and its facts line, the strip. */
-export function DatasetCardSkeleton() {
+export function DatasetCardSkeleton(props: { compact?: boolean }) {
   return (
-    <li class="card" aria-hidden="true">
+    <li class="card" class:compact={props.compact} aria-hidden="true">
       <div class="mosaic">
         <span class="tile">
           <Skeleton w="100%" h="100%" r="0" image />
@@ -201,13 +208,14 @@ css`
     outline: var(--size-focus-ring) solid var(--focus);
     outline-offset: var(--size-focus-offset);
   }
-  /* The 2 × 2 mosaic: four 16:9 cells with 1 px seams (a wide card stays short), on the inset well an image letterboxes
-     on. */
+  /* The 2 × 2 mosaic, Desktop's 136 px band (a wide card stays short): four cells with 1 px seams, on the inset well an
+     image letterboxes on. */
   .mosaic {
     display: grid;
     grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
     gap: 1px;
-    aspect-ratio: 16 / 9;
+    height: 136px;
     background: var(--line-subtle);
     border-bottom: 1px solid var(--line-subtle);
   }
@@ -295,6 +303,31 @@ css`
     flex: 1;
     min-width: 0;
     pointer-events: auto;
+  }
+  /* Overview's compact card: a shorter mosaic, the body and strip on a 12 px inset. */
+  .compact .mosaic {
+    height: 112px;
+  }
+  .compact .body {
+    flex: 1;
+    align-content: start;
+    padding: var(--space-2) var(--space-3) var(--space-1);
+  }
+  /* A narrow card (a laptop's row of four) wraps its counts rather than cut them; the strips stay on the row's bottom. */
+  .compact .facts {
+    align-items: start;
+  }
+  .compact .facts .num {
+    white-space: normal;
+  }
+  .compact .foot {
+    padding: 0 var(--space-3) var(--space-2);
+  }
+  /* Phones: the compact card is a row of the same parts, without the mosaic (the Datasets list's phone concept). */
+  @media (max-width: 767px) {
+    .compact .mosaic {
+      display: none;
+    }
   }
   .no-strip {
     height: 4px;

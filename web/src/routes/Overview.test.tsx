@@ -195,7 +195,7 @@ describe('Overview', () => {
     open(api);
     const card = await vi.waitFor(() => {
       flush();
-      const li = target.querySelector('#datasets li.d-card');
+      const li = target.querySelector('#datasets li.card[data-id]');
       if (!li) throw new Error('still waiting for the datasets');
       return li;
     });
@@ -414,6 +414,26 @@ describe('Overview', () => {
     });
     const primary = [...target.querySelectorAll<HTMLAnchorElement>('header a')].find((a) => a.textContent?.trim() === 'New run');
     expect(primary?.getAttribute('href')).toBe('#/runs/new');
+  });
+
+  it('lists Best models as single-line rows (Dataset, Best model, mAP50-95) and Datasets as the Datasets page cards', async () => {
+    watched.runs = await idleRuns();
+    const api = new MockApi('normal', 0);
+    open(api);
+    const table = await vi.waitFor(() => {
+      flush();
+      const t = target.querySelector('#best-models table[aria-label="Best models"]');
+      if (!t?.querySelector('tbody tr') || !target.querySelector('#datasets li.card[data-id]')) throw new Error('still waiting for the lists');
+      return t;
+    });
+    expect([...table.querySelectorAll('thead th')].map((th) => th.textContent)).toEqual(['Dataset', 'Best model', 'mAP50-95']);
+    // One line per evaluation dataset: no meta line under the name.
+    const row = table.querySelector('tbody tr')!;
+    expect(row.querySelectorAll('td')).toHaveLength(3);
+    expect(row.querySelector('td a.name')?.getAttribute('href')).toMatch(/^#\/models\//);
+    // The cards, one row of up to four.
+    const datasets = await api.datasets();
+    expect(target.querySelectorAll('#datasets li.card[data-id]')).toHaveLength(Math.min(4, datasets.length));
   });
 
   it('shows the live run as one panel: the rail under its header, four tiles beside the chart, the machine at its foot', async () => {

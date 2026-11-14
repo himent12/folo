@@ -1,6 +1,7 @@
 /**
  * A run's metrics (design/UNIFIED.md §4 Run, rows 1–3): the KPI strip, then Validation mAP (3/5) beside Training loss
- * (2/5) with 220 px plots, then Precision / Recall beside Learning rate with 140 px plots. Below 1024 px the rows
+ * (2/5) with 220 px plots, then Precision / Recall beside Learning rate with 140 px plots on the same 3/5 · 2/5 split, so
+ * the gap between the panels does not move sideways from one row to the next (as Desktop's). Below 1024 px the rows
  * stack; on phones the second row moves into the section picker (Run's `pr` and `lr` parts, ./RunChart there too).
  * A history that failed to load says so once, with Retry, in place of the strip and the charts (whose readings it
  * holds); a run that never trained says that in one line (Outcome above says how it ended).
@@ -47,7 +48,7 @@ export default function RunCharts(props: RunChartsProps) {
             <RunChart kind="loss" model={m} height={props.phone ? PHONE : TALL} loading={props.loading} />
           </div>
           {!props.phone ? (
-            <div class="row even">
+            <div class="row wide">
               <RunChart kind="pr" model={m} height={SHORT} loading={props.loading} />
               <RunChart kind="lr" model={m} height={SHORT} loading={props.loading} />
             </div>
@@ -73,9 +74,6 @@ css`
   .row.wide {
     grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   }
-  .row.even {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
   .failed,
   .never {
     padding: var(--space-4);
@@ -88,8 +86,7 @@ css`
     color: var(--text-tertiary);
   }
   @media (max-width: 1023px) {
-    .row.wide,
-    .row.even {
+    .row.wide {
       grid-template-columns: minmax(0, 1fr);
     }
   }

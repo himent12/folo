@@ -77,6 +77,11 @@ describe('Model: what was evaluated', () => {
     expect(text('#pr .foot')).toContain('24 training images of fasteners-mini');
     const dd = [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Evaluated on')?.querySelector('dd');
     expect(dd?.querySelector('a')?.getAttribute('href')).toContain('/datasets/ds_fasteners_mini');
+    // Details (design/UNIFIED.md §4 Model): three columns of label / value rows, the latency among them.
+    expect(target.querySelectorAll('#details .col')).toHaveLength(3);
+    const labels = [...target.querySelectorAll('#details .kv dt')].map((d) => d.textContent);
+    expect(labels).toContain('Reference latency');
+    expect(labels).not.toContain('Architecture latency');
     // "Validation" is said only where the notice says there is none.
     expect(target.textContent).not.toMatch(/validation (images of|split of|metrics)/i);
   });
