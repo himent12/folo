@@ -1,7 +1,9 @@
 # FOLO design system
 
 One design language for **FOLO Studio** (`web/`) and **FOLO Desktop** (`apps/desktop/`). `tokens.json` is the single
-source of truth; both apps generate their theme from it and never hard-code a colour, size or duration.
+source of truth; both apps generate their theme from it and never hard-code a colour, size or duration. This file
+is the reference for tokens, type and colour; `UNIFIED.md` is the one look both apps are built against, screen by
+screen (shell, page parts, charts, every screen).
 
 - Web: `cd web && npm run tokens` writes `web/src/lib/design/tokens.css` (CSS custom properties) and `tokens.ts`
   (typed values for canvas/SVG code). `npm run check` fails if the generated files are stale.
@@ -25,8 +27,9 @@ live state and the primary action; status colours for status; the class palette 
 
 ## Type
 - **Geist** (UI, and every number: metrics, scores, counts, coordinates, axis ticks, legends) and **Geist Mono**
-  (only identifiers, paths, filenames, logs, CLI and JSON), weights 400 / 500 / 600 only. A config value is mono only
-  when it is an identifier (`folo-s`, a weights path); prose values ("from scratch", "auto") stay in Geist.
+  (only server ids, paths, filenames, logs, CLI and JSON), weights 400 / 500 / 600 only. A config value is mono only
+  when it is a path, a file or a server id (`run_7d1e`, a weights path). An architecture (`folo-s`) is a name, like
+  a run's or a model's, and stays in Geist, as do prose values ("from scratch", "auto").
   Files (OFL, `fonts/OFL.txt`): `fonts/<Name>-<Weight>.ttf` for desktop and `.woff2` for web.
 - Base UI text is `base` (13 / 20). The scale: `micro` 10, `xs` 11, `sm` 12, `base` 13, `md` 14, `lg` 16, `xl` 20 (page
   titles), `2xl` 24, `3xl` 32 (headline metrics), `4xl` 44 (hero metric). Larger steps tighten tracking.
@@ -44,10 +47,10 @@ boundaries, and each tier has one structure per page:
 
 | Tier | Width | Nav | Columns and rails | Dialogs | Toolbars and KPI rows |
 |---|---|---|---|---|---|
-| Phone | < 768 | top bar (title, back) + bottom tab bar | one column; rails and secondary panels become sections behind a picker | bottom sheets | list toolbars two rows (filter, then the field; what the list holds is its footer line); KPI rows 2 × 2 or a picker |
-| Tablet | 768–1023 | icon sidebar (56 px) | one column; rails stack under the main column or become sections behind a picker | centred | list toolbars two rows; Run's metrics a picker in the chart header; short KPI captions |
-| Laptop | 1024–1279 | icon sidebar (opens over the page) | main column + sticky rail (Run, Model, New run, Playground, Settings) | centred | one row; Run's six metric tabs compact (20 px values) |
-| Desktop | ≥ 1280 (designed at 1440) | full sidebar (232 px, collapsible) | the same main + rail, wider panels side by side (Overview's Recent runs and Best models) | centred | one row; full-size tabs (24 px values); every table column |
+| Phone | < 768 | top bar (title, back) + bottom tab bar | one column; rails and secondary panels become sections behind a picker | bottom sheets | list toolbars two rows (filter, then the field; what the list holds is its footer line); KPI tiles 2 × 2 |
+| Tablet | 768–1023 | icon sidebar (56 px) | one column; rails and side panels stack under the main column | centred | list toolbars two rows; KPI strips wrap to two rows (Run's five tiles three over two); short KPI captions |
+| Laptop | 1024–1279 | icon sidebar (opens over the page) | main column + sticky rail (New run, Playground); Run's panels side by side in rows | centred | one row; KPI strips one row (Run's Throughput without its trend) |
+| Desktop | ≥ 1280 (designed at 1440) | full sidebar (232 px, collapsible) | the same, wider panels side by side (Overview's live run, Recent runs and Best models) | centred | one row; KPI tiles with every caption and trend; every table column |
 
 The web writes them as `(min-width: 768px)` / `(max-width: 767px)` (and 1024 / 1279, 1280 / 1279); `npm run tokens`
 exports the same queries as `media` in `tokens.ts` for script. A component that needs a threshold of its own (a panel
@@ -76,8 +79,9 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   metadata. All three meet WCAG AA (4.5:1) on every surface in both themes; `text.disabled` is for disabled controls
   only.
 - **Accent "signal" lime** (`accent.solid` #C5F82A): the focus-confirm green of a viewfinder. Used for the primary
-  button, focus rings, the live/running state, the selected detection and "best" markers. Never for hero numbers,
-  meters, links or decorative fills. On light surfaces the primary button carries a neutral 1 px edge, not a lime one. Text on a lime fill is
+  button, focus rings, the live/running state and the selected detection. On a chart lime marks only the live end
+  of a line, so it always means now; the best epoch is a hollow ring in `text.primary` (`UNIFIED.md` §3). Never for
+  hero numbers, meters, links or decorative fills. On light surfaces the primary button carries a neutral 1 px edge, not a lime one. Text on a lime fill is
   `accent.on` (near black). On light backgrounds lime is too pale for text and strokes, so use `accent.text` /
   `accent.line` (deeper olive) there; on dark they equal the solid. The same applies to **non-text marks that must be
   seen against the surface** (progress bars, live/status dots, slider and switch fills, checkmarks, selection strokes,
@@ -94,7 +98,7 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   white in both themes (the caption buttons look like the system's).
 - Charts: `chart.series[0..5]` in this fixed order (sky, amber, magenta, teal, violet, orange), never cycled; the
   order keeps every adjacent pair apart under colour-vision deficiency (checked by `contrast.mjs`). The
-  series deliberately exclude the accent lime (reserved for actions, live state, focus and "best" markers). Some
+  series deliberately exclude the accent lime (reserved for actions, live state and focus). Some
   series share a hue family with status colours (amber, teal), so charts never use colour alone for status: status is
   always labelled. Light series are ≥ 3:1 on both plot surfaces (`bg.panel`, `bg.inset`). Under tritan deficiency
   amber and magenta are the closest pair, which is why lines also carry legends with values. `chart.series` is the
