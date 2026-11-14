@@ -1,0 +1,70 @@
+# folo-nn
+
+folo-nn is everything the detector and the trainer need below the model definition: the `Module` trait, layers,
+weight initialisation, optimizers, the LR schedule, the weight EMA, loss scaling for mixed precision and the `.folo`
+weight format. It depends on one workspace crate, folo-core (tensors and autograd). folo-vision, folo-server,
+folo-cli, folo-wasm and FOLO Desktop (`apps/desktop`) depend on it; folo-gpu has it as a dev-dependency only. The
+normative specs it implements are [MODEL.md](../../docs/MODEL.md) (blocks and training recipe) and
+[FORMAT.md](../../docs/FORMAT.md) (the file format); [NN.md](../../docs/NN.md) is the overview.
+
+## Where things are
+
+| Path | What it holds |
+|---|---|
+| `src/lib.rs` | Crate docs with a worked step loop (a doctest), and the re-exports |
+| `src/module.rs` | `Module` (named parameters and buffers, train / eval mode, traversal), `Forward`, `Layer` |
+| `src/layers/` | `conv.rs` (`Conv2d`), `batchnorm.rs` (`BatchNorm2d`, `RunningStats`), `conv_bn_act.rs` (`ConvBnAct`, MODEL.md's `Conv`, and `fuse_conv_bn`), `simple.rs` (`Linear`, `Activation`, `MaxPool2d`, `Upsample`, `Concat`, `Identity`), `container.rs` (`Sequential`, `ModuleList`) |
+| `src/init.rs` | Seeded Kaiming / Xavier initialisation and the head bias priors (MODEL.md §2.9, §6.5) |
+| `src/optim/` | `mod.rs` (`Optimizer`, `OptimKind`, `ParamGroup`, `StandardGroups`, the `auto` optimizer rule), `sgd.rs`, `adamw.rs`, `musgd.rs` (MuSGD and Newton–Schulz `orthogonalize`), `grads.rs` (`GradAccumulator`, clipping) |
+| `src/sched.rs` | `LrSchedule`: warmup, then linear or cosine decay (MODEL.md §8.4, `folo.sched` in FORMAT.md) |
+| `src/ema.rs` | `ModelEma` (MODEL.md §8.5) |
+| `src/amp.rs` | `GradScaler`, dynamic loss scaling for mixed-precision training (`folo.amp` in FORMAT.md) |
+| `src/io/` | `.folo` files: `safetensors.rs` (the container), `meta.rs` (`__metadata__`, `ModelConfig`, `scale_row`), `file.rs` (`ModelFile`, loading rules), `checkpoint.rs` (training state), `export.rs` (Conv+BN fusion, `F16` export) |
+| `src/error.rs` | `Error` and `Result` |
+| `tests/modules.rs` | Layers and `Module`: names, modes, gradient checks, hand-computed BatchNorm values, fusion |
+| `tests/optim.rs` | Optimizers, groups, accumulation, clipping, schedule application and EMA against hand-computed values |
+| `tests/folo_io.rs` | `.folo` files: safetensors compatibility both ways, loading rules, export, checkpoint resume |
+| `tests/gpu/` | `main.rs`: modules, optimizer state and EMAs moved between devices, the fused BatchNorm and Conv paths on the GPU; `muon.rs`: MuSGD's fused Muon step |
+| `benches/nn.rs` | BatchNorm train forward + backward, optimizer and EMA steps, `.folo` save / load |
+| `benches/train_step.rs` | One CPU training step of a folo-n-sized network |
+
+## Start here
+
+1. `Module` and `Forward` in `src/module.rs`: every layer and the whole detector implement them; names come from
+   `visit_tensors` and `visit_children`.
+2. `ConvBnAct` in `src/layers/conv_bn_act.rs`: the block the detector is made of, and how its forward picks a path
+   (fused, train, eval).
+3. `StandardGroups` and the `Optimizer` trait in `src/optim/mod.rs`, then `Sgd` in `src/optim/sgd.rs`.
+4. `GradAccumulator` in `src/optim/grads.rs` and `LrSchedule` in `src/sched.rs`: what one training step does around
+   the optimizer.
+5. `ModelFile` in `src/io/file.rs`, then `save_checkpoint` in `src/io/checkpoint.rs`: how weights and training
+   state are stored.
+
+## Common changes
+
+| To do this | Touch these files |
+|---|---|
+| Add a layer | A file in `src/layers/` (a small one can go in `simple.rs`); `mod` and `pub use` in `src/layers/mod.rs`; the re-export in `src/lib.rs`; `impl Module` (an empty impl for a layer without tensors, as `MaxPool2d`) and `impl Forward`; tests in `tests/modules.rs`; the Layers table in `docs/NN.md` |
+| Add an optimizer | A file in `src/optim/` implementing `Optimizer`; a variant of `OptimKind` and its `as_str` in `src/optim/mod.rs`; its state tensor names in `src/io/checkpoint.rs`; tests in `tests/optim.rs` and `tests/folo_io.rs` (resume). To make training use it: `OptimizerChoice` and `ResolvedOptim` in `crates/folo-vision/src/train/config.rs`, the constructor match in `crates/folo-vision/src/train/setup.rs`, `Optimizer` and `ResolvedOptimizer` in `crates/folo-api/src/runs.rs`, `OptimizerArg` in `crates/folo-cli/src/train/config.rs`. Docs: MODEL.md §8.2, FORMAT.md (`folo.optim`), API.md |
+| Change the LR schedule | `src/sched.rs`; `tests/optim.rs`; MODEL.md §8.4 and FORMAT.md (`folo.sched`) |
+| Change `.folo` metadata or the loading rules | `src/io/meta.rs` or `src/io/file.rs`; `tests/folo_io.rs`; FORMAT.md |
+
+## Tests and benchmarks
+
+```sh
+cargo test -p folo-nn                       # unit tests, doctests and tests/
+cargo test -p folo-nn --test gpu            # the GPU tests only
+cargo bench -p folo-nn --bench nn
+cargo bench -p folo-nn --bench train_step   # -- --steps N, or -- --loop for a profiler
+```
+
+`tests/gpu/` needs a hardware GPU adapter (Vulkan, DX12 or Metal) and skips with a note without one;
+`FOLO_GPU_TEST_SOFTWARE=1` runs it on a software adapter. No test in this crate is `#[ignore]`d.
+
+## Further reading
+
+- [ARCHITECTURE.md](../../docs/ARCHITECTURE.md): how the crates fit together, and where to make a change.
+- [NN.md](../../docs/NN.md): the overview of this crate.
+- [MODEL.md](../../docs/MODEL.md) §2, §8 and [FORMAT.md](../../docs/FORMAT.md): the specs.
+- Neighbours: [folo-core](../folo-core/README.md) below, [folo-gpu](../folo-gpu/README.md) for the GPU kernels,
+  [folo-vision](../folo-vision/README.md) above.
