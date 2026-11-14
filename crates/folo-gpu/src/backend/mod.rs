@@ -23,6 +23,17 @@
 //! Differences from the CPU backend: index ops cannot report out-of-range indices without a host round trip,
 //! so `index_select` / `gather` produce zeros and `index_add` / `scatter_add` skip such entries; the
 //! scatter-adds use float atomics, so their summation order (and last-bit rounding) is unspecified.
+//!
+//! Files:
+//! - `mod.rs`: [`GpuStorage`], [`GpuBackend`], [`init`] / [`register`], and helpers such as [`context_for`] and
+//!   [`tensor_from_buffer`].
+//! - `ops.rs`: the `Backend` trait implementation: one method per op, each calling a `crate::kernels` entry point.
+//! - `encode.rs`: calls several ops share: the strided elementwise kernel, BatchNorm and conv descriptions, matmul
+//!   on strided operands.
+//! - `sites.rs`: the candidate-first detection hooks.
+//! - `convert.rs`: folo-core descriptions and errors in the kernels' terms.
+//! - `storage.rs`: a view's buffer, result storages, dense copies of strided views.
+//! - `plan.rs`: [`ForwardPlans`], recorded and replayed inference calls.
 
 mod convert;
 mod encode;

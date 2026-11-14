@@ -10,6 +10,11 @@
 //!
 //! Providers: [`runpod::RunPod`] (GPU pods rented per run) and [`remote::Remote`] (a FOLO server that already
 //! runs). [`providers`] lists them; adding one is a type implementing [`Provider`] and a line there.
+//!
+//! The modules: [`runpod`] (folder: the provider, its offers, its tests), [`remote`], [`bootstrap`] (the worker's
+//! setup script), `http` (JSON over HTTPS with a bearer key, for provider APIs) and `fixture` (test only: a
+//! scripted HTTP server). This file holds the trait and the types it uses ([`Values`], [`Account`],
+//! [`Endpoint`], [`LaunchSpec`], [`InstanceState`], [`Error`]) and where workers download FOLO from.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

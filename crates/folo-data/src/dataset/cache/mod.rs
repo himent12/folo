@@ -20,6 +20,8 @@
 //! cached (small ones gain nothing). With a read guard installed ([`crate::guard`]) nothing is cached or listed:
 //! every file is read and checked again.
 //! Bump [`FORMAT`] when the scan's rules change (what a probe or a label parse returns, the JSON rules).
+//!
+//! Files: [`probe`], [`coco`], [`listing`] (folder listings and file stamps) and `tests.rs`.
 
 pub(crate) mod coco;
 pub(crate) mod listing;

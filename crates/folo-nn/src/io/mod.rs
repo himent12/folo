@@ -1,5 +1,12 @@
 //! `.folo` files (docs/FORMAT.md): the safetensors container, metadata, namespaces, strict and partial
 //! loading, checkpoints and export.
+//!
+//! - [`safetensors`]: the container, read with docs/FORMAT.md's acceptance rules and written in FOLO's layout.
+//! - `meta.rs`: `__metadata__` ([`Metadata`]), the v1 [`ModelConfig`] and the scale table ([`scale_row`]).
+//! - `file.rs`: [`ModelFile`], an opened file, its namespaces and the strict / partial loading rules
+//!   ([`LoadOptions`], [`LoadReport`]).
+//! - `checkpoint.rs`: the full training state ([`save_checkpoint`], [`checkpoint_contents`]).
+//! - `export.rs`: weights files and export ([`save_weights`], [`write_export`]): Conv+BN fusion, optional `F16`.
 
 mod checkpoint;
 mod export;

@@ -4,6 +4,10 @@
 //!
 //! Not the speed probe of `/api/system/benchmark` ([`crate::BenchmarkRequest`]): that one times a model, this
 //! one grades what a model sees.
+//!
+//! Files: `benchmarks` (plans, sources, images and the requests that make, change and design a benchmark),
+//! `catalog` (`GET /api/bench/catalog`), `entries` (contestants, progress and scores), `results` (a finished
+//! entry's measurements and detections), `loops` (self-improvement loops), `events` (the SSE events) and `tests`.
 
 mod benchmarks;
 mod catalog;

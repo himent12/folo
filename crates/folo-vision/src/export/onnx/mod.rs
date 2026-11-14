@@ -34,6 +34,9 @@
 //! or, with [`OnnxOptions::half`], `F16` (then the input, outputs and every activation are `F16` too). Anything
 //! the exporter cannot map (an unfused BatchNorm, a tensor no node consumed) is an [`Error::Unsupported`]
 //! naming it. The class names and FOLO metadata go into `metadata_props` (see [`OnnxExport::metadata`]).
+//!
+//! Files: [`proto`] (the protobuf encoder), `graph.rs` (the graph under construction and the layer-level helpers),
+//! `blocks.rs` (FOLO's blocks as nodes) and `decode.rs` (`--decode` in the graph). The unit tests are in this file.
 
 pub mod proto;
 

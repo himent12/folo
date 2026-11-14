@@ -12,6 +12,10 @@
 //!
 //! Requests send exactly the documented fields (v2 rejects unknown ones with `422`); answers are read tolerantly
 //! (unknown fields ignored, missing ones defaulted, numbers that arrive as strings accepted).
+//!
+//! This file holds [`RunPod`], its API calls and answer types; `provider.rs` implements
+//! [`Provider`](crate::Provider) on it, `offers.rs` turns catalog GPU types into offers, and `tests.rs` runs it
+//! against a scripted server.
 
 mod offers;
 mod provider;

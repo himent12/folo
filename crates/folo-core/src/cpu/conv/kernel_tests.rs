@@ -1,3 +1,7 @@
+//! Unit tests of the conv kernels: the depthwise, GEMM and Winograd paths against an `f64` reference, the fused
+//! epilogue bit for bit against GEMM then epilogue, results independent of the image scratch budget, and
+//! Winograd results the same for every thread count and batch.
+
 use super::im2col::Im2Col;
 use super::shifted::shifted_scratch;
 use super::small_c::uses_small_c;

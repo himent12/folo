@@ -12,6 +12,10 @@
 //! Parallelism: C is split into tiles processed by rayon tasks after the panels of a K block are packed in
 //! parallel. When C is too small to give every thread a tile but K is long, K is split across threads with
 //! private accumulators that are summed at the end.
+//!
+//! Files: `mod.rs` holds [`Operand`], the public [`gemm`] / [`sgemm`] entry points and panel packing;
+//! `blocked.rs` the blocked driver; `kernel.rs` the micro-kernels; `rows.rs` and `arows.rs` the variants that
+//! read B or A in place through row pointers; `tests.rs` the unit tests against a naive GEMM.
 
 mod arows;
 mod blocked;

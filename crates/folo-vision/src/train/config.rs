@@ -202,7 +202,7 @@ pub fn default_workers() -> usize {
 /// What the optimizer settings resolve to for a given training set (docs/MODEL.md §8.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedOptim {
-    /// SGD or AdamW.
+    /// SGD, AdamW or MuSGD.
     pub kind: OptimKind,
     /// Base LR of every group.
     pub lr0: f64,

@@ -2,7 +2,8 @@
 //!
 //! Two implementations: [`crate::mock::MockStore`] (deterministic synthetic data, `folo serve --mock`) and
 //! [`crate::real::RealStore`] (datasets on disk, training runs, models and inference on the FOLO engine). Methods
-//! are synchronous; handlers run the ones that may touch the disk or burn CPU on tokio's blocking pool.
+//! are synchronous; handlers run the ones that may touch the disk or burn CPU on tokio's blocking pool. A third
+//! lives in folo-mcp: `folo_mcp::proxy::HttpStore`, which forwards every call to a running `folo serve`.
 
 use std::path::Path;
 
@@ -398,7 +399,7 @@ pub trait Store: Send + Sync + 'static {
         None
     }
     /// The optional features of `/api/system`'s `features` that depend on the store (`folo_api::FEATURE_*`:
-    /// uploads, run cursors, checkpoints); the ones every store has are listed by the server.
+    /// uploads, run cursors, checkpoints, the cloud); the ones every store has are listed by the server.
     fn features(&self) -> &'static [&'static str] {
         &[]
     }

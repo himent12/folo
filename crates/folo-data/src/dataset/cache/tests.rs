@@ -1,3 +1,6 @@
+//! The scan cache: opens with and without it give the same dataset and see changes; file stamps and recently
+//! modified files; the read guard; pruning old cache files; corrupt or foreign cache files; small folders; COCO.
+
 use super::*;
 use crate::dataset::{LoadedDataset, OpenOptions, Split, open_with};
 use folo_test_support::TestDir;

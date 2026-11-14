@@ -1,3 +1,6 @@
+//! Unit tests of the tools: the tool count and list the docs and llms.txt state, unknown arguments, paging and
+//! size limits, run warnings and config diffs, issue filtering for an older server, and capped run names.
+
 use super::*;
 use folo_api::{IssuePage, IssueSeverity, LogLevel, LogLine};
 use folo_server::store::IssueQuery;

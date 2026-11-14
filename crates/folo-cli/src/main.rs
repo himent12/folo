@@ -1,4 +1,23 @@
 //! The `folo` command-line tool. See `docs/CLI.md`.
+//!
+//! This file parses the command line, dispatches each subcommand (`run`), turns on the shared caches and resolves
+//! the data dir. The command tree is `folo_cli::cli` (src/cli.rs). The modules:
+//!
+//! - `serve`: `folo serve`, plus the tracing setup and data-dir lock errors `mcp` and `doctor` share.
+//! - `mcp`: `folo mcp` (the folo-mcp server on stdio).
+//! - `doctor`: `folo doctor`.
+//! - `describe`: `folo describe` (the clap tree as JSON).
+//! - `train`: `folo train` and `folo stop` (folder: config, progress, resume, stop).
+//! - `infer`: `folo val`, `folo predict` and `folo export`; `coco` (`val --coco` / `--save-json`) and `draw`
+//!   (`predict --save` images) serve it.
+//! - `dataset`: `folo dataset check | stats | synth | convert`.
+//! - `weights`: `folo weights list | pull` and published-name resolution (folder: download).
+//! - `cloud`: `folo cloud ...` through `folo_server::cloud`.
+//! - `engine`: opening datasets, registering the GPU backend, engine errors as CLI errors.
+//! - `output`: `--json` records, the error envelope and the exit codes.
+//! - `serve_lock`: one owner per data dir (`serve.lock`, `serve.json`).
+//!
+//! `folo bench` answers `not_implemented` (exit 4).
 
 mod cloud;
 mod coco;

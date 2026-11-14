@@ -3,6 +3,20 @@
 //! Kernels work on contiguous `&[f32]` with rayon above a size threshold (32K elements). Strided inputs are either walked
 //! row by row with merged dimensions (elementwise ops, copies) or made contiguous once (everything else).
 //! The GEMM in [`gemm`] is public so other crates can call it on raw slices.
+//!
+//! # Files
+//! - `mod.rs`: [`CpuBackend`], the [`Backend`] implementation that unpacks each call's views and hands them to the
+//!   kernels below; [`in_pool`] and [`take_buffer`].
+//! - `elementwise.rs`: strided copies, unary / binary / `where` kernels and the unary gradients, and the shared
+//!   [`silu`], [`silu_backward`] and [`fast_exp`] formulas.
+//! - `reduce.rs`: reductions, arg-reductions, softmax and top-k over one dimension (`[outer, d, inner]`).
+//! - `index.rs`: `index_select`, `index_add`, `gather` and `scatter_add` over one dimension.
+//! - `pool.rs`: max, average and adaptive average pooling and nearest upsampling, with their gradients.
+//! - `pool_alloc.rs`: the cache of large `f32` buffers ([`set_buffer_cache_limit`]).
+//! - [`gemm`] (`gemm/`): the single-precision GEMM: blocked driver, micro-kernels, row-pointer operands.
+//! - `conv/`: conv2d forward and gradients: implicit-im2col GEMM, Winograd, depthwise, few-input-channel and
+//!   per-site paths.
+//! - `sites_tests.rs`, `winograd_tests.rs`: unit tests of `conv2d_act_at` and of the Winograd dispatch.
 
 use std::borrow::Cow;
 

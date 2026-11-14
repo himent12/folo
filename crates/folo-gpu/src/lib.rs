@@ -1,6 +1,6 @@
 //! FOLO's GPU compute layer on [wgpu](https://wgpu.rs): Vulkan, DX12 and Metal natively, WebGPU in the browser.
 //!
-//! The crate has three layers:
+//! The crate has four layers:
 //!
 //! - **Device** — [`GpuContext`] picks an adapter (high-performance by default, overridable with
 //!   `FOLO_GPU_ADAPTER` / `FOLO_GPU_BACKEND`), creates the device and queue with the features and limits FOLO
@@ -13,12 +13,25 @@
 //!   upsample, concat, permute, casts).
 //! - **Tensors** — [`GpuTensor`]: a buffer + shape + dtype handle with methods that validate shapes, allocate
 //!   outputs from the pool and call the kernel layer.
-//!
 //! - **folo-core backend** — [`backend`]: [`GpuBackend`] implements `folo_core::backend::Backend` over the
 //!   kernel layer; [`init`] registers it as `Device::Gpu(0)` so folo-core tensors (and autograd) run on the GPU.
 //!
 //! The kernel layer is deliberately independent of [`GpuTensor`] so the folo-core backend drives it with its
 //! own storage type (see `docs/GPU.md`).
+//!
+//! # Map
+//! - [`context`]: [`GpuContext`] (adapter, device, queue, command batch, forward plans, precompile, readback).
+//! - [`pool`]: the size-class buffer pool ([`GpuBuffer`]).
+//! - `pipeline.rs` (crate-private): kernel definitions, specialisation constants, the parameter block and the WGSL
+//!   prelude every kernel is compiled with; [`pipeline_cache`]: compiled pipelines kept on disk.
+//! - `kernel_list.rs` (crate-private): the kernel lists [`GpuContext::precompile`] records and compiles.
+//! - [`kernels`]: the Rust entry points; their WGSL is in `src/shaders/` or generated in Rust.
+//! - [`backend`]: [`GpuBackend`], folo-core's `Backend` over the kernel layer.
+//! - [`tensor`]: the tensor-level API, [`GpuTensor`].
+//! - [`detect`]: the task-aligned assigner and detection loss on folo-core GPU tensors.
+//! - [`profile`]: per-kernel timings (`FOLO_GPU_PROFILE=1`); [`dtype`], [`error`]: element types and errors.
+//!
+//! `crates/folo-gpu/README.md` maps an op to its shader, entry point, backend method and test.
 //!
 //! ```no_run
 //! use folo_gpu::{GpuContext, GpuTensor};

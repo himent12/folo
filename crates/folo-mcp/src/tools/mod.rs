@@ -1,5 +1,16 @@
 //! The tools of docs/MCP.md: their schemas (generated from the Rust types with schemars) and their dispatch onto
 //! the [`Store`](folo_server::Store).
+//!
+//! This file holds the table, [`TOOLS`] (name, description, `mutating`, input and output schema), in the order of
+//! docs/MCP.md, and what `tools/list` and `folo describe` show of it. The rest of the folder:
+//!
+//! - `dispatch.rs`: a call from request to handler (the `--read-only` refusal, argument checks, progress).
+//! - `schemas.rs`: schemas generated with schemars and shrunk; `arguments.rs`: unknown and malformed arguments.
+//! - `results.rs`: size limits, summaries and pages of a result.
+//! - Handlers: `info.rs` (`folo_info`), `datasets.rs` (the dataset tools), `models.rs` (`list_models`, `val`,
+//!   `predict`, `predict_batch`, `export`), `runs.rs` (`train`, `run_status`, `list_runs`, `stop_run`,
+//!   `reorder_run`, `compare_runs`), `cloud.rs` (the `cloud_*` tools).
+//! - `tests.rs`: unit tests, including the tool count the docs state.
 
 mod arguments;
 mod cloud;

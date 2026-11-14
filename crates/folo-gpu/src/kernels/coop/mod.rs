@@ -19,6 +19,9 @@
 //! **Epilogue.** Cooperative matrices have no per-element access, so each subgroup stores one fragment at a time
 //! into its own 1 KiB slice of an f32 scratch array, and its 32 lanes then apply `alpha`, the bias and the
 //! activation to 8 elements each and write them to `C` with bounds checks.
+//!
+//! Files: `shader.rs` the WGSL generator; `matmul.rs` the GEMM ([`gemm`]); `convolution.rs` the conv forward
+//! ([`conv2d`]) and gradients; `support.rs` the device checks and the opt-in.
 
 mod convolution;
 mod matmul;

@@ -1,3 +1,6 @@
+//! Unit tests of the loss internals: the fused CPU kernels against the composite path, confident positives,
+//! huge foreground logits, duplicate anchors, and the fixed-order sum.
+
 use super::terms::{loss_impl, sum_fixed_order};
 use super::*;
 use crate::decode::make_anchors;

@@ -1,3 +1,7 @@
+//! GEMM unit tests: results against a naive GEMM (`f64` sums) on odd sizes and transposed operands, stride
+//! overflow checks, the portable micro-kernel against the dispatched one, the register epilogue bit for bit
+//! against the row pass, and the row-pointer A paths bit for bit against the packed path.
+
 use super::kernel::{Kernel, kernel, kernel_generic};
 use super::*;
 

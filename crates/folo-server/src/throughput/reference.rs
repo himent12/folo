@@ -1,3 +1,5 @@
+//! The reference numbers: docs/BENCHMARKS.md's FOLO measurements on the dev machine.
+
 use folo_api::{Arch, InferPrecision, InferThroughput, Rate, ThroughputSource, TrainThroughput};
 
 use super::run_estimate::{compute, latency_growth, scale_rate, slowdown};

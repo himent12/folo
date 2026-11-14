@@ -1,10 +1,37 @@
 //! The kernel layer: one Rust entry point per WGSL kernel, operating on raw `wgpu::Buffer`s plus explicit
-//! sizes. Nothing here knows about [`crate::GpuTensor`]; the tensor wrapper (and later the folo-core
-//! `Backend` implementation) validate shapes, allocate outputs and call into this layer.
+//! sizes. Nothing here knows about [`crate::GpuTensor`]; the tensor wrapper and the folo-core `Backend`
+//! implementation ([`crate::backend`]) validate shapes, allocate outputs and call into this layer.
 //!
 //! Buffer layout convention: every operand is a dense row-major array starting at byte 0 of its buffer
 //! (NCHW for images, `[out, in/groups, kh, kw]` for conv weights). Buffers may be larger than the operand
 //! (pool size classes); kernels never touch the slack.
+//!
+//! Each module declares its kernels as `KernelDef`s (the fixed ones collected in its `DEFS` and in `all_defs`)
+//! and gets their WGSL one of two ways: `include_str!` of a file in `src/shaders/`, often prefixed by shared
+//! snippets (`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl`, the `E` / `V4` / `OUT`
+//! aliases of `vec_prelude`), or a generator in Rust that writes the source from the spec with no `.wgsl` file
+//! (the GEMM and implicit-GEMM convs, tensor cores, `ew.rs`, `strided.rs`, `pool_grad.rs`, Muon, the
+//! multi-tensor optimizer kernels). At compile time `pipeline::render` puts the specialisation constants and the
+//! shared prelude in front of either.
+//!
+//! Modules used by the folo-core backend:
+//! - `ew.rs`: strided elementwise ops (unary and their gradients, binary, comparisons, `where`).
+//! - `strided.rs`: strided gathers and scatters, fills, casts and index ops for every dtype.
+//! - `reduce.rs`: reductions, arg-reductions, softmax and top-k (also the tensor wrapper's reduce and softmax).
+//! - `gemm.rs`: the tiled GEMM generator; `gemm_cat.rs`: GEMMs whose `B` is a concatenation read in place.
+//! - `conv/`: conv2d forward, gradients, split-K, depthwise and per-site convs.
+//! - `coop/`: tensor-core (cooperative-matrix) f16 GEMM and conv.
+//! - `pool_grad.rs`: pooling with folo-core's semantics and the pooling and upsampling gradients.
+//! - `layout.rs`: permute, concat, nearest upsampling and f32 / f16 casts (upsampling for the backend too).
+//! - `norm.rs`: train-mode BatchNorm + activation; `optim.rs`: fused optimizer updates, clipping and
+//!   unscaling; `muon.rs`: MuSGD's Muon step.
+//! - `vision.rs`: letterboxing and detection-head candidates; `detect.rs`: the assigner and detection loss;
+//!   `detect_sites.rs`: candidate-first detection.
+//!
+//! Modules only the tensor wrapper (and the benches) call: `elementwise.rs` (unary, broadcasting binary and bias +
+//! activation; its [`elementwise::UnaryOp`] is also the fused activation of the GEMM and conv epilogues) and
+//! `pooling.rs` (max pooling; its [`pooling::Window2d`] also describes conv windows). `bounds.rs` limits what a
+//! kernel list may ask a generator for.
 
 pub(crate) mod bounds;
 pub mod conv;

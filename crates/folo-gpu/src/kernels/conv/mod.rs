@@ -25,6 +25,10 @@
 //! on, the f16 input and weight gradients run on [`coop`](crate::kernels::coop)'s `CONV_MODE` 2 / 3 kernels (1×1 input gradients as a
 //! GEMM over the transposed weight), and the weight gradient can be written as f32 directly
 //! ([`conv2d_backward_weight_as`]).
+//!
+//! Files: `forward.rs` the forward ([`conv2d`], [`conv2d_cat`]); `split.rs` its split-K; `sites.rs` the forward
+//! at listed output pixels ([`conv2d_sites`]); `input_grad.rs` and `weight_grad.rs` the gradients;
+//! `depthwise.rs` the WGSL generators of the direct depthwise kernels (from `shaders/depthwise.wgsl`).
 
 mod depthwise;
 mod forward;

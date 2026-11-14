@@ -8,10 +8,13 @@
 //! Where nothing is measured, the numbers come from [`reference`]: docs/BENCHMARKS.md's FOLO figures, scaled to
 //! other sizes by compute. A measured row also stands in for nearby sizes: its rate times the reference's ratio
 //! between the two ([`estimate`]).
+//!
+//! Files: `recording` ([`Throughput`]: the table in memory and in its file), `api_table` (the API's table: measured
+//! rows and the reference rows they shadow), [`reference`](mod@reference) (the reference numbers), `run_estimate`
+//! (a run's wall time and peak GPU memory from the table) and `tests`.
 
 mod api_table;
 mod recording;
-/// The reference numbers: docs/BENCHMARKS.md's FOLO measurements on the dev machine.
 pub mod reference;
 mod run_estimate;
 

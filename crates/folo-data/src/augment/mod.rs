@@ -3,6 +3,12 @@
 //! Every function here keeps boxes consistent with pixels: geometric ops transform boxes by their corners, clip
 //! them to the output and drop the ones that became too small or too thin ([`BoxFilter`]). [`TrainTransform`]
 //! chains them the way YOLO training does: mosaic → random affine → mixup → HSV → flips.
+//!
+//! - `geometry.rs`: random affine, flips, [`resize_long_side`] and the box transform ([`transform_boxes`],
+//!   [`BoxFilter`]).
+//! - `hsv.rs`: HSV colour jitter ([`random_hsv`], [`apply_hsv`]). `mosaic.rs`: [`mosaic4`] and [`mixup`].
+//! - `pipeline.rs`: [`TrainTransform`], the training transform.
+//! - This file: [`AugmentConfig`], the parameters (`TrainConfig.augment` in docs/API.md).
 
 mod geometry;
 mod hsv;

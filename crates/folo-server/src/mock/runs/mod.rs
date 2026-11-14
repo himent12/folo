@@ -4,6 +4,10 @@
 //! Runs created through the API share one training slot, like the real server's: [`reschedule`] gives each waiting
 //! run the moment it starts (when the run ahead of it ends), so its clock, its queue position and its `queue`
 //! events follow from the wall clock alone. The seeded looping run is outside the queue.
+//!
+//! Files: `curve` (metric curves by step and epoch), `clock` (the wall-clock timeline of a live run), `events` (log
+//! lines, events between two snapshots and the ticker that sends them), `queue` (the shared training slot) and
+//! `tests`.
 
 mod clock;
 mod curve;

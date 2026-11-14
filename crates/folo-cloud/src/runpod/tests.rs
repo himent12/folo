@@ -1,3 +1,6 @@
+//! Unit tests of the RunPod provider against the scripted HTTP server of `crate::fixture` (never the real
+//! service): check, offers, launch, state, find and terminate, and that keys and tokens stay out of messages.
+
 use super::*;
 use folo_api::CloudAvailability;
 

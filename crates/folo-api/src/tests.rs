@@ -1,3 +1,6 @@
+//! Unit tests of the wire format: defaults, round trips and compatibility (older servers' responses still parse,
+//! unknown enum values from newer ones decode as `Unknown`, the schema leaves `Unknown` out).
+
 use super::*;
 
 /// An optimizer value from a newer build decodes as `Unknown` (a client built before it keeps listing runs);

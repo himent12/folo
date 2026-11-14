@@ -23,6 +23,13 @@
 //!   ([`crate::uploads`]); a finished dataset upload moves to `datasets/<name>/`, a model to `models/`.
 //! - `cloud/connections.json`, `cloud/instances/`: cloud connections and the instance ledger ([`crate::cloud`]).
 //! - `label/<id>/`: labeling jobs ([`crate::label`]); `bench/<id>/`: vision benchmarks ([`crate::bench`]).
+//!
+//! Files: this one holds [`RealStore`] itself and [`RealStore::open_with_cloud`], which builds the runs, models,
+//! uploads, cloud, labeler and benches services it uses. `store` is its [`Store`](crate::Store) implementation;
+//! `datasets` (registering, loading and re-checking indexes), `registry` (`datasets.json` and its
+//! tombstones), `deletion` (`DELETE /api/datasets/{id}?files=true`), `training` (starting runs here or on a cloud
+//! connection), `models` (the models it lists), `uploads` (what finished uploads become) and `gpu_idle` (releasing
+//! inference memory when idle) hold the rest; `tests` covers dataset ids and file deletion.
 
 mod datasets;
 mod deletion;

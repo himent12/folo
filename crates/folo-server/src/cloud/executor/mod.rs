@@ -9,6 +9,12 @@
 //! is stopped, or panics. The only way out without it is letting go of a run that trains while this process shuts
 //! down: it keeps training, and the next process follows it again from its private state ([`Private`]). A run that
 //! does not train yet has nothing to lose, so a shutdown stops it and releases its instance.
+//!
+//! Files: this one holds [`spawn`] (the thread), the [`Release`] guard and the state the phases share; `launch`
+//! (provisioning the instance, or following a run again, and booting its worker), `sync` (the dataset and starting
+//! weights sent to the worker, and the run started there), `train` (following the worker's run, the instance's state
+//! and cost, stopping it) and `mirror` (the worker's run copied into the local run folder, its weights collected at
+//! the end).
 
 mod launch;
 mod mirror;

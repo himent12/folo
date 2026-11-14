@@ -34,6 +34,12 @@
 //! The device is a parameter: inputs, the loss and the optimizers follow the model's device, which
 //! [`place_model`] sets (`Module::to_device`).
 //!
+//! Files: `config.rs` ([`TrainConfig`], [`OptimizerChoice`]), `setup.rs` ([`Trainer::new`], [`Trainer::resume`]),
+//! `epoch.rs` (one epoch), `run.rs` ([`Trainer::run`]: epochs, validation, early stopping), `checkpoint.rs`
+//! ([`Trainer::save_checkpoint`]), `writer/` (the epoch's files, off the training thread), `events.rs`
+//! ([`EventSink`]), `feed.rs` (staging batches for a GPU), `device.rs` ([`place_model`], [`amp_support`]) and
+//! `tests.rs`. This file: [`Trainer`], [`TrainData`], [`TrainOptions`] and the trainer's constants.
+//!
 //! [`detection_loss`]: crate::loss::detection_loss
 //! [`dual_loss`]: crate::loss::dual_loss
 

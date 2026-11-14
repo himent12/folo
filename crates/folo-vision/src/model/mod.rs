@@ -11,6 +11,11 @@
 //!   [`FoloModel::open`] and [`FoloModel::transfer_from`] (partial loading for a new class list) go through
 //!   folo-nn's `.folo` format (docs/FORMAT.md).
 //!
+//! Files: [`blocks`] (§2), [`head`] (§6), `io.rs` (`.folo` weight IO), `predict.rs` (decode and the raw prediction
+//! path, §6.4 and §9.3), `lazy.rs` and `lazy_gpu.rs` (candidate-first prediction on the CPU and on a GPU, §9.5).
+//! This file holds [`FoloModel`] itself: construction for a scale and class count, the forward pass, fusion and
+//! device moves.
+//!
 //! ```
 //! use folo_core::{no_grad, Tensor};
 //! use folo_nn::Module;
