@@ -10,7 +10,8 @@ top of it. It depends only on folo-api among the workspace crates. Four crates d
 | folo-cloud | The `remote` provider asks the server for its health and system info (`crates/folo-cloud/src/remote.rs`); `Endpoint::client` builds a client of a worker |
 | folo-cli | `serve_lock::serves` asks a server at a data dir's recorded address which data dir it serves |
 
-The client knows the API's conventions and nothing about its routes: paths are relative to `/api`, bodies are
+`Client` knows the API's conventions and nothing about its routes (only `src/transfer.rs` names routes, the
+upload protocol's `/uploads` family): paths are relative to `/api`, bodies are
 JSON, a non-2xx answer is the error envelope `{ "error": { code, message, hint } }`, and a token is sent as
 `Authorization: Bearer`. `http://` and `https://` (rustls) both work.
 
@@ -32,6 +33,7 @@ JSON, a non-2xx answer is the error envelope `{ "error": { code, message, hint }
 | to do this | touch these files |
 |---|---|
 | Call a new API route | Nothing here: callers pass the path (`client.get::<DatasetList>("/datasets")`) and a folo-api type. The route itself is folo-server's |
+| Change the upload protocol | `upload`, `complete` and `Parts` in `src/transfer.rs` (the `/uploads` routes); the server side is folo-server's |
 | Change which failures are retried | `Error::is_transient` in `src/lib.rs` and its test `only_some_statuses_are_transient`; `crates/folo-server/tests/transfer.rs` exercises the retries |
 
 ## Tests and benchmarks
