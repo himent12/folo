@@ -1,8 +1,10 @@
 // @vitest-environment happy-dom
 /// <reference types="node" />
 // The Runs list (Models and Datasets: listTables.test.tsx).
-// The list tables at every width: a header cell and the cells under it hide together, so each value sits under its own
-// heading. The responsive column rule is base.css's (loaded here as the app loads it).
+// The list table at every width: a header cell and the cells under it hide together, so each value sits under its own
+// heading. Runs drops its columns by container queries on its frame (Runs.tsx `.cq-*`), which happy-dom does not
+// evaluate: the rules are read from the source (each threshold, its class and its `display: none`) and applied at both
+// sides of every threshold to the headers and every row's cells.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { flush as flushSync, type Component } from 'fw';
@@ -15,8 +17,6 @@ import { parse, router } from '$lib/router';
 import { page as pageMeta } from '$lib/shell/crumbs';
 import Runs from './Runs';
 
-// Each side of the .hide-lg (< 1280) and .hide-md (< 1024) boundaries, and a tablet (820).
-const WIDTHS = [1280, 1279, 1024, 1023, 820];
 
 type Mounted = { unmount(): void };
 let target: HTMLElement;
@@ -80,17 +80,50 @@ function columns(table: HTMLTableElement) {
   return { head, rows };
 }
 
-function expectAligned(table: HTMLTableElement) {
-  const heads: number[] = [];
-  for (const width of WIDTHS) {
-    resize(width);
-    const { head, rows } = columns(table);
-    heads.push(head);
-    expect(rows.length, `rows at ${width}`).toBeGreaterThan(0);
-    for (const n of rows) expect(n, `cells per row at ${width} px`).toBe(head);
+/**
+ * The Runs table's container rules, read from its source (happy-dom does not evaluate `@container`): each threshold
+ * with the column class it hides. A rule must be exactly `display: none` on one `.cq-*` class, so a wrong declaration
+ * or a rule that hides something else fails here.
+ */
+function containerRules(): [number, string][] {
+  const src = readFileSync(resolve(process.cwd(), 'src/routes/Runs.tsx'), 'utf8');
+  const out: [number, string][] = [];
+  for (const m of src.matchAll(/@container \(max-width: (\d+)px\) \{\s*\.runs :global\(\.(cq-[\w-]+)\) \{([^}]*)\}/g)) {
+    expect(m[3]!.trim(), `the declaration under ${m[1]} px`).toBe('display: none;');
+    out.push([Number(m[1]), m[2]!]);
   }
-  // The rule is in force (columns do hide as the screen narrows), so the check above is not vacuous.
-  expect(heads.at(-1)).toBeLessThan(heads[0]!);
+  return out;
+}
+/** The frame widths the columns leave at (Runs.tsx): the least important first, each with the heads it takes. */
+const DROPS: [number, string, string[]][] = [
+  [1139, 'cq-trend', ['Trend']],
+  [1023, 'cq-dur', ['Duration']],
+  [927, 'cq-created', ['Created']],
+  [831, 'cq-ctx', ['Architecture', 'Dataset']],
+];
+
+/**
+ * At each side of every container threshold the table uses: which headers show, and every body row shows exactly the
+ * cells under those headers, so a header never hides without its cells or the other way round.
+ */
+function expectSameColumns(table: HTMLTableElement) {
+  expect(containerRules()).toEqual(DROPS.map(([w, c]) => [w, c]));
+  const cq = (el: Element) => [...el.classList].find((c) => c.startsWith('cq-'));
+  const heads = [...table.querySelectorAll('thead th')];
+  const rows = [...table.querySelectorAll('tbody tr')].map((tr) => [...tr.children]).filter((cells) => cells.every((td) => span(td) === 1));
+  expect(rows.length, 'rows').toBeGreaterThan(0);
+  // Each class is on the headers it names and on no other.
+  for (const [, c, names] of DROPS) expect(heads.filter((th) => cq(th) === c).map((th) => th.textContent?.trim())).toEqual(names);
+  for (const cells of rows) expect(cells.length).toBe(heads.length);
+  const all = heads.map((th) => th.textContent?.trim());
+  for (const width of [1140, ...DROPS.flatMap(([w]) => [w + 1, w])]) {
+    const hidden = new Set(DROPS.filter(([w]) => width <= w).map(([, c]) => c));
+    const visible = (el: Element) => !hidden.has(cq(el) ?? '');
+    const shownHeads = heads.filter(visible).map((th) => th.textContent?.trim());
+    const gone = DROPS.filter(([w]) => width <= w).flatMap(([, , names]) => names);
+    expect(shownHeads, `heads at ${width} px`).toEqual(all.filter((h) => !gone.includes(h!)));
+    for (const cells of rows) expect(cells.map(visible), `cells at ${width} px`).toEqual(heads.map(visible));
+  }
 }
 
 /** The headers without a fixed width (the check column and the empty last one aside). */
@@ -111,12 +144,12 @@ describe('list tables: one geometry in every state', () => {
     it(`${name}: loaded and loading, one visible cell per visible header at every width, and the same fixed widths`, async () => {
       await open(page, path, new MockApi('normal', 0));
       const loaded = await table(sel, (t) => !!t.querySelector('tbody tr[data-row]'), 'the rows');
-      expectAligned(loaded);
+      expectSameColumns(loaded);
       expect(loose(loaded)).toEqual(FLEX[name]);
 
       await open(page, path, new MockApi('loading'));
       const skeleton = target.querySelector<HTMLTableElement>(sel)!;
-      expectAligned(skeleton);
+      expectSameColumns(skeleton);
       expect(loose(skeleton)).toEqual(FLEX[name]);
       // The toolbar is the same one, live.
       expect(target.querySelector<HTMLInputElement>('.list-toolbar .lt-search input')!.disabled).toBe(false);
@@ -138,7 +171,7 @@ describe('list tables: one geometry in every state', () => {
         // No counts over a list that has nothing to count.
         expect(bar.querySelectorAll('.lt-filter .meta').length).toBe(0);
       }
-      // The page owns the create action while mounted, so the top bar's New run steps aside.
+      // The page owns the create action while mounted (counted by shell/crumbs; the top bar has none).
       const label = CREATE[name];
       expect(pageMeta.ownsCreate).toBe(!!label);
       if (label) {
@@ -389,14 +422,72 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
     expect(seen.some((t) => t.includes('(removed)'))).toBe(false);
   });
 
-  it('shows the compare checkboxes without a hover once two runs are listed', async () => {
+  it('shows the compare checkboxes on a hovered or focused row, and on every row once one is ticked (design/UNIFIED.md §4)', async () => {
     await open(Runs, '/runs', new MockApi('normal', 0));
     await loaded();
-    expect(target.querySelector('table.runs')!.classList.contains('pickable')).toBe(true);
-    const [one] = await new MockApi('normal', 0).runs();
-    await open(Runs, `/runs?q=${encodeURIComponent(one!.id)}`, new MockApi('normal', 0));
-    await loaded();
-    expect(ids()).toHaveLength(1);
-    expect(target.querySelector('table.runs')!.classList.contains('pickable')).toBe(false);
+    const table = target.querySelector('table.runs')!;
+    // At rest no row shows its box: no class reveals them all for a list of two or more.
+    expect(table.classList.contains('pickable')).toBe(false);
+    expect(table.classList.contains('picking')).toBe(false);
+    const src = readFileSync(resolve(process.cwd(), 'src/routes/Runs.tsx'), 'utf8');
+    expect(src).toContain('.runs tbody tr:is(:hover, :focus-within, .on) .check input');
+    target.querySelector<HTMLLabelElement>('tbody tr[data-row] .check label')!.click();
+    flushSync();
+    expect(table.classList.contains('picking')).toBe(true);
+  });
+});
+
+describe('Runs: one fact per column (design/UNIFIED.md §4)', () => {
+  it('gives each run its architecture (a name, in sans), dataset, progress as "38 / 100" and best score in columns of their own', async () => {
+    const api = new MockApi('normal', 0);
+    const runs = await api.runs();
+    const done = runs.find((r) => r.status === 'completed' && r.best && r.dataset)!;
+    await open(Runs, '/runs', api);
+    const row = await vi.waitFor(() => {
+      flushSync();
+      const tr = target.querySelector<HTMLElement>(`table.runs tr[data-id="${done.id}"]`);
+      if (!tr?.querySelector('.cell-cut')?.textContent?.includes(done.dataset!.name)) throw new Error('rows not loaded');
+      return tr;
+    });
+    const heads = [...target.querySelectorAll('table.runs thead th')].map((th) => th.textContent?.trim());
+    expect(heads).toEqual(['Select for comparison', 'Run', 'Architecture', 'Dataset', 'Status', 'Progress', 'Best mAP50-95', 'Trend', 'Duration', 'Created', 'Actions']);
+    const cells = [...row.children];
+    const arch = cells[2]!.querySelector('.ident')!;
+    expect(arch.textContent).toBe(done.config.arch);
+    expect(arch.classList.contains('mono')).toBe(false);
+    expect(cells[2]!.getAttribute('title')).toMatch(/^(From |From scratch)/);
+    expect(cells[5]!.textContent).toContain(`${done.epoch} / ${done.epochs}`);
+    expect(cells[6]!.getAttribute('title')).toBe(`Best at epoch ${done.best!.epoch}`);
+  });
+
+  it('says what the page holds in its header, and only a narrowed list says what it shows under the table', async () => {
+    const api = new MockApi('normal', 0);
+    const runs = await api.runs();
+    await open(Runs, '/runs', api);
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('header .sub')?.textContent?.includes(`${runs.length} runs`)) throw new Error('no facts yet');
+    });
+    // Every fact on a wider screen; a phone's one header row keeps the first two beside New run, so none is cut.
+    const wide = target.querySelector('header .sub.wide-only')!.textContent!.trim();
+    expect(wide.split(' · ').length).toBeGreaterThan(2);
+    expect(wide).toContain('of training');
+    expect(target.querySelector('header .sub.phone-only')!.textContent!.trim()).toBe(wide.split(' · ').slice(0, 2).join(' · '));
+    expect(target.querySelector('.list-foot')).toBeNull();
+    await open(Runs, '/runs?status=failed', api);
+    const foot = await vi.waitFor(() => {
+      flushSync();
+      const f = target.querySelector('.list-foot');
+      if (!f) throw new Error('no line yet');
+      return f;
+    });
+    const failed = runs.filter((r) => r.status === 'failed').length;
+    expect(foot.textContent?.trim()).toBe(`${failed} of ${runs.length} runs`);
+    // A search that matches nothing still says what is shown.
+    const input = target.querySelector<HTMLInputElement>('.lt-search input')!;
+    input.value = 'zzz-no-such-run';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.list-foot')?.textContent?.trim()).toBe(`0 of ${runs.length} runs`);
   });
 });

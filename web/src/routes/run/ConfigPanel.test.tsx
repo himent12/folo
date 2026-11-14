@@ -63,6 +63,14 @@ describe('ConfigPanel', () => {
     expect(r['Weight decay']?.textContent).toBe('0.0005');
   });
 
+  it('sets the architecture and the device in sans: names, not identifiers (design/README.md, Type)', () => {
+    const r = rows(null, { ...config, weights: 'D:/runs/shapes/best.folo' });
+    expect(r['Model']?.textContent).toBe('folo-s');
+    expect(r['Device']?.textContent).toBe('gpu:0');
+    const mono = (k: string) => !!r[k]?.querySelector('.mono');
+    expect([mono('Model'), mono('Device'), mono('Dataset')]).toEqual([false, false, false]);
+  });
+
   it('keeps the request as today without a resolution', () => {
     const r = rows(null);
     // One short value; what Auto picks is a line under the label, never a long value wrapping in the value column.
@@ -117,6 +125,23 @@ describe("ConfigPanel: the run's CLI command (servers that list run_cli)", () =>
     target.remove();
     mountWith({ cli: null });
     expect(target.querySelector('.cli')).toBeNull();
+  });
+
+  it("puts the run's id and Copy command in the header (design/UNIFIED.md §4 Run), Copy command where the server has one", async () => {
+    mountWith({ cli: line, runId: 'run_7d1e' });
+    const header = target.querySelector('#config header')!;
+    expect(header.querySelector('.run-id')?.textContent).toBe('run_7d1e');
+    const write = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+    const copy = [...header.querySelectorAll<HTMLButtonElement>('button')].find((b) => (b.getAttribute('aria-label') ?? b.textContent?.trim()) === 'Copy command')!;
+    copy.click();
+    await Promise.resolve();
+    expect(write).toHaveBeenCalledWith(line);
+    unmount(c!);
+    target.remove();
+    mountWith({ cli: null, runId: 'run_7d1e' });
+    const labels = [...target.querySelectorAll('#config header button')].map((b) => b.getAttribute('aria-label') ?? b.textContent?.trim());
+    expect(labels).toEqual(['Copy JSON']);
   });
 });
 

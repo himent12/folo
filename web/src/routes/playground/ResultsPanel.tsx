@@ -1,5 +1,10 @@
-/** The detections kept by the thresholds, as a table (each row a way to inspect its box) or the prediction as JSON. */
-import { bindable, css, For, type Signal } from 'fw';
+/**
+ * The detections kept by the thresholds, as a table (each row a way to inspect its box) or the prediction as JSON.
+ * `rail` (from 1024 px) is the rail's Detections section: class, size and confidence in 320 px, the selected row's
+ * coordinates on a line under the list, and the classes found (each a show / hide toggle) as a tab between the two;
+ * below 1024 px it is a panel under the image with the coordinates as columns.
+ */
+import { bindable, css, Dynamic, effect, For, type Signal } from 'fw';
 import type { Prediction } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
 import Panel from '$lib/ui/Panel';
@@ -12,7 +17,12 @@ type Det = Prediction['boxes'][number];
 
 export interface ResultsPanelProps {
   result: { boxes: Det[]; ms: number } | null;
-  tab?: 'detections' | 'json';
+  tab?: 'detections' | 'classes' | 'json';
+  /** The rail's section (from 1024 px), with a Classes tab. */
+  rail?: boolean;
+  classCount?: number;
+  classList?: () => JSX.Element;
+  showAllButton?: () => JSX.Element;
   rows: { b: Det; i: number }[];
   predicting: boolean;
   notice: 'file' | 'error' | null;
@@ -35,10 +45,18 @@ export default function ResultsPanel(props: ResultsPanelProps) {
   const tbody = bindable(props, 'tbody') as Signal<HTMLTableSectionElement | undefined>;
   const hover = bindable(props, 'hover');
   const picked = bindable(props, 'picked');
+  /** The view shown: Classes is the rail's tab only (a panel under the image has its own Classes panel). */
+  const view = () => (!props.rail && tab.get() === 'classes' ? 'detections' : tab.get());
+  // Leaving the rail (the window narrowed below 1024 px) on Classes selects Detections, so the tab list always has its
+  // selected, focusable tab.
+  effect(() => {
+    if (!props.rail && tab.get() === 'classes') tab.set('detections');
+  });
+  const sel = () => (props.selectedIdx === null ? null : (props.rows.find((r) => r.i === props.selectedIdx)?.b ?? null));
 
   return (
-    <div class="results">
-      <Panel pad="none">
+    <div class="results" class:rail={!!props.rail}>
+      <Dynamic component={props.rail ? Bare : Panel} pad="none">
         <div class="tabs-row">
           <Tabs
             label="Result views"
@@ -46,11 +64,12 @@ export default function ResultsPanel(props: ResultsPanelProps) {
             bind:value={tab}
             tabs={[
               { value: 'detections', label: 'Detections', meta: props.result ? String(props.rows.length) : undefined },
+              ...(props.rail ? [{ value: 'classes' as const, label: 'Classes', meta: props.result ? String(props.classCount ?? 0) : undefined }] : []),
               { value: 'json', label: 'JSON' },
             ]}
           />
         </div>
-        <div id="pg-panel" role="tabpanel" aria-labelledby={`pg-${tab.get()}`}>
+        <div id="pg-panel" role="tabpanel" aria-labelledby={`pg-${view()}`}>
           {!props.result ? (
             <p class="placeholder">
               {props.predicting
@@ -59,7 +78,12 @@ export default function ResultsPanel(props: ResultsPanelProps) {
                   ? 'No detections: the last prediction failed.'
                   : 'Detections appear here once you run the model on an image.'}
             </p>
-          ) : tab.get() === 'json' ? (
+          ) : view() === 'classes' ? (
+            <div class="classes-tab">
+              {props.showAllButton ? <div class="show-all">{props.showAllButton}</div> : null}
+              {props.classList?.()}
+            </div>
+          ) : view() === 'json' ? (
             <div class="json-wrap">
               <JsonView value={props.json} label="Prediction as JSON" />
             </div>
@@ -81,26 +105,39 @@ export default function ResultsPanel(props: ResultsPanelProps) {
               <table class="table dense">
                 <thead>
                   <tr>
-                    <th scope="col" class="r idx">
-                      #
-                    </th>
+                    {props.rail ? null : (
+                      <th scope="col" class="r idx">
+                        #
+                      </th>
+                    )}
                     <th scope="col">Class</th>
-                    <th scope="col">Score</th>
-                    <th scope="col" class="r hide-sm coord" title="Box left edge, in image pixels">
-                      x1
+                    {props.rail ? (
+                      <th scope="col" class="r">
+                        Size (px)
+                      </th>
+                    ) : null}
+                    <th scope="col" class:r={!!props.rail}>
+                      {props.rail ? 'Confidence' : 'Score'}
                     </th>
-                    <th scope="col" class="r hide-sm coord" title="Box top edge, in image pixels">
-                      y1
-                    </th>
-                    <th scope="col" class="r hide-sm coord" title="Box right edge, in image pixels">
-                      x2
-                    </th>
-                    <th scope="col" class="r hide-sm coord" title="Box bottom edge, in image pixels">
-                      y2
-                    </th>
-                    <th scope="col" class="r">
-                      Size (px)
-                    </th>
+                    {props.rail ? null : (
+                      <>
+                        <th scope="col" class="r hide-sm coord" title="Box left edge, in image pixels">
+                          x1
+                        </th>
+                        <th scope="col" class="r hide-sm coord" title="Box top edge, in image pixels">
+                          y1
+                        </th>
+                        <th scope="col" class="r hide-sm coord" title="Box right edge, in image pixels">
+                          x2
+                        </th>
+                        <th scope="col" class="r hide-sm coord" title="Box bottom edge, in image pixels">
+                          y2
+                        </th>
+                        <th scope="col" class="r">
+                          Size (px)
+                        </th>
+                      </>
+                    )}
                   </tr>
                 </thead>
                 <tbody ref={tbody}>
@@ -125,14 +162,19 @@ export default function ResultsPanel(props: ResultsPanelProps) {
                           onclick={() => picked.set(b())}
                           onkeydown={(e) => props.onrowkey(e, k())}
                         >
-                          <td class="r idx faint">{i() + 1}</td>
+                          {props.rail ? null : <td class="r idx faint">{i() + 1}</td>}
                           <td class="lead">
                             <span class="cls">
                               <Swatch color={classColor(b().class)} />
                               <span class="truncate">{b().name}</span>
                             </span>
                           </td>
-                          <td>
+                          {props.rail ? (
+                            <td class="r muted">
+                              {px(b().x2 - b().x1)}×{px(b().y2 - b().y1)}
+                            </td>
+                          ) : null}
+                          <td class:r={!!props.rail}>
                             <span class="score">
                               <span class="s-track" aria-hidden="true">
                                 <span style:transform={`scaleX(${b().score})`}></span>
@@ -140,25 +182,46 @@ export default function ResultsPanel(props: ResultsPanelProps) {
                               <span class="num">{score(b().score)}</span>
                             </span>
                           </td>
-                          <td class="r muted hide-sm coord">{px(b().x1)}</td>
-                          <td class="r muted hide-sm coord">{px(b().y1)}</td>
-                          <td class="r muted hide-sm coord">{px(b().x2)}</td>
-                          <td class="r muted hide-sm coord">{px(b().y2)}</td>
-                          <td class="r muted">
-                            {px(b().x2 - b().x1)}×{px(b().y2 - b().y1)}
-                          </td>
+                          {props.rail ? null : (
+                            <>
+                              <td class="r muted hide-sm coord">{px(b().x1)}</td>
+                              <td class="r muted hide-sm coord">{px(b().y1)}</td>
+                              <td class="r muted hide-sm coord">{px(b().x2)}</td>
+                              <td class="r muted hide-sm coord">{px(b().y2)}</td>
+                              <td class="r muted">
+                                {px(b().x2 - b().x1)}×{px(b().y2 - b().y1)}
+                              </td>
+                            </>
+                          )}
                         </tr>
                       );
                     }}
                   </For>
                 </tbody>
               </table>
+              {/* The rail has no coordinate columns: the selected box's are here (and in JSON). */}
+              {props.rail ? (
+                <p class="sel-line num" aria-live="polite">
+                  {sel() ? (
+                    <>
+                      <span class="faint">Box</span> x1 {px(sel()!.x1)} · y1 {px(sel()!.y1)} · x2 {px(sel()!.x2)} · y2 {px(sel()!.y2)}
+                    </>
+                  ) : (
+                    <span class="faint">Select a box for its coordinates</span>
+                  )}
+                </p>
+              ) : null}
             </div>
           )}
         </div>
-      </Panel>
+      </Dynamic>
     </div>
   );
+}
+
+/** The rail's section has no frame of its own: the rail is the panel. */
+function Bare(props: { pad?: string; children?: JSX.Element }) {
+  return <>{props.children}</>;
 }
 
 css`
@@ -252,6 +315,39 @@ css`
   tbody tr.hot .s-track span,
   tbody tr.on .s-track span {
     background: var(--text-primary);
+  }
+  /* The rail's section: the list grows with the rail, which scrolls (no scroll box of its own); the tabs sit on the
+     section's 16 px inset like the rail's other headings. */
+  .rail .scroll {
+    max-height: none;
+    overflow: visible;
+  }
+  .rail .scroll thead th {
+    position: static;
+  }
+  .rail .s-track {
+    width: 48px;
+  }
+  .rail .cls {
+    max-width: 112px;
+  }
+  .sel-line {
+    padding: var(--space-2) var(--space-4) 0;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .classes-tab {
+    display: grid;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4) 0;
+  }
+  .show-all {
+    display: flex;
+    justify-content: flex-end;
+  }
+  .show-all:empty {
+    display: none;
   }
   @media (pointer: coarse) {
     .table.dense td {

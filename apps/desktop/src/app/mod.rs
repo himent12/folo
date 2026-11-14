@@ -39,8 +39,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use folo_ui::{
-    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, ScrollHandle,
-    SharedString, Subscription, Task, Window, actions, px,
+    App, AppContext, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, ScrollHandle, SharedString,
+    Subscription, Task, Window, actions, px,
 };
 
 use crate::api::*;
@@ -215,6 +215,14 @@ pub enum SampleView {
     Both,
 }
 
+/// The run log's level filter: every line, warnings, or errors.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LogFilter {
+    All,
+    Warn,
+    Error,
+}
+
 pub struct Toast {
     pub id: u64,
     pub tone: Tone,
@@ -239,8 +247,6 @@ pub struct Inspector {
     /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
     pub sample: Option<(String, SampleView)>,
 }
-
-pub type ModelsOrderKey = (usize, usize, &'static str, bool);
 
 pub struct PlayImage {
     pub name: SharedString,
@@ -337,15 +343,23 @@ pub struct FoloApp {
     /// Where focus was before the inspector opened, restored on close.
     inspector_return: Option<FocusHandle>,
     pub hist_hover: HashMap<&'static str, f32>,
-    /// Grid view controls built by the image browser, placed on the tab row.
-    pub ds_view_controls: Option<AnyElement>,
 
     // Runs
     pub run_filter: RunFilter,
     pub chart_hover: Option<f32>,
+    /// The run charts' x axis: Some(true) fits it to the epochs trained ("So far"), Some(false)
+    /// shows the planned run ("All N"); None takes the default (planned while active, else trained).
+    pub run_x_fit: Option<bool>,
     pub sample_view: SampleView,
+    /// The validation samples' minimum confidence for a prediction to be drawn.
+    pub sample_conf: f32,
+    pub log_filter: LogFilter,
     pub loss_parts: [bool; 4],
     pub log_scroll: ScrollHandle,
+    /// The run page's Per class list, scrolled inside its panel.
+    pub per_class_scroll: ScrollHandle,
+    /// The model page's class table, scrolled inside the precision-recall panel.
+    pub pc_scroll: ScrollHandle,
     /// Log lines on screen at the last render (new ones scroll into view while following).
     pub log_seen: u64,
     /// The log follows its tail. Only a scroll changes this (the offset moved); a reflow that
@@ -366,12 +380,11 @@ pub struct FoloApp {
     pub pr_pin: Option<u32>,
     /// Highlighted option while the Export menu is open.
     pub export_hl: usize,
-    /// Models table order: column key and descending; None keeps the server's order.
+    /// The Models table's sort inside each evaluation group: column key and descending; None keeps
+    /// the server's order.
     pub models_sort: Option<(&'static str, bool)>,
     /// The Runs table's sort: column key and descending.
     pub runs_sort: Option<(&'static str, bool)>,
-    /// The sorted order of the models list, for (list allocation, length, column, descending).
-    pub models_order: RefCell<Option<(ModelsOrderKey, Vec<usize>)>>,
     pub confusion_norm: bool,
     /// The confusion-matrix cell (row, column) under the pointer or the keyboard cursor.
     pub cm_cell: Option<(usize, usize)>,
@@ -601,12 +614,16 @@ impl FoloApp {
             overlay_return: None,
             inspector_return: None,
             hist_hover: HashMap::new(),
-            ds_view_controls: None,
             run_filter: RunFilter::All,
             chart_hover: None,
-            sample_view: SampleView::Predictions,
+            run_x_fit: None,
+            sample_view: SampleView::Both,
+            sample_conf: 0.3,
+            log_filter: LogFilter::All,
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
+            per_class_scroll: ScrollHandle::new(),
+            pc_scroll: ScrollHandle::new(),
             log_seen: 0,
             log_follow: true,
             log_last_y: px(0.),
@@ -618,9 +635,9 @@ impl FoloApp {
             pr_pin: None,
             export_hl: 0,
             // Newest first, shown on the Created header, which is also how the server lists them.
-            models_sort: Some(("created", true)),
+            // Ranked within each group, best first (as Studio's list opens).
+            models_sort: Some(("map", true)),
             runs_sort: Some(("created", true)),
-            models_order: RefCell::new(None),
             confusion_norm: true,
             cm_cell: None,
             play_model: None,

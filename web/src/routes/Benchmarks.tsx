@@ -50,7 +50,7 @@ const cols: Col[] = [
   { key: 'classes', label: 'Classes', num: true, get: (b) => b.classes.length, hide: 'lg', w: '88px' },
   { key: 'conditions', label: 'Conditions', num: true, get: (b) => b.plan.conditions.length, hide: 'lg', w: '104px' },
   { key: 'entries', label: 'Entries', num: true, get: (b) => b.entries, w: '88px' },
-  { key: 'leader', label: 'Leader', get: (b) => b.best?.score ?? -1, w: '232px' },
+  { key: 'leader', label: 'Leader', get: (b) => b.best?.score ?? -1, w: '256px' },
   { key: 'created', label: 'Created', num: true, get: (b) => Date.parse(b.created), hide: 'md', w: '104px' },
 ];
 const COLS = cols.length;
@@ -103,9 +103,19 @@ export default function Benchmarks() {
         return d * sign || a.name.localeCompare(b.name);
       });
   });
-  const totals = computed(() => {
-    const s = shown.get();
-    return { images: s.reduce((a, b) => a + b.images, 0), entries: s.reduce((a, b) => a + b.entries, 0) };
+  // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "4 benchmarks · 1,240 images ·
+  // 9 entries · 1 running", whatever the filter; a narrowed list says what it shows under it.
+  const facts = computed<string[] | null>(() => {
+    const all = benches.data;
+    if (!all?.length) return null;
+    const active = count('active');
+    return [
+      `${num(all.length)} ${all.length === 1 ? 'benchmark' : 'benchmarks'}`,
+      imagesText(all.reduce((a, b) => a + b.images, 0)),
+      entriesText(all.reduce((a, b) => a + b.entries, 0)),
+      active ? `${active} running` : '',
+    ]
+      .filter(Boolean);
   });
 
   const offline = computed(() => !benches.data && isOffline(benches.error));
@@ -118,8 +128,10 @@ export default function Benchmarks() {
     <>
       <Page
         title="Benchmarks"
-        sub={() => <span>Frozen sets of labeled images that grade any vision model, unchanged and under hard conditions.</span>}
-        subPhone={() => <span>Grade any model on your images.</span>}
+        // What the page holds (what a benchmark is, frozen labeled images that grade any model, is the empty state's).
+        sub={facts.get() ? () => <span class="num">{facts.get()!.join(' · ')}</span> : undefined}
+        // Phones: the first two facts, beside the page's action (the rest are a wider screen's).
+        subPhone={facts.get() ? () => <span class="num">{facts.get()!.slice(0, 2).join(' · ')}</span> : undefined}
         actions={() => (
           <>
             {!unsupported.get() ? (
@@ -263,12 +275,11 @@ export default function Benchmarks() {
                             <td class="r num muted hide-lg">{b().classes.length}</td>
                             <td class="r num muted hide-lg">{b().plan.conditions.length}</td>
                             <td class="r num muted">{num(b().entries)}</td>
+                            {/* The leader cell (design/UNIFIED.md §4, Benchmarks): the score in text.primary 500, then the
+                                entry's name, cut when long (its own page has it whole). */}
                             <td class="leader">
                               {b().best ? (
                                 <span class="lead-row">
-                                  <span class="l-name truncate" title={b().best!.name}>
-                                    {b().best!.name}
-                                  </span>
                                   <span class="l-score num">
                                     {b().best!.partial ? (
                                       <span class="partial" use:tooltip={'The leader’s score is partial: it compares only loosely with complete entries'}>
@@ -276,6 +287,9 @@ export default function Benchmarks() {
                                       </span>
                                     ) : null}
                                     {scoreText(b().best!.score)}
+                                  </span>
+                                  <span class="l-name truncate" title={b().best!.name}>
+                                    {b().best!.name}
                                   </span>
                                 </span>
                               ) : (
@@ -349,16 +363,10 @@ export default function Benchmarks() {
                 </ul>
               ) : null}
             </Panel>{' '}
-            {benches.data && shown.get().length ? (
+            {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
+            {benches.data && shown.get().length < benches.data.length ? (
               <p class="list-foot num">
-                <Meta>
-                  <span>
-                    {shown.get().length < benches.data.length ? `${shown.get().length} of ${benches.data.length}` : shown.get().length}{' '}
-                    {benches.data.length === 1 ? 'benchmark' : 'benchmarks'}
-                  </span>{' '}
-                  <span>{imagesText(totals.get().images)}</span>{' '}
-                  <span>{entriesText(totals.get().entries)}</span>
-                </Meta>
+                {shown.get().length} of {benches.data.length} {benches.data.length === 1 ? 'benchmark' : 'benchmarks'}
               </p>
             ) : null}
           </>
@@ -382,7 +390,7 @@ css`
   .src {
     color: var(--text-secondary);
   }
-  /* The leader: its name (cut when long; its own page has it whole) and its score on the cell's right edge. */
+  /* The leader: its score, then its name (cut when long; its own page has it whole). */
   .leader {
     max-width: 0;
   }
@@ -397,6 +405,8 @@ css`
     color: var(--text-secondary);
   }
   .l-score {
+    flex-shrink: 0;
+    color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
   /* "partial" before a partial leader's score, a tertiary word (the leaderboard's mark). */

@@ -1,13 +1,13 @@
 import Box from '$icons/box';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
-import { computed, css, For, MediaQuery, signal } from 'fw';
+import { computed, css, For, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { bestMark, bestWord } from '$lib/bestMark';
 import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run } from '$lib/api/types';
-import { ago, bytes, compact, date, metric, num, sizeIn, sizeUnit } from '$lib/format';
+import { ago, bytes, compact, date, metric, sizeParts } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
@@ -28,13 +28,11 @@ import TableState from '$lib/ui/TableState';
 import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
 import { rowNav } from '$lib/ui/rowNav';
-import { media } from '$lib/design/tokens';
 import { unlike, versusYolo26n } from '$lib/benchmarks';
-import { FROM_SCRATCH, origin, originTip, type Origin } from '$lib/lineage';
 import { filterLabel, groupKey, groupLabel, rankKey, scoreContext, splitLabel, type ScoreContext } from '$lib/scoreSummary';
 import { loadThroughput, measuredLatency, measuredTraining } from '$lib/throughput';
 
-type Key = 'name' | 'arch' | 'classes' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'parent' | 'created';
+type Key = 'name' | 'arch' | 'classes' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'created';
 interface Col {
   key: Key;
   label: string;
@@ -100,12 +98,6 @@ export default function Models() {
     return !!r && r.status === 'completed' && r.best?.epoch === r.epochs;
   };
   const sourceName = (m: Model) => (m.run_id ? (runById.get().get(m.run_id)?.name ?? m.run_id) : '');
-  const modelById = computed(() => new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
-  /** The model a trained model was fine-tuned from (its run's starting weights); null for imported weights. */
-  const parentOf = (m: Model) => {
-    const run = m.run_id ? runById.get().get(m.run_id) : undefined;
-    return run ? origin(run.config.weights, modelById.get()) : null;
-  };
 
   const dsById = computed(() => new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
   // Each model's evaluation set, worked out once per change of the lists (legacy worked it out again for the groups,
@@ -122,25 +114,20 @@ export default function Models() {
   });
   const evalSet = (m: Model) => evals.get().get(m.id)!;
 
+  // The columns of design/UNIFIED.md §4 (Models): Params, GFLOPs and where a model started from are on its own page.
   // Source run: a run's name ends in what tells it from its siblings ("shapes-hard-s" beside "shapes-hard-m"), so it is
-  // never cut (DESIGN_DIRECTION §2.3). The widths add up to the 1,160 px panel with the longest model name whole: the
-  // input size (the same 640 on almost every model, and on each model's page) is not a column, which pays for
-  // mAP50-95's "joint best" (120 px, its real width) and a 128 px Source run (104 px of text) from 1280 px; between
-  // 1024 and 1279 Classes, GFLOPs and Started from step out and Source run takes 144. A longer run name wraps at its
-  // hyphens, never cut; a longer model name is cut with an ellipsis (.name-cell), whole in its tooltip.
-  const laptopOnly = new MediaQuery(`${media.laptopUp} and ${media.upToDesktop}`, false);
-  // Sizes in one unit for the column, named in its header (prefs.units: MiB or MB).
+  // never cut (DESIGN_DIRECTION §2.3); a longer one wraps at its hyphens. A longer model name is cut with an ellipsis
+  // (.name-cell), whole in its tooltip. Tablets drop Classes, Size and Source run (the phone rows keep their facts).
+  // Size as Desktop's: each cell its number with its own unit ("37.0 MiB", "1.2 GiB"), the unit one step smaller in
+  // tertiary, the heading plain "Size"; sorted by bytes (prefs.units: MiB or MB).
   const cols = computed<Col[]>(() => [
     { key: 'name', label: 'Model', get: (m) => m.name.toLowerCase() },
-    { key: 'arch', label: 'Arch', get: (m) => m.arch, w: '72px' },
-    { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'lg', w: '84px' },
-    { key: 'params', label: 'Params', num: true, get: (m) => m.params, w: '80px' },
-    { key: 'flops', label: 'GFLOPs', num: true, get: (m) => m.flops_g, hide: 'lg', w: '84px' },
-    { key: 'bytes', label: `Size, ${sizeUnit(prefs.units)}`, num: true, get: (m) => m.bytes, hide: 'md', w: '80px' },
-    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '120px' },
-    { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1, w: '80px' },
-    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: laptopOnly.current ? '144px' : '128px' },
-    { key: 'parent', label: 'Started from', get: (m) => parentOf(m)?.label ?? '~', hide: 'lg', w: '120px' },
+    { key: 'arch', label: 'Architecture', get: (m) => m.arch, w: '112px' },
+    { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'md', w: '88px' },
+    { key: 'bytes', label: 'Size', num: true, get: (m) => m.bytes, hide: 'md', w: '96px' },
+    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '136px' },
+    { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1, w: '88px' },
+    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: '144px' },
     { key: 'created', label: 'Created', num: true, get: (m) => Date.parse(m.created), w: '112px' },
   ]);
 
@@ -229,8 +216,17 @@ export default function Models() {
     ];
   });
   const pickOptions = computed(() => dsOptions.get().map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` })));
-  // What the rows shown hold, said once at the list's end (base.css .list-foot).
-  const shownBytes = computed(() => groups.get().reduce((a, g) => a + g.rows.reduce((b, m) => b + m.bytes, 0), 0));
+  // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "7 models · 2 datasets ·
+  // 52.4 MiB", whatever the filter; a narrowed list says what it shows under it.
+  const facts = computed(() => {
+    const all = models.data;
+    if (!all?.length) return null;
+    const sets = new Set(all.map((m) => evalSet(m).ctx.datasetId).filter(Boolean)).size;
+    const size = all.reduce((a, m) => a + m.bytes, 0);
+    return [`${all.length} ${all.length === 1 ? 'model' : 'models'}`, sets ? `${sets} ${sets === 1 ? 'dataset' : 'datasets'}` : '', bytes(size, prefs.units)]
+      .filter(Boolean)
+      .join(' · ');
+  });
   /** Medium weight goes to the name and the score the list is ranked by; specs stay regular. */
   const strongScore = computed<Key>(() => (sortKey.get() === 'map50' ? 'map50' : 'map50_95'));
 
@@ -262,15 +258,10 @@ export default function Models() {
   return (
     <Page
       title="Models"
-      // One fixed line: the counts live at the list's end, so nothing here changes as the list loads.
-      sub={() => (
-        <span>
-          Trained, published and imported weights, ranked within each evaluation dataset and split. To import a .folo file, put it in the models
-          folder of the server's data directory.
-        </span>
-      )}
+      // What the page holds (how to import a .folo file is the empty state's; ranking is the group heads').
+      sub={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
       // Phones: one line, so the list starts 16 px under it.
-      subPhone={() => <span>Ranked per dataset and split.</span>}
+      subPhone={facts.get() ? () => <span class="num">{facts.get()}</span> : undefined}
     >
       {/* The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its
           own. It is always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or
@@ -321,7 +312,7 @@ export default function Models() {
           )}
         </div>{' '}
         <div class="lt-search">
-          <Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" disabled={!hasData.get()} />
+          <Input bind:value={query} icon={Search} placeholder="Filter by name, architecture or run" aria-label="Filter models" type="search" disabled={!hasData.get()} />
         </div>
       </div>{' '}
       <Panel pad="none">
@@ -427,7 +418,6 @@ export default function Models() {
                     </tr>
                     <For each={g().rows} key={(m) => m.id}>
                       {(m) => {
-                        const parent = computed(() => parentOf(m()));
                         return (
                           <tr class="link" data-row data-id={m().id} aria-label={m().name} onclick={() => router.go(`/models/${m().id}`)}>
                             <td class="name-cell">
@@ -435,15 +425,16 @@ export default function Models() {
                                 {m().name}
                               </a>
                             </td>
-                            <td>
-                              <Ident value={m().arch} class="faint" />
+                            <td class="spec">
+                              <Ident value={m().arch} />
                             </td>
-                            <td class="r spec hide-lg" title={m().classes.slice(0, 12).join(', ') + (m().classes.length > 12 ? ', …' : '')}>
+                            <td class="r spec hide-md" title={m().classes.slice(0, 12).join(', ') + (m().classes.length > 12 ? ', …' : '')}>
                               {m().classes.length}
                             </td>
-                            <td class="r spec">{compact(m().params)}</td>
-                            <td class="r spec hide-lg">{num(m().flops_g, 1)}</td>
-                            <td class="r spec hide-md">{sizeIn(m().bytes, prefs.units)}</td>
+                            <td class="r spec hide-md">
+                              {sizeParts(m().bytes, prefs.units)[0]}{' '}
+                              <span class="size-unit">{sizeParts(m().bytes, prefs.units)[1]}</span>
+                            </td>
                             <td class="r score" class:strong={strongScore.get() === 'map50_95'}>
                               {bestText(m)}
                               {score(m())}
@@ -460,8 +451,7 @@ export default function Models() {
                                 <span class="faint">—</span>
                               )}
                             </td>
-                            <td class="hide-lg">{parentCell(() => parent.get())}</td>
-                            <td class="r faint" title={date(m().created)}>
+                            <td class="r spec" title={date(m().created)}>
                               {ago(m().created)}
                             </td>
                           </tr>
@@ -551,15 +541,10 @@ export default function Models() {
           </For>
         </div>
       </Panel>{' '}
-      {models.data && shownCount.get() ? (
+      {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
+      {models.data && shownCount.get() < models.data.length ? (
         <p class="list-foot num">
-          <Meta>
-            <span>
-              {shownCount.get() < models.data.length ? `${shownCount.get()} of ${models.data.length}` : shownCount.get()}{' '}
-              {models.data.length === 1 ? 'model' : 'models'}
-            </span>{' '}
-            <span>{bytes(shownBytes.get(), prefs.units)}</span>
-          </Meta>
+          {shownCount.get()} of {models.data.length} {models.data.length === 1 ? 'model' : 'models'}
         </p>
       ) : null}{' '}
       {/* Only with models to look at. The engine comparison is reference: one line until it is asked for. */}
@@ -580,24 +565,6 @@ export default function Models() {
       ) : null}
     </Page>
   );
-
-  function parentCell(parent: () => Origin | null) {
-    const asModel = () => parent() as Extract<Origin, { kind: 'model' }>;
-    const asFile = () => parent() as Extract<Origin, { kind: 'file' }>;
-    return (
-      <>
-        {parent()?.kind === 'model' && modelById.get().has(asModel().id) ? (
-          <Ident value={asModel().label} class="src" title={originTip(asModel())} href={href(`/models/${asModel().id}`)} onclick={(e) => e.stopPropagation()} />
-        ) : parent()?.kind === 'file' ? (
-          <Ident value={asFile().label} class="src" title={asFile().path} />
-        ) : parent() && parent()!.kind !== 'scratch' ? (
-          <Ident value={parent()!.label} class="faint" title={originTip(parent()!)} />
-        ) : (
-          <span class="faint">{parent() ? FROM_SCRATCH : '—'}</span>
-        )}
-      </>
-    );
-  }
 }
 
 css`
@@ -680,6 +647,11 @@ css`
   .score.strong {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
+  }
+  /* A size's own unit, one step under the cell's figure in tertiary (design/README.md, Type), as Desktop's "37.0 MiB". */
+  .size-unit {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
   /* The group's top model: a word in tertiary, never a colour (scores compare only within a dataset). */
   .best {

@@ -66,11 +66,11 @@ export const settingsScenes = [
     },
   },
   {
-    // Settings › System › Throughput: the rows this server measured (training, predictions; one from another adapter),
-    // their spread, samples and age, and Measure now.
+    // Settings › Throughput: the rows this server measured as a table (a two-line list on phones), Training in the
+    // panel's header switch, their spread, samples and age, and Measure now.
     name: 'settings-throughput',
-    path: '/settings?section=system',
-    // The whole page: the harness shoots from the top, and the block sits near the bottom.
+    path: '/settings?section=throughput',
+    // The whole page: the harness shoots from the top, and the panel sits near the bottom.
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
@@ -79,9 +79,21 @@ export const settingsScenes = [
     },
   },
   {
+    // The switch on Inference: end-to-end latency, one row measured on another adapter (listed, quieter, not used).
+    name: 'settings-throughput-inference',
+    path: '/settings?section=throughput',
+    fullPage: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.tp-row');
+      await page.locator('#throughput [role="radio"]', { hasText: 'Inference' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // Measure now running: the button busy, the elapsed seconds counted against "up to 10 s".
     name: 'settings-measuring',
-    path: '/settings?section=system',
+    path: '/settings?section=throughput',
     // The whole page: the harness shoots from the top, and the block sits near the bottom.
     fullPage: true,
     viewports: ['desktop', 'mobile'],

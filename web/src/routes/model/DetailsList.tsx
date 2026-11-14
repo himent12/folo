@@ -1,4 +1,8 @@
-/** The model's details: what it is, how it was trained and stored, its classes, where it came from and its latency. */
+/**
+ * The model's details: what it is, how it was trained and stored, its classes, where it came from and its latency.
+ * A full-width panel's facts, each label beside its value: three columns of rows from 1280 px (as Desktop's), the rows
+ * two to a line on laptops and tablets, one on phones.
+ */
 import { bindable, computed, css, For } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run, ThroughputTable } from '$lib/api/types';
@@ -22,8 +26,6 @@ import { weightsEpoch } from './weightsEpoch';
 
 export interface DetailsListProps {
   m: Model;
-  /** Folded rail (up to 1199 px) and phones: labels beside their values, in two columns. */
-  two: boolean;
   tp: Resource<ThroughputTable | null>;
   run: Run | null | undefined;
   /** The source run, its dataset and the model it was fine-tuned from. */
@@ -53,207 +55,195 @@ export default function DetailsList(props: DetailsListProps) {
   const src = () => props.source;
   const h = () => here.get()!;
 
+  // Three columns of label / value rows (as Desktop's Details): what the model is, how it was trained and stored,
+  // where it came from and how fast its architecture runs. One label width and one row rhythm in every column; a long
+  // value (the classes, the file-size note) wraps inside its row.
   return (
-    <dl class="details" class:two={props.two} id="model-details">
-      <div class="kv">
-        <dt>Architecture</dt>
-        <dd>
-          <Ident value={m().arch} />
-        </dd>
-      </div>
-      <div class="kv">
-        <dt>Input size</dt>
-        <dd class="num">
-          {m().imgsz} × {m().imgsz} px
-        </dd>
-      </div>
-      <div class="kv">
-        <dt>Parameters</dt>
-        <dd class="num">
-          {compact(m().params)} <span class="faint">({m().params.toLocaleString('en-US')})</span>
-        </dd>
-      </div>
-      <div class="kv">
-        <dt>Compute</dt>
-        <dd class="num">{num(m().flops_g, 1)} GFLOPs</dd>
-      </div>
-      <div class="kv">
-        <dt>Head</dt>
-        <dd>{HEAD_LABEL[props.head]}</dd>
-      </div>
-      {/* How it was trained, from the file's training record: none for exports, imported weights and older
-          servers, so nothing is said then. */}
-      {m().trained_with ? (
-        <>
+    <dl class="details" id="model-details">
+      <div class="col">
+        <div class="kv">
+          <dt>Architecture</dt>
+          <dd>
+            <Ident value={m().arch} />
+          </dd>
+        </div>
+        <div class="kv">
+          <dt>Input size</dt>
+          <dd class="num">
+            {m().imgsz} × {m().imgsz} px
+          </dd>
+        </div>
+        <div class="kv">
+          <dt>Parameters</dt>
+          <dd class="num">
+            {compact(m().params)} <span class="faint">({m().params.toLocaleString('en-US')})</span>
+          </dd>
+        </div>
+        <div class="kv">
+          <dt>Compute</dt>
+          <dd class="num">{num(m().flops_g, 1)} GFLOPs</dd>
+        </div>
+        <div class="kv">
+          <dt>Head</dt>
+          <dd>{HEAD_LABEL[props.head]}</dd>
+        </div>
+        {m().trained_with ? (
           <div class="kv">
             <dt>Trained in</dt>
             <dd>{m().trained_with!.amp ? PRECISION_LABEL.amp : PRECISION_LABEL.f32}</dd>
           </div>
+        ) : null}
+      </div>
+      <div class="col">
+        {m().trained_with ? (
           <div class="kv">
             <dt>Trained for</dt>
             <dd class="num">
               {num(m().trained_with!.epochs)} {m().trained_with!.epochs === 1 ? 'epoch' : 'epochs'} at {m().trained_with!.imgsz} px
             </dd>
           </div>
-        </>
-      ) : null}
-      {weightsEpoch(m(), props.run) ? (
+        ) : null}
+        {weightsEpoch(m(), props.run) ? (
+          <div class="kv">
+            <dt>Weights from</dt>
+            <dd class="num">{weightsEpoch(m(), props.run)}</dd>
+          </div>
+        ) : null}
+        {props.stored ? (
+          <div class="kv">
+            <dt>Stored as</dt>
+            <dd>{props.stored}</dd>
+          </div>
+        ) : null}
         <div class="kv">
-          <dt>Weights from</dt>
-          <dd class="num">{weightsEpoch(m(), props.run)}</dd>
+          <dt>File size</dt>
+          {/* A training checkpoint (it has a training record) also holds the optimizer state and the averaged weights:
+              say why it is bigger than what Export writes. */}
+          <dd class="evald">
+            <span class="num">{bytes(m().bytes, prefs.units)}</span>
+            {m().trained_with && !m().fused ? (
+              <span class="faint">training checkpoint with optimizer state; exported as FOLO f16, about {bytes(m().params * F16_BYTES_PER_PARAM, prefs.units)}</span>
+            ) : null}
+          </dd>
         </div>
-      ) : null}
-      {props.stored ? (
         <div class="kv">
-          <dt>Stored as</dt>
-          <dd>{props.stored}</dd>
-        </div>
-      ) : null}
-      <div class="kv">
-        <dt>File size</dt>
-        {/* A training checkpoint (it has a training record) also holds the optimizer state and the averaged weights:
-            say why it is bigger than what Export writes. */}
-        <dd class="evald">
-          <span class="num">{bytes(m().bytes, prefs.units)}</span>
-          {m().trained_with && !m().fused ? (
-            <span class="faint">training checkpoint with optimizer state; exported as FOLO f16, about {bytes(m().params * F16_BYTES_PER_PARAM, prefs.units)}</span>
-          ) : null}
-        </dd>
-      </div>
-      <div class="kv wide">
-        <dt>Classes</dt>
-        <dd class="classes">
-          <For each={m().classes.slice(0, 10)} key={(_, i) => i}>
-            {(c, i) => (
-              <span class="chip">
-                <span class="sw" style:background={classInk(i())} aria-hidden="true"></span>
-                {c()}
-              </span>
-            )}
-          </For>
-          {m().classes.length > 10 ? <span class="faint">+{m().classes.length - 10} more</span> : null}
-        </dd>
-      </div>
-      <div class="kv" class:stack={!m().run_id && m().source === 'published'}>
-        <dt>Source</dt>
-        <dd>
-          {m().run_id ? (
-            <>
-              <a class="link" href={href(`/runs/${m().run_id}`)}>
-                {props.run?.name ?? m().run_id}
-              </a>{' '}
-              {props.context.data?.dataset ? (
-                <>
-                  <span class="faint">{' on '}</span>
-                  <a class="link" href={href(`/datasets/${props.context.data.dataset.id}`)}>
-                    {props.context.data.dataset.name}
-                  </a>
-                </>
-              ) : null}
-            </>
-          ) : m().source === 'published' ? (
-            // `folo weights pull` weights: what they are, in the words `folo weights list` prints. What they are for in
-            // plain words; the server's own description, its provenance, in the ⓘ.
-            <>
-              <span class="pub">
-                Published weights
-                {m().about ? <InfoButton label="Where these weights come from" controls="model-about" bind:open={aboutOpen} /> : null}
-              </span>{' '}
-              <span class="about">{publishedSummary(m())}</span>{' '}
-              {m().about && aboutOpen.get() ? (
-                <span class="about" id="model-about">
-                  {m().about}
+          <dt>Classes</dt>
+          <dd class="classes">
+            <For each={m().classes.slice(0, 10)} key={(_, i) => i}>
+              {(c, i) => (
+                <span class="chip">
+                  <span class="sw" style:background={classInk(i())} aria-hidden="true"></span>
+                  {c()}
                 </span>
-              ) : null}
-            </>
-          ) : (
-            <span class="muted">Imported .folo file</span>
-          )}
-        </dd>
-      </div>
-      {/* What the curves, the per-class table and the matrix were measured on (/eval's provenance). */}
-      <div class="kv">
-        <dt>Evaluated on</dt>
-        {/* The dataset as the value, the split and its images under it, so the row keeps the rail's alignment. */}
-        <dd class="evald">
-          {props.unevaluated ? (
-            <span class="muted">Not evaluated: no registered dataset has its classes</span>
-          ) : src().datasetName && src().datasetId ? (
-            <a class="link" href={href(`/datasets/${encodeURIComponent(src().datasetId!)}`)}>
-              {src().datasetName}
-            </a>
-          ) : src().datasetName ? (
-            <span>{src().datasetName}</span>
-          ) : null}{' '}
-          {props.unevaluated ? null : (
-            <span class="num" class:faint={!!src().datasetName}>
-              {src().split ? `${splitWord(src().split!)} split` : 'split not reported'}
-              {props.ev ? `, ${count(props.ev.images, 'image')}` : ''}
-            </span>
-          )}
-        </dd>
-      </div>
-      {props.lineage ? (
-        <div class="kv">
-          <dt>Started from</dt>
-          <dd>{props.lineage.kind !== 'scratch' ? <Lineage origin={props.lineage} /> : <span class="muted">{FROM_SCRATCH}</span>}</dd>
+              )}
+            </For>
+            {m().classes.length > 10 ? <span class="faint">+{m().classes.length - 10} more</span> : null}
+          </dd>
         </div>
-      ) : null}
-      <div class="kv">
-        <dt>Model id</dt>
-        <dd>
-          <Ident value={m().id} class="muted" />
-        </dd>
-      </div>
-      <div class="kv">
-        <dt>Created</dt>
-        <dd>{date(m().created)}</dd>
-      </div>
-      {/* The architecture's number, never this model's own timing: measured on this server where it has
-          predicted with the architecture at the model's size (its spread and count beside it), the reference
-          (docs/BENCHMARKS.md) otherwise or under it. The label says whose it is; the conditions sit beside the
-          value. Last, apart from the facts about this model. */}
-      <div class="kv wide ref">
-        <dt>{here.get() ? 'Architecture latency' : 'Architecture reference latency'}</dt>
-        {here.get() ? (
-          // Two labelled rows, each value with its conditions under it, so no fact is left alone on a line.
-          <dd class="latency lat-rows">
-            <span class="lat-k">Measured</span>
-            <span class="num">{latencyMs(h().latency_ms)}</span>
-            {/* Each row: where it was measured, then the conditions, as two lines of the same anatomy. */}
-            <Meta class="figs num">
-              <span>on this server</span>
-              <span>{latencyRange(h().latency_ms_low, h().latency_ms_high)}</span>
-            </Meta>
-            <Meta class="figs num">
-              <span>{num(h().samples)} predictions</span>
-              <span>{m().imgsz} px</span>
-              <span>{h().precision}</span>
-            </Meta>
-            <span class="lat-k">Reference</span>
-            {latency(m()) !== undefined ? (
+        <div class="kv" class:stack={!m().run_id && m().source === 'published'}>
+          <dt>Source</dt>
+          <dd>
+            {m().run_id ? (
               <>
-                <span class="num">{latency(m())!.toFixed(2)} ms</span>
-                <Meta class="figs num">
-                  <span>on an RTX 4080 SUPER</span>
-                </Meta>
-                <Meta class="figs num">
-                  <Ident value={m().arch} />
-                  <span>640 px</span>
-                </Meta>
+                <a class="link" href={href(`/runs/${m().run_id}`)}>
+                  {props.run?.name ?? m().run_id}
+                </a>{' '}
+                {props.context.data?.dataset ? (
+                  <>
+                    <span class="faint">{' on '}</span>
+                    <a class="link" href={href(`/datasets/${props.context.data.dataset.id}`)}>
+                      {props.context.data.dataset.name}
+                    </a>
+                  </>
+                ) : null}
+              </>
+            ) : m().source === 'published' ? (
+              // `folo weights pull` weights: what they are, in the words `folo weights list` prints. What they are for in
+              // plain words; the server's own description, its provenance, in the ⓘ.
+              <>
+                <span class="pub">
+                  Published weights
+                  {m().about ? <InfoButton label="Where these weights come from" controls="model-about" bind:open={aboutOpen} /> : null}
+                </span>{' '}
+                <span class="about">{publishedSummary(m())}</span>{' '}
+                {m().about && aboutOpen.get() ? (
+                  <span class="about" id="model-about">
+                    {m().about}
+                  </span>
+                ) : null}
               </>
             ) : (
-              <span class="faint">
-                Not measured for <Ident value={m().arch} /> yet
+              <span class="muted">Imported .folo file</span>
+            )}
+          </dd>
+        </div>
+      </div>
+      <div class="col">
+        {/* What the curves, the per-class table and the matrix were measured on (/eval's provenance). */}
+        <div class="kv">
+          <dt>Evaluated on</dt>
+          {/* The dataset as the value, the split and its images under it, so the row keeps the rail's alignment. */}
+          <dd class="evald">
+            {props.unevaluated ? (
+              <span class="muted">Not evaluated: no registered dataset has its classes</span>
+            ) : src().datasetName && src().datasetId ? (
+              <a class="link" href={href(`/datasets/${encodeURIComponent(src().datasetId!)}`)}>
+                {src().datasetName}
+              </a>
+            ) : src().datasetName ? (
+              <span>{src().datasetName}</span>
+            ) : null}{' '}
+            {props.unevaluated ? null : (
+              <span class="num" class:faint={!!src().datasetName}>
+                {src().split ? `${splitWord(src().split!)} split` : 'split not reported'}
+                {props.ev ? `, ${count(props.ev.images, 'image')}` : ''}
               </span>
             )}
           </dd>
-        ) : (
+        </div>
+        {props.lineage ? (
+          <div class="kv">
+            <dt>Started from</dt>
+            <dd>{props.lineage.kind !== 'scratch' ? <Lineage origin={props.lineage} /> : <span class="muted">{FROM_SCRATCH}</span>}</dd>
+          </div>
+        ) : null}
+        <div class="kv">
+          <dt>Model id</dt>
+          <dd>
+            <Ident value={m().id} class="muted" />
+          </dd>
+        </div>
+        <div class="kv">
+          <dt>Created</dt>
+          <dd>{date(m().created)}</dd>
+        </div>
+        {/* The architecture's numbers, never this model's own timing: measured on this server where it has predicted
+            with the architecture at the model's size, and the reference (docs/BENCHMARKS.md). Rows of the same grid,
+            each value with its conditions as its secondary lines. */}
+        {here.get() ? (
+          <div class="kv">
+            <dt>Measured latency</dt>
+            <dd class="latency">
+              <span class="num">{latencyMs(h().latency_ms)}</span>
+              <Meta class="figs num">
+                <span>on this server</span>
+                <span>{latencyRange(h().latency_ms_low, h().latency_ms_high)}</span>
+              </Meta>
+              <Meta class="figs num">
+                <span>{num(h().samples)} predictions</span>
+                <span>{m().imgsz} px</span>
+                <span>{h().precision}</span>
+              </Meta>
+            </dd>
+          </div>
+        ) : null}
+        <div class="kv">
+          <dt>Reference latency</dt>
           <dd class="latency">
             {latency(m()) !== undefined ? (
               <>
                 <span class="num">{latency(m())!.toFixed(2)} ms</span>
-                <Meta class="figs">
+                <Meta class="figs num">
                   <Ident value={m().arch} />
                   <span>640 px</span>
                   <span>RTX 4080 SUPER</span>
@@ -266,7 +256,7 @@ export default function DetailsList(props: DetailsListProps) {
               </span>
             )}
           </dd>
-        )}
+        </div>
       </div>
     </dl>
   );
@@ -287,27 +277,30 @@ css`
     border-radius: 2px;
     flex-shrink: 0;
   }
+  /* Three columns, each a list of rows: one label width (112 px) and one 28 px row rhythm everywhere; a value with
+     secondary lines (the file-size note, the split, the latency's conditions) grows its row. */
   .details {
     display: grid;
-    gap: var(--space-3);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: var(--space-8);
+    align-items: start;
+  }
+  .col {
+    display: grid;
+    align-content: start;
+    min-width: 0;
   }
   .kv {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: var(--space-4);
-  }
-  /* A value with a sentence under it (published weights and what they are): the label over it, the sentence at the
-     measure, in the rail; the folded rail keeps its label column (\`.two .kv\` below). */
-  .kv.stack {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
+    grid-template-columns: 112px minmax(0, 1fr);
+    align-items: baseline;
+    gap: var(--space-3);
+    min-height: var(--control-md);
+    padding: var(--space-1) 0;
   }
   .kv.stack dd {
     display: grid;
     gap: 2px;
-    text-align: left;
   }
   .pub {
     display: inline-flex;
@@ -321,37 +314,13 @@ css`
     color: var(--text-secondary);
     text-wrap: pretty;
   }
-  /* Folded rail (up to 1199 px): labels beside their values, in two columns. */
-  .details.two {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-2) var(--space-8);
-  }
-  .two .kv {
-    display: grid;
-    grid-template-columns: 112px minmax(0, 1fr);
-    gap: var(--space-3);
-  }
-  .two .kv.wide {
-    grid-column: 1 / -1;
-  }
-  .two dd {
-    text-align: left;
-  }
-  .two .classes {
-    justify-content: flex-start;
-  }
   .evald {
     display: grid;
-    justify-items: end;
-    text-align: right;
+    justify-items: start;
   }
   .evald .faint {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-  }
-  .two .evald {
-    justify-items: start;
-    text-align: left;
   }
   dt {
     color: var(--text-tertiary);
@@ -359,17 +328,7 @@ css`
   }
   dd {
     min-width: 0;
-    text-align: right;
     overflow-wrap: anywhere;
-  }
-  /* Stacked in every layout: the label is long, and the value keeps its conditions on the same line. */
-  .kv.ref,
-  .two .kv.ref {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--line-subtle);
   }
   /* The value, then each line of its conditions as its own meta line: items wrap whole, so a fact ("RTX 4080 SUPER")
      never breaks inside (dd's overflow-wrap would split it). Figures people read are secondary (§2.3). */
@@ -388,27 +347,9 @@ css`
   .latency :global(.figs) {
     color: var(--text-secondary);
   }
-  /* Measured and Reference: a label column, the value beside it and its conditions under the value. */
-  .lat-rows {
-    grid-template-columns: max-content minmax(0, 1fr);
-    column-gap: var(--space-3);
-  }
-  /* Global: the conditions line is ui/Meta's own element. */
-  .lat-rows > :global(:not(.lat-k)) {
-    grid-column: 2;
-  }
-  .lat-k {
-    grid-column: 1;
-    color: var(--text-tertiary);
-  }
-  .lat-rows > .lat-k:not(:first-child),
-  .lat-rows > .lat-k:not(:first-child) + :global(*) {
-    margin-top: var(--space-2);
-  }
   .classes {
     display: flex;
     flex-wrap: wrap;
-    justify-content: flex-end;
     gap: var(--space-1);
   }
   .chip {
@@ -422,12 +363,18 @@ css`
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
-  @media (max-width: 767px) {
-    .details.two {
-      grid-template-columns: minmax(0, 1fr);
+  /* Laptops and tablets: the rows two to a line, in the columns' order. */
+  @media (max-width: 1279px) {
+    .details {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-    .two .kv {
-      grid-template-columns: 96px minmax(0, 1fr);
+    .col {
+      display: contents;
+    }
+  }
+  @media (max-width: 767px) {
+    .details {
+      grid-template-columns: minmax(0, 1fr);
     }
   }
 `;

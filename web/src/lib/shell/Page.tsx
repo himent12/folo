@@ -1,6 +1,11 @@
 /**
  * Standard page frame: title row (title, optional meta line and actions) above the content.
  *
+ * The header (design/UNIFIED.md §2): the title in 20 / 600; on a detail page its status badge on the same line
+ * (`badge`); under it one line of facts in 12 px text.secondary separated by " · " (`sub`: what the page holds right
+ * now, "9 runs · 2 active · 1 failed", not a sentence describing the page); the actions at the right, at most one lime
+ * primary, 32 px high.
+ *
  * One rule for the actions on every page: from 768 px up they sit on the title row, right-aligned, whatever the
  * length of the lead and meta lines (which run the full width under and above it), and on one row: they never wrap. Below 768 px a page passes its
  * secondary actions as `more`: they are buttons on wider screens and one ⋯ menu on phones, beside `actions` (the
@@ -31,8 +36,10 @@ export interface PageProps {
   more?: MenuItem[];
   /** The ⋯ menu's accessible name, e.g. "More model actions". */
   moreLabel?: string;
-  /** Something before the title, e.g. a status badge row. */
+  /** Something before the title. Kept for callers; a detail page's status badge goes on the title line (`badge`). */
   lead?: JSX.Element;
+  /** A status badge (ui/StatusBadge) on the title's line, after the name: a detail page's header. */
+  badge?: JSX.Element;
   children: JSX.Element;
   wide?: boolean;
   /** A form page (column and rail): the same content edge as every page, the column's measure set by the page. */
@@ -46,7 +53,7 @@ export default function Page(props: PageProps) {
 
   const hasActions = computed(() => !!p.actions || p.more.length > 0);
   /** Only the title: on phones the top bar shows it, so the header takes no room and content starts at the gutter. */
-  const bare = computed(() => !p.sub && !p.subPhone && !hasActions.get() && !p.lead);
+  const bare = computed(() => !p.sub && !p.subPhone && !hasActions.get() && !p.lead && !p.badge);
   // The app's first page fades in as Studio appears; moving between pages after that is immediate (a fade on every
   // route change decorates a move the person already made, and makes a list feel slow to arrive).
   const enter = !entered;
@@ -57,10 +64,13 @@ export default function Page(props: PageProps) {
       <header class:inline={p.inlineActions} class:one-row={!!p.subPhone} class:bare={bare.get()}>
         <div class="titles">
           {p.lead ? <div class="lead">{p.lead}</div> : null}
-          {/* Route changes move focus here (App), so the new page is announced by its name. */}
-          <h1 tabindex={-1} data-route-focus>
-            {p.title}
-          </h1>
+          <div class="title-line">
+            {/* Route changes move focus here (App), so the new page is announced by its name. */}
+            <h1 tabindex={-1} data-route-focus>
+              {p.title}
+            </h1>
+            {p.badge ? <span class="badge-slot">{p.badge}</span> : null}
+          </div>
           {p.sub ? (
             <div class="sub" class:wide-only={!!p.subPhone}>
               {p.sub}
@@ -133,8 +143,20 @@ css`
   .sub {
     grid-column: 1 / -1;
   }
-  h1 {
+  /* The name, then its status badge on the same line; a long name wraps before the badge leaves it. */
+  .title-line {
     grid-column: 1;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-3);
+    min-width: 0;
+  }
+  .badge-slot {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
   }
   .lead {
     display: flex;
@@ -160,6 +182,8 @@ css`
     flex-wrap: wrap;
     gap: var(--space-1) var(--space-3);
     min-width: 0;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
   .actions {
@@ -170,6 +194,13 @@ css`
     gap: var(--space-2);
     flex-wrap: nowrap;
     min-width: 0;
+  }
+  /* A page header's buttons are 32 high (design/UNIFIED.md §2, Buttons), where a pointer is precise; touch keeps its
+     44 px targets. */
+  @media (min-width: 768px) and (pointer: fine) {
+    .actions :global(.btn:not(.sm)) {
+      --h: var(--control-lg);
+    }
   }
   /* An actions snippet with nothing to show this time (e.g. no create action over an empty list) takes no room. */
   .actions:empty {

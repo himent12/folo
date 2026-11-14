@@ -224,6 +224,9 @@ pub trait RunExt {
     fn stopped_title(&self) -> String;
     /// What a stopped run kept, in Studio's words.
     fn stopped_detail(&self) -> &'static str;
+    /// The epoch a failed run failed in: the one its last step was in (an older server reports the
+    /// last finished epoch), as Studio's `failedEpoch` counts it, so both apps name the same one.
+    fn failed_epoch(&self) -> u32;
 }
 
 /// `close_mosaic` as the engine applies it to `epochs` (capped at half the run).
@@ -245,6 +248,11 @@ impl RunExt for Run {
     fn progress(&self) -> f32 {
         let total = (self.epochs as u64 * self.steps_per_epoch).max(1);
         (self.step as f64 / total as f64).clamp(0.0, 1.0) as f32
+    }
+
+    fn failed_epoch(&self) -> u32 {
+        let from_steps = if self.steps_per_epoch > 0 { self.step.div_ceil(self.steps_per_epoch) } else { 0 };
+        self.epoch.max(u32::try_from(from_steps).unwrap_or(u32::MAX))
     }
 
     fn cloud_pending(&self) -> Option<&RunCloud> {
@@ -319,6 +327,24 @@ impl SplitsExt for Splits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_run_names_the_epoch_its_last_step_was_in() {
+        use crate::api::Backend;
+        let api = crate::api::mock::MockBackend::new(4200, true);
+        let base = api.run("run_a19f").unwrap();
+        let failed = |epoch: u32, step: u64, steps_per_epoch: u64| {
+            Run { status: RunStatus::Failed, epoch, step, steps_per_epoch, ..base.clone() }.failed_epoch()
+        };
+        // An older server reports the last finished epoch (2) for a run that failed 30 steps into epoch 3.
+        assert_eq!(failed(2, 130, 50), 3);
+        // A server that reports the epoch in progress, and a failure on an epoch's last step.
+        assert_eq!(failed(3, 130, 50), 3);
+        assert_eq!(failed(2, 100, 50), 2);
+        // Before the first step, and without a step count.
+        assert_eq!(failed(0, 0, 50), 0);
+        assert_eq!(failed(4, 0, 0), 4);
+    }
 
     #[test]
     fn a_stopped_run_says_what_it_kept_and_who_stopped_it() {

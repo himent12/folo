@@ -12,6 +12,8 @@ export interface SparklineProps {
   fill?: boolean;
   /** Total length the series will reach (e.g. epochs), so a live run fills left to right. */
   length?: number;
+  /** The end dot's colour, when it says more than the line (a live run's lime "now"); else the line's. */
+  endColor?: string;
 }
 
 export default function Sparkline(props: SparklineProps) {
@@ -45,7 +47,7 @@ export default function Sparkline(props: SparklineProps) {
         <>
           {p.fill ? <path class="a" d={geo.get()!.a} style:fill={p.color} /> : null}
           <path class="l" d={geo.get()!.d} style:stroke={p.color} />
-          <circle cx={geo.get()!.last[0]} cy={geo.get()!.last[1]} r="2" style:fill={p.color} />
+          <circle cx={geo.get()!.last[0]} cy={geo.get()!.last[1]} r="2" style:fill={p.endColor ?? p.color} />
         </>
       ) : (
         <line x1="1" x2={p.width - 1} y1={p.height / 2} y2={p.height / 2} class="none" />

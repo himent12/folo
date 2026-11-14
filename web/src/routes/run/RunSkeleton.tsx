@@ -2,8 +2,21 @@
 import { css, Index } from 'fw';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';
 import Skeleton from '$lib/ui/Skeleton';
+import { SHORT, TALL } from './RunCharts';
 
 const range = (n: number) => Array.from({ length: n }, (_, i) => i);
+
+/** A chart panel's frame: its 40 px header row over the plot, as ui/Panel and run/RunChart lay them out. */
+const chart = (height: number, title: string) => (
+  <div class="sk-panel">
+    <div class="sk-ph">
+      <Skeleton w={title} h="14px" />
+    </div>
+    <div class="sk-pb">
+      <ChartSkeleton height={height} />
+    </div>
+  </div>
+);
 
 export default function RunSkeleton() {
   // Mirrors the real layout (header, summary strip, chart rows) so nothing jumps when data arrives.
@@ -14,35 +27,26 @@ export default function RunSkeleton() {
         <Skeleton w="240px" h="28px" />
         <Skeleton w="min(420px, 100%)" h="16px" />
       </div>
-      {/* The metrics instrument (epoch, six KPI tabs, one chart), then the samples grid beside the per-class and config
-          rail. */}
-      <div class="sk-metrics">
-        <div class="sk-strip">
-          <div class="sk-cell sk-epoch">
-            <Skeleton w="88px" h="32px" />
-            <Skeleton h="4px" />
-            <Skeleton w="160px" h="12px" />
-          </div>
-          <div class="sk-tabs">
-            <Index each={range(6)}>
-              {() => (
-                <div class="sk-cell">
-                  <Skeleton w="56%" h="12px" />
-                  <Skeleton w="48%" h="24px" />
-                  <Skeleton w="68%" h="12px" />
-                </div>
-              )}
-            </Index>
-          </div>
-        </div>
-        {/* The chart's own header row (title, range control) over its legend and plot, as RunMetrics lays them out. */}
-        <div class="sk-chart">
-          <div class="sk-ch">
-            <Skeleton w="200px" h="14px" />
-            <Skeleton w="104px" h="24px" r="var(--radius-md)" />
-          </div>
-          <ChartSkeleton height={320} />
-        </div>
+      {/* The KPI strip (five tiles), Validation mAP beside Training loss, Precision / Recall beside Learning rate
+          (run/RunCharts), then the samples beside the per-class and config rail. */}
+      <div class="sk-strip">
+        <Index each={range(5)}>
+          {() => (
+            <div class="sk-cell">
+              <Skeleton w="56%" h="12px" />
+              <Skeleton w="48%" h="24px" />
+              <Skeleton w="68%" h="12px" />
+            </div>
+          )}
+        </Index>
+      </div>
+      <div class="sk-row2 wide">
+        {chart(TALL, '160px')}
+        {chart(TALL, '120px')}
+      </div>
+      <div class="sk-row2 even">
+        {chart(SHORT, '140px')}
+        {chart(SHORT, '112px')}
       </div>
       <div class="sk-pick">
         <Skeleton w="280px" h="28px" r="var(--radius-md)" />
@@ -130,55 +134,33 @@ css`
     gap: var(--space-2);
     max-width: 100%;
   }
-  .sk-metrics {
-    background: var(--bg-panel);
+  /* One panel cut into five tiles by hairlines, as run/RunKpis. */
+  .sk-strip {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--line-subtle);
     border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
-  .sk-strip {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    border-bottom: 1px solid var(--line-subtle);
-  }
-  .sk-tabs {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-  }
-  /* The same row geometry as the loaded cells (RunMetrics), so the chart does not move when data arrives. */
   .sk-cell {
     display: grid;
-    grid-template-rows: 16px 40px 16px;
+    grid-template-rows: 16px 32px 16px;
     align-items: center;
-    gap: 6px;
-    padding: var(--space-4);
-    border-left: 1px solid var(--line-subtle);
-  }
-  /* The epoch row over the tabs, at every width. */
-  .sk-epoch {
-    grid-template-columns: 88px minmax(0, 1fr) 160px;
-    grid-template-rows: 32px;
-    align-items: center;
-    gap: var(--space-4);
+    gap: var(--space-1);
     padding: var(--space-3) var(--space-4);
-    border-left: 0;
-    border-bottom: 1px solid var(--line-subtle);
+    background: var(--bg-panel);
   }
-  .sk-tabs .sk-cell:first-child {
-    border-left: 0;
-  }
-  /* RunMetrics' chart: 0 16 16 padding, a 48 px header row (8 px above the title), 8 px to the legend. */
-  .sk-chart {
+  .sk-row2 {
     display: grid;
-    gap: var(--space-2);
-    padding: 0 var(--space-4) var(--space-4);
+    gap: var(--space-4);
   }
-  .sk-ch {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    min-height: 48px;
-    padding-top: var(--space-2);
+  .sk-row2.wide {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+  .sk-row2.even {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
   .sk-pick {
     display: none;
@@ -265,18 +247,17 @@ css`
     justify-content: space-between;
   }
   @media (max-width: 1279px) {
-    .sk-tabs .sk-cell {
-      grid-template-rows: 16px 32px 16px;
-      gap: var(--space-1);
-      padding: var(--space-3);
-    }
     .sk-tiles :global(.sk-tile:nth-child(9)) {
       display: block;
     }
   }
   @media (max-width: 1023px) {
-    .sk-tabs {
-      display: none;
+    .sk-strip {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .sk-row2.wide,
+    .sk-row2.even {
+      grid-template-columns: minmax(0, 1fr);
     }
     .sk-pick {
       display: block;
@@ -296,6 +277,15 @@ css`
   @media (max-width: 767px) {
     .loading {
       padding: var(--space-4);
+    }
+    .sk-strip {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .sk-cell:last-child {
+      grid-column: 1 / -1;
+    }
+    .sk-row2.even {
+      display: none;
     }
     .sk-ctl :global(:first-child) {
       display: none;

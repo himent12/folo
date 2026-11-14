@@ -27,19 +27,21 @@ export default function RunSpark(props: RunSparkProps) {
     };
   });
 
-  // Neutral ink; only a live run's line takes the accent. Failure is stated by the status dot, not repeated here.
-  const color = computed(() => (props.run.status === 'running' ? 'var(--accent-line)' : 'var(--text-tertiary)'));
+  // Neutral ink, a live run's end dot lime ("now", design/UNIFIED.md §4 Runs). Failure is stated by the status mark,
+  // not repeated here.
+  const end = computed(() => (props.run.status === 'running' ? 'var(--accent-line)' : undefined));
   const domain = computed<[number, number]>(() => [0, Math.max(0.1, ...values.get())]);
 
   return (
     <Sparkline
       values={values.get()}
-      width={props.width ?? 88}
-      height={props.height ?? 22}
-      color={color.get()}
+      width={props.width ?? 96}
+      height={props.height ?? 20}
+      color="var(--text-tertiary)"
+      endColor={end.get()}
       domain={domain.get()}
       length={props.run.epochs}
-      fill={props.run.status === 'running'}
+      fill={false}
     />
   );
 }

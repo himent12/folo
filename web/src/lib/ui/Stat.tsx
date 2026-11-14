@@ -1,6 +1,39 @@
-/** A labelled metric: small label, big tabular value, optional unit and a secondary line. */
-import { css, defaults } from 'fw';
+/**
+ * A labelled metric, the KPI strip's tile (design/UNIFIED.md §2, KPI strip): its label in 12 px text.secondary, the
+ * value in 24 / 600 (`lg`: the page's one 32 px value) with its unit and the secondary part of the value ("img/s",
+ * "/ 100", a duration's "m" and "s") in 12 px text.tertiary on the value's baseline, and one caption line in 12 px
+ * text.secondary. A tile is not a button. `sm` is the compact form for tight rails. `Figure` is the value alone, for a
+ * strip that lays out its own tiles (Model's).
+ */
+import { css, defaults, Index } from 'fw';
 import Skeleton from './Skeleton';
+
+type Part = { t: string; k: 'n' | 'u' | 'slash' };
+/** A duration as the format helpers write it: "42s", "7m", "12m 02s", "1h 04m" (a leading "~" kept). */
+const DURATION = /^~?\d+[hms]( \d+[hms])?$/;
+
+/**
+ * A KPI value's parts, as Desktop sets them (apps/desktop `ui::metric`): the figures at the value's size; a duration's
+ * units small ("12" "m" " 02" "s"); a pair's slash between its two full-size values ("0.849" "/" "0.762").
+ */
+export function figureParts(value: string): Part[] {
+  const pair = value.split(' / ');
+  if (pair.length === 2) return [{ t: pair[0]!, k: 'n' }, { t: ' / ', k: 'slash' }, { t: pair[1]!, k: 'n' }];
+  if (!DURATION.test(value)) return [{ t: value, k: 'n' }];
+  const out: Part[] = [];
+  for (const [, n, u] of value.matchAll(/([^hms]+)([hms])/g)) out.push({ t: n!, k: 'n' }, { t: u!, k: 'u' });
+  return out;
+}
+
+/** A KPI value with its unit (design/UNIFIED.md §2, KPI strip): see `figureParts`; `unit` follows, small. */
+export function Figure(props: { value: string; unit?: string }) {
+  return (
+    <>
+      <Index each={figureParts(props.value)}>{(p) => <>{p().k === 'n' ? p().t : <span class={p().k === 'u' ? 'unit dur' : 'slash'}>{p().t}</span>}</>}</Index>
+      {props.unit ? <span class="unit">{props.unit}</span> : null}
+    </>
+  );
+}
 
 export interface StatProps {
   label: string;
@@ -32,8 +65,7 @@ export default function Stat(props: StatProps) {
         <>
           {/* A value is a metric, always in ink: status hue goes on a mark beside its words, never on the number (§2.6). */}
           <span class="value">
-            {p.value}
-            {p.unit ? <span class="unit">{p.unit}</span> : null}
+            <Figure value={p.value} unit={p.unit} />
           </span>
           {p.sub ? <span class="sub">{p.sub}</span> : null}
         </>
@@ -54,7 +86,7 @@ css`
   .label {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     white-space: nowrap;
   }
   /* Inline flow, not flex: a unit or a superscript never changes the line box, so every stat's value sits on the same
@@ -62,11 +94,11 @@ css`
   .value {
     display: block;
     /* A fixed row: glyphs from a fallback font (superscripts like ⁻³) cannot grow the line box. */
-    height: var(--type-lg-line);
-    font-size: var(--type-lg-size);
-    line-height: var(--type-lg-line);
-    letter-spacing: var(--type-lg-tracking);
-    font-weight: var(--weight-medium);
+    height: var(--type-2xl-line);
+    font-size: var(--type-2xl-size);
+    line-height: var(--type-2xl-line);
+    letter-spacing: var(--type-2xl-tracking);
+    font-weight: var(--weight-semibold);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     overflow: hidden;
@@ -76,6 +108,8 @@ css`
     height: var(--type-md-line);
     font-size: var(--type-md-size);
     line-height: var(--type-md-line);
+    letter-spacing: var(--type-md-tracking);
+    font-weight: var(--weight-medium);
   }
   .lg .value {
     height: var(--type-3xl-line);
@@ -91,17 +125,29 @@ css`
   .sub.ph {
     height: var(--type-sm-line);
   }
+  /* A unit and a duration's "m" / "s": 12 px tertiary on the value's baseline, at every value size (Desktop's
+     KPI_UNIT). line-height 1 keeps the smaller text from growing the line box, so values with and without units
+     share a baseline. */
   .unit {
-    /* line-height 1 keeps a smaller unit from growing the line box, so values with and without units share a baseline. */
     line-height: 1;
     margin-left: 4px;
-    font-size: 0.7em;
+    font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);
     letter-spacing: 0;
   }
-  .lg .unit {
-    font-size: 0.5em;
+  .unit.dur {
+    margin-left: 1px;
+  }
+  /* A pair's slash: between two full-size values, a step down and in tertiary, a space each side (Desktop's metric_pair:
+     4 px), so the pair reads and copies as "0.849 / 0.762". */
+  .slash {
+    line-height: 1;
+    white-space: pre;
+    font-size: var(--type-lg-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+    letter-spacing: 0;
   }
   .sub {
     font-size: var(--type-sm-size);

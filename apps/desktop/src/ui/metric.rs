@@ -3,8 +3,26 @@
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{Div, IntoElement, ParentElement, SharedString, Styled, div, px};
 
-use super::text::{StyledExt, caption, text};
+use super::text::{StyledExt, text};
 use crate::theme::{Theme, TypeStep, ty};
+
+/// A KPI tile's value (design/UNIFIED §2, KPI strip: `2xl` 600), its unit, and the one headline
+/// value a page may hold (`3xl`). The Run and Model pages' strips both take these, so the two read
+/// the same.
+pub const KPI_VALUE: TypeStep = ty::X2XL;
+pub const KPI_UNIT: TypeStep = ty::SM;
+pub const KPI_HEADLINE: TypeStep = ty::X3XL;
+
+/// A KPI tile's label over its value: `sm` in `text.secondary`, one line. Every strip (Run,
+/// Model, Overview, a dataset's Statistics, a benchmark entry) takes it, so their tiles can't drift.
+pub fn kpi_label(t: &Theme, label: &str) -> Div {
+    text(ty::SM, t.text_secondary).whitespace_nowrap().child(label.to_string())
+}
+
+/// A KPI tile's caption line under its value: `sm` in `text.secondary`, tabular.
+pub fn kpi_note(t: &Theme) -> Div {
+    text(ty::SM, t.text_secondary).tnum()
+}
 
 /// Two values as one figure, "0.861 / 0.792": both at `size`, the slash a step down in tertiary
 /// ink. The run and model pages' Precision / Recall both use it.
@@ -59,7 +77,7 @@ pub fn stat_sized(
         .flex_col()
         .gap(px(6.))
         .min_w_0()
-        .child(caption(t, label))
+        .child(kpi_label(t, label))
         .child(metric(t, value, "", size, ty::SM))
         .children(detail)
 }
@@ -78,7 +96,7 @@ pub fn stat_at(
         .flex_col()
         .gap(px(if step.size < ty::X2XL.size { 4. } else { 6. }))
         .min_w_0()
-        .child(caption(t, label))
+        .child(kpi_label(t, label))
         .child(metric(t, value, unit, step, ty::SM))
         .children(detail)
 }

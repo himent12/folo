@@ -107,7 +107,7 @@ export default function RunRows(props: RunRowsProps) {
                           <Meta>
                             {!cause() ? <span>{props.placeOf(r()) !== null ? queuePlace(props.placeOf(r()) ?? 0) : statusWord(r())}</span> : null}
                             <span>
-                              {r().epoch}/{r().epochs}
+                              {r().epoch} / {r().epochs}
                             </span>
                             {/* A free-text name, the one item that may cut itself (ui/Meta), whole in its tooltip. */}
                             {!props.choosing ? (

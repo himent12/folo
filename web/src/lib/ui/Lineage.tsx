@@ -1,7 +1,8 @@
 /**
  * The checkpoint a run started from, named one way on every screen (header, Config, Model's Details, Compare): the
- * model's name (an identifier, so mono through ui/Ident) linked to it, with its server id in the tooltip; a file by
- * its file name, the full path in the tooltip; "From scratch" in sans. Resolve the origin with `$lib/lineage`.
+ * model's name (a name, so sans like a run's: design/UNIFIED.md §2) linked to it, with its server id in the tooltip;
+ * a file by its file name (mono), the full path in the tooltip; "From scratch" in sans. Resolve the origin with
+ * `$lib/lineage`.
  */
 import { css } from 'fw';
 import { FROM_SCRATCH, originTip, type Origin } from '$lib/lineage';
@@ -23,12 +24,13 @@ export default function Lineage(props: LineageProps) {
       ) : props.origin.kind === 'model' ? (
         <Ident
           value={props.origin.label}
+          kind="name"
           title={originTip(props.origin)}
           class={link() ? 'lineage-link' : ''}
           href={link() ? href(`/models/${encodeURIComponent((props.origin as { id: string }).id)}`) : undefined}
         />
       ) : (
-        <Ident value={props.origin.label} title={originTip(props.origin)} />
+        <Ident value={props.origin.label} kind="id" title={originTip(props.origin)} />
       )}
     </>
   );

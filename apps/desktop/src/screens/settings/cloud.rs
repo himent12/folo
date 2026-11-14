@@ -343,14 +343,6 @@ impl FoloApp {
                         let live = i.status.is_alive();
                         let ink = if live { t.text_primary } else { t.text_tertiary };
                         let quiet = if live { t.text_secondary } else { t.text_tertiary };
-                        let (dot_c, label_c) = match i.status {
-                            crate::api::CloudInstanceStatus::Running => (t.accent_fill(), t.accent_text),
-                            crate::api::CloudInstanceStatus::Terminating => (t.warning_solid, t.warning_text),
-                            crate::api::CloudInstanceStatus::Lost => (t.danger_solid, t.danger_text),
-                            // Launching, starting, terminated, and a newer server's status (counted
-                            // alive: it keeps its Terminate): no status hue.
-                            _ => (t.text_tertiary, quiet),
-                        };
                         let line = offer_line(&i.offer);
                         let run = i.run_id.as_ref().map(|r| {
                             (r.clone(), self.store.run(r).map_or(r.clone(), |run| run.name.clone()))
@@ -408,12 +400,14 @@ impl FoloApp {
                             .child(cell(
                                 100.,
                                 false,
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .child(div().size(px(6.)).flex_none().rounded_full().bg(dot_c))
-                                    .child(text(ty::SM, label_c).whitespace_nowrap().child(i.status.label())),
+                                // The one status mark of every list; a newer server's status is
+                                // counted alive (it keeps its Terminate) and waits like a launch.
+                                status_cell(
+                                    &t,
+                                    StatusKind::of_instance(i.status),
+                                    i.status.label(),
+                                    format!("inst-{}", i.id),
+                                ),
                             ))
                             .when(show_started, |d| {
                                 d.child(cell(

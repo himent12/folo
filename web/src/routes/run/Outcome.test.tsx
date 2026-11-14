@@ -102,6 +102,7 @@ describe('Outcome', () => {
     const r = render(failed(OOM));
     expect(r.target.querySelector('.c-title')?.textContent).toBe('Ran out of GPU memory');
     expect(r.target.querySelector('.c-msg')?.textContent).toContain('Batch 32 at 960 px');
+    expect(r.target.querySelector('.c-msg')?.textContent).toContain('did not fit, at epoch 23.');
     // One action (half the batch, primary) and the disclosure; each fix opens New run from this run with it applied.
     expect(r.labels).toEqual(['Retry with batch 16', 'More fixes']);
     expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&batch=16');
@@ -117,6 +118,13 @@ describe('Outcome', () => {
     expect(r.labels).not.toContain('Resume');
     expect(r.target.querySelector('.c-detail code')?.textContent).toBe('wgpu backend: Out of Memory');
     expect(r.target.querySelector('.c-msg')?.textContent).not.toContain('wgpu');
+    r.done();
+  });
+
+  it('names the epoch its last step was in, as the Epoch tile and the charts\' "failed during epoch" do', () => {
+    // An older server reports the last finished epoch (23) for a run that died 25 steps into epoch 24.
+    const r = render({ ...failed(OOM), step: 2900 });
+    expect(r.target.querySelector('.c-msg')?.textContent).toContain('did not fit, at epoch 24.');
     r.done();
   });
 
@@ -178,11 +186,9 @@ describe('Outcome', () => {
     const titles = [...c.querySelectorAll('.c-title')].map((t) => t.textContent);
     expect(titles).toEqual(['Completed in 16m 00s', 'Too short to learn:']);
     expect(c.querySelector('.c-also .c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
-    // The fix leads; the model's hand-off stays beside it; the reasons behind Why?.
-    expect(r.labels).toEqual(['Train 10 epochs', 'Open model', 'Try in Playground', 'Why?']);
+    // The fix, then the reasons behind Why?; the model's hand-off is the page header's (Open model, Try in Playground).
+    expect(r.labels).toEqual(['Train 10 epochs', 'Why?']);
     expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&epochs=10');
-    expect(r.buttons[1]?.getAttribute('href')).toBe('#/models/m_1');
-    expect(r.buttons[2]?.getAttribute('href')).toBe('#/playground?model=m_1');
     expect(c.querySelector('.c-detail')?.textContent ?? '').not.toMatch(/lr0|warmup_epochs/);
     r.done();
   });
@@ -220,27 +226,21 @@ describe('Outcome', () => {
     r.done();
   });
 
-  it('hands a completed run on to its model and the Playground, the Playground left out only at mAP exactly 0', () => {
-    const done = (map50_95: number): Run => ({ ...short('completed'), best: { epoch: 5, map50_95 } });
-    let r = render(done(0.073));
-    expect(r.labels).toEqual(['Open model', 'Try in Playground']);
-    expect(r.target.querySelector('.c-text')?.textContent).toContain('best mAP50-95 0.073 at epoch 5');
-    r.done();
-    r = render(done(0));
-    expect(r.labels).toEqual(['Open model']);
-    // Nothing detected is said in words, never "best mAP50-95 0.000 at epoch 1".
-    expect(r.target.querySelector('.c-text')?.textContent).toContain('no detections');
-    expect(r.target.querySelector('.c-text')?.textContent).not.toContain('0.000');
-    r.done();
+  it('gives a plain completed run no callout: its facts are the KPI tiles, its model the header (design/UNIFIED.md §4 Run)', () => {
+    for (const map50_95 of [0.073, 0]) {
+      const r = render({ ...short('completed'), best: { epoch: 5, map50_95 } });
+      expect(r.target.querySelector('.callout')).toBeNull();
+      r.done();
+    }
   });
 
-  it('says why a completed run ended before its last epoch: the early stop, with the epoch it last improved', () => {
-    const early: Run = { ...failed(''), status: 'completed', error: null, epoch: 256, epochs: 2000, best: { epoch: 156, map50_95: 0.196 }, model_id: 'm_a2f0' };
-    let r = render(early);
-    expect(r.target.querySelector('.c-text')?.textContent).toContain('stopped early at epoch 256 of 2000: no better score after epoch 156');
+  it('says why a warned completed run ended before its last epoch: the early stop, with the epoch it last improved', () => {
+    const early: Run = { ...short('completed'), epoch: 4, epochs: 5, best: { epoch: 2, map50_95: 0.01 } };
+    let r = render(early, vi.fn(), [SHORT]);
+    expect(r.target.querySelector('.c-text')?.textContent).toContain('stopped early at epoch 4 of 5: no better score after epoch 2');
     r.done();
     // A run that trained every epoch says nothing of the kind.
-    r = render({ ...early, epoch: 2000 });
+    r = render({ ...early, epoch: 5 }, vi.fn(), [SHORT]);
     expect(r.target.querySelector('.c-text')?.textContent).not.toContain('stopped early');
     r.done();
   });

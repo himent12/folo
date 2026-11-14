@@ -1,7 +1,9 @@
-//! A run's validation samples panel.
+//! A run's validation samples panel: eight of the fixed evaluation images at an epoch, with the
+//! view (Both / Predicted / Truth), the epoch picker and the minimum confidence.
 
 use std::rc::Rc;
 
+use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
@@ -15,6 +17,18 @@ use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit};
 
+/// The minimum confidence slider's range and step.
+pub(crate) const SAMPLE_CONF: (f32, f32, f32) = (0.25, 0.95, 0.05);
+
+/// The epochs the picker offers below the latest (`latest`, the last validated epoch): the first,
+/// then every fifth, newest first, as Studio lists them.
+pub(super) fn sample_epochs(latest: u32) -> Vec<u32> {
+    (1..latest).rev().filter(|&e| e == 1 || e % 5 == 0).collect()
+}
+
+/// The tiles in a row: two rows of four.
+const PER_ROW: usize = 4;
+
 impl FoloApp {
     pub(super) fn samples_panel(
         &mut self,
@@ -25,18 +39,62 @@ impl FoloApp {
         let t = theme(cx);
         // The samples come from each epoch's evaluation: training images when there's no val split.
         let images = if self.eval_split(r) == "train" { "training" } else { "validation" };
-        let views = [SampleView::Predictions, SampleView::Truth, SampleView::Both];
+        let views = [SampleView::Both, SampleView::Predictions, SampleView::Truth];
         let sel = views.iter().position(|v| *v == self.sample_view).unwrap_or(0);
         let seg = self.segmented(
             "samples-view",
-            &["Predictions", "Ground truth", "Both"],
+            &["Both", "Predicted", "Truth"],
             sel,
             window,
             cx,
             Rc::new(move |this, i, _, _| this.sample_view = views[i]),
         );
-        let classes =
-            self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()).unwrap_or_default();
+        // The epoch picker: the latest (followed while the run trains), or a past epoch held still.
+        let latest = self
+            .store
+            .run_data
+            .get(&r.id)
+            .and_then(|l| l.ready())
+            .and_then(|d| d.metrics.epochs.last().map(|e| e.epoch))
+            .unwrap_or(r.epoch);
+        let past = sample_epochs(latest);
+        let picked = self.sample_epoch.filter(|e| *e < latest);
+        let epoch_sel = picked.and_then(|e| past.iter().position(|p| *p == e)).map_or(0, |i| i + 1);
+        let mut options: Vec<(SharedString, Option<SharedString>)> =
+            vec![(format!("Latest (epoch {latest})").into(), None)];
+        options.extend(past.iter().map(|e| (SharedString::from(format!("Epoch {e}")), None)));
+        let current: SharedString = picked.map_or("Latest".into(), |e| format!("Epoch {e}").into());
+        let rid = r.id.clone();
+        let picker = (latest > 1).then(|| {
+            self.select(
+                "samples-epoch",
+                current,
+                options,
+                epoch_sel,
+                window,
+                cx,
+                Rc::new(move |this, i, _, cx| {
+                    let e = if i == 0 { None } else { past.get(i - 1).copied() };
+                    if e != this.sample_epoch {
+                        this.sample_epoch = e;
+                        this.store.samples.remove(&rid);
+                        this.ensure_samples(&rid, cx);
+                    }
+                    cx.notify();
+                }),
+            )
+        });
+        let conf = self.sample_conf;
+        let (lo, hi, step) = SAMPLE_CONF;
+        let slider = self.slider("sample-conf", conf, lo, hi, step, window, cx);
+        let conf_tip = format!("Minimum confidence · {conf:.2}");
+        let conf_ring = self.ring(&self.fh("sample-conf", cx), window);
+        let classes = r
+            .dataset
+            .as_ref()
+            .map(|d| d.classes.clone())
+            .or_else(|| self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()))
+            .unwrap_or_default();
         let body = match self.store.samples.get(&r.id) {
             _ if r.epoch == 0 => div()
                 .child(empty_state(
@@ -53,7 +111,7 @@ impl FoloApp {
                 let samples: Vec<crate::api::Sample> = s.samples.iter().take(8).cloned().collect();
                 let epoch = s.epoch;
                 let view = self.sample_view;
-                let tiles: Vec<AnyElement> = samples
+                let mut tiles: Vec<AnyElement> = samples
                     .iter()
                     .enumerate()
                     .map(|(n, smp)| {
@@ -66,7 +124,7 @@ impl FoloApp {
                             }));
                         }
                         if view != SampleView::Truth {
-                            boxes.extend(smp.pred.iter().filter(|p| p.score >= 0.3).map(|p| DrawBox {
+                            boxes.extend(smp.pred.iter().filter(|p| p.score >= conf).map(|p| DrawBox {
                                 // Class and score where the cell has room (viz drops the score below 140 px).
                                 label: classes.get(p.class as usize).cloned().map(Into::into),
                                 score: Some(p.score),
@@ -134,21 +192,29 @@ impl FoloApp {
                         .into_any_element()
                     })
                     .collect();
-                // One row of eight across the page's width (the log takes its own full-width row
-                // below), about the size the 3:5 column's two rows of four had.
+                // A short last row keeps its tiles the grid's size.
+                while !tiles.len().is_multiple_of(PER_ROW) {
+                    tiles.push(div().flex_1().min_w(px(0.)).into_any_element());
+                }
+                let mut rows = Vec::new();
+                let mut it = tiles.into_iter().peekable();
+                while it.peek().is_some() {
+                    rows.push(div().flex().items_start().gap(px(8.)).children(it.by_ref().take(PER_ROW)));
+                }
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.))
                     .p(px(16.))
-                    .child(div().flex().items_start().gap(px(8.)).children(tiles))
+                    .children(rows)
                     // The caption says what the tiles show, view by view.
                     .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
                         "Epoch {epoch} · 8 of 16 fixed {images} images · {}",
                         match view {
-                            SampleView::Predictions => "predictions with score ≥ 0.30",
-                            SampleView::Truth => "ground-truth labels",
-                            SampleView::Both => "ground truth and predictions with score ≥ 0.30",
+                            SampleView::Predictions => format!("predictions with score ≥ {conf:.2}"),
+                            SampleView::Truth => "ground-truth labels".to_string(),
+                            SampleView::Both =>
+                                format!("ground truth and predictions with score ≥ {conf:.2}"),
                         }
                     )))
                     .into_any_element()
@@ -158,18 +224,57 @@ impl FoloApp {
                 .child(text(ty::SM, t.danger_text).child(e.message.clone()))
                 .into_any_element(),
             _ => div()
-                .p(px(12.))
+                .p(px(16.))
                 .flex()
+                .flex_col()
                 .gap(px(8.))
-                .children((0..8).map(|i| {
-                    let mut sq = div().w_full().child(skeleton(&t, format!("smp{i}")));
-                    sq.style().aspect_ratio = Some(1.0);
-                    div().flex_1().min_w(px(0.)).child(sq)
+                .children((0..2).map(|row| {
+                    div().flex().gap(px(8.)).children((0..PER_ROW).map(move |i| {
+                        let mut sq = div().w_full().child(skeleton(&t, format!("smp{}", row * PER_ROW + i)));
+                        sq.style().aspect_ratio = Some(1.0);
+                        div().flex_1().min_w(px(0.)).child(sq)
+                    }))
                 }))
                 .into_any_element(),
         };
+        // The class key and the minimum confidence share the row under the header.
+        let tools = div()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .px(px(16.))
+            .pt(px(10.))
+            .child(div().flex_1().min_w_0().flex().flex_wrap().gap(px(12.)).children(
+                classes.into_iter().enumerate().map(|(i, name)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(class_swatch(&t, i as u32, 8.))
+                        .child(text(ty::SM, t.text_secondary).child(name))
+                }),
+            ))
+            .when(self.sample_view != SampleView::Truth, |d| {
+                d.child(
+                    div()
+                        .id("sample-conf-field")
+                        .relative()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .tooltip(crate::controls::tip(conf_tip.clone(), Some("← →")))
+                        .when(conf_ring, |d| {
+                            d.child(crate::controls::focus_tip(&t, format!("{conf_tip} · ← → adjust"), 20.))
+                        })
+                        .child(text(ty::SM, t.text_tertiary).child("Min confidence"))
+                        .child(div().w(px(120.)).child(slider))
+                        .child(text(ty::SM, t.text_primary).tnum().w(px(28.)).child(format!("{conf:.2}"))),
+                )
+            });
         panel(&t)
             .flex_1()
+            .min_w_0()
             .flex()
             .flex_col()
             .child(
@@ -177,27 +282,23 @@ impl FoloApp {
                     &t,
                     if images == "training" { "Training samples" } else { "Validation samples" },
                 )
-                .child(seg),
+                .child(div().flex().items_center().gap(px(8.)).child(seg).children(picker)),
             )
-            .child(
-                div().px(px(16.)).pt(px(10.)).flex().flex_wrap().gap(px(12.)).children(
-                    self.store
-                        .dataset_summary(&r.config.dataset_id)
-                        .map(|d| d.classes.clone())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, name)| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .child(crate::ui::class_swatch(&t, i as u32, 8.))
-                                .child(text(ty::SM, t.text_secondary).child(name))
-                        }),
-                ),
-            )
+            .child(tools)
             .child(body)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sample_epochs;
+
+    #[test]
+    fn the_picker_offers_the_first_epoch_and_every_fifth_newest_first() {
+        assert_eq!(sample_epochs(23), vec![20, 15, 10, 5, 1]);
+        assert_eq!(sample_epochs(20), vec![15, 10, 5, 1]);
+        assert_eq!(sample_epochs(2), vec![1]);
+        assert!(sample_epochs(1).is_empty());
     }
 }

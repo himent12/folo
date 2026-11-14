@@ -5,11 +5,10 @@ use std::rc::Rc;
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
 
-use super::page::hero_height;
+use super::page::{hero_height, two_columns};
 use crate::api::{Run, RunExt, time};
 use crate::app::{FoloApp, Route, act};
-use crate::charts::{LineChart, Series, line_chart};
-use crate::controls::Btn;
+use crate::charts::{End, LineChart, Series, line_chart};
 use crate::theme::{theme, ty};
 use crate::ui::*;
 
@@ -25,11 +24,10 @@ impl FoloApp {
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
         let id = r.id.clone();
-        let open = self.button(
+        // The way to the full dashboard: a quiet link like the panels' "All runs →".
+        let open = self.quiet_link(
             "ov-dash",
-            "Open dashboard",
-            Btn::Secondary,
-            Some("icons/arrow-up-right.svg"),
+            "Open run",
             window,
             cx,
             act(move |this, w, cx| this.navigate(Route::Run(id.clone()), w, cx)),
@@ -72,10 +70,11 @@ impl FoloApp {
                     vec![
                         Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(true),
                         // Dashed: the pair reads apart without colour (as in the legend).
+                        // The chart's one lime dot is mAP50-95's: this line ends in a dot of its hue.
                         Series::new("mAP50", t.chart_series[1], d.map50.clone())
                             .width(1.25)
                             .dashed()
-                            .live(true),
+                            .end(End::Done),
                     ],
                 );
                 map.x_range = Some((0., total));
@@ -83,10 +82,15 @@ impl FoloApp {
                 map.ease_key = crate::charts::ease_key(&r.id);
                 // Epochs are whole numbers ("5", not "5.0").
                 map.x_fmt = |v| format!("{v:.0}");
-                map.y_range = Some((0., 1.));
-                // Short windows: 0 / 0.50 / 1.00, so labels keep their distance in the lower plot.
-                map.y_ticks = if hero_h < 120. { 2 } else { 4 };
-                map.y_fmt = Some(|v| format!("{v:.2}"));
+                // From 0 to a little over the highest value (charts::domain), as on the run page.
+                map.unit_max = Some(
+                    d.map50
+                        .iter()
+                        .chain(d.map50_95.iter())
+                        .map(|p| p.1)
+                        .filter(|v| v.is_finite())
+                        .fold(0., f32::max),
+                );
                 // One annotation lane above the plot, as on the run dashboard's charts: the ETA sits
                 // there, not inside the data. The card grows by the lane; short windows take it out
                 // of the plot instead, so Recent runs keeps its rows.
@@ -101,9 +105,7 @@ impl FoloApp {
                     r.epoch as f32,
                     r.eta_s.map_or(SharedString::default(), |s| format!("ETA {}", time::duration(s)).into()),
                 ));
-                if let Some(b) = &best {
-                    map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
-                }
+                map.best = best.as_ref().map(|b| (b.epoch as f32, b.map50_95));
                 let v = |pts: &[(f32, f32)]| {
                     crate::charts::value_at(pts, hover, 0., total).map(|x| format!("{x:.3}"))
                 };
@@ -113,20 +115,11 @@ impl FoloApp {
                     .gap(px(12.))
                     .child(crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95)))
                     .child(crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v(&d.map50)))
-                    // The lime dot on the chart, keyed as on the run dashboard.
-                    .children(best.as_ref().map(|b| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
-                            .child(text(ty::SM, t.text_secondary).child("best"))
-                            .child(text(ty::SM, t.text_primary).tnum().child(format!(
-                                "{} @ {}",
-                                f3(b.map50_95),
-                                b.epoch
-                            )))
-                    }))
+                    // The best ring on the chart, keyed as on the run dashboard.
+                    .children(
+                        best.as_ref()
+                            .map(|b| crate::ui::best_legend(&t, format!("{} @ {}", f3(b.map50_95), b.epoch))),
+                    )
                     .into_any_element();
                 // One Tab stop with the dashboard's keyboard cursor (← / →, Home / End, Esc), ending
                 // at the latest validated epoch.
@@ -157,45 +150,53 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(4.))
                 .min_w_0()
-                .child(caption(&t, label))
+                .child(kpi_label(&t, label))
                 .child(value)
-                .when_some(detail, |d, s| d.child(text(ty::SM, t.text_tertiary).tnum().child(s)))
+                .when_some(detail, |d, s| d.child(kpi_note(&t).child(s)))
         };
-        // One row of four KPIs above a full-width chart: no column beside the chart to leave a
-        // gap in, whatever the chart's height. Four equal tracks (a grid, so a tile's padding and
-        // divider can't make it wider than the others) with 1 px dividers, like the run, model and
-        // dataset strips.
-        // Every tile insets its content by the card's padding (the strip itself has none at the
-        // sides), so the four labels step evenly across the card and the first lines up with the
-        // header's name.
-        let tile = |first: bool, body| {
+        // From 1280 px the four KPIs are a 2 x 2 block in the card's left third beside the chart;
+        // narrower, one row of four over a full-width chart. Equal tracks (a grid, so a tile's
+        // padding and divider can't make it wider than the others) with 1 px dividers, like the
+        // run, model and dataset strips. Every tile insets its content by the card's padding, so
+        // the first label lines up with the header's name.
+        let block = two_columns(window);
+        let tile = |i: usize, body| {
             div()
                 .min_w_0()
                 .pl(px(card_pad))
-                .when(!first, |d| d.border_l_1().border_color(t.line_subtle))
+                .when(block, |d| {
+                    d.pr(px(card_pad))
+                        .py(px(card_pad_y))
+                        .when(i % 2 == 1, |d| d.border_l_1())
+                        .when(i >= 2, |d| d.border_t_1())
+                        .border_color(t.line_subtle)
+                })
+                .when(!block && i > 0, |d| d.border_l_1().border_color(t.line_subtle))
                 .child(body)
         };
         let kpis = div()
             .w_full()
             .grid()
-            .grid_cols(4)
+            .grid_cols(if block { 2 } else { 4 })
+            // Beside the chart the two rows share its height, so the dividers run to the foot.
+            .when(block, |d| d.flex_1().grid_rows(2))
             .child(tile(
-                true,
+                0,
                 // Progress is drawn once, as the line under the card's header; here it's a
                 // number like the other tiles' detail lines.
                 kpi(
                     "Epoch",
-                    metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM)
+                    metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), KPI_VALUE, KPI_UNIT)
                         .into_any_element(),
                     Some(format!("{:.0}% complete", r.progress() * 100.)),
                 ),
             ))
             .child(tile(
-                false,
+                1,
                 kpi(
                     // Named as on the run's dashboard.
                     "mAP50-95 · latest",
-                    text(ty::X2XL, t.text_primary)
+                    text(KPI_VALUE, t.text_primary)
                         .tnum()
                         .child(map_now.map_or("–".into(), f3))
                         .into_any_element(),
@@ -203,17 +204,17 @@ impl FoloApp {
                 ),
             ))
             .child(tile(
-                false,
+                2,
                 kpi(
                     "Throughput",
-                    metric(&t, ips.map_or("–".into(), |v| format!("{v:.0}")), "img/s", ty::X2XL, ty::SM)
+                    metric(&t, ips.map_or("–".into(), |v| format!("{v:.0}")), "img/s", KPI_VALUE, KPI_UNIT)
                         .into_any_element(),
                     ips_avg.map(|a| format!("avg {a:.0}")),
                 ),
             ))
             .child(tile(
-                false,
-                kpi("Time left", duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(), elapsed),
+                3,
+                kpi("Time left", duration_metric(&t, eta_s, KPI_VALUE, KPI_UNIT).into_any_element(), elapsed),
             ));
         let footer = self.system_footer(cx);
         panel(&t)
@@ -255,12 +256,41 @@ impl FoloApp {
                     div().h_full().w(folo_ui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill()),
                 ),
             )
-            .child(div().w_full().py(px(card_pad_y)).child(kpis))
-            // The chart section is the run page's chart card without its frame: a header row on a
-            // full-width rule, the legend row, then the plot, so the two screens' charts read alike.
-            .child(div().w_full().min_w_0().border_t_1().border_color(t.line_subtle).child(
-                crate::ui::chart_section(&t, self.map_title(r), "per epoch", legend_el, chart, hero_h < 120.),
-            ))
+            // The chart section is the run page's chart card without its frame: a header row, the
+            // legend row, then the plot, so the two screens' charts read alike. Beside the KPI block
+            // it opens on a 1 px rule at its left, else on a full-width rule under the tiles.
+            .map(|d| {
+                let section = crate::ui::chart_section(
+                    &t,
+                    self.map_title(r),
+                    "per epoch",
+                    legend_el,
+                    chart,
+                    hero_h < 120.,
+                );
+                if block {
+                    d.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .child(
+                                div().w(folo_ui::relative(1. / 3.)).flex_none().flex().flex_col().child(kpis),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .border_l_1()
+                                    .border_color(t.line_subtle)
+                                    .child(section),
+                            ),
+                    )
+                } else {
+                    d.child(div().w_full().py(px(card_pad_y)).child(kpis)).child(
+                        div().w_full().min_w_0().border_t_1().border_color(t.line_subtle).child(section),
+                    )
+                }
+            })
             .children(footer)
             .into_any_element()
     }

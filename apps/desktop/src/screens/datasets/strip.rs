@@ -1,4 +1,5 @@
-//! A dataset's stat strip: counts, splits and label health.
+//! A dataset's stat strip (the Statistics tab's KPI strip): counts, splits and label health. Its
+//! Empty images tile shows them in the grid and its Broken labels tile copies the check command.
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
@@ -20,9 +21,9 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        // Short windows: XL values and 8 px padding (see `dataset`).
-        let short = window.viewport_size().height < px(700.);
-        let (step, pad) = if short { (ty::XL, 8.) } else { (ty::X2XL, 12.) };
+        // In the Statistics tab, under the health line (it no longer sits above the image grid, so
+        // it keeps its full size in short windows too).
+        let (step, pad) = (ty::X2XL, 12.);
         let stat = |t: &Theme, label: &str, value: String, unit: &str, detail: Option<Div>| {
             stat_at(t, label, value, unit, detail, step)
         };
@@ -57,7 +58,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(5.))
                     .child(swatch(col, 6.))
-                    .child(text(ty::SM, t.text_tertiary).tnum().child(format!("{n} {}", int(c))))
+                    .child(kpi_note(&t).child(format!("{n} {}", int(c))))
             }),
         );
         let tile = |content: folo_ui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(pad)).child(content);
@@ -86,7 +87,7 @@ impl FoloApp {
                 "Boxes",
                 int(boxes),
                 "",
-                Some(text(ty::SM, t.text_tertiary).tnum().child(format!("{per:.1} per image"))),
+                Some(kpi_note(&t).child(format!("{per:.1} per image"))),
             )))
             .child(vline(&t))
             .child(tile(stat(
@@ -94,7 +95,7 @@ impl FoloApp {
                 "Classes",
                 ds.classes.len().to_string(),
                 "",
-                Some(text(ty::SM, t.text_tertiary).whitespace_nowrap().child(names_summary(&ds.classes, 24))),
+                Some(kpi_note(&t).whitespace_nowrap().child(names_summary(&ds.classes, 24))),
             )))
             .child(vline(&t))
             .child({
@@ -122,9 +123,9 @@ impl FoloApp {
                             }
                         } else if ds.splits.total() == 0 {
                             // Nothing to have labels: not "every image has labels" for no image.
-                            text(ty::SM, t.text_tertiary).child("no images")
+                            kpi_note(&t).child("no images")
                         } else {
-                            text(ty::SM, t.text_tertiary).child("every image has labels")
+                            kpi_note(&t).child("every image has labels")
                         }),
                     ));
                 if empty > 0 {
@@ -170,7 +171,7 @@ impl FoloApp {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(if short { 4. } else { 6. }))
+                            .gap(px(6.))
                             .min_w_0()
                             .child(
                                 div()

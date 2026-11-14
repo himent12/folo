@@ -79,8 +79,8 @@ export default function CompareTable(props: CompareTableProps) {
   });
   const bestScore = (r: Run) => (r.best && bestOf.get().get(r.id) ? r.best.map50_95.toFixed(bestOf.get().get(r.id)!.decimals) : metric(r.best?.map50_95));
 
-  // A cell is a Setting (../run/resolved): identifiers (an architecture, a checkpoint) in mono like the chips and every
-  // other screen (ui/Ident), prose ("From scratch") and named optimizers ("AdamW") in sans. Where the server resolved a
+  // A cell is a Setting (../run/resolved): an architecture or a checkpoint through ui/Ident, as on every other screen
+  // (it sets a name in sans and a path or id in mono), prose ("From scratch") and named optimizers ("AdamW") in sans. Where the server resolved a
   // run's config (`Run.resolved`), the optimizer, LR and batch are what it trains with, the request a note beside them.
   const plain = (value: string): Setting => ({ value });
   const ident = (value: string): Setting => ({ value, ident: true });

@@ -1,6 +1,7 @@
 /**
- * The model to run (its score and what it is on under the select) and where it runs: on the title row from 1024 px
- * up, or (`toolbar`) a toolbar row of their own under the title below that.
+ * The model to run (its score and what it is on under the select) and where it runs: the rail's first section from
+ * 1024 px (`rail`: each label over its control, full width), or (`toolbar`) a toolbar row of their own under the
+ * title below that.
  */
 import ArrowUpRight from '$icons/arrow-up-right';
 import { bindable, css } from 'fw';
@@ -14,6 +15,7 @@ import Select from '$lib/ui/Select';
 
 export interface ModelPickersProps {
   toolbar?: boolean;
+  rail?: boolean;
   ranked: Model[];
   modelId: string | null;
   choices: ModelChoice<Model>[];
@@ -29,7 +31,7 @@ export interface ModelPickersProps {
 export default function ModelPickers(props: ModelPickersProps) {
   const runOn = bindable(props, 'runOn', 'server');
 
-  // The model and where it runs: on the title row from 1024 px up, a toolbar row under the title below that.
+  // The model and where it runs: the rail's first section from 1024 px up, a toolbar row under the title below that.
   const pickers = () => (
     <>
       {props.ranked.length ? (
@@ -87,7 +89,7 @@ export default function ModelPickers(props: ModelPickersProps) {
     </>
   );
 
-  return <>{props.toolbar ? <div class="pg-tools">{pickers()}</div> : pickers()}</>;
+  return <div class={props.rail ? 'pg-rail' : 'pg-tools'}>{pickers()}</div>;
 }
 
 css`
@@ -128,6 +130,33 @@ css`
   }
   .model-pick :global(.select) {
     min-width: 0;
+  }
+  /* The rail (320 px): each label over its control, the select and its open button taking the width, the score under
+     them; Run on the same way under the model (Desktop's arrangement). */
+  .pg-rail {
+    display: grid;
+    gap: var(--space-4);
+  }
+  .pg-rail .model-pick {
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: auto;
+  }
+  .pg-rail .model-pick .pick-label {
+    grid-column: 1 / -1;
+  }
+  .pg-rail .pick-meta {
+    grid-column: 1 / -1;
+  }
+  .pg-rail .runon {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-1);
+  }
+  .pg-rail .runon-seg {
+    display: grid;
+  }
+  .pg-rail .pick-label {
+    color: var(--text-secondary);
   }
   .runon {
     display: flex;

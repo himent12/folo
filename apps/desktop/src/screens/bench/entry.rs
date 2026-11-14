@@ -4,7 +4,7 @@ use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, relative};
 
 use super::cells::bar_row;
-use super::format::{axis_name, axis_text, contestant_line, entry_frac, entry_tone, pct};
+use super::format::{axis_name, axis_text, contestant_line, entry_frac, pct};
 use crate::api::{Bench, BenchAxis, BenchEntryStatus, BenchReadiness, BenchResult, Label, time};
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
@@ -63,7 +63,12 @@ impl FoloApp {
             .gap(px(10.))
             .min_w_0()
             .child(text(ty::XL, t.text_primary).ellipsis().child(e.name.clone()))
-            .child(badge(&t, e.status.label(), entry_tone(e.status)));
+            .child(status_badge_of(
+                &t,
+                StatusKind::of_entry(e.status),
+                e.status.label(),
+                format!("entry-{}", e.id),
+            ));
         if e.score.as_ref().is_some_and(|s| s.partial) {
             title = title.child(badge(&t, "partial", Tone::Neutral));
         }
@@ -154,15 +159,15 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .child(caption(&t, "Score"))
+                .child(kpi_label(&t, "Score"))
                 .child(metric(
                     &t,
                     score.map_or("–".to_string(), |s| format!("{:.1}", s.total)),
                     "/ 100",
-                    ty::X3XL,
-                    ty::SM,
+                    KPI_HEADLINE,
+                    KPI_UNIT,
                 ))
-                .child(text(ty::SM, t.text_tertiary).child(if score.is_some_and(|s| s.partial) {
+                .child(kpi_note(&t).child(if score.is_some_and(|s| s.partial) {
                     "Partial: over what was measured"
                 } else {
                     "All five axes measured"
@@ -174,9 +179,11 @@ impl FoloApp {
             let v = s.and_then(|s| s.value);
             let detail = match a {
                 BenchAxis::Accuracy => format!("mAP50-95 {}", f3(r.accuracy.map50_95)),
-                BenchAxis::Robustness => r.robustness.as_ref().map_or("conditions not run".into(), |x| {
-                    format!("keeps {} of its accuracy", pct(x.retention))
-                }),
+                // Short enough for the tile at 1280 px; the Robustness panel says it in full.
+                BenchAxis::Robustness => r
+                    .robustness
+                    .as_ref()
+                    .map_or("conditions not run".into(), |x| format!("{} accuracy kept", pct(x.retention))),
                 BenchAxis::SelfLabeling => match r.self_labeling.readiness {
                     BenchReadiness::Ready => "ready to self-label".into(),
                     BenchReadiness::Partial => "partly ready".into(),
@@ -195,14 +202,17 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(caption(
+                    .child(kpi_label(
                         &t,
                         &format!("{} · {}", axis_name(a), pct(s.map_or(a.weight(), |s| s.weight))),
                     ))
-                    .child(div().h(px(ty::X3XL.line)).flex().items_end().child(
-                        metric(&t, axis_text(v), "", ty::XL, ty::SM).pb(px(baseline_lift(ty::X3XL, ty::XL))),
-                    ))
-                    .child(text(ty::SM, t.text_tertiary).ellipsis().child(detail)),
+                    .child(
+                        div().h(px(KPI_HEADLINE.line)).flex().items_end().child(
+                            metric(&t, axis_text(v), "", KPI_VALUE, KPI_UNIT)
+                                .pb(px(baseline_lift(KPI_HEADLINE, KPI_VALUE))),
+                        ),
+                    )
+                    .child(kpi_note(&t).ellipsis().child(detail)),
                 0.12,
             ));
         }

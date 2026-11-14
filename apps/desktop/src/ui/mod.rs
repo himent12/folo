@@ -26,11 +26,17 @@ pub use format::{
     gpu_label, int, latency_text, lr_sci, may_overflow, model_storage, operating_conf, plural, pr_caption,
     queue_text, queue_wait_text, sci, score_delta, share_spare, short_gpu, split_label, waiting_text,
 };
-pub use legend::{class_swatch, legend_value, line_swatch, swatch};
-pub use metric::{baseline_lift, detail_line, duration_metric, kv, metric, metric_pair, stat_at, stat_sized};
+pub use legend::{best_legend, class_swatch, legend_value, line_swatch, swatch};
+pub use metric::{
+    KPI_HEADLINE, KPI_UNIT, KPI_VALUE, baseline_lift, detail_line, duration_metric, kpi_label, kpi_note, kv,
+    metric, metric_pair, stat_at, stat_sized,
+};
 pub use motion::{appear, os_prefers_reduced_motion, reduce_motion, set_reduce_motion};
 pub use scroll::{ThumbGeo, paint_thumb, scroll_edges};
-pub use status::{Tone, badge, badge_icon, dot, e2e_tag, status_badge, status_dot, status_label};
+pub use status::{
+    StatusKind, Tone, badge, badge_icon, dot, e2e_tag, run_progress_cell, status_badge, status_badge_of,
+    status_cell, status_dot, status_label, status_mark,
+};
 pub use surface::{chart_section, empty_state, panel, panel_header, progress, select_bar, skeleton, vline};
 pub use text::{
     Ellipsis, StyledExt, caption, icon, inline_link, kbd, meta_row, overline, path_text, rich, shortcut, text,

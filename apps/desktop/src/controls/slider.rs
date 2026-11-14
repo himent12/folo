@@ -159,7 +159,10 @@ impl FoloApp {
                 self.set_play_conf(v, cx);
             }
             "play-iou" => self.play_iou = q(at(0.3, 0.95), 0.01),
-            "ds-tile" => self.ds_tile = q(at(112., 272.), 8.),
+            "sample-conf" => {
+                let (lo, hi, step) = crate::screens::runs::SAMPLE_CONF;
+                self.sample_conf = q(at(lo, hi), step).clamp(lo, hi);
+            }
             _ => {
                 if let Some(f) = self.new_run.as_mut() {
                     match key {

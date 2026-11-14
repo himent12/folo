@@ -57,16 +57,17 @@ impl FoloApp {
                 .into_any_element(),
             Some(l) => {
                 let cards: Vec<AnyElement> = l.iter().map(|d| self.dataset_card(d, window, cx)).collect();
+                let per_row = card_columns(self.content_width(window));
                 let mut rows = Vec::new();
                 let mut it = cards.into_iter().peekable();
                 while it.peek().is_some() {
-                    // Equal thirds (basis 0, no min width), so a short last row matches the rows above.
+                    // Equal columns (basis 0, no min width), so a short last row matches the rows above.
                     let mut row: Vec<AnyElement> = it
                         .by_ref()
-                        .take(3)
+                        .take(per_row)
                         .map(|c| div().flex_grow().flex_basis(px(0.)).min_w_0().flex().child(c).into_any_element())
                         .collect();
-                    while row.len() < 3 {
+                    while row.len() < per_row {
                         row.push(div().flex_grow().flex_basis(px(0.)).min_w_0().into_any_element());
                     }
                     rows.push(div().flex().gap(px(16.)).children(row));
@@ -76,6 +77,12 @@ impl FoloApp {
         };
         self.page_frame(&t, header, body, cx)
     }
+}
+
+/// How many dataset cards share a row `width` px wide: as many as stay at least 300 px wide with
+/// 16 px between them (design §4 Datasets), at least one.
+pub fn card_columns(width: f32) -> usize {
+    (((width + 16.) / (300. + 16.)).floor() as usize).max(1)
 }
 
 /// Class names that fit in about `budget` characters, then "+N" ("circle, square +3").
@@ -96,7 +103,14 @@ pub fn names_summary(names: &[String], budget: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::names_summary;
+    use super::{card_columns, names_summary};
+
+    #[test]
+    fn cards_stay_at_least_300_wide() {
+        // 960 (content 872): two; 1280 (1000): three; 1680 (1392): four.
+        assert_eq!([card_columns(872.), card_columns(1000.), card_columns(1392.)], [2, 3, 4]);
+        assert_eq!(card_columns(200.), 1);
+    }
 
     #[test]
     fn summaries_fit_whole_names() {

@@ -186,3 +186,60 @@ fn closing_generate_while_it_works_says_it_goes_on() {
     });
     assert_eq!(toasts(&mut app), before + 1);
 }
+
+#[test]
+fn a_dataset_page_has_its_tabs_and_one_toolbar_and_statistics_holds_the_strip() {
+    let (mut app, window) = super::tests::open();
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Dataset("ds_3b91".into()), w, cx));
+    let images = drawn_keys(&mut app, window);
+    // Images / Statistics as underline tabs; the split, the class picker (a select, not a chip per
+    // class), Boxes, S / M / L (not a slider) and Fit / Fill on one toolbar.
+    for k in ["ds-tab-0", "ds-tab-1", "ds-split", "ds-class", "ds-boxes", "ds-size", "ds-fit"] {
+        assert!(images.iter().any(|x| x == k), "{k}: {images:?}");
+    }
+    assert!(!images.iter().any(|k| k == "ds-tile" || k.starts_with("ds-class-")), "{images:?}");
+    // The empty-images and broken-labels tiles moved into Statistics with the rest of the strip.
+    assert!(!images.iter().any(|k| k == "ds-empty-tile"), "{images:?}");
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_tab = super::DsTab::Statistics;
+        cx.notify();
+    });
+    let stats = drawn_keys(&mut app, window);
+    assert!(stats.iter().any(|k| k == "ds-empty-tile"), "Show them stays: {stats:?}");
+    // The health summary is a Tab stop (its focus tip lists every finding).
+    assert!(stats.iter().any(|k| k == "ds-health"), "{stats:?}");
+    // "Show them": the empty-images chip takes the class picker's place on the toolbar.
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_tab = super::DsTab::Images;
+        this.ds_empty_only = true;
+        cx.notify();
+    });
+    let empty = drawn_keys(&mut app, window);
+    assert!(empty.iter().any(|k| k == "ds-empty-chip"), "{empty:?}");
+}
+
+/// The focus keys a page draws, once what it asked for has come.
+fn drawn_keys(app: &mut folo_ui::HeadlessApp, window: folo_ui::WindowHandle<super::FoloApp>) -> Vec<String> {
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(app, window, |this, _, _| this.focus.borrow().keys().map(|k| k.to_string()).collect())
+}
+
+#[test]
+fn the_health_summary_asks_for_the_check_even_when_every_label_parses() {
+    let (mut app, window) = super::tests::open();
+    // A dataset whose labels all parse: the check can still find unreadable images or warnings.
+    let id = drive(&mut app, window, |this, _, _| {
+        let ids: Vec<String> = this.store.datasets.ready().unwrap().iter().map(|d| d.id.clone()).collect();
+        ids.into_iter().find(|id| id != "ds_3b91").unwrap()
+    });
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Dataset(id.clone()), w, cx));
+    drawn_keys(&mut app, window);
+    drawn_keys(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        let stats = this.store.dataset.get(&id).and_then(|l| l.ready()).and_then(|d| d.stats.clone());
+        assert_eq!(stats.map(|s| s.broken_labels), Some(0), "{id}");
+        assert!(this.store.issues.contains_key(&id), "the check's counts were asked for");
+    });
+}

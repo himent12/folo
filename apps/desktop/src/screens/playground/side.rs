@@ -126,7 +126,8 @@ impl FoloApp {
         let controls = div()
             .flex()
             .flex_col()
-            .gap(px(if tight { 8. } else { 14. }))
+            // 12 between the controls: with the 12 px picker row, the rail fits whole at 1280 × 800.
+            .gap(px(if tight { 8. } else { 12. }))
             .px(px(16.))
             .py(px(if tight { 10. } else { 16. }))
             .child(
@@ -643,7 +644,7 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(8.))
                 .px(px(16.))
-                .py(px(if fold { 10. } else { 16. }))
+                .py(px(if fold { 10. } else { 12. }))
                 .border_t_1()
                 .border_color(t.line_subtle)
                 .child(heading)

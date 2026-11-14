@@ -38,6 +38,7 @@ pub const ALL: &[&str] = &[
     "dataset",
     "dataset+light",
     "dataset+filter",
+    "dataset+stats",
     "inspector",
     "inspector+light",
     "inspector+sample",
@@ -46,10 +47,12 @@ pub const ALL: &[&str] = &[
     "run-live+light",
     "run-live+hover",
     "run-live+charts-focus",
+    "run-live+log-focus",
     "run-done",
     "run-done+bottom",
     "run-done+sample-focus",
     "run-failed",
+    "run-done+no-history",
     "new-run",
     "new-run+amp",
     "new-run+light",
@@ -61,6 +64,7 @@ pub const ALL: &[&str] = &[
     "model",
     "model+light",
     "model+table-focus",
+    "model+bottom",
     "playground",
     "playground+nms",
     "playground+empty",
@@ -184,6 +188,10 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
                 app.ds_split = Some(crate::api::Split::Val);
                 app.ds_class = Some(3);
             }
+            // The Statistics tab: the health line over the KPI strip and the charts.
+            if s.has("stats") {
+                app.ds_tab = crate::app::DsTab::Statistics;
+            }
         }
         // Opened from a finished run's sample: its predictions over the dashed labels.
         "inspector" if s.has("sample") => {
@@ -262,7 +270,13 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
                 app.scroll_end_pending = 60;
             }
         }
-        "model" => app.route = Route::Model("m_44c0".into()),
+        "model" => {
+            app.route = Route::Model("m_44c0".into());
+            // The page's end: the confusion matrix and the Details panel.
+            if s.has("bottom") {
+                app.scroll_end_pending = 60;
+            }
+        }
         "playground" => app.route = Route::Playground,
         "settings" => {
             app.route = Route::Settings;
@@ -431,6 +445,8 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     let focus = [
         ("charts-focus", "run-charts"),
         ("sample-focus", "smp-2"),
+        // Row 5: the log (its level filter and counts) beside the config.
+        ("log-focus", "log-scroll"),
         ("table-focus", "pc-row-1"),
         ("canvas-focus", "stage-canvas"),
     ]
@@ -441,6 +457,14 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.focus_key(key, window, cx);
         // Enough frames for the async lists (samples, the eval) to land and lay out.
         app.reveal_pending = 90;
+    }
+    // `+no-history`: the run's history couldn't be read (the charts' error panel, Per class's).
+    if s.has("no-history")
+        && let Route::Run(id) = &app.route
+    {
+        let down =
+            crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878");
+        app.store.run_data.insert(id.clone(), Load::Failed(down));
     }
     // `+lost`: the server stopped answering mid-session (the banner over the page, Overview's strip).
     if s.has("lost") {

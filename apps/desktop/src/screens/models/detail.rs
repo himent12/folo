@@ -84,19 +84,9 @@ impl FoloApp {
             .gap(px(10.))
             .child(text(ty::XL, t.text_primary).child(m.name.clone()))
             .child(badge(&t, m.arch.as_str(), Tone::Neutral))
-            // End-to-end, with its help on hover and keyboard focus (the help icon's own stop).
-            .when(e2e, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        // The same compact tag as every list, right after the architecture badge;
-                        // its help on hover and keyboard focus.
-                        .child(e2e_tag(&t, "e2e-model-head"))
-                        .child(self.help_icon("model-head-help", FoloApp::E2E_HELP, window, cx)),
-                )
-            });
+            // The same compact tag as every list, right after the architecture badge, its help on
+            // hover; the Details panel's Head row gives it a keyboard route.
+            .when(e2e, |d| d.child(e2e_tag(&t, "e2e-model-head")));
         let mut subtitle =
             div().flex().items_center().gap(px(6.)).child(text(ty::BASE, t.text_secondary).child(format!(
                 "{} px · {} classes{}{} · created {created}",
@@ -194,19 +184,21 @@ impl FoloApp {
         // The headline metric gets the headline: twice the width, one size up; the rest are context.
         // Every tile: caption, a value line as tall as the headline's (values bottom-aligned on one
         // baseline), then the detail line.
-        let small =
-            |label: &str, value: String, unit: &str, detail: Option<folo_ui::Div>| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .min_w_0()
-                    .child(caption(&t, label))
-                    .child(div().h(px(ty::X3XL.line)).flex().items_end().child(
-                        metric(&t, value, unit, ty::XL, ty::SM).pb(px(baseline_lift(ty::X3XL, ty::XL))),
-                    ))
-                    .children(detail)
-            };
+        let small = |label: &str, value: String, unit: &str, detail: Option<folo_ui::Div>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .min_w_0()
+                .child(kpi_label(&t, label))
+                .child(
+                    div().h(px(KPI_HEADLINE.line)).flex().items_end().child(
+                        metric(&t, value, unit, KPI_VALUE, KPI_UNIT)
+                            .pb(px(baseline_lift(KPI_HEADLINE, KPI_VALUE))),
+                    ),
+                )
+                .children(detail)
+        };
         let kpis = panel(&t)
             .flex()
             .child(
@@ -221,21 +213,19 @@ impl FoloApp {
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .child(caption(&t, "mAP50-95"))
+                            .child(kpi_label(&t, "mAP50-95"))
                             .child(
-                                text(ty::X3XL, t.text_primary)
-                                    .h(px(ty::X3XL.line))
+                                text(KPI_HEADLINE, t.text_primary)
+                                    .h(px(KPI_HEADLINE.line))
                                     .tnum()
                                     .child(mm.as_ref().map_or("–".into(), |x| f3(x.map50_95))),
                             )
-                            .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().ellipsis().child(
-                                match &head_ds {
-                                    Some((d, split)) => {
-                                        format!("IoU 0.50–0.95 · {}", split_label(d, split, None))
-                                    }
-                                    None => "IoU 0.50–0.95".to_string(),
-                                },
-                            )),
+                            .child(kpi_note(&t).whitespace_nowrap().ellipsis().child(match &head_ds {
+                                Some((d, split)) => {
+                                    format!("IoU 0.50–0.95 · {}", split_label(d, split, None))
+                                }
+                                None => "IoU 0.50–0.95".to_string(),
+                            })),
                     ),
             )
             .child(vline(&t))
@@ -243,7 +233,7 @@ impl FoloApp {
                 "mAP50",
                 mm.as_ref().map_or("–".into(), |x| f3(x.map50)),
                 "",
-                Some(text(ty::SM, t.text_tertiary).child("IoU 0.50")),
+                Some(kpi_note(&t).child("IoU 0.50")),
             )))
             .child(vline(&t))
             // The same pair and caption as the run page (ui::metric_pair, ui::pr_caption); a wider
@@ -254,26 +244,26 @@ impl FoloApp {
                     .flex_col()
                     .gap(px(4.))
                     .min_w_0()
-                    .child(caption(&t, "Precision / Recall"))
+                    .child(kpi_label(&t, "Precision / Recall"))
                     .child(
-                        div().h(px(ty::X3XL.line)).flex().items_end().child(
+                        div().h(px(KPI_HEADLINE.line)).flex().items_end().child(
                             metric_pair(
                                 &t,
-                                ty::XL,
+                                KPI_VALUE,
                                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.precision)),
                                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.recall)),
                             )
-                            .pb(px(baseline_lift(ty::X3XL, ty::XL))),
+                            .pb(px(baseline_lift(KPI_HEADLINE, KPI_VALUE))),
                         ),
                     )
-                    .child(text(ty::SM, t.text_tertiary).ellipsis().child(op_point.clone())),
+                    .child(kpi_note(&t).ellipsis().child(op_point.clone())),
             ))
             .child(vline(&t))
             .child(tile(small(
                 "Parameters",
                 p,
                 pu,
-                Some(text(ty::SM, t.text_tertiary).tnum().child(format!("{:.1} GFLOPs", m.flops_g))),
+                Some(kpi_note(&t).child(format!("{:.1} GFLOPs", m.flops_g))),
             )))
             .child(vline(&t))
             .child(tile(small(
@@ -281,7 +271,7 @@ impl FoloApp {
                 b,
                 bu,
                 Some(
-                    text(ty::SM, t.text_tertiary)
+                    kpi_note(&t)
                         // The record's stored precision (as the header says), never a guess from size.
                         // The format; the stored precision is the subtitle's to say (once).
                         .child(".folo"),
@@ -291,79 +281,62 @@ impl FoloApp {
         let body = match self.store.evals.get(id) {
             Some(Load::Ready(ev)) => {
                 let ev = ev.clone();
-                // Side by side only while the PR panel keeps 600 px beside the matrix (46 %, 440 px
-                // minimum): its plot and side legend both fit. Else one above the other, each full
-                // width (below a ~1410 px window: content width under ~1127 px).
-                let stacked = self.eval_stacked(window);
+                // The precision-recall panel (the plot and its class table), the confusion matrix and
+                // its lists, then the Details: each a full-width panel.
                 let pr = self.pr_panel(&m, &ev, window, cx);
                 let cm = self.confusion_panel(&m, &ev, window, cx);
-                let table = self.class_table(&m, &ev, window, cx);
+                let details = self.details_panel(&m, Some(&ev), window, cx);
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(16.))
                     .child(kpis)
-                    .child(if stacked {
-                        // Narrow: one above the other, each full width.
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(16.))
-                            .child(div().flex().child(pr))
-                            .child(div().flex().child(cm))
-                    } else {
-                        // The PR panel holds a plot and its legend: it takes the larger share, so the
-                        // plot keeps ~240 px at 1280; the matrix (46 %, 440 px minimum) heads every column
-                        // with the class's full name.
-                        div()
-                            .flex()
-                            .gap(px(16.))
-                            .child(
-                                div().flex_grow().flex_basis(folo_ui::relative(0.54)).min_w_0().flex().child(pr),
-                            )
-                            .child(
-                                div()
-                                    .flex_grow()
-                                    .flex_basis(folo_ui::relative(0.46))
-                                    .min_w(px(440.))
-                                    .flex()
-                                    .child(cm),
-                            )
-                    })
-                    .child(table)
+                    .child(div().flex().child(pr))
+                    .child(div().flex().child(cm))
+                    .child(details)
                     .into_any_element()
             }
-            Some(Load::Failed(e)) if e.code == "not_supported" => div()
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .child(kpis)
-                .child(panel(&t).child(empty_state(
-                    &t,
-                    "icons/chart-line.svg",
-                    // The server can't evaluate here (not a model without results): say which.
-                    "Evaluation isn't available on this server",
-                    "Its PR curves and confusion matrix need a server that evaluates models. `folo val` prints its metrics in a terminal.",
-                    Tone::Neutral,
-                )))
-                .into_any_element(),
+            Some(Load::Failed(e)) if e.code == "not_supported" => {
+                let details = self.details_panel(&m, None, window, cx);
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.))
+                    .child(kpis)
+                    .child(panel(&t).child(empty_state(
+                        &t,
+                        "icons/chart-line.svg",
+                        // The server can't evaluate here (not a model without results): say which.
+                        "Evaluation isn't available on this server",
+                        "Its PR curves and confusion matrix need a server that evaluates models. `folo val` prints its metrics in a terminal.",
+                        Tone::Neutral,
+                    )))
+                    .child(details)
+                    .into_any_element()
+            }
             Some(Load::Failed(e)) => {
                 let e = e.clone();
+                let details = self.details_panel(&m, None, window, cx);
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(16.))
                     .child(kpis)
                     .child(self.error_panel(&e, "eval-retry", window, cx))
+                    .child(details)
                     .into_any_element()
             }
-            _ => div()
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .child(kpis)
-                .child(div().h(px(360.)).child(skeleton(&t, "eval")))
-                .into_any_element(),
+            _ => {
+                let details = self.details_panel(&m, None, window, cx);
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.))
+                    .child(kpis)
+                    .child(div().h(px(360.)).child(skeleton(&t, "eval")))
+                    .child(details)
+                    .into_any_element()
+            }
         };
         self.page_frame(&t, header, body, cx)
     }
@@ -490,12 +463,5 @@ impl FoloApp {
             .with_priority(2)
         });
         div().relative().child(trigger).children(menu).into_any_element()
-    }
-
-    /// The PR panel sits above the matrix (each full width) unless it keeps 600 px beside it
-    /// (46 %, 440 px minimum): its plot and side legend both fit.
-    pub(super) fn eval_stacked(&self, window: &Window) -> bool {
-        let row = self.content_width(window) - 16.;
-        row - (row * 0.46).max(440.) < 600.
     }
 }

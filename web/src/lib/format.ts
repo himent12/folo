@@ -59,13 +59,19 @@ export function bytes(x: number | null | undefined, units: 'binary' | 'metric' =
   return `${i === 0 ? nf(0).format(v) : nf(1).format(v)} ${names[i]}`;
 }
 
-/** The one unit a table's size column uses, named in its header ("Size, MiB"); the cells are `sizeIn`. */
-export const sizeUnit = (units: 'binary' | 'metric' = 'binary') => (units === 'binary' ? 'MiB' : 'MB');
-
-/** A size in the column's unit, one decimal, no unit: 38_797_312 → "37.0". */
-export function sizeIn(x: number | null | undefined, units: 'binary' | 'metric' = 'binary'): string {
-  if (!ok(x)) return '—';
-  return nf(1).format(x / (units === 'binary' ? 2 ** 20 : 1e6));
+/**
+ * A size as a number and its own unit, for a table cell that sets the unit apart (Models' Size: "37.0" then "MiB",
+ * the column's heading "Size"). Desktop's steps and rounding (apps/desktop `format::bytes`): GiB and MiB to one
+ * decimal, KiB whole, bytes as they are; `units` picks MiB or MB (prefs.units). 38_797_312 → ["37.0", "MiB"].
+ */
+export function sizeParts(x: number | null | undefined, units: 'binary' | 'metric' = 'binary'): [value: string, unit: string] {
+  if (!ok(x)) return ['—', ''];
+  const k = units === 'binary' ? 1024 : 1000;
+  const [kb, mb, gb] = units === 'binary' ? ['KiB', 'MiB', 'GiB'] : ['kB', 'MB', 'GB'];
+  if (x >= k ** 3) return [nf(1).format(x / k ** 3), gb];
+  if (x >= k ** 2) return [nf(1).format(x / k ** 2), mb];
+  if (x >= k) return [nf(0).format(x / k), kb];
+  return [nf(0).format(x), 'B'];
 }
 
 /** Seconds → "1h 04m", "12m 30s", "42s". */

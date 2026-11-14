@@ -88,8 +88,8 @@ src/local.rs      local inference: folo-vision's Predictor in process, on folo-g
 src/store/        fetched state, live run data (SSE events), the decoded-image cache
 src/bench/        vision benchmarks: what the Benchmarks screens hold, the open benchmark's stream, their actions
 src/app/          root view: chrome, sidebar, routing, fetching, live event pump, actions
-src/controls/     focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
-src/ui/           stateless pieces: type, panels, badges, metrics, progress, skeletons, empty states
+src/controls/     focusable controls: buttons, segmented, tabs, chips, switch, slider, select, tooltip
+src/ui/           stateless pieces: type, panels, badges, status glyphs, metrics, progress, skeletons, empty states
 src/charts/       canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram
 src/viz.rs        images with detection boxes and label chips (design/README.md box spec)
 src/screens/      one module per screen
@@ -114,7 +114,7 @@ never click Show in Explorer, Show in folder or a link there: Explorer and the b
 on your desktop take the request and open their window on your screen.
 
 - `shoot.ps1`: one headless screenshot (`folo-desktop --scenario … --shot`; Screenshots, below).
-- `shoot-all.ps1`: every review scenario headless, in parallel (98 PNGs in a few seconds on a release build),
+- `shoot-all.ps1`: every review scenario headless, in parallel (109 PNGs in a few seconds on a release build),
   as `<Dir>\<W>x<H>\<scenario>.png`: all scenarios at 1280 x 800, the densest at 960 x 620 and 1680 x 1050.
 - `parity.py` (Python with numpy and Pillow): compares two such trees pixel by pixel (the per-pixel difference
   is the largest channel difference): per pair the share of pixels above `--tol`, the largest difference, the
@@ -186,7 +186,7 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
 
 With a server that lists the `vision_bench` feature (docs/BENCH.md), **Benchmarks** in the sidebar (`Ctrl 6`) lists
 the server's benchmarks and makes new ones (from a dataset split, or the labeled images of a labeling job, with the
-default plan). A benchmark's page has three tabs:
+default plan). A benchmark's page has three underline tabs, each with its count:
 
 - **Leaderboard**: the entries ranked by score, with the five axes on the score's 0–100 scale, running entries with
   their progress (live over the benchmark's event stream), and Run: a model of the server that knows the
@@ -238,7 +238,7 @@ add a token instead. folo-ui has no letter-spacing (GPUI had none either, and th
 with `+` (`dataset+light`, `overview+empty`). `folo-desktop --list-scenarios` prints the review set.
 
 ```powershell
-tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (98 PNGs in <W>x<H> folders; a few seconds on a release build)
+tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (109 PNGs in <W>x<H> folders; a few seconds on a release build)
 tools\shoot.ps1 -Scenario palette -Out shots\palette.png -Width 960 -Height 620
 tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://127.0.0.1:7878 --open run:run_9d9d"   # real data
 ```

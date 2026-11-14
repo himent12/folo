@@ -20,6 +20,13 @@
 :root[data-theme='dark'] {
   --line-panel: var(--line-subtle);
 }
+/* The top bar is 40 px from 768 px up (design/UNIFIED.md §1, Desktop's title bar: a 40 px control row); the phone's
+   keeps `size.topbar` (48), its title and its 44 px touch targets. Sticky offsets under the bar read this one value. */
+@media (min-width: 768px) {
+  :root {
+    --size-topbar: var(--control-xl);
+  }
+}
 
 *,
 *::before,
@@ -155,8 +162,9 @@ table {
   font-size: 0.94em;
 }
 
-/* A model, checkpoint or run identifier (ui/Ident, always `.mono`); as a link it keeps the text colour it sits in and
-   underlines on hover, like every link (DESIGN_DIRECTION §2.6). */
+/* A model, checkpoint or run identifier (ui/Ident: `.mono`, or `.name` for an architecture or a model named for
+   one); as a link it keeps the text colour it sits in and underlines on hover, like every link (DESIGN_DIRECTION
+   §2.6). */
 a.ident:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -311,13 +319,16 @@ a.ident:hover {
 }
 
 /*
- * Data tables: the one table system (DESIGN_DIRECTION §2.7). Every <table class="table"> gets the same header, row
- * heights, first column, hover, selection bar and keyboard focus from here; a sortable header is ui/SortHeader.svelte,
- * arrow-key rows are ui/rowNav.ts, and an empty / error / loading state sits in the frame with ui/TableState.svelte.
- * The defaults are wrapped in :where() so they weigh nothing: a table's own classes (.faint, a column style) win.
- *   rows   36 px single-line (.dense 28, .tall 48 for a name over one meta line); header 32 px
- *   header 12/500 tertiary, sentence case; numbers right-aligned (.r) and tabular, the unit in the header
- *   lead   the first cell of a row is 13/500 primary (the row's name); its second line is .sub (12/400 tertiary)
+ * Data tables: the one table system (DESIGN_DIRECTION §2.7, design/UNIFIED.md §2 Tables). Every <table class="table">
+ * gets the same header, row heights, first column, hover, selection bar and keyboard focus from here; a sortable header
+ * is ui/SortHeader, arrow-key rows are ui/rowNav.ts, and an empty / error / loading state sits in the frame with
+ * ui/TableState. The defaults are wrapped in :where() so they weigh nothing: a table's own classes (.faint, a column
+ * style) win.
+ *   rows   36 px single-line, the header row too (.dense 28; .tall 48 only where a phone or tablet stacks a meta line)
+ *   header 12/500 text.secondary, sentence case; numbers right-aligned (.r) and tabular, the unit in the header; the
+ *          number a list is ranked by in text.primary 500, the others text.secondary
+ *   lead   the first cell of a row is 13/500 primary (the row's name); a second fact gets its own column, never a
+ *          second line (.sub, 12/400 tertiary, is for the smaller tiers' stacked rows)
  *   rows that open something carry .link (hover fill, pointer); selected rows .on (bg.active + the 2 px ink bar, --select-bar)
  */
 .table {
@@ -325,13 +336,13 @@ a.ident:hover {
   font-variant-numeric: tabular-nums;
 }
 :where(.table) th {
-  height: 32px;
+  height: var(--size-row);
   padding: 0 var(--space-3);
   text-align: left;
   font-size: var(--type-sm-size);
   line-height: var(--type-sm-line);
   font-weight: var(--weight-medium);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   white-space: nowrap;
   border-bottom: 1px solid var(--line-subtle);
 }

@@ -80,12 +80,13 @@ impl FoloApp {
             Some((s.epoch, smp.pred.clone()))
         });
         let show_preds = sample_ctx.as_ref().is_some_and(|(_, v)| *v != crate::app::SampleView::Truth);
-        // Shown predictions (score ≥ 0.30, as the run page draws them). Box indices: the labels
-        // first (0..n), then these (n..), for hover, focus and the list rows alike.
+        // Shown predictions (at the run page's minimum confidence, as it draws them). Box indices:
+        // the labels first (0..n), then these (n..), for hover, focus and the list rows alike.
+        let conf = self.sample_conf;
         let preds: Option<Vec<crate::api::ScoredBox>> = sample_preds
             .as_ref()
             .filter(|_| show_preds)
-            .map(|(_, ps)| ps.iter().filter(|p| p.score >= 0.3).cloned().collect());
+            .map(|(_, ps)| ps.iter().filter(|p| p.score >= conf).cloned().collect());
         let n_labels = meta.boxes.len();
         let focused =
             (0..n_labels).find(|i| self.fh(format!("insp-box-{i}"), cx).is_focused(window)).or_else(|| {
@@ -129,7 +130,7 @@ impl FoloApp {
             match (&sample_preds, show_preds) {
                 (Some((epoch, _)), true) => (
                     format!("{name} · epoch {epoch}"),
-                    "Predictions ≥ 0.30 solid · labels dashed".to_string(),
+                    format!("Predictions ≥ {conf:.2} solid · labels dashed"),
                 ),
                 (Some((epoch, _)), false) => {
                     (format!("{name} · epoch {epoch}"), "Labels (the run page's view)".to_string())

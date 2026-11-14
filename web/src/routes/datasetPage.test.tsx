@@ -155,6 +155,22 @@ describe('Dataset page', () => {
     expect(train.getAttribute('href')).toBe('#/runs/new?dataset=ds_shapes');
     expect(target.querySelector('.no-train')).toBeNull();
   });
+
+  // design/UNIFIED.md §4: the name, the format as a small tag, one meta line; the tabs with their counts.
+  it('tags the name with the format and gives the tabs their counts ("Images 2,400", "Statistics · 3 findings")', async () => {
+    const ds = await api.dataset('ds_shapes_hard');
+    open('/datasets/ds_shapes_hard');
+    const tag = await until(() => target.querySelector('.page header .title-line .badge-slot'), 'the format tag');
+    expect(tag.textContent).toBe(ds.format);
+    expect(target.querySelector('.page header .sub')?.textContent).not.toContain(ds.format);
+    const tabs = await until(() => {
+      const t = [...target.querySelectorAll('[role="tab"]')].map((x) => x.textContent?.replace(/\s+/g, ' ').trim());
+      return t.length === 2 && /findings?$/.test(t[1] ?? '') ? t : null;
+    }, 'the tabs with the findings');
+    expect(tabs[0]).toMatch(/^Images ?[\d,]+$/);
+    expect(tabs[0]).toContain('5,000');
+    expect(tabs[1]).toMatch(/^Statistics ?· \d+ findings?$/);
+  });
 });
 
 describe('Dataset page history', () => {

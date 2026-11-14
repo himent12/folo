@@ -177,7 +177,7 @@ export default function LineEnds(props: LineEndsProps) {
 
 css`
   .end-dot {
-    stroke: var(--bg-panel);
+    stroke: var(--plot-bg, var(--bg-panel));
     stroke-width: 1.5;
   }
   /* A failed run's line ends in a cross, over a halo in the panel colour like the dots. */
@@ -185,7 +185,7 @@ css`
     fill: none;
     stroke-width: 2;
     stroke-linecap: round;
-    filter: drop-shadow(0 0 1px var(--bg-panel));
+    filter: drop-shadow(0 0 1px var(--plot-bg, var(--bg-panel)));
   }
   /* Still training: a filled lime dot (style:fill) whose heartbeat, a ring every 2.4 s, is StatusBadge's \`live-pulse\`
      drawn in SVG; off under reduced motion, where the dot still says "now". */
@@ -218,7 +218,7 @@ css`
     font-size: var(--type-sm-size);
     font-weight: var(--weight-medium);
     paint-order: stroke;
-    stroke: var(--bg-panel);
+    stroke: var(--plot-bg, var(--bg-panel));
     stroke-width: 3px;
   }
   .end-label.hl {
@@ -246,7 +246,7 @@ css`
     stroke-width: 1.5;
   }
   .marker:not([data-merged]) .ring {
-    fill: var(--bg-panel);
+    fill: var(--plot-bg, var(--bg-panel));
   }
   /* A new best: a ring grows out of the marker and fades, once, over the chart duration. */
   .marker .pulse {
@@ -305,7 +305,7 @@ css`
     font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
     paint-order: stroke;
-    stroke: var(--bg-panel);
+    stroke: var(--plot-bg, var(--bg-panel));
     stroke-width: 3px;
   }
 `;

@@ -6,7 +6,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::cells::{name_with_badges, num_cell};
+use super::cells::num_cell;
 use super::format::source_line;
 use crate::api::time;
 use crate::app::{FoloApp, Route, act};
@@ -56,10 +56,17 @@ impl FoloApp {
         }
         let list = self.bench.list.ready().cloned();
         let subtitle = match (&list, self.bench.list.error()) {
-            (Some(l), _) => format!(
-                "{} · your images under hard conditions, scored on five axes",
-                plural(l.len(), "benchmark")
-            ),
+            // What the page holds (§2 page header): how many, and how many have an entry running.
+            (Some(l), _) => {
+                let running = l.iter().filter(|b| b.active).count();
+                let images: u64 = l.iter().map(|b| b.images).sum();
+                let mut facts = vec![plural(l.len(), "benchmark")];
+                if running > 0 {
+                    facts.push(format!("{running} running"));
+                }
+                facts.push(counted(images, "image", "images"));
+                facts.join(" · ")
+            }
             (None, Some(_)) => "The benchmark list didn't load".to_string(),
             _ if self.bench_unsupported() => "Not available on this server".to_string(),
             _ => "Loading…".to_string(),
@@ -89,9 +96,23 @@ impl FoloApp {
             return self.page_frame(&t, header, err, cx);
         }
         let form = self.bench.new_bench.is_some().then(|| self.new_bench_form(&t, window, cx));
-        // The name column's width: what the fixed columns, their gaps and the row padding leave.
-        let name_w =
-            (self.content_width(window) - (72. + 84. + 64. + 220. + 84.) - 5. * 16. - 42.).clamp(120., 640.);
+        // Single-line rows; the optional columns drop whole where the window is narrow (`BenchCols`),
+        // and the name takes what the others leave.
+        let content = self.content_width(window);
+        let c = BenchCols::fit(content);
+        let name_w = (content - c.fixed() - BENCH_SLACK).clamp(BENCH_NAME_MIN, 480.);
+        // The leader's name is cut before a benchmark's name, never while the Benchmark column has
+        // room it doesn't use: the room past the longest name (and the running dot) goes to Leader.
+        let name_need = list
+            .iter()
+            .flat_map(|l| l.iter())
+            .map(|b| {
+                let w = f32::from(crate::charts::text_width(window, &b.name, ty::SM.size)) * 1.05;
+                w.ceil() + if b.active { 20. } else { 0. }
+            })
+            .fold(BENCH_NAME_FLOOR, f32::max);
+        let leader_w = LEADER_W + (name_w - name_need).max(0.).floor();
+        let name_w = name_w.min(name_need);
         let now = self.store.api.now();
         let head = div()
             .flex()
@@ -101,12 +122,14 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(th(&t, "Benchmark").flex_1().min_w(px(200.)))
+            .child(th(&t, "Benchmark").flex_1().min_w(px(name_w)))
+            .child(th(&t, "Images from").w(px(FROM_W)).flex_none())
             .child(num_cell(72., th(&t, "Images")))
-            .child(num_cell(84., th(&t, "Conditions")))
+            .when(c.classes, |d| d.child(num_cell(64., th(&t, "Classes"))))
+            .when(c.conditions, |d| d.child(num_cell(84., th(&t, "Conditions"))))
             .child(num_cell(64., th(&t, "Entries")))
-            .child(th(&t, "Leader").w(px(220.)).flex_none())
-            .child(num_cell(84., th(&t, "Created")));
+            .child(th(&t, "Leader").w(px(leader_w)).flex_none())
+            .when(c.created, |d| d.child(num_cell(84., th(&t, "Created"))));
         let table = match list {
             None => panel(&t).child(head).child(loading_rows(&t, "benches", 3)).into_any_element(),
             Some(l) if l.is_empty() => panel(&t)
@@ -124,53 +147,101 @@ impl FoloApp {
                     .map(|b| {
                         let key = format!("bench-row-{}", b.id);
                         let id = b.id.clone();
+                        // The leader: its score (what the board ranks by), then its name.
                         let leader = match &b.best {
                             Some(best) => div()
                                 .flex()
                                 .items_center()
                                 .gap(px(8.))
                                 .min_w_0()
-                                .child(text(ty::SM, t.text_primary).tnum().font_weight(FontWeight::MEDIUM).child(format!("{:.1}", best.score)))
+                                .child(
+                                    text(ty::SM, t.text_primary)
+                                        .tnum()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .flex_none()
+                                        .child(format!("{:.1}", best.score)),
+                                )
                                 .child(text(ty::SM, t.text_secondary).ellipsis().min_w_0().child(best.name.clone()))
                                 .when(best.partial, |d| d.child(badge(&t, "partial", Tone::Neutral))),
-                            None => text(ty::SM, t.text_tertiary).child(if b.active { "Running…" } else { "No finished entry" }),
+                            None => text(ty::SM, t.text_tertiary)
+                                .child(if b.active { "Running…" } else { "No finished entry" }),
                         };
                         let at = time::parse(&b.created);
+                        // A running entry or loop: the ringed lime dot after the name, its word in the tip.
+                        let active_w = if b.active { 14. } else { 0. };
+                        let name = div()
+                            .id(SharedString::from(format!("bench-name-{}", b.id)))
+                            .flex_1()
+                            .min_w(px(name_w))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .when(crate::ui::may_overflow(&b.name, ty::SM.size, name_w - active_w), |d| {
+                                d.tooltip(crate::controls::tip(b.name.clone(), None))
+                            })
+                            .child(
+                                text(ty::SM, t.text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .max_w(px(name_w - active_w))
+                                    .ellipsis()
+                                    .child(b.name.clone()),
+                            )
+                            .when(b.active, |d| {
+                                d.child(
+                                    div()
+                                        .id(SharedString::from(format!("bench-live-{}", b.id)))
+                                        .tooltip(crate::controls::tip("An entry or loop is running", None))
+                                        .child(status_mark(
+                                            StatusKind::Running,
+                                            StatusKind::Running.hue(&t),
+                                            format!("bench-{}", b.id),
+                                        )),
+                                )
+                            });
                         let row = div()
                             .id(SharedString::from(key.clone()))
                             .flex()
                             .items_center()
                             .gap(px(16.))
                             .px(px(16.))
-                            .h(px(52.))
+                            .h(px(36.))
                             .border_b_1()
                             .border_color(t.line_subtle)
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
+                            .child(name)
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(200.))
-                                    .flex()
-                                    .flex_col()
-                                    .child(name_with_badges(
-                                        &t,
-                                        window,
-                                        &b.name,
-                                        if b.active { &[("Running", Tone::Accent)] } else { &[] },
-                                        name_w,
-                                    ))
-                                    .child(text(ty::SM, t.text_tertiary).ellipsis().child(source_line(b))),
+                                text(ty::SM, t.text_secondary)
+                                    .w(px(FROM_W))
+                                    .flex_none()
+                                    .ellipsis()
+                                    .child(source_line(b)),
                             )
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(int(b.images))))
-                            .child(num_cell(84., text(ty::SM, t.text_secondary).tnum().child(b.plan.conditions.len().to_string())))
+                            .when(c.classes, |d| {
+                                d.child(num_cell(
+                                    64.,
+                                    text(ty::SM, t.text_secondary).tnum().child(b.classes.len().to_string()),
+                                ))
+                            })
+                            .when(c.conditions, |d| {
+                                d.child(num_cell(
+                                    84.,
+                                    text(ty::SM, t.text_secondary).tnum().child(b.plan.conditions.len().to_string()),
+                                ))
+                            })
                             .child(num_cell(64., text(ty::SM, t.text_secondary).tnum().child(b.entries.to_string())))
-                            .child(div().w(px(220.)).flex_none().min_w_0().child(leader))
-                            .child(num_cell(
-                                84.,
-                                text(ty::SM, t.text_tertiary).tnum().child(at.map_or(String::new(), |c| time::ago(c, now))),
-                            ));
+                            .child(div().w(px(leader_w)).flex_none().min_w_0().child(leader))
+                            .when(c.created, |d| {
+                                d.child(num_cell(
+                                    84.,
+                                    text(ty::SM, t.text_tertiary)
+                                        .tnum()
+                                        .whitespace_nowrap()
+                                        .child(at.map_or(String::new(), |c| time::ago(c, now))),
+                                ))
+                            });
                         self.bind(row, &key, 0., window, cx, act(move |this, w, cx| this.navigate(Route::Bench(id.clone()), w, cx)))
                             .into_any_element()
                     })
@@ -180,5 +251,61 @@ impl FoloApp {
         };
         let body = div().flex().flex_col().gap(px(16.)).children(form).child(table);
         self.page_frame(&t, header, body, cx)
+    }
+}
+
+/// The narrowest the Benchmark column gets; optional columns drop before it would go under.
+const BENCH_NAME_MIN: f32 = 140.;
+/// The narrowest it gets when its names are short and Leader takes its spare room ("Benchmark").
+const BENCH_NAME_FLOOR: f32 = 96.;
+/// Row padding, the panel's borders and slack for rounding.
+const BENCH_SLACK: f32 = 32. + 2. + 8.;
+const FROM_W: f32 = 140.;
+const LEADER_W: f32 = 180.;
+
+/// Which of the Benchmarks table's optional columns show at a content width: Conditions, then
+/// Classes, then Created, each while the row still fits with the name at [`BENCH_NAME_MIN`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BenchCols {
+    conditions: bool,
+    classes: bool,
+    created: bool,
+}
+
+/// Which of the optional columns a step of the fit turns on.
+type Flag = fn(&mut BenchCols) -> &mut bool;
+impl BenchCols {
+    /// Images from, Images, Entries and Leader always show.
+    const BASE: [f32; 4] = [FROM_W, 72., 64., LEADER_W];
+
+    fn fit(content: f32) -> Self {
+        let mut c = BenchCols::default();
+        let order: [(Flag, f32); 3] =
+            [(|c| &mut c.conditions, 84.), (|c| &mut c.classes, 64.), (|c| &mut c.created, 84.)];
+        for (flag, w) in order {
+            if c.fixed() + w + 16. + BENCH_NAME_MIN + BENCH_SLACK > content {
+                break;
+            }
+            *flag(&mut c) = true;
+        }
+        c
+    }
+
+    /// The fixed columns' widths and their gaps.
+    fn fixed(&self) -> f32 {
+        let opt = [(self.conditions, 84.), (self.classes, 64.), (self.created, 84.)];
+        Self::BASE.iter().map(|w| w + 16.).sum::<f32>()
+            + opt.iter().filter(|(on, _)| *on).map(|(_, w)| w + 16.).sum::<f32>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BenchCols;
+
+    #[test]
+    fn every_column_at_1280_and_whole_columns_drop_below() {
+        assert_eq!(BenchCols::fit(1000.), BenchCols { conditions: true, classes: true, created: true });
+        assert_eq!(BenchCols::fit(872.), BenchCols { conditions: true, classes: false, created: false });
     }
 }

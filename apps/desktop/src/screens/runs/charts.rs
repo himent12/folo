@@ -10,7 +10,7 @@ use folo_ui::{
 
 use crate::api::{Run, RunExt, RunStatus, time};
 use crate::app::{FoloApp, act};
-use crate::charts::{HoverFn, LineChart, Marker, Series, line_chart};
+use crate::charts::{End, HoverFn, LineChart, Marker, Series, line_chart};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
@@ -28,6 +28,16 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         let live = r.status == RunStatus::Running;
+        // How each line ends: while it trains the chart's first series in the lime dot and the
+        // others in a dot of their hue (`trail`), else the run's outcome (charts::marks).
+        let end = match r.status {
+            RunStatus::Running | RunStatus::Stopping => End::Live,
+            RunStatus::Completed => End::Done,
+            RunStatus::Stopped => End::Stopped,
+            RunStatus::Failed => End::Failed,
+            RunStatus::Queued => End::None,
+        };
+        let trail = end.trailing();
         let hover = self.chart_hover;
         let (split, map_title) = (self.eval_split(r), self.map_title(r));
         // The P/R chart's operating point follows the cursor: each epoch's own best-F1 confidence.
@@ -52,11 +62,7 @@ impl FoloApp {
                         .collect()
                 })
                 .unwrap_or_default();
-            let total = if r.status.is_active() || r.status == RunStatus::Completed {
-                r.epochs as f32
-            } else {
-                r.epoch.max(1) as f32
-            };
+            let total = self.run_x_total(r);
             let xs: Vec<(f32, f32)> = epochs.iter().map(|e| (e.0, 0.)).collect();
             let at = match hover {
                 Some(f) => crate::charts::nearest(&xs, total * f),
@@ -74,12 +80,10 @@ impl FoloApp {
             })
             .ok();
         });
-        // Active and completed runs show the whole schedule; cut-short runs zoom to the epochs they ran.
-        let total = if r.status.is_active() || r.status == RunStatus::Completed {
-            r.epochs as f32
-        } else {
-            r.epoch.max(1) as f32
-        };
+        // The planned run while it trains (and once it completed); fitted to the epochs trained
+        // for a run cut short, or when "So far" is picked.
+        let total = self.run_x_total(r);
+        let planned = total >= r.epochs as f32;
         // Where mosaic closes, as the engine runs it (the capped value: 7 of a 15-epoch run's
         // asked-for 10, docs/DOGFOOD-3 S2).
         let close_n = r.close_mosaic_epochs();
@@ -112,7 +116,7 @@ impl FoloApp {
             // Same x ticks in all four charts.
             c.x_ticks = Some(6);
             c.ease_key = crate::charts::ease_key(&r.id);
-            if live {
+            if live && planned {
                 c.future = Some((r.epoch as f32, SharedString::default()));
             }
             c
@@ -122,10 +126,17 @@ impl FoloApp {
         let (primary_h, secondary_h) = if short { (140., 110.) } else { (220., 140.) };
         let names = ["box", "cls", "dfl", "total"];
         let colors = t.loss_colors();
+        // Total leads the loss chart (its lime end while live); without it, the first part shown.
+        let lead = if self.loss_parts[3] { 3 } else { (0..4).find(|&i| self.loss_parts[i]).unwrap_or(3) };
+        // Each loss line's name at its end, in its hue's text ink (total in ink).
+        let label_inks = [t.chart_text[1], t.chart_text[4], t.chart_text[3], t.text_primary];
         let loss_series: Vec<Series> = (0..4)
             .filter(|&i| self.loss_parts[i])
             .map(|i| {
-                let s = Series::new(names[i], colors[i], d.loss[i].clone()).smooth(LOSS_EMA).live(live);
+                let s = Series::new(names[i], colors[i], d.loss[i].clone())
+                    .smooth(LOSS_EMA)
+                    .end(if i == lead { end } else { trail })
+                    .end_label(label_inks[i]);
                 match i {
                     1 => s.dashed(),
                     2 => s.dotted(),
@@ -140,32 +151,33 @@ impl FoloApp {
             (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_min[i]).fold(f32::INFINITY, f32::min);
         loss.log_y = true;
         loss.y_range = Some(log_range(loss_min, loss_max));
+        loss.end_labels = true;
         let mut map = base(
             "run-map",
             vec![
-                Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(live).width(1.75),
+                Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().end(end).width(1.75),
                 // Dashed: the pair reads apart without colour (as in the legend).
-                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed().live(live),
+                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed().end(trail),
             ],
             primary_h,
         );
-        map.y_range = Some((0., 1.));
-        if live {
+        // From 0 to a little over the highest value, 3 to 5 round gridlines (charts::domain).
+        let map_max = series_max(&[&d.map50, &d.map50_95]);
+        map.unit_max = Some(map_max);
+        if live && planned {
             map.future = Some((
                 r.epoch as f32,
                 r.eta_s.map_or("remaining".into(), |s| format!("ETA {}", time::duration(s)).into()),
             ));
         }
-        map.y_fmt = Some(|v| format!("{v:.2}"));
-        if let Some(b) = &r.best {
-            map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
-        }
+        // The best epoch: a hollow ink ring on its series ("○ best" in the legend).
+        map.best = r.best.as_ref().map(|b| (b.epoch as f32, b.map50_95));
         // A failed run marks where it stopped, on the charts that tell the story.
         if r.status == RunStatus::Failed {
             let stopped = d.loss[3].last().map_or(r.epoch as f32, |p| p.0);
             let fail = Marker {
                 x: stopped,
-                label: format!("failed during epoch {}", r.epoch).into(),
+                label: format!("failed during epoch {}", r.failed_epoch()).into(),
                 color: t.danger_text,
                 lane: Some(0),
             };
@@ -176,30 +188,17 @@ impl FoloApp {
             "run-pr",
             vec![
                 // One hue for the pair, told apart by dash: no other chart here uses slot 5.
-                Series::new("precision", t.chart_series[2], d.precision.clone()).live(live),
-                Series::new("recall", t.chart_series[3], d.recall.clone()).dashed().live(live),
+                Series::new("precision", t.chart_series[2], d.precision.clone()).end(end),
+                Series::new("recall", t.chart_series[3], d.recall.clone()).dashed().end(trail),
             ],
             secondary_h,
         );
-        // From a tenth under the lowest value (0 while either is still low), so a converged pair
-        // spreads over the plot instead of its top half.
-        let low = d.precision.iter().chain(d.recall.iter()).map(|p| p.1).fold(f32::INFINITY, f32::min);
-        let floor = pr_floor(low);
-        pr.y_range = Some((floor, 1.));
-        // From 0: three labels (0, 0.50, 1.00), as the lower row's plot is under 180 px, where five
-        // crowd. A raised floor (0.4 or more) labels every 0.2 from it, at most four, so the axis
-        // never reads as starting at 0.
-        pr.y_ticks = 2;
-        if floor > 0. {
-            // Every 0.2 from the floor: 0.40 / 0.60 / 0.80 / 1.00 at most (the grid the other
-            // charts' ticks sit on, not a computed middle).
-            pr.y_tick_values =
-                Some((0..).map(|k| floor + 0.2 * k as f32).take_while(|v| *v <= 1.001).collect());
-        }
-        pr.y_fmt = Some(|v| format!("{v:.2}"));
+        // A 0–1 pair too: from 0, so a converged pair still reads as high, not as a fall.
+        let pr_max = series_max(&[&d.precision, &d.recall]);
+        pr.unit_max = Some(pr_max);
         let mut lr = base(
             "run-lr",
-            vec![Series::new("lr", t.text_tertiary, d.lr.clone()).area().live(live)],
+            vec![Series::new("lr", t.text_tertiary, d.lr.clone()).area().end(end)],
             secondary_h,
         );
         // The top on a nice tick above the peak, so the top gridline is labelled and the warm-up
@@ -306,18 +305,7 @@ impl FoloApp {
         ];
         if let Some(b) = &r.best {
             map_items.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
-                    .child(text(ty::SM, t.text_secondary).child("best"))
-                    .child(text(ty::SM, t.text_primary).tnum().child(format!(
-                        "{} @ {}",
-                        f3(b.map50_95),
-                        b.epoch
-                    )))
-                    .into_any_element(),
+                crate::ui::best_legend(&t, format!("{} @ {}", f3(b.map50_95), b.epoch)).into_any_element(),
             );
         }
         let map_legend = div().flex().items_center().gap(px(12.)).children(map_items).into_any_element();
@@ -383,19 +371,83 @@ impl FoloApp {
                     .child(div().flex().min_w_0().flex_grow().flex_basis(folo_ui::relative(gb)).child(b))
             }
         };
+        // "So far / All N" in the first chart's header fits every chart's x axis to the epochs
+        // trained, or shows the planned run; only while those differ.
+        let x_switch = (r.epoch > 0 && r.epoch < r.epochs).then(|| {
+            let all = format!("All {}", r.epochs);
+            self.segmented(
+                "run-x-fit",
+                &["So far", all.as_str()],
+                if planned { 1 } else { 0 },
+                window,
+                cx,
+                Rc::new(|this, i, _, _| this.run_x_fit = Some(i == 0)),
+            )
+            .tooltip(crate::controls::tip(
+                "The x axis of every chart: the epochs trained, or the planned run",
+                None,
+            ))
+            .into_any_element()
+        });
+        // A 0–1 axis cut under 0.25 says so beside its qualifier.
+        let zoom = |q: &str, max: f32| {
+            if crate::charts::domain::unit_zoomed(max) {
+                format!("{q} · {}", crate::charts::domain::UNIT_ZOOM_NOTE)
+            } else {
+                q.to_string()
+            }
+        };
+        let map_card = panel(&t).flex_1().min_w_0().child(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .child(
+                    panel_header(&t, map_title)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(12.))
+                                .child(
+                                    text(ty::SM, t.text_tertiary)
+                                        .font_weight(folo_ui::FontWeight::MEDIUM)
+                                        .child(zoom("per epoch", map_max)),
+                                )
+                                .children(x_switch),
+                        )
+                        .when(short, |d| d.h(px(32.))),
+                )
+                .child(
+                    div()
+                        .h(px(if short { 24. } else { 28. }))
+                        .px(px(16.))
+                        .pt(px(if short { 4. } else { 6. }))
+                        .flex()
+                        .items_center()
+                        .child(map_legend),
+                )
+                .child(div().px(px(12.)).pb(px(6.)).child(line_chart(&t, map))),
+        );
         let grid = div()
             .flex()
             .flex_col()
             .gap(px(16.))
             .child(row(
-                card(map_title, "per epoch", map_legend, line_chart(&t, map)).into_any_element(),
+                map_card.into_any_element(),
                 card("Training loss", &loss_caption, loss_legend, line_chart(&t, loss)).into_any_element(),
                 if pair_a { -0.5 } else { -0.6 },
                 if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
-                card("Precision / Recall", &pr_caption(pr_conf, split, true), pr_legend, line_chart(&t, pr))
-                    .into_any_element(),
+                card(
+                    "Precision / Recall",
+                    &zoom(&pr_caption(pr_conf, split, true), pr_max),
+                    pr_legend,
+                    line_chart(&t, pr),
+                )
+                .into_any_element(),
                 card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,
                 0.4,
@@ -429,27 +481,28 @@ fn log_range(lo: f32, hi: f32) -> (f32, f32) {
     (y0, y1)
 }
 
-/// The P/R chart's lower bound: the 0.2 step at least 0.05 under the lowest value, or 0 when that
-/// is under 0.4 (or there is no data yet).
-fn pr_floor(low: f32) -> f32 {
-    if !low.is_finite() {
-        return 0.;
+/// The highest finite value of some series (0 without data): what a fitted 0–1 axis is fitted to.
+fn series_max(series: &[&[(f32, f32)]]) -> f32 {
+    series.iter().flat_map(|s| s.iter()).map(|p| p.1).filter(|v| v.is_finite()).fold(0., f32::max)
+}
+
+impl FoloApp {
+    /// The run charts' x extent, in epochs: the planned run, or (So far, and by default for a run that
+    /// ended short of its plan) the epochs trained.
+    pub(super) fn run_x_total(&self, r: &Run) -> f32 {
+        let fit = self.run_x_fit.unwrap_or(!(r.status.is_active() || r.status == RunStatus::Completed));
+        if fit { r.epoch.max(1) as f32 } else { r.epochs.max(1) as f32 }
     }
-    // Steps of 0.2 from 0.4 (a 0.2 floor bought little and read as arbitrary).
-    let f = ((low - 0.05) * 5.).floor() / 5.;
-    if f < 0.4 { 0. } else { f.min(0.8) }
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn pr_floor_steps() {
-        assert_eq!(super::pr_floor(f32::INFINITY), 0.);
-        assert_eq!(super::pr_floor(0.12), 0.);
-        assert!((super::pr_floor(0.47) - 0.4).abs() < 1e-6);
-        assert_eq!(super::pr_floor(0.36), 0.);
-        assert!((super::pr_floor(0.71) - 0.6).abs() < 1e-6);
-        assert!((super::pr_floor(0.99) - 0.8).abs() < 1e-6);
+    fn a_fitted_axis_takes_the_highest_finite_value() {
+        let a = [(1., 0.2), (2., f32::NAN), (3., 0.6)];
+        let b = [(1., 0.4)];
+        assert_eq!(super::series_max(&[&a, &b]), 0.6);
+        assert_eq!(super::series_max(&[]), 0.);
     }
 
     use super::log_range;

@@ -246,7 +246,7 @@ export default function Outcome(props: OutcomeProps) {
             </>
           )}
         >
-          Batch {props.run.config.batch} at {props.run.config.imgsz} px with <Ident value={props.run.config.arch} /> did not fit, at epoch {props.run.epoch}.
+          Batch {props.run.config.batch} at {props.run.config.imgsz} px with <Ident value={props.run.config.arch} /> did not fit{failedEpoch(props.run) === null ? ' before its first step' : `, at epoch ${failedEpoch(props.run)}`}.
         </Callout>
       ) : status() === 'failed' ? (
         // What went wrong in plain words by its error code, the server's own message under Details. A failure is not
@@ -297,8 +297,8 @@ export default function Outcome(props: OutcomeProps) {
           {summary.get() ?? props.run.error}
         </Callout>
       ) : status() === 'completed' && short.get() ? (
-        // A run that completed but was too short to learn: the outcome and the warning in one callout, the fix its first
-        // action, the model's hand-off after it.
+        // A run that completed but was too short to learn: the outcome and the warning in one callout, the fix its
+        // action (the model's hand-off is the header's Open model and Try in Playground).
         <Callout
           tone="success"
           icon={CircleCheck}
@@ -311,29 +311,11 @@ export default function Outcome(props: OutcomeProps) {
               {earlyFact()}
             </>
           )}
-          actions={() => (
-            <>
-              {scheduleFix()}
-              {handOff()}
-            </>
-          )}
+          actions={scheduleFix}
           more={why}
         />
-      ) : status() === 'completed' ? (
-        <Callout
-          tone="success"
-          icon={CircleCheck}
-          title={`Completed in ${duration(props.elapsed)}`}
-          brief
-          facts={() => (
-            <>
-              {bestFact()}
-              {earlyFact()}
-              <span>saved as a model</span>
-            </>
-          )}
-          actions={handOff}
-        />
+        // A plain completion has no callout (design/UNIFIED.md §4 Run): its duration is the Duration tile, its best the
+        // mAP tile's caption, an early stop the Epoch tile's, and its model the header's Open model.
       ) : status() === 'stopped' ? (
         // A run stopped before its first epoch ended has no checkpoint: it says so, and starts again rather than resumes.
         <Callout

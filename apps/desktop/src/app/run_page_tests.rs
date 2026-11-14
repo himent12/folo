@@ -124,6 +124,25 @@ fn a_final_read_that_fails_does_not_leave_the_history_loading() {
 }
 
 #[test]
+fn a_history_that_failed_to_load_draws_its_failure_in_per_class_with_the_retry() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| this.navigate(crate::app::Route::Run("run_52e8".into()), w, cx));
+    app.frame(window.into());
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.focus.borrow().contains_key("per-class-retry"), "loaded: the classes, no retry");
+        let down = crate::api::ApiError::new("server_unreachable", "Could not reach folo serve");
+        this.store.run_data.insert("run_52e8".into(), Load::Failed(down));
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let drawn = this.focus.borrow();
+        assert!(drawn.contains_key("run-data-retry"), "the charts say it");
+        assert!(drawn.contains_key("per-class-retry"), "and Per class, not skeletons for good");
+    });
+}
+
+#[test]
 fn a_released_runs_instance_not_confirmed_terminated_says_it_may_still_be_billed() {
     use PhaseState::*;
     // RunPod hasn't confirmed the termination of the training run's instance (the demo's +trouble).
@@ -276,5 +295,33 @@ fn a_released_run_reads_provisional_while_the_instance_list_loads() {
         assert!(!this.released_instance_unknown(&c), "but no read failed: no alarm");
         let usd = crate::ui::fmt_cost(c.cost_usd.unwrap());
         assert_eq!(panel_cost(&c, None, true), format!("{usd} so far"));
+    });
+}
+
+#[test]
+fn an_earlier_epochs_samples_landing_after_leaving_the_page_are_dropped() {
+    // A past epoch was picked on the run page, and the page was left before its samples came.
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let held = api.hold("samples run_52e8");
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                this.sample_epoch = Some(5);
+                this.ensure_samples("run_52e8", cx);
+            })
+            .unwrap()
+    });
+    app.run_until_held(1);
+    held.wait_held();
+    app.update(|cx| window.update(cx, |this, w, cx| this.navigate(crate::app::Route::Runs, w, cx)).unwrap());
+    drop(held);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.sample_epoch, None, "the next run page starts on the latest epoch");
+        assert!(
+            !this.store.samples.contains_key("run_52e8"),
+            "epoch 5's late answer must not stand in for the latest"
+        );
     });
 }

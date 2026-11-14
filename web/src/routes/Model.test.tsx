@@ -6,6 +6,7 @@ import { hub } from '$lib/api/index';
 import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
 import type { ModelEval } from '$lib/api/types';
+import { metric } from '$lib/format';
 import { parse, router } from '$lib/router';
 import Model from './Model';
 
@@ -44,11 +45,11 @@ afterEach(() => {
 
 const text = (sel: string) => target.querySelector(sel)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
 
-/** The model page, once its evaluation (the per-class footer and the matrix's notes) and its run's dataset are in. */
+/** The model page, once its evaluation (the per-class table's footer, in the curves' panel, and the matrix's notes) and its run's dataset are in. */
 async function open(id: string) {
   router.route = parse(`#/models/${id}`);
   c = mount(Model, { target });
-  await until(() => target.querySelector('#per-class .foot') && target.querySelector('#cm .cm-notes'), 'the evaluation');
+  await until(() => target.querySelector('#pr .foot') && target.querySelector('#cm .cm-notes'), 'the evaluation');
 }
 
 describe('Model: what was evaluated', () => {
@@ -73,9 +74,14 @@ describe('Model: what was evaluated', () => {
     // names no split; the curves, the per-class table and Details do.
     expect(target.querySelector('section.kpis')?.getAttribute('aria-label')).toBe('Metrics stored with the file');
     expect(text('#pr-title .meta')).toBe('fasteners-mini · training split · IoU 0.5');
-    expect(text('#per-class .foot')).toContain('24 training images of fasteners-mini');
+    expect(text('#pr .foot')).toContain('24 training images of fasteners-mini');
     const dd = [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Evaluated on')?.querySelector('dd');
     expect(dd?.querySelector('a')?.getAttribute('href')).toContain('/datasets/ds_fasteners_mini');
+    // Details (design/UNIFIED.md §4 Model): three columns of label / value rows, the latency among them.
+    expect(target.querySelectorAll('#details .col')).toHaveLength(3);
+    const labels = [...target.querySelectorAll('#details .kv dt')].map((d) => d.textContent);
+    expect(labels).toContain('Reference latency');
+    expect(labels).not.toContain('Architecture latency');
     // "Validation" is said only where the notice says there is none.
     expect(target.textContent).not.toMatch(/validation (images of|split of|metrics)/i);
   });
@@ -91,7 +97,7 @@ describe('Model: what was evaluated', () => {
     await open('m_fast_n');
     await until(() => text('#pr-title .meta') === 'fasteners · IoU 0.5', "the run's dataset");
     expect(target.querySelector('[role="note"][aria-label="Evaluation split"]')).toBeNull();
-    expect(text('#per-class .foot')).not.toContain('validation');
+    expect(text('#pr .foot')).not.toContain('validation');
     expect(text('#cm .cm-notes')).toContain('does not report');
     expect(text('#cm .cm-notes')).not.toContain('conf 0.25');
   });
@@ -160,5 +166,58 @@ describe('Model: an imported file', () => {
     const help = await until(() => target.querySelector('#metric-help'), 'the help');
     expect(help.textContent).toContain('Not recorded: these numbers came with the file');
     expect(help.textContent).toContain("this server's own evaluation, on fasteners-mini · training split");
+  });
+});
+
+describe('Model: one look (design/UNIFIED.md §4 Model)', () => {
+  it('opens on a strip of five tiles: the headline, mAP50, the precision / recall pair, the parameters and the file', async () => {
+    await open('m_fast_n');
+    const tiles = [...target.querySelectorAll('section.kpis .kpi')];
+    expect(tiles.map((t) => t.querySelector('.k-label')?.textContent?.trim())).toEqual(['mAP50-95', 'mAP50', 'Precision / Recall', 'Parameters', 'File size']);
+    expect(tiles[0]!.classList.contains('hero')).toBe(true);
+    const m = await hub.api.model('m_fast_n');
+    expect(tiles[2]!.querySelector('.k-value')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(`${metric(m.metrics!.precision)} / ${metric(m.metrics!.recall)}`);
+    // The figure, then its unit one step smaller; GFLOPs and the file's format as captions.
+    expect(tiles[3]!.querySelector('.k-value .unit')?.textContent?.trim()).toBe('M');
+    expect(tiles[3]!.querySelector('.k-sub')?.textContent).toContain('GFLOPs');
+    expect(tiles[4]!.querySelector('.k-value .unit')?.textContent?.trim()).toBe('MiB');
+    expect(tiles[4]!.querySelector('.k-sub')?.textContent).toContain('.folo');
+    // The headline names what it was measured on, in few words.
+    await until(() => tiles[0]!.querySelector('.k-sub')?.textContent?.includes('fasteners · val'), 'the headline caption');
+  });
+
+  it('puts the per-class table in the curves panel as their legend, and Details in one full-width panel', async () => {
+    await open('m_fast_n');
+    // No separate Per class panel and no folded or sticky rail: the table, its footer and the trace controls are the
+    // curves panel's.
+    expect(target.querySelector('#per-class')).toBeNull();
+    expect(target.querySelectorAll('#pr tbody button.cls')).toHaveLength(8);
+    expect(target.querySelector('#pr button.trace')).not.toBeNull();
+    expect(target.querySelector('.d-line')).toBeNull();
+    expect(text('#details-title')).toBe('Details');
+    const terms = [...target.querySelectorAll('#details dt')].map((d) => d.textContent?.trim());
+    for (const t of ['Architecture', 'Input size', 'Parameters', 'Head', 'File size', 'Classes', 'Source', 'Evaluated on', 'Model id', 'Created'])
+      expect(terms).toContain(t);
+    // In page order: the curves, the matrix, then Details.
+    const order = ['#pr', '#cm', '#details'].map((s) => target.querySelector(s)!);
+    expect(order[0]!.compareDocumentPosition(order[1]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(order[1]!.compareDocumentPosition(order[2]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("switches the matrix's cells between the row's share and the objects counted, the shade staying the share", async () => {
+    await open('m_fast_n');
+    const ev = await hub.api.modelEval('m_fast_n');
+    const cell = () => target.querySelector<HTMLElement>('#cm .cell[data-r="0"][data-c="0"]')!;
+    const shade = cell().style.getPropertyValue('--s');
+    const row = ev.confusion[0]!;
+    expect(cell().querySelector('.v')?.textContent?.trim()).toBe(String(Math.round((row[0]! / row.reduce((a, b) => a + b, 0)) * 100)));
+    expect(text('#cm-title .meta')).toContain('share of each true class');
+    const counts = [...target.querySelectorAll<HTMLButtonElement>('#cm [role="radiogroup"][aria-label="Cell values"] [role="radio"]')].find((b) => b.textContent?.trim() === 'Counts')!;
+    counts.click();
+    flushSync();
+    expect(counts.getAttribute('aria-checked')).toBe('true');
+    expect(cell().querySelector('.v')?.textContent?.trim()).toBe(String(row[0]));
+    expect(cell().style.getPropertyValue('--s')).toBe(shade);
+    expect(text('#cm-title .meta')).toContain('objects per true class');
   });
 });

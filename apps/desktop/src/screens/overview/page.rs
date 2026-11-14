@@ -5,7 +5,6 @@ use folo_ui::{
     AnyElement, Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::SIDE_W;
 use crate::api::RunStatus;
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -153,19 +152,23 @@ impl FoloApp {
             .gap(px(16.))
             .child(div().flex().child(hero))
             .when_some(strip, |d, s| d.child(s))
-            // Narrow windows stack the two lists full width rather than squeeze the runs table.
+            // From 1280 px Recent runs (two thirds) sits beside Best models (one third, at least
+            // 380 px); narrower windows stack the two lists full width rather than squeeze the
+            // runs table.
             .map(|d| {
-                // Side by side only when Recent runs keeps a full row beside Best model (measured,
-                // so a content cap change can't squeeze it); otherwise the two tables stack.
                 if !self.tables_beside(window) {
                     d.child(div().flex().child(recent)).child(div().flex().child(models))
                 } else {
                     d.child(
                         div()
                             .flex()
-                            .gap(px(16.))
+                            .gap(px(COLUMN_GAP))
+                            // Recent runs takes what is left (its columns are budgeted on
+                            // `main_w`, with slack): two fixed slots summing to the content's
+                            // width overflow it by a rounding error, and the layout then puts the
+                            // whole page at its min-content width.
                             .child(div().flex_1().min_w_0().flex().child(recent))
-                            .child(div().w(px(SIDE_W + 40.)).flex_none().flex().child(models)),
+                            .child(div().w(px(self.side_w(window))).flex_none().flex().child(models)),
                     )
                 }
             })
@@ -173,12 +176,40 @@ impl FoloApp {
         self.page_frame(&t, header, body, cx)
     }
 
-    /// Whether Recent runs sits beside Best model: from 1500 px, and only while the list keeps its
-    /// narrow column set (798 px, plus 8 of slack) in what Best model leaves. A row wider than
-    /// its slot makes the layout put the whole page at its min-content width.
+    /// Whether the page has two columns: Recent runs beside Best models, and the live run's KPI
+    /// block beside its chart. From 1280 px.
     pub(super) fn tables_beside(&self, window: &Window) -> bool {
-        window.viewport_size().width >= px(1500.) && self.content_width(window) - (SIDE_W + 40.) - 16. >= 806.
+        two_columns(window)
     }
+
+    /// The one-third column's width (Best models), in whole pixels.
+    pub(super) fn side_w(&self, window: &Window) -> f32 {
+        side_width(self.content_width(window))
+    }
+
+    /// Recent runs' width: the two thirds beside Best models, or the content when they stack.
+    pub(super) fn main_w(&self, window: &Window) -> f32 {
+        let content = self.content_width(window);
+        if self.tables_beside(window) { content - COLUMN_GAP - self.side_w(window) } else { content }
+    }
+}
+
+/// Between the Overview's two columns.
+const COLUMN_GAP: f32 = 16.;
+
+/// Best models' least width beside Recent runs (UNIFIED.md §4): its three columns need a little
+/// more than a third of the row at 1280 px.
+const SIDE_MIN: f32 = 380.;
+
+/// Best models' column in a row `content` wide: a third of it, at least `SIDE_MIN`, in whole
+/// pixels. Recent runs takes the rest.
+pub(super) fn side_width(content: f32) -> f32 {
+    ((content - COLUMN_GAP) / 3.).floor().max(SIDE_MIN)
+}
+
+/// Whether the Overview has two columns (UNIFIED.md §4: from 1280 px).
+pub(super) fn two_columns(window: &Window) -> bool {
+    window.viewport_size().width >= px(1280.)
 }
 
 /// The Overview hero chart's plot height: lower in short windows (620 px minimum, so two Recent
