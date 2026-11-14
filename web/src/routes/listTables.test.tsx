@@ -1,14 +1,14 @@
 // @vitest-environment happy-dom
 /// <reference types="node" />
 // The Models and Datasets lists (the Runs list is in runsList.test.tsx).
-// The list tables (Models, Datasets) at every width: a header cell and the cells under it hide together, so each
-// value sits under its own heading. The responsive column rule is base.css's (loaded here as the app loads it); the
+// The Models table at every width: a header cell and the cells under it hide together, so each value sits under its
+// own heading. Datasets are cards (design/UNIFIED.md §4), checked for the same promises in their own shape. The responsive column rule is base.css's (loaded here as the app loads it); the
 // sort headers are ui/SortHeader components, which a page-scoped rule could not reach (round 16's Models at 1024).
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { flush as flushSync, type Component } from 'fw';
 import { render } from '../../framework/testing';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
@@ -98,11 +98,8 @@ const loose = (table: HTMLTableElement) =>
     .filter((th) => !th.classList.contains('check') && !th.classList.contains('rest') && !th.style.width)
     .map((th) => th.textContent?.trim());
 
-const LISTS: [string, Component<Record<string, never>>, string, string][] = [
-  ['Models', Models, '/models', 'table.models'],
-  ['Datasets', Datasets, '/datasets', 'table.ds'],
-];
-const SOURCE: Record<string, string> = { Models: 'src/routes/Models.tsx', Datasets: 'src/routes/Datasets.tsx' };
+const LISTS: [string, Component<Record<string, never>>, string, string][] = [['Models', Models, '/models', 'table.models']];
+const SOURCE: Record<string, string> = { Models: 'src/routes/Models.tsx' };
 
 /**
  * The bodies of the component's own rules (its css`` block, comments dropped) whose selector `el` matches as rendered.
@@ -122,9 +119,9 @@ function ownRules(file: string, el: Element): string[] {
 }
 // Every column but the flexible ones carries its width on the header row, which loading and loaded share, so a column
 // sits at the same x in each (round 21: runs-empty and models-empty set their columns apart).
-const FLEX: Record<string, string[]> = { Models: ['Model'], Datasets: ['Class balance'] };
-/** The page's own create action; Models has none, so the top bar keeps its New run. */
-const CREATE: Record<string, string | undefined> = { Datasets: 'Add dataset' };
+const FLEX: Record<string, string[]> = { Models: ['Model'] };
+/** The page's own create action; Models has none. */
+const CREATE: Record<string, string | undefined> = {};
 
 describe('list tables: one geometry in every state', () => {
   for (const [name, page, path, sel] of LISTS) {
@@ -174,7 +171,7 @@ describe('list tables: one geometry in every state', () => {
         // No counts over a list that has nothing to count.
         expect(bar.querySelectorAll('.lt-filter .meta').length).toBe(0);
       }
-      // The page owns the create action while mounted, so the top bar's New run steps aside.
+      // The page owns the create action while mounted (counted by shell/crumbs).
       const label = CREATE[name];
       expect(pageMeta.ownsCreate).toBe(!!label);
       if (label) {
@@ -192,6 +189,102 @@ describe('list tables: one geometry in every state', () => {
       expect(pageMeta.ownsCreate).toBe(false);
     });
   }
+});
+
+describe('Datasets: cards in every state', () => {
+  const cards = () => [...target.querySelectorAll<HTMLElement>('.cards > .card')];
+
+  it('loaded and loading: one card per dataset (its name a link that is whole in its tooltip), the same grid and toolbar while loading', async () => {
+    const api = new MockApi('normal', 0);
+    const list = await api.datasets();
+    await open(Datasets, '/datasets', api);
+    await vi.waitFor(() => {
+      flushSync();
+      if (cards().length !== list.length) throw new Error('still waiting for the cards');
+    });
+    for (const card of cards()) {
+      const d = list.find((x) => x.id === card.dataset.id)!;
+      const link = card.querySelector<HTMLAnchorElement>('a.name')!;
+      expect(link.getAttribute('href')).toBe(`#/datasets/${d.id}`);
+      expect(link.getAttribute('title')).toBe(d.name);
+      // The format as a tag, the images and classes under the name; the path and splits are the dataset's page's.
+      expect(card.querySelector('.tag')?.textContent).toBe(d.format.toUpperCase());
+      expect(card.textContent).toContain(`${d.classes.length} ${d.classes.length === 1 ? 'class' : 'classes'}`);
+      expect(card.textContent).not.toContain(d.path);
+      expect(card.querySelectorAll('.mosaic .tile')).toHaveLength(4);
+    }
+    // The header says what the page holds, and a list nothing narrows has no line under it.
+    expect(target.querySelector('header .sub')?.textContent).toContain(`${list.length} datasets`);
+    expect(target.querySelector('.list-foot')).toBeNull();
+
+    await open(Datasets, '/datasets', new MockApi('loading'));
+    expect(target.querySelectorAll('.cards > .card[aria-hidden="true"]').length).toBeGreaterThan(0);
+    expect(target.querySelector<HTMLInputElement>('.list-toolbar .lt-search input')!.disabled).toBe(false);
+  });
+
+  it('draws each mosaic from the first images of its dataset, as thumbnails with their boxes', async () => {
+    // happy-dom never reports a card in view: without an observer a card reads its mosaic at once.
+    vi.stubGlobal('IntersectionObserver', undefined);
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    const api = new MockApi('normal', 0);
+    const asked = vi.spyOn(api, 'datasetImages');
+    await open(Datasets, '/datasets', api);
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('.cards .mosaic .dsimg')) throw new Error('still waiting for a mosaic');
+    });
+    expect(asked.mock.calls.every(([, q]) => q.limit === 4 && q.offset === undefined)).toBe(true);
+  });
+
+  it('narrowed by the search, says under the cards how many of how many it shows', async () => {
+    const api = new MockApi('normal', 0);
+    const list = await api.datasets();
+    await open(Datasets, '/datasets', api);
+    await vi.waitFor(() => {
+      flushSync();
+      if (cards().length !== list.length) throw new Error('still waiting for the cards');
+    });
+    const input = target.querySelector<HTMLInputElement>('.list-toolbar .lt-search input')!;
+    input.value = list[0]!.name;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const n = cards().length;
+    expect(n).toBeLessThan(list.length);
+    expect(target.querySelector('.list-foot')?.textContent).toContain(`${n} of ${list.length} datasets`);
+    // Nothing matches: the state says so where the cards were, and the line still counts what is shown.
+    input.value = 'zebra';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(cards()).toHaveLength(0);
+    expect(target.querySelector('.list-foot')?.textContent).toContain(`0 of ${list.length} datasets`);
+  });
+
+  it('empty or failed: the toolbar stays, disabled, one panel holds the state, and offline Add dataset says why it is off', async () => {
+    for (const scenario of ['empty', 'error'] as const) {
+      await open(Datasets, '/datasets', new MockApi(scenario, 0));
+      await vi.waitFor(() => {
+        flushSync();
+        if (!target.querySelector('.state')?.textContent?.trim()) throw new Error(`still waiting for the ${scenario} state`);
+      });
+      expect(cards()).toHaveLength(0);
+      const bar = target.querySelector('.list-toolbar')!;
+      expect(bar.querySelector<HTMLInputElement>('.lt-search input')!.disabled).toBe(true);
+      const radios = [...bar.querySelectorAll<HTMLButtonElement>('.lt-filter [role=radio]')];
+      expect(radios.length).toBeGreaterThan(0);
+      expect(radios.every((r) => r.disabled)).toBe(true);
+      expect(bar.querySelectorAll('.lt-filter .meta').length).toBe(0);
+    }
+    expect(pageMeta.ownsCreate).toBe(true);
+    const add = await vi.waitFor(() => {
+      flushSync();
+      const b = [...target.querySelectorAll<HTMLButtonElement>('header button')].find((x) => x.textContent?.includes('Add dataset'));
+      if (!b?.disabled) throw new Error('not disabled yet');
+      return b;
+    });
+    expect(document.getElementById(add.getAttribute('aria-describedby') ?? '')?.textContent).toBeTruthy();
+  });
 });
 
 describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', () => {
@@ -225,7 +318,9 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
     await open(Models, '/models', api);
     const state = await table('table.models', (t) => !!t.querySelector('tr.state')?.textContent?.includes('D:/folo-data'), 'the empty state');
     expect(state.querySelector('tr.state')!.textContent).toContain('To import a .folo file, copy it into D:/folo-data/models on the server');
-    expect(target.querySelector('header')?.textContent).toContain('To import a .folo file');
+    // The header holds facts, not help (design/UNIFIED.md §2): with no models there are none, and the help is the
+    // empty state's alone.
+    expect(target.querySelector('header')?.textContent).not.toContain('To import a .folo file');
   });
 
   it("marks a run's last checkpoint that is its best epoch as the same weights, not a joint best", async () => {

@@ -1,9 +1,9 @@
-import Gauge from '$icons/gauge';
+import LayoutDashboard from '$icons/layout-dashboard';
 import Images from '$icons/images';
 import Activity from '$icons/activity';
 import Box from '$icons/box';
 import Target from '$icons/target';
-import ScanSearch from '$icons/scan-search';
+import ScanEye from '$icons/scan-eye';
 import Settings from '$icons/settings';
 import type { IconType } from '$lib/ui/types';
 
@@ -23,12 +23,12 @@ export interface NavItem {
 }
 
 export const mainNav: NavItem[] = [
-  { id: 'overview', label: 'Overview', path: '/', icon: Gauge, keys: 'G O' },
+  { id: 'overview', label: 'Overview', path: '/', icon: LayoutDashboard, keys: 'G O' },
   { id: 'datasets', label: 'Datasets', path: '/datasets', icon: Images, keys: 'G D' },
   { id: 'runs', label: 'Runs', path: '/runs', icon: Activity, keys: 'G R' },
   { id: 'models', label: 'Models', path: '/models', icon: Box, keys: 'G M' },
   { id: 'benchmarks', label: 'Benchmarks', path: '/benchmarks', icon: Target, keys: 'G B', tabUnder: 'models' },
-  { id: 'playground', label: 'Playground', path: '/playground', icon: ScanSearch, keys: 'G P' },
+  { id: 'playground', label: 'Playground', path: '/playground', icon: ScanEye, keys: 'G P' },
 ];
 
 /** The phone tab bar's sections. */

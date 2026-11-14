@@ -1,11 +1,13 @@
 /**
  * A sortable column header for a `.table`: the label is a button (Enter / Space sort), the mark beside it shows the
- * direction, and the cell carries `aria-sort` while it is the sorted column. Unsorted headers keep the mark's slot
- * (faint on hover), so labels never shift when the sort moves. Right-aligned (number) columns put the mark before
- * the label, so the label stays flush with the numbers under it.
+ * direction, and the cell carries `aria-sort` while it is the sorted column. A sortable head always shows a chevron
+ * (design/UNIFIED.md §2, Tables): a faint up-down pair while another column is sorted, the direction's chevron in ink on
+ * the sorted one, so labels never shift when the sort moves. Right-aligned (number) columns put the mark before the
+ * label, so the label stays flush with the numbers under it.
  */
-import ArrowDown from '$icons/arrow-down';
-import ArrowUp from '$icons/arrow-up';
+import ChevronDown from '$icons/chevron-down';
+import ChevronUp from '$icons/chevron-up';
+import ChevronsUpDown from '$icons/chevrons-up-down';
 import { css, defaults } from 'fw';
 
 export interface SortHeaderProps {
@@ -33,7 +35,7 @@ export default function SortHeader(props: SortHeaderProps) {
       <button type="button" class="sort" class:on={!!p.dir} disabled={p.disabled} onclick={() => p.onsort()}>
         <span>{p.label}</span>
         <span class="mark" aria-hidden="true">
-          {p.dir === 'asc' ? <ArrowUp size={12} strokeWidth={2} /> : <ArrowDown size={12} strokeWidth={2} />}
+          {p.dir === 'asc' ? <ChevronUp size={12} strokeWidth={2} /> : p.dir === 'desc' ? <ChevronDown size={12} strokeWidth={2} /> : <ChevronsUpDown size={12} strokeWidth={2} />}
         </span>
       </button>
     </th>
@@ -49,7 +51,7 @@ css`
     align-items: center;
     gap: var(--space-1);
     width: 100%;
-    height: 32px;
+    height: var(--size-row);
     padding: 0 var(--space-3);
     color: inherit;
     font-weight: inherit;
@@ -68,19 +70,17 @@ css`
   }
   .mark {
     display: flex;
-    opacity: 0;
-    transition: opacity var(--dur-fast) var(--ease-standard);
+    color: var(--text-tertiary);
+    transition: color var(--dur-fast) var(--ease-standard);
   }
   .sort:not(:disabled):hover,
   .sort.on {
     color: var(--text-primary);
   }
   .sort:not(:disabled):hover .mark,
-  .sort:focus-visible .mark {
-    opacity: 0.5;
-  }
+  .sort:focus-visible .mark,
   .sort.on .mark {
-    opacity: 1;
+    color: inherit;
   }
   .sort:disabled {
     cursor: default;

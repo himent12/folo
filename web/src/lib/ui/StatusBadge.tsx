@@ -1,7 +1,8 @@
 /**
- * A run's status as its mark and word. Two forms, one rule (DESIGN_DIRECTION 6): the tinted pill is the title form,
- * beside the name of the one run a screen is about (the run page's header, Overview's live card), at most one per
- * screen; everywhere else (tables, lists, Compare, meta lines) it is `plain`, dot + word.
+ * A run's status as its mark and word (design/UNIFIED.md §2, Status). Two forms, one rule: the tinted badge is the
+ * title form, on the title line of the one run a screen is about (the run page's header, Overview's live run), at most
+ * one per screen; everywhere else (tables, lists, Compare, meta lines) it is `plain`: the mark in the status hue, the
+ * word in ink (text.primary; text.secondary for queued and stopped).
  * It takes the run itself (`run`), not its bare status, so a cloud run in its hand-over
  * says its phase in the neutral look of a waiting run wherever a status is shown; anything else with a run's states
  * (a labeling job) passes its `state`, the status with its own word.
@@ -97,7 +98,7 @@ css`
     gap: 6px;
     height: 20px;
     padding: 0 8px 0 6px;
-    border-radius: var(--radius-full);
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--c);
     font-size: var(--type-sm-size);
@@ -105,8 +106,8 @@ css`
     line-height: 1;
     white-space: nowrap;
   }
+  /* One height for every badge (20); \`sm\` only packs it tighter. */
   .sm {
-    height: 18px;
     padding: 0 6px 0 4px;
   }
   /* Every mark sits in the same 8 px slot, so names after it line up whatever the status. */
@@ -182,9 +183,13 @@ css`
     line-height: inherit;
     vertical-align: top;
     background: none;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     font-size: inherit;
     font-weight: var(--weight-regular);
+  }
+  /* Waiting and stopped are not news: their word steps back to text.secondary, as a held status does. */
+  .plain:is(.queued, .stopped, .held) {
+    color: var(--text-secondary);
   }
   .plain .dot {
     background: var(--c);
@@ -202,9 +207,6 @@ css`
   .plain.queued .dot {
     background: none;
     box-shadow: inset 0 0 0 1.5px var(--c);
-  }
-  .plain.running {
-    color: var(--text-primary);
   }
   /* A last known status: neutral, still. Its mark keeps its shape (the ringed dot still says which status it was), but
      neither lime nor a heartbeat claims it is current. */
