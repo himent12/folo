@@ -3,7 +3,7 @@
 //! a view option is a segmented control instead.
 
 use folo_ui::{
-    Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    Context, Div, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
@@ -26,7 +26,8 @@ impl Tab {
 
 impl FoloApp {
     /// A row of underline tabs, `selected` one marked by a 2 px underline in primary ink. Each tab is
-    /// a Tab stop (`{key}-{i}`), and Enter or Space opens it, as a click does.
+    /// a Tab stop (`{key}-{i}`), and Enter or Space opens it, as a click does; ← / → (wrapping) and
+    /// Home / End open the next, the previous, the first or the last tab and move focus with it.
     pub fn tabs(
         &self,
         key: &str,
@@ -37,6 +38,7 @@ impl FoloApp {
         on_select: OnSelect,
     ) -> Div {
         let t = theme(cx);
+        let n = tabs.len().max(1);
         let items: Vec<_> = tabs
             .into_iter()
             .enumerate()
@@ -72,6 +74,24 @@ impl FoloApp {
                                 text(ty::BASE, t.text_tertiary).tnum().whitespace_nowrap().child(m)
                             })),
                     );
+                let keys = on_select.clone();
+                let tab_key = key.to_string();
+                let el = el.on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
+                    let next = match ev.keystroke.key.as_str() {
+                        "left" => (i + n - 1) % n,
+                        "right" => (i + 1) % n,
+                        "home" => 0,
+                        "end" => n - 1,
+                        _ => return,
+                    };
+                    cx.stop_propagation();
+                    if next != i {
+                        keys(this, next, window, cx);
+                        let fh = this.fh(format!("{tab_key}-{next}"), cx);
+                        window.focus(&fh);
+                        cx.notify();
+                    }
+                }));
                 let f = on_select.clone();
                 self.bind(
                     el,
@@ -88,5 +108,52 @@ impl FoloApp {
             })
             .collect();
         div().flex().gap(px(12.)).children(items)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use folo_ui::{HeadlessApp, KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput, WindowHandle};
+
+    use crate::app::tests::{drive, open};
+    use crate::app::{FoloApp, Route};
+    use crate::bench::BenchTab;
+
+    fn press(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, key: &str) {
+        let keystroke = Keystroke::parse(key).unwrap();
+        app.simulate_input(
+            window.into(),
+            PlatformInput::KeyDown(KeyDownEvent { keystroke: keystroke.clone(), is_held: false }),
+        );
+        app.run_until_idle();
+        app.frame(window.into());
+        app.simulate_input(window.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+        app.run_until_idle();
+        app.frame(window.into());
+    }
+
+    #[test]
+    fn arrows_and_home_end_move_between_tabs_and_focus_follows() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Bench("bn_3c90".into()), w, cx));
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| w.focus(&this.fh("bench-tab-0", cx)));
+        app.frame(window.into());
+        press(&mut app, window, "right");
+        drive(&mut app, window, |this, w, cx| {
+            assert_eq!(this.bench.tab, BenchTab::Plan);
+            assert!(this.fh("bench-tab-1", cx).is_focused(w), "focus moves with the selection");
+        });
+        press(&mut app, window, "end");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.bench.tab), BenchTab::Loops);
+        // Wraps: right from the last is the first.
+        press(&mut app, window, "right");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.bench.tab), BenchTab::Leaderboard);
+        press(&mut app, window, "left");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.bench.tab), BenchTab::Loops);
+        press(&mut app, window, "home");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.bench.tab), BenchTab::Leaderboard);
     }
 }

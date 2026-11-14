@@ -225,3 +225,21 @@ fn drawn_keys(app: &mut folo_ui::HeadlessApp, window: folo_ui::WindowHandle<supe
     app.frame(window.into());
     drive(app, window, |this, _, _| this.focus.borrow().keys().map(|k| k.to_string()).collect())
 }
+
+#[test]
+fn the_health_summary_asks_for_the_check_even_when_every_label_parses() {
+    let (mut app, window) = super::tests::open();
+    // A dataset whose labels all parse: the check can still find unreadable images or warnings.
+    let id = drive(&mut app, window, |this, _, _| {
+        let ids: Vec<String> = this.store.datasets.ready().unwrap().iter().map(|d| d.id.clone()).collect();
+        ids.into_iter().find(|id| id != "ds_3b91").unwrap()
+    });
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Dataset(id.clone()), w, cx));
+    drawn_keys(&mut app, window);
+    drawn_keys(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        let stats = this.store.dataset.get(&id).and_then(|l| l.ready()).and_then(|d| d.stats.clone());
+        assert_eq!(stats.map(|s| s.broken_labels), Some(0), "{id}");
+        assert!(this.store.issues.contains_key(&id), "the check's counts were asked for");
+    });
+}

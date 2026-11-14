@@ -227,7 +227,9 @@ impl FoloApp {
             );
         let header = detail_header(&t, title, meta, vec![delete, reveal, train]);
 
-        if ds.stats.as_ref().is_some_and(|s| s.broken_labels > 0) {
+        // The check's counts feed the health summary: unreadable images and check warnings show
+        // there even when every label parses.
+        if ds.stats.is_some() {
             self.ensure_issues(&ds.id, cx);
         }
         // Each section with what it holds: the images, and how many findings the statistics have.

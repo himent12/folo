@@ -290,8 +290,13 @@ impl FoloApp {
                         let map50 = m.metrics.as_ref().map(|m| m.map50);
                         let arch = format!("{} · {} px", m.arch.as_str(), m.imgsz);
                         let created = time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now));
+                        // Keyboard focus says what hover does: the model and its dataset in full.
+                        let focus_text = self
+                            .ring(&self.fh(key.clone(), cx), window)
+                            .then(|| format!("{} · {ds_name}", m.name));
                         let row = div()
                             .id(SharedString::from(key.clone()))
+                            .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
                             .h(px(36.))
                             .mx(px(4.))
                             .px(px(12.))
