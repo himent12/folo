@@ -57,10 +57,65 @@ fn new_bench_open() -> (HeadlessApp, WindowHandle<FoloApp>) {
 fn esc_closes_the_new_benchmark_form_and_stays_on_the_list() {
     let (mut app, window) = new_bench_open();
     press(&mut app, window, "escape");
-    drive(&mut app, window, |this, _, _| {
+    drive(&mut app, window, |this, w, cx| {
         assert!(this.bench.new_bench.is_none(), "Esc closes the form");
         assert_eq!(this.route, Route::Benches, "and stays on the list");
+        // Review round 1: the focus fell to the app root, so Enter did nothing and Tab restarted.
+        assert!(this.fh("bench-new", cx).is_focused(w), "the focus is back on New benchmark");
     });
+}
+
+#[test]
+fn ctrl_enter_under_the_palette_creates_no_benchmark() {
+    // Review round 1: the palette isn't a modal, and the bindings run before its own Enter.
+    let (mut app, window) = new_bench_open();
+    let name = "typed under the palette";
+    drive(&mut app, window, |this, w, cx| {
+        let f = this.bench.new_bench.as_ref().unwrap();
+        f.name.update(cx, |i, cx| i.set_text(name.to_string(), cx));
+        this.open_palette(w, cx);
+    });
+    app.frame(window.into());
+    assert!(drive(&mut app, window, |this, _, _| this.palette.is_some()), "the palette is open");
+    press(&mut app, window, "ctrl-enter");
+    let api = drive(&mut app, window, |this, _, _| this.store.api.clone());
+    let made = api.benches().unwrap().into_iter().filter(|b| b.name == name).count();
+    assert_eq!(made, 0, "the form under the palette sent nothing");
+}
+
+#[test]
+fn ctrl_enter_on_a_design_proposal_neither_uses_it_nor_asks_again() {
+    // A proposal replaces the plan: it is used with its own button, after a look at it.
+    let bench = Route::Bench("bn_7a04".into());
+    let (mut app, window) = open_keyed();
+    drive(&mut app, window, |this, w, cx| this.navigate(bench.clone(), w, cx));
+    app.frame(window.into());
+    let plan = |api: &std::sync::Arc<dyn crate::api::Backend>| {
+        let b = api.benches().unwrap().into_iter().find(|b| b.id == "bn_7a04").unwrap();
+        format!("{:?}", b.plan)
+    };
+    let before = drive(&mut app, window, |this, w, cx| {
+        this.bench.tab = crate::bench::BenchTab::Plan;
+        this.open_design("bn_7a04", w, cx);
+        let req = crate::api::DesignBench {
+            agent: crate::api::LabelAgentId::Claude,
+            model: None,
+            effort: None,
+            note: String::new(),
+        };
+        let proposal = this.store.api.design_bench("bn_7a04", &req).unwrap();
+        this.bench.design.as_mut().unwrap().proposal = Some(proposal);
+        this.store.api.clone()
+    });
+    let before = plan(&before);
+    app.frame(window.into());
+    press(&mut app, window, "ctrl-enter");
+    let api = drive(&mut app, window, |this, _, _| {
+        let f = this.bench.design.as_ref().expect("the proposal stays on screen");
+        assert!(f.proposal.is_some() && !f.asking && !f.applying, "nothing was sent");
+        this.store.api.clone()
+    });
+    assert_eq!(plan(&api), before, "the plan is unchanged");
 }
 
 #[test]

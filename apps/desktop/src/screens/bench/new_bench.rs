@@ -181,10 +181,7 @@ impl FoloApp {
             None,
             window,
             cx,
-            act(|this, _, cx| {
-                this.bench.new_bench = None;
-                cx.notify();
-            }),
+            act(|this, w, cx| this.close_bench_form(crate::bench::BenchForm::NewBench, w, cx)),
         );
         let field = |label: &str, control: AnyElement| {
             div().flex().flex_col().gap(px(6.)).child(caption(&t, label)).child(control)
@@ -222,6 +219,7 @@ impl FoloApp {
                                 .child(icon("icons/circle-alert.svg", 14., t.danger_text))
                                 .child(text(ty::SM, t.danger_text).child(e.message)),
                         )
+                        .when_some(e.hint, |d, h| d.child(text(ty::SM, t.text_tertiary).child(h)))
                     })
                     .child(div().flex().gap(px(8.)).child(create).child(cancel)),
             )

@@ -30,6 +30,9 @@ pub struct HttpBackend {
     /// No overall timeout (SSE streams stay open for the life of a run), but the handshake is
     /// bounded (connect and response headers), and so is a silence on an open stream.
     stream_agent: ureq::Agent,
+    /// The address as typed when it names no HTTP server ("abc def", "http://", "foo://x"):
+    /// nothing is sent, and errors say so.
+    not_an_address: Option<String>,
 }
 
 impl HttpBackend {
@@ -41,10 +44,21 @@ impl HttpBackend {
     fn with_stream_limits(base: &str, handshake: Duration, silence: Duration) -> Self {
         // As typed or pasted in Settings: surrounding whitespace (a copied line's end) and a
         // missing scheme ("127.0.0.1:7878") would otherwise make every request fail.
-        let base = base.trim().trim_end_matches('/');
-        let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
-        let stream_agent = stream_agent(handshake, silence);
-        Self { base, agent: agent(Some(Duration::from_secs(30))), stream_agent }
+        let typed = base.trim();
+        // Judged as typed: trimming "http://" to "http:" and adding a scheme would make it a host.
+        let not_an_address = (!transport::address_ok(typed)).then(|| typed.to_string());
+        // Left as typed then, so ureq turns it down before a lookup ("http:///api" has no host).
+        let base = match &not_an_address {
+            Some(typed) => typed.clone(),
+            None if typed.contains("://") => typed.trim_end_matches('/').to_string(),
+            None => format!("http://{}", typed.trim_end_matches('/')),
+        };
+        Self {
+            base,
+            agent: agent(Some(Duration::from_secs(30))),
+            stream_agent: stream_agent(handshake, silence),
+            not_an_address,
+        }
     }
 
     /// The server's address as requests use it (scheme added, no trailing `/`).
@@ -518,6 +532,7 @@ FOLO"
         let api = HttpBackend::new(&url);
         let e = api.health().unwrap_err();
         assert_eq!(e.code, "server_unreachable");
+        assert!(!e.is_bad_address(), "a server that is down is not a bad address");
         // For a person: no transport jargon ("timeout: connect", "io: …").
         let hint = e.hint.unwrap();
         assert!(hint.starts_with("Start it with `folo serve`") && !hint.contains('('), "{hint}");
@@ -546,15 +561,27 @@ FOLO"
     #[test]
     fn an_address_that_is_not_one_says_so_instead_of_blaming_the_server() {
         // Typed in Settings › Connection: nothing can be sent to these, so no server is "down".
-        for typed in ["abc def", "http://[::", "http:// 127.0.0.1:1", "http://a b:7878"] {
+        // "http://" and "foo://some:42/123" passed for one (review round 1): trimmed to "http:" and
+        // given a scheme, the first became the host "http"; ureq refuses the second's scheme unsent.
+        let not =
+            ["abc def", "http://[::", "http:// 127.0.0.1:1", "http://a b:7878", "http://", "http://:7878"];
+        for typed in not.into_iter().chain(["foo://some:42/123", "ftp://127.0.0.1:21", " ", "https:///"]) {
             let api = HttpBackend::new(typed);
             assert!(!api.address_ok(), "{typed:?}");
             let e = api.health().unwrap_err();
             assert_eq!(e.code, "server_unreachable", "{typed:?}");
             assert!(e.message.ends_with("is not a server address"), "{typed:?}: {}", e.message);
+            assert!(!e.message.contains("reach"), "{typed:?}: {}", e.message);
+            assert!(e.is_bad_address(), "the sidebar says so too: {typed:?}");
             assert!(e.hint.unwrap().contains("http://host:port"));
         }
-        for fine in ["127.0.0.1:7878", "http://localhost:18090/", "https://[::1]:443", "http://my-box"] {
+        assert_eq!(
+            HttpBackend::new("foo://x:1").health().unwrap_err().message,
+            "foo://x:1 is not a server address"
+        );
+        for fine in
+            ["127.0.0.1:7878", "http://localhost:18090/", "https://[::1]:443", "http://my-box", "HTTP://a:1"]
+        {
             assert!(HttpBackend::new(fine).address_ok(), "{fine:?}");
         }
     }

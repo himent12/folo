@@ -102,6 +102,10 @@ impl FoloApp {
             }
             SourceChoice::Deleted => return refuse(f, "Its pool was deleted: pick another", cx),
         };
+        // Start is off then; Ctrl+Enter says why instead of sending what the server turns down.
+        if pool.images(Split::Train) == 0 {
+            return refuse(f, "That pool has no images: pick another", cx);
+        }
         let req = StartBenchLoop {
             name: None,
             teacher,

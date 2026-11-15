@@ -136,6 +136,7 @@ impl FoloApp {
                 cx.notify();
             }),
         );
+        let fail_hint = self.store.health.error().and_then(|e| e.hint.clone());
         let status = match &self.store.health {
             Load::Ready(h) => div()
                 .flex()
@@ -163,6 +164,17 @@ impl FoloApp {
             .flex_col()
             .overflow_hidden()
             .child(panel_header(&t, "Connection").child(status))
+            // What to do about a failure ("Type it as http://host:port, …"), under its words.
+            .when_some(fail_hint, |d, h| {
+                d.child(
+                    div()
+                        .px(px(16.))
+                        .py(px(8.))
+                        .border_b_1()
+                        .border_color(t.line_subtle)
+                        .child(text(ty::SM, t.text_tertiary).child(h)),
+                )
+            })
             .child(row(
                 "Data source",
                 help("Built-in demo data runs inside the app; `folo serve` is the FOLO engine over HTTP."),

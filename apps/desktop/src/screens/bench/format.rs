@@ -149,15 +149,34 @@ impl FoloApp {
 /// Where a plan nobody designed comes from, as Studio's Plan tab says it (`PlanTab.tsx`): the
 /// default one (every condition of the catalog at severities 1, 3 and 5, weight 1), none at all, or
 /// one written by hand (`POST`/`PUT` with a `plan`). `default_len` is the catalog's default plan's
-/// length (`None` until the catalog is in: then the plan's shape alone decides).
-pub fn plan_origin(plan: &BenchPlan, default_len: Option<usize>) -> &'static str {
+/// length, `None` while the catalog loads or after it failed: a plan of the default's shape is then
+/// called neither (Studio waits for the catalog too), as its number of conditions alone can't tell.
+pub fn plan_origin(plan: &BenchPlan, default_len: Option<usize>) -> Option<&'static str> {
     let default_shape = plan.conditions.iter().all(|c| c.weight == 1.0 && c.severities == [1, 3, 5]);
     if plan.conditions.is_empty() {
-        "No conditions: entries run the unchanged images only, and the score has no robustness axis."
-    } else if default_shape && default_len.is_none_or(|n| n == plan.conditions.len()) {
-        "The default plan: every condition at severities 1, 3 and 5, each counting the same."
+        Some("No conditions: entries run the unchanged images only, and the score has no robustness axis.")
+    } else if !default_shape {
+        Some("Written by hand.")
     } else {
-        "Written by hand."
+        match default_len {
+            Some(n) if n == plan.conditions.len() => {
+                Some("The default plan: every condition at severities 1, 3 and 5, each counting the same.")
+            }
+            Some(_) => Some("Written by hand."),
+            None => None,
+        }
+    }
+}
+
+const SAME_WAY: &str = "Each condition changes every image the same way for every contestant.";
+
+/// The Plan tab's first line: who designed the plan, else where it comes from ([`plan_origin`]).
+pub fn plan_intro(designed_by: Option<&str>, plan: &BenchPlan, default_len: Option<usize>) -> String {
+    match (designed_by, plan_origin(plan, default_len)) {
+        (Some(who), _) => format!("{who}. {SAME_WAY}"),
+        (None, Some(origin)) if plan.conditions.is_empty() => origin.to_string(),
+        (None, Some(origin)) => format!("{origin} {SAME_WAY}"),
+        (None, None) => SAME_WAY.to_string(),
     }
 }
 
@@ -175,24 +194,31 @@ mod tests {
             why: None,
         };
         let plan = |conditions| BenchPlan { conditions, ..Default::default() };
+        // The line the Plan tab shows (`plan.rs` builds it with `plan_intro`).
+        let says = |p: &BenchPlan, catalog: Option<usize>| plan_intro(None, p, catalog);
         let full = plan(vec![c("haze", &[1, 3, 5], 1.0), c("jpeg", &[1, 3, 5], 1.0)]);
-        assert!(plan_origin(&full, Some(2)).starts_with("The default plan"));
-        assert!(plan_origin(&full, None).starts_with("The default plan"));
+        assert!(says(&full, Some(2)).starts_with("The default plan"));
         // A benchmark made with its own plan (lane d4-bench-settings: haze 1, 5 and sensor noise 3)
         // was called "The default plan".
         let own = plan(vec![c("haze", &[1, 5], 1.0), c("sensor_noise", &[3], 1.0)]);
-        assert_eq!(plan_origin(&own, Some(12)), "Written by hand.");
-        assert_eq!(plan_origin(&plan(vec![c("haze", &[1, 3, 5], 2.0)]), None), "Written by hand.");
-        assert_eq!(plan_origin(&full, Some(12)), "Written by hand.", "a part of the catalog");
-        assert!(plan_origin(&plan(vec![]), Some(12)).starts_with("No conditions"));
+        assert!(says(&own, Some(12)).starts_with("Written by hand."));
+        assert!(says(&own, None).starts_with("Written by hand."), "its shape alone tells");
+        assert!(says(&plan(vec![c("haze", &[1, 3, 5], 2.0)]), None).starts_with("Written by hand."));
+        assert!(says(&full, Some(12)).starts_with("Written by hand."), "a part of the catalog");
+        // Haze alone at 1, 3 and 5 has the default's shape: while the catalog loads, or after it
+        // failed, it is called neither (review round 1).
+        let haze = plan(vec![c("haze", &[1, 3, 5], 1.0)]);
+        assert_eq!(says(&haze, None), SAME_WAY);
+        assert_eq!(says(&full, None), SAME_WAY);
+        assert!(says(&haze, Some(12)).starts_with("Written by hand."));
+        assert!(says(&plan(vec![]), Some(12)).starts_with("No conditions"));
+        assert!(says(&plan(vec![]), None).starts_with("No conditions"));
+        assert!(plan_intro(Some("Designed by Claude"), &own, None).starts_with("Designed by Claude. Each"));
         // The demo's default plan reads as one.
         use crate::api::Backend;
         let api = crate::api::mock::MockBackend::new(4200, true);
         let cat = api.bench_catalog().unwrap();
-        assert!(
-            plan_origin(&cat.default_plan, Some(cat.default_plan.conditions.len()))
-                .starts_with("The default")
-        );
+        assert!(says(&cat.default_plan, Some(cat.default_plan.conditions.len())).starts_with("The default"));
     }
 
     #[test]

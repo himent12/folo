@@ -36,11 +36,16 @@ Repro: Ctrl+6, New benchmark; the name field has focus. Enter: nothing. Ctrl+Ent
 lists it). Esc: the form stays. On a benchmark with Loops › New loop open, Esc leaves the page for the list and the
 form is lost. Cause: `dismiss` (`src/app/overlay_state.rs`) knew no bench form and fell through to the parent
 route; the Submit action (`src/app/render.rs`) handled only the dialogs. Fix: `src/bench/keys.rs` names the form on
-screen; Esc stands a delete's second click down first, then closes the form, then goes back; Ctrl+Enter (and Enter
-in the New benchmark name) does what the form's primary button does. The Keyboard list's line now reads "Submit the
-open dialog or form". Tests: `controls/key_tests.rs` (`esc_closes_the_new_benchmark_form_and_stays_on_the_list`,
-`enter_or_ctrl_enter_in_the_new_benchmark_form_creates_it`,
-`esc_on_a_benchmark_stands_a_delete_and_the_new_loop_form_down_before_going_back`).
+screen; Esc stands a delete's second click down first, then closes the form (Cancel, Close and Discard too) and
+gives the focus back to the button that opened it, then goes back; Ctrl+Enter (and Enter in the New benchmark name)
+does what Create, Start loop or Ask does, never while the command palette is open over the form and never while that
+button is off (no agent installed, a pool with no images: the form then says why). One exception on purpose: with
+Design's proposal on screen Ctrl+Enter does nothing, as using it replaces the plan and is left to "Use this plan"
+after a look. The forms and Settings › Connection show an error's hint under its words. The Keyboard list's line now
+reads "Submit the open dialog or form". Tests: `controls/key_tests.rs`
+(`esc_closes_the_new_benchmark_form_and_stays_on_the_list`, `enter_or_ctrl_enter_in_the_new_benchmark_form_creates_it`,
+`esc_on_a_benchmark_stands_a_delete_and_the_new_loop_form_down_before_going_back`,
+`ctrl_enter_under_the_palette_creates_no_benchmark`, `ctrl_enter_on_a_design_proposal_neither_uses_it_nor_asks_again`).
 
 ### d4-bench-settings-2: long names in the title bar
 Repro: a benchmark named "COCO photos 🐟 ünïcødé 名前 long name with spaces and more text to see truncation ok", open
@@ -53,14 +58,19 @@ Repro: `POST /api/bench/benchmarks` with `plan: {conditions: [{condition: "haze"
 {condition: "sensor_noise", severities: [3]}]}`, open it, Plan. Cause: `src/screens/bench/plan.rs` said "The default
 plan" whenever `designed_by` was empty. Fix: `plan_origin` (`src/screens/bench/format.rs`) uses Studio's rule
 (`PlanTab.tsx` `isDefault`): the catalog's default (every condition at 1, 3 and 5, weight 1), no conditions, or
-written by hand. Test: `only_the_default_plan_is_called_the_default_one`.
+written by hand. A plan of the default's shape is called neither while the catalog loads or after it failed (one
+condition alone at 1, 3 and 5 is not the default). The Plan tab's line is built by `plan_intro`, which the test
+checks. Test: `only_the_default_plan_is_called_the_default_one`.
 
 ### d4-bench-settings-4: an address that is not one
 Repro: Settings › Connection, type `abc def`, Connect. Cause: `src/api/http/transport.rs` `unreachable` said the
-same for every failed request. Fix: when the address does not parse as a URL with a host it says "abc def is not a
-server address" with "Type it as http://host:port, like http://127.0.0.1:7878.". Test:
+same for every failed request. Fix: an address is judged as typed, before a scheme is added or a `/` trimmed
+(`http://` used to become the host "http"): unless it is http or https with a host (`foo://some:42`, `ftp://…`,
+`http://`, `http://:7878` are not), nothing is sent and it says "abc def is not a server address" with "Type it as
+http://host:port, like http://127.0.0.1:7878.", shown under the status in Settings; the sidebar's connection line
+says "Not a server address" instead of "Server unreachable". Test:
 `an_address_that_is_not_one_says_so_instead_of_blaming_the_server`. Deferred: the lost-connection banner still
-retries such an address (the retry loop is the connection lane's).
+retries such an address (the retry loop is the connection lane's, SIBLING).
 
 ## Checked and fine
 Leaderboard numbers and order against the API (63.4602 shows 63.5; axes match); ties to the tenth share a rank, as in

@@ -16,7 +16,31 @@ pub enum BenchForm {
     Design,
 }
 
+impl BenchForm {
+    /// The button that opens it: the focus goes back to it when the form closes.
+    fn opener(self) -> &'static str {
+        match self {
+            BenchForm::NewBench => "bench-new",
+            BenchForm::NewLoop => "bench-loop-new",
+            BenchForm::Design => "bench-design",
+        }
+    }
+}
+
 impl FoloApp {
+    /// Closes `form` (Esc, Cancel, Close, Discard) and gives the focus back to the button that
+    /// opened it, as the dialogs do: its field had the focus and is gone with it.
+    pub fn close_bench_form(&mut self, form: BenchForm, window: &mut Window, cx: &mut Context<Self>) {
+        match form {
+            BenchForm::Design => self.bench.design = None,
+            BenchForm::NewLoop => self.bench.new_loop = None,
+            BenchForm::NewBench => self.bench.new_bench = None,
+        }
+        let opener = self.fh(form.opener(), cx);
+        window.focus(&opener);
+        cx.notify();
+    }
+
     /// The inline form shown on the page now, if any (a form left on another tab isn't).
     pub fn shown_bench_form(&self) -> Option<BenchForm> {
         let here = route_bench(&self.route);
@@ -41,15 +65,8 @@ impl FoloApp {
             cx.notify();
             return true;
         }
-        match self.shown_bench_form() {
-            Some(BenchForm::Design) => self.bench.design = None,
-            Some(BenchForm::NewLoop) => self.bench.new_loop = None,
-            Some(BenchForm::NewBench) => self.bench.new_bench = None,
-            None => return false,
-        }
-        // Its field had the focus and is gone with it.
-        window.focus(&self.root_focus);
-        cx.notify();
+        let Some(form) = self.shown_bench_form() else { return false };
+        self.close_bench_form(form, window, cx);
         true
     }
 
@@ -62,7 +79,8 @@ impl FoloApp {
                 let Some(bench) = self.bench.new_loop.as_ref().map(|f| f.bench.clone()) else { return false };
                 self.submit_new_loop(&bench, cx);
             }
-            // Asking; a proposal is used with its own button, after a look at it.
+            // Asking only: a proposal replaces the plan, so it is used with its own button after a
+            // look at it, and Ctrl+Enter then does nothing.
             Some(BenchForm::Design) => {
                 if self.bench.design.as_ref().is_some_and(|f| f.proposal.is_none()) {
                     self.ask_design(cx);

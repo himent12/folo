@@ -301,6 +301,10 @@ impl FoloApp {
             Load::Failed(e) if e.code == "unauthorized" => {
                 (t.danger_solid, "icons/circle-x.svg", "Server needs a token".to_string())
             }
+            // As Settings says: nothing was sent, so no server is down.
+            Load::Failed(e) if e.is_bad_address() => {
+                (t.danger_solid, "icons/circle-x.svg", "Not a server address".to_string())
+            }
             Load::Failed(_) => (t.danger_solid, "icons/circle-x.svg", "Server unreachable".to_string()),
             _ => (t.text_disabled, "icons/refresh-cw.svg", "Connecting…".to_string()),
         };

@@ -118,7 +118,8 @@ impl Render for FoloApp {
                     this.submit_new_run(w, cx);
                 } else if this.synth.is_some() {
                     this.submit_synth(w, cx);
-                } else if !this.modal_open() {
+                } else if !this.modal_open() && this.palette.is_none() {
+                    // Not under the palette either: its Enter is the palette's.
                     this.submit_bench_form(cx);
                 }
             }))
