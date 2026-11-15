@@ -10,6 +10,7 @@ import type { Box, BenchDetection } from '$lib/api/types';
 import { containFit, placeBox } from '$lib/bench/frame';
 import { matchImage } from '$lib/bench/match';
 import { placeChips } from '$lib/detect/chips';
+import { cancelOnRemove } from '$lib/detect/DetectionView';
 
 /** How a box came out, in the gallery's one encoding (never by colour alone: a solid line, a solid line with a cross, a dashed line). */
 export type Outcome = 'right' | 'wrong' | 'missed';
@@ -95,7 +96,7 @@ export default function MatchView(props: MatchViewProps) {
 
   return (
     <div class="mv" class:full={full()} class:small={cw.get() > 0 && cw.get() < 480} bind:clientWidth={cw} bind:clientHeight={ch}>
-      {props.src ? <img src={props.src} alt={props.alt ?? ''} class:loaded={loaded.get()} draggable="false" onload={() => loaded.set(true)} /> : null}
+      {props.src ? <img ref={cancelOnRemove} src={props.src} alt={props.alt ?? ''} class:loaded={loaded.get()} draggable="false" onload={() => loaded.set(true)} /> : null}
       {geo.get() ? (
         <div class="layer" aria-hidden="true">
           <For each={marks.get()} key={(k) => k.key}>

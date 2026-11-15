@@ -60,6 +60,22 @@ describe('a dataset whose folder is missing', () => {
     expect(target.querySelector('.card[data-name="fasteners"]')!.textContent).not.toContain('Folder missing');
   });
 
+  it('adds none of its old images to the count in the header (stress s1-datasets-6)', async () => {
+    const all = await hub.api.datasets();
+    const readable = all.filter((d) => d.id !== 'ds_shapes');
+    const images = (d: (typeof all)[number]) => d.splits.train + d.splits.val + d.splits.test;
+    const want = readable.reduce((a, d) => a + images(d), 0).toLocaleString('en-US');
+    const all_ = all.reduce((a, d) => a + images(d), 0).toLocaleString('en-US');
+    expect(want).not.toBe(all_);
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('.card[data-name="shapes"]')?.textContent?.includes('Folder missing'), 'the shapes row');
+    expect(target.textContent).toContain(`${all.length} datasets · ${want} images`);
+    // Its card keeps the count it had, marked as such; a readable one says its count plainly.
+    const shapes = all.find((d) => d.id === 'ds_shapes')!;
+    expect(target.querySelector('.card[data-name="shapes"] .facts')!.textContent).toContain(`${images(shapes).toLocaleString('en-US')} images (last known) ·`);
+    expect(target.querySelector('.card[data-name="fasteners"] .facts')!.textContent).not.toContain('last known');
+  });
+
   it('keeps its name on its page, says what is wrong, and can be removed from FOLO', async () => {
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     const del = vi.spyOn(hub.api, 'deleteDataset');

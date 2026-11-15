@@ -47,12 +47,14 @@ export class Reach implements Reachability {
     clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#offline.set(false);
+    this.#settle(false);
   }
 
   ok(): void {
     // An answer settles any suspicion: a probe still out is moot, whatever it ends with.
     this.#gen++;
     this.#probing = false;
+    this.#settle(true);
     if (!this.#offline.peek()) return;
     this.#attempt = 0;
     clearTimeout(this.#timer);
@@ -81,11 +83,34 @@ export class Reach implements Reachability {
       if (gen !== this.#gen) return;
       this.#probing = false;
       this.#offline.set(true);
+      this.#settle(false);
       const delay = PROBE_DELAYS[Math.min(this.#attempt++, PROBE_DELAYS.length - 1)];
       this.#timer = setTimeout(() => {
         this.#timer = undefined;
         void this.#check();
       }, delay);
     }
+  }
+
+  /** Who waits for what the check finds (`suspect`), settled by the next answer, failed probe or reset. */
+  #waiters: ((up: boolean) => void)[] = [];
+
+  /**
+   * As `failed`, and says what the check found: true when the server answered (a probe, or any request), false when it
+   * did not (offline: its return then ends in `back`), when it is offline already, or when there is nothing to check (the
+   * mock). Lets something the browser loads itself (an <img>) retry once when its failure was an outage over by the time
+   * the check landed (stress s1-datasets-8).
+   */
+  suspect(): Promise<boolean> {
+    if (!this.#probe || this.#offline.peek()) return Promise.resolve(false);
+    const answer = new Promise<boolean>((resolve) => this.#waiters.push(resolve));
+    this.failed();
+    return answer;
+  }
+
+  #settle(up: boolean): void {
+    const waiters = this.#waiters;
+    this.#waiters = [];
+    for (const w of waiters) w(up);
   }
 }
