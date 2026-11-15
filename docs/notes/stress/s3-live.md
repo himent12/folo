@@ -40,7 +40,9 @@ mosaic off" (2 of 3 epochs done; it said "Last 1 epoch: mosaic off") or "Mosaic 
 never the planned count (`mosaicOffText`'s `ended`). Review round 2: a run that stopped or failed part-way into the
 mosaic-off epoch (step 90 of 40 per epoch, 2 epochs finished) trained those batches without mosaic, so it says "Mosaic
 off from epoch 3 … until the run stopped part-way through epoch 3", not "before mosaic off" (`mosaicOffText`'s
-`trained`, the progress in epochs with the steps of an unfinished epoch). FOLO Desktop has no such caption.
+`trained`, the progress in epochs with the steps of an unfinished epoch). Review round 3: a run that failed before
+epoch 3's first step reports `epoch: 2` with 2 finished, so the caption takes the history's last epoch when it is
+higher ("Failed after 2 finished epochs", not 1). FOLO Desktop has no such caption.
 
 ### s3-live-4: a deleted run reconnects forever
 
@@ -65,8 +67,11 @@ be behind" with Retry, and is tried again every 3 s by itself; a stopped run res
 (the poll no longer waits for a run that is already active). Review round 2: a compared run deleted in another tab
 froze the other runs' metrics for good (the answer's runs no longer matched the list, which read as "the link
 changed"); now only a change of `ids` is left to the metrics Resource, and a deletion alone never blocks a refresh of
-the runs that remain. Tests: `RunCompare.test.tsx` "a run that trains while compared" (five cases, fake timers; the
-first fails at base, the three added in round 1 and the one added in round 2 fail at the head reviewed before them). SIBLING (same front end, another surface):
+the runs that remain. Review round 3: a failed run's `Run.epoch` is also its last finished epoch when it failed before
+the next epoch's first step (`crates/folo-server/src/runs/entry.rs:130-132`), so metrics read before the runs list
+came count as caught up only when they hold epoch `Run.epoch` of a failed run (one extra read at most, never one per
+poll). Tests: `RunCompare.test.tsx` "a run that trains while compared" (six cases, fake timers; the first fails at
+base, the ones added in rounds 1, 2 and 3 fail at the head reviewed before them). SIBLING (same front end, another surface):
 `web/src/lib/api/liveLabel.ts` keeps a labeling job deleted elsewhere "Reconnecting"; left to lane s5-label (see
 Deferred).
 
