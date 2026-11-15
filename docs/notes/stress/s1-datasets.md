@@ -67,6 +67,14 @@ Repro steps and evidence for each are in `D:/folo-build/stress/lanes/s1-datasets
 - The inspector's neighbour prefetches and the benchmark gallery's images stop loading when they leave (siblings of
   finding 2: `Inspector.tsx`, `bench/entry/MatchView.tsx`).
 
+## Review round 2
+
+- Finding 8 also recovers from an outage that only images saw (no API request failed meanwhile, so nothing told
+  Studio it was offline): a failed `<img>` asks for one health probe (`hub.suspect`, the same de-duplicated check a
+  failed request starts); when it confirms the outage, its later answer bumps `hub.back` and the tiles load again. A
+  broken file costs one probe that answers, and stays "Image unavailable". Left: an outage over before that probe
+  lands (milliseconds) is not seen; Retry still works.
+
 ## Also seen
 
 - Fix 2 re-measured in headless Chrome against a `--web-dir` build of this branch (`grid.mjs`, same scroll): 0

@@ -104,7 +104,8 @@ export default function DatasetImage(props: DatasetImageProps) {
 
   // The server answers again after an outage (`hub.back`): an image that failed meanwhile tries again by itself, as a
   // Resource does; otherwise every tile on screen keeps "Image unavailable" until clicked (stress s1-datasets-8). One
-  // still loading then retries if it fails later (`failed`).
+  // still loading then retries if it fails later (`failed`). An outage that only images saw reaches `hub.back` through
+  // the probe their failure asks for (`hub.suspect` below).
   let back = untrack(() => hub.back);
   effect(() => {
     const now = hub.back;
@@ -126,7 +127,15 @@ export default function DatasetImage(props: DatasetImageProps) {
         src={phase.get() === 'error' ? null : src.get()}
         boxes={phase.get() === 'ready' ? (props.boxes ?? NO_BOXES) : NO_BOXES}
         truth={phase.get() === 'ready' ? (props.truth ?? NO_BOXES) : NO_BOXES}
-        onload={(ok) => (ok ? phase.set('ready') : failed())}
+        onload={(ok) => {
+          if (ok) {
+            phase.set('ready');
+            return;
+          }
+          // The browser loaded it, not the API: an outage only images ran into has to be told (`hub.suspect`).
+          hub.suspect();
+          failed();
+        }}
         {...(rest as Omit<DetectionViewProps, 'src'>)}
       />
       {phase.get() === 'loading' ? (

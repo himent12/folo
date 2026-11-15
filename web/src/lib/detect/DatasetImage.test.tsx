@@ -5,6 +5,7 @@ import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { render as fwRender } from '../../../framework/testing';
 import DatasetImage, { type DatasetImageProps } from './DatasetImage';
+import { PROBE_DELAYS, Reach } from "$lib/api/reach";
 
 /** Port of `mount(DatasetImage, { target, props })`; `unmount(c)` is `c.unmount()`. */
 const mount = (_: typeof DatasetImage, o: { target: HTMLElement; props: DatasetImageProps }) => fwRender(() => <DatasetImage {...o.props} />, o.target);
@@ -138,6 +139,61 @@ describe('DatasetImage', () => {
       expect(url).toHaveBeenCalledTimes(2);
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  /** The hub's reachability, as a real `Reach` over `probe`: `hub.suspect` and `hub.back` go to it. */
+  function reachOver(probe: () => Promise<void>) {
+    const reach = new Reach();
+    reach.reset(probe);
+    const spies = [vi.spyOn(hub, 'suspect').mockImplementation(() => reach.failed()), vi.spyOn(hub, 'back', 'get').mockImplementation(() => reach.back)];
+    return { reach, restore: () => spies.forEach((s) => s.mockRestore()) };
+  }
+
+  it('has the server checked when an image fails, and loads it again after an outage only images saw (stress s1-datasets-8)', async () => {
+    let up = false;
+    const probe = vi.fn(async () => {
+      if (!up) throw new Error('nothing answered');
+    });
+    const { reach, restore } = reachOver(probe);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // No API request fails meanwhile: `imageUrl` only builds the URL, the browser's own request is what fails.
+      const url = render(async () => '/api/datasets/ds/images/img?thumb=256');
+      const first = await until(() => target.querySelector('img'), 'the image');
+      first.dispatchEvent(new Event('error'));
+      await until(() => target.querySelector('.failed'), 'the failure');
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(reach.offline).toBe(true);
+      up = true;
+      await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+      const again = await until(() => target.querySelector('img'), 'the image again');
+      expect(again).not.toBe(first);
+      expect(url).toHaveBeenCalledTimes(2);
+      expect(target.querySelector('.failed')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
+  it('shows a failed image as failed when the server answers the check (a broken file): one check, no retry', async () => {
+    const probe = vi.fn(async () => {});
+    const { reach, restore } = reachOver(probe);
+    try {
+      const url = render(async () => '/api/datasets/ds/images/img?thumb=256');
+      const img = await until(() => target.querySelector('img'), 'the image');
+      img.dispatchEvent(new Event('error'));
+      await until(() => target.querySelector('.failed'), 'the failure');
+      await until(() => probe.mock.calls.length === 1 && !reach.offline, 'the check');
+      await new Promise((r) => setTimeout(r, 20));
+      flushSync();
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(reach.back).toBe(0);
+      expect(url).toHaveBeenCalledTimes(1);
+      expect(target.querySelector('.failed')).not.toBeNull();
+    } finally {
+      restore();
     }
   });
 

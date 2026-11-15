@@ -219,6 +219,15 @@ class Hub {
     this.mode = 'mock';
     this.epoch++;
   }
+
+      /**
+       * Something that talks to the server outside the API failed: an <img> the browser loads itself (`imageUrl` only
+       * builds its URL). Checked as a failed request is (./reach: one health probe, none while one is out or while offline),
+       * so an outage only images saw still ends in `back` and their tiles load again (stress s1-datasets-8).
+       */
+      suspect(): void {
+        this.#reach.failed();
+      }
 }
 
 export const hub = new Hub();
