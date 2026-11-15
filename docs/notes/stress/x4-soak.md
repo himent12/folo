@@ -73,18 +73,26 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
 
 - Repro: `folo serve --mock`, headless Chrome on `#/runs`. Loop: `POST /api/runs` (1 epoch), set
   `location.hash = #/runs/<new id>`, wait until the run ends; forced GC; CDP `Performance.getMetrics`.
-- Happened: 20 runs: DOM nodes 3,899 -> 28,808, JS heap 7.5 -> 19.2 MB, while the live document stays at
-  about 1,670 elements. Same when going through `#/models` between runs. Finished runs opened one after
-  another plateau (about 6,100 nodes): only pages that were live while shown are kept.
+- Happened: 20 runs of 2 epochs: DOM nodes 3,899 -> 28,808, JS heap 7.5 -> 19.2 MB, while the live document
+  stays at about 1,670 elements. Finished runs opened one after another plateau (about 6,100 nodes): only
+  pages that were live while shown are kept.
 - Cause, part one (fixed): `web/framework/runtime/bind.ts` created the shared `ResizeObserver` of
   `bind:clientWidth` inside the first caller's effect, so its callback closed over that caller's element: the
   first bound element (on the Run page, the run chart) and its whole detached page were kept for good. Fix: the
   callback is the module-level `notifySize`. Test `web/framework/runtime/bind.test.tsx` "bind:clientWidth"
   (WeakRef and a forced GC; the old code keeps the element).
-- Cause, part two (deferred): the retainer that grows with each live run is not pinned. Heap snapshots also show
-  detached run-page trees reached through module-level closures and a resolved screen-loader promise
-  (`web/src/routes.ts`), but the per-run path needs a two-snapshot diff (after 2 and after 4 runs, a detached
-  node of the newest run, every retaining path), not done in the time.
+- Measured with that fix: runs of 1 epoch now plateau (about 5,600 nodes; about 7,200 before the fix, one
+  whole page more). Runs of 2 epochs still grow about 1,700 nodes per run: a run that crosses an epoch while
+  its page is shown leaves that page behind. (A first version of the repro script used CDP
+  `Runtime.queryObjects`, whose result arrays stay alive in the inspector and themselves keep every element
+  they list: its growth for 1-epoch runs was that artifact. The numbers here are without it.)
+- Cause, part two (deferred): a heap snapshot of an unminified build after four 2-epoch runs reaches the old
+  pages' trees (run chart, samples grid, logs toolbar) from the command palette: the document's delegated
+  `onpointermove` closure of a palette item (`web/src/lib/shell/CommandPalette.tsx:477`) -> that item's
+  computed -> its `_targets` -> effects and owners of the left page (`web/framework/runtime/core.ts`), and from
+  the palette's `items` computed (an item's `icon` closure). Either the left page's effects stay linked into a
+  long-lived computed, or the palette keeps page commands. This is the framework's reactivity core: left for
+  its owner. Repro scripts: lane dir `scripts/live-follow.mjs` (`NOQ=1`, epochs 2) and `scripts/holders.mjs`.
 
 ## Not a bug
 
@@ -96,3 +104,5 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
 - Run page left open across ten real CPU runs (Studio and Desktop), start/stop loops of tiny runs.
 - Desktop idle CPU on every screen and `--bench-frames` on the big data; Studio `npm run perf`.
 - Narrow window widths (1024, 800) on Runs and the big grid.
+- The `apps/desktop` gates (fmt, clippy, test, build) for the x4-soak-2 fix: no build slot was free in any of
+  three turns, so that commit was never compiled here; CI is its first build.
