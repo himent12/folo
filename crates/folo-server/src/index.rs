@@ -201,7 +201,9 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
                     "unknown_format",
                     format!("'{shown}' is not a dataset folder, but '{below}' inside it holds a dataset"),
                 )
-                .hint(format!("register '{below}': the folder holding data.yaml, images/ + labels/, or annotations/"));
+                .hint(format!(
+                    "register '{below}': the folder holding data.yaml, images/ + labels/, or annotations/"
+                ));
             }
             match images_under(Path::new(path)) {
                 0 => Error::new(StatusCode::BAD_REQUEST, "unknown_format", m),

@@ -23,8 +23,8 @@ use crate::index::{data_error, read_image_with, requested_path, write_atomic};
 use crate::label::Labeler;
 use crate::runs::run_model_id;
 use crate::store::{
-    weights_file_name, ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput,
-    PredictSource, QueueMove, Store, Subscription, Weights, WeightsFormat,
+    ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
+    Store, Subscription, Weights, WeightsFormat, weights_file_name,
 };
 use crate::throughput::{EstimateInput, InferKey, InferSample};
 use crate::uploads::Uploads;
@@ -33,7 +33,7 @@ use crate::util::slug;
 use super::datasets::Naming;
 use super::models::cli_weights;
 use super::training::{run_cloud, upload_fingerprint};
-use super::{RealStore, State, MAX_SYNTHETIC_IMAGES, SHUTDOWN_WAIT};
+use super::{MAX_SYNTHETIC_IMAGES, RealStore, SHUTDOWN_WAIT, State};
 
 impl Store for RealStore {
     fn is_mock(&self) -> bool {
