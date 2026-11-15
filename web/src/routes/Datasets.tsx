@@ -138,12 +138,14 @@ export default function Datasets() {
     return (datasets.data ?? []).filter((d) => (f === 'all' || d.format === f) && (!q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q)));
   });
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "5 datasets · 9,400 images ·
-  // 64,086 boxes", whatever the filter; a narrowed list says what it shows under it.
+  // 64,086 boxes", whatever the filter; a narrowed list says what it shows under it. A dataset that cannot be read
+  // holds no images now: the counts of its registration are not added (stress s1-datasets-6).
   const facts = computed<string[] | null>(() => {
     const list = datasets.data;
     if (!list?.length) return null;
     const boxes = list.reduce((a, d) => a + (d.stats?.boxes ?? 0), 0);
-    return [count(list.length, 'dataset'), count(list.reduce((a, d) => a + imageCount(d), 0), 'image'), boxes ? count(boxes, 'box') : ''].filter(Boolean);
+    const images = list.reduce((a, d) => a + (d.problem ? 0 : imageCount(d)), 0);
+    return [count(list.length, 'dataset'), count(images, 'image'), boxes ? count(boxes, 'box') : ''].filter(Boolean);
   });
 
   // Nothing answers: adding a dataset needs the server, so the action is disabled and says why (as on Runs).
