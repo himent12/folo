@@ -118,6 +118,42 @@ describe('Inspector labels', () => {
     pager.dispose();
   });
 
+  it('drops the neighbour prefetches still loading when it closes (stress s1-datasets-2)', async () => {
+    const Original = globalThis.Image;
+    const made: HTMLImageElement[] = [];
+    // A full-size image the browser is still fetching.
+    globalThis.Image = class extends Original {
+      constructor() {
+        super();
+        made.push(this);
+      }
+      override get complete() {
+        return false;
+      }
+    } as typeof Image;
+    try {
+      hub.api.imageUrl = (_ds: string, id: string) => Promise.resolve(`/api/datasets/ds_fasteners/images/${id}`);
+      const dataset = await hub.api.dataset('ds_fasteners');
+      const pager = new ImagePager(dataset.id, undefined, undefined);
+      const second = await pager.at(1);
+      await pager.at(2);
+      c = mount(Inspector, {
+        target,
+        props: { pager, classes: dataset.classes, imageId: second!.id, only: null, onnavigate: () => {}, onclose: () => {}, onmissing: () => {} },
+      });
+      await vi.waitFor(() => {
+        flushSync();
+        if (made.filter((im) => im.getAttribute('src')).length < 2) throw new Error('neighbours not prefetched yet');
+      });
+      unmount(c);
+      c = undefined;
+      expect(made.filter((im) => im.hasAttribute('src'))).toHaveLength(0);
+      pager.dispose();
+    } finally {
+      globalThis.Image = Original;
+    }
+  });
+
   it('fades its key hint off the image once the viewer is used, and keeps the split on one line', async () => {
     const dataset = await hub.api.dataset('ds_fasteners');
     const pager = new ImagePager(dataset.id, undefined, undefined);

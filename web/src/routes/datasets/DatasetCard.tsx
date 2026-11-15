@@ -26,8 +26,11 @@ import { PROBLEM_LABEL, type ListedDataset } from './problem';
 /** The mosaic's images: the dataset's first four. */
 export const MOSAIC = 4;
 
-/** What a card says under its name: "2,400 images · 8 classes". */
-export const cardFacts = (d: ListedDataset) => `${count(imageCount(d), 'image')} · ${count(d.classes.length, 'class')}`;
+/**
+ * What a card says under its name: "2,400 images · 8 classes". A dataset that cannot be read now has its count from the
+ * registration, and says so: "24 images (last known) · 3 classes" (the header leaves it out of its total).
+ */
+export const cardFacts = (d: ListedDataset) => `${count(imageCount(d), 'image')}${d.problem ? ' (last known)' : ''} · ${count(d.classes.length, 'class')}`;
 
 export interface DatasetCardProps {
   dataset: ListedDataset;

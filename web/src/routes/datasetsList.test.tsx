@@ -70,6 +70,10 @@ describe('a dataset whose folder is missing', () => {
     open(Datasets, '/datasets');
     await until(() => target.querySelector('.card[data-name="shapes"]')?.textContent?.includes('Folder missing'), 'the shapes row');
     expect(target.textContent).toContain(`${all.length} datasets · ${want} images`);
+    // Its card keeps the count it had, marked as such; a readable one says its count plainly.
+    const shapes = all.find((d) => d.id === 'ds_shapes')!;
+    expect(target.querySelector('.card[data-name="shapes"] .facts')!.textContent).toContain(`${images(shapes).toLocaleString('en-US')} images (last known) ·`);
+    expect(target.querySelector('.card[data-name="fasteners"] .facts')!.textContent).not.toContain('last known');
   });
 
   it('keeps its name on its page, says what is wrong, and can be removed from FOLO', async () => {

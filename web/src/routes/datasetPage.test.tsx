@@ -165,6 +165,42 @@ describe('Dataset page', () => {
     expect(target.textContent).not.toContain('Train on this dataset');
   });
 
+  it('says the dataset cannot be loaded when its folder stopped being a dataset while the page was open', async () => {
+    const read = api.dataset.bind(api);
+    let broken = false;
+    vi.spyOn(api, 'dataset').mockImplementation(async (id: string) => {
+      if (broken) throw new ApiError(400, 'invalid_dataset', 'data.yaml: expected a mapping');
+      return read(id);
+    });
+    open('/datasets/ds_shapes');
+    await until(() => target.querySelector('[data-i="0"]'), 'the grid');
+    broken = true;
+    window.dispatchEvent(new Event('focus'));
+    await until(() => target.textContent?.includes('Could not load this dataset'), 'the broken dataset');
+    expect(target.querySelector('[data-i="0"]')).toBeNull();
+    expect(target.textContent).not.toContain('Train on this dataset');
+  });
+
+  it('keeps the page when a refresh fails for a reason that is not about the dataset (offline)', async () => {
+    const read = api.dataset.bind(api);
+    let offline = false;
+    const spy = vi.spyOn(api, 'dataset').mockImplementation(async (id: string) => {
+      if (offline) throw new TypeError('Failed to fetch');
+      return read(id);
+    });
+    open('/datasets/ds_shapes');
+    await until(() => target.querySelector('[data-i="0"]'), 'the grid');
+    const before = spy.mock.calls.length;
+    offline = true;
+    window.dispatchEvent(new Event('focus'));
+    await until(() => spy.mock.calls.length > before, 'the refresh');
+    // Let the failed read settle.
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(target.querySelector('[data-i="0"]')).not.toBeNull();
+    expect(target.textContent).not.toContain('Could not load this dataset');
+  });
+
   it('offers Train as a link for a dataset that can train', async () => {
     open('/datasets/ds_shapes');
     const train = await until(() => [...target.querySelectorAll('a')].find((a) => a.textContent?.includes('Train on this dataset')), 'Train');

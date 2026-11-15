@@ -52,13 +52,26 @@ Repro steps and evidence for each are in `D:/folo-build/stress/lanes/s1-datasets
 
 ## Not done
 
-- Removing a dataset a run uses, then opening the run page.
-- The Statistics tab's UI numbers on the 12,000-image set against the API (checked on the small sets only).
+- Desktop's side of findings 6 and 8 (review round 1, `SIBLING`, left to the Desktop lanes): its Datasets header
+  still adds an unreadable dataset's images (`apps/desktop/src/screens/datasets/list.rs:21`), and a thumbnail that
+  failed during an outage stays `ImgSlot::Failed` after recovery (`apps/desktop/src/store/images.rs:73`,
+  `apps/desktop/src/app/connection.rs:156`).
+
+## Review round 1
+
+- The recovery retry of finding 8 now also covers an image still loading when the server came back and failing
+  after (`DatasetImage.tsx` `failed`: an attempt started before the last recovery tries again).
+- A dataset page whose folder stops being a dataset while open (broken `data.yaml`, a 400 on the quiet re-read) shows
+  "Could not load this dataset", as on opening it, not the old grid and Train (`Dataset.tsx`, sibling of finding 1).
+- An unreadable dataset's card and phone row say "24 images (last known)" (`DatasetCard.tsx` `cardFacts`).
+- The inspector's neighbour prefetches and the benchmark gallery's images stop loading when they leave (siblings of
+  finding 2: `Inspector.tsx`, `bench/entry/MatchView.tsx`).
 
 ## Also seen
 
 - Fix 2 re-measured in headless Chrome against a `--web-dir` build of this branch (`grid.mjs`, same scroll): 0
   thumbnail requests still pending at the inspector (849 before), its image shows at once.
+- The Statistics tab of the 12,000-image set matches the API and the label count (lane `FINDINGS.md`).
 - Removing a dataset that runs used (registration only): the Runs list says "shapes (removed)", the run page
   header still links "shapes" to a page that says "Dataset not found" (polish, Runs surface, not fixed here).
   Registering the folder again gives the same id back and the run's link works again, as docs/API.md promises.

@@ -456,7 +456,7 @@ css`
  * of thumbnails, and the image the user then opened waited behind them, stress s1-datasets-2); without its `src` it
  * stops. Registered on the owner that created the element, so it runs when that branch or the view goes.
  */
-function cancelOnRemove(el: HTMLImageElement): void {
+export function cancelOnRemove(el: HTMLImageElement): void {
   onCleanup(() => el.removeAttribute('src'));
 }
 

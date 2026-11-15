@@ -115,6 +115,32 @@ describe('DatasetImage', () => {
     }
   });
 
+  it('tries again an image that was still loading when the server came back and failed after (stress s1-datasets-8)', async () => {
+    const back = signal(0);
+    const spy = vi.spyOn(hub, 'back', 'get').mockImplementation(() => back.get());
+    try {
+      const url = render(async () => 'data:,d');
+      const first = await until(() => target.querySelector('img'), 'the image');
+      // The recovery is seen while the image loads; the browser reports its (outage-time) failure only after.
+      back.set(1);
+      flushSync();
+      expect(url).toHaveBeenCalledTimes(1);
+      first.dispatchEvent(new Event('error'));
+      const second = await until(() => {
+        const im = target.querySelector('img');
+        return im !== first && im;
+      }, 'the image again');
+      expect(url).toHaveBeenCalledTimes(2);
+      expect(target.querySelector('.failed')).toBeNull();
+      // A failure of an attempt made after the recovery is shown, not retried for ever.
+      second.dispatchEvent(new Event('error'));
+      await until(() => target.querySelector('.failed'), 'the failure');
+      expect(url).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('fetches the image again under a new dataset revision (the same id may name another file now)', async () => {
     const api = new MockApi('normal', 0);
     api.imageUrl = vi.fn(async () => '/api/datasets/ds/images/0?thumb=256');

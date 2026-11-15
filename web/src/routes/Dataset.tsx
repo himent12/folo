@@ -225,11 +225,12 @@ export default function Dataset() {
     if (before.d !== now) untrack(() => pager.get()?.reload());
     if (before.d !== now || (before.counts !== undefined && before.counts !== c)) changed.set((n) => n + 1);
   });
-  // The folder went missing meanwhile, or the dataset was removed from FOLO (another tab, the CLI): say so, as on
-  // opening it, rather than keep showing what it held (its images answer 404 from now on).
+  // The folder went missing meanwhile, is no dataset now (a broken data.yaml: 400), or the dataset was removed from
+  // FOLO (another tab, the CLI): say so, as on opening it, rather than keep showing what it held (its images answer 404
+  // from now on). An answer that is not about the dataset (offline, 5xx) keeps the page as it was.
   effect(() => {
     const e = ds.stale;
-    if (datasetProblem(e) !== 'missing' && !(e instanceof ApiError && e.status === 404)) return;
+    if (datasetProblem(e) === undefined && !(e instanceof ApiError && e.status === 404)) return;
     untrack(() => {
       ds.data = undefined;
       ds.error = e;

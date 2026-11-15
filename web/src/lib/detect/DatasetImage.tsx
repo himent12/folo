@@ -66,9 +66,21 @@ export default function DatasetImage(props: DatasetImageProps) {
     };
   });
 
+  /** The server-recovery count (`hub.back`) when the current attempt started: see `failed`. */
+  let since = 0;
+  /**
+   * The attempt failed. One started before the server last came back retries instead: its image (loaded by the browser,
+   * not through the API) can fail after the recovery was seen, while it was still loading (stress s1-datasets-8).
+   */
+  function failed() {
+    if (untrack(() => hub.back) !== since) attempt.set((a) => a + 1);
+    else phase.set('error');
+  }
+
   effect(() => {
     void attempt.get();
     let live = true;
+    since = untrack(() => hub.back);
     src.set(null);
     phase.set('loading');
     const jobId = props.jobId;
@@ -82,7 +94,7 @@ export default function DatasetImage(props: DatasetImageProps) {
         if (live) src.set(rev && !/^(blob|data):/.test(u) ? `${u}${u.includes('?') ? '&' : '?'}rev=${rev}` : u);
       },
       () => {
-        if (live) phase.set('error');
+        if (live) failed();
       },
     );
     return () => {
@@ -91,7 +103,8 @@ export default function DatasetImage(props: DatasetImageProps) {
   });
 
   // The server answers again after an outage (`hub.back`): an image that failed meanwhile tries again by itself, as a
-  // Resource does; otherwise every tile on screen keeps "Image unavailable" until clicked (stress s1-datasets-8).
+  // Resource does; otherwise every tile on screen keeps "Image unavailable" until clicked (stress s1-datasets-8). One
+  // still loading then retries if it fails later (`failed`).
   let back = untrack(() => hub.back);
   effect(() => {
     const now = hub.back;
@@ -113,7 +126,7 @@ export default function DatasetImage(props: DatasetImageProps) {
         src={phase.get() === 'error' ? null : src.get()}
         boxes={phase.get() === 'ready' ? (props.boxes ?? NO_BOXES) : NO_BOXES}
         truth={phase.get() === 'ready' ? (props.truth ?? NO_BOXES) : NO_BOXES}
-        onload={(ok) => phase.set(ok ? 'ready' : 'error')}
+        onload={(ok) => (ok ? phase.set('ready') : failed())}
         {...(rest as Omit<DetectionViewProps, 'src'>)}
       />
       {phase.get() === 'loading' ? (

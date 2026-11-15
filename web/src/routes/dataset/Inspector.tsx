@@ -94,16 +94,33 @@ export default function Inspector(props: InspectorProps) {
     };
   });
 
-  // Prefetch neighbours (metadata and the full-size image) so J/K feel instant.
+  // Prefetch neighbours (metadata and the full-size image) so J/K feel instant. The next step, and closing the
+  // inspector, drop the prefetches still loading: an image without its src stops (holding J would queue every
+  // full-size image passed, and the one stopped at would wait behind them, stress s1-datasets-2).
   effect(() => {
     const at = idx.get();
     if (at < 0) return;
     props.pager.ensure(at - 1, at + 2);
     const ds = props.pager.datasetId;
+    let live = true;
+    const pre: HTMLImageElement[] = [];
     for (const j of [at + 1, at - 1]) {
       const n = untrack(() => props.pager.get(j));
-      if (n) void hub.api.imageUrl(ds, n.id).then((u) => void (new Image().src = u), () => {});
+      if (n)
+        void hub.api.imageUrl(ds, n.id).then(
+          (u) => {
+            if (!live) return;
+            const im = new Image();
+            im.src = u;
+            pre.push(im);
+          },
+          () => {},
+        );
     }
+    return () => {
+      live = false;
+      for (const im of pre) if (!im.complete) im.removeAttribute('src');
+    };
   });
 
   /** The last step's direction: the next image slides in from that side (120 ms, none under reduced motion). */
