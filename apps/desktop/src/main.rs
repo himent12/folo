@@ -175,6 +175,16 @@ fn arg_warnings<S: AsRef<str>>(args: &[S]) -> Vec<String> {
     out
 }
 
+/// The theme to open in: `--theme` when it is dark or light, else the last launch's, else dark (a bad
+/// `--theme x` used to win over the remembered light theme, open dark and remember dark).
+fn launch_mode(cli: Option<&str>, saved: Option<&str>) -> Mode {
+    let valid = |t: &&str| matches!(*t, "dark" | "light");
+    match cli.filter(valid).or(saved.filter(valid)) {
+        Some("light") => Mode::Light,
+        _ => Mode::Dark,
+    }
+}
+
 fn arg(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
@@ -203,10 +213,7 @@ fn main() {
         window_state::remembers(scenario.is_some(), arg("--width").is_some() || arg("--height").is_some());
     let state_path = remember.then(window_state::path);
     let saved = state_path.as_deref().map(window_state::load).unwrap_or_default();
-    let mode = match arg("--theme").as_deref().or(saved.theme.as_deref()) {
-        Some("light") => Mode::Light,
-        _ => Mode::Dark,
-    };
+    let mode = launch_mode(arg("--theme").as_deref(), saved.theme.as_deref());
     let spec = scenario.as_deref().map(scenario::Spec::parse);
     // Data source: `--server URL` connects to a running folo serve; `--mock` uses the built-in demo
     // data; by default the app finds or starts a server (see `FoloApp::autoconnect`).
@@ -433,6 +440,12 @@ mod tests {
             w[0].clone()
         };
         assert!(one(&["--theme", "x"]).contains("not dark or light"));
+        // ...and what that line promises happens: the last theme, else dark.
+        assert_eq!(launch_mode(Some("x"), Some("light")), Mode::Light);
+        assert_eq!(launch_mode(Some("x"), None), Mode::Dark);
+        assert_eq!(launch_mode(Some("dark"), Some("light")), Mode::Dark);
+        assert_eq!(launch_mode(None, Some("light")), Mode::Light);
+        assert_eq!(launch_mode(Some("light"), Some("bogus")), Mode::Light);
         assert!(one(&["--scenario", "nope-not-real", "--shot", "a.png"]).contains("no such scenario"));
         assert!(one(&["--sever", "http://127.0.0.1:1"]).contains("unknown option"));
         assert!(one(&["--mock", "--server"]).contains("missing its value"));

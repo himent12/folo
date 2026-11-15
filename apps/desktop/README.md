@@ -121,7 +121,8 @@ cargo run -- --help                                # every option (`--version`: 
 ```
 
 An unknown option, an option missing its value, a `--theme` other than dark or light and an unknown
-`--scenario` each print one `folo-desktop: …` line on stderr; the app still opens.
+`--scenario` each print one `folo-desktop: …` line on stderr; the app still opens (a bad `--theme` opens in the
+remembered theme, else dark).
 
 Build output goes to `target\` unless `CARGO_TARGET_DIR` names another folder; the tools below look there too.
 

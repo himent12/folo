@@ -47,8 +47,9 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
     Some(score)
 }
 
-/// The items matching `q`, at most 40: best match first, each group kept together under one heading
-/// (the group of the best match first), so a group never shows twice. No query: every item as listed.
+/// The items matching `q`, at most 40: the 40 best matches, each group kept together under one heading
+/// (the group of the best match first, best first within a group), so a group never shows twice. No
+/// query: every item as listed.
 pub fn rank(q: &str, items: Vec<PaletteItem>) -> Vec<PaletteItem> {
     let mut scored: Vec<(i32, usize, PaletteItem)> = items
         .into_iter()
@@ -57,6 +58,9 @@ pub fn rank(q: &str, items: Vec<PaletteItem>) -> Vec<PaletteItem> {
         .collect();
     if !q.is_empty() {
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        // Cut before grouping: grouping first let a big group of weak matches push a strong match
+        // of a later group out of the list.
+        scored.truncate(40);
         let mut groups: Vec<&'static str> = Vec::new();
         for (_, _, it) in &scored {
             if !groups.contains(&it.group) {
@@ -498,5 +502,29 @@ mod tests {
         // No query: the items as listed.
         let all = rank("", vec![item("Actions", "a"), item("Runs", "b"), item("Actions", "c")]);
         assert_eq!(all.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+    }
+
+    /// The 40 shown are the 40 best before they are grouped: with 40 runs of long names that match
+    /// "run" weakly (through their group), grouping first pushed "New training run" out of the list
+    /// (round 1 review of stress d5-window-input-6).
+    #[test]
+    fn the_cut_keeps_the_best_matches_of_every_group() {
+        let mut items = vec![item("Actions", "New training run"), item("Go to", "Runs")];
+        items.push(item("Runs", "a"));
+        for n in 0..39 {
+            items.push(item("Runs", &format!("experiment-with-a-very-long-name-{n:03}")));
+        }
+        assert!(fuzzy("run", "a Runs") > fuzzy("run", "New training run Actions"));
+        assert!(
+            fuzzy("run", "New training run Actions")
+                > fuzzy("run", "experiment-with-a-very-long-name-000 Runs")
+        );
+        let ranked = rank("run", items);
+        assert_eq!(ranked.len(), 40);
+        let titles: Vec<&str> = ranked.iter().map(|i| i.title.as_str()).collect();
+        assert!(titles.contains(&"New training run"), "{titles:?}");
+        let groups: Vec<&str> = ranked.iter().map(|i| i.group).collect();
+        assert_eq!(&groups[..3], ["Go to", "Runs", "Runs"], "grouped, the best group first");
+        assert_eq!(groups.last(), Some(&"Actions"));
     }
 }

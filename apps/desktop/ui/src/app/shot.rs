@@ -74,14 +74,17 @@ const MAX_SETTLE_MS: f32 = 600_000.0;
 pub(crate) const MAX_SIDE: f32 = 16384.0;
 
 /// Checks a headless window's `--width`, `--height` (logical px) and `--scale` up front: finite, at
-/// least 1 px, at most [`MAX_SIDE`] device pixels a side, a scale above 0 and at most 8. (`inf` asked
-/// for a 13 TB frame and aborted, a scale of `inf` panicked; 0, negative and NaN failed late.)
+/// least 1 px, a scale above 0 and at most 8, and 1 to [`MAX_SIDE`] device pixels a side, rounded as
+/// the framebuffer is (`Window::resize_framebuffer`). (`inf` asked for a 13 TB frame and aborted, a
+/// scale of `inf` panicked; 0, negative, NaN and a scale that rounds a side to 0 pixels failed late.)
 pub(crate) fn check_size(width: f32, height: f32, scale: f32) -> Result<()> {
     anyhow::ensure!(scale > 0.0 && scale <= 8.0, "--scale {scale}: expected more than 0 and at most 8");
     for (name, v) in [("--width", width), ("--height", height)] {
+        let device = (v * scale).round();
         anyhow::ensure!(
-            v >= 1.0 && v * scale <= MAX_SIDE,
-            "{name} {v}: expected 1 to {} px at --scale {scale}",
+            v >= 1.0 && (1.0..=MAX_SIDE).contains(&device),
+            "{name} {v}: expected {} to {} px at --scale {scale}",
+            (0.5 / scale).ceil().max(1.0),
             (MAX_SIDE / scale).floor()
         );
     }
@@ -178,6 +181,9 @@ mod tests {
             &["--scale", "NaN"],
             &["--scale", "0"],
             &["--scale", "9"],
+            // Rounds to 0 x 0 device pixels: "the window has no pixels" after settling.
+            &["--scale", "0.0001"],
+            &["--width", "1", "--scale", "0.4"],
             &["--shot-time", "1e12"],
             &["--shot-time", "NaN"],
             &["--shot-time", "-1"],
@@ -188,6 +194,8 @@ mod tests {
             &["--width", "1", "--height", "1"][..],
             &["--width", "16384"],
             &["--scale", "8"],
+            &["--scale", "0.001"],
+            &["--width", "2", "--height", "2", "--scale", "0.25"],
             &["--shot-time", "0"],
         ] {
             assert!(shot(good).unwrap().is_some(), "{good:?}");

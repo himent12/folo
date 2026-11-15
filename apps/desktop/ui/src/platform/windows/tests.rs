@@ -311,14 +311,16 @@ fn a_cancelled_press_does_not_click() {
 }
 
 /// A focusable field that records what the platform types into it; `ctrl-k` is bound and handled.
+/// `marked` is the length of the marked (composed) text, 0 for none.
 struct Field {
     focus: FocusHandle,
     typed: Rc<RefCell<Vec<String>>>,
+    marked: Rc<std::cell::Cell<usize>>,
 }
 
 impl Render for Field {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let (focus, typed) = (self.focus.clone(), self.typed.clone());
+        let (focus, typed, marked) = (self.focus.clone(), self.typed.clone(), self.marked.clone());
         div()
             .key_context("Field")
             .track_focus(&self.focus)
@@ -327,21 +329,22 @@ impl Render for Field {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |_, _, window, cx| window.handle_input(&focus, Recorder(typed), cx),
+                    move |_, _, window, cx| window.handle_input(&focus, Recorder(typed, marked), cx),
                 )
                 .size_full(),
             )
     }
 }
 
-struct Recorder(Rc<RefCell<Vec<String>>>);
+struct Recorder(Rc<RefCell<Vec<String>>>, Rc<std::cell::Cell<usize>>);
 
 impl InputHandler for Recorder {
     fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut App) -> Option<UTF16Selection> {
         None
     }
     fn marked_text_range(&mut self, _: &mut Window, _: &mut App) -> Option<std::ops::Range<usize>> {
-        None
+        let n = self.1.get();
+        (n > 0).then_some(0..n)
     }
     fn text_for_range(
         &mut self,
@@ -359,6 +362,7 @@ impl InputHandler for Recorder {
         _: &mut Window,
         _: &mut App,
     ) {
+        self.1.set(0);
         self.0.borrow_mut().push(text.to_string());
     }
     fn replace_and_mark_text_in_range(
@@ -369,6 +373,7 @@ impl InputHandler for Recorder {
         _: &mut Window,
         _: &mut App,
     ) {
+        self.1.set(text.encode_utf16().count());
         self.0.borrow_mut().push(format!("mark {text}"));
     }
     fn unmark_text(&mut self, _: &mut Window, _: &mut App) {}
@@ -406,7 +411,7 @@ fn typed_text_is_windows_translation() {
             let typed = typed.clone();
             cx.open_window(options, move |window, cx| {
                 window.focus(&focus);
-                cx.new(|_| Field { focus, typed })
+                cx.new(|_| Field { focus, typed, marked: Rc::default() })
             })
         })
         .unwrap();
@@ -442,6 +447,16 @@ fn typed_text_is_windows_translation() {
     post(hwnd, WM_CHAR, '\u{E9}' as usize, 1);
     pump();
     assert_eq!(take(), ["mark \u{B4}", "\u{E9}"]);
+
+    // A flagless WM_IME_COMPOSITION (the composition is gone) drops only composed text: with nothing
+    // marked it replaces nothing (it used to replace the selection with "", stress d5-window-input-1);
+    // with an accent marked, that goes.
+    send(hwnd, WM_IME_COMPOSITION, 0, 0);
+    assert_eq!(take(), Vec::<String>::new(), "nothing composed: the text stays");
+    post(hwnd, WM_DEADCHAR, '\u{B4}' as usize, 1);
+    pump();
+    send(hwnd, WM_IME_COMPOSITION, 0, 0);
+    assert_eq!(take(), ["mark \u{B4}", ""], "the composed accent is dropped");
 
     // A character outside the BMP arrives as a surrogate pair in two WM_CHARs.
     post(hwnd, WM_CHAR, 0xD83D, 1);
