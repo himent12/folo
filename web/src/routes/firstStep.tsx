@@ -20,14 +20,16 @@ export const firstStepLabel = (noDatasets: boolean) => (noDatasets ? 'Add datase
  * Keeps a page's dataset list (read for the first step) current, as the Datasets page does: read again after a dataset
  * action in this tab, and when the tab is shown again (the first dataset added in another tab meanwhile).
  */
-export function refreshOnDatasetChange(datasets: { readonly loading: boolean; refresh(): Promise<void> }): void {
+export function refreshOnDatasetChange(datasets: { refresh(): Promise<void> }): void {
   const seen = datasetChanges.peek();
   effect(() => {
     if (datasetChanges.get() !== seen) untrack(() => void datasets.refresh());
   });
   effect(() => {
     const back = () => {
-      if (document.visibilityState === 'visible' && !datasets.loading) void datasets.refresh();
+      // Also while the first read is still out: this read supersedes it (an answer from before the tab was hidden
+      // would otherwise land last, and nothing would read the list again).
+      if (document.visibilityState === 'visible') void datasets.refresh();
     };
     document.addEventListener('visibilitychange', back);
     return () => document.removeEventListener('visibilitychange', back);

@@ -58,6 +58,8 @@ the header's create action of Runs and Overview (past runs, no dataset left) is 
 The 11 new cases in the same test file fail with those changes reverted. Re-review 1: Overview's header reads its
 dataset list the same way (`refreshOnDatasetChange` in `Overview.tsx`), so the last dataset deleted or the first one
 added in another tab turns its action over when the tab is shown again; the two Overview cases fail without it.
+Re-review 2: the tab shown again while the first dataset read is still out reads the list again too (that read
+supersedes the first, whose old "none" would otherwise land last and stay); the three new cases fail without it.
 
 ### x2-newcomer-3: Enter does not submit Generate synthetic (Desktop)
 

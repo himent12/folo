@@ -125,6 +125,34 @@ describe('the first step on an empty server', () => {
         expect(a.getAttribute('href')).toBe('#/runs/new');
       });
     }
+
+    // Review round 3: the tab shown again while the first read is still out (its answer, from before the first dataset
+    // was added elsewhere, lands last): the page reads the list again instead of keeping that old "none".
+    it(`${name}: the tab shown again during the first read still turns Add dataset into New run`, async () => {
+      const api = new MockApi('empty', 0);
+      const [one] = await new MockApi('normal', 0).datasets();
+      const early: ((v: Dataset[]) => void)[] = [];
+      let added = false;
+      api.datasets = () => (added ? Promise.resolve([one!]) : new Promise<Dataset[]>((r) => early.push(r)));
+      open(page, path, api);
+      await vi.waitFor(() => {
+        if (early.length === 0) throw new Error('the datasets have not been asked for yet');
+      });
+      added = true;
+      document.dispatchEvent(new Event('visibilitychange'));
+      for (const answer of early) answer([]);
+      await settled();
+      const a = await vi.waitFor(async () => {
+        const el = await action();
+        if (!el.textContent?.includes('New run')) throw new Error('still Add dataset');
+        return el;
+      });
+      // Not the loading fallback: the old "none" has been taken in and passed over, and the action stays New run.
+      await settled();
+      expect(a.textContent).toContain('New run');
+      expect(target!.querySelector('a[href="#/datasets?add=folder"]')).toBeNull();
+      expect(a.getAttribute('href')).toBe('#/runs/new');
+    });
   }
 });
 
