@@ -66,13 +66,22 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
   waited behind all of them, and tiles evicted from the cache while waiting were still fetched.
 - Fix: `apps/desktop/src/store/image_queue.rs` `LoadQueue`: at most 8 fetches on their way, the newest
   request first, a request whose slot the cache evicted is dropped unfetched; cleared on a new data source.
-  Tests: `store/image_queue.rs` and `app/image_tests.rs` (a 3000-tile fling: the newest tiles fetched first,
-  at most budget + 8 fetches; the old code fetched all 3000).
+  "Newest" is the latest ask: a tile drawn again while it waits (`image()` and `bench_image()` on a loading
+  slot call `LoadQueue::touch`) moves ahead of the tiles queued after it (review round 1).
+  Tests: `store/image_queue.rs` and `app/image_tests.rs`: a 3000-tile fling starts tiles 0-7 at once, then
+  2999 down to 2992, at most budget + 8 fetches (the old code fetched all 3000); 500 tiles, then tiles 20
+  and 8 drawn again: 8 and 20 start next, each tile fetched once.
+- Also (review round 1, pre-existing): an image that failed to load (server down) stayed a placeholder for
+  good; Retry (`retry_all`, also run on a backend switch) now forgets failed image slots
+  (`ImageCache::forget_failed`) so they load again. Still deferred: a failed tile looks the same as a loading
+  one, with no per-tile Retry (Studio has one, `web/src/lib/detect/DatasetImage.tsx`); same for benchmark
+  thumbnails and the inspector.
 
 ### x4-soak-3 Studio: Run pages that were live while shown stay in memory
 
-- Repro: `folo serve --mock`, headless Chrome on `#/runs`. Loop: `POST /api/runs` (1 epoch), set
-  `location.hash = #/runs/<new id>`, wait until the run ends; forced GC; CDP `Performance.getMetrics`.
+- Repro: `folo serve --mock`, headless Chrome on `#/runs`. Loop: `POST /api/runs` (2 epochs), set
+  `location.hash = #/runs/<new id>`, wait until the run ends; forced GC; CDP `Performance.getMetrics`
+  (lane script `scripts/live-follow.mjs` with `NOQ=1`, so no `Runtime.queryObjects`; see below).
 - Happened: 20 runs of 2 epochs: DOM nodes 3,899 -> 28,808, JS heap 7.5 -> 19.2 MB, while the live document
   stays at about 1,670 elements. Finished runs opened one after another plateau (about 6,100 nodes): only
   pages that were live while shown are kept.
@@ -86,13 +95,17 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
   its page is shown leaves that page behind. (A first version of the repro script used CDP
   `Runtime.queryObjects`, whose result arrays stay alive in the inspector and themselves keep every element
   they list: its growth for 1-epoch runs was that artifact. The numbers here are without it.)
-- Cause, part two (deferred): a heap snapshot of an unminified build after four 2-epoch runs reaches the old
-  pages' trees (run chart, samples grid, logs toolbar) from the command palette: the document's delegated
-  `onpointermove` closure of a palette item (`web/src/lib/shell/CommandPalette.tsx:477`) -> that item's
-  computed -> its `_targets` -> effects and owners of the left page (`web/framework/runtime/core.ts`), and from
-  the palette's `items` computed (an item's `icon` closure). Either the left page's effects stay linked into a
-  long-lived computed, or the palette keeps page commands. This is the framework's reactivity core: left for
-  its owner. Repro scripts: lane dir `scripts/live-follow.mjs` (`NOQ=1`, epochs 2) and `scripts/holders.mjs`.
+- Cause, part two (deferred, not located): a heap snapshot of an unminified build after four 2-epoch runs
+  (lane `logs/holders-ep2.txt:355-379`) reaches an old page's chart from an `SVGSVGElement` that the
+  document's `SVGDocumentExtensions` still lists: its `$$pointermove` handler, a closure named
+  `onpointermove`, -> a computed (`x`) -> its `_targets` -> effects and owners of the left page
+  (`web/framework/runtime/core.ts`). The name and shape match the run chart's handler
+  (`web/src/lib/charts/LineChart.tsx:335`, bound at `:550`); that mapping is not verified. (The round-0 text
+  named a command palette item here: wrong, the palette's handler is on an `<li>`. The palette appears only on
+  a separate path, `holders-ep2.txt:54-60`, from its `items` computed to an icon closure, which does not show
+  an effect chain.) Why the detached chart's effects stay linked is not found; it sits in the framework's
+  reactivity core: left for its owner. Repro scripts: lane dir `scripts/live-follow.mjs` (`NOQ=1`, epochs 2)
+  and `scripts/holders.mjs`.
 
 ## Not a bug
 

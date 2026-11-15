@@ -17,15 +17,21 @@ describe('mapHistory', () => {
     expect(runMetrics).toHaveBeenCalledTimes(304);
   });
 
-  it('replaces an active run entry as it advances instead of keeping one per epoch', async () => {
+  it('keeps one entry for an active run as it advances, not one per epoch', async () => {
     const { api, runMetrics } = fakeApi();
-    for (let e = 1; e <= 3; e++) {
-      await mapHistory(api, run(1, 'running', e));
-      await mapHistory(api, run(1, 'running', e));
+    // A list one run short of the bound, then a live run that crosses ten epochs and finishes.
+    await Promise.all(Array.from({ length: MAX_RUNS - 1 }, (_, i) => mapHistory(api, run(i))));
+    for (let e = 1; e <= 10; e++) {
+      await mapHistory(api, run(-1, 'running', e));
+      await mapHistory(api, run(-1, 'running', e));
     }
-    await mapHistory(api, run(1, 'completed', 3));
-    await mapHistory(api, run(1, 'completed', 3));
-    expect(runMetrics).toHaveBeenCalledTimes(4);
+    await mapHistory(api, run(-1, 'completed', 10));
+    await mapHistory(api, run(-1, 'completed', 10));
+    expect(runMetrics).toHaveBeenCalledTimes(MAX_RUNS - 1 + 11);
+    // The live run took one place, not eleven: the oldest finished run is still cached.
+    runMetrics.mockClear();
+    await mapHistory(api, run(0));
+    expect(runMetrics).not.toHaveBeenCalled();
   });
 
   it('evicts the least recently used run past the bound', async () => {

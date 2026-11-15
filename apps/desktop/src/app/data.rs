@@ -359,7 +359,11 @@ impl FoloApp {
         let key = ImgKey { dataset: dataset.to_string(), image: image.to_string(), kind };
         match self.store.images_px.get(&key) {
             Some(ImgSlot::Ready(img)) => return Some(img.clone()),
-            Some(_) => return None,
+            Some(_) => {
+                // Drawn again while loading (a grid scrolled back): ahead of the ones queued after it.
+                self.store.image_queue.touch(&key);
+                return None;
+            }
             None => {}
         }
         if self.hold_loading || !self.store.images_px.begin(&key) {
@@ -404,7 +408,8 @@ impl FoloApp {
     fn start_queued_images(&mut self, cx: &mut Context<Self>) {
         loop {
             let store = &mut self.store;
-            let next = store.image_queue.start_next(|k| matches!(store.images_px.get(k), Some(ImgSlot::Loading)));
+            let next =
+                store.image_queue.start_next(|k| matches!(store.images_px.get(k), Some(ImgSlot::Loading)));
             let Some((key, call)) = next else { return };
             let api = self.store.api.clone();
             let generation = self.backend_gen;

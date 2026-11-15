@@ -109,7 +109,10 @@ impl FoloApp {
         let key = ImgKey { dataset, image: img, kind: ImgKind::Thumb };
         match self.store.images_px.get(&key) {
             Some(ImgSlot::Ready(img)) => return Some(img.clone()),
-            Some(_) => return None,
+            Some(_) => {
+                self.store.image_queue.touch(&key);
+                return None;
+            }
             None => {}
         }
         if self.hold_loading || !self.store.images_px.begin(&key) {
