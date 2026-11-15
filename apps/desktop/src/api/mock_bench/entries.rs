@@ -7,7 +7,9 @@ use crate::api::*;
 use crate::synth::hash;
 
 use super::benches::plan_passes;
-use super::scoring::{missing_classes, score_external_entry, synth_detections, synthesize_result};
+use super::scoring::{
+    check_external_boxes, missing_classes, score_external_entry, synth_detections, synthesize_result,
+};
 use super::{
     EntryFixture, EntrySkill, MockBench, find_bench, find_bench_mut, find_entry, find_entry_mut,
     sorted_entries,
@@ -190,6 +192,7 @@ impl MockBench {
                         .filter(|s| !s.is_empty())
                         .ok_or_else(|| ApiError::new("invalid_body", "External entries require a name."))?
                         .to_string();
+                    check_external_boxes(predictions)?;
                     if *open {
                         let max_total = b.images.len() as u64 * (1 + passes);
                         let entry = BenchEntry {

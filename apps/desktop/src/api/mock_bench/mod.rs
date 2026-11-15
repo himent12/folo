@@ -298,6 +298,47 @@ mod tests {
     }
 
     #[test]
+    fn external_boxes_with_reversed_corners_or_no_number_are_refused_not_scored() {
+        let m = MockBackend::new(0, true);
+        let mut images = Vec::new();
+        loop {
+            let page = m.bench_images("bn_7a04", images.len() as u32, 100, None).unwrap();
+            let done = page.images.is_empty() || images.len() + page.images.len() >= page.total as usize;
+            images.extend(page.images);
+            if done {
+                break;
+            }
+        }
+        let upload = |x1: f32, x2: f32| StartBenchEntry {
+            contestant: BenchContestantSpec::External {
+                scored: false,
+                open: false,
+                predictions: images
+                    .iter()
+                    .map(|im| BenchPrediction {
+                        image: im.id.clone(),
+                        condition: None,
+                        severity: None,
+                        boxes: vec![BenchDetection { class: 0, score: 1.0, x1, y1: 10.0, x2, y2: 40.0 }],
+                    })
+                    .collect(),
+            },
+            name: Some("external".into()),
+            max_images: None,
+            conditions: None,
+        };
+        // An (x, y, width, height) box sent as corners, and an overflowed coordinate.
+        let swapped = m.start_bench_entry("bn_7a04", &upload(50.0, 10.0)).unwrap_err();
+        assert_eq!(swapped.code, "invalid_body");
+        assert!(swapped.message.contains("is less than"), "{}", swapped.message);
+        let inf = m.start_bench_entry("bn_7a04", &upload(10.0, f32::INFINITY)).unwrap_err();
+        assert!(inf.message.contains("not a finite number"), "{}", inf.message);
+        assert!(m.bench_entries("bn_7a04").unwrap().iter().all(|e| e.name != "external"));
+        // A box of no area is a box.
+        m.start_bench_entry("bn_7a04", &upload(10.0, 10.0)).unwrap();
+    }
+
+    #[test]
     fn entry_images_come_worst_first_and_conditions_keep_the_size() {
         let m = MockBackend::new(0, true);
         let page = m.bench_entry_images("bn_3c90", "be_3c01", "worst", 0, 24).unwrap();

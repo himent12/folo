@@ -85,9 +85,23 @@ field left empty from the leave dialog either, also after a change of tab" (fail
   and reverted A's class rename. A field still at what the dialog took in now follows the job's changes from
   elsewhere; one edited here is kept and the dialog says so. Tests in `labeling.test.tsx` ("Edit job does not put
   back a class another tab renamed ...", "Edit job says so when another tab saves a field edited here").
-- Not changed: Desktop's demo backend (`apps/desktop/src/api/mock_bench/scoring.rs`) still scores external boxes with
-  reversed corners (s5-label-3's sibling, SIBLING). No Desktop screen uploads external records; the fix needs a cargo
-  slot for `apps/desktop`. Neither save has a server-side version check: last writer wins once the user is told.
+- Neither save has a server-side version check: last writer wins once the user is told.
+
+### Review round 2 (re-review 1)
+- The plan's "Changed elsewhere" note lived only in the Conditions tab: B on the Leaderboard tab, leaving with edits,
+  saw no warning in "Save the plan?" and its Save plan undid A's change. The leave dialog now says so too. Test: "says
+  so in the leave dialog when another tab saved the plan while another view was open".
+- A plan saved by another tab while this page's save was on its way was taken for the page's own (told by `saving`,
+  i.e. timing) and never warned; the late answer then said "Plan saved". The page's own update is now told by the plan
+  it sent, and a save whose answer finds another plan on the server keeps the edits, warns and does not say saved.
+  Test: "says so when another tab saves the plan while this one saves, and does not say Plan saved".
+- An emptied weight lost its text and error at any edit of another condition, so the draft's old number came back.
+  The typed text that holds no number now stays until Discard, a plan from the server or the condition turned off.
+  Test: "keeps an emptied weight empty, with its error, across edits of other conditions". All three fail without the
+  fix.
+- Desktop's demo backend (`apps/desktop/src/api/mock_bench/scoring.rs` `check_external_boxes`, called from
+  `entries.rs`) now refuses external boxes with reversed corners or a non-finite coordinate, as the server does
+  (s5-label-3's sibling). Test: `mock_bench` `external_boxes_with_reversed_corners_or_no_number_are_refused_not_scored`.
 
 ## Pushed hard, no bug
 Agent garbage / error / edge / huge replies (clear run errors, sub-pixel and unknown-label boxes dropped); the
