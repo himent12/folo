@@ -163,7 +163,7 @@ impl FoloApp {
                 "All classes".into(),
                 line_swatch(t.text_primary, false, false, 2.),
                 &mean,
-                m.metrics.as_ref().map(|x| x.map50),
+                super::detail::run_metrics(m).map(|x| x.map50),
             ));
         for c in &lit {
             if let Some((_, pts)) = curves.iter().find(|(k, _)| k == c) {

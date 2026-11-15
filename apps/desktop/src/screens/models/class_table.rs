@@ -47,8 +47,9 @@ impl FoloApp {
             .border_color(t.line_subtle)
             .child(div().flex_1().min_w_0().child(th(&t, "Class")))
             .children(["AP50", "AP50-95", "Precision", "Recall"].map(|h| num_cell(NUM_W, th(&t, h))));
-        // Every class together, as the KPI strip reports it, drawn as the plot's ink line.
-        let all = m.metrics.as_ref().map(|mm| {
+        // Every class together, as the KPI strip reports it, drawn as the plot's ink line; a run's
+        // model only (`run_metrics`: a file's stored numbers may be on another dataset).
+        let all = super::detail::run_metrics(m).map(|mm| {
             div()
                 .flex()
                 .items_center()

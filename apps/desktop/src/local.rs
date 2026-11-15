@@ -56,6 +56,32 @@ pub fn generation() -> Generation {
     Generation(GENERATION.load(Ordering::SeqCst))
 }
 
+/// A prediction's place on its line (the Playground's): superseded as soon as a newer one is
+/// taken there. A superseded local run is skipped instead of decoded and inferred: nobody shows
+/// its answer, and a burst of them (IoU arrow keys held down) would otherwise all run, one after
+/// the other, before the one still wanted.
+#[derive(Clone, Debug)]
+pub struct Ticket {
+    line: Arc<AtomicU64>,
+    n: u64,
+}
+
+impl Ticket {
+    /// The newest ticket on `line`: every one taken there before is superseded.
+    pub fn take(line: &Arc<AtomicU64>) -> Ticket {
+        Ticket { line: line.clone(), n: line.fetch_add(1, Ordering::SeqCst) + 1 }
+    }
+
+    /// `Err(superseded)` once a newer ticket was taken on this one's line.
+    fn check(&self) -> ApiResult<()> {
+        if self.line.load(Ordering::SeqCst) == self.n {
+            Ok(())
+        } else {
+            Err(ApiError::new("superseded", "A newer prediction replaced this one"))
+        }
+    }
+}
+
 /// A lock that survives a panic elsewhere (the data under it stays consistent: whole entries).
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -95,14 +121,20 @@ fn device(target: Target) -> ApiResult<(Device, String)> {
 }
 
 /// The predictor of `model_id` on `target`: the loaded one while the server says its weights are
-/// unchanged (or can't be reached), else freshly downloaded and loaded.
+/// unchanged (or can't be reached), else freshly downloaded and loaded. A `ticket` superseded
+/// while it waited for the load lock answers `superseded` without asking the server (a
+/// revalidation can take seconds against a server out of reach, one queued run after the other).
 fn predictor(
     api: &dyn Backend,
     model_id: &str,
     target: Target,
     generation: Generation,
+    ticket: &Ticket,
 ) -> ApiResult<Arc<Mutex<Predictor>>> {
-    predictor_with(&api.describe(), model_id, target, generation, |etag| api.model_weights(model_id, etag))
+    predictor_with(&api.describe(), model_id, target, generation, |etag| {
+        ticket.check()?;
+        api.model_weights(model_id, etag)
+    })
 }
 
 /// [`predictor`] over any weights source: `fetch(etag)` answers `None` when `etag` is current.
@@ -176,13 +208,16 @@ pub fn forget_all() {
 }
 
 /// `POST /api/predict`, answered in this process. `device` reads "local:<name>".
-/// `generation` is [`generation()`] as of when the request was scheduled.
+/// `generation` is [`generation()`] as of when the request was scheduled, `ticket` its place on
+/// its line: once superseded it answers `superseded` without running.
 pub fn predict(
     api: &dyn Backend,
     req: &PredictRequest,
     target: Target,
     generation: Generation,
+    ticket: &Ticket,
 ) -> ApiResult<PredictResponse> {
+    ticket.check()?;
     let (_, name) = device(target)?;
     let encoded;
     let bytes: &[u8] = match &req.input {
@@ -197,17 +232,20 @@ pub fn predict(
             }
         },
     };
-    run(&*predictor(api, &req.model_id, target, generation)?, bytes, req, &name)
+    run(&*predictor(api, &req.model_id, target, generation, ticket)?, bytes, req, &name, ticket)
 }
 
-/// One prediction of encoded `bytes` with a loaded predictor.
+/// One prediction of encoded `bytes` with a loaded predictor, unless `ticket` was superseded
+/// while it waited for the predictor (the runs before it hold it one at a time).
 fn run(
     predictor: &Mutex<Predictor>,
     bytes: &[u8],
     req: &PredictRequest,
     name: &str,
+    ticket: &Ticket,
 ) -> ApiResult<PredictResponse> {
     let mut p = lock(predictor);
+    ticket.check()?;
     // Decoding counts as preprocessing, as it does on the server.
     let t = Instant::now();
     let img = folo_data::decode(bytes)
@@ -310,13 +348,71 @@ mod tests {
             iou: 0.7,
             max_det: 300,
         };
-        let r = run(&retrained, &png(64, 48), &req, "CPU").unwrap();
+        let ticket = Ticket::take(&Arc::default());
+        let r = run(&retrained, &png(64, 48), &req, "CPU", &ticket).unwrap();
         assert_eq!((r.image.width, r.image.height), (64, 48));
         assert_eq!(r.device, "local:CPU");
         assert!(r.timing.total_ms > 0.);
         assert!(r.boxes.iter().all(|b| b.score >= 0.05 && b.x1 >= 0. && b.x2 <= 64.));
-        let bad = run(&retrained, b"not an image", &req, "CPU");
+        let bad = run(&retrained, b"not an image", &req, "CPU", &ticket);
         assert_eq!(bad.err().map(|e| e.code), Some("image_decode_failed".into()));
+    }
+
+    /// d3-models-1: runs queued behind a busy predictor (IoU arrow keys held down) that a newer
+    /// one superseded are skipped, not decoded and inferred one after the other before it.
+    #[test]
+    fn superseded_runs_queued_behind_the_predictor_are_skipped() {
+        let _serial = lock(&SERIAL);
+        let bytes = weights();
+        let p = predictor_with("test-ticket", "m_t", Target::Cpu, generation(), |_| {
+            Ok(Some(Weights { bytes: bytes.clone(), etag: "\"t\"".into() }))
+        })
+        .unwrap();
+        let req = PredictRequest {
+            model_id: "m_t".into(),
+            input: PredictInput::File { name: "x.png".into(), bytes: Arc::new(png(64, 48)) },
+            conf: 0.05,
+            iou: 0.7,
+            max_det: 300,
+        };
+        let image = png(64, 48);
+        let line = Arc::default();
+        // Five predictions asked for in a row while one still runs (it holds the predictor).
+        let busy = lock(&*p);
+        let tickets: Vec<Ticket> = (0..5).map(|_| Ticket::take(&line)).collect();
+        let (shared, image, req) = (&*p, &image, &req);
+        let answers: Vec<ApiResult<PredictResponse>> = std::thread::scope(|s| {
+            let waiting: Vec<_> =
+                tickets.iter().map(|t| s.spawn(move || run(shared, image, req, "CPU", t))).collect();
+            // Let them all queue on the predictor, then free it.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(busy);
+            waiting.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let codes: Vec<Option<String>> =
+            answers.iter().map(|a| a.as_ref().err().map(|e| e.code.clone())).collect();
+        assert_eq!(codes[..4], vec![Some("superseded".to_string()); 4][..], "only the newest runs");
+        assert!(answers[4].is_ok());
+        // And one superseded before it was even scheduled never reaches the backend.
+        let stale = Ticket::take(&line);
+        Ticket::take(&line);
+        let api = crate::api::mock::MockBackend::new(0, true);
+        assert_eq!(
+            predict(&api, req, Target::Cpu, generation(), &stale).err().map(|e| e.code),
+            Some("superseded".into())
+        );
+        // Nor does one superseded while it waited for the load lock (another run revalidating
+        // against a server out of reach): the demo backend would answer `not_supported`.
+        let loading = lock(&LOAD);
+        let waiting = Ticket::take(&line);
+        let answer = std::thread::scope(|s| {
+            let h = s.spawn(|| predict(&api, req, Target::Cpu, generation(), &waiting));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            Ticket::take(&line);
+            drop(loading);
+            h.join().unwrap()
+        });
+        assert_eq!(answer.err().map(|e| e.code), Some("superseded".into()));
     }
 
     #[test]
@@ -407,7 +503,8 @@ mod tests {
             }
             // Twice: the second run reuses the loaded model (a 304).
             for _ in 0..2 {
-                let local = predict(&api, &req, target, generation()).unwrap();
+                let local =
+                    predict(&api, &req, target, generation(), &Ticket::take(&Arc::default())).unwrap();
                 println!(
                     "{:<7} {:>3} boxes, {:>3} >= 0.25, {:.1} ms on {}",
                     format!("{target:?}"),

@@ -405,6 +405,9 @@ pub struct FoloApp {
     pub play_iou: f32,
     /// Where Playground runs the model: on the server (`None`), or in this process.
     pub play_target: Option<crate::local::Target>,
+    /// The Playground's line of predictions ([`crate::local::Ticket`]): a newer one skips the
+    /// local runs still queued.
+    play_line: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// This machine's GPU for local inference (its adapter name), probed once off the UI thread.
     pub local_gpu: Load<String>,
     pub play_image: Option<PlayImage>,
@@ -648,6 +651,7 @@ impl FoloApp {
             play_picker_open: false,
             play_iou: 0.7,
             play_target: None,
+            play_line: Default::default(),
             local_gpu: Load::Idle,
             play_image: None,
             play_pred: Load::Idle,

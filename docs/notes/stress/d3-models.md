@@ -26,12 +26,13 @@ on single images only (the GPU was busy training).
 
 | id | severity | what | status |
 |---|---|---|---|
-| d3-models-1 | annoying | Local CPU/GPU: every superseded run (IoU arrow key held, slider steps) still decodes and infers, one after the other; the wanted answer comes 6-15 s after the last key instead of after one inference | fix written, not in this PR |
-| d3-models-2 | annoying | Model page of a published model: headline tiles stay "–" after it was evaluated, while the caption names the evaluated dataset and split | deferred |
-| d3-models-3 | polish | Playground header "300 detections ≥ 0.00" while the threshold is 0.001 | fix written, not in this PR |
+| d3-models-1 | annoying | Local CPU/GPU: every superseded run (IoU arrow key held, slider steps) still decodes and infers, one after the other; the wanted answer comes 6-15 s after the last key instead of after one inference | fixed in this PR; SIBLING Studio WebGPU |
+| d3-models-2 | annoying | Model page of a published model: headline tiles stay "–" after it was evaluated, while the caption names the evaluated dataset and split | caption fixed with d3-models-7; the "–" deferred |
+| d3-models-3 | polish | Playground header "300 detections ≥ 0.00" while the threshold is 0.001 | fixed in this PR |
 | d3-models-4 | polish | Models list: mAP50 at 3 decimals ("0.000") beside mAP50-95 widened to 6 ("0.000008") reads as mAP50 < mAP50-95 | deferred |
 | d3-models-5 | polish | 80-class confusion matrix: one-letter column heads, the last overlaps "Missed"; 1280 px window: class table truncates "circle" to "cir…" | deferred |
 | d3-models-6 | polish | A 1x1 image fills the stage and its thumbnail as a radial glow fading to black (linear upscale against a dark edge) instead of a flat square | deferred |
+| d3-models-7 | annoying | (review round 1) Model page of an imported or published file: its stored metrics are captioned with this server's evaluation dataset and split, and its stored mAP50 / AP50 labels the fresh curves' "All classes" row and legend | fixed in this PR; SIBLING Studio legend |
 
 ### d3-models-1: superseded local runs all execute
 
@@ -45,24 +46,45 @@ GPU busy training. Fix: `local::Ticket`, one per Playground request on the app's
 before anything, again under the load lock before revalidating the weights (each queued run asked the server again,
 up to the 2 s connect / 15 s answer timeout apiece against a server out of reach), and `run` again after taking the
 predictor lock, answering `superseded` (an answer the app drops by its seq anyway). Test: `local::tests::superseded_runs_queued_behind_the_predictor_are_skipped`. SIBLING: the Server
-target queues every `/api/predict` on the server too (not changed: the server is another lane's area).
+target queues every `/api/predict` on the server too (not changed: the server is another lane's area). SIBLING
+(review round 1): Studio's in-browser engine resumes every request that awaited the detector load and decodes and
+detects it, superseded or not (`web/src/lib/inference/browser.ts:193-196`; the only cancellation check is before the
+load, `web/src/routes/playground/predict.ts:61`). Not changed here: Studio's code.
 
-### d3-models-2: published model's headline tiles stay "–" (deferred)
+### d3-models-2: published model's headline tiles stay "–" (the "–" deferred)
 
 `Model.metrics` is `null` for `source: published`, and the tiles read only it
-(`apps/desktop/src/screens/models/detail.rs:141,221,234`), while the caption under mAP50-95 names the evaluation's
-dataset and split. `ModelEval` has no overall metrics (`crates/folo-api/src/models.rs:202`): the fix is either an
-overall block in `/eval` (API change) or a client-side class mean, which must match the server's averaging rule
-(classes without ground truth). A design call: deferred.
+(`apps/desktop/src/screens/models/detail.rs:141,221,234`), while the caption under mAP50-95 named the evaluation's
+dataset and split. The caption is fixed with d3-models-7 (no dataset is claimed for a model no run made). The "–":
+`ModelEval` has no overall metrics (`crates/folo-api/src/models.rs:202`): the fix is either an overall block in
+`/eval` (API change) or a client-side class mean, which must match the server's averaging rule (classes without
+ground truth). A design call: deferred.
 
 ### d3-models-3: "≥ 0.00" at a 0.001 threshold
 
 `apps/desktop/src/screens/playground/stage.rs:178,363` formatted the threshold with two decimals while the slider
-and every other surface use `fmt_conf` (three where the third carries information). Fix: `fmt_conf` (written, not in this PR; see below).
+and every other surface use `fmt_conf` (three where the third carries information). Fix: `fmt_conf`.
 
-## Fixes not in this PR
+### d3-models-7: a file's stored metrics borrow the evaluation's provenance (review round 1)
 
-The code fixes for d3-models-1 and d3-models-3 (and one README sentence on skipped superseded local runs) are written but were never compiled: no build slot came in three turns (both queues 4-5 deep for 25-36 minutes each turn). Gates come before a push, so the code is not pushed. It lives uncommitted in the lane worktree `D:/folo-wt/stress-d3-models` and as a patch at `D:/folo-build/stress/lanes/d3-models/d3-models-fixes.patch` (`git apply` on this branch; run `cargo fmt --all` in `apps/desktop` after it, because the patch reorders one `use` line in `local.rs`). Files: `apps/desktop/src/local.rs` (`Ticket` and the test), `src/app/playground.rs`, `src/app/mod.rs`, `src/screens/playground/stage.rs`, `apps/desktop/README.md`.
+Repro: import a `.folo` whose stored metrics were measured on dataset A, register a dataset B with the same classes
+(`/eval` picks the first registered dataset with the model's classes, `crates/folo-server/src/real/models.rs:94`),
+open the model's page. The headline tile showed the file's stored mAP50-95 captioned "IoU 0.50–0.95 · B · val", and
+the precision-recall panel's "All classes" row and legend showed the stored mAP50 / AP50 beside B's fresh curves.
+Studio already names no dataset for a file's metrics (`web/src/routes/model/KpiSummary.tsx:54,63`). Fix:
+`headline_source` and `run_metrics` (`apps/desktop/src/screens/models/detail.rs`): a model no run made gets no
+dataset in its caption, and its stored numbers stay out of the evaluation panel (`class_table.rs`, `pr.rs`; the
+legend's "All classes" reads "–" at rest, its curve still reads at the cursor). Test:
+`screens::models::detail::tests::a_files_stored_metrics_never_take_the_evaluations_dataset`. SIBLING: Studio's
+curve legend still labels the fresh mean curve with the stored AP50 (`web/src/routes/Model.tsx:366`,
+`web/src/routes/model/PrCurves.tsx:186,274`); not changed here.
+
+## Gates
+
+`apps/desktop`: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (all pass, both new tests among them); `bash tools/file-size.sh` OK. That each new test
+fails without its fix was not run (one build slot per turn); it follows from the code: without the ticket checks
+the four superseded runs answer, and without `headline_source` the file's caption takes the evaluation's dataset.
 
 ## Not reached
 

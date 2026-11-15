@@ -175,7 +175,11 @@ impl FoloApp {
             let shown =
                 self.play_pred.ready().map(|p| p.boxes.iter().filter(|b| b.score >= self.play_conf).count());
             let count = shown.map(|n| {
-                format!("{n} {} ≥ {:.2}", if n == 1 { "detection" } else { "detections" }, self.play_conf)
+                format!(
+                    "{n} {} ≥ {}",
+                    if n == 1 { "detection" } else { "detections" },
+                    fmt_conf(self.play_conf)
+                )
             });
             let mut w = |s: Option<String>| {
                 s.map_or(0., |s| f32::from(crate::charts::text_width(window, &s, ty::SM.size)))
@@ -360,9 +364,9 @@ impl FoloApp {
                     .when_some(count, |d, n| {
                         d.child(div().flex_none().flex().items_center().gap(px(6.)).child(
                             text(ty::SM, t.text_secondary).tnum().child(format!(
-                                "{n} {} ≥ {:.2}",
+                                "{n} {} ≥ {}",
                                 if n == 1 { "detection" } else { "detections" },
-                                self.play_conf
+                                fmt_conf(self.play_conf)
                             )),
                         ))
                     })
