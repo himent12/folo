@@ -36,18 +36,19 @@ pub struct DistillConfig {
     pub cls_gain: f32,
     /// `lambda_d`, the weight of the DFL term `L_kd`.
     pub dfl_gain: f32,
-    /// `T`, the temperature of the DFL softmaxes (`> 0`); the class term has none.
+    /// `T`, the temperature of the DFL softmaxes (`> 0`); the class term has none. Starts at 4, which beat 1 on
+    /// the proxy (docs/notes/hill/r4-distill.md).
     pub temperature: f32,
 }
 
 impl Default for DistillConfig {
     fn default() -> Self {
-        DistillConfig { teacher: String::new(), cls_gain: 0.5, dfl_gain: 1.5, temperature: 1.0 }
+        DistillConfig { teacher: String::new(), cls_gain: 0.5, dfl_gain: 1.5, temperature: 4.0 }
     }
 }
 
 impl DistillConfig {
-    /// The starting values (`cls_gain` 0.5, `dfl_gain` 1.5, `T` 1) with `teacher`.
+    /// The starting values (`cls_gain` 0.5, `dfl_gain` 1.5, `T` 4) with `teacher`.
     pub fn new(teacher: impl Into<String>) -> Self {
         DistillConfig { teacher: teacher.into(), ..DistillConfig::default() }
     }

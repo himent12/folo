@@ -172,5 +172,5 @@ fn config_is_validated() {
         assert!(c.validate().is_err(), "{c:?}");
     }
     let c: DistillConfig = serde_json::from_str(r#"{"teacher":"t.folo"}"#).unwrap();
-    assert_eq!((c.cls_gain, c.dfl_gain, c.temperature), (0.5, 1.5, 1.0));
+    assert_eq!((c.cls_gain, c.dfl_gain, c.temperature), (0.5, 1.5, 4.0));
 }

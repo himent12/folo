@@ -152,7 +152,7 @@ fn a_teacher_trains_deterministically() {
     let (a, log) = train(with.clone());
     assert_eq!(a, train(with).0, "deterministic");
     assert_ne!(a, plain, "the teacher changes the weights");
-    assert!(log.iter().any(|l| l.contains("distilling from") && l.contains("temperature 1")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("distilling from") && l.contains("temperature 4")), "{log:?}");
     let line = log.iter().find(|l| l.starts_with("epoch 1: distillation cls")).expect("the epoch's terms");
     assert!(line.contains("over 2 batches"), "{line}");
     let o2o = with_teacher(TrainConfig { head: folo_vision::model::HeadMode::O2o, ..micro(1) }, &teacher);
@@ -293,7 +293,7 @@ fn stored_configs_with_and_without_distill_load() {
     let v = serde_json::to_value(&with).unwrap();
     assert_eq!(
         v["distill"],
-        serde_json::json!({ "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 1.0 })
+        serde_json::json!({ "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 4.0 })
     );
     assert_eq!(serde_json::from_value::<TrainConfig>(v).unwrap(), with);
 }
