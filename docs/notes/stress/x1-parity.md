@@ -75,7 +75,12 @@ turns 3 and 4 took that time.
   issues, its decoded images (`ImageCache::forget_dataset`) and the grid's filter, so they are read again
   (`a_dataset_read_again_with_other_contents_lists_its_images_again`,
   `forgetting_a_dataset_keeps_the_others_and_drops_its_late_loads`). Labels edited on disk with every count
-  unchanged are not noticed: the dataset record is the same.
+  unchanged are not noticed: the dataset record is the same. After review round 3: every image load and every
+  issue check is numbered too (`ImgSlot::Loading(ticket)`, `issue_reads`), so one asked for before the files
+  changed never fills what was asked for since, whichever answers first
+  (`a_load_from_before_a_forget_never_fills_the_slot_asked_for_again`,
+  `an_issue_check_of_files_since_changed_never_comes_back`); the card test reads the rendered focus tip (its glyphs
+  grow by the words added to the server's reason).
 - **x1-parity-1** (review round 2): `apps/desktop/src/charts/line.rs` asks `charts::axis::label_pow` for the
   shared power of ten, which has none for a fitted 0–1 axis (its ticks are written in full, "0.000042"), so no
   "× 10⁻⁵" caption multiplies values that already read right; on the mAP, Precision and Recall charts. This is
