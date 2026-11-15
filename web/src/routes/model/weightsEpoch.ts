@@ -2,21 +2,29 @@
 // (id `m_<run>-last`) its last finished one. When they are the same epoch, the two are the same weights, and each
 // says so.
 //
-// How many epochs the run finished is read from its recorded history (`GET /api/runs/{id}/metrics`: one `Epoch` per
-// validated epoch), never from `Run.status` and `Run.epoch`: a completed run may have stopped early (patience), a
-// failed one may have failed before it trained again (a resume whose dataset no longer opens keeps `epoch`), and a
-// queued resume keeps the epoch it finished.
+// How many epochs the run finished (`finishedEpochs`), never the planned count: a completed run may have stopped
+// early (patience). A completed or stopped run's `Run.epoch` says it, checkpoint-backed; for any other run its
+// recorded history (`GET /api/runs/{id}/metrics`: one `Epoch` per validated epoch) does when `Run.epoch` agrees.
 
 import type { Epoch, Model, Run } from '$lib/api/types';
 
 /** True for a run's `last.folo` model. */
 export const isLast = (m: Pick<Model, 'id'>) => m.id.endsWith('-last');
 
-/** The epochs a run finished, from its history: the highest validated epoch; null without one (not known). */
-export function finishedEpochs(epochs: readonly Pick<Epoch, 'epoch'>[] | null | undefined): number | null {
+/**
+ * The epochs a run finished, null when not known. A `completed` or `stopped` run's `epoch` is the server's count of
+ * finished epochs, which it brings up to the run's `weights/last.folo` after a crash between writing that checkpoint
+ * and its history line (docs/API.md, Runs; `runs/history.rs` `reconcile`), so it is the authority and the history may
+ * lag it. Any other run's `epoch` may be one in progress or the one it failed in, so its history's highest validated
+ * epoch counts, but only when `epoch` is not past it: past it, the checkpoint may hold one more (a crash or a failed
+ * write after saving it), and that is not known.
+ */
+export function finishedEpochs(run: Pick<Run, 'status' | 'epoch'>, epochs: readonly Pick<Epoch, 'epoch'>[] | null | undefined): number | null {
+  if (run.status === 'completed' || run.status === 'stopped') return run.epoch > 0 ? run.epoch : null;
+  if (!epochs) return null;
   let n = 0;
-  for (const e of epochs ?? []) if (e.epoch > n) n = e.epoch;
-  return n > 0 ? n : null;
+  for (const e of epochs) if (e.epoch > n) n = e.epoch;
+  return n > 0 && run.epoch <= n ? n : null;
 }
 
 /**

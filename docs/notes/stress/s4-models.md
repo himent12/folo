@@ -41,21 +41,25 @@ in-browser WebGPU check is single-image inference.
 
 - **s4-models-1**: seed data, open `#/models/m_c527-last` (`GET /api/runs/run_c527` → `status: stopped, epoch: 1,
   epochs: 50`). Before: "Trained for 50 epochs at 320 px", "Weights from last finished epoch". After: "1 of 50 epochs
-  at 320 px", "last finished epoch, 1 of 50, same weights as best". The count is the highest epoch of the run's
-  history (`GET /api/runs/{id}/metrics`), not `Run.status` / `Run.epoch` arithmetic (review round 1: an early-stopped
-  completed run has `epoch < epochs`; a failed resume that never trained again keeps its finished `epoch`; a queued
-  resume too). Until the history is in (or when it, or the run, does not load; a checkpoint copied out of its run)
-  Details says "50 epochs planned at 320 px". The page reads the run and its history again when the models change
-  (a run resumed in another window that ends). Tests: `web/src/routes/model/weightsEpoch.test.ts`,
+  at 320 px", "last finished epoch, 1 of 50, same weights as best". The count (`finishedEpochs`) is a `completed` or
+  `stopped` run's `Run.epoch`, which the server brings up to `weights/last.folo` after a crash between the checkpoint
+  and its history line (`crates/folo-server/src/runs/history.rs` `reconcile`; re-review 1); for any other status the
+  highest epoch of the run's history (`GET /api/runs/{id}/metrics`) when `Run.epoch` is not past it (review round 1:
+  a failed resume that never trained again, a queued resume; an early-stopped completed run has `epoch < epochs`).
+  Past it, or when it is not known (loading, the run or a needed history did not load, a checkpoint copied out of its
+  run), Details says "50 epochs planned at 320 px". The page reads the run and its history again when the models
+  change (a run resumed in another window that ends). Tests: `web/src/routes/model/weightsEpoch.test.ts`,
   `web/src/routes/Model.test.tsx` (`Model: how long it trained`).
 - **s4-models-2**: Playground, Browse files → a JPEG cut in half. After: "truncated-half.jpg could not be decoded: the
   file may be truncated or damaged." (the format is told by the first bytes, as elsewhere in `intake.ts`). Test:
   `web/src/routes/playground/intake.test.ts` (`calls a file of a readable format that does not decode damaged…`).
 - **s4-models-4**: seed data; move `data/datasets/shapes` away; open `#/models/m_c527-last` (cached or not). After:
   the registered dataset's "the folder of dataset 'shapes' is gone … move the folder back"; unregistered too: "the
-  folder of dataset 'shapes' this model trained on is gone", hint "move the folder back … or POST /api/val". Test:
-  the end of `crates/folo-server/tests/real_runs/training.rs` (`train_evaluate_predict_and_reload`: moved away,
-  unregistered, moved back).
+  folder of dataset 'shapes' this model trained on is gone", hint "move the folder back … or POST /api/val". The
+  Model page's evaluation panels show "Move the dataset's folder back where it was, then Retry." in place of that
+  hint, which names endpoints and so stays under Technical details (re-review 1). Tests: the end of
+  `crates/folo-server/tests/real_runs/training.rs` (`train_evaluate_predict_and_reload`: moved away, unregistered,
+  moved back); `web/src/routes/Model.test.tsx` (`Model: evaluation when the dataset folder is gone`).
 
 ### Checked, not bugs
 
@@ -82,5 +86,3 @@ in-browser WebGPU check is single-image inference.
 - An ONNX validity check beyond the header (no onnx runtime on this machine).
 - Box coordinates against the CLI, and the in-browser backends against the server detection by detection.
 - The odd files not in the drop / paste subset, by drop and by paste.
-- s4-models-4's recovery hint ("move the folder back") is under Studio's Technical details, as every API hint is
-  (`web/src/lib/ui/ErrorState.tsx`); the visible message names the cause.

@@ -25,8 +25,8 @@ import { HEAD_LABEL, PRECISION_LABEL } from '../run/resolved';
 import { trainedFor, weightsEpoch } from './weightsEpoch';
 
 /**
- * The source run, its dataset, the model it was fine-tuned from, and the epochs the run finished (from its history,
- * ./weightsEpoch finishedEpochs; null while not known).
+ * The source run, its dataset, the model it was fine-tuned from, and the epochs the run finished (./weightsEpoch
+ * finishedEpochs; null while not known).
  */
 export interface ModelContext {
   run: Run | null;

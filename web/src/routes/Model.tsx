@@ -67,13 +67,13 @@ export default function Model() {
       { id: 'model-copy-id', label: 'Copy model id', match: [m.id], icon: Copy, run: () => void copyText(m.id, 'model id') },
     ];
   });
-  // `epochs`: how many the run finished, from its history (model/weightsEpoch); null while not known.
+  // `epochs`: how many the run finished (model/weightsEpoch `finishedEpochs`); null while not known.
   const context = new Resource<ModelContext>(async (s) => {
     const rid = runId.get();
     if (!rid) return { run: null, dataset: null, parent: null, epochs: null };
     const run = await hub.api.run(rid, s).catch(() => null);
     // Every epoch and (with `every` at the run's step count) next to no steps.
-    const epochs = run ? await hub.api.runMetrics(rid, s, Math.max(1, run.step)).then((h) => finishedEpochs(h.epochs), () => null) : null;
+    const epochs = run ? await hub.api.runMetrics(rid, s, Math.max(1, run.step)).then((h) => finishedEpochs(run, h.epochs), () => finishedEpochs(run, null)) : null;
     const dataset = run ? await hub.api.dataset(run.config.dataset_id, s).catch(() => null) : null;
     const from = origin(run?.config.weights);
     const parent = from.kind === 'model' ? await hub.api.model(from.id, s).catch(() => null) : null;
@@ -92,6 +92,16 @@ export default function Model() {
   const tp = new Resource((s) => loadThroughput(hub.api, s));
   /** No registered dataset has this model's classes (an imported file): nothing to evaluate on, and no retry helps. */
   const unevaluable = computed(() => evaluation.error instanceof ApiError && evaluation.error.code === 'no_matching_dataset');
+  /**
+   * The dataset's folder is gone (`404 path_not_found`, "the folder of dataset '…' is gone", docs/API.md): the way back,
+   * in this page's terms; the server's hint names endpoints, so ErrorState keeps it with the details.
+   */
+  const evalHint = computed(() => {
+    const e = evaluation.error;
+    return e instanceof ApiError && e.code === 'path_not_found' && /\bis gone\b/.test(e.message)
+      ? 'Move the dataset’s folder back where it was, then Retry.'
+      : undefined;
+  });
   const notEvaluated = () => (
     <EmptyState
       title="Not evaluated"
@@ -380,7 +390,7 @@ export default function Model() {
                   ) : unevaluable.get() ? (
                     notEvaluated()
                   ) : evaluation.error ? (
-                    <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
+                    <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" hint={evalHint.get()} />
                   ) : (
                     <div class="sk">
                       <Skeleton h="24px" w="200px" />
@@ -406,7 +416,7 @@ export default function Model() {
                       notEvaluated()
                     ) : evaluation.error ? (
                       // The failure is said in the section the reader is on: the curves are another section here.
-                      <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
+                      <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" hint={evalHint.get()} />
                     ) : (
                       <div class="sk">
                         {[0, 1, 2, 3, 4, 5].map(() => (

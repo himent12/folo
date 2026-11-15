@@ -36,13 +36,32 @@ describe('weightsEpoch', () => {
 });
 
 describe('finishedEpochs', () => {
-  // Review round 1: Run.status and Run.epoch cannot say it (a failed resume that never trained keeps epoch 2, a queued
-  // resume keeps epoch 3, an early-stopped completed run has epoch < epochs): the recorded epochs do.
-  it('is the highest epoch of the run’s history, null without one', () => {
-    expect(finishedEpochs([{ epoch: 1 }, { epoch: 2 }])).toBe(2);
-    expect(finishedEpochs([{ epoch: 1 }, { epoch: 2 }, { epoch: 3 }])).toBe(3);
-    expect(finishedEpochs([])).toBeNull();
-    expect(finishedEpochs(null)).toBeNull();
+  const h = (n: number) => Array.from({ length: n }, (_, i) => ({ epoch: i + 1 }));
+  // Re-review 1: a crash after `last.folo` of epoch 3 was saved, before its history line, leaves the history at epoch
+  // 2; the server brings the stopped run's `epoch` up to the checkpoint (runs/history.rs reconcile), so that counts.
+  it('takes a completed or stopped run’s epoch, which the checkpoint backs, over a history that lags it', () => {
+    expect(finishedEpochs({ status: 'stopped', epoch: 3 }, h(2))).toBe(3);
+    expect(finishedEpochs({ status: 'stopped', epoch: 3 }, null)).toBe(3);
+    // Review round 1: an early-stopped completed run has epoch < epochs.
+    expect(finishedEpochs({ status: 'completed', epoch: 101 }, h(101))).toBe(101);
+    expect(finishedEpochs({ status: 'stopped', epoch: 0 }, [])).toBeNull();
+  });
+
+  // Review round 1: a failed resume that never trained keeps epoch 2, a queued resume keeps epoch 3.
+  it('takes any other run’s history when its epoch is not past it', () => {
+    expect(finishedEpochs({ status: 'failed', epoch: 2 }, h(2))).toBe(2);
+    expect(finishedEpochs({ status: 'queued', epoch: 3 }, h(3))).toBe(3);
+    expect(finishedEpochs({ status: 'running', epoch: 2 }, h(2))).toBe(2);
+  });
+
+  // Past it, the run may be in that epoch, have failed in it, or have saved its checkpoint and crashed (or failed to
+  // write its samples) before the history line: not known.
+  it('does not know when another run’s epoch is past its history, nor without the history', () => {
+    expect(finishedEpochs({ status: 'failed', epoch: 3 }, h(2))).toBeNull();
+    expect(finishedEpochs({ status: 'queued', epoch: 3 }, h(2))).toBeNull();
+    expect(finishedEpochs({ status: 'running', epoch: 3 }, h(2))).toBeNull();
+    expect(finishedEpochs({ status: 'failed', epoch: 2 }, null)).toBeNull();
+    expect(finishedEpochs({ status: 'queued', epoch: 0 }, [])).toBeNull();
   });
 });
 
