@@ -250,6 +250,25 @@ impl Filling {
                         classes.saturating_sub(1)
                     )));
                 }
+                // A box the scoring would take as a wrong guess without a word: an overflowed coordinate, or
+                // corners the wrong way round (most often (x, y, width, height) sent as corners).
+                if ![d.x1, d.y1, d.x2, d.y2].iter().all(|v| v.is_finite()) {
+                    return Err(invalid(format!(
+                        "{what}, box {}: a coordinate is not a finite number",
+                        b + 1
+                    )));
+                }
+                if d.x2 < d.x1 || d.y2 < d.y1 {
+                    return Err(invalid(format!(
+                        "{what}, box {}: x2 {} or y2 {} is less than x1 {} or y1 {}",
+                        b + 1,
+                        d.x2,
+                        d.y2,
+                        d.x1,
+                        d.y1
+                    ))
+                    .hint("a box is its corners in pixels: top-left (x1, y1), bottom-right (x2, y2), not x, y, width, height"));
+                }
                 if self.scored && !(0.0..=1.0).contains(&d.score) {
                     return Err(invalid(format!(
                         "{what}, box {}: score {} is outside 0..=1",
@@ -824,6 +843,28 @@ mod tests {
         assert!(check(&f, true, &bad_score).err().unwrap().body.message.contains("score 1.5"));
         // Without confidences the scores are not read.
         assert!(check(&f, false, &bad_score).is_ok());
+        // Corners the wrong way round (an (x, y, w, h) box sent as corners) and overflowed coordinates are named,
+        // not scored as wrong guesses; a box of no area is a box.
+        let mut swapped = base.clone();
+        swapped[1].boxes[0].x2 = 5.0;
+        let e = check(&f, true, &swapped).err().unwrap();
+        assert!(
+            e.body
+                .message
+                .contains("prediction 2 (image '2', unchanged), box 1: x2 5 or y2 50 is less than x1 10"),
+            "{}",
+            e.body.message
+        );
+        assert!(e.body.hint.as_deref().unwrap_or("").contains("not x, y, width, height"));
+        let mut upside = base.clone();
+        upside[0].boxes[0].y1 = 60.0;
+        assert!(check(&f, true, &upside).is_err());
+        let mut overflow = base.clone();
+        overflow[0].boxes[0].x2 = f32::INFINITY;
+        assert!(check(&f, true, &overflow).err().unwrap().body.message.contains("not a finite number"));
+        let mut flat = base.clone();
+        flat[0].boxes[0].x2 = flat[0].boxes[0].x1;
+        assert!(check(&f, true, &flat).is_ok());
         let mut many = base.clone();
         many[0].boxes = vec![many[0].boxes[0]; MAX_BOXES + 1];
         let e = check(&f, true, &many).err().unwrap();

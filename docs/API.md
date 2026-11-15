@@ -1109,7 +1109,8 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
     benchmark does not have, a condition that is not in the catalog or a (condition, severity) the plan does not
     run, a severity without its condition or the other way round, a record that repeats another with other
     boxes (of the same request, or received before), more than 1000 boxes, a class outside the benchmark's, a
-    score outside `0..=1` (when `scored`); then, when the entry is finished, an image without its unchanged
+    coordinate that is not a finite 32-bit float, corners the wrong way round (`x2 < x1` or `y2 < y1`: most often
+    `x, y, width, height` sent as corners; a box of no area is taken), a score outside `0..=1` (when `scored`); then, when the entry is finished, an image without its unchanged
     record, and a condition answered for some images or severities but not all. A record that repeats one with
     exactly the same boxes (and scores, when `scored`) is accepted and ignored: a client that retries a request
     whose answer it lost gets no `400`. With `scored: false` every score is taken as 1.

@@ -133,7 +133,10 @@ export function checkPredictions(records: readonly unknown[], ctx: PredictionCon
       if (!isObj(b)) return at(i, `box ${k + 1} is not an object.`);
       if (!isNum(b.class) || !Number.isInteger(b.class) || b.class < 0 || b.class >= ctx.classes)
         return at(i, `box ${k + 1}: "class" must be a class index from 0 to ${ctx.classes - 1}.`);
-      if (![b.x1, b.y1, b.x2, b.y2].every(isNum)) return at(i, `box ${k + 1}: "x1", "y1", "x2" and "y2" must be numbers (pixels).`);
+      // Finite as the server reads them (32-bit floats): 1e39 is a number here and infinity there.
+      if (![b.x1, b.y1, b.x2, b.y2].every((v) => isNum(v) && Number.isFinite(Math.fround(v)))) return at(i, `box ${k + 1}: "x1", "y1", "x2" and "y2" must be numbers (pixels).`);
+      if (Math.fround(b.x2 as number) < Math.fround(b.x1 as number) || Math.fround(b.y2 as number) < Math.fround(b.y1 as number))
+        return at(i, `box ${k + 1}: "x2" or "y2" is less than "x1" or "y1". A box is its corners in pixels, top-left (x1, y1) and bottom-right (x2, y2), not x, y, width, height.`);
       if (b.score !== undefined) {
         if (!isNum(b.score) || b.score < 0 || b.score > 1) return at(i, `box ${k + 1}: "score" must be between 0 and 1.`);
         scores = true;
