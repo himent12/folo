@@ -41,6 +41,7 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
 | --- | --- | --- | --- | --- |
 | x4-soak-1 | annoying | Studio Runs | past 200 runs every visit refetches every run's full metrics history | fixed |
 | x4-soak-2 | annoying | Desktop dataset grid | a fling through a big grid starts one fetch per tile passed (~700 threads); the tiles in view load seconds late | fixed |
+| x4-soak-3 | annoying | Studio Run page | every Run page shown while its run is live stays in memory after you leave it (~1,300 DOM nodes, ~0.6 MB per run) | part fixed (one retainer), rest deferred |
 
 ### x4-soak-1 Studio: Runs page refetches every run's metrics on every visit past 200 runs
 
@@ -67,6 +68,23 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
   request first, a request whose slot the cache evicted is dropped unfetched; cleared on a new data source.
   Tests: `store/image_queue.rs` and `app/image_tests.rs` (a 3000-tile fling: the newest tiles fetched first,
   at most budget + 8 fetches; the old code fetched all 3000).
+
+### x4-soak-3 Studio: Run pages that were live while shown stay in memory
+
+- Repro: `folo serve --mock`, headless Chrome on `#/runs`. Loop: `POST /api/runs` (1 epoch), set
+  `location.hash = #/runs/<new id>`, wait until the run ends; forced GC; CDP `Performance.getMetrics`.
+- Happened: 20 runs: DOM nodes 3,899 -> 28,808, JS heap 7.5 -> 19.2 MB, while the live document stays at
+  about 1,670 elements. Same when going through `#/models` between runs. Finished runs opened one after
+  another plateau (about 6,100 nodes): only pages that were live while shown are kept.
+- Cause, part one (fixed): `web/framework/runtime/bind.ts` created the shared `ResizeObserver` of
+  `bind:clientWidth` inside the first caller's effect, so its callback closed over that caller's element: the
+  first bound element (on the Run page, the run chart) and its whole detached page were kept for good. Fix: the
+  callback is the module-level `notifySize`. Test `web/framework/runtime/bind.test.tsx` "bind:clientWidth"
+  (WeakRef and a forced GC; the old code keeps the element).
+- Cause, part two (deferred): the retainer that grows with each live run is not pinned. Heap snapshots also show
+  detached run-page trees reached through module-level closures and a resolved screen-loader promise
+  (`web/src/routes.ts`), but the per-run path needs a two-snapshot diff (after 2 and after 4 runs, a detached
+  node of the newest run, every retaining path), not done in the time.
 
 ## Not a bug
 
