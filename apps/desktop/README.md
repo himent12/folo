@@ -278,7 +278,11 @@ window that started it closed, or it crashed), the app finds or starts one again
 local server couldn't start stays on the pages' error panels. `--server URL` and `--mock` pick a source explicitly;
 Settings › Connection switches at runtime: an address on this machine that doesn't answer falls back to the local
 server with a note saying so, and another machine's address is never replaced by the local server. A server started
-with `--token` shows as needing one (the app can't send a token). `--open run:<id>` (or `dataset:`, `model:`, `runs`,
+with `--token` shows as needing one (the app can't send a token); the server the app starts itself never inherits a
+`FOLO_TOKEN` from the app's environment, so it is always one the app can use. A run's live event stream that stays
+silent for 45 s (three of the server's 15 s keep-alives) counts as dropped: the app opens it again and reads the history
+anew, and when the run list says the run ended meanwhile it loads the final history. When the server answers again
+after being unreachable, every list that failed (runs too) is read again. `--open run:<id>` (or `dataset:`, `model:`, `runs`,
 …) starts on a screen. The deciding is `FoloApp::autoconnect` (`src/app/connection.rs`); finding the binary,
 starting and stopping it is `src/api/http/server.rs`.
 

@@ -57,7 +57,7 @@ impl HttpBackend {
             .with_config()
             .limit(64 << 20)
             .read_to_vec()
-            .map_err(|e| ApiError::new("bad_response", e.to_string()))?;
+            .map_err(|e| self.body_failed(e, ""))?;
         Ok(ImageData::Encoded(bytes))
     }
     /// [`Backend::bench_image`]'s answer.
@@ -93,7 +93,7 @@ impl HttpBackend {
             .with_config()
             .limit(64 << 20)
             .read_to_vec()
-            .map_err(|e| ApiError::new("bad_response", e.to_string()))?;
+            .map_err(|e| self.body_failed(e, ""))?;
         Ok(ImageData::Encoded(bytes))
     }
 }

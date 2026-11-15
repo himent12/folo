@@ -171,6 +171,7 @@ impl FoloApp {
         self.store.runs = Load::Ready(newest_first_runs(runs));
         self.store.sync_run_list();
         self.subscribe_active(cx);
+        self.settle_lost_streams(cx);
     }
 }
 

@@ -20,27 +20,31 @@ use transport::{agent, seg, stream_agent};
 
 /// How long an event stream may take to send its response headers.
 const STREAM_HANDSHAKE: Duration = Duration::from_secs(5);
+/// How long an open event stream may say nothing (not even the server's 15 s keep-alive) before it is
+/// taken for dead: three keep-alives missed.
+const STREAM_SILENCE: Duration = Duration::from_secs(45);
 
 pub struct HttpBackend {
     base: String,
     agent: ureq::Agent,
     /// No overall timeout (SSE streams stay open for the life of a run), but the handshake is
-    /// bounded: connect and response headers.
+    /// bounded (connect and response headers), and so is a silence on an open stream.
     stream_agent: ureq::Agent,
 }
 
 impl HttpBackend {
     /// `base` like `http://127.0.0.1:7878` (no trailing `/api`).
     pub fn new(base: &str) -> Self {
-        Self::with_handshake(base, STREAM_HANDSHAKE)
+        Self::with_stream_limits(base, STREAM_HANDSHAKE, STREAM_SILENCE)
     }
 
-    fn with_handshake(base: &str, handshake: Duration) -> Self {
+    fn with_stream_limits(base: &str, handshake: Duration, silence: Duration) -> Self {
         // As typed or pasted in Settings: surrounding whitespace (a copied line's end) and a
         // missing scheme ("127.0.0.1:7878") would otherwise make every request fail.
         let base = base.trim().trim_end_matches('/');
         let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
-        Self { base, agent: agent(Some(Duration::from_secs(30))), stream_agent: stream_agent(handshake) }
+        let stream_agent = stream_agent(handshake, silence);
+        Self { base, agent: agent(Some(Duration::from_secs(30))), stream_agent }
     }
 
     /// The server's address as requests use it (scheme added, no trailing `/`).
@@ -517,6 +521,26 @@ FOLO"
         // For a person: no transport jargon ("timeout: connect", "io: …").
         let hint = e.hint.unwrap();
         assert!(hint.starts_with("Start it with `folo serve`") && !hint.contains('('), "{hint}");
+    }
+
+    /// A body cut off midway (the server killed, a proxy dropping the link after the headers) is the
+    /// server out of reach, so the reconnect sweep asks for it again; it read as "Unexpected
+    /// response" and a page such as a finished benchmark's result kept its error with the server
+    /// back. A body that arrived whole but is no JSON, or JSON cut short by the server, stays a bad
+    /// response. (folo serve sends JSON with a content-length; a chunked body cut by a hang-up ends
+    /// cleanly in ureq and reads as JSON cut short, a bad response.)
+    #[test]
+    fn a_body_cut_off_midway_is_unreachable_and_a_bad_body_is_not() {
+        let (url, _requests) = canned_server(vec![
+            // Announces 100 bytes, sends 7, hangs up.
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: 100\r\n\r\n[{\"id\":"
+                .to_vec(),
+            json("200 OK", "not json"),
+            json("200 OK", "[{\"id\":"),
+        ]);
+        let api = HttpBackend::new(&url);
+        let codes: Vec<String> = (0..3).map(|_| api.datasets().unwrap_err().code).collect();
+        assert_eq!(codes, ["server_unreachable", "bad_response", "bad_response"]);
     }
 
     #[test]

@@ -14,6 +14,17 @@ use super::{FoloApp, ServerMode};
 /// The most refreshes (2 s apart) a failed recovery waits before the next attempt.
 const RECOVER_WAIT_MAX: u32 = 30;
 
+/// A load that failed because the server could not be reached.
+fn unreachable<T>(l: &Load<T>) -> bool {
+    l.error().is_some_and(|e| e.code == "server_unreachable")
+}
+
+/// Drops the loads that failed because the server could not be reached: each is asked for again
+/// when its page next needs it.
+fn forget_unreachable<K, T>(loads: &mut std::collections::HashMap<K, Load<T>>) {
+    loads.retain(|_, l| !unreachable(l));
+}
+
 /// Whether two addresses name one server (as typed or as the server reports itself).
 /// Two forms of this machine's address (`localhost`, `127.0.0.1`, `[::1]`) with one port are one server.
 pub(super) fn same_server(a: &str, b: &str) -> bool {
@@ -90,6 +101,8 @@ impl FoloApp {
         self.clear_bench();
         self.subscriptions.clear();
         self.subscribing.clear();
+        self.stream_lost.clear();
+        self.history_retry.clear();
         self.store.clear_pending();
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
@@ -153,9 +166,40 @@ impl FoloApp {
         if self.play_pred.error().is_some_and(|e| e.code == "server_unreachable") {
             self.rerun_predict(cx);
         }
+        // A request still out now that fails later (`fetch`) failed while it was away too.
+        self.reconnects += 1;
+        self.forget_unreachable_loads();
         // Back: read the lists now (the server may have restarted on another data dir).
         self.refresh_lists(cx);
         cx.notify();
+    }
+
+    /// What a page asked for while the server was away (a dataset and its images, a run's history, a
+    /// model's evaluation, the benchmarks and their results) is asked for again when shown: nothing
+    /// else does, and the page kept "Could not reach folo serve" until Retry (a finished benchmark
+    /// result has no Retry at all).
+    pub(super) fn forget_unreachable_loads(&mut self) {
+        let s = &mut self.store;
+        forget_unreachable(&mut s.dataset);
+        forget_unreachable(&mut s.images);
+        forget_unreachable(&mut s.issues);
+        forget_unreachable(&mut s.evals);
+        forget_unreachable(&mut s.run_data);
+        forget_unreachable(&mut s.samples);
+        forget_unreachable(&mut s.logs);
+        let b = &mut self.bench;
+        forget_unreachable(&mut b.entries);
+        forget_unreachable(&mut b.loops);
+        forget_unreachable(&mut b.results);
+        if unreachable(&b.list) {
+            b.list = Load::Idle;
+        }
+        if unreachable(&b.catalog) {
+            b.catalog = Load::Idle;
+        }
+        if unreachable(&b.agents) {
+            b.agents = Load::Idle;
+        }
     }
 
     /// Connect to a running `folo serve`, or start a local `folo serve` (the real engine, bare

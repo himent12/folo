@@ -38,14 +38,14 @@ impl HttpBackend {
             _ => {}
         }
         let etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
-        let bytes = resp.body_mut().with_config().limit(2 << 30).read_to_vec().map_err(|e| match e {
-            // The connection dropped or stalled mid-download: the server is out of reach (callers
-            // holding older weights fall back to them), not a malformed answer.
-            ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed => {
-                self.unreachable(&e)
-            }
-            _ => ApiError::new("bad_response", e.to_string()),
-        })?;
+        // A download cut or stalled midway is the server out of reach (callers holding older
+        // weights fall back to them), not a malformed answer.
+        let bytes = resp
+            .body_mut()
+            .with_config()
+            .limit(2 << 30)
+            .read_to_vec()
+            .map_err(|e| self.body_failed(e, ""))?;
         Ok(Some(Weights { bytes, etag }))
     }
 

@@ -520,6 +520,9 @@ impl Backend for MockBackend {
     }
 
     fn events(&self, id: &str) -> ApiResult<Subscription> {
+        if self.fail_events.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878"));
+        }
         self.events_for(id)
     }
 
