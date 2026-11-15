@@ -50,6 +50,8 @@ export default function Preview(props: PreviewProps) {
   const plainUrl = signal<string | null>(null);
   const changedUrl = signal<string | null>(null);
   const error = signal<unknown>(undefined);
+  /** Bumped by the images error's Retry: loads the first images again. */
+  const imagesTry = signal(0);
   const boxes = signal(true);
   /** Where the divider is, 0–100 from the left: unchanged on its left, the condition on its right. */
   const split = signal(50);
@@ -60,6 +62,7 @@ export default function Preview(props: PreviewProps) {
     const id = benchId.get();
     if (hub.mode === 'connecting') return;
     void hub.epoch;
+    void imagesTry.get();
     let gone = false;
     error.set(undefined);
     hub.api.benchImages(id, { limit: PAGE }).then(
@@ -159,7 +162,7 @@ export default function Preview(props: PreviewProps) {
           <Segmented label="Severity" size="sm" bind:value={severityText} options={severityOptions} />
         </div>
         {error.get() && !image.get() ? (
-          <ErrorState error={error.get()} title="Could not load the images" compact />
+          <ErrorState error={error.get()} title="Could not load the images" retry={() => imagesTry.set((n) => n + 1)} compact />
         ) : (
           <div class="stage" style:aspect-ratio={ratio.get()} style={{ '--ar': ratio.get() }}>
             {image.get() && plainUrl.get() && changedUrl.get() ? (

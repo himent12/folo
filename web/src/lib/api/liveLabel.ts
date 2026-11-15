@@ -258,8 +258,11 @@ export class LiveLabelJob {
         reconnect: () => sync(),
       });
 
+      // The first load's failure is the page's error even when the stream has told of the job meanwhile (its `job`
+      // event comes at once): a job with no list of its images would show as empty. A later load that got through
+      // (the stream's re-sync) has the list, so it wins.
       load().catch((e) => {
-        if (closed) return;
+        if (closed || applied > 0) return;
         this.error = e;
         this.loading = false;
       });

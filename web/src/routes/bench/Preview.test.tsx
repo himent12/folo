@@ -87,3 +87,30 @@ it('never leaves another condition’s boxes over the distance image, and retrie
   expect(truth('changed')).toBe(JSON.stringify(far));
   expect(truth('changed')).not.toBe(plain);
 });
+
+// Review round 3: the first page of images rejected (a page of the wrong shape) showed an error with no Retry, and
+// nothing but remounting the preview loaded it again.
+it('retries the first images after they failed to load', async () => {
+  const bench = await hub.api.bench('bn_9f03');
+  const catalog = await hub.api.benchCatalog();
+  vi.spyOn(hub.api, 'benchImageUrl').mockImplementation(async (_b, im, o) => `blob:${im}/${o?.condition ?? ''}`);
+  const real = hub.api.benchImages.bind(hub.api);
+  let fail = true;
+  const list = vi.spyOn(hub.api, 'benchImages').mockImplementation(async (id: string, q?: BenchImagesQuery) => {
+    if (fail) throw new ApiError(200, 'bad_response', 'The server sent an answer of an unexpected shape (no page of images).');
+    return real(id, q);
+  });
+  c = render(() => <Preview bench={bench} catalog={catalog} condition="haze" />, target);
+  await settle();
+  expect(target.textContent).toMatch(/Could not load the images/);
+  const retry = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => /Retry|Try again/.test(b.textContent ?? ''));
+  expect(retry).toBeDefined();
+
+  fail = false;
+  const calls = list.mock.calls.length;
+  retry!.click();
+  await settle();
+  expect(list.mock.calls.length).toBeGreaterThan(calls);
+  expect(target.textContent).not.toMatch(/Could not load the images/);
+  expect(JSON.parse(truth('plain')!).length).toBeGreaterThan(0);
+});

@@ -58,6 +58,7 @@ directory and checked nothing; the review caught it, and it was run again from t
 source file is under 1000 lines").
 Round 2: `npm run check`, `npm run build` and `tools/file-size.sh` passed; `npm test` 1767 of 1768, the other
 (`results.test.tsx` "New loop … opened, closed and opened again") timed out at 5 s under load and passes alone (31 of 31).
+Round 3: `npm run check`, `npm test` (216 files, 1770 tests, all pass), `npm run build` and `tools/file-size.sh` passed.
 
 ## Review round 1
 
@@ -79,3 +80,13 @@ Round 2: `npm run check`, `npm run build` and `tools/file-size.sh` passed; `npm 
   condition's boxes stayed drawn over the moved image. The truth is now cleared while it is not known, and a failure
   shows "Could not load the boxes under …" with Retry under the image (`routes/bench/Preview.tsx`); test
   `routes/bench/Preview.test.tsx`.
+
+## Review round 3
+
+- A labeling job whose first list of images failed (a page of the wrong shape) after the stream's `job` event had
+  arrived showed the job with no images, as an empty job, with no error and no Retry: the page showed the load error
+  only while no job was known. The first load's failure is now the page's error whatever the stream said, unless a
+  later load (the stream's re-sync) got through (`lib/api/liveLabel.ts`, `routes/LabelJob.tsx`); test
+  `routes/label/labeling.test.tsx` (the `job` event is heard before the images fail).
+- The benchmark preview's "Could not load the images" has Retry, which loads the first images again; before, only
+  remounting the preview did (`routes/bench/Preview.tsx`); test `routes/bench/Preview.test.tsx`.

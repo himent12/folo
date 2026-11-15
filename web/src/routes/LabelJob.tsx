@@ -248,7 +248,8 @@ export default function LabelJob() {
         <Page title="Label images">
           <Unsupported />
         </Page>
-      ) : live.error && !job.get() ? (
+      ) : live.error ? (
+        // Also with the job heard from the stream: without its images the page would show an empty job, no Retry.
         <Page
           title="Labeling job"
           actions={() => (
