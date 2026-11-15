@@ -22,7 +22,7 @@ import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
 // The head and precision in the words Run's Config and Compare use.
 import { HEAD_LABEL, PRECISION_LABEL } from '../run/resolved';
-import { weightsEpoch } from './weightsEpoch';
+import { trainedFor, weightsEpoch } from './weightsEpoch';
 
 export interface DetailsListProps {
   m: Model;
@@ -96,11 +96,9 @@ export default function DetailsList(props: DetailsListProps) {
       </div>
       <div class="col">
         {m().trained_with ? (
-          <div class="kv">
+          <div class="kv" id="model-trained-for">
             <dt>Trained for</dt>
-            <dd class="num">
-              {num(m().trained_with!.epochs)} {m().trained_with!.epochs === 1 ? 'epoch' : 'epochs'} at {m().trained_with!.imgsz} px
-            </dd>
+              <dd class="num">{trainedFor(m(), props.run)}</dd>
           </div>
         ) : null}
         {weightsEpoch(m(), props.run) ? (
