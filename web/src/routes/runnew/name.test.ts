@@ -1,12 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import { nameHint, runName, uniqueName } from './name';
+import { clipName, nameHint, nameLength, runName, uniqueName } from './name';
 
 describe('run names', () => {
   it('turns what was typed into a tidy name', () => {
     expect(runName('my first run')).toBe('my-first-run');
-    expect(runName('  café: v2!  ')).toBe('caf-v2');
+    expect(runName('  café: v2!  ')).toBe('café-v2');
     expect(runName('shapes_1k.v2-n')).toBe('shapes_1k.v2-n');
     expect(runName('!!!')).toBe('');
+  });
+
+  it('keeps letters of every script, as the server and FOLO Desktop do (round s2-runs-1)', () => {
+    expect(runName('ünïcødé-名前')).toBe('ünïcødé-名前');
+    expect(runName('名前')).toBe('名前');
+    expect(runName('Москва 2')).toBe('Москва-2');
+    // A combining accent stays on its letter; an emoji is not a letter.
+    expect(runName('cafe\u0301 🐟 run')).toBe('cafe\u0301-run');
+    expect(nameHint('名前', new Set(), true)).toBeNull();
+  });
+
+  it('counts and cuts characters, not UTF-16 units', () => {
+    expect(nameLength('𠀀𠀀')).toBe(2);
+    expect(clipName('a𠀀b', 2)).toBe('a𠀀');
+    // 64 letters outside the BMP fit the limit whole, and a suffix never leaves half a letter behind.
+    const wide = '𠀀'.repeat(64);
+    expect(uniqueName(wide, new Set())).toBe(wide);
+    expect(uniqueName(wide, new Set([wide]))).toBe(`${'𠀀'.repeat(62)}-2`);
   });
 
   it('suggests a unique name that fits the length limit', () => {

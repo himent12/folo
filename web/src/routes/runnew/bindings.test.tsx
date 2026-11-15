@@ -242,3 +242,44 @@ describe('New run: bindings', () => {
     expect(rail.getAttribute('aria-expanded')).toBe('false');
   });
 });
+
+describe('New run: Start while the user moves on (round s2-runs)', () => {
+  /** Starts with the server's answer held back; `answer()` lets it through. */
+  async function startHeld() {
+    let answer!: () => Promise<void>;
+    const real = api.createRun.bind(api);
+    vi.spyOn(api, 'createRun').mockImplementation((c) => new Promise((ok, fail) => (answer = () => real(c).then(ok, fail))));
+    target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await tick();
+    await until(() => answer, 'the request');
+    return answer;
+  }
+  const wentToRun = () => vi.mocked(router.go).mock.calls.some(([to]) => /^\/runs\/(?!new)/.test(String(to)));
+
+  it('opens the new run when the form is still showing', async () => {
+    await open();
+    await (await startHeld())();
+    await until(() => wentToRun(), 'the run page');
+  });
+
+  it('leaves the user where they went when they left before the server answered (s2-runs-2)', async () => {
+    await open();
+    const answer = await startHeld();
+    // Back, or a click on Datasets, while the request is out.
+    router.route = parse('#/datasets');
+    flush();
+    await answer();
+    // The form's own continuation after its await.
+    await new Promise((r) => setTimeout(r, 20));
+    flush();
+    expect(wentToRun()).toBe(false);
+  });
+
+  it('refuses a learning rate the server reads as 0 or 10 (32-bit), s2-runs-3', async () => {
+    await open();
+    for (const [v, bad] of [['1e-46', true], ['9.9999999999', true], ['1e-30', false], ['0.01', false]] as const) {
+      type('input#lr0', v);
+      expect($<HTMLInputElement>('input#lr0').getAttribute('aria-invalid'), v).toBe(bad ? 'true' : null);
+    }
+  });
+});

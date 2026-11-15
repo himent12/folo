@@ -50,7 +50,14 @@ export default function Menu(props: MenuProps) {
 
   function place() {
     const r = root.get()?.getBoundingClientRect();
-    if (r) at.set({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+    if (!r) return;
+    // Under the button; above it when the list (measured once shown) would cross the window's bottom edge and fits
+    // above: a row near the bottom would otherwise put its last items, Delete among them, out of reach (the page may not
+    // scroll, and scrolling closes a placed list).
+    const h = list.get()?.offsetHeight ?? 0;
+    const below = r.bottom + 6;
+    const top = h && below + h > window.innerHeight - 8 && r.top - 6 - h >= 8 ? r.top - 6 - h : below;
+    at.set({ top, right: Math.max(8, window.innerWidth - r.right) });
   }
 
   const entries = () => [...(list.get()?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
@@ -60,6 +67,8 @@ export default function Menu(props: MenuProps) {
     active.set(where === 'first' ? 0 : shown.get().length - 1);
     open.set(true);
     await tick();
+    // Placed again now that the list has a height: above the button where it does not fit below.
+    if (p.fixed) place();
     const all = entries();
     (where === 'first' ? all[0] : all.at(-1))?.focus();
   }

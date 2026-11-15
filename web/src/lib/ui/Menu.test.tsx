@@ -175,3 +175,40 @@ describe('Menu on a phone', () => {
     viewport(width);
   });
 });
+
+describe('Menu placed on the viewport (fixed)', () => {
+  /** Opens a fixed menu whose button sits at `top`..`top + 36` of the window and whose list is 120 px high. */
+  async function openAt(top: number) {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const r = { top, bottom: top + 36, left: 900, right: 936, width: 36, height: 36, x: 900, y: top };
+      return { ...r, toJSON: () => r } as DOMRect;
+    });
+    const height = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.getAttribute('role') === 'menu' ? 120 : 0;
+    });
+    const items = [{ label: 'Open model', href: '#/m' }, { label: 'Try in Playground', href: '#/p' }, { label: 'Delete run', danger: true, onclick: () => {} }];
+    const c = mount(Menu, { target, props: { label: 'Actions for r', items, fixed: true } });
+    target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click();
+    flushSync();
+    await tick();
+    flushSync();
+    const placed = target.querySelector<HTMLElement>('[role="menu"]')!.style.top;
+    unmount(c);
+    target.remove();
+    rect.mockRestore();
+    height.mockRestore();
+    return placed;
+  }
+
+  it('opens under its button where the list fits there', async () => {
+    expect(await openAt(100)).toBe(`${100 + 36 + 6}px`);
+  });
+
+  it('opens above its button near the window bottom, so its last item (Delete) stays reachable', async () => {
+    // Runs list round s2-runs-5: the last row's list ran below the window and the page could not scroll to it.
+    const top = window.innerHeight - 40;
+    expect(await openAt(top)).toBe(`${top - 6 - 120}px`);
+  });
+});

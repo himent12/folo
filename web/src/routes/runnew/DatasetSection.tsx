@@ -1,6 +1,7 @@
 /** New run, section 1: the dataset, as cards from 768 px up and as a compact select with a one-line summary on phones. */
 import Check from '$icons/check';
 import CircleAlert from '$icons/circle-alert';
+import Info from '$icons/info';
 import { bindable, css, For, Index } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import Badge from '$lib/ui/Badge';
@@ -13,6 +14,7 @@ import Skeleton from '$lib/ui/Skeleton';
 import Meta from '$lib/ui/Meta';
 import { balanced } from '$lib/ui/balancedGrid';
 import type { FormErrors } from './jump';
+import { noValNote } from './valSplit';
 
 
 export interface DatasetSectionProps {
@@ -111,6 +113,13 @@ export default function DatasetSection(props: DatasetSectionProps) {
               </span>
             </p>
           ) : null}
+            {/* A train-only dataset trains, but its scores are on the training images (runnew/valSplit). */}
+            {!props.errors.dataset && props.dataset && !props.dataset.problem && noValNote(props.dataset) ? (
+              <p class="ds-note" id="dataset-note">
+              <Info size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>{noValNote(props.dataset)}</span>
+            </p>
+          ) : null}
         </>
       )}
     </Panel>
@@ -130,6 +139,21 @@ css`
     color: var(--danger-text);
   }
   .ds-error > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  /* A train-only dataset's note: the error line's geometry in secondary ink (it informs, Start stays on). */
+  .ds-note {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-1);
+    margin-top: var(--space-2);
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .ds-note > :global(svg) {
     flex-shrink: 0;
     margin-top: 1px;
   }
