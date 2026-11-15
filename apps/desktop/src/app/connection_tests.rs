@@ -767,3 +767,86 @@ fn a_huge_full_size_image_is_held_at_the_cap_and_its_thumbnail_as_sent() {
     assert_eq!(side(&mut app, ImgKind::Full), (ImageCache::FULL_MAX_SIDE, 8));
     assert_eq!(side(&mut app, ImgKind::Thumb), (5000, 10), "a thumbnail is the server's size");
 }
+
+/// A thumbnail whose body is cut off midway over real HTTP reads as `server_unreachable`
+/// (`HttpBackend::body_failed`); with `/system` answering that only probes, so it still backs off
+/// 2, 8 and 32 s, waits after the fourth failure, and the inspector's Retry loads it.
+#[test]
+fn a_thumbnail_cut_off_midway_backs_off_then_waits_for_a_retry() {
+    use std::io::{Read, Write};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use crate::api::http::HttpBackend;
+    use crate::store::{ImgKey, ImgKind, ImgSlot};
+    // Announces 1000 bytes, sends 10, hangs up: four times.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for _ in 0..4 {
+            let Ok((mut sock, _)) = listener.accept() else { return };
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: image/jpeg\r\ncontent-length: 1000\r\nconnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes());
+            let _ = sock.write_all(b"\xff\xd8\xff\xe0abcdef");
+            let _ = sock.flush();
+        }
+    });
+    let http = Arc::new(HttpBackend::new(&url));
+    let codes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (mut app, window) = open();
+    let (ds, im) = ("ds_3b91", "img_03417");
+    let key = ImgKey { dataset: ds.into(), image: im.into(), kind: ImgKind::Thumb };
+    let fetch = |app: &mut folo_ui::HeadlessApp| {
+        let (http, codes) = (http.clone(), codes.clone());
+        drive(app, window, |this, _, cx| {
+            assert!(this.store.images_px.begin(&key));
+            let call = move |_: &dyn Backend| {
+                let r = http.image(ds, im, Some(128));
+                if let Err(e) = &r {
+                    codes.lock().unwrap().push(e.code.clone());
+                }
+                r
+            };
+            this.load_cached_image(key.clone(), call, cx);
+        })
+    };
+    let failed = |app: &mut folo_ui::HeadlessApp| {
+        drive(app, window, |this, _, _| matches!(this.store.images_px.get(&key), Some(ImgSlot::Failed)))
+    };
+    for wait in [2, 8, 32] {
+        fetch(&mut app);
+        assert!(failed(&mut app));
+        // The `/system` probe the outage-looking failure asked for is answered: no outage.
+        assert!(failed(&mut app));
+        assert!(!drive(&mut app, window, |this, _, _| this.store.unreachable()), "no outage");
+        app.advance_clock(Duration::from_secs(wait) - Duration::from_millis(1));
+        assert!(failed(&mut app), "{wait} s not up yet");
+        app.advance_clock(Duration::from_millis(1));
+        assert!(
+            drive(&mut app, window, |this, _, _| this.store.images_px.get(&key).is_none()),
+            "asked for again after {wait} s"
+        );
+    }
+    fetch(&mut app);
+    app.advance_clock(Duration::from_secs(3600));
+    assert!(failed(&mut app), "the fourth failure waits");
+    assert!(drive(&mut app, window, |this, _, _| this.image_failed(ds, im, ImgKind::Thumb)));
+    assert_eq!(*codes.lock().unwrap(), ["server_unreachable"; 4], "a cut body is the server out of reach");
+    // The inspector's Retry asks the app's own server (answering now): the thumbnail shows.
+    drive(&mut app, window, |this, _, cx| {
+        this.retry_failed_image(ds, im, cx);
+        assert!(this.image(ds, im, ImgKind::Thumb, cx).is_none());
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(matches!(this.store.images_px.get(&key), Some(ImgSlot::Ready(_))));
+        assert!(!this.image_failed(ds, im, ImgKind::Thumb));
+    });
+}
