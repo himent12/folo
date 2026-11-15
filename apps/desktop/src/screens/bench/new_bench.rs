@@ -2,7 +2,8 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, Focusable, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
+    AnyElement, Context, Focusable, InteractiveElement, IntoElement, ParentElement, SharedString, Styled,
+    Window, div, px,
 };
 
 use crate::app::{FoloApp, act};
@@ -85,6 +86,13 @@ impl FoloApp {
             .border_1()
             .border_color(if name_fh.is_focused(window) { t.accent_line } else { t.line_control })
             .text_size(px(ty::SM.size))
+            // Enter in the name creates it, as the Create button does.
+            .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "enter" && !ev.keystroke.modifiers.control {
+                    this.submit_new_bench(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .when(name_ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
             .child(name_input);
         let src_select = self.source_select("bench-new-ds", &sources, choice, window, cx, |this, id, cx| {

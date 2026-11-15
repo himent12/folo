@@ -5,6 +5,7 @@ mod create;
 mod delete;
 mod design;
 mod images;
+mod keys;
 mod load;
 mod loops;
 mod merge;

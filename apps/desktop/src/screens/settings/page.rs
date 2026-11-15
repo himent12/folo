@@ -245,7 +245,7 @@ impl FoloApp {
             ("Full screen", &["F11"]),
             ("Back", &["Alt", "←"]),
             ("Close / back", &["Esc"]),
-            ("Start training (in the dialog)", &["Ctrl", "Enter"]),
+            ("Submit the open dialog or form", &["Ctrl", "Enter"]),
         ];
         let go_to = GO_TO_KEYS;
         let col = |title: &str, items: &[(&str, &[&str])]| {
