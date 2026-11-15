@@ -64,6 +64,9 @@ pub struct MockBackend {
     fail_events: std::sync::atomic::AtomicBool,
     /// The next instance-list read fails ([`MockBackend::fail_instances_once`]).
     fail_instances: std::sync::atomic::AtomicBool,
+    /// Datasets whose own read fails with this (code, message) until mended
+    /// ([`MockBackend::break_dataset`]).
+    broken: Mutex<HashMap<String, (String, String)>>,
     clock: Clock,
 }
 
@@ -215,6 +218,19 @@ impl MockBackend {
         let f = self.datasets.iter_mut().find(|d| d.ds.id == id).expect("a demo dataset");
         f.ds.splits.train = 0;
         self
+    }
+
+    /// Reading dataset `id` fails with `code` from now on, as a server answers for a folder moved
+    /// away (`path_not_found`) or one that no longer reads as a dataset (`invalid_dataset`).
+    #[cfg(test)]
+    pub fn break_dataset(&self, id: &str, code: &str, message: &str) {
+        self.broken.lock().unwrap().insert(id.to_string(), (code.to_string(), message.to_string()));
+    }
+
+    /// Dataset `id` reads again (its folder is back).
+    #[cfg(test)]
+    pub fn mend_dataset(&self, id: &str) {
+        self.broken.lock().unwrap().remove(id);
     }
 
     /// Lists a removed dataset (or run) again, as registering its folder again does on a server.

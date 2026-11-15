@@ -218,6 +218,67 @@ fn a_dataset_page_has_its_tabs_and_one_toolbar_and_statistics_holds_the_strip() 
     assert!(empty.iter().any(|k| k == "ds-empty-chip"), "{empty:?}");
 }
 
+/// x1-parity-7 and its review: an Overview card says when its server can't read the dataset, in
+/// Studio's words with the server's reason, and follows the folder moved away after the card was
+/// read, then put back (a visit to a page with cards reads each dataset again). Its page offers
+/// Retry, Remove from FOLO and the list, not Connection settings.
+#[test]
+fn a_dataset_card_follows_its_folder_away_and_back() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let (id, format) = drive(&mut app, window, |this, _, _| {
+        let d = this.store.datasets.ready().unwrap()[0].clone();
+        (d.id.clone(), crate::api::Label::label(&d.format))
+    });
+    // The card as the Overview draws it, once its reads have answered.
+    let card = |app: &mut folo_ui::HeadlessApp| {
+        drawn_keys(app, window);
+        drive(app, window, |this, _, _| {
+            let d = this.store.dataset_summary(&id).cloned().expect("listed");
+            this.dataset_card_badge(&d)
+        })
+    };
+    let go = |app: &mut folo_ui::HeadlessApp, route: super::Route| {
+        drive(app, window, |this, w, cx| this.navigate(route, w, cx));
+    };
+    go(&mut app, super::Route::Overview);
+    assert_eq!(card(&mut app), (format, Tone::Neutral, None));
+
+    // The folder moved away: the next visit says so, with the server's reason for the tip.
+    api.break_dataset(&id, "path_not_found", "Dataset folder not found: D:/data/shapes");
+    go(&mut app, super::Route::Datasets);
+    go(&mut app, super::Route::Overview);
+    let (label, tone, why) = card(&mut app);
+    assert_eq!((label, tone), ("Folder missing", Tone::Warning));
+    assert_eq!(why.as_deref(), Some("Dataset folder not found: D:/data/shapes"));
+
+    // Its page: the dataset's own ways on, not the connection panel.
+    go(&mut app, super::Route::Dataset(id.clone()));
+    let keys = drawn_keys(&mut app, window);
+    assert!(keys.iter().any(|k| k == "ds-problem-retry"), "{keys:?}");
+    assert!(keys.iter().any(|k| k == "ds-problem-delete"), "{keys:?}");
+    assert!(!keys.iter().any(|k| k == "ds-detail-retry-settings"), "{keys:?}");
+
+    // Put back: Retry on its page reads it again, and the card is healthy again.
+    api.mend_dataset(&id);
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_recheck.insert(id.clone());
+        cx.notify();
+    });
+    drawn_keys(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset.get(&id).is_some_and(|l| l.ready().is_some()), "read again");
+    });
+    go(&mut app, super::Route::Overview);
+    assert_eq!(card(&mut app), (format, Tone::Neutral, None));
+
+    // A folder that no longer reads as a dataset: "Can't read".
+    api.break_dataset(&id, "invalid_dataset", "no images found");
+    go(&mut app, super::Route::Datasets);
+    go(&mut app, super::Route::Overview);
+    assert_eq!(card(&mut app).0, "Can't read");
+}
+
 /// The focus keys a page draws, once what it asked for has come.
 fn drawn_keys(app: &mut folo_ui::HeadlessApp, window: folo_ui::WindowHandle<super::FoloApp>) -> Vec<String> {
     app.frame(window.into());

@@ -236,6 +236,39 @@ impl FoloApp {
                 self.store.images.remove(id);
             }
         }
+        // Read before and shown again on a page with cards (`ds_recheck`): read again in place, the
+        // card keeping what it shows until the answer. Only an answer about the dataset replaces it
+        // (a connection blip leaves a healthy card healthy); back from a failure, its images reload.
+        if self.ds_recheck.remove(id) && self.store.dataset.get(id).is_some_and(|l| !l.is_loading()) {
+            let (a, b) = (id.to_string(), id.to_string());
+            self.fetch(
+                cx,
+                move |api| api.dataset(&a),
+                move |this, r, _| {
+                    // Cleared since (Retry, another server): this answer is about what was there.
+                    if this.store.dataset.get(&b).is_none_or(|l| l.is_loading()) {
+                        return;
+                    }
+                    match r {
+                        Ok(d) => {
+                            if this.store.dataset.get(&b).is_some_and(|l| l.error().is_some())
+                                && this.store.images.get(&b).is_some_and(|l| l.error().is_some())
+                            {
+                                this.store.images.remove(&b);
+                            }
+                            this.store.dataset.insert(b, Load::Ready(d));
+                        }
+                        Err(e)
+                            if e.code == "dataset_not_found"
+                                || crate::screens::dataset_problem(&e).is_some() =>
+                        {
+                            this.store.dataset.insert(b, Load::Failed(e));
+                        }
+                        Err(_) => {}
+                    }
+                },
+            );
+        }
         if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.dataset.insert(id.to_string(), Load::Loading);
             let (a, b) = (id.to_string(), id.to_string());

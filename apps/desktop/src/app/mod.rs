@@ -332,6 +332,9 @@ pub struct FoloApp {
     /// load (a later load replaces it; its pages are dropped).
     pub images_more: HashMap<String, u64>,
     pub images_seq: u64,
+    /// Datasets read before, read again (in place) the next time a card or their page shows them:
+    /// a folder moved away or put back since says so ([`FoloApp::ensure_dataset`]).
+    pub ds_recheck: std::collections::HashSet<String>,
     pub ds_tile: f32,
     /// The grid tile under the pointer (it reveals every label, as a focused one does).
     pub ds_hover_tile: Option<String>,
@@ -620,6 +623,7 @@ impl FoloApp {
             ds_split_counts: RefCell::new(None),
             images_more: HashMap::new(),
             images_seq: 0,
+            ds_recheck: Default::default(),
             ds_tile: 168.,
             ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),

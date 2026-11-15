@@ -85,8 +85,7 @@ pub fn local_deadline(t: i64, now: i64) -> String {
     format!("{:02}:{:02}", s / 3600, s / 60 % 60)
 }
 
-/// Seconds east of UTC at `t` (Windows: the zone's rules for that date, daylight saving included;
-/// UTC elsewhere).
+/// Seconds east of UTC at `t`: the machine zone's rules for that date, daylight saving included.
 #[cfg(windows)]
 fn local_offset_at(t: i64) -> i64 {
     use windows_sys::Win32::Foundation::SYSTEMTIME;
@@ -114,8 +113,26 @@ fn local_offset_at(t: i64) -> i64 {
 }
 
 #[cfg(not(windows))]
-fn local_offset_at(_t: i64) -> i64 {
-    0
+fn local_offset_at(t: i64) -> i64 {
+    // `struct tm` as glibc, musl and the BSDs (macOS) lay it out: nine ints, then the offset east of
+    // UTC in seconds and the zone's name. std links the C library, so `localtime_r` needs no crate.
+    #[repr(C)]
+    #[allow(dead_code)] // C fills the other fields; only the offset is read here.
+    struct Tm {
+        fields: [std::ffi::c_int; 9],
+        gmtoff: std::ffi::c_long,
+        zone: *const std::ffi::c_char,
+    }
+    unsafe extern "C" {
+        fn localtime_r(t: *const i64, out: *mut Tm) -> *mut Tm;
+    }
+    let mut tm = Tm { fields: [0; 9], gmtoff: 0, zone: std::ptr::null() };
+    // SAFETY: both pointers are to live values of the layouts above (`time_t` is 64-bit on every
+    // target the app builds for); only the result's nullness is read.
+    if unsafe { localtime_r(&t, &mut tm) }.is_null() {
+        return 0;
+    }
+    i64::from(tm.gmtoff)
 }
 
 /// "just now", "4 min ago", "3 h ago", "yesterday", "5 d ago", or a local date for older times.
@@ -143,7 +160,12 @@ pub fn ago(then: i64, now: i64) -> String {
         return format!("{days} d ago");
     }
     // The calendar date where the user is, as Studio shows it (a UTC date is a day off in the evening).
-    let (y, m, dd) = civil_from_days((then + local_offset_at(then)).div_euclid(86_400));
+    calendar_date(then, local_offset_at(then))
+}
+
+/// "Nov 1, 2026": the date of `t` in a zone `offset` seconds east of UTC.
+fn calendar_date(t: i64, offset: i64) -> String {
+    let (y, m, dd) = civil_from_days((t + offset).div_euclid(86_400));
     const MONTHS: [&str; 12] =
         ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     format!("{} {dd}, {y}", MONTHS[(m - 1) as usize])
@@ -224,11 +246,22 @@ mod tests {
 
     #[test]
     fn an_old_date_is_the_local_calendar_date() {
-        // 2026-11-01T23:30Z is "Nov 1" in UTC and Nov 2 east of UTC: the reader's day is shown.
-        let then = parse("2026-11-01T23:30:00Z").unwrap();
-        let local = then + local_offset_at(then);
-        let (_, _, d) = civil_from_days(local.div_euclid(86_400));
-        assert_eq!(ago(then, then + 30 * 86_400), format!("Nov {d}, 2026"));
+        let h = 3600;
+        // Late on Nov 1 in UTC is Nov 2 in Tokyo (UTC+9); early on Nov 2 in UTC is Nov 1 in
+        // California (UTC-8), the reviewer's case; the same moments in UTC keep their UTC date.
+        let late = parse("2026-11-01T23:30:00Z").unwrap();
+        let early = parse("2026-11-02T04:00:00Z").unwrap();
+        assert_eq!(calendar_date(late, 9 * h), "Nov 2, 2026");
+        assert_eq!(calendar_date(late, 0), "Nov 1, 2026");
+        assert_eq!(calendar_date(early, -8 * h), "Nov 1, 2026");
+        assert_eq!(calendar_date(early, 0), "Nov 2, 2026");
+        // Across a year: New Year's Eve in New York is already Jan 1 in UTC.
+        assert_eq!(calendar_date(parse("2027-01-01T02:00:00Z").unwrap(), -5 * h), "Dec 31, 2026");
+        // `ago` shows the date in the machine's zone, whatever the platform (Windows and the C
+        // library each have their own lookup): a half-hour zone or a whole one, never a day off.
+        let off = local_offset_at(early);
+        assert!(off % 900 == 0 && off.abs() <= 14 * h, "{off}");
+        assert_eq!(ago(early, early + 30 * 86_400), calendar_date(early, off));
     }
 
     #[test]

@@ -97,6 +97,17 @@ impl FoloApp {
             self.reload_cloud();
         }
         self.after_bench_navigate();
+        // The pages with dataset cards show each dataset's health as the server has it now: a
+        // folder moved away (or put back) since it was read says so on the next visit.
+        if matches!(self.route, Route::Overview | Route::Datasets | Route::Dataset(_)) {
+            self.ds_recheck = self
+                .store
+                .dataset
+                .iter()
+                .filter(|(_, l)| !l.is_loading())
+                .map(|(id, _)| id.clone())
+                .collect();
+        }
         self.page_scroll.set_offset(folo_ui::point(px(0.), px(0.)));
         self.chart_hover = None;
         self.export_open = false;

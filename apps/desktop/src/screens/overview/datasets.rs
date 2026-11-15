@@ -117,14 +117,7 @@ impl FoloApp {
             .and_then(|l| l.ready())
             .and_then(|x| x.stats.as_ref())
             .map(|s| s.class_counts.clone());
-        // A dataset whose own read fails (folder gone, images deleted) says so on its card, as in
-        // Studio, instead of looking like a healthy dataset whose previews are still loading.
-        let problem = self
-            .store
-            .dataset
-            .get(&d.id)
-            .and_then(|l| l.error())
-            .and_then(|e| dataset_problem(e).map(|label| (label, e.message.clone())));
+        let (badge_label, badge_tone, problem) = self.dataset_card_badge(d);
         // The card in full: its name, size and every class with its boxes (the strip's breakdown), on
         // hover and on keyboard focus; what is wrong with it, when something is.
         let mut full = format!(
@@ -133,8 +126,8 @@ impl FoloApp {
             counted(d.splits.total(), "image", "images"),
             counts.as_deref().map_or_else(|| d.classes.join(", "), |c| balance_text(&d.classes, c))
         );
-        if let Some((label, why)) = &problem {
-            full = format!("{full} · {label}: {why}");
+        if let Some(why) = &problem {
+            full = format!("{full} · {badge_label}: {why}");
         }
         let focused = self.ring(&self.fh(key.clone(), cx), window);
         let card = div()
@@ -188,10 +181,7 @@ impl FoloApp {
                             }
                         ),
                     ))
-                    .child(match problem {
-                        Some((label, _)) => badge(&t, label, Tone::Warning),
-                        None => badge(&t, d.format.label(), Tone::Neutral),
-                    }),
+                    .child(badge(&t, badge_label, badge_tone)),
             )
             .child(class_strip(&t, counts.as_deref()));
         self.bind(
@@ -203,6 +193,17 @@ impl FoloApp {
             act(move |this, w, cx| this.navigate(Route::Dataset(id.clone()), w, cx)),
         )
         .into_any_element()
+    }
+
+    /// A dataset card's badge: its format, or what is wrong with it when its own read failed
+    /// (folder gone, images deleted), as in Studio, with the server's reason for the card's tip.
+    /// Without it the card looked like a healthy dataset whose previews are still loading.
+    pub(crate) fn dataset_card_badge(&self, d: &crate::api::Dataset) -> (&'static str, Tone, Option<String>) {
+        let failed = self.store.dataset.get(&d.id).and_then(|l| l.error());
+        match failed.and_then(|e| dataset_problem(e).map(|label| (label, e.message.clone()))) {
+            Some((label, why)) => (label, Tone::Warning, Some(why)),
+            None => (d.format.label(), Tone::Neutral, None),
+        }
     }
 
     /// A panel header's quiet link to where it leads ("All runs →"): secondary ink with the arrow
