@@ -55,7 +55,9 @@ Review round 1 made it hold in every order and over time: `FirstStepAction` is o
 `noDatasets` (it picked its branch once, so datasets answering after the runs left it on New run); the pages read their
 dataset list again after a dataset action in the tab and when the tab is shown again (`refreshOnDatasetChange`); and
 the header's create action of Runs and Overview (past runs, no dataset left) is Add dataset too, as Desktop's headers.
-The 11 new cases in the same test file fail with those changes reverted.
+The 11 new cases in the same test file fail with those changes reverted. Re-review 1: Overview's header reads its
+dataset list the same way (`refreshOnDatasetChange` in `Overview.tsx`), so the last dataset deleted or the first one
+added in another tab turns its action over when the tab is shown again; the two Overview cases fail without it.
 
 ### x2-newcomer-3: Enter does not submit Generate synthetic (Desktop)
 

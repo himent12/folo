@@ -145,5 +145,36 @@ describe('the header action with runs but no dataset', () => {
       });
       expect(target!.querySelector('a[href="#/runs/new"]')).toBeNull();
     });
+
+    // Review round 2: the header follows datasets added or deleted in another tab once this one is shown again.
+    for (const change of ['the last dataset deleted', 'the first dataset added'] as const) {
+      it(`${name}: ${change} in another tab turns the header action over`, async () => {
+        const api = new MockApi('normal', 0);
+        const [one] = await new MockApi('normal', 0).datasets();
+        const deleting = change === 'the last dataset deleted';
+        let list: Dataset[] = deleting ? [one!] : [];
+        let answered!: () => void;
+        const asked = new Promise<void>((r) => (answered = r));
+        api.datasets = async () => {
+          answered();
+          return list;
+        };
+        open(page as Component<Record<string, never>>, path, api);
+        await asked;
+        await settled();
+        const header = (want: string) =>
+          vi.waitFor(() => {
+            flushSync();
+            const hrefs = [...target!.querySelectorAll('header .actions a')].map((a) => a.getAttribute('href'));
+            if (!hrefs.includes(want)) throw new Error(`header has ${hrefs.join(', ')}, not ${want}`);
+            return hrefs;
+          });
+        await header(deleting ? '#/runs/new' : '#/datasets?add=folder');
+        list = deleting ? [] : [one!];
+        document.dispatchEvent(new Event('visibilitychange'));
+        const after = await header(deleting ? '#/datasets?add=folder' : '#/runs/new');
+        expect(after).not.toContain(deleting ? '#/runs/new' : '#/datasets?add=folder');
+      });
+    }
   }
 });

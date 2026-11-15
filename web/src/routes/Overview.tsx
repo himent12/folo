@@ -30,7 +30,7 @@ import { slotRun } from './overview/slot';
 import AlsoRunning from './overview/AlsoRunning';
 import { bestNote, unrankedKinds } from './overview/bestNote';
 import { followNewDatasets } from './overview/newDatasets';
-import FirstStepAction from './firstStep';
+import FirstStepAction, { refreshOnDatasetChange } from './firstStep';
 import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
 
@@ -43,6 +43,9 @@ export default function Overview() {
   // The list endpoint has no stats; each dataset is read for its class balance (a missing folder is marked, and not
   // asked about again on every visit: lib/api/datasetReads).
   const datasets = new Resource(readDatasets);
+  // The header's first step (./firstStep) follows it: read again after a dataset action and when the tab is shown again
+  // (the first dataset added, or the last one deleted, in another tab).
+  refreshOnDatasetChange(datasets);
   // Which optional features the server has (labeling, benchmarks): what else Overview can point to.
   const system = new Resource((s) => hub.api.system(s));
   // The run list the sidebar's live card reads (the shell polls it every 2 s, shell/RunWatch) while it is current, so the
