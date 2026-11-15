@@ -36,12 +36,17 @@ empty data dir. Base `1436ad68`. Shared prebuilt binaries, servers on the CPU de
 
 Repro: empty server, `folo-desktop --server http://127.0.0.1:<port>`, press Ctrl+N (or Ctrl+K, New training run).
 Nothing happens: no form, no toast, no navigation. Root cause: `apps/desktop/src/app/new_run.rs` `open_new_run`
-returned early when the dataset list was empty, the same as while it was still loading. Fix: with a loaded empty list
-it goes to Datasets and toasts "Add a dataset first" (Studio's `#/runs/new` says the same); while loading it still
-waits. Test: `new_run_without_any_dataset_leads_to_datasets` in `apps/desktop/src/app/tests.rs`. Review round 1:
-`--open new-run` against an empty server waited silently, and opened the dialog out of the blue once a dataset was
-added (`apps/desktop/src/app/render.rs` consumed the request only for a nonempty list); it now answers once the list
-is in, through the same path. Test: `open_new_run_on_launch_without_any_dataset_leads_to_datasets`.
+returned early when the dataset list was empty, the same as while it was still loading. The same bug was fixed by
+lane d2-runs (d2-runs-4, PR #282, merged first), and that fix is the one kept: with a loaded empty list
+`open_new_run` stays on the current page and shows the toast "Add a dataset first" once, however often it is pressed,
+with an Add dataset action that goes to Datasets and opens the folder dialog; while loading it still waits. This
+lane's first fix (go to Datasets at once and toast) was dropped in the rebase onto `c712032d`. Test:
+`new_run_without_any_dataset_offers_add_dataset` in `apps/desktop/src/app/tests.rs` (from a page, Ctrl+N twice: one
+toast, not moved; its action lands on Datasets). Review round 1: `--open new-run` against an empty server waited
+silently, and opened the dialog out of the blue once a dataset was added (`apps/desktop/src/app/render.rs` consumed
+the request only for a nonempty list); main's `render.rs` (d2-runs) answers it once the list is in, through the same
+path. Test: `open_new_run_on_launch_without_any_dataset_says_so_once_the_list_is_in` (the list from the server, the
+toast once, the user not moved).
 
 ### x2-newcomer-2: Studio's empty pages ask for New run with zero datasets
 
