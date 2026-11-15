@@ -1,13 +1,13 @@
 //! The distillation term against finite differences and its closed-form gradients, its zero at a teacher equal to
-//! the student, the blended-target identity with the supervised BCE, and the flip map.
+//! the student, the blended-target identity with the supervised BCE, and the validation of its settings.
 
+use folo_core::Tensor;
 use folo_core::rng::Rng;
 use folo_core::testing::{GradCheck, grad_check_with};
-use folo_core::{Device, Tensor};
 
 use super::*;
 use crate::boxes::Xyxy;
-use crate::decode::{make_anchors, softmax_expectation};
+use crate::decode::make_anchors;
 use crate::loss::{BatchAssignment, LossConfig, loss_with_assignment};
 
 const R: usize = 16;
@@ -158,74 +158,6 @@ fn sup_only(
     l.total.backward().unwrap().get(&x).unwrap().to_vec::<f32>().unwrap()
 }
 
-/// The flip map on a rectangular input (64 × 96): a permutation that is its own inverse, applied twice the identity,
-/// and the mapped outputs decode to the mirror images of the boxes they came from.
-#[test]
-fn flip_map_mirrors_boxes_exactly() {
-    let (h, w) = (64u32, 96u32);
-    let anchors = make_anchors(h, w, &[8, 16, 32], 0.5);
-    let a = anchors.len();
-    let perm = flip_permutation(&anchors);
-    assert!(perm.iter().enumerate().all(|(i, &p)| perm[p] == i), "an involution");
-    let mut sorted = perm.clone();
-    sorted.sort_unstable();
-    assert_eq!(sorted, (0..a).collect::<Vec<_>>(), "a permutation");
-    assert!(perm.iter().enumerate().any(|(i, &p)| p != i));
-
-    let map = FlipMap::new(&anchors, w as usize, Device::Cpu).unwrap();
-    let (box_raw, cls_raw) = raw(9, 2, 3, a);
-    let twice = map.map_box(&map.map_box(&box_raw).unwrap()).unwrap();
-    assert_eq!(twice.to_vec::<f32>().unwrap(), box_raw.to_vec::<f32>().unwrap());
-    let twice = map.map_cls(&map.map_cls(&cls_raw).unwrap()).unwrap();
-    assert_eq!(twice.to_vec::<f32>().unwrap(), cls_raw.to_vec::<f32>().unwrap());
-    let x = Tensor::rand_uniform([1, 3, h as usize, w as usize], 0.0, 1.0, &mut Rng::seed(1));
-    let flipped = map.flip_input(&x).unwrap().to_vec::<f32>().unwrap();
-    let xv = x.to_vec::<f32>().unwrap();
-    let wu = w as usize;
-    assert!((0..xv.len()).all(|i| flipped[i] == xv[i - i % wu + (wu - 1 - i % wu)]), "columns reversed");
-
-    let decode = |t: &Tensor| -> Vec<[f32; 4]> {
-        let v = t.to_vec::<f32>().unwrap();
-        (0..a)
-            .map(|an| {
-                let d: Vec<f32> = (0..4)
-                    .map(|s| {
-                        softmax_expectation(&(0..R).map(|i| v[(s * R + i) * a + an]).collect::<Vec<_>>())
-                    })
-                    .collect();
-                let ([px, py], st) = (anchors.points[an], anchors.strides[an]);
-                [(px - d[0]) * st, (py - d[1]) * st, (px + d[2]) * st, (py + d[3]) * st]
-            })
-            .collect()
-    };
-    let one = box_raw.narrow(0, 0, 1).unwrap().contiguous().unwrap();
-    let (orig, mapped) = (decode(&one), decode(&map.map_box(&one).unwrap()));
-    let wf = w as f32;
-    for an in 0..a {
-        let (m, o) = (mapped[an], orig[perm[an]]);
-        let mirror = [wf - o[2], o[1], wf - o[0], o[3]];
-        assert!(m.iter().zip(&mirror).all(|(x, y)| (x - y).abs() < 1e-3), "anchor {an}: {m:?} vs {mirror:?}");
-    }
-    // A width that is not a multiple of every stride has no exact map.
-    assert!(FlipMap::new(&make_anchors(64, 80, &[8, 16, 32], 0.5), 80, Device::Cpu).is_err());
-}
-
-/// The flip consensus averages in probability space: a view averaged with itself is unchanged, and the targets of
-/// two disagreeing views sit between them.
-#[test]
-fn consensus_averages_probabilities() {
-    let anchors = make_anchors(64, 64, &[8, 16, 32], 0.5);
-    let (tb, tc) = raw(10, 1, 2, anchors.len());
-    let v = TeacherView::new(&tb, &tc, R, 1.0).unwrap();
-    let same = v.average(&v).unwrap();
-    assert_eq!(same.cls_prob.to_vec::<f32>().unwrap(), v.cls_prob.to_vec::<f32>().unwrap());
-    let map = FlipMap::new(&anchors, 64, Device::Cpu).unwrap();
-    let avg = v.average(&v.mapped(&map).unwrap()).unwrap();
-    // Each side's averaged distribution still sums to 1.
-    let s = avg.box_prob.sum(2, false).unwrap().to_vec::<f32>().unwrap();
-    assert!(s.iter().all(|x| (x - 1.0).abs() < 1e-5));
-}
-
 #[test]
 fn config_is_validated() {
     assert!(DistillConfig::new("folo-s-coco").validate().is_ok());
@@ -239,6 +171,6 @@ fn config_is_validated() {
     for c in bad {
         assert!(c.validate().is_err(), "{c:?}");
     }
-    let c: DistillConfig = serde_json::from_str(r#"{"teacher":"t.folo","consensus":"flip"}"#).unwrap();
-    assert_eq!((c.cls_gain, c.dfl_gain, c.temperature, c.consensus), (0.5, 1.5, 1.0, Consensus::Flip));
+    let c: DistillConfig = serde_json::from_str(r#"{"teacher":"t.folo"}"#).unwrap();
+    assert_eq!((c.cls_gain, c.dfl_gain, c.temperature), (0.5, 1.5, 1.0));
 }

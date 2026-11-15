@@ -1,9 +1,9 @@
 //! Distillation (docs/MODEL.md §8.9) on the GPU against the CPU reference: the teacher's targets, the term and its
-//! gradients (also under autocast), the flip map, and a mixed-precision run with an f16 teacher.
+//! gradients (also under autocast), and a mixed-precision run with an f16 teacher.
 //!
 //! Tolerances: the term and its gradients are f32 compositions of softplus, sigmoid, log, log-softmax and row sums
 //! whose GPU kernels round differently from the CPU's, so values agree to a relative 1e-5 and gradients to 1e-6 plus
-//! 1e-4 of the largest one; the flip map only moves values, so it is exact.
+//! 1e-4 of the largest one.
 //!
 //! This test binary asks for tensor cores before the shared GPU context exists; it skips (with a note) without a
 //! hardware adapter, and the mixed-precision run without tensor cores.
@@ -17,8 +17,7 @@ use folo_data::{AugmentConfig, Split};
 use folo_nn::Module;
 use folo_test_support::TestDir;
 use folo_vision::decode::make_anchors;
-use folo_vision::loss::distill::FlipMap;
-use folo_vision::loss::{Consensus, DistillConfig, DistillTargets, TeacherView, distill_loss};
+use folo_vision::loss::{DistillConfig, DistillTargets, TeacherView, distill_loss};
 use folo_vision::train::OptimizerChoice;
 use folo_vision::{TrainConfig, TrainData, TrainOptions, Trainer};
 
@@ -71,20 +70,16 @@ fn close(got: &[f32], want: &[f32], what: &str) {
 }
 
 /// The term's values and both gradients, plus the targets, on `dev` (under autocast when `amp`).
-fn term_on(dev: Device, amp: bool, temp: f32, consensus: Consensus) -> (f32, f32, Vec<Vec<f32>>) {
+fn term_on(dev: Device, amp: bool, temp: f32) -> (f32, f32, Vec<Vec<f32>>) {
     let anchors = make_anchors(64, 96, &[8, 16, 32], 0.5);
     let (sb, sc) = raw(1, 2, 5, anchors.len());
     let (tb, tc) = raw(2, 2, 5, anchors.len());
     let on = |t: &Tensor| t.to_device(dev).unwrap();
     let (z, x) = (on(&sb).requires_grad_(), on(&sc).requires_grad_());
     let _a = amp.then(folo_core::autocast);
-    let mut view = TeacherView::new(&on(&tb), &on(&tc), R, temp).unwrap();
-    if consensus == Consensus::Flip {
-        let map = FlipMap::new(&anchors, 96, dev).unwrap();
-        view = view.average(&view.mapped(&map).unwrap()).unwrap();
-    }
+    let view = TeacherView::new(&on(&tb), &on(&tc), R, temp).unwrap();
     let t = DistillTargets::new(&view).unwrap();
-    let cfg = DistillConfig { temperature: temp, consensus, ..DistillConfig::new("t") };
+    let cfg = DistillConfig { temperature: temp, ..DistillConfig::new("t") };
     let out = distill_loss(&z, &x, &t, 3.5, &cfg).unwrap();
     let g = out.total.backward().unwrap();
     let grads = [&x, &z].map(|v| g.get(v).unwrap().to_vec::<f32>().unwrap()).to_vec();
@@ -94,17 +89,17 @@ fn term_on(dev: Device, amp: bool, temp: f32, consensus: Consensus) -> (f32, f32
     (out.cls, out.dfl, all)
 }
 
-/// The term, its gradients and the targets on the GPU agree with the CPU, at T = 1 and 2, with one view and the
-/// flip consensus, and under autocast (the term stays f32).
+/// The term, its gradients and the targets on the GPU agree with the CPU, at T = 1 and 2, and under autocast (the
+/// term stays f32).
 #[test]
 fn term_and_gradients_match_the_cpu() {
     let (dev, _) = gpu!();
-    for (temp, consensus) in [(1.0, Consensus::None), (2.0, Consensus::Flip)] {
-        let (c0, d0, g0) = term_on(Device::Cpu, false, temp, consensus);
+    for temp in [1.0, 2.0] {
+        let (c0, d0, g0) = term_on(Device::Cpu, false, temp);
         assert!(c0 > 1e-2 && d0 > 1e-2, "the case has content: {c0} {d0}");
         for amp in [false, true] {
-            let (c, d, g) = term_on(dev, amp, temp, consensus);
-            let what = format!("T {temp} {} amp {amp}", consensus.as_str());
+            let (c, d, g) = term_on(dev, amp, temp);
+            let what = format!("T {temp} amp {amp}");
             assert!(
                 (c - c0).abs() <= 1e-5 * c0 && (d - d0).abs() <= 1e-5 * d0,
                 "{what}: {c} {d} vs {c0} {d0}"
@@ -131,24 +126,6 @@ fn f16_teacher_outputs_match_the_cpu() {
     close(&gpu.box_prob.to_vec::<f32>().unwrap(), &cpu.box_prob.to_vec::<f32>().unwrap(), "box");
 }
 
-/// The flip map moves values exactly on the GPU: the input mirror (f32 and f16) and both output maps.
-#[test]
-fn flip_map_matches_the_cpu_exactly() {
-    let (dev, _) = gpu!();
-    let anchors = make_anchors(64, 96, &[8, 16, 32], 0.5);
-    let (cpu, gpu) =
-        (FlipMap::new(&anchors, 96, Device::Cpu).unwrap(), FlipMap::new(&anchors, 96, dev).unwrap());
-    let (b, c) = raw(4, 2, 3, anchors.len());
-    let x = Tensor::rand_uniform([2, 3, 64, 96], 0.0, 1.0, &mut Rng::seed(5));
-    let bits = |t: Tensor| t.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap();
-    let on = |t: &Tensor| t.to_device(dev).unwrap();
-    assert_eq!(bits(gpu.map_box(&on(&b)).unwrap()), bits(cpu.map_box(&b).unwrap()));
-    assert_eq!(bits(gpu.map_cls(&on(&c)).unwrap()), bits(cpu.map_cls(&c).unwrap()));
-    assert_eq!(bits(gpu.flip_input(&on(&x)).unwrap()), bits(cpu.flip_input(&x).unwrap()));
-    let h = x.to_dtype(DType::F16).unwrap();
-    assert_eq!(bits(gpu.flip_input(&on(&h)).unwrap()), bits(cpu.flip_input(&h).unwrap()));
-}
-
 fn data() -> TrainData {
     let cfg = SyntheticConfig {
         images: 20,
@@ -167,7 +144,7 @@ fn data() -> TrainData {
     TrainData { train: split(Split::Train), val: split(Split::Val), classes: cfg.classes.clone() }
 }
 
-/// A mixed-precision run on the GPU with an f16 flip-consensus teacher: it loads the teacher in f16, trains with
+/// A mixed-precision run on the GPU with an f16 teacher: it loads the teacher in f16, trains with
 /// finite losses and weights, and reports both terms.
 #[test]
 fn amp_run_with_an_f16_teacher() {
@@ -194,10 +171,7 @@ fn amp_run_with_an_f16_teacher() {
         warmup_epochs: 0.0,
         workers: 2,
         augment: AugmentConfig::none(),
-        distill: Some(DistillConfig {
-            consensus: Consensus::Flip,
-            ..DistillConfig::new(teacher.to_string_lossy())
-        }),
+        distill: Some(DistillConfig::new(teacher.to_string_lossy())),
         ..TrainConfig::default()
     };
     let log: Arc<Mutex<Vec<String>>> = Arc::default();

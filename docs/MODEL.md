@@ -29,7 +29,7 @@ Conventions used throughout:
 | schedule | linear LR decay to `lrf = 0.01`, 3 warmup epochs (bias LR 0.1 → lr0, momentum 0.8 → 0.937), nominal batch 64 via gradient accumulation |
 | EMA | `d = 0.9999 · (1 − exp(−updates / 2000))`, over parameters and BN running stats |
 | precision | f32 training (no AMP); f32 or f16 inference after Conv+BN fusion |
-| distillation | opt-in (`distill`, §8.9): a frozen teacher's class probabilities and DFL distributions at the shared anchors, optionally a flip consensus of two views; off by default, training-only |
+| distillation | opt-in (`distill`, §8.9): a frozen teacher's class probabilities and DFL distributions at the shared anchors; off by default, training-only |
 
 ## 1. Design rationale
 
@@ -928,8 +928,8 @@ Opt-in (`amp = true`, `folo train --amp`; default `false`), as `torch.autocast` 
   first steps of a run usually overflow at `2^16` and are skipped while the scale backs off (2–5 steps).
 
 ### 8.9 Distillation (`distill`, opt-in)
-Dense consensus distillation from a frozen teacher: `TrainConfig.distill = { teacher, cls_gain, dfl_gain,
-temperature, consensus }` (`folo train --teacher <file or published name>`, `--set distill.<key>=<value>`). Absent (the
+Dense distillation from a frozen teacher: `TrainConfig.distill = { teacher, cls_gain, dfl_gain, temperature }`
+(`folo train --teacher <file or published name>`, `--set distill.<key>=<value>`). Absent (the
 default, and not written to `folo.train` or `config.json`), training is §8.3 exactly. Inference, export, `.folo` files
 and the HTTP API do not change: the teacher exists only in the trainer.
 
@@ -939,7 +939,6 @@ and the HTTP API do not change: the teacher exists only in the trainer.
 | `cls_gain` | 0.5 | `λc`, finite, `>= 0` |
 | `dfl_gain` | 1.5 | `λd`, finite, `>= 0` |
 | `temperature` | 1.0 | `T`, finite, `> 0` (DFL term only) |
-| `consensus` | `none` | `none`: one teacher view; `flip`: the batch and its mirror image, averaged |
 
 **Teacher.** Loaded once when the trainer is built (a new run and a resume alike; a missing file fails the run with
 an error naming `distill.teacher`; a resume may also turn distillation on or change it, `ResumeOverrides::distill`,
@@ -951,15 +950,9 @@ by element). Class names that differ are only warned about: classes match by ind
 
 **Targets (constants, no autograd).** Each training batch `x` (`[B, 3, H, W]`, the augmented batch the student sees)
 goes through the teacher before the student's forward, under `no_grad`; its outputs are cast to f32 and:
-- `p = sigmoid(cls_raw_T)`, `[B, nc, A]`; `s = softmax(box_raw_T / T)` over the `reg_max` bins of each side,
-  `[B, 4, reg_max, A]` (§6.3 layout, side order `l t r b`).
-- `consensus = "flip"`: the teacher also sees `x'`, `x` reversed along `W`, giving `p'` and `s'`, which are mapped back
-  by `M`: in every level `l` of width `W_l = W / stride_l` the anchor `(y, x)` takes the value at `(y, W_l − 1 − x)`
-  (anchor indices level-major, row-major, §6.2), and the box sides `l` and `r` trade places (`M` maps side `i` to
-  side `[2, 1, 0, 3][i]`). The map is exact because anchor centres `x + 0.5` mirror to `W_l − x − 0.5` when `W` is a
-  multiple of every stride, and it is its own inverse. Then `p~ = (p + M p') / 2`, `s~ = (s + M s') / 2`: averaged
-  in probability space, so where the views disagree about an edge `s~` is wider (the DFL target then carries real
-  uncertainty) and where they agree it stays sharp. With `consensus = "none"`, `p~ = p` and `s~ = s`.
+- `p~ = sigmoid(cls_raw_T)`, `[B, nc, A]`; `s~ = softmax(box_raw_T / T)` over the `reg_max` bins of each side,
+  `[B, 4, reg_max, A]` (§6.3 layout, side order `l t r b`). (A two-view "flip consensus", the teacher also run on the
+  mirrored batch and both views averaged, was measured and gave nothing: docs/notes/hill/r4-distill.md.)
 - `q_a = max_c p~[b, c, a]`, the teacher's confidence that anchor `a` matters.
 - Logarithms of the targets are taken at `max(v, f32::MIN_POSITIVE)`, so a probability of 0 or 1 contributes 0.
 

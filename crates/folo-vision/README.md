@@ -18,7 +18,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/boxes.rs` | `Xyxy` / `Cxcywh`, letterbox mapping, IoU / GIoU / DIoU / CIoU |
 | `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs |
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
-| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `dual_loss`), `assignment.rs` (host assignment), `terms.rs` (BCE, CIoU, DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term, its flip map and tests), `tests.rs` |
+| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `dual_loss`), `assignment.rs` (host assignment), `terms.rs` (BCE, CIoU, DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term and its tests), `tests.rs` |
 | `src/nms.rs` | Class-aware batched NMS, the full post-process, and the top-k of the `o2o` head |
 | `src/fusion.rs` | Cluster box fusion after NMS (opt-in through `NmsConfig::fusion`) |
 | `src/metrics.rs` | `Evaluator`: mAP, precision / recall / F1, PR curves, confusion matrix |

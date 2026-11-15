@@ -247,9 +247,6 @@ pub fn with_distill(mut cmd: CliCommand, distill: Option<folo_vision::DistillCon
             set(k, v.to_string());
         }
     }
-    if d.consensus != start.consensus {
-        set("consensus", d.consensus.as_str().to_string());
-    }
     cmd.cli = shell_join(&cmd.argv);
     cmd
 }
@@ -404,14 +401,13 @@ mod tests {
         write(serde_json::json!({ "train": { "epochs": 3 } }));
         assert_eq!(recorded_distill(&dir), None);
         let distill = serde_json::json!({
-            "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 2.0, "consensus": "flip"
+            "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 2.0
         });
         write(serde_json::json!({ "train": { "distill": distill } }));
         let cmd = with_distill(base(), recorded_distill(&dir));
         assert_eq!(
             cmd.cli,
-            "folo train --data D:/coco --format coco --teacher folo-s-coco --set distill.temperature=2 --set \
-             distill.consensus=flip"
+            "folo train --data D:/coco --format coco --teacher folo-s-coco --set distill.temperature=2"
         );
     }
 

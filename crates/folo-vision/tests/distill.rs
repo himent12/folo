@@ -1,4 +1,4 @@
-//! Dense consensus distillation in the trainer (docs/MODEL.md §8.9) on a micro run.
+//! Dense distillation in the trainer (docs/MODEL.md §8.9) on a micro run.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -8,7 +8,6 @@ use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
 use folo_data::{AugmentConfig, Split};
 use folo_nn::Module;
 use folo_test_support::TestDir;
-use folo_vision::loss::Consensus;
 use folo_vision::train::{OptimizerChoice, ResumeOverrides};
 use folo_vision::{DistillConfig, TrainConfig, TrainData, TrainOptions, Trainer};
 
@@ -90,8 +89,8 @@ fn teacher_file(dir: &TestDir, nc: usize, seed: u64) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn with_teacher(cfg: TrainConfig, teacher: &str, consensus: Consensus) -> TrainConfig {
-    TrainConfig { distill: Some(DistillConfig { consensus, ..DistillConfig::new(teacher) }), ..cfg }
+fn with_teacher(cfg: TrainConfig, teacher: &str) -> TrainConfig {
+    TrainConfig { distill: Some(DistillConfig::new(teacher)), ..cfg }
 }
 
 type Log = Arc<Mutex<Vec<RunEvent>>>;
@@ -142,31 +141,24 @@ fn a_run_without_a_teacher_is_unchanged() {
     assert!(t.run_config()["train"].get("distill").is_none());
 }
 
-/// A teacher changes the weights, deterministically (two runs give the same weights), for both consensus modes and
-/// an `o2o` student; the epoch's log reports both terms and the teacher it loaded.
+/// A teacher changes the weights, deterministically (two runs give the same weights), also for an `o2o` student;
+/// the epoch's log reports both terms and the teacher it loaded.
 #[test]
 fn a_teacher_trains_deterministically() {
     let dir = TestDir::new("distill-det");
     let teacher = teacher_file(&dir, 2, 7);
     let (plain, _) = train(micro(1));
-    let none = with_teacher(micro(1), &teacher, Consensus::None);
-    let (a, log) = train(none.clone());
-    assert_eq!(a, train(none).0, "deterministic");
+    let with = with_teacher(micro(1), &teacher);
+    let (a, log) = train(with.clone());
+    assert_eq!(a, train(with).0, "deterministic");
     assert_ne!(a, plain, "the teacher changes the weights");
-    assert!(log.iter().any(|l| l.contains("distilling from") && l.contains("consensus none")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("distilling from") && l.contains("temperature 1")), "{log:?}");
     let line = log.iter().find(|l| l.starts_with("epoch 1: distillation cls")).expect("the epoch's terms");
     assert!(line.contains("over 2 batches"), "{line}");
-    let flip = with_teacher(micro(1), &teacher, Consensus::Flip);
-    let (f, _) = train(flip.clone());
-    assert_eq!(f, train(flip).0, "flip: deterministic");
-    assert!(f != a && f != plain, "flip differs from one view");
-    let o2o = with_teacher(
-        TrainConfig { head: folo_vision::model::HeadMode::O2o, ..micro(1) },
-        &teacher,
-        Consensus::Flip,
-    );
+    let o2o = with_teacher(TrainConfig { head: folo_vision::model::HeadMode::O2o, ..micro(1) }, &teacher);
     let (o, _) = train(o2o.clone());
     assert_eq!(o, train(o2o).0, "o2o student: deterministic");
+    assert!(o != a && o != plain, "the o2o student trains differently");
 }
 
 /// Stops the run at the boundary after epoch `.0`.
@@ -208,7 +200,7 @@ fn file_tensors(path: &Path) -> Vec<(String, Vec<u8>)> {
 fn a_resume_reloads_the_teacher_and_continues_bit_exactly() {
     let dir = TestDir::new("distill-resume");
     let teacher = teacher_file(&dir, 2, 8);
-    let cfg = with_teacher(micro(2), &teacher, Consensus::Flip);
+    let cfg = with_teacher(micro(2), &teacher);
     let (dir_a, dir_b) = (dir.join("a"), dir.join("b"));
     let (opts, _) = options(Some(&dir_a));
     Trainer::new(cfg.clone(), data(), opts).unwrap().run().unwrap();
@@ -219,7 +211,7 @@ fn a_resume_reloads_the_teacher_and_continues_bit_exactly() {
     let ckpt = dir_b.join("weights/last.folo");
     let stored = folo_nn::io::ModelFile::open(&ckpt).unwrap().checkpoint().unwrap().train.clone();
     assert_eq!(stored["distill"]["teacher"], teacher.as_str());
-    assert_eq!(stored["distill"]["consensus"], "flip");
+    assert_eq!(stored["distill"]["dfl_gain"], 1.5);
     let (opts, log) = options(Some(&dir_b));
     let mut b = Trainer::resume(&ckpt, data(), opts, ResumeOverrides::default()).unwrap();
     b.run().unwrap();
@@ -278,10 +270,10 @@ fn incompatible_teachers_and_bad_settings_are_errors() {
     let err = |cfg: TrainConfig| {
         Trainer::new(cfg, data(), TrainOptions::default()).err().expect("refused").to_string()
     };
-    let e = err(with_teacher(micro(1), &three, Consensus::None));
+    let e = err(with_teacher(micro(1), &three));
     assert!(e.contains("nc 3") && e.contains("student 2"), "{e}");
     let missing = dir.join("nowhere.folo").to_string_lossy().into_owned();
-    assert!(err(with_teacher(micro(1), &missing, Consensus::None)).contains("does not exist"));
+    assert!(err(with_teacher(micro(1), &missing)).contains("does not exist"));
     let two = teacher_file(&dir, 2, 9);
     let set = |d: DistillConfig| TrainConfig { distill: Some(d), ..micro(1) };
     let e = err(set(DistillConfig { temperature: 0.0, ..DistillConfig::new(&two) }));
@@ -297,13 +289,11 @@ fn stored_configs_with_and_without_distill_load() {
     old.as_object_mut().unwrap().remove("distill");
     let cfg: TrainConfig = serde_json::from_value(old).unwrap();
     assert_eq!(cfg.distill, None);
-    let with = with_teacher(TrainConfig::default(), "folo-s-coco", Consensus::Flip);
+    let with = with_teacher(TrainConfig::default(), "folo-s-coco");
     let v = serde_json::to_value(&with).unwrap();
     assert_eq!(
         v["distill"],
-        serde_json::json!({
-            "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 1.0, "consensus": "flip"
-        })
+        serde_json::json!({ "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 1.0 })
     );
     assert_eq!(serde_json::from_value::<TrainConfig>(v).unwrap(), with);
 }

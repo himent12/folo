@@ -2,7 +2,6 @@
 //! trainer is built, fused, in eval mode on the trainer's device (`F16` on a GPU under mixed precision, else `F32`),
 //! and run under `no_grad` on each training batch to build the [`DistillTargets`] of that batch.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use folo_core::{DType, Device, Tensor, no_grad};
@@ -10,7 +9,7 @@ use folo_nn::Module;
 use folo_nn::io::ModelFile;
 
 use crate::error::{Error, Result};
-use crate::loss::distill::{Consensus, DistillConfig, DistillTargets, FlipMap, TeacherView};
+use crate::loss::distill::{DistillConfig, DistillTargets, TeacherView};
 use crate::model::{FoloModel, HeadMode};
 
 /// The file `distill.teacher` names: a `.folo` file, or the cached file of a published name (`folo weights pull`).
@@ -39,12 +38,11 @@ pub fn resolve_teacher(teacher: &str) -> Result<PathBuf> {
     )))
 }
 
-/// A loaded teacher and the flip maps of the input shapes it has seen.
+/// A loaded teacher.
 pub(super) struct Teacher {
     model: FoloModel,
     dtype: DType,
     cfg: DistillConfig,
-    flips: HashMap<(usize, usize), FlipMap>,
 }
 
 impl Teacher {
@@ -86,11 +84,9 @@ impl Teacher {
         let mut logs = vec![(
             folo_api::LogLevel::Info,
             format!(
-                "distilling from {shown} ({}, {} parameters, {dtype}, consensus {}): cls_gain {}, dfl_gain {}, \
-                 temperature {}",
+                "distilling from {shown} ({}, {} parameters, {dtype}): cls_gain {}, dfl_gain {}, temperature {}",
                 model.arch(),
                 model.num_parameters(),
-                cfg.consensus.as_str(),
                 cfg.cls_gain,
                 cfg.dfl_gain,
                 cfg.temperature
@@ -107,35 +103,14 @@ impl Teacher {
                 ),
             ));
         }
-        Ok((Teacher { model, dtype, cfg: cfg.clone(), flips: HashMap::new() }, logs))
+        Ok((Teacher { model, dtype, cfg: cfg.clone() }, logs))
     }
 
-    /// The targets of the batch `x` (`[B, 3, H, W]`, the student's input), without autograd: one teacher forward,
-    /// or two for the flip consensus (the second on `x` mirrored along `W`, mapped back and averaged).
-    pub(super) fn targets(&mut self, x: &Tensor) -> Result<DistillTargets> {
+    /// The targets of the batch `x` (`[B, 3, H, W]`, the student's input), without autograd: one teacher forward.
+    pub(super) fn targets(&self, x: &Tensor) -> Result<DistillTargets> {
         let _g = no_grad();
-        let (model, dtype, temp) = (&self.model, self.dtype, self.cfg.temperature);
-        let view = |x: &Tensor| -> Result<TeacherView> {
-            let out = model.forward_head(&x.to_dtype(dtype)?, HeadMode::O2m)?;
-            Ok(TeacherView::new(&out.box_raw, &out.cls_raw, out.reg_max, temp)?)
-        };
-        let plain = view(x)?;
-        let v = match self.cfg.consensus {
-            Consensus::None => plain,
-            Consensus::Flip => {
-                let &[_, _, h, w] = x.dims() else {
-                    return Err(Error::Config(format!("the batch {} is not [B, 3, H, W]", x.shape())));
-                };
-                let map = match self.flips.entry((h, w)) {
-                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(FlipMap::new(&self.model.anchors(h, w), w, x.device())?)
-                    }
-                };
-                let mirrored = view(&map.flip_input(x)?)?.mapped(map)?;
-                plain.average(&mirrored)?
-            }
-        };
-        Ok(DistillTargets::new(&v)?)
+        let out = self.model.forward_head(&x.to_dtype(self.dtype)?, HeadMode::O2m)?;
+        let view = TeacherView::new(&out.box_raw, &out.cls_raw, out.reg_max, self.cfg.temperature)?;
+        Ok(DistillTargets::new(&view)?)
     }
 }

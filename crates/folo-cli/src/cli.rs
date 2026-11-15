@@ -188,7 +188,7 @@ pub struct TrainArgs {
     pub weights: Option<String>,
     /// Distil from this frozen teacher (docs/MODEL.md §8.9): a .folo file or a published name such as folo-s-coco
     /// with the student's classes, reg_max and strides. Starts with distill.cls_gain 0.5, distill.dfl_gain 1.5,
-    /// distill.temperature 1 and distill.consensus none; change them with --set distill.<key>=<value>.
+    /// and distill.temperature 1; change them with --set distill.<key>=<value>.
     #[arg(long)]
     pub teacher: Option<String>,
     /// Run name [default: <dataset>-<arch suffix>]; an existing run folder gets a numeric suffix.

@@ -114,14 +114,9 @@ fn teacher_flag_and_distill_keys() {
         ..TrainConfig::default()
     };
     let sets = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let c = apply_sets(
-        with,
-        &sets(&["distill.temperature=2", "distill.consensus=flip", "distill.cls_gain=0.25"]),
-    )
-    .unwrap();
+    let c = apply_sets(with, &sets(&["distill.temperature=2", "distill.cls_gain=0.25"])).unwrap();
     let d = c.distill.unwrap();
     assert_eq!((d.temperature, d.cls_gain, d.dfl_gain), (2.0, 0.25, 1.5));
-    assert_eq!(d.consensus, folo_vision::loss::Consensus::Flip);
     let e = apply_sets(TrainConfig::default(), &sets(&["distill.cls_gain=1"])).unwrap_err();
     assert_eq!(e.code, "invalid_config");
 }

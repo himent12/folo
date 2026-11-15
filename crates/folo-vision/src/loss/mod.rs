@@ -51,7 +51,7 @@ mod tests;
 
 pub use assignment::assign_batch;
 pub use device::assign_batch_device;
-pub use distill::{Consensus, DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss};
+pub use distill::{DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss};
 pub use terms::{ciou, loss_with_assignment};
 
 use crate::assign::TalConfig;

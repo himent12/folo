@@ -115,7 +115,7 @@ pub struct TrainConfig {
     /// [`super::TrainOptions::weights`], whatever is given here, and stored with the run, so a resume resolves `auto`
     /// as the run started. Missing in configs from before it: `false`.
     pub transfer: bool,
-    /// Dense consensus distillation from a frozen teacher (docs/MODEL.md §8.9; `folo train --teacher`). `None`, the
+    /// Dense distillation from a frozen teacher (docs/MODEL.md §8.9; `folo train --teacher`). `None`, the
     /// default, trains without one and is not written, so such a run's `folo.train` and `config.json` are those
     /// of a build without the key. Stored with the run, so a resume loads the same teacher.
     #[serde(skip_serializing_if = "Option::is_none")]

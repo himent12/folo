@@ -1,11 +1,9 @@
-//! Dense consensus distillation (docs/MODEL.md §8.9): the student's raw head outputs learn a frozen teacher's class
+//! Dense distillation (docs/MODEL.md §8.9): the student's raw head outputs learn a frozen teacher's class
 //! probabilities and DFL distributions, anchor by anchor.
 //!
 //! A teacher of the student's `nc`, `reg_max` and strides has the same anchors, so its raw outputs align with the
-//! student's element by element. [`TeacherView::new`] turns one teacher forward into probabilities, [`FlipMap`]
-//! maps the outputs of the teacher's forward on the mirrored input back onto the student's anchors (the `flip`
-//! consensus), [`DistillTargets::new`] builds the constants of the loss, and [`distill_loss`] the differentiable
-//! term:
+//! student's element by element. [`TeacherView::new`] turns one teacher forward into probabilities,
+//! [`DistillTargets::new`] builds the constants of the loss, and [`distill_loss`] the differentiable term:
 //!
 //! - `L_kc = (1 / N) · Σ_{b,c,a} [softplus(x) − x · p~ − H(p~)]`, the Bernoulli KL from the teacher's `p~` to
 //!   the student's `sigmoid(x)` (`H(p~)` is the teacher's entropy, a constant: the gradient is that of the BCE
@@ -18,39 +16,14 @@
 //! sums of `terms.rs`, so the term is reproducible bit for bit on the CPU and composed only of tensor ops that every
 //! backend has (softplus, log-softmax along a dim, elementwise arithmetic, row sums).
 
-mod flip;
 #[cfg(test)]
 mod tests;
-
-pub use flip::{FlipMap, flip_permutation};
 
 use folo_core::{DType, Error, Result, Tensor, no_grad};
 use serde::{Deserialize, Serialize};
 
 use super::invalid;
 use super::terms::sum_fixed_order;
-
-/// `distill.consensus`: how the teacher's targets are formed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Consensus {
-    /// One teacher forward on the student's batch.
-    #[default]
-    None,
-    /// Two: the batch and its mirror image along the width, mapped back exactly ([`FlipMap`]) and averaged in
-    /// probability space.
-    Flip,
-}
-
-impl Consensus {
-    /// `none` or `flip`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Consensus::None => "none",
-            Consensus::Flip => "flip",
-        }
-    }
-}
 
 /// `TrainConfig.distill` (docs/MODEL.md §8.9): the teacher and the weights of the two distillation terms.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -65,24 +38,16 @@ pub struct DistillConfig {
     pub dfl_gain: f32,
     /// `T`, the temperature of the DFL softmaxes (`> 0`); the class term has none.
     pub temperature: f32,
-    /// One teacher view or the flip consensus of two.
-    pub consensus: Consensus,
 }
 
 impl Default for DistillConfig {
     fn default() -> Self {
-        DistillConfig {
-            teacher: String::new(),
-            cls_gain: 0.5,
-            dfl_gain: 1.5,
-            temperature: 1.0,
-            consensus: Consensus::None,
-        }
+        DistillConfig { teacher: String::new(), cls_gain: 0.5, dfl_gain: 1.5, temperature: 1.0 }
     }
 }
 
 impl DistillConfig {
-    /// The starting values (`cls_gain` 0.5, `dfl_gain` 1.5, `T` 1, one view) with `teacher`.
+    /// The starting values (`cls_gain` 0.5, `dfl_gain` 1.5, `T` 1) with `teacher`.
     pub fn new(teacher: impl Into<String>) -> Self {
         DistillConfig { teacher: teacher.into(), ..DistillConfig::default() }
     }
@@ -126,21 +91,6 @@ impl TeacherView {
         let z = box_raw.to_dtype(DType::F32)?.reshape([b, 4, reg_max, a])?;
         let z = if temperature == 1.0 { z } else { z.div_scalar(temperature)? };
         Ok(TeacherView { cls_prob: cls_raw.to_dtype(DType::F32)?.sigmoid()?, box_prob: z.softmax(2)? })
-    }
-
-    /// This view mapped through `map` (the outputs of a mirrored forward onto the unmirrored anchors).
-    pub fn mapped(&self, map: &FlipMap) -> Result<Self> {
-        let _g = no_grad();
-        Ok(TeacherView { cls_prob: map.map_cls(&self.cls_prob)?, box_prob: map.map_box(&self.box_prob)? })
-    }
-
-    /// The mean of two views in probability space, `(p + p') / 2` and `(s + s') / 2`.
-    pub fn average(&self, other: &TeacherView) -> Result<Self> {
-        let _g = no_grad();
-        Ok(TeacherView {
-            cls_prob: self.cls_prob.add(&other.cls_prob)?.mul_scalar(0.5)?,
-            box_prob: self.box_prob.add(&other.box_prob)?.mul_scalar(0.5)?,
-        })
     }
 }
 

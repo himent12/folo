@@ -54,7 +54,7 @@ impl Trainer {
             let snapshot = RunningStats::capture(&self.model)?;
             // Distillation (§8.9): the frozen teacher sees the same batch, without autograd, before the student's
             // forward, so its activations are gone before the student's graph is built.
-            let kd_targets = match &mut self.teacher {
+            let kd_targets = match &self.teacher {
                 Some(t) => Some(t.targets(&x)?),
                 None => None,
             };
