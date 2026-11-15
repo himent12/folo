@@ -8,6 +8,7 @@ import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { TrainConfig } from '$lib/api/types';
 import { parse, router } from '$lib/router';
+import { toast } from '$lib/ui/toast';
 import { render, type Rendered } from '../../../framework/testing';
 import RunNew from '../RunNew';
 
@@ -255,11 +256,21 @@ describe('New run: Start while the user moves on (round s2-runs)', () => {
     return answer;
   }
   const wentToRun = () => vi.mocked(router.go).mock.calls.some(([to]) => /^\/runs\/(?!new)/.test(String(to)));
+  /**
+   * Lets the held answer through and waits for the form to have handled it: its success toast, which the form shows
+   * in the same continuation just before it decides whether to open the run.
+   */
+  async function answered(answer: () => Promise<void>) {
+    const shown = vi.spyOn(toast, 'success');
+    await answer();
+    await until(() => shown.mock.calls.length, 'the start’s toast');
+    flush();
+  }
 
   it('opens the new run when the form is still showing', async () => {
     await open();
-    await (await startHeld())();
-    await until(() => wentToRun(), 'the run page');
+    await answered(await startHeld());
+    expect(wentToRun()).toBe(true);
   });
 
   it('leaves the user where they went when they left before the server answered (s2-runs-2)', async () => {
@@ -268,11 +279,46 @@ describe('New run: Start while the user moves on (round s2-runs)', () => {
     // Back, or a click on Datasets, while the request is out.
     router.route = parse('#/datasets');
     flush();
-    await answer();
-    // The form's own continuation after its await.
-    await new Promise((r) => setTimeout(r, 20));
-    flush();
+    await answered(answer);
     expect(wentToRun()).toBe(false);
+  });
+
+  it('leaves the user where they went while that screen’s chunk still loads (review of s2-runs-2)', async () => {
+    await open();
+    const answer = await startHeld();
+    // App keeps the route on display (and the form) until the next screen's chunk is there (App `holdWhile`).
+    const release = router.holdWhile((to) => to.name === 'datasets');
+    try {
+      router.route = parse('#/datasets');
+      flush();
+      expect(router.route.name).toBe('run-new');
+      expect(target.querySelector('form')).not.toBeNull();
+      await answered(answer);
+      expect(wentToRun()).toBe(false);
+    } finally {
+      release();
+    }
+  });
+
+  it('a start answered after the user left and opened New run again keeps the new form and its draft', async () => {
+    await open();
+    const answer = await startHeld();
+    // Away and back to the same link before the answer: the form on screen is a new one, with edits of its own.
+    c!.unmount();
+    await open();
+    type('input#name', 'second-form');
+    await answered(answer);
+    expect(wentToRun()).toBe(false);
+    const draft = sessionStorage.getItem('folo.runNew.draft');
+    expect(draft && JSON.parse(draft).name).toBe('second-form');
+  });
+
+  it('clears its own draft once started', async () => {
+    await open();
+    type('input#name', 'first-form');
+    expect(sessionStorage.getItem('folo.runNew.draft')).not.toBeNull();
+    await answered(await startHeld());
+    expect(sessionStorage.getItem('folo.runNew.draft')).toBeNull();
   });
 
   it('refuses a learning rate the server reads as 0 or 10 (32-bit), s2-runs-3', async () => {
