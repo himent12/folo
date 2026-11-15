@@ -120,7 +120,7 @@ Things to know:
   6.5 GFLOPs at 640; folo-s is 9.5 M and 21.6 GFLOPs.
 - **Small objects**: use a larger `--imgsz` (a multiple of 32) when targets are only a few pixels across at 640 px.
 - **Data loading**: with large JPEGs and mosaic, the data loader can set the pace. `--workers N` (default
-  `min(cores, 8)`) adds decode threads.
+  `min(cores, 16)`) adds decode threads.
 - **Device**: `--device cpu` or `--device gpu:<n>` pins the device. `gpu:<n>` without a usable adapter fails with
   `device_not_found` (exit 3), and the hint lists the devices this machine has.
 - **Mixed precision**: `--amp` trains with f16 activations on the GPU's tensor cores and f32 master weights, about
