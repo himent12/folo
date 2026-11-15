@@ -67,11 +67,14 @@ fn weights_hash(t: &Trainer) -> u64 {
 /// The weights hash of one epoch of [`micro`] without a teacher, by target, each derived on origin/main at 1436ad68
 /// (before distillation existed) on that target with AVX2 + FMA; never from this branch's own output.
 ///
-/// The hash is bit-exact, so it depends on everything the CPU path computes with: the CPU kernels' AVX2 + FMA path
-/// (picked at run time) and the platform's C math library, which Rust std's `f32::atan`, `ln_1p`, `powf`, `exp` and
-/// `ln` call in the loss (CIoU, softplus) and the assignment metric. Windows' UCRT and glibc round some of those
-/// differently, so one CPU gives one hash on Windows and another on Linux. The Linux reference is glibc 2.39
-/// (Ubuntu 24.04, the CI runners'); another C math library may need its own reference.
+/// The hash is bit-exact, so it depends on everything the CPU path computes with, including the CPU kernels' AVX2 +
+/// FMA path (picked at run time). Measured: the same micro run on origin/main 1436ad68 gives one hash on Windows and
+/// another on Linux on the same CPU, the thread count changes neither, and the two platforms' C math libraries (UCRT,
+/// glibc 2.39) return different bits for functions the training step reaches through Rust std (`f32::atan`, `ln_1p`,
+/// `powf`, `exp`, `ln`, in the loss and the assignment metric). Inferred, likely but not proven: that the math
+/// libraries are the cause (no substitution experiment was run; an allocator-alignment effect was not ruled out).
+/// The Linux reference was derived with glibc 2.39 (Ubuntu 24.04, rustc 1.100.0); another libm version may give
+/// other bits.
 const NO_TEACHER_HASHES: &[(&str, u64)] =
     &[("x86_64-windows-msvc", 0x1851_7ce4_1137_dca4), ("x86_64-linux-gnu", 0x13d4_6148_e25d_2926)];
 
@@ -162,7 +165,9 @@ fn a_run_without_a_teacher_is_unchanged() {
     match NO_TEACHER_HASHES.iter().find(|(k, _)| *k == target).filter(|_| avx2_fma()) {
         Some(&(_, want)) => assert_eq!(
             h, want,
-            "{h:#018x} on {target}: a run without a teacher no longer trains as origin/main did ({want:#018x})"
+            "{h:#018x} on {target}: a run without a teacher no longer trains as origin/main did ({want:#018x}); on a \
+             platform or libm version other than the references', the same micro run on origin/main tells whether this \
+             is a regression (if not, update NO_TEACHER_HASHES)"
         ),
         None => eprintln!(
             "note: weights hash {h:#018x} not compared: no reference for {target} (AVX2 + FMA: {}); derive it on \

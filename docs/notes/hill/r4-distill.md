@@ -84,8 +84,12 @@ all 6,260 step losses and the 20 epoch lines (train loss, internal validation) i
 the same `best.folo` AP 0.12551666, `config.json` different only in the run name
 (`D:/folo-data/runs-hill4/proxy/logs/cmp-ctl-off-s0.log`, script `D:/folo-build/hill4/distill-cmp.py`). With the
 teacher off the branch trains bit-identically to origin/main (this proxy ran on Windows; `tests/distill.rs` checks a
-CPU micro run against origin/main's weights hash per target, x86-64 Windows and Linux, which differ because UCRT and
-glibc round `atan`, `ln_1p` and `powf` differently).
+CPU micro run against origin/main's weights hash per target, x86-64 Windows and Linux). The two hashes differ, likely
+because UCRT and glibc round `atan`, `ln_1p`, `powf`, `exp` and `ln` differently. Measured: on origin/main 1436ad68
+the same micro run gives one hash on Windows and another on Linux on the same CPU, the thread count changes neither,
+and the two math libraries (UCRT, glibc 2.39) return different bits for those functions. Not shown: that they are the
+cause (no substitution experiment; an allocator-alignment effect was not ruled out). The Linux reference was derived
+with glibc 2.39 (Ubuntu 24.04, rustc 1.100.0); another libm version may give other bits.
 
 The proxy arms all ran one binary, `folo-kd.exe` at `dc727599` (before the mirrored view was removed in
 `751d6d84`). That the removal changes nothing for one view was checked on CPU, not on the proxy: both binaries
