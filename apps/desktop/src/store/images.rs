@@ -76,6 +76,12 @@ impl ImageCache {
     /// holds the one on screen with the grid behind it, and the texture fits every GPU.
     pub const FULL_MAX_SIDE: u32 = 4096;
 
+    /// A cache holding at most `byte_budget` decoded bytes (tests of the app around it).
+    #[cfg(test)]
+    pub fn with_byte_budget(byte_budget: usize) -> Self {
+        Self { byte_budget, ..Default::default() }
+    }
+
     pub fn get(&self, k: &ImgKey) -> Option<&ImgSlot> {
         self.slots.get(k)
     }
