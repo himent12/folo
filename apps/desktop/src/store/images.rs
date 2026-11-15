@@ -27,15 +27,35 @@ pub enum ImgSlot {
     Failed,
 }
 
-/// Decoded images keyed by dataset/image/size, evicted oldest-first past a budget.
-#[derive(Default)]
+/// Decoded images keyed by dataset/image/size, evicted oldest-first past a count and a byte budget.
 pub struct ImageCache {
     pub slots: HashMap<ImgKey, ImgSlot>,
     order: VecDeque<ImgKey>,
+    /// Decoded bytes held by the `Ready` slots.
+    bytes: usize,
+    /// [`Self::BYTE_BUDGET`] (smaller in tests).
+    byte_budget: usize,
+}
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self { slots: HashMap::new(), order: VecDeque::new(), bytes: 0, byte_budget: Self::BYTE_BUDGET }
+    }
+}
+
+/// The decoded bytes of an image (its BGRA frame).
+fn image_bytes(img: &RenderImage) -> usize {
+    img.as_bytes(0).map_or(0, <[u8]>::len)
 }
 
 impl ImageCache {
+    /// At most this many entries (thumbnails are small: 600 of 320 px are under 250 MB).
     pub const BUDGET: usize = 600;
+    /// At most this many decoded bytes: a few full-size photos would otherwise hold gigabytes.
+    pub const BYTE_BUDGET: usize = 768 << 20;
+    /// Full-size images are decoded at most this long a side (64 MB each), so the byte budget always
+    /// holds the one on screen with the grid behind it, and the texture fits every GPU.
+    pub const FULL_MAX_SIDE: u32 = 4096;
 
     pub fn get(&self, k: &ImgKey) -> Option<&ImgSlot> {
         self.slots.get(k)
@@ -54,6 +74,7 @@ impl ImageCache {
     /// Forget everything (a new data source); returns the decoded images to free on the GPU.
     pub fn clear(&mut self) -> Vec<Arc<RenderImage>> {
         self.order.clear();
+        self.bytes = 0;
         self.slots
             .drain()
             .filter_map(|(_, s)| match s {
@@ -70,16 +91,30 @@ impl ImageCache {
         if !matches!(self.slots.get(&k), Some(ImgSlot::Loading)) {
             return img.into_iter().collect();
         }
-        self.slots.insert(k, img.map_or(ImgSlot::Failed, ImgSlot::Ready));
+        self.bytes += img.as_deref().map_or(0, image_bytes);
+        self.slots.insert(k.clone(), img.map_or(ImgSlot::Failed, ImgSlot::Ready));
         let mut evicted = Vec::new();
-        while self.order.len() > Self::BUDGET {
-            if let Some(old) = self.order.pop_front()
-                && let Some(ImgSlot::Ready(img)) = self.slots.remove(&old)
-            {
+        // The image just finished stays (it is the one asked for): past the byte budget everything
+        // older goes first.
+        while self.order.len() > Self::BUDGET || (self.bytes > self.byte_budget && self.order.len() > 1) {
+            let Some(old) = self.order.pop_front() else { break };
+            if old == k {
+                self.order.push_back(old);
+                continue;
+            }
+            if let Some(ImgSlot::Ready(img)) = self.slots.remove(&old) {
+                self.bytes -= image_bytes(&img);
                 evicted.push(img);
             }
         }
         evicted
+    }
+
+    /// Forget the failures, so those images are asked for again (the server is back: what failed
+    /// while it was away may well load now).
+    pub fn forget_failed(&mut self) {
+        self.slots.retain(|_, s| !matches!(s, ImgSlot::Failed));
+        self.order.retain(|k| self.slots.contains_key(k));
     }
 }
 
@@ -96,14 +131,25 @@ pub fn decode_upright(bytes: &[u8]) -> Option<image::RgbaImage> {
 
 /// Turn backend pixels into a `RenderImage` (BGRA frames); encoded ones upright ([`decode_upright`]).
 pub fn to_render_image(data: ImageData) -> Option<Arc<RenderImage>> {
-    let (w, h, mut px) = match data {
-        ImageData::Rgba { width, height, pixels } => (width, height, pixels),
-        ImageData::Encoded(bytes) => {
-            let img = decode_upright(&bytes)?;
-            let (w, h) = img.dimensions();
-            (w, h, img.into_raw())
-        }
+    to_render_image_within(data, None)
+}
+
+/// [`to_render_image`], scaled down (aspect kept) so its long side is at most `max_side`.
+pub fn to_render_image_within(data: ImageData, max_side: Option<u32>) -> Option<Arc<RenderImage>> {
+    let mut img = match data {
+        ImageData::Rgba { width, height, pixels } => image::RgbaImage::from_raw(width, height, pixels)?,
+        ImageData::Encoded(bytes) => decode_upright(&bytes)?,
     };
+    if let Some(m) = max_side {
+        let (w, h) = img.dimensions();
+        let long = w.max(h);
+        if long > m {
+            let side = |v: u32| (u64::from(v) * u64::from(m) / u64::from(long)).max(1) as u32;
+            img = image::imageops::thumbnail(&img, side(w), side(h));
+        }
+    }
+    let (w, h) = img.dimensions();
+    let mut px = img.into_raw();
     for p in px.as_chunks_mut::<4>().0 {
         p.swap(0, 2);
     }
@@ -153,6 +199,65 @@ mod tests {
         c.finish(key(ImageCache::BUDGET + 1), None);
         assert!(c.get(&key(1)).is_none() && c.get(&key(2)).is_some());
         assert_eq!(c.slots.len(), ImageCache::BUDGET);
+    }
+
+    fn render(w: u32, h: u32) -> Arc<RenderImage> {
+        Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(w, h))]))
+    }
+
+    #[test]
+    fn big_images_are_held_within_a_byte_budget_keeping_the_newest() {
+        // 10x10 = 400 bytes each; the budget holds two.
+        let mut c = ImageCache { byte_budget: 900, ..Default::default() };
+        let key = |i: usize| ImgKey { dataset: "d".into(), image: i.to_string(), kind: ImgKind::Full };
+        for i in 0..5 {
+            assert!(c.begin(&key(i)));
+            let evicted = c.finish(key(i), Some(render(10, 10)));
+            assert_eq!(evicted.len(), usize::from(i >= 2), "image {i}");
+            assert!(c.bytes <= 900);
+        }
+        assert!(c.get(&key(2)).is_none() && matches!(c.get(&key(4)), Some(ImgSlot::Ready(_))));
+        // One image over the whole budget still shows: everything older goes, it stays.
+        assert!(c.begin(&key(9)));
+        assert_eq!(c.finish(key(9), Some(render(20, 20))).len(), 2);
+        assert!(matches!(c.get(&key(9)), Some(ImgSlot::Ready(_))));
+        assert_eq!(c.bytes, 1600);
+        // The next result in evicts the big one (the inspector moved on).
+        assert!(c.begin(&key(10)));
+        assert_eq!(c.finish(key(10), Some(render(10, 10))).len(), 1);
+        assert_eq!(c.bytes, 400);
+        assert_eq!(c.clear().len(), 1);
+        assert_eq!(c.bytes, 0);
+    }
+
+    #[test]
+    fn failures_are_forgotten_on_request_and_ready_images_kept() {
+        let mut c = ImageCache::default();
+        let key = |i: &str| ImgKey { dataset: "d".into(), image: i.into(), kind: ImgKind::Thumb };
+        for (k, img) in [("ok", Some(render(1, 1))), ("down", None)] {
+            assert!(c.begin(&key(k)));
+            c.finish(key(k), img);
+        }
+        assert!(c.begin(&key("loading")));
+        c.forget_failed();
+        assert!(c.get(&key("down")).is_none(), "asked for again");
+        assert!(matches!(c.get(&key("ok")), Some(ImgSlot::Ready(_))));
+        assert!(matches!(c.get(&key("loading")), Some(ImgSlot::Loading)));
+        assert!(c.begin(&key("down")));
+        assert_eq!(c.order.len(), 3);
+    }
+
+    #[test]
+    fn full_images_are_scaled_down_to_the_cap_keeping_their_aspect() {
+        let data = || ImageData::Rgba { width: 9000, height: 30, pixels: vec![7; 9000 * 30 * 4] };
+        let s = to_render_image_within(data(), Some(ImageCache::FULL_MAX_SIDE)).unwrap().size(0);
+        assert_eq!((s.width.0, s.height.0), (4096, 13));
+        // Thin ones keep at least a pixel; small ones are left alone.
+        let thin = ImageData::Rgba { width: 1, height: 20000, pixels: vec![7; 20000 * 4] };
+        let s = to_render_image_within(thin, Some(4096)).unwrap().size(0);
+        assert_eq!((s.width.0, s.height.0), (1, 4096));
+        let s = to_render_image_within(data(), None).unwrap().size(0);
+        assert_eq!((s.width.0, s.height.0), (9000, 30));
     }
 
     /// `jpeg` with an EXIF APP1 segment holding `orientation` right after its SOI marker.

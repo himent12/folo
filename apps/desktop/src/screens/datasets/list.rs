@@ -16,9 +16,9 @@ impl FoloApp {
         let subtitle = match &list {
             Some(l) => {
                 format!(
-                    "{} · {} images",
+                    "{} · {}",
                     plural(l.len(), "dataset"),
-                    int(l.iter().map(|d| d.splits.total()).sum())
+                    counted(l.iter().map(|d| d.splits.total()).sum(), "image", "images")
                 )
             }
             None => "Loading…".into(),

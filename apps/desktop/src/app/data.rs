@@ -381,10 +381,17 @@ impl FoloApp {
     ) {
         let api = self.store.api.clone();
         let generation = self.backend_gen;
+        // Full-size images are bounded too: a 12000 px photo would otherwise hold 400 MB.
+        let max_side = (key.kind == ImgKind::Full).then_some(ImageCache::FULL_MAX_SIDE);
         cx.spawn(async move |this, cx| {
-            let img = cx
+            let (img, err) = cx
                 .background_executor()
-                .spawn(async move { call(&*api).ok().and_then(to_render_image) })
+                .spawn(async move {
+                    match call(&*api) {
+                        Ok(d) => (to_render_image_within(d, max_side), None),
+                        Err(e) => (None, Some(e)),
+                    }
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.backend_gen != generation {
@@ -392,6 +399,11 @@ impl FoloApp {
                         cx.drop_image(img, None);
                     }
                     return;
+                }
+                // An image that couldn't reach the server marks it down, so its return is noticed
+                // (`reconnected` asks for the failed images again) even when only images saw the outage.
+                if let Some(e) = err.filter(|e| e.code == "server_unreachable") {
+                    this.store.note_reachability(Some(&e));
                 }
                 let evicted = this.store.images_px.finish(key, img);
                 for e in evicted {

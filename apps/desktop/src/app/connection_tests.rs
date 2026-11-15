@@ -1,14 +1,14 @@
 //! Connecting from Settings and losing the local server, with a fake connector: no socket is opened
 //! and no `folo serve` is started.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use super::tests::{drive, open};
 use super::{Connector, ServerMode};
-use crate::api::Backend;
 use crate::api::http::Spawned;
 use crate::api::mock::MockBackend;
+use crate::api::Backend;
 use crate::store::Load;
 
 fn demo(_: &str) -> Arc<dyn Backend> {
@@ -566,5 +566,34 @@ fn a_delivered_end_is_handled_once() {
         drop(tx);
         this.drain_streams(cx);
         assert_eq!(finished_toasts(this, id), 1, "{:?}", titles(this));
+    });
+}
+
+#[test]
+fn images_that_failed_while_the_server_was_away_load_once_it_answers() {
+    use crate::api::ApiError;
+    use crate::store::{ImgKey, ImgKind, ImgSlot};
+    let (mut app, window) = open();
+    let key = ImgKey { dataset: "ds_3b91".into(), image: "img_03417".into(), kind: ImgKind::Thumb };
+    // A thumbnail asked for while the server is away; nothing else saw the outage.
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.store.images_px.begin(&key));
+        let down = ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7926");
+        this.load_cached_image(key.clone(), move |_: &dyn Backend| Err(down), cx);
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(matches!(this.store.images_px.get(&key), Some(ImgSlot::Failed)));
+        assert!(this.store.unreachable(), "the image's failure notes the outage");
+        // The 2 s refresh, now answered.
+        this.store.system = Load::Idle;
+        this.ensure_core(cx);
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(!this.store.unreachable());
+        assert!(this.store.images_px.get(&key).is_none(), "the failure is forgotten");
+        assert!(this.image("ds_3b91", "img_03417", ImgKind::Thumb, cx).is_none(), "asked for again");
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(matches!(this.store.images_px.get(&key), Some(ImgSlot::Ready(_))), "the tile shows");
     });
 }

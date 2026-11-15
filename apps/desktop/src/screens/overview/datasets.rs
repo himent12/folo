@@ -102,9 +102,9 @@ impl FoloApp {
         // The card in full: its name, size and every class with its boxes (the strip's breakdown), on
         // hover and on keyboard focus.
         let full = format!(
-            "{} · {} images · {}",
+            "{} · {} · {}",
             d.name,
-            int(d.splits.total()),
+            counted(d.splits.total(), "image", "images"),
             counts.as_deref().map_or_else(|| d.classes.join(", "), |c| balance_text(&d.classes, c))
         );
         let focused = self.ring(&self.fh(key.clone(), cx), window);
@@ -150,8 +150,8 @@ impl FoloApp {
                         // Counts that never need cutting; the class names are the card's tip (hover
                         // and keyboard focus), in full.
                         format!(
-                            "{} images · {}",
-                            int(d.splits.total()),
+                            "{} · {}",
+                            counted(d.splits.total(), "image", "images"),
                             if d.classes.len() == 1 {
                                 "1 class".to_string()
                             } else {

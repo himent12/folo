@@ -168,7 +168,7 @@ pub fn health_checks(d: &Dataset, s: &DatasetStats, counts: Option<&IssueCounts>
     if images > 0 && images < 200 {
         push(
             Severity::Info,
-            format!("only {} images", int(images)),
+            format!("only {}", n_of(images, "image", "images")),
             "Expect overfitting; keep augmentation on and start from pretrained weights.",
         );
     }

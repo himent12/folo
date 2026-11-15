@@ -330,7 +330,8 @@ impl FoloApp {
                 },
                 Err(e) => {
                     let verb = if matches!(target, DeleteTarget::Run(_)) { "delete" } else { "remove" };
-                    this.toast(Tone::Danger, format!("Couldn't {verb} {name}"), Some(e.message.into()), cx)
+                    let body = removal_refused(&e, files);
+                    this.toast(Tone::Danger, format!("Couldn't {verb} {name}"), Some(body.into()), cx)
                 }
             },
         );
@@ -561,9 +562,50 @@ fn upsert_dataset(list: &mut Vec<crate::api::Dataset>, ds: crate::api::Dataset) 
     }
 }
 
+/// What a refused removal says: the server's reason, then the way forward in the app's words. A
+/// refused file deletion (another dataset may read that folder, or could not be checked; a run is
+/// active) can always unregister the dataset alone, which the server's hint names by its API flag
+/// (`files=true`), meaningless here: the switch in the dialog is what the person knows.
+fn removal_refused(e: &ApiError, files: bool) -> String {
+    let mut body = e.message.clone();
+    let way = if files && e.code != "server_unreachable" {
+        Some("To unregister it and keep its files, remove it again with “Also delete” off.".to_string())
+    } else {
+        e.hint.clone().filter(|h| !h.contains("files=true") && !h.contains("/api/"))
+    };
+    if let Some(way) = way {
+        if !body.ends_with(['.', '!', '?']) {
+            body.push('.');
+        }
+        body.push(' ');
+        let mut c = way.chars();
+        body.extend(c.next().map(|f| f.to_ascii_uppercase()));
+        body.push_str(c.as_str());
+    }
+    body
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::api::Backend;
+    use crate::api::{ApiError, Backend};
+
+    #[test]
+    fn a_refused_file_deletion_says_how_to_unregister_alone() {
+        let e = ApiError::new("dataset_in_use", "the files of broken could not be checked, so they may be in that folder")
+            .with_hint("fix broken first, or unregister this dataset without files=true");
+        let body = super::removal_refused(&e, true);
+        assert!(body.starts_with("the files of broken could not be checked"), "{body}");
+        assert!(body.contains("“Also delete” off"), "{body}");
+        assert!(!body.contains("files=true"), "API words stay out: {body}");
+        // Unregistering alone failed: the server's hint, unless it speaks the API.
+        let e = ApiError::new("run_active", "run a is queued or training").with_hint("wait for it to end, or stop it first");
+        assert_eq!(super::removal_refused(&e, false), "run a is queued or training. Wait for it to end, or stop it first");
+        let e = ApiError::new("run_active", "run 'a' is still active").with_hint("stop it first: POST /api/runs/a/stop");
+        assert_eq!(super::removal_refused(&e, false), "run 'a' is still active");
+        // The server away: nothing to change in the dialog.
+        let e = ApiError::new("server_unreachable", "Lost connection to folo serve.");
+        assert_eq!(super::removal_refused(&e, true), "Lost connection to folo serve.");
+    }
 
     #[test]
     fn a_new_dataset_goes_where_the_server_lists_it() {
