@@ -110,11 +110,11 @@ sidebar entry a route highlights) and `router`. Screens read `router.route`, the
 screen's chunk loads, the screen still shown keeps its own route (`router.location` is the URL's); a chunk that fails
 to load shows an error with Retry (`src/ScreenError.tsx`), or, when the server's index.html now names another entry
 script (Studio was updated under the open page), "Studio was updated" with Reload; a screen that throws while it is
-created shows "This page could not be shown" with Reload in its place (`ScreenCrash`), never the previous screen under the new
-URL. `src/routes.ts` maps each route
-name to its file in `src/routes/` (`ROUTES`), and `import.meta.glob` makes each of those files a chunk. The sidebar,
-the phone tab bar, the palette's navigation and the `G` shortcuts all come from `mainNav` and `settingsNav` in
-`src/lib/shell/nav.ts`. A screen sets its breadcrumbs with `setCrumbs` (`src/lib/shell/crumbs.ts`).
+created shows "This page could not be shown" with Reload in its place (`ScreenCrash`), never the previous screen under
+the new URL. `src/routes.ts` maps each route name to its file in `src/routes/` (`ROUTES`), and `import.meta.glob`
+makes each of those files a chunk. The sidebar, the phone tab bar, the palette's navigation and the `G` shortcuts all
+come from `mainNav` and `settingsNav` in `src/lib/shell/nav.ts`. A screen sets its breadcrumbs with `setCrumbs`
+(`src/lib/shell/crumbs.ts`).
 
 ## State and live updates
 

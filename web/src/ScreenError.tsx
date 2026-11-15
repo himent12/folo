@@ -10,6 +10,8 @@ import { setCrumbs } from '$lib/shell/crumbs';
 import { mainNav, settingsNav } from '$lib/shell/nav';
 import Page from '$lib/shell/Page';
 import Button from '$lib/ui/Button';
+import ErrorState from '$lib/ui/ErrorState';
+import type { ScreenName, Screens } from './routes';
 
 /**
  * The screen of a route whose screen threw while it was created (data of a shape it did not expect, a bug): the page
@@ -40,9 +42,6 @@ export function ScreenCrash(props: { error: unknown }) {
     </Page>
   );
 }
-
-import ErrorState from '$lib/ui/ErrorState';
-import type { ScreenName, Screens } from './routes';
 
 /** The entry script of a built Studio's index.html (`<script type="module" … src="/assets/index-….js">`), or null. */
 export function entryScript(html: string): string | null {

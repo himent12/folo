@@ -2,6 +2,7 @@
 import { deep, flush as flushSync } from 'fw';
 import { createComponent } from 'fw/internal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi, type Scenario } from '$lib/api/mock';
 import type { Dataset, LabelImagesAdded, LabelJob } from '$lib/api/types';
@@ -15,7 +16,6 @@ import AddImagesDialog from './AddImagesDialog';
 import DatasetDialog, { type DatasetDialogProps } from './DatasetDialog';
 import JobDialog, { type JobDialogProps } from './JobDialog';
 import { whyNothingAdded, type Uploads } from './uploads';
-import { ApiError } from "$lib/api/client";
 
 let target: HTMLElement;
 /** Port of `mount(comp, { target, props })`: the props object is read live (a `deep` one changes them). */
