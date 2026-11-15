@@ -12,11 +12,31 @@ const PLAIN: Record<string, string> = { '⁻': '−', '⁰': '0', '¹': '1', '²
  * `stoppedEarly`) never gets there, or not to its end: "Stopped early, before mosaic off" / "Mosaic off from epoch 91".
  * `cap` is the caption under the hatch, `full` its tooltip and the rail's accessible description.
  */
-export function mosaicOffText(n: number, epochs: number, epoch: number, live: boolean, early = false): { cap: string; full: string } {
+export function mosaicOffText(
+  n: number,
+  epochs: number,
+  epoch: number,
+  live: boolean,
+  early = false,
+  ended: 'stopped' | 'failed' | null = null,
+  trained = epoch,
+): { cap: string; full: string } {
   const from = epochs - n;
   const last = `${n} ${n === 1 ? 'epoch' : 'epochs'}`;
   if (early && epoch <= from) return { cap: 'Stopped early, before mosaic off', full: `Stopped early at epoch ${epoch}: mosaic was to be off after epoch ${from}` };
   if (early) return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the early stop at epoch ${epoch}` };
+  // Stopped or failed short of its plan (`ended`): the epochs it finished, never the planned count it did not train.
+  // Steps past epoch `from` (`trained`, in epochs: 2.25) ran without mosaic though no such epoch finished: the
+  // trainer closes mosaic before the epoch's first batch (review round 2).
+  if (ended && !live && epoch < epochs) {
+    const how = ended === 'failed' ? 'Failed' : 'Stopped';
+    if (epoch <= from && trained > from + 1e-9) {
+      const into = Math.ceil(trained - 1e-9);
+      return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the run ${ended} part-way through epoch ${into}` };
+    }
+    if (epoch <= from) return { cap: `${how} before mosaic off`, full: `${how} after ${epoch} finished ${epoch === 1 ? 'epoch' : 'epochs'}: mosaic was to be off after epoch ${from}` };
+    return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the run ${ended} after epoch ${epoch}` };
+  }
   if (epoch < from) return { cap: `Mosaic off after epoch ${from}`, full: `Mosaic off after epoch ${from}: the last ${last} train without mosaic` };
   if (live) {
     const final = n === 1 ? 'final epoch' : `final ${n} epochs`;
@@ -43,6 +63,17 @@ export function lrParts(v: number | null | undefined): { value: string; unit?: s
 export function stepEpoch(status: string, observed: number, finished: number): string {
   const n = Math.max(1, Math.ceil(observed - 1e-9));
   return `ep ${n}${status !== 'running' && status !== 'queued' && n > finished ? ' (partial)' : ''}`;
+}
+
+/**
+ * The epochs a run has finished, the `epoch` [`mosaicOffText`] takes. `Run.epoch` is the epoch in progress while a run
+ * is queued, running or stopping, and the one it failed in for a failed run (docs/API.md `Run.epoch`); only a
+ * completed or stopped run carries its last finished epoch. Read as finished, epoch 2 of 3 in progress said "Mosaic
+ * off · final epoch" a whole epoch before the trainer closes mosaic, and a run that failed in epoch 2 said "Last 1
+ * epoch: mosaic off" for an epoch it never trained (stress s3-live-1).
+ */
+export function epochsDone(status: string, epoch: number): number {
+  return status === 'completed' || status === 'stopped' ? epoch : Math.max(0, epoch - 1);
 }
 
 /** The loss terms in plain words (DESIGN_DIRECTION §2.3: no jargon without its definition). */

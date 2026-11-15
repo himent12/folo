@@ -1,6 +1,42 @@
 import { describe, expect, it } from 'vitest';
 import { startFrom } from './RunCompare';
-import { lrParts, mosaicOffText, stepEpoch } from './run/readings';
+import { epochsDone, lrParts, mosaicOffText, stepEpoch } from './run/readings';
+
+describe('Run metrics: mosaicOffText from Run.epoch (stress s3-live-1)', () => {
+  // A 3-epoch run with close_mosaic capped to 1: the trainer closes mosaic after epoch 2, so epoch 3 alone trains
+  // without it. `Run.epoch` is the epoch in progress while live and the one it failed in for a failed run.
+  const ended = (status: string) => (status === 'stopped' || status === 'failed' ? status : null);
+  const say = (status: string, epoch: number, live: boolean, n = 1, epochs = 3) => mosaicOffText(n, epochs, epochsDone(status, epoch), live, false, ended(status)).cap;
+  it('does not call mosaic off while epoch 2 of 3 still trains with it', () => {
+    expect(say('running', 2, true)).toBe('Mosaic off after epoch 2');
+    expect(say('stopping', 2, true)).toBe('Mosaic off after epoch 2');
+    expect(say('running', 3, true)).toBe('Mosaic off · final epoch');
+  });
+  it('does not claim a mosaic-free epoch a run that failed before finishing one never trained', () => {
+    expect(say('failed', 2, false)).toBe('Failed before mosaic off');
+    // Failed as epoch 3 began, before its first batch: nothing trained without mosaic.
+    expect(say('failed', 3, false)).toBe('Failed before mosaic off');
+  });
+  it('says mosaic was off for the batches of an epoch the run never finished (review round 2)', () => {
+    // 2.25 epochs trained (step 90 of 40 per epoch): ten batches of epoch 3, without mosaic.
+    const part = (status: string, epoch: number) => mosaicOffText(1, 3, epochsDone(status, epoch), false, false, ended(status), 2.25);
+    expect(part('failed', 3)).toEqual({ cap: 'Mosaic off from epoch 3', full: 'Mosaic off from epoch 3 until the run failed part-way through epoch 3' });
+    expect(part('stopped', 2).cap).toBe('Mosaic off from epoch 3');
+    // Exactly at the boundary (step 80): no batch of epoch 3 ran.
+    expect(mosaicOffText(1, 3, 2, false, false, 'stopped', 2).cap).toBe('Stopped before mosaic off');
+  });
+  it('reads the finished epochs of completed and stopped runs as they are (review round 1)', () => {
+    expect(say('completed', 3, false)).toBe('Last 1 epoch: mosaic off');
+    expect(say('stopped', 1, false)).toBe('Stopped before mosaic off');
+    // Stopped with 2 of 3 finished: neither trained without mosaic (it said "Last 1 epoch: mosaic off").
+    expect(say('stopped', 2, false)).toBe('Stopped before mosaic off');
+    expect(say('stopped', 3, false)).toBe('Last 1 epoch: mosaic off');
+    // Part of the phase: from where it began, never the planned count.
+    expect(say('stopped', 3, false, 2, 4)).toBe('Mosaic off from epoch 3');
+    expect(mosaicOffText(2, 4, 3, false, false, 'stopped').full).toBe('Mosaic off from epoch 3 until the run stopped after epoch 3');
+    expect(epochsDone('queued', 0)).toBe(0);
+  });
+});
 
 describe('Compare: startFrom', () => {
   const models = [{ id: 'm_shapes_n', name: 'shapes-n' }];

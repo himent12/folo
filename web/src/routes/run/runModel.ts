@@ -22,7 +22,7 @@ import { DEFAULT_SMOOTHING, type Scale, type Smoothing } from '$lib/charts/LossO
 import { eta, metric } from '$lib/format';
 import { EpochSeries, joinExtents, liveHorizon, StepSeries } from './metricSeries';
 import { failedEpoch } from './failure';
-import { mosaicOffText, stepEpoch } from './readings';
+import { mosaicOffText, stepEpoch, epochsDone } from './readings';
 import { effectiveCloseMosaic, warmupEpochs } from './resolved';
 
 export const ACTIVE = ['queued', 'running', 'stopping'];
@@ -164,7 +164,16 @@ export class RunModel {
   readonly closeN = computed(() => effectiveCloseMosaic(this.run()));
   readonly closeFrom = computed(() => 1 - this.closeN.get() / this.run().epochs);
   readonly mosaicOff = computed(() => this.closeFrom.get() > 0 && this.closeFrom.get() < 1);
-  readonly closeText = computed(() => mosaicOffText(this.closeN.get(), this.run().epochs, this.run().epoch, this.live.get(), stoppedEarly(this.run())), {
+  readonly closeText = computed(() => {
+    const r = this.run();
+    const ended = r.status === 'stopped' || r.status === 'failed' ? r.status : null;
+    // How far it trained, in epochs, steps of an epoch it never finished included (2.25: a quarter into epoch 3).
+    const trained = Math.max(this.observed.get(), r.steps_per_epoch > 0 ? r.step / r.steps_per_epoch : 0);
+    // A failed run's `epoch` may also be its last finished one (it failed before the next epoch's first step): the
+    // history's last epoch says so.
+    const done = Math.max(epochsDone(r.status, r.epoch), this.lastEpoch.get()?.epoch ?? 0);
+    return mosaicOffText(this.closeN.get(), r.epochs, done, this.live.get(), stoppedEarly(r), ended, trained);
+  }, {
     equals: (a, b) => a.cap === b.cap && a.full === b.full,
   });
   readonly xMark = computed((): XMark | undefined => (this.mosaicOff.get() ? { x: this.run().epochs - this.closeN.get(), label: 'mosaic off' } : undefined), {

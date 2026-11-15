@@ -2,10 +2,11 @@
 import { flush as flushSync } from 'fw';
 import { render, type Rendered } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { hub } from '$lib/api/index';
+import { ApiError, hub } from '$lib/api/index';
+import { metric } from '$lib/format';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
-import RunCompare from './RunCompare';
+import RunCompare, { COMPARE_POLL_MS } from './RunCompare';
 
 /** Port of `mount(RunCompare, { target })`; `unmount(c)` is `c.unmount()`. */
 const mount = (_: typeof RunCompare, o: { target: HTMLElement }) => render(() => <RunCompare />, o.target);
@@ -208,6 +209,163 @@ describe('Compare runs from a link that names a deleted run', () => {
     await until(() => target.querySelector('#cmp-table table'), 'the table');
     await until(() => target.querySelector('.swap') || target.textContent?.includes("Could not load these runs' metrics"), 'the chart or its error');
     expect(target.textContent).not.toContain("Could not load these runs' metrics");
+  });
+});
+
+describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
+  afterEach(() => vi.useRealTimers());
+  /** `ms` of fake time on, then the answers and what they set off settled. */
+  const tick = async (ms = 0) => {
+    await vi.advanceTimersByTimeAsync(ms);
+    for (let i = 0; i < 6; i++) {
+      await vi.advanceTimersByTimeAsync(0);
+      flushSync();
+    }
+  };
+  /**
+   * Run `done` compared while it trains: "running" in its second epoch in the list, one finished epoch in its metrics,
+   * each as the server holds them when asked. `state.training = false` completes it; `state.gate` holds its metrics
+   * answer (asked while it trained) until released; `state.fail` makes its next metrics reads fail.
+   */
+  async function trainingCompare(gate: Promise<void> | null = null, training = true) {
+    const api = hub.api as MockApi;
+    const [done, other] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const full = (await api.runMetrics(done!.id)).epochs;
+    const listRuns = api.runs.bind(api);
+    const readMetrics = api.runMetrics.bind(api);
+    const state = { training, gate, fail: 0, epoch: 2, deleted: false };
+    vi.spyOn(api, 'runs').mockImplementation(async (...a) => {
+      const training = state.training;
+      const list = (await listRuns(...a)).filter((r) => !(state.deleted && r.id === other!.id));
+      return list.map((r) => (training && r.id === done!.id ? { ...r, status: 'running', epoch: state.epoch, best: null } : r));
+    });
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      const training = state.training;
+      const epoch = state.epoch;
+      const held = id === done!.id ? state.gate : null;
+      if (id === done!.id && state.fail > 0) {
+        state.fail--;
+        throw new ApiError(500, 'internal', 'the metrics could not be read');
+      }
+      if (id === other!.id && state.deleted) throw new ApiError(404, 'run_not_found', 'no such run');
+      const m = await readMetrics(id, ...rest);
+      if (held) await held;
+      return training && id === done!.id ? { ...m, epochs: m.epochs.slice(0, epoch - 1) } : m;
+    });
+    vi.useFakeTimers();
+    router.route = parse(`#/runs/compare?ids=${done!.id},${other!.id}`);
+    c = mount(RunCompare, { target });
+    const chip = () => [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(done!.name))?.textContent ?? '';
+    const last = metric(full.at(-1)!.val.map50_95);
+    expect(metric(full[0]!.val.map50_95)).not.toBe(last);
+    return { state, chip, first: metric(full[0]!.val.map50_95), second: metric(full[1]!.val.map50_95), last, other: other! };
+  }
+
+  it('follows it: its line and value grow as it trains, and its end mark says how it ended', async () => {
+    const { state, chip, first, last } = await trainingCompare();
+    await tick();
+    expect(chip()).toContain('live');
+    expect(chip()).toContain(first);
+    // It completes while the page is open: within a poll and the metrics read it sets off.
+    state.training = false;
+    await tick(COMPARE_POLL_MS);
+    expect(chip()).not.toContain('live');
+    expect(chip()).toContain(last);
+  });
+
+  it('never loses a completion seen while the metrics read is still out (review round 1)', async () => {
+    let release!: () => void;
+    const { state, chip, last } = await trainingCompare(new Promise<void>((r) => (release = r)));
+    await tick();
+    expect(chip()).toContain('live');
+    // The run completes and the poll sees it while the first metrics answer (asked while it trained) is still out.
+    state.training = false;
+    state.gate = null;
+    await tick(COMPARE_POLL_MS);
+    expect(chip()).not.toContain('live');
+    release();
+    await tick();
+    expect(chip()).toContain(last);
+  });
+
+  it('says a failed refresh may leave the curves behind, and tries again until it gets them (review round 1)', async () => {
+    const { state, chip, first, last } = await trainingCompare();
+    await tick();
+    expect(chip()).toContain(first);
+    state.training = false;
+    state.fail = 1;
+    await tick(COMPARE_POLL_MS);
+    expect(chip()).not.toContain('live');
+    expect(target.querySelector('.stale-note')?.textContent).toContain("Could not refresh these runs' metrics");
+    // Tried again a poll later, with no click.
+    await tick(COMPARE_POLL_MS);
+    expect(target.querySelector('.stale-note')).toBeNull();
+    expect(chip()).toContain(last);
+  });
+
+  it('keeps following it after the other compared run is deleted elsewhere (review round 2)', async () => {
+    const { state, chip, second, last, other } = await trainingCompare();
+    await tick();
+    // An epoch later its metrics are read again, with both runs in the list.
+    state.epoch = 3;
+    await tick(COMPARE_POLL_MS);
+    expect(chip()).toContain(second);
+    // The other run is deleted in another tab: its chip goes, the link still names it.
+    state.deleted = true;
+    await tick(COMPARE_POLL_MS);
+    expect([...target.querySelectorAll('.chip')].some((el) => el.textContent?.includes(other.name))).toBe(false);
+    // Then this one completes: its line and value still reach the end (they froze at epoch 2).
+    state.training = false;
+    await tick(COMPARE_POLL_MS);
+    expect(chip()).not.toContain('live');
+    expect(chip()).toContain(last);
+  });
+
+  it('reads again a failed run whose metrics came before the runs list (review round 3)', async () => {
+    // The metrics answer is asked while epoch 1's checkpoint is still being written (no epochs); the runs list comes
+    // after epoch 2 failed before its first step: `failed, epoch: 1`, epoch 1 finished (docs/API.md `Run.epoch`).
+    const api = hub.api as MockApi;
+    const [run, other] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const full = (await api.runMetrics(run!.id)).epochs;
+    const listRuns = api.runs.bind(api);
+    const readMetrics = api.runMetrics.bind(api);
+    let release!: () => void;
+    const listed = new Promise<void>((r) => (release = r));
+    let reads = 0;
+    vi.spyOn(api, 'runs').mockImplementation(async (...a) => {
+      const list = await listRuns(...a);
+      await listed;
+      return list.map((r) => (r.id === run!.id ? { ...r, status: 'failed', epoch: 1, best: null } : r));
+    });
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      const m = await readMetrics(id, ...rest);
+      if (id !== run!.id) return m;
+      return { ...m, epochs: m.epochs.slice(0, reads++ === 0 ? 0 : 1) };
+    });
+    vi.useFakeTimers();
+    router.route = parse(`#/runs/compare?ids=${run!.id},${other!.id}`);
+    c = mount(RunCompare, { target });
+    await tick();
+    expect(reads).toBe(1);
+    release();
+    await tick();
+    await tick(COMPARE_POLL_MS);
+    const chip = [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(run!.name))?.textContent ?? '';
+    expect(chip).toContain(metric(full[0]!.val.map50_95));
+    // One read more, not one per poll: the second answer was asked with the list in hand.
+    await tick(COMPARE_POLL_MS);
+    expect(reads).toBe(2);
+  });
+
+  it('follows a stopped run resumed in another tab (review round 1)', async () => {
+    // Not training when the page opens (stopped, say).
+    const { state, chip } = await trainingCompare(null, false);
+    await tick();
+    expect(chip()).not.toContain('live');
+    // Resumed elsewhere: it trains again.
+    state.training = true;
+    await tick(COMPARE_POLL_MS);
+    expect(chip()).toContain('live');
   });
 });
 

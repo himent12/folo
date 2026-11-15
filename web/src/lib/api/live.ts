@@ -21,6 +21,7 @@
 
 import { effect, ReactiveSet, signal, untrack } from 'fw';
 import { AppendLog } from './appendLog';
+import { ApiError } from './client';
 import { hub } from './index';
 import type { Epoch, LogLine, Run, RunCloud, RunLogs, Step } from './types';
 
@@ -324,22 +325,63 @@ export class LiveRun {
       let replayTimer: ReturnType<typeof setTimeout> | undefined;
       let speAsked = false;
       let resolvedAsked = false;
+      // The run was deleted (in another tab, the Runs list, the CLI): the page says so, as a reload would ("Run not
+      // found"), instead of "Reconnecting" over the last known run forever while the stream retries a 404 (stress
+      // s3-live-4; LiveBench does the same for a benchmark). Nothing retries after; the page's Retry starts over.
+      let unsub = (): void => {};
+      const gone = (e: unknown): boolean => {
+        if (closed || !(e instanceof ApiError && e.status === 404)) return false;
+        closed = true;
+        clearTimeout(lostTimer);
+        clearTimeout(syncTimer);
+        clearTimeout(replayTimer);
+        unsub();
+        this.run = undefined;
+        this.steps = [];
+        this.epochs = [];
+        this.logs = [];
+        this.logsEarlier = 0;
+        this.#streamedTail = [];
+        this.lost = null;
+        this.waiting = null;
+        this.connection = 'idle';
+        this.loading = false;
+        this.error = e;
+        this.#bump();
+        return true;
+      };
+      // A dropped stream may mean the run is gone (the stream answers 404 then, and EventSource gives no status): one
+      // snapshot at a time says so; any other answer leaves the reconnect to the stream.
+      let checking = false;
+      const check = () => {
+        if (checking || closed) return;
+        checking = true;
+        api.run(runId).then(
+          () => void (checking = false),
+          (e) => {
+            checking = false;
+            gone(e);
+          },
+        );
+      };
+
       const sync = (attempt = 0) => {
         clearTimeout(syncTimer);
-        load().catch(() => {
-          if (closed) return;
+        load().catch((e) => {
+          if (closed || gone(e)) return;
           syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
         });
       };
 
       // Subscribe first: events that arrive while history loads are kept and merged, not lost.
-      const unsub = api.runEvents(runId, {
+      unsub = api.runEvents(runId, {
         connection: (s) => {
           if (closed) return;
           // EventSource construction does not mean the subscription is live: events emitted between our first
           // history load and the stream opening would be lost, so load (and merge) again once it opens.
           if (s === 'open' && this.connection === 'idle') sync();
           this.connection = s;
+          if (s === 'reconnecting') check();
           if (s === 'open') {
             clearTimeout(lostTimer);
             lostTimer = undefined;
