@@ -101,7 +101,7 @@ impl FoloApp {
             c.min_lanes = 1;
             c.x_int = true;
             c.x_name = "epoch";
-            c.x_fmt = |v| format!("{v:.0}");
+            c.x_fmt = epoch_of;
             // Named on the first chart only; the others keep the line.
             // No switch to mark when mosaic never closes, or is off throughout.
             c.markers = if close_n == 0 || close_n >= r.epochs {
@@ -173,7 +173,8 @@ impl FoloApp {
         // The best epoch: a hollow ink ring on its series ("○ best" in the legend).
         map.best = r.best.as_ref().map(|b| (b.epoch as f32, b.map50_95));
         // A failed run marks where it stopped, on the charts that tell the story.
-        if r.status == RunStatus::Failed {
+        // Not one that failed before its first step: there is no "epoch 0" to mark (Studio's failEvent).
+        if r.status == RunStatus::Failed && r.failed_epoch() > 0 {
             let stopped = d.loss[3].last().map_or(r.epoch as f32, |p| p.0);
             let fail = Marker {
                 x: stopped,
@@ -373,7 +374,7 @@ impl FoloApp {
         };
         // "So far / All N" in the first chart's header fits every chart's x axis to the epochs
         // trained, or shows the planned run; only while those differ.
-        let x_switch = (r.epoch > 0 && r.epoch < r.epochs).then(|| {
+        let x_switch = (r.epoch > 0 && self.run_x_so_far(r) < r.epochs as f32).then(|| {
             let all = format!("All {}", r.epochs);
             self.segmented(
                 "run-x-fit",
@@ -486,13 +487,36 @@ fn series_max(series: &[&[(f32, f32)]]) -> f32 {
     series.iter().flat_map(|s| s.iter()).map(|p| p.1).filter(|v| v.is_finite()).fold(0., f32::max)
 }
 
+/// The epoch at x on the run charts: a step's x is `step / steps_per_epoch`, so epoch e's steps lie
+/// in (e - 1, e] and a validated epoch sits at x = e. Rounding called the first epoch's steps
+/// "epoch 0" and the first half of every epoch the one before it. Whole x (ticks, epochs) are kept.
+fn epoch_of(x: f32) -> String {
+    // A tick computed as 0.1 * 30 is 3.0000002, not past epoch 3. Saturating: 0 and -0.0 read 0.
+    let e = if (x - x.round()).abs() < 1e-4 { x.round() } else { x.ceil() };
+    format!("{}", e as u32)
+}
+
 impl FoloApp {
     /// The run charts' x extent, in epochs: the planned run, or (So far, and by default for a run that
     /// ended short of its plan) the epochs trained.
     pub(super) fn run_x_total(&self, r: &Run) -> f32 {
         let fit = self.run_x_fit.unwrap_or(!(r.status.is_active() || r.status == RunStatus::Completed));
-        if fit { r.epoch.max(1) as f32 } else { r.epochs.max(1) as f32 }
+        if fit { self.run_x_so_far(r) } else { r.epochs.max(1) as f32 }
     }
+
+    /// The "So far" extent: the epochs trained, steps included ([`fitted_total`]).
+    fn run_x_so_far(&self, r: &Run) -> f32 {
+        let last_step =
+            self.store.run_data.get(&r.id).and_then(|x| x.ready()).and_then(|d| d.metrics.steps.last());
+        fitted_total(r.epoch, last_step.map(|s| s.epoch))
+    }
+}
+
+/// "So far": the epochs trained, the one a run stopped (or failed) in included. A run stopped
+/// during epoch 3 keeps epoch 2 (`Run.epoch`), but it took epoch 3's steps: fitted to 2, the loss and
+/// LR charts cut them off while their legends read the last of them.
+fn fitted_total(kept: u32, last_step_epoch: Option<u32>) -> f32 {
+    kept.max(last_step_epoch.unwrap_or(0)).max(1) as f32
 }
 
 #[cfg(test)]
@@ -503,6 +527,33 @@ mod tests {
         let b = [(1., 0.4)];
         assert_eq!(super::series_max(&[&a, &b]), 0.6);
         assert_eq!(super::series_max(&[]), 0.);
+    }
+
+    #[test]
+    fn so_far_holds_the_steps_of_the_epoch_a_run_stopped_in() {
+        use super::fitted_total;
+        // Stopped during epoch 3 of 3 (all 36 steps taken, validation cut): epoch 2 kept, 3 drawn.
+        assert_eq!(fitted_total(2, Some(3)), 3.);
+        // Stopped right after an epoch's validation: nothing past it.
+        assert_eq!(fitted_total(2, Some(2)), 2.);
+        // No history loaded yet, or none at all.
+        assert_eq!(fitted_total(2, None), 2.);
+        assert_eq!(fitted_total(0, None), 1.);
+    }
+
+    #[test]
+    fn the_cursor_names_the_epoch_a_step_belongs_to() {
+        use super::epoch_of;
+        // 12 steps per epoch: step 4 is in epoch 1, step 17 in epoch 2, step 24 ends epoch 2.
+        assert_eq!(epoch_of(4. / 12.), "1");
+        assert_eq!(epoch_of(17. / 12.), "2");
+        assert_eq!(epoch_of(24. / 12.), "2");
+        assert_eq!(epoch_of(25. / 12.), "3");
+        // Ticks and per-epoch points stay whole.
+        assert_eq!(epoch_of(0.), "0");
+        assert_eq!(epoch_of(-0.), "0");
+        assert_eq!(epoch_of(3.), "3");
+        assert_eq!(epoch_of(0.1 * 30.), "3");
     }
 
     use super::log_range;

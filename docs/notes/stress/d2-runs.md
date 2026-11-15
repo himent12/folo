@@ -30,7 +30,10 @@ moment; every finding was reproduced twice.
   click "Interrupted: the server stopped during training" with Resume from epoch 2, within about 20 s.
 - **Cloud** (`folo serve --mock`): a live cloud run through Provisioning, Booting, Uploading data (32.0 of 45.8 MiB =
   the API's 38.4 / 48.0 MB), Training, Collecting weights, Releasing, Released, Completed with its toast; its
-  instance deleted mid-training (Failed in epoch 3 of 3 with the provider's message, Resume from epoch 3).
+  instance deleted mid-training (Failed in epoch 3 of 3 with the provider's message, Resume from epoch 3). New run's
+  Stop after with 0, -1, 1e9, letters, empty and 100000: refused inline, Start disabled.
+- **Two Desktop windows on one live run**, Stop (confirmed by keyboard) in one: both go Stopping, then "Stopped at
+  epoch 2", Resume from epoch 3 and the same Duration, within 3 s of each other.
 
 ## Findings
 
@@ -40,6 +43,10 @@ moment; every finding was reproduced twice.
 | d2-runs-2 | polish | New run › Device offers GPU 0 on a server whose `/api/system` lists no GPU; Start then answers "Device gpu:0 is not available". `apps/desktop/src/overlays/new_run.rs:192`. | fixed: GPU 0 disabled with the reason as its tooltip (arrow keys skip it), `FoloApp::nr_no_gpu`, test `app::tests::new_run_offers_gpu_0_only_on_a_server_that_has_a_gpu` |
 | d2-runs-3 | polish | After the server is killed mid-epoch, the interrupted run's Duration is the last `alive_at` (35 s for ~58 s trained) and the loss chart ends at the last flushed step (12, where 16 had been streamed). `crates/folo-server/src/runs/registry.rs:56-61`. | deferred: server internals, approximate by design |
 | d2-runs-4 | annoying | Ctrl N (and the palette's New run) does nothing at all on a server without datasets. `apps/desktop/src/app/new_run.rs:124` returned silently. | fixed: one "Add a dataset first" toast with an Add dataset action, test `app::tests::new_run_on_a_server_without_datasets_says_so_once` |
+| d2-runs-5 | polish | The run charts' cursor chip names the wrong epoch on the step charts (Training loss, Learning rate): step 4 of 12 reads "epoch 0", the first half of every epoch the one before it. `apps/desktop/src/screens/runs/charts.rs:104` rounded x, while epoch e's steps lie in (e-1, e]. | fixed: `epoch_of` (ceil, as Studio's `stepEpoch`), test `screens::runs::charts::tests::the_cursor_names_the_epoch_a_step_belongs_to` |
+| d2-runs-6 | annoying | New run's cloud footer states "Limit $17.00 at 100 h" beside a Stop after field that says `100000` and is marked invalid: the footer read the last valid value the typing passed through. `apps/desktop/src/overlays/new_run_footer.rs:387`. | fixed: `limit_text` shows "—" while Stop after is invalid, test `overlays::new_run_footer::tests::the_limit_is_not_shown_for_a_stop_after_being_corrected` |
+| d2-runs-7 | annoying | A run stopped during epoch 3 of 3 (36 steps taken, epoch 2 kept) opens on a "So far" axis of 0–2: the loss and LR charts cut off the 12 steps of epoch 3, without the Stopped end mark, while the loss legend reads the last of them. `apps/desktop/src/screens/runs/charts.rs:502` fitted to `Run.epoch`, the kept epoch. | fixed: `fitted_total` (the last step's epoch counts), test `screens::runs::charts::tests::so_far_holds_the_steps_of_the_epoch_a_run_stopped_in` |
+| d2-runs-8 | polish | A run that failed before its first step (dataset with no images) says "Failed in epoch 0 of 2" with red "failed during epoch 0" markers; Studio says "Failed before training started" and draws none. `apps/desktop/src/screens/runs/detail.rs:389`, `screens/runs/charts.rs:176`. | fixed: `failed_title`, no marker before the first step, test `screens::runs::detail::tests::a_run_that_failed_before_its_first_step_says_so` |
 
 Repro for each, from a fresh state:
 
@@ -48,9 +55,13 @@ Repro for each, from a fresh state:
 - d2-runs-2: `FOLO_GPU_BACKEND=metal folo serve …` (gpus = []), Ctrl N, click GPU 0, Ctrl Enter.
 - d2-runs-3: 3-epoch CPU run, kill the server PID in epoch 2, restart it, open the run.
 - d2-runs-4: `folo serve --data-dir <empty dir>`, Desktop on it, Ctrl N.
+- d2-runs-5: `--open run:run_9105` (any finished run), hover the Training loss chart a third of the way into epoch 1.
+- d2-runs-6: `folo-desktop --mock`, Ctrl N, Run on → RunPod, Stop after: Ctrl A, type `100000`.
+- d2-runs-7: 3-epoch CPU run, Stop it during epoch 3, open its page: the loss chart ends at x 2 ("All 3" shows the rest).
+- d2-runs-8: a run on a dataset with no images (the seed's `broken`), open its page.
 
 ## Not reached
 
-Linked hover across charts and the smoothing control on a live run (window-message mouse moves did not raise the
-hover readout off screen, so it was looked at only on the demo); memory over a long live run (beyond the 400-run
-list); two Desktop windows on the same run (Stop in one).
+Linked hover was checked on a finished run only (one x across all four charts, legends follow the cursor, the
+per-epoch charts show it near an epoch; that is where d2-runs-5 showed), not while a run trains; memory over a long
+live run (beyond the 400-run list).
