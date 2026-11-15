@@ -31,6 +31,8 @@ down their method, commands, A/B tables and what did not work. BENCHMARKS has th
 | [Learning: accuracy per epoch, the `auto` optimizer rule](hill/learn.md) | [Learning: `auto` rules 4 and 5](hill/r2-learn.md) |
 | | [Fold-in: the merged build measured again](hill/r2-fold-in.md) |
 
+Round 4 (2026-11-14): [Distillation from a frozen teacher on the proxy](hill/r4-distill.md).
+
 ## Design review logs
 
 The two apps were refined in rounds too: screenshots of every screen, two independent design reviews against a fixed
