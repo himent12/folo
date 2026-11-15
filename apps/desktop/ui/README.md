@@ -157,8 +157,10 @@ The winit backend's shared code (events, keys, the custom caption, presenting) a
 `Application::new` also reads `--shot <png>` from the process arguments: the app then runs on the headless
 platform, settles (queues pumped, animations advanced on the fake clock up to `--shot-time`, default 2200 ms),
 writes its first window as a PNG and exits. `--width` / `--height` (logical px, default 1280 x 800), `--scale`
-(default 1) and `--text portable` (cosmic-text instead of DirectWrite) set the window. An error exits 2 with a
-message. `apps/desktop/tools/shoot.ps1` uses it.
+(default 1) and `--text portable` (cosmic-text instead of DirectWrite) set the window. Sizes are checked up
+front: finite, at least 1 px, 1 to 16384 device pixels a side (rounded as the framebuffer is), a scale above 0
+and at most 8, a `--shot-time` of at most
+600000 ms (`--bench-frames` checks the same sizes). An error exits 2 with a message. `apps/desktop/tools/shoot.ps1` uses it.
 
 ## Adapted from GPUI
 

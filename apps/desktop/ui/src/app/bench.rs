@@ -101,14 +101,11 @@ impl BenchArgs {
             Some(other) => return Err(anyhow!("--text {other}: expected `native` or `portable`")),
         };
         let scale_factor = number("--scale", 1.0)?;
-        anyhow::ensure!(scale_factor > 0.0, "--scale must be positive");
+        let (width, height) = (number("--width", 1280.0)?, number("--height", 800.0)?);
+        super::shot::check_size(width, height, scale_factor)?;
         Ok(Some(BenchArgs {
             frames,
-            options: HeadlessOptions {
-                size: size(px(number("--width", 1280.0)?), px(number("--height", 800.0)?)),
-                scale_factor,
-                text,
-            },
+            options: HeadlessOptions { size: size(px(width), px(height)), scale_factor, text },
         }))
     }
 }
@@ -256,4 +253,45 @@ fn print_line(kind: &str, samples: &[Sample], shaped: usize) {
         samples.len(),
         shaped,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bench(list: &[&str]) -> Result<Option<BenchArgs>> {
+        let args: Vec<String> = ["folo-desktop", "--bench-frames", "3"]
+            .into_iter()
+            .chain(list.iter().copied())
+            .map(String::from)
+            .collect();
+        BenchArgs::parse(&args)
+    }
+
+    /// `--bench-frames` refuses the sizes `--shot` does (stress d5-window-input-3): an `inf` side asked
+    /// for a 13 TB frame, a scale of `inf` panicked, a tiny scale rounded the frame to 0 x 0.
+    #[test]
+    fn refuses_sizes_it_cannot_render() {
+        assert!(BenchArgs::parse(&["folo-desktop".to_string()]).unwrap().is_none());
+        for bad in [
+            &["--width", "inf"][..],
+            &["--height", "NaN"],
+            &["--width", "0"],
+            &["--width", "20000"],
+            &["--scale", "inf"],
+            &["--scale", "0"],
+            &["--scale", "0.0001"],
+        ] {
+            assert!(bench(bad).is_err(), "{bad:?}");
+        }
+        for frames in ["0", "-1", "abc"] {
+            let args: Vec<String> =
+                ["folo-desktop", "--bench-frames", frames].into_iter().map(String::from).collect();
+            assert!(BenchArgs::parse(&args).is_err(), "--bench-frames {frames}");
+        }
+        for good in [&["--scale", "8"][..], &[], &["--width", "1", "--height", "1"], &["--width", "16384"]] {
+            let b = bench(good).unwrap().unwrap();
+            assert_eq!(b.frames, 3, "{good:?}");
+        }
+    }
 }

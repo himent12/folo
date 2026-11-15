@@ -127,6 +127,64 @@ fn info_text<S: AsRef<str>>(args: &[S]) -> Option<String> {
     }
 }
 
+/// The options that take a value, and those that don't (`USAGE`).
+const VALUE_FLAGS: &[&str] = &[
+    "--server",
+    "--open",
+    "--theme",
+    "--width",
+    "--height",
+    "--scenario",
+    "--shot",
+    "--scale",
+    "--shot-time",
+    "--text",
+    "--bench-frames",
+];
+const BARE_FLAGS: &[&str] = &["--mock", "--list-scenarios", "-h", "--help", "-V", "--version"];
+
+/// What is wrong with `args` (without the program name) that the app would otherwise pass over in
+/// silence: an unknown option, an option missing its value, a theme other than dark or light, a
+/// scenario whose screen is not one of `scenario::ALL`'s. One stderr line each; the app still opens.
+fn arg_warnings<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_ref();
+        if VALUE_FLAGS.contains(&a) {
+            match args.get(i + 1).map(AsRef::as_ref) {
+                Some(v) if !v.starts_with("--") => {
+                    if a == "--theme" && !matches!(v, "dark" | "light") {
+                        out.push(format!("--theme {v}: not dark or light; using the last theme, else dark"));
+                    }
+                    let screen = v.split('+').next().unwrap_or("").trim();
+                    if a == "--scenario" && !scenario::ALL.iter().any(|s| s.split('+').next() == Some(screen))
+                    {
+                        out.push(format!("--scenario {v}: no such scenario (see --list-scenarios)"));
+                    }
+                    i += 2;
+                    continue;
+                }
+                _ => out.push(format!("{a}: missing its value (see --help)")),
+            }
+        } else if a.starts_with('-') && !BARE_FLAGS.contains(&a) {
+            out.push(format!("{a}: unknown option, ignored (see --help)"));
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The theme to open in: `--theme` when it is dark or light, else the last launch's, else dark (a bad
+/// `--theme x` used to win over the remembered light theme, open dark and remember dark).
+fn launch_mode(cli: Option<&str>, saved: Option<&str>) -> Mode {
+    let valid = |t: &&str| matches!(*t, "dark" | "light");
+    match cli.filter(valid).or(saved.filter(valid)) {
+        Some("light") => Mode::Light,
+        _ => Mode::Dark,
+    }
+}
+
 fn arg(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
@@ -144,6 +202,9 @@ fn main() {
         }
         return;
     }
+    for warning in arg_warnings(&args) {
+        eprintln!("folo-desktop: {warning}");
+    }
     let scenario = arg("--scenario");
     let width: f32 = arg("--width").and_then(|w| w.parse().ok()).unwrap_or(1280.0);
     let height: f32 = arg("--height").and_then(|h| h.parse().ok()).unwrap_or(800.0);
@@ -152,10 +213,7 @@ fn main() {
         window_state::remembers(scenario.is_some(), arg("--width").is_some() || arg("--height").is_some());
     let state_path = remember.then(window_state::path);
     let saved = state_path.as_deref().map(window_state::load).unwrap_or_default();
-    let mode = match arg("--theme").as_deref().or(saved.theme.as_deref()) {
-        Some("light") => Mode::Light,
-        _ => Mode::Dark,
-    };
+    let mode = launch_mode(arg("--theme").as_deref(), saved.theme.as_deref());
     let spec = scenario.as_deref().map(scenario::Spec::parse);
     // Data source: `--server URL` connects to a running folo serve; `--mock` uses the built-in demo
     // data; by default the app finds or starts a server (see `FoloApp::autoconnect`).
@@ -365,5 +423,37 @@ mod tests {
             assert!(help.contains(target), "--help leaves out {target}");
         }
         assert_eq!(info_text::<&str>(&[]), None);
+    }
+
+    /// Unknown options, missing values, a bad theme and an unknown scenario each get a line; the
+    /// app's own options are quiet (stress d5-window-input-5).
+    #[test]
+    fn bad_arguments_are_named_not_ignored() {
+        assert!(arg_warnings(&["--mock", "--open", "runs", "--theme", "light", "--width", "900"]).is_empty());
+        assert!(
+            arg_warnings(&["--scenario", "overview+light", "--shot", "a.png", "--scale", "2"]).is_empty()
+        );
+        assert!(arg_warnings(&["--scenario", "run-cloud+trouble", "--text", "portable"]).is_empty());
+        let one = |args: &[&str]| {
+            let w = arg_warnings(args);
+            assert_eq!(w.len(), 1, "{args:?}: {w:?}");
+            w[0].clone()
+        };
+        assert!(one(&["--theme", "x"]).contains("not dark or light"));
+        // ...and what that line promises happens: the last theme, else dark.
+        assert_eq!(launch_mode(Some("x"), Some("light")), Mode::Light);
+        assert_eq!(launch_mode(Some("x"), None), Mode::Dark);
+        assert_eq!(launch_mode(Some("dark"), Some("light")), Mode::Dark);
+        assert_eq!(launch_mode(None, Some("light")), Mode::Light);
+        assert_eq!(launch_mode(Some("light"), Some("bogus")), Mode::Light);
+        assert!(one(&["--scenario", "nope-not-real", "--shot", "a.png"]).contains("no such scenario"));
+        assert!(one(&["--sever", "http://127.0.0.1:1"]).contains("unknown option"));
+        assert!(one(&["--mock", "--server"]).contains("missing its value"));
+        // `--scenario --shot P`: the scenario has no value; --shot keeps its own.
+        assert!(one(&["--scenario", "--shot", "a.png"]).starts_with("--scenario: missing"));
+        // Every option --help lists is known.
+        for flag in VALUE_FLAGS.iter().chain(BARE_FLAGS) {
+            assert!(USAGE.contains(flag), "{flag}");
+        }
     }
 }

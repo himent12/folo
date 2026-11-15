@@ -31,6 +31,8 @@ mod sidebar;
 mod start_from;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod text_input_tests;
 mod titlebar;
 
 use std::cell::RefCell;

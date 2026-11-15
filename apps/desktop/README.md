@@ -120,11 +120,16 @@ cargo run -- --scenario run-live+hover             # a fixed, deterministic stat
 cargo run -- --help                                # every option (`--version`: the version); prints and exits
 ```
 
+An unknown option, an option missing its value, a `--theme` other than dark or light and an unknown
+`--scenario` each print one `folo-desktop: …` line on stderr; the app still opens (a bad `--theme` opens in the
+remembered theme, else dark).
+
 Build output goes to `target\` unless `CARGO_TARGET_DIR` names another folder; the tools below look there too.
 
 Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1–5` screens · `Ctrl 6` benchmarks · `Ctrl ,` settings ·
 `Ctrl Shift L` theme · `F11` full screen · `Alt ←` back · `Esc` close or go up · `Tab` / arrows move focus ·
-`F6` next region.
+`F6` next region. Text fields: `Home` / `End`, `Ctrl ←/→` word, `Ctrl Backspace` / `Ctrl Delete` delete a word,
+`Shift` with any of these moves select, `Ctrl A` all.
 
 ## Window
 
@@ -160,7 +165,8 @@ dismisses. The caption buttons' width and Close's hover colours are tokens (`lay
 three buttons are plain buttons: Minimize, Restore (leaves full screen) and Close.
 
 The window opens as it was closed: its restored size and place, maximized or full screen, the theme and Reduce
-motion when it was set against the OS's own setting (`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file).
+motion when it was set against the OS's own setting (`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file). It is read field by
+field: one value this build can't read (a wrong type, a window mode from a newer build) is dropped alone.
 It reopens on the display it was on (the display's UUID, derived from its device name as GPUI did, so a file
 written by an older build still matches; kept with the place: each display's bounds are in its own logical pixels,
 so with mixed scale factors their rectangles overlap and the place alone can't say which), if
