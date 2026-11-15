@@ -84,6 +84,15 @@ the same `best.folo` AP 0.12551666, `config.json` different only in the run name
 (`D:/folo-data/runs-hill4/proxy/logs/cmp-ctl-off-s0.log`, script `D:/folo-build/hill4/distill-cmp.py`). With the
 teacher off the branch trains bit-identically to origin/main.
 
+The proxy arms all ran one binary, `folo-kd.exe` at `dc727599` (before the flip consensus was removed in
+`751d6d84`). That the removal changes nothing for one view was checked on CPU, not on the proxy: both binaries
+trained folo-n for 2 epochs (16 batches of 8, 2 optimizer steps) on 64 mini320 images at 160 px with the teacher at
+T = 4 and seed 0. Every printed loss and distillation line is the same, `metrics.jsonl` differs only in timings and
+the teacher log line (which loses its `consensus none`), and the tensor payload of `last.folo` is byte-identical
+(the last 42,045,980 bytes; only the safetensors header with the stored config differs). Script
+`D:/folo-build/hill4/equiv.sh`, output `D:/folo-build/hill4/equiv/` (`cmp.out`). This does not cover the GPU / f16
+path.
+
 Every run of the lane and lane `base`'s controls, P1, proxy-val COCO AP of `best.folo` (best epoch 20 in every run):
 
 | run | flags (after `--teacher …` for distillation arms) | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
