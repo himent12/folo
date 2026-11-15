@@ -157,7 +157,9 @@ pub fn short_id(prefix: &str, h: u64) -> String {
 }
 
 /// A folder name for a display name: lowercase ASCII letters, digits and `-` (at most 48 characters), or
-/// `fallback` when nothing of the name is left.
+/// `fallback` when nothing of the name is left. A name Windows reserves for a device (`nul`, `con`, `com1`, ...)
+/// gets `-set` appended: a folder `nul` is the null device there, so a sample set named "NUL" was written into
+/// nothing and its registration then failed with "does not exist" (stress s1-datasets-5).
 pub fn slug(name: &str, fallback: &str) -> String {
     let mut s = String::new();
     for c in name.trim().chars() {
@@ -167,8 +169,24 @@ pub fn slug(name: &str, fallback: &str) -> String {
             s.push('-');
         }
     }
-    let s = s.trim_end_matches('-').chars().take(48).collect::<String>();
-    if s.is_empty() { fallback.into() } else { s }
+    let s = s.chars().take(48).collect::<String>();
+    let s = s.trim_end_matches('-');
+    if s.is_empty() {
+        fallback.into()
+    } else if is_device_name(s) {
+        format!("{s}-set")
+    } else {
+        s.into()
+    }
+}
+
+/// `con`, `prn`, `aux`, `nul`, `com0`-`com9`, `lpt0`-`lpt9`: names Windows maps to devices in any folder.
+fn is_device_name(s: &str) -> bool {
+    match s.as_bytes() {
+        b"con" | b"prn" | b"aux" | b"nul" => true,
+        [b'c', b'o', b'm', d] | [b'l', b'p', b't', d] => d.is_ascii_digit(),
+        _ => false,
+    }
 }
 
 /// Creates a new folder `parent/base`, or `parent/base-2`, `-3`, ... when that is taken, and returns it.
@@ -213,6 +231,20 @@ mod tests {
         assert_eq!(slug("Shapes 1k!", "synthetic"), "shapes-1k");
         assert_eq!(slug("  --  ", "synthetic"), "synthetic");
         assert_eq!(slug("a__b", "x"), "a-b");
+        // Cut at 48 characters, never ending on a dash.
+        assert_eq!(slug(&format!("{} b", "a".repeat(47)), "x"), "a".repeat(47));
+    }
+
+    #[test]
+    fn slugs_never_name_a_windows_device() {
+        for (name, folder) in
+            [("NUL", "nul-set"), ("con", "con-set"), ("Aux.txt", "aux-txt"), ("COM1", "com1-set")]
+        {
+            assert_eq!(slug(name, "synthetic"), folder, "{name}");
+        }
+        assert_eq!(slug("lpt9", "x"), "lpt9-set");
+        assert_eq!(slug("console", "x"), "console");
+        assert_eq!(slug("com10", "x"), "com10");
     }
 
     #[test]

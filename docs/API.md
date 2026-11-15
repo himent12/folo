@@ -141,7 +141,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   generator, deterministic in `images`, `classes`, `imgsz` and `seed`; a twentieth of the objects extra-small, so
   under 10% of the boxes are under 5% of the image side and a sample set passes Studio's health checks) into
   `<data dir>/datasets/<name>` (the name
-  lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registers them, named `name`, or `name-2`, `name-3`,
+  lowercased to `a-z0-9-`, at most 48 characters, a Windows device name such as `nul` or `com1` with `-set` appended,
+  with `-2`, `-3`, ... when taken) and registers them, named `name`, or `name-2`, `name-3`,
   ... when a dataset already has that name (case aside; decided as the set is registered, so two generations of one
   name at once get two names). Images are split 80 / 20 into
   train / val. `classes`: 1 to 8 distinct names; `circle`, `square`, `triangle`, `star`, `ring`, `cross`,
