@@ -149,6 +149,22 @@ describe('Dataset page', () => {
     expect(target.querySelector('[data-i="0"]')).toBeNull();
   });
 
+  it('says the dataset is not found when another tab removed it while the page was open (stress s1-datasets-1)', async () => {
+    const read = api.dataset.bind(api);
+    let removed = false;
+    vi.spyOn(api, 'dataset').mockImplementation(async (id: string) => {
+      if (removed) throw new ApiError(404, 'dataset_not_found', `no dataset '${id}'`);
+      return read(id);
+    });
+    open('/datasets/ds_shapes');
+    await until(() => target.querySelector('[data-i="0"]'), 'the grid');
+    removed = true;
+    window.dispatchEvent(new Event('focus'));
+    await until(() => target.textContent?.includes('Dataset not found'), 'the removed dataset');
+    expect(target.querySelector('[data-i="0"]')).toBeNull();
+    expect(target.textContent).not.toContain('Train on this dataset');
+  });
+
   it('offers Train as a link for a dataset that can train', async () => {
     open('/datasets/ds_shapes');
     const train = await until(() => [...target.querySelectorAll('a')].find((a) => a.textContent?.includes('Train on this dataset')), 'Train');

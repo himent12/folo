@@ -105,6 +105,23 @@ describe('DatasetImage', () => {
     expect(api.imageUrl).toHaveBeenCalledTimes(2);
   });
 
+  it('stops loading an image that leaves the page: a retry, or the tile scrolled away (stress s1-datasets-2)', async () => {
+    render(async () => '/api/datasets/ds/images/img?thumb=256');
+    const first = await until(() => target.querySelector('img'), 'the image');
+    expect(first.getAttribute('src')).toBe('/api/datasets/ds/images/img?thumb=256');
+    // Chrome goes on loading a detached <img> that keeps its src: the one taken down must have none.
+    first.dispatchEvent(new Event('error'));
+    await until(() => target.querySelector('.failed'), 'the failure');
+    expect(first.isConnected).toBe(false);
+    expect(first.hasAttribute('src')).toBe(false);
+    target.querySelector<HTMLButtonElement>('button.retry')!.click();
+    const second = await until(() => target.querySelector('img'), 'the image again');
+    expect(second).not.toBe(first);
+    unmount(c!);
+    c = undefined;
+    expect(second.hasAttribute('src')).toBe(false);
+  });
+
   it('says so when the image itself fails to load', async () => {
     render(async () => 'data:,c');
     const img = await until(() => target.querySelector('img'), 'the image');

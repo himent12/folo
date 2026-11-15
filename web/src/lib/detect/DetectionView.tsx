@@ -15,7 +15,7 @@
  * truth mark recedes to 30 %; a selected box under 32 px on screen is also framed by lime viewfinder corners (the
  * product's mark), so it cannot be lost among bigger ones.
  */
-import { computed, css, defaults, effect, Index, signal } from 'fw';
+import { computed, css, defaults, effect, Index, onCleanup, signal } from 'fw';
 import { classColor } from '$lib/design/tokens';
 import { CHIP_H, placeChips } from './chips';
 
@@ -152,6 +152,7 @@ export default function DetectionView(props: DetectionViewProps) {
     <div class="view" class:compact={p.compact} class:small={small.get()} class:cover={p.fit === 'cover'} bind:clientWidth={cw} bind:clientHeight={ch}>
       {p.src ? (
         <img
+          ref={cancelOnRemove}
           src={p.src}
           alt={p.alt}
           class:loaded={loaded.get()}
@@ -161,7 +162,9 @@ export default function DetectionView(props: DetectionViewProps) {
             loaded.set(true);
             p.onload?.(true);
           }}
-          onerror={() => p.onload?.(false)}
+          onerror={(e) => {
+            if ((e.target as HTMLImageElement).hasAttribute('src')) p.onload?.(false);
+          }}
         />
       ) : null}
       {geo.get() ? (
@@ -448,3 +451,12 @@ css`
     opacity: 0.8;
   }
 `;
+/**
+ * An `<img>` taken out of the page goes on loading in Chrome (a fast scroll through a virtualised grid queued thousands
+ * of thumbnails, and the image the user then opened waited behind them, stress s1-datasets-2); without its `src` it
+ * stops. Registered on the owner that created the element, so it runs when that branch or the view goes.
+ */
+function cancelOnRemove(el: HTMLImageElement): void {
+  onCleanup(() => el.removeAttribute('src'));
+}
+
