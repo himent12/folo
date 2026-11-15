@@ -544,6 +544,22 @@ FOLO"
     }
 
     #[test]
+    fn an_address_that_is_not_one_says_so_instead_of_blaming_the_server() {
+        // Typed in Settings › Connection: nothing can be sent to these, so no server is "down".
+        for typed in ["abc def", "http://[::", "http:// 127.0.0.1:1", "http://a b:7878"] {
+            let api = HttpBackend::new(typed);
+            assert!(!api.address_ok(), "{typed:?}");
+            let e = api.health().unwrap_err();
+            assert_eq!(e.code, "server_unreachable", "{typed:?}");
+            assert!(e.message.ends_with("is not a server address"), "{typed:?}: {}", e.message);
+            assert!(e.hint.unwrap().contains("http://host:port"));
+        }
+        for fine in ["127.0.0.1:7878", "http://localhost:18090/", "https://[::1]:443", "http://my-box"] {
+            assert!(HttpBackend::new(fine).address_ok(), "{fine:?}");
+        }
+    }
+
+    #[test]
     fn a_token_server_says_what_works_instead_of_asking_for_a_header() {
         let body = r#"{ "error": { "code": "unauthorized", "message": "this server needs a token: send `Authorization: Bearer <token>`", "hint": "send the token the server was started with" } }"#;
         let (url, _requests) = canned_server(vec![

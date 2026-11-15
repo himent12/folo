@@ -81,8 +81,19 @@ impl HttpBackend {
     /// Nothing answered: said for a person (ureq's own words, "timeout: connect" for a refused port on
     /// Windows, would read as a fault of the server).
     pub(super) fn unreachable(&self, _e: &ureq::Error) -> ApiError {
+        // Garbage typed in Settings ("abc def", "http://", "http://[::") never left the app: say so,
+        // not that a server is down.
+        if !self.address_ok() {
+            return ApiError::new("server_unreachable", format!("{} is not a server address", self.host()))
+                .with_hint("Type it as http://host:port, like http://127.0.0.1:7878.");
+        }
         ApiError::new("server_unreachable", format!("Could not reach folo serve at {}", self.host()))
             .with_hint("Start it with `folo serve`, or switch to the built-in demo in Settings.")
+    }
+
+    /// Whether the address parses as a URL with a host (a request can be sent to it at all).
+    pub(super) fn address_ok(&self) -> bool {
+        self.base.parse::<ureq::http::Uri>().is_ok_and(|u| u.host().is_some_and(|h| !h.is_empty()))
     }
 
     pub(super) fn host(&self) -> String {
