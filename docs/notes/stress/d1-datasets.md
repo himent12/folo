@@ -57,8 +57,40 @@ Deferred (server): `crates/folo-server/src/real/deletion.rs:61` fails closed whe
 `folo_data::open_with`) errors, and a dataset that finds no images errors, so one emptied dataset anywhere blocks file
 deletion of every generated dataset. Whether "no images found" may count as "reads nothing" is a server decision.
 
+### d1-datasets-2 and d1-datasets-6 (polish)
+
+"1 images" came from `"{} images"` in `screens/overview/datasets.rs` (card and tooltip), `screens/datasets/list.rs`
+(subtitle) and `screens/datasets/health.rs` ("only 1 images"); they now use the singular for one. Grid tiles printed
+`meta.id` (`"6"` on a real server, `img_00007` in the demo, which hid it) in the caption and tooltip; they now show the
+file name (`file_name`, either slash), as Studio's grid does (`web/src/routes/dataset/ImageGrid.tsx`). Test:
+`screens/datasets/images.rs` `a_tile_is_named_by_its_file_not_its_id`.
+
 ### d1-datasets-3 (deferred)
 
 `crates/folo-server/src/index.rs:177` takes folo-data's `broken_labels` (images skipped for a broken label,
 `folo-data/src/dataset/mod.rs:259`), `crates/folo-server/src/stats.rs:56` adds label lines, and docs/API.md says lines.
-Which unit is right is an API decision; the Desktop wording follows once it is made.
+The real server also keeps images whose label lines it drops for an out-of-range class (oddyolo val lists all 8),
+although each issue says "the loader skips this image". Which unit is right is an API decision; the Desktop wording
+follows once it is made.
+
+## Checked, not bugs
+
+- 10,000-image grid scrolled fast top to bottom and back: private bytes stayed near 100 MB, handles transient.
+- EXIF-rotated photos: tiles and inspector upright; boxes at the right pixels on `photos-yolo`.
+- Window at its minimum (960x620 logical) and 2560 px wide: list and grid lay out (the subtitle drops the split counts
+  at the minimum). Keyboard: Tab reaches the tiles, arrows move, Enter opens the right image.
+- A dataset unregistered through the API while its inspector is open: the inspector closes at the next refresh, no
+  crash, no stale image.
+- Generate synthetic: names `../x`, `con`, `a/b`, `NUL.txt`, 300 characters, spaces are sanitised by the server
+  (`x`, `con`, `a-b`, 48-character cap); an image count of 23 digits is a field error with Generate off; a
+  double-click on Generate makes one dataset; Esc while generating leaves a toast and the dataset arrives.
+- Inspector: Left at the first image wraps to the last, Right at the last to the first; zoom and pan clamp at the
+  image edge, `-` stops at Fit.
+- Chips missing on boxes under two chip heights in thumbnails: by design (`src/viz.rs`).
+
+## Not done
+
+- Add dataset through the real file dialog on a sandbox desktop (only the path routes the app takes without the dialog
+  were tried).
+- Two windows on the same dataset; the dataset folder deleted on disk while its grid is open (only the unregister case).
+- Studio's side of d1-datasets-5 (its delete dialog) was not checked.
