@@ -259,6 +259,12 @@ impl Job {
         }
     }
 
+    /// Whether `bytes` are a `job.json` [`Job::load`] takes (it parses and its version is one this server reads),
+    /// found without writing anything: which copy of a job folder to load is picked by it.
+    pub fn readable(bytes: &[u8]) -> bool {
+        serde_json::from_slice::<JobFile>(bytes).is_ok_and(|f| f.version == VERSION)
+    }
+
     /// Reads the job in `dir`. A run its file still shows as active belonged to a process that is gone: it is
     /// closed as stopped.
     pub fn load(dir: PathBuf) -> Result<Job> {

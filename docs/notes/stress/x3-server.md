@@ -50,9 +50,13 @@ recursive walk following links, a stat per file) before `folo_data::open_with` d
 hints that phrase the error (`dataset_below`, `images_under`) read at most 20,000 entries (`DIAGNOSE_ENTRIES`; review
 round 1: they used to stop after 10,000 *images*, so a wide tree without images was still walked whole), also inside
 the folders below (review round 2: `dataset_below` asked `detect_format`, which reads a folder whole; now
-`looks_like_dataset` checks the names detection uses within the budget). Tests: `index::tests`
+`looks_like_dataset` checks the names detection uses within the budget). Review round 3: that probe opened any
+`*.yaml`, so a FIFO named so hung it and the `folo mcp --confine` read guard was bypassed; it now opens only a regular
+file the guard allows (on Unix with `O_NONBLOCK`, so a FIFO swapped in after the check does not block either) and
+lists no folder the guard refuses. Tests: `index::tests`
 `diagnostics_of_a_non_dataset_read_a_bounded_number_of_entries`, `looking_inside_a_folder_below_counts_against_the_budget`
-(counts, no timing).
+(counts, no timing), `a_fifo_named_like_a_yaml_never_holds_the_diagnostics_up` (Unix only: not run on this Windows PC),
+`tests/confined_diagnostics.rs`.
 
 ### x3-server-7: a damaged registry is shown as an empty one
 
@@ -103,10 +107,13 @@ folder's `run.json` without looking at the id. Fix: one run per id, from the fol
 name); the copies are skipped with a WARN naming both folders and are not touched. Labeling jobs and benchmarks had
 the same bug (`SIBLING`, review round 1): all three use `util::one_per_id`; jobs and benchmarks through
 `util::folders_by_id`, which reads only the id of each `job.json` / `bench.json`, so a copy is skipped before its loader
-would close an interrupted run or active entries and write them back (review round 2). Tests: `runs::tests`
+would close an interrupted run or active entries and write them back (review round 2); of the folders of one id the
+first whose record its loader takes (`Job::readable`, `Slot::readable`: it parses, its version is known; nothing
+written) wins, so a damaged original does not hide an intact backup (review round 3). Tests: `runs::tests`
 `a_copied_run_folder_is_loaded_once`, `util::tests` `copies_of_a_folder_load_once` and
 `folders_are_picked_by_id_before_loading`, `tests/label` `a_copied_job_folder_is_left_as_it_is` (the backup's files
-byte for byte).
+byte for byte) and `a_damaged_job_record_does_not_hide_its_backup`, `tests/bench`
+`a_damaged_benchmark_record_does_not_hide_its_backup`.
 Deferred: deleting the run and restarting loads the copy (it is a run folder under `runs/`, as it was before this
 fix, when both were listed); hiding a user's backup needs tombstones by run id, a design choice.
 

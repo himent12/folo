@@ -397,3 +397,33 @@ async fn a_copied_job_folder_is_left_as_it_is() {
     assert_eq!(std::fs::read(copy.join("job.json")).unwrap(), saved, "the backup is not rewritten");
     assert_eq!(names(&copy), before, "and nothing is added to it");
 }
+
+/// A job whose own `job.json` its loader refuses (a version this server does not read, or only its id left) does
+/// not hide an intact copy of its folder: the copy is loaded (review round 3).
+#[tokio::test]
+async fn a_damaged_job_record_does_not_hide_its_backup() {
+    let t = TestDir::new("label-copy-damaged");
+    let home = t.join("home");
+    let f = fixture(&home, vec![]);
+    let job = job_with_images(&f.app, 2).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    f.store.shutdown();
+    drop(f);
+    let dir = home.join("label").join(&job.id);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("job.json")).unwrap()).unwrap();
+    let copy = home.join("label").join(format!("{} - Copy", job.id));
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("job.json"), saved.to_string()).unwrap();
+    let mut newer = saved.clone();
+    newer["version"] = json!(999);
+    for damaged in [newer, json!({ "id": job.id })] {
+        std::fs::write(dir.join("job.json"), damaged.to_string()).unwrap();
+        let f = fixture(&home, vec![]);
+        let list: LabelJobList = ok(&f.app, get("/api/label/jobs")).await;
+        assert_eq!(list.jobs.len(), 1, "the copy is loaded: {damaged}");
+        let got: LabelJob = ok(&f.app, get(&uri)).await;
+        assert_eq!(got.name, job.name);
+        f.store.shutdown();
+    }
+}

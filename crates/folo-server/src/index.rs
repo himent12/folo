@@ -232,6 +232,10 @@ pub(crate) const DIAGNOSE_ENTRIES: usize = 20_000;
 /// itself.
 pub(crate) fn dataset_below(dir: &Path, mut budget: usize) -> Option<PathBuf> {
     fn folders(dir: &Path, budget: &mut usize) -> Vec<PathBuf> {
+        // A folder the read guard refuses (`folo mcp --confine`) is not listed.
+        if folo_data::guard::check(dir).is_err() {
+            return Vec::new();
+        }
         let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
         let mut dirs = Vec::new();
         for e in entries {
@@ -271,6 +275,10 @@ fn looks_like_dataset(dir: &Path, budget: &mut usize) -> bool {
         *budget = budget.saturating_sub(n);
         ok
     };
+    // A folder the read guard refuses (`folo mcp --confine`) is not looked into (review round 3).
+    if folo_data::guard::check(dir).is_err() {
+        return false;
+    }
     // The names detection takes without reading the folder: a YAML, YOLO folders, a Roboflow COCO file.
     let named = ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"].map(|n| dir.join(n));
     let splits = ["train", "valid", "val", "test"];
@@ -289,7 +297,10 @@ fn looks_like_dataset(dir: &Path, budget: &mut usize) -> bool {
     };
     let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
     // COCO: a JSON in `annotations/` (not captions or keypoints), or one named like COCO annotations at the root.
-    for e in std::fs::read_dir(dir.join("annotations")).into_iter().flatten() {
+    let annotations = dir.join("annotations");
+    let listed =
+        folo_data::guard::check(&annotations).ok().and_then(|()| std::fs::read_dir(&annotations).ok());
+    for e in listed.into_iter().flatten() {
         if !charge(1) {
             return false;
         }
@@ -311,18 +322,53 @@ fn looks_like_dataset(dir: &Path, budget: &mut usize) -> bool {
         let (p, n) = (e.path(), name(&e.path()));
         let coco = ext(&p, &["json"])
             && (n.contains("coco") || n.starts_with("instances") || n.contains("annotations"));
-        // YOLO: any YAML with a `train` key, read only so far.
-        let yolo = ext(&p, &["yaml", "yml"]) && {
-            use std::io::Read;
-            let mut head = String::new();
-            let read = std::fs::File::open(&p).and_then(|f| f.take(64 << 10).read_to_string(&mut head));
-            read.is_ok() && head.lines().any(|l| l.trim_start_matches('\u{feff}').starts_with("train:"))
-        };
-        if (coco || yolo) && p.is_file() {
+        // YOLO: any YAML with a `train` key.
+        if (coco && p.is_file()) || (ext(&p, &["yaml", "yml"]) && yaml_has_train(&p)) {
             return true;
         }
     }
     false
+}
+
+/// Whether the YAML `p` has a `train:` line in its first 64 KiB. Only a regular file the read guard allows is
+/// opened (`folo mcp --confine`: a link to a file outside is not read), and on Unix without waiting for a writer, so
+/// a FIFO named `*.yaml`, also one swapped in after the check, never holds registration up (review round 3).
+fn yaml_has_train(p: &Path) -> bool {
+    use std::io::Read;
+    let regular = |m: std::io::Result<std::fs::Metadata>| m.is_ok_and(|m| m.is_file());
+    if !regular(std::fs::metadata(p)) || folo_data::guard::check(p).is_err() {
+        return false;
+    }
+    let Ok(file) = open_without_waiting(p) else { return false };
+    let mut head = String::new();
+    regular(file.metadata())
+        && file.take(64 << 10).read_to_string(&mut head).is_ok()
+        && head.lines().any(|l| l.trim_start_matches('\u{feff}').starts_with("train:"))
+}
+
+/// Opens `p` to read; on Unix with `O_NONBLOCK`, which a regular file ignores and which opens a FIFO (one swapped
+/// in after a check) at once instead of waiting for a writer.
+fn open_without_waiting(p: &Path) -> std::io::Result<std::fs::File> {
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(any(
+        target_vendor = "apple",
+        all(
+            target_os = "linux",
+            any(
+                target_arch = "x86_64",
+                target_arch = "aarch64",
+                target_arch = "x86",
+                target_arch = "arm",
+                target_arch = "riscv64"
+            )
+        )
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.custom_flags(if cfg!(target_vendor = "apple") { 0x4 } else { 0o4000 });
+    }
+    open.open(p)
 }
 
 /// Image files under `dir` (a few levels deep) among the first `budget` entries walked, for a folder that is not a
@@ -786,6 +832,31 @@ mod tests {
         assert!(!looks_like_dataset(coco.parent().unwrap(), &mut 100), "captions only");
         std::fs::write(coco.join("instances_val.json"), "{}").unwrap();
         assert!(looks_like_dataset(coco.parent().unwrap(), &mut 100));
+    }
+
+    /// A FIFO named like a YAML, with no writer, is not opened by the probe of a folder below, and opening one
+    /// (swapped in after the check) does not wait for a writer: registering its parent answers (review round 3).
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_like_a_yaml_never_holds_the_diagnostics_up() {
+        let dir = tmp("diagnose-fifo");
+        std::fs::create_dir_all(dir.join("child")).unwrap();
+        let fifo = dir.join("child/probe.yaml");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status().expect("mkfifo runs");
+        assert!(made.success(), "mkfifo {}", fifo.display());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (root, pipe) = (dir.to_path_buf(), fifo.clone());
+        std::thread::spawn(move || {
+            let below = dataset_below(&root, DIAGNOSE_ENTRIES);
+            let opened = open_without_waiting(&pipe).is_ok();
+            let _ = tx.send((below, yaml_has_train(&pipe), opened));
+        });
+        let (below, train, opened) =
+            rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the FIFO held the probe up");
+        assert_eq!((below, train), (None, false));
+        if cfg!(any(target_os = "linux", target_vendor = "apple")) {
+            assert!(opened, "opened without waiting for a writer");
+        }
     }
 
     #[test]

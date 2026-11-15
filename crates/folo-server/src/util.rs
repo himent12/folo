@@ -193,13 +193,20 @@ pub fn claim_dir(parent: &Path, base: &str) -> std::io::Result<PathBuf> {
 /// beside it) has its original's id: the record from the folder named after its id is kept (else the first by folder
 /// name), and the copies are logged as `what` and skipped, not listed twice under one id (x3-server-9).
 pub fn one_per_id<T>(what: &str, mut loaded: Vec<(PathBuf, String, T)>) -> Vec<(PathBuf, T)> {
-    let key = |(dir, id, _): &(PathBuf, String, T)| {
-        (dir.file_name() != Some(std::ffi::OsStr::new(id)), dir.clone())
-    };
-    loaded.sort_by_cached_key(key);
+    loaded.sort_by_cached_key(|(dir, id, _)| copy_order(dir, id));
+    first_per_id(what, loaded)
+}
+
+/// The order copies of one id are taken in: the folder named after the id first, then by folder name.
+fn copy_order(dir: &Path, id: &str) -> (bool, PathBuf) {
+    (dir.file_name() != Some(std::ffi::OsStr::new(id)), dir.to_path_buf())
+}
+
+/// The first record of each id in `sorted`; the later ones are logged as `what` and skipped.
+fn first_per_id<T>(what: &str, sorted: Vec<(PathBuf, String, T)>) -> Vec<(PathBuf, T)> {
     let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     let mut out = Vec::new();
-    for (dir, id, record) in loaded {
+    for (dir, id, record) in sorted {
         if let Some(first) = seen.get(&id) {
             tracing::warn!(
                 "skipping {}: {what} {id} is loaded from {} already",
@@ -214,54 +221,65 @@ pub fn one_per_id<T>(what: &str, mut loaded: Vec<(PathBuf, String, T)>) -> Vec<(
     out
 }
 
-/// The folders under `root` holding the JSON record `file`, one per id ([`one_per_id`], `what` names them), read for
-/// their `id` only: a copy is skipped before anything loads it, so the recovery a load does (closing what a
-/// previous process left active, written back) never rewrites a backup (review round 2). A folder whose id cannot
-/// be read is kept, for its loader to say why it is skipped.
-pub fn folders_by_id(what: &str, root: &Path, file: &str) -> Vec<PathBuf> {
+/// The folders under `root` holding the JSON record `file`, one per id (`what` names them), picked before anything
+/// loads them, so the recovery a load does (closing what a previous process left active, written back) never
+/// rewrites a backup (review round 2). `readable` says, without writing anything, whether a record's bytes are one
+/// its loader takes (it parses, its version is known): of the folders of one id, the first with a readable record
+/// in [`one_per_id`]'s order is kept, so a damaged original does not hide an intact backup (review round 3); with
+/// none readable, the first is kept for its loader to say why it is skipped. So is a folder whose id cannot be read.
+pub fn folders_by_id(what: &str, root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) -> Vec<PathBuf> {
     #[derive(serde::Deserialize)]
     struct Head {
         id: String,
     }
-    let found = std::fs::read_dir(root)
+    let mut found: Vec<(PathBuf, String, bool)> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|dir| dir.join(file).is_file())
         .map(|dir| {
-            let head =
-                std::fs::read(dir.join(file)).ok().and_then(|b| serde_json::from_slice::<Head>(&b).ok());
+            let bytes = std::fs::read(dir.join(file)).ok();
+            let head = bytes.as_deref().and_then(|b| serde_json::from_slice::<Head>(b).ok());
             // No id: a key no id has (ids have no NUL), so it is kept and its loader logs it.
             let id = head.map_or_else(|| format!("\0{}", dir.display()), |h| h.id);
-            (dir, id, ())
+            let ok = bytes.as_deref().is_some_and(&readable);
+            (dir, id, ok)
         })
         .collect();
-    one_per_id(what, found).into_iter().map(|(dir, ())| dir).collect()
+    found.sort_by_cached_key(|(dir, id, ok)| (!*ok, copy_order(dir, id)));
+    first_per_id(what, found).into_iter().map(|(dir, _)| dir).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Copies are told apart by the id in their record, before any is loaded; a record without one is kept.
+    /// Copies are told apart by the id in their record, before any is loaded; a readable record wins over the
+    /// original's damaged one (review round 3); a record without an id is kept.
     #[test]
     fn folders_are_picked_by_id_before_loading() {
         let t = folo_test_support::TestDir::new("util-folders-by-id");
         let root = t.join("label");
         for (dir, body) in [
-            ("lj_1", r#"{"id":"lj_1","x":1}"#),
-            ("lj_1 - Copy", r#"{"id":"lj_1","x":2}"#),
-            ("lj_2", r#"{"id":"lj_2"}"#),
+            ("lj_1", r#"{"id":"lj_1","version":1}"#),
+            ("lj_1 - Copy", r#"{"id":"lj_1","version":1}"#),
+            ("lj_2", r#"{"id":"lj_2","version":999}"#),
+            ("lj_2 - Copy", r#"{"id":"lj_2","version":1}"#),
+            ("lj_3", r#"{"id":"lj_3"}"#),
+            ("lj_3 - Copy", r#"{"id":"lj_3"}"#),
             ("broken", "{"),
         ] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
             std::fs::write(root.join(dir).join("job.json"), body).unwrap();
         }
         std::fs::create_dir_all(root.join("empty")).unwrap();
-        let mut kept = folders_by_id("labeling job", &root, "job.json");
+        let readable =
+            |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).is_ok_and(|v| v["version"] == 1);
+        let mut kept = folders_by_id("labeling job", &root, "job.json", readable);
         kept.sort();
-        assert_eq!(kept, [root.join("broken"), root.join("lj_1"), root.join("lj_2")]);
+        let want = ["broken", "lj_1", "lj_2 - Copy", "lj_3"].map(|d| root.join(d));
+        assert_eq!(kept, want, "the original, else the readable copy; none readable: the original");
     }
 
     #[test]

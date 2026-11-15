@@ -350,6 +350,12 @@ impl Slot {
         }
     }
 
+    /// Whether `bytes` are a `bench.json` [`Slot::load`] takes (it parses and its version is one this server reads),
+    /// found without writing anything: which copy of a benchmark folder to load is picked by it.
+    pub fn readable(bytes: &[u8]) -> bool {
+        serde_json::from_slice::<BenchFile>(bytes).is_ok_and(|f| f.version == VERSION)
+    }
+
     /// Reads the benchmark in `dir` with its entries and loops. Entries and loops a previous process left active
     /// are closed as `failed`, those that were `stopping` as `stopped` (and written back); an entry or loop file
     /// that cannot be read is skipped and logged.

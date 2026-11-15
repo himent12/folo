@@ -110,19 +110,20 @@ impl Benches {
         }
         // A copy of a benchmark folder is not a second benchmark of its id: it is skipped before loading (which
         // closes the entries and loops left active and writes them back), and its files are left alone.
-        let mut benches: Vec<Arc<Slot>> = crate::util::folders_by_id("benchmark", &root, "bench.json")
-            .into_iter()
-            .filter_map(|dir| match Slot::load(dir.clone()) {
-                Ok(slot) => {
-                    let _ = std::fs::remove_dir_all(dir.join("tmp"));
-                    Some(Arc::new(slot))
-                }
-                Err(err) => {
-                    tracing::warn!("skipping benchmark {}: {err}", dir.display());
-                    None
-                }
-            })
-            .collect();
+        let mut benches: Vec<Arc<Slot>> =
+            crate::util::folders_by_id("benchmark", &root, "bench.json", Slot::readable)
+                .into_iter()
+                .filter_map(|dir| match Slot::load(dir.clone()) {
+                    Ok(slot) => {
+                        let _ = std::fs::remove_dir_all(dir.join("tmp"));
+                        Some(Arc::new(slot))
+                    }
+                    Err(err) => {
+                        tracing::warn!("skipping benchmark {}: {err}", dir.display());
+                        None
+                    }
+                })
+                .collect();
         // By time, not by text: one made before `created` had milliseconds has none.
         benches.sort_by_cached_key(|b| (parse_rfc3339_millis(&b.lock().file.created), b.id.clone()));
         let engine = Arc::new(Engine::new("auto".into(), guard));

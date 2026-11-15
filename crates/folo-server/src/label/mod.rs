@@ -164,19 +164,20 @@ impl Labeler {
         let root = data_dir.join("label");
         // A copy of a job folder is not a second job of its id: it is skipped before loading (which closes an
         // interrupted run and writes the job back) and is not swept.
-        let mut jobs: Vec<Arc<Job>> = crate::util::folders_by_id("labeling job", &root, "job.json")
-            .into_iter()
-            .filter_map(|dir| match Job::load(dir.clone()) {
-                Ok(job) => {
-                    job.sweep();
-                    Some(Arc::new(job))
-                }
-                Err(err) => {
-                    tracing::warn!("skipping labeling job {}: {err}", dir.display());
-                    None
-                }
-            })
-            .collect();
+        let mut jobs: Vec<Arc<Job>> =
+            crate::util::folders_by_id("labeling job", &root, "job.json", Job::readable)
+                .into_iter()
+                .filter_map(|dir| match Job::load(dir.clone()) {
+                    Ok(job) => {
+                        job.sweep();
+                        Some(Arc::new(job))
+                    }
+                    Err(err) => {
+                        tracing::warn!("skipping labeling job {}: {err}", dir.display());
+                        None
+                    }
+                })
+                .collect();
         jobs.sort_by_cached_key(|j| (j.lock().file.created.clone(), j.id.clone()));
         Labeler {
             root,

@@ -141,7 +141,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   but no labels", with a hint to label them; a folder that is not a dataset is said so without walking it: these
   hints look at 20,000 entries at most, also inside the folders they look for a dataset in (there by the names
   detection uses: a `data.yaml`, a YAML with a `train:` line read to 64 KiB, `images/` + `labels/`, an
-  `annotations/` JSON), and nothing waits for them),
+  `annotations/` JSON; only regular files are read, and nothing the `folo mcp --confine` read guard refuses), and
+  nothing waits for them),
   `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes). The
   request returns once the dataset is indexed (every image header is read, in parallel). Registering a path that
   is already registered (the same folder by its canonical path, whatever the spelling, with `format` `auto` or
