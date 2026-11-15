@@ -36,7 +36,17 @@ pub struct ImageCache {
     /// [`Self::BYTE_BUDGET`] (smaller in tests).
     byte_budget: usize,
     /// How often each image failed in a row (its automatic retries: [`Self::retry_delay`]).
-    failures: HashMap<ImgKey, u32>,
+    failures: HashMap<ImgKey, Failure>,
+    /// The token the next failure gets (every failure a new one).
+    next_token: u64,
+}
+
+/// An image's failures in a row, and its latest one's token: a retry timer set for an older failure
+/// (one a reconnect or a Retry already answered) leaves a newer one alone.
+#[derive(Clone, Copy, Default)]
+struct Failure {
+    count: u32,
+    token: u64,
 }
 
 impl Default for ImageCache {
@@ -47,6 +57,7 @@ impl Default for ImageCache {
             bytes: 0,
             byte_budget: Self::BYTE_BUDGET,
             failures: HashMap::new(),
+            next_token: 0,
         }
     }
 }
@@ -104,7 +115,10 @@ impl ImageCache {
         if img.is_some() {
             self.failures.remove(&k);
         } else {
-            *self.failures.entry(k.clone()).or_default() += 1;
+            let f = self.failures.entry(k.clone()).or_default();
+            f.count += 1;
+            f.token = self.next_token;
+            self.next_token += 1;
         }
         self.slots.insert(k.clone(), img.map_or(ImgSlot::Failed, ImgSlot::Ready));
         let mut evicted = Vec::new();
@@ -138,15 +152,33 @@ impl ImageCache {
     pub const RETRIES: u32 = 3;
 
     /// When to ask again for `k`, which just failed: 2, 8 then 32 s after its 1st, 2nd and 3rd
-    /// failure in a row; `None` past [`Self::RETRIES`] (a corrupt file is not fetched for ever).
-    pub fn retry_delay(&self, k: &ImgKey) -> Option<std::time::Duration> {
-        let n = self.failures.get(k).copied().unwrap_or(0);
-        (1..=Self::RETRIES).contains(&n).then(|| std::time::Duration::from_secs(2 << (2 * (n - 1))))
+    /// failure in a row, with that failure's token for [`Self::forget`]; `None` past
+    /// [`Self::RETRIES`] (a corrupt file is not fetched for ever).
+    pub fn retry_delay(&self, k: &ImgKey) -> Option<(std::time::Duration, u64)> {
+        let f = self.failures.get(k).copied().unwrap_or_default();
+        (1..=Self::RETRIES)
+            .contains(&f.count)
+            .then(|| (std::time::Duration::from_secs(2 << (2 * (f.count - 1))), f.token))
     }
 
-    /// Forget `k` if it failed, so the next draw asks for it again; its count of failures stays.
-    pub fn forget(&mut self, k: &ImgKey) {
-        if matches!(self.slots.get(k), Some(ImgSlot::Failed)) {
+    /// Whether `k` failed (and waits for a retry).
+    pub fn failed(&self, k: &ImgKey) -> bool {
+        matches!(self.slots.get(k), Some(ImgSlot::Failed))
+    }
+
+    /// A Retry by hand: `k` is asked for again at the next draw, its automatic retries afresh.
+    pub fn retry(&mut self, k: &ImgKey) {
+        if self.failed(k) {
+            self.slots.remove(k);
+            self.order.retain(|o| o != k);
+        }
+        self.failures.remove(k);
+    }
+
+    /// Forget `k` if its latest failure is still the one `token` names (a timer set for an older
+    /// one does nothing), so the next draw asks for it again; its count of failures stays.
+    pub fn forget(&mut self, k: &ImgKey, token: u64) {
+        if self.failed(k) && self.failures.get(k).is_some_and(|f| f.token == token) {
             self.slots.remove(k);
             self.order.retain(|o| o != k);
             // Counts of images forgotten and never drawn again are dropped once they pile up.
@@ -285,6 +317,41 @@ mod tests {
         assert!(matches!(c.get(&key("loading")), Some(ImgSlot::Loading)));
         assert!(c.begin(&key("down")));
         assert_eq!(c.order.len(), 3);
+    }
+
+    #[test]
+    fn a_retry_timer_set_for_an_older_failure_leaves_a_newer_one_alone() {
+        let mut c = ImageCache::default();
+        let k = ImgKey { dataset: "d".into(), image: "i".into(), kind: ImgKind::Full };
+        let fail = |c: &mut ImageCache| {
+            assert!(c.begin(&k));
+            c.finish(k.clone(), None);
+            c.retry_delay(&k)
+        };
+        let (wait, old) = fail(&mut c).unwrap();
+        assert_eq!(wait.as_secs(), 2);
+        // A reconnect answers it; the image fails again: a new first failure.
+        c.forget_failed();
+        let (wait, new) = fail(&mut c).unwrap();
+        assert_eq!(wait.as_secs(), 2);
+        c.forget(&k, old);
+        assert!(c.failed(&k), "the older timer does nothing");
+        c.forget(&k, new);
+        assert!(c.get(&k).is_none(), "its own timer asks again");
+        let (_, second) = fail(&mut c).unwrap();
+        c.forget(&k, second);
+        let (_, third) = fail(&mut c).unwrap();
+        c.forget(&k, third);
+        // The fourth failure in a row: no timer, and no older one asks again either.
+        assert!(fail(&mut c).is_none());
+        for t in [old, new, second, third] {
+            c.forget(&k, t);
+        }
+        assert!(c.failed(&k));
+        // A Retry by hand starts it over, its budget too.
+        c.retry(&k);
+        assert!(c.get(&k).is_none());
+        assert_eq!(fail(&mut c).unwrap().0.as_secs(), 2);
     }
 
     #[test]

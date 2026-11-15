@@ -371,6 +371,22 @@ impl FoloApp {
         None
     }
 
+    /// Whether a dataset image failed at full size (its retries may be spent): the inspector then
+    /// says so and offers [`Self::retry_failed_image`].
+    pub fn image_failed(&self, dataset: &str, image: &str) -> bool {
+        let key = ImgKey { dataset: dataset.to_string(), image: image.to_string(), kind: ImgKind::Full };
+        self.store.images_px.failed(&key)
+    }
+
+    /// Retry by hand: the image (both sizes) is asked for again, its automatic retries afresh.
+    pub fn retry_failed_image(&mut self, dataset: &str, image: &str, cx: &mut Context<Self>) {
+        for kind in [ImgKind::Full, ImgKind::Thumb] {
+            let key = ImgKey { dataset: dataset.to_string(), image: image.to_string(), kind };
+            self.store.images_px.retry(&key);
+        }
+        cx.notify();
+    }
+
     /// Fetches and decodes an image off the UI thread into the slot `key` (already marked loading),
     /// dropping it if the data source changed meanwhile.
     pub fn load_cached_image(
@@ -400,10 +416,16 @@ impl FoloApp {
                     }
                     return;
                 }
-                // An image that couldn't reach the server marks it down, so its return is noticed
-                // (`reconnected` asks for the failed images again) even when only images saw the outage.
-                if let Some(e) = err.filter(|e| e.code == "server_unreachable") {
-                    this.store.note_reachability(Some(&e));
+                // An image that couldn't reach the server has it asked at once whether it is there:
+                // an outage that confirms is noticed (`reconnected` asks for the failed images again)
+                // even when only images saw it. The image alone doesn't mark it down: one that times
+                // out on a server that answers would have its retries reset at every next answer.
+                if err.is_some_and(|e| e.code == "server_unreachable")
+                    && !this.store.unreachable()
+                    && !this.store.system.is_loading()
+                {
+                    this.store.system = Load::Idle;
+                    this.ensure_core(cx);
                 }
                 let failed = img.is_none();
                 let evicted = this.store.images_px.finish(key.clone(), img);
@@ -412,8 +434,8 @@ impl FoloApp {
                 }
                 // Any other failure (a body cut off, a file being rewritten) is asked for again a
                 // few times on its own: nothing else would, as no outage was seen.
-                if failed && let Some(wait) = this.store.images_px.retry_delay(&key) {
-                    this.retry_image(key, wait, cx);
+                if failed && let Some((wait, token)) = this.store.images_px.retry_delay(&key) {
+                    this.retry_image(key, wait, token, cx);
                 }
                 cx.notify();
             })
@@ -422,14 +444,15 @@ impl FoloApp {
         .detach();
     }
 
-    /// After `wait`, forgets the failed image `key` so the next draw asks for it again.
-    fn retry_image(&mut self, key: ImgKey, wait: std::time::Duration, cx: &mut Context<Self>) {
+    /// After `wait`, forgets the failed image `key` so the next draw asks for it again, unless the
+    /// failure `token` names was answered meanwhile (a reconnect, a Retry, a newer failure).
+    fn retry_image(&mut self, key: ImgKey, wait: std::time::Duration, token: u64, cx: &mut Context<Self>) {
         let generation = self.backend_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
                 if this.backend_gen == generation {
-                    this.store.images_px.forget(&key);
+                    this.store.images_px.forget(&key, token);
                     cx.notify();
                 }
             })

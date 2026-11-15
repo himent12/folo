@@ -39,8 +39,8 @@ coordinates (`meta.width/height`), so boxes still line up. Tests: `store/images.
 
 Repro: open `tenk`, stop the server, scroll a few notches, start it again; the tiles asked for meanwhile show their
 boxes on an empty tile forever. `ImgSlot::Failed` was stored for any error and only a server switch cleared it.
-Fix: `ImageCache::forget_failed` from `FoloApp::reconnected`, and an image that fails with `server_unreachable` marks the
-server down itself, so an outage only the images saw is noticed and recovered too. Tests: `store/images.rs`
+Fix: `ImageCache::forget_failed` from `FoloApp::reconnected`, and an image that fails with `server_unreachable` has
+`/system` asked at once, so an outage only the images saw is noticed and recovered too. Tests: `store/images.rs`
 `failures_are_forgotten_on_request_and_ready_images_kept`, `app/connection_tests.rs`
 `images_that_failed_while_the_server_was_away_load_once_it_answers`.
 Review round 1: a failure with the server up (a body cut off after its headers, a file being rewritten) saw no outage,
@@ -48,9 +48,19 @@ so nothing retried it. Any failed image is now asked for again on its own 2, 8 a
 failure in a row (`ImageCache::retry_delay`, `FoloApp::retry_image`); past that it waits for a reconnect or the error
 panel's Retry (`retry_all` forgets failed images too), so a corrupt file is not fetched for ever. Test:
 `app/connection_tests.rs` `an_image_that_failed_with_the_server_up_is_asked_for_again_a_few_times`.
-Deferred (SIBLING of Studio's `DatasetImage`): a failed tile still looks like a loading one (boxes on an empty tile);
-Studio says "Image unavailable" with a Retry. Telling the two apart needs a third state through `image_canvas` and
-every caller of `FoloApp::image` (grid, inspector, Playground samples, Bench).
+Review round 2: (a) a retry timer only knew the backend, so one set before a reconnect could ask again for the next
+failure early, and overlapping timers could pass the fourth-failure stop; each failure now has a token and a timer only
+answers its own (`ImageCache::forget(key, token)`). (b) An image timing out on a server whose `/system` answers marked it
+down, and the next answer "reconnected" and reset its retries, so it was fetched for ever; an image's
+`server_unreachable` now only has `/system` asked at once, and only `/system` marks the server down. (c) The inspector
+says "Image unavailable" (or that it shows the thumbnail) with a Retry button (Tab, Enter) that asks for the image again
+with its retries afresh (`FoloApp::retry_failed_image`). Tests: `store/images.rs`
+`a_retry_timer_set_for_an_older_failure_leaves_a_newer_one_alone`, `app/connection_tests.rs`
+`a_retry_timer_left_from_before_a_reconnect_leaves_the_next_failure_alone`, the server-up test above (timeouts with
+`/system` answering; ends with the Retry). Deferred (SIBLING of Studio's `DatasetImage`): a failed grid tile still
+looks like a loading one (boxes on an empty tile); Enter on it opens the inspector, which now says so and retries.
+Telling the two apart on the tile needs a third state through `image_canvas` and every caller of `FoloApp::image`
+(grid, Playground samples, Bench).
 
 ### d1-datasets-5: a refused file deletion left no way forward
 

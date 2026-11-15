@@ -1,14 +1,14 @@
 //! Connecting from Settings and losing the local server, with a fake connector: no socket is opened
 //! and no `folo serve` is started.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use super::tests::{drive, open};
 use super::{Connector, ServerMode};
-use crate::api::Backend;
 use crate::api::http::Spawned;
 use crate::api::mock::MockBackend;
+use crate::api::Backend;
 use crate::store::Load;
 
 fn demo(_: &str) -> Arc<dyn Backend> {
@@ -577,14 +577,18 @@ fn images_that_failed_while_the_server_was_away_load_once_it_answers() {
     let key = ImgKey { dataset: "ds_3b91".into(), image: "img_03417".into(), kind: ImgKind::Thumb };
     // A thumbnail asked for while the server is away; nothing else saw the outage.
     drive(&mut app, window, |this, _, cx| {
+        this.store.api = Arc::new(MockBackend::new(4200, true).failing());
         assert!(this.store.images_px.begin(&key));
         let down = ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7926");
         this.load_cached_image(key.clone(), move |_: &dyn Backend| Err(down), cx);
     });
-    drive(&mut app, window, |this, _, cx| {
+    drive(&mut app, window, |this, _, _| {
         assert!(matches!(this.store.images_px.get(&key), Some(ImgSlot::Failed)));
-        assert!(this.store.unreachable(), "the image's failure notes the outage");
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.store.unreachable(), "the image's failure has the outage checked, and seen");
         // The 2 s refresh, now answered.
+        this.store.api = Arc::new(MockBackend::new(4200, true));
         this.store.system = Load::Idle;
         this.ensure_core(cx);
     });
@@ -606,19 +610,22 @@ fn an_image_that_failed_with_the_server_up_is_asked_for_again_a_few_times() {
     use crate::store::{ImgKey, ImgKind, ImgSlot};
     let (mut app, window) = open();
     let key = ImgKey { dataset: "ds_3b91".into(), image: "img_03417".into(), kind: ImgKind::Full };
-    // The body cut off after its headers: no outage seen, so no reconnect would clear it.
-    let fail = |app: &mut folo_ui::HeadlessApp| {
+    // A body cut off after its headers, then headers that time out, while `/system` answers: no
+    // outage, so no reconnect clears them (nor resets their retries).
+    let fail = |app: &mut folo_ui::HeadlessApp, code: &'static str| {
         drive(app, window, |this, _, cx| {
             assert!(this.store.images_px.begin(&key));
-            let cut = ApiError::new("bad_response", "folo serve's answer was cut off");
+            let cut = ApiError::new(code, "folo serve's answer was cut off");
             this.load_cached_image(key.clone(), move |_: &dyn Backend| Err(cut), cx);
         })
     };
     let failed = |app: &mut folo_ui::HeadlessApp| {
         drive(app, window, |this, _, _| matches!(this.store.images_px.get(&key), Some(ImgSlot::Failed)))
     };
-    for wait in [2, 8, 32] {
-        fail(&mut app);
+    for (wait, code) in [(2, "bad_response"), (8, "server_unreachable"), (32, "server_unreachable")] {
+        fail(&mut app, code);
+        assert!(failed(&mut app));
+        // The `/system` probe a timed-out image asks for is answered.
         assert!(failed(&mut app));
         assert!(!drive(&mut app, window, |this, _, _| this.store.unreachable()), "no outage");
         app.advance_clock(Duration::from_secs(wait) - Duration::from_millis(1));
@@ -629,16 +636,77 @@ fn an_image_that_failed_with_the_server_up_is_asked_for_again_a_few_times() {
             "after {wait} s"
         );
     }
-    // A fourth failure in a row (a corrupt file) waits for a reconnect instead of polling for ever.
-    fail(&mut app);
+    // A fourth failure in a row (a corrupt file) waits for a Retry instead of polling for ever.
+    fail(&mut app, "server_unreachable");
     app.advance_clock(Duration::from_secs(3600));
     assert!(failed(&mut app));
-    // Asked for again by a draw once forgotten, it shows.
+    assert!(drive(&mut app, window, |this, _, _| this.image_failed("ds_3b91", "img_03417")), "it says so");
+    // The inspector's Retry: asked for again by the next draw, it shows.
     drive(&mut app, window, |this, _, cx| {
-        this.store.images_px.forget_failed();
+        this.retry_failed_image("ds_3b91", "img_03417", cx);
         assert!(this.image("ds_3b91", "img_03417", ImgKind::Full, cx).is_none());
     });
     drive(&mut app, window, |this, _, _| {
         assert!(matches!(this.store.images_px.get(&key), Some(ImgSlot::Ready(_))));
+        assert!(!this.image_failed("ds_3b91", "img_03417"));
     });
+}
+
+#[test]
+fn a_retry_timer_left_from_before_a_reconnect_leaves_the_next_failure_alone() {
+    use std::time::Duration;
+
+    use crate::api::ApiError;
+    use crate::store::{ImgKey, ImgKind, ImgSlot};
+    let (mut app, window) = open();
+    let key = ImgKey { dataset: "ds_3b91".into(), image: "img_03417".into(), kind: ImgKind::Thumb };
+    let fail = |app: &mut folo_ui::HeadlessApp| {
+        drive(app, window, |this, _, cx| {
+            assert!(this.store.images_px.begin(&key));
+            let cut = ApiError::new("bad_response", "folo serve's answer was cut off");
+            this.load_cached_image(key.clone(), move |_: &dyn Backend| Err(cut), cx);
+        })
+    };
+    let failed = |app: &mut folo_ui::HeadlessApp| {
+        drive(app, window, |this, _, _| matches!(this.store.images_px.get(&key), Some(ImgSlot::Failed)))
+    };
+    // A failure at 0 s (its retry due at 2 s); a reconnect at 1 s asks for it again, and it fails
+    // again (its retry due at 3 s).
+    fail(&mut app);
+    assert!(failed(&mut app));
+    app.advance_clock(Duration::from_secs(1));
+    drive(&mut app, window, |this, _, cx| this.reconnected(cx));
+    assert!(!failed(&mut app));
+    fail(&mut app);
+    assert!(failed(&mut app));
+    app.advance_clock(Duration::from_secs(1));
+    assert!(failed(&mut app), "the timer from before the reconnect does nothing");
+    app.advance_clock(Duration::from_secs(1));
+    assert!(!failed(&mut app), "its own timer asks again");
+}
+
+#[test]
+fn a_huge_full_size_image_is_held_at_the_cap_and_its_thumbnail_as_sent() {
+    use crate::api::ImageData;
+    use crate::store::{ImageCache, ImgKey, ImgKind, ImgSlot};
+    let (mut app, window) = open();
+    let key = |kind| ImgKey { dataset: "ds_3b91".into(), image: "img_03417".into(), kind };
+    let wide = || ImageData::Rgba { width: 5000, height: 10, pixels: vec![9; 5000 * 10 * 4] };
+    drive(&mut app, window, |this, _, cx| {
+        for kind in [ImgKind::Full, ImgKind::Thumb] {
+            assert!(this.store.images_px.begin(&key(kind)));
+            this.load_cached_image(key(kind), move |_: &dyn Backend| Ok(wide()), cx);
+        }
+    });
+    let side = |app: &mut folo_ui::HeadlessApp, kind| {
+        drive(app, window, |this, _, _| match this.store.images_px.get(&key(kind)) {
+            Some(ImgSlot::Ready(img)) => {
+                let s = img.size(0);
+                (s.width.0 as u32, s.height.0 as u32)
+            }
+            _ => panic!("{kind:?} not loaded"),
+        })
+    };
+    assert_eq!(side(&mut app, ImgKind::Full), (ImageCache::FULL_MAX_SIDE, 8));
+    assert_eq!(side(&mut app, ImgKind::Thumb), (5000, 10), "a thumbnail is the server's size");
 }
