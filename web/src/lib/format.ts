@@ -111,10 +111,15 @@ export function ago(iso: string | null | undefined, now = Date.now()): string {
   if (Number.isNaN(t)) return '—';
   const s = Math.round((now - t) / 1000);
   if (s < 45) return 'just now';
-  if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  // Each unit is rounded, and one that rounds up to the next reads as the next ("1h ago", never
+  // "60m ago"). Desktop's `ago` (apps/desktop/src/api/time.rs) uses the same rule.
+  const m = Math.max(1, Math.round(s / 60));
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(s / 3600);
+  if (h < 24) return `${h}h ago`;
   if (s < 2 * 86400) return 'yesterday';
-  if (s < 14 * 86400) return `${Math.round(s / 86400)}d ago`;
+  const d = Math.round(s / 86400);
+  if (d < 14) return `${d}d ago`;
   return date(iso);
 }
 
