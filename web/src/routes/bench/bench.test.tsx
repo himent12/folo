@@ -426,6 +426,58 @@ describe('the benchmark page', () => {
     expect(save().disabled).toBe(false);
   });
 
+  it('does not save a weight field left empty from the leave dialog either, also after a change of tab', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weight = () => document.querySelector<HTMLInputElement>('input[aria-label="Weight of Haze"]')!;
+    const type = (v: string) => {
+      weight().value = v;
+      weight().dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+    };
+    type('3');
+    type('');
+    // The field stays empty across a change of tab: the page holds it.
+    router.go('/benchmarks/bn_9f03', { replace: true });
+    await settle();
+    router.go('/benchmarks/bn_9f03?tab=conditions', { replace: true });
+    await settle();
+    expect(weight().value).toBe('');
+    expect(weight().getAttribute('aria-invalid')).toBe('true');
+    const put = vi.spyOn(hub.api, 'updateBench');
+    router.go('/benchmarks');
+    flushSync();
+    const dialog = document.querySelector('dialog[open]')!;
+    expect(dialog.textContent).toMatch(/Haze: the weight is empty/);
+    const save = [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Save plan')!;
+    expect(save.disabled).toBe(true);
+    save.click();
+    await settle();
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it('says so when another tab saves the plan under unsaved edits, and keeps them', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weight = (n: string) => document.querySelector<HTMLInputElement>(`input[aria-label="Weight of ${n}"]`)!;
+    weight('Haze').value = '3';
+    weight('Haze').dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(text()).not.toMatch(/Changed elsewhere/);
+    // Another tab saves a change of another condition.
+    const b = await hub.api.bench('bn_9f03');
+    const other = b.plan.conditions.find((c) => c.condition !== 'haze')!;
+    await hub.api.updateBench('bn_9f03', {
+      plan: { ...b.plan, conditions: b.plan.conditions.map((c) => (c === other ? { ...c, weight: 4 } : c)) },
+    });
+    await settle();
+    expect(text()).toMatch(/Changed elsewhere while you edited/);
+    expect(weight('Haze').value).toBe('3');
+    // Discard shows the other tab's plan, and the note goes.
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((x) => x.textContent?.trim() === 'Discard')!.click();
+    flushSync();
+    expect(text()).not.toMatch(/Changed elsewhere/);
+    expect(weight('Haze').value).toBe('1');
+  });
+
   it('keeps the preview on its image when the benchmark changes under it (a `bench` event)', async () => {
     // happy-dom has no canvas to draw the mock's images: any URL does.
     const url = vi.spyOn(hub.api, 'benchImageUrl').mockImplementation(async (_b, im, o) => `blob:${im}/${o?.condition ?? ''}`);

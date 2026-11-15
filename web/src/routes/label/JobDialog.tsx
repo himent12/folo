@@ -52,6 +52,13 @@ export default function JobDialog(props: JobDialogProps) {
   /** The names the last addition could not take: past the limit of classes. */
   const leftOut = signal<string[]>([]);
   const instructions = signal('');
+  /**
+   * Edit: the job's name and classes as the form last took them in. A field still at them follows the job's changes
+   * from elsewhere (another tab saved it), so Save does not put back what that tab changed; one edited here keeps the
+   * edits and the dialog says so, since Save replaces the other tab's.
+   */
+  let taken = { name: '', classes: [] as string[] };
+  const elsewhere = signal(false);
 
   // Every opening (or another job) starts from the job as it is; a change of the job while it is open (an upload, a
   // run's progress) keeps the edits, and a submit in flight. A new job keeps what was typed while the page lives
@@ -71,6 +78,8 @@ export default function JobDialog(props: JobDialogProps) {
         return;
       }
       created = !!job;
+      taken = { name: job?.name ?? '', classes: job ? [...job.classes] : [] };
+      elsewhere.set(false);
       name.set(job?.name ?? '');
       classes.set(job ? [...job.classes] : []);
       draft.set('');
@@ -79,6 +88,24 @@ export default function JobDialog(props: JobDialogProps) {
       error.set(undefined);
       touched.set(false);
       busy.set(false);
+    });
+  });
+
+  effect(() => {
+    const job = props.job;
+    if (!open.get() || !job) return;
+    const jobName = job.name;
+    const jobClasses = job.classes;
+    untrack(() => {
+      if (jobName !== taken.name) {
+        if (name.peek() === taken.name) name.set(jobName);
+        else elsewhere.set(true);
+      }
+      if (!sameList(jobClasses, taken.classes)) {
+        if (sameList(classes.peek(), taken.classes)) classes.set([...jobClasses]);
+        else elsewhere.set(true);
+      }
+      taken = { name: jobName, classes: [...jobClasses] };
     });
   });
 
@@ -250,13 +277,24 @@ export default function JobDialog(props: JobDialogProps) {
             </Field>
           </>
         )}
+        {editing.get() && elsewhere.get() ? (
+          <p class="elsewhere" role="status">
+            Changed elsewhere while you edited: the job was saved from another tab or window. The fields you left show its new values; Save replaces the ones you changed.
+          </p>
+        ) : null}
         {error.get() ? <ErrorState error={error.get()} title={editing.get() ? 'Could not save the job' : 'Could not create the job'} compact /> : null}
       </form>
     </Dialog>
   );
 }
 
+const sameList = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 css`
+  .elsewhere {
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
   .why {
     margin-right: auto;
     align-self: center;

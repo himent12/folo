@@ -16,7 +16,7 @@ import { LiveBench } from '$lib/api/liveBench';
 import { lastKnown, Now } from '$lib/api/freshness';
 import { Resource } from '$lib/api/resource';
 import type { BenchEntry, BenchLoop, BenchPlan } from '$lib/api/types';
-import { clonePlan, samePlan } from '$lib/bench/plan';
+import { clonePlan, samePlan, editedPlanError, planCondition } from '$lib/bench/plan';
 import { isEntryActive, isLoopActive, planEditable } from '$lib/bench/rules';
 import { media } from '$lib/design/tokens';
 import { ago, date, num } from '$lib/format';
@@ -102,25 +102,55 @@ export default function Benchmark() {
   // Fixed once an entry finished or is under way (failed and stopped ones graded nothing to keep comparable).
   const editable = computed(() => !!bench.get() && planEditable(live.entries));
   const dirty = computed(() => !!bench.get() && editable.get() && !samePlan(draft.get(), bench.get()!.plan));
-  // A plan from the server (the first load, a save, another tab's change) replaces the editor's unless it has edits.
+  // A plan from the server (the first load, a save, another tab's change) replaces the editor's unless it has edits;
+  // one saved elsewhere under the edits keeps them and says so (Save plan would replace it, and nothing else would tell).
   const planKey = computed(() => {
     const b = bench.get();
     return b ? `${b.id}:${JSON.stringify(b.plan)}` : '';
   });
+  const saving = signal(false);
+  const elsewhere = signal(false);
   let shownKey = '';
   effect(() => {
     const key = planKey.get();
     if (!key || key === shownKey) return;
     untrack(() => {
       const b = bench.get()!;
-      if (!shownKey.startsWith(`${b.id}:`) || !dirty.get()) draft.set(clonePlan(b.plan));
+      if (!shownKey.startsWith(`${b.id}:`) || !dirty.get()) {
+        draft.set(clonePlan(b.plan));
+        elsewhere.set(false);
+      } else if (!saving.get()) elsewhere.set(true);
       shownKey = key;
     });
   });
-  const saving = signal(false);
+  effect(() => {
+    if (!dirty.get()) untrack(() => elsewhere.set(false));
+  });
+  // The weight fields as typed (PlanTab): one emptied keeps the draft at the last number typed, so every save checks
+  // them, the plan's Save plan and the leave dialog's alike. Another benchmark starts afresh; a draft changed from
+  // outside a field (Discard, a condition off and on, a save) drops what was typed for a weight it no longer has.
+  const typed = signal<Record<string, string>>({});
+  effect(() => {
+    void id.get();
+    untrack(() => typed.set({}));
+  });
+  effect(() => {
+    const d = draft.get();
+    untrack(() => {
+      const t = typed.get();
+      const kept = Object.entries(t).filter(([c, v]) => Number(v) === planCondition(d, c)?.weight);
+      if (kept.length !== Object.keys(t).length) typed.set(Object.fromEntries(kept));
+    });
+  });
+  const planWhy = computed(() => (editable.get() ? editedPlanError(draft.get(), typed.get(), catalog.data?.conditions) : null));
   async function savePlan(): Promise<boolean> {
     const b = bench.peek();
     if (!b) return false;
+    const why = planWhy.peek();
+    if (why) {
+      toast.error(new Error(why), 'Could not save the plan');
+      return false;
+    }
     saving.set(true);
     const benchId = b.id;
     const plan = clonePlan(draft.peek());
@@ -517,6 +547,9 @@ export default function Benchmark() {
                       editable={editable.get()}
                       catalog={catalog.data}
                       bind:draft={draft}
+                      bind:typed={typed}
+                      error={planWhy.get()}
+                      elsewhere={elsewhere.get()}
                       dirty={dirty.get()}
                       saving={saving.get()}
                       onsave={() => void savePlan()}
@@ -658,9 +691,18 @@ export default function Benchmark() {
             footer={() => (
               <>
                 <Button onclick={() => answer('discard')}>Discard changes</Button>
-                <Button variant="primary" loading={saving.get()} onclick={() => answer('save')}>
-                  Save plan
-                </Button>
+                {planWhy.get() ? (
+                  <p class="why" data-gate-why>
+                    {planWhy.get()}
+                  </p>
+                ) : null}
+                <Gate reason={planWhy.get() ? 'Fix the plan first' : null}>
+                  {(why) => (
+                    <Button variant="primary" loading={saving.get()} disabled={!!why()} aria-describedby={why()} onclick={() => answer('save')}>
+                      Save plan
+                    </Button>
+                  )}
+                </Gate>
               </>
             )}
           />

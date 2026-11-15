@@ -1,6 +1,28 @@
 // A benchmark's plan (docs/API.md, Vision benchmarks: "A plan is …"): whether one is valid, editing it a step at a time
 // in the screens' editor, and what a proposed plan changes from the current one.
 
+/** A weight field as typed holds no number (emptied, or text): the plan keeps the last number typed, which it does not show. */
+export function unreadableWeight(v: string | undefined): boolean {
+  return v !== undefined && (!v.trim() || !Number.isFinite(Number(v)));
+}
+
+/**
+ * What is wrong with a plan being edited, or null: a weight field that holds no number (`typed`, per condition, the
+ * fields as typed), else `planError`. Every save of the edits checks it (the plan's Save and the leave dialog's), so
+ * none stores a weight the field does not show.
+ */
+export function editedPlanError(
+  plan: BenchPlan,
+  typed: Readonly<Record<string, string>>,
+  catalog?: readonly Pick<BenchCondition, 'id' | 'name'>[],
+): string | null {
+  const empty = plan.conditions.find((c) => unreadableWeight(typed[c.condition]));
+  if (!empty) return planError(plan, catalog);
+  const name = catalog?.find((c) => c.id === empty.condition)?.name ?? empty.condition;
+  return `${name}: the weight is empty. ${weightError(Number.NaN)}.`;
+}
+
+
 import type { BenchCatalog, BenchCondition, BenchPlan, BenchPlanCondition } from '../api/types';
 import { MAX_SEVERITY, WEIGHT_MAX } from './rules';
 

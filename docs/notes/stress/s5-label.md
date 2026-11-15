@@ -70,6 +70,25 @@ weight text that is not a number flags the field and gives the plan error "Haze:
 Save plan. Test: `web/src/routes/bench/bench.test.tsx` "does not save a weight field left empty with the last number
 typed in it" (fails without the fix).
 
+Review round 1 found a second way to the same save: leaving the page with the field empty and choosing Save plan in
+"Save the plan?" called `savePlan` (`web/src/routes/Benchmark.tsx`) with no check. The typed weights now live in the
+page next to the draft (they also survive a change of tab), `$lib/bench/plan` `editedPlanError` is the one check,
+`savePlan` refuses while it fails, and the dialog's Save plan is held with the reason. Test: "does not save a weight
+field left empty from the leave dialog either, also after a change of tab" (fails without the fix).
+
+### Siblings of s5-label-1 (review round 1)
+- The plan editor in two tabs: B with unsaved edits kept them silently when A saved the plan, so B's Save plan undid
+  A's change unseen. `Benchmark.tsx` now says "Changed elsewhere while you edited ... Save plan replaces it with
+  yours; Discard shows it" when a plan arrives under edits that is not the page's own save. Test: "says so when
+  another tab saves the plan under unsaved edits, and keeps them".
+- Edit job in two tabs (`web/src/routes/label/JobDialog.tsx`): B, changing only the name, sent its stale class list
+  and reverted A's class rename. A field still at what the dialog took in now follows the job's changes from
+  elsewhere; one edited here is kept and the dialog says so. Tests in `labeling.test.tsx` ("Edit job does not put
+  back a class another tab renamed ...", "Edit job says so when another tab saves a field edited here").
+- Not changed: Desktop's demo backend (`apps/desktop/src/api/mock_bench/scoring.rs`) still scores external boxes with
+  reversed corners (s5-label-3's sibling, SIBLING). No Desktop screen uploads external records; the fix needs a cargo
+  slot for `apps/desktop`. Neither save has a server-side version check: last writer wins once the user is told.
+
 ## Pushed hard, no bug
 Agent garbage / error / edge / huge replies (clear run errors, sub-pixel and unknown-label boxes dropped); the
 in-call image is `409` to PUT and DELETE while a waiting one leaves the run; save with the server down (clear error,

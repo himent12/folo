@@ -8,9 +8,9 @@
 import Eye from '$icons/eye';
 import Lock from '$icons/lock';
 import Sparkles from '$icons/sparkles';
-import { bindable, computed, css, effect, For, signal, untrack, type Signal } from 'fw';
+import { bindable, computed, css, For, signal, untrack, type Signal } from 'fw';
 import type { Bench, BenchCatalog, BenchCondition, BenchPlan } from '$lib/api/types';
-import { planCondition, planError, planPasses, setWeight, toggleCondition, toggleSeverity, weightError } from '$lib/bench/plan';
+import { planCondition, planPasses, setWeight, toggleCondition, toggleSeverity, unreadableWeight, weightError } from '$lib/bench/plan';
 import { GROUP_NAME, GROUPS, SEVERITIES } from '$lib/bench/rules';
 import { AGENT_NAME } from '$lib/label';
 import Button from '$lib/ui/Button';
@@ -29,6 +29,12 @@ export interface PlanTabProps {
   catalog: BenchCatalog;
   /** Bindable: the plan as edited (the page holds it, saved or not). */
   draft?: BenchPlan;
+  /** Bindable: the weight fields as typed, per condition (the page holds them, so every save can check them). */
+  typed?: Record<string, string>;
+  /** What is wrong with the edited plan ($lib/bench/plan editedPlanError), or null. */
+  error: string | null;
+  /** The plan was saved elsewhere (another tab) under these unsaved edits. */
+  elsewhere: boolean;
   dirty: boolean;
   saving: boolean;
   onsave: () => void;
@@ -48,33 +54,9 @@ export default function PlanTab(props: PlanTabProps) {
   const first = () => props.bench.plan.conditions[0]?.condition ?? props.catalog.conditions[0]?.id ?? 'haze';
   const preview = signal(untrack(first));
   const severity = signal(3);
-  /** Weights as typed, per condition, so a half-typed number is not thrown away. */
-  const typed = signal<Record<string, string>>({});
-  // A weight field emptied (or holding no number) leaves the draft at the last number typed: until it holds one again
-  // it is wrong, so the field does not read as valid and Save plan does not store a weight the field does not show.
-  const error = computed(() => {
-    if (!props.editable) return null;
-    const d = draft.get();
-    const t = typed.get();
-    const empty = d.conditions.find((c) => unreadable(t[c.condition]));
-    if (!empty) return planError(d, props.catalog.conditions);
-    const name = props.catalog.conditions.find((c) => c.id === empty.condition)?.name ?? empty.condition;
-    return `${name}: the weight is empty. ${weightError(Number.NaN)}.`;
-  });
-  effect(() => {
-    void props.bench.id;
-    typed.set({});
-  });
-  // A draft changed from outside the field (Discard, a condition off and on, a save) drops what was typed for a weight
-  // it no longer has: the field shows the plan's.
-  effect(() => {
-    const d = draft.get();
-    untrack(() => {
-      const t = typed.get();
-      const kept = Object.entries(t).filter(([id, v]) => Number(v) === planCondition(d, id)?.weight);
-      if (kept.length !== Object.keys(t).length) typed.set(Object.fromEntries(kept));
-    });
-  });
+  /** Weights as typed, per condition, so a half-typed number is not thrown away (the page holds them, with the draft). */
+  const typed = bindable(props, 'typed') as Signal<Record<string, string>>;
+  const error = () => (props.editable ? props.error : null);
 
   const groups = computed(() =>
     GROUPS.map((g) => ({ g, conditions: props.catalog.conditions.filter((c) => c.group === g) })).filter((x) => x.conditions.length),
@@ -109,7 +91,7 @@ export default function PlanTab(props: PlanTabProps) {
     const wErr = () => {
       const p = pc.get();
       if (!p || !props.editable) return null;
-      return unreadable(typed.get()[c().id]) ? weightError(Number.NaN) : weightError(p.weight);
+      return unreadableWeight(typed.get()[c().id]) ? weightError(Number.NaN) : weightError(p.weight);
     };
     return (
       <li class="cond" class:off={!on()} class:shown={preview.get() === c().id}>
@@ -234,7 +216,7 @@ export default function PlanTab(props: PlanTabProps) {
                         <Button variant="ghost" size="sm" onclick={props.ondiscard}>
                           Discard
                         </Button>
-                        <Gate reason={error.get() ? 'Fix the plan first' : null}>
+                        <Gate reason={error() ? 'Fix the plan first' : null}>
                           {(why) => (
                             <Button variant="primary" size="sm" loading={props.saving} disabled={!!why()} aria-describedby={why()} onclick={props.onsave}>
                               Save plan
@@ -274,9 +256,14 @@ export default function PlanTab(props: PlanTabProps) {
               ) : (
                 <p class="rationale">Written by hand.</p>
               )}
-              {error.get() ? (
+              {error() ? (
                 <p class="plan-err" role="alert">
-                  {error.get()}
+                  {error()}
+                </p>
+              ) : null}
+              {props.editable && props.elsewhere ? (
+                <p class="plan-elsewhere" role="status">
+                  Changed elsewhere while you edited: the plan was saved from another tab or window. Save plan replaces it with yours; Discard shows it.
                 </p>
               ) : null}
             </div>
@@ -353,6 +340,10 @@ css`
   .c-err {
     font-size: var(--type-sm-size);
     color: var(--danger-text);
+  }
+  .plan-elsewhere {
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
   }
   .unsaved {
     font-size: var(--type-sm-size);
@@ -581,6 +572,3 @@ css`
     }
   }
 `;
-
-/** A weight field's text that is not a number (empty, or what the number input could not read). */
-const unreadable = (v: string | undefined) => v !== undefined && !(v.trim() && Number.isFinite(Number(v)));
