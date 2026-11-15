@@ -5,12 +5,12 @@ use std::rc::Rc;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    canvas, div, px, uniform_list, AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
+    AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, canvas, div, px, uniform_list,
 };
 
 use crate::api::{Dataset, ImageInfo, Split, SplitsExt};
-use crate::app::{act, FoloApp};
+use crate::app::{FoloApp, act};
 use crate::theme::{radius, size as tsize, theme, ty};
 use crate::ui::*;
 

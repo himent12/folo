@@ -4,11 +4,11 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    div, px, InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled,
+    InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, div, px,
 };
 
 use crate::api::{Dataset, DatasetStats, Histogram, IssueCounts, SplitsExt};
-use crate::theme::{ty, Theme};
+use crate::theme::{Theme, ty};
 use crate::ui::*;
 
 /// How much a finding matters.
@@ -50,20 +50,12 @@ fn share_below(h: &Histogram, limit: f64) -> f64 {
             below += c;
         }
     }
-    if total == 0 {
-        0.
-    } else {
-        below as f64 / total as f64
-    }
+    if total == 0 { 0. } else { below as f64 / total as f64 }
 }
 
 /// "35%", "0.8%": one decimal under 10 %.
 fn share(x: f64) -> String {
-    if x < 0.1 {
-        format!("{:.1}%", x * 100.)
-    } else {
-        format!("{:.0}%", x * 100.)
-    }
+    if x < 0.1 { format!("{:.1}%", x * 100.) } else { format!("{:.0}%", x * 100.) }
 }
 
 fn n_of(n: u64, one: &str, many: &str) -> String {
@@ -296,8 +288,8 @@ pub fn findings_text(items: &[Finding]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::mock::MockBackend;
     use crate::api::Backend;
+    use crate::api::mock::MockBackend;
 
     fn hist(edges: &[f64], counts: &[u64]) -> Histogram {
         Histogram { edges: edges.to_vec(), counts: counts.to_vec() }
