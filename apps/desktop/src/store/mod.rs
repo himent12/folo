@@ -98,6 +98,8 @@ pub struct Store {
     pub images_px: ImageCache,
     /// Throughput history for the system card (GPU util samples), newest last.
     pub gpu_util: VecDeque<f32>,
+    /// How many GPUs the server's last `/system` answer listed: what holds while it is asked again.
+    pub last_gpu_count: Option<usize>,
 }
 
 impl Store {
@@ -125,6 +127,7 @@ impl Store {
             lengths: HashMap::new(),
             images_px: ImageCache::default(),
             gpu_util: VecDeque::new(),
+            last_gpu_count: None,
         }
     }
 

@@ -92,6 +92,10 @@ impl FoloApp {
         // epoch is a dot on its series, with the value in the legend.
         let close_marker =
             Marker { x: closing, label: "close mosaic".into(), color: t.text_tertiary, lane: Some(0) };
+        // The steps per epoch the step charts' x is in (store::live): the cursor reads a step's
+        // epoch back from its step.
+        let spe = self.store.run_data.get(&r.id).and_then(|x| x.ready()).map_or(r.steps_per_epoch, |d| d.spe);
+        let cursor_epoch: Rc<dyn Fn(f32) -> String> = Rc::new(move |x| epoch_at(x, spe));
         let base = |id: &str, series: Vec<Series>, height: f32| {
             let mut c = LineChart::new(id.to_string(), series);
             c.x_range = Some((0., total));
@@ -101,7 +105,8 @@ impl FoloApp {
             c.min_lanes = 1;
             c.x_int = true;
             c.x_name = "epoch";
-            c.x_fmt = |v| format!("{v:.0}");
+            c.x_fmt = epoch_tick;
+            c.cursor_fmt = Some(cursor_epoch.clone());
             // Named on the first chart only; the others keep the line.
             // No switch to mark when mosaic never closes, or is off throughout.
             c.markers = if close_n == 0 || close_n >= r.epochs {
@@ -173,14 +178,10 @@ impl FoloApp {
         // The best epoch: a hollow ink ring on its series ("○ best" in the legend).
         map.best = r.best.as_ref().map(|b| (b.epoch as f32, b.map50_95));
         // A failed run marks where it stopped, on the charts that tell the story.
-        if r.status == RunStatus::Failed {
-            let stopped = d.loss[3].last().map_or(r.epoch as f32, |p| p.0);
-            let fail = Marker {
-                x: stopped,
-                label: format!("failed during epoch {}", r.failed_epoch()).into(),
-                color: t.danger_text,
-                lane: Some(0),
-            };
+        let failed = r.status == RunStatus::Failed;
+        if let Some((x, label)) = fail_mark(failed, r.failed_epoch(), r.epoch, d.loss[3].last().map(|p| p.0))
+        {
+            let fail = Marker { x, label: label.into(), color: t.danger_text, lane: Some(0) };
             loss.markers.insert(0, fail.clone());
             map.markers.insert(0, fail);
         }
@@ -373,7 +374,7 @@ impl FoloApp {
         };
         // "So far / All N" in the first chart's header fits every chart's x axis to the epochs
         // trained, or shows the planned run; only while those differ.
-        let x_switch = (r.epoch > 0 && r.epoch < r.epochs).then(|| {
+        let x_switch = (r.epoch > 0 && self.run_x_so_far(r) < r.epochs as f32).then(|| {
             let all = format!("All {}", r.epochs);
             self.segmented(
                 "run-x-fit",
@@ -486,13 +487,51 @@ fn series_max(series: &[&[(f32, f32)]]) -> f32 {
     series.iter().flat_map(|s| s.iter()).map(|p| p.1).filter(|v| v.is_finite()).fold(0., f32::max)
 }
 
+/// Where a failed run's charts mark its failure (x, label): at its last step, else its kept epoch.
+/// None for a run that failed before its first step: there is no "epoch 0" to mark (Studio's
+/// failEvent).
+fn fail_mark(failed: bool, failed_epoch: u32, kept: u32, last_step_x: Option<f32>) -> Option<(f32, String)> {
+    (failed && failed_epoch > 0)
+        .then(|| (last_step_x.unwrap_or(kept as f32), format!("failed during epoch {failed_epoch}")))
+}
+
+/// An x tick on the run charts: whole epochs (one computed as 0.1 * 30 is 3.0000002). Saturating:
+/// 0 and -0.0 read 0.
+fn epoch_tick(x: f32) -> String {
+    format!("{}", x.round() as u32)
+}
+
+/// The epoch of the point the cursor is on: a step's x is `step / spe` (store::live), so the step
+/// is read back and epoch e's steps `(e - 1)·spe + 1 ..= e·spe` name e; a validated epoch sits at
+/// x = e. Not from x itself: rounding called the first half of every epoch the one before it, and
+/// at 20 000 steps an epoch step 1 is x = 0.00005, too close to 0 for any tolerance.
+fn epoch_at(x: f32, spe: u64) -> String {
+    let spe = spe.max(1);
+    let step = (f64::from(x) * spe as f64).round().max(0.) as u64;
+    format!("{}", step.div_ceil(spe))
+}
+
 impl FoloApp {
     /// The run charts' x extent, in epochs: the planned run, or (So far, and by default for a run that
     /// ended short of its plan) the epochs trained.
     pub(super) fn run_x_total(&self, r: &Run) -> f32 {
         let fit = self.run_x_fit.unwrap_or(!(r.status.is_active() || r.status == RunStatus::Completed));
-        if fit { r.epoch.max(1) as f32 } else { r.epochs.max(1) as f32 }
+        if fit { self.run_x_so_far(r) } else { r.epochs.max(1) as f32 }
     }
+
+    /// The "So far" extent: the epochs trained, steps included ([`fitted_total`]).
+    fn run_x_so_far(&self, r: &Run) -> f32 {
+        let last_step =
+            self.store.run_data.get(&r.id).and_then(|x| x.ready()).and_then(|d| d.metrics.steps.last());
+        fitted_total(r.epoch, last_step.map(|s| s.epoch))
+    }
+}
+
+/// "So far": the epochs trained, the one a run stopped (or failed) in included. A run stopped
+/// during epoch 3 keeps epoch 2 (`Run.epoch`), but it took epoch 3's steps: fitted to 2, the loss and
+/// LR charts cut them off while their legends read the last of them.
+fn fitted_total(kept: u32, last_step_epoch: Option<u32>) -> f32 {
+    kept.max(last_step_epoch.unwrap_or(0)).max(1) as f32
 }
 
 #[cfg(test)]
@@ -503,6 +542,67 @@ mod tests {
         let b = [(1., 0.4)];
         assert_eq!(super::series_max(&[&a, &b]), 0.6);
         assert_eq!(super::series_max(&[]), 0.);
+    }
+
+    #[test]
+    fn so_far_holds_the_steps_of_the_epoch_a_run_stopped_in() {
+        use super::fitted_total;
+        // Stopped during epoch 3 of 3 (all 36 steps taken, validation cut): epoch 2 kept, 3 drawn.
+        assert_eq!(fitted_total(2, Some(3)), 3.);
+        // Stopped right after an epoch's validation: nothing past it.
+        assert_eq!(fitted_total(2, Some(2)), 2.);
+        // No history loaded yet, or none at all.
+        assert_eq!(fitted_total(2, None), 2.);
+        assert_eq!(fitted_total(0, None), 1.);
+    }
+
+    #[test]
+    fn a_run_that_failed_before_its_first_step_has_no_failure_marker() {
+        use super::fail_mark;
+        // Failed before its first step (epoch 0, no step): nothing to mark (d2-runs-8).
+        assert_eq!(fail_mark(true, 0, 0, None), None);
+        // Failed during epoch 2 at step 21 of 12 per epoch: marked there.
+        assert_eq!(fail_mark(true, 2, 1, Some(21. / 12.)), Some((21. / 12., "failed during epoch 2".into())));
+        // Its step history not in yet: at the epoch it kept.
+        assert_eq!(fail_mark(true, 2, 1, None), Some((1., "failed during epoch 2".into())));
+        // Not failed: no marker.
+        assert_eq!(fail_mark(false, 2, 1, Some(1.5)), None);
+    }
+
+    #[test]
+    fn the_cursor_names_the_epoch_a_step_belongs_to() {
+        use super::{epoch_at, epoch_tick};
+        // A step's x as store::live computes it.
+        let x = |step: u64, spe: u64| step as f32 / spe as f32;
+        // 12 steps per epoch: step 4 is in epoch 1, step 17 in epoch 2, step 24 ends epoch 2.
+        assert_eq!(epoch_at(x(4, 12), 12), "1");
+        assert_eq!(epoch_at(x(17, 12), 12), "2");
+        assert_eq!(epoch_at(x(24, 12), 12), "2");
+        assert_eq!(epoch_at(x(25, 12), 12), "3");
+        // 20 000 steps per epoch (d2-runs-5 at scale): step 1 is x = 0.00005, still epoch 1.
+        assert_eq!(epoch_at(x(1, 20_000), 20_000), "1");
+        assert_eq!(epoch_at(x(20_000, 20_000), 20_000), "1");
+        assert_eq!(epoch_at(x(20_001, 20_000), 20_000), "2");
+        // Every step just before, at and after an epoch's end, over a 300-epoch run.
+        for spe in [1u64, 7, 12, 1_000, 20_000] {
+            for e in 1..=300u64 {
+                let end = e * spe;
+                assert_eq!(epoch_at(x(end, spe), spe), e.to_string(), "step {end} of {spe}");
+                assert_eq!(epoch_at(x(end + 1, spe), spe), (e + 1).to_string(), "step {} of {spe}", end + 1);
+                if spe > 1 {
+                    assert_eq!(epoch_at(x(end - 1, spe), spe), e.to_string(), "step {} of {spe}", end - 1);
+                }
+            }
+        }
+        // A per-epoch point (x = e) names its epoch; nothing trained yet reads 0.
+        assert_eq!(epoch_at(3., 12), "3");
+        assert_eq!(epoch_at(0., 12), "0");
+        assert_eq!(epoch_at(-0., 12), "0");
+        // Ticks stay whole.
+        assert_eq!(epoch_tick(0.), "0");
+        assert_eq!(epoch_tick(-0.), "0");
+        assert_eq!(epoch_tick(3.), "3");
+        assert_eq!(epoch_tick(0.1 * 30.), "3");
     }
 
     use super::log_range;

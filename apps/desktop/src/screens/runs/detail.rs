@@ -386,11 +386,11 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(format!(
-                        "Failed in epoch {} of {}",
-                        r.failed_epoch(),
-                        r.epochs
-                    )))
+                    .child(
+                        text(ty::BASE, t.text_primary)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(failed_title(r.failed_epoch(), r.epochs)),
+                    )
                     .child(
                         div()
                             .font_family(crate::theme::MONO)
@@ -638,8 +638,25 @@ fn is_gpu_oom(message: &str) -> bool {
     m.contains("out of memory") || m.contains("outofmemory")
 }
 
+/// A failed run's banner title, in Studio's words (`failedTitle`): a run that failed before its
+/// first step (its dataset unreadable) is not "Failed in epoch 0", an epoch that does not exist.
+fn failed_title(failed_epoch: u32, epochs: u32) -> String {
+    if failed_epoch == 0 {
+        "Failed before training started".into()
+    } else {
+        format!("Failed in epoch {failed_epoch} of {epochs}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_run_that_failed_before_its_first_step_says_so() {
+        use super::failed_title;
+        assert_eq!(failed_title(0, 2), "Failed before training started");
+        assert_eq!(failed_title(2, 3), "Failed in epoch 2 of 3");
+    }
+
     #[test]
     fn out_of_memory_failures_are_recognised() {
         use super::is_gpu_oom;

@@ -24,6 +24,16 @@ fn rough_duration(secs: f64) -> String {
     if m < 60 { format!("{m} min") } else { format!("{} h {} min", m / 60, m % 60) }
 }
 
+/// A cloud run's Limit: the most it can cost, at Stop after. While Stop after holds an invalid value,
+/// `hours` is the last valid one (the field's "1" of a "1e9" being typed), so nothing is claimed.
+fn limit_text(price: Option<f64>, hours: f32, hours_bad: bool) -> String {
+    match price {
+        _ if hours_bad => "—".to_string(),
+        Some(p) => format!("{} at {}", fmt_cost(p * hours as f64), fmt_hours(hours)),
+        None => fmt_hours(hours),
+    }
+}
+
 /// An estimate's range, as rough as its ends: whole minutes under an hour ("7–15 min"), else
 /// hours to a tenth ("1.2–2.0 h").
 fn rough_range(lo: f64, hi: f64) -> String {
@@ -112,6 +122,7 @@ impl FoloApp {
         let compute_blocked = self.compute_blocked();
         let dataset_blocked = self.dataset_blocked().is_some();
         let weights_gone = self.nr_weights_gone().is_some();
+        let device_gone = self.nr_device_gone().is_some();
         // What the footer can honestly say. With the server's estimator: its answer for this
         // config; while a changed config is out, the last answer marked as updating (if it was for
         // the same kind of device); nothing for an unparsed value, a rejected config or a deleted
@@ -343,6 +354,9 @@ impl FoloApp {
                 window,
                 cx,
             )
+        } else if device_gone {
+            // It says why under Device.
+            self.button_disabled("nr-start", go, Btn::Primary, Some(go_icon), "Pick Auto or CPU", window, cx)
         } else if epochs_bad || lr_bad || close_bad {
             self.button_disabled(
                 "nr-start",
@@ -384,7 +398,10 @@ impl FoloApp {
         });
         let cost_facts = runs_on.clone().map(|on| {
             let price = cloud_offer.as_ref().and_then(|o| o.price_per_hour);
-            let hours = self.new_run.as_ref().map_or(folo_api::DEFAULT_MAX_HOURS, |f| f.max_hours);
+            let (hours, hours_bad) = self
+                .new_run
+                .as_ref()
+                .map_or((folo_api::DEFAULT_MAX_HOURS, false), |f| (f.max_hours, f.hours_invalid));
             let est_cost = match (&est, price) {
                 (_, None) => "not billed".to_string(),
                 (Est::Server(e, _), Some(_)) => {
@@ -392,10 +409,7 @@ impl FoloApp {
                 }
                 _ => "…".to_string(),
             };
-            let limit = match price {
-                Some(p) => format!("{} at {}", fmt_cost(p * hours as f64), fmt_hours(hours)),
-                None => fmt_hours(hours),
-            };
+            let limit = limit_text(price, hours, hours_bad);
             let fact = |name: &str, value: String| {
                 div()
                     .flex()
@@ -505,6 +519,20 @@ mod tests {
         assert_eq!(estimate_text(36., 32., 39.), ("36 s".to_string(), "32–39 s".to_string()));
         assert_eq!(rough_duration(45.), "45 s");
         assert_eq!(rough_duration(59.6), "1 min");
+    }
+
+    #[test]
+    fn the_limit_is_not_shown_for_a_stop_after_being_corrected() {
+        // 12 h of a $0.17/h offer.
+        assert_eq!(
+            limit_text(Some(0.17), 12., false),
+            format!("{} at {}", fmt_cost(0.17 * 12.), fmt_hours(12.))
+        );
+        // "100000" typed: the form still holds the "100" it passed through; the footer claimed
+        // "$17.00 at 100 h" beside a field that says 100000 and an error.
+        assert_eq!(limit_text(Some(0.17), 100., true), "—");
+        assert_eq!(limit_text(None, 100., true), "—");
+        assert_eq!(limit_text(None, 8., false), fmt_hours(8.));
     }
 
     #[test]

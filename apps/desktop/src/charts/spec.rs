@@ -1,5 +1,6 @@
 //! What a line chart draws: its series, markers and options.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use folo_ui::{Hsla, SharedString};
@@ -106,6 +107,9 @@ pub struct LineChart {
     /// Tick label format; `None` picks decimals from the tick step so labels line up.
     pub y_fmt: Option<fn(f32) -> String>,
     pub x_fmt: fn(f32) -> String,
+    /// The cursor's x (its chip, the readout's title) when it says more than a tick: the run charts
+    /// read a step's epoch back from its step. `None`: `x_fmt`.
+    pub cursor_fmt: Option<Rc<dyn Fn(f32) -> String>>,
     /// Readout values use this format (defaults to `y_fmt`).
     pub value_fmt: Option<fn(f32) -> String>,
     pub x_name: &'static str,
@@ -155,6 +159,7 @@ impl LineChart {
             y_tick_values: None,
             y_fmt: None,
             x_fmt: |v| format_tick(v),
+            cursor_fmt: None,
             value_fmt: None,
             x_name: "",
             markers: Vec::new(),

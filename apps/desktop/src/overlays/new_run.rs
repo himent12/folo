@@ -189,8 +189,30 @@ impl FoloApp {
         let size_labels: Vec<String> = IMGSZ.iter().map(|b| b.to_string()).collect();
         let size_refs: Vec<&str> = size_labels.iter().map(String::as_str).collect();
         let size_seg = seg(self, "nr-imgsz", &size_refs, imgsz, window, cx, |f, i| f.imgsz = i);
-        let device_seg =
-            seg(self, "nr-device", &["Auto", "GPU 0", "CPU"], device, window, cx, |f, i| f.device = i);
+        // A server without a GPU refuses gpu:0 at Start: not offered (arrow keys skip it).
+        let gpu_off = [None, self.nr_no_gpu().map(SharedString::from), None];
+        // GPU 0 still picked on such a server (prefilled from a run that had it, or picked before
+        // the server said): Start waits for Auto or CPU, and this says so under the choice.
+        let device_gone = self.nr_device_gone();
+        let device_seg = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(self.segmented_fill_with(
+                "nr-device",
+                &["Auto", "GPU 0", "CPU"],
+                device,
+                &gpu_off,
+                window,
+                cx,
+                Rc::new(|this, i, _, _| {
+                    if let Some(f) = this.new_run.as_mut() {
+                        f.device = i;
+                    }
+                }),
+            ))
+            .when_some(device_gone, |d, why| d.child(text(ty::SM, t.danger_text).child(why)))
+            .into_any_element();
         // An unknown prefilled optimizer selects no segment.
         let opt_sel = if opt_unknown { OPT_LABELS.len() } else { opt };
         let opt_seg = seg(self, "nr-opt", &OPT_LABELS, opt_sel, window, cx, |f, i| f.pick_optimizer(i));
