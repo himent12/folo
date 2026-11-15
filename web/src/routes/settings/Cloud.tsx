@@ -185,6 +185,12 @@ export default function Cloud() {
           </>
         )}
       >
+        {/* Connect waits for the providers: when they fail, say so (with Retry) rather than leave it disabled unexplained. */}
+        {providers.error && !providers.data ? (
+          <div class="state">
+            <ErrorState error={providers.error} title="Could not load the cloud providers" retry={() => providers.refresh()} compact />
+          </div>
+        ) : null}
         {connections.error && !connections.data ? (
           <div class="state">
             <ErrorState error={connections.error} title="Could not load the connections" retry={() => connections.refresh()} compact />

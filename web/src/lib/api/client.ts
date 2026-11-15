@@ -405,14 +405,14 @@ export class HttpApi implements Api {
   createSyntheticDataset(body: CreateSyntheticDataset) {
     return this.#req<Dataset>('POST', '/datasets/synthetic', body);
   }
-  datasetImages(id: string, q: DatasetImagesQuery, signal?: AbortSignal) {
-    return this.#req<DatasetImages>(
-      'GET',
-      `/datasets/${encodeURIComponent(id)}/images${qs({ split: q.split, offset: q.offset, limit: q.limit, class: q.class })}`,
-      undefined,
-      signal,
-    );
-  }
+    datasetImages(id: string, q: DatasetImagesQuery, signal?: AbortSignal) {
+        return this.#envelope<DatasetImages>(
+          `/datasets/${encodeURIComponent(id)}/images${qs({ split: q.split, offset: q.offset, limit: q.limit, class: q.class })}`,
+          'images',
+          true,
+          signal,
+        );
+      }
   datasetIssues(id: string, q: DatasetIssuesQuery, signal?: AbortSignal) {
     return this.#req<DatasetIssues>(
       'GET',
@@ -569,14 +569,14 @@ export class HttpApi implements Api {
   designBench(id: string, body: DesignBench, signal?: AbortSignal) {
     return this.#req<BenchDesign>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/design`, body, signal);
   }
-  benchImages(id: string, q: BenchImagesQuery = {}, signal?: AbortSignal) {
-    return this.#req<BenchImagePage>(
-      'GET',
-      `/bench/benchmarks/${encodeURIComponent(id)}/images${qs({ offset: q.offset, limit: q.limit, condition: q.condition, severity: q.severity })}`,
-      undefined,
-      signal,
-    );
-  }
+    benchImages(id: string, q: BenchImagesQuery = {}, signal?: AbortSignal) {
+        return this.#envelope<BenchImagePage>(
+          `/bench/benchmarks/${encodeURIComponent(id)}/images${qs({ offset: q.offset, limit: q.limit, condition: q.condition, severity: q.severity })}`,
+          'images',
+          true,
+          signal,
+        );
+      }
   async benchImageUrl(id: string, imageId: string, opts: BenchImageOptions = {}) {
     return `${this.base}/api/bench/benchmarks/${encodeURIComponent(id)}/images/${encodeURIComponent(imageId)}${qs({ condition: opts.condition, severity: opts.severity, thumb: opts.thumb })}`;
   }
@@ -592,14 +592,14 @@ export class HttpApi implements Api {
   benchResult(id: string, entryId: string, signal?: AbortSignal) {
     return this.#req<BenchResult>('GET', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/result`, undefined, signal);
   }
-  benchEntryImages(id: string, entryId: string, q: BenchEntryImagesQuery = {}, signal?: AbortSignal) {
-    return this.#req<BenchEntryImagePage>(
-      'GET',
-      `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/images${qs({ sort: q.sort, offset: q.offset, limit: q.limit })}`,
-      undefined,
-      signal,
-    );
-  }
+    benchEntryImages(id: string, entryId: string, q: BenchEntryImagesQuery = {}, signal?: AbortSignal) {
+        return this.#envelope<BenchEntryImagePage>(
+          `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/images${qs({ sort: q.sort, offset: q.offset, limit: q.limit })}`,
+          'images',
+          true,
+          signal,
+        );
+      }
   stopBenchEntry(id: string, entryId: string) {
     return this.#req<BenchEntry>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/stop`);
   }
@@ -697,9 +697,9 @@ export class HttpApi implements Api {
   disconnectCloud(id: string) {
     return this.#req<void>('DELETE', `/cloud/connections/${encodeURIComponent(id)}`);
   }
-  cloudOffers(id: string, signal?: AbortSignal, refresh = false) {
-    return this.#req<CloudOfferList>('GET', `/cloud/connections/${encodeURIComponent(id)}/offers${qs({ refresh: refresh ? 'true' : undefined })}`, undefined, signal);
-  }
+    cloudOffers(id: string, signal?: AbortSignal, refresh = false) {
+        return this.#envelope<CloudOfferList>(`/cloud/connections/${encodeURIComponent(id)}/offers${qs({ refresh: refresh ? 'true' : undefined })}`, 'offers', false, signal);
+      }
   async cloudInstances(signal?: AbortSignal) {
     return this.#list<CloudInstance>('/cloud/instances', 'instances', signal);
   }
@@ -725,17 +725,27 @@ export class HttpApi implements Api {
     );
   }
 
-    /**
+      /**
        * A collection: `GET path` answers `{ <key>: [...] }`. Anything else (the key missing, null, an object) is the server's
        * mistake and an error, not an empty list: a missing list showed "No runs yet" as if that were true, and a list of the
        * wrong type made screens throw and wait forever (s6-shell-3).
        */
       async #list<T>(path: string, key: string, signal?: AbortSignal): Promise<T[]> {
+        return (await this.#envelope<Record<string, T[]>>(path, key, false, signal))[key]!;
+      }
+
+      /**
+       * An answer that holds a collection under `key` (and with `paged`, the `total` of a page): checked as `#list` checks
+       * a list, and resolved whole. Offers of `null` left "Loading offers…" forever; a page without its images showed an
+       * empty grid, or threw in the screen that read `.length` (s6-shell-3).
+       */
+      async #envelope<T extends object>(path: string, key: string, paged: boolean, signal?: AbortSignal): Promise<T> {
         const json = await this.#req<Record<string, unknown> | undefined>('GET', path, undefined, signal);
-        const v = json !== null && typeof json === 'object' ? json[key] : undefined;
-        if (!Array.isArray(v)) {
-          throw new ApiError(200, 'bad_response', `The server sent an answer of an unexpected shape (no list of ${key}).`, 'Is the server a FOLO server of the same version as Studio?', `GET /api${path.split('?')[0]}`);
+        const ok = json !== null && typeof json === 'object' && !Array.isArray(json) && Array.isArray(json[key]) && (!paged || typeof json.total === 'number');
+        if (!ok) {
+          const what = paged ? `no page of ${key}` : `no list of ${key}`;
+          throw new ApiError(200, 'bad_response', `The server sent an answer of an unexpected shape (${what}).`, 'Is the server a FOLO server of the same version as Studio?', `GET /api${path.split('?')[0]}`);
         }
-        return v as T[];
+        return json as T;
       }
 }

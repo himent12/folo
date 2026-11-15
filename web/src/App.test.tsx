@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // The screen of `main` while the next screen's chunk loads, and when it fails to load.
-import { flush } from 'fw';
+import { flush, onMount } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from '../framework/testing';
 import { hub } from '$lib/api/index';
@@ -262,5 +262,43 @@ describe('a screen that throws while it is created', () => {
 
     router.route = parse('#/runs');
     await until(() => main().textContent === 'the runs', 'the runs');
+  });
+
+  // Review round 1: a child built before its sibling threw kept its effects (polling, listeners) on the detached page.
+  it('disposes what the screen built before it threw: none of its effects run', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let started = 0;
+    let stopped = 0;
+    const Poller = () => {
+      onMount(() => {
+        started++;
+        return () => stopped++;
+      });
+      return <i>polls</i>;
+    };
+    const Thrower = (): JSX.Element => {
+      throw new TypeError('the sibling broke');
+    };
+    const loaders: Partial<Record<ScreenName, () => Promise<ScreenModule>>> = {
+      overview: () => Promise.resolve(screen('the overview')),
+      settings: () =>
+        Promise.resolve({
+          default: () => (
+            <div>
+              <Poller />
+              <Thrower />
+            </div>
+          ),
+        }),
+    };
+    const screens = new Screens((name) => loaders[name]);
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('.fake'), 'the overview');
+
+    router.route = parse('#/settings');
+    await until(() => main().textContent?.includes('the sibling broke'), 'the crash');
+    await settle();
+    expect(started - stopped).toBe(0);
   });
 });

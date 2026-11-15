@@ -61,6 +61,38 @@ describe('HttpApi: a list answer of the wrong shape is an error', () => {
     answer('{"jobs":[]}');
     expect(await new HttpApi('').labelJobs()).toEqual([]);
   });
+
+  // Review round 1: offers of null left "Loading offers…" forever; a page without images showed an empty grid or threw.
+  const api = new HttpApi('');
+  const reads = {
+    offers: () => api.cloudOffers('cx_1'),
+    'dataset images': () => api.datasetImages('ds_1', {}),
+    'bench images': () => api.benchImages('b_1'),
+    'entry images': () => api.benchEntryImages('b_1', 'e_1'),
+  };
+  const bad: Record<keyof typeof reads, string[]> = {
+    offers: ['{"offers":null,"fetched":"t"}', '{"fetched":"t"}', '[]', ''],
+    'dataset images': ['{"total":12}', '{"total":12,"images":null}', '{"images":[]}', '{"total":"12","images":[]}', ''],
+    'bench images': ['{"total":12}', '{"images":{}}', ''],
+    'entry images': ['{"total":12}', '{"images":[],"total":null}', ''],
+  };
+  for (const [what, bodies] of Object.entries(bad) as [keyof typeof reads, string[]][]) {
+    for (const body of bodies) {
+      it(`${what}: ${body || 'no body'}`, async () => {
+        answer(body);
+        await expect(reads[what]()).rejects.toMatchObject({ code: 'bad_response' });
+      });
+    }
+  }
+
+  it('pages and offers of the right shape come through whole', async () => {
+    answer('{"offers":[],"fetched":"t"}');
+    expect(await reads.offers()).toEqual({ offers: [], fetched: 't' });
+    answer('{"total":3,"images":[{"id":"i"}]}');
+    expect(await reads['dataset images']()).toEqual({ total: 3, images: [{ id: 'i' }] });
+    answer('{"total":0,"images":[]}');
+    expect(await reads['entry images']()).toEqual({ total: 0, images: [] });
+  });
 });
 
 describe('HttpApi: queue and ONNX (docs/API.md, #129)', () => {
