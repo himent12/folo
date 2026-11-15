@@ -405,6 +405,27 @@ describe('the benchmark page', () => {
     expect(weight().value).toBe('1');
   });
 
+  it('does not save a weight field left empty with the last number typed in it', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weight = () => document.querySelector<HTMLInputElement>('input[aria-label="Weight of Haze"]')!;
+    const type = (v: string) => {
+      weight().value = v;
+      weight().dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+    };
+    const save = () => [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Save plan')!;
+    type('3');
+    expect(save().disabled).toBe(false);
+    type('');
+    // The draft still holds 3: Save would store a weight the field does not show.
+    expect(weight().getAttribute('aria-invalid')).toBe('true');
+    expect(text()).toMatch(/Haze: the weight is empty/);
+    expect(save().disabled).toBe(true);
+    type('2');
+    expect(weight().getAttribute('aria-invalid')).toBeNull();
+    expect(save().disabled).toBe(false);
+  });
+
   it('keeps the preview on its image when the benchmark changes under it (a `bench` event)', async () => {
     // happy-dom has no canvas to draw the mock's images: any URL does.
     const url = vi.spyOn(hub.api, 'benchImageUrl').mockImplementation(async (_b, im, o) => `blob:${im}/${o?.condition ?? ''}`);
