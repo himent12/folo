@@ -45,6 +45,17 @@ export function stepEpoch(status: string, observed: number, finished: number): s
   return `ep ${n}${status !== 'running' && status !== 'queued' && n > finished ? ' (partial)' : ''}`;
 }
 
+/**
+ * The epochs a run has finished, the `epoch` [`mosaicOffText`] takes. `Run.epoch` is the epoch in progress while a run
+ * is queued, running or stopping, and the one it failed in for a failed run (docs/API.md `Run.epoch`); only a
+ * completed or stopped run carries its last finished epoch. Read as finished, epoch 2 of 3 in progress said "Mosaic
+ * off · final epoch" a whole epoch before the trainer closes mosaic, and a run that failed in epoch 2 said "Last 1
+ * epoch: mosaic off" for an epoch it never trained (stress s3-live-1).
+ */
+export function epochsDone(status: string, epoch: number): number {
+  return status === 'completed' || status === 'stopped' ? epoch : Math.max(0, epoch - 1);
+}
+
 /** The loss terms in plain words (DESIGN_DIRECTION §2.3: no jargon without its definition). */
 export const LOSS_TERMS: [term: string, means: string][] = [
   ['total', 'box, cls and dfl weighted and added: what training lowers.'],

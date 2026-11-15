@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import { startFrom } from './RunCompare';
-import { lrParts, mosaicOffText, stepEpoch } from './run/readings';
+import { epochsDone, lrParts, mosaicOffText, stepEpoch } from './run/readings';
+
+describe('Run metrics: mosaicOffText from Run.epoch (stress s3-live-1)', () => {
+  // A 3-epoch run with close_mosaic capped to 1: the trainer closes mosaic after epoch 2, so epoch 3 alone trains
+  // without it. `Run.epoch` is the epoch in progress while live and the one it failed in for a failed run.
+  const say = (status: string, epoch: number, live: boolean) => mosaicOffText(1, 3, epochsDone(status, epoch), live).cap;
+  it('does not call mosaic off while epoch 2 of 3 still trains with it', () => {
+    expect(say('running', 2, true)).toBe('Mosaic off after epoch 2');
+    expect(say('stopping', 2, true)).toBe('Mosaic off after epoch 2');
+    expect(say('running', 3, true)).toBe('Mosaic off · final epoch');
+  });
+  it('does not claim a mosaic-free epoch a run that failed in epoch 2 never trained', () => {
+    expect(say('failed', 2, false)).toBe('Mosaic off after epoch 2');
+    expect(say('failed', 3, false)).toBe('Last 1 epoch: mosaic off');
+  });
+  it('reads the finished epochs of completed and stopped runs as they are', () => {
+    expect(say('completed', 3, false)).toBe('Last 1 epoch: mosaic off');
+    expect(say('stopped', 1, false)).toBe('Mosaic off after epoch 2');
+    expect(epochsDone('queued', 0)).toBe(0);
+  });
+});
 
 describe('Compare: startFrom', () => {
   const models = [{ id: 'm_shapes_n', name: 'shapes-n' }];
