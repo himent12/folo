@@ -32,7 +32,12 @@ actions!(
         Copy,
         WordLeft,
         WordRight,
-        DeleteWordLeft
+        DeleteWordLeft,
+        DeleteWordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        SelectHome,
+        SelectEnd
     ]
 );
 
@@ -48,6 +53,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-left", WordLeft, ctx),
         KeyBinding::new("ctrl-right", WordRight, ctx),
         KeyBinding::new("ctrl-backspace", DeleteWordLeft, ctx),
+        KeyBinding::new("ctrl-delete", DeleteWordRight, ctx),
+        KeyBinding::new("ctrl-shift-left", SelectWordLeft, ctx),
+        KeyBinding::new("ctrl-shift-right", SelectWordRight, ctx),
+        KeyBinding::new("shift-home", SelectHome, ctx),
+        KeyBinding::new("shift-end", SelectEnd, ctx),
         KeyBinding::new("ctrl-a", SelectAll, ctx),
         KeyBinding::new("ctrl-v", Paste, ctx),
         KeyBinding::new("ctrl-c", Copy, ctx),
@@ -178,6 +188,35 @@ impl TextInput {
         self.replace_text_in_range(None, "", window, cx)
     }
 
+    fn delete_word_right(&mut self, _: &DeleteWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.next_word(self.cursor_offset()), cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_word(self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word(self.cursor_offset()), cx);
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    /// The selected byte range (tests read it).
+    #[cfg(test)]
+    pub(crate) fn selection(&self) -> Range<usize> {
+        self.selected_range.clone()
+    }
+
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
@@ -238,7 +277,7 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
+            self.replace_text_in_range(None, &one_line(&text), window, cx);
         }
     }
 
@@ -675,6 +714,11 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::word_left))
             .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_all))
@@ -697,6 +741,20 @@ impl Focusable for TextInput {
     }
 }
 
+/// Pasted text for a single-line field: each line break (CRLF, CR or LF) and tab a space, other
+/// control characters dropped. (Only LF was replaced: a Windows clipboard's CRLF left a CR in the
+/// value, invisible on screen and sent along with it.)
+fn one_line(s: &str) -> String {
+    s.replace("\r\n", " ")
+        .chars()
+        .filter_map(|c| match c {
+            '\r' | '\n' | '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// Byte offset in `s` of UTF-16 offset `offset`, clamped to the end and to char boundaries.
 fn utf16_to_utf8(s: &str, offset: usize) -> usize {
     let mut utf8 = 0;
@@ -713,7 +771,15 @@ fn utf16_to_utf8(s: &str, offset: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{mask, masked_offset, unmasked_offset, utf16_to_utf8};
+    use super::{mask, masked_offset, one_line, unmasked_offset, utf16_to_utf8};
+
+    #[test]
+    fn pasted_text_becomes_one_line_without_control_characters() {
+        assert_eq!(one_line("http://127.0.0.1:18101\r\n"), "http://127.0.0.1:18101 ");
+        assert_eq!(one_line("a\r\nb\nc\rd\te"), "a b c d e");
+        assert_eq!(one_line("x\u{0}\u{7f}\u{1b}y"), "xy");
+        assert_eq!(one_line("名前 🐟"), "名前 🐟");
+    }
 
     #[test]
     fn a_masked_field_maps_offsets_between_text_and_bullets() {

@@ -51,19 +51,41 @@ impl ShotArgs {
             Some(other) => return Err(anyhow!("--text {other}: expected `native` or `portable`")),
         };
         let scale_factor = number("--scale", 1.0)?;
-        anyhow::ensure!(scale_factor > 0.0, "--scale must be positive");
+        let (width, height) = (number("--width", 1280.0)?, number("--height", 800.0)?);
+        check_size(width, height, scale_factor)?;
         let settle_ms = number("--shot-time", SETTLE_TIME.as_millis() as f32)?;
-        anyhow::ensure!(settle_ms >= 0.0, "--shot-time must not be negative");
+        anyhow::ensure!(
+            (0.0..=MAX_SETTLE_MS).contains(&settle_ms),
+            "--shot-time {settle_ms}: expected 0 to {MAX_SETTLE_MS} ms"
+        );
         Ok(Some(ShotArgs {
             settle_time: Duration::from_millis(settle_ms as u64),
             path: PathBuf::from(path),
-            options: HeadlessOptions {
-                size: size(px(number("--width", 1280.0)?), px(number("--height", 800.0)?)),
-                scale_factor,
-                text,
-            },
+            options: HeadlessOptions { size: size(px(width), px(height)), scale_factor, text },
         }))
     }
+}
+
+/// The longest `--shot-time`: ten minutes of animation (a repeating pulse asks for frames for as long
+/// as it may, 50 ms apiece; `1e12` never finished).
+const MAX_SETTLE_MS: f32 = 600_000.0;
+
+/// The most device pixels a headless frame may have on a side (a 16384 x 16384 frame is 1 GiB).
+pub(crate) const MAX_SIDE: f32 = 16384.0;
+
+/// Checks a headless window's `--width`, `--height` (logical px) and `--scale` up front: finite, at
+/// least 1 px, at most [`MAX_SIDE`] device pixels a side, a scale above 0 and at most 8. (`inf` asked
+/// for a 13 TB frame and aborted, a scale of `inf` panicked; 0, negative and NaN failed late.)
+pub(crate) fn check_size(width: f32, height: f32, scale: f32) -> Result<()> {
+    anyhow::ensure!(scale > 0.0 && scale <= 8.0, "--scale {scale}: expected more than 0 and at most 8");
+    for (name, v) in [("--width", width), ("--height", height)] {
+        anyhow::ensure!(
+            v >= 1.0 && v * scale <= MAX_SIDE,
+            "{name} {v}: expected 1 to {} px at --scale {scale}",
+            (MAX_SIDE / scale).floor()
+        );
+    }
+    Ok(())
 }
 
 /// A screenshot run: the request and the headless platform it runs on.
@@ -135,5 +157,40 @@ mod tests {
         assert_eq!(shot.options.text, TextBackend::Portable);
         assert!(ShotArgs::parse(&args(&["--shot", "a.png", "--scale", "x"])).is_err());
         assert!(ShotArgs::parse(&args(&["--shot", "a.png", "--text", "dwrite"])).is_err());
+    }
+
+    /// Sizes and times that crashed, hung or failed late (stress d5-window-input-3) are refused up front.
+    #[test]
+    fn refuses_sizes_and_times_it_cannot_render() {
+        let shot = |extra: &[&str]| {
+            let mut list = vec!["--shot", "a.png"];
+            list.extend_from_slice(extra);
+            ShotArgs::parse(&args(&list))
+        };
+        for bad in [
+            &["--width", "inf"][..],
+            &["--width", "NaN"],
+            &["--width", "0"],
+            &["--height", "-5"],
+            &["--width", "20000"],
+            &["--width", "9000", "--scale", "2"],
+            &["--scale", "inf"],
+            &["--scale", "NaN"],
+            &["--scale", "0"],
+            &["--scale", "9"],
+            &["--shot-time", "1e12"],
+            &["--shot-time", "NaN"],
+            &["--shot-time", "-1"],
+        ] {
+            assert!(shot(bad).is_err(), "{bad:?}");
+        }
+        for good in [
+            &["--width", "1", "--height", "1"][..],
+            &["--width", "16384"],
+            &["--scale", "8"],
+            &["--shot-time", "0"],
+        ] {
+            assert!(shot(good).unwrap().is_some(), "{good:?}");
+        }
     }
 }

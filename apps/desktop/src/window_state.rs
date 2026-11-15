@@ -98,7 +98,33 @@ pub fn path() -> PathBuf {
 
 /// The saved state; a missing or corrupt file reads as nothing saved.
 pub fn load(path: &Path) -> State {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    std::fs::read(path).ok().map(|b| parse(&b)).unwrap_or_default()
+}
+
+/// The state in `bytes`, field by field: a field of the wrong type or with a value this build
+/// doesn't know (a window mode from a newer one) is dropped alone, so the theme survives a bad
+/// window and the bounds survive an unknown mode. Not JSON at all: nothing saved.
+fn parse(bytes: &[u8]) -> State {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else { return State::default() };
+    fn field<T: serde::de::DeserializeOwned>(v: &serde_json::Value, key: &str) -> Option<T> {
+        v.get(key).cloned().and_then(|x| serde_json::from_value(x).ok())
+    }
+    let window = v.get("window").and_then(|w| {
+        Some(Placement {
+            x: field(w, "x")?,
+            y: field(w, "y")?,
+            width: field(w, "width")?,
+            height: field(w, "height")?,
+            mode: field(w, "mode").unwrap_or_default(),
+            display: field(w, "display"),
+        })
+    });
+    State {
+        window,
+        theme: field(&v, "theme"),
+        spawn_server: field(&v, "spawn_server"),
+        reduce_motion: field(&v, "reduce_motion"),
+    }
 }
 
 /// Write `state` atomically: a temporary file next to `path`, then a rename over it.
@@ -183,6 +209,26 @@ mod tests {
         assert!(!remembers(true, false));
         assert!(!remembers(false, true));
         assert!(!remembers(true, true));
+    }
+
+    /// One field this build can't read drops that field alone (stress d5-window-input-4): a window mode
+    /// from a newer build kept the theme light and the bounds; a window of the wrong types kept the theme.
+    #[test]
+    fn a_bad_field_drops_only_itself() {
+        let s =
+            parse(br#"{"window":{"x":5,"y":6,"width":1300,"height":810,"mode":"sideways"},"theme":"light"}"#);
+        assert_eq!(s.theme.as_deref(), Some("light"));
+        let w = s.window.expect("bounds kept");
+        assert_eq!((w.x, w.y, w.width, w.height, w.mode), (5., 6., 1300., 810., WindowMode::Windowed));
+        let s =
+            parse(br#"{"window":{"x":"a","y":2,"width":3,"height":4},"theme":"light","spawn_server":"yes"}"#);
+        assert_eq!((s.window, s.theme.as_deref(), s.spawn_server), (None, Some("light"), None));
+        assert_eq!(
+            parse(br#"{"theme":42,"reduce_motion":true}"#),
+            State { reduce_motion: Some(true), ..State::default() }
+        );
+        assert_eq!(parse(b"{not json"), State::default());
+        assert_eq!(parse(b"[1,2]"), State::default());
     }
 
     #[test]

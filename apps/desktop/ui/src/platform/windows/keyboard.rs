@@ -153,8 +153,12 @@ impl WindowInner {
 
     fn ime_composition(&self, ctx: HIMC, flags: u32) -> Option<isize> {
         if flags == 0 {
-            // A Japanese IME sends this with no flags when the composition is gone.
-            self.with_input_handler(|h| h.replace_text_in_range(None, ""))?;
+            // A Japanese IME sends this with no flags when the composition is gone: drop the composed
+            // text. With none under way there is nothing to drop (`replace_text_in_range(None, "")`
+            // would delete the selection instead).
+            if composition_ended_drops_text(self.with_input_handler(|h| h.marked_text_range()).flatten()) {
+                self.with_input_handler(|h| h.replace_text_in_range(None, ""))?;
+            }
             return Some(0);
         }
         if flags & GCS_COMPSTR.0 != 0 {
@@ -173,6 +177,12 @@ impl WindowInner {
         }
         None
     }
+}
+
+/// Whether a flagless `WM_IME_COMPOSITION` (the composition is gone) removes text: only the marked
+/// (composed) text, so only when there is some.
+fn composition_ended_drops_text(marked: Option<std::ops::Range<usize>>) -> bool {
+    marked.is_some_and(|r| !r.is_empty())
 }
 
 /// Moves the IME windows to the app's caret now, if the window has an input context.
@@ -443,6 +453,15 @@ mod tests {
         assert_eq!(immutable_key_name(VK_F24), Some("f24"));
         assert_eq!(immutable_key_name(VK_PRIOR), Some("pageup"));
         assert_eq!(immutable_key_name(VK_A), None);
+    }
+
+    /// A bare WM_IME_COMPOSITION with nothing composed left the selection deleted (stress
+    /// d5-window-input-1): only composed text goes.
+    #[test]
+    fn an_ended_composition_drops_only_composed_text() {
+        assert!(!composition_ended_drops_text(None));
+        assert!(!composition_ended_drops_text(Some(3..3)));
+        assert!(composition_ended_drops_text(Some(2..5)));
     }
 
     #[test]

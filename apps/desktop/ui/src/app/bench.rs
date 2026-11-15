@@ -101,14 +101,11 @@ impl BenchArgs {
             Some(other) => return Err(anyhow!("--text {other}: expected `native` or `portable`")),
         };
         let scale_factor = number("--scale", 1.0)?;
-        anyhow::ensure!(scale_factor > 0.0, "--scale must be positive");
+        let (width, height) = (number("--width", 1280.0)?, number("--height", 800.0)?);
+        super::shot::check_size(width, height, scale_factor)?;
         Ok(Some(BenchArgs {
             frames,
-            options: HeadlessOptions {
-                size: size(px(number("--width", 1280.0)?), px(number("--height", 800.0)?)),
-                scale_factor,
-                text,
-            },
+            options: HeadlessOptions { size: size(px(width), px(height)), scale_factor, text },
         }))
     }
 }

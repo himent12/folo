@@ -47,6 +47,28 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
     Some(score)
 }
 
+/// The items matching `q`, at most 40: best match first, each group kept together under one heading
+/// (the group of the best match first), so a group never shows twice. No query: every item as listed.
+pub fn rank(q: &str, items: Vec<PaletteItem>) -> Vec<PaletteItem> {
+    let mut scored: Vec<(i32, usize, PaletteItem)> = items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, it)| fuzzy(q, &format!("{} {}", it.title, it.group)).map(|s| (s, i, it)))
+        .collect();
+    if !q.is_empty() {
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut groups: Vec<&'static str> = Vec::new();
+        for (_, _, it) in &scored {
+            if !groups.contains(&it.group) {
+                groups.push(it.group);
+            }
+        }
+        // Stable: within a group the order by score stays.
+        scored.sort_by_key(|(_, _, it)| groups.iter().position(|g| *g == it.group));
+    }
+    scored.into_iter().map(|(_, _, it)| it).take(40).collect()
+}
+
 impl FoloApp {
     fn palette_items(&self) -> Vec<PaletteItem> {
         let mut items = Vec::new();
@@ -196,16 +218,7 @@ impl FoloApp {
 
     fn filtered_palette(&self) -> Vec<PaletteItem> {
         let q = self.palette.as_ref().map(|p| p.query.trim().to_string()).unwrap_or_default();
-        let mut scored: Vec<(i32, usize, PaletteItem)> = self
-            .palette_items()
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, it)| fuzzy(&q, &format!("{} {}", it.title, it.group)).map(|s| (s, i, it)))
-            .collect();
-        if !q.is_empty() {
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        }
-        scored.into_iter().map(|(_, _, it)| it).take(40).collect()
+        rank(&q, self.palette_items())
     }
 
     pub(super) fn palette_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -454,5 +467,36 @@ mod tests {
         assert!(fuzzy("shn", "shapes-n").is_some());
         assert!(fuzzy("zzz", "shapes").is_none());
         assert_eq!(fuzzy("", "anything"), Some(0));
+    }
+
+    fn item(group: &'static str, title: &str) -> PaletteItem {
+        PaletteItem {
+            group,
+            icon: "",
+            title: title.into(),
+            detail: String::new(),
+            keys: &[],
+            action: act(|_, _, _| {}),
+        }
+    }
+
+    /// "run" matches a run by its group's name ("shapes-n Runs") better than "New training run": the
+    /// Runs group showed twice, split around Actions (stress d5-window-input-6).
+    #[test]
+    fn a_group_shows_once_with_its_best_match_first() {
+        let items = vec![
+            item("Actions", "New training run"),
+            item("Go to", "Runs"),
+            item("Runs", "shapes-n"),
+            item("Runs", "shapes-mini-s"),
+        ];
+        let ranked: Vec<(&str, String)> =
+            rank("run", items).into_iter().map(|i| (i.group, i.title)).collect();
+        let groups: Vec<&str> = ranked.iter().map(|r| r.0).collect();
+        assert_eq!(groups, ["Go to", "Runs", "Runs", "Actions"], "{ranked:?}");
+        assert_eq!(ranked[1].1, "shapes-n", "within a group, best first");
+        // No query: the items as listed.
+        let all = rank("", vec![item("Actions", "a"), item("Runs", "b"), item("Actions", "c")]);
+        assert_eq!(all.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
     }
 }
