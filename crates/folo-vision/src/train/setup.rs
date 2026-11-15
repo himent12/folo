@@ -285,7 +285,7 @@ impl Trainer {
         // The frozen teacher of §8.9, if the run has one (a new run and a resume alike load it here).
         let teacher = match &cfg.distill {
             Some(d) => {
-                let (t, logs) = Teacher::load(d, &model, device, cfg.amp)?;
+                let (t, logs) = Teacher::load(d, &model, device, cfg.amp, opts.run_dir.as_deref())?;
                 pending_logs.extend(logs);
                 Some(t)
             }

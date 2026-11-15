@@ -35,8 +35,9 @@ IoU >= 0.5; on the truths both models find, folo-s's box or score is put on folo
 
 On the same objects folo-s's median edge error is 17-19% lower at every size (S 1.87 / 1.56 px, M 3.30 / 2.67,
 L 4.81 / 3.94; n / s). Both tables say the same: the teacher's ranking is worth about twice its boxes
-(+0.026..+0.031 against +0.015..+0.016), the boxes show in AP75 only, the scores in AP50 and AP75. Edge-only
-(localisation) distillation is capped at about +0.016 even if the student copied the teacher's boxes perfectly.
+(+0.026..+0.031 against +0.015..+0.016), the boxes show in AP75 only, the scores in AP50 and AP75. Swapping in the
+teacher's boxes at shared anchors (the student's scores and candidates kept) gave +0.016; whether edge-only
+(localisation) distillation in training can exceed that is untested.
 
 **The DFL distributions carry no uncertainty.** Hill 3's refiner lane (r3-refine.md, Part 5) measured median DFL
 widths of 3.45 / 5.97 / 12.52 px for S / M / L primaries, about 0.43 / 0.37 / 0.39 bins at strides 8 / 16 / 32. A
@@ -114,7 +115,7 @@ Every run of the lane and lane `base`'s controls, P1, proxy-val COCO AP of `best
 Seed-0 reading so far. The starting values clear the kill criterion (0.1297) by 0.024. Against its fair control
 (`cls1-s0`, the same total class gain 1.0) `kd-s0` is +0.027; the class term alone (`kc-s0`, also total gain 1.0) is
 +0.023 over `cls1-s0`; the DFL term alone (`kdl-s0`, total class gain 0.5) is +0.020 over `ctl-s0`, more than the
-+0.016 the box swap bounded at full scale (the proxy student is far weaker than the teacher, see "What is not
++0.016 the box swap measured on the frozen full-scale models (the proxy student is far weaker than the teacher, see "What is not
 shown"). Both terms add: kd is +0.004 over class-only and +0.008 over DFL-only. The design predicted the class
 term in AP50 and the DFL term in AP75; on the proxy neither separates: `kc-s0` over `cls1-s0` is AP50 +0.027 /
 AP75 +0.029, `kdl-s0` over `ctl-s0` AP50 +0.026 / AP75 +0.023. At this distance from the teacher both terms
@@ -177,8 +178,8 @@ the design predicted does not show at this distance from the teacher.
   a teacher trained at 640 px on all of train2017, which includes these 20,000 images: the
   teacher has seen every proxy training image with its labels, and the student is far from converged (proxy val
   AP 0.125 against the teacher's 0.322 at the same 320 px). A full-scale student (folo-n-coco-v3: 0.340 against
-  folo-s's 0.416 on val2017) is much closer to its teacher, and the counsel swaps bound what the teacher's scores and
-  boxes can give it at +0.031 and +0.016. The full-scale test (the COCO control's twin with `--teacher`) is pending.
+  folo-s's 0.416 on val2017) is much closer to its teacher; on the frozen models the counsel swaps measured +0.031
+  (scores) and +0.016 (boxes), which do not bound what training can give. The full-scale test (the COCO control's twin with `--teacher`) is pending.
 - No COCO val2017 number: val2017 is read once per final configuration, and no final configuration has been
   trained at full scale.
 - The single-seed arms (`kc`, `kdl`, `flip`, `t4`, `blend`) differ from `kd-s0` by less than the gaps that matter
@@ -203,8 +204,8 @@ The control is lane `base`'s full-COCO run `D:/folo-data/runs-hill4/coco/n-r5-ct
     --data D:/folo-data/coco --workers 16 --device gpu:0
   ```
   The control continuing past epoch 48 without a teacher is its exact twin (same weights, same batches), so the
-  difference is distillation over the last quarter of the schedule only: a lower bound of what the whole run would
-  get, available a few hours after the control ends.
+  difference is distillation over the last quarter of the schedule only; how it relates to a whole run is untested.
+  It is available a few hours after the control ends.
 - **(B) a whole run.** The control's command with `--teacher ... --name n-r5-kd`: the same seed and batches from
   epoch 1, the clean comparison, about four times the wall time of (A).
 

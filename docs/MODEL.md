@@ -946,7 +946,9 @@ an error naming `distill.teacher`; a resume may also turn distillation on or cha
 optimizer state), fused (§9.1), eval mode, on the trainer's device, in f16 on a GPU when `amp` is on
 and in f32 otherwise; its one-to-many branch is used whatever its `head`. A teacher with another `nc`, `reg_max` or
 strides is refused (both heads must have the same anchors, §6.2, and channels, §6.3, so the raw outputs align element
-by element). Class names that differ are only warned about: classes match by index.
+by element). Class names that differ are only warned about: classes match by index. A teacher that is the run's
+own `weights/last.folo` or `best.folo` (after resolving links and `..`) is refused, also as a resume override: every
+epoch overwrites them, so the next resume would load another teacher; a copy outside `weights/` is accepted.
 
 **Targets (constants, no autograd).** Each training batch `x` (`[B, 3, H, W]`, the augmented batch the student sees)
 goes through the teacher before the student's forward, under `no_grad`; its outputs are cast to f32 and:
@@ -974,7 +976,7 @@ Every element (`softplus(x) − x · p~ − H(p~)`, and `q_a · s~_i · (ln s~_i
 it is summed; the class elements are summed over `a` per `(b, c)` and the DFL elements over `a` per `(b, side, bin)`,
 then those row sums in the fixed-order tree of §7 (rows of 4096), so the term is bit-reproducible on the CPU.
 `T = 1` divides by nothing. For a `head = "o2o"` student the term is computed on the one-to-many outputs and is part
-of the one-to-many loss: `L = w_m · (L_o2m + λc · L_kc + λd · L_kd) + (1 − w_m) · L_o2o` (§6.6, `B` and the gains
+of the one-to-many loss: `L = w_m · (L_o2m + B · (λc · L_kc + λd · L_kd)) + (1 − w_m) · L_o2o` (§6.6, `B` and the gains
 inside `L_o2m` as above), so the teacher never outweighs the schedule that moves the emphasis to the one-to-one
 branch. For an `o2m` student `L` is the line above.
 

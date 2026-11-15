@@ -38,6 +38,22 @@ pub fn resolve_teacher(teacher: &str) -> Result<PathBuf> {
     )))
 }
 
+/// Refuses a teacher file that is `run_dir`'s own `weights/last.folo` or `weights/best.folo` (compared after
+/// resolving links and `..`): training overwrites both, so the next resume would load another teacher.
+fn refuse_own_checkpoint(teacher: &Path, run_dir: &Path) -> Result<()> {
+    let Ok(t) = teacher.canonicalize() else { return Ok(()) };
+    for name in ["last.folo", "best.folo"] {
+        if run_dir.join("weights").join(name).canonicalize().is_ok_and(|c| c == t) {
+            return Err(Error::Config(format!(
+                "the teacher {} (distill.teacher) is this run's own checkpoint, which training overwrites; copy it \
+                 first and pass the copy",
+                folo_api::json::path(teacher)
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A loaded teacher.
 pub(super) struct Teacher {
     model: FoloModel,
@@ -49,13 +65,18 @@ impl Teacher {
     /// Loads `cfg.teacher` for `student` on `device` (`F16` when `amp` on a GPU) and checks that it can teach it:
     /// the same number of classes, `reg_max` and strides, so both heads have the same anchors and channels. Returns
     /// the teacher and the log lines of its loading (an info line, and a warning when the class names differ).
+    /// With a run folder `run_dir`, a teacher that is that run's own `weights/last.folo` or `best.folo` is refused.
     pub(super) fn load(
         cfg: &DistillConfig,
         student: &FoloModel,
         device: Device,
         amp: bool,
+        run_dir: Option<&Path>,
     ) -> Result<(Self, Vec<(folo_api::LogLevel, String)>)> {
         let path = resolve_teacher(&cfg.teacher)?;
+        if let Some(dir) = run_dir {
+            refuse_own_checkpoint(&path, dir)?;
+        }
         let shown = folo_api::json::path(&path);
         let file = ModelFile::open(&path)?;
         let dtype = if amp && !device.is_cpu() { DType::F16 } else { DType::F32 };

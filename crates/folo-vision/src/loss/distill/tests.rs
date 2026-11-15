@@ -34,7 +34,16 @@ fn grads(loss: &DistillLoss, of: &[&Tensor]) -> Vec<Vec<f32>> {
 
 fn max_abs_diff(x: &[f32], y: &[f32]) -> f32 {
     assert_eq!(x.len(), y.len());
+    // `f32::max` drops a NaN operand: a non-finite value must fail here, not vanish from the maximum.
+    assert!(x.iter().chain(y).all(|v| v.is_finite()), "non-finite value");
     x.iter().zip(y).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max)
+}
+
+/// The comparisons below cannot pass on a NaN gradient.
+#[test]
+#[should_panic(expected = "non-finite value")]
+fn max_abs_diff_fails_on_nan() {
+    max_abs_diff(&[0.0, f32::NAN], &[0.0, 0.0]);
 }
 
 /// The whole term against central finite differences in both inputs, at T = 1 and T = 3. Few anchors, so the f32

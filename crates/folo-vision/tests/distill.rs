@@ -282,6 +282,36 @@ fn incompatible_teachers_and_bad_settings_are_errors() {
     assert!(e.contains("distill.dfl_gain"), "{e}");
 }
 
+/// A teacher that is the run's own `last.folo` or `best.folo` (which every epoch overwrites, so a resume would load
+/// another teacher) is refused, also through `..`; a copy of it outside `weights/` is a teacher like any other.
+#[test]
+fn the_runs_own_checkpoint_is_not_a_teacher() {
+    let dir = TestDir::new("distill-own");
+    let teacher = teacher_file(&dir, 2, 11);
+    let run = dir.join("r");
+    std::fs::create_dir_all(run.join("weights")).unwrap();
+    for name in ["last.folo", "best.folo"] {
+        std::fs::copy(&teacher, run.join("weights").join(name)).unwrap();
+    }
+    let new = |t: &Path| {
+        let (opts, _) = options(Some(&run));
+        Trainer::new(with_teacher(micro(1), &t.to_string_lossy()), data(), opts)
+    };
+    for own in [run.join("weights/last.folo"), run.join("weights/../weights/best.folo")] {
+        let e = new(&own).err().expect("refused").to_string();
+        assert!(e.contains("this run's own checkpoint") && e.contains("distill.teacher"), "{e}");
+    }
+    let copy = run.join("teacher.folo");
+    std::fs::copy(run.join("weights/last.folo"), &copy).unwrap();
+    assert!(new(&copy).is_ok(), "a copy teaches");
+    let (opts, _) = options(None);
+    let own = run.join("weights/last.folo").to_string_lossy().into_owned();
+    assert!(
+        Trainer::new(with_teacher(micro(1), &own), data(), opts).is_ok(),
+        "no run folder: nothing overwritten"
+    );
+}
+
 /// `distill` in a stored config: absent (every config before it) is `None`; present, it round-trips.
 #[test]
 fn stored_configs_with_and_without_distill_load() {
