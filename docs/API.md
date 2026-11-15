@@ -1358,7 +1358,9 @@ mostly shown) for the others.
   were added, removed or edited. A dataset whose folder no longer exists (moved, renamed, deleted) stays in the list
   with its last classes and splits; `GET /api/datasets/{id}` and its images answer `404 path_not_found` ("the folder
   of dataset '<name>' is gone: ...") until the folder is back (it is re-checked like any change), and `DELETE`
-  unregisters it.
+  unregisters it. `/eval` of a model trained on it answers the same; once the dataset is unregistered too, it answers
+  `404 path_not_found` "the folder of dataset '<name>' this model trained on is gone: ..." while the run's recorded
+  path does not exist.
 - `cache/thumbs/<id>/`: thumbnails, keyed by the image's path, size, modification time and the requested side.
 - `datasets/<name>/`: synthetic datasets and the datasets made from labeling jobs. `DELETE /api/datasets/{id}`
   removes the dataset's caches, and its files only with `?files=true`.

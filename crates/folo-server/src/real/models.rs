@@ -81,15 +81,17 @@ impl RealStore {
 
     /// The dataset `/eval` validates `m` on and its index fingerprint: its run's dataset (the registered copy when
     /// it still is, else the path the run trained on, with no fingerprint: such results are not cached), else the
-    /// first registered dataset with the model's classes.
+    /// first registered dataset with the model's classes. A run's dataset whose folder is gone is said as that, not
+    /// with the registration error's advice on which folder to pass.
     pub(super) fn eval_dataset(&self, m: &ModelRef) -> Result<(DatasetRef, Option<String>)> {
         if let Some(d) = &m.dataset {
-            return Ok(
-                match self.entry(&d.id).and_then(|e| Ok((self.dataset_ref(&e), self.fresh_index(&e)?))) {
-                    Ok((r, idx)) => (r, Some(idx.fingerprint.hash.clone())),
-                    Err(_) => (d.clone(), None),
-                },
-            );
+            return match self.entry(&d.id).and_then(|e| Ok((self.dataset_ref(&e), self.fresh_index(&e)?))) {
+                Ok((r, idx)) => Ok((r, Some(idx.fingerprint.hash.clone()))),
+                Err(e) if !std::path::Path::new(&d.path).exists() => {
+                    Err(if e.body.code == "path_not_found" { e } else { run_dataset_gone(d) })
+                }
+                Err(_) => Ok((d.clone(), None)),
+            };
         }
         let list = self.entries.read().unwrap().clone();
         for e in list {
@@ -101,6 +103,18 @@ impl RealStore {
         }
         Err(no_matching_dataset(&m.model.classes))
     }
+}
+
+/// `404 path_not_found` for a run model whose dataset is no longer registered and whose folder is gone: names the
+/// dataset and the path it trained on, and what evaluates the model again.
+fn run_dataset_gone(d: &DatasetRef) -> Error {
+    let (name, path) = (&d.name, folo_data::paths::shown(&d.path));
+    let message =
+        format!("the folder of dataset '{name}' this model trained on is gone: '{path}' does not exist");
+    Error::new(StatusCode::NOT_FOUND, "path_not_found", message).hint(
+        "move the folder back (the model page evaluates it again), or validate it on another registered dataset \
+         with POST /api/val",
+    )
 }
 
 /// `404 no_matching_dataset`: no registered dataset has exactly `classes`, so `/eval` has nothing to run on. The

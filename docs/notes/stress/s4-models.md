@@ -31,7 +31,7 @@ in-browser WebGPU check is single-image inference.
 | s4-models-1 | annoying | Model page, Details | A run stopped after epoch 1 of 50: "Trained for 50 epochs at 320 px" and "Weights from: last finished epoch" (no number). `trained_with.epochs` is the planned count. | fixed in this PR; SIBLING Desktop `apps/desktop/src/screens/models/details.rs:142` |
 | s4-models-2 | polish | Playground intake | A truncated JPEG: "could not be opened as an image. Use a JPEG, PNG, BMP or WebP file." for a JPEG. The server reads it (200, 640x480); the browser's `createImageBitmap` refuses incomplete data. | fixed in this PR (message) |
 | s4-models-3 | polish | model downloads | `?format=onnx&dynamic=true` downloads as `folo-n-coco.onnx`, the static graph's name (different bytes); `folo-n-coco-f16` exports as `folo-n-coco-f16-f16.folo` / `-f16.onnx`. | deferred: naming is a design decision across Studio, Desktop and the CLI |
-| s4-models-4 | annoying | Model page, `GET /api/models/{id}/eval` | Model of a run whose registered dataset folder was moved away: `404 path_not_found` "'D:/…/datasets/shapes' does not exist" with the hint "pass the dataset root: the folder holding data.yaml, …", which the user cannot do here. `GET /api/datasets/{id}` answers the right "the folder of dataset 'shapes' is gone … move the folder back". | open: root cause `crates/folo-server/src/real/models.rs:88-91` (`eval_dataset` drops the entry's `folder_gone` error and falls back to the run's recorded path, whose index build fails with the registration error of `src/index.rs:188-192`) |
+| s4-models-4 | annoying | Model page, `GET /api/models/{id}/eval` | Model of a run whose registered dataset folder was moved away: `404 path_not_found` "'D:/…/datasets/shapes' does not exist" with the hint "pass the dataset root: the folder holding data.yaml, …", which the user cannot do here. `GET /api/datasets/{id}` answers the right "the folder of dataset 'shapes' is gone … move the folder back". | fixed in this PR: `crates/folo-server/src/real/models.rs` `eval_dataset` dropped the entry's `folder_gone` error and fell back to the run's recorded path, whose index build failed with the registration error of `src/index.rs:188-192` |
 
 ### Repros
 
@@ -43,7 +43,11 @@ in-browser WebGPU check is single-image inference.
 - **s4-models-2**: Playground, Browse files → a JPEG cut in half. After: "truncated-half.jpg could not be decoded: the
   file may be truncated or damaged." (the format is told by the first bytes, as elsewhere in `intake.ts`). Test:
   `web/src/routes/playground/intake.test.ts` (`calls a file of a readable format that does not decode damaged…`).
-- **s4-models-4**: seed data; move `data/datasets/shapes` away; open `#/models/m_c527-last` (cached or not).
+- **s4-models-4**: seed data; move `data/datasets/shapes` away; open `#/models/m_c527-last` (cached or not). After:
+  the registered dataset's "the folder of dataset 'shapes' is gone … move the folder back"; unregistered too: "the
+  folder of dataset 'shapes' this model trained on is gone", hint "move the folder back … or POST /api/val". Test:
+  the end of `crates/folo-server/tests/real_runs/training.rs` (`train_evaluate_predict_and_reload`: moved away,
+  unregistered, moved back).
 
 ### Checked, not bugs
 
@@ -63,6 +67,5 @@ in-browser WebGPU check is single-image inference.
 
 ## Not done
 
-- s4-models-4's server fix (needs a build slot; next round of this PR).
 - Desktop's sibling of s4-models-1.
 - An ONNX validity check beyond the header (no onnx runtime on this machine).
