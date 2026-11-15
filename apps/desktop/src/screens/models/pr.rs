@@ -38,6 +38,21 @@ pub(super) fn mean_curve(pr: &[PrCurve]) -> Vec<(f32, f32)> {
     trim_tail(pts)
 }
 
+/// The operating points on the chart as (recall, precision, class; None for the whole model): each
+/// lit class's from this evaluation, else the whole model's from its run's stored metrics. A file's
+/// stored numbers (imported, published) may be on another dataset than these curves: no dot
+/// (`detail::run_metrics`).
+pub(super) fn operating_dots(m: &Model, ev: &ModelEval, lit: &[u32]) -> Vec<(f32, f32, Option<u32>)> {
+    let whole =
+        super::detail::run_metrics(m).filter(|_| lit.is_empty()).map(|mm| (mm.recall, mm.precision, None));
+    let classes = ev
+        .per_class
+        .iter()
+        .filter(|c| lit.contains(&c.class))
+        .map(|c| (c.recall, c.precision, Some(c.class)));
+    whole.into_iter().chain(classes).collect()
+}
+
 impl FoloApp {
     /// The class isolated on the PR chart: the hovered row, else the focused one, else the pin.
     pub(super) fn pr_isolated(&self, ev: &ModelEval, window: &Window) -> Option<u32> {
@@ -118,14 +133,10 @@ impl FoloApp {
         chart.x_ticks = Some(4);
         // The operating point (recall and precision at the one threshold with the best mean F1):
         // the lit classes' in their hue, else the whole model's in ink.
-        if lit.is_empty()
-            && let Some(mm) = &m.metrics
-        {
-            chart.dots.push((mm.recall, mm.precision, t.text_primary));
-        }
-        for c in ev.per_class.iter().filter(|c| lit.contains(&c.class)) {
-            chart.dots.push((c.recall, c.precision, t.class_stroke(c.class)));
-        }
+        chart.dots = operating_dots(m, ev, &lit)
+            .into_iter()
+            .map(|(r, p, c)| (r, p, c.map_or(t.text_primary, |c| t.class_stroke(c))))
+            .collect();
         chart.ease_key = crate::charts::ease_key(&m.id);
         chart.height = PLOT_H;
         chart.hover = self.pr_hover;
@@ -250,5 +261,22 @@ mod tests {
     fn a_curve_ends_at_its_last_recall_with_precision() {
         assert_eq!(trim_tail(vec![(0., 1.), (0.5, 0.5), (1., 0.)]), vec![(0., 1.), (0.5, 0.5)]);
         assert!(trim_tail(vec![(0., 0.), (1., 0.)]).is_empty());
+    }
+
+    #[test]
+    fn a_files_stored_metrics_never_draw_the_evaluations_operating_point() {
+        use crate::api::{Backend, mock::MockBackend};
+        let api = MockBackend::new(4200, true);
+        let run_model = api.models().unwrap().into_iter().find(|m| m.run_id.is_some()).unwrap();
+        let ev = api.model_eval(&run_model.id).unwrap();
+        let mm = run_model.metrics.unwrap();
+        // A run's model: its own operating point in ink when no class is lit.
+        assert_eq!(operating_dots(&run_model, &ev, &[]), vec![(mm.recall, mm.precision, None)]);
+        // A file (imported, published) evaluated here: its stored precision and recall are not
+        // this evaluation's, so no whole-model dot; a lit class still gets its own from `ev`.
+        let file = Model { run_id: None, ..run_model };
+        assert!(operating_dots(&file, &ev, &[]).is_empty());
+        let c = &ev.per_class[0];
+        assert_eq!(operating_dots(&file, &ev, &[c.class]), vec![(c.recall, c.precision, Some(c.class))]);
     }
 }

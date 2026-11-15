@@ -186,13 +186,21 @@ export class BrowserEngine {
     backend: Backend;
     image: () => Promise<Blob>;
     options: { conf: number; iou: number; maxDet: number };
+    /** Aborted when a newer request replaces this one: it stops before decoding and before detecting. */
+    signal?: AbortSignal;
   }): Promise<Prediction> {
     const entry = this.#detector(req);
     entry.users++;
+    const superseded = () => {
+      if (req.signal?.aborted) throw new DOMException('Superseded', 'AbortError');
+    };
     try {
       const det = await entry.detector;
       this.phase = 'ready';
+      // Requests replaced while the detector loaded all wake here: only the latest decodes and runs.
+      superseded();
       const pixels = await this.decode(await req.image());
+      superseded();
       const p = await det.detect(pixels, undefined, undefined, req.options);
       this.info = det.info();
       return p;

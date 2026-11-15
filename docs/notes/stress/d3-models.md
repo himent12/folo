@@ -26,13 +26,13 @@ on single images only (the GPU was busy training).
 
 | id | severity | what | status |
 |---|---|---|---|
-| d3-models-1 | annoying | Local CPU/GPU: every superseded run (IoU arrow key held, slider steps) still decodes and infers, one after the other; the wanted answer comes 6-15 s after the last key instead of after one inference | fixed in this PR; SIBLING Studio WebGPU |
+| d3-models-1 | annoying | Local CPU/GPU: every superseded run (IoU arrow key held, slider steps) still decodes and infers, one after the other; the wanted answer comes 6-15 s after the last key instead of after one inference | fixed in this PR; SIBLING Studio in-browser engine, fixed too (round 2) |
 | d3-models-2 | annoying | Model page of a published model: headline tiles stay "–" after it was evaluated, while the caption names the evaluated dataset and split | caption fixed with d3-models-7; the "–" deferred |
 | d3-models-3 | polish | Playground header "300 detections ≥ 0.00" while the threshold is 0.001 | fixed in this PR |
 | d3-models-4 | polish | Models list: mAP50 at 3 decimals ("0.000") beside mAP50-95 widened to 6 ("0.000008") reads as mAP50 < mAP50-95 | deferred |
 | d3-models-5 | polish | 80-class confusion matrix: one-letter column heads, the last overlaps "Missed"; 1280 px window: class table truncates "circle" to "cir…" | deferred |
 | d3-models-6 | polish | A 1x1 image fills the stage and its thumbnail as a radial glow fading to black (linear upscale against a dark edge) instead of a flat square | deferred |
-| d3-models-7 | annoying | (review round 1) Model page of an imported or published file: its stored metrics are captioned with this server's evaluation dataset and split, and its stored mAP50 / AP50 labels the fresh curves' "All classes" row and legend | fixed in this PR; SIBLING Studio legend |
+| d3-models-7 | annoying | (review round 1) Model page of an imported or published file: its stored metrics are captioned with this server's evaluation dataset and split, and its stored mAP50 / AP50 labels the fresh curves' "All classes" row and legend | fixed in this PR (chart dot in round 2); SIBLING Studio legend, fixed too (round 2) |
 
 ### d3-models-1: superseded local runs all execute
 
@@ -47,9 +47,11 @@ before anything, again under the load lock before revalidating the weights (each
 up to the 2 s connect / 15 s answer timeout apiece against a server out of reach), and `run` again after taking the
 predictor lock, answering `superseded` (an answer the app drops by its seq anyway). Test: `local::tests::superseded_runs_queued_behind_the_predictor_are_skipped`. SIBLING: the Server
 target queues every `/api/predict` on the server too (not changed: the server is another lane's area). SIBLING
-(review round 1): Studio's in-browser engine resumes every request that awaited the detector load and decodes and
-detects it, superseded or not (`web/src/lib/inference/browser.ts:193-196`; the only cancellation check is before the
-load, `web/src/routes/playground/predict.ts:61`). Not changed here: Studio's code.
+(review round 1): Studio's in-browser engine resumed every request that awaited the detector load and decoded and
+detected it, superseded or not (`web/src/lib/inference/browser.ts`; the only cancellation check was before the
+load, `web/src/routes/playground/predict.ts:61`). Fixed in round 2: `BrowserEngine.predict` takes the request's
+abort signal and stops after the load and after decoding; test `web/src/lib/inference/browser.test.ts` "skips
+requests superseded while the detector loaded".
 
 ### d3-models-2: published model's headline tiles stay "–" (the "–" deferred)
 
@@ -74,10 +76,14 @@ the precision-recall panel's "All classes" row and legend showed the stored mAP5
 Studio already names no dataset for a file's metrics (`web/src/routes/model/KpiSummary.tsx:54,63`). Fix:
 `headline_source` and `run_metrics` (`apps/desktop/src/screens/models/detail.rs`): a model no run made gets no
 dataset in its caption, and its stored numbers stay out of the evaluation panel (`class_table.rs`, `pr.rs`; the
-legend's "All classes" reads "–" at rest, its curve still reads at the cursor). Test:
-`screens::models::detail::tests::a_files_stored_metrics_never_take_the_evaluations_dataset`. SIBLING: Studio's
-curve legend still labels the fresh mean curve with the stored AP50 (`web/src/routes/Model.tsx:366`,
-`web/src/routes/model/PrCurves.tsx:186,274`); not changed here.
+legend's "All classes" reads "–" at rest, its curve still reads at the cursor). Round 2: the chart's whole-model
+operating-point dot came from the stored precision / recall too; `pr::operating_dots` takes it from `run_metrics`
+only. Tests: `screens::models::detail::tests::a_files_stored_metrics_never_take_the_evaluations_dataset`,
+`screens::models::pr::tests::a_files_stored_metrics_never_draw_the_evaluations_operating_point`. Studio sibling
+(round 2, fixed here): its curve legend labelled the fresh mean curve with the stored AP50
+(`web/src/routes/Model.tsx`, `PrCurves.tsx:186`); Model.tsx now passes the stored AP50 only for a run's model, so a
+file's legend reads the evaluation's mean. Test: `web/src/routes/Model.test.tsx` "never labels an imported file's
+curves with the AP50 stored in the file".
 
 ## Gates
 

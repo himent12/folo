@@ -67,6 +67,7 @@ export function ask(r: {
       backend: on,
       image: () => imageBlob(s, signal),
       options: { conf: options.conf, iou: options.iou, maxDet: options.max_det },
+      signal,
     });
   });
 }
