@@ -106,7 +106,7 @@ Every run of the lane and lane `base`'s controls, P1, proxy-val COCO AP of `best
 | flip-s0 | `distill.consensus=flip` (removed since) | 0.1533 | 0.248 | 0.158 | 0.070 | 0.236 | 0.338 |
 | t4-s0 | `distill.temperature=4` | 0.1565 | 0.248 | 0.164 | 0.071 | 0.245 | 0.341 |
 | t4-s1 | `distill.temperature=4`, seed 1 | 0.1548 | 0.247 | 0.162 | 0.074 | 0.241 | 0.347 |
-| t4-s2 | `distill.temperature=4`, seed 2 | PENDING | | | | | |
+| t4-s2 | `distill.temperature=4`, seed 2 | 0.1538 | 0.248 | 0.158 | 0.072 | 0.235 | 0.353 |
 | blend-s0 | `loss.cls_gain=0.25`, `distill.cls_gain=0.25` | PENDING | | | | | |
 
 (the `ctl` and `cls1` rows give AP per seed and the 3-seed means of the other columns.)
@@ -135,6 +135,36 @@ removed from the branch (code, tests, docs). Its averaged targets are softer, as
 (469 against 528 img/s at epoch end, both with the COCO control on the same GPU). Horizontal-flip augmentation
 (`fliplr` 0.5) already shows the student both orientations, which may be why the mirrored view adds no information.
 
+**T = 4.** `t4-s0` gave 0.1565 against 0.1536 for `kd-s0` (T = 1): +0.0029, above the 0.002 seed noise, all of it
+in AP75 (0.164 against 0.160; AP50 equal, AP_L 0.341 against 0.349). The temperature acts on the DFL term only (the
+class term has none); at T = 4 the softened teacher distributions spread over more bins than the two-bin floor and
+the T² factor makes the term about 2.6 times larger (epoch 20: dfl 0.811 against 0.315). Internal mAP50-95 e10 / e20
+0.1115 / 0.1559 against 0.1041 / 0.1529. Seeds 1 and 2 gave 0.1548 and 0.1538, closer to `kd-s0`: the 3-seed mean
+of `t4` (0.1550) is only +0.0014 over the single `kd-s0`, so T = 4 over T = 1 is a seed-0 choice, not a shown gain
+(`kd` has one seed; its seed 1 was stopped at its start to give `t4`'s seeds the GPU, seed 2 was dropped).
+
+BLEND-PLACEHOLDER
+
+**Choice.** `t4` (`--teacher` with T = 4, class gain 0.5, DFL gain 1.5, one view): the best seed-0 arm by more
+than the 0.002 noise over `kd-s0`, and no simpler arm comes within 0.002 of it (`kc` -0.007, `kdl` -0.011, `kd`
+-0.003). Both terms stay (each alone is clearly worse); the temperature stays a tunable key; the flip consensus is
+removed. Since the gate passed, `--teacher` alone now starts at these values (T = 4 in `DistillConfig::default`,
+docs/MODEL.md §8.9, docs/CLI.md).
+
+**Gate** (3 seeds per side, proxy-val COCO AP of `best.folo`; table `proxy/logs/table-distill.md` from
+`proxy/bin/table.py --runs`):
+
+| arm | seeds | AP mean | AP min-max | AP50 | AP75 | AP_S | AP_M | AP_L |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| t4 (chosen) | 0 1 2 | 0.1550 | 0.1538-0.1565 | 0.248 | 0.161 | 0.072 | 0.240 | 0.347 |
+| cls1 (matching control, total class gain 1.0) | 0 1 2 | 0.1281 | 0.1267-0.1296 | 0.213 | 0.131 | 0.061 | 0.195 | 0.288 |
+| ctl (defaults) | 0 1 2 | 0.1247 | 0.1238-0.1255 | 0.204 | 0.130 | 0.062 | 0.190 | 0.281 |
+
+`t4` is +0.0269 AP over its matching control `cls1` (bar +0.010) and +0.0303 over `ctl`; its lowest seed (0.1538)
+is above the highest control seed (0.1296): **the gate passes** on the proxy. The gain is spread over every column
+(AP50 +0.035, AP75 +0.030, AP_S +0.011, AP_M +0.045, AP_L +0.059 over `cls1`): the AP50-for-class, AP75-for-DFL split
+the design predicted does not show at this distance from the teacher.
+
 ## What is not shown
 
 - **The proxy flatters distillation.** P1 is a 20-epoch, 320 px folo-n trained from scratch on 20,000 images next to
@@ -151,6 +181,10 @@ removed from the branch (code, tests, docs). Its averaged targets are softer, as
   teacher's cost alone, unloaded, is not measured.
 
 ## Leftovers: the full-scale test (proposed, not run)
+
+Smaller leftovers: `kd` (T = 1) has one seed, so T = 4 over T = 1 is not shown beyond seed 0; doubled gains
+(the optional arm) were not tried; the cost split between the teacher forward and the loss path is not profiled; no
+unloaded speed A/B.
 
 The control is lane `base`'s full-COCO run `D:/folo-data/runs-hill4/coco/n-r5-ctl` (folo-n from scratch, 640 px,
 64 epochs, batch 16 x accumulate 4, AMP, seed 0, origin/main 1436ad68). Two forms of its distillation twin:
@@ -198,12 +232,7 @@ per-process numbers) read 13.5-13.7 GiB during `kc-s0` plus the COCO control; th
 measured. No unloaded A/B was taken (the COCO control occupied the GPU for this lane's whole time).
 
 From about 17:30 a game ran on the same GPU as well (`nvidia-smi`): `t4-s0` took 33-903 s per epoch, so its wall
-time is not a cost number, and runs after it are slower several-fold; accuracy does not depend on load.
-
-**T = 4.** `t4-s0` gave 0.1565 against 0.1536 for `kd-s0` (T = 1): +0.0029, above the 0.002 seed noise, all of it
-in AP75 (0.164 against 0.160; AP50 equal, AP_L 0.341 against 0.349). The temperature acts on the DFL term only (the
-class term has none); at T = 4 the softened teacher distributions spread over more bins than the two-bin floor and
-the T² factor makes the term about 2.6 times larger (epoch 20: dfl 0.811 against 0.315). Internal mAP50-95 e10 / e20
-0.1115 / 0.1559 against 0.1041 / 0.1529. On seed 0 `t4` is the candidate configuration; its seeds 1 and 2 run next.
-
-RESULTS-CONTINUE (successor: blend row, the choice, the 3-seed gate of t4 against cls1)
+time is not a cost number, and runs after it are slower several-fold; accuracy does not depend on load. `t4-s1`
+(104.7 s per epoch, 239 img/s) and `t4-s2` (66.4 s, 393 img/s) ran under the same mixed load plus other agents'
+builds and test suites; T = 4 itself adds only a division before the softmax (not measured
+separately).
