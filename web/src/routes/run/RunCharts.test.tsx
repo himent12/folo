@@ -155,6 +155,30 @@ describe('the live KPI strip', () => {
     expect(tile('Final throughput')).toBeDefined();
     v.c.unmount();
   });
+
+  it('says mosaic is off only from the epoch the trainer closes it (stress s3-live-1)', () => {
+    // 3 epochs, mosaic closed for the last 1: epochs 1 and 2 train with it. `Run.epoch` is the epoch in progress.
+    const run = {
+      ...base,
+      config: { ...base.config, epochs: 3, augment: { ...base.config.augment, close_mosaic: 1 } },
+      resolved: null,
+      status: 'running',
+      epoch: 2,
+      epochs: 3,
+      step: 60,
+      steps_per_epoch: 40,
+      best: null,
+    } as const;
+    let v = show(run, { steps: [step(60, 40)] });
+    expect(v.model.closeText.get().cap).toBe('Mosaic off after epoch 2');
+    v.c.unmount();
+    v = show({ ...run, status: 'failed' }, { steps: [step(60, 40)] });
+    expect(v.model.closeText.get().cap).toBe('Mosaic off after epoch 2');
+    v.c.unmount();
+    v = show({ ...run, epoch: 3, step: 90 }, { steps: [step(90, 40)] });
+    expect(v.model.closeText.get().cap).toBe('Mosaic off · final epoch');
+    v.c.unmount();
+  });
 });
 
 describe('the run charts when the history failed to load', () => {
