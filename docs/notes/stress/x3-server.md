@@ -32,6 +32,7 @@ and ports 18140-18149) the way FOLO Studio and FOLO Desktop drive it, and harder
 | x3-server-1 | blocker | Registering a folder that is not a dataset (a drive, `C:/Windows/WinSxS`) stats every file below it before it finds out (386 s), and every dataset delete waits for it meanwhile | fixed |
 | x3-server-7 | blocker | A truncated `datasets.json` loads no dataset and `GET /api/datasets` answers an empty list: both apps say "No datasets yet" while every registration is refused | fixed |
 | x3-server-6 | annoying | Registering the folder above a dataset says "has 40 images but no labels — label them first" | fixed |
+| x3-server-9 | annoying | A copy of a run folder next to it (a backup) lists the run twice under one id | fixed |
 | x3-server-4 | annoying | A dataset named `nul` cannot be made ("does not exist", upload 500) | duplicate of s1-datasets-5, fixed there |
 | x3-server-5 | polish | A dataset archive with a file and a folder of one name answers `500 io_error` | fixed |
 | x3-server-2 | polish | A token sent as `?token=` (never accepted) is written to the server log | fixed |
@@ -79,6 +80,14 @@ Repro: `folo serve --token …`; `GET /api/runs?token=…` answers 401 and stder
 uri=/api/runs?token=… }`. Cause: the trace layer's `DefaultMakeSpan` records the whole URI. Fix: `request_span`
 (`lib.rs`) records method and path only, like `log_request` already did.
 
+### x3-server-9: a copied run folder is listed twice
+
+Repro: `runs/run_17a6` copied to `runs/run_17a7` (a backup next to it); on start `GET /api/runs` listed run_17a6 twice
+and both apps showed two identical rows; nothing in the log. Cause: `Runs::open` (`runs/registry.rs`) loaded every
+folder's `run.json` without looking at the id. Fix: one run per id, from the folder named after it (else the first by
+name); the copies are skipped with a WARN naming both folders and are not touched. Test: `runs::tests`
+`a_copied_run_folder_is_loaded_once`.
+
 ### x3-server-8: one warning per listing
 
 Fix: `Models::warn_skipped` (`models.rs`) remembers each skipped file's version (path, size, modification time) and
@@ -105,8 +114,10 @@ warns once per version, for run models, the models folder and published weights.
 - Damaged data dirs: a truncated or empty `run.json` is skipped with a WARN naming the file; missing weights drop the
   models and keep the run; a dataset folder gone stays listed with "the folder of dataset 'x' is gone".
 
+- A second `folo serve` on one data dir exits with `data_dir_in_use` naming the running server's URL; a taken port is
+  `bind_failed` with a hint; after a kill -9 the stale `serve.lock` is taken over at once.
+
 ## Not done
 
-A second server on one data dir, a taken port and a stale `serve.lock` after a kill; kills during an upload, a label
-save and synthetic generation; memory after several runs (575 MB working set after one tiny run, not followed up);
-`runs` as a file and two run folders with one id start without a warning (not dug into).
+Kills during an upload, a label save and synthetic generation; memory after several runs (575 MB working set after
+one tiny run, not followed up); `runs` as a file starts with no runs and no warning (not dug into).

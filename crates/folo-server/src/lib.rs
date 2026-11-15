@@ -247,7 +247,7 @@ async fn guard_host(State(allowed): State<Arc<[String]>>, req: Request, next: Ne
 
 /// The span of a request: its method and path, without headers or the query string, so a token a client sends
 /// (`Authorization`, or a `?token=` the server never accepts) never reaches the log (x3-server-2).
-fn request_span<B>(req: &axum::http::Request<B>) -> tracing::Span {
+fn request_span(req: &Request) -> tracing::Span {
     tracing::info_span!("request", method = %req.method(), uri = req.uri().path(), version = ?req.version())
 }
 

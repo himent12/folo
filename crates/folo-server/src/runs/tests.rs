@@ -459,6 +459,26 @@ fn a_cloud_run_followed_elsewhere_is_not_deleted() {
     runs.shutdown(None);
 }
 
+/// A copy of a run folder next to it (a backup, `run_a - Copy`) has the same id: one run is loaded, from the folder
+/// named after the id, not two rows under one id (x3-server-9).
+#[test]
+fn a_copied_run_folder_is_loaded_once() {
+    let dir = TestDir::new("runs-copied");
+    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"orig"}"#).unwrap();
+    let bytes = serde_json::to_vec(&queued_file("run_a", config)).unwrap();
+    for folder in ["run_0", "run_a", "run_a - Copy"] {
+        std::fs::create_dir_all(dir.join(folder)).unwrap();
+        std::fs::write(dir.join(folder).join("run.json"), &bytes).unwrap();
+    }
+    let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+    let list = runs.entries();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].dir(), dir.join("run_a"), "the folder named after the id is the run");
+    // The skipped copies are left as they were (the loaded run was marked stopped, they were not touched).
+    assert_eq!(std::fs::read(dir.join("run_0/run.json")).unwrap(), bytes);
+    runs.shutdown(None);
+}
+
 /// A run named past today's 64-character limit by an older version still resumes, its config sent back as it is.
 #[test]
 fn a_run_with_a_legacy_long_name_resumes() {
