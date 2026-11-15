@@ -1,6 +1,7 @@
 //! Client-side state: what has been fetched from the backend, live run data, and decoded images.
 
 mod best;
+mod image_queue;
 mod images;
 mod live;
 
@@ -10,9 +11,13 @@ use std::sync::Arc;
 use crate::api::*;
 
 pub use best::better_model;
+pub use image_queue::LoadQueue;
 pub use images::{
     ImageCache, ImgKey, ImgKind, ImgSlot, decode_upright, to_render_image, to_render_image_within,
 };
+
+/// A queued image fetch: the backend call that answers it (run off the UI thread).
+pub type ImageJob = Box<dyn FnOnce(&dyn Backend) -> ApiResult<ImageData> + Send>;
 pub use live::{Derived, RunData};
 
 /// A value fetched from the backend.
@@ -98,6 +103,8 @@ pub struct Store {
     /// 0 can't undo it.
     lengths: HashMap<String, (u64, u32)>,
     pub images_px: ImageCache,
+    /// Image fetches waiting to start, a few at a time, newest first.
+    pub image_queue: LoadQueue<ImageJob>,
     /// Throughput history for the system card (GPU util samples), newest last.
     pub gpu_util: VecDeque<f32>,
     /// How many GPUs the server's last `/system` answer listed: what holds while it is asked again.
@@ -128,6 +135,7 @@ impl Store {
             resumed: Default::default(),
             lengths: HashMap::new(),
             images_px: ImageCache::default(),
+            image_queue: LoadQueue::default(),
             gpu_util: VecDeque::new(),
             last_gpu_count: None,
         }
