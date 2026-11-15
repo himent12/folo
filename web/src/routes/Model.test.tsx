@@ -103,6 +103,33 @@ describe('Model: what was evaluated', () => {
   });
 });
 
+// s4-models-1 (and its review round 1): "Trained for" reads the epochs the run finished from its history, never the
+// planned count or `Run.status` / `Run.epoch` arithmetic; without the history it says the number is the plan.
+describe('Model: how long it trained', () => {
+  it('says how many of the planned epochs the run finished, a completed run that stopped early too', async () => {
+    const api = hub.api as MockApi;
+    const m = await api.model('m_fast_n');
+    const tw = m.trained_with!;
+    const real = api.runMetrics.bind(api);
+    api.runMetrics = async (id, s, every) => {
+      const h = await real(id, s, every);
+      return { ...h, epochs: h.epochs.slice(0, 3) };
+    };
+    await open('m_fast_n');
+    const shown = await until(() => text('#model-trained-for dd').includes(' of ') && text('#model-trained-for dd'), 'the epochs trained');
+    expect(shown).toBe(`3 of ${tw.epochs.toLocaleString('en-US')} epochs at ${tw.imgsz} px`);
+  });
+
+  it('labels the plan as planned when the run’s history does not load', async () => {
+    const api = hub.api as MockApi;
+    const tw = (await api.model('m_fast_n')).trained_with!;
+    api.runMetrics = () => Promise.reject(new ApiError(500, 'internal', 'boom'));
+    await open('m_fast_n');
+    await until(() => text('#pr-title').includes('fasteners'), "the run's dataset");
+    expect(text('#model-trained-for dd')).toBe(`${tw.epochs.toLocaleString('en-US')} epochs planned at ${tw.imgsz} px`);
+  });
+});
+
 describe('Model on a phone: the work before the summary', () => {
   const width = window.innerWidth;
   const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });

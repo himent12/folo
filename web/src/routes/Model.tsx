@@ -39,8 +39,8 @@ import Callout from './run/Callout';
 import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
 import { media } from '$lib/design/tokens';
 import KpiSummary from './model/KpiSummary';
-import DetailsList from './model/DetailsList';
-import { weightsEpoch } from './model/weightsEpoch';
+import DetailsList, { type ModelContext } from './model/DetailsList';
+import { finishedEpochs, weightsEpoch } from './model/weightsEpoch';
 import ConfusionPanel from './model/ConfusionPanel';
 
 export default function Model() {
@@ -67,15 +67,20 @@ export default function Model() {
       { id: 'model-copy-id', label: 'Copy model id', match: [m.id], icon: Copy, run: () => void copyText(m.id, 'model id') },
     ];
   });
-  const context = new Resource<{ run: Run | null; dataset: Dataset | null; parent: ModelT | null }>(async (s) => {
+  // `epochs`: how many the run finished, from its history (model/weightsEpoch); null while not known.
+  const context = new Resource<ModelContext>(async (s) => {
     const rid = runId.get();
-    if (!rid) return { run: null, dataset: null, parent: null };
+    if (!rid) return { run: null, dataset: null, parent: null, epochs: null };
     const run = await hub.api.run(rid, s).catch(() => null);
+    // Every epoch and (with `every` at the run's step count) next to no steps.
+    const epochs = run ? await hub.api.runMetrics(rid, s, Math.max(1, run.step)).then((h) => finishedEpochs(h.epochs), () => null) : null;
     const dataset = run ? await hub.api.dataset(run.config.dataset_id, s).catch(() => null) : null;
     const from = origin(run?.config.weights);
     const parent = from.kind === 'model' ? await hub.api.model(from.id, s).catch(() => null) : null;
-    return { run, dataset, parent };
+    return { run, dataset, parent, epochs };
   });
+  // A run resumed elsewhere that ends changes the models: the run and its epochs are read again with them.
+  refreshOnModelsChange(context);
   const lineage = computed(() => {
     const c = context.data;
     return c?.run ? origin(c.run.config.weights, c.parent ? [c.parent] : []) : null;
@@ -190,6 +195,7 @@ export default function Model() {
 
   const m = () => model.data!;
   const run = () => context.data?.run;
+  const done = () => context.data?.epochs ?? null;
   const head = () => m().head ?? 'o2m';
 
   // Where the weights started: the run's `weights`, a model (linked), an imported file, or nothing.
@@ -214,7 +220,7 @@ export default function Model() {
               {run()?.name ?? m().run_id}
             </a>
           </span>
-          {weightsEpoch(m(), run()) ? <span>{weightsEpoch(m(), run())}</span> : null}
+          {weightsEpoch(m(), run(), done()) ? <span>{weightsEpoch(m(), run(), done())}</span> : null}
           {lineageNote()}
         </>
       ) : m().source === 'published' ? (

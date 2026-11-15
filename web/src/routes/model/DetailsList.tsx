@@ -24,12 +24,22 @@ import Meta from '$lib/ui/Meta';
 import { HEAD_LABEL, PRECISION_LABEL } from '../run/resolved';
 import { trainedFor, weightsEpoch } from './weightsEpoch';
 
+/**
+ * The source run, its dataset, the model it was fine-tuned from, and the epochs the run finished (from its history,
+ * ./weightsEpoch finishedEpochs; null while not known).
+ */
+export interface ModelContext {
+  run: Run | null;
+  dataset: Dataset | null;
+  parent: Model | null;
+  epochs: number | null;
+}
+
 export interface DetailsListProps {
   m: Model;
   tp: Resource<ThroughputTable | null>;
   run: Run | null | undefined;
-  /** The source run, its dataset and the model it was fine-tuned from. */
-  context: Resource<{ run: Run | null; dataset: Dataset | null; parent: Model | null }>;
+  context: Resource<ModelContext>;
   source: EvalSource;
   ev: Evaluation | null;
   lineage: Origin | null;
@@ -52,6 +62,7 @@ export default function DetailsList(props: DetailsListProps) {
   const aboutOpen = bindable(props, 'aboutOpen');
   const here = computed(() => measuredLatency(props.tp.data, props.m.arch, props.m.imgsz));
   const m = () => props.m;
+  const done = () => props.context.data?.epochs ?? null;
   const src = () => props.source;
   const h = () => here.get()!;
 
@@ -98,13 +109,13 @@ export default function DetailsList(props: DetailsListProps) {
         {m().trained_with ? (
           <div class="kv" id="model-trained-for">
             <dt>Trained for</dt>
-              <dd class="num">{trainedFor(m(), props.run)}</dd>
+              <dd class="num">{trainedFor(m(), props.run, done())}</dd>
           </div>
         ) : null}
-        {weightsEpoch(m(), props.run) ? (
+        {weightsEpoch(m(), props.run, done()) ? (
           <div class="kv">
             <dt>Weights from</dt>
-            <dd class="num">{weightsEpoch(m(), props.run)}</dd>
+            <dd class="num">{weightsEpoch(m(), props.run, done())}</dd>
           </div>
         ) : null}
         {props.stored ? (
