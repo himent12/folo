@@ -24,6 +24,7 @@ Three different things in this repository are called "bench":
 | [`learn/`](learn/README.md) | Trained from scratch on the same COCO subset, how do FOLO and Ultralytics compare, and what do their augmentations produce? | [docs/notes/hill/learn.md](../docs/notes/hill/learn.md) |
 | `fusion/` | Which post-processing (NMS variants, box fusion) scores best on FOLO's pre-NMS candidates? | [docs/notes/hill/r3-fusion.md](../docs/notes/hill/r3-fusion.md) |
 | `refine/` | Can a small learned box refiner (PyTorch, on FOLO's feature dump) tighten the boxes? | [docs/notes/hill/r3-refine.md](../docs/notes/hill/r3-refine.md) |
+| [`distill/`](distill/README.md) | How much of the folo-n to folo-s gap is in the scores and how much in the boxes, and is folo-s a better localiser on the same objects? | [docs/notes/hill/r4-distill.md](../docs/notes/hill/r4-distill.md) |
 
 `fusion/` and `refine/` are the working code of two lanes of hill-climb 3. Each script's docstring says what
 it does; the notebooks above say how they were used. `fusion/` reads the dump that
