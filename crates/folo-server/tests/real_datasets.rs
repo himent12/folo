@@ -642,10 +642,27 @@ async fn a_damaged_registry_is_an_error_not_an_empty_list() {
     let e = err(&app, get("/api/datasets"), StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
     assert!(e.message.contains("lists 1 dataset this server did not load"), "{}", e.message);
     assert!(e.hint.unwrap().contains("restart folo serve"));
+    // Registering another dataset meanwhile neither lists it alone nor gets past the error (review round 2).
+    let other = t.join("other");
+    write_shapes(&other, 3);
+    let e = err(
+        &app,
+        post_json("/api/datasets", json!({ "path": other })),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+    )
+    .await;
+    assert!(e.hint.unwrap().contains("restart folo serve"), "{}", e.message);
+    let e = err(&app, get("/api/datasets"), StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
+    assert!(e.message.contains("lists 1 dataset this server did not load"), "{}", e.message);
+    assert_eq!(std::fs::read_to_string(home.join("datasets.json")).unwrap(), text, "nothing was written");
     drop(app);
     let app = restart(&home);
     let list: DatasetList = ok(&app, get("/api/datasets")).await;
     assert_eq!(list.datasets.len(), 1, "a restart loads the fixed registry");
+    let _: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": other }))).await;
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert_eq!(list.datasets.len(), 2, "and registers again");
     // A data dir that never had a registry is simply empty.
     let fresh = restart(&t.join("fresh"));
     let list: DatasetList = ok(&fresh, get("/api/datasets")).await;

@@ -162,25 +162,19 @@ impl Labeler {
     /// read is left out (and logged), never overwritten.
     pub fn open(data_dir: &Path) -> Labeler {
         let root = data_dir.join("label");
-        let loaded: Vec<_> = std::fs::read_dir(&root)
+        // A copy of a job folder is not a second job of its id: it is skipped before loading (which closes an
+        // interrupted run and writes the job back) and is not swept.
+        let mut jobs: Vec<Arc<Job>> = crate::util::folders_by_id("labeling job", &root, "job.json")
             .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().join("job.json").is_file())
-            .filter_map(|e| match Job::load(e.path()) {
-                Ok(job) => Some((e.path(), job.id.clone(), job)),
+            .filter_map(|dir| match Job::load(dir.clone()) {
+                Ok(job) => {
+                    job.sweep();
+                    Some(Arc::new(job))
+                }
                 Err(err) => {
-                    tracing::warn!("skipping labeling job {}: {err}", e.path().display());
+                    tracing::warn!("skipping labeling job {}: {err}", dir.display());
                     None
                 }
-            })
-            .collect();
-        // A copy of a job folder is not a second job of its id (and is not swept).
-        let mut jobs: Vec<Arc<Job>> = crate::util::one_per_id("labeling job", loaded)
-            .into_iter()
-            .map(|(_, job)| {
-                job.sweep();
-                Arc::new(job)
             })
             .collect();
         jobs.sort_by_cached_key(|j| (j.lock().file.created.clone(), j.id.clone()));

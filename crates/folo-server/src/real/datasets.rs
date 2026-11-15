@@ -115,8 +115,32 @@ impl RealStore {
         }
     }
 
+    /// `Err` while `datasets.json`, unreadable when this server started, lists datasets: they were not loaded, so a
+    /// list would leave them out and registering one again could give it a second id. Said (with the file's own
+    /// error while it is still damaged) to the list, registering and unregistering until a restart loads them; a
+    /// registry fixed to list none lifts it (x3-server-7, review rounds 1 and 2).
+    pub(super) fn registry_loaded(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        if !self.registry_unread.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let n = read_registry(&self.data_dir)?.datasets.len();
+        if n == 0 {
+            self.registry_unread.store(false, Ordering::SeqCst);
+            return Ok(());
+        }
+        let (path, s) = (registry_path(&self.data_dir), if n == 1 { "" } else { "s" });
+        Err(Error::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            format!("{} lists {n} dataset{s} this server did not load when it started", path.display()),
+        )
+        .hint("restart folo serve to load them"))
+    }
+
     /// Indexes `path` and adds it to the registry.
     pub(super) fn register(&self, name: Naming, path: String, format: DatasetFormat) -> Result<Dataset> {
+        self.registry_loaded()?;
         // Registered absolute, so the registry works whatever the working directory of the next start.
         let path = absolute(Path::new(&path)).to_string_lossy().into_owned();
         // Registering a folder again (by its canonical path) returns the dataset it already is. Checked before
@@ -204,6 +228,7 @@ impl RealStore {
     /// exclusively: a run admitted under the shared lease is in the run registry before the tombstones are pruned, so
     /// it never names an id whose identity was dropped.
     pub(super) fn unregister(&self, id: &str) -> Result<()> {
+        self.registry_loaded()?;
         let mut list = self.entries.write().unwrap();
         let mut file = read_registry(&self.data_dir)?;
         let entry = list.iter().find(|e| e.reg.lock().unwrap().id == id).cloned();

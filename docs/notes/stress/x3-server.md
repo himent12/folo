@@ -48,18 +48,23 @@ recursive walk following links, a stat per file) before `folo_data::open_with` d
 `register` holds `RealStore::files` shared for all of it while `delete_dataset` takes it exclusively. Fix: a cheap
 `folo_data::detect_format` first (`index::preflight`), which registration runs before it takes the file lease; the
 hints that phrase the error (`dataset_below`, `images_under`) read at most 20,000 entries (`DIAGNOSE_ENTRIES`; review
-round 1: they used to stop after 10,000 *images*, so a wide tree without images was still walked whole). Test:
-`index::tests` `diagnostics_of_a_non_dataset_read_a_bounded_number_of_entries` (counts, no timing).
+round 1: they used to stop after 10,000 *images*, so a wide tree without images was still walked whole), also inside
+the folders below (review round 2: `dataset_below` asked `detect_format`, which reads a folder whole; now
+`looks_like_dataset` checks the names detection uses within the budget). Tests: `index::tests`
+`diagnostics_of_a_non_dataset_read_a_bounded_number_of_entries`, `looking_inside_a_folder_below_counts_against_the_budget`
+(counts, no timing).
 
 ### x3-server-7: a damaged registry is shown as an empty one
 
 Repro: copy a data dir, cut `datasets.json` in half, start: `GET /api/datasets` answered `200 {"datasets":[]}`;
 Studio's Datasets screen said "No datasets yet" and offered Register folder, which then failed; the only clue was one
 ERROR line in stderr. Cause: `RealStore::open_with_cloud` (`real/mod.rs`) loads an empty list on a registry error and
-`list_datasets` (`real/store.rs`) served it as real. Fix: while nothing is loaded, the list reads the registry again
-and answers its `500 internal` "… is malformed" with the hint "fix the JSON by hand or move the file away"; once the
-file is fixed it answers `500` "… lists N datasets this server did not load when it started", hint "restart folo
-serve" (review round 1: it answered an empty list again). Desktop's Overview showed "No datasets yet" and skeletons
+`list_datasets` (`real/store.rs`) served it as real. Fix: a registry unread at start is remembered
+(`RealStore::registry_loaded`, `real/datasets.rs`); the list reads the registry again and answers its `500 internal`
+"… is malformed" with the hint "fix the JSON by hand or move the file away"; once the file is fixed it answers `500`
+"… lists N datasets this server did not load when it started", hint "restart folo serve" (review round 1: it answered
+an empty list again). Registering and unregistering answer the same until the restart (review round 2: registering
+another dataset made the list nonempty, so it answered that one alone). Desktop's Overview showed "No datasets yet" and skeletons
 for a failed list: its idle panel and datasets strip now say the error with Retry (`SIBLING`; Studio already did).
 Tests: `tests/real_datasets.rs` `a_damaged_registry_is_an_error_not_an_empty_list`, Desktop `app::list_tests`
 `a_failed_datasets_list_is_said_on_overview`.
@@ -96,8 +101,12 @@ Repro: `runs/run_17a6` copied to `runs/run_17a7` (a backup next to it); on start
 and both apps showed two identical rows; nothing in the log. Cause: `Runs::open` (`runs/registry.rs`) loaded every
 folder's `run.json` without looking at the id. Fix: one run per id, from the folder named after it (else the first by
 name); the copies are skipped with a WARN naming both folders and are not touched. Labeling jobs and benchmarks had
-the same bug (`SIBLING`, review round 1): all three use `util::one_per_id`, before a job is swept or a benchmark's
-`tmp/` removed. Tests: `runs::tests` `a_copied_run_folder_is_loaded_once`, `util::tests` `copies_of_a_folder_load_once`.
+the same bug (`SIBLING`, review round 1): all three use `util::one_per_id`; jobs and benchmarks through
+`util::folders_by_id`, which reads only the id of each `job.json` / `bench.json`, so a copy is skipped before its loader
+would close an interrupted run or active entries and write them back (review round 2). Tests: `runs::tests`
+`a_copied_run_folder_is_loaded_once`, `util::tests` `copies_of_a_folder_load_once` and
+`folders_are_picked_by_id_before_loading`, `tests/label` `a_copied_job_folder_is_left_as_it_is` (the backup's files
+byte for byte).
 Deferred: deleting the run and restarting loads the copy (it is a run folder under `runs/`, as it was before this
 fix, when both were listed); hiding a user's backup needs tombstones by run id, a design choice.
 
@@ -105,7 +114,8 @@ fix, when both were listed); hiding a user's backup needs tombstones by run id, 
 
 Fix: `Models::warn_skipped` (`models.rs`) remembers each skipped file's version (path, size, modification time) and
 warns once per version, for run models, the models folder and published weights. Test: `models::tests`
-`a_damaged_weights_file_is_warned_about_once` (captures the log of repeated listings; review round 1).
+`a_damaged_weights_file_is_warned_about_once` (captures the log of repeated listings; review round 1) and
+`real::tests` `a_damaged_run_checkpoint_is_warned_about_once` (a run's `best.folo`, the listing that spammed; round 2).
 
 ### Deferred
 

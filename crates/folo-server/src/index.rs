@@ -228,7 +228,8 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
 pub(crate) const DIAGNOSE_ENTRIES: usize = 20_000;
 
 /// The first folder one or two levels below `dir` (in name order, at most 64 folders a level, `budget` folder entries
-/// read in all) where a dataset is detected, for a folder that is not a dataset itself.
+/// read in all, also those [`looks_like_dataset`] reads) where a dataset is found, for a folder that is not a dataset
+/// itself.
 pub(crate) fn dataset_below(dir: &Path, mut budget: usize) -> Option<PathBuf> {
     fn folders(dir: &Path, budget: &mut usize) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -247,17 +248,81 @@ pub(crate) fn dataset_below(dir: &Path, mut budget: usize) -> Option<PathBuf> {
         dirs.sort();
         dirs
     }
-    let detected = |d: &Path| folo_data::detect_format(d, folo_data::Format::Auto).is_ok();
     let first = folders(dir, &mut budget);
-    if let Some(d) = first.iter().find(|d| detected(d)) {
+    if let Some(d) = first.iter().find(|d| looks_like_dataset(d, &mut budget)) {
         return Some(d.clone());
     }
     for d in &first {
-        if let Some(found) = folders(d, &mut budget).into_iter().find(|d| detected(d)) {
+        if let Some(found) = folders(d, &mut budget).into_iter().find(|d| looks_like_dataset(d, &mut budget))
+        {
             return Some(found);
         }
     }
     None
+}
+
+/// Whether `dir` holds what [`folo_data::detect_format`] finds a dataset by, looked at within `budget` (one entry
+/// per path checked or folder entry read, a YAML read up to 64 KiB): `detect_format` reads every entry of the
+/// folder and its `annotations/`, which a folder of millions of files makes unbounded (x3-server-1, review round 2).
+/// It only phrases an error, so a dataset whose YAML is beyond the budget is missed, never walked to.
+fn looks_like_dataset(dir: &Path, budget: &mut usize) -> bool {
+    let mut charge = |n: usize| -> bool {
+        let ok = *budget >= n;
+        *budget = budget.saturating_sub(n);
+        ok
+    };
+    // The names detection takes without reading the folder: a YAML, YOLO folders, a Roboflow COCO file.
+    let named = ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"].map(|n| dir.join(n));
+    let splits = ["train", "valid", "val", "test"];
+    if !charge(named.len() + 2 + 2 * splits.len()) {
+        return false;
+    }
+    if named.iter().any(|p| p.is_file())
+        || (dir.join("images").is_dir() && dir.join("labels").is_dir())
+        || splits.iter().any(|s| dir.join(s).join("images").is_dir())
+        || splits.iter().any(|s| dir.join(s).join("_annotations.coco.json").is_file())
+    {
+        return true;
+    }
+    let ext = |p: &Path, want: &[&str]| {
+        p.extension().and_then(|e| e.to_str()).is_some_and(|e| want.iter().any(|w| e.eq_ignore_ascii_case(w)))
+    };
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    // COCO: a JSON in `annotations/` (not captions or keypoints), or one named like COCO annotations at the root.
+    for e in std::fs::read_dir(dir.join("annotations")).into_iter().flatten() {
+        if !charge(1) {
+            return false;
+        }
+        let Ok(e) = e else { continue };
+        let (p, n) = (e.path(), name(&e.path()));
+        if ext(&p, &["json"])
+            && !n.starts_with("captions")
+            && !n.starts_with("person_keypoints")
+            && p.is_file()
+        {
+            return true;
+        }
+    }
+    for e in std::fs::read_dir(dir).into_iter().flatten() {
+        if !charge(1) {
+            return false;
+        }
+        let Ok(e) = e else { continue };
+        let (p, n) = (e.path(), name(&e.path()));
+        let coco = ext(&p, &["json"])
+            && (n.contains("coco") || n.starts_with("instances") || n.contains("annotations"));
+        // YOLO: any YAML with a `train` key, read only so far.
+        let yolo = ext(&p, &["yaml", "yml"]) && {
+            use std::io::Read;
+            let mut head = String::new();
+            let read = std::fs::File::open(&p).and_then(|f| f.take(64 << 10).read_to_string(&mut head));
+            read.is_ok() && head.lines().any(|l| l.trim_start_matches('\u{feff}').starts_with("train:"))
+        };
+        if (coco || yolo) && p.is_file() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Image files under `dir` (a few levels deep) among the first `budget` entries walked, for a folder that is not a
@@ -692,6 +757,35 @@ mod tests {
         assert!(images_under(&dir, 10) < 10, "the walk stops after 10 entries");
         assert!(dataset_below(&dir, 1000).is_some());
         assert_eq!(dataset_below(&dir, 10), None, "the folder search stops after 10 entries");
+    }
+
+    /// Looking for a dataset in a folder below counts what it reads there too: a folder of many files before the
+    /// dataset uses the budget up, where `detect_format` read it whole (review round 2).
+    #[test]
+    fn looking_inside_a_folder_below_counts_against_the_budget() {
+        let dir = tmp("diagnose-inside");
+        std::fs::create_dir_all(dir.join("a-junk")).unwrap();
+        for i in 0..3000 {
+            std::fs::write(dir.join(format!("a-junk/{i:04}.txt")), b"").unwrap();
+        }
+        let set = dir.join("b-set");
+        std::fs::create_dir_all(set.join("images")).unwrap();
+        std::fs::write(set.join("coco128.yaml"), "path: .\ntrain: images\nnames: [x]\n").unwrap();
+        assert_eq!(dataset_below(&dir, DIAGNOSE_ENTRIES), Some(set.clone()), "a YAML with a train key");
+        assert_eq!(dataset_below(&dir, 1000), None, "the 3000 files of a-junk use 1000 entries up");
+        let mut budget = 1000;
+        assert!(!looks_like_dataset(&dir.join("a-junk"), &mut budget));
+        assert_eq!(budget, 0, "it stopped at the budget");
+        // What detection finds without reading the folder, and COCO.
+        std::fs::remove_file(set.join("coco128.yaml")).unwrap();
+        std::fs::create_dir_all(set.join("labels")).unwrap();
+        assert!(looks_like_dataset(&set, &mut 100), "images/ + labels/");
+        let coco = dir.join("c-coco/annotations");
+        std::fs::create_dir_all(&coco).unwrap();
+        std::fs::write(coco.join("captions_val.json"), "{}").unwrap();
+        assert!(!looks_like_dataset(coco.parent().unwrap(), &mut 100), "captions only");
+        std::fs::write(coco.join("instances_val.json"), "{}").unwrap();
+        assert!(looks_like_dataset(coco.parent().unwrap(), &mut 100));
     }
 
     #[test]

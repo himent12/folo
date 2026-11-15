@@ -363,3 +363,37 @@ async fn a_run_cut_short_by_a_restart_is_closed_as_stopped() {
     let logs: RunLogs = ok(&f.app, get(&format!("{uri}/logs"))).await;
     assert!(logs.lines.last().unwrap().message.starts_with("the server stopped during the agent run"));
 }
+
+/// A copy of a job folder made while its run was unfinished is skipped before loading: the restart closes the
+/// job's run, never the backup's, whose files stay byte for byte (review round 2).
+#[tokio::test]
+async fn a_copied_job_folder_is_left_as_it_is() {
+    let t = TestDir::new("label-copy");
+    let home = t.join("home");
+    let f = fixture(&home, vec![Step::Hold]);
+    let job = job_with_images(&f.app, 2).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    ok::<LabelJob>(&f.app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    let dir = home.join("label").join(&job.id);
+    let saved = std::fs::read(dir.join("job.json")).unwrap();
+    f.store.shutdown();
+    drop(f);
+    let copy = home.join("label").join(format!("{} - Copy", job.id));
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(dir.join("job.json"), &saved).unwrap();
+    std::fs::write(copy.join("job.json"), &saved).unwrap();
+    let names = |d: &std::path::Path| {
+        let mut v: Vec<_> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        v.sort();
+        v
+    };
+    let before = names(&copy);
+
+    let f = fixture(&home, vec![]);
+    let list: LabelJobList = ok(&f.app, get("/api/label/jobs")).await;
+    assert_eq!(list.jobs.len(), 1, "one job of its id");
+    let job: LabelJob = ok(&f.app, get(&uri)).await;
+    assert_eq!(job.run.unwrap().outcome, Some(LabelOutcome::Stopped), "the job's own run is closed");
+    assert_eq!(std::fs::read(copy.join("job.json")).unwrap(), saved, "the backup is not rewritten");
+    assert_eq!(names(&copy), before, "and nothing is added to it");
+}

@@ -214,9 +214,55 @@ pub fn one_per_id<T>(what: &str, mut loaded: Vec<(PathBuf, String, T)>) -> Vec<(
     out
 }
 
+/// The folders under `root` holding the JSON record `file`, one per id ([`one_per_id`], `what` names them), read for
+/// their `id` only: a copy is skipped before anything loads it, so the recovery a load does (closing what a
+/// previous process left active, written back) never rewrites a backup (review round 2). A folder whose id cannot
+/// be read is kept, for its loader to say why it is skipped.
+pub fn folders_by_id(what: &str, root: &Path, file: &str) -> Vec<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Head {
+        id: String,
+    }
+    let found = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|dir| dir.join(file).is_file())
+        .map(|dir| {
+            let head =
+                std::fs::read(dir.join(file)).ok().and_then(|b| serde_json::from_slice::<Head>(&b).ok());
+            // No id: a key no id has (ids have no NUL), so it is kept and its loader logs it.
+            let id = head.map_or_else(|| format!("\0{}", dir.display()), |h| h.id);
+            (dir, id, ())
+        })
+        .collect();
+    one_per_id(what, found).into_iter().map(|(dir, ())| dir).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Copies are told apart by the id in their record, before any is loaded; a record without one is kept.
+    #[test]
+    fn folders_are_picked_by_id_before_loading() {
+        let t = folo_test_support::TestDir::new("util-folders-by-id");
+        let root = t.join("label");
+        for (dir, body) in [
+            ("lj_1", r#"{"id":"lj_1","x":1}"#),
+            ("lj_1 - Copy", r#"{"id":"lj_1","x":2}"#),
+            ("lj_2", r#"{"id":"lj_2"}"#),
+            ("broken", "{"),
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("job.json"), body).unwrap();
+        }
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        let mut kept = folders_by_id("labeling job", &root, "job.json");
+        kept.sort();
+        assert_eq!(kept, [root.join("broken"), root.join("lj_1"), root.join("lj_2")]);
+    }
 
     #[test]
     fn copies_of_a_folder_load_once() {
