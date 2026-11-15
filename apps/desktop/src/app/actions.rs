@@ -591,16 +591,24 @@ mod tests {
 
     #[test]
     fn a_refused_file_deletion_says_how_to_unregister_alone() {
-        let e = ApiError::new("dataset_in_use", "the files of broken could not be checked, so they may be in that folder")
-            .with_hint("fix broken first, or unregister this dataset without files=true");
+        let e = ApiError::new(
+            "dataset_in_use",
+            "the files of broken could not be checked, so they may be in that folder",
+        )
+        .with_hint("fix broken first, or unregister this dataset without files=true");
         let body = super::removal_refused(&e, true);
         assert!(body.starts_with("the files of broken could not be checked"), "{body}");
         assert!(body.contains("“Also delete” off"), "{body}");
         assert!(!body.contains("files=true"), "API words stay out: {body}");
         // Unregistering alone failed: the server's hint, unless it speaks the API.
-        let e = ApiError::new("run_active", "run a is queued or training").with_hint("wait for it to end, or stop it first");
-        assert_eq!(super::removal_refused(&e, false), "run a is queued or training. Wait for it to end, or stop it first");
-        let e = ApiError::new("run_active", "run 'a' is still active").with_hint("stop it first: POST /api/runs/a/stop");
+        let e = ApiError::new("run_active", "run a is queued or training")
+            .with_hint("wait for it to end, or stop it first");
+        assert_eq!(
+            super::removal_refused(&e, false),
+            "run a is queued or training. Wait for it to end, or stop it first"
+        );
+        let e = ApiError::new("run_active", "run 'a' is still active")
+            .with_hint("stop it first: POST /api/runs/a/stop");
         assert_eq!(super::removal_refused(&e, false), "run 'a' is still active");
         // The server away: nothing to change in the dialog.
         let e = ApiError::new("server_unreachable", "Lost connection to folo serve.");
