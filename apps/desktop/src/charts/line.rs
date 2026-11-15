@@ -11,7 +11,7 @@ use folo_ui::{
 };
 
 use super::axis::{
-    axis_pow, even_ticks, format_step, int_ticks, nice_step, pow2_stride, pow2_ticks_every, superscript,
+    even_ticks, format_step, int_ticks, label_pow, nice_step, pow2_stride, pow2_ticks_every, superscript,
     ticks,
 };
 use super::cursor::{chip_label, cursor_x, nearest};
@@ -197,8 +197,9 @@ fn paint_line_chart(
         ticks(y0, y1, spec.y_ticks)
     };
     let ystep = nice_step(y1 - y0, spec.y_ticks);
-    // Tiny values share one power of ten, shown once ("0 5 10" and "× 10⁻³", design/README).
-    let ypow = (spec.y_fmt.is_none() && !spec.log_y).then(|| axis_pow(y0, y1, spec.y_ticks)).flatten();
+    // Tiny values share one power of ten, shown once ("0 5 10" and "× 10⁻³", design/README); a
+    // fitted axis's labels are exact decimals, so it has none.
+    let ypow = label_pow(unit.is_some(), spec.y_fmt.is_some(), spec.log_y, y0, y1, spec.y_ticks);
     let ylabels: Vec<String> = yticks
         .iter()
         .map(|v| match (spec.y_fmt, ypow) {

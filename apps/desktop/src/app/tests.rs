@@ -162,6 +162,55 @@ fn a_dialog_forgets_could_not_reach_once_the_server_answers() {
 }
 
 #[test]
+fn new_run_offers_gpu_0_only_on_a_server_that_has_a_gpu() {
+    use crate::store::Load;
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| this.open_new_run(None, w, cx));
+    // The demo server has a GPU: offered.
+    drive(&mut app, window, |this, _, _| assert_eq!(this.nr_no_gpu(), None));
+    // Not answered yet: still offered (the server decides at Start).
+    drive(&mut app, window, |this, _, _| {
+        let kept = std::mem::replace(&mut this.store.system, Load::Loading);
+        assert_eq!(this.nr_no_gpu(), None);
+        this.store.system = kept;
+    });
+    // A server with no GPU (`/api/system` gpus = [], d2-runs-2): GPU 0 is disabled, with the reason.
+    drive(&mut app, window, |this, _, _| {
+        if let Load::Ready(s) = &mut this.store.system {
+            s.gpus.clear();
+        }
+        assert!(this.nr_no_gpu().is_some_and(|why| why.contains("no GPU")));
+    });
+    // The dialog draws with it.
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| assert!(this.new_run.is_some()));
+}
+
+#[test]
+fn new_run_on_a_server_without_datasets_says_so_once() {
+    use crate::store::Load;
+    let (mut app, window) = open();
+    // Still loading: nothing yet (the list lands in a moment).
+    drive(&mut app, window, |this, w, cx| {
+        this.store.datasets = Load::Loading;
+        this.open_new_run(None, w, cx);
+        assert!(this.new_run.is_none() && this.toasts.is_empty());
+    });
+    // An empty server (d2-runs-4): Ctrl+N twice, one toast that leads to Add dataset.
+    drive(&mut app, window, |this, w, cx| {
+        this.store.datasets = Load::Ready(Vec::new());
+        this.open_new_run(None, w, cx);
+        this.open_new_run(None, w, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.new_run.is_none());
+        let shown: Vec<_> = this.toasts.iter().filter(|t| &*t.title == "Add a dataset first").collect();
+        assert_eq!(shown.len(), 1);
+        assert!(shown[0].action.as_ref().is_some_and(|(label, _)| &**label == "Add dataset"));
+    });
+}
+
+#[test]
 fn deleting_a_run_or_a_dataset_leaves_its_page_for_the_list() {
     use super::{DeleteTarget, Route};
     let (mut app, window) = open();

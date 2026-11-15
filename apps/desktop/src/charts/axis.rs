@@ -152,6 +152,14 @@ pub fn axis_pow(y0: f32, y1: f32, ticks: usize) -> Option<i32> {
     (step > 0. && step < 0.01 && top > 0.).then(|| top.log10().floor() as i32)
 }
 
+/// The power of ten a chart's y labels are written in (the "× 10⁻³" caption), if any. Only plain
+/// linear labels are scaled: a fitted 0–1 axis (`fitted`) writes every tick in full ("0.000042"),
+/// and a formatter or a log axis writes its own, so a caption over those would multiply values
+/// that already read right.
+pub fn label_pow(fitted: bool, formatted: bool, log_y: bool, y0: f32, y1: f32, ticks: usize) -> Option<i32> {
+    (!fitted && !formatted && !log_y).then(|| axis_pow(y0, y1, ticks)).flatten()
+}
+
 /// A value in a given power of ten, as legends write it: two decimals ("6.71×10⁻⁴" reads
 /// "0.67×10⁻³"), or two significant figures once it's below 0.1 ("0.011×10⁻³"), so a small
 /// value never rounds to "0.00".
@@ -248,6 +256,14 @@ mod tests {
         assert_eq!(axis_pow(0., 0.012, 3), Some(-2));
         assert_eq!(axis_pow(0., 0.0015, 3), Some(-3));
         assert_eq!(axis_pow(0., 1., 4), None);
+        // A fitted 0–1 axis writes its ticks in full ("0.000042"): no caption over them (a run's
+        // first-epoch mAP50 of 3.9×10⁻⁵ read "0.000042" under "× 10⁻⁵").
+        let f = crate::charts::domain::unit_domain(3.9e-5, 200.);
+        assert_eq!(axis_pow(f.domain.0, f.domain.1, 4), Some(-5));
+        assert_eq!(label_pow(true, false, false, f.domain.0, f.domain.1, 4), None);
+        assert_eq!(label_pow(false, false, false, 0., 0.0015, 3), Some(-3));
+        assert_eq!(label_pow(false, true, false, 0., 0.0015, 3), None);
+        assert_eq!(label_pow(false, false, true, 0., 0.0015, 3), None);
         assert_eq!(in_pow(6.71e-4, -3), "0.67×10⁻³");
         assert_eq!(in_pow(1.11e-3, -3), "1.11×10⁻³");
         assert_eq!(in_pow(1.1e-5, -3), "0.011×10⁻³");

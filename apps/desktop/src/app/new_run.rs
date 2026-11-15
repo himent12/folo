@@ -122,6 +122,27 @@ impl FoloApp {
     pub fn open_new_run(&mut self, dataset: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         // Nothing to train on until the dataset list is in (Ctrl+N included).
         if self.store.datasets.ready().is_none_or(|d| d.is_empty()) {
+            // An empty server: Ctrl+N and the palette's New run say what's missing instead of
+            // doing nothing (once, however often they're pressed).
+            const NO_DATASET: &str = "Add a dataset first";
+            if self.store.datasets.ready().is_some() && !self.toasts.iter().any(|t| &*t.title == NO_DATASET) {
+                self.toast_with(
+                    Tone::Info,
+                    NO_DATASET,
+                    Some(
+                        "Training needs a dataset: add a YOLO or COCO folder, or generate a synthetic one."
+                            .into(),
+                    ),
+                    Some((
+                        "Add dataset".into(),
+                        super::act(|this, w, cx| {
+                            this.navigate(Route::Datasets, w, cx);
+                            this.add_dataset_folder(cx);
+                        }),
+                    )),
+                    cx,
+                );
+            }
             return;
         }
         if self.new_run.is_none() {
@@ -636,6 +657,13 @@ impl FoloApp {
             (None, Some(amp)) => amp.clone(),
             (None, None) => "Mixed precision isn't available on this server".into(),
         })
+    }
+
+    /// Why Device's "GPU 0" can't be picked, if it can't: the server lists no GPU (such a run is
+    /// refused at Start). Unknown until the server's system answer lands: then it stays offered.
+    pub fn nr_no_gpu(&self) -> Option<&'static str> {
+        let system = self.store.system.ready()?;
+        system.gpus.is_empty().then_some("This server has no GPU: Auto and CPU train on its CPU")
     }
 }
 
