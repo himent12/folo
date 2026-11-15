@@ -6,8 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import type { Dataset } from '$lib/api/types';
 import { parse, router } from '$lib/router';
+import { datasetsChanged } from './datasets/changes';
 import Models from './Models';
+import Overview from './Overview';
 import Playground from './Playground';
 import Runs from './Runs';
 
@@ -42,6 +45,12 @@ const action = () =>
     return el;
   });
 
+/** Every answer already given is taken in: the microtasks it queued have run, and the page has redrawn. */
+const settled = async () => {
+  await new Promise((r) => setTimeout(r, 0));
+  flushSync();
+};
+
 const PAGES: [string, Component<Record<string, never>>, string][] = [
   ['Runs', Runs, '/runs'],
   ['Models', Models, '/models'],
@@ -64,14 +73,77 @@ describe('the first step on an empty server', () => {
     it(`${name}: with a dataset, New run`, async () => {
       const api = new MockApi('empty', 0);
       const [one] = await new MockApi('normal', 0).datasets();
-      api.datasets = async () => [one!];
+      let answered!: () => void;
+      const asked = new Promise<void>((r) => (answered = r));
+      api.datasets = async () => {
+        answered();
+        return [one!];
+      };
       open(page, path, api);
-      // Let the datasets answer (with one): the action stays New run.
-      await action();
-      await new Promise((r) => setTimeout(r, 50));
+      // The datasets have answered (with one) and the page has taken it in: the action is New run, not the loading one.
+      await asked;
+      await settled();
       const a = await action();
       expect(a.textContent).toContain('New run');
       expect(a.getAttribute('href')).toBe('#/runs/new');
+    });
+
+    // Review round 1: the runs and models answer before the datasets do; the action follows once those say "none".
+    it(`${name}: datasets answering last still turn the action into Add dataset`, async () => {
+      const api = new MockApi('empty', 0);
+      let answer!: (v: never[]) => void;
+      api.datasets = () => new Promise((r) => (answer = r));
+      open(page, path, api);
+      const before = await action();
+      expect(before.textContent).toContain('New run');
+      answer([]);
+      await settled();
+      const a = await action();
+      expect(a.textContent).toContain('Add dataset');
+      expect(a.getAttribute('href')).toBe('#/datasets?add=folder');
+    });
+
+    // Review round 1: the first dataset added in this tab or another one (the tab shown again) turns it into New run.
+    for (const how of ['a dataset action in this tab', 'the tab shown again'] as const) {
+      it(`${name}: the first dataset, after ${how}, turns Add dataset into New run`, async () => {
+        const api = new MockApi('empty', 0);
+        const [one] = await new MockApi('normal', 0).datasets();
+        let list: Dataset[] = [];
+        api.datasets = async () => list;
+        open(page, path, api);
+        await vi.waitFor(async () => {
+          if (!(await action()).textContent?.includes('Add dataset')) throw new Error('the datasets have not answered yet');
+        });
+        list = [one!];
+        if (how === 'the tab shown again') document.dispatchEvent(new Event('visibilitychange'));
+        else datasetsChanged();
+        const a = await vi.waitFor(async () => {
+          const el = await action();
+          if (!el.textContent?.includes('New run')) throw new Error('still Add dataset');
+          return el;
+        });
+        expect(a.getAttribute('href')).toBe('#/runs/new');
+      });
+    }
+  }
+});
+
+// Review round 1: with past runs but no dataset left, the header's create action of Runs and Overview asks for a
+// dataset too (Desktop's screens/runs/list.rs and overview/page.rs gate theirs).
+describe('the header action with runs but no dataset', () => {
+  for (const [name, page, path] of [
+    ['Runs', Runs, '/runs'],
+    ['Overview', Overview, '/'],
+  ] as const) {
+    it(`${name}: Add dataset, not New run`, async () => {
+      const api = new MockApi('normal', 0);
+      api.datasets = async () => [];
+      open(page as Component<Record<string, never>>, path, api);
+      await vi.waitFor(() => {
+        flushSync();
+        if (!target!.querySelector('a[href="#/datasets?add=folder"]')) throw new Error('no Add dataset yet');
+      });
+      expect(target!.querySelector('a[href="#/runs/new"]')).toBeNull();
     });
   }
 });

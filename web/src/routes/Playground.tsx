@@ -47,7 +47,7 @@ import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
 import type { Source } from './playground/source';
 import { followVanished } from './playground/vanished';
-import FirstStepAction, { noDatasetsYet } from "./firstStep";
+import FirstStepAction, { noDatasetsYet, refreshOnDatasetChange } from "./firstStep";
 
 type Seg = 'file' | 'dataset' | 'webcam';
 type Det = Prediction['boxes'][number];
@@ -116,6 +116,7 @@ export default function Playground() {
   refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
   const noDatasets = computed(() => noDatasetsYet(datasets.data));
+  refreshOnDatasetChange(datasets);
   const choices = computed(() => {
     // Until the runs and datasets answer (or fail) the splits are unknown: wait, so the default never switches.
     if (!models.data || (!runs.data && !runs.error) || (!datasets.data && !datasets.error)) return [];

@@ -30,6 +30,7 @@ import { slotRun } from './overview/slot';
 import AlsoRunning from './overview/AlsoRunning';
 import { bestNote, unrankedKinds } from './overview/bestNote';
 import { followNewDatasets } from './overview/newDatasets';
+import FirstStepAction from './firstStep';
 import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
 
@@ -135,14 +136,9 @@ export default function Overview() {
       title="Overview"
       sub={facts.get() ? () => <span class="facts num">{facts.get()}</span> : undefined}
       actions={
-        // A fresh install's one way in is the onboarding's Add dataset: no second primary beside it.
-        fresh.get()
-          ? undefined
-          : () => (
-              <Button variant="primary" icon={Plus} href={href('/runs/new')}>
-                New run
-              </Button>
-            )
+        // A fresh install's one way in is the onboarding's Add dataset: no second primary beside it. Past runs but no
+        // dataset left: Add dataset (./firstStep), not a New run that only says "Add a dataset first".
+        fresh.get() ? undefined : () => <FirstStepAction noDatasets={noDatasets.get()} primary />
       }
     >
       {fresh.get() ? (

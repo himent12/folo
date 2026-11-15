@@ -34,7 +34,7 @@ import { rowNav } from '$lib/ui/rowNav';
 import { unlike, versusYolo26n } from '$lib/benchmarks';
 import { filterLabel, groupKey, groupLabel, rankKey, scoreContext, splitLabel, type ScoreContext } from '$lib/scoreSummary';
 import { loadThroughput, measuredLatency, measuredTraining } from '$lib/throughput';
-import FirstStepAction, { noDatasetsYet } from "./firstStep";
+import FirstStepAction, { noDatasetsYet, refreshOnDatasetChange } from "./firstStep";
 
 type Key = 'name' | 'arch' | 'classes' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'created';
 interface Col {
@@ -89,6 +89,7 @@ export default function Models() {
   refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
   const noDatasets = computed(() => noDatasetsYet(datasets.data));
+  refreshOnDatasetChange(datasets);
   // Where imported .folo files go, for the empty state (the server's data dir, when it says; the mock has none).
   const system = new Resource((s) => hub.api.system(s));
   const modelsDir = computed(() => (system.data?.data_dir ? `\`${system.data.data_dir}/models\`` : "the models folder of the server's data directory"));
