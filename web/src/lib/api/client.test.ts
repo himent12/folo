@@ -69,12 +69,15 @@ describe('HttpApi: a list answer of the wrong shape is an error', () => {
     'dataset images': () => api.datasetImages('ds_1', {}),
     'bench images': () => api.benchImages('b_1'),
     'entry images': () => api.benchEntryImages('b_1', 'e_1'),
+    // Review round 2: 1000 images and no total stopped LiveLabelJob's paging and showed a truncated job as whole.
+    'label images': () => api.labelImages('lj_1'),
   };
   const bad: Record<keyof typeof reads, string[]> = {
     offers: ['{"offers":null,"fetched":"t"}', '{"fetched":"t"}', '[]', ''],
     'dataset images': ['{"total":12}', '{"total":12,"images":null}', '{"images":[]}', '{"total":"12","images":[]}', ''],
     'bench images': ['{"total":12}', '{"images":{}}', ''],
     'entry images': ['{"total":12}', '{"images":[],"total":null}', ''],
+    'label images': ['{"images":[{"id":"i"}]}', '{"images":[],"total":"1000"}', '{"total":3}', '{"total":3,"images":{}}', ''],
   };
   for (const [what, bodies] of Object.entries(bad) as [keyof typeof reads, string[]][]) {
     for (const body of bodies) {
@@ -92,6 +95,8 @@ describe('HttpApi: a list answer of the wrong shape is an error', () => {
     expect(await reads['dataset images']()).toEqual({ total: 3, images: [{ id: 'i' }] });
     answer('{"total":0,"images":[]}');
     expect(await reads['entry images']()).toEqual({ total: 0, images: [] });
+    answer('{"total":1001,"images":[{"id":"i"}]}');
+    expect(await reads['label images']()).toEqual({ total: 1001, images: [{ id: 'i' }] });
   });
 });
 

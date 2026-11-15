@@ -56,6 +56,8 @@ each screen beyond the dialogs' focus, the Cloud panel against `folo serve --moc
 these changes. `npm run build` passed. No Rust was touched. The first `tools/file-size.sh` run was started from the wrong
 directory and checked nothing; the review caught it, and it was run again from the worktree root in round 1 ("every
 source file is under 1000 lines").
+Round 2: `npm run check`, `npm run build` and `tools/file-size.sh` passed; `npm test` 1767 of 1768, the other
+(`results.test.tsx` "New loop … opened, closed and opened again") timed out at 5 s under load and passes alone (31 of 31).
 
 ## Review round 1
 
@@ -67,3 +69,13 @@ source file is under 1000 lines").
   `null` (a required `Vec`, `crates/folo-api/src/cloud.rs`); its image pages were not checked.
 - Settings › Cloud shows an error with Retry when the providers cannot be read, instead of a disabled Connect with no
   word (`settings/Cloud.tsx`); test `Cloud.test.tsx`.
+
+## Review round 2
+
+- A labeling job's image pages are checked too (`client.ts` `labelImages()` through `#envelope`): a page of 1000 images
+  without `total` had stopped `LiveLabelJob`'s paging and shown a truncated job as whole, with no error; test
+  `client.test.ts`.
+- The benchmark preview's Distance boxes come from a second request whose failure was swallowed: the previous
+  condition's boxes stayed drawn over the moved image. The truth is now cleared while it is not known, and a failure
+  shows "Could not load the boxes under …" with Retry under the image (`routes/bench/Preview.tsx`); test
+  `routes/bench/Preview.test.tsx`.
