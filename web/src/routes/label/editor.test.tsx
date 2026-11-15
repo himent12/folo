@@ -121,6 +121,27 @@ describe('the labeling editor: saving', () => {
     expect(footer()).toMatch(/Unsaved changes/);
   });
 
+  it('says so when another tab saves the image under unsaved edits, and Discard goes back to those labels', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    expect(boxCount()).toBe(1);
+    // Another tab saves two boxes on the same image: the stream brings them here.
+    const theirs = [
+      { class: 0, x1: 1, y1: 1, x2: 20, y2: 20 },
+      { class: 1, x1: 30, y1: 30, x2: 60, y2: 60 },
+    ];
+    await hub.api.updateLabelImage('lb_7c21', '1', theirs);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(editor()!.querySelector('[role="status"]')?.textContent ?? '').toMatch(/Changed elsewhere/);
+    });
+    // The edits stay, unsaved; Discard shows what the other tab saved, not what this one opened with.
+    expect(boxCount()).toBe(1);
+    expect(footer()).toMatch(/Unsaved changes/);
+    click(inEditor('Discard'));
+    expect(boxCount()).toBe(2);
+  });
+
   it('saves an image not labeled yet as it is: labeled by hand, a background image without boxes', async () => {
     await openEditor('3');
     expect(boxCount()).toBe(0);

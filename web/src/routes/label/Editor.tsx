@@ -79,8 +79,11 @@ export default function Editor(props: EditorProps) {
   });
 
   // The draft: the boxes as edited here, over the image's own (`base`). An image that changes on the server while it
-  // is not being edited (the agent relabeled it) shows its new boxes.
+  // is not being edited (the agent relabeled it) shows its new boxes; one that changes under unsaved edits (another
+  // tab saved it) keeps the edits, takes the new boxes as what Discard goes back to, and says so: Save would replace
+  // them, and nothing else would tell.
   const base = signal<Box[]>([]);
+  const saving = signal(false);
   const draft = signal<Box[]>([]);
   const selected = signal<number | null>(null);
   const hovered = signal<number | null>(null);
@@ -114,11 +117,20 @@ export default function Editor(props: EditorProps) {
       asked.set(null);
       status.clear();
       untrack(forget);
-    } else if (!sameBoxes(cur.boxes, base.get()) && sameBoxes(draft.get(), base.get())) {
-      base.set(cur.boxes);
-      draft.set(cur.boxes);
-      selected.set(null);
-      untrack(forget);
+    } else if (!sameBoxes(cur.boxes, base.get())) {
+      if (sameBoxes(draft.get(), base.get())) {
+        base.set(cur.boxes);
+        draft.set(cur.boxes);
+        selected.set(null);
+        untrack(forget);
+      } else if (!saving.get()) {
+        // Not this editor's own save on its way (its answer sets `base`): someone else's.
+        base.set(cur.boxes);
+        if (!sameBoxes(draft.peek(), cur.boxes))
+          untrack(() =>
+            status.show('info', 'Changed elsewhere while you edited', 'Its labels were saved from another tab or window. Save replaces them with yours; Discard shows them.'),
+          );
+      }
     }
   });
 
@@ -181,7 +193,6 @@ export default function Editor(props: EditorProps) {
     selected.set(null);
   }
 
-  const saving = signal(false);
   // An image not labeled yet (waiting, or failed) can be saved as it is: kept as labeled by hand, its boxes or none.
   const savable = computed(() => dirty.get() || (!!img.get() && img.get()!.status !== 'labeled'));
   async function save(): Promise<boolean> {
