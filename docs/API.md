@@ -119,7 +119,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   from servers older than the field.
 
 ## Datasets
-- `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
+- `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`). When `datasets.json` could not be
+  read at start (malformed, unreadable), no dataset loaded and the list answers `500 internal` "… datasets.json is
+  malformed …" with a hint, not an empty list.
 - `POST /api/datasets` body `{ "name"?, "path", "format": "auto|yolo|coco" }` → `201 Dataset` with `stats`.
   Registers a dataset on disk: a folder, a `data.yaml` or a COCO instances `.json`. `path` must be absolute
   (surrounding whitespace and one pair of quotes, as Windows' "Copy as path" adds, are ignored; a relative path is
@@ -130,8 +132,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   folder layout) or `images/{train,val,test}` + `labels/…`; COCO from `annotations/instances_*.json` (Roboflow
   layouts too). Corrupt or missing images and images with broken labels are left out (`stats.broken_labels` counts
   the latter; `folo dataset check` lists them all). Without `names` / `nc`, classes are named `class0..` up to the
-  largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset; a folder with images
-  but no labels says "'<path>' has N images but no labels", with a hint to label them),
+  largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset; the folder above
+  a dataset says "'<path>' is not a dataset folder, but '<path>/<sub>' inside it holds a dataset" (looked for one and
+  two levels down), with a hint to register that one; a folder with images but no labels says "'<path>' has N images
+  but no labels", with a hint to label them; a folder that is not a dataset is said so before anything walks it),
   `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes). The
   request returns once the dataset is indexed (every image header is read, in parallel). Registering a path that
   is already registered (the same folder by its canonical path, whatever the spelling, with `format` `auto` or

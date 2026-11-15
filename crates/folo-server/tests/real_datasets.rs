@@ -596,3 +596,49 @@ async fn a_registry_from_before_tombstones_loads_and_reconnects() {
     let back: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data }))).await;
     assert_eq!(back.id, "ds_0bad");
 }
+
+/// The folder above a dataset (picked one level too high, or an archive that wraps the dataset in a folder) names
+/// the dataset inside it, instead of saying "has 6 images but no labels" and sending the user to label them
+/// (x3-server-6).
+#[tokio::test]
+async fn a_folder_above_a_dataset_names_the_dataset_inside() {
+    let t = TestDir::new("real-wrapped");
+    let home = t.join("home");
+    write_shapes(&t.join("wrapped/my-set"), 6);
+    write_shapes(&t.join("deeper/2026/my-set"), 4);
+    std::fs::create_dir_all(t.join("deeper/notes")).unwrap();
+    let app = app(&home);
+    for (folder, inside) in [("wrapped", "wrapped/my-set"), ("deeper", "deeper/2026/my-set")] {
+        let body = json!({ "path": t.join(folder) });
+        let e = err(&app, post_json("/api/datasets", body), StatusCode::BAD_REQUEST, "unknown_format").await;
+        assert!(e.message.ends_with("inside it holds a dataset"), "{folder}: {}", e.message);
+        assert!(e.message.replace('\\', "/").contains(inside), "{folder}: {}", e.message);
+        assert!(e.hint.unwrap().starts_with("register '"), "{folder}");
+    }
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert!(list.datasets.is_empty());
+}
+
+/// A `datasets.json` that cannot be read loads no dataset: the list says so (500 with how to fix it) instead of
+/// answering an empty list, which both apps show as "No datasets yet" (x3-server-7). The file is kept.
+#[tokio::test]
+async fn a_damaged_registry_is_an_error_not_an_empty_list() {
+    let t = TestDir::new("real-damaged-registry");
+    let (home, data) = (t.join("home"), t.join("shapes"));
+    write_shapes(&data, 6);
+    let app = app(&home);
+    let _: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data }))).await;
+    drop(app);
+    let text = std::fs::read_to_string(home.join("datasets.json")).unwrap();
+    let cut = &text[..text.len() / 2];
+    std::fs::write(home.join("datasets.json"), cut).unwrap();
+    let app = restart(&home);
+    let e = err(&app, get("/api/datasets"), StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
+    assert!(e.message.contains("datasets.json is malformed"), "{}", e.message);
+    assert!(e.hint.unwrap().contains("fix the JSON"));
+    assert_eq!(std::fs::read_to_string(home.join("datasets.json")).unwrap(), cut, "the file is kept");
+    // A data dir that never had a registry is simply empty.
+    let fresh = restart(&t.join("fresh"));
+    let list: DatasetList = ok(&fresh, get("/api/datasets")).await;
+    assert!(list.datasets.is_empty());
+}

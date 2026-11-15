@@ -144,7 +144,7 @@ fn run_model(models: &Models, e: &RunEntry, last: bool) -> Option<ModelRef> {
             Some(ModelRef::new(model, path, Some(e.dataset())))
         }
         Err(err) => {
-            tracing::warn!("skipping {}: {err}", path.display());
+            models.warn_skipped(&path, &err);
             None
         }
     }

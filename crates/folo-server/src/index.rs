@@ -191,22 +191,52 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
                 "pass the dataset root: the folder holding data.yaml, images/ + labels/, or annotations/",
             )
         }
-        // The message already says what a dataset folder holds; images there without labels are said as that.
-        DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => match images_under(Path::new(path)) {
-            0 => Error::new(StatusCode::BAD_REQUEST, "unknown_format", m),
-            n => {
-                let (path, s) = (folo_data::paths::shown(path), if n == 1 { "" } else { "s" });
-                let message = format!("'{path}' has {n} image{s} but no labels");
-                Error::new(StatusCode::BAD_REQUEST, "unknown_format", message).hint(
-                    "label them first (FOLO Studio: Datasets, Label images), or add YOLO labels/ or a COCO \
-                     annotations/ JSON",
+        // The message already says what a dataset folder holds. A dataset one or two folders down (the folder above
+        // it was picked, or an archive wraps it in a folder) is named; images there without labels are said as that.
+        DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => {
+            if let Some(below) = dataset_below(Path::new(path)) {
+                let (shown, below) = (folo_data::paths::shown(path), folo_data::paths::shown(below));
+                return Error::new(
+                    StatusCode::BAD_REQUEST,
+                    "unknown_format",
+                    format!("'{shown}' is not a dataset folder, but '{below}' inside it holds a dataset"),
                 )
+                .hint(format!("register '{below}': the folder holding data.yaml, images/ + labels/, or annotations/"));
             }
-        },
+            match images_under(Path::new(path)) {
+                0 => Error::new(StatusCode::BAD_REQUEST, "unknown_format", m),
+                n => {
+                    let (path, s) = (folo_data::paths::shown(path), if n == 1 { "" } else { "s" });
+                    let message = format!("'{path}' has {n} image{s} but no labels");
+                    Error::new(StatusCode::BAD_REQUEST, "unknown_format", message).hint(
+                        "label them first (FOLO Studio: Datasets, Label images), or add YOLO labels/ or a COCO \
+                         annotations/ JSON",
+                    )
+                }
+            }
+        }
         DataError::Format(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", m),
         DataError::Config(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_body", m),
         e => Error::internal(e.to_string()),
     }
+}
+
+/// The first folder one or two levels below `dir` (in name order, at most 64 folders a level) where a dataset is
+/// detected, for a folder that is not a dataset itself.
+fn dataset_below(dir: &Path) -> Option<PathBuf> {
+    fn folders(dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+        let mut dirs: Vec<PathBuf> =
+            entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).take(64).collect();
+        dirs.sort();
+        dirs
+    }
+    let detected = |d: &Path| folo_data::detect_format(d, folo_data::Format::Auto).is_ok();
+    let first = folders(dir);
+    if let Some(d) = first.iter().find(|d| detected(d)) {
+        return Some(d.clone());
+    }
+    first.iter().flat_map(|d| folders(d)).find(|d| detected(d))
 }
 
 /// Image files under `dir` (a few levels deep, counted up to 10,000), for a folder that is not a dataset.
@@ -352,6 +382,9 @@ impl Index {
         // check rebuild instead of being missed. Which folders to watch is only known after reading (split sources
         // and image lists may point outside `base`), so read again until the watched set is stable (once for a
         // self-contained dataset, twice for one with external sources).
+        // A folder that is not a dataset is said as that before anything walks it: the fingerprint below stats every
+        // file under `base`, which takes minutes for a drive or a system folder (and blocks dataset deletes meanwhile).
+        folo_data::detect_format(&p, data_format(format)).map_err(|e| data_error(e, path))?;
         let mut watched = vec![base.clone()];
         let mut attempt = 0;
         // Image headers only: registration already reads every file once (for the content hash of duplicates).

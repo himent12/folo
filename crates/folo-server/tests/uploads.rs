@@ -321,6 +321,37 @@ async fn entries_that_would_overwrite_each_other_are_refused() {
     }
 }
 
+/// An archive with a file and a folder of one name is refused like the other hostile archives (422, naming it),
+/// not answered with the operating system's error as `500 io_error` (x3-server-5).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_and_a_folder_of_one_name_are_refused() {
+    let t = TestDir::new("uploads-file-folder");
+    let home = t.join("home");
+    let app = app(open(&home));
+    let (dir, file) = (tar::EntryType::Directory, tar::EntryType::Regular);
+    let cases = [
+        ([("images/", dir), ("images", file)], "images"),
+        ([("x", file), ("x/y.txt", file)], "x"),
+        ([("labels/a.txt", file), ("labels/a.txt/b", dir)], "labels/a.txt"),
+    ];
+    for (entries, clash) in cases {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, kind) in entries {
+            let data: &[u8] = if kind.is_dir() { b"" } else { b"one" };
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(kind);
+            h.set_size(data.len() as u64);
+            h.set_mode(0o755);
+            b.append_data(&mut h, name, data).unwrap();
+        }
+        let u = start(&app, json!({ "kind": "dataset", "name": "clash" })).await;
+        let req = put(&format!("/api/uploads/{}/parts/0", u.id), b.into_inner().unwrap());
+        let e = err(&app, req, StatusCode::UNPROCESSABLE_ENTITY, "invalid_upload").await;
+        assert!(e.message.starts_with(&format!("{clash} is both a file and a folder")), "{}", e.message);
+        assert!(staging(&home).is_empty(), "{clash}: {:?}", staging(&home));
+    }
+}
+
 /// Writes a folo-n weights file with two classes.
 fn model_bytes(dir: &Path) -> Vec<u8> {
     let path = dir.join("pets.folo");
