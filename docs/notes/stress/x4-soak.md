@@ -72,10 +72,17 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
   2999 down to 2992, at most budget + 8 fetches (the old code fetched all 3000); 500 tiles, then tiles 20
   and 8 drawn again: 8 and 20 start next, each tile fetched once.
 - Also (review round 1, pre-existing): an image that failed to load (server down) stayed a placeholder for
-  good; Retry (`retry_all`, also run on a backend switch) now forgets failed image slots
-  (`ImageCache::forget_failed`) so they load again. Still deferred: a failed tile looks the same as a loading
-  one, with no per-tile Retry (Studio has one, `web/src/lib/detect/DatasetImage.tsx`); same for benchmark
-  thumbnails and the inspector.
+  good. Lane d1-datasets fixes that and this branch is stacked on it, following its model: a failed image
+  is asked for again by a timer after 2, 8 and 32 s, a reconnect and Retry (`retry_all`) forget failures
+  (`ImageCache::forget_failed`), the inspector has a Retry. This lane's own versions of that (forget on
+  reconnect, review round 2; an `ImgSlot::Unreachable` state forgotten at every `/system` answer, review
+  round 3) were dropped; their scenarios are kept as tests on d1's model in `app/image_tests.rs` (an outage
+  the 2 s refresh never saw; a fetch failing after `reconnected()` ran; Retry and a reconnection) together
+  with the queue's seams with it (a skipped load leaves no slot or timer behind, a retry goes through the
+  queue's bound, a late result never overwrites a newer one, the byte budget evicts queued loads). Still
+  deferred: a failed tile looks the same as a loading
+  one, with no per-tile Retry in the grid (Studio has one, `web/src/lib/detect/DatasetImage.tsx`); same for
+  benchmark thumbnails.
 
 ### x4-soak-3 Studio: Run pages that were live while shown stay in memory
 
