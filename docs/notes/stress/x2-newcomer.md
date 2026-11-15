@@ -23,9 +23,9 @@ empty data dir. Base `1436ad68`. Shared prebuilt binaries, servers on the CPU de
 
 | id | severity | surface | finding | status |
 |---|---|---|---|---|
-| x2-newcomer-1 | annoying | Desktop | Ctrl+N / New training run with no dataset does nothing at all | fix written, next push (needs the Desktop gates) |
+| x2-newcomer-1 | annoying | Desktop | Ctrl+N / New training run with no dataset does nothing at all | fixed |
 | x2-newcomer-2 | polish | Studio | empty Runs, Models, Playground offer New run when no dataset exists (one dead hop; Desktop offers Add dataset) | fixed |
-| x2-newcomer-3 | polish | Desktop | Enter in the Generate synthetic dialog does nothing | fix written, next push (needs the Desktop gates) |
+| x2-newcomer-3 | polish | Desktop | Enter in the Generate synthetic dialog does nothing | fixed |
 | x2-newcomer-4 | annoying | server | registering a drive root (`D:\`) answers after 389 s: the folder is fingerprinted before format detection | duplicate of x3-server's claim |
 | x2-newcomer-5 | polish | server | a YOLO folder and its `data.yaml` register as two datasets | deferred |
 | x2-newcomer-6 | polish | Desktop | New run defaults to 640 px right after a 320 px synthetic set (estimate ≈ 1 h 49 min on the CPU) | deferred |
@@ -52,7 +52,8 @@ Test: `web/src/routes/firstStep.test.tsx` (the three no-dataset cases fail on th
 
 The Name field has focus when the dialog opens; Enter did nothing (Ctrl+Enter and the button worked), unlike Connect
 cloud and Studio's form. Root cause: `apps/desktop/src/overlays/synth.rs` `input_box` had no Enter handler. Fix:
-`on_key_down` Enter calls `submit_synth`, which validates the fields. Test: `enter_in_the_synth_dialog_generates`.
+`on_key_down` Enter calls `submit_synth`, which validates the fields. Test: `enter_in_the_synth_dialog_generates`
+(opens the dialog as against folo serve, sends a real Enter key down, checks the request went with the name).
 
 ### Deferred
 
@@ -76,12 +77,20 @@ cloud and Studio's form. Root cause: `apps/desktop/src/overlays/synth.rs` `input
 - Studio Add dataset: a nonexistent path and an images-only folder get clear messages with a next step.
 - Desktop with a dead server: Overview, Runs and Models cards say what happened and offer Connection settings + Retry.
 - Desktop's own server: `--port 0` on its own data dir, dies with the app (job object).
+- Renaming a registered dataset's folder on disk: after the 5 s re-check `GET /api/datasets/{id}`, its images and
+  `POST /api/runs` answer `404 path_not_found` ("the folder of dataset 'my set' is gone", with the hint to move it
+  back or unregister); renamed back, the dataset answers 200 again.
+- A second `folo serve` on the same data dir: "another FOLO process is using ...", names the running server's URL,
+  exits non-zero.
+- QUICKSTART §2-§6 literally (synth, stats, train 1 epoch on the CPU, predict, val, export f16 and ONNX) with the
+  shared binary: every command works and writes the files the text names.
+- Studio export from the model page: FOLO f16 and ONNX both download (4.9 MiB, 9.9 MiB) and the dialog says where
+  the file went; no console errors.
 
 ## Not done
 
-- Studio export (f16 / ONNX download) and Desktop's Playground and export steps of the journey.
-- Closing the browser tab mid-upload, renaming a registered folder on disk, Desktop started twice, the server moved to
-  another port under a running app.
+- Desktop's Playground and export steps of the journey.
+- Closing the browser tab mid-upload, Desktop started twice, the server moved to another port under a running app.
 - The close-with-a-running-run confirm dialog was seen to hold the window but not captured.
 
 ## Wishes
