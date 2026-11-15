@@ -18,12 +18,36 @@ interface Prefs {
 const KEY = 'folo.prefs';
 const defaults: Prefs = { theme: 'dark', serverUrl: '', units: 'binary', sidebarCollapsed: false, labelAgent: null };
 
+/**
+ * The stored object with every value of the wrong type (another writer, an older version, a hand edit) put back to its
+ * default: a number or null for the server address made every request fail and Settings throw, so nothing could fix it
+ * (s6-shell-1). Keys this version does not know stay, for a later version to read.
+ */
+export function sanitize(raw: unknown): Prefs {
+  const o: Record<string, unknown> = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : {};
+  const pick = <T>(v: unknown, ok: (v: unknown) => v is T, d: T): T => (ok(v) ? v : d);
+  return {
+    ...o,
+    theme: pick(o.theme, (v): v is ThemePref => v === 'dark' || v === 'light' || v === 'system', defaults.theme),
+    serverUrl: pick(o.serverUrl, (v): v is string => typeof v === 'string', defaults.serverUrl).trim(),
+    units: pick(o.units, (v): v is Units => v === 'metric' || v === 'binary', defaults.units),
+    sidebarCollapsed: pick(o.sidebarCollapsed, (v): v is boolean => typeof v === 'boolean', defaults.sidebarCollapsed),
+    labelAgent: pick(o.labelAgent, (v): v is LabelAgentId | null => v === null || v === 'claude' || v === 'codex', defaults.labelAgent),
+  } as Prefs;
+}
+
 /** What is stored now (keys of a later version included), or null when storage cannot be read. */
 function stored(): Prefs | null {
   try {
     const raw = localStorage.getItem(KEY);
     const theme = localStorage.getItem('folo.theme');
-    const p = { ...defaults, ...(raw ? (JSON.parse(raw) as Partial<Prefs>) : {}) };
+    let parsed: unknown = {};
+    try {
+      parsed = raw ? JSON.parse(raw) : {};
+    } catch {
+      // Not JSON (a hand edit, a truncated write): the defaults, as for nothing stored.
+    }
+    const p = sanitize(parsed);
     if (theme === 'dark' || theme === 'light' || theme === 'system') p.theme = theme;
     return p;
   } catch {

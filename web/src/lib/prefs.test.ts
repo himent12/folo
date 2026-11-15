@@ -78,3 +78,42 @@ describe('preferences across tabs', () => {
     expect(keyPrefs.singleKeys).toBe(true);
   });
 });
+
+// Stored preferences of the wrong type (another writer, an older version, a hand edit; s6-shell-1): a number or null for
+// the server address made every request go to "42" and Settings throw while rendering, so nothing in the app could fix it.
+describe('stored preferences of the wrong type', () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  for (const [what, stored] of [
+    ['wrong types', { serverUrl: 42, theme: 'neon', units: 7, sidebarCollapsed: 'yes', labelAgent: 'gpt' }],
+    ['nulls', { serverUrl: null, theme: null, units: null, sidebarCollapsed: null, labelAgent: null }],
+    ['an array', [1, 2, 3]],
+    ['a string', 'http://x'],
+  ] as const) {
+    it(`fall back to the defaults: ${what}`, () => {
+      localStorage.setItem(KEY, JSON.stringify(stored));
+      const p = new PrefsStore();
+      expect(p.serverUrl).toBe('');
+      expect(p.theme).toBe('dark');
+      expect(p.units).toBe('binary');
+      expect(p.sidebarCollapsed).toBe(false);
+      expect(p.labelAgent).toBeNull();
+    });
+  }
+
+  it('keep the values of the right type and the keys of a later version', () => {
+    localStorage.setItem(KEY, JSON.stringify({ serverUrl: 'http://gpu-box:7878', theme: 'light', units: 'metric', sidebarCollapsed: 1, later: { a: 1 } }));
+    const p = new PrefsStore();
+    expect([p.serverUrl, p.theme, p.units, p.sidebarCollapsed]).toEqual(['http://gpu-box:7878', 'light', 'metric', false]);
+    p.units = 'binary';
+    expect(read()).toMatchObject({ later: { a: 1 }, serverUrl: 'http://gpu-box:7878', units: 'binary' });
+  });
+
+  it('a value of the wrong type from another tab is not taken', () => {
+    const p = new PrefsStore();
+    fromOtherTab(KEY, JSON.stringify({ theme: 5, sidebarCollapsed: 'yes' }));
+    expect(p.theme).toBe('dark');
+    expect(p.sidebarCollapsed).toBe(false);
+  });
+});

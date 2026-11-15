@@ -233,3 +233,34 @@ describe('the scroll an entry kept, when its screen waits for its chunk', () => 
     }
   });
 });
+
+// s6-shell-2: Settings threw while it was created (a stored server address of the wrong type): the URL said #/settings,
+// the sidebar too, but `main` kept the Overview and nothing said that anything had failed.
+describe('a screen that throws while it is created', () => {
+  it('shows the error with Reload instead of keeping the screen before, and the next page still opens', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const loaders: Partial<Record<ScreenName, () => Promise<ScreenModule>>> = {
+      overview: () => Promise.resolve(screen('the overview')),
+      settings: () =>
+        Promise.resolve({
+          default: () => {
+            throw new TypeError('e.trim is not a function');
+          },
+        }),
+      runs: () => Promise.resolve(screen('the runs')),
+    };
+    const screens = new Screens((name) => loaders[name]);
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('.fake'), 'the overview');
+
+    router.route = parse('#/settings');
+    await until(() => !main().querySelector('.fake'), 'the overview to go');
+    expect(main().textContent).toContain('This page could not be shown');
+    expect(main().textContent).toContain('e.trim is not a function');
+    expect([...main().querySelectorAll('button')].some((b) => b.textContent?.includes('Reload'))).toBe(true);
+
+    router.route = parse('#/runs');
+    await until(() => main().textContent === 'the runs', 'the runs');
+  });
+});

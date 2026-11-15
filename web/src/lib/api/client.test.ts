@@ -35,6 +35,34 @@ describe('HttpApi.predict', () => {
   });
 });
 
+// s6-shell-3: a list answer without its list read as an empty list ("No runs yet"), one of the wrong type made screens
+// throw (`.filter is not a function`) and show a skeleton forever.
+describe('HttpApi: a list answer of the wrong shape is an error', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const answer = (body: string) => vi.stubGlobal('fetch', async () => new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+
+  for (const [what, body] of [
+    ['the key missing', '{}'],
+    ['null', '{"runs":null}'],
+    ['an object', '{"runs":{"a":1}}'],
+    ['a string', '{"runs":"run_1"}'],
+    ['no body', ''],
+    ['a bare array', '[]'],
+  ] as const) {
+    it(`runs: ${what}`, async () => {
+      answer(body);
+      await expect(new HttpApi('').runs()).rejects.toMatchObject({ code: 'bad_response', request: 'GET /api/runs' });
+    });
+  }
+
+  it('a list of the right shape comes through', async () => {
+    answer('{"benchmarks":[{"id":"b1"}]}');
+    expect(await new HttpApi('').benches()).toEqual([{ id: 'b1' }]);
+    answer('{"jobs":[]}');
+    expect(await new HttpApi('').labelJobs()).toEqual([]);
+  });
+});
+
 describe('HttpApi: queue and ONNX (docs/API.md, #129)', () => {
   afterEach(() => vi.unstubAllGlobals());
 

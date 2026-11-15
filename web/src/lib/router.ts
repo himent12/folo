@@ -58,7 +58,8 @@ const table: [RouteName, RegExp, string[]][] = [
 export function parse(hash: string): Route {
   const raw = hash.replace(/^#/, '') || '/';
   const [pathPart = '/', queryPart = ''] = raw.split('?', 2);
-  const path = pathPart.length > 1 ? pathPart.replace(/\/+$/, '') : '/';
+  // `#//` is the Overview, not a page at "" ("There is no page at ."; s6-shell-5).
+  const path = pathPart.length > 1 ? pathPart.replace(/\/+$/, '') || '/' : '/';
   const query = new URLSearchParams(queryPart);
   for (const [name, re, keys] of table) {
     const m = re.exec(path);
