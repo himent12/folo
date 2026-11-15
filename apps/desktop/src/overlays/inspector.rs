@@ -151,29 +151,22 @@ impl FoloApp {
                 cx,
                 act(move |this, _, cx| this.retry_failed_image(&ds, &id, cx)),
             );
-            div()
-                .absolute()
-                .bottom(px(40.))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .px(px(12.))
-                        .py(px(8.))
-                        .rounded(px(radius::MD))
-                        .bg(t.bg_overlay)
-                        .child(text(ty::SM, t.text_secondary).child(if img.is_some() {
-                            "Full-size image unavailable: showing the thumbnail"
-                        } else {
-                            "Image unavailable"
-                        }))
-                        .child(retry),
-                )
+            div().absolute().bottom(px(40.)).left_0().right_0().flex().justify_center().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(radius::MD))
+                    .bg(t.bg_overlay)
+                    .child(text(ty::SM, t.text_secondary).child(if img.is_some() {
+                        "Full-size image unavailable: showing the thumbnail"
+                    } else {
+                        "Image unavailable"
+                    }))
+                    .child(retry),
+            )
         });
         let bounds_cell = self.insp_view.clone();
         // A pan pushed past the edge is stored clamped, so reversing it responds at once.

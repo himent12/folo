@@ -1,14 +1,14 @@
 //! Connecting from Settings and losing the local server, with a fake connector: no socket is opened
 //! and no `folo serve` is started.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::tests::{drive, open};
 use super::{Connector, ServerMode};
+use crate::api::Backend;
 use crate::api::http::Spawned;
 use crate::api::mock::MockBackend;
-use crate::api::Backend;
 use crate::store::Load;
 
 fn demo(_: &str) -> Arc<dyn Backend> {
