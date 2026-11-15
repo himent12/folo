@@ -110,11 +110,17 @@ impl Backend for MockBackend {
     }
 
     fn dataset(&self, id: &str) -> ApiResult<Dataset> {
-        self.check()?;
-        if let Some((code, message)) = self.broken.lock().unwrap().get(id) {
-            return Err(ApiError::new(code, message.clone()));
-        }
-        Ok(self.fixture(id)?.ds.clone())
+        let read = || -> ApiResult<Dataset> {
+            self.check()?;
+            if let Some((code, message)) = self.broken.lock().unwrap().get(id) {
+                return Err(ApiError::new(code, message.clone()));
+            }
+            Ok(self.fixture(id)?.ds.clone())
+        };
+        // The answer as the dataset was when asked: a test may hold it past a later read.
+        let r = read();
+        self.hold_point("dataset");
+        r
     }
 
     fn dataset_issues(&self, id: &str) -> ApiResult<IssuePage> {

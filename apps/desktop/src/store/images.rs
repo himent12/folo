@@ -126,6 +126,20 @@ impl ImageCache {
             .collect()
     }
 
+    /// Forget one dataset's images (its files changed: ids are positions, so an id may now be another
+    /// picture); returns the decoded images to free on the GPU. A load still on its way is dropped
+    /// when it lands ([`ImageCache::finish`]).
+    pub fn forget_dataset(&mut self, dataset: &str) -> Vec<Arc<RenderImage>> {
+        self.order.retain(|k| k.dataset != dataset);
+        let gone: Vec<ImgKey> = self.slots.keys().filter(|k| k.dataset == dataset).cloned().collect();
+        gone.into_iter()
+            .filter_map(|k| match self.slots.remove(&k) {
+                Some(ImgSlot::Ready(img)) => Some(img),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Store a result; returns images evicted to stay within budget (free them on the GPU).
     pub fn finish(&mut self, k: ImgKey, img: Option<Arc<RenderImage>>) -> Vec<Arc<RenderImage>> {
         // A request evicted while it was still loading has no slot (and no place in `order`) any
@@ -281,6 +295,25 @@ mod tests {
         // A request that was in flight across the clear lands nowhere.
         let late = Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
         assert_eq!(c.finish(k("c"), Some(late)).len(), 1);
+    }
+
+    #[test]
+    fn forgetting_a_dataset_keeps_the_others_and_drops_its_late_loads() {
+        let mut c = ImageCache::default();
+        let k = |d: &str, i: &str| ImgKey { dataset: d.into(), image: i.into(), kind: ImgKind::Thumb };
+        let img = || Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
+        for (d, i) in [("ds", "a"), ("other", "a")] {
+            assert!(c.begin(&k(d, i)));
+            c.finish(k(d, i), Some(img()));
+        }
+        assert!(c.begin(&k("ds", "b"))); // still loading
+        assert_eq!(c.forget_dataset("ds").len(), 1, "its decoded image is freed");
+        assert!(c.get(&k("ds", "a")).is_none() && c.get(&k("ds", "b")).is_none());
+        assert!(matches!(c.get(&k("other", "a")), Some(ImgSlot::Ready(_))), "the other dataset's stays");
+        // The load that was on its way is another picture now: it lands nowhere, and the image is
+        // fetched again.
+        assert_eq!(c.finish(k("ds", "b"), Some(img())).len(), 1);
+        assert!(c.begin(&k("ds", "a")));
     }
 
     #[test]

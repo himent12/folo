@@ -240,21 +240,26 @@ impl FoloApp {
         // card keeping what it shows until the answer. Only an answer about the dataset replaces it
         // (a connection blip leaves a healthy card healthy); back from a failure, its images reload.
         if self.ds_recheck.remove(id) && self.store.dataset.get(id).is_some_and(|l| !l.is_loading()) {
+            let ticket = self.ds_read_ticket(id);
             let (a, b) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
                 move |api| api.dataset(&a),
-                move |this, r, _| {
-                    // Cleared since (Retry, another server): this answer is about what was there.
+                move |this, r, cx| {
+                    // A newer read was asked for since (another Retry or visit): its answer stands.
+                    if !this.ds_read_done(&b, ticket) {
+                        return;
+                    }
+                    // Cleared since (another server): this answer is about what was there.
                     if this.store.dataset.get(&b).is_none_or(|l| l.is_loading()) {
                         return;
                     }
                     match r {
                         Ok(d) => {
-                            if this.store.dataset.get(&b).is_some_and(|l| l.error().is_some())
-                                && this.store.images.get(&b).is_some_and(|l| l.error().is_some())
-                            {
-                                this.store.images.remove(&b);
+                            // Back from a failure, or its contents changed: the images, their labels and
+                            // their pixels are read again (image ids are positions, docs/API.md).
+                            if this.store.dataset.get(&b).and_then(|l| l.ready()) != Some(&d) {
+                                this.forget_dataset_contents(&b, cx);
                             }
                             this.store.dataset.insert(b, Load::Ready(d));
                         }
@@ -271,12 +276,15 @@ impl FoloApp {
         }
         if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.dataset.insert(id.to_string(), Load::Loading);
+            let ticket = self.ds_read_ticket(id);
             let (a, b) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
                 move |api| api.dataset(&a),
                 move |this, r, _| {
-                    this.store.dataset.insert(b, r.into());
+                    if this.ds_read_done(&b, ticket) {
+                        this.store.dataset.insert(b, r.into());
+                    }
                 },
             );
         }
@@ -286,6 +294,40 @@ impl FoloApp {
             self.images_more.insert(id.to_string(), self.images_seq);
             self.load_images_from(id.to_string(), self.images_seq, 0, cx);
         }
+    }
+
+    /// A number for a new read of dataset `id`, the latest from now on ([`FoloApp::ds_read_done`]).
+    fn ds_read_ticket(&mut self, id: &str) -> u64 {
+        self.ds_read_seq += 1;
+        self.ds_reads.insert(id.to_string(), self.ds_read_seq);
+        self.ds_read_seq
+    }
+
+    /// Whether the read numbered `ticket` is still dataset `id`'s latest: its answer may be applied
+    /// (and nothing older will be). An older one is dropped.
+    fn ds_read_done(&mut self, id: &str, ticket: u64) -> bool {
+        if self.ds_reads.get(id) != Some(&ticket) {
+            return false;
+        }
+        self.ds_reads.remove(id);
+        true
+    }
+
+    /// Drops what the app holds of a dataset's files (its image list and the page of it still on its
+    /// way, its label issues, its decoded images, the grid's filter): read again when shown.
+    fn forget_dataset_contents(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.store.images.remove(id);
+        self.images_more.remove(id);
+        self.store.issues.remove(id);
+        *self.ds_filter_cache.borrow_mut() = None;
+        *self.ds_split_counts.borrow_mut() = None;
+        let textures = self.store.images_px.forget_dataset(id);
+        // Freed after this update, when no window is mid-draw (as on a server switch).
+        cx.defer(move |cx| {
+            for img in textures {
+                cx.drop_image(img, None);
+            }
+        });
     }
 
     /// Every image of a dataset (the grid filters by split and class here, so a list cut short

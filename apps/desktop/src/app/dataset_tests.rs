@@ -238,11 +238,27 @@ fn a_dataset_card_follows_its_folder_away_and_back() {
             this.dataset_card_badge(&d)
         })
     };
+    // What the Datasets list painted (its cards on top of the page, inside the window; the
+    // Overview's are below the fold): its warning-toned badges (their fill), counted in the scene.
+    let warning_badges = |app: &mut folo_ui::HeadlessApp| {
+        let fill = drive(app, window, |this, w, cx| {
+            this.navigate(super::Route::Datasets, w, cx);
+            crate::theme::theme(cx).warning_muted
+        });
+        drawn_keys(app, window);
+        drawn_keys(app, window);
+        app.scene(window.into())
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, folo_ui::Primitive::Quad(q) if q.background.solid == fill))
+            .count()
+    };
     let go = |app: &mut folo_ui::HeadlessApp, route: super::Route| {
         drive(app, window, |this, w, cx| this.navigate(route, w, cx));
     };
     go(&mut app, super::Route::Overview);
     assert_eq!(card(&mut app), (format, Tone::Neutral, None));
+    let healthy = warning_badges(&mut app);
 
     // The folder moved away: the next visit says so, with the server's reason for the tip.
     api.break_dataset(&id, "path_not_found", "Dataset folder not found: D:/data/shapes");
@@ -251,6 +267,8 @@ fn a_dataset_card_follows_its_folder_away_and_back() {
     let (label, tone, why) = card(&mut app);
     assert_eq!((label, tone), ("Folder missing", Tone::Warning));
     assert_eq!(why.as_deref(), Some("Dataset folder not found: D:/data/shapes"));
+    // The card itself paints it: one warning badge more than the healthy page had.
+    assert_eq!(warning_badges(&mut app), healthy + 1, "the card draws its warning badge");
 
     // Its page: the dataset's own ways on, not the connection panel.
     go(&mut app, super::Route::Dataset(id.clone()));
@@ -271,12 +289,113 @@ fn a_dataset_card_follows_its_folder_away_and_back() {
     });
     go(&mut app, super::Route::Overview);
     assert_eq!(card(&mut app), (format, Tone::Neutral, None));
+    assert_eq!(warning_badges(&mut app), healthy, "and paints no warning");
 
     // A folder that no longer reads as a dataset: "Can't read".
     api.break_dataset(&id, "invalid_dataset", "no images found");
     go(&mut app, super::Route::Datasets);
     go(&mut app, super::Route::Overview);
     assert_eq!(card(&mut app).0, "Can't read");
+}
+
+/// Review round 2 of x1-parity-7: two reads of a dataset on their way at once (two Retries, two
+/// visits) that answer in reverse order. The later read saw the folder as it is now: its answer
+/// stands, whichever way the folder went in between.
+#[test]
+fn an_older_dataset_read_answering_last_never_overwrites_a_newer_one() {
+    for first_broken in [true, false] {
+        let api = Arc::new(MockBackend::new(4200, true));
+        let (mut app, window) = open_with(api.clone());
+        let id = drive(&mut app, window, |this, _, cx| {
+            let id = this.store.datasets.ready().unwrap()[0].id.clone();
+            this.ensure_dataset(&id, cx);
+            id
+        });
+        // Every card's dataset read once, so the held read below is ours.
+        drawn_keys(&mut app, window);
+        let read_again = |app: &mut folo_ui::HeadlessApp| {
+            app.update(|cx| {
+                window
+                    .update(cx, |this, _, cx| {
+                        this.ds_recheck.insert(id.clone());
+                        this.ensure_dataset(&id, cx);
+                    })
+                    .unwrap()
+            });
+        };
+        let set = |broken: bool| {
+            if broken {
+                api.break_dataset(&id, "path_not_found", "Dataset folder not found");
+            } else {
+                api.mend_dataset(&id);
+            }
+        };
+        // Read A is answered as the folder was, then held back.
+        set(first_broken);
+        let first = api.hold("dataset");
+        read_again(&mut app);
+        app.run_until_held(1);
+        first.wait_held();
+        // The folder changes; read B answers first.
+        set(!first_broken);
+        read_again(&mut app);
+        app.run_until_held(1);
+        // (A plain update while A is held: `drive` waits for every call.)
+        let now = |app: &mut folo_ui::HeadlessApp| {
+            app.update(|cx| {
+                window
+                    .update(cx, |this, _, _| this.store.dataset.get(&id).map(|l| l.error().is_some()))
+                    .unwrap()
+            })
+        };
+        assert_eq!(now(&mut app), Some(!first_broken), "read B's answer is shown");
+        // A lands last: dropped.
+        drop(first);
+        app.run_until_idle();
+        assert_eq!(now(&mut app), Some(!first_broken), "read A answered late (broken first: {first_broken})");
+    }
+}
+
+/// Review round 2 of x1-parity-7: a dataset read again whose answer differs from what the app read
+/// before (a repaired copy put back with an image fewer) lists its images again: the grid and the
+/// split tabs count the same images, and nothing derived from the old files stays.
+#[test]
+fn a_dataset_read_again_with_other_contents_lists_its_images_again() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let id = drive(&mut app, window, |this, _, cx| {
+        let id = this.store.datasets.ready().unwrap()[0].id.clone();
+        this.ensure_dataset(&id, cx);
+        id
+    });
+    // What the app holds from before: one image more than the folder has now, and label issues.
+    let total = drive(&mut app, window, |this, _, _| {
+        let real = this.store.dataset.get(&id).and_then(|l| l.ready()).cloned().expect("read");
+        let mut old = real.clone();
+        old.splits.train += 1;
+        this.store.dataset.insert(id.clone(), crate::store::Load::Ready(old));
+        let list = this.store.images.get_mut(&id).and_then(|l| l.ready_mut()).expect("listed");
+        let extra = list.last().cloned().expect("an image");
+        list.push(extra);
+        this.store
+            .issues
+            .insert(id.clone(), crate::store::Load::Failed(crate::api::ApiError::new("old", "old")));
+        real.splits.total()
+    });
+    // A visit to a page with cards (the app opens on the Overview: the list is another page).
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Datasets, w, cx));
+    drawn_keys(&mut app, window);
+    drawn_keys(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        let d = this.store.dataset.get(&id).and_then(|l| l.ready()).expect("read again");
+        assert_eq!(d.splits.total(), total, "the dataset as it is now");
+        let images = this.store.images.get(&id).and_then(|l| l.ready()).map(|l| l.len() as u64);
+        assert_eq!(images, Some(total), "its image list read again, not the old one kept");
+        assert!(
+            this.store.issues.get(&id).is_none_or(|l| l.error().is_none_or(|e| e.code != "old")),
+            "its old label issues dropped"
+        );
+    });
 }
 
 /// The focus keys a page draws, once what it asked for has come.

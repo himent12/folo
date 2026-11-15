@@ -335,6 +335,10 @@ pub struct FoloApp {
     /// Datasets read before, read again (in place) the next time a card or their page shows them:
     /// a folder moved away or put back since says so ([`FoloApp::ensure_dataset`]).
     pub ds_recheck: std::collections::HashSet<String>,
+    /// Each dataset's latest read (a number from `ds_read_seq`): an older read answering after a
+    /// newer one (two Retries, two visits) is dropped, so the newer answer stands.
+    pub ds_reads: HashMap<String, u64>,
+    pub ds_read_seq: u64,
     pub ds_tile: f32,
     /// The grid tile under the pointer (it reveals every label, as a focused one does).
     pub ds_hover_tile: Option<String>,
@@ -624,6 +628,8 @@ impl FoloApp {
             images_more: HashMap::new(),
             images_seq: 0,
             ds_recheck: Default::default(),
+            ds_reads: HashMap::new(),
+            ds_read_seq: 0,
             ds_tile: 168.,
             ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),

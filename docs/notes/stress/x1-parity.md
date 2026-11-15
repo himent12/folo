@@ -13,7 +13,7 @@ table, confusion matrix), relative times, device labels, queue wording.
 
 | id | severity | surface | finding | status |
 |---|---|---|---|---|
-| x1-parity-1 | blocker | Desktop run page / Overview mAP chart | "× 10⁻²" caption over unscaled ticks on a fitted 0-1 axis | duplicate of d2-runs-1 (line.rs ypow), left to d2-runs |
+| x1-parity-1 | blocker | Desktop run page / Overview mAP chart, Precision / Recall chart | "× 10⁻²" caption over unscaled ticks on a fitted 0-1 axis | fixed (SIBLING of d2-runs-1: the same change as that lane's) |
 | x1-parity-2 | annoying | every relative time | same moment "6d ago" (Studio) vs "5 d ago" (Desktop); Desktop's old dates in UTC; Studio "60m ago" | fixed |
 | x1-parity-3 | polish | Runs table, queued run | "1st in queue" vs "Next to start" | deferred: wording, both true |
 | x1-parity-4 | polish | run header, Overview hero | CPU device "(CPU)" vs "· cpu" | deferred: wording |
@@ -38,8 +38,7 @@ every seed and lane run; dataset image / box / class counts of shapes and photos
   laid out at 15 px and then at 200 px (`ui/src/elements/tests/text.rs` shape) shows the name in full, so the
   trigger is something of the real page (the eval arriving after the first frame, the table's own sizing). Left
   open with this description; a fix belongs in folo-ui's layout core or `src/screens/models/class_table.rs`.
-- **x1-parity-1**: the same root cause as d2-runs-1 (`apps/desktop/src/charts/line.rs` ypow on a fitted unit axis);
-  left to d2-runs.
+- **x1-parity-1**: fixed after review round 2 (below), with d2-runs-1's own change, line for line.
 - **x1-parity-3 / -4**: wording only ("1st in queue" vs "Next to start"; "(CPU)" vs "· cpu"), both true.
 - Also seen, not filed: Desktop's dataset page for the broken `ds_7816` shows the server's message under a plug icon
   with a "Connection settings" button (it is not a connection problem); both apps' Datasets header counts the 24
@@ -68,7 +67,20 @@ turns 3 and 4 took that time.
   read shows; and the page of an unreadable dataset offers All datasets, Remove from FOLO and Retry with the
   server's message (`screens/datasets/detail.rs`), not Connection settings. Tests:
   `an_unreadable_dataset_is_named_on_its_card`, `dataset_tests.rs` `a_dataset_card_follows_its_folder_away_and_back`
-  (drawn Overview and dataset page over a mock whose dataset read breaks and mends).
+  (drawn Overview and dataset page over a mock whose dataset read breaks and mends; the warning badge counted in
+  the painted scene). After review round 2: every read of a dataset takes a number (`ds_reads`), and only the
+  latest one's answer is applied, so two Retries or visits answering in reverse order leave the newer answer
+  (`an_older_dataset_read_answering_last_never_overwrites_a_newer_one`); a read again whose dataset differs from
+  the one held (back from a failure, or other contents) drops its image list, the page of it on its way, its label
+  issues, its decoded images (`ImageCache::forget_dataset`) and the grid's filter, so they are read again
+  (`a_dataset_read_again_with_other_contents_lists_its_images_again`,
+  `forgetting_a_dataset_keeps_the_others_and_drops_its_late_loads`). Labels edited on disk with every count
+  unchanged are not noticed: the dataset record is the same.
+- **x1-parity-1** (review round 2): `apps/desktop/src/charts/line.rs` asks `charts::axis::label_pow` for the
+  shared power of ten, which has none for a fitted 0–1 axis (its ticks are written in full, "0.000042"), so no
+  "× 10⁻⁵" caption multiplies values that already read right; on the mAP, Precision and Recall charts. This is
+  d2-runs' change for d2-runs-1 (`stress/d2-runs` commit 2cfa2b12), copied line for line so either merges over
+  the other. Test: `charts::axis::tests::small_values_share_a_power_of_ten`.
 - **x1-parity-8**: `apps/desktop/src/app/mod.rs` starts `sample_conf` at the slider's floor `SAMPLE_CONF.0` (0.25,
   every prediction the server keeps, as Studio's `Samples.tsx` starts) instead of 0.3. Test:
   `run_page_tests.rs` `validation_samples_start_at_every_prediction_the_server_keeps`.

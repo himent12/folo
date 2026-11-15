@@ -59,7 +59,7 @@ impl Drop for Held {
 }
 
 impl MockBackend {
-    /// Holds the next `call` (`"datasets"`, `"models"`, `"runs"`, `"predict"`, `"images"`,
+    /// Holds the next `call` (`"datasets"`, `"dataset"`, `"models"`, `"runs"`, `"predict"`, `"images"`,
     /// `"metrics <run id>"`, `"samples <run id>"`) once its answer is made,
     /// until the returned hand releases it.
     #[cfg(test)]
