@@ -116,7 +116,25 @@ impl HttpBackend {
             .with_config()
             .limit(256 << 20)
             .read_json()
-            .map_err(|e| ApiError::new("bad_response", format!("Unexpected response from folo serve: {e}")))
+            .map_err(|e| self.body_failed(e, "Unexpected response from folo serve: "))
+    }
+
+    /// A response body that didn't read. The link breaking under it (the server went away, a proxy
+    /// cut it, a read timed out: a body shorter than it announced) is the server being out of reach,
+    /// as a request that got no answer is, so reconnecting asks for it again; a body that arrived
+    /// whole but isn't what was asked for (not JSON, the wrong shape, too big) is a bad response.
+    pub(super) fn body_failed(&self, e: ureq::Error, what: &str) -> ApiError {
+        // JSON read straight off the socket carries the socket's error inside serde's.
+        let e = match e {
+            ureq::Error::Json(j) if j.is_io() => ureq::Error::from(std::io::Error::from(j)),
+            e => e,
+        };
+        match e {
+            ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed => {
+                self.unreachable(&e)
+            }
+            e => ApiError::new("bad_response", format!("{what}{e}")),
+        }
     }
 
     pub(super) fn get<T: DeserializeOwned>(&self, path: &str) -> ApiResult<T> {

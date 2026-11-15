@@ -523,6 +523,26 @@ FOLO"
         assert!(hint.starts_with("Start it with `folo serve`") && !hint.contains('('), "{hint}");
     }
 
+    /// A body cut off midway (the server killed, a proxy dropping the link after the headers) is the
+    /// server out of reach, so the reconnect sweep asks for it again; it read as "Unexpected
+    /// response" and a page such as a finished benchmark's result kept its error with the server
+    /// back. A body that arrived whole but is no JSON, or JSON cut short by the server, stays a bad
+    /// response. (folo serve sends JSON with a content-length; a chunked body cut by a hang-up ends
+    /// cleanly in ureq and reads as JSON cut short, a bad response.)
+    #[test]
+    fn a_body_cut_off_midway_is_unreachable_and_a_bad_body_is_not() {
+        let (url, _requests) = canned_server(vec![
+            // Announces 100 bytes, sends 7, hangs up.
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: 100\r\n\r\n[{\"id\":"
+                .to_vec(),
+            json("200 OK", "not json"),
+            json("200 OK", "[{\"id\":"),
+        ]);
+        let api = HttpBackend::new(&url);
+        let codes: Vec<String> = (0..3).map(|_| api.datasets().unwrap_err().code).collect();
+        assert_eq!(codes, ["server_unreachable", "bad_response", "bad_response"]);
+    }
+
     #[test]
     fn a_token_server_says_what_works_instead_of_asking_for_a_header() {
         let body = r#"{ "error": { "code": "unauthorized", "message": "this server needs a token: send `Authorization: Bearer <token>`", "hint": "send the token the server was started with" } }"#;

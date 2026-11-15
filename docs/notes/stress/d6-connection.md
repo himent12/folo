@@ -66,6 +66,12 @@ states of every screen. Base commit `1436ad68`.
   announced once. Tests: `a_request_that_fails_after_the_server_is_back_is_asked_again`,
   `a_benchmark_result_that_failed_while_the_server_was_away_is_asked_again`,
   `a_final_history_that_failed_is_read_again_at_the_next_refresh`.
+- **Review round 3, cut bodies.** A response whose headers arrived but whose body was cut or stalled (the server
+  killed, a proxy dropping the link) read as `bad_response` ("Unexpected response"), which no reconnect sweep clears:
+  a finished benchmark's result kept "The result didn't load" with no Retry. `body_failed`
+  (`src/api/http/transport.rs`) now makes a body that breaks in transport `server_unreachable` (JSON, images,
+  weights), and keeps a body that arrived whole but is no JSON of the right shape a bad response. Test:
+  `http::tests::a_body_cut_off_midway_is_unreachable_and_a_bad_body_is_not`.
 - **d6-connection-1.** `FOLO_TOKEN` set, `FOLO_SERVER` at a dead port, auto mode. Fix: `serve_command` removes
   `FOLO_TOKEN` from the started server's environment (`src/api/http/server.rs`). Test:
   `the_started_server_never_inherits_a_token`.
