@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { createRoot, flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Api, RunEventHandlers } from './client';
+import { ApiError, type Api, type RunEventHandlers } from './client';
 import { hub } from './index';
 import { keepStepsPerEpoch, LiveRun, mergeBy, STREAM_GRACE_MS, streamedRun } from './live';
 import { MockApi } from './mock';
@@ -100,6 +100,47 @@ describe('LiveRun ordering', () => {
     await vi.advanceTimersByTimeAsync(STREAM_GRACE_MS - 100);
     handlers.connection?.('open');
     await vi.advanceTimersByTimeAsync(1000);
+    expect(live.lost).toBeNull();
+    stop();
+  });
+
+  it('notices a run deleted elsewhere: a dropped stream whose run answers 404 shows it gone, and the stream closes', async () => {
+    const closes = vi.fn();
+    hub.api.runEvents = (_id, h) => {
+      handlers = h;
+      return closes;
+    };
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    metrics.resolve({ steps: [step(1)], epochs: [] });
+    handlers.connection?.('open');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.id).toBe('run_7d1e');
+    // A blip with the run still there changes nothing.
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.id).toBe('run_7d1e');
+    expect(live.error).toBeUndefined();
+    handlers.connection?.('open');
+    // Deleted in another tab: the stream drops and answers 404 from then on.
+    const gone = new ApiError(404, 'run_not_found', 'No run with id run_7d1e.');
+    const asked = vi.fn(() => Promise.reject(gone));
+    hub.api.run = asked;
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.error).toBe(gone);
+    expect(live.run).toBeUndefined();
+    expect(live.connection).toBe('idle');
+    expect(live.lost).toBeNull();
+    expect(closes).toHaveBeenCalledTimes(1);
+    // Nothing retries: neither the stream's later errors nor the timers ask again.
+    const n = asked.mock.calls.length;
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(asked.mock.calls.length).toBe(n);
     expect(live.lost).toBeNull();
     stop();
   });
