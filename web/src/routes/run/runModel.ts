@@ -169,7 +169,10 @@ export class RunModel {
     const ended = r.status === 'stopped' || r.status === 'failed' ? r.status : null;
     // How far it trained, in epochs, steps of an epoch it never finished included (2.25: a quarter into epoch 3).
     const trained = Math.max(this.observed.get(), r.steps_per_epoch > 0 ? r.step / r.steps_per_epoch : 0);
-    return mosaicOffText(this.closeN.get(), r.epochs, epochsDone(r.status, r.epoch), this.live.get(), stoppedEarly(r), ended, trained);
+    // A failed run's `epoch` may also be its last finished one (it failed before the next epoch's first step): the
+    // history's last epoch says so.
+    const done = Math.max(epochsDone(r.status, r.epoch), this.lastEpoch.get()?.epoch ?? 0);
+    return mosaicOffText(this.closeN.get(), r.epochs, done, this.live.get(), stoppedEarly(r), ended, trained);
   }, {
     equals: (a, b) => a.cap === b.cap && a.full === b.full,
   });

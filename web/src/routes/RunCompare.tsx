@@ -126,9 +126,14 @@ export default function RunCompare() {
       if (document.visibilityState === 'visible' && !untrack(() => runs.loading || runs.refreshing)) void runs.refresh();
     }),
   );
-  /** Every compared run's metrics hold the epochs its list entry says it finished. */
+  /**
+   * Every compared run's metrics hold every epoch its list entry may have finished. A failed run's `epoch` is the one it
+   * failed in, or its last finished one when it failed before the next epoch's first step (docs/API.md `Run.epoch`):
+   * the list cannot tell them apart, so a failed run counts as finished through `epoch`, and one read again when it was
+   * not costs a single read (review round 3: an empty answer asked before epoch 1's checkpoint landed stood for good).
+   */
   const caughtUp = (read: Map<string, RunMetrics>) =>
-    chosen.get().every((r) => (read.get(r.id)?.epochs.at(-1)?.epoch ?? 0) >= epochsDone(r.status, r.epoch));
+    chosen.get().every((r) => (read.get(r.id)?.epochs.at(-1)?.epoch ?? 0) >= (r.status === 'failed' ? r.epoch : epochsDone(r.status, r.epoch)));
   // A failed refresh is tried again COMPARE_POLL_MS after it failed (its own effect: the runs polled meanwhile never
   // put it off).
   effect(() => {

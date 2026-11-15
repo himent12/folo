@@ -321,6 +321,42 @@ describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
     expect(chip()).toContain(last);
   });
 
+  it('reads again a failed run whose metrics came before the runs list (review round 3)', async () => {
+    // The metrics answer is asked while epoch 1's checkpoint is still being written (no epochs); the runs list comes
+    // after epoch 2 failed before its first step: `failed, epoch: 1`, epoch 1 finished (docs/API.md `Run.epoch`).
+    const api = hub.api as MockApi;
+    const [run, other] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const full = (await api.runMetrics(run!.id)).epochs;
+    const listRuns = api.runs.bind(api);
+    const readMetrics = api.runMetrics.bind(api);
+    let release!: () => void;
+    const listed = new Promise<void>((r) => (release = r));
+    let reads = 0;
+    vi.spyOn(api, 'runs').mockImplementation(async (...a) => {
+      const list = await listRuns(...a);
+      await listed;
+      return list.map((r) => (r.id === run!.id ? { ...r, status: 'failed', epoch: 1, best: null } : r));
+    });
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      const m = await readMetrics(id, ...rest);
+      if (id !== run!.id) return m;
+      return { ...m, epochs: m.epochs.slice(0, reads++ === 0 ? 0 : 1) };
+    });
+    vi.useFakeTimers();
+    router.route = parse(`#/runs/compare?ids=${run!.id},${other!.id}`);
+    c = mount(RunCompare, { target });
+    await tick();
+    expect(reads).toBe(1);
+    release();
+    await tick();
+    await tick(COMPARE_POLL_MS);
+    const chip = [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(run!.name))?.textContent ?? '';
+    expect(chip).toContain(metric(full[0]!.val.map50_95));
+    // One read more, not one per poll: the second answer was asked with the list in hand.
+    await tick(COMPARE_POLL_MS);
+    expect(reads).toBe(2);
+  });
+
   it('follows a stopped run resumed in another tab (review round 1)', async () => {
     // Not training when the page opens (stopped, say).
     const { state, chip } = await trainingCompare(null, false);

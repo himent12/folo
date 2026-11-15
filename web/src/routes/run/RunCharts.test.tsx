@@ -190,6 +190,11 @@ describe('the live KPI strip', () => {
     v = show({ ...run, status: 'failed', epoch: 3, step: 90 }, { steps: [step(90, 40)] });
     expect(v.model.closeText.get().cap).toBe('Mosaic off from epoch 3');
     v.c.unmount();
+    // Failed as epoch 3 began, before its first step (review round 3): the server reports `epoch: 2`, its last
+    // finished one, and the history holds epoch 2, so it failed after 2 finished epochs, not 1.
+    v = show({ ...run, status: 'failed', step: 80 }, { steps: [step(80, 40)], epochs: [epoch(1), epoch(2)] });
+    expect(v.model.closeText.get()).toEqual({ cap: 'Failed before mosaic off', full: 'Failed after 2 finished epochs: mosaic was to be off after epoch 2' });
+    v.c.unmount();
   });
 });
 
