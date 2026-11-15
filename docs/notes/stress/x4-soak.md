@@ -117,5 +117,6 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
 - Run page left open across ten real CPU runs (Studio and Desktop), start/stop loops of tiny runs.
 - Desktop idle CPU on every screen and `--bench-frames` on the big data; Studio `npm run perf`.
 - Narrow window widths (1024, 800) on Runs and the big grid.
-- The `apps/desktop` gates (fmt, clippy, test, build) for the x4-soak-2 fix: no build slot was free in any of
-  three turns, so that commit was never compiled here; CI is its first build.
+- Re-measuring the 20k-grid fling with the fixed Desktop build: the fix is checked by its behaviour tests
+  (`store/image_queue.rs`, `app/image_tests.rs`), not by a new thread-count run. The `apps/desktop` gates
+  (fmt, test, clippy, build) first ran in review round 2 (all pass).
