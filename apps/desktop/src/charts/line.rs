@@ -14,7 +14,7 @@ use super::axis::{
     even_ticks, format_step, int_ticks, label_pow, nice_step, pow2_stride, pow2_ticks_every, superscript,
     ticks,
 };
-use super::cursor::{chip_label, cursor_x, nearest};
+use super::cursor::{chip_label, cursor_value, cursor_x, nearest};
 use super::domain::unit_domain;
 use super::ease::ease;
 use super::end_labels::{end_gutter, paint_end_names};
@@ -590,10 +590,14 @@ fn paint_line_chart(
     }
     // Readout box.
     let smoothed_any = spec.series.iter().any(|s| s.smooth > 0.0);
-    let title =
-        format!("{} {}{}", spec.x_name, (spec.x_fmt)(snap), if smoothed_any { " · smoothed" } else { "" })
-            .trim()
-            .to_string();
+    let title = format!(
+        "{} {}{}",
+        spec.x_name,
+        cursor_value(spec, snap),
+        if smoothed_any { " · smoothed" } else { "" }
+    )
+    .trim()
+    .to_string();
     let fs = ty::SM.size;
     let title_w = text_width(window, &title, fs);
     let name_w = rows.iter().map(|r| text_width(window, &r.1, fs)).fold(title_w, |a, b| a.max(b));

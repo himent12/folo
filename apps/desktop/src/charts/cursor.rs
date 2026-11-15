@@ -12,8 +12,13 @@ pub fn value_near(points: &[(f32, f32)], x: f32, span: f32) -> Option<f32> {
 
 /// The cursor chip's text, named ("epoch 36") so a linked cursor's unit is explicit.
 pub(super) fn chip_label(spec: &LineChart, x: f32) -> String {
-    let v = (spec.x_fmt)(x);
+    let v = cursor_value(spec, x);
     if spec.x_name.is_empty() { v } else { format!("{} {v}", spec.x_name) }
+}
+
+/// The cursor's x as text: `cursor_fmt`, else the tick format.
+pub(super) fn cursor_value(spec: &LineChart, x: f32) -> String {
+    spec.cursor_fmt.as_ref().map_or_else(|| (spec.x_fmt)(x), |f| f(x))
 }
 
 /// Index of the point nearest to `x` in a sorted series.

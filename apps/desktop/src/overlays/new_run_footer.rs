@@ -122,6 +122,7 @@ impl FoloApp {
         let compute_blocked = self.compute_blocked();
         let dataset_blocked = self.dataset_blocked().is_some();
         let weights_gone = self.nr_weights_gone().is_some();
+        let device_gone = self.nr_device_gone().is_some();
         // What the footer can honestly say. With the server's estimator: its answer for this
         // config; while a changed config is out, the last answer marked as updating (if it was for
         // the same kind of device); nothing for an unparsed value, a rejected config or a deleted
@@ -353,6 +354,9 @@ impl FoloApp {
                 window,
                 cx,
             )
+        } else if device_gone {
+            // It says why under Device.
+            self.button_disabled("nr-start", go, Btn::Primary, Some(go_icon), "Pick Auto or CPU", window, cx)
         } else if epochs_bad || lr_bad || close_bad {
             self.button_disabled(
                 "nr-start",

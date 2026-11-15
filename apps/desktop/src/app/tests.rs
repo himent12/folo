@@ -166,24 +166,66 @@ fn new_run_offers_gpu_0_only_on_a_server_that_has_a_gpu() {
     use crate::store::Load;
     let (mut app, window) = open();
     drive(&mut app, window, |this, w, cx| this.open_new_run(None, w, cx));
-    // The demo server has a GPU: offered.
+    app.frame(window.into());
+    // The demo server has a GPU: offered, and the right arrow from Auto picks it.
     drive(&mut app, window, |this, _, _| assert_eq!(this.nr_no_gpu(), None));
-    // Not answered yet: still offered (the server decides at Start).
+    assert_eq!(device_after_right(&mut app, window, 0), 1);
+    // Never answered: still offered (the server decides at Start).
     drive(&mut app, window, |this, _, _| {
         let kept = std::mem::replace(&mut this.store.system, Load::Loading);
+        let last = this.store.last_gpu_count.take();
         assert_eq!(this.nr_no_gpu(), None);
         this.store.system = kept;
+        this.store.last_gpu_count = last;
     });
-    // A server with no GPU (`/api/system` gpus = [], d2-runs-2): GPU 0 is disabled, with the reason.
+    // A server with no GPU (`/api/system` gpus = [], d2-runs-2): GPU 0 is disabled, with the reason,
+    // and the right arrow from Auto steps over it to CPU.
     drive(&mut app, window, |this, _, _| {
         if let Load::Ready(s) = &mut this.store.system {
             s.gpus.clear();
         }
         assert!(this.nr_no_gpu().is_some_and(|why| why.contains("no GPU")));
     });
+    assert_eq!(device_after_right(&mut app, window, 0), 2);
+    // While `/system` is asked again (every 2 s it is Loading) the last answer, no GPU, stands.
+    drive(&mut app, window, |this, _, _| {
+        this.store.last_gpu_count = Some(0);
+        this.store.system = Load::Loading;
+        assert!(this.nr_no_gpu().is_some());
+    });
+    assert_eq!(device_after_right(&mut app, window, 0), 2);
+    // GPU 0 still picked (prefilled from a run that had it, or picked before the server said):
+    // Start says why and nothing is sent until Auto or CPU is picked.
+    drive(&mut app, window, |this, w, cx| {
+        this.new_run.as_mut().unwrap().device = 1;
+        assert!(this.nr_device_gone().is_some_and(|why| why.contains("pick Auto or CPU")));
+        this.submit_new_run(w, cx);
+        assert!(!this.new_run.as_ref().unwrap().submitting, "nothing is sent");
+        this.new_run.as_mut().unwrap().device = 2;
+        assert_eq!(this.nr_device_gone(), None);
+    });
     // The dialog draws with it.
     app.frame(window.into());
     drive(&mut app, window, |this, _, _| assert!(this.new_run.is_some()));
+}
+
+/// New run's Device control focused at option `from`, then the right arrow pressed as a keyboard
+/// does: the option it picks.
+fn device_after_right(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, from: usize) -> usize {
+    use folo_ui::{KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput};
+    drive(app, window, |this, _, _| this.new_run.as_mut().unwrap().device = from);
+    app.frame(window.into());
+    drive(app, window, |this, w, cx| w.focus(&this.fh("nr-device", cx)));
+    app.frame(window.into());
+    let keystroke = Keystroke::parse("right").unwrap();
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent { keystroke: keystroke.clone(), is_held: false }),
+    );
+    app.run_until_idle();
+    app.simulate_input(window.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+    app.run_until_idle();
+    drive(app, window, |this, _, _| this.new_run.as_ref().unwrap().device)
 }
 
 #[test]
@@ -207,6 +249,18 @@ fn new_run_on_a_server_without_datasets_says_so_once() {
         let shown: Vec<_> = this.toasts.iter().filter(|t| &*t.title == "Add a dataset first").collect();
         assert_eq!(shown.len(), 1);
         assert!(shown[0].action.as_ref().is_some_and(|(label, _)| &**label == "Add dataset"));
+    });
+    // `--open new-run` on it says so too, at its first frame, and doesn't open the dialog later
+    // when a dataset appears.
+    drive(&mut app, window, |this, _, _| {
+        this.toasts.clear();
+        this.open_new_run_pending = true;
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.open_new_run_pending, "the request is answered");
+        assert!(this.toasts.iter().any(|t| &*t.title == "Add a dataset first"));
+        assert!(this.new_run.is_none());
     });
 }
 

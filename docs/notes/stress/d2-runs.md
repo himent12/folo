@@ -3,8 +3,9 @@
 FOLO Desktop › Runs, the New run dialog, the live training dashboard and the cloud run pages, driven off screen
 (`FOLO_UI_OFFSCREEN=1`, window messages through `apps/desktop/tools/drive.ps1`) against isolated `folo serve`
 instances on the CPU (`FOLO_GPU_BACKEND=metal`), `folo serve --mock` for cloud, and the built-in demo (`--mock`,
-`--scenario`). Base `1436ad68`. Every value shown was checked against the API JSON and `metrics.jsonl` at the same
-moment; every finding was reproduced twice.
+`--scenario`). Base `1436ad68`. The values shown were checked against the API JSON and `metrics.jsonl`: a finished
+run's exactly, a live run's against a read taken within a poll of the screenshot (so a live value can be one poll
+apart); every finding was reproduced twice.
 
 ## What was tested
 
@@ -28,8 +29,9 @@ moment; every finding was reproduced twice.
   (this one has 434).") and nothing is sent.
 - **Server killed by PID mid-epoch** and restarted: "Lost connection… retrying", "Server unreachable", then without a
   click "Interrupted: the server stopped during training" with Resume from epoch 2, within about 20 s.
-- **Cloud** (`folo serve --mock`): a live cloud run through Provisioning, Booting, Uploading data (32.0 of 45.8 MiB =
-  the API's 38.4 / 48.0 MB), Training, Collecting weights, Releasing, Released, Completed with its toast; its
+- **Cloud** (`folo serve --mock`): a live cloud run through Provisioning, Booting, Uploading data (32.0 of 45.8 MiB,
+  70 %; the total is the API's 48.0 MB; the API's 38.4 MB = 36.6 MiB uploaded was read a poll after the screenshot,
+  so the uploaded figure was not matched at one moment), Training, Collecting weights, Releasing, Released, Completed with its toast; its
   instance deleted mid-training (Failed in epoch 3 of 3 with the provider's message, Resume from epoch 3). New run's
   Stop after with 0, -1, 1e9, letters, empty and 100000: refused inline, Start disabled.
 - **Two Desktop windows on one live run**, Stop (confirmed by keyboard) in one: both go Stopping, then "Stopped at
@@ -40,13 +42,13 @@ moment; every finding was reproduced twice.
 | id | severity | what | status |
 |---|---|---|---|
 | d2-runs-1 | annoying | A run's Validation mAP axis reads `0.000042` under `× 10⁻⁵` (= 4.2×10⁻¹⁰): every run whose mAP is under about 0.03 (the first epochs of every real run) gets a power-of-ten caption over labels that are already exact. Root cause `apps/desktop/src/charts/line.rs:201`: the caption ignored the fitted 0–1 axis, whose labels are written in full. | fixed: `charts::axis::label_pow`, test `charts::axis::tests::small_values_share_a_power_of_ten` |
-| d2-runs-2 | polish | New run › Device offers GPU 0 on a server whose `/api/system` lists no GPU; Start then answers "Device gpu:0 is not available". `apps/desktop/src/overlays/new_run.rs:192`. | fixed: GPU 0 disabled with the reason as its tooltip (arrow keys skip it), `FoloApp::nr_no_gpu`, test `app::tests::new_run_offers_gpu_0_only_on_a_server_that_has_a_gpu` |
+| d2-runs-2 | polish | New run › Device offers GPU 0 on a server whose `/api/system` lists no GPU; Start then answers "Device gpu:0 is not available". `apps/desktop/src/overlays/new_run.rs:192`. | fixed: GPU 0 disabled with the reason as its tooltip (arrow keys skip it), also while `/system` is asked again (`Store::last_gpu_count`); a GPU 0 still picked (prefilled from a run, or picked before `/system` answered) blocks Start with "This server has no GPU: pick Auto or CPU" (`FoloApp::nr_device_gone`), test `app::tests::new_run_offers_gpu_0_only_on_a_server_that_has_a_gpu` (keyboard). SIBLING: Studio keeps a restored `gpu:0` draft submittable on a server without GPUs (`web/src/routes/runnew/TrainingSection.tsx:324`, `runnew/jump.ts:122`), not fixed here |
 | d2-runs-3 | polish | After the server is killed mid-epoch, the interrupted run's Duration is the last `alive_at` (35 s for ~58 s trained) and the loss chart ends at the last flushed step (12, where 16 had been streamed). `crates/folo-server/src/runs/registry.rs:56-61`. | deferred: server internals, approximate by design |
-| d2-runs-4 | annoying | Ctrl N (and the palette's New run) does nothing at all on a server without datasets. `apps/desktop/src/app/new_run.rs:124` returned silently. | fixed: one "Add a dataset first" toast with an Add dataset action, test `app::tests::new_run_on_a_server_without_datasets_says_so_once` |
-| d2-runs-5 | polish | The run charts' cursor chip names the wrong epoch on the step charts (Training loss, Learning rate): step 4 of 12 reads "epoch 0", the first half of every epoch the one before it. `apps/desktop/src/screens/runs/charts.rs:104` rounded x, while epoch e's steps lie in (e-1, e]. | fixed: `epoch_of` (ceil, as Studio's `stepEpoch`), test `screens::runs::charts::tests::the_cursor_names_the_epoch_a_step_belongs_to` |
+| d2-runs-4 | annoying | Ctrl N (and the palette's New run) does nothing at all on a server without datasets. `apps/desktop/src/app/new_run.rs:124` returned silently. | fixed: one "Add a dataset first" toast with an Add dataset action, also for `--open new-run` (`app/render.rs`, which waited for a dataset and opened the dialog later), test `app::tests::new_run_on_a_server_without_datasets_says_so_once` |
+| d2-runs-5 | polish | The run charts' cursor chip names the wrong epoch on the step charts (Training loss, Learning rate): step 4 of 12 reads "epoch 0", the first half of every epoch the one before it. `apps/desktop/src/screens/runs/charts.rs:104` rounded x, while epoch e's steps lie in (e-1, e]. | fixed: the cursor reads the step back from x and names its epoch (`epoch_at`, `LineChart::cursor_fmt`; ticks keep `epoch_tick`), right also at 20 000 steps an epoch, test `screens::runs::charts::tests::the_cursor_names_the_epoch_a_step_belongs_to` |
 | d2-runs-6 | annoying | New run's cloud footer states "Limit $17.00 at 100 h" beside a Stop after field that says `100000` and is marked invalid: the footer read the last valid value the typing passed through. `apps/desktop/src/overlays/new_run_footer.rs:387`. | fixed: `limit_text` shows "—" while Stop after is invalid, test `overlays::new_run_footer::tests::the_limit_is_not_shown_for_a_stop_after_being_corrected` |
 | d2-runs-7 | annoying | A run stopped during epoch 3 of 3 (36 steps taken, epoch 2 kept) opens on a "So far" axis of 0–2: the loss and LR charts cut off the 12 steps of epoch 3, without the Stopped end mark, while the loss legend reads the last of them. `apps/desktop/src/screens/runs/charts.rs:502` fitted to `Run.epoch`, the kept epoch. | fixed: `fitted_total` (the last step's epoch counts), test `screens::runs::charts::tests::so_far_holds_the_steps_of_the_epoch_a_run_stopped_in` |
-| d2-runs-8 | polish | A run that failed before its first step (dataset with no images) says "Failed in epoch 0 of 2" with red "failed during epoch 0" markers; Studio says "Failed before training started" and draws none. `apps/desktop/src/screens/runs/detail.rs:389`, `screens/runs/charts.rs:176`. | fixed: `failed_title`, no marker before the first step, test `screens::runs::detail::tests::a_run_that_failed_before_its_first_step_says_so` |
+| d2-runs-8 | polish | A run that failed before its first step (dataset with no images) says "Failed in epoch 0 of 2" with red "failed during epoch 0" markers; Studio says "Failed before training started" and draws none. `apps/desktop/src/screens/runs/detail.rs:389`, `screens/runs/charts.rs:176`. | fixed: `failed_title`, no marker before the first step (`fail_mark`), tests `screens::runs::detail::tests::a_run_that_failed_before_its_first_step_says_so`, `screens::runs::charts::tests::a_run_that_failed_before_its_first_step_has_no_failure_marker` |
 
 Repro for each, from a fresh state:
 
