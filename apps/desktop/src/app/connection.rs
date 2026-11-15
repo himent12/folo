@@ -111,6 +111,8 @@ impl FoloApp {
         self.start_error = None;
         self.reached = false;
         self.store.gpu_util.clear();
+        // The last `/system` answer was the old server's: its GPUs say nothing about this one's.
+        self.store.last_gpu_count = None;
         self.play_pred = Load::Idle;
         self.play_pred_pending = false;
         self.play_model = None;

@@ -242,6 +242,40 @@ fn a_server_that_never_answered_was_not_lost() {
 }
 
 #[test]
+fn a_cpu_only_server_does_not_take_gpu_0_from_the_next_one() {
+    // Server A answered `/system` with no GPU: New run disables GPU 0 there.
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, _| {
+        if let Load::Ready(s) = &mut this.store.system {
+            s.gpus.clear();
+        }
+        this.store.last_gpu_count = Some(0);
+        assert!(this.nr_no_gpu().is_some());
+    });
+    // Switched to server B: before (and when) its `/system` fails to answer, A's "no GPU" is gone.
+    drive(&mut app, window, |this, _, cx| {
+        this.set_backend(Arc::new(MockBackend::new(4200, true).failing()), ServerMode::Local, cx);
+        assert_eq!(this.store.last_gpu_count, None);
+        assert_eq!(this.nr_no_gpu(), None, "B's GPU 0 is offered until B says otherwise");
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.system.ready().is_none(), "B's /system failed");
+        assert_eq!(this.nr_no_gpu(), None);
+    });
+    // A same-server refresh keeps the last answer (rev_user round 1): B with a GPU, then asked again.
+    drive(&mut app, window, |this, _, cx| {
+        this.set_backend(Arc::new(MockBackend::new(4200, true)), ServerMode::Local, cx)
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.store.last_gpu_count.map(|n| n > 0), Some(true));
+        this.store.system = Load::Loading;
+        assert_eq!(this.nr_no_gpu(), None);
+    });
+}
+
+#[test]
 fn the_reason_the_local_server_did_not_start_stays_on_the_error_panels() {
     let (mut app, window) = open();
     drive(&mut app, window, |this, _, cx| {
