@@ -29,7 +29,7 @@ real `folo serve` on the CPU (port 18090, seed data dir), a second empty server 
 | d4-bench-settings-1 | annoying | Benchmarks' inline forms (New benchmark, New loop, Design) ignore Esc, Enter and Ctrl+Enter; Esc on a benchmark page leaves it and drops the form | fixed |
 | d4-bench-settings-2 | polish | A long benchmark (or run, model) name in the title bar runs under the search field with no "…"; on an entry page the entry's own name is pushed out of sight | fixed |
 | d4-bench-settings-3 | annoying | The Plan tab calls any plan no agent designed "The default plan", also a two-condition one written by hand (Studio says "Written by hand.") | fixed |
-| d4-bench-settings-4 | annoying | A server address that is not a URL ("abc def", "http://") reads "Could not reach folo serve at abc def" with a hint to start a server | fixed (message); the retry banner stays |
+| d4-bench-settings-4 | annoying | A server address that is not a URL ("abc def", "http://[::") reads "Could not reach folo serve at abc def" with a hint to start a server | fixed (message); the retry banner stays |
 
 ### d4-bench-settings-1: Esc, Enter and Ctrl+Enter on the Benchmarks forms
 Repro: Ctrl+6, New benchmark; the name field has focus. Enter: nothing. Ctrl+Enter: nothing (Settings › Keyboard
