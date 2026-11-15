@@ -822,3 +822,56 @@ fn a_dataset_not_found_once_loads_again_once_it_is_listed() {
         assert!(this.store.dataset.get("ds_nope").is_some_and(|l| l.error().is_some()));
     });
 }
+
+/// x2-newcomer-1 (fixed by d2-runs-4's change, kept): New run (Ctrl N, the palette, a New run button) with no
+/// dataset at all stays on the page and says why once, and the toast's Add dataset leads to Datasets.
+#[test]
+fn new_run_without_any_dataset_offers_add_dataset() {
+    let (mut app, window) = open_with(Arc::new(MockBackend::new(4200, true).empty()));
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            this.store.datasets.ready().is_some_and(|d| d.is_empty()),
+            "an empty server, its list loaded"
+        );
+        this.navigate(super::Route::Playground, w, cx);
+    });
+    // Ctrl N twice: one toast, the user not moved.
+    drive(&mut app, window, |this, w, cx| this.open_new_run(None, w, cx));
+    drive(&mut app, window, |this, w, cx| this.open_new_run(None, w, cx));
+    let add = drive(&mut app, window, |this, _, _| {
+        assert!(this.new_run.is_none(), "no form without a dataset");
+        assert_eq!(this.route, super::Route::Playground);
+        let shown: Vec<_> = this.toasts.iter().filter(|t| t.title.as_ref() == "Add a dataset first").collect();
+        assert_eq!(shown.len(), 1, "a second Ctrl N adds no second toast");
+        let (label, add) = shown[0].action.clone().expect("the toast offers the way on");
+        assert_eq!(label.as_ref(), "Add dataset");
+        add
+    });
+    // Its action: Datasets and the folder step (on the demo that says it needs folo serve).
+    drive(&mut app, window, |this, w, cx| add(this, w, cx));
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.route, super::Route::Datasets);
+        assert!(this.toasts.iter().any(|t| t.title.as_ref() == "Registering folders needs folo serve"));
+    });
+}
+
+/// x2-newcomer-3: Enter in the Generate synthetic dialog's Name field generates (as Ctrl Enter does).
+#[test]
+fn enter_in_the_synth_dialog_generates() {
+    use folo_ui::{KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput};
+    let (mut app, window) = open_with(Arc::new(MockBackend::new(4200, true).empty()));
+    drive(&mut app, window, |this, w, cx| this.open_synth(w, cx));
+    app.frame(window.into());
+    let keystroke = Keystroke::parse("enter").unwrap();
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent { keystroke: keystroke.clone(), is_held: false }),
+    );
+    app.run_until_idle();
+    app.frame(window.into());
+    app.simulate_input(window.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.synth.as_ref().is_none_or(|f| f.submitting), "Enter sent the dialog");
+    });
+}
