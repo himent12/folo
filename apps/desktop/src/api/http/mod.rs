@@ -565,9 +565,13 @@ FOLO"
         // given a scheme, the first became the host "http"; ureq refuses the second's scheme unsent.
         let not =
             ["abc def", "http://[::", "http:// 127.0.0.1:1", "http://a b:7878", "http://", "http://:7878"];
-        for typed in not.into_iter().chain(["foo://some:42/123", "ftp://127.0.0.1:21", " ", "https:///"]) {
+        // Review round 2: a port ureq can't use sent the request to port 80.
+        let ports = ["http://127.0.0.1:99999", "127.0.0.1:70000", "http://h:abc", "localhost:", "http://h:0"];
+        let odd = ["foo://some:42/123", "ftp://127.0.0.1:21", " ", "https:///", "http://[::1]:65536"];
+        for typed in not.into_iter().chain(ports).chain(odd) {
             let api = HttpBackend::new(typed);
             assert!(!api.address_ok(), "{typed:?}");
+            assert!(api.url("/health").starts_with("folo-not-sent:"), "never sent: {typed:?}");
             let e = api.health().unwrap_err();
             assert_eq!(e.code, "server_unreachable", "{typed:?}");
             assert!(e.message.ends_with("is not a server address"), "{typed:?}: {}", e.message);
@@ -581,8 +585,12 @@ FOLO"
         );
         for fine in
             ["127.0.0.1:7878", "http://localhost:18090/", "https://[::1]:443", "http://my-box", "HTTP://a:1"]
+                .into_iter()
+                .chain(["http://[::1]", "localhost:65535", "http://u@h:8080"])
         {
-            assert!(HttpBackend::new(fine).address_ok(), "{fine:?}");
+            let api = HttpBackend::new(fine);
+            assert!(api.address_ok(), "{fine:?}");
+            assert!(api.url("/health").to_ascii_lowercase().starts_with("http"), "{fine:?}");
         }
     }
 

@@ -25,14 +25,15 @@ impl ServerProcess {
 /// The runs of the server at `url` now, asked with a one-second limit (closing the window waits on it);
 /// `None` when it doesn't answer in time.
 pub fn runs_now(url: &str) -> Option<Vec<Run>> {
-    let base = super::HttpBackend::new(url).base().to_string();
+    // `url()`, not the base: an address that isn't one is never sent (port 80 for ":99999").
+    let runs = super::HttpBackend::new(url).url("/runs");
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_millis(500)))
         .timeout_global(Some(Duration::from_secs(1)))
         .build()
         .into();
-    let mut r = agent.get(&format!("{base}/api/runs")).call().ok().filter(|r| r.status().is_success())?;
+    let mut r = agent.get(&runs).call().ok().filter(|r| r.status().is_success())?;
     r.body_mut().with_config().limit(64 << 20).read_json::<folo_api::RunList>().ok().map(|l| l.runs)
 }
 
@@ -96,7 +97,8 @@ pub fn is_loopback(url: &str) -> bool {
 /// accepts at once however busy the server is.
 pub fn probe(url: &str) -> bool {
     let connect = if is_loopback(url) { Duration::from_millis(500) } else { Duration::from_secs(2) };
-    let base = super::HttpBackend::new(url).base().to_string();
+    // `url()`, not the base: an address that isn't one is never sent (port 80 for ":99999").
+    let health = super::HttpBackend::new(url).url("/health");
     let agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(connect))
@@ -104,7 +106,7 @@ pub fn probe(url: &str) -> bool {
         .build();
     let agent: ureq::Agent = agent.into();
     agent
-        .get(&format!("{base}/api/health"))
+        .get(&health)
         .call()
         .ok()
         .filter(|r| r.status().is_success())

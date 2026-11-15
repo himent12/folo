@@ -103,16 +103,22 @@ fn ctrl_enter_on_a_design_proposal_neither_uses_it_nor_asks_again() {
             effort: None,
             note: String::new(),
         };
-        let proposal = this.store.api.design_bench("bn_7a04", &req).unwrap();
-        this.bench.design.as_mut().unwrap().proposal = Some(proposal);
-        this.store.api.clone()
+        let mut proposal = this.store.api.design_bench("bn_7a04", &req).unwrap();
+        // Marked: the mock answers every ask alike, so only a mark shows that no new answer
+        // replaced it (review round 2).
+        proposal.plan.rationale = Some("the proposal on screen".into());
+        this.bench.design.as_mut().unwrap().proposal = Some(proposal.clone());
+        (this.store.api.clone(), proposal)
     });
-    let before = plan(&before);
+    let (before, shown) = (plan(&before.0), before.1);
     app.frame(window.into());
+    // With no agent, asking does nothing anyway: the test would prove nothing.
+    assert!(drive(&mut app, window, |this, _, _| !this.bench_agents().is_empty()), "an agent can be asked");
     press(&mut app, window, "ctrl-enter");
     let api = drive(&mut app, window, |this, _, _| {
         let f = this.bench.design.as_ref().expect("the proposal stays on screen");
-        assert!(f.proposal.is_some() && !f.asking && !f.applying, "nothing was sent");
+        assert!(!f.asking && !f.applying && f.error.is_none(), "nothing was sent");
+        assert_eq!(f.proposal.as_ref(), Some(&shown), "no new ask replaced the proposal");
         this.store.api.clone()
     });
     assert_eq!(plan(&api), before, "the plan is unchanged");
