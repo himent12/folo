@@ -92,8 +92,11 @@ export default function RunCompare() {
   const chosen = computed(() => ids.get().map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
   /** Where the compared runs are: each one's status and epoch ("run_a:running:3,run_b:completed:30"). */
   const moved = computed(() => chosen.get().map((r) => `${r.id}:${r.status}:${r.epoch}`).join(','));
-  /** What `moved` was when each metrics answer was asked for: null when asked before the runs list came. */
-  const readAt = new WeakMap<object, string | null>();
+  /**
+   * Each metrics answer's `ids` (joined) and what `moved` was when it was asked for (`at`: null when asked before the
+   * runs list came).
+   */
+  const readAt = new WeakMap<object, { ids: string; at: string | null }>();
   const metrics = new Resource(async (s) => {
     const list = ids.get();
     const at = untrack(() => (runs.data ? moved.get() : null));
@@ -104,7 +107,7 @@ export default function RunCompare() {
     };
     const out = await Promise.all(list.map((id) => hub.api.runMetrics(id, s).then((m) => [id, m] as const, gone)));
     const read = new Map<string, RunMetrics>(out.filter((x) => x !== null));
-    readAt.set(read, at);
+    readAt.set(read, { ids: list.join(','), at });
     return read;
   });
 
@@ -123,7 +126,6 @@ export default function RunCompare() {
       if (document.visibilityState === 'visible' && !untrack(() => runs.loading || runs.refreshing)) void runs.refresh();
     }),
   );
-  const strip = (key: string) => key.replace(/:[^,]*/g, '');
   /** Every compared run's metrics hold the epochs its list entry says it finished. */
   const caughtUp = (read: Map<string, RunMetrics>) =>
     chosen.get().every((r) => (read.get(r.id)?.epochs.at(-1)?.epoch ?? 0) >= epochsDone(r.status, r.epoch));
@@ -137,12 +139,20 @@ export default function RunCompare() {
   effect(() => {
     const read = metrics.data;
     if (!read || !runs.data || metrics.loading || metrics.refreshing || metrics.stale !== undefined) return;
-    const at = readAt.get(read);
+    const asked = readAt.get(read);
+    // The link names other runs: the metrics follow `ids` by themselves.
+    if (!asked || asked.ids !== ids.get().join(',')) return;
+    const { at } = asked;
     const now = moved.get();
     if (at === now) return;
-    // The set of runs changed: the metrics follow `ids` by themselves.
-    if (at !== null && at !== undefined && strip(at) !== strip(now)) return;
-    if (at === null && caughtUp(read)) return;
+    if (at === null) {
+      if (caughtUp(read)) return;
+    } else {
+      // Only a run that moved, or one the list holds now and did not then, needs a read: a run deleted elsewhere drops
+      // out of `moved` and leaves the others' metrics as they are, and never freezes them (review round 2).
+      const then = new Set(at.split(','));
+      if (now.split(',').every((e) => !e || then.has(e))) return;
+    }
     untrack(() => void metrics.refresh());
   });
   // Runs planned for very different lengths (30 vs 150 epochs), or one run that trained over twice as long as every

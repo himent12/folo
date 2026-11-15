@@ -19,14 +19,21 @@ export function mosaicOffText(
   live: boolean,
   early = false,
   ended: 'stopped' | 'failed' | null = null,
+  trained = epoch,
 ): { cap: string; full: string } {
   const from = epochs - n;
   const last = `${n} ${n === 1 ? 'epoch' : 'epochs'}`;
   if (early && epoch <= from) return { cap: 'Stopped early, before mosaic off', full: `Stopped early at epoch ${epoch}: mosaic was to be off after epoch ${from}` };
   if (early) return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the early stop at epoch ${epoch}` };
   // Stopped or failed short of its plan (`ended`): the epochs it finished, never the planned count it did not train.
+  // Steps past epoch `from` (`trained`, in epochs: 2.25) ran without mosaic though no such epoch finished: the
+  // trainer closes mosaic before the epoch's first batch (review round 2).
   if (ended && !live && epoch < epochs) {
     const how = ended === 'failed' ? 'Failed' : 'Stopped';
+    if (epoch <= from && trained > from + 1e-9) {
+      const into = Math.ceil(trained - 1e-9);
+      return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the run ${ended} part-way through epoch ${into}` };
+    }
     if (epoch <= from) return { cap: `${how} before mosaic off`, full: `${how} after ${epoch} finished ${epoch === 1 ? 'epoch' : 'epochs'}: mosaic was to be off after epoch ${from}` };
     return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the run ${ended} after epoch ${epoch}` };
   }

@@ -233,21 +233,24 @@ describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
     const full = (await api.runMetrics(done!.id)).epochs;
     const listRuns = api.runs.bind(api);
     const readMetrics = api.runMetrics.bind(api);
-    const state = { training, gate, fail: 0 };
+    const state = { training, gate, fail: 0, epoch: 2, deleted: false };
     vi.spyOn(api, 'runs').mockImplementation(async (...a) => {
       const training = state.training;
-      return (await listRuns(...a)).map((r) => (training && r.id === done!.id ? { ...r, status: 'running', epoch: 2, best: null } : r));
+      const list = (await listRuns(...a)).filter((r) => !(state.deleted && r.id === other!.id));
+      return list.map((r) => (training && r.id === done!.id ? { ...r, status: 'running', epoch: state.epoch, best: null } : r));
     });
     vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
       const training = state.training;
+      const epoch = state.epoch;
       const held = id === done!.id ? state.gate : null;
       if (id === done!.id && state.fail > 0) {
         state.fail--;
         throw new ApiError(500, 'internal', 'the metrics could not be read');
       }
+      if (id === other!.id && state.deleted) throw new ApiError(404, 'run_not_found', 'no such run');
       const m = await readMetrics(id, ...rest);
       if (held) await held;
-      return training && id === done!.id ? { ...m, epochs: m.epochs.slice(0, 1) } : m;
+      return training && id === done!.id ? { ...m, epochs: m.epochs.slice(0, epoch - 1) } : m;
     });
     vi.useFakeTimers();
     router.route = parse(`#/runs/compare?ids=${done!.id},${other!.id}`);
@@ -255,7 +258,7 @@ describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
     const chip = () => [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(done!.name))?.textContent ?? '';
     const last = metric(full.at(-1)!.val.map50_95);
     expect(metric(full[0]!.val.map50_95)).not.toBe(last);
-    return { state, chip, first: metric(full[0]!.val.map50_95), last };
+    return { state, chip, first: metric(full[0]!.val.map50_95), second: metric(full[1]!.val.map50_95), last, other: other! };
   }
 
   it('follows it: its line and value grow as it trains, and its end mark says how it ended', async () => {
@@ -297,6 +300,24 @@ describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
     // Tried again a poll later, with no click.
     await tick(COMPARE_POLL_MS);
     expect(target.querySelector('.stale-note')).toBeNull();
+    expect(chip()).toContain(last);
+  });
+
+  it('keeps following it after the other compared run is deleted elsewhere (review round 2)', async () => {
+    const { state, chip, second, last, other } = await trainingCompare();
+    await tick();
+    // An epoch later its metrics are read again, with both runs in the list.
+    state.epoch = 3;
+    await tick(COMPARE_POLL_MS);
+    expect(chip()).toContain(second);
+    // The other run is deleted in another tab: its chip goes, the link still names it.
+    state.deleted = true;
+    await tick(COMPARE_POLL_MS);
+    expect([...target.querySelectorAll('.chip')].some((el) => el.textContent?.includes(other.name))).toBe(false);
+    // Then this one completes: its line and value still reach the end (they froze at epoch 2).
+    state.training = false;
+    await tick(COMPARE_POLL_MS);
+    expect(chip()).not.toContain('live');
     expect(chip()).toContain(last);
   });
 

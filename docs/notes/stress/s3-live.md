@@ -37,7 +37,10 @@ Fix: `epochsDone(status, epoch)` in `run/readings.ts`. Tests: `runParts.test.tsx
 `run/RunCharts.test.tsx` "says mosaic is off only from the epoch the trainer closes it" (through `RunModel`; fails
 without the fix). Review round 1: a stopped or failed run short of its plan says what it finished, "Stopped before
 mosaic off" (2 of 3 epochs done; it said "Last 1 epoch: mosaic off") or "Mosaic off from epoch 3" (part of the phase),
-never the planned count (`mosaicOffText`'s `ended`). FOLO Desktop has no such caption.
+never the planned count (`mosaicOffText`'s `ended`). Review round 2: a run that stopped or failed part-way into the
+mosaic-off epoch (step 90 of 40 per epoch, 2 epochs finished) trained those batches without mosaic, so it says "Mosaic
+off from epoch 3 … until the run stopped part-way through epoch 3", not "before mosaic off" (`mosaicOffText`'s
+`trained`, the progress in epochs with the steps of an unfinished epoch). FOLO Desktop has no such caption.
 
 ### s3-live-4: a deleted run reconnects forever
 
@@ -59,8 +62,11 @@ a move seen while a metrics read is still out is acted on once that read settles
 partial for good); metrics read before the runs list came are read again only when they hold fewer epochs than the
 list says finished; a refresh that fails keeps the curves, says "Could not refresh these runs' metrics: the curves may
 be behind" with Retry, and is tried again every 3 s by itself; a stopped run resumed in another tab is followed too
-(the poll no longer waits for a run that is already active). Tests: `RunCompare.test.tsx` "a run that trains while
-compared" (four cases, fake timers; the first fails at base, the three added in round 1 fail at the reviewed head). SIBLING (same front end, another surface):
+(the poll no longer waits for a run that is already active). Review round 2: a compared run deleted in another tab
+froze the other runs' metrics for good (the answer's runs no longer matched the list, which read as "the link
+changed"); now only a change of `ids` is left to the metrics Resource, and a deletion alone never blocks a refresh of
+the runs that remain. Tests: `RunCompare.test.tsx` "a run that trains while compared" (five cases, fake timers; the
+first fails at base, the three added in round 1 and the one added in round 2 fail at the head reviewed before them). SIBLING (same front end, another surface):
 `web/src/lib/api/liveLabel.ts` keeps a labeling job deleted elsewhere "Reconnecting"; left to lane s5-label (see
 Deferred).
 

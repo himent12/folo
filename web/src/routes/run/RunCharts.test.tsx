@@ -182,6 +182,14 @@ describe('the live KPI strip', () => {
     v = show({ ...run, epoch: 3, step: 90 }, { steps: [step(90, 40)] });
     expect(v.model.closeText.get().cap).toBe('Mosaic off · final epoch');
     v.c.unmount();
+    // Ended ten batches into epoch 3 (review round 2): those batches trained without mosaic, so it never says
+    // "before mosaic off".
+    v = show({ ...run, status: 'stopped', step: 90 }, { steps: [step(90, 40)] });
+    expect(v.model.closeText.get()).toEqual({ cap: 'Mosaic off from epoch 3', full: 'Mosaic off from epoch 3 until the run stopped part-way through epoch 3' });
+    v.c.unmount();
+    v = show({ ...run, status: 'failed', epoch: 3, step: 90 }, { steps: [step(90, 40)] });
+    expect(v.model.closeText.get().cap).toBe('Mosaic off from epoch 3');
+    v.c.unmount();
   });
 });
 
