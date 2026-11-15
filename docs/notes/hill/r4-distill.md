@@ -105,6 +105,8 @@ Every run of the lane and lane `base`'s controls, P1, proxy-val COCO AP of `best
 | kdl-s0 | `distill.cls_gain=0` | 0.1454 | 0.232 | 0.153 | 0.072 | 0.220 | 0.310 |
 | flip-s0 | `distill.consensus=flip` (removed since) | 0.1533 | 0.248 | 0.158 | 0.070 | 0.236 | 0.338 |
 | t4-s0 | `distill.temperature=4` | 0.1565 | 0.248 | 0.164 | 0.071 | 0.245 | 0.341 |
+| t4-s1 | `distill.temperature=4`, seed 1 | 0.1548 | 0.247 | 0.162 | 0.074 | 0.241 | 0.347 |
+| t4-s2 | `distill.temperature=4`, seed 2 | PENDING | | | | | |
 | blend-s0 | `loss.cls_gain=0.25`, `distill.cls_gain=0.25` | PENDING | | | | | |
 
 (the `ctl` and `cls1` rows give AP per seed and the 3-seed means of the other columns.)
