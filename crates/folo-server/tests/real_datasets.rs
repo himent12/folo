@@ -637,6 +637,15 @@ async fn a_damaged_registry_is_an_error_not_an_empty_list() {
     assert!(e.message.contains("datasets.json is malformed"), "{}", e.message);
     assert!(e.hint.unwrap().contains("fix the JSON"));
     assert_eq!(std::fs::read_to_string(home.join("datasets.json")).unwrap(), cut, "the file is kept");
+    // Fixed while the server runs: still no false "No datasets yet", but how to load them (review round 1).
+    std::fs::write(home.join("datasets.json"), &text).unwrap();
+    let e = err(&app, get("/api/datasets"), StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
+    assert!(e.message.contains("lists 1 dataset this server did not load"), "{}", e.message);
+    assert!(e.hint.unwrap().contains("restart folo serve"));
+    drop(app);
+    let app = restart(&home);
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert_eq!(list.datasets.len(), 1, "a restart loads the fixed registry");
     // A data dir that never had a registry is simply empty.
     let fresh = restart(&t.join("fresh"));
     let list: DatasetList = ok(&fresh, get("/api/datasets")).await;

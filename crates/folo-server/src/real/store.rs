@@ -168,12 +168,29 @@ impl Store for RealStore {
     }
 
     fn list_datasets(&self) -> Result<Vec<Dataset>> {
-        let list = self.entries.read().unwrap().clone();
         // A registry that could not be read at start loaded no dataset: that is an error to show (with how to fix
-        // it), not "no datasets yet" (x3-server-7).
-        if list.is_empty() {
-            super::registry::read_registry(&self.data_dir)?;
-        }
+        // it), not "no datasets yet" (x3-server-7); and once it is fixed, until a restart loads it (x3-server-7,
+        // review round 1). Read under the list's lock, which registering and unregistering hold while they write it.
+        let list = {
+            let entries = self.entries.read().unwrap();
+            if entries.is_empty() {
+                let n = super::registry::read_registry(&self.data_dir)?.datasets.len();
+                if n > 0 {
+                    let path = super::registry::registry_path(&self.data_dir);
+                    let s = if n == 1 { "" } else { "s" };
+                    return Err(Error::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal",
+                        format!(
+                            "{} lists {n} dataset{s} this server did not load when it started",
+                            path.display()
+                        ),
+                    )
+                    .hint("restart folo serve to load them"));
+                }
+            }
+            entries.clone()
+        };
         Ok(list
             .iter()
             .map(|e| {

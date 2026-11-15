@@ -108,20 +108,25 @@ impl Benches {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
-        let mut benches: Vec<Arc<Slot>> = std::fs::read_dir(&root)
+        let loaded: Vec<_> = std::fs::read_dir(&root)
             .into_iter()
             .flatten()
             .flatten()
             .filter(|e| e.path().join("bench.json").is_file())
             .filter_map(|e| match Slot::load(e.path()) {
-                Ok(slot) => {
-                    let _ = std::fs::remove_dir_all(e.path().join("tmp"));
-                    Some(Arc::new(slot))
-                }
+                Ok(slot) => Some((e.path(), slot.id.clone(), slot)),
                 Err(err) => {
                     tracing::warn!("skipping benchmark {}: {err}", e.path().display());
                     None
                 }
+            })
+            .collect();
+        // A copy of a benchmark folder is not a second benchmark of its id (and its files are left alone).
+        let mut benches: Vec<Arc<Slot>> = crate::util::one_per_id("benchmark", loaded)
+            .into_iter()
+            .map(|(dir, slot)| {
+                let _ = std::fs::remove_dir_all(dir.join("tmp"));
+                Arc::new(slot)
             })
             .collect();
         // By time, not by text: one made before `created` had milliseconds has none.

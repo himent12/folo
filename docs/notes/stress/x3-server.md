@@ -46,8 +46,10 @@ answered `400 unknown_format` after 386 s, the unrelated delete 404 after 383 s 
 finished in 5 minutes). Cause: `Index::build` (`crates/folo-server/src/index.rs`) fingerprinted the whole folder (a
 recursive walk following links, a stat per file) before `folo_data::open_with` detected that there is no dataset, and
 `register` holds `RealStore::files` shared for all of it while `delete_dataset` takes it exclusively. Fix: a cheap
-`folo_data::detect_format` first. No regression test: the difference is time on a big tree; the existing
-registration-error tests cover that the answer is unchanged.
+`folo_data::detect_format` first (`index::preflight`), which registration runs before it takes the file lease; the
+hints that phrase the error (`dataset_below`, `images_under`) read at most 20,000 entries (`DIAGNOSE_ENTRIES`; review
+round 1: they used to stop after 10,000 *images*, so a wide tree without images was still walked whole). Test:
+`index::tests` `diagnostics_of_a_non_dataset_read_a_bounded_number_of_entries` (counts, no timing).
 
 ### x3-server-7: a damaged registry is shown as an empty one
 
@@ -55,8 +57,12 @@ Repro: copy a data dir, cut `datasets.json` in half, start: `GET /api/datasets` 
 Studio's Datasets screen said "No datasets yet" and offered Register folder, which then failed; the only clue was one
 ERROR line in stderr. Cause: `RealStore::open_with_cloud` (`real/mod.rs`) loads an empty list on a registry error and
 `list_datasets` (`real/store.rs`) served it as real. Fix: while nothing is loaded, the list reads the registry again
-and answers its `500 internal` "… is malformed" with the hint "fix the JSON by hand or move the file away". Test:
-`tests/real_datasets.rs` `a_damaged_registry_is_an_error_not_an_empty_list`.
+and answers its `500 internal` "… is malformed" with the hint "fix the JSON by hand or move the file away"; once the
+file is fixed it answers `500` "… lists N datasets this server did not load when it started", hint "restart folo
+serve" (review round 1: it answered an empty list again). Desktop's Overview showed "No datasets yet" and skeletons
+for a failed list: its idle panel and datasets strip now say the error with Retry (`SIBLING`; Studio already did).
+Tests: `tests/real_datasets.rs` `a_damaged_registry_is_an_error_not_an_empty_list`, Desktop `app::list_tests`
+`a_failed_datasets_list_is_said_on_overview`.
 
 ### x3-server-6: the folder above a dataset is sent to labeling
 
@@ -64,8 +70,11 @@ Repro: `photos-yolo` copied to `wrapped/my-set/`; `POST /api/datasets {"path":".
 40 images but no labels", hint "label them first". Same for an upload whose archive wraps the dataset in a folder.
 Cause: `data_error` (`index.rs`) counted images below without looking for a dataset below. Fix: `dataset_below` looks
 one and two levels down (64 folders a level) and names it: "'…/wrapped' is not a dataset folder, but
-'…/wrapped/my-set' inside it holds a dataset", hint "register '…/wrapped/my-set'". Test:
-`a_folder_above_a_dataset_names_the_dataset_inside`.
+'…/wrapped/my-set' inside it holds a dataset", hint "register '…/wrapped/my-set'". An upload's folder is removed when
+registration fails, so its error instead says "the archive is not a dataset at its top, but its folder 'my-set' holds
+one", hint to pack that folder's contents at the archive's top and upload again (`real/uploads.rs`
+`wrapped_archive`; review round 1). Tests: `a_folder_above_a_dataset_names_the_dataset_inside`, `tests/uploads.rs`
+`an_archive_wrapping_the_dataset_in_a_folder_says_how_to_pack_it`.
 
 ### x3-server-5: file and folder of one name in an archive
 
@@ -78,21 +87,25 @@ and a folder in the archive", and the session is dropped like for the other host
 
 Repro: `folo serve --token …`; `GET /api/runs?token=…` answers 401 and stderr had `request{method=GET
 uri=/api/runs?token=… }`. Cause: the trace layer's `DefaultMakeSpan` records the whole URI. Fix: `request_span`
-(`lib.rs`) records method and path only, like `log_request` already did.
+(`lib.rs`) records method and path only, like `log_request` already did. Test: `tests/token.rs`
+`api_requests_need_the_token_and_it_is_never_logged` sends `?token=<secret>` and checks the TRACE log (review round 1).
 
 ### x3-server-9: a copied run folder is listed twice
 
 Repro: `runs/run_17a6` copied to `runs/run_17a7` (a backup next to it); on start `GET /api/runs` listed run_17a6 twice
 and both apps showed two identical rows; nothing in the log. Cause: `Runs::open` (`runs/registry.rs`) loaded every
 folder's `run.json` without looking at the id. Fix: one run per id, from the folder named after it (else the first by
-name); the copies are skipped with a WARN naming both folders and are not touched. Test: `runs::tests`
-`a_copied_run_folder_is_loaded_once`.
+name); the copies are skipped with a WARN naming both folders and are not touched. Labeling jobs and benchmarks had
+the same bug (`SIBLING`, review round 1): all three use `util::one_per_id`, before a job is swept or a benchmark's
+`tmp/` removed. Tests: `runs::tests` `a_copied_run_folder_is_loaded_once`, `util::tests` `copies_of_a_folder_load_once`.
+Deferred: deleting the run and restarting loads the copy (it is a run folder under `runs/`, as it was before this
+fix, when both were listed); hiding a user's backup needs tombstones by run id, a design choice.
 
 ### x3-server-8: one warning per listing
 
 Fix: `Models::warn_skipped` (`models.rs`) remembers each skipped file's version (path, size, modification time) and
 warns once per version, for run models, the models folder and published weights. Test: `models::tests`
-`a_damaged_weights_file_is_warned_about_once`.
+`a_damaged_weights_file_is_warned_about_once` (captures the log of repeated listings; review round 1).
 
 ### Deferred
 
@@ -120,4 +133,8 @@ warns once per version, for run models, the models folder and published weights.
 ## Not done
 
 Kills during an upload, a label save and synthetic generation; memory after several runs (575 MB working set after
-one tiny run, not followed up); `runs` as a file starts with no runs and no warning (not dug into).
+one tiny run, not followed up).
+
+A file in place of `runs/` (or `label/`, `bench/`, `datasets/`, `models/`, `uploads/`) started with no runs and no
+warning; `folo serve` now refuses to start (`serve_failed`) naming the file (`RealStore::check_layout`, review
+round 1). Test: `real::tests` `a_file_in_place_of_a_store_folder_is_said`.

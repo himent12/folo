@@ -93,6 +93,11 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         {
             tracing::warn!("could not record the address in the data dir: {e}");
         }
+        // A file in place of a folder the store keeps (runs/, ...) would be listed as empty with nothing said.
+        if !args.mock {
+            RealStore::check_layout(&data_dir)
+                .map_err(|m| CliError::new(ExitCode::Runtime, "serve_failed", m))?;
+        }
         let store: Arc<dyn Store> = if args.mock {
             Arc::new(MockStore::new())
         } else {

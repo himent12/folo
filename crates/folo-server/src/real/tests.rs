@@ -434,3 +434,18 @@ fn the_object_registrys_tombstones_are_saved_before_its_list() {
     assert_eq!(list.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [c.id.as_str()]);
     assert_eq!(register(&store, Path::new(&b.path)).id, b.id);
 }
+
+/// A file where the data dir keeps a folder is said, naming it, instead of a store that lists no runs (review round 1).
+#[test]
+fn a_file_in_place_of_a_store_folder_is_said() {
+    let t = TestDir::new("real-layout");
+    assert_eq!(RealStore::check_layout(&t.join("fresh")), Ok(()), "a data dir not made yet");
+    for name in ["runs", "label", "bench"] {
+        let home = t.join(name);
+        std::fs::create_dir_all(home.join("models")).unwrap();
+        assert_eq!(RealStore::check_layout(&home), Ok(()));
+        std::fs::write(home.join(name), b"junk").unwrap();
+        let e = RealStore::check_layout(&home).unwrap_err();
+        assert!(e.contains(&format!("keeps the folder {name}/")), "{e}");
+    }
+}

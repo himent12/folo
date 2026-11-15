@@ -194,7 +194,7 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
         // The message already says what a dataset folder holds. A dataset one or two folders down (the folder above
         // it was picked, or an archive wraps it in a folder) is named; images there without labels are said as that.
         DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => {
-            if let Some(below) = dataset_below(Path::new(path)) {
+            if let Some(below) = dataset_below(Path::new(path), DIAGNOSE_ENTRIES) {
                 let (shown, below) = (folo_data::paths::shown(path), folo_data::paths::shown(below));
                 return Error::new(
                     StatusCode::BAD_REQUEST,
@@ -205,7 +205,7 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
                     "register '{below}': the folder holding data.yaml, images/ + labels/, or annotations/"
                 ));
             }
-            match images_under(Path::new(path)) {
+            match images_under(Path::new(path), DIAGNOSE_ENTRIES) {
                 0 => Error::new(StatusCode::BAD_REQUEST, "unknown_format", m),
                 n => {
                     let (path, s) = (folo_data::paths::shown(path), if n == 1 { "" } else { "s" });
@@ -223,33 +223,67 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
     }
 }
 
-/// The first folder one or two levels below `dir` (in name order, at most 64 folders a level) where a dataset is
-/// detected, for a folder that is not a dataset itself.
-fn dataset_below(dir: &Path) -> Option<PathBuf> {
-    fn folders(dir: &Path) -> Vec<PathBuf> {
+/// Entries the diagnostics of a folder that is not a dataset look at, at most ([`dataset_below`], [`images_under`]):
+/// they only phrase an error, so a drive or a system folder is never walked to say it is not one (x3-server-1).
+pub(crate) const DIAGNOSE_ENTRIES: usize = 20_000;
+
+/// The first folder one or two levels below `dir` (in name order, at most 64 folders a level, `budget` folder entries
+/// read in all) where a dataset is detected, for a folder that is not a dataset itself.
+pub(crate) fn dataset_below(dir: &Path, mut budget: usize) -> Option<PathBuf> {
+    fn folders(dir: &Path, budget: &mut usize) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-        let mut dirs: Vec<PathBuf> =
-            entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).take(64).collect();
+        let mut dirs = Vec::new();
+        for e in entries {
+            if *budget == 0 || dirs.len() == 64 {
+                break;
+            }
+            *budget -= 1;
+            if let Ok(e) = e
+                && e.path().is_dir()
+            {
+                dirs.push(e.path());
+            }
+        }
         dirs.sort();
         dirs
     }
     let detected = |d: &Path| folo_data::detect_format(d, folo_data::Format::Auto).is_ok();
-    let first = folders(dir);
+    let first = folders(dir, &mut budget);
     if let Some(d) = first.iter().find(|d| detected(d)) {
         return Some(d.clone());
     }
-    first.iter().flat_map(|d| folders(d)).find(|d| detected(d))
+    for d in &first {
+        if let Some(found) = folders(d, &mut budget).into_iter().find(|d| detected(d)) {
+            return Some(found);
+        }
+    }
+    None
 }
 
-/// Image files under `dir` (a few levels deep, counted up to 10,000), for a folder that is not a dataset.
-fn images_under(dir: &Path) -> usize {
+/// Image files under `dir` (a few levels deep) among the first `budget` entries walked, for a folder that is not a
+/// dataset.
+fn images_under(dir: &Path, budget: usize) -> usize {
     walkdir::WalkDir::new(dir)
         .max_depth(4)
         .into_iter()
+        .take(budget)
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file() && folo_data::is_image_path(e.path()))
-        .take(10_000)
         .count()
+}
+
+/// Says that `path` is not there (`404 path_not_found`) or not a dataset (`400 unknown_format`) without walking it.
+/// [`Index::build`] checks it first; registration checks it before it takes the file lease, so a folder that is not
+/// a dataset never holds up a dataset deletion.
+pub fn preflight(path: &str, format: DatasetFormat) -> Result<()> {
+    let p = absolute(Path::new(path));
+    if !p.exists() {
+        return Err(data_error(
+            folo_data::DataError::Io { path: p.clone(), source: std::io::ErrorKind::NotFound.into() },
+            path,
+        ));
+    }
+    folo_data::detect_format(&p, data_format(format)).map(|_| ()).map_err(|e| data_error(e, path))
 }
 
 /// The path of a dataset to register, as sent: surrounding whitespace and one pair of matching quotes removed
@@ -372,21 +406,15 @@ impl Index {
     pub fn build(path: &str, format: DatasetFormat, exclude: &[PathBuf]) -> Result<Index> {
         let excluded: Vec<PathBuf> = exclude.iter().map(|x| absolute(x)).collect();
         let p = absolute(Path::new(path));
-        if !p.exists() {
-            return Err(data_error(
-                folo_data::DataError::Io { path: p.clone(), source: std::io::ErrorKind::NotFound.into() },
-                path,
-            ));
-        }
+        // A folder that is not a dataset is said as that before anything walks it: the fingerprint below stats every
+        // file under `base`, which takes minutes for a drive or a system folder.
+        preflight(path, format)?;
         let base = if p.is_file() { p.parent().unwrap_or(&p).to_path_buf() } else { p.clone() };
         let opts = folo_data::OpenOptions { format: data_format(format), verify_images: true };
         // Fingerprint the folders *before* reading them, so a file changed while folo-data reads makes the next
         // check rebuild instead of being missed. Which folders to watch is only known after reading (split sources
         // and image lists may point outside `base`), so read again until the watched set is stable (once for a
         // self-contained dataset, twice for one with external sources).
-        // A folder that is not a dataset is said as that before anything walks it: the fingerprint below stats every
-        // file under `base`, which takes minutes for a drive or a system folder (and blocks dataset deletes meanwhile).
-        folo_data::detect_format(&p, data_format(format)).map_err(|e| data_error(e, path))?;
         let mut watched = vec![base.clone()];
         let mut attempt = 0;
         // Image headers only: registration already reads every file once (for the content hash of duplicates).
@@ -646,6 +674,24 @@ mod tests {
         assert_eq!(default_name(&bccd.join("loose.json"), free), "loose");
         let taken = |n: &str| ["bccd", "bccd-2"].contains(&n.to_lowercase().as_str());
         assert_eq!(default_name(&bccd, taken), "bccd-3");
+    }
+
+    /// The diagnostics of a folder that is not a dataset stop after their budget of entries, whatever they find
+    /// (x3-server-1: they used to count up to 10,000 *images*, so a wide tree without images was walked whole).
+    #[test]
+    fn diagnostics_of_a_non_dataset_read_a_bounded_number_of_entries() {
+        let dir = tmp("diagnose");
+        for i in 0..40 {
+            std::fs::create_dir_all(dir.join(format!("sub{i:02}"))).unwrap();
+            std::fs::write(dir.join(format!("{i:02}.jpg")), b"x").unwrap();
+        }
+        std::fs::create_dir_all(dir.join("sub39/set/images")).unwrap();
+        std::fs::write(dir.join("sub39/set/data.yaml"), "names: [x]\n").unwrap();
+        assert_eq!(images_under(&dir, 1000), 40);
+        // The folder itself is the first entry walked: at most 9 of the 40 images are seen.
+        assert!(images_under(&dir, 10) < 10, "the walk stops after 10 entries");
+        assert!(dataset_below(&dir, 1000).is_some());
+        assert_eq!(dataset_below(&dir, 10), None, "the folder search stops after 10 entries");
     }
 
     #[test]

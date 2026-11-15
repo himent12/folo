@@ -352,6 +352,37 @@ async fn a_file_and_a_folder_of_one_name_are_refused() {
     }
 }
 
+/// An archive that wraps the dataset in a folder (a zip of the dataset folder) is not registered, and the folder it
+/// was unpacked into is removed: the error says to pack the folder's contents at the top and upload again, not to
+/// register a folder that is gone (x3-server-6, review round 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archive_wrapping_the_dataset_in_a_folder_says_how_to_pack_it() {
+    let t = TestDir::new("uploads-wrapped");
+    let home = t.join("home");
+    let app = app(open(&home));
+    let mut b = tar::Builder::new(Vec::new());
+    for (name, data) in [("my-set/data.yaml", &b"names: [x]\n"[..]), ("my-set/images/train/a.jpg", b"jpg")] {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        b.append_data(&mut h, name, data).unwrap();
+    }
+    let u = start(&app, json!({ "kind": "dataset", "name": "wrapped" })).await;
+    ok::<Upload>(
+        &app,
+        put(&format!("/api/uploads/{}/parts/0", u.id), b.into_inner().unwrap()),
+        StatusCode::OK,
+    )
+    .await;
+    let complete = bare("POST", &format!("/api/uploads/{}/complete", u.id));
+    let e = err(&app, complete, StatusCode::BAD_REQUEST, "unknown_format").await;
+    assert!(e.message.contains("its folder 'my-set' holds one"), "{}", e.message);
+    let hint = e.hint.unwrap();
+    assert!(hint.contains("top level") && hint.contains("upload it again"), "{hint}");
+    let left: Vec<_> = std::fs::read_dir(home.join("datasets")).into_iter().flatten().flatten().collect();
+    assert!(left.is_empty(), "nothing stays in datasets/: {left:?}");
+}
+
 /// Writes a folo-n weights file with two classes.
 fn model_bytes(dir: &Path) -> Vec<u8> {
     let path = dir.join("pets.folo");

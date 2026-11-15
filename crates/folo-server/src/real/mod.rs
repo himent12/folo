@@ -40,7 +40,7 @@ mod store;
 mod training;
 mod uploads;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -183,6 +183,26 @@ pub struct RealStore {
 }
 
 impl RealStore {
+    /// Checks that the folders the store keeps under `data_dir` (runs, labeling jobs, benchmarks, ...) are folders it
+    /// can read where they exist. [`RealStore::open`] lists a folder it cannot read as empty, so a file in place of
+    /// `runs/` would show "no runs" with nothing said; `folo serve` refuses to start with this message instead.
+    pub fn check_layout(data_dir: &Path) -> std::result::Result<(), String> {
+        for name in ["runs", "label", "bench", "datasets", "models", "uploads"] {
+            let p = data_dir.join(name);
+            let Ok(meta) = std::fs::metadata(&p) else { continue };
+            if !meta.is_dir() {
+                return Err(format!(
+                    "{} is a file, where the data dir keeps the folder {name}/: move the file away and start again",
+                    p.display()
+                ));
+            }
+            if let Err(e) = std::fs::read_dir(&p) {
+                return Err(format!("cannot read the folder {}: {e}", p.display()));
+            }
+        }
+        Ok(())
+    }
+
     /// Opens the store rooted at `data_dir`. Registered datasets are listed right away and indexed on a background
     /// thread (from the cache when it is fresh). Datasets whose folder is gone are kept out of the list (and
     /// logged) but stay in the registry file. Cloud runs a previous process left are picked up

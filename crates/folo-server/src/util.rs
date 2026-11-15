@@ -189,9 +189,48 @@ pub fn claim_dir(parent: &Path, base: &str) -> std::io::Result<PathBuf> {
     }
 }
 
+/// One record per id, of records loaded from folders as `(folder, id, record)`. A copy of a folder (a backup made
+/// beside it) has its original's id: the record from the folder named after its id is kept (else the first by folder
+/// name), and the copies are logged as `what` and skipped, not listed twice under one id (x3-server-9).
+pub fn one_per_id<T>(what: &str, mut loaded: Vec<(PathBuf, String, T)>) -> Vec<(PathBuf, T)> {
+    let key = |(dir, id, _): &(PathBuf, String, T)| {
+        (dir.file_name() != Some(std::ffi::OsStr::new(id)), dir.clone())
+    };
+    loaded.sort_by_cached_key(key);
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for (dir, id, record) in loaded {
+        if let Some(first) = seen.get(&id) {
+            tracing::warn!(
+                "skipping {}: {what} {id} is loaded from {} already",
+                dir.display(),
+                first.display()
+            );
+            continue;
+        }
+        seen.insert(id, dir.clone());
+        out.push((dir, record));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copies_of_a_folder_load_once() {
+        let p = |s: &str| PathBuf::from("/data/label").join(s);
+        let loaded = vec![
+            (p("lj_1 - Copy"), "lj_1".to_string(), 1),
+            (p("lj_2"), "lj_2".to_string(), 2),
+            (p("lj_1"), "lj_1".to_string(), 3),
+            (p("backup-b"), "lj_9".to_string(), 4),
+            (p("backup-a"), "lj_9".to_string(), 5),
+        ];
+        let kept: Vec<i32> = one_per_id("job", loaded).into_iter().map(|(_, r)| r).collect();
+        assert_eq!(kept, [3, 2, 5], "the folder named after the id, else the first by name");
+    }
 
     #[test]
     fn millisecond_times_round_trip_and_sort_as_time() {

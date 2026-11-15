@@ -117,8 +117,6 @@ impl RealStore {
 
     /// Indexes `path` and adds it to the registry.
     pub(super) fn register(&self, name: Naming, path: String, format: DatasetFormat) -> Result<Dataset> {
-        // Shared with run admission; a deletion of dataset files waits for it (see `RealStore::files`).
-        let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
         // Registered absolute, so the registry works whatever the working directory of the next start.
         let path = absolute(Path::new(&path)).to_string_lossy().into_owned();
         // Registering a folder again (by its canonical path) returns the dataset it already is. Checked before
@@ -136,6 +134,11 @@ impl RealStore {
         if let Some(id) = existing {
             return self.get_dataset(&id);
         }
+        // A path that is not there or not a dataset is said before the lease (and without walking it), so it never
+        // holds up a dataset deletion (x3-server-1).
+        crate::index::preflight(&path, format)?;
+        // Shared with run admission; a deletion of dataset files waits for it (see `RealStore::files`).
+        let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
         let idx = Arc::new(Index::build(&path, format, &own_state(&self.data_dir))?);
         let mut list = self.entries.write().unwrap();
         if let Some(id) = same(&list) {

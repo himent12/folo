@@ -35,7 +35,8 @@ impl RealStore {
         let dir = self.claim_dataset_dir(&slug(done.name(), "dataset"))?;
         let path = dir.to_string_lossy().into_owned();
         let registered = move_children(done.root(), &dir)
-            .and_then(|()| self.register(Naming::Given(done.name().to_string()), path, done.format()));
+            .and_then(|()| self.register(Naming::Given(done.name().to_string()), path, done.format()))
+            .map_err(|e| wrapped_archive(e, &dir));
         if registered.is_err() {
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -75,6 +76,26 @@ impl RealStore {
         }
         self.model(&file_model_id(&path)).map(|m| m.model)
     }
+}
+
+/// The error of an uploaded archive that is not a dataset at its top but holds one in a folder (a zip of the dataset
+/// folder): the folder it was unpacked into is removed right after, so the advice is to pack the dataset's contents
+/// at the archive's top and upload again, not to register a folder that will be gone (x3-server-6).
+fn wrapped_archive(e: Error, dir: &Path) -> Error {
+    if e.body.code != "unknown_format" {
+        return e;
+    }
+    let Some(below) = crate::index::dataset_below(dir, crate::index::DIAGNOSE_ENTRIES) else { return e };
+    let inner = below.strip_prefix(dir).unwrap_or(&below).to_string_lossy().replace('\\', "/");
+    Error::new(
+        StatusCode::BAD_REQUEST,
+        "unknown_format",
+        format!("the archive is not a dataset at its top, but its folder '{inner}' holds one"),
+    )
+    .hint(format!(
+        "pack what '{inner}' holds (data.yaml, images/ + labels/, or annotations/) at the archive's top level and \
+         upload it again"
+    ))
 }
 
 /// Moves every entry of `from` into the folder `to` (renames: both are in the data dir).

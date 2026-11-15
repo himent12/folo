@@ -1,7 +1,7 @@
 //! The run registry: loading it from disk, looking runs up, listing them with their queue places, deleting them
 //! and gating the device for benchmark probes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, TryLockError};
@@ -30,22 +30,12 @@ impl Runs {
                 let path = d.join("run.json");
                 let Ok(bytes) = std::fs::read(&path) else { continue };
                 match serde_json::from_slice::<RunFile>(&bytes) {
-                    Ok(f) => files.push((d, f)),
+                    Ok(f) => files.push((d, f.run.id.clone(), f)),
                     Err(e) => tracing::warn!("skipping {}: {e}", path.display()),
                 }
             }
-            // A copy of a run folder (a backup made next to it) has its original's id: one id is one run, loaded from
-            // the folder named after it (else the first by name); the copies are said and skipped, not listed twice
-            // under one id (x3-server-9).
-            files.sort_by_key(|(d, f)| d.file_name() != Some(std::ffi::OsStr::new(&f.run.id)));
-            let mut seen: HashMap<String, PathBuf> = HashMap::new();
-            for (d, mut file) in files {
-                if let Some(first) = seen.get(&file.run.id) {
-                    let (id, first) = (&file.run.id, first.display());
-                    tracing::warn!("skipping {}: run {id} is loaded from {first} already", d.display());
-                    continue;
-                }
-                seen.insert(file.run.id.clone(), d.clone());
+            // A copy of a run folder (a backup made next to it) is not a second run of its id (x3-server-9).
+            for (d, mut file) in crate::util::one_per_id("run", files) {
                 // Runs from before `Run.resolved` (or its `close_mosaic`): the trainer's config.json has the same
                 // numbers.
                 if file.run.resolved.as_ref().is_none_or(|r| r.close_mosaic.is_none()) {

@@ -813,14 +813,35 @@ mod tests {
         std::fs::create_dir_all(models.models_dir()).unwrap();
         let path = models.models_dir().join("broken.folo");
         std::fs::write(&path, b"not weights").unwrap();
+        // What the listings log, caught on this thread.
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Captured::default();
+        let sink = log.clone();
+        let subscriber =
+            tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
+        let warnings = || String::from_utf8_lossy(&log.0.lock().unwrap()).matches("skipping").count();
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..3 {
+                assert!(models.scan().is_empty());
+            }
+            assert_eq!(warnings(), 1, "three listings say it once");
+            // Another version of the file (another size) is said again.
+            std::fs::write(&path, b"still not weights").unwrap();
+            assert!(models.scan().is_empty());
+            assert!(models.scan().is_empty());
+            assert_eq!(warnings(), 2, "a changed file is said again, once");
+        });
         let err = models.meta(&path).unwrap_err();
-        assert!(models.warn_skipped(&path, &err));
-        assert!(!models.warn_skipped(&path, &err), "the same file again");
-        assert!(models.scan().is_empty());
-        assert!(!models.warn_skipped(&path, &err), "a listing does not say it again");
-        // Another version of the file (another size) is said again.
-        std::fs::write(&path, b"still not weights").unwrap();
-        assert!(models.warn_skipped(&path, &err));
         assert!(!models.warn_skipped(dir.join("gone.folo").as_path(), &err), "a missing file is not said");
     }
 }
