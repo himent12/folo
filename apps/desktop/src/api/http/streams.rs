@@ -211,7 +211,10 @@ mod tests {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
+        // Holds the socket open until the test has its answer (or panics): the end seen must be the
+        // reader's own timeout, not the server closing.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().unwrap();
             let mut buf = [0u8; 2048];
             let _ = sock.read(&mut buf);
@@ -222,7 +225,8 @@ mod tests {
             let frame = [format!("{:x}\r\n", chunk.len()).as_bytes(), chunk, b"\r\n"].concat();
             let _ = sock.write_all(&frame).and_then(|_| sock.flush());
             // Then nothing, the socket held open.
-            std::thread::sleep(Duration::from_secs(20));
+            let _ = held.recv();
+            drop(sock);
         });
         let base = format!("http://{addr}");
         let sub = HttpBackend::with_stream_limits(&base, Duration::from_secs(5), Duration::from_millis(300))
@@ -238,6 +242,8 @@ mod tests {
             next.map(|_| "an event"),
             t0.elapsed()
         );
+        drop(release);
+        server.join().unwrap();
     }
 
     #[test]

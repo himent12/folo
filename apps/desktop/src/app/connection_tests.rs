@@ -341,6 +341,95 @@ fn a_stream_that_ends_silently_after_its_run_finished_still_ends_the_run() {
     });
 }
 
+/// A run's stream dropped mid-run, opening it again failed (the server away a moment), and the run
+/// ended before the next list refresh: nothing subscribes to an ended run, so the list's word that it
+/// ended is taken as its end (final history, the toast). Before, the page kept the history of the
+/// moment the stream dropped for good.
+#[test]
+fn a_run_that_ends_while_its_lost_stream_cannot_reopen_still_ends() {
+    use crate::api::RunStatus;
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = super::tests::open_with(api.clone());
+    let id = "run_52e8";
+    let all = drive(&mut app, window, |this, _, cx| {
+        this.ensure_run_data(id, cx);
+        this.store.api.metrics(id).unwrap().steps.len()
+    });
+    drive(&mut app, window, |this, _, cx| {
+        // Seen training, its history what the stream thinned.
+        let r = this.store.runs.ready_mut().unwrap().iter_mut().find(|r| r.id == id).unwrap();
+        r.status = RunStatus::Running;
+        let Some(Load::Ready(d)) = this.store.run_data.get_mut(id) else { panic!("loaded") };
+        d.metrics.steps = d.metrics.steps.iter().step_by(5).cloned().collect();
+        api.fail_events_once();
+        drop(stream_of(this, id));
+        this.drain_streams(cx);
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(!this.subscriptions.contains_key(id), "the stream did not open again");
+        assert_eq!(finished_toasts(this, id), 0);
+        // The 5 s refresh: the run has ended.
+        this.refresh_runs(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(finished_toasts(this, id), 1, "{:?}", titles(this));
+        let Some(Load::Ready(d)) = this.store.run_data.get(id) else { panic!("still shown") };
+        assert_eq!(d.metrics.steps.len(), all, "the final history");
+        assert!(this.stream_lost.is_empty());
+    });
+}
+
+/// A stream gone silent until after its run ended: a loaded log and the latest predictions missed
+/// what it never delivered, and are read again (the log kept the lines up to the silence, and the
+/// samples the epoch it was at, under a Latest picker offering the final epoch).
+#[test]
+fn a_silent_end_reads_the_log_and_latest_samples_again() {
+    let (mut app, window) = open();
+    let id = "run_52e8";
+    drive(&mut app, window, |this, _, cx| {
+        // What it held of the latest (the epoch the stream went silent at).
+        let samples = this.store.api.samples(id, None).unwrap();
+        this.store.samples.insert(id.into(), Load::Ready(samples));
+        this.store.install_logs(id, Ok(Vec::new()));
+        drop(stream_of(this, id));
+        this.drain_streams(cx);
+        assert!(
+            matches!(this.store.samples.get(id), Some(Load::Idle)),
+            "the latest samples are asked for again"
+        );
+    });
+    drive(&mut app, window, |this, _, _| {
+        let Some(Load::Ready(lines)) = this.store.logs.get(id) else { panic!("the log reloaded") };
+        assert!(!lines.is_empty(), "the lines the stream never delivered");
+    });
+}
+
+/// Pages that failed while the server was away (a dataset, the benchmarks) ask again once it answers:
+/// before, they kept "Could not reach folo serve" until Retry, while the lists around them recovered.
+#[test]
+fn a_page_that_failed_while_the_server_was_away_loads_once_it_is_back() {
+    let (mut app, window) = open();
+    let down =
+        crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:18110");
+    let ds = drive(&mut app, window, |this, _, cx| {
+        let ds = this.store.datasets.ready().unwrap()[0].id.clone();
+        this.store.health = Load::Failed(down.clone());
+        this.store.dataset.insert(ds.clone(), Load::Failed(down.clone()));
+        this.bench.list = Load::Failed(down.clone());
+        this.store.system = Load::Idle;
+        this.ensure_core(cx);
+        ds
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(!this.store.unreachable());
+        assert!(this.bench.list.error().is_none(), "the benchmark list is asked for again");
+        this.ensure_dataset(&ds, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset.get(&ds).and_then(|l| l.ready()).is_some(), "the dataset loads");
+    });
+}
+
 /// A delivered end, its disconnect seen a tick later: handled once.
 #[test]
 fn a_delivered_end_is_handled_once() {

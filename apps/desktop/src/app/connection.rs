@@ -14,6 +14,17 @@ use super::{FoloApp, ServerMode};
 /// The most refreshes (2 s apart) a failed recovery waits before the next attempt.
 const RECOVER_WAIT_MAX: u32 = 30;
 
+/// A load that failed because the server could not be reached.
+fn unreachable<T>(l: &Load<T>) -> bool {
+    l.error().is_some_and(|e| e.code == "server_unreachable")
+}
+
+/// Drops the loads that failed because the server could not be reached: each is asked for again
+/// when its page next needs it.
+fn forget_unreachable<T>(loads: &mut std::collections::HashMap<String, Load<T>>) {
+    loads.retain(|_, l| !unreachable(l));
+}
+
 /// Whether two addresses name one server (as typed or as the server reports itself).
 /// Two forms of this machine's address (`localhost`, `127.0.0.1`, `[::1]`) with one port are one server.
 pub(super) fn same_server(a: &str, b: &str) -> bool {
@@ -90,6 +101,7 @@ impl FoloApp {
         self.clear_bench();
         self.subscriptions.clear();
         self.subscribing.clear();
+        self.stream_lost.clear();
         self.store.clear_pending();
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
@@ -152,6 +164,29 @@ impl FoloApp {
         // The Playground's prediction that couldn't reach it runs again, as Retry would.
         if self.play_pred.error().is_some_and(|e| e.code == "server_unreachable") {
             self.rerun_predict(cx);
+        }
+        // What a page asked for while it was away (a dataset and its images, a run's history, a
+        // model's evaluation, the benchmarks) is asked for again when shown: nothing else does, and
+        // the page kept "Could not reach folo serve" until Retry.
+        let s = &mut self.store;
+        forget_unreachable(&mut s.dataset);
+        forget_unreachable(&mut s.images);
+        forget_unreachable(&mut s.issues);
+        forget_unreachable(&mut s.evals);
+        forget_unreachable(&mut s.run_data);
+        forget_unreachable(&mut s.samples);
+        forget_unreachable(&mut s.logs);
+        let b = &mut self.bench;
+        forget_unreachable(&mut b.entries);
+        forget_unreachable(&mut b.loops);
+        if unreachable(&b.list) {
+            b.list = Load::Idle;
+        }
+        if unreachable(&b.catalog) {
+            b.catalog = Load::Idle;
+        }
+        if unreachable(&b.agents) {
+            b.agents = Load::Idle;
         }
         // Back: read the lists now (the server may have restarted on another data dir).
         self.refresh_lists(cx);

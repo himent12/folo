@@ -233,6 +233,7 @@ impl FoloApp {
                     this.subscriptions.remove(&rid);
                     *this.sub_attempt.entry(rid.clone()).or_default() += 1;
                     this.subscribing.remove(&rid);
+                    this.stream_lost.remove(&rid);
                     this.store.reset_for_resume(&rid);
                     this.history_ticket(&rid, "metrics");
                     this.history_ticket(&rid, "logs");

@@ -550,6 +550,9 @@ pub struct FoloApp {
     subscriptions: HashMap<String, crate::api::Subscription>,
     /// Runs whose event stream is being opened (off the UI thread).
     subscribing: std::collections::HashSet<String>,
+    /// Runs whose stream dropped mid-run, the events since not yet read back (a stream opened again
+    /// reads them; a run that ended meanwhile gets its end handled once the list says so).
+    stream_lost: std::collections::HashSet<String>,
     /// Per run: which subscription attempt is current (a resume supersedes one in flight).
     sub_attempt: HashMap<String, u64>,
     /// Bumped on every data-source switch; async results from an older source are discarded.
@@ -725,6 +728,7 @@ impl FoloApp {
             slider_ranges: RefCell::new(HashMap::new()),
             subscriptions: HashMap::new(),
             subscribing: Default::default(),
+            stream_lost: Default::default(),
             sub_attempt: HashMap::new(),
             backend_gen: 0,
             connect_seq: 0,

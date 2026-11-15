@@ -60,6 +60,8 @@ pub struct MockBackend {
     fail_images_from: Mutex<Option<u32>>,
     /// The next run-history read fails ([`MockBackend::fail_metrics_once`]).
     fail_metrics: std::sync::atomic::AtomicBool,
+    /// The next run-stream open fails ([`MockBackend::fail_events_once`]).
+    fail_events: std::sync::atomic::AtomicBool,
     /// The next instance-list read fails ([`MockBackend::fail_instances_once`]).
     fail_instances: std::sync::atomic::AtomicBool,
     clock: Clock,
@@ -187,6 +189,12 @@ impl MockBackend {
     #[cfg(test)]
     pub fn fail_metrics_once(&self) {
         self.fail_metrics.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next run-stream open fails as an unreachable server would.
+    #[cfg(test)]
+    pub fn fail_events_once(&self) {
+        self.fail_events.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The next instance-list read fails as an unreachable server would.

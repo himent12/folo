@@ -45,6 +45,17 @@ states of every screen. Base commit `1436ad68`.
   loads) and removes finished subscriptions at once (an end is handled once). Tests: `streams.rs`
   `a_stream_that_goes_silent_ends`; `connection_tests.rs`
   `a_stream_that_ends_silently_after_its_run_finished_still_ends_the_run`, `a_delivered_end_is_handled_once`.
+  Review round 1 widened it: an end the stream never delivered also reads a loaded log again and marks the latest
+  samples for a new read (an epoch picked on the page stays); a stream that dropped mid-run and could not be opened
+  again stays in `stream_lost` until it opens, or until the run list says the run ended, which then handles that end
+  (`settle_lost_streams`, called from `install_runs`). Tests: `a_run_that_ends_while_its_lost_stream_cannot_reopen_still_ends`,
+  `a_silent_end_reads_the_log_and_latest_samples_again`. SIBLING: Studio's `web/src/lib/api/sse.ts` relies on
+  `EventSource.onerror` alone and has no silence deadline (Studio lane, not fixed here).
+- **Review round 1, reconnect.** Pages that failed with `server_unreachable` while the server was away (a dataset
+  and its images, issues, a model's evaluation, a run's history, samples or log, a benchmark's list, catalog,
+  agents, entries or loops) kept their error after it came back: their loaders fetch only Idle entries. `reconnected`
+  (`src/app/connection.rs`) now drops those failures so the page asks again. Test:
+  `a_page_that_failed_while_the_server_was_away_loads_once_it_is_back`.
 - **d6-connection-1.** `FOLO_TOKEN` set, `FOLO_SERVER` at a dead port, auto mode. Fix: `serve_command` removes
   `FOLO_TOKEN` from the started server's environment (`src/api/http/server.rs`). Test:
   `the_started_server_never_inherits_a_token`.

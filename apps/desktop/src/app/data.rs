@@ -434,8 +434,14 @@ impl FoloApp {
                     return;
                 }
                 this.subscribing.remove(&id);
+                // A failed attempt after a drop stays lost: the run list asks again while the run
+                // trains, and handles its end if it ends meanwhile (`settle_lost_streams`).
                 let Ok(sub) = sub else { return };
+                let was_lost = this.stream_lost.remove(&id);
                 this.subscriptions.insert(id.clone(), sub);
+                if was_lost {
+                    this.invalidate_latest_samples(&id);
+                }
                 let had_data = this.store.run_data.remove(&id).is_some();
                 let had_logs = this.store.logs.remove(&id).is_some();
                 if had_data {
@@ -588,19 +594,67 @@ impl FoloApp {
                 None => {}
             }
         }
-        finished.extend(silent);
         // A delivered end is the stream's last word (its reader stops): it goes now, so its
         // disconnect, seen on a later tick, is not taken for a silent end and handled twice.
         for id in ended.iter().chain(finished.iter().map(|(id, _)| id)) {
             self.subscriptions.remove(id);
         }
         for id in dropped {
+            self.stream_lost.insert(id.clone());
             self.resubscribe(id, cx);
         }
         for (id, status) in finished {
             self.run_ended(&id, status, cx);
         }
+        for (id, status) in silent {
+            self.end_unseen(&id, status, cx);
+        }
         changed
+    }
+
+    /// A run's end its stream never delivered (the stream went silent, or dropped and could not be
+    /// opened again, while the run ended): handled as a delivered end, and what the stream would have
+    /// added to a loaded log and to the latest predictions meanwhile is read again too.
+    fn end_unseen(&mut self, id: &str, status: RunStatus, cx: &mut Context<Self>) {
+        self.stream_lost.remove(id);
+        self.run_ended(id, status, cx);
+        if matches!(self.store.logs.get(id), Some(Load::Ready(_) | Load::Loading)) {
+            self.store.logs.remove(id);
+            self.ensure_logs(id, cx);
+        }
+        self.invalidate_latest_samples(id);
+    }
+
+    /// A run's latest predictions after its stream missed events (each epoch it missed made new
+    /// ones): read again when shown. An earlier epoch picked on its page stays.
+    fn invalidate_latest_samples(&mut self, id: &str) {
+        let picked = matches!(&self.route, Route::Run(r) if r == id) && self.sample_epoch.is_some();
+        if !picked && matches!(self.store.samples.get(id), Some(Load::Ready(_) | Load::Loading)) {
+            self.store.samples.insert(id.to_string(), Load::Idle);
+            // An answer still on its way predates the gap.
+            self.history_tickets.remove(&(id.to_string(), "samples"));
+        }
+    }
+
+    /// Runs whose stream dropped mid-run and could not be opened again. Nothing subscribes to a run
+    /// that has ended, so once the run list says one did, its end is handled here (before, its page
+    /// kept the history of the moment the stream dropped for good).
+    pub(super) fn settle_lost_streams(&mut self, cx: &mut Context<Self>) {
+        let lost: Vec<String> = self
+            .stream_lost
+            .iter()
+            .filter(|id| !self.subscribing.contains(*id) && !self.subscriptions.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in lost {
+            match self.store.run(&id).map(|r| r.status) {
+                Some(s) if s.is_active() => {}
+                Some(s) => self.end_unseen(&id, s, cx),
+                None => {
+                    self.stream_lost.remove(&id);
+                }
+            }
+        }
     }
 
     /// Drain live events ~10× a second and refresh slow-moving data every few seconds.
