@@ -16,7 +16,7 @@ import { LiveBench } from '$lib/api/liveBench';
 import { lastKnown, Now } from '$lib/api/freshness';
 import { Resource } from '$lib/api/resource';
 import type { BenchEntry, BenchLoop, BenchPlan } from '$lib/api/types';
-import { clonePlan, samePlan, editedPlanError, planCondition } from '$lib/bench/plan';
+import { clonePlan, samePlan, editedPlanError, planCondition, unreadableWeight } from '$lib/bench/plan';
 import { isEntryActive, isLoopActive, planEditable } from '$lib/bench/rules';
 import { media } from '$lib/design/tokens';
 import { ago, date, num } from '$lib/format';
@@ -108,8 +108,16 @@ export default function Benchmark() {
     const b = bench.get();
     return b ? `${b.id}:${JSON.stringify(b.plan)}` : '';
   });
+  // The weight fields as typed (PlanTab): one emptied keeps the draft at the last number typed, so every save checks
+  // them, the plan's Save plan and the leave dialog's alike. Another benchmark, Discard and a plan replaced from the
+  // server start afresh; a condition turned off drops its field, and one that holds no number stays so (with its error)
+  // across edits of other conditions. A number that is no longer the draft's weight (changed from outside the field) goes.
+  const typed = signal<Record<string, string>>({});
   const saving = signal(false);
   const elsewhere = signal(false);
+  // The plan this page's Save plan has sent and not yet heard back on: an update holding it is the page's own, any other
+  // one that comes while it saves is another tab's (told by what it holds, not by when it comes).
+  let sent: BenchPlan | null = null;
   let shownKey = '';
   effect(() => {
     const key = planKey.get();
@@ -118,18 +126,16 @@ export default function Benchmark() {
       const b = bench.get()!;
       if (!shownKey.startsWith(`${b.id}:`) || !dirty.get()) {
         draft.set(clonePlan(b.plan));
+        // Replaced from the server: what was typed is for a plan no longer shown.
+        typed.set({});
         elsewhere.set(false);
-      } else if (!saving.get()) elsewhere.set(true);
+      } else if (!(sent && samePlan(b.plan, sent))) elsewhere.set(true);
       shownKey = key;
     });
   });
   effect(() => {
     if (!dirty.get()) untrack(() => elsewhere.set(false));
   });
-  // The weight fields as typed (PlanTab): one emptied keeps the draft at the last number typed, so every save checks
-  // them, the plan's Save plan and the leave dialog's alike. Another benchmark starts afresh; a draft changed from
-  // outside a field (Discard, a condition off and on, a save) drops what was typed for a weight it no longer has.
-  const typed = signal<Record<string, string>>({});
   effect(() => {
     void id.get();
     untrack(() => typed.set({}));
@@ -138,7 +144,10 @@ export default function Benchmark() {
     const d = draft.get();
     untrack(() => {
       const t = typed.get();
-      const kept = Object.entries(t).filter(([c, v]) => Number(v) === planCondition(d, c)?.weight);
+      const kept = Object.entries(t).filter(([c, v]) => {
+        const w = planCondition(d, c)?.weight;
+        return w !== undefined && (unreadableWeight(v) || Number(v) === w);
+      });
       if (kept.length !== Object.keys(t).length) typed.set(Object.fromEntries(kept));
     });
   });
@@ -155,8 +164,19 @@ export default function Benchmark() {
     saving.set(true);
     const benchId = b.id;
     const plan = clonePlan(draft.peek());
+    sent = plan;
     try {
       await live.act(() => hub.api.updateBench(benchId, { plan }));
+      const now = bench.peek();
+      if (now && now.id === benchId && !samePlan(now.plan, plan)) {
+        // Another tab saved after this save landed (its event came before this answer): the server holds that plan, so
+        // the edits stay edits and the page says so, here and at every Save plan.
+        if (dirty.peek()) elsewhere.set(true);
+        // page-level: the save did land, then was replaced; Plan saved would say the wrong thing.
+        toast.info('Plan saved, then changed elsewhere', 'Another tab or window saved its plan after yours. Save plan replaces it with yours; Discard shows it.');
+        // Not saved as it stands: the leave dialog stays on the page rather than leave the edits behind.
+        return false;
+      }
       draft.set(plan);
       // page-level: the plan's own Save, outside any dialog.
       toast.success('Plan saved', `${plan.conditions.length} conditions. It is fixed once the first entry runs.`);
@@ -165,12 +185,15 @@ export default function Benchmark() {
       toast.error(e, 'Could not save the plan');
       return false;
     } finally {
+      sent = null;
       saving.set(false);
     }
   }
   const discard = () => {
     const b = bench.peek();
-    if (b) draft.set(clonePlan(b.plan));
+    if (!b) return;
+    draft.set(clonePlan(b.plan));
+    typed.set({});
   };
 
   // Leaving with unsaved edits asks first, whichever way (a link, Back, the palette); a change of tab does not.
@@ -686,7 +709,9 @@ export default function Benchmark() {
           <Dialog
             open={!!leaving.get()}
             title="Save the plan?"
-            description={`${b().name}'s plan has changes you have not saved.`}
+            description={`${b().name}'s plan has changes you have not saved.${
+              elsewhere.get() ? ' It was also saved from another tab or window while you edited: Save plan replaces that with yours; Discard keeps that one.' : ''
+            }`}
             size="sm"
             onclose={() => leaving.set(null)}
             footer={() => (

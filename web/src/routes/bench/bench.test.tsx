@@ -478,6 +478,82 @@ describe('the benchmark page', () => {
     expect(weight('Haze').value).toBe('1');
   });
 
+  it('says so in the leave dialog when another tab saved the plan while another view was open', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weight = () => document.querySelector<HTMLInputElement>('input[aria-label="Weight of Haze"]')!;
+    weight().value = '3';
+    weight().dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    // To the leaderboard: the plan's own note is not on screen.
+    router.go('/benchmarks/bn_9f03', { replace: true });
+    await settle();
+    const b = await hub.api.bench('bn_9f03');
+    await hub.api.updateBench('bn_9f03', {
+      plan: { ...b.plan, conditions: b.plan.conditions.map((c) => (c.condition !== 'haze' ? { ...c, weight: 4 } : c)) },
+    });
+    await settle();
+    router.go('/benchmarks');
+    flushSync();
+    const dialog = document.querySelector('dialog[open]')!;
+    expect(dialog.textContent).toMatch(/also saved from another tab or window while you edited/);
+  });
+
+  it('says so when another tab saves the plan while this one saves, and does not say Plan saved', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weight = () => document.querySelector<HTMLInputElement>('input[aria-label="Weight of Haze"]')!;
+    weight().value = '3';
+    weight().dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const real = hub.api.updateBench.bind(hub.api);
+    let answer!: () => void;
+    const held = new Promise<void>((r) => (answer = r));
+    // This tab's save lands on the server; its answer comes late.
+    vi.spyOn(hub.api, 'updateBench').mockImplementationOnce(async (id, req) => {
+      const out = await real(id, req);
+      await held;
+      return out;
+    });
+    const success = vi.spyOn(toast, 'success');
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((x) => x.textContent?.trim() === 'Save plan')!.click();
+    await settle();
+    // Another tab saves after it, while this one still waits.
+    const b = await hub.api.bench('bn_9f03');
+    await real('bn_9f03', {
+      plan: { ...b.plan, conditions: b.plan.conditions.map((c) => (c.condition !== 'haze' ? { ...c, weight: 4 } : { ...c, weight: 1 })) },
+    });
+    await settle();
+    answer();
+    await settle();
+    expect(text()).toMatch(/Changed elsewhere while you edited/);
+    expect(weight().value).toBe('3');
+    expect(success).not.toHaveBeenCalled();
+  });
+
+  it('keeps an emptied weight empty, with its error, across edits of other conditions', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weights = () => [...document.querySelectorAll<HTMLInputElement>('input[aria-label^="Weight of "]')];
+    const haze = () => weights().find((w) => w.getAttribute('aria-label') === 'Weight of Haze')!;
+    const other = () => weights().find((w) => w.getAttribute('aria-label') !== 'Weight of Haze')!;
+    const type = (el: HTMLInputElement, v: string) => {
+      el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+    };
+    type(haze(), '3');
+    type(haze(), '');
+    type(other(), '2');
+    expect(haze().value).toBe('');
+    expect(haze().getAttribute('aria-invalid')).toBe('true');
+    expect(text()).toMatch(/Haze: the weight is empty/);
+    const save = [...document.querySelectorAll<HTMLButtonElement>('button')].find((x) => x.textContent?.trim() === 'Save plan')!;
+    expect(save.disabled).toBe(true);
+    // Discard starts afresh.
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((x) => x.textContent?.trim() === 'Discard')!.click();
+    flushSync();
+    expect(haze().value).toBe('1');
+    expect(haze().getAttribute('aria-invalid')).toBeNull();
+  });
+
   it('keeps the preview on its image when the benchmark changes under it (a `bench` event)', async () => {
     // happy-dom has no canvas to draw the mock's images: any URL does.
     const url = vi.spyOn(hub.api, 'benchImageUrl').mockImplementation(async (_b, im, o) => `blob:${im}/${o?.condition ?? ''}`);
