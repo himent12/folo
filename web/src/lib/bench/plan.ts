@@ -57,16 +57,23 @@ export const planPasses = (plan: BenchPlan) => plan.conditions.reduce((a, c) => 
 /** The plan's condition for `id`, if it runs. */
 export const planCondition = (plan: BenchPlan, id: string) => plan.conditions.find((c) => c.condition === id);
 
-/** Two plans run the same conditions at the same severities and weights, with the same reasons. */
+/**
+ * Two plans run the same conditions at the same severities and weights, with the same reasons, as the server keeps
+ * them: a weight as a 32-bit float (`1.00000001` is `1`), a reason trimmed and an empty one none. So a plan the server
+ * answers with is the one sent, though it rounded or trimmed it.
+ */
 export function samePlan(a: BenchPlan, b: BenchPlan): boolean {
-  if ((a.rationale ?? null) !== (b.rationale ?? null)) return false;
+  if (kept(a.rationale) !== kept(b.rationale)) return false;
   if ((a.designed_by?.agent ?? null) !== (b.designed_by?.agent ?? null) || (a.designed_by?.model ?? null) !== (b.designed_by?.model ?? null)) return false;
   if (a.conditions.length !== b.conditions.length) return false;
   return a.conditions.every((c, i) => {
     const d = b.conditions[i];
-    return !!d && d.condition === c.condition && d.weight === c.weight && (d.why ?? null) === (c.why ?? null) && d.severities.join() === c.severities.join();
+    return !!d && d.condition === c.condition && Math.fround(d.weight) === Math.fround(c.weight) && kept(d.why) === kept(c.why) && d.severities.join() === c.severities.join();
   });
 }
+
+/** A reason as the server keeps it: trimmed, an empty one none (crates/folo-bench `check_plan`). */
+const kept = (s: string | null | undefined) => s?.trim() || null;
 
 /** The conditions in catalog order, so a plan edited a step at a time reads in the order the editor lists them. */
 function ordered(conditions: BenchPlanCondition[], catalog: readonly Pick<BenchCondition, 'id'>[]): BenchPlanCondition[] {

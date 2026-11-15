@@ -142,6 +142,23 @@ describe('the labeling editor: saving', () => {
     expect(boxCount()).toBe(2);
   });
 
+  it('says so in the leave dialog too when another tab saves the image, also while that dialog is open', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    // J (the next image) asks first; the editor under the question is inert, so its status line is not where the eye is.
+    key('j');
+    expect(asking()).toBeDefined();
+    expect(asking()!.textContent).not.toMatch(/another tab/);
+    await hub.api.updateLabelImage('lb_7c21', '1', [{ class: 0, x1: 1, y1: 1, x2: 20, y2: 20 }]);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(asking()!.textContent).toMatch(/also saved from another tab or window while you edited/);
+    });
+    // Discard keeps those labels, and the note goes with the edits.
+    click([...asking()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Discard changes'));
+    expect(asking()).toBeUndefined();
+  });
+
   it('saves an image not labeled yet as it is: labeled by hand, a background image without boxes', async () => {
     await openEditor('3');
     expect(boxCount()).toBe(0);

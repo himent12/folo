@@ -166,9 +166,10 @@ export default function Benchmark() {
     const plan = clonePlan(draft.peek());
     sent = plan;
     try {
-      await live.act(() => hub.api.updateBench(benchId, { plan }));
+      // The answer holds the plan as the server keeps it (a weight rounded to a 32-bit float, a reason trimmed).
+      const saved = (await live.act(() => hub.api.updateBench(benchId, { plan }))).plan;
       const now = bench.peek();
-      if (now && now.id === benchId && !samePlan(now.plan, plan)) {
+      if (now && now.id === benchId && !samePlan(now.plan, saved)) {
         // Another tab saved after this save landed (its event came before this answer): the server holds that plan, so
         // the edits stay edits and the page says so, here and at every Save plan.
         if (dirty.peek()) elsewhere.set(true);
@@ -177,7 +178,8 @@ export default function Benchmark() {
         // Not saved as it stands: the leave dialog stays on the page rather than leave the edits behind.
         return false;
       }
-      draft.set(plan);
+      // Shown as kept: a field rounded by the server shows the number it holds.
+      draft.set(clonePlan(saved));
       // page-level: the plan's own Save, outside any dialog.
       toast.success('Plan saved', `${plan.conditions.length} conditions. It is fixed once the first entry runs.`);
       return true;
@@ -637,7 +639,11 @@ export default function Benchmark() {
               agentsError={agents.error}
               retryAgents={() => agents.refresh()}
               choice={choice}
-              onuse={(p) => draft.set(clonePlan(p))}
+              onuse={(p) => {
+                // A proposal replaces the plan: fields typed for the old one (an emptied weight) go with it.
+                typed.set({});
+                draft.set(clonePlan(p));
+              }}
             />
           ) : null}
           <NewLoopDialog

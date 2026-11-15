@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
-import type { Bench, Model } from '$lib/api/types';
+import type { Bench, BenchDesign, Model } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { toast } from '$lib/ui/toast';
@@ -552,6 +552,59 @@ describe('the benchmark page', () => {
     flushSync();
     expect(haze().value).toBe('1');
     expect(haze().getAttribute('aria-invalid')).toBeNull();
+  });
+
+  it('saves a weight the server rounds from the leave dialog and leaves: its own save, not another tab’s', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weight = () => document.querySelector<HTMLInputElement>('input[aria-label="Weight of Haze"]')!;
+    weight().value = '2.00000001';
+    weight().dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const real = hub.api.updateBench.bind(hub.api);
+    // The server keeps a weight as a 32-bit float (folo-api `BenchPlanCondition::weight`): 2.00000001 comes back as 2.
+    vi.spyOn(hub.api, 'updateBench').mockImplementation((id, req) =>
+      real(id, req.plan ? { ...req, plan: { ...req.plan, conditions: req.plan.conditions.map((c) => ({ ...c, weight: Math.fround(c.weight) })) } } : req),
+    );
+    const success = vi.spyOn(toast, 'success');
+    const info = vi.spyOn(toast, 'info');
+    const go = vi.spyOn(history, 'pushState');
+    router.go('/benchmarks');
+    flushSync();
+    const dialog = document.querySelector('dialog[open]')!;
+    expect(dialog.textContent).not.toMatch(/another tab/);
+    [...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Save plan')!.click();
+    await settle();
+    expect(info).not.toHaveBeenCalled();
+    expect(success).toHaveBeenCalled();
+    expect(go).toHaveBeenCalled();
+    expect((await hub.api.bench('bn_9f03')).plan.conditions.find((c) => c.condition === 'haze')!.weight).toBe(2);
+  });
+
+  it('takes a proposal used in place of the plan with its own weights, not a field emptied in the old one', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weight = () => document.querySelector<HTMLInputElement>('input[aria-label="Weight of Haze"]')!;
+    const type = (v: string) => {
+      weight().value = v;
+      weight().dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+    };
+    // Emptied, the plan is still as loaded (no edits): Design with an agent stays on offer.
+    type('');
+    expect(weight().getAttribute('aria-invalid')).toBe('true');
+    const b = await hub.api.bench('bn_9f03');
+    const plan = { ...b.plan, conditions: b.plan.conditions.map((c) => ({ ...c, weight: c.condition === 'haze' ? 2 : c.weight })), rationale: 'Haze matters.', designed_by: { agent: 'claude' as const, model: null } };
+    vi.spyOn(hub.api, 'designBench').mockResolvedValue({ plan, usage: {} } as BenchDesign);
+    button(/^Design with an agent/)!.click();
+    await settle();
+    const ask = await until(() => [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((x) => /^Ask /.test(x.textContent?.trim() ?? '') && !x.disabled), 'Ask');
+    ask.click();
+    await settle();
+    const use = await until(() => [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((x) => x.textContent?.trim() === 'Use this plan'), 'Use this plan');
+    use.click();
+    await settle();
+    expect(weight().value).toBe('2');
+    expect(weight().getAttribute('aria-invalid')).toBeNull();
+    expect(text()).not.toMatch(/Haze: the weight is empty/);
   });
 
   it('keeps the preview on its image when the benchmark changes under it (a `bench` event)', async () => {
