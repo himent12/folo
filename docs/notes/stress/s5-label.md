@@ -103,6 +103,18 @@ field left empty from the leave dialog either, also after a change of tab" (fail
   `entries.rs`) now refuses external boxes with reversed corners or a non-finite coordinate, as the server does
   (s5-label-3's sibling). Test: `mock_bench` `external_boxes_with_reversed_corners_or_no_number_are_refused_not_scored`.
 
+### Review round 3 (re-review 2)
+- Round 2's check took the server's own rounding for another tab: a weight such as `2.00000001` comes back as `2`
+  (the server keeps it as an f32), so "Plan saved, then changed elsewhere" showed and the leave dialog never let go.
+  `samePlan` now compares plans as the server keeps them (weight as f32, reasons trimmed) and a save is checked
+  against the PUT answer. Test: "saves a weight the server rounds from the leave dialog and leaves ...".
+- The image editor's "Changed elsewhere" lived only in its status line, under the inert editor when "Save your
+  changes?" was open. The leave dialog now says it too, also when the other tab saves while the dialog is open.
+  Test: "says so in the leave dialog too when another tab saves the image ...".
+- Use this plan (a proposal from Design with an agent) kept an emptied weight field of the old plan, so the proposal
+  showed an empty field and could not be saved. It now starts the fields afresh. Test: "takes a proposal used in
+  place of the plan with its own weights ...". All three fail without the fix (lane log `r3-nofix.log`).
+
 ## Pushed hard, no bug
 Agent garbage / error / edge / huge replies (clear run errors, sub-pixel and unknown-label boxes dropped); the
 in-call image is `409` to PUT and DELETE while a waiting one leaves the run; save with the server down (clear error,
