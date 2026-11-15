@@ -60,7 +60,7 @@ partial for good); metrics read before the runs list came are read again only wh
 list says finished; a refresh that fails keeps the curves, says "Could not refresh these runs' metrics: the curves may
 be behind" with Retry, and is tried again every 3 s by itself; a stopped run resumed in another tab is followed too
 (the poll no longer waits for a run that is already active). Tests: `RunCompare.test.tsx` "a run that trains while
-compared" (four cases, fake timers; each fails without its part of the fix). SIBLING (same front end, another surface):
+compared" (four cases, fake timers; the first fails at base, the three added in round 1 fail at the reviewed head). SIBLING (same front end, another surface):
 `web/src/lib/api/liveLabel.ts` keeps a labeling job deleted elsewhere "Reconnecting"; left to lane s5-label (see
 Deferred).
 
