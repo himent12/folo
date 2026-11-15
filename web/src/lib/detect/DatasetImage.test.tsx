@@ -3,9 +3,9 @@ import { flush as flushSync, signal } from 'fw';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { PROBE_DELAYS, Reach } from '$lib/api/reach';
 import { render as fwRender } from '../../../framework/testing';
 import DatasetImage, { type DatasetImageProps } from './DatasetImage';
-import { PROBE_DELAYS, Reach } from "$lib/api/reach";
 
 /** Port of `mount(DatasetImage, { target, props })`; `unmount(c)` is `c.unmount()`. */
 const mount = (_: typeof DatasetImage, o: { target: HTMLElement; props: DatasetImageProps }) => fwRender(() => <DatasetImage {...o.props} />, o.target);
@@ -146,7 +146,7 @@ describe('DatasetImage', () => {
   function reachOver(probe: () => Promise<void>) {
     const reach = new Reach();
     reach.reset(probe);
-    const spies = [vi.spyOn(hub, 'suspect').mockImplementation(() => reach.failed()), vi.spyOn(hub, 'back', 'get').mockImplementation(() => reach.back)];
+    const spies = [vi.spyOn(hub, 'suspect').mockImplementation(() => reach.suspect()), vi.spyOn(hub, 'back', 'get').mockImplementation(() => reach.back)];
     return { reach, restore: () => spies.forEach((s) => s.mockRestore()) };
   }
 
@@ -177,20 +177,41 @@ describe('DatasetImage', () => {
     }
   });
 
-  it('shows a failed image as failed when the server answers the check (a broken file): one check, no retry', async () => {
+  it('loads again an image whose outage was over before the check landed: the server answers it, one retry (stress s1-datasets-8)', async () => {
+    // The image failed during the outage, but its error arrives after the server is back: the check finds it up, so no
+    // outage is ever confirmed and `back` never moves.
     const probe = vi.fn(async () => {});
     const { reach, restore } = reachOver(probe);
     try {
       const url = render(async () => '/api/datasets/ds/images/img?thumb=256');
-      const img = await until(() => target.querySelector('img'), 'the image');
-      img.dispatchEvent(new Event('error'));
-      await until(() => target.querySelector('.failed'), 'the failure');
-      await until(() => probe.mock.calls.length === 1 && !reach.offline, 'the check');
-      await new Promise((r) => setTimeout(r, 20));
-      flushSync();
+      const first = await until(() => target.querySelector('img'), 'the image');
+      first.dispatchEvent(new Event('error'));
+      const again = await until(() => url.mock.calls.length === 2 && target.querySelector('img'), 'the image again');
       expect(probe).toHaveBeenCalledTimes(1);
       expect(reach.back).toBe(0);
-      expect(url).toHaveBeenCalledTimes(1);
+      expect(target.querySelector('.failed')).toBeNull();
+      again.dispatchEvent(new Event('load'));
+      await until(() => target.querySelector('.box'), 'the boxes');
+    } finally {
+      restore();
+    }
+  });
+
+  it('shows a broken file as failed after that one retry, and asks no more', async () => {
+    const probe = vi.fn(async () => {});
+    const { reach, restore } = reachOver(probe);
+    try {
+      const url = render(async () => '/api/datasets/ds/images/img?thumb=256');
+      const first = await until(() => target.querySelector('img'), 'the image');
+      first.dispatchEvent(new Event('error'));
+      const second = await until(() => url.mock.calls.length === 2 && target.querySelector('img'), 'the retry');
+      second.dispatchEvent(new Event('error'));
+      await until(() => target.querySelector('.failed'), 'the failure');
+      await until(() => probe.mock.calls.length === 2 && !reach.offline, 'the second check');
+      await new Promise((r) => setTimeout(r, 20));
+      flushSync();
+      expect(reach.back).toBe(0);
+      expect(url).toHaveBeenCalledTimes(2);
       expect(target.querySelector('.failed')).not.toBeNull();
     } finally {
       restore();

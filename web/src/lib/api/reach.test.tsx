@@ -94,6 +94,35 @@ describe('Reach', () => {
     reach.reset(null);
     expect([reach.offline, reach.back]).toEqual([false, 0]);
   });
+
+  it('says what a suspicion found: up when the probe or any request answers, down when nothing does (stress s1-datasets-8)', async () => {
+    let up = true;
+    let probes = 0;
+    const reach = new Reach();
+    expect(await reach.suspect()).toBe(false); // nothing to check (the mock)
+    reach.reset(async () => {
+      probes++;
+      if (!up) throw new Error('down');
+    });
+    // Two suspicions at once share one probe, and both hear it answered.
+    const both = Promise.all([reach.suspect(), reach.suspect()]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect([await both, probes, reach.back]).toEqual([[true, true], 1, 0]);
+
+    up = false;
+    const down = reach.suspect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([await down, reach.offline]).toEqual([false, true]);
+    // Offline already: no probe of its own, its return ends in `back`.
+    expect(await reach.suspect()).toBe(false);
+    expect(probes).toBe(2);
+
+    // A probe that hangs: any request that answers meanwhile settles the suspicion as up.
+    reach.reset(() => new Promise(() => {}));
+    const hung = reach.suspect();
+    reach.ok();
+    expect(await hung).toBe(true);
+  });
 });
 
 describe('hub.offline with the server', () => {

@@ -5,7 +5,7 @@
  * floating on an empty frame), and a failed URL or image says so, with Retry.
  */
 import ImageOff from '$icons/image-off';
-import { computed, css, effect, signal, splitProps, untrack } from 'fw';
+import { computed, css, effect, signal, splitProps, untrack, onCleanup } from 'fw';
 import { hub } from '$lib/api/index';
 import Skeleton from '$lib/ui/Skeleton';
 import DetectionView, { type DetectionViewProps, type ViewBox } from './DetectionView';
@@ -105,7 +105,7 @@ export default function DatasetImage(props: DatasetImageProps) {
   // The server answers again after an outage (`hub.back`): an image that failed meanwhile tries again by itself, as a
   // Resource does; otherwise every tile on screen keeps "Image unavailable" until clicked (stress s1-datasets-8). One
   // still loading then retries if it fails later (`failed`). An outage that only images saw reaches `hub.back` through
-  // the probe their failure asks for (`hub.suspect` below).
+  // the probe their failure asks for (`imageFailed` below).
   let back = untrack(() => hub.back);
   effect(() => {
     const now = hub.back;
@@ -114,10 +114,29 @@ export default function DatasetImage(props: DatasetImageProps) {
     if (untrack(() => phase.get()) === 'error') attempt.set((a) => a + 1);
   });
 
+  /**
+   * The browser's request for the image failed: the server is asked whether it is there (`hub.suspect`). A confirmed
+   * outage ends in `hub.back` (above); a check the server answers means the outage, if any, was over before it landed (or
+   * the file is broken), so the image tries once more, no more until it loads or Retry is used (`rechecked`).
+   */
+  let rechecked = false;
+  let gone = false;
+  onCleanup(() => (gone = true));
+  function imageFailed() {
+    const at = untrack(() => attempt.get());
+    const once = !rechecked;
+    rechecked = true;
+    void hub.suspect().then((up) => {
+      if (up && once && !gone && untrack(() => attempt.get()) === at && untrack(() => phase.get()) === 'error') attempt.set((a) => a + 1);
+    });
+    failed();
+  }
+
   /** Native (not delegated) capture listeners, so the tile around it never sees the click. */
   function retry(e: Event) {
     e.stopPropagation();
     e.preventDefault();
+    rechecked = false;
     attempt.set((a) => a + 1);
   }
 
@@ -129,12 +148,12 @@ export default function DatasetImage(props: DatasetImageProps) {
         truth={phase.get() === 'ready' ? (props.truth ?? NO_BOXES) : NO_BOXES}
         onload={(ok) => {
           if (ok) {
+            rechecked = false;
             phase.set('ready');
             return;
           }
-          // The browser loaded it, not the API: an outage only images ran into has to be told (`hub.suspect`).
-          hub.suspect();
-          failed();
+          // The browser loaded it, not the API: an outage only images ran into has to be told (`imageFailed`).
+          imageFailed();
         }}
         {...(rest as Omit<DetectionViewProps, 'src'>)}
       />

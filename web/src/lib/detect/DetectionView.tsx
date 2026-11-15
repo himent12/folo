@@ -451,6 +451,7 @@ css`
     opacity: 0.8;
   }
 `;
+
 /**
  * An `<img>` taken out of the page goes on loading in Chrome (a fast scroll through a virtualised grid queued thousands
  * of thumbnails, and the image the user then opened waited behind them, stress s1-datasets-2); without its `src` it
@@ -459,4 +460,3 @@ css`
 export function cancelOnRemove(el: HTMLImageElement): void {
   onCleanup(() => el.removeAttribute('src'));
 }
-

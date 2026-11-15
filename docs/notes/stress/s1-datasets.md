@@ -72,8 +72,11 @@ Repro steps and evidence for each are in `D:/folo-build/stress/lanes/s1-datasets
 - Finding 8 also recovers from an outage that only images saw (no API request failed meanwhile, so nothing told
   Studio it was offline): a failed `<img>` asks for one health probe (`hub.suspect`, the same de-duplicated check a
   failed request starts); when it confirms the outage, its later answer bumps `hub.back` and the tiles load again. A
-  broken file costs one probe that answers, and stays "Image unavailable". Left: an outage over before that probe
-  lands (milliseconds) is not seen; Retry still works.
+  broken file costs one probe that answers, and stays "Image unavailable".
+- Review round 3: an outage already over when that probe lands is covered too. The probe (or any request) answering
+  resolves `hub.suspect()` true (`Reach.suspect`), and the image then loads once more; a broken file therefore costs one
+  retry and two probes, then stays "Image unavailable" until it loads or Retry is used. Tests in
+  `DatasetImage.test.tsx` and `reach.test.tsx`.
 
 ## Also seen
 
