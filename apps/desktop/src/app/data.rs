@@ -405,11 +405,33 @@ impl FoloApp {
                 if let Some(e) = err.filter(|e| e.code == "server_unreachable") {
                     this.store.note_reachability(Some(&e));
                 }
-                let evicted = this.store.images_px.finish(key, img);
+                let failed = img.is_none();
+                let evicted = this.store.images_px.finish(key.clone(), img);
                 for e in evicted {
                     cx.drop_image(e, None);
                 }
+                // Any other failure (a body cut off, a file being rewritten) is asked for again a
+                // few times on its own: nothing else would, as no outage was seen.
+                if failed && let Some(wait) = this.store.images_px.retry_delay(&key) {
+                    this.retry_image(key, wait, cx);
+                }
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// After `wait`, forgets the failed image `key` so the next draw asks for it again.
+    fn retry_image(&mut self, key: ImgKey, wait: std::time::Duration, cx: &mut Context<Self>) {
+        let generation = self.backend_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                if this.backend_gen == generation {
+                    this.store.images_px.forget(&key);
+                    cx.notify();
+                }
             })
             .ok();
         })

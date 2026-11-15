@@ -597,3 +597,48 @@ fn images_that_failed_while_the_server_was_away_load_once_it_answers() {
         assert!(matches!(this.store.images_px.get(&key), Some(ImgSlot::Ready(_))), "the tile shows");
     });
 }
+
+#[test]
+fn an_image_that_failed_with_the_server_up_is_asked_for_again_a_few_times() {
+    use std::time::Duration;
+
+    use crate::api::ApiError;
+    use crate::store::{ImgKey, ImgKind, ImgSlot};
+    let (mut app, window) = open();
+    let key = ImgKey { dataset: "ds_3b91".into(), image: "img_03417".into(), kind: ImgKind::Full };
+    // The body cut off after its headers: no outage seen, so no reconnect would clear it.
+    let fail = |app: &mut folo_ui::HeadlessApp| {
+        drive(app, window, |this, _, cx| {
+            assert!(this.store.images_px.begin(&key));
+            let cut = ApiError::new("bad_response", "folo serve's answer was cut off");
+            this.load_cached_image(key.clone(), move |_: &dyn Backend| Err(cut), cx);
+        })
+    };
+    let failed = |app: &mut folo_ui::HeadlessApp| {
+        drive(app, window, |this, _, _| matches!(this.store.images_px.get(&key), Some(ImgSlot::Failed)))
+    };
+    for wait in [2, 8, 32] {
+        fail(&mut app);
+        assert!(failed(&mut app));
+        assert!(!drive(&mut app, window, |this, _, _| this.store.unreachable()), "no outage");
+        app.advance_clock(Duration::from_secs(wait) - Duration::from_millis(1));
+        assert!(failed(&mut app), "{wait} s not up yet");
+        app.advance_clock(Duration::from_millis(1));
+        assert!(
+            drive(&mut app, window, |this, _, _| this.store.images_px.get(&key).is_none()),
+            "after {wait} s"
+        );
+    }
+    // A fourth failure in a row (a corrupt file) waits for a reconnect instead of polling for ever.
+    fail(&mut app);
+    app.advance_clock(Duration::from_secs(3600));
+    assert!(failed(&mut app));
+    // Asked for again by a draw once forgotten, it shows.
+    drive(&mut app, window, |this, _, cx| {
+        this.store.images_px.forget_failed();
+        assert!(this.image("ds_3b91", "img_03417", ImgKind::Full, cx).is_none());
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(matches!(this.store.images_px.get(&key), Some(ImgSlot::Ready(_))));
+    });
+}

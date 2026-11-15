@@ -4,11 +4,11 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, div, px,
+    div, px, InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled,
 };
 
 use crate::api::{Dataset, DatasetStats, Histogram, IssueCounts, SplitsExt};
-use crate::theme::{Theme, ty};
+use crate::theme::{ty, Theme};
 use crate::ui::*;
 
 /// How much a finding matters.
@@ -50,12 +50,20 @@ fn share_below(h: &Histogram, limit: f64) -> f64 {
             below += c;
         }
     }
-    if total == 0 { 0. } else { below as f64 / total as f64 }
+    if total == 0 {
+        0.
+    } else {
+        below as f64 / total as f64
+    }
 }
 
 /// "35%", "0.8%": one decimal under 10 %.
 fn share(x: f64) -> String {
-    if x < 0.1 { format!("{:.1}%", x * 100.) } else { format!("{:.0}%", x * 100.) }
+    if x < 0.1 {
+        format!("{:.1}%", x * 100.)
+    } else {
+        format!("{:.0}%", x * 100.)
+    }
 }
 
 fn n_of(n: u64, one: &str, many: &str) -> String {
@@ -288,8 +296,8 @@ pub fn findings_text(items: &[Finding]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::Backend;
     use crate::api::mock::MockBackend;
+    use crate::api::Backend;
 
     fn hist(edges: &[f64], counts: &[u64]) -> Histogram {
         Histogram { edges: edges.to_vec(), counts: counts.to_vec() }
@@ -342,5 +350,20 @@ mod tests {
         let mut five = clean.clone();
         five.class_counts = vec![500, 100];
         assert!(!health_checks(&d, &five, None).iter().any(|f| f.short.contains("imbalance")));
+    }
+
+    #[test]
+    fn a_small_dataset_is_counted_in_the_singular_at_one() {
+        let api = MockBackend::new(4200, true);
+        let mut d = api.dataset("ds_3b91").unwrap();
+        let s = d.stats.clone().unwrap();
+        let small = |d: &Dataset| {
+            health_checks(d, &s, None).into_iter().map(|f| f.short).find(|s| s.starts_with("only "))
+        };
+        for (train, val, said) in [(1, 0, Some("only 1 image")), (1, 1, Some("only 2 images")), (0, 0, None)]
+        {
+            (d.splits.train, d.splits.val, d.splits.test) = (train, val, 0);
+            assert_eq!(small(&d).as_deref(), said, "{train} + {val}");
+        }
     }
 }

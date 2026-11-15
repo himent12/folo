@@ -563,12 +563,15 @@ fn upsert_dataset(list: &mut Vec<crate::api::Dataset>, ds: crate::api::Dataset) 
 }
 
 /// What a refused removal says: the server's reason, then the way forward in the app's words. A
-/// refused file deletion (another dataset may read that folder, or could not be checked; a run is
-/// active) can always unregister the dataset alone, which the server's hint names by its API flag
-/// (`files=true`), meaningless here: the switch in the dialog is what the person knows.
+/// file deletion refused before anything changed (another dataset may read that folder, or could
+/// not be checked: `dataset_in_use`; a folder FOLO did not write: `invalid_query`) can still
+/// unregister the dataset alone, which the server's hint names by its API flag (`files=true`),
+/// meaningless here: the switch in the dialog is what the person knows. Any other error keeps its
+/// own hint (a run active refuses unregistering too; a folder that failed to delete was already
+/// unregistered; `unauthorized` names the token to fix).
 fn removal_refused(e: &ApiError, files: bool) -> String {
     let mut body = e.message.clone();
-    let way = if files && e.code != "server_unreachable" {
+    let way = if files && matches!(e.code.as_str(), "dataset_in_use" | "invalid_query") {
         Some("To unregister it and keep its files, remove it again with “Also delete” off.".to_string())
     } else {
         e.hint.clone().filter(|h| !h.contains("files=true") && !h.contains("/api/"))
@@ -613,6 +616,26 @@ mod tests {
         // The server away: nothing to change in the dialog.
         let e = ApiError::new("server_unreachable", "Lost connection to folo serve.");
         assert_eq!(super::removal_refused(&e, true), "Lost connection to folo serve.");
+        // Errors where unregistering alone would not help keep their own way forward: a run
+        // refuses it too; a folder that failed to delete was already unregistered; a token.
+        let e = ApiError::new("run_active", "run a is queued or training")
+            .with_hint("wait for it to end, or stop it first");
+        assert_eq!(
+            super::removal_refused(&e, true),
+            "run a is queued or training. Wait for it to end, or stop it first"
+        );
+        let e = ApiError::new("internal", "broken was unregistered, but deleting 'D:/x' failed: denied");
+        assert!(!super::removal_refused(&e, true).contains("remove it again"));
+        let e = ApiError::new("unauthorized", "folo serve wants a token")
+            .with_hint("enter the server's token in Settings");
+        assert_eq!(
+            super::removal_refused(&e, true),
+            "folo serve wants a token. Enter the server's token in Settings"
+        );
+        // A folder FOLO did not write is refused before anything changed: unregistering still can.
+        let e = ApiError::new("invalid_query", "'D:/photos' is not a folder FOLO wrote into its data dir")
+            .with_hint("unregister it without files=true");
+        assert!(super::removal_refused(&e, true).ends_with("with “Also delete” off."));
     }
 
     #[test]

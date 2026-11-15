@@ -43,6 +43,14 @@ Fix: `ImageCache::forget_failed` from `FoloApp::reconnected`, and an image that 
 server down itself, so an outage only the images saw is noticed and recovered too. Tests: `store/images.rs`
 `failures_are_forgotten_on_request_and_ready_images_kept`, `app/connection_tests.rs`
 `images_that_failed_while_the_server_was_away_load_once_it_answers`.
+Review round 1: a failure with the server up (a body cut off after its headers, a file being rewritten) saw no outage,
+so nothing retried it. Any failed image is now asked for again on its own 2, 8 and 32 s after its 1st, 2nd and 3rd
+failure in a row (`ImageCache::retry_delay`, `FoloApp::retry_image`); past that it waits for a reconnect or the error
+panel's Retry (`retry_all` forgets failed images too), so a corrupt file is not fetched for ever. Test:
+`app/connection_tests.rs` `an_image_that_failed_with_the_server_up_is_asked_for_again_a_few_times`.
+Deferred (SIBLING of Studio's `DatasetImage`): a failed tile still looks like a loading one (boxes on an empty tile);
+Studio says "Image unavailable" with a Retry. Telling the two apart needs a third state through `image_canvas` and
+every caller of `FoloApp::image` (grid, inspector, Playground samples, Bench).
 
 ### d1-datasets-5: a refused file deletion left no way forward
 
@@ -51,7 +59,9 @@ FOLO with "Also delete the 3,000 generated images" on. The server answers `409 d
 could not be checked (... no train or val images found), so they may be in that folder", and the toast showed only
 that; the server's hint ("unregister this dataset without files=true") was dropped and speaks the API anyway.
 Fix (Desktop): `removal_refused` (`app/actions.rs`) adds "To unregister it and keep its files, remove it again with
-“Also delete” off."; other hints are shown unless they name API flags or routes. Test: `app/actions.rs`
+“Also delete” off." to the refusals made before anything changed (`dataset_in_use`, `invalid_query`); every other
+error keeps its own hint (`run_active` refuses unregistering too, a folder that failed to delete was already
+unregistered, `unauthorized` names the token), unless the hint names API flags or routes. Test: `app/actions.rs`
 `a_refused_file_deletion_says_how_to_unregister_alone`.
 Deferred (server): `crates/folo-server/src/real/deletion.rs:61` fails closed when `reads()` (`index.rs:299`,
 `folo_data::open_with`) errors, and a dataset that finds no images errors, so one emptied dataset anywhere blocks file
@@ -64,6 +74,11 @@ deletion of every generated dataset. Whether "no images found" may count as "rea
 `meta.id` (`"6"` on a real server, `img_00007` in the demo, which hid it) in the caption and tooltip; they now show the
 file name (`file_name`, either slash), as Studio's grid does (`web/src/routes/dataset/ImageGrid.tsx`). Test:
 `screens/datasets/images.rs` `a_tile_is_named_by_its_file_not_its_id`.
+Review round 1: the grid toolbar ("1 images", "1 val images") counts in the singular too, the health hint has a test
+(`a_small_dataset_is_counted_in_the_singular_at_one`), and a dataset image picked in Playground is named by its file
+when the dataset's image list is loaded (`app/playground.rs`, its id otherwise). SIBLING, not changed: "N images" with
+no singular in `ui/format.rs` `split_label`, `screens/models/confusion.rs`, `overlays/new_run.rs`, `screens/bench/*`
+and Studio's `web/src/routes/dataset/health.ts` (other lanes' surfaces).
 
 ### d1-datasets-3 (deferred)
 

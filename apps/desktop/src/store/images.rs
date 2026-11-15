@@ -35,11 +35,19 @@ pub struct ImageCache {
     bytes: usize,
     /// [`Self::BYTE_BUDGET`] (smaller in tests).
     byte_budget: usize,
+    /// How often each image failed in a row (its automatic retries: [`Self::retry_delay`]).
+    failures: HashMap<ImgKey, u32>,
 }
 
 impl Default for ImageCache {
     fn default() -> Self {
-        Self { slots: HashMap::new(), order: VecDeque::new(), bytes: 0, byte_budget: Self::BYTE_BUDGET }
+        Self {
+            slots: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            byte_budget: Self::BYTE_BUDGET,
+            failures: HashMap::new(),
+        }
     }
 }
 
@@ -74,6 +82,7 @@ impl ImageCache {
     /// Forget everything (a new data source); returns the decoded images to free on the GPU.
     pub fn clear(&mut self) -> Vec<Arc<RenderImage>> {
         self.order.clear();
+        self.failures.clear();
         self.bytes = 0;
         self.slots
             .drain()
@@ -92,6 +101,11 @@ impl ImageCache {
             return img.into_iter().collect();
         }
         self.bytes += img.as_deref().map_or(0, image_bytes);
+        if img.is_some() {
+            self.failures.remove(&k);
+        } else {
+            *self.failures.entry(k.clone()).or_default() += 1;
+        }
         self.slots.insert(k.clone(), img.map_or(ImgSlot::Failed, ImgSlot::Ready));
         let mut evicted = Vec::new();
         // The image just finished stays (it is the one asked for): past the byte budget everything
@@ -102,6 +116,7 @@ impl ImageCache {
                 self.order.push_back(old);
                 continue;
             }
+            self.failures.remove(&old);
             if let Some(ImgSlot::Ready(img)) = self.slots.remove(&old) {
                 self.bytes -= image_bytes(&img);
                 evicted.push(img);
@@ -111,10 +126,35 @@ impl ImageCache {
     }
 
     /// Forget the failures, so those images are asked for again (the server is back: what failed
-    /// while it was away may well load now).
+    /// while it was away may well load now), each with its automatic retries afresh.
     pub fn forget_failed(&mut self) {
         self.slots.retain(|_, s| !matches!(s, ImgSlot::Failed));
         self.order.retain(|k| self.slots.contains_key(k));
+        self.failures.clear();
+    }
+
+    /// Automatic retries of an image that failed (a dropped body, a file being rewritten) before it
+    /// waits for the server to come back or a Retry.
+    pub const RETRIES: u32 = 3;
+
+    /// When to ask again for `k`, which just failed: 2, 8 then 32 s after its 1st, 2nd and 3rd
+    /// failure in a row; `None` past [`Self::RETRIES`] (a corrupt file is not fetched for ever).
+    pub fn retry_delay(&self, k: &ImgKey) -> Option<std::time::Duration> {
+        let n = self.failures.get(k).copied().unwrap_or(0);
+        (1..=Self::RETRIES).contains(&n).then(|| std::time::Duration::from_secs(2 << (2 * (n - 1))))
+    }
+
+    /// Forget `k` if it failed, so the next draw asks for it again; its count of failures stays.
+    pub fn forget(&mut self, k: &ImgKey) {
+        if matches!(self.slots.get(k), Some(ImgSlot::Failed)) {
+            self.slots.remove(k);
+            self.order.retain(|o| o != k);
+            // Counts of images forgotten and never drawn again are dropped once they pile up.
+            if self.failures.len() > Self::BUDGET {
+                let slots = &self.slots;
+                self.failures.retain(|o, _| o == k || slots.contains_key(o));
+            }
+        }
     }
 }
 
