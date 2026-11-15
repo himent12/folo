@@ -107,7 +107,7 @@ Every run of the lane and lane `base`'s controls, P1, proxy-val COCO AP of `best
 | t4-s0 | `distill.temperature=4` | 0.1565 | 0.248 | 0.164 | 0.071 | 0.245 | 0.341 |
 | t4-s1 | `distill.temperature=4`, seed 1 | 0.1548 | 0.247 | 0.162 | 0.074 | 0.241 | 0.347 |
 | t4-s2 | `distill.temperature=4`, seed 2 | 0.1538 | 0.248 | 0.158 | 0.072 | 0.235 | 0.353 |
-| blend-s0 | `loss.cls_gain=0.25`, `distill.cls_gain=0.25` | PENDING | | | | | |
+| blend-s0 | `loss.cls_gain=0.25`, `distill.cls_gain=0.25` | 0.1478 | 0.234 | 0.158 | 0.072 | 0.225 | 0.333 |
 
 (the `ctl` and `cls1` rows give AP per seed and the 3-seed means of the other columns.)
 
@@ -143,7 +143,11 @@ the T² factor makes the term about 2.6 times larger (epoch 20: dfl 0.811 agains
 of `t4` (0.1550) is only +0.0014 over the single `kd-s0`, so T = 4 over T = 1 is a seed-0 choice, not a shown gain
 (`kd` has one seed; its seed 1 was stopped at its start to give `t4`'s seeds the GPU, seed 2 was dropped).
 
-BLEND-PLACEHOLDER
+**Blend.** `blend-s0` keeps the total class gain at 0.5 and only moves the class target halfway to the teacher's
+scores (`loss.cls_gain=0.25` + `distill.cls_gain=0.25`, DFL term at 1.5, T = 1): 0.1478, +0.022 over `ctl-s0`
+(its fair control, same total class gain) and +0.002 over `kdl-s0` (the DFL term alone at class gain 0.5, the
+label target untouched). Against `kd-s0` (0.1536, total class gain 1.0) it is -0.006: on the proxy the class term
+works more by adding gain on the teacher's target than by replacing part of the label target. Not chosen.
 
 **Choice.** `t4` (`--teacher` with T = 4, class gain 0.5, DFL gain 1.5, one view): the best seed-0 arm by more
 than the 0.002 noise over `kd-s0`, and no simpler arm comes within 0.002 of it (`kc` -0.007, `kdl` -0.011, `kd`
@@ -233,6 +237,6 @@ measured. No unloaded A/B was taken (the COCO control occupied the GPU for this 
 
 From about 17:30 a game ran on the same GPU as well (`nvidia-smi`): `t4-s0` took 33-903 s per epoch, so its wall
 time is not a cost number, and runs after it are slower several-fold; accuracy does not depend on load. `t4-s1`
-(104.7 s per epoch, 239 img/s) and `t4-s2` (66.4 s, 393 img/s) ran under the same mixed load plus other agents'
+(104.7 s per epoch, 239 img/s) and `t4-s2` (66.4 s, 393 img/s) and `blend-s0` (57.4 s, 416 img/s, `proxy/logs/cost-blend.log`) ran under the same mixed load plus other agents'
 builds and test suites; T = 4 itself adds only a division before the softmax (not measured
 separately).
