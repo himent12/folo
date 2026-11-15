@@ -47,6 +47,7 @@ import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
 import type { Source } from './playground/source';
 import { followVanished } from './playground/vanished';
+import FirstStepAction, { noDatasetsYet } from "./firstStep";
 
 type Seg = 'file' | 'dataset' | 'webcam';
 type Det = Prediction['boxes'][number];
@@ -114,6 +115,7 @@ export default function Playground() {
   const runs = new Resource((s) => hub.api.runs(s));
   refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
+  const noDatasets = computed(() => noDatasetsYet(datasets.data));
   const choices = computed(() => {
     // Until the runs and datasets answer (or fail) the splits are unknown: wait, so the default never switches.
     if (!models.data || (!runs.data && !runs.error) || (!datasets.data && !datasets.error)) return [];
@@ -750,12 +752,12 @@ export default function Playground() {
             <EmptyState
               icon={Box}
               title="No models to run"
-              description="Train a model first; its best weights show up here when the run finishes."
-              actions={() => (
-                <Button icon={Plus} href={href('/runs/new')}>
-                  New run
-                </Button>
-              )}
+                description={
+                  noDatasets.get()
+                    ? 'Models come from training runs, and a run needs a dataset first: add one, then start a run.'
+                    : 'Train a model first; its best weights show up here when the run finishes.'
+                }
+                actions={() => <FirstStepAction noDatasets={noDatasets.get()} />}
             />
           </Panel>
         ) : (
