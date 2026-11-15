@@ -26,7 +26,7 @@ answering ok, garbage, error, slow, huge and edge replies. Scripts and shots liv
 | id | severity | surface | what | status |
 |---|---|---|---|---|
 | s5-label-1 | annoying | Studio labeling | The same image open in two tabs: when one saves, the other (with unsaved edits) shows nothing; its Save silently replaces the other's labels and its Discard goes back to stale boxes. | fixed |
-| s5-label-2 | annoying | server labeling | A server killed mid-run leaves the agent CLI processes running to the end of their (paid) call: 4 of 4 alive 2 s after the kill. | fixed (Windows); Unix deferred |
+| s5-label-2 | annoying | server labeling | A server killed mid-run leaves the agent CLI processes running to the end of their (paid) call: 4 of 4 alive 2 s after the kill. | deferred: Windows fix on branch `stress/s5-label-tree`, not compiled (no build slot); Unix open |
 | s5-label-3 | annoying | server + Studio bench | External boxes with `x2 < x1` / `y2 < y1` (most often `x, y, w, h` sent as corners) or an f32-overflowing coordinate were taken and scored as wrong guesses: `201 done`, a real-looking leaderboard row. | fixed |
 | s5-label-4 | polish | Studio bench | A plan weight field emptied read as valid, and Save plan stored the last number typed into it. | fixed |
 | s5-label-5 | polish | server labeling | A dataset made from a job and named `nul` answers `500 internal`. | deferred: s1-datasets fixes `slug` |
@@ -45,10 +45,11 @@ without the fix: no status). Checked end to end with the built Studio served by 
 ### s5-label-2: agent processes outlive a killed server
 Repro: a slow agent, start a run, `taskkill /F` the server: the CLI shims and their node children run on (4 of 4
 after 2 s). Root cause: `crates/folo-server/src/label/tree.rs` made the call's job object without
-`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Fix: the limit is set when the job is made, so the handle Windows closes for a
-dead server ends the tree; `Drop` clears it before closing, so a call that finished normally still leaves what it
-started alone (the module's promise). Test: `label::tree::windows::tests` (a job closed without its drop ends its
-process; a dropped one does not). Deferred: Unix (the call leads a process group, which nothing ends when the
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Proposed fix, NOT in this PR: the limit is set when the job is made, so the
+handle Windows closes for a dead server ends the tree; `Drop` clears it before closing, so a call that finished
+normally still leaves what it started alone (the module's promise). Test: `label::tree::windows::tests` (a job closed
+without its drop ends its process; a dropped one does not). It is commit `3263d76d` on branch `stress/s5-label-tree`
+and has never been compiled: in three turns no build slot came free (queues of four to eight). Deferred: Unix (the call leads a process group, which nothing ends when the
 server is killed; `PR_SET_PDEATHSIG` or a reaper would be needed).
 
 ### s5-label-3: external boxes with reversed corners
