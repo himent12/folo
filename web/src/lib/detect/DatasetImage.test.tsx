@@ -90,6 +90,31 @@ describe('DatasetImage', () => {
     await until(() => target.querySelector('.box'), 'the boxes');
   });
 
+  it('tries a failed image again by itself when the server answers again after an outage', async () => {
+    const back = signal(0);
+    const spy = vi.spyOn(hub, 'back', 'get').mockImplementation(() => back.get());
+    try {
+      let fail = true;
+      const url = render(async () => {
+        if (fail) throw new Error('offline');
+        return 'data:,c';
+      });
+      await until(() => target.querySelector('.failed'), 'the failure');
+      fail = false;
+      back.set(1);
+      const img = await until(() => target.querySelector('img'), 'the image');
+      expect(url).toHaveBeenCalledTimes(2);
+      img.dispatchEvent(new Event('load'));
+      await until(() => target.querySelector('.box'), 'the boxes');
+      // A loaded image is left alone by the next recovery.
+      back.set(2);
+      flushSync();
+      expect(url).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('fetches the image again under a new dataset revision (the same id may name another file now)', async () => {
     const api = new MockApi('normal', 0);
     api.imageUrl = vi.fn(async () => '/api/datasets/ds/images/0?thumb=256');

@@ -5,7 +5,7 @@
  * floating on an empty frame), and a failed URL or image says so, with Retry.
  */
 import ImageOff from '$icons/image-off';
-import { computed, css, effect, signal, splitProps } from 'fw';
+import { computed, css, effect, signal, splitProps, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import Skeleton from '$lib/ui/Skeleton';
 import DetectionView, { type DetectionViewProps, type ViewBox } from './DetectionView';
@@ -88,6 +88,16 @@ export default function DatasetImage(props: DatasetImageProps) {
     return () => {
       live = false;
     };
+  });
+
+  // The server answers again after an outage (`hub.back`): an image that failed meanwhile tries again by itself, as a
+  // Resource does; otherwise every tile on screen keeps "Image unavailable" until clicked (stress s1-datasets-8).
+  let back = untrack(() => hub.back);
+  effect(() => {
+    const now = hub.back;
+    if (now === back) return;
+    back = now;
+    if (untrack(() => phase.get()) === 'error') attempt.set((a) => a + 1);
   });
 
   /** Native (not delegated) capture listeners, so the tile around it never sees the click. */
