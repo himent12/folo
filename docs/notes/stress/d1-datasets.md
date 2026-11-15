@@ -57,7 +57,13 @@ says "Image unavailable" (or that it shows the thumbnail) with a Retry button (T
 with its retries afresh (`FoloApp::retry_failed_image`). Tests: `store/images.rs`
 `a_retry_timer_set_for_an_older_failure_leaves_a_newer_one_alone`, `app/connection_tests.rs`
 `a_retry_timer_left_from_before_a_reconnect_leaves_the_next_failure_alone`, the server-up test above (timeouts with
-`/system` answering; ends with the Retry). Deferred (SIBLING of Studio's `DatasetImage`): a failed grid tile still
+`/system` answering; ends with the Retry). Review round 3: a thumbnail past its retries stayed blank when the
+inspector's full size then loaded (the Retry looked only at the full size). Now an image that loads at one size has its
+failed other size asked for again with its retries afresh (`ImageCache::finish`), and the inspector also offers Retry
+("Thumbnail unavailable") when it shows the full size but the thumbnail failed (`FoloApp::image_failed` takes the size).
+Tests: `store/images.rs` `an_image_that_loads_at_one_size_has_its_other_size_asked_for_again`,
+`app/connection_tests.rs` `a_thumbnail_past_its_retries_loads_again_once_the_inspector_loads_its_full_size`.
+Deferred (SIBLING of Studio's `DatasetImage`): a failed grid tile still
 looks like a loading one (boxes on an empty tile); Enter on it opens the inspector, which now says so and retries.
 Telling the two apart on the tile needs a third state through `image_canvas` and every caller of `FoloApp::image`
 (grid, Playground samples, Bench).

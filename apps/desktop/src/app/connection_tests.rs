@@ -640,7 +640,10 @@ fn an_image_that_failed_with_the_server_up_is_asked_for_again_a_few_times() {
     fail(&mut app, "server_unreachable");
     app.advance_clock(Duration::from_secs(3600));
     assert!(failed(&mut app));
-    assert!(drive(&mut app, window, |this, _, _| this.image_failed("ds_3b91", "img_03417")), "it says so");
+    assert!(
+        drive(&mut app, window, |this, _, _| this.image_failed("ds_3b91", "img_03417", ImgKind::Full)),
+        "it says so"
+    );
     // The inspector's Retry: asked for again by the next draw, it shows.
     drive(&mut app, window, |this, _, cx| {
         this.retry_failed_image("ds_3b91", "img_03417", cx);
@@ -648,8 +651,62 @@ fn an_image_that_failed_with_the_server_up_is_asked_for_again_a_few_times() {
     });
     drive(&mut app, window, |this, _, _| {
         assert!(matches!(this.store.images_px.get(&key), Some(ImgSlot::Ready(_))));
-        assert!(!this.image_failed("ds_3b91", "img_03417"));
+        assert!(!this.image_failed("ds_3b91", "img_03417", ImgKind::Full));
     });
+}
+
+#[test]
+fn a_thumbnail_past_its_retries_loads_again_once_the_inspector_loads_its_full_size() {
+    use std::time::Duration;
+
+    use crate::api::ApiError;
+    use crate::store::{ImgKey, ImgKind, ImgSlot};
+    let (mut app, window) = open();
+    let ds = "ds_3b91";
+    let key = |im: &str, kind| ImgKey { dataset: ds.into(), image: im.into(), kind };
+    let slot = |app: &mut folo_ui::HeadlessApp, im: &str, kind| {
+        drive(app, window, |this, _, _| match this.store.images_px.get(&key(im, kind)) {
+            None => "none",
+            Some(ImgSlot::Loading) => "loading",
+            Some(ImgSlot::Ready(_)) => "ready",
+            Some(ImgSlot::Failed) => "failed",
+        })
+    };
+    let show = |app: &mut folo_ui::HeadlessApp, im: &str, kind| {
+        drive(app, window, |this, _, cx| assert!(this.image(ds, im, kind, cx).is_none()));
+        assert_eq!(slot(app, im, kind), "ready", "{im} {kind:?}");
+    };
+    // The grid's thumbnail is cut off four times in a row (`/system` answering): no more retries.
+    let exhaust = |app: &mut folo_ui::HeadlessApp, im: &str| {
+        for wait in [2, 8, 32, 0] {
+            drive(app, window, |this, _, cx| {
+                assert!(this.store.images_px.begin(&key(im, ImgKind::Thumb)));
+                let cut = ApiError::new("bad_response", "folo serve's answer was cut off");
+                this.load_cached_image(key(im, ImgKind::Thumb), move |_: &dyn Backend| Err(cut), cx);
+            });
+            assert_eq!(slot(app, im, ImgKind::Thumb), "failed");
+            app.advance_clock(Duration::from_secs(wait));
+        }
+        app.advance_clock(Duration::from_secs(3600));
+        assert_eq!(slot(app, im, ImgKind::Thumb), "failed", "it waits");
+    };
+    let im = "img_03417";
+    exhaust(&mut app, im);
+    // The images answer again; the inspector opens on it and its full size loads.
+    show(&mut app, im, ImgKind::Full);
+    // So the thumbnail is asked for again by the grid's next draw, and shows.
+    assert_eq!(slot(&mut app, im, ImgKind::Thumb), "none");
+    show(&mut app, im, ImgKind::Thumb);
+    // A thumbnail that fails after its full size loaded: the inspector offers Retry for it.
+    let im = "img_00001";
+    show(&mut app, im, ImgKind::Full);
+    exhaust(&mut app, im);
+    assert_eq!(slot(&mut app, im, ImgKind::Full), "ready");
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.image_failed(ds, im, ImgKind::Thumb) && !this.image_failed(ds, im, ImgKind::Full));
+        this.retry_failed_image(ds, im, cx);
+    });
+    show(&mut app, im, ImgKind::Thumb);
 }
 
 #[test]

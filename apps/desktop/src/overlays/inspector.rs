@@ -139,8 +139,11 @@ impl FoloApp {
             }
         });
         // An image that would not load (its automatic retries may be spent) says so, with a Retry
-        // that asks for it again (Tab reaches it; Enter or Space presses it).
-        let unavailable = self.image_failed(&ds_id, &meta.id).then(|| {
+        // that asks for it again (Tab reaches it; Enter or Space presses it). A full-size one shown
+        // whose thumbnail failed after it loaded says so too: the grid would stay blank.
+        let full_failed = self.image_failed(&ds_id, &meta.id, ImgKind::Full);
+        let thumb_failed = img.is_some() && self.image_failed(&ds_id, &meta.id, ImgKind::Thumb);
+        let unavailable = (full_failed || thumb_failed).then(|| {
             let (ds, id) = (ds_id.clone(), meta.id.clone());
             let retry = self.button(
                 "insp-retry-image",
@@ -160,7 +163,9 @@ impl FoloApp {
                     .py(px(8.))
                     .rounded(px(radius::MD))
                     .bg(t.bg_overlay)
-                    .child(text(ty::SM, t.text_secondary).child(if img.is_some() {
+                    .child(text(ty::SM, t.text_secondary).child(if !full_failed {
+                        "Thumbnail unavailable: the grid can't show it"
+                    } else if img.is_some() {
                         "Full-size image unavailable: showing the thumbnail"
                     } else {
                         "Image unavailable"

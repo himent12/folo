@@ -114,6 +114,13 @@ impl ImageCache {
         self.bytes += img.as_deref().map_or(0, image_bytes);
         if img.is_some() {
             self.failures.remove(&k);
+            // The image loads now: its other size, if it failed (its retries perhaps spent), is asked
+            // for again at its next draw (a thumbnail that failed recovers once the inspector loads).
+            let kind = match k.kind {
+                ImgKind::Thumb => ImgKind::Full,
+                ImgKind::Full => ImgKind::Thumb,
+            };
+            self.retry(&ImgKey { kind, ..k.clone() });
         } else {
             let f = self.failures.entry(k.clone()).or_default();
             f.count += 1;
@@ -352,6 +359,34 @@ mod tests {
         c.retry(&k);
         assert!(c.get(&k).is_none());
         assert_eq!(fail(&mut c).unwrap().0.as_secs(), 2);
+    }
+
+    #[test]
+    fn an_image_that_loads_at_one_size_has_its_other_size_asked_for_again() {
+        let mut c = ImageCache::default();
+        let key = |kind| ImgKey { dataset: "d".into(), image: "i".into(), kind };
+        let (thumb, full) = (key(ImgKind::Thumb), key(ImgKind::Full));
+        // The thumbnail fails past its retries.
+        for _ in 0..=ImageCache::RETRIES {
+            c.slots.remove(&thumb);
+            c.order.retain(|o| o != &thumb);
+            assert!(c.begin(&thumb));
+            c.finish(thumb.clone(), None);
+        }
+        assert!(c.retry_delay(&thumb).is_none());
+        // Another image loading leaves it failed.
+        assert!(c.begin(&full));
+        let other = ImgKey { image: "j".into(), ..thumb.clone() };
+        assert!(c.begin(&other));
+        c.finish(other, Some(render(1, 1)));
+        assert!(c.failed(&thumb));
+        // Its full size loads: the thumbnail is asked for again, its retries afresh.
+        c.finish(full.clone(), Some(render(1, 1)));
+        assert!(c.get(&thumb).is_none());
+        assert!(c.begin(&thumb));
+        c.finish(thumb.clone(), None);
+        assert_eq!(c.retry_delay(&thumb).unwrap().0.as_secs(), 2);
+        assert!(matches!(c.get(&full), Some(ImgSlot::Ready(_))), "a thumbnail's failure leaves it alone");
     }
 
     #[test]

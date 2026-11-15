@@ -371,10 +371,10 @@ impl FoloApp {
         None
     }
 
-    /// Whether a dataset image failed at full size (its retries may be spent): the inspector then
+    /// Whether a dataset image failed at that size (its retries may be spent): the inspector then
     /// says so and offers [`Self::retry_failed_image`].
-    pub fn image_failed(&self, dataset: &str, image: &str) -> bool {
-        let key = ImgKey { dataset: dataset.to_string(), image: image.to_string(), kind: ImgKind::Full };
+    pub fn image_failed(&self, dataset: &str, image: &str, kind: ImgKind) -> bool {
+        let key = ImgKey { dataset: dataset.to_string(), image: image.to_string(), kind };
         self.store.images_px.failed(&key)
     }
 
