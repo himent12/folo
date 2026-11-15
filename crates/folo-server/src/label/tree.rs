@@ -85,10 +85,12 @@ mod windows {
 
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
@@ -107,6 +109,10 @@ mod windows {
                 return None;
             }
             let job = JobObject(handle);
+            // A server that dies without dropping the job (killed, crashed) closes its handle all the same, and
+            // Windows then ends the tree: an agent call whose answer nobody will read stops spending. Best effort:
+            // without the limit the job still serves `terminate`.
+            job.kill_on_close(true);
             // SAFETY: `job.0` is the job handle just created and `child` owns a valid process handle.
             let assigned = unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) };
             (assigned != 0).then_some(job)
@@ -117,13 +123,82 @@ mod windows {
             // SAFETY: `self.0` is a job handle this value owns.
             unsafe { TerminateJobObject(self.0, 1) };
         }
+
+        /// Sets or clears "end every process when the last handle to the job closes". True when Windows took it.
+        fn kill_on_close(&self, on: bool) -> bool {
+            // SAFETY: a plain struct of integers, valid zeroed (no limits).
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            if on {
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            }
+            // SAFETY: `self.0` is a job handle this value owns; `info` is the struct this class takes, with its size.
+            unsafe {
+                SetInformationJobObject(
+                    self.0,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&info).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                ) != 0
+            }
+        }
     }
 
     impl Drop for JobObject {
         fn drop(&mut self) {
-            // SAFETY: `self.0` is a handle this value owns, closed exactly once. Closing the job does not end
-            // its processes: a call that finished normally leaves what it started alone.
+            // A call that finished normally leaves what it started alone: the limit goes before the handle.
+            self.kill_on_close(false);
+            // SAFETY: `self.0` is a handle this value owns, closed exactly once.
             unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        use super::*;
+
+        /// A suspended `ping` (a process that keeps running for half a minute) in a new job, running.
+        fn pinger() -> (Child, JobObject) {
+            let mut cmd = Command::new("ping");
+            cmd.args(["-n", "30", "127.0.0.1"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            super::super::Tree::prepare(&mut cmd);
+            let child = cmd.spawn().expect("ping starts");
+            let job = JobObject::holding(&child).expect("a job");
+            assert!(resume(child.id()));
+            (child, job)
+        }
+
+        fn ends_within(child: &mut Child, limit: Duration) -> bool {
+            let start = Instant::now();
+            while start.elapsed() < limit {
+                if child.try_wait().unwrap().is_some() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            false
+        }
+
+        #[test]
+        fn a_job_closed_without_its_drop_ends_its_tree_and_a_dropped_one_does_not() {
+            // The server dying: the handle closes, the drop never runs.
+            let (mut child, job) = pinger();
+            // SAFETY: the handle is closed once, here; `forget` keeps the drop from closing it again.
+            unsafe { CloseHandle(job.0) };
+            std::mem::forget(job);
+            assert!(ends_within(&mut child, Duration::from_secs(10)), "the agent outlived the server");
+
+            // A call that finished: dropping the job leaves the process running.
+            let (mut child, job) = pinger();
+            drop(job);
+            assert!(!ends_within(&mut child, Duration::from_millis(800)), "a dropped job ended its process");
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
