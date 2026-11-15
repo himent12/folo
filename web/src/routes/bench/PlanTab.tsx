@@ -48,9 +48,19 @@ export default function PlanTab(props: PlanTabProps) {
   const first = () => props.bench.plan.conditions[0]?.condition ?? props.catalog.conditions[0]?.id ?? 'haze';
   const preview = signal(untrack(first));
   const severity = signal(3);
-  const error = computed(() => (props.editable ? planError(draft.get(), props.catalog.conditions) : null));
   /** Weights as typed, per condition, so a half-typed number is not thrown away. */
   const typed = signal<Record<string, string>>({});
+  // A weight field emptied (or holding no number) leaves the draft at the last number typed: until it holds one again
+  // it is wrong, so the field does not read as valid and Save plan does not store a weight the field does not show.
+  const error = computed(() => {
+    if (!props.editable) return null;
+    const d = draft.get();
+    const t = typed.get();
+    const empty = d.conditions.find((c) => unreadable(t[c.condition]));
+    if (!empty) return planError(d, props.catalog.conditions);
+    const name = props.catalog.conditions.find((c) => c.id === empty.condition)?.name ?? empty.condition;
+    return `${name}: the weight is empty. ${weightError(Number.NaN)}.`;
+  });
   effect(() => {
     void props.bench.id;
     typed.set({});
@@ -98,7 +108,8 @@ export default function PlanTab(props: PlanTabProps) {
     const on = () => !!pc.get();
     const wErr = () => {
       const p = pc.get();
-      return p && props.editable ? weightError(p.weight) : null;
+      if (!p || !props.editable) return null;
+      return unreadable(typed.get()[c().id]) ? weightError(Number.NaN) : weightError(p.weight);
     };
     return (
       <li class="cond" class:off={!on()} class:shown={preview.get() === c().id}>
@@ -570,3 +581,6 @@ css`
     }
   }
 `;
+
+/** A weight field's text that is not a number (empty, or what the number input could not read). */
+const unreadable = (v: string | undefined) => v !== undefined && !(v.trim() && Number.isFinite(Number(v)));

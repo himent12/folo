@@ -18,7 +18,8 @@ answering ok, garbage, error, slow, huge and edge replies. Scripts and shots liv
 - Benchmarks: from the shapes val split, from a photos job and from the odd job; model entries on the CPU
   (folo-n-coco, the shapes models), followed live in two tabs, reloaded mid-run, deleted while the entry page was
   open; external entries over the API with 20 malformed shapes; a 35-entry leaderboard (25 externals with long CJK
-  names) checked row by row against `GET …/entries`; compare of four entries with one deleted under it; 390 px.
+  names) checked row by row against `GET …/entries`; compare of four entries with one deleted under it; 390 px; the
+  predictions-file upload through Add entry; the plan editor with weights 0, -1, empty, `1e400`, 0.0001, 10.5.
 
 ## Findings
 
@@ -27,6 +28,7 @@ answering ok, garbage, error, slow, huge and edge replies. Scripts and shots liv
 | s5-label-1 | annoying | Studio labeling | The same image open in two tabs: when one saves, the other (with unsaved edits) shows nothing; its Save silently replaces the other's labels and its Discard goes back to stale boxes. | fixed |
 | s5-label-2 | annoying | server labeling | A server killed mid-run leaves the agent CLI processes running to the end of their (paid) call: 4 of 4 alive 2 s after the kill. | fixed (Windows); Unix deferred |
 | s5-label-3 | annoying | server + Studio bench | External boxes with `x2 < x1` / `y2 < y1` (most often `x, y, w, h` sent as corners) or an f32-overflowing coordinate were taken and scored as wrong guesses: `201 done`, a real-looking leaderboard row. | fixed |
+| s5-label-4 | polish | Studio bench | A plan weight field emptied read as valid, and Save plan stored the last number typed into it. | fixed |
 
 ### s5-label-1: two tabs, one image
 Repro: open `#/datasets/label/<job>?image=7` in tabs A and B. In B, Add box (unsaved). In A, delete every box and
@@ -57,6 +59,15 @@ Repro: `POST /api/bench/benchmarks/{id}/entries` with an external contestant who
 area is still taken. Tests: `external.rs` `every_wrong_record_is_named`, `external.test.ts`. `docs/API.md` lists
 both rules.
 
+### s5-label-4: an emptied plan weight saves the last number typed
+Repro: Conditions tab of a benchmark with no entries; type 3 into Weight of Haze, then clear the field. Before: the
+field was empty and not flagged, Save plan was enabled and stored weight 3 (0, -1 and 10.5 were flagged; `1e400`,
+which the number input reads as empty, was not). Root cause: `web/src/routes/bench/PlanTab.tsx` keeps the draft at
+the last number while the text is blank, and the field's error and the Save gate looked at the draft only. Fix: a
+weight text that is not a number flags the field and gives the plan error "Haze: the weight is empty ...", which holds
+Save plan. Test: `web/src/routes/bench/bench.test.tsx` "does not save a weight field left empty with the last number
+typed in it" (fails without the fix).
+
 ## Pushed hard, no bug
 Agent garbage / error / edge / huge replies (clear run errors, sub-pixel and unknown-label boxes dropped); the
 in-call image is `409` to PUT and DELETE while a waiting one leaves the run; save with the server down (clear error,
@@ -66,5 +77,4 @@ leaderboard order and scores against the API with 35 entries; compare with a del
 shapes (all refused with clear messages except s5-label-3).
 
 ## Not done
-Loops (a tiny student run on the CPU), the Studio predictions-file upload driven through the dialog (only its
-checker was tested), the benchmark plan editor with odd weights, agent benchmark entries.
+Loops (a tiny student run on the CPU), agent benchmark entries, plan design by an agent.
