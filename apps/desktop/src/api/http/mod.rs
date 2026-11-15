@@ -20,27 +20,31 @@ use transport::{agent, seg, stream_agent};
 
 /// How long an event stream may take to send its response headers.
 const STREAM_HANDSHAKE: Duration = Duration::from_secs(5);
+/// How long an open event stream may say nothing (not even the server's 15 s keep-alive) before it is
+/// taken for dead: three keep-alives missed.
+const STREAM_SILENCE: Duration = Duration::from_secs(45);
 
 pub struct HttpBackend {
     base: String,
     agent: ureq::Agent,
     /// No overall timeout (SSE streams stay open for the life of a run), but the handshake is
-    /// bounded: connect and response headers.
+    /// bounded (connect and response headers), and so is a silence on an open stream.
     stream_agent: ureq::Agent,
 }
 
 impl HttpBackend {
     /// `base` like `http://127.0.0.1:7878` (no trailing `/api`).
     pub fn new(base: &str) -> Self {
-        Self::with_handshake(base, STREAM_HANDSHAKE)
+        Self::with_stream_limits(base, STREAM_HANDSHAKE, STREAM_SILENCE)
     }
 
-    fn with_handshake(base: &str, handshake: Duration) -> Self {
+    fn with_stream_limits(base: &str, handshake: Duration, silence: Duration) -> Self {
         // As typed or pasted in Settings: surrounding whitespace (a copied line's end) and a
         // missing scheme ("127.0.0.1:7878") would otherwise make every request fail.
         let base = base.trim().trim_end_matches('/');
         let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
-        Self { base, agent: agent(Some(Duration::from_secs(30))), stream_agent: stream_agent(handshake) }
+        let stream_agent = stream_agent(handshake, silence);
+        Self { base, agent: agent(Some(Duration::from_secs(30))), stream_agent }
     }
 
     /// The server's address as requests use it (scheme added, no trailing `/`).

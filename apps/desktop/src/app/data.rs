@@ -466,7 +466,11 @@ impl FoloApp {
         } else if matches!(self.store.models, Load::Ready(_)) {
             self.fetch_list(List::Models, cx);
         }
-        if matches!(self.store.runs, Load::Ready(_)) {
+        // A failed run list too: nothing else asks for it again (Runs and Overview said "Could not
+        // reach folo serve" for good when the app was opened before its server).
+        if matches!(self.store.runs, Load::Failed(_)) {
+            self.store.runs = Load::Idle;
+        } else if matches!(self.store.runs, Load::Ready(_)) {
             self.refresh_runs(cx);
         }
         self.ensure_core(cx);
@@ -545,6 +549,60 @@ impl FoloApp {
         self.fetch_list(List::Runs, cx);
     }
 
+    /// Apply what the run streams sent since the last tick; whether anything changed.
+    pub(super) fn drain_streams(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        let mut ended = Vec::new();
+        let mut finished = Vec::new();
+        let ids: Vec<String> = self.subscriptions.keys().cloned().collect();
+        for id in ids {
+            loop {
+                let ev = match self.subscriptions.get(&id).map(|rx| rx.try_recv()) {
+                    Some(Ok(ev)) => ev,
+                    Some(Err(TryRecvError::Empty)) | None => break,
+                    Some(Err(TryRecvError::Disconnected)) => {
+                        ended.push(id.clone());
+                        break;
+                    }
+                };
+                if let RunEvent::Status(s) = &ev
+                    && !s.status.is_active()
+                {
+                    finished.push((id.clone(), s.status));
+                }
+                self.store.apply(&id, ev);
+                changed = true;
+            }
+        }
+        // A stream that ended without a terminal status dropped out: the events in the gap are gone
+        // (the API replays only the status), so reload that run's history and the run list, which
+        // resubscribes if it's still training. One whose run the list already says has ended (it went
+        // silent, and timed out after the run finished) never delivered that end: it is handled now
+        // (the final history, the models), as a delivered end would be.
+        let mut dropped = Vec::new();
+        let mut silent = Vec::new();
+        for id in ended.iter().filter(|id| !finished.iter().any(|(f, _)| f == *id)) {
+            match self.store.run(id).map(|r| r.status) {
+                Some(s) if s.is_active() => dropped.push(id.clone()),
+                Some(s) => silent.push((id.clone(), s)),
+                None => {}
+            }
+        }
+        finished.extend(silent);
+        // A delivered end is the stream's last word (its reader stops): it goes now, so its
+        // disconnect, seen on a later tick, is not taken for a silent end and handled twice.
+        for id in ended.iter().chain(finished.iter().map(|(id, _)| id)) {
+            self.subscriptions.remove(id);
+        }
+        for id in dropped {
+            self.resubscribe(id, cx);
+        }
+        for (id, status) in finished {
+            self.run_ended(&id, status, cx);
+        }
+        changed
+    }
+
     /// Drain live events ~10× a second and refresh slow-moving data every few seconds.
     pub(super) fn start_pump(&mut self, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |this, cx| {
@@ -554,47 +612,7 @@ impl FoloApp {
                 tick += 1;
                 let alive = this
                     .update(cx, |this, cx| {
-                        let mut changed = false;
-                        let mut ended = Vec::new();
-                        let mut finished = Vec::new();
-                        let ids: Vec<String> = this.subscriptions.keys().cloned().collect();
-                        for id in ids {
-                            loop {
-                                let ev = match this.subscriptions.get(&id).map(|rx| rx.try_recv()) {
-                                    Some(Ok(ev)) => ev,
-                                    Some(Err(TryRecvError::Empty)) | None => break,
-                                    Some(Err(TryRecvError::Disconnected)) => {
-                                        ended.push(id.clone());
-                                        break;
-                                    }
-                                };
-                                if let RunEvent::Status(s) = &ev
-                                    && !s.status.is_active()
-                                {
-                                    finished.push((id.clone(), s.status));
-                                }
-                                this.store.apply(&id, ev);
-                                changed = true;
-                            }
-                        }
-                        // A stream that ended without a terminal status dropped out: the events in the
-                        // gap are gone (the API replays only the status), so reload that run's history
-                        // and the run list, which resubscribes if it's still training.
-                        let dropped: Vec<String> = ended
-                            .iter()
-                            .filter(|id| !finished.iter().any(|(f, _)| f == *id))
-                            .filter(|id| this.store.run(id).is_some_and(|r| r.status.is_active()))
-                            .cloned()
-                            .collect();
-                        for id in ended {
-                            this.subscriptions.remove(&id);
-                        }
-                        for id in dropped {
-                            this.resubscribe(id, cx);
-                        }
-                        for (id, status) in finished {
-                            this.run_ended(&id, status, cx);
-                        }
+                        let mut changed = this.drain_streams(cx);
                         if this.bench_pump(tick, cx) {
                             changed = true;
                         }

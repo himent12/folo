@@ -288,3 +288,71 @@ fn another_server_on_the_local_ones_port_is_not_ours() {
         assert_eq!(this.local_dir.as_deref(), Some("D:/data"), "the local data dir stays known");
     });
 }
+
+/// Opened before its server: every list failed. The server answers: every list is read again, the run
+/// list too (it kept "Could not reach folo serve" on Runs and Overview until Retry).
+#[test]
+fn every_list_that_failed_is_read_again_once_the_server_answers() {
+    let (mut app, window) = open();
+    let down =
+        crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:18110");
+    drive(&mut app, window, |this, _, cx| {
+        this.store.health = Load::Failed(down.clone());
+        this.store.datasets = Load::Failed(down.clone());
+        this.store.models = Load::Failed(down.clone());
+        this.store.runs = Load::Failed(down.clone());
+        // The 2 s refresh, now answered.
+        this.store.system = Load::Idle;
+        this.ensure_core(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.store.unreachable());
+        assert!(this.store.datasets.ready().is_some(), "datasets");
+        assert!(this.store.models.ready().is_some(), "models");
+        assert!(this.store.runs.ready().is_some(), "runs: {:?}", this.store.runs.error());
+    });
+}
+
+/// A run stream's sender: `drop` it for a stream that ended.
+fn stream_of(this: &mut super::FoloApp, id: &str) -> std::sync::mpsc::Sender<crate::api::RunEvent> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    this.subscriptions.insert(id.into(), crate::api::Subscription::new(rx).0);
+    tx
+}
+
+fn finished_toasts(this: &super::FoloApp, id: &str) -> usize {
+    let title = format!("{} finished", this.store.run(id).expect("the run is listed").name);
+    titles(this).iter().filter(|t| **t == title).count()
+}
+
+/// A run's stream went silent and timed out after the run had ended (the list already says so): the
+/// end it never delivered is handled now (final history, models, the toast), not dropped (the page
+/// kept its first chart point and no final numbers for good).
+#[test]
+fn a_stream_that_ends_silently_after_its_run_finished_still_ends_the_run() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, cx| {
+        let id = "run_52e8";
+        assert!(!this.store.run(id).unwrap().status.is_active(), "a finished run");
+        drop(stream_of(this, id));
+        this.drain_streams(cx);
+        assert_eq!(finished_toasts(this, id), 1);
+        assert!(!this.subscriptions.contains_key(id));
+    });
+}
+
+/// A delivered end, its disconnect seen a tick later: handled once.
+#[test]
+fn a_delivered_end_is_handled_once() {
+    use crate::api::{RunEvent, RunStatus, StatusEvent};
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, cx| {
+        let id = "run_52e8";
+        let tx = stream_of(this, id);
+        tx.send(RunEvent::Status(StatusEvent::new(RunStatus::Completed, None))).unwrap();
+        this.drain_streams(cx);
+        drop(tx);
+        this.drain_streams(cx);
+        assert_eq!(finished_toasts(this, id), 1, "{:?}", titles(this));
+    });
+}

@@ -223,16 +223,44 @@ enum Attempt {
     InUse(Option<String>, Option<String>),
 }
 
-fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Attempt, String> {
+/// The command that starts the app's own `folo serve`. Without `FOLO_TOKEN`: a server started with
+/// one (`folo serve` reads it from the environment) answers every call `401`, and the app can't send a
+/// token, so a token set for the CLI or for a remote server would leave every screen saying "This
+/// server needs a token" about a server the person never started.
+fn serve_command(bin: &std::path::Path) -> Command {
     let mut cmd = Command::new(bin);
-    cmd.args(SERVE_ARGS).stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null());
+    cmd.args(SERVE_ARGS)
+        .env_remove("FOLO_TOKEN")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", bin.display()))?;
+    cmd
+}
+
+/// Why `bin` could not be started, said for a person: a file that is no program (a renamed text file,
+/// a program for another machine) reads "isn't a program", not Windows' "This version of %1 is not
+/// compatible…".
+fn start_failed(bin: &std::path::Path, e: &std::io::Error) -> String {
+    // ERROR_BAD_EXE_FORMAT, ERROR_EXE_MACHINE_TYPE_MISMATCH; ENOEXEC elsewhere.
+    let not_a_program = if cfg!(windows) { [193, 216].as_slice() } else { [8].as_slice() };
+    if e.raw_os_error().is_some_and(|c| not_a_program.contains(&c)) {
+        return format!(
+            "{} isn't a program this PC can run: FOLO_BIN should name FOLO's folo{}",
+            bin.display(),
+            if cfg!(windows) { ".exe" } else { "" }
+        );
+    }
+    format!("could not start {}: {e}", bin.display())
+}
+
+fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Attempt, String> {
+    let mut child = serve_command(bin).spawn().map_err(|e| start_failed(bin, &e))?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (tx, rx) = channel();
     std::thread::spawn(move || {
@@ -318,6 +346,28 @@ mod tests {
             "failed could not bind"
         );
         assert_eq!(url(startup_record("FOLO serving")), "none");
+    }
+
+    #[test]
+    fn the_started_server_never_inherits_a_token() {
+        let cmd = serve_command(std::path::Path::new("folo"));
+        let token = cmd.get_envs().find(|(k, _)| *k == std::ffi::OsStr::new("FOLO_TOKEN"));
+        assert_eq!(token, Some((std::ffi::OsStr::new("FOLO_TOKEN"), None)), "FOLO_TOKEN is removed");
+    }
+
+    #[test]
+    fn a_file_that_is_no_program_is_named_so() {
+        let bin = std::path::Path::new(r"D:\tools\folo.exe");
+        let code = if cfg!(windows) { 216 } else { 8 };
+        let said = start_failed(bin, &std::io::Error::from_raw_os_error(code));
+        assert!(said.starts_with(r"D:\tools\folo.exe isn't a program this PC can run"), "{said}");
+        assert!(!said.contains("%1"), "{said}");
+        if cfg!(windows) {
+            assert!(start_failed(bin, &std::io::Error::from_raw_os_error(193)).contains("isn't a program"));
+        }
+        // Anything else keeps the system's words.
+        let other = start_failed(bin, &std::io::Error::other("busy"));
+        assert_eq!(other, r"could not start D:\tools\folo.exe: busy");
     }
 
     #[test]

@@ -195,10 +195,49 @@ mod tests {
             std::thread::sleep(Duration::from_secs(10));
         });
         let t0 = std::time::Instant::now();
-        let r =
-            HttpBackend::with_handshake(&format!("http://{addr}"), Duration::from_millis(50)).events("run_x");
+        let base = format!("http://{addr}");
+        let r = HttpBackend::with_stream_limits(&base, Duration::from_millis(50), Duration::from_secs(45))
+            .events("run_x");
         assert!(r.is_err());
         assert!(t0.elapsed() < Duration::from_secs(3), "handshake took {:?}", t0.elapsed());
+    }
+
+    /// A link that stops passing bytes without closing (a stuck proxy, a sleeping laptop): the stream
+    /// ends once it has been silent for longer than the keep-alives allow, so the live pump notices,
+    /// drops it and reads the run again. Before, the reader blocked in `read` for good and the run's
+    /// page froze, also after the run ended.
+    #[test]
+    fn a_stream_that_goes_silent_ends() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf);
+            let _ = sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+            );
+            let chunk = b"event: status\ndata: {\"status\":\"running\",\"error\":null}\n\n";
+            let frame = [format!("{:x}\r\n", chunk.len()).as_bytes(), chunk, b"\r\n"].concat();
+            let _ = sock.write_all(&frame).and_then(|_| sock.flush());
+            // Then nothing, the socket held open.
+            std::thread::sleep(Duration::from_secs(20));
+        });
+        let base = format!("http://{addr}");
+        let sub = HttpBackend::with_stream_limits(&base, Duration::from_secs(5), Duration::from_millis(300))
+            .events("run_x")
+            .expect("stream opens");
+        let first = sub.recv_timeout(Duration::from_secs(5)).expect("status delivered");
+        assert!(matches!(first, RunEvent::Status(s) if s.status == RunStatus::Running));
+        let t0 = std::time::Instant::now();
+        let next = sub.recv_timeout(Duration::from_secs(10));
+        assert!(
+            matches!(next, Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
+            "a silent stream stays open: {:?} after {:?}",
+            next.map(|_| "an event"),
+            t0.elapsed()
+        );
     }
 
     #[test]

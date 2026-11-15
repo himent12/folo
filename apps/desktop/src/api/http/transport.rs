@@ -19,11 +19,17 @@ pub(super) fn agent(timeout: Option<Duration>) -> ureq::Agent {
         .into()
 }
 
-pub(super) fn stream_agent(headers: Duration) -> ureq::Agent {
+/// An agent for event streams: the handshake (connect, response headers) is bounded by `headers`, and
+/// every read of the body by `silence`. The server sends a keep-alive every 15 s (docs/API.md), so a
+/// stream that says nothing for longer has a dead link under it (a stuck proxy, a sleeping laptop, a
+/// NAT that forgot it): the read fails and the reader ends, instead of blocking for good while its
+/// page waits for events that never come.
+pub(super) fn stream_agent(headers: Duration, silence: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(2)))
         .timeout_recv_response(Some(headers))
+        .timeout_per_read(Some(silence))
         .build()
         .into()
 }
