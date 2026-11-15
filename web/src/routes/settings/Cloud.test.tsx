@@ -221,8 +221,8 @@ describe('Settings › Cloud', () => {
     const api = new MockApi('normal', 0);
     const real = api.cloudProviders.bind(api);
     let fail = true;
-    api.cloudProviders = (s?: AbortSignal) =>
-      fail ? Promise.reject(new ApiError(200, 'bad_response', 'The server sent an answer of an unexpected shape (no list of providers).')) : real(s);
+    api.cloudProviders = () =>
+      fail ? Promise.reject(new ApiError(200, 'bad_response', 'The server sent an answer of an unexpected shape (no list of providers).')) : real();
     api.cloudConnections = async () => [];
     open(api);
     const err = await until(() => [...target.querySelectorAll('.state')].find((e) => text(e).includes('Could not load the cloud providers')), 'the error');
