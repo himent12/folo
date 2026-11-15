@@ -35,6 +35,71 @@ describe('HttpApi.predict', () => {
   });
 });
 
+// s6-shell-3: a list answer without its list read as an empty list ("No runs yet"), one of the wrong type made screens
+// throw (`.filter is not a function`) and show a skeleton forever.
+describe('HttpApi: a list answer of the wrong shape is an error', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const answer = (body: string) => vi.stubGlobal('fetch', async () => new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+
+  for (const [what, body] of [
+    ['the key missing', '{}'],
+    ['null', '{"runs":null}'],
+    ['an object', '{"runs":{"a":1}}'],
+    ['a string', '{"runs":"run_1"}'],
+    ['no body', ''],
+    ['a bare array', '[]'],
+  ] as const) {
+    it(`runs: ${what}`, async () => {
+      answer(body);
+      await expect(new HttpApi('').runs()).rejects.toMatchObject({ code: 'bad_response', request: 'GET /api/runs' });
+    });
+  }
+
+  it('a list of the right shape comes through', async () => {
+    answer('{"benchmarks":[{"id":"b1"}]}');
+    expect(await new HttpApi('').benches()).toEqual([{ id: 'b1' }]);
+    answer('{"jobs":[]}');
+    expect(await new HttpApi('').labelJobs()).toEqual([]);
+  });
+
+  // Review round 1: offers of null left "Loading offers…" forever; a page without images showed an empty grid or threw.
+  const api = new HttpApi('');
+  const reads = {
+    offers: () => api.cloudOffers('cx_1'),
+    'dataset images': () => api.datasetImages('ds_1', {}),
+    'bench images': () => api.benchImages('b_1'),
+    'entry images': () => api.benchEntryImages('b_1', 'e_1'),
+    // Review round 2: 1000 images and no total stopped LiveLabelJob's paging and showed a truncated job as whole.
+    'label images': () => api.labelImages('lj_1'),
+  };
+  const bad: Record<keyof typeof reads, string[]> = {
+    offers: ['{"offers":null,"fetched":"t"}', '{"fetched":"t"}', '[]', ''],
+    'dataset images': ['{"total":12}', '{"total":12,"images":null}', '{"images":[]}', '{"total":"12","images":[]}', ''],
+    'bench images': ['{"total":12}', '{"images":{}}', ''],
+    'entry images': ['{"total":12}', '{"images":[],"total":null}', ''],
+    'label images': ['{"images":[{"id":"i"}]}', '{"images":[],"total":"1000"}', '{"total":3}', '{"total":3,"images":{}}', ''],
+  };
+  for (const [what, bodies] of Object.entries(bad) as [keyof typeof reads, string[]][]) {
+    for (const body of bodies) {
+      it(`${what}: ${body || 'no body'}`, async () => {
+        answer(body);
+        await expect(reads[what]()).rejects.toMatchObject({ code: 'bad_response' });
+      });
+    }
+  }
+
+  it('pages and offers of the right shape come through whole', async () => {
+    answer('{"offers":[],"fetched":"t"}');
+    expect(await reads.offers()).toEqual({ offers: [], fetched: 't' });
+    answer('{"total":3,"images":[{"id":"i"}]}');
+    expect(await reads['dataset images']()).toEqual({ total: 3, images: [{ id: 'i' }] });
+    answer('{"total":0,"images":[]}');
+    expect(await reads['entry images']()).toEqual({ total: 0, images: [] });
+    answer('{"total":1001,"images":[{"id":"i"}]}');
+    expect(await reads['label images']()).toEqual({ total: 1001, images: [{ id: 'i' }] });
+  });
+});
+
 describe('HttpApi: queue and ONNX (docs/API.md, #129)', () => {
   afterEach(() => vi.unstubAllGlobals());
 

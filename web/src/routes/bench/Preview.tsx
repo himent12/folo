@@ -42,10 +42,16 @@ export default function Preview(props: PreviewProps) {
   const index = signal(0);
   const images = signal<BenchImage[]>([]);
   const total = signal(0);
-  const changedBoxes = signal<BenchImage['boxes']>([]);
+  /** The truth under the condition; null while it is not known (loading, or its request failed): never another
+   *  condition's boxes over this one's image. */
+  const changedBoxes = signal<BenchImage['boxes'] | null>([]);
+  const truthError = signal<unknown>(undefined);
+  const truthTry = signal(0);
   const plainUrl = signal<string | null>(null);
   const changedUrl = signal<string | null>(null);
   const error = signal<unknown>(undefined);
+  /** Bumped by the images error's Retry: loads the first images again. */
+  const imagesTry = signal(0);
   const boxes = signal(true);
   /** Where the divider is, 0–100 from the left: unchanged on its left, the condition on its right. */
   const split = signal(50);
@@ -56,6 +62,7 @@ export default function Preview(props: PreviewProps) {
     const id = benchId.get();
     if (hub.mode === 'connecting') return;
     void hub.epoch;
+    void imagesTry.get();
     let gone = false;
     error.set(undefined);
     hub.api.benchImages(id, { limit: PAGE }).then(
@@ -96,13 +103,27 @@ export default function Preview(props: PreviewProps) {
       (u) => !gone && changedUrl.set(u),
       (e) => !gone && error.set(e),
     );
-    // The truth under it: only a geometric condition moves it; the others keep the image's own.
-    if (c === 'distance') {
-      void hub.api.benchImages(id, { offset: index.get(), limit: 1, condition: c, severity: s }).then(
-        (p) => !gone && changedBoxes.set(p.images[0]?.boxes ?? im.boxes),
-        () => {},
-      );
-    } else changedBoxes.set(im.boxes);
+    return () => (gone = true);
+  });
+  // The truth under it: only a geometric condition moves it; the others keep the image's own. A failed request says
+  // so with Retry (it used to be swallowed, leaving the previous condition's boxes drawn over this image).
+  effect(() => {
+    const im = image.get();
+    const c = condition.get();
+    const s = severity.get();
+    void truthTry.get();
+    truthError.set(undefined);
+    if (!im) return;
+    if (c !== 'distance') {
+      changedBoxes.set(im.boxes);
+      return;
+    }
+    let gone = false;
+    changedBoxes.set(null);
+    void hub.api.benchImages(benchId.get(), { offset: index.get(), limit: 1, condition: c, severity: s }).then(
+      (p) => !gone && changedBoxes.set(p.images[0]?.boxes ?? im.boxes),
+      (e) => !gone && truthError.set(e),
+    );
     return () => (gone = true);
   });
 
@@ -141,7 +162,7 @@ export default function Preview(props: PreviewProps) {
           <Segmented label="Severity" size="sm" bind:value={severityText} options={severityOptions} />
         </div>
         {error.get() && !image.get() ? (
-          <ErrorState error={error.get()} title="Could not load the images" compact />
+          <ErrorState error={error.get()} title="Could not load the images" retry={() => imagesTry.set((n) => n + 1)} compact />
         ) : (
           <div class="stage" style:aspect-ratio={ratio.get()} style={{ '--ar': ratio.get() }}>
             {image.get() && plainUrl.get() && changedUrl.get() ? (
@@ -162,7 +183,7 @@ export default function Preview(props: PreviewProps) {
                     src={changedUrl.get()!}
                     width={image.get()!.width}
                     height={image.get()!.height}
-                    truth={boxes.get() ? changedBoxes.get() : []}
+                    truth={boxes.get() ? (changedBoxes.get() ?? []) : []}
                     classes={props.bench.classes}
                     labels={false}
                     alt={`${image.get()!.file} under ${name.get()}, severity ${severity.get()}`}
@@ -193,6 +214,9 @@ export default function Preview(props: PreviewProps) {
             )}
           </div>
         )}
+        {truthError.get() && image.get() ? (
+          <ErrorState error={truthError.get()} title={`Could not load the boxes under ${name.get()}`} retry={() => truthTry.set((n) => n + 1)} compact />
+        ) : null}
         <div class="foot">
           <p class="what">{desc.get()}</p>
           <div class="step">

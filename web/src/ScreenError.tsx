@@ -13,6 +13,36 @@ import Button from '$lib/ui/Button';
 import ErrorState from '$lib/ui/ErrorState';
 import type { ScreenName, Screens } from './routes';
 
+/**
+ * The screen of a route whose screen threw while it was created (data of a shape it did not expect, a bug): the page
+ * frame of its section and the error, with Reload. Without it the screen shown before stayed on display under the new
+ * URL, the sidebar on the new section, and nothing said it failed (s6-shell-2).
+ */
+export function ScreenCrash(props: { error: unknown }) {
+  const nav = computed(() => {
+    const s = section(router.route.name);
+    return [...mainNav, settingsNav].find((n) => n.id === s);
+  });
+  effect(() => {
+    const n = nav.get();
+    setCrumbs(n ? { label: n.label, path: n.path } : { label: 'Error' });
+  });
+  return (
+    <Page title={nav.get()?.label ?? 'FOLO Studio'}>
+      <ErrorState
+        error={props.error instanceof Error ? props.error : new Error(String(props.error))}
+        title="This page could not be shown"
+        hint="Reload the page. If it happens again, the error below says what went wrong."
+        actions={
+          <Button size="sm" variant="primary" icon={RotateCw} onclick={() => location.reload()}>
+            Reload
+          </Button>
+        }
+      />
+    </Page>
+  );
+}
+
 /** The entry script of a built Studio's index.html (`<script type="module" … src="/assets/index-….js">`), or null. */
 export function entryScript(html: string): string | null {
   const tag = /<script\b[^>]*\btype="module"[^>]*>/.exec(html)?.[0];

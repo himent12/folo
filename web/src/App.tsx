@@ -5,7 +5,7 @@
 // shortcut, the palette opening, idle time after startup), so that wait is rarely there at all. The screen kept on
 // display keeps its route too (`router.holdWhile`): it never reads the route of the screen to come. A chunk that fails
 // to load shows an error with Retry (ScreenError), and the screen once any later try brings it in.
-import { computed, css, Dynamic, effect, Key, onCleanup, onMount, signal, tick, untrack, type Component } from 'fw';
+import { computed, createRoot, css, effect, getOwner, Key, onCleanup, onMount, signal, tick, untrack, type Component } from 'fw';
 import { hub } from '$lib/api/index';
 import { prefs } from '$lib/prefs';
 import { router, type Route } from '$lib/router';
@@ -24,7 +24,7 @@ import Topbar from '$lib/shell/Topbar';
 import Toaster from '$lib/ui/Toaster';
 import { screens as appScreens, type Screens } from './routes';
 import NotFound from './routes/NotFound';
-import ScreenError from './ScreenError';
+import ScreenError, { ScreenCrash } from './ScreenError';
 
 type Screen = { path: string | null; comp: Component<Record<string, never>> | null };
 
@@ -82,6 +82,22 @@ export default function App(props: AppProps) {
   const waiting = (to: Route) => to.name !== 'not-found' && screens.screenOf(to.name) === undefined && !screens.failure(to.name);
   /** A route whose chunk could not be loaded: the error, with Retry. */
   const failed: Component<Record<string, never>> = () => <ScreenError screens={screens} />;
+  /**
+   * The screen, or the error it threw while it was created (ScreenCrash), so `main` never keeps the one before; what it
+   * built until then is disposed, so none of its effects run.
+   */
+  const show = (Comp: Screen['comp']) => {
+    if (!Comp) return undefined;
+    // In a scope of its own: what the screen built before it threw (a child that polls, a listener) is torn down with it.
+    let drop = () => {};
+    try {
+      return createRoot((dispose) => ((drop = dispose), <Comp />), getOwner());
+    } catch (error) {
+      drop();
+      console.error(error);
+      return <ScreenCrash error={error} />;
+    }
+  };
 
   /** What `main` shows: the screen of the route on display once its chunk is there, else the one shown until then. */
   let last: Screen = NONE;
@@ -160,7 +176,7 @@ export default function App(props: AppProps) {
         <div class="main">
           <Topbar onsearch={() => paletteOpen.set(true)} />
           <main id="content" tabindex={-1} ref={(e) => (mainEl = e)}>
-            <Key when={screen.get()}>{() => <Dynamic component={untrack(() => screen.get().comp)} />}</Key>
+            <Key when={screen.get()}>{() => show(untrack(() => screen.get().comp))}</Key>
           </main>
         </div>
         <TabBar />

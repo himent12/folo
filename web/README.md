@@ -65,7 +65,7 @@ start `folo serve`, or open `http://localhost:5173/?mock=1`.
 | `src/firstScreen.ts` | Starts fetching the first screen's chunk before the rest of the app has run |
 | `src/App.tsx` | The shell (sidebar, top bar, tab bar, palette, shortcuts, toasts, run watch) and the current screen |
 | `src/routes.ts` | The route table: which file in `src/routes/` renders each route; each screen is a chunk of its own |
-| `src/ScreenError.tsx` | A screen whose chunk failed to load: Retry, or "Studio was updated" with Reload |
+| `src/ScreenError.tsx` | A screen whose chunk failed to load: Retry, or "Studio was updated" with Reload; `ScreenCrash`, a screen that threw while created |
 | `src/routes/` | The screens (table below); each screen's parts in the folder beside it |
 | `src/lib/api/` | `index.ts` (`hub`: live server or mock), `client.ts` (the `Api` interface and `HttpApi`), `types.ts` + `types/` (docs/API.md's types, by resource), `resource.ts`, `sse.ts`, `live*.ts`, `reach.ts`, `handshake.ts`, `upload.ts`, `mock/` |
 | `src/lib/router.ts` | The hash router (`router`, `href`, `RouteName`) |
@@ -109,10 +109,12 @@ load. `src/lib/router.ts` holds the `RouteName` union, the table of path pattern
 sidebar entry a route highlights) and `router`. Screens read `router.route`, the route on display: while the next
 screen's chunk loads, the screen still shown keeps its own route (`router.location` is the URL's); a chunk that fails
 to load shows an error with Retry (`src/ScreenError.tsx`), or, when the server's index.html now names another entry
-script (Studio was updated under the open page), "Studio was updated" with Reload. `src/routes.ts` maps each route
-name to its file in `src/routes/` (`ROUTES`), and `import.meta.glob` makes each of those files a chunk. The sidebar,
-the phone tab bar, the palette's navigation and the `G` shortcuts all come from `mainNav` and `settingsNav` in
-`src/lib/shell/nav.ts`. A screen sets its breadcrumbs with `setCrumbs` (`src/lib/shell/crumbs.ts`).
+script (Studio was updated under the open page), "Studio was updated" with Reload; a screen that throws while it is
+created shows "This page could not be shown" with Reload in its place (`ScreenCrash`), never the previous screen under
+the new URL. `src/routes.ts` maps each route name to its file in `src/routes/` (`ROUTES`), and `import.meta.glob`
+makes each of those files a chunk. The sidebar, the phone tab bar, the palette's navigation and the `G` shortcuts all
+come from `mainNav` and `settingsNav` in `src/lib/shell/nav.ts`. A screen sets its breadcrumbs with `setCrumbs`
+(`src/lib/shell/crumbs.ts`).
 
 ## State and live updates
 

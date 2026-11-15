@@ -215,4 +215,22 @@ describe('Settings › Cloud', () => {
     expect(toast.items[0]).toMatchObject({ tone: 'info', title: 'Terminating the RTX 4090' });
     await until(() => text(target.querySelector('table.inst tbody tr .st')) === 'Terminating', 'the new state');
   });
+
+  // s6-shell review (round 1): providers of the wrong shape left "No cloud connected" with a disabled Connect and no word.
+  it('says why Connect waits when the providers cannot be read, and Retry reads them again', async () => {
+    const api = new MockApi('normal', 0);
+    const real = api.cloudProviders.bind(api);
+    let fail = true;
+    api.cloudProviders = () =>
+      fail ? Promise.reject(new ApiError(200, 'bad_response', 'The server sent an answer of an unexpected shape (no list of providers).')) : real();
+    api.cloudConnections = async () => [];
+    open(api);
+    const err = await until(() => [...target.querySelectorAll('.state')].find((e) => text(e).includes('Could not load the cloud providers')), 'the error');
+    expect(text(err)).toContain('unexpected shape');
+    expect(button(target, 'Connect')!.disabled).toBe(true);
+    fail = false;
+    button(err, 'Retry')!.click();
+    await until(() => !text(target).includes('Could not load the cloud providers'), 'the error to go');
+    await until(() => button(target, 'Connect') && !button(target, 'Connect')!.disabled, 'Connect enabled');
+  });
 });

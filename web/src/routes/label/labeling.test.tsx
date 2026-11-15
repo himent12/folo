@@ -2,6 +2,7 @@
 import { deep, flush as flushSync } from 'fw';
 import { createComponent } from 'fw/internal';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi, type Scenario } from '$lib/api/mock';
 import type { Dataset, LabelImagesAdded, LabelJob } from '$lib/api/types';
@@ -392,6 +393,40 @@ describe('the job page', () => {
     await page('/datasets/label/lb_7c21', 'no-labeling');
     expect(text()).toMatch(/This server cannot label images/);
     expect(document.querySelector('.err')).toBeNull();
+  });
+
+  // Review round 3 (s6-shell): the stream's `job` event comes at once; a first list of images that failed after it
+  // (a page of the wrong shape) left the job showing with no images, as an empty job, and no Retry.
+  it('when the images fail to load after the stream told of the job: the error and Retry, not an empty job', async () => {
+    let heard = false;
+    const events = MockApi.prototype.labelEvents;
+    vi.spyOn(MockApi.prototype, 'labelEvents').mockImplementation(function (this: MockApi, id, h) {
+      return events.call(this, id, { ...h, job: (j) => ((heard = true), h.job?.(j)) });
+    });
+    const images = MockApi.prototype.labelImages;
+    let fail = true;
+    vi.spyOn(MockApi.prototype, 'labelImages').mockImplementation(async function (this: MockApi, ...a: Parameters<MockApi['labelImages']>) {
+      if (!fail) return images.apply(this, a);
+      await vi.waitFor(() => expect(heard).toBe(true));
+      throw new ApiError(200, 'bad_response', 'The server sent an answer of an unexpected shape (no page of images).');
+    });
+    hub.api = new MockApi('normal', 0);
+    router.route = parse('#/datasets/label/lb_7c21');
+    open(LabelJobPage, {});
+    await vi.waitFor(() => {
+      flushSync();
+      expect(text()).toMatch(/Could not load this labeling job/);
+    });
+    expect(heard).toBe(true);
+    expect(button('Label 40 images')).toBeUndefined();
+
+    fail = false;
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /Retry|Try again/.test(b.textContent ?? ''))!.click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(button('Label 40 images')).toBeTruthy();
+    });
+    expect(text()).not.toMatch(/Could not load this labeling job/);
   });
 
   it('for a job that does not exist: not found, with the way back', async () => {

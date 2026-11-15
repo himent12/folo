@@ -394,7 +394,7 @@ export class HttpApi implements Api {
   }
 
   async datasets(signal?: AbortSignal) {
-    return (await this.#req<{ datasets: Dataset[] }>('GET', '/datasets', undefined, signal)).datasets;
+    return this.#list<Dataset>('/datasets', 'datasets', signal);
   }
   dataset(id: string, signal?: AbortSignal) {
     return this.#req<Dataset>('GET', `/datasets/${encodeURIComponent(id)}`, undefined, signal);
@@ -406,10 +406,10 @@ export class HttpApi implements Api {
     return this.#req<Dataset>('POST', '/datasets/synthetic', body);
   }
   datasetImages(id: string, q: DatasetImagesQuery, signal?: AbortSignal) {
-    return this.#req<DatasetImages>(
-      'GET',
+    return this.#envelope<DatasetImages>(
       `/datasets/${encodeURIComponent(id)}/images${qs({ split: q.split, offset: q.offset, limit: q.limit, class: q.class })}`,
-      undefined,
+      'images',
+      true,
       signal,
     );
   }
@@ -429,7 +429,7 @@ export class HttpApi implements Api {
   }
 
   async models(signal?: AbortSignal) {
-    return (await this.#req<{ models: Model[] }>('GET', '/models', undefined, signal)).models;
+    return this.#list<Model>('/models', 'models', signal);
   }
   model(id: string, signal?: AbortSignal) {
     return this.#req<Model>('GET', `/models/${encodeURIComponent(id)}`, undefined, signal);
@@ -444,7 +444,7 @@ export class HttpApi implements Api {
   }
 
   async runs(signal?: AbortSignal) {
-    return (await this.#req<{ runs: Run[] }>('GET', '/runs', undefined, signal)).runs;
+    return this.#list<Run>('/runs', 'runs', signal);
   }
   run(id: string, signal?: AbortSignal) {
     return this.#req<Run>('GET', `/runs/${encodeURIComponent(id)}`, undefined, signal);
@@ -484,10 +484,10 @@ export class HttpApi implements Api {
   }
 
   async labelAgents(signal?: AbortSignal) {
-    return (await this.#req<{ agents: LabelAgent[] }>('GET', '/label/agents', undefined, signal)).agents;
+    return this.#list<LabelAgent>('/label/agents', 'agents', signal);
   }
   async labelJobs(signal?: AbortSignal) {
-    return (await this.#req<{ jobs: LabelJob[] }>('GET', '/label/jobs', undefined, signal)).jobs;
+    return this.#list<LabelJob>('/label/jobs', 'jobs', signal);
   }
   labelJob(id: string, signal?: AbortSignal) {
     return this.#req<LabelJob>('GET', `/label/jobs/${encodeURIComponent(id)}`, undefined, signal);
@@ -502,12 +502,9 @@ export class HttpApi implements Api {
     return this.#req<void>('DELETE', `/label/jobs/${encodeURIComponent(id)}`);
   }
   labelImages(jobId: string, q: LabelImagesQuery = {}, signal?: AbortSignal) {
-    return this.#req<LabelImagePage>(
-      'GET',
-      `/label/jobs/${encodeURIComponent(jobId)}/images${qs({ status: q.status, offset: q.offset, limit: q.limit })}`,
-      undefined,
-      signal,
-    );
+    // A page without its images, or without the `total` that bounds the paging, would stop LiveLabelJob's paging
+    // early and show a truncated job as whole (review round 2).
+    return this.#envelope<LabelImagePage>(`/label/jobs/${encodeURIComponent(jobId)}/images${qs({ status: q.status, offset: q.offset, limit: q.limit })}`, 'images', true, signal);
   }
   async addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void) {
     const send = (chunk: File[]) => {
@@ -552,7 +549,7 @@ export class HttpApi implements Api {
     return this.#req<BenchCatalog>('GET', '/bench/catalog', undefined, signal);
   }
   async benches(signal?: AbortSignal) {
-    return (await this.#req<{ benchmarks: Bench[] }>('GET', '/bench/benchmarks', undefined, signal)).benchmarks;
+    return this.#list<Bench>('/bench/benchmarks', 'benchmarks', signal);
   }
   bench(id: string, signal?: AbortSignal) {
     return this.#req<Bench>('GET', `/bench/benchmarks/${encodeURIComponent(id)}`, undefined, signal);
@@ -570,10 +567,10 @@ export class HttpApi implements Api {
     return this.#req<BenchDesign>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/design`, body, signal);
   }
   benchImages(id: string, q: BenchImagesQuery = {}, signal?: AbortSignal) {
-    return this.#req<BenchImagePage>(
-      'GET',
+    return this.#envelope<BenchImagePage>(
       `/bench/benchmarks/${encodeURIComponent(id)}/images${qs({ offset: q.offset, limit: q.limit, condition: q.condition, severity: q.severity })}`,
-      undefined,
+      'images',
+      true,
       signal,
     );
   }
@@ -581,7 +578,7 @@ export class HttpApi implements Api {
     return `${this.base}/api/bench/benchmarks/${encodeURIComponent(id)}/images/${encodeURIComponent(imageId)}${qs({ condition: opts.condition, severity: opts.severity, thumb: opts.thumb })}`;
   }
   async benchEntries(id: string, signal?: AbortSignal) {
-    return (await this.#req<{ entries: BenchEntry[] }>('GET', `/bench/benchmarks/${encodeURIComponent(id)}/entries`, undefined, signal)).entries;
+    return this.#list<BenchEntry>(`/bench/benchmarks/${encodeURIComponent(id)}/entries`, 'entries', signal);
   }
   startBenchEntry(id: string, body: StartBenchEntry) {
     return this.#req<BenchEntry>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/entries`, body);
@@ -593,10 +590,10 @@ export class HttpApi implements Api {
     return this.#req<BenchResult>('GET', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/result`, undefined, signal);
   }
   benchEntryImages(id: string, entryId: string, q: BenchEntryImagesQuery = {}, signal?: AbortSignal) {
-    return this.#req<BenchEntryImagePage>(
-      'GET',
+    return this.#envelope<BenchEntryImagePage>(
       `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/images${qs({ sort: q.sort, offset: q.offset, limit: q.limit })}`,
-      undefined,
+      'images',
+      true,
       signal,
     );
   }
@@ -613,7 +610,7 @@ export class HttpApi implements Api {
     return this.#req<void>('DELETE', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}`);
   }
   async benchLoops(id: string, signal?: AbortSignal) {
-    return (await this.#req<{ loops: BenchLoop[] }>('GET', `/bench/benchmarks/${encodeURIComponent(id)}/loops`, undefined, signal)).loops;
+    return this.#list<BenchLoop>(`/bench/benchmarks/${encodeURIComponent(id)}/loops`, 'loops', signal);
   }
   startBenchLoop(id: string, body: StartBenchLoop) {
     return this.#req<BenchLoop>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/loops`, body);
@@ -683,10 +680,10 @@ export class HttpApi implements Api {
   }
 
   async cloudProviders(signal?: AbortSignal) {
-    return (await this.#req<{ providers: CloudProvider[] }>('GET', '/cloud/providers', undefined, signal)).providers;
+    return this.#list<CloudProvider>('/cloud/providers', 'providers', signal);
   }
   async cloudConnections(signal?: AbortSignal) {
-    return (await this.#req<{ connections: CloudConnection[] }>('GET', '/cloud/connections', undefined, signal)).connections;
+    return this.#list<CloudConnection>('/cloud/connections', 'connections', signal);
   }
   connectCloud(body: ConnectCloud) {
     return this.#req<CloudConnection>('POST', '/cloud/connections', body);
@@ -698,10 +695,10 @@ export class HttpApi implements Api {
     return this.#req<void>('DELETE', `/cloud/connections/${encodeURIComponent(id)}`);
   }
   cloudOffers(id: string, signal?: AbortSignal, refresh = false) {
-    return this.#req<CloudOfferList>('GET', `/cloud/connections/${encodeURIComponent(id)}/offers${qs({ refresh: refresh ? 'true' : undefined })}`, undefined, signal);
+    return this.#envelope<CloudOfferList>(`/cloud/connections/${encodeURIComponent(id)}/offers${qs({ refresh: refresh ? 'true' : undefined })}`, 'offers', false, signal);
   }
   async cloudInstances(signal?: AbortSignal) {
-    return (await this.#req<{ instances: CloudInstance[] }>('GET', '/cloud/instances', undefined, signal)).instances;
+    return this.#list<CloudInstance>('/cloud/instances', 'instances', signal);
   }
   terminateCloudInstance(id: string) {
     return this.#req<CloudInstance>('DELETE', `/cloud/instances/${encodeURIComponent(id)}`);
@@ -723,5 +720,29 @@ export class HttpApi implements Api {
       { model_id: opts.model_id, dataset_id: input.dataset_id, image_id: input.image_id, conf: opts.conf, iou: opts.iou, max_det: opts.max_det },
       signal,
     );
+  }
+
+  /**
+   * A collection: `GET path` answers `{ <key>: [...] }`. Anything else (the key missing, null, an object) is the server's
+   * mistake and an error, not an empty list: a missing list showed "No runs yet" as if that were true, and a list of the
+   * wrong type made screens throw and wait forever (s6-shell-3).
+   */
+  async #list<T>(path: string, key: string, signal?: AbortSignal): Promise<T[]> {
+    return (await this.#envelope<Record<string, T[]>>(path, key, false, signal))[key]!;
+  }
+
+  /**
+   * An answer that holds a collection under `key` (and with `paged`, the `total` of a page): checked as `#list` checks
+   * a list, and resolved whole. Offers of `null` left "Loading offers…" forever; a page without its images showed an
+   * empty grid, or threw in the screen that read `.length` (s6-shell-3).
+   */
+  async #envelope<T extends object>(path: string, key: string, paged: boolean, signal?: AbortSignal): Promise<T> {
+    const json = await this.#req<Record<string, unknown> | undefined>('GET', path, undefined, signal);
+    const ok = json !== null && typeof json === 'object' && !Array.isArray(json) && Array.isArray(json[key]) && (!paged || typeof json.total === 'number');
+    if (!ok) {
+      const what = paged ? `no page of ${key}` : `no list of ${key}`;
+      throw new ApiError(200, 'bad_response', `The server sent an answer of an unexpected shape (${what}).`, 'Is the server a FOLO server of the same version as Studio?', `GET /api${path.split('?')[0]}`);
+    }
+    return json as T;
   }
 }

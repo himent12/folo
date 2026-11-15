@@ -41,6 +41,10 @@ describe('router.parse', () => {
     expect(parse('#/datasets/%ZZ').name).toBe('not-found');
   });
 
+  it('reads a path of slashes only as the Overview (s6-shell-5: "There is no page at .")', () => {
+    for (const h of ['#//', '#///', '#//?x=1']) expect(parse(h)).toMatchObject({ name: 'overview', path: '/' });
+  });
+
   it('reports unknown paths', () => {
     expect(parse('#/nope/nope').name).toBe('not-found');
   });

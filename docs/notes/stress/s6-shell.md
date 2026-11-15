@@ -1,0 +1,92 @@
+# Stress round, lane s6-shell: FOLO Studio's shell
+
+What a user meets around every screen: routing, deep links, Back and Forward, the command palette, the global keys,
+Settings, preferences in localStorage, layout at extreme widths, and every screen when the server misbehaves.
+
+## How it was tested
+
+- `folo serve` (shared prebuilt binary, `--device cpu`) on a copy of the seed data, serving this branch's `web/dist`;
+  a second one with `--token` on its own data dir. Studio driven in headless Chrome (playwright-core), screenshots viewed.
+- A mutating proxy in front of the server (lane script `proxy.mjs`, switched per request with `/__mode?m=`): 500, 404,
+  truncated JSON, HTML instead of JSON, every array replaced by an object (`wrongtype`), every top-level field dropped
+  (`dropall`) or set to null (`nullall`), an empty object, a 10 s delay. Every list and detail route walked through each
+  mode, checked for page errors and for a visible error with Retry.
+- Deep links to every route, unknown ids on every `:id` route, malformed percent-encoding, `#//`, a 5000-character hash,
+  traversal-looking ids. Corrupt, wrong-typed, array, string and 4 MB `folo.prefs`.
+- Back and Forward hammered (60 random steps, no waiting, two seeds). Palette: Ctrl+K 21 times, garbage queries,
+  Enter with no results, Ctrl+K over the shortcuts dialog, focus return. Single keys typed inside the Settings field.
+- Server killed mid-session on Runs, then Models, Settings, Datasets, Overview visited, then the server restarted.
+- 320×640 and 3840×2160 through every screen.
+
+## Findings
+
+| id | severity | what | status |
+| --- | --- | --- | --- |
+| s6-shell-1 | blocker | `folo.prefs` with a non-string `serverUrl` (`42`, `null`): Studio offline for good, Settings never opens (`e.trim is not a function`), `{"theme":"neon"}` applied as is | fixed: `web/src/lib/prefs.ts` `sanitize()` puts values of the wrong type back to their defaults; test `prefs.test.ts` |
+| s6-shell-2 | blocker | a screen that throws while created leaves the previous screen on display under the new URL, no error (seen with s6-shell-1's state: URL `#/settings`, Overview shown) | fixed: `web/src/App.tsx` `show()` catches it and shows `ScreenCrash` (`ScreenError.tsx`) with Reload; test `App.test.tsx` |
+| s6-shell-3 | annoying | a list answer of the wrong shape (array missing, null, an object): Benchmarks and Labeling jobs skeleton forever with `(s.data ?? []).filter is not a function`; with the key missing, lists read as empty (wrong data shown as right) | fixed: `web/src/lib/api/client.ts` list getters go through `#list`, and (review round 1) cloud offers and image pages through `#envelope`, which throw `bad_response`; every screen shows its error with Retry; test `client.test.ts` |
+| s6-shell-4 | annoying | proxy `nullall`, `#/datasets/<id>`: skeleton forever, no error | deferred: `routes/Dataset.tsx`, lane s1-datasets' area |
+| s6-shell-5 | polish | `#//` said "There is no page at ." | fixed: `web/src/lib/router.ts`, `#//` is the Overview; test `router.test.ts` |
+| s6-shell-6 | polish | a palette pick made over the shortcuts dialog navigates but leaves that dialog open on the new page | deferred: Ctrl+K over a dialog is deliberate (`lib/shell/shortcuts.ts:104`); one Escape closes it |
+| s6-shell-7 | polish | Overview at 320 px: Recent runs cuts run names to one letter | deferred: a layout decision for phones |
+
+## Checked and fine
+
+- Every route deep-linked; unknown ids give a clear "not found"; malformed percent-encoding and long hashes give Not
+  found, never a crash. Corrupt JSON and 4 MB prefs load with defaults.
+- Back/Forward hammering ends with screen, heading and sidebar highlight matching the URL.
+- Palette: fast toggling, garbage queries, Escape and focus return work. Single keys in a text field type, never navigate.
+- Server gone: every screen says so, with Retry; server back: screens recover by themselves within seconds.
+- A `--token` server: every screen names the token wall (documented: Studio cannot send a token).
+- 500, 404, truncated JSON, HTML through the proxy: every screen shows an error with Retry.
+- A 10 s delay on every answer (Overview, Runs, a model, Settings): each screen waits, then shows the right content, with
+  no page error and no error state; this is a slow load, not an error. (An earlier draft counted it as "an error shown":
+  the walk script looked for the word "Failed", which the Overview and Runs show for a failed run.) Recovery after a
+  delay was not tested separately.
+
+## Not reached
+
+SSE streams that stall or send garbage on a live run's page, 200% zoom and reduced motion, the accessibility tree of
+each screen beyond the dialogs' focus, the Cloud panel against `folo serve --mock`, two tabs changing prefs at once.
+
+## Gates
+
+`npm run check` passed; `npm test` 1742 of 1744 passed, the two others (`LineChart.perf.test.tsx` memoPathsOf,
+`Logs.test.tsx` streaming) timed out at 5 s on the loaded PC and pass alone with `--testTimeout 60000`; neither touches
+these changes. `npm run build` passed. No Rust was touched. The first `tools/file-size.sh` run was started from the wrong
+directory and checked nothing; the review caught it, and it was run again from the worktree root in round 1 ("every
+source file is under 1000 lines").
+Round 2: `npm run check`, `npm run build` and `tools/file-size.sh` passed; `npm test` 1767 of 1768, the other
+(`results.test.tsx` "New loop … opened, closed and opened again") timed out at 5 s under load and passes alone (31 of 31).
+Round 3: `npm run check`, `npm test` (216 files, 1770 tests, all pass), `npm run build` and `tools/file-size.sh` passed.
+
+## Review round 1
+
+- A screen that throws while it is created is now built in a scope of its own and disposed (`web/src/App.tsx` `show()`),
+  so a child built before the throw (a poller, a listener) never runs on the detached page; test `App.test.tsx`.
+- s6-shell-3 widened: cloud offers and the dataset, benchmark and entry image pages are checked as lists are
+  (`client.ts` `#envelope`, `bad_response`): offers of `null` had left "Loading offers…" forever, a page without its
+  images an empty grid (Playground) or a throw (benchmark preview); test `client.test.ts`. Desktop rejects offers of
+  `null` (a required `Vec`, `crates/folo-api/src/cloud.rs`); its image pages were not checked.
+- Settings › Cloud shows an error with Retry when the providers cannot be read, instead of a disabled Connect with no
+  word (`settings/Cloud.tsx`); test `Cloud.test.tsx`.
+
+## Review round 2
+
+- A labeling job's image pages are checked too (`client.ts` `labelImages()` through `#envelope`): a page of 1000 images
+  without `total` had stopped `LiveLabelJob`'s paging and shown a truncated job as whole, with no error; test
+  `client.test.ts`.
+- The benchmark preview's Distance boxes come from a second request whose failure was swallowed: the previous
+  condition's boxes stayed drawn over the moved image. The truth is now cleared while it is not known, and a failure
+  shows "Could not load the boxes under …" with Retry under the image (`routes/bench/Preview.tsx`); test
+  `routes/bench/Preview.test.tsx`.
+
+## Review round 3
+
+- A labeling job whose first list of images failed (a page of the wrong shape) after the stream's `job` event had
+  arrived showed the job with no images, as an empty job, with no error and no Retry: the page showed the load error
+  only while no job was known. The first load's failure is now the page's error whatever the stream said, unless a
+  later load (the stream's re-sync) got through (`lib/api/liveLabel.ts`, `routes/LabelJob.tsx`); test
+  `routes/label/labeling.test.tsx` (the `job` event is heard before the images fail).
+- The benchmark preview's "Could not load the images" has Retry, which loads the first images again; before, only
+  remounting the preview did (`routes/bench/Preview.tsx`); test `routes/bench/Preview.test.tsx`.
