@@ -860,7 +860,12 @@ fn new_run_without_any_dataset_offers_add_dataset() {
 fn enter_in_the_synth_dialog_generates() {
     use folo_ui::{KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput};
     let (mut app, window) = open_with(Arc::new(MockBackend::new(4200, true).empty()));
-    drive(&mut app, window, |this, w, cx| this.open_synth(w, cx));
+    // The dialog is for folo serve (on the demo, Generate synthetic only explains itself).
+    drive(&mut app, window, |this, w, cx| {
+        this.server_mode = super::ServerMode::Local;
+        this.open_synth(w, cx);
+        assert!(this.synth.as_ref().is_some_and(|f| !f.submitting), "the dialog is open, not sent");
+    });
     app.frame(window.into());
     let keystroke = Keystroke::parse("enter").unwrap();
     app.simulate_input(
@@ -872,6 +877,8 @@ fn enter_in_the_synth_dialog_generates() {
     app.simulate_input(window.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke }));
     app.run_until_idle();
     drive(&mut app, window, |this, _, _| {
-        assert!(this.synth.as_ref().is_none_or(|f| f.submitting), "Enter sent the dialog");
+        // The demo backend refuses the request (the dialog stays with its error); what counts is that it went.
+        let f = this.synth.as_ref().expect("the dialog stays open on the demo's refusal");
+        assert_eq!(f.sent_name, "shapes", "Enter sent the dialog");
     });
 }
