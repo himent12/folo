@@ -64,11 +64,33 @@ fn weights_hash(t: &Trainer) -> u64 {
     h
 }
 
-/// The weights hash of one epoch of [`micro`] without a teacher on origin/main at 1436ad68 (before distillation).
-const NO_TEACHER_HASH: u64 = 0x1851_7ce4_1137_dca4;
+/// The weights hash of one epoch of [`micro`] without a teacher, by target, each derived on origin/main at 1436ad68
+/// (before distillation existed) on that target with AVX2 + FMA; never from this branch's own output.
+///
+/// The hash is bit-exact, so it depends on everything the CPU path computes with: the CPU kernels' AVX2 + FMA path
+/// (picked at run time) and the platform's C math library, which Rust std's `f32::atan`, `ln_1p`, `powf`, `exp` and
+/// `ln` call in the loss (CIoU, softplus) and the assignment metric. Windows' UCRT and glibc round some of those
+/// differently, so one CPU gives one hash on Windows and another on Linux. The Linux reference is glibc 2.39
+/// (Ubuntu 24.04, the CI runners'); another C math library may need its own reference.
+const NO_TEACHER_HASHES: &[(&str, u64)] =
+    &[("x86_64-windows-msvc", 0x1851_7ce4_1137_dca4), ("x86_64-linux-gnu", 0x13d4_6148_e25d_2926)];
 
-/// Whether this machine takes the CPU kernels' AVX2 + FMA path, the one [`NO_TEACHER_HASH`] was pinned on.
-fn pinned_kernels() -> bool {
+/// This build's `arch-os-env`, the key of [`NO_TEACHER_HASHES`].
+fn target() -> String {
+    let env = if cfg!(target_env = "msvc") {
+        "msvc"
+    } else if cfg!(target_env = "gnu") {
+        "gnu"
+    } else if cfg!(target_env = "musl") {
+        "musl"
+    } else {
+        "other"
+    };
+    format!("{}-{}-{env}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// Whether this machine takes the CPU kernels' AVX2 + FMA path, the one every reference was derived on.
+fn avx2_fma() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
@@ -123,18 +145,30 @@ fn train(cfg: TrainConfig) -> (u64, Vec<String>) {
     (weights_hash(&t), logs(&log))
 }
 
-/// A run without `distill` trains exactly as before distillation existed: the weights after one epoch hash to the
-/// value origin/main gave, and its config has no `distill` key. CPU kernels pick an AVX2 + FMA path at run time, so
-/// the pin holds on x86-64 machines that have both; elsewhere the test only prints the hash.
+/// A run without `distill` trains exactly as before distillation existed: on a target of [`NO_TEACHER_HASHES`] with
+/// AVX2 + FMA the weights after one epoch hash to the value origin/main gave there. Everywhere the run is
+/// deterministic (two runs, one hash) and its config has no `distill` key; on a target without a reference the test
+/// prints the hash and the line to add, which must come from the same run on origin/main, not from this test.
 #[test]
 fn a_run_without_a_teacher_is_unchanged() {
-    let mut t = Trainer::new(micro(1), data(), TrainOptions::default()).unwrap();
-    t.run().unwrap();
-    let h = weights_hash(&t);
-    if pinned_kernels() {
-        assert_eq!(h, NO_TEACHER_HASH, "{h:#018x}: a run without a teacher no longer trains as before");
-    } else {
-        eprintln!("note: weights hash {h:#018x} not compared (no AVX2 + FMA)");
+    let run = || {
+        let mut t = Trainer::new(micro(1), data(), TrainOptions::default()).unwrap();
+        t.run().unwrap();
+        (weights_hash(&t), t)
+    };
+    let ((h, t), (again, _)) = (run(), run());
+    assert_eq!(h, again, "a run without a teacher is not deterministic");
+    let target = target();
+    match NO_TEACHER_HASHES.iter().find(|(k, _)| *k == target).filter(|_| avx2_fma()) {
+        Some(&(_, want)) => assert_eq!(
+            h, want,
+            "{h:#018x} on {target}: a run without a teacher no longer trains as origin/main did ({want:#018x})"
+        ),
+        None => eprintln!(
+            "note: weights hash {h:#018x} not compared: no reference for {target} (AVX2 + FMA: {}); derive it on \
+             origin/main and add (\"{target}\", {h:#018x}) to NO_TEACHER_HASHES only if origin/main gives the same",
+            avx2_fma()
+        ),
     }
     let cfg = serde_json::to_value(t.config()).unwrap();
     assert!(cfg.get("distill").is_none(), "{cfg}");

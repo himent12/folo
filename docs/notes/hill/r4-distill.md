@@ -83,7 +83,9 @@ teacher), `blend` (0.25 + 0.25) against `ctl` (0.5, no teacher).
 all 6,260 step losses and the 20 epoch lines (train loss, internal validation) identical to the last printed digit,
 the same `best.folo` AP 0.12551666, `config.json` different only in the run name
 (`D:/folo-data/runs-hill4/proxy/logs/cmp-ctl-off-s0.log`, script `D:/folo-build/hill4/distill-cmp.py`). With the
-teacher off the branch trains bit-identically to origin/main.
+teacher off the branch trains bit-identically to origin/main (this proxy ran on Windows; `tests/distill.rs` checks a
+CPU micro run against origin/main's weights hash per target, x86-64 Windows and Linux, which differ because UCRT and
+glibc round `atan`, `ln_1p` and `powf` differently).
 
 The proxy arms all ran one binary, `folo-kd.exe` at `dc727599` (before the mirrored view was removed in
 `751d6d84`). That the removal changes nothing for one view was checked on CPU, not on the proxy: both binaries
