@@ -95,7 +95,7 @@ Every run of the lane and lane `base`'s controls, P1, proxy-val COCO AP of `best
 | kc-s0 | `distill.dfl_gain=0` | 0.1493 | 0.238 | 0.158 | 0.069 | 0.230 | 0.322 |
 | kdl-s0 | `distill.cls_gain=0` | 0.1454 | 0.232 | 0.153 | 0.072 | 0.220 | 0.310 |
 | flip-s0 | `distill.consensus=flip` (removed since) | 0.1533 | 0.248 | 0.158 | 0.070 | 0.236 | 0.338 |
-| t4-s0 | `distill.temperature=4` | PENDING | | | | | |
+| t4-s0 | `distill.temperature=4` | 0.1565 | 0.248 | 0.164 | 0.071 | 0.245 | 0.341 |
 | blend-s0 | `loss.cls_gain=0.25`, `distill.cls_gain=0.25` | PENDING | | | | | |
 
 (the `ctl` and `cls1` rows give AP per seed and the 3-seed means of the other columns.)
@@ -164,4 +164,35 @@ epoch at full scale is projected at 540-730 s alone (2-2.7x): (A) 16 epochs in a
 about 10-13 h, each with the GPU to itself. Both read COCO val2017 once at the end (`folo val --coco` of
 `best.folo`, against the control's same read).
 
-RESULTS-CONTINUE (successor: t4 / blend rows, the choice, the 3-seed gate, cost section)
+## Cost
+
+From each run's own log (`D:/folo-build/hill4/distill-cost.py`, log `proxy/logs/cost-distill.log`): mean epoch wall
+time over the 20 epochs and the median img/s at the end of an epoch. Load: every run below shared the GPU with the
+full-COCO control (lane `base`, folo-n at 640 px, batch 16); the controls of lane `base` ran under a different
+share of it, so only the runs of this lane are compared with each other.
+
+| run | teacher | epoch s (min-max) | img/s at epoch end |
+|---|---|---:|---:|
+| off-s0 | none | 14.1 (10.3-25.5) | 1,898 |
+| kd-s0 | folo-s, f16, one view | 38.5 (36.1-42.1) | 528 |
+| kc-s0 | one view, DFL term off | 38.0 (29.0-41.5) | 535 |
+| kdl-s0 | one view, class term off | 35.7 (34.2-38.9) | 587 |
+| flip-s0 | two views (removed) | 43.8 (43.0-45.3) | 469 |
+
+The teacher makes a proxy epoch about 2.7 times as long under this load. The mirrored second view (one more
+teacher forward, mapping and averaging) added only 5.3 s, so the teacher's forward itself is a small part of the
+24 s; the rest sits in building the targets and the two loss terms with their backward over `[B, 144, A]` f32
+tensors (not profiled). Turning one term off saves little (kc, kdl). GPU memory: the whole board (WDDM reports no
+per-process numbers) read 13.5-13.7 GiB during `kc-s0` plus the COCO control; the teacher's own share is not
+measured. No unloaded A/B was taken (the COCO control occupied the GPU for this lane's whole time).
+
+From about 17:30 a game ran on the same GPU as well (`nvidia-smi`): `t4-s0` took 33-903 s per epoch, so its wall
+time is not a cost number, and runs after it are slower several-fold; accuracy does not depend on load.
+
+**T = 4.** `t4-s0` gave 0.1565 against 0.1536 for `kd-s0` (T = 1): +0.0029, above the 0.002 seed noise, all of it
+in AP75 (0.164 against 0.160; AP50 equal, AP_L 0.341 against 0.349). The temperature acts on the DFL term only (the
+class term has none); at T = 4 the softened teacher distributions spread over more bins than the two-bin floor and
+the T² factor makes the term about 2.6 times larger (epoch 20: dfl 0.811 against 0.315). Internal mAP50-95 e10 / e20
+0.1115 / 0.1559 against 0.1041 / 0.1529. On seed 0 `t4` is the candidate configuration; its seeds 1 and 2 run next.
+
+RESULTS-CONTINUE (successor: blend row, the choice, the 3-seed gate of t4 against cls1)
