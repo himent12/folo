@@ -12,11 +12,24 @@ const PLAIN: Record<string, string> = { '⁻': '−', '⁰': '0', '¹': '1', '²
  * `stoppedEarly`) never gets there, or not to its end: "Stopped early, before mosaic off" / "Mosaic off from epoch 91".
  * `cap` is the caption under the hatch, `full` its tooltip and the rail's accessible description.
  */
-export function mosaicOffText(n: number, epochs: number, epoch: number, live: boolean, early = false): { cap: string; full: string } {
+export function mosaicOffText(
+  n: number,
+  epochs: number,
+  epoch: number,
+  live: boolean,
+  early = false,
+  ended: 'stopped' | 'failed' | null = null,
+): { cap: string; full: string } {
   const from = epochs - n;
   const last = `${n} ${n === 1 ? 'epoch' : 'epochs'}`;
   if (early && epoch <= from) return { cap: 'Stopped early, before mosaic off', full: `Stopped early at epoch ${epoch}: mosaic was to be off after epoch ${from}` };
   if (early) return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the early stop at epoch ${epoch}` };
+  // Stopped or failed short of its plan (`ended`): the epochs it finished, never the planned count it did not train.
+  if (ended && !live && epoch < epochs) {
+    const how = ended === 'failed' ? 'Failed' : 'Stopped';
+    if (epoch <= from) return { cap: `${how} before mosaic off`, full: `${how} after ${epoch} finished ${epoch === 1 ? 'epoch' : 'epochs'}: mosaic was to be off after epoch ${from}` };
+    return { cap: `Mosaic off from epoch ${from + 1}`, full: `Mosaic off from epoch ${from + 1} until the run ${ended} after epoch ${epoch}` };
+  }
   if (epoch < from) return { cap: `Mosaic off after epoch ${from}`, full: `Mosaic off after epoch ${from}: the last ${last} train without mosaic` };
   if (live) {
     const final = n === 1 ? 'final epoch' : `final ${n} epochs`;

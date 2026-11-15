@@ -30,12 +30,11 @@ import AddRun from './compare/AddRun';
 import RunChips from './compare/RunChips';
 import ManageSheet from './compare/ManageSheet';
 import CompareTable from './compare/CompareTable';
+import { pollTogether } from '$lib/api/share';
+import { epochsDone } from './run/readings';
 
-/** How often the runs are read again while a compared run is queued or training. */
+/** How often the compared runs are read again (and a metrics read that failed is tried again). */
 export const COMPARE_POLL_MS = 3000;
-
-import { pollTogether } from "$lib/api/share";
-import { ACTIVE } from "./run/runModel";
 
 /**
  * The weights a run started from, by name: a model id resolves through the models list, a path shows its file name,
@@ -90,41 +89,61 @@ export default function RunCompare() {
   const datasets = new Resource((s) => hub.api.datasets(s));
   // Names for runs fine-tuned from a model ("Start from").
   const models = new Resource((s) => hub.api.models(s));
+  const chosen = computed(() => ids.get().map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
+  /** Where the compared runs are: each one's status and epoch ("run_a:running:3,run_b:completed:30"). */
+  const moved = computed(() => chosen.get().map((r) => `${r.id}:${r.status}:${r.epoch}`).join(','));
+  /** What `moved` was when each metrics answer was asked for: null when asked before the runs list came. */
+  const readAt = new WeakMap<object, string | null>();
   const metrics = new Resource(async (s) => {
     const list = ids.get();
+    const at = untrack(() => (runs.data ? moved.get() : null));
     // A run deleted since the link was made has no metrics (and no chip): it leaves the others' alone.
     const gone = (e: unknown) => {
       if (e instanceof ApiError && e.code === 'run_not_found') return null;
       throw e;
     };
     const out = await Promise.all(list.map((id) => hub.api.runMetrics(id, s).then((m) => [id, m] as const, gone)));
-    return new Map<string, RunMetrics>(out.filter((x) => x !== null));
+    const read = new Map<string, RunMetrics>(out.filter((x) => x !== null));
+    readAt.set(read, at);
+    return read;
   });
 
   const phoneQuery = new MediaQuery(media.phone, false);
   const narrow = () => phoneQuery.current;
   const cursor = signal<number | null>(null);
 
-  const chosen = computed(() => ids.get().map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
-  // A compared run still queued or training changes under the page: while one is, the runs are read again every
-  // COMPARE_POLL_MS, and the metrics whenever a compared run's status or epoch moves, so its line grows and its end
-  // mark says how it ended (stress s3-live-5: a live run stayed "— · live", no curve, long after it had completed).
-  const following = computed(() => chosen.get().some((r) => ACTIVE.includes(r.status)));
-  effect(() => {
-    if (!following.get()) return;
-    return pollTogether(COMPARE_POLL_MS, () => {
+  // A compared run changes under the page: it trains, ends, is resumed or deleted in another tab. The runs are read
+  // again every COMPARE_POLL_MS, and the metrics whenever a compared run's status or epoch has moved since the metrics
+  // shown were asked for, so a line grows and its end mark says how it ended (stress s3-live-5: a live run stayed
+  // "— · live", no curve, long after it had completed). A move seen while a read is out is acted on once it settles,
+  // never lost; metrics read before the runs list came are read again only when they are behind it. A refresh that
+  // fails keeps the curves, says so over the chart, and is tried again every COMPARE_POLL_MS.
+  effect(() =>
+    pollTogether(COMPARE_POLL_MS, () => {
       if (document.visibilityState === 'visible' && !untrack(() => runs.loading || runs.refreshing)) void runs.refresh();
-    });
-  });
-  const moved = computed(() => chosen.get().map((r) => `${r.id}:${r.status}:${r.epoch}`).join(','));
-  let seen: string | undefined;
+    }),
+  );
+  const strip = (key: string) => key.replace(/:[^,]*/g, '');
+  /** Every compared run's metrics hold the epochs its list entry says it finished. */
+  const caughtUp = (read: Map<string, RunMetrics>) =>
+    chosen.get().every((r) => (read.get(r.id)?.epochs.at(-1)?.epoch ?? 0) >= epochsDone(r.status, r.epoch));
+  // A failed refresh is tried again COMPARE_POLL_MS after it failed (its own effect: the runs polled meanwhile never
+  // put it off).
   effect(() => {
+    if (metrics.stale === undefined || metrics.loading || metrics.refreshing) return;
+    const t = setTimeout(() => void metrics.refresh(), COMPARE_POLL_MS);
+    return () => clearTimeout(t);
+  });
+  effect(() => {
+    const read = metrics.data;
+    if (!read || !runs.data || metrics.loading || metrics.refreshing || metrics.stale !== undefined) return;
+    const at = readAt.get(read);
     const now = moved.get();
-    const was = seen;
-    seen = now;
-    // Not on the first list, nor when the set of runs changed (the metrics follow `ids` by themselves).
-    if (was === undefined || !untrack(() => metrics.data) || was.replace(/:[^,]*/g, '') !== now.replace(/:[^,]*/g, '')) return;
-    if (was !== now) untrack(() => void metrics.refresh());
+    if (at === now) return;
+    // The set of runs changed: the metrics follow `ids` by themselves.
+    if (at !== null && at !== undefined && strip(at) !== strip(now)) return;
+    if (at === null && caughtUp(read)) return;
+    untrack(() => void metrics.refresh());
   });
   // Runs planned for very different lengths (30 vs 150 epochs), or one run that trained over twice as long as every
   // other, would crush the short ones into the start of an epoch axis: then the axis defaults to "By progress" (each run
@@ -311,6 +330,14 @@ export default function RunCompare() {
 
   const plot = () => (
     <>
+      {metrics.stale !== undefined && metrics.data ? (
+        <p class="caveat stale-note" role="status">
+          Could not refresh these runs' metrics: the curves may be behind. Trying again…{' '}
+          <Button size="sm" variant="ghost" onclick={() => void metrics.refresh()}>
+            Retry
+          </Button>
+        </p>
+      ) : null}
       {metrics.error ? (
         <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} title="Could not load these runs' metrics" />
       ) : !metrics.data || !runs.data ? (
@@ -503,6 +530,13 @@ css`
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
+  }
+  /* A metrics refresh failed: the curves stay, this line says they may be behind, its Retry beside it. */
+  .stale-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
   }
   @media (max-width: 767px) {
     /* Compact groups 8 px apart (controls, legend, caveat, plot), so the plot starts within ~200 px of the controls. */

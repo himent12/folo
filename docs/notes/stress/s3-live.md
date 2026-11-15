@@ -35,7 +35,9 @@ Cause: `run/runModel.ts` `closeText` passed `Run.epoch` to `mosaicOffText`, whic
 is the epoch in progress while queued / running / stopping and the one a failed run failed in (docs/API.md `Run.epoch`).
 Fix: `epochsDone(status, epoch)` in `run/readings.ts`. Tests: `runParts.test.tsx` (the readings) and
 `run/RunCharts.test.tsx` "says mosaic is off only from the epoch the trainer closes it" (through `RunModel`; fails
-without the fix). FOLO Desktop has no such caption.
+without the fix). Review round 1: a stopped or failed run short of its plan says what it finished, "Stopped before
+mosaic off" (2 of 3 epochs done; it said "Last 1 epoch: mosaic off") or "Mosaic off from epoch 3" (part of the phase),
+never the planned count (`mosaicOffText`'s `ended`). FOLO Desktop has no such caption.
 
 ### s3-live-4: a deleted run reconnects forever
 
@@ -51,9 +53,16 @@ deleted elsewhere" (fails without the fix).
 
 Repro: start a 2-epoch run, open `#/runs/compare?ids=<it>,<a finished run>` while it trains, let it complete, wait
 20 s: still `— · live`, no curve, and the axis note "one run trained far longer" stays. Cause: `RunCompare.tsx` read
-the runs and their metrics once. Fix: while a compared run is queued, running or stopping the runs are read again every
-3 s, and a run's metrics again whenever its status or epoch moves. Test: `RunCompare.test.tsx` "a run that trains
-while compared" (fails without the fix).
+the runs and their metrics once. Fix: the runs are read again every 3 s while the page is open, and the metrics again
+whenever a compared run's status or epoch has moved since the metrics shown were asked for. Review round 1 hardened it:
+a move seen while a metrics read is still out is acted on once that read settles (it was dropped, leaving the curve
+partial for good); metrics read before the runs list came are read again only when they hold fewer epochs than the
+list says finished; a refresh that fails keeps the curves, says "Could not refresh these runs' metrics: the curves may
+be behind" with Retry, and is tried again every 3 s by itself; a stopped run resumed in another tab is followed too
+(the poll no longer waits for a run that is already active). Tests: `RunCompare.test.tsx` "a run that trains while
+compared" (four cases, fake timers; each fails without its part of the fix). SIBLING (same front end, another surface):
+`web/src/lib/api/liveLabel.ts` keeps a labeling job deleted elsewhere "Reconnecting"; left to lane s5-label (see
+Deferred).
 
 ### Deferred
 
@@ -61,8 +70,15 @@ while compared" (fails without the fix).
   so the `step` that the 10 s `alive_at` write of `run.json` carried survives the restart. A run stopped by the user
   also keeps `step` past its epoch (12 steps per epoch, step 15), so this may be the documented meaning of `step`:
   a server-semantics decision, not a page fix.
-- **s3-live-3.** Deleting a dataset leaves its files and lets queued runs on it train; the run page cannot tell
-  "dataset gone" from a slow image. Needs the run to know its dataset is unregistered (server) before the page can say it.
+- **s3-live-3.** (Cause corrected in review round 1.) The page can already tell: `Run.tsx:88` reads the datasets and
+  `datasetGone` (`Run.tsx:103`) turns the tiles into "dataset removed" without Retry (`run/Samples.tsx:175`). But that
+  list is read once, when the page opens; the repro (`failstart.mjs`) opens the page before the dataset is deleted, so
+  the page keeps the stale list and shows Retry tiles. A client-side fix is feasible with no new server field (read the
+  datasets again when the run's status changes, or when a sample read fails); left for time, it is polish.
+- **SIBLING of s3-live-4, labeling jobs** (review round 1). `web/src/lib/api/liveLabel.ts:202-233` reconnects a job
+  deleted in another tab forever and discards its resync failures, so `LabelJob.tsx` keeps the old job "Reconnecting".
+  The same fix as `live.ts` applies (ask `GET /api/label/jobs/{id}` on a drop, a 404 ends the stream with "not found").
+  Labeling is lane s5-label's surface; handed to it, not fixed here.
 - **s3-live-6.** By design of `run/Logs.tsx` (older lines live in `log.jsonl`, said above the first line); an honest
   Warn / Error count needs a server-side count per level.
 

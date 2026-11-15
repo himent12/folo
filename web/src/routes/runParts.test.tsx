@@ -5,19 +5,27 @@ import { epochsDone, lrParts, mosaicOffText, stepEpoch } from './run/readings';
 describe('Run metrics: mosaicOffText from Run.epoch (stress s3-live-1)', () => {
   // A 3-epoch run with close_mosaic capped to 1: the trainer closes mosaic after epoch 2, so epoch 3 alone trains
   // without it. `Run.epoch` is the epoch in progress while live and the one it failed in for a failed run.
-  const say = (status: string, epoch: number, live: boolean) => mosaicOffText(1, 3, epochsDone(status, epoch), live).cap;
+  const ended = (status: string) => (status === 'stopped' || status === 'failed' ? status : null);
+  const say = (status: string, epoch: number, live: boolean, n = 1, epochs = 3) => mosaicOffText(n, epochs, epochsDone(status, epoch), live, false, ended(status)).cap;
   it('does not call mosaic off while epoch 2 of 3 still trains with it', () => {
     expect(say('running', 2, true)).toBe('Mosaic off after epoch 2');
     expect(say('stopping', 2, true)).toBe('Mosaic off after epoch 2');
     expect(say('running', 3, true)).toBe('Mosaic off · final epoch');
   });
-  it('does not claim a mosaic-free epoch a run that failed in epoch 2 never trained', () => {
-    expect(say('failed', 2, false)).toBe('Mosaic off after epoch 2');
-    expect(say('failed', 3, false)).toBe('Last 1 epoch: mosaic off');
+  it('does not claim a mosaic-free epoch a run that failed before finishing one never trained', () => {
+    expect(say('failed', 2, false)).toBe('Failed before mosaic off');
+    // Failed in epoch 3: the mosaic-free epoch never finished.
+    expect(say('failed', 3, false)).toBe('Failed before mosaic off');
   });
-  it('reads the finished epochs of completed and stopped runs as they are', () => {
+  it('reads the finished epochs of completed and stopped runs as they are (review round 1)', () => {
     expect(say('completed', 3, false)).toBe('Last 1 epoch: mosaic off');
-    expect(say('stopped', 1, false)).toBe('Mosaic off after epoch 2');
+    expect(say('stopped', 1, false)).toBe('Stopped before mosaic off');
+    // Stopped with 2 of 3 finished: neither trained without mosaic (it said "Last 1 epoch: mosaic off").
+    expect(say('stopped', 2, false)).toBe('Stopped before mosaic off');
+    expect(say('stopped', 3, false)).toBe('Last 1 epoch: mosaic off');
+    // Part of the phase: from where it began, never the planned count.
+    expect(say('stopped', 3, false, 2, 4)).toBe('Mosaic off from epoch 3');
+    expect(mosaicOffText(2, 4, 3, false, false, 'stopped').full).toBe('Mosaic off from epoch 3 until the run stopped after epoch 3');
     expect(epochsDone('queued', 0)).toBe(0);
   });
 });

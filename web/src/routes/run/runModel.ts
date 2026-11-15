@@ -164,7 +164,11 @@ export class RunModel {
   readonly closeN = computed(() => effectiveCloseMosaic(this.run()));
   readonly closeFrom = computed(() => 1 - this.closeN.get() / this.run().epochs);
   readonly mosaicOff = computed(() => this.closeFrom.get() > 0 && this.closeFrom.get() < 1);
-  readonly closeText = computed(() => mosaicOffText(this.closeN.get(), this.run().epochs, epochsDone(this.run().status, this.run().epoch), this.live.get(), stoppedEarly(this.run())), {
+  readonly closeText = computed(() => {
+    const r = this.run();
+    const ended = r.status === 'stopped' || r.status === 'failed' ? r.status : null;
+    return mosaicOffText(this.closeN.get(), r.epochs, epochsDone(r.status, r.epoch), this.live.get(), stoppedEarly(r), ended);
+  }, {
     equals: (a, b) => a.cap === b.cap && a.full === b.full,
   });
   readonly xMark = computed((): XMark | undefined => (this.mosaicOff.get() ? { x: this.run().epochs - this.closeN.get(), label: 'mosaic off' } : undefined), {
