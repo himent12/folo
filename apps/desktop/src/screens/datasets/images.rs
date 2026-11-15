@@ -5,12 +5,12 @@ use std::rc::Rc;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, canvas, div, px, uniform_list,
+    canvas, div, px, uniform_list, AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::api::{Dataset, ImageInfo, Split, SplitsExt};
-use crate::app::{FoloApp, act};
+use crate::app::{act, FoloApp};
 use crate::theme::{radius, size as tsize, theme, ty};
 use crate::ui::*;
 
@@ -313,7 +313,7 @@ impl FoloApp {
                             // The strip keeps two; the tile's tip lists every class it holds.
                             let all = format!(
                                 "{} · {}",
-                                meta.id,
+                                file_name(&meta.file),
                                 if named.is_empty() { "no boxes".into() } else { named.join(" · ") }
                             );
                             (if parts.is_empty() { "no boxes".to_string() } else { parts.join(" · ") }, all)
@@ -383,10 +383,15 @@ impl FoloApp {
                                             ))
                                             .when(!focused, |d| d.invisible())
                                             .group_hover(SharedString::from(key.clone()), |s| s.visible())
+                                            .gap(px(8.))
+                                            // The file's name, as Studio's grid shows it (a real
+                                            // server's ids are list positions, "6", not names).
                                             .child(
                                                 text(ty::SM, folo_ui::white())
                                                     .font_family(crate::theme::MONO)
-                                                    .child(meta.id.clone()),
+                                                    .min_w_0()
+                                                    .ellipsis()
+                                                    .child(file_name(&meta.file).to_string()),
                                             )
                                             .child(
                                                 text(ty::SM, folo_ui::hsla(0., 0., 1., 0.75))
@@ -478,5 +483,22 @@ impl FoloApp {
     pub(crate) fn grid_cols(&self) -> usize {
         let width = f32::from(self.grid_width.get());
         (((width + GAP) / (self.ds_tile + GAP)).floor() as usize).max(1)
+    }
+}
+
+/// An image's file name without its folders ("images/train/000001.jpg" -> "000001.jpg"), as Studio's
+/// grid names a tile; either slash, since a server on Windows may answer with backslashes.
+fn file_name(file: &str) -> &str {
+    file.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(file)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_tile_is_named_by_its_file_not_its_id() {
+        assert_eq!(super::file_name("images/train/000000014007.jpg"), "000000014007.jpg");
+        assert_eq!(super::file_name(r"images\val\a b.png"), "a b.png");
+        assert_eq!(super::file_name("one.jpg"), "one.jpg");
+        assert_eq!(super::file_name(""), "");
     }
 }

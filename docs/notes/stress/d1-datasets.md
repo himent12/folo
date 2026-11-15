@@ -21,6 +21,8 @@ real `folo serve` (CPU, own data dir, port 18060) built from the shared prebuilt
 | d1-datasets-2 | polish | "1 images" on the dataset card, its tooltip, the list subtitle and the health hint | fixed |
 | d1-datasets-3 | annoying | Health "32 broken label files" for 8 affected files: the server fills `broken_labels` from two producers with different units | deferred |
 | d1-datasets-4 | annoying | Thumbnails (and inspector images) that failed while the server was away stay blank for good after it is back | fixed |
+| d1-datasets-5 | annoying | Remove with "Also delete the generated images" refused because an unrelated dataset found no images; the toast dropped the way forward | Desktop fixed, server deferred |
+| d1-datasets-6 | polish | Grid tiles captioned with the image id ("6" on a real server), not the file name Studio shows | fixed |
 
 ### d1-datasets-1: the decoded-image cache had no byte budget
 
@@ -41,6 +43,19 @@ Fix: `ImageCache::forget_failed` from `FoloApp::reconnected`, and an image that 
 server down itself, so an outage only the images saw is noticed and recovered too. Tests: `store/images.rs`
 `failures_are_forgotten_on_request_and_ready_images_kept`, `app/connection_tests.rs`
 `images_that_failed_while_the_server_was_away_load_once_it_answers`.
+
+### d1-datasets-5: a refused file deletion left no way forward
+
+Repro: any registered dataset whose images are gone on disk (`broken`), then Generate synthetic `dblgen`, Remove from
+FOLO with "Also delete the 3,000 generated images" on. The server answers `409 dataset_in_use` "the files of broken
+could not be checked (... no train or val images found), so they may be in that folder", and the toast showed only
+that; the server's hint ("unregister this dataset without files=true") was dropped and speaks the API anyway.
+Fix (Desktop): `removal_refused` (`app/actions.rs`) adds "To unregister it and keep its files, remove it again with
+“Also delete” off."; other hints are shown unless they name API flags or routes. Test: `app/actions.rs`
+`a_refused_file_deletion_says_how_to_unregister_alone`.
+Deferred (server): `crates/folo-server/src/real/deletion.rs:61` fails closed when `reads()` (`index.rs:299`,
+`folo_data::open_with`) errors, and a dataset that finds no images errors, so one emptied dataset anywhere blocks file
+deletion of every generated dataset. Whether "no images found" may count as "reads nothing" is a server decision.
 
 ### d1-datasets-3 (deferred)
 
