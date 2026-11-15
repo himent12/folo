@@ -634,7 +634,9 @@ impl FoloApp {
             chart_hover: None,
             run_x_fit: None,
             sample_view: SampleView::Both,
-            sample_conf: 0.3,
+            // Every prediction the server keeps for a sample (docs/API.md: score >= 0.25), the slider's
+            // floor, as Studio starts (it started at 0.3 here, so Desktop drew fewer boxes than Studio).
+            sample_conf: crate::screens::runs::SAMPLE_CONF.0,
             log_filter: LogFilter::All,
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),

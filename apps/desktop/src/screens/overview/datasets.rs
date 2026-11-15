@@ -117,14 +117,25 @@ impl FoloApp {
             .and_then(|l| l.ready())
             .and_then(|x| x.stats.as_ref())
             .map(|s| s.class_counts.clone());
+        // A dataset whose own read fails (folder gone, images deleted) says so on its card, as in
+        // Studio, instead of looking like a healthy dataset whose previews are still loading.
+        let problem = self
+            .store
+            .dataset
+            .get(&d.id)
+            .and_then(|l| l.error())
+            .and_then(|e| dataset_problem(e).map(|label| (label, e.message.clone())));
         // The card in full: its name, size and every class with its boxes (the strip's breakdown), on
-        // hover and on keyboard focus.
-        let full = format!(
+        // hover and on keyboard focus; what is wrong with it, when something is.
+        let mut full = format!(
             "{} · {} · {}",
             d.name,
             counted(d.splits.total(), "image", "images"),
             counts.as_deref().map_or_else(|| d.classes.join(", "), |c| balance_text(&d.classes, c))
         );
+        if let Some((label, why)) = &problem {
+            full = format!("{full} · {label}: {why}");
+        }
         let focused = self.ring(&self.fh(key.clone(), cx), window);
         let card = div()
             .id(SharedString::from(key.clone()))
@@ -177,7 +188,10 @@ impl FoloApp {
                             }
                         ),
                     ))
-                    .child(badge(&t, d.format.label(), Tone::Neutral)),
+                    .child(match problem {
+                        Some((label, _)) => badge(&t, label, Tone::Warning),
+                        None => badge(&t, d.format.label(), Tone::Neutral),
+                    }),
             )
             .child(class_strip(&t, counts.as_deref()));
         self.bind(
@@ -242,6 +256,19 @@ impl FoloApp {
     }
 }
 
+/// What a failed read of a listed dataset means for its card, in Studio's words
+/// (web/src/routes/datasets/problem.ts): its folder is gone, or the folder no longer reads as a
+/// dataset. Nothing for a failure that is not about the dataset (the server is unreachable, the
+/// token is wrong, the dataset was just deleted).
+pub(crate) fn dataset_problem(e: &crate::api::ApiError) -> Option<&'static str> {
+    match e.code.as_str() {
+        "path_not_found" => Some("Folder missing"),
+        "server_unreachable" | "unauthorized" | "http_error" | "bad_response" | "not_supported"
+        | "dataset_not_found" | "internal" => None,
+        _ => Some("Can't read"),
+    }
+}
+
 /// The class-balance strip along a dataset card's bottom edge: one segment per class with boxes,
 /// as wide as its share, in the class's colour, 1 px of the card between segments (Studio's
 /// `ClassStrip`). An empty track until the stats are in, and for a dataset without boxes.
@@ -288,7 +315,20 @@ pub(crate) fn balance_text(classes: &[String], counts: &[u64]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::balance_text;
+    use super::{balance_text, dataset_problem};
+    use crate::api::ApiError;
+
+    /// x1-parity-7: a dataset whose images were deleted (the server answers 400 invalid_dataset)
+    /// reads "Can't read" on its card, as in Studio; a lost connection is not the dataset's fault.
+    #[test]
+    fn an_unreadable_dataset_is_named_on_its_card() {
+        let e = |code: &str| ApiError::new(code, "x");
+        assert_eq!(dataset_problem(&e("invalid_dataset")), Some("Can't read"));
+        assert_eq!(dataset_problem(&e("unknown_format")), Some("Can't read"));
+        assert_eq!(dataset_problem(&e("path_not_found")), Some("Folder missing"));
+        assert_eq!(dataset_problem(&e("server_unreachable")), None);
+        assert_eq!(dataset_problem(&e("unauthorized")), None);
+    }
 
     #[test]
     fn the_balance_reads_largest_first_and_sums_past_ten() {

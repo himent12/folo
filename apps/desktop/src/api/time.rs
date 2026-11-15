@@ -118,21 +118,35 @@ fn local_offset_at(_t: i64) -> i64 {
     0
 }
 
-/// "just now", "4 min ago", "3 h ago", "2 d ago", or a date for older times.
+/// "just now", "4 min ago", "3 h ago", "yesterday", "5 d ago", or a local date for older times.
+/// The same numbers as Studio's `ago` (web/src/lib/format.ts): minutes, hours and days are rounded
+/// (5.9 days is "6 d ago" in both apps), a unit that rounds up to the next one reads as the next
+/// one (59 min 40 s is "1 h ago", not "60 min ago"), and days run up to two weeks.
 pub fn ago(then: i64, now: i64) -> String {
     let d = (now - then).max(0);
-    match d {
-        0..45 => "just now".into(),
-        45..3600 => format!("{} min ago", (d + 30) / 60),
-        3600..86_400 => format!("{} h ago", d / 3600),
-        86_400..604_800 => format!("{} d ago", d / 86_400),
-        _ => {
-            let (y, m, dd) = civil_from_days(then.div_euclid(86_400));
-            const MONTHS: [&str; 12] =
-                ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            format!("{} {dd}, {y}", MONTHS[(m - 1) as usize])
-        }
+    if d < 45 {
+        return "just now".into();
     }
+    let min = ((d + 30) / 60).max(1);
+    if min < 60 {
+        return format!("{min} min ago");
+    }
+    let h = (d + 1800) / 3600;
+    if h < 24 {
+        return format!("{h} h ago");
+    }
+    if d < 2 * 86_400 {
+        return "yesterday".into();
+    }
+    let days = (d + 43_200) / 86_400;
+    if days < 14 {
+        return format!("{days} d ago");
+    }
+    // The calendar date where the user is, as Studio shows it (a UTC date is a day off in the evening).
+    let (y, m, dd) = civil_from_days((then + local_offset_at(then)).div_euclid(86_400));
+    const MONTHS: [&str; 12] =
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    format!("{} {dd}, {y}", MONTHS[(m - 1) as usize])
 }
 
 /// [`ago`] for a moment shown beside a running clock (a live run's "started …" next to its elapsed
@@ -185,6 +199,36 @@ mod tests {
         assert_eq!(ago(0, 7200), "2 h ago");
         assert_eq!(duration(1840.0), "30m 40s");
         assert_eq!(duration(12_000.0), "3h 20m");
+    }
+
+    /// x1-parity-2: the same moment reads with the same number in Desktop and Studio.
+    #[test]
+    fn ages_round_like_studio() {
+        let h = 3600;
+        let day = 86_400;
+        let now = parse("2026-11-15T12:00:00Z").unwrap();
+        // 5.9 days: Studio "6d ago", Desktop said "5 d ago".
+        assert_eq!(ago(now - (5 * day + 22 * h), now), "6 d ago");
+        // 1 h 40 min: Studio "2h ago", Desktop said "1 h ago".
+        assert_eq!(ago(now - (h + 40 * 60), now), "2 h ago");
+        // A unit that rounds up reads as the next one.
+        assert_eq!(ago(now - (59 * 60 + 40), now), "1 h ago");
+        assert_eq!(ago(now - (23 * h + 45 * 60), now), "yesterday");
+        assert_eq!(ago(now - 30 * h, now), "yesterday");
+        assert_eq!(ago(now - 2 * day, now), "2 d ago");
+        // Days up to two weeks, as Studio; then a date.
+        assert_eq!(ago(now - 10 * day, now), "10 d ago");
+        let old = ago(now - (13 * day + 13 * h), now);
+        assert!(old.starts_with("Nov ") && old.ends_with(", 2026"), "{old}");
+    }
+
+    #[test]
+    fn an_old_date_is_the_local_calendar_date() {
+        // 2026-11-01T23:30Z is "Nov 1" in UTC and Nov 2 east of UTC: the reader's day is shown.
+        let then = parse("2026-11-01T23:30:00Z").unwrap();
+        let local = then + local_offset_at(then);
+        let (_, _, d) = civil_from_days(local.div_euclid(86_400));
+        assert_eq!(ago(then, then + 30 * 86_400), format!("Nov {d}, 2026"));
     }
 
     #[test]
