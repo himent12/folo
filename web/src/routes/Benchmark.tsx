@@ -148,6 +148,7 @@ export default function Benchmark() {
     if (!b) return false;
     const why = planWhy.peek();
     if (why) {
+      // page-level: both Save plan buttons are held while this fails; the leave dialog closes on a refused save (answer).
       toast.error(new Error(why), 'Could not save the plan');
       return false;
     }
