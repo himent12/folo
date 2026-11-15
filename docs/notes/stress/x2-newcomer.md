@@ -38,7 +38,10 @@ Repro: empty server, `folo-desktop --server http://127.0.0.1:<port>`, press Ctrl
 Nothing happens: no form, no toast, no navigation. Root cause: `apps/desktop/src/app/new_run.rs` `open_new_run`
 returned early when the dataset list was empty, the same as while it was still loading. Fix: with a loaded empty list
 it goes to Datasets and toasts "Add a dataset first" (Studio's `#/runs/new` says the same); while loading it still
-waits. Test: `new_run_without_any_dataset_leads_to_datasets` in `apps/desktop/src/app/tests.rs`.
+waits. Test: `new_run_without_any_dataset_leads_to_datasets` in `apps/desktop/src/app/tests.rs`. Review round 1:
+`--open new-run` against an empty server waited silently, and opened the dialog out of the blue once a dataset was
+added (`apps/desktop/src/app/render.rs` consumed the request only for a nonempty list); it now answers once the list
+is in, through the same path. Test: `open_new_run_on_launch_without_any_dataset_leads_to_datasets`.
 
 ### x2-newcomer-2: Studio's empty pages ask for New run with zero datasets
 
@@ -47,6 +50,12 @@ Desktop's `first_step.rs` already offers Add dataset in that case. Fix: `web/src
 (`FirstStepAction`, `noDatasetsYet`), used by `Runs.tsx`, `Models.tsx`, `Playground.tsx`: Add dataset
 (`#/datasets?add=folder`) when the server answered with no dataset, New run otherwise (also while loading or failed).
 Test: `web/src/routes/firstStep.test.tsx` (the three no-dataset cases fail on the old code).
+
+Review round 1 made it hold in every order and over time: `FirstStepAction` is one Button whose link and words follow
+`noDatasets` (it picked its branch once, so datasets answering after the runs left it on New run); the pages read their
+dataset list again after a dataset action in the tab and when the tab is shown again (`refreshOnDatasetChange`); and
+the header's create action of Runs and Overview (past runs, no dataset left) is Add dataset too, as Desktop's headers.
+The 11 new cases in the same test file fail with those changes reverted.
 
 ### x2-newcomer-3: Enter does not submit Generate synthetic (Desktop)
 
