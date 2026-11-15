@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
-import RunCompare from './RunCompare';
+import RunCompare, { COMPARE_POLL_MS } from './RunCompare';
 
 /** Port of `mount(RunCompare, { target })`; `unmount(c)` is `c.unmount()`. */
 const mount = (_: typeof RunCompare, o: { target: HTMLElement }) => render(() => <RunCompare />, o.target);
@@ -209,6 +209,37 @@ describe('Compare runs from a link that names a deleted run', () => {
     await until(() => target.querySelector('.swap') || target.textContent?.includes("Could not load these runs' metrics"), 'the chart or its error');
     expect(target.textContent).not.toContain("Could not load these runs' metrics");
   });
+});
+
+describe('Compare: a run that trains while compared (stress s3-live-5)', () => {
+  it('follows it: its line and value arrive as it trains, and its end mark says how it ended', async () => {
+    const api = hub.api as MockApi;
+    const [done, other] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const listRuns = api.runs.bind(api);
+    const readMetrics = api.runMetrics.bind(api);
+    // The run is still in its first epoch: no epoch in its metrics, "running" in the list.
+    let training = true;
+    vi.spyOn(api, 'runs').mockImplementation(async (...a) => (await listRuns(...a)).map((r) => (training && r.id === done!.id ? { ...r, status: 'running', epoch: 1, best: null } : r)));
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      const m = await readMetrics(id, ...rest);
+      return training && id === done!.id ? { steps: [], epochs: [] } : m;
+    });
+    router.route = parse(`#/runs/compare?ids=${done!.id},${other!.id}`);
+    c = mount(RunCompare, { target });
+    const chip = () => [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(done!.name))?.textContent ?? '';
+    await until(() => chip().includes('live'), 'the live chip');
+    expect(chip()).toContain('—');
+    // It completes while the page is open.
+    training = false;
+    // Within a poll (COMPARE_POLL_MS) and the metrics read it sets off.
+    await vi.waitFor(
+      () => {
+        flushSync();
+        if (chip().includes('live') || chip().includes('—')) throw new Error(`still live: ${chip()}`);
+      },
+      { timeout: COMPARE_POLL_MS + 3000, interval: 50 },
+    );
+  }, 15_000);
 });
 
 describe('Compare: a run that detected nothing', () => {

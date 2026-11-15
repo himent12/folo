@@ -31,6 +31,12 @@ import RunChips from './compare/RunChips';
 import ManageSheet from './compare/ManageSheet';
 import CompareTable from './compare/CompareTable';
 
+/** How often the runs are read again while a compared run is queued or training. */
+export const COMPARE_POLL_MS = 3000;
+
+import { pollTogether } from "$lib/api/share";
+import { ACTIVE } from "./run/runModel";
+
 /**
  * The weights a run started from, by name: a model id resolves through the models list, a path shows its file name,
  * none is null ("From scratch"). Fine-tuned vs from scratch often explains most of a gap between two runs.
@@ -100,6 +106,26 @@ export default function RunCompare() {
   const cursor = signal<number | null>(null);
 
   const chosen = computed(() => ids.get().map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
+  // A compared run still queued or training changes under the page: while one is, the runs are read again every
+  // COMPARE_POLL_MS, and the metrics whenever a compared run's status or epoch moves, so its line grows and its end
+  // mark says how it ended (stress s3-live-5: a live run stayed "— · live", no curve, long after it had completed).
+  const following = computed(() => chosen.get().some((r) => ACTIVE.includes(r.status)));
+  effect(() => {
+    if (!following.get()) return;
+    return pollTogether(COMPARE_POLL_MS, () => {
+      if (document.visibilityState === 'visible' && !untrack(() => runs.loading || runs.refreshing)) void runs.refresh();
+    });
+  });
+  const moved = computed(() => chosen.get().map((r) => `${r.id}:${r.status}:${r.epoch}`).join(','));
+  let seen: string | undefined;
+  effect(() => {
+    const now = moved.get();
+    const was = seen;
+    seen = now;
+    // Not on the first list, nor when the set of runs changed (the metrics follow `ids` by themselves).
+    if (was === undefined || !untrack(() => metrics.data) || was.replace(/:[^,]*/g, '') !== now.replace(/:[^,]*/g, '')) return;
+    if (was !== now) untrack(() => void metrics.refresh());
+  });
   // Runs planned for very different lengths (30 vs 150 epochs), or one run that trained over twice as long as every
   // other, would crush the short ones into the start of an epoch axis: then the axis defaults to "By progress" (each run
   // over its planned epochs, ../lib/charts/runAxis), and the header says why.
