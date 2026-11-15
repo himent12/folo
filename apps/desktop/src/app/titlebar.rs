@@ -78,12 +78,22 @@ impl FoloApp {
                     .capture_any_mouse_down(self.leave_kb(cx))
                     .children(crumbs.into_iter().enumerate().map(|(i, (label, route))| {
                         let last = route.is_none();
-                        let crumb = div().id(("crumb", i)).px(px(4.)).py(px(2.)).rounded(px(4.)).child(
-                            text(ty::BASE, if last { t.text_primary } else { t.text_tertiary })
-                                .when(last, |d| d.font_weight(FontWeight::MEDIUM))
-                                .whitespace_nowrap()
-                                .child(label),
-                        );
+                        // A long name (a benchmark's, a run's) ends in "…" before the search field
+                        // instead of running under it; the section's name ("Benchmarks") stays whole.
+                        let shrinks = i > 0;
+                        let crumb = div()
+                            .id(("crumb", i))
+                            .when(shrinks, |d| d.min_w_0())
+                            .px(px(4.))
+                            .py(px(2.))
+                            .rounded(px(4.))
+                            .child(
+                                text(ty::BASE, if last { t.text_primary } else { t.text_tertiary })
+                                    .when(last, |d| d.font_weight(FontWeight::MEDIUM))
+                                    .when(shrinks, |d| d.ellipsis())
+                                    .when(!shrinks, |d| d.whitespace_nowrap())
+                                    .child(label),
+                            );
                         let crumb = match route {
                             Some(r) => self
                                 .bind(
@@ -104,6 +114,8 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(6.))
+                            .when(shrinks, |d| d.min_w_0())
+                            .when(!shrinks, |d| d.flex_none())
                             .when(i > 0, |d| d.child(icon("icons/chevron-right.svg", 12., t.text_disabled)))
                             .child(crumb)
                     })),
