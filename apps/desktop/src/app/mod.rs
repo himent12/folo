@@ -553,6 +553,12 @@ pub struct FoloApp {
     /// Runs whose stream dropped mid-run, the events since not yet read back (a stream opened again
     /// reads them; a run that ended meanwhile gets its end handled once the list says so).
     stream_lost: std::collections::HashSet<String>,
+    /// Ended runs whose final history could not be read over the partial one shown: read again at
+    /// each run-list refresh until it is in.
+    history_retry: std::collections::HashSet<String>,
+    /// Bumped each time the server answers again after it was unreachable: a request sent before
+    /// that which then fails as unreachable is a late failure, not a new loss.
+    reconnects: u64,
     /// Per run: which subscription attempt is current (a resume supersedes one in flight).
     sub_attempt: HashMap<String, u64>,
     /// Bumped on every data-source switch; async results from an older source are discarded.
@@ -729,6 +735,8 @@ impl FoloApp {
             subscriptions: HashMap::new(),
             subscribing: Default::default(),
             stream_lost: Default::default(),
+            history_retry: Default::default(),
+            reconnects: 0,
             sub_attempt: HashMap::new(),
             backend_gen: 0,
             connect_seq: 0,

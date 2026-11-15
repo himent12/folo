@@ -50,12 +50,22 @@ states of every screen. Base commit `1436ad68`.
   again stays in `stream_lost` until it opens, or until the run list says the run ended, which then handles that end
   (`settle_lost_streams`, called from `install_runs`). Tests: `a_run_that_ends_while_its_lost_stream_cannot_reopen_still_ends`,
   `a_silent_end_reads_the_log_and_latest_samples_again`. SIBLING: Studio's `web/src/lib/api/sse.ts` relies on
-  `EventSource.onerror` alone and has no silence deadline (Studio lane, not fixed here).
+  `EventSource.onerror` alone and has no silence deadline (deferred to the Studio side: it needs a fetch-based SSE
+  reader with an idle deadline, and lane s3-live claims the same `web/src/lib/api/live.ts` stream code).
 - **Review round 1, reconnect.** Pages that failed with `server_unreachable` while the server was away (a dataset
   and its images, issues, a model's evaluation, a run's history, samples or log, a benchmark's list, catalog,
   agents, entries or loops) kept their error after it came back: their loaders fetch only Idle entries. `reconnected`
   (`src/app/connection.rs`) now drops those failures so the page asks again. Test:
   `a_page_that_failed_while_the_server_was_away_loads_once_it_is_back`.
+- **Review round 2, late failures and final history.** A request sent while the server was away that failed only
+  after it answered again (a timeout still running at the reconnect) installed its failure after the sweep, for
+  good; `fetch` (`src/app/data.rs`) now counts reconnects and clears such late `server_unreachable` failures too.
+  A finished benchmark entry's result (`bench.results`, no Retry on its page) is in the sweep. An ended run whose
+  final history read failed over a partial one kept the partial charts (its stream gone, nothing asked again); it
+  is now read again at each run-list refresh until it is in (`history_retry`, `settle_lost_streams`), the end
+  announced once. Tests: `a_request_that_fails_after_the_server_is_back_is_asked_again`,
+  `a_benchmark_result_that_failed_while_the_server_was_away_is_asked_again`,
+  `a_final_history_that_failed_is_read_again_at_the_next_refresh`.
 - **d6-connection-1.** `FOLO_TOKEN` set, `FOLO_SERVER` at a dead port, auto mode. Fix: `serve_command` removes
   `FOLO_TOKEN` from the started server's environment (`src/api/http/server.rs`). Test:
   `the_started_server_never_inherits_a_token`.

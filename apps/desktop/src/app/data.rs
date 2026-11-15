@@ -35,6 +35,7 @@ impl FoloApp {
         }
         let api = self.store.api.clone();
         let generation = self.backend_gen;
+        let reconnects = self.reconnects;
         cx.spawn(async move |this, cx| {
             let r = cx.background_executor().spawn(async move { call(&*api) }).await;
             this.update(cx, |this, cx| {
@@ -42,7 +43,15 @@ impl FoloApp {
                 if this.backend_gen != generation {
                     return;
                 }
+                // Sent while the server was away and failed after it answered again: the reconnect
+                // had nothing to clear yet, so the failure it installs is cleared now (the page asks
+                // again when shown; it kept "Could not reach folo serve" with the server healthy).
+                let late =
+                    this.reconnects != reconnects && matches!(&r, Err(e) if e.code == "server_unreachable");
                 apply(this, r, cx);
+                if late && !this.store.unreachable() {
+                    this.forget_unreachable_loads();
+                }
                 cx.notify();
             })
             .ok();
@@ -535,6 +544,8 @@ impl FoloApp {
                 }
                 // Dropped meanwhile (the run deleted): not brought back. A failure keeps a history
                 // shown, and ends one still loading (its page says so and can ask again).
+                // An ended run's final history that failed over a partial one shown is read again
+                // at the next run-list refresh (nothing else would: its stream is gone).
                 match (r, this.store.run_data.get(&key)) {
                     (Ok(m), Some(Load::Ready(_) | Load::Loading)) => {
                         this.store.install_run_data(&key, Ok(RunData::new(m, spe)));
@@ -543,6 +554,11 @@ impl FoloApp {
                     (Err(e), Some(Load::Loading)) => {
                         this.store.install_run_data(&key, Err(e));
                         cx.notify();
+                    }
+                    (Err(_), Some(Load::Ready(_)))
+                        if this.store.run(&key).is_some_and(|r| !r.status.is_active()) =>
+                    {
+                        this.history_retry.insert(key);
                     }
                     _ => {}
                 }
@@ -638,8 +654,14 @@ impl FoloApp {
 
     /// Runs whose stream dropped mid-run and could not be opened again. Nothing subscribes to a run
     /// that has ended, so once the run list says one did, its end is handled here (before, its page
-    /// kept the history of the moment the stream dropped for good).
+    /// kept the history of the moment the stream dropped for good). An ended run's final history
+    /// that failed to load is asked for again here too, once per list refresh, until it is in.
     pub(super) fn settle_lost_streams(&mut self, cx: &mut Context<Self>) {
+        for id in std::mem::take(&mut self.history_retry) {
+            if matches!(self.store.run_data.get(&id), Some(Load::Ready(_))) {
+                self.reload_run_history(&id, cx);
+            }
+        }
         let lost: Vec<String> = self
             .stream_lost
             .iter()

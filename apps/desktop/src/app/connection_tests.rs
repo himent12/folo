@@ -430,6 +430,95 @@ fn a_page_that_failed_while_the_server_was_away_loads_once_it_is_back() {
     });
 }
 
+/// A request sent while the server was away that fails only after it answers again (a timeout still
+/// running at the reconnect): its failure is cleared too, and the page asks again (it kept "Could not
+/// reach folo serve" with the server healthy, nothing asking again).
+#[test]
+fn a_request_that_fails_after_the_server_is_back_is_asked_again() {
+    let (mut app, window) = open();
+    let down =
+        crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:18110");
+    let ds = drive(&mut app, window, |this, _, cx| {
+        let ds = this.store.datasets.ready().unwrap()[0].id.clone();
+        this.store.health = Load::Failed(down.clone());
+        this.store.dataset.insert(ds.clone(), Load::Loading);
+        let (e, key) = (down.clone(), ds.clone());
+        this.fetch(
+            cx,
+            move |_| Err::<(), _>(e),
+            move |this, r, _| {
+                if let Err(e) = r {
+                    this.store.dataset.insert(key, Load::Failed(e));
+                }
+            },
+        );
+        // Back before that answer is in.
+        this.store.note_reachability(None);
+        this.reconnected(cx);
+        ds
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(
+            this.store.dataset.get(&ds).is_none_or(|l| l.error().is_none()),
+            "the late failure is cleared"
+        );
+        this.ensure_dataset(&ds, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset.get(&ds).and_then(|l| l.ready()).is_some(), "the dataset loads");
+    });
+}
+
+/// A finished benchmark entry's result that failed while the server was away is asked for again once
+/// it answers (its page has no Retry: it said "The result didn't load" for good).
+#[test]
+fn a_benchmark_result_that_failed_while_the_server_was_away_is_asked_again() {
+    let (mut app, window) = open();
+    let down =
+        crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:18110");
+    let key = ("bench".to_string(), "entry".to_string());
+    drive(&mut app, window, |this, _, cx| {
+        this.store.health = Load::Failed(down.clone());
+        this.bench.results.insert(key.clone(), Load::Failed(down.clone()));
+        this.store.system = Load::Idle;
+        this.ensure_core(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.store.unreachable());
+        assert!(!this.bench.results.contains_key(&key), "the result is asked for again when shown");
+    });
+}
+
+/// A run ended unseen (its stream went silent) and its final history failed to load once: the partial
+/// history shown is replaced at the next run-list refresh, and the end is announced once.
+#[test]
+fn a_final_history_that_failed_is_read_again_at_the_next_refresh() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = super::tests::open_with(api.clone());
+    let id = "run_52e8";
+    let all = drive(&mut app, window, |this, _, cx| {
+        this.ensure_run_data(id, cx);
+        this.store.api.metrics(id).unwrap().steps.len()
+    });
+    drive(&mut app, window, |this, _, cx| {
+        let Some(Load::Ready(d)) = this.store.run_data.get_mut(id) else { panic!("loaded") };
+        d.metrics.steps = d.metrics.steps.iter().step_by(5).cloned().collect();
+        api.fail_metrics_once();
+        drop(stream_of(this, id));
+        this.drain_streams(cx);
+    });
+    drive(&mut app, window, |this, _, cx| {
+        // The 5 s refresh.
+        this.refresh_runs(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        let Some(Load::Ready(d)) = this.store.run_data.get(id) else { panic!("still shown") };
+        assert_eq!(d.metrics.steps.len(), all, "the final history");
+        assert_eq!(finished_toasts(this, id), 1, "{:?}", titles(this));
+        assert!(this.history_retry.is_empty());
+    });
+}
+
 /// A delivered end, its disconnect seen a tick later: handled once.
 #[test]
 fn a_delivered_end_is_handled_once() {
