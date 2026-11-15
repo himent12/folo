@@ -47,7 +47,7 @@ pub use assign::{Assignment, TalConfig};
 pub use boxes::{Cxcywh, IouKind, Letterbox, Xyxy};
 pub use decode::Anchors;
 pub use error::{Error, Result};
-pub use loss::{ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
+pub use loss::{DistillConfig, ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
 pub use metrics::{EvalConfig, EvalReport, Evaluator, Truth};
 pub use model::{FoloModel, HeadOutput, ModelConfig};
 pub use nms::{Detection, NmsConfig};

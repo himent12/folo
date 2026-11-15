@@ -121,8 +121,13 @@ fn start(
     };
     let suffix = arch.strip_prefix("folo-").unwrap_or(&arch).to_string();
     let name = args.name.clone().unwrap_or_else(|| format!("{ds_name}-{suffix}"));
-    let mut cfg =
-        apply_sets(config_of(args, name.clone(), absolute(data_arg), arch, weights_head), &args.set)?;
+    let mut base = config_of(args, name.clone(), absolute(data_arg), arch, weights_head);
+    if let Some(t) = &args.teacher {
+        // Resolved now for the error and its `folo weights pull` hint; the trainer resolves it again (and on resume).
+        crate::weights::resolve(Path::new(t))?;
+        base.distill = Some(folo_vision::DistillConfig::new(teacher_setting(t)));
+    }
+    let mut cfg = apply_sets(base, &args.set)?;
     // Validate before creating the run folder, so a typo leaves nothing behind.
     cfg.validate().map_err(|e| engine_error("train", e))?;
     let data = train_data(&ds)?;
@@ -154,6 +159,12 @@ fn start(
 /// `p` made absolute (so a resume from another folder finds the dataset).
 fn absolute(p: &str) -> String {
     std::path::absolute(p).map_or_else(|_| p.to_string(), folo_api::json::path)
+}
+
+/// `distill.teacher` of `--teacher t`: an existing file made absolute (so a resume from another folder finds it),
+/// else `t` as given (a published name, resolved in the weights cache whenever the run starts or resumes).
+pub(super) fn teacher_setting(t: &str) -> String {
+    if Path::new(t).is_file() { absolute(t) } else { t.to_string() }
 }
 
 fn train_data(ds: &folo_data::LoadedDataset) -> Result<TrainData, CliError> {

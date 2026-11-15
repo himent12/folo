@@ -13,7 +13,7 @@ use crate::engine::{engine_error, open_dataset};
 use crate::output::{CliError, ExitCode, Out};
 
 use super::progress::progress_sink;
-use super::train_data;
+use super::{teacher_setting, train_data};
 
 pub(super) fn resume(
     args: &TrainArgs,
@@ -63,15 +63,16 @@ pub(super) fn resume(
             if stored.dataset.is_empty() { "<dataset>" } else { &stored.dataset }
         )));
     }
-    if !args.set.is_empty() {
+    if let Some(s) = args.set.iter().find(|s| !s.trim_start().starts_with("distill.")) {
         return Err(CliError::new(
             ExitCode::Usage,
             "invalid_config",
-            "--set cannot change a resumed run (a resumed run keeps its settings)",
+            format!("--set {s} cannot change a resumed run (a resumed run keeps its settings; only distill.* may change)"),
         )
         .hint("leave --set out, or start a new run from its weights with --model <run>/weights/best.folo"));
     }
     check_resume_flags(args, &stored)?;
+    let distill = resume_distill(args, &stored)?;
     // weights/last.folo lives in <run>/weights/.
     let run_dir = ckpt
         .parent()
@@ -112,13 +113,47 @@ pub(super) fn resume(
         // The run's device unless --device says otherwise (its default, `auto`, is not the run's choice).
         device: args.explicit.iter().any(|f| f == "device").then(|| args.device.clone()),
         data_format: Some(format),
+        distill,
     };
     Ok((Trainer::resume(ckpt, data, opts, overrides).map_err(|e| engine_error("train", e))?, run_dir))
 }
 
-/// Flags a resume may change: where and how fast it runs, where its data is, and how it reports.
+/// The resume override of distillation (docs/CLI.md, docs/MODEL.md §8.9): `None` (keep what the run stored) without
+/// `--teacher` and `--set distill.*`; else the stored `distill` (or, for a run without one, the starting values) with
+/// the teacher of `--teacher` and the `--set distill.*` values, validated.
+pub(super) fn resume_distill(
+    args: &TrainArgs,
+    stored: &TrainConfig,
+) -> Result<Option<folo_vision::DistillConfig>, CliError> {
+    if args.teacher.is_none() && args.set.is_empty() {
+        return Ok(None);
+    }
+    let mut base = TrainConfig { distill: stored.distill.clone(), ..TrainConfig::default() };
+    if let Some(t) = &args.teacher {
+        crate::weights::resolve(Path::new(t))?;
+        let teacher = teacher_setting(t);
+        base.distill = Some(match base.distill.take() {
+            Some(d) => folo_vision::DistillConfig { teacher, ..d },
+            None => folo_vision::DistillConfig::new(teacher),
+        });
+    } else if base.distill.is_none() {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "invalid_config",
+            "--set distill.* on a resumed run that does not distil needs --teacher",
+        )
+        .hint("add --teacher <weights> to distil from the resumed epoch on"));
+    }
+    let cfg = super::config::apply_sets(base, &args.set)?;
+    let d = cfg.distill.expect("distill is set");
+    d.validate().map_err(|e| CliError::new(ExitCode::Usage, "invalid_config", e))?;
+    Ok(Some(d))
+}
+
+/// Flags a resume may change: where and how fast it runs, where its data is, how it reports, and (§8.9) the
+/// teacher it distils from.
 const RESUME_MAY_CHANGE: &[&str] =
-    &["resume", "data", "format", "workers", "device", "json_events", "project", "cache"];
+    &["resume", "data", "format", "workers", "device", "json_events", "project", "cache", "teacher"];
 
 /// With `--resume`, every other flag given on the command line must repeat the run's stored setting (as MCP
 /// and `POST /api/runs` require): a changed one is `invalid_config`, naming the flag and both values.

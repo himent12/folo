@@ -89,6 +89,87 @@ fn resume_refuses_weights() {
     assert!(e.message.contains("--weights"), "{}", e.message);
 }
 
+/// `--teacher` parses; it stores a file as an absolute path and a published name as given, and `--set distill.*`
+/// changes the starting values only once a teacher is set.
+#[test]
+fn teacher_flag_and_distill_keys() {
+    use clap::Parser;
+    let parse = |extra: &[&str]| {
+        let argv = ["folo", "train", "--data", "d"].iter().chain(extra).copied().collect::<Vec<_>>();
+        let crate::cli::Command::Train(args) = crate::cli::Cli::try_parse_from(argv).unwrap().command else {
+            panic!("not train")
+        };
+        args
+    };
+    assert_eq!(parse(&["--teacher", "folo-s-coco"]).teacher.as_deref(), Some("folo-s-coco"));
+    assert_eq!(parse(&[]).teacher, None);
+    assert_eq!(super::teacher_setting("folo-s-coco"), "folo-s-coco");
+    let dir = TestDir::new("teacher-setting");
+    std::fs::write(dir.join("t.folo"), b"x").unwrap();
+    let file = folo_api::json::path(dir.join("t.folo"));
+    assert_eq!(super::teacher_setting(&file), file, "an existing file, absolute");
+
+    let with = TrainConfig {
+        distill: Some(folo_vision::DistillConfig::new("folo-s-coco")),
+        ..TrainConfig::default()
+    };
+    let sets = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let c = apply_sets(with, &sets(&["distill.temperature=2", "distill.cls_gain=0.25"])).unwrap();
+    let d = c.distill.unwrap();
+    assert_eq!((d.temperature, d.cls_gain, d.dfl_gain), (2.0, 0.25, 1.5));
+    let e = apply_sets(TrainConfig::default(), &sets(&["distill.cls_gain=1"])).unwrap_err();
+    assert_eq!(e.code, "invalid_config");
+}
+
+/// The resume override: `--resume` with `--teacher` turns distillation on (starting values, or the run's stored
+/// gains with the new teacher), `--set distill.*` changes the gains, and without either the stored config stays.
+#[test]
+fn resume_overrides_the_teacher() {
+    use super::resume::{check_resume_flags, resume_distill};
+    use clap::Parser;
+    let dir = TestDir::new("resume-teacher");
+    std::fs::write(dir.join("t.folo"), b"x").unwrap();
+    let file = folo_api::json::path(dir.join("t.folo"));
+    let args = |extra: &[&str]| {
+        let mut argv = vec!["folo", "train", "--resume", "r/weights/last.folo"];
+        argv.extend_from_slice(extra);
+        let crate::cli::Command::Train(mut a) = crate::cli::Cli::try_parse_from(argv).unwrap().command else {
+            panic!("not train")
+        };
+        a.explicit = vec!["resume".into()];
+        if a.teacher.is_some() {
+            a.explicit.push("teacher".into());
+        }
+        a
+    };
+    let plain = TrainConfig::default();
+    let mut tuned = folo_vision::DistillConfig::new("folo-s-coco");
+    tuned.temperature = 3.0;
+    let distilled = TrainConfig { distill: Some(tuned), ..TrainConfig::default() };
+
+    // Without --teacher and --set: the stored config stays (no override).
+    assert_eq!(resume_distill(&args(&[]), &distilled).unwrap(), None);
+    // --teacher on a run without distillation: on, at the starting values.
+    let a = args(&["--teacher", &file]);
+    assert!(check_resume_flags(&a, &plain).is_ok(), "--teacher may change on a resume");
+    assert_eq!(resume_distill(&a, &plain).unwrap(), Some(folo_vision::DistillConfig::new(file.clone())));
+    // --teacher on a distillation run: the new teacher with the run's gains; --set changes them.
+    let d = resume_distill(&args(&["--teacher", &file, "--set", "distill.cls_gain=0.25"]), &distilled)
+        .unwrap()
+        .unwrap();
+    assert_eq!((d.teacher.as_str(), d.cls_gain, d.temperature), (file.as_str(), 0.25, 3.0));
+    // --set distill.* alone changes a distillation run's gains and needs a teacher otherwise.
+    let d = resume_distill(&args(&["--set", "distill.dfl_gain=0"]), &distilled).unwrap().unwrap();
+    assert_eq!((d.teacher.as_str(), d.dfl_gain), ("folo-s-coco", 0.0));
+    let e = resume_distill(&args(&["--set", "distill.dfl_gain=1"]), &plain).unwrap_err();
+    assert!(e.message.contains("--teacher"), "{}", e.message);
+    // Invalid values are errors; a missing teacher file is not found.
+    let e =
+        resume_distill(&args(&["--teacher", &file, "--set", "distill.temperature=0"]), &plain).unwrap_err();
+    assert!(e.message.contains("distill.temperature"), "{}", e.message);
+    assert!(resume_distill(&args(&["--teacher", "no/such/teacher.folo"]), &plain).is_err());
+}
+
 #[test]
 fn resume_settings_compare_integers_exactly() {
     let f32s = |a, b| same(&a, &b, true);

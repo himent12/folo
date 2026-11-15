@@ -7,8 +7,9 @@
 //!   `(seed, epoch, position)`, so a resumed epoch reproduces its batches exactly. `accumulate =
 //!   max(round(nbs / batch), 1)` batches form a window; windows never cross an epoch boundary.
 //! - **Step** (§8.3–8.5): train-mode forward, [`detection_loss`] (for a `head = "o2o"` model the [`dual_loss`] of
-//!   both branches, §6.6), and (only if the loss and every BatchNorm
-//!   statistic are finite) backward into a [`GradAccumulator`]. At the end of a window with at least one finite
+//!   both branches, §6.6), plus, in a distillation run (`distill`, §8.9), the [`distill_loss`] of the one-to-many
+//!   outputs against a frozen teacher's forward on the same batch, as part of the one-to-many loss ([`step_loss`]),
+//!   and (only if the loss and every BatchNorm statistic are finite) backward into a [`GradAccumulator`]. At the end of a window with at least one finite
 //!   batch: the schedule sets each group's LR and momentum for iteration `t`, the global gradient norm is clipped,
 //!   the optimizer steps, the EMA updates and `t` advances. A non-finite batch restores the running statistics it
 //!   touched, emits a `warn` log and no `step` event; ten in a row, or an epoch without a finite batch, fail the
@@ -37,9 +38,12 @@
 //! Files: `config.rs` ([`TrainConfig`], [`OptimizerChoice`]), `setup.rs` ([`Trainer::new`], [`Trainer::resume`]),
 //! `epoch.rs` (one epoch), `run.rs` ([`Trainer::run`]: epochs, validation, early stopping), `checkpoint.rs`
 //! ([`Trainer::save_checkpoint`]), `writer/` (the epoch's files, off the training thread), `events.rs`
-//! ([`EventSink`]), `feed.rs` (staging batches for a GPU), `device.rs` ([`place_model`], [`amp_support`]) and
-//! `tests.rs`. This file: [`Trainer`], [`TrainData`], [`TrainOptions`] and the trainer's constants.
+//! ([`EventSink`]), `feed.rs` (staging batches for a GPU), `device.rs` ([`place_model`], [`amp_support`]),
+//! `teacher.rs` (the distillation teacher, [`resolve_teacher`]) and `tests.rs`. This file: [`Trainer`],
+//! [`TrainData`], [`TrainOptions`] and the trainer's constants.
 //!
+//! [`distill_loss`]: crate::loss::distill_loss
+//! [`step_loss`]: crate::loss::step_loss
 //! [`detection_loss`]: crate::loss::detection_loss
 //! [`dual_loss`]: crate::loss::dual_loss
 
@@ -51,6 +55,7 @@ mod events;
 mod feed;
 mod run;
 mod setup;
+mod teacher;
 #[cfg(test)]
 mod tests;
 mod writer;
@@ -62,6 +67,7 @@ pub use device::{amp_available, amp_not_supported, amp_support, can_place, place
 pub use events::{EventSink, channel_sink, event_record, rfc3339_now};
 pub use run::update_best;
 pub use setup::{resumed_close_mosaic, schedule_warnings};
+pub use teacher::resolve_teacher;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -180,6 +186,10 @@ pub struct ResumeOverrides {
     pub device: Option<String>,
     /// How the dataset is read ([`TrainConfig::data_format`]), kept in the resumed run's checkpoints.
     pub data_format: Option<folo_data::Format>,
+    /// Distillation from the resumed epoch on (`folo train --resume --teacher`, docs/MODEL.md §8.9): replaces the
+    /// stored [`TrainConfig::distill`] and is stored with the run's later checkpoints and `config.json`. The teacher
+    /// is not part of the optimizer state, so nothing else of the resume changes. `None` keeps what the run stored.
+    pub distill: Option<crate::loss::DistillConfig>,
 }
 
 /// How a run ended.
@@ -210,6 +220,8 @@ pub struct Trainer {
     device: Device,
     model: FoloModel,
     ema: Option<ModelEma<FoloModel>>,
+    /// The frozen teacher of a distillation run (`cfg.distill`, §8.9).
+    teacher: Option<teacher::Teacher>,
     opt: Box<dyn Optimizer>,
     sched: LrSchedule,
     acc: GradAccumulator,

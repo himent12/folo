@@ -460,3 +460,24 @@ async fn mock_queue_control() {
             ok(&app, Request::post(format!("/api/runs/{id}/stop")).body(Body::empty()).unwrap()).await;
     }
 }
+
+/// `distill` (a CLI recipe key, docs/MODEL.md §8.9) is refused by `POST /api/runs`, for a new run and a resume, so a
+/// body asking for a teacher never trains without one; nothing is created.
+#[tokio::test]
+async fn distillation_is_refused() {
+    let (server, _store) = mock();
+    let app = server.router();
+    let before = ok::<RunList>(&app, get("/api/runs")).await.runs.len();
+    let ds: DatasetList = ok(&app, get("/api/datasets")).await;
+    let id = ds.datasets[0].id.clone();
+    for extra in [json!({}), json!({ "resume_run_id": "run_x" })] {
+        let mut body = json!({ "dataset_id": id, "distill": { "teacher": "folo-s-coco" } });
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let e = err(&app, post_json("/api/runs", body), StatusCode::BAD_REQUEST, "invalid_config").await;
+        assert!(
+            e.message.contains("distill") && e.hint.as_deref().unwrap_or("").contains("--teacher"),
+            "{e:?}"
+        );
+    }
+    assert_eq!(ok::<RunList>(&app, get("/api/runs")).await.runs.len(), before);
+}
