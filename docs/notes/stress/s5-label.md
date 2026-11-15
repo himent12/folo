@@ -29,6 +29,7 @@ answering ok, garbage, error, slow, huge and edge replies. Scripts and shots liv
 | s5-label-2 | annoying | server labeling | A server killed mid-run leaves the agent CLI processes running to the end of their (paid) call: 4 of 4 alive 2 s after the kill. | fixed (Windows); Unix deferred |
 | s5-label-3 | annoying | server + Studio bench | External boxes with `x2 < x1` / `y2 < y1` (most often `x, y, w, h` sent as corners) or an f32-overflowing coordinate were taken and scored as wrong guesses: `201 done`, a real-looking leaderboard row. | fixed |
 | s5-label-4 | polish | Studio bench | A plan weight field emptied read as valid, and Save plan stored the last number typed into it. | fixed |
+| s5-label-5 | polish | server labeling | A dataset made from a job and named `nul` answers `500 internal`. | deferred: s1-datasets fixes `slug` |
 
 ### s5-label-1: two tabs, one image
 Repro: open `#/datasets/label/<job>?image=7` in tabs A and B. In B, Add box (unsaved). In A, delete every box and
@@ -74,7 +75,16 @@ in-call image is `409` to PUT and DELETE while a waiting one leaves the run; sav
 edits kept, saved after the restart); job state after a server killed mid-run (idle, `stopped`, images back to
 labeled); dataset export line by line; bench live progress, reload, delete under an open entry ("Entry not found");
 leaderboard order and scores against the API with 35 entries; compare with a deleted entry; 20 malformed external
-shapes (all refused with clear messages except s5-label-3).
+shapes (all refused with clear messages except s5-label-3); dataset names `../../evil`, `..`, `日本語`, blank, `CON`
+(folders `evil`, `labeled`, `labeled-2`, the job's name, `con`); Enter held 80 times on "Looks right" (31 images
+reviewed in order, none twice or skipped, no request error); editor, job page and leaderboard at 390×844 and
+800×600 (no sideways overflow, every editor button reachable).
+
+### s5-label-5: a dataset named "nul" (deferred, SIBLING)
+`POST /api/label/jobs/{id}/dataset {"name":"nul"}` answers `500 internal` "writing the dataset .../datasets/nul: The
+system cannot find the path specified": `crates/folo-server/src/util.rs` `slug` keeps `nul`, a Windows device name.
+The same root cause is claimed and fixed by lane s1-datasets (`slug`, shared by synthetic, upload, label export and
+loop datasets); nothing changed here.
 
 ## Not done
 Loops (a tiny student run on the CPU), agent benchmark entries, plan design by an agent.
