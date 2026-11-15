@@ -951,8 +951,7 @@ by element). Class names that differ are only warned about: classes match by ind
 **Targets (constants, no autograd).** Each training batch `x` (`[B, 3, H, W]`, the augmented batch the student sees)
 goes through the teacher before the student's forward, under `no_grad`; its outputs are cast to f32 and:
 - `p~ = sigmoid(cls_raw_T)`, `[B, nc, A]`; `s~ = softmax(box_raw_T / T)` over the `reg_max` bins of each side,
-  `[B, 4, reg_max, A]` (§6.3 layout, side order `l t r b`). (A two-view "flip consensus", the teacher also run on the
-  mirrored batch and both views averaged, was measured and gave nothing: docs/notes/hill/r4-distill.md.)
+  `[B, 4, reg_max, A]` (§6.3 layout, side order `l t r b`).
 - `q_a = max_c p~[b, c, a]`, the teacher's confidence that anchor `a` matters.
 - Logarithms of the targets are taken at `max(v, f32::MIN_POSITIVE)`, so a probability of 0 or 1 contributes 0.
 
@@ -974,12 +973,14 @@ give no gradient); the fair control of a distillation run is the same total clas
 Every element (`softplus(x) − x · p~ − H(p~)`, and `q_a · s~_i · (ln s~_i − log_softmax(z / T)_i)`) is formed before
 it is summed; the class elements are summed over `a` per `(b, c)` and the DFL elements over `a` per `(b, side, bin)`,
 then those row sums in the fixed-order tree of §7 (rows of 4096), so the term is bit-reproducible on the CPU.
-`T = 1` divides by nothing. For a `head = "o2o"` student the term is computed on the one-to-many outputs and added to
-the dual loss (§6.6) unweighted by `w_m`.
+`T = 1` divides by nothing. For a `head = "o2o"` student the term is computed on the one-to-many outputs and is part
+of the one-to-many loss: `L = w_m · (L_o2m + λc · L_kc + λd · L_kd) + (1 − w_m) · L_o2o` (§6.6, `B` and the gains
+inside `L_o2m` as above), so the teacher never outweighs the schedule that moves the emphasis to the one-to-one
+branch. For an `o2m` student `L` is the line above.
 
 **Reported.** `λc · L_kc` and `λd · L_kd` (without `B`, like §7.4's items) are read back once per batch; the epoch
 logs one line, `epoch E: distillation cls … dfl … over n batches (first quarter …, last quarter …)`, the means over
-its finite batches and over their first and last quarter. `LossItems`, the `step` and `epoch` events and the API's
+its finite batches and over their first and last quarter; for an `o2o` student they are not weighted by `w_m`. `LossItems`, the `step` and `epoch` events and the API's
 loss object do not change. A batch whose distillation terms are not finite is a non-finite batch (§8.3).
 
 **Mixed precision.** The teacher runs in f16 (its own fused f16 weights, f16 input; no autocast needed) and its

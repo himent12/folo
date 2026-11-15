@@ -56,7 +56,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | §8.6 Data and augmentation | folo-data `src/augment/`, `src/loader.rs` |
 | §8.7 Validation and checkpoints | `src/val.rs`, `src/train/run.rs`, `src/train/checkpoint.rs`, `src/train/writer/` |
 | §8.8 Mixed precision | `src/train/epoch.rs`; folo-nn `src/amp.rs` |
-| §8.9 Distillation | `src/loss/distill/`, `src/train/teacher.rs`, `src/train/epoch.rs` |
+| §8.9 Distillation | `src/loss/distill/`, `src/loss/mod.rs` (`step_loss`), `src/train/teacher.rs`, `src/train/epoch.rs` |
 | §9.1 Fusion | `FoloModel::fuse` in `src/model/mod.rs`; folo-nn `fuse_conv_bn` |
 | §9.2 Letterbox | `src/predict.rs`; folo-data `src/letterbox.rs` |
 | §9.3 NMS, §9.4 Box fusion | `src/nms.rs`, `src/fusion.rs` |

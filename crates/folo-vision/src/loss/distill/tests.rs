@@ -1,5 +1,6 @@
 //! The distillation term against finite differences and its closed-form gradients, its zero at a teacher equal to
-//! the student, the blended-target identity with the supervised BCE, and the validation of its settings.
+//! the student, the blended-target identity with the supervised BCE, its `w_m` weighting for an `o2o` student, and
+//! the validation of its settings.
 
 use folo_core::Tensor;
 use folo_core::rng::Rng;
@@ -8,7 +9,7 @@ use folo_core::testing::{GradCheck, grad_check_with};
 use super::*;
 use crate::boxes::Xyxy;
 use crate::decode::make_anchors;
-use crate::loss::{BatchAssignment, LossConfig, loss_with_assignment};
+use crate::loss::{BatchAssignment, LossConfig, loss_with_assignment, step_loss};
 
 const R: usize = 16;
 
@@ -143,6 +144,57 @@ fn class_term_is_a_blended_bce_target() {
     assert!(max_abs_diff(&got, &want) < 1e-6, "{}", max_abs_diff(&got, &want));
     // The identity has content: without the teacher the gradients differ.
     assert!(max_abs_diff(&got, &sup_only(&sb, &sc, &anchors, &asg, g + lambda)) > 1e-3);
+}
+
+/// For a `head = "o2o"` student the term is part of the one-to-many loss (§6.6, §8.9): its gradient w.r.t. the
+/// one-to-many outputs in [`step_loss`] at epoch `e` is `w_m(e)` times the one an `o2m` student gets (where it is
+/// the term's own gradient). Fails if the term is added to the dual loss unweighted.
+#[test]
+fn an_o2o_student_weights_the_term_by_w_m() {
+    let anchors = make_anchors(64, 64, &[8, 16, 32], 0.5);
+    let (b, nc, a) = (2, 3, anchors.len());
+    let (sb, sc) = raw(9, b, nc, a);
+    let (ob, oc) = raw(10, b, nc, a);
+    let (tb, tc) = raw(11, b, nc, a);
+    let fg = [(0u32, 5u32, 1u32, 0.7f32), (1, 70, 0, 0.9)];
+    let asg = BatchAssignment {
+        batch: b,
+        num_anchors: a,
+        num_classes: nc,
+        image: fg.iter().map(|f| f.0).collect(),
+        anchor: fg.iter().map(|f| f.1).collect(),
+        label: fg.iter().map(|f| f.2).collect(),
+        score: fg.iter().map(|f| f.3).collect(),
+        target: vec![Xyxy::new(4.0, 6.0, 30.0, 40.0); fg.len()],
+        inputs_finite: true,
+    };
+    let t = targets_of(&tb, &tc, 4.0);
+    let c = cfg(0.5, 1.5, 4.0);
+    // Gradients w.r.t. the one-to-many `(cls_raw, box_raw)` of the step loss, with and without the teacher.
+    let step = |teacher: bool, w_m: Option<f32>| {
+        let (x, z) = (sc.detach().requires_grad_(), sb.detach().requires_grad_());
+        let sup = loss_with_assignment(&z, &x, &anchors, &asg, &LossConfig::default()).unwrap();
+        let kd = distill_loss(&z, &x, &t, sup.target_score_sum, &c).unwrap();
+        let o2o = loss_with_assignment(&ob, &oc, &anchors, &asg, &LossConfig::o2o()).unwrap();
+        let l = step_loss(sup, teacher.then_some(&kd), w_m.map(|w| (&o2o, w)), b).unwrap();
+        let g = l.total.backward().unwrap();
+        [&x, &z].map(|v| g.get(v).unwrap().to_vec::<f32>().unwrap())
+    };
+    // The teacher's share of those gradients.
+    let from_teacher = |w_m: Option<f32>| {
+        let (with, without) = (step(true, w_m), step(false, w_m));
+        let diff = |i: usize| with[i].iter().zip(&without[i]).map(|(p, q)| p - q).collect::<Vec<f32>>();
+        [diff(0), diff(1)]
+    };
+    let o2m = from_teacher(None);
+    assert!(o2m.iter().all(|g| g.iter().any(|v| v.abs() > 1e-3)), "the term has gradients");
+    for e in [0, 10, 19] {
+        let w_m = crate::loss::o2m_weight(e, 20);
+        for (got, want) in from_teacher(Some(w_m)).iter().zip(&o2m) {
+            let want: Vec<f32> = want.iter().map(|v| w_m * v).collect();
+            assert!(max_abs_diff(got, &want) < 1e-5, "epoch {e}, w_m {w_m}: {}", max_abs_diff(got, &want));
+        }
+    }
 }
 
 fn sup_only(

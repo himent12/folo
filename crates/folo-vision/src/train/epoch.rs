@@ -10,7 +10,7 @@ use super::feed;
 use super::{BatchSource, MAX_AMP_SKIPS, MAX_NONFINITE_BATCHES, Trainer};
 use crate::error::{Error, Result};
 use crate::loss::{
-    LossConfig, LossItems, detection_loss, distill_loss, dual_loss, o2m_weight, targets_from_normalized,
+    LossConfig, LossItems, detection_loss, distill_loss, o2m_weight, step_loss, targets_from_normalized,
 };
 use crate::val::batch_tensor;
 
@@ -67,33 +67,25 @@ impl Trainer {
             let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
             let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
             let mut loss = detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg)?;
-            // On the one-to-many outputs, over the supervised loss's normaliser.
+            // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
             let kd = match (kd_targets, &self.cfg.distill) {
                 (Some(t), Some(d)) => Some(distill_loss(&box_raw, &cls_raw, &t, loss.target_score_sum, d)?),
                 _ => None,
             };
             drop((box_raw, cls_raw));
-            if let Some((b, c)) = &out.o2o {
-                // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
-                let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
-                let o2o = detection_loss(
-                    &box_raw,
-                    &cls_raw,
-                    &out.anchors,
-                    &targets,
-                    &LossConfig { tal: crate::assign::TalConfig::o2o(), ..self.loss_cfg },
-                )?;
-                loss = dual_loss(&loss, &o2o, o2m_weight(e, self.cfg.epochs))?;
-            }
-            // The distillation term joins the total unweighted by the dual loss's w_m (it is the o2m branch's).
-            let kd = match kd {
-                Some(kd) => {
-                    loss.total = loss.total.add(&kd.total)?;
-                    loss.total_value += n as f32 * (kd.cls + kd.dfl);
-                    Some([kd.cls, kd.dfl])
+            // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
+            let o2o = match &out.o2o {
+                Some((b, c)) => {
+                    let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
+                    let cfg = LossConfig { tal: crate::assign::TalConfig::o2o(), ..self.loss_cfg };
+                    Some(detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &cfg)?)
                 }
                 None => None,
             };
+            let w_m = o2m_weight(e, self.cfg.epochs);
+            // `w_m · (L_o2m + L_distill) + (1 − w_m) · L_o2o`; the reported terms stay unweighted by `w_m` (§8.9).
+            loss = step_loss(loss, kd.as_ref(), o2o.as_ref().map(|o| (o, w_m)), n)?;
+            let kd = kd.map(|kd| [kd.cls, kd.dfl]);
             let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
             let finite = loss.is_finite() && kd_finite && RunningStats::all_finite(&self.model)?;
             let items = loss.items;

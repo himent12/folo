@@ -8,8 +8,8 @@
 //!   max(round(nbs / batch), 1)` batches form a window; windows never cross an epoch boundary.
 //! - **Step** (§8.3–8.5): train-mode forward, [`detection_loss`] (for a `head = "o2o"` model the [`dual_loss`] of
 //!   both branches, §6.6), plus, in a distillation run (`distill`, §8.9), the [`distill_loss`] of the one-to-many
-//!   outputs against a frozen teacher's forward on the same batch, and (only if the loss and every BatchNorm
-//!   statistic are finite) backward into a [`GradAccumulator`]. At the end of a window with at least one finite
+//!   outputs against a frozen teacher's forward on the same batch, as part of the one-to-many loss ([`step_loss`]),
+//!   and (only if the loss and every BatchNorm statistic are finite) backward into a [`GradAccumulator`]. At the end of a window with at least one finite
 //!   batch: the schedule sets each group's LR and momentum for iteration `t`, the global gradient norm is clipped,
 //!   the optimizer steps, the EMA updates and `t` advances. A non-finite batch restores the running statistics it
 //!   touched, emits a `warn` log and no `step` event; ten in a row, or an epoch without a finite batch, fail the
@@ -43,6 +43,7 @@
 //! [`TrainData`], [`TrainOptions`] and the trainer's constants.
 //!
 //! [`distill_loss`]: crate::loss::distill_loss
+//! [`step_loss`]: crate::loss::step_loss
 //! [`detection_loss`]: crate::loss::detection_loss
 //! [`dual_loss`]: crate::loss::dual_loss
 

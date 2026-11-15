@@ -1,4 +1,4 @@
-# Hill-climb 4: dense consensus distillation (lab notebook)
+# Hill-climb 4: dense output distillation (lab notebook)
 
 Lane `distill` of hill-climb 4 (2026-11-14). Goal: folo-n learns from a frozen folo-s teacher on the same augmented
 batches, through its raw head outputs, without changing inference, export or the `.folo` format. The method is
@@ -42,7 +42,7 @@ L 4.81 / 3.94; n / s). Both tables say the same: the teacher's ranking is worth 
 widths of 3.45 / 5.97 / 12.52 px for S / M / L primaries, about 0.43 / 0.37 / 0.39 bins at strides 8 / 16 / 32. A
 two-bin DFL target with a uniform sub-bin phase has a mean width of pi/8 = 0.393 bins: the measured widths are the
 encoding floor of a certain edge. At T = 1 a single teacher's distribution is therefore little more than its box.
-That is what the flip consensus (two views averaged in probability space) was meant to add: where the mirrored view
+That is what a mirrored second teacher view (two views averaged in probability space) was meant to add: where it
 disagrees about an edge the averaged target is wider. It measured as useless on the proxy and was removed (below).
 
 ## Protocol
@@ -84,7 +84,7 @@ the same `best.folo` AP 0.12551666, `config.json` different only in the run name
 (`D:/folo-data/runs-hill4/proxy/logs/cmp-ctl-off-s0.log`, script `D:/folo-build/hill4/distill-cmp.py`). With the
 teacher off the branch trains bit-identically to origin/main.
 
-The proxy arms all ran one binary, `folo-kd.exe` at `dc727599` (before the flip consensus was removed in
+The proxy arms all ran one binary, `folo-kd.exe` at `dc727599` (before the mirrored view was removed in
 `751d6d84`). That the removal changes nothing for one view was checked on CPU, not on the proxy: both binaries
 trained folo-n for 2 epochs (16 batches of 8, 2 optimizer steps) on 64 mini320 images at 160 px with the teacher at
 T = 4 and seed 0. Every printed loss and distillation line is the same, `metrics.jsonl` differs only in timings and
@@ -151,9 +151,11 @@ works more by adding gain on the teacher's target than by replacing part of the 
 
 **Choice.** `t4` (`--teacher` with T = 4, class gain 0.5, DFL gain 1.5, one view): the best seed-0 arm by more
 than the 0.002 noise over `kd-s0`, and no simpler arm comes within 0.002 of it (`kc` -0.007, `kdl` -0.011, `kd`
--0.003). Both terms stay (each alone is clearly worse); the temperature stays a tunable key; the flip consensus is
+-0.003). Both terms stay (each alone is clearly worse); the temperature stays a tunable key; the mirrored view is
 removed. Since the gate passed, `--teacher` alone now starts at these values (T = 4 in `DistillConfig::default`,
-docs/MODEL.md §8.9, docs/CLI.md).
+docs/MODEL.md §8.9, docs/CLI.md). After the proxy, for a `head = "o2o"` student the term became part of the
+one-to-many loss, weighted by the dual loss's `w_m` (§6.6, §8.9); every arm here is an `o2m` student, which that
+change leaves bit-identical, and no `o2o` student was measured with a teacher.
 
 **Gate** (3 seeds per side, proxy-val COCO AP of `best.folo`; table `proxy/logs/table-distill.md` from
 `proxy/bin/table.py --runs`):

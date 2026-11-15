@@ -38,7 +38,8 @@
 //! Files: `assignment.rs` ([`assign_batch`], the detached host part), `terms.rs` ([`loss_with_assignment`] and
 //! [`ciou`], the differentiable terms), `device.rs` ([`assign_batch_device`], the folo-gpu kernels), `distill/`
 //! (the opt-in distillation term of §8.9, [`distill_loss`]) and `tests.rs`.
-//! This file: [`LossConfig`], [`ImageTargets`], [`BatchAssignment`], [`detection_loss`] and [`dual_loss`] (§6.6).
+//! This file: [`LossConfig`], [`ImageTargets`], [`BatchAssignment`], [`detection_loss`], [`dual_loss`] (§6.6) and
+//! [`step_loss`] (one training step's loss, with the distillation term).
 //!
 //! [`assign`]: crate::assign::assign
 
@@ -121,6 +122,27 @@ pub fn dual_loss(o2m: &LossOutput, o2o: &LossOutput, w_m: f32) -> Result<LossOut
         num_fg: o2m.num_fg,
         target_score_sum: o2m.target_score_sum,
     })
+}
+
+/// The loss of one training step (§8.3) of `batch` images: the one-to-many loss `o2m` plus the distillation term
+/// `kd` of §8.9, if any, and for a `head = "o2o"` model (`o2o = Some((L_o2o, w_m))`) the [`dual_loss`] of that sum
+/// and the one-to-one loss: `L = w_m · (L_o2m + L_distill) + (1 − w_m) · L_o2o`, so the teacher is weighted with the
+/// branch it teaches. `total_value` gains `batch · (kd.cls + kd.dfl)` before the weighting; the items stay the
+/// supervised ones. Without `o2o` it is `o2m` plus `kd`.
+pub fn step_loss(
+    mut o2m: LossOutput,
+    kd: Option<&DistillLoss>,
+    o2o: Option<(&LossOutput, f32)>,
+    batch: usize,
+) -> Result<LossOutput> {
+    if let Some(kd) = kd {
+        o2m.total = o2m.total.add(&kd.total)?;
+        o2m.total_value += batch as f32 * (kd.cls + kd.dfl);
+    }
+    match o2o {
+        Some((o2o, w_m)) => dual_loss(&o2m, o2o, w_m),
+        None => Ok(o2m),
+    }
 }
 
 /// The ground truth of one image: boxes in input pixels and their class ids.
