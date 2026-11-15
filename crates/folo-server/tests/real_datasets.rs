@@ -653,6 +653,18 @@ async fn a_damaged_registry_is_an_error_not_an_empty_list() {
     )
     .await;
     assert!(e.hint.unwrap().contains("restart folo serve"), "{}", e.message);
+    // A synthetic dataset is refused before anything is generated (review round 4: it left `datasets/probe`).
+    let synthetic = json!({ "name": "probe", "images": 1, "imgsz": 64 });
+    let e = err(
+        &app,
+        post_json("/api/datasets/synthetic", synthetic),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+    )
+    .await;
+    assert!(e.hint.unwrap().contains("restart folo serve"), "{}", e.message);
+    let generated = std::fs::read_dir(home.join("datasets")).map_or(0, |d| d.count());
+    assert_eq!(generated, 0, "no folder is left under datasets/");
     let e = err(&app, get("/api/datasets"), StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
     assert!(e.message.contains("lists 1 dataset this server did not load"), "{}", e.message);
     assert_eq!(std::fs::read_to_string(home.join("datasets.json")).unwrap(), text, "nothing was written");

@@ -53,7 +53,11 @@ the folders below (review round 2: `dataset_below` asked `detect_format`, which 
 `looks_like_dataset` checks the names detection uses within the budget). Review round 3: that probe opened any
 `*.yaml`, so a FIFO named so hung it and the `folo mcp --confine` read guard was bypassed; it now opens only a regular
 file the guard allows (on Unix with `O_NONBLOCK`, so a FIFO swapped in after the check does not block either) and
-lists no folder the guard refuses. Tests: `index::tests`
+lists no folder the guard refuses. Review round 4: `O_NONBLOCK` is set on every Unix target whose value is known
+(Linux and Android by architecture, Apple and the BSDs, Solaris and illumos); on any other the probe opens no YAML at
+all. Deferred (review round 4): the top-level `detect_format` that registration runs first still lists the registered
+folder whole and reads its candidate YAMLs whole (`folo_data::dataset::yolo::find_yaml`), unchanged from `main`;
+bounding detection is a `folo-data` change that would alter which datasets are found. Tests: `index::tests`
 `diagnostics_of_a_non_dataset_read_a_bounded_number_of_entries`, `looking_inside_a_folder_below_counts_against_the_budget`
 (counts, no timing), `a_fifo_named_like_a_yaml_never_holds_the_diagnostics_up` (Unix only: not run on this Windows PC),
 `tests/confined_diagnostics.rs`.
@@ -68,7 +72,8 @@ ERROR line in stderr. Cause: `RealStore::open_with_cloud` (`real/mod.rs`) loads 
 "… is malformed" with the hint "fix the JSON by hand or move the file away"; once the file is fixed it answers `500`
 "… lists N datasets this server did not load when it started", hint "restart folo serve" (review round 1: it answered
 an empty list again). Registering and unregistering answer the same until the restart (review round 2: registering
-another dataset made the list nonempty, so it answered that one alone). Desktop's Overview showed "No datasets yet" and skeletons
+another dataset made the list nonempty, so it answered that one alone); a synthetic dataset is refused before it is
+generated, and a generated folder whose registration fails is removed (review round 4). Desktop's Overview showed "No datasets yet" and skeletons
 for a failed list: its idle panel and datasets strip now say the error with Retry (`SIBLING`; Studio already did).
 Tests: `tests/real_datasets.rs` `a_damaged_registry_is_an_error_not_an_empty_list`, Desktop `app::list_tests`
 `a_failed_datasets_list_is_said_on_overview`.
@@ -109,10 +114,13 @@ the same bug (`SIBLING`, review round 1): all three use `util::one_per_id`; jobs
 `util::folders_by_id`, which reads only the id of each `job.json` / `bench.json`, so a copy is skipped before its loader
 would close an interrupted run or active entries and write them back (review round 2); of the folders of one id the
 first whose record its loader takes (`Job::readable`, `Slot::readable`: it parses, its version is known; nothing
-written) wins, so a damaged original does not hide an intact backup (review round 3). Tests: `runs::tests`
+written) is tried first, so a damaged original does not hide an intact backup (review round 3), and one that reads
+but does not load (its recovery cannot be written back to a folder the server may not write) gives way to the next
+copy (`util::load_first`, review round 4). Tests: `runs::tests`
 `a_copied_run_folder_is_loaded_once`, `util::tests` `copies_of_a_folder_load_once` and
 `folders_are_picked_by_id_before_loading`, `tests/label` `a_copied_job_folder_is_left_as_it_is` (the backup's files
-byte for byte) and `a_damaged_job_record_does_not_hide_its_backup`, `tests/bench`
+byte for byte), `a_damaged_job_record_does_not_hide_its_backup` and
+`a_job_whose_recovery_cannot_be_written_does_not_hide_its_backup`, `tests/bench`
 `a_damaged_benchmark_record_does_not_hide_its_backup`.
 Deferred: deleting the run and restarting loads the copy (it is a run folder under `runs/`, as it was before this
 fix, when both were listed); hiding a user's backup needs tombstones by run id, a design choice.

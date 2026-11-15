@@ -346,27 +346,50 @@ fn yaml_has_train(p: &Path) -> bool {
         && head.lines().any(|l| l.trim_start_matches('\u{feff}').starts_with("train:"))
 }
 
+/// `O_NONBLOCK` of this Unix target (std does not name it and the server takes no `libc` dependency for one flag):
+/// None on a target whose value is not known here, where the probe opens nothing rather than a file that may wait
+/// (review round 4).
+#[cfg(unix)]
+const O_NONBLOCK: Option<i32> = if cfg!(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)) {
+    Some(0x4)
+} else if cfg!(any(target_os = "solaris", target_os = "illumos")) {
+    Some(0x80)
+} else if cfg!(any(target_os = "linux", target_os = "android")) {
+    if cfg!(any(
+        target_arch = "mips",
+        target_arch = "mips64",
+        target_arch = "mips32r6",
+        target_arch = "mips64r6"
+    )) {
+        Some(0x80)
+    } else if cfg!(any(target_arch = "sparc", target_arch = "sparc64")) {
+        Some(0x4000)
+    } else {
+        Some(0o4000)
+    }
+} else {
+    None
+};
+
 /// Opens `p` to read; on Unix with `O_NONBLOCK`, which a regular file ignores and which opens a FIFO (one swapped
-/// in after a check) at once instead of waiting for a writer.
+/// in after a check) at once instead of waiting for a writer. On a Unix target whose `O_NONBLOCK` is not known it
+/// opens nothing (`Unsupported`): the probe then reads no YAML, which only makes its error say less.
 fn open_without_waiting(p: &Path) -> std::io::Result<std::fs::File> {
     let mut open = std::fs::OpenOptions::new();
     open.read(true);
-    #[cfg(any(
-        target_vendor = "apple",
-        all(
-            target_os = "linux",
-            any(
-                target_arch = "x86_64",
-                target_arch = "aarch64",
-                target_arch = "x86",
-                target_arch = "arm",
-                target_arch = "riscv64"
-            )
-        )
-    ))]
+    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        open.custom_flags(if cfg!(target_vendor = "apple") { 0x4 } else { 0o4000 });
+        let Some(flag) = O_NONBLOCK else {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "O_NONBLOCK is not known here"));
+        };
+        open.custom_flags(flag);
     }
     open.open(p)
 }
@@ -854,9 +877,8 @@ mod tests {
         let (below, train, opened) =
             rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the FIFO held the probe up");
         assert_eq!((below, train), (None, false));
-        if cfg!(any(target_os = "linux", target_vendor = "apple")) {
-            assert!(opened, "opened without waiting for a writer");
-        }
+        // Where O_NONBLOCK is not known nothing is opened, so nothing waits either (review round 4).
+        assert_eq!(opened, O_NONBLOCK.is_some(), "opened without waiting for a writer");
     }
 
     #[test]

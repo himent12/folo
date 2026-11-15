@@ -427,3 +427,59 @@ async fn a_damaged_job_record_does_not_hide_its_backup() {
         f.store.shutdown();
     }
 }
+
+/// Makes the `job.json` in `dir` one the server cannot replace (`on`), or replaceable again; says whether it is
+/// (a root user on Unix writes anyway).
+fn unwritable(dir: &std::path::Path, on: bool) -> bool {
+    #[cfg(windows)]
+    {
+        let p = dir.join("job.json");
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_readonly(on);
+        std::fs::set_permissions(&p, perms).unwrap();
+        true
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(if on { 0o555 } else { 0o755 }))
+            .unwrap();
+        let probe = dir.join(".probe");
+        let blocked = std::fs::write(&probe, b"").is_err();
+        let _ = std::fs::remove_file(&probe);
+        blocked
+    }
+}
+
+/// A job whose own `job.json` reads but whose recovery (closing the run a crash left active) cannot be written back
+/// does not hide an intact copy of its folder: the copy is loaded, the original left as it was (review round 4).
+#[tokio::test]
+async fn a_job_whose_recovery_cannot_be_written_does_not_hide_its_backup() {
+    let t = TestDir::new("label-copy-unwritable");
+    let home = t.join("home");
+    let f = fixture(&home, vec![Step::Hold]);
+    let job = job_with_images(&f.app, 2).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    ok::<LabelJob>(&f.app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    let dir = home.join("label").join(&job.id);
+    let saved = std::fs::read(dir.join("job.json")).unwrap();
+    f.store.shutdown();
+    drop(f);
+    let copy = home.join("label").join(format!("{} - Copy", job.id));
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(dir.join("job.json"), &saved).unwrap();
+    std::fs::write(copy.join("job.json"), &saved).unwrap();
+    let blocked = unwritable(&dir, true);
+
+    let f = fixture(&home, vec![]);
+    let list: LabelJobList = ok(&f.app, get("/api/label/jobs")).await;
+    let got: LabelJob = ok(&f.app, get(&uri)).await;
+    f.store.shutdown();
+    let original = std::fs::read(dir.join("job.json")).unwrap();
+    unwritable(&dir, false);
+    assert_eq!(list.jobs.len(), 1, "the job is listed (from its copy)");
+    assert_eq!(got.run.unwrap().outcome, Some(LabelOutcome::Stopped), "the copy's run is closed");
+    if blocked {
+        assert_eq!(original, saved, "the original, which cannot be written, is left as it was");
+    }
+}
