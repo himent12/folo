@@ -78,16 +78,26 @@ pub(super) fn seg(s: &str) -> String {
 }
 
 /// Whether an address as typed in Settings (the scheme optional) names an HTTP server: http or
-/// https, a host, and a port from 1 to 65535 when one is typed. ureq refuses any other scheme
-/// before sending a byte, and quietly sends to port 80 when the typed port isn't a number it can
-/// use ("http://127.0.0.1:99999", ":abc", a bare ":").
-pub(super) fn address_ok(typed: &str) -> bool {
+/// https, a host (a bracketed one a real IPv6 address), and a port from 1 to 65535 when one is
+/// typed. ureq refuses any other scheme before sending a byte, and quietly sends to port 80 when
+/// the typed port isn't a number it can use ("http://127.0.0.1:99999", ":abc", a bare ":"); the
+/// URI parser counts a bracketed host's colons but doesn't read it ("[:::]", "[1::2::3]").
+pub(crate) fn address_ok(typed: &str) -> bool {
+    let typed = typed.trim();
     let url = if typed.contains("://") { typed.to_string() } else { format!("http://{typed}") };
     url.parse::<ureq::http::Uri>().is_ok_and(|u| {
         matches!(u.scheme_str(), Some("http" | "https"))
-            && u.host().is_some_and(|h| !h.is_empty())
+            && u.host().is_some_and(host_ok)
             && u.authority().is_some_and(|a| port_ok(a.as_str()))
     })
+}
+
+/// A host as the URI parser gives it: not empty, and `[v6]` an IPv6 address.
+fn host_ok(host: &str) -> bool {
+    match host.strip_prefix('[') {
+        Some(v6) => v6.strip_suffix(']').is_some_and(|a| a.parse::<std::net::Ipv6Addr>().is_ok()),
+        None => !host.is_empty(),
+    }
 }
 
 /// The port of an authority (`user@host:port`, `[v6]:port`): none typed, or one from 1 to 65535.

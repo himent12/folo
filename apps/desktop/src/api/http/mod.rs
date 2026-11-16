@@ -14,6 +14,7 @@ use serde::Serialize;
 use super::*;
 
 pub use server::{ServerProcess, Spawned, is_loopback, probe, runs_now, spawn_server};
+pub(crate) use transport::address_ok;
 #[cfg(test)]
 pub(crate) use transport::needs_token;
 use transport::{agent, seg, stream_agent};
@@ -568,7 +569,9 @@ FOLO"
         // Review round 2: a port ureq can't use sent the request to port 80.
         let ports = ["http://127.0.0.1:99999", "127.0.0.1:70000", "http://h:abc", "localhost:", "http://h:0"];
         let odd = ["foo://some:42/123", "ftp://127.0.0.1:21", " ", "https:///", "http://[::1]:65536"];
-        for typed in not.into_iter().chain(ports).chain(odd) {
+        // Review round 3: the URI parser counts a bracketed host's colons but doesn't read it.
+        let v6 = ["http://[:::]:7878", "[1::2::3]:7878", "http://[127.0.0.1]:7878", "http://[::g]"];
+        for typed in not.into_iter().chain(ports).chain(odd).chain(v6) {
             let api = HttpBackend::new(typed);
             assert!(!api.address_ok(), "{typed:?}");
             assert!(api.url("/health").starts_with("folo-not-sent:"), "never sent: {typed:?}");
@@ -586,7 +589,13 @@ FOLO"
         for fine in
             ["127.0.0.1:7878", "http://localhost:18090/", "https://[::1]:443", "http://my-box", "HTTP://a:1"]
                 .into_iter()
-                .chain(["http://[::1]", "localhost:65535", "http://u@h:8080"])
+                .chain([
+                    "http://[::1]",
+                    "localhost:65535",
+                    "http://u@h:8080",
+                    "[fe80::1]:7878",
+                    "http://[::]:1",
+                ])
         {
             let api = HttpBackend::new(fine);
             assert!(api.address_ok(), "{fine:?}");

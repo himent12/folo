@@ -65,12 +65,16 @@ checks. Test: `only_the_default_plan_is_called_the_default_one`.
 ### d4-bench-settings-4: an address that is not one
 Repro: Settings › Connection, type `abc def`, Connect. Cause: `src/api/http/transport.rs` `unreachable` said the
 same for every failed request. Fix: an address is judged as typed, before a scheme is added or a `/` trimmed
-(`http://` used to become the host "http"): unless it is http or https with a host and, when one is typed, a port
-from 1 to 65535 (`foo://some:42`, `ftp://…`, `http://`, `http://:7878`, `http://127.0.0.1:99999`, `localhost:abc`
-are not; ureq sent the last two to port 80, review round 2), nothing is sent, also by the Connect probe and it says "abc def is not a server address" with "Type it as
-http://host:port, like http://127.0.0.1:7878.", shown under the status in Settings; the sidebar's connection line
-says "Not a server address" instead of "Server unreachable". Test:
-`an_address_that_is_not_one_says_so_instead_of_blaming_the_server`. Deferred: the lost-connection banner still
+(`http://` used to become the host "http"): unless it is http or https with a host (a bracketed one a real IPv6
+address) and, when one is typed, a port from 1 to 65535 (`foo://some:42`, `ftp://…`, `http://`, `http://:7878`,
+`http://127.0.0.1:99999`, `localhost:abc`, `http://[:::]:7878` are not; ureq sent `:99999` and `:abc` to port 80,
+review round 2; the URI parser lets `[:::]` through, round 3), nothing is sent, also by the Connect probe, and it
+says "abc def is not a server address" with "Type it as http://host:port, like http://127.0.0.1:7878.", shown under
+the status in Settings; the sidebar's connection line says "Not a server address" instead of "Server unreachable".
+Such an address on this machine (`http://127.0.0.1:99999`) no longer starts or finds the local server in its place
+(round 3: it wrote the local server's address over the typed one, so the message never showed). Tests:
+`an_address_that_is_not_one_says_so_instead_of_blaming_the_server`,
+`a_local_address_that_is_not_one_is_kept_and_starts_nothing`. Deferred: the lost-connection banner still
 retries such an address (the retry loop is the connection lane's, SIBLING).
 
 ## Checked and fine
