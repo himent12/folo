@@ -161,3 +161,13 @@ Windows steps in `ci.yml`, `desktop.yml` and `release.yml` (its Windows `cargo b
 `tools/ci-retry.sh`, which on self-hosted runners retries a step once **only when its output shows one of those crash
 codes**, and logs a warning. Compile errors and failing (including flaky) tests are never retried, and on hosted
 runners nothing is.
+
+The self-hosted Linux runners (the WSL VMs on the same machine) show the same thing in Node: `npm run check` died
+three times in one evening on unrelated heads with V8's `# Fatal error in , line 0` / `unreachable code` banner and
+`Trace/breakpoint trap` (exit 133), and a layout-QA shard once with `Illegal instruction` (exit 132), with Node
+v22 from `actions/setup-node`. So `web.yml` runs `npm run check`, `npm test` and `npm run qa` through the same
+script, which also counts as a crash a process killed by SIGILL, SIGTRAP, SIGBUS or SIGSEGV (exit 132 / 133 / 135 /
+139, npm's `signal SIG...` line, or V8's banner); a type error, a failing test or a QA finding exits 1 and is not
+retried. Not determined: whether the Node crashes come from the CPU (as the rustc ones appear to) or from that Node
+build; a crash that repeats on the retry, or one seen on hosted runners, points at Node and should be reported
+there.

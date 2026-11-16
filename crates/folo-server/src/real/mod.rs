@@ -343,6 +343,13 @@ impl RealStore {
         self
     }
 
+    /// Test support: one look of the sweeper of open external benchmark entries as if the clock read `now`: an entry
+    /// that got no part for [`RealStore::bench_open_timeout`] by then expires. Nothing else calls it.
+    #[doc(hidden)]
+    pub fn expire_bench_entries_at(&self, now: std::time::Instant) {
+        self.benches.expire_open_entries_at(now);
+    }
+
     /// Test support: while `on`, every benchmark model entry waits after its last pass, before it is graded (a
     /// stop can then land while it is graded). Nothing else turns it on.
     #[doc(hidden)]

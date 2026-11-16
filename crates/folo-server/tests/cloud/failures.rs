@@ -130,6 +130,42 @@ fn a_stop_that_finds_the_worker_gone_loses_the_run_instead_of_collecting() {
 }
 
 #[test]
+fn an_instance_lost_while_its_weights_are_collected_loses_the_run() {
+    no_gpu();
+    let t = TestDir::new("cloud-collect-lost");
+    let cloud = TestCloud::new(&t.join("workers"));
+    // The first checkpoint is copied and no other while the run trains: the weights asked for after it are the
+    // collection's.
+    let store =
+        plane(&t.join("home"), &cloud, Tuning { checkpoint_every: Duration::from_secs(3600), ..fast() });
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    cloud.hold_epochs(true);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
+    until("the first checkpoint copied", || run_of(&store, &run.id).cloud.and_then(|c| c.synced));
+    // Stopped, the worker's run ends, and the copy of its weights is under way when the instance dies.
+    cloud.gates.weights.store(true, Ordering::SeqCst);
+    store.stop_run(&run.id).unwrap();
+    until("the collection's copy", || (cloud.gates.weights_held.load(Ordering::SeqCst) > 0).then_some(()));
+    assert_eq!(phase(&run_of(&store, &run.id)), CloudPhase::Collecting);
+    cloud.kill(0);
+    cloud.gates.weights.store(false, Ordering::SeqCst);
+    // The copy fails on the proxy's 502, and the provider says the instance is gone: it is lost, not a failed copy.
+    let lost = finished(&store, &run.id);
+    assert_eq!(
+        (lost.status, lost.error_code.as_deref()),
+        (RunStatus::Failed, Some("cloud_instance_lost")),
+        "{:?}",
+        log_of(&store, &run.id)
+    );
+    let e = lost.error.clone().unwrap();
+    assert!(e.contains("copying weights/last.folo") && e.contains("resume the run"), "{e}");
+    let weights = t.join("home").join("runs").join(&run.id).join("weights");
+    assert!(weights.join("last.folo").is_file(), "the checkpoint copied before is kept, to resume from");
+    assert_eq!(lost.cloud.unwrap().ended_in, Some(CloudPhase::Collecting));
+}
+
+#[test]
 fn a_checkpoint_fetched_just_before_the_worker_is_lost_is_kept() {
     no_gpu();
     let t = TestDir::new("cloud-copy-lost");

@@ -6,6 +6,7 @@ on:
     paths:
       - web/**
       - design/**
+      - tools/ci-retry.sh
       - .github/workflows/web.yml
   push:
     branches: [main]
@@ -28,8 +29,19 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
-      - run: npm run check
-      - run: npm test
+      # Node on the self-hosted Linux runners (WSL on the unstable host, docs/CI.md) now and then dies of SIGTRAP or
+      # SIGILL ("# Fatal error in , line 0 / unreachable code", exit 133 / 132). tools/ci-retry.sh retries such a
+      # step once there, only on a crash signal: a type error or a failing test is never retried.
+      - name: check
+        shell: bash
+        env:
+          ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
+        run: bash ../tools/ci-retry.sh npm run check
+      - name: test
+        shell: bash
+        env:
+          ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
+        run: bash ../tools/ci-retry.sh npm test
   qa:
     # npm run qa (web/DESIGN_DIRECTION.md §6): builds the production bundle and checks every scene at tablet and
     # phone sizes, failing on a blank section, horizontal overflow, a covered control or a cut select. A state costs
@@ -74,6 +86,8 @@ jobs:
           if sudo -n true 2>/dev/null; then deps="--with-deps"; fi
           npx playwright-core install $deps --only-shell chromium
       - name: QA (production build; blank sections, overflow, covered controls)
+        shell: bash
         env:
           FOLO_QA_SHARD: ${{ matrix.shard }}/3
-        run: npm run qa
+          ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
+        run: bash ../tools/ci-retry.sh npm run qa

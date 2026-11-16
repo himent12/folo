@@ -134,7 +134,7 @@ impl Exec {
     }
 
     /// Where the provider says the instance is (`None` for a `remote` server, or when the provider does not answer).
-    fn instance_state(&self) -> Option<InstanceState> {
+    pub(super) fn instance_state(&self) -> Option<InstanceState> {
         let id = self.private.instance_id.as_ref()?;
         let provider_ref = self.core.ledger.get(id).ok()?.provider_ref?;
         self.c.provider.state(&self.c.connection.values(), &provider_ref).ok()

@@ -215,7 +215,7 @@ impl FoloApp {
                             this.toast(
                                 Tone::Neutral,
                                 "Copied the check command",
-                                Some(format!("Run `{cmd}` in a terminal to list the broken label files.").into()),
+                                Some(format!("Run `{cmd}` in a terminal to list the broken labels.").into()),
                                 cx,
                             );
                         }),

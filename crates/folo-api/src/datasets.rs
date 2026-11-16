@@ -96,7 +96,9 @@ pub struct DatasetStats {
     pub boxes: u64,
     /// Images with no boxes.
     pub empty_images: u64,
-    /// Label lines that could not be parsed or are out of range.
+    /// Images left out because of a broken label: for YOLO one per label file with a line that cannot be parsed or
+    /// is out of range (however many such lines it has), for COCO one per image with a broken annotation. Each
+    /// broken line is an error in `/issues`.
     pub broken_labels: u64,
     /// Boxes per class, indexed like `classes`.
     pub class_counts: Vec<u64>,

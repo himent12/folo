@@ -11,6 +11,7 @@ use folo_api::{
 };
 use folo_client::transfer::{self, Control, TransferError};
 use folo_client::{Client, encode};
+use folo_cloud::InstanceState;
 
 use crate::cloud::state::Outcome;
 use crate::cloud::worker;
@@ -270,6 +271,17 @@ impl Exec {
                 Err(TransferError::Stopped) => return Err(Halt::LetGo),
                 Err(e) => {
                     let file = if last { "last.folo" } else { "best.folo" };
+                    // An instance its provider says is gone is lost, whichever request noticed it: the run resumes
+                    // from the checkpoint copied before, as one lost while it trains does.
+                    if matches!(self.instance_state(), Some(InstanceState::Gone | InstanceState::Stopped)) {
+                        return Err(failed(
+                            "cloud_instance_lost",
+                            format!(
+                                "copying weights/{file}: {e}; its instance is gone, so the weights copied so far \
+                                 stay (resume the run to continue from them)"
+                            ),
+                        ));
+                    }
                     return Err(failed("cloud_sync_failed", format!("copying weights/{file}: {e}")));
                 }
             }

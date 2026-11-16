@@ -131,8 +131,8 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
     out.push({
       id: 'broken',
       severity: 'danger',
-      title: `${int(s.broken_labels)} broken label ${s.broken_labels === 1 ? 'file' : 'files'}`,
-      short: `${int(s.broken_labels)} broken label ${s.broken_labels === 1 ? 'file' : 'files'}`,
+      title: `${int(s.broken_labels)} ${s.broken_labels === 1 ? 'image' : 'images'} with broken labels`,
+      short: `${int(s.broken_labels)} ${s.broken_labels === 1 ? 'image' : 'images'} with broken labels`,
       tiny: `${int(s.broken_labels)} broken`,
       detail: 'These labels could not be parsed, so their images are skipped in training. Fix or delete them: this page updates by itself when the files change.',
       issues: 'error',

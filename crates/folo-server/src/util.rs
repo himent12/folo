@@ -243,14 +243,19 @@ fn first_per_id<T>(what: &str, sorted: Vec<(PathBuf, String, T)>) -> Vec<(PathBu
 /// before anything loads them, so the recovery a load does (closing what a previous process left active, written
 /// back) never rewrites a backup (review round 2). `readable` says, without writing anything, whether a record's
 /// bytes are one its loader takes (it parses, its version is known): in each group the readable records come first,
-/// in [`one_per_id`]'s order, so a damaged original does not hide an intact backup (review round 3); [`load_first`]
-/// loads the first of a group that loads (review round 4). A folder whose id cannot be read is a group of its own.
+/// so a damaged original does not hide an intact backup (review round 3), the record written most often first (a
+/// record's `saves`, 0 without one), so once a restart loaded a copy because the original did not load, the work
+/// saved to the copy is not shadowed by the original at the next restart, then in [`one_per_id`]'s order;
+/// [`load_first`] loads the first of a group that loads (review round 4). A folder whose id cannot be read is a
+/// group of its own.
 pub fn folders_by_id(root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) -> Vec<Vec<PathBuf>> {
     #[derive(serde::Deserialize)]
     struct Head {
         id: String,
+        #[serde(default)]
+        saves: u64,
     }
-    let mut found: Vec<(PathBuf, String, bool)> = std::fs::read_dir(root)
+    let mut found: Vec<(PathBuf, String, bool, u64)> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
@@ -260,14 +265,15 @@ pub fn folders_by_id(root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) 
             let bytes = std::fs::read(dir.join(file)).ok();
             let head = bytes.as_deref().and_then(|b| serde_json::from_slice::<Head>(b).ok());
             // No id: a key no id has (ids have no NUL), so it is kept and its loader logs it.
+            let saves = head.as_ref().map_or(0, |h| h.saves);
             let id = head.map_or_else(|| format!("\0{}", dir.display()), |h| h.id);
             let ok = bytes.as_deref().is_some_and(&readable);
-            (dir, id, ok)
+            (dir, id, ok, saves)
         })
         .collect();
-    found.sort_by_cached_key(|(dir, id, ok)| (!*ok, copy_order(dir, id)));
+    found.sort_by_cached_key(|(dir, id, ok, saves)| (!*ok, std::cmp::Reverse(*saves), copy_order(dir, id)));
     let (mut at, mut groups) = (std::collections::HashMap::new(), Vec::<Vec<PathBuf>>::new());
-    for (dir, id, _) in found {
+    for (dir, id, _, _) in found {
         let i = *at.entry(id).or_insert_with(|| {
             groups.push(Vec::new());
             groups.len() - 1

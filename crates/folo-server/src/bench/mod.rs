@@ -160,6 +160,13 @@ impl Benches {
         self.engine.open_timeout_ms.store(timeout.as_millis() as u64, Ordering::SeqCst);
     }
 
+    /// Test support: one look of the sweeper of open external entries as if the clock read `now`, so a test decides
+    /// which entries are past the timeout without racing the clock.
+    #[doc(hidden)]
+    pub fn expire_open_entries_at(&self, now: Instant) {
+        expire(&self.engine, &self.benches, now);
+    }
+
     /// Test support: while `on`, a model entry waits after its last pass, before it is graded.
     #[doc(hidden)]
     pub fn hold_entries(&self, on: bool) {
@@ -365,9 +372,15 @@ fn sweep(engine: &Engine, benches: &RwLock<Vec<Arc<Slot>>>) {
             continue;
         }
         last = Instant::now();
-        let slots = benches.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        for slot in slots {
-            external::expire(&slot, timeout);
-        }
+        expire(engine, benches, last);
+    }
+}
+
+/// One look of the sweeper, as if the clock read `now`.
+fn expire(engine: &Engine, benches: &RwLock<Vec<Arc<Slot>>>, now: Instant) {
+    let timeout = Duration::from_millis(engine.open_timeout_ms.load(Ordering::SeqCst));
+    let slots = benches.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    for slot in slots {
+        external::expire(&slot, timeout, now);
     }
 }

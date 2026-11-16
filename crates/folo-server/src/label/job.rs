@@ -63,6 +63,12 @@ pub struct JobFile {
     pub run: Option<LabelRun>,
     pub usage: LabelUsage,
     pub dataset_id: Option<String>,
+    /// How many times the job was written (0 in a file from before it was counted). Of two copies of a job folder,
+    /// the one written more often is loaded first (`util::folders_by_id`): after a restart loaded a copy because the
+    /// original could not be loaded, the work saved to the copy since is never shadowed by the original again.
+    /// Written by [`Job::save`] from [`Job`]'s own count.
+    #[serde(default, skip_serializing)]
+    pub saves: u64,
 }
 
 impl JobFile {
@@ -80,6 +86,7 @@ impl JobFile {
             run: None,
             usage: LabelUsage::default(),
             dataset_id: None,
+            saves: 0,
         }
     }
 }
@@ -242,6 +249,8 @@ pub struct Job {
     pub dir: PathBuf,
     state: Mutex<State>,
     events: broadcast::Sender<LabelEvent>,
+    /// `job.json`'s write count ([`JobFile::saves`]).
+    saves: std::sync::atomic::AtomicU64,
 }
 
 impl Job {
@@ -254,6 +263,7 @@ impl Job {
         Job {
             id: file.id.clone(),
             dir,
+            saves: file.saves.into(),
             state: Mutex::new(State { file, active: None, logs: lines, exporting: false, deleted: false }),
             events: broadcast::channel(EVENT_BUFFER).0,
         }
@@ -338,8 +348,17 @@ impl Job {
         if state.deleted {
             return Ok(());
         }
+        /// The file with its write count, which `JobFile` reads but does not write itself.
+        #[derive(Serialize)]
+        struct Saved<'a> {
+            #[serde(flatten)]
+            file: &'a JobFile,
+            saves: u64,
+        }
         let path = self.dir.join("job.json");
-        let bytes = serde_json::to_vec(&state.file).expect("jobs serialize");
+        // Under the state's lock (the caller holds `state`), so two saves never write their counts out of order.
+        let saves = self.saves.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let bytes = serde_json::to_vec(&Saved { file: &state.file, saves }).expect("jobs serialize");
         write_atomic(&path, &bytes).map_err(|e| Error::internal(format!("writing {}: {e}", path.display())))
     }
 
@@ -534,5 +553,42 @@ mod tests {
         assert!(state.active.as_ref().unwrap().waiting.is_empty());
         state.active.as_mut().unwrap().stopping = true;
         assert_eq!(state.job().status, LabelJobStatus::Stopping);
+    }
+
+    /// A restart that loaded the backup copy of a job because the original did not load (its recovery could not be
+    /// written back) saves the work to the copy; the next restart loads the copy again, not the original that sorts
+    /// first by name (x3-server, follow-up f3-server-ci-5).
+    #[test]
+    fn the_copy_written_last_is_loaded_after_the_original_failed_once() {
+        let t = folo_test_support::TestDir::new("label-job-saves");
+        let root = t.join("label");
+        let (original, copy) = (root.join("lb_1"), root.join("lb_1 - Copy"));
+        std::fs::create_dir_all(&original).unwrap();
+        let job =
+            Job::new(original.clone(), JobFile::new("lb_1".into(), "first".into(), vec![], String::new()));
+        job.save(&job.lock()).unwrap();
+        job.save(&job.lock()).unwrap();
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::copy(original.join("job.json"), copy.join("job.json")).unwrap();
+        let restart = |fails: Option<&Path>| {
+            let groups = crate::util::folders_by_id(&root, "job.json", Job::readable);
+            crate::util::load_first("labeling job", groups, |dir| match fails {
+                Some(f) if f == dir => Err("cannot write the recovery back"),
+                _ => Ok(Job::load(dir.to_path_buf()).unwrap()),
+            })
+        };
+        // Equal copies: the folder named after the id.
+        assert_eq!(restart(None)[0].dir, original);
+        // The original does not load once: the copy is loaded and the work goes on in it.
+        let loaded = restart(Some(&original)).remove(0);
+        assert_eq!(loaded.dir, copy);
+        loaded.lock().file.name = "renamed in the copy".into();
+        loaded.save(&loaded.lock()).unwrap();
+        // The next restart, where the original loads again, keeps the copy's work.
+        let again = restart(None).remove(0);
+        assert_eq!(
+            (again.dir.as_path(), again.lock().file.name.as_str()),
+            (copy.as_path(), "renamed in the copy")
+        );
     }
 }

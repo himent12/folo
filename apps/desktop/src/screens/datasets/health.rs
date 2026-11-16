@@ -71,7 +71,7 @@ pub fn health_checks(d: &Dataset, s: &DatasetStats, counts: Option<&IssueCounts>
     if s.broken_labels > 0 {
         push(
             Severity::Danger,
-            n_of(s.broken_labels, "broken label file", "broken label files"),
+            n_of(s.broken_labels, "image with broken labels", "images with broken labels"),
             "These labels could not be parsed, so their images are skipped in training. Fix or delete them.",
         );
         let kind = |k: &str| counts.and_then(|c| c.by_kind.get(k).copied()).unwrap_or(0);
@@ -309,7 +309,7 @@ mod tests {
         let shorts: Vec<&str> = items.iter().map(|f| f.short.as_str()).collect();
         // Most severe first; the broken files, the check's warnings, the empty class, the imbalance
         // (1,000 / 100 = 10×), the tiny boxes (40 %).
-        assert_eq!(items[0].short, "3 broken label files");
+        assert_eq!(items[0].short, "3 images with broken labels");
         assert!(
             shorts.contains(&"2 check warnings") && shorts.contains(&"1 class without boxes"),
             "{shorts:?}"

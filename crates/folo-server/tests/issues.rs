@@ -107,6 +107,43 @@ fn write_shapes(dir: &Path) {
     folo_data::synthetic::write_yolo(&cfg, dir, folo_data::ImageFormat::Png).unwrap();
 }
 
+/// `stats.broken_labels` counts images left out for a broken label (docs/API.md), one per broken label file however
+/// many broken lines it has, while `/issues` lists every broken line: a dataset where files, lines and kept images
+/// all differ (d1-datasets-3).
+#[tokio::test]
+async fn real_broken_labels_count_the_images_left_out_not_the_lines() {
+    let t = TestDir::new("issues-broken-count");
+    let (home, data) = (t.join("home"), t.join("shapes"));
+    write_shapes(&data);
+    let clean = folo_data::open(&data).unwrap().split_sizes().iter().sum::<usize>() as u64;
+    // Three broken lines (a class out of range, too few values, a box outside the image) beside a good one, and a
+    // second file with one broken line.
+    let three = "0 0.5 0.5 0.2 0.2\n42 0.5 0.5 0.1 0.1\n0 0.5 0.5\n0 1.5 1.5 0.2 0.2\n";
+    std::fs::write(data.join("labels/train/000001.txt"), three).unwrap();
+    std::fs::write(data.join("labels/train/000002.txt"), "42 0.5 0.5 0.1 0.1\n").unwrap();
+    let store = RealStore::open(home).recheck_every(Duration::ZERO);
+    let app = Server::new(Arc::new(store), Options::default()).router();
+    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data.to_str().unwrap() }))).await;
+    let stats = ds.stats.clone().unwrap();
+    assert_eq!(stats.broken_labels, 2, "two broken label files");
+    assert_eq!(ds.splits.train + ds.splits.val + ds.splits.test, clean - 2, "their two images are left out");
+    let errors: IssuePage =
+        ok(&app, get(&format!("/api/datasets/{}/issues?severity=error&limit=1000", ds.id))).await;
+    let mut lines: Vec<(&str, Option<u32>)> =
+        errors.issues.iter().map(|i| (i.file.as_str(), i.line)).collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        [
+            ("labels/train/000001.txt", Some(2)),
+            ("labels/train/000001.txt", Some(3)),
+            ("labels/train/000001.txt", Some(4)),
+            ("labels/train/000002.txt", Some(1)),
+        ],
+        "every broken line"
+    );
+}
+
 #[tokio::test]
 async fn real_issues_are_cached_and_refreshed() {
     let t = TestDir::new("issues-real");
