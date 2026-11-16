@@ -269,8 +269,8 @@ against the `fp32-strict` rows. The default-fp32 rows are what users actually ge
 
 The fourth round worked on accuracy only; nothing in it moves a speed row. A frozen teacher (`folo-s-coco`) runs on
 the same augmented batch as the folo-n student, and two terms pull the student's raw head outputs towards the
-teacher's: its class probabilities and its DFL box distributions at temperature T, weighted per anchor by the
-teacher's confidence. It is opt-in (`folo train --teacher`, #279, [docs/MODEL.md](MODEL.md) §8.9): without it
+teacher's: a KL to its class probabilities (no temperature, no per-anchor weight) and a KL to its DFL box
+distributions at temperature T, weighted per anchor by the teacher's confidence. It is opt-in (`folo train --teacher`, #279, [docs/MODEL.md](MODEL.md) §8.9): without it
 training is bit-identical to before, and inference, export and `.folo` files do not change; the configuration (class
 gain 0.5, DFL gain 1.5, T 4) was chosen on a proxy and then run once on full COCO
 ([notes/hill/r4-distill.md](notes/hill/r4-distill.md), which has the commands and the log of every number below).
@@ -301,17 +301,20 @@ Paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1000 resampl
 
 | difference | AP | 95% interval |
 |---|---:|---|
-| **fork - control: the teacher** | **+0.0052** | [+0.0032, +0.0075] |
+| **fork - control: the distillation recipe** | **+0.0052** | [+0.0032, +0.0075] |
 | control - v3 | +0.0112 | [+0.0075, +0.0148] |
 | fork - v3 | +0.0164 | [+0.0129, +0.0197] |
 
-The teacher's gain is a fifth of the proxy's (+0.027 over its matching control) and 8% of the control's gap to the
-teacher; it shows in every AP column.
+The recipe's gain is about a sixth of the proxy's against its defaults (+0.030; +0.027 against the matching control
+`cls1`) and 8% of the control's gap to the teacher; it shows in every AP column.
 
 **What is not shown.** One training seed per side: the intervals cover the sampling of the evaluation images, not
 the training seed. The fork had the teacher on epochs 33-64 only; a whole run with it from epoch 1 is not measured.
-Control - v3 compares two recipes that differ in optimizer, schedule length and starting point (v3 is SGD, 78
-epochs from v2's weights); it is not an ablation. The teacher was trained on train2017, the student's training set.
+Fork - control measures the whole recipe: the fork's supervised class gain stays 0.5 and the teacher's class term adds
+0.5, a total of 1.0 ([docs/MODEL.md](MODEL.md) §8.9), and full scale has no control at the same total class gain
+(the proxy's `cls1`). Control - v3 compares two recipes that differ in optimizer, schedule length and starting point
+(v3 is SGD: v2's 62 epochs from scratch, then 16 annealing epochs from v2's weights, 78 in all); it is not an
+ablation. The teacher was trained on train2017, the student's training set.
 The teacher's training cost is not measured cleanly (below). Nothing is published: the new weights are local files,
 and the downloadable folo-n is still v3 at 0.340.
 
@@ -322,7 +325,8 @@ blended class target (`loss.cls_gain=0.25` + `distill.cls_gain=0.25`, the total 
 
 **What it cost.** On the proxy, under the shared load of the full-COCO control, an epoch took 38.5 s with the teacher
 against 14.1 s without (528 against 1,898 img/s): about 2.7 times per epoch, not profiled. On full COCO the fork's
-epochs 33-64 took 19,519 s (about 5.4 GPU-hours) and the control's 11,211 s (about 3.1 h), on different days and each
+epochs 33-64 took 19,519 s of completed-epoch wall time (about 5.4 h, without the interrupted partial epochs) and
+the control's 11,211 s (about 3.1 h), on different days and each
 next to other lanes' jobs, CI runners and at times a game: that is not a cost ratio (in epochs 55-64 the fork's median
 epoch was shorter than the control's). No unloaded A/B was taken.
 

@@ -202,14 +202,19 @@ the design predicted does not show at this distance from the teacher.
 
 ## Full scale
 
-**On full COCO the teacher adds +0.0052 AP** (val2017, paired bootstrap over images, 95% [+0.0032, +0.0075]) when
-it trains the second half of a 64-epoch folo-n run.
+**On full COCO the distillation recipe adds +0.0052 AP** (val2017, paired bootstrap over images, 95% [+0.0032,
++0.0075]) when it trains the second half of a 64-epoch folo-n run. This is the whole recipe against the defaults:
+the fork's total class gain is 1.0 (supervised 0.5 plus the teacher's 0.5) against the control's 0.5, and unlike
+the proxy (`cls1`) full scale has no control at the same total class gain.
 
 The control is the full-COCO run `D:/folo-data/runs-hill4/coco/n-r5-ctl`: folo-n from scratch on train2017,
 `auto` rule 5 (MuSGD), 64 epochs, 640 px, batch 16 x accumulate 4, AMP, EMA, seed 0, origin/main 1436ad68. The fork
 `D:/folo-data/runs-hill4/coco/n-r5-kd-e32` is the control's epoch-32 checkpoint (the proposal's fork, taken at the
 half of the schedule instead of epoch 48) continued for epochs 33-64 with `--teacher D:/folo-data/runs-hill4/teachers/folo-s-coco.folo`
-(class gain 0.5, DFL gain 1.5, T 4; branch `vision/distill` 18008617):
+(class gain 0.5, DFL gain 1.5, T 4, as the run log `coco/logs/n-r5-kd-e32.out` and the fork's `config.json`
+record). The binary is recorded as built from branch `vision/distill` 18008617 (`bin/folo-kd.txt`, sha256
+58a814ea...); its `--version` prints the previous commit fb99dd5892cb, a stale version string not checked by a
+rebuild:
 ```
 folo train --resume D:/folo-data/runs-hill4/coco/n-r5-kd-e32/weights/last.folo \
   --teacher D:/folo-data/runs-hill4/teachers/folo-s-coco.folo --data D:/folo-data/coco --format coco \
@@ -271,7 +276,8 @@ below the control's (434 s), which only load explains. The proxy's 2.7x per epoc
 
 Logs: `D:/folo-data/runs-hill4/coco/eval/` (val logs, detections, the scripts), `coco/logs/final-*.log`; weights
 (not published) in `D:/folo-data/runs-hill4/weights/` with a README and SHA256SUMS. Leftovers: a whole run with
-the teacher from epoch 1 (the clean comparison, about 2-3 times the control's wall time); more seeds per side; `kd` (T = 1)
+the teacher from epoch 1 (the clean comparison; its full-scale overhead is not measured); a full-scale control at
+total class gain 1.0; more seeds per side; `kd` (T = 1)
 has one proxy seed, so T = 4 over T = 1 is not shown beyond seed 0; doubled gains were not tried; the cost split
 between the teacher forward and the loss path is not profiled; no unloaded speed A/B.
 
