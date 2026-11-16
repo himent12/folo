@@ -413,6 +413,7 @@ impl FoloApp {
             let Some((key, call)) = next else { return };
             let api = self.store.api.clone();
             let generation = self.backend_gen;
+            let attempt = self.store.images_px.attempt(&key);
             // Full-size images are bounded too: a 12000 px photo would otherwise hold 400 MB.
             let max_side = (key.kind == ImgKind::Full).then_some(ImageCache::FULL_MAX_SIDE);
             cx.spawn(async move |this, cx| {
@@ -444,15 +445,22 @@ impl FoloApp {
                         this.store.system = Load::Idle;
                         this.ensure_core(cx);
                     }
-                    let failed = img.is_none();
-                    let evicted = this.store.images_px.finish(key.clone(), img);
-                    for e in evicted {
-                        cx.drop_image(e, None);
-                    }
-                    // Any other failure (a body cut off, a file being rewritten) is asked for again a
-                    // few times on its own: nothing else would, as no outage was seen.
-                    if failed && let Some((wait, token)) = this.store.images_px.retry_delay(&key) {
-                        this.retry_image(key, wait, token, cx);
+                    // A slot evicted while its fetch was on its way (scrolled far past) has dropped
+                    // it; drawn again since, it is on a newer fetch, whose answer is the one it gets.
+                    let current = attempt.is_some() && this.store.images_px.attempt(&key) == attempt;
+                    if current {
+                        let failed = img.is_none();
+                        let evicted = this.store.images_px.finish(key.clone(), img);
+                        for e in evicted {
+                            cx.drop_image(e, None);
+                        }
+                        // Any other failure (a body cut off, a file being rewritten) is asked for again
+                        // a few times on its own: nothing else would, as no outage was seen.
+                        if failed && let Some((wait, token)) = this.store.images_px.retry_delay(&key) {
+                            this.retry_image(key, wait, token, cx);
+                        }
+                    } else if let Some(img) = img {
+                        cx.drop_image(img, None);
                     }
                     this.start_queued_images(cx);
                     cx.notify();

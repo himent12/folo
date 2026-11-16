@@ -179,19 +179,87 @@ fn a_thumbnail_failing_after_reconnected_ran_loads_again_by_its_retry_timer() {
 #[test]
 fn retry_or_a_reconnection_forgets_every_failed_image() {
     let (mut app, window) = open();
+    let broken = || crate::api::ApiError::new("decode_failed", "not an image");
+    let slots = |this: &FoloApp, ids: [usize; 2]| (slot(this, ids[0]), slot(this, ids[1]));
+    // Each recovery against failures of its own: a reconnection...
     drive(&mut app, window, |this, _, cx| {
-        fail(this, 0, crate::api::ApiError::new("decode_failed", "not an image"), cx);
-        fail(this, 1, crate::api::ApiError::new("decode_failed", "not an image"), cx);
+        fail(this, 0, broken(), cx);
+        fail(this, 1, broken(), cx);
     });
     drive(&mut app, window, |this, _, cx| {
-        assert_eq!((slot(this, 0), slot(this, 1)), ("failed", "failed"));
+        assert_eq!(slots(this, [0, 1]), ("failed", "failed"));
         this.reconnected(cx);
-        assert_eq!(slot(this, 0), "none", "reconnected() forgets them all");
-        this.retry_all(cx);
-        assert_eq!(slot(this, 1), "none", "so does Retry");
-        assert_eq!(draw(this, &[0, 1], cx), 2);
+        assert_eq!(slots(this, [0, 1]), ("none", "none"), "reconnected() forgets them all");
     });
-    assert_eq!(drive(&mut app, window, |this, _, _| (slot(this, 0), slot(this, 1))), ("ready", "ready"));
+    // ...then Retry, with two that failed after the reconnection.
+    drive(&mut app, window, |this, _, cx| {
+        fail(this, 2, broken(), cx);
+        fail(this, 3, broken(), cx);
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(slots(this, [2, 3]), ("failed", "failed"), "failed right before the Retry");
+        this.retry_all(cx);
+        assert_eq!(slots(this, [2, 3]), ("none", "none"), "Retry forgets them all");
+        assert_eq!(draw(this, &[0, 1, 2, 3], cx), 4);
+    });
+    let ready = drive(&mut app, window, |this, _, _| (0..4).all(|i| slot(this, i) == "ready"));
+    assert!(ready, "all four load again");
+}
+
+#[test]
+fn a_fetch_for_a_tile_evicted_and_drawn_again_does_not_undo_the_newer_fetch() {
+    // Tile A's fetch is on its way when the cache drops A (a fling far past); A is drawn again and
+    // fetched again, and the first fetch fails before the second answers.
+    let (mut app, window) = open();
+    let a = 0;
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                // Its failure lands only after this closure returns.
+                fail(this, a, crate::api::ApiError::new("bad_response", "cut off"), cx);
+                for i in 1..=ImageCache::BUDGET {
+                    assert!(this.store.images_px.begin(&key(i)));
+                    this.store.images_px.finish(key(i), None);
+                }
+                assert_eq!(slot(this, a), "none", "dropped while its fetch is on its way");
+                assert!(this.store.images_px.begin(&key(a)));
+                this.load_cached_image(
+                    key(a),
+                    move |_| {
+                        held.recv().ok();
+                        Ok(ImageData::Rgba { width: 1, height: 1, pixels: vec![0; 4] })
+                    },
+                    cx,
+                );
+                assert_eq!(this.store.image_queue.in_flight(), 2, "both fetches of A on their way");
+            })
+            .expect("the window is open")
+    });
+    let in_flight = |app: &mut folo_ui::HeadlessApp| {
+        app.update(|cx| window.update(cx, |this, _, _| this.store.image_queue.in_flight()).unwrap())
+    };
+    // The first fetch's failure lands; the second is held.
+    for _ in 0..1000 {
+        if in_flight(&mut app) == 1 {
+            break;
+        }
+        app.run_until_held(1);
+    }
+    assert_eq!(in_flight(&mut app), 1, "the first fetch answered");
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                assert_eq!(slot(this, a), "loading", "the old fetch's failure is not the new one's");
+                assert!(this.store.images_px.retry_delay(&key(a)).is_none(), "nor counted against it");
+            })
+            .unwrap()
+    });
+    release.send(()).unwrap();
+    app.run_until_idle();
+    assert_eq!(drive(&mut app, window, |this, _, _| slot(this, a)), "ready", "the newer fetch's pixels show");
+    wait(&mut app, 3_600_000);
+    assert_eq!(drive(&mut app, window, |this, _, _| slot(this, a)), "ready");
 }
 
 // The queue's seams with those retries.
