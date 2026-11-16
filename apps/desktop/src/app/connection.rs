@@ -110,6 +110,7 @@ impl FoloApp {
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).
         let mut textures = self.store.images_px.clear();
+        self.store.image_queue.clear();
         textures.extend(self.play_image.take().map(|p| p.image));
         cx.defer(move |cx| {
             for img in textures {

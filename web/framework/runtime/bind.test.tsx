@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import { bindable, defaults, effect, fade, flush, fly, For, Key, onWindow, Show, signal, splitProps, type Action, type Signal } from 'fw';
 import { render } from '../testing';
@@ -88,6 +90,45 @@ describe('bind:', () => {
     flush();
     expect(el.get()).toBeUndefined();
     unmount();
+  });
+});
+
+describe('bind:clientWidth', () => {
+  // stress x4-soak-3: the shared observer's callback was a closure made in the first caller's effect, so it kept that
+  // first element (on the Run page: the run chart, and through it the whole page left long ago) alive for good.
+  it('keeps no element alive once it has left the page, and still serves the elements after it', async () => {
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc') as () => void;
+    let notify: ResizeObserverCallback | undefined;
+    class FakeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        notify ??= cb;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeObserver);
+    try {
+      const width = signal(0);
+      const first = render(() => <div class="first" bind:clientWidth={width} />);
+      flush();
+      const gone = new WeakRef(first.container.firstElementChild!);
+      first.unmount();
+      const w2 = signal(0);
+      const second = render(() => <div class="second" bind:clientWidth={w2} />);
+      flush();
+      const el = second.container.querySelector('.second')!;
+      Object.defineProperty(el, 'clientWidth', { value: 321 });
+      notify!([{ target: el } as ResizeObserverEntry], {} as ResizeObserver);
+      expect(w2.get()).toBe(321);
+      second.unmount();
+      await new Promise((r) => setTimeout(r, 0));
+      gc();
+      expect(gone.deref()).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

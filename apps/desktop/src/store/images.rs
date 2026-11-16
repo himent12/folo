@@ -39,6 +39,11 @@ pub struct ImageCache {
     failures: HashMap<ImgKey, Failure>,
     /// The token the next failure gets (every failure a new one).
     next_token: u64,
+    /// The attempt each loading slot is on, a new one at every [`Self::begin`]: a fetch started for a
+    /// slot evicted and asked for again meanwhile (a grid flung far past and back) is not the new
+    /// slot's, and its answer is dropped ([`Self::attempt`]).
+    loading: HashMap<ImgKey, u64>,
+    next_attempt: u64,
 }
 
 /// An image's failures in a row, and its latest one's token: a retry timer set for an older failure
@@ -58,6 +63,8 @@ impl Default for ImageCache {
             byte_budget: Self::BYTE_BUDGET,
             failures: HashMap::new(),
             next_token: 0,
+            loading: HashMap::new(),
+            next_attempt: 0,
         }
     }
 }
@@ -76,6 +83,12 @@ impl ImageCache {
     /// holds the one on screen with the grid behind it, and the texture fits every GPU.
     pub const FULL_MAX_SIDE: u32 = 4096;
 
+    /// A cache holding at most `byte_budget` decoded bytes (tests of the app around it).
+    #[cfg(test)]
+    pub fn with_byte_budget(byte_budget: usize) -> Self {
+        Self { byte_budget, ..Default::default() }
+    }
+
     pub fn get(&self, k: &ImgKey) -> Option<&ImgSlot> {
         self.slots.get(k)
     }
@@ -87,13 +100,22 @@ impl ImageCache {
         }
         self.slots.insert(k.clone(), ImgSlot::Loading);
         self.order.push_back(k.clone());
+        self.loading.insert(k.clone(), self.next_attempt);
+        self.next_attempt += 1;
         true
+    }
+
+    /// The attempt `k` is loading on (`None` unless it is loading): a fetch carries the one its slot
+    /// had when it started, and its answer is that slot's only while this still says the same.
+    pub fn attempt(&self, k: &ImgKey) -> Option<u64> {
+        self.loading.get(k).copied()
     }
 
     /// Forget everything (a new data source); returns the decoded images to free on the GPU.
     pub fn clear(&mut self) -> Vec<Arc<RenderImage>> {
         self.order.clear();
         self.failures.clear();
+        self.loading.clear();
         self.bytes = 0;
         self.slots
             .drain()
@@ -111,6 +133,7 @@ impl ImageCache {
         if !matches!(self.slots.get(&k), Some(ImgSlot::Loading)) {
             return img.into_iter().collect();
         }
+        self.loading.remove(&k);
         self.bytes += img.as_deref().map_or(0, image_bytes);
         if img.is_some() {
             self.failures.remove(&k);
@@ -138,6 +161,7 @@ impl ImageCache {
                 continue;
             }
             self.failures.remove(&old);
+            self.loading.remove(&old);
             if let Some(ImgSlot::Ready(img)) = self.slots.remove(&old) {
                 self.bytes -= image_bytes(&img);
                 evicted.push(img);
@@ -278,6 +302,29 @@ mod tests {
         c.finish(key(ImageCache::BUDGET + 1), None);
         assert!(c.get(&key(1)).is_none() && c.get(&key(2)).is_some());
         assert_eq!(c.slots.len(), ImageCache::BUDGET);
+    }
+
+    #[test]
+    fn a_slot_evicted_and_asked_for_again_is_on_a_new_attempt() {
+        let mut c = ImageCache::default();
+        let key = |i: usize| ImgKey { dataset: "d".into(), image: i.to_string(), kind: ImgKind::Thumb };
+        assert!(c.begin(&key(0)));
+        let old = c.attempt(&key(0)).expect("loading");
+        // Evicted while its fetch is on its way, then drawn again: a second fetch, a new attempt.
+        for i in 1..=ImageCache::BUDGET {
+            assert!(c.begin(&key(i)));
+            c.finish(key(i), None);
+        }
+        assert!(c.get(&key(0)).is_none() && c.attempt(&key(0)).is_none());
+        assert!(c.begin(&key(0)));
+        let new = c.attempt(&key(0)).expect("loading again");
+        assert_ne!(old, new, "the first fetch's answer is told apart from the second's");
+        // Only loading slots have one: nothing piles up for the finished and evicted ones.
+        c.finish(key(0), Some(render(1, 1)));
+        assert_eq!((c.attempt(&key(0)), c.loading.len()), (None, 0));
+        assert!(c.begin(&key(ImageCache::BUDGET + 1)));
+        assert_eq!(c.loading.len(), 1);
+        assert!(c.clear().len() == 1 && c.loading.is_empty());
     }
 
     fn render(w: u32, h: u32) -> Arc<RenderImage> {
