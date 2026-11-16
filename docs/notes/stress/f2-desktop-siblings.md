@@ -94,8 +94,18 @@ painted-scene tests of `app/unavailable_tests.rs`; with `unavailable_mark` made 
 rev_tests 2: this report and the PR body now say the New run note is neutral. rev_user 4 (Studio's benchmark
 gallery, MatchView and Preview swallow image failures) is a Studio surface: deferred, SIBLING, below.
 
+## Re-review 1
+Two keyboard defects of the new Benchmarks Retry, fixed in 99f10150. (1) The focus ring was clipped: the bound
+frame itself had `overflow_hidden`, so the ring (a child 4 px outside it) was cut away. The frame now binds
+unclipped and only the image inside it clips, as Playground's samples do (`src/screens/bench/plan.rs:42-50`,
+`entry_images.rs:93-97`). (2) Enter retried, the Retry went, and its focus handle stopped being painted, so Tab
+started over at the page's first control. `FoloApp::passing_stop` (`src/app/focus.rs:28`) keeps a handle the Retry
+had tracked on the loading or loaded frame as no Tab stop, so Tab goes on from it. Test:
+`a_failed_bench_preview_is_marked_and_is_a_retry` now focuses the failed preview, checks its ring's edge quads
+cover the whole ring box, presses Enter (the image loads) and Tab (focus is on the next failed preview's Retry).
+
 ## Gates
-From `apps/desktop`, in a build slot, at 301afae3: `cargo fmt --all -- --check` OK, `cargo clippy --workspace
+From `apps/desktop`, in a build slot, at 99f10150: `cargo fmt --all -- --check` OK, `cargo clippy --workspace
 --all-targets -- -D warnings` OK, `cargo test --workspace` OK; `bash tools/file-size.sh` OK. No `cfg(unix)` code was
 touched.
 
