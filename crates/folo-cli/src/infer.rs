@@ -318,7 +318,7 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
     let (tmp, mut f) = folo_nn::io::safetensors::create_temp_beside(dst).map_err(|e| e.to_string())?;
     let r = f.write_all(bytes).and_then(|_| f.sync_all()).and_then(|_| {
         drop(f);
-        std::fs::rename(&tmp, dst)
+        folo_nn::io::rename_over(&tmp, dst)
     });
     if let Err(e) = r {
         let _ = std::fs::remove_file(&tmp);

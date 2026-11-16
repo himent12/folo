@@ -392,11 +392,22 @@ pub fn create_temp_beside(path: &Path) -> Result<(std::path::PathBuf, std::fs::F
 }
 
 /// [`write`] to `path` atomically: the bytes go to a fresh temporary file next to it ([`create_temp_beside`]),
-/// which is then renamed over `path`.
+/// which is then renamed over `path` ([`rename_over`](super::rename_over): retried for a while when another
+/// program holds `path` open on Windows).
 pub fn write_file(
     path: &Path,
     metadata: Option<&BTreeMap<String, String>>,
     tensors: &[(String, Tensor)],
+) -> Result<()> {
+    write_file_with(path, metadata, tensors, super::RenameRetry::DEFAULT)
+}
+
+/// [`write_file`] with the rename's retry given (tests shorten it).
+pub(crate) fn write_file_with(
+    path: &Path,
+    metadata: Option<&BTreeMap<String, String>>,
+    tensors: &[(String, Tensor)],
+    retry: super::RenameRetry,
 ) -> Result<()> {
     let (tmp, f) = create_temp_beside(path)?;
     let res = (|| {
@@ -407,7 +418,7 @@ pub fn write_file(
             let f = w.into_inner().map_err(|e| Error::io(&tmp, e.into_error()))?;
             f.sync_all().map_err(|e| Error::io(&tmp, e))?;
         }
-        std::fs::rename(&tmp, path).map_err(|e| Error::io(path, e))
+        super::rename_over_with(&tmp, path, retry).map(drop).map_err(|e| Error::io(path, e))
     })();
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);

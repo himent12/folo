@@ -51,7 +51,7 @@ impl ServeLock {
         // Whole or not at all for a reader: written beside it, then renamed over it.
         let tmp = self.info.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec(&body).expect("json"))?;
-        std::fs::rename(&tmp, &self.info)
+        folo_nn::io::rename_over(&tmp, &self.info)
     }
 }
 

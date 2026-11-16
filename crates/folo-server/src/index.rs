@@ -765,7 +765,9 @@ pub fn read_image_with(
 }
 
 /// Writes `bytes` to a unique temporary file next to `path`, then renames it over `path`, so readers never see a
-/// partial file (concurrent writers of the same content are harmless).
+/// partial file (concurrent writers of the same content are harmless). A `path` another program holds open is
+/// waited for only [briefly](folo_nn::io::RenameRetry::BRIEF): the store's files are written under the locks of
+/// the state they persist (a run's `run.json` under its run's), which a long wait would stall.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
@@ -779,10 +781,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    folo_nn::io::rename_over_with(&tmp, path, STORE_RETRY).map(drop).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }
+
+/// How [`write_atomic`] waits for a held file, per write: an operation that makes several writes under one lock (a
+/// dataset registration makes three) may hold it for that many budgets.
+const STORE_RETRY: folo_nn::io::RenameRetry = folo_nn::io::RenameRetry::BRIEF;
 
 #[cfg(test)]
 mod tests {
@@ -791,6 +797,33 @@ mod tests {
 
     fn tmp(tag: &str) -> TestDir {
         TestDir::new(&format!("index-{tag}"))
+    }
+
+    /// Store writes (run under locks) wait briefly for a held file: checked on the policy, not timed.
+    #[test]
+    fn store_writes_wait_briefly_for_a_held_file() {
+        assert_eq!(STORE_RETRY, folo_nn::io::RenameRetry::BRIEF);
+        assert!(STORE_RETRY.budget <= std::time::Duration::from_millis(250), "{STORE_RETRY:?}");
+    }
+
+    /// A store write over a file held open (as Python's `open()` does) gives up, with a watchdog far above any
+    /// budget, leaving the old content and no temporary file.
+    #[cfg(windows)]
+    #[test]
+    fn a_store_write_gives_up_on_a_file_another_program_holds() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tmp("held");
+        let path = dir.join("run.json");
+        write_atomic(&path, b"old").unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
+        let (done, result) = std::sync::mpsc::channel();
+        let p = path.clone();
+        let _ = std::thread::spawn(move || done.send(write_atomic(&p, b"new").is_err()));
+        let failed = result.recv_timeout(std::time::Duration::from_secs(60)).expect("gave up within 60 s");
+        assert!(failed, "the write over a held file succeeded");
+        drop(held);
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no temporary file stays");
     }
 
     #[test]

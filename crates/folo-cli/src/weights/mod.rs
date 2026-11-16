@@ -169,7 +169,7 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
         folo_nn::io::ModelFile::open(&file)
             .map_err(|e| CliError::new(ExitCode::Runtime, "invalid_weights", format!("{}: {e}", p.asset)))?;
         let _ = std::fs::remove_file(&dest);
-        std::fs::rename(&file, &dest)
+        folo_nn::io::rename_over(&file, &dest)
             .map_err(|e| io(&format!("cannot move into {}", folo_api::json::path(&dest)), e))?;
         Ok((got, via))
     })();

@@ -1,6 +1,7 @@
 //! Mirroring the worker's run into the local run folder (history, samples, status, checkpoint copies) and
 //! collecting its weights at the end.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -143,7 +144,7 @@ impl Exec {
         };
         // This thread, which holds the run, is the only one that writes `weights/last.folo`.
         let placed = fetched.and_then(|()| {
-            std::fs::rename(&copying.staged, self.dir.join("weights").join("last.folo"))
+            folo_nn::io::rename_over(&copying.staged, &self.dir.join("weights").join("last.folo"))
                 .map_err(TransferError::Io)
         });
         match placed {
@@ -236,8 +237,14 @@ impl Exec {
         };
         let stop = || self.core.halt.is_on();
         let mut ctl = Control { progress: &mut progress, stop: &stop, backoff: transfer::FIRST_BACKOFF };
-        match transfer::download(client, &path, &weights.join(file), &mut ctl) {
-            Ok(_) => {}
+        // Fetched into a staging file nothing else opens, then put in place with the retry (as `reap_copy` does): a
+        // program reading the local `last.folo` at this moment must not fail the run's sync. A process killed
+        // meanwhile leaves a `.download` that `transfer::remove_partial` clears when the run is next followed.
+        let (staged, dest) = (weights.join(format!(".{file}.final.download")), weights.join(file));
+        let placed = transfer::download(client, &path, &staged, &mut ctl)
+            .and_then(|_| publish(&staged, &dest, &mut || {}).map_err(TransferError::Io));
+        match placed {
+            Ok(()) => {}
             Err(TransferError::Failed(e)) if e.code() == "model_not_found" => return Ok(false),
             Err(e) => return Err(e),
         }
@@ -283,5 +290,78 @@ impl Exec {
             self.entry.log(LogLevel::Info, format!("the time limit of {} ended the run", self.hours()));
         }
         Ok(outcome)
+    }
+}
+
+/// Puts the finished download `staged` in place of `dest` in the same folder, waiting for a program that holds
+/// `dest` open ([`folo_nn::io::rename_over`]; `retrying` is called after each failed attempt that is tried again).
+/// `staged` is gone either way: a failed rename removes it.
+fn publish(staged: &Path, dest: &Path, retrying: &mut dyn FnMut()) -> std::io::Result<()> {
+    let placed = folo_nn::io::rename_over_observed(staged, dest, folo_nn::io::RenameRetry::DEFAULT, retrying);
+    if placed.is_err() {
+        let _ = std::fs::remove_file(staged);
+    }
+    placed.map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use folo_test_support::TestDir;
+
+    use super::publish;
+
+    /// The names in `dir`, sorted (a staging file left behind shows up here).
+    fn names(dir: &TestDir) -> Vec<String> {
+        let mut n: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        n.sort();
+        n
+    }
+
+    #[test]
+    fn a_staged_copy_replaces_the_checkpoint_and_leaves_nothing_behind() {
+        let dir = TestDir::new("cloud-publish");
+        let (staged, dest) = (dir.join(".last.folo.final.download"), dir.join("last.folo"));
+        std::fs::write(&dest, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        publish(&staged, &dest, &mut || {}).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert_eq!(names(&dir), ["last.folo"]);
+    }
+
+    #[test]
+    fn a_staged_copy_that_cannot_be_put_in_place_is_removed() {
+        let dir = TestDir::new("cloud-publish-fail");
+        let (staged, dest) = (dir.join(".last.folo.final.download"), dir.join("last.folo"));
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        assert!(publish(&staged, &dest, &mut || {}).is_err());
+        assert_eq!(names(&dir), ["last.folo"]);
+        assert!(dest.is_dir());
+    }
+
+    /// A program that has the local `last.folo` open (shares reading and writing, not deleting: what Python's
+    /// `open()` does) lets go only once an attempt has failed, so a copy that renames straight over the held file
+    /// fails this every time, however the threads are scheduled.
+    #[cfg(windows)]
+    #[test]
+    fn a_staged_copy_waits_for_a_program_reading_the_checkpoint() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = TestDir::new("cloud-publish-held");
+        let (staged, dest) = (dir.join(".last.folo.final.download"), dir.join("last.folo"));
+        std::fs::write(&dest, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        let mut held = Some(std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&dest).unwrap());
+        let mut retries = 0;
+        publish(&staged, &dest, &mut || {
+            retries += 1;
+            held = None;
+        })
+        .unwrap();
+        assert!(retries >= 1 && held.is_none(), "the first attempt, with the file held, did not fail");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert_eq!(names(&dir), ["last.folo"]);
     }
 }

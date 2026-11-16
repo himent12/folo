@@ -65,6 +65,9 @@ NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision / 
   statistics restored.
 - **After every epoch:** validation of the EMA model with `metrics::Evaluator`, fitness mAP@0.5:0.95, `last.folo` /
   `best.folo` checkpoints (complete FORMAT.md state, atomic), early stopping. Resume from a checkpoint is bit-exact.
+  On Windows, where the rename over `last.folo` fails while another program (a script, a virus scan) has the file
+  open, it is retried for up to 10 s before the run fails with an error saying another program may hold the file
+  or its permissions may not allow replacing it.
 - **Events** (`status`, rate-limited `step`, `epoch`, `log`: the API.md payloads as `folo_api::RunEvent`) go to a
   callback and to the run's `metrics.jsonl`; the CLI's progress view, `--json` and the server consume them.
 - **Devices:** the device is a parameter. On a GPU (`place_model` moves the model; optimizer, EMA and gradient
