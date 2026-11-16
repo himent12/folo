@@ -225,15 +225,19 @@ type SizeKey = 'clientWidth' | 'clientHeight' | 'offsetWidth' | 'offsetHeight';
 let observer: ResizeObserver | undefined;
 const watchers = new WeakMap<Element, Set<() => void>>();
 
+// The shared observer's callback lives out here, not in bindSize: a closure made there would keep the first bound
+// element (and its whole tree, long after it left the page) alive for as long as the observer lives.
+function notifySize(entries: ResizeObserverEntry[]) {
+  for (const entry of entries) for (const fn of watchers.get(entry.target) ?? []) fn();
+}
+
 /** Internal: `bind:clientWidth={sig}` and co. (read-only), via a shared ResizeObserver, as Svelte does. */
 export function bindSize(el: Element, key: SizeKey, sig: { set(v: number): void }): void {
   const update = () => sig.set((el as HTMLElement)[key]);
   effectNow(() => {
     untrack(update);
     if (typeof ResizeObserver === 'undefined') return;
-    observer ??= new ResizeObserver((entries) => {
-      for (const entry of entries) for (const fn of watchers.get(entry.target) ?? []) fn();
-    });
+      observer ??= new ResizeObserver(notifySize);
     let set = watchers.get(el);
     if (set === undefined) {
       watchers.set(el, (set = new Set()));

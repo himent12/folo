@@ -14,6 +14,8 @@ mod drag;
 mod focus;
 mod forms;
 #[cfg(test)]
+mod image_tests;
+#[cfg(test)]
 mod list_tests;
 mod lists;
 mod navigation;
