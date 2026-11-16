@@ -26,4 +26,4 @@ pub use file::{
     LoadOptions, LoadReport, ModelFile, Namespace, Purpose, SkipReason, Skipped, Source, is_class_output,
 };
 pub use meta::{FORMAT_VERSION, FileKind, FloatDType, Metadata, Metrics, ModelConfig, scale_row};
-pub use replace::{RenameRetry, rename_over, rename_over_with};
+pub use replace::{RenameRetry, rename_over, rename_over_observed, rename_over_with};

@@ -62,9 +62,9 @@ pub fn rename_over_with(tmp: &Path, path: &Path, retry: RenameRetry) -> io::Resu
     rename_over_observed(tmp, path, retry, &mut || {})
 }
 
-/// [`rename_over_with`], calling `retrying` after every failed attempt that is tried again, before the wait (tests
-/// let go of the file there, so they know a first attempt failed).
-fn rename_over_observed(
+/// [`rename_over_with`], calling `retrying` after every failed attempt that is tried again, before the wait (tests,
+/// here and in callers' crates, let go of the file there, so they know a first attempt failed).
+pub fn rename_over_observed(
     tmp: &Path,
     path: &Path,
     retry: RenameRetry,
