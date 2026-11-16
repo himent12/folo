@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // A run's KPI strip and its four charts (design/UNIFIED.md §4 Run): the live strip in its first minute (runs F14: the
 // epoch in progress, the start's phase, no time left until it has settled), a history that failed to load (one error,
-// one Retry), a run that detected nothing yet (said in words), and the one cursor the four charts share.
+// one Retry), a run that detected nothing yet (said in words), and a cursor that shows on the chart it is on only.
 import { flush as flushSync, tick } from 'fw';
 import { render } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -334,7 +334,7 @@ describe('the four run charts', () => {
     done.c.unmount();
   });
 
-  it('share one cursor: arrowing through one reads every one', async () => {
+  it('keep each cursor to its own chart: arrowing through one reads that one only', async () => {
     // happy-dom lays nothing out: every plot is 600 px wide from its first read.
     const proto = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
     Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
@@ -342,7 +342,7 @@ describe('the four run charts', () => {
       get: () => 600,
     });
     try {
-      const { c, model } = show(
+      const { c } = show(
         {
           ...base,
           status: 'completed',
@@ -360,8 +360,8 @@ describe('the four run charts', () => {
       svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
       flushSync();
       await tick();
-      expect(model.cursor.get()).not.toBeNull();
-      for (const id of ['chart-map', 'chart-loss', 'chart-pr', 'chart-lr']) expect(target.querySelector(`#${id} line.cursor`), id).not.toBeNull();
+      expect(target.querySelector('#chart-map line.cursor')).not.toBeNull();
+      for (const id of ['chart-loss', 'chart-pr', 'chart-lr']) expect(target.querySelector(`#${id} line.cursor`), id).toBeNull();
       c.unmount();
     } finally {
       if (proto) Object.defineProperty(HTMLElement.prototype, 'clientWidth', proto);

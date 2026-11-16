@@ -104,7 +104,7 @@ now. *From Studio → Desktop* (it drew the best as a lime dot, which read as th
 fixed 0–1 with the top third empty; an axis zoomed under 0.25 says so. *From Studio → Desktop.* Ticks are `xs`
 Geist, tabular.
 
-**X axis.** A run's charts share one x axis and one cursor. While a run is live the axis is the planned run, the
+**X axis.** A run's charts share one x axis; the cursor shows on the chart under the pointer only (or, stepped with the arrow keys in Desktop, on the first chart), and the other charts and their legends keep their latest values. While a run is live the axis is the planned run, the
 part not trained yet shaded, with the ETA over the boundary; "So far / All N" in the first chart's header fits
 the axis to the epochs trained, for all of the page's charts. *Planned axis from Desktop → Studio (its default
 was So far); the switch from Studio → Desktop.*

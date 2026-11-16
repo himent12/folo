@@ -110,6 +110,7 @@ impl FoloApp {
         }
         self.page_scroll.set_offset(folo_ui::point(px(0.), px(0.)));
         self.chart_hover = None;
+        self.chart_hover_on = None;
         self.export_open = false;
         self.pr_pin = None;
         self.pr_focus = None;

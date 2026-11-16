@@ -135,7 +135,7 @@ export default function Run() {
    */
   const historyError = computed(() => (run.get() ? live.error : undefined));
   const retryHistory = () => live.retry();
-  // What the KPI strip and the four charts read, once for all of them: their series, the one x axis and the one cursor.
+  // What the KPI strip and the four charts read, once for all of them: their series and the one x axis.
   const model = new RunModel({
     get run() {
       return live.run;

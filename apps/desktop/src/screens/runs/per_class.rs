@@ -258,9 +258,11 @@ impl FoloApp {
             }))
             .overflow_y_scroll()
             .track_scroll(&scroll)
-            // Beside the samples the list takes their height (its own adds none to the row);
-            // stacked it stops at 360 px.
-            .when(beside, |d| d.flex_1().flex_basis(px(0.)).min_h(px(0.)))
+            // Beside the samples the list takes their height, but never less than its first
+            // `BESIDE_ROWS` rows: beside a short samples panel (no images yet) the row grows so
+            // every class of a small dataset shows whole, not one row and a sliver. Stacked it
+            // stops at 360 px.
+            .when(beside, |d| d.flex_1().flex_basis(px(0.)).min_h(px(beside_min_h(rows.len()))))
             .when(!beside, |d| d.max_h(px(360.)))
             .children(rows.iter().map(row));
         div()
@@ -278,6 +280,14 @@ impl FoloApp {
 
 /// A class row's height.
 const ROW: f32 = 32.;
+
+/// The rows the list shows at least beside the samples; more scroll inside it.
+const BESIDE_ROWS: usize = 8;
+
+/// The least height of the list beside the samples, px: its rows up to `BESIDE_ROWS`, whole.
+fn beside_min_h(rows: usize) -> f32 {
+    rows.min(BESIDE_ROWS) as f32 * ROW
+}
 
 #[cfg(test)]
 mod tests {
@@ -333,6 +343,15 @@ mod tests {
         };
         assert_eq!(e, last);
         assert!(!rows.is_empty());
+    }
+
+    #[test]
+    fn beside_the_samples_a_small_datasets_classes_all_show_whole() {
+        // Three classes: three whole rows, however short the samples panel beside them.
+        assert_eq!(beside_min_h(3), 3. * ROW);
+        assert_eq!(beside_min_h(0), 0.);
+        // Eighty: the first eight, the rest scroll.
+        assert_eq!(beside_min_h(80), BESIDE_ROWS as f32 * ROW);
     }
 
     #[test]

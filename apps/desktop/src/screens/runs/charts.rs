@@ -14,6 +14,9 @@ use crate::charts::{End, HoverFn, LineChart, Marker, Series, line_chart};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
+/// The run chart a cursor stepped with the keys shows on while no pointer is on a chart.
+const FIRST_CHART: &str = "run-map";
+
 /// The loss lines' smoothing: Studio's default (`DEFAULT_SMOOTHING`, the same debiased EMA), so the
 /// two front ends show the same smoothed loss.
 const LOSS_EMA: f32 = 0.98;
@@ -38,7 +41,11 @@ impl FoloApp {
             RunStatus::Queued => End::None,
         };
         let trail = end.trailing();
-        let hover = self.chart_hover;
+        // The cursor shows on one chart only, the one the pointer is on (a cursor stepped with the
+        // keys, no pointer on a chart, on the first); the other charts and their legends stay at
+        // the latest point.
+        let (cursor, hover_on) = (self.chart_hover, self.chart_hover_on);
+        let hover_of = move |id: &str| cursor_on(cursor, hover_on, id);
         let (split, map_title) = (self.eval_split(r), self.map_title(r));
         // The P/R chart's operating point follows the cursor: each epoch's own best-F1 confidence.
         let pr_conf = {
@@ -64,22 +71,29 @@ impl FoloApp {
                 .unwrap_or_default();
             let total = self.run_x_total(r);
             let xs: Vec<(f32, f32)> = epochs.iter().map(|e| (e.0, 0.)).collect();
-            let at = match hover {
+            let at = match hover_of("run-pr") {
                 Some(f) => crate::charts::nearest(&xs, total * f),
                 None => epochs.len().checked_sub(1),
             };
             at.and_then(|i| epochs[i].1)
         };
         let view = cx.entity().downgrade();
-        let on_hover: HoverFn = Rc::new(move |f, _, cx| {
-            view.update(cx, |this, cx| {
-                if this.chart_hover != f {
-                    this.chart_hover = f;
-                    cx.notify();
-                }
+        // Each chart reports for itself: the pointer on it takes the cursor there; leaving it (or a
+        // move outside its plot) clears the cursor only if it was this chart's, so a late leave of
+        // one chart never clears the next one's.
+        let on_hover = |id: &'static str| -> HoverFn {
+            let view = view.clone();
+            Rc::new(move |f, _, cx| {
+                view.update(cx, |this, cx| {
+                    let Some(next) = hovered(this.chart_hover_on, id, f) else { return };
+                    if (this.chart_hover, this.chart_hover_on) != next {
+                        (this.chart_hover, this.chart_hover_on) = next;
+                        cx.notify();
+                    }
+                })
+                .ok();
             })
-            .ok();
-        });
+        };
         // The planned run while it trains (and once it completed); fitted to the epochs trained
         // for a run cut short, or when "So far" is picked.
         let total = self.run_x_total(r);
@@ -96,11 +110,11 @@ impl FoloApp {
         // epoch back from its step.
         let spe = self.store.run_data.get(&r.id).and_then(|x| x.ready()).map_or(r.steps_per_epoch, |d| d.spe);
         let cursor_epoch: Rc<dyn Fn(f32) -> String> = Rc::new(move |x| epoch_at(x, spe));
-        let base = |id: &str, series: Vec<Series>, height: f32| {
+        let base = |id: &'static str, series: Vec<Series>, height: f32| {
             let mut c = LineChart::new(id.to_string(), series);
             c.x_range = Some((0., total));
-            c.hover = hover;
-            c.on_hover = Some(on_hover.clone());
+            c.hover = hover_of(id);
+            c.on_hover = Some(on_hover(id));
             c.height = height;
             c.min_lanes = 1;
             c.x_int = true;
@@ -212,9 +226,9 @@ impl FoloApp {
         lr.pow_caption = false;
         lr.y_ticks = 3;
 
-        // Legend values: at the shared cursor, else the latest point.
-        let v = |pts: &[(f32, f32)], fmt: fn(f32) -> String| {
-            crate::charts::value_at(pts, hover, 0., total).map(fmt)
+        // Legend values: at the cursor on their own chart, else the latest point.
+        let v = |id: &str, pts: &[(f32, f32)], fmt: fn(f32) -> String| {
+            crate::charts::value_at(pts, hover_of(id), 0., total).map(fmt)
         };
         let f3v: fn(f32) -> String = |x| format!("{x:.3}");
         // Loss parts are toggles; their values are the smoothed curve's, like the lines.
@@ -224,7 +238,8 @@ impl FoloApp {
             let on = self.loss_parts[i];
             let key = format!("loss-part-{name}");
             let color = colors[i];
-            let value = on.then(|| v(&crate::charts::smoothed(&d.loss[i], LOSS_EMA), f3v)).flatten();
+            let value =
+                on.then(|| v("run-loss", &crate::charts::smoothed(&d.loss[i], LOSS_EMA), f3v)).flatten();
             let el = div()
                 .id(SharedString::from(key.clone()))
                 .h(px(20.))
@@ -299,9 +314,9 @@ impl FoloApp {
             .child(loss_help)
             .into_any_element();
         let mut map_items = vec![
-            crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95, f3v))
+            crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v("run-map", &d.map50_95, f3v))
                 .into_any_element(),
-            crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v(&d.map50, f3v))
+            crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v("run-map", &d.map50, f3v))
                 .into_any_element(),
         ];
         if let Some(b) = &r.best {
@@ -314,14 +329,27 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(12.))
-            .child(crate::ui::legend_value(&t, "precision", t.chart_series[2], false, v(&d.precision, f3v)))
-            .child(crate::ui::legend_value(&t, "recall", t.chart_series[3], true, v(&d.recall, f3v)))
+            .child(crate::ui::legend_value(
+                &t,
+                "precision",
+                t.chart_series[2],
+                false,
+                v("run-pr", &d.precision, f3v),
+            ))
+            .child(crate::ui::legend_value(
+                &t,
+                "recall",
+                t.chart_series[3],
+                true,
+                v("run-pr", &d.recall, f3v),
+            ))
             .into_any_element();
         // The axis's power of ten ("× 10⁻³", in the caption, once); the legend value in normalised
         // notation as Studio writes it ("1.43×10⁻⁵", not "0.014×10⁻³"), so it reads on its own.
         let lr_pow = crate::charts::axis_pow(0., lr_top, 3);
         // In f64: a tiny valid rate would overflow 10^-p in f32.
-        let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| lr_sci(x as f64));
+        let lr_value =
+            crate::charts::value_at(&d.lr, hover_of("run-lr"), 0., total).map(|x| lr_sci(x as f64));
         let lr_legend =
             crate::ui::legend_value(&t, "lr", t.text_tertiary, false, lr_value).into_any_element();
         // What the run actually trains with (Run.resolved, once the trainer is built): the
@@ -348,8 +376,10 @@ impl FoloApp {
         };
         // The total as Studio's Loss tab says it: the step's raw reading and the smoothed line's
         // value, at the cursor or the latest step, so the two numbers never seem to disagree.
-        let loss_caption = match (v(&d.loss[3], f3v), v(&crate::charts::smoothed(&d.loss[3], LOSS_EMA), f3v))
-        {
+        let loss_caption = match (
+            v("run-loss", &d.loss[3], f3v),
+            v("run-loss", &crate::charts::smoothed(&d.loss[3], LOSS_EMA), f3v),
+        ) {
             (Some(raw), Some(smooth)) => format!("raw {raw} · smoothed {smooth} · log scale"),
             _ => "log scale · EMA 0.98".to_string(),
         };
@@ -469,6 +499,28 @@ impl FoloApp {
     }
 }
 
+/// The cursor chart `id` draws: the cursor (`cursor`, a fraction of the x range) when `on` is this
+/// chart, or when no pointer is on a chart (`on` None, a cursor stepped with the keys) and this is
+/// the first chart; else none.
+fn cursor_on(cursor: Option<f32>, on: Option<&'static str>, id: &str) -> Option<f32> {
+    cursor.filter(|_| on.unwrap_or(FIRST_CHART) == id)
+}
+
+/// The cursor and the chart it is on after chart `id` reports the pointer at `f` (None: off its
+/// plot, or gone), given the chart the cursor is on now; None to leave both as they are (another
+/// chart's cursor, which a late leave of this one must not clear).
+fn hovered(
+    on: Option<&'static str>,
+    id: &'static str,
+    f: Option<f32>,
+) -> Option<(Option<f32>, Option<&'static str>)> {
+    match f {
+        Some(_) => Some((f, Some(id))),
+        None if on.is_none_or(|on| on == id) => Some((None, None)),
+        None => None,
+    }
+}
+
 /// A log axis over positive values `lo..=hi`, from the power of two at or below `lo` to the one at
 /// or above `hi` (5 % headroom), at least one doubling tall. No positive data: 0.5 to 4.
 fn log_range(lo: f32, hi: f32) -> (f32, f32) {
@@ -536,6 +588,27 @@ fn fitted_total(kept: u32, last_step_epoch: Option<u32>) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_cursor_shows_on_the_chart_the_pointer_is_on_only() {
+        use super::{cursor_on, hovered};
+        // The pointer on Training loss: only that chart draws the cursor.
+        let (cursor, on) = hovered(None, "run-loss", Some(0.4)).unwrap();
+        assert_eq!(cursor_on(cursor, on, "run-loss"), Some(0.4));
+        for other in ["run-map", "run-pr", "run-lr"] {
+            assert_eq!(cursor_on(cursor, on, other), None, "{other}");
+        }
+        // Moving to Validation mAP takes the cursor there; Training loss's late leave keeps it.
+        let (cursor, on) = hovered(on, "run-map", Some(0.7)).unwrap();
+        assert_eq!(hovered(on, "run-loss", None), None);
+        assert_eq!(cursor_on(cursor, on, "run-map"), Some(0.7));
+        assert_eq!(cursor_on(cursor, on, "run-loss"), None);
+        // Leaving the chart it is on clears it.
+        assert_eq!(hovered(on, "run-map", None), Some((None, None)));
+        // A cursor stepped with the keys (no pointer on a chart) shows on the first chart.
+        assert_eq!(cursor_on(Some(0.5), None, "run-map"), Some(0.5));
+        assert_eq!(cursor_on(Some(0.5), None, "run-lr"), None);
+    }
+
     #[test]
     fn a_fitted_axis_takes_the_highest_finite_value() {
         let a = [(1., 0.2), (2., f32::NAN), (3., 0.6)];

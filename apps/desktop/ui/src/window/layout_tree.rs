@@ -27,6 +27,12 @@
 //! resolve to another face: a node added under another generation is not reused). Nodes measured
 //! without a key are never reused. Text shaping comes from the window's line layout cache, which a
 //! replay keeps warm, so a measure in a reused subtree sees what a fresh layout of this window would.
+//!
+//! taffy's per-frame cache has one exception: a node's cached final layout does not answer once the
+//! node has been measured again (computed in `ComputeSize`) after it was stored. taffy's block
+//! algorithm lays a block's children out while it measures it, at the measuring size, so that answer
+//! would leave the children where the measure put them (the cards of FOLO Desktop's run page kept
+//! their content at their min-content width, beside a log of long wrapped lines).
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -123,6 +129,9 @@ pub(crate) struct LayoutTree {
     nodes: Vec<Node>,
     /// taffy's per-frame cache of each of this frame's nodes (last frame's are not kept).
     caches: Vec<Cache>,
+    /// Per node: computed in `ComputeSize` since its cached final layout was stored, so that entry
+    /// must not answer (`CacheTree::cache_get`).
+    remeasured: Vec<bool>,
     children: Vec<NodeId>,
     /// Last frame's nodes, and their children, while this frame's are added.
     previous: Vec<Node>,
@@ -149,6 +158,7 @@ impl LayoutTree {
         std::mem::swap(&mut self.children, &mut self.previous_children);
         self.nodes.clear();
         self.caches.clear();
+        self.remeasured.clear();
         self.previous_scale = self.scale;
         self.children.clear();
         // Room for this frame's nodes, about as many as last frame's: without the trim, doubling leaves
@@ -156,6 +166,7 @@ impl LayoutTree {
         let room = |len: usize| len + len / 8 + 16;
         trim(&mut self.nodes, room(self.previous.len()));
         trim(&mut self.caches, room(self.previous.len()));
+        trim(&mut self.remeasured, room(self.previous.len()));
         trim(&mut self.children, room(self.previous_children.len()));
         self.by_sig.clear();
         for (ix, node) in self.previous.iter().enumerate() {
@@ -226,6 +237,7 @@ impl LayoutTree {
         }
         self.nodes.push(node);
         self.caches.push(Cache::new());
+        self.remeasured.push(false);
         id
     }
 
@@ -295,6 +307,7 @@ impl LayoutTree {
         };
         (self.nodes.capacity() + self.previous.capacity()) * std::mem::size_of::<Node>()
             + self.caches.capacity() * std::mem::size_of::<Cache>()
+            + self.remeasured.capacity()
             + (self.children.capacity() + self.previous_children.capacity()) * std::mem::size_of::<NodeId>()
             + records(&self.nodes)
             + records(&self.previous)
@@ -314,6 +327,27 @@ impl LayoutTree {
     pub(crate) fn children(&self, id: NodeId) -> &[NodeId] {
         let node = &self.nodes[usize::from(id)];
         &self.children[node.first as usize..(node.first + node.count) as usize]
+    }
+}
+
+#[cfg(test)]
+impl LayoutTree {
+    /// One layout request to `node`, as a parent's algorithm makes it (tests replay a sequence).
+    pub(crate) fn request(
+        &mut self,
+        node: NodeId,
+        inputs: LayoutInput,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> LayoutOutput {
+        use taffy::LayoutPartialTree as _;
+        let scale_factor = window.scale_factor();
+        View { tree: self, window, cx, scale_factor }.compute_child_layout(node, inputs)
+    }
+
+    /// A node's unrounded layout (relative to its parent), as the last request left it.
+    pub(crate) fn unrounded(&self, id: NodeId) -> &Layout {
+        &self.nodes[usize::from(id)].unrounded
     }
 }
 
@@ -343,6 +377,12 @@ impl View<'_> {
         } else {
             compute_cached_layout(self, node, inputs, |view, node, inputs| {
                 let ix = usize::from(node);
+                // Measuring lays the children out too (taffy's block algorithm runs their final
+                // layout at the size it measures with), so a final layout cached before no longer
+                // describes them.
+                if inputs.run_mode == RunMode::ComputeSize {
+                    view.tree.remeasured[ix] = true;
+                }
                 let display = view.tree.nodes[ix].style.display;
                 match (display, view.tree.nodes[ix].count > 0) {
                     (Display::None, _) => compute_hidden_layout(view, node),
@@ -389,6 +429,7 @@ impl View<'_> {
             node.matched = 0;
             node.invocations.clear();
             self.tree.caches[ix].clear();
+            self.tree.remeasured[ix] = false;
             if unplaced {
                 node.unrounded = Layout::new();
             }
@@ -594,7 +635,15 @@ impl taffy::CacheTree for View<'_> {
         available_space: Size<TaffySpace>,
         run_mode: RunMode,
     ) -> Option<LayoutOutput> {
-        self.tree.caches[usize::from(node)].get(known_dimensions, available_space, run_mode)
+        let ix = usize::from(node);
+        // A final layout cached before the node was measured again: measuring moved its children
+        // (taffy's block algorithm lays them out at the measuring size), and an answer from this
+        // entry would leave them there. A card laid out at its shrink-to-fit width while measured
+        // kept its content at that width once stretched (the run page's charts, beside a long log).
+        if run_mode == RunMode::PerformLayout && self.tree.remeasured[ix] {
+            return None;
+        }
+        self.tree.caches[ix].get(known_dimensions, available_space, run_mode)
     }
 
     fn cache_store(
@@ -605,11 +654,17 @@ impl taffy::CacheTree for View<'_> {
         run_mode: RunMode,
         output: LayoutOutput,
     ) {
-        self.tree.caches[usize::from(node)].store(known_dimensions, available_space, run_mode, output)
+        let ix = usize::from(node);
+        if run_mode == RunMode::PerformLayout {
+            self.tree.remeasured[ix] = false;
+        }
+        self.tree.caches[ix].store(known_dimensions, available_space, run_mode, output)
     }
 
     fn cache_clear(&mut self, node: NodeId) {
-        self.tree.caches[usize::from(node)].clear();
+        let ix = usize::from(node);
+        self.tree.caches[ix].clear();
+        self.tree.remeasured[ix] = false;
     }
 }
 

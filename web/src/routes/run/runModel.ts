@@ -106,8 +106,6 @@ export class RunModel {
   readonly scale = signal<Scale>('log');
   /** "So far / All N" in the first chart's header, for every chart of the page. While a run trains: the plan. */
   readonly horizon = signal<'observed' | 'full'>('full');
-  /** The one cursor of the page's charts (data x, epochs): hovering one reads every one. */
-  readonly cursor = signal<number | null>(null);
 
   constructor(src: RunSource) {
     this.run = () => src.run!;

@@ -4,6 +4,7 @@
 mod frames;
 mod keys;
 mod layout;
+mod layout_remeasure;
 mod layout_reuse;
 mod mouse;
 mod realwin;
