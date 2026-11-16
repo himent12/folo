@@ -25,28 +25,17 @@ impl Runs {
             let mut dirs: Vec<PathBuf> =
                 rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect();
             dirs.sort();
-            let (mut files, mut unknown) = (Vec::new(), Vec::new());
+            let mut files = Vec::new();
             for d in dirs {
                 let path = d.join("run.json");
-                if !path.is_file() {
-                    // It may be a copy whose run.json is moved aside for now (f3-server-ci review round 3).
-                    unknown.push(d);
-                    continue;
-                }
-                match std::fs::read(&path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|bytes| serde_json::from_slice::<RunFile>(&bytes).map_err(|e| e.to_string()))
-                {
+                let Ok(bytes) = std::fs::read(&path) else { continue };
+                match serde_json::from_slice::<RunFile>(&bytes) {
                     Ok(f) => files.push((d, f.run.id.clone(), f)),
-                    Err(e) => {
-                        tracing::warn!("skipping {}: {e}", path.display());
-                        unknown.push(d);
-                    }
+                    Err(e) => tracing::warn!("skipping {}: {e}", path.display()),
                 }
             }
-            // A copy of a run folder (a backup made next to it) is not a second run of its id (x3-server-9); the
-            // copy loaded in place of an original that did not read stays the run (f3-server-ci review round 2).
-            for (d, mut file) in crate::util::one_per_id("run", files, &unknown) {
+            // A copy of a run folder (a backup made next to it) is not a second run of its id (x3-server-9).
+            for (d, mut file) in crate::util::one_per_id("run", files) {
                 // Runs from before `Run.resolved` (or its `close_mosaic`): the trainer's config.json has the same
                 // numbers.
                 if file.run.resolved.as_ref().is_none_or(|r| r.close_mosaic.is_none()) {

@@ -166,8 +166,8 @@ impl Labeler {
         // interrupted run and writes the job back) and is not swept.
         // A copy that reads but does not load (its recovery cannot be written back) gives way to the next.
         let folders = crate::util::folders_by_id(&root, "job.json", Job::readable);
-        let mut jobs: Vec<Arc<Job>> = crate::util::load_first("labeling job", folders, |dir, copies| {
-            Job::load(dir.to_path_buf(), crate::util::most_saves(copies, "job.json")).map(|job| {
+        let mut jobs: Vec<Arc<Job>> = crate::util::load_first("labeling job", folders, |dir| {
+            Job::load(dir.to_path_buf()).map(|job| {
                 job.sweep();
                 Arc::new(job)
             })

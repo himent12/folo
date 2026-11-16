@@ -2,7 +2,7 @@
 
 A follow-up lane, no hunting: five items the round's lanes and reviewers confirmed but left open because they sat in
 another lane's surface (`crates/folo-server`, its tests, the CI workflows). Each was checked on main (069935d6), fixed
-at the root with a regression test that fails without the fix, or documented.
+at the root with a regression test that fails without the fix, documented, or (item 5) deferred.
 
 | id | item | severity | status |
 |---|---|---|---|
@@ -11,7 +11,7 @@ at the root with a regression test that fails without the fix, or documented.
 | f3-server-ci-2b | `tests/bench/external.rs` `open_entries_expire_without_parts` raced a 300 ms open timeout against the wall clock | annoying (CI) | fixed |
 | f3-server-ci-3 | `npm run check` / `npm run qa` killed by SIGTRAP / SIGILL (V8 "Fatal error in , line 0") on the self-hosted Linux runners | annoying (CI) | mitigated: retried once on a crash signal |
 | f3-server-ci-4 (d1-datasets-3) | `broken_labels` documented as label lines in `folo-api`, counted per broken label file (YOLO) or entry (COCO) by both producers; apps say "broken label files" | annoying | fixed (docs, wording "N broken labels") |
-| f3-server-ci-5 (x3-server) | After a restart loaded a labeling job's backup copy because the original did not load, the next restart loads the original again, hiding the work saved to the copy | blocker (work hidden) | fixed for labeling jobs, benchmarks and runs (review round 2) |
+| f3-server-ci-5 (x3-server) | After a restart loaded a labeling job's backup copy because the original did not load, the next restart loads the original again, hiding the work saved to the copy (benchmarks and runs too) | blocker (work hidden) | deferred: a design decision (lead, after review round 3); kept on `stress/f3-copy-selection` |
 
 ## f3-server-ci-1: a gone instance is a lost one, whichever request notices
 
@@ -83,50 +83,37 @@ without `image_id`: `broken_labels` 2, no image left out; then two annotations w
 (review round 2: the COCO loader keeps one reason per image, so they count once): `broken_labels` 3, one image fewer.
 The contract says so: for COCO one per image left out for annotations that cannot be read, however many it has.
 
-## f3-server-ci-5 (x3-server): the copy written last is loaded
+## f3-server-ci-5 (x3-server): which copy of a folder is loaded after a restart (deferred)
 
-`util.rs` `folders_by_id` put the folder named after the id first among readable records. A job whose original did
-not load once (its recovery could not be written back) was loaded from its copy and saved there; at the next restart
-the original loaded again and the copy's work was hidden. `job.json` now carries `saves`, the job's write count
-(`label/job.rs`; 0 for files from before), and `folders_by_id` takes the readable record written most often first,
-then the old order. A copy of an old backup put back beside the live folder has fewer saves and does not win (a
-file-time order would have let it).
+Taken out of this PR by the lead's decision after review round 3; the work is kept on branch
+`stress/f3-copy-selection` (no PR). For copy selection this branch behaves exactly as main: `util::folders_by_id` +
+`load_first` for labeling jobs and benchmarks (the folder named after the id first among records the loader takes),
+`util::one_per_id` for runs.
 
-Review round 1: a backup older than the original (fewer saves) that was loaded once and saved to still lost at the
-next restart, as its count went on from its own. `Job::load` now takes the group's most saves
-(`util::most_saves`, given to the loader by `load_first`) and counts on from there, so the first save to a loaded
-backup outranks every copy; a backup loaded but never saved to leaves the original first, as it holds the newer work.
+Scenario: a job, benchmark or run folder has a hand-made copy beside it (`lb_1` and `lb_1 - Copy`). At one start the
+original does not load (its record unreadable, or its interrupted-run recovery cannot be written back), so the copy
+is loaded and the user's work is saved there. At the next start the original loads again and wins by name: the work
+saved to the copy is hidden (still on disk, logged as a skipped copy). It needs both the hand-made copy and an
+original that fails at one restart and reads at the next.
 
-Review round 2: an original whose `job.json` could not be read at all has no id, so `most_saves` never saw it, and
-once it read again its higher count won; benchmarks and runs (sibling, `runs/registry.rs`) had no count at all. All
-three stores now persist which copy was loaded: `util::choose` writes a rank (`.folo-chosen`, atomically) into the
-folder about to be loaded, above the ranks of the other copies of its id and of every folder whose record has no
-readable id (`Folders::unknown`; a run's unreadable `run.json` likewise), and `folders_by_id` / `one_per_id` take the
-highest rank first, before `saves` and the name order. A store without copies or unreadable records writes nothing;
-a folder that cannot take the rank gives way to the next copy. So the copy loaded last stays the record: also a
-backup loaded once and never saved to stays first (the original's newer work, not shown in that session either,
-stays in its folder, logged as a skipped copy).
+What was tried, and what each review round found:
+- Round 1 (two blocking): a write count `saves` in `job.json`, the copy written most often first. An older backup
+  loaded once and saved to still lost to the original's higher count; the test only covered equal copies.
+- Round 2 (two blocking): the loaded copy counted on from the group's highest count. An original whose record could
+  not be read at all had no id, so its count was never seen and won once it read again; benchmarks and runs had no
+  count at all, so they kept the bug.
+- Round 3 (five blocking): a persisted rank (`.folo-chosen`) written into the chosen folder at start-up, used by all
+  three stores. An unreadable rank counted as 0; the rank was written before the load, so a start where every copy
+  failed promoted a stale original; a folder without its record was not seen, so a lone copy got no rank; a folder
+  that could not take the rank was skipped, hiding healthy read-only records; and the cloud reaper looked for
+  `cloud.lock` in `runs/<id>` while a run loaded from a copy locks its own folder (that last one is also on main
+  whenever a run is loaded from a copy). The answer (ranks from the clock, marking after the load, `follow_dir` for
+  cloud runs) was not reviewed, its main test was not shown to fail without it and the cloud part has no test.
 
-Tests (each fails with `choose` disabled): `label/job.rs` `the_copy_written_last_is_loaded_after_the_original_failed_once`
-(the original saved to 10 beside a backup at 2 fails to load once, the backup is edited and stays; then the original
-chosen and saved to 16, its `job.json` made unparsable, the backup edited, the original restored: the backup stays);
-`util.rs` `the_copy_loaded_in_place_of_an_unreadable_original_stays_loaded`; `runs/tests.rs`
-`the_copy_loaded_in_place_of_an_unreadable_run_stays_the_run`; `tests/bench/restarts.rs`
-`a_damaged_benchmark_record_does_not_hide_its_backup` (now ends with the original intact again).
-
-Review round 3 (re-review 2): (a) a rank that could not be read counted as 0, so a backup ranked 1 lost to an original
-ranked 7 once that read again: a rank is now the time of the choice (nanoseconds) when higher than the ranks read, so it
-outranks one written at an earlier choice, readable or not (unless the clock went back). (b) The rank was written before
-the load, so a start where every copy failed (recovery not written back) promoted a stale original: `load_first` marks
-a folder only after it loaded. (c) A folder without its record (moved aside) was not a neighbour, so a lone backup got
-no rank: folders without the record are `Folders::unknown` too (`runs/registry.rs` likewise). (d) A folder that could
-not take its rank was skipped, so one damaged record anywhere hid healthy records in read-only folders: the record now
-loads all the same (a folder that takes no writes saves no work to shadow). (e) Cloud: the reaper and `abandon` looked
-for `cloud.lock` in `runs/<id>` while a run loaded from a copy locks its own folder, so the reaper terminated a followed
-instance (also on main whenever a copy was loaded): `Cloud::start` and `abandon` note the run's folder
-(`Core::follow_dir`) and `Core::run_dir` answers it. Test: `util.rs`
-`the_copy_loaded_stays_chosen_whatever_hid_the_original` (a, b, c, d; the unreadable marker is a folder in its place).
-(e) has no test of its own: a cloud test with a copied run folder needs the harness to resume from a copy.
+Questions for a maintainer: where is the selection stored (in each data folder, in one store-level file, or not at
+all, leaving copies to the user); what may a start-up write into a user's data folder; what "newest" means when clocks
+move or a backup is restored; and whether the cloud reaper's lock path for a run loaded from a copy is fixed on its
+own first.
 
 ## Gates
 

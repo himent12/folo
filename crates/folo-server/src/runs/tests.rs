@@ -479,34 +479,6 @@ fn a_copied_run_folder_is_loaded_once() {
     runs.shutdown(None);
 }
 
-/// A run whose `run.json` does not read is loaded from its backup copy (and stopped there, as a run a previous process
-/// left queued); once the original reads again, the copy, where the run went on, stays the run instead of the stale
-/// original sorting first again (f3-server-ci review round 2).
-#[test]
-fn the_copy_loaded_in_place_of_an_unreadable_run_stays_the_run() {
-    let dir = TestDir::new("runs-copy-chosen");
-    let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"orig"}"#).unwrap();
-    let bytes = serde_json::to_vec(&queued_file("run_a", config)).unwrap();
-    for folder in ["run_a", "run_a - Copy"] {
-        std::fs::create_dir_all(dir.join(folder)).unwrap();
-        std::fs::write(dir.join(folder).join("run.json"), &bytes).unwrap();
-    }
-    std::fs::write(dir.join("run_a/run.json"), "{").unwrap();
-    let open = || Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
-    let runs = open();
-    assert_eq!(runs.entries()[0].dir(), dir.join("run_a - Copy"), "the original does not read");
-    runs.shutdown(None);
-    std::fs::write(dir.join("run_a/run.json"), &bytes).unwrap();
-    for _ in 0..2 {
-        let runs = open();
-        let list = runs.entries();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].dir(), dir.join("run_a - Copy"), "the copy the run went on in stays the run");
-        assert_eq!(list[0].run().status, RunStatus::Stopped);
-        runs.shutdown(None);
-    }
-}
-
 /// A run named past today's 64-character limit by an older version still resumes, its config sent back as it is.
 #[test]
 fn a_run_with_a_legacy_long_name_resumes() {

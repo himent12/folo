@@ -63,12 +63,6 @@ pub struct JobFile {
     pub run: Option<LabelRun>,
     pub usage: LabelUsage,
     pub dataset_id: Option<String>,
-    /// How many times the job was written (0 in a file from before it was counted). Of two copies of a job folder,
-    /// the one written more often is loaded first (`util::folders_by_id`): after a restart loaded a copy because the
-    /// original could not be loaded, the work saved to the copy since is never shadowed by the original again.
-    /// Written by [`Job::save`] from [`Job`]'s own count.
-    #[serde(default, skip_serializing)]
-    pub saves: u64,
 }
 
 impl JobFile {
@@ -86,7 +80,6 @@ impl JobFile {
             run: None,
             usage: LabelUsage::default(),
             dataset_id: None,
-            saves: 0,
         }
     }
 }
@@ -249,8 +242,6 @@ pub struct Job {
     pub dir: PathBuf,
     state: Mutex<State>,
     events: broadcast::Sender<LabelEvent>,
-    /// `job.json`'s write count ([`JobFile::saves`]).
-    saves: std::sync::atomic::AtomicU64,
 }
 
 impl Job {
@@ -263,7 +254,6 @@ impl Job {
         Job {
             id: file.id.clone(),
             dir,
-            saves: file.saves.into(),
             state: Mutex::new(State { file, active: None, logs: lines, exporting: false, deleted: false }),
             events: broadcast::channel(EVENT_BUFFER).0,
         }
@@ -276,10 +266,8 @@ impl Job {
     }
 
     /// Reads the job in `dir`. A run its file still shows as active belonged to a process that is gone: it is
-    /// closed as stopped. `most_saves`: the most saves of any copy of the folder (`util::most_saves`); a copy loaded
-    /// in place of one written more often counts its saves on from there, so what it saves outranks every copy at
-    /// the next restart, while a copy that saves nothing leaves the order as it was.
-    pub fn load(dir: PathBuf, most_saves: u64) -> Result<Job> {
+    /// closed as stopped.
+    pub fn load(dir: PathBuf) -> Result<Job> {
         let path = dir.join("job.json");
         let bad = |e: &dyn std::fmt::Display| Error::internal(format!("reading {}: {e}", path.display()));
         let bytes = std::fs::read(&path).map_err(|e| bad(&e))?;
@@ -292,7 +280,6 @@ impl Job {
             run.outcome = Some(folo_api::LabelOutcome::Stopped);
         });
         let job = Job::new(dir, file);
-        job.saves.fetch_max(most_saves, std::sync::atomic::Ordering::Relaxed);
         if interrupted.is_some() {
             let mut state = job.lock();
             job.log(
@@ -351,17 +338,8 @@ impl Job {
         if state.deleted {
             return Ok(());
         }
-        /// The file with its write count, which `JobFile` reads but does not write itself.
-        #[derive(Serialize)]
-        struct Saved<'a> {
-            #[serde(flatten)]
-            file: &'a JobFile,
-            saves: u64,
-        }
         let path = self.dir.join("job.json");
-        // Under the state's lock (the caller holds `state`), so two saves never write their counts out of order.
-        let saves = self.saves.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let bytes = serde_json::to_vec(&Saved { file: &state.file, saves }).expect("jobs serialize");
+        let bytes = serde_json::to_vec(&state.file).expect("jobs serialize");
         write_atomic(&path, &bytes).map_err(|e| Error::internal(format!("writing {}: {e}", path.display())))
     }
 
@@ -556,75 +534,5 @@ mod tests {
         assert!(state.active.as_ref().unwrap().waiting.is_empty());
         state.active.as_mut().unwrap().stopping = true;
         assert_eq!(state.job().status, LabelJobStatus::Stopping);
-    }
-
-    /// A restart that loaded the backup copy of a job because the original did not load (its recovery could not be
-    /// written back) saves the work to the copy; the next restart loads the copy again, not the original that sorts
-    /// first by name, also when the backup is older than the original (written fewer times, f3-server-ci review
-    /// round 1). A copy that was loaded but saved nothing leaves the original first (x3-server, f3-server-ci-5).
-    #[test]
-    fn the_copy_written_last_is_loaded_after_the_original_failed_once() {
-        let t = folo_test_support::TestDir::new("label-job-saves");
-        let root = t.join("label");
-        let (original, copy) = (root.join("lb_1"), root.join("lb_1 - Copy"));
-        std::fs::create_dir_all(&original).unwrap();
-        let job =
-            Job::new(original.clone(), JobFile::new("lb_1".into(), "first".into(), vec![], String::new()));
-        job.save(&job.lock()).unwrap();
-        job.save(&job.lock()).unwrap();
-        std::fs::create_dir_all(&copy).unwrap();
-        std::fs::copy(original.join("job.json"), copy.join("job.json")).unwrap();
-        let restart = |fails: Option<&Path>| {
-            let groups = crate::util::folders_by_id(&root, "job.json", Job::readable);
-            crate::util::load_first("labeling job", groups, |dir, copies| match fails {
-                Some(f) if f == dir => Err("cannot write the recovery back".to_string()),
-                _ => Job::load(dir.to_path_buf(), crate::util::most_saves(copies, "job.json"))
-                    .map_err(|e| e.body.message),
-            })
-        };
-        // Equal copies: the folder named after the id.
-        assert_eq!(restart(None)[0].dir, original);
-        // The original goes on (saves 2 -> 10): the backup (2) is older.
-        let job = restart(None).remove(0);
-        for _ in 0..8 {
-            job.save(&job.lock()).unwrap();
-        }
-        drop(job);
-        assert_eq!(restart(None)[0].dir, original);
-        // The original does not load once: the older backup is loaded and the work goes on in it.
-        let loaded = restart(Some(&original)).remove(0);
-        assert_eq!(loaded.dir, copy);
-        loaded.lock().file.name = "renamed in the copy".into();
-        loaded.save(&loaded.lock()).unwrap();
-        drop(loaded);
-        // The next restarts, where the original loads again, keep the copy's work.
-        for _ in 0..2 {
-            let again = restart(None).remove(0);
-            assert_eq!(
-                (again.dir.as_path(), again.lock().file.name.as_str()),
-                (copy.as_path(), "renamed in the copy")
-            );
-        }
-        // The same when the original's job.json could not be read at all (no id to group it by): the copy loaded
-        // in its place stays the job once it reads again (f3-server-ci review round 2).
-        std::fs::write(copy.join(crate::util::CHOSEN), "0").unwrap();
-        std::fs::write(original.join(crate::util::CHOSEN), "7").unwrap();
-        let job = restart(None).remove(0);
-        assert_eq!(job.dir, original, "the original was chosen last");
-        // ... and is saved more often than the copy after it.
-        for _ in 0..5 {
-            job.save(&job.lock()).unwrap();
-        }
-        drop(job);
-        let bytes = std::fs::read(original.join("job.json")).unwrap();
-        std::fs::write(original.join("job.json"), "{").unwrap();
-        let loaded = restart(None).remove(0);
-        assert_eq!(loaded.dir, copy, "the original does not read");
-        loaded.lock().file.name = "renamed again".into();
-        loaded.save(&loaded.lock()).unwrap();
-        drop(loaded);
-        std::fs::write(original.join("job.json"), bytes).unwrap();
-        let again = restart(None).remove(0);
-        assert_eq!((again.dir.as_path(), again.lock().file.name.as_str()), (copy.as_path(), "renamed again"));
     }
 }

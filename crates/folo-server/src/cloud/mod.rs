@@ -175,9 +175,6 @@ pub(crate) struct Core {
     pub ledger: Ledger,
     offers: Mutex<HashMap<String, (Instant, CloudOfferList)>>,
     pub halt: Halt,
-    /// The folder of each run followed here: where its `cloud.lock` is, also when that is a copy of its folder loaded
-    /// in place of `runs/<id>` (`util::one_per_id`, f3-server-ci review round 3).
-    run_dirs: Mutex<HashMap<String, PathBuf>>,
 }
 
 /// A connection with its provider.
@@ -202,17 +199,9 @@ impl Core {
         Ok(Connected { connection, provider })
     }
 
-    /// The run folder of run `id`: the one [`Core::follow_dir`] noted, else `runs/<id>`.
+    /// The run folder of run `id`.
     pub fn run_dir(&self, id: &str) -> PathBuf {
-        match self.run_dirs.lock().unwrap().get(id) {
-            Some(dir) => dir.clone(),
-            None => self.data_dir.join("runs").join(id),
-        }
-    }
-
-    /// Notes `dir` as the folder of run `id`, the one whose `cloud.lock` the reaper checks.
-    pub(crate) fn follow_dir(&self, id: &str, dir: &Path) {
-        self.run_dirs.lock().unwrap().insert(id.to_string(), dir.to_path_buf());
+        self.data_dir.join("runs").join(id)
     }
 
     /// What connection `c` can run on, from the cache unless it is older than [`OFFERS_TTL`] or `refresh`.
@@ -299,7 +288,6 @@ impl Cloud {
             ledger,
             offers: Mutex::default(),
             halt: Halt::default(),
-            run_dirs: Mutex::default(),
         };
         Cloud { core: Arc::new(core), threads: Mutex::default() }
     }
@@ -394,7 +382,6 @@ impl Cloud {
     /// another process follows the run.
     pub(crate) fn start(&self, job: Job, mode: Mode) -> Result<()> {
         let dir = job.entry.dir().to_path_buf();
-        self.core.follow_dir(job.entry.id(), &dir);
         let lock = files::try_lock_run(&dir)
             .map_err(|e| Error::io(format!("locking {}: {e}", files::run_lock_path(&dir).display())))?
             .ok_or_else(|| crate::runs::followed_elsewhere(job.entry.id()))?;
