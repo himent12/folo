@@ -132,14 +132,21 @@ impl FoloApp {
                             }));
                         }
                         let dims = (smp.width as f32, smp.height as f32);
+                        // Failed, not loading: said on the cell, as on dataset tiles (its Retry is the
+                        // inspector's, which the cell opens: its full size loading asks for it again).
+                        let failed = img.is_none() && self.thumb_unavailable(&smp.dataset_id, &smp.image_id);
+                        let painted = image_canvas(&t, img, dims, boxes, Fit::Cover, true, false);
                         // Square cells: every sample gets the same frame whatever its aspect. The
-                        // ratio sits on an inner full-width box, whose width is definite.
+                        // ratio sits on an inner full-width box, whose width is definite. The mark
+                        // lies on the square itself: a full-size wrapper in it would have no height.
                         let mut square = div()
                             .w_full()
+                            .relative()
                             .rounded(px(radius::MD))
                             .overflow_hidden()
                             .bg(t.bg_inset)
-                            .child(image_canvas(&t, img, dims, boxes, Fit::Cover, true, false));
+                            .child(painted)
+                            .when(failed, |s| s.child(crate::screens::unavailable_mark(&t, true)));
                         square.style().aspect_ratio = Some(1.0);
                         // Each sample is a Tab stop: click or Enter opens it in the inspector (the
                         // image in full, its labels, and the dataset to walk from it).

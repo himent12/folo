@@ -78,10 +78,10 @@ impl FoloApp {
             .and_then(time::parse)
             .map_or(String::new(), |c| format!(" · finished {}", time::ago(c, now)));
         let subtitle = format!(
-            "{} · on {} · {} images · {} of {} conditions{finished}",
+            "{} · on {} · {} · {} of {} conditions{finished}",
             contestant_line(&e),
             b.name,
-            int(e.images),
+            counted(e.images, "image", "images"),
             e.conditions_run,
             b.plan.conditions.len(),
         );

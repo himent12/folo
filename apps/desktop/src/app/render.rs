@@ -19,6 +19,16 @@ use super::{
 
 // ---------- render ----------
 
+impl FoloApp {
+    /// Whether the "retrying" pill is up: the server stopped answering and no reconnect is under
+    /// way. Not for an address typed in Settings that is not one ("http://127.0.0.1:99999"): nothing
+    /// is sent there, so no server is down and retrying can't help; the sidebar and Settings say
+    /// "Not a server address" instead (d4-bench-settings-4).
+    pub(crate) fn lost_banner_shown(&self) -> bool {
+        self.store.unreachable() && self.connecting.is_none() && !self.store.bad_address()
+    }
+}
+
 impl Render for FoloApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(r) = self.route_pending.take() {
@@ -66,8 +76,7 @@ impl Render for FoloApp {
         let overlays = self.overlays(window, cx);
         // Lost the server (it was there, and the 2 s refresh can't reach it): said over the page,
         // so the page keeps its place, until it answers again.
-        let lost =
-            (self.store.unreachable() && self.connecting.is_none()).then(|| lost_banner(&t, self.reached));
+        let lost = self.lost_banner_shown().then(|| lost_banner(&t, self.reached));
         div()
             .id("root")
             .key_context("FoloApp")

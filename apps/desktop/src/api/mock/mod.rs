@@ -58,6 +58,8 @@ pub struct MockBackend {
     holds: Mutex<Vec<(&'static str, Arc<hold::Gate>)>>,
     /// An image-list call from this offset on fails once ([`MockBackend::fail_images_once_from`]).
     fail_images_from: Mutex<Option<u32>>,
+    /// Every image's pixels fail while set, as a cut-off answer would ([`MockBackend::fail_pixels`]).
+    fail_pixels: std::sync::atomic::AtomicBool,
     /// The next run-history read fails ([`MockBackend::fail_metrics_once`]).
     fail_metrics: std::sync::atomic::AtomicBool,
     /// The next run-stream open fails ([`MockBackend::fail_events_once`]).
@@ -210,6 +212,21 @@ impl MockBackend {
     #[cfg(test)]
     pub fn fail_images_once_from(&self, offset: u32) {
         *self.fail_images_from.lock().unwrap() = Some(offset);
+    }
+
+    /// From now on (`true`) or no longer, every image's pixels (dataset and benchmark ones, either
+    /// size) fail as an answer cut off would, while the rest of the server answers.
+    #[cfg(test)]
+    pub fn fail_pixels(&self, on: bool) {
+        self.fail_pixels.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The error an image fetch answers with while [`Self::fail_pixels`] is on.
+    fn pixels_check(&self) -> ApiResult<()> {
+        if self.fail_pixels.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(ApiError::new("bad_response", "folo serve's answer was cut off"));
+        }
+        Ok(())
     }
 
     /// A dataset whose training images all failed to read, as the server would count it.

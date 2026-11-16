@@ -326,6 +326,46 @@ fn a_dataset_card_follows_its_folder_away_and_back() {
     assert_eq!(tip_long - tip_short, words, "the tip reads the server's reason");
 }
 
+/// s1-datasets-6: a dataset whose folder is gone kept adding its last known image count to the
+/// Datasets header, and its card showed that count as if current. Studio leaves it out of the total
+/// and says "(last known)" on the card.
+#[test]
+fn a_dataset_whose_folder_is_gone_counts_only_as_last_known() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let (id, all, its) = drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Datasets, w, cx);
+        let l = this.store.datasets.ready().unwrap();
+        let all: u64 = l.iter().map(|d| d.splits.total()).sum();
+        (l[0].id.clone(), all, l[0].splits.total())
+    });
+    drawn_keys(&mut app, window);
+    let facts = |app: &mut folo_ui::HeadlessApp| {
+        drive(app, window, |this, _, _| {
+            let l = this.store.datasets.ready().unwrap().clone();
+            let d = l.iter().find(|d| d.id == id).unwrap();
+            (
+                this.datasets_subtitle(&l),
+                crate::screens::overview::card_facts(d, this.dataset_unreadable(&id)),
+            )
+        })
+    };
+    let (header, card) = facts(&mut app);
+    assert!(header.ends_with(&crate::ui::counted(all, "image", "images")), "{header}");
+    assert!(!card.contains("last known"), "{card}");
+
+    api.break_dataset(&id, "path_not_found", "Dataset folder not found: D:/data/shapes");
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Overview, w, cx));
+    drive(&mut app, window, |this, w, cx| this.navigate(super::Route::Datasets, w, cx));
+    drawn_keys(&mut app, window);
+    let (header, card) = facts(&mut app);
+    assert!(header.ends_with(&crate::ui::counted(all - its, "image", "images")), "{header}");
+    assert!(
+        card.starts_with(&format!("{} (last known) · ", crate::ui::counted(its, "image", "images"))),
+        "{card}"
+    );
+}
+
 /// Review round 2 of x1-parity-7: two reads of a dataset on their way at once (two Retries, two
 /// visits) that answer in reverse order. The later read saw the folder as it is now: its answer
 /// stands, whichever way the folder went in between.

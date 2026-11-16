@@ -10,17 +10,19 @@ use crate::theme::theme;
 use crate::ui::*;
 
 impl FoloApp {
+    /// The Datasets header's facts, "2 datasets · 1,240 images": the images of every dataset its
+    /// server can still read. One it can't (folder gone, images deleted) has only a last known
+    /// count, which its card says; it is left out of the total, as in Studio (s1-datasets-6).
+    pub(crate) fn datasets_subtitle(&self, l: &[crate::api::Dataset]) -> String {
+        let images = l.iter().filter(|d| !self.dataset_unreadable(&d.id)).map(|d| d.splits.total()).sum();
+        format!("{} · {}", plural(l.len(), "dataset"), counted(images, "image", "images"))
+    }
+
     pub fn datasets(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let list = self.store.datasets.ready().cloned();
         let subtitle = match &list {
-            Some(l) => {
-                format!(
-                    "{} · {}",
-                    plural(l.len(), "dataset"),
-                    counted(l.iter().map(|d| d.splits.total()).sum(), "image", "images")
-                )
-            }
+            Some(l) => self.datasets_subtitle(l),
             None => "Loading…".into(),
         };
         let add = self

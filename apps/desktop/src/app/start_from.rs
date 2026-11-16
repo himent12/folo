@@ -270,6 +270,33 @@ mod tests {
     }
 
     #[test]
+    fn a_train_only_dataset_says_its_scores_are_on_the_training_images() {
+        // s2-runs-6: with no val split every epoch is scored on the training images (docs/API.md,
+        // "Split fallback"); New run said nothing. It trains, so Start is not held back.
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| this.open_new_run(Some("ds_8f2c"), w, cx));
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(this.dataset_val_note(), None, "the demo dataset has a val split");
+            let list = this.store.datasets.ready_mut().unwrap();
+            list.iter_mut().find(|d| d.id == "ds_8f2c").unwrap().splits.val = 0;
+            let note = this.dataset_val_note().expect("said");
+            assert!(
+                note.starts_with("No validation images: each epoch is scored on the training images"),
+                "{note}"
+            );
+            assert_eq!(this.dataset_blocked(), None);
+        });
+        // Drawn under the picker.
+        app.frame(window.into());
+        drive(&mut app, window, |this, _, _| {
+            // Nothing to train on at all: the block says why, not this note.
+            let list = this.store.datasets.ready_mut().unwrap();
+            list.iter_mut().find(|d| d.id == "ds_8f2c").unwrap().splits.train = 0;
+            assert_eq!(this.dataset_val_note(), None);
+        });
+    }
+
+    #[test]
     fn a_dataset_counted_empty_before_is_asked_for_again() {
         // The list says no training image (read before images were added); the server, asked
         // again when New run opens on it, counts them: Start is not held back.

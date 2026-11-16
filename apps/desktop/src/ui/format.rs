@@ -99,7 +99,7 @@ pub fn model_storage(m: &crate::api::Model) -> Option<String> {
 /// count when known).
 pub fn split_label(dataset: &str, split: &str, images: Option<u64>) -> String {
     match images {
-        Some(n) => format!("{dataset} · {split} · {} images", int(n)),
+        Some(n) => format!("{dataset} · {split} · {}", counted(n, "image", "images")),
         None => format!("{dataset} · {split}"),
     }
 }
@@ -290,6 +290,15 @@ pub fn f3(v: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// d1-datasets: a one-image split read "1 images".
+    #[test]
+    fn a_split_label_counts_one_image_in_the_singular() {
+        assert_eq!(split_label("shapes", "val", Some(1)), "shapes · val · 1 image");
+        assert_eq!(split_label("shapes", "val", Some(1200)), "shapes · val · 1,200 images");
+        assert_eq!(split_label("shapes", "val", Some(0)), "shapes · val · 0 images");
+        assert_eq!(split_label("shapes", "val", None), "shapes · val");
+    }
 
     #[test]
     fn confidences_keep_a_meaningful_third_decimal() {

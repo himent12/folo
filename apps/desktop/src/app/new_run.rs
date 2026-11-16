@@ -392,6 +392,19 @@ impl FoloApp {
         ))
     }
 
+    /// The form's dataset has training images and no validation images: it trains, but every
+    /// epoch is scored on the training images (docs/API.md, "Split fallback"), so New run says so
+    /// before Start, in Studio's words (web/src/routes/runnew/valSplit.ts; s2-runs-6). None for a
+    /// dataset that can't train or whose own read failed (the picker says why instead).
+    pub fn dataset_val_note(&self) -> Option<&'static str> {
+        let f = self.new_run.as_ref()?;
+        let ds = self.store.dataset_summary(&f.dataset)?;
+        let unreadable = self.dataset_unreadable(&f.dataset);
+        (ds.splits.train > 0 && ds.splits.val == 0 && !unreadable).then_some(
+            "No validation images: each epoch is scored on the training images, so its mAP shows fit to them, not accuracy on new images. Add a val split for a held-out score.",
+        )
+    }
+
     /// Why New run can't train on its dataset: one with no training image (every image of the
     /// folder failed to read), refused by the server only after Start otherwise.
     pub fn dataset_blocked(&self) -> Option<String> {

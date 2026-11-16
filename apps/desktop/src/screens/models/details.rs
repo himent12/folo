@@ -11,22 +11,53 @@ use crate::store::Load;
 use crate::theme::{Theme, theme, ty};
 use crate::ui::*;
 
+/// The epochs a run finished, None when not known (Studio's `finishedEpochs`,
+/// web/src/routes/model/weightsEpoch.ts). A `completed` or `stopped` run's `epoch` is the server's
+/// count, brought up to its `weights/last.folo` after a crash between that checkpoint and its
+/// history line, so it is the authority (a completed run may also have stopped early, patience).
+/// Any other run's `epoch` may be one in progress or the one it failed in: its recorded history's
+/// highest epoch (`history_top`, None while not loaded, `Some(0)` for an empty one) counts, but
+/// only when `epoch` is not past it.
+pub(super) fn finished_epochs(status: RunStatus, epoch: u32, history_top: Option<u32>) -> Option<u32> {
+    if matches!(status, RunStatus::Completed | RunStatus::Stopped) {
+        return (epoch > 0).then_some(epoch);
+    }
+    history_top.filter(|&n| n > 0 && epoch <= n)
+}
+
+/// The Details' "Trained for": the epochs the model's run finished, of the planned ones when it
+/// ended early (`trained_with.epochs` is the planned count): "50 epochs at 640 px", "1 of 50
+/// epochs at 320 px"; while that is not known, only the plan, labelled so: "50 epochs planned at
+/// 320 px" (s4-models-1, as Studio's `trainedFor`).
+pub(super) fn trained_for(m: &Model, run: Option<&Run>, done: Option<u32>) -> Option<String> {
+    let t = m.trained_with?;
+    let planned = t.epochs;
+    let unit = if planned == 1 { "epoch" } else { "epochs" };
+    let ran = done.filter(|_| run.is_some_and(|r| m.run_id.as_deref() == Some(r.id.as_str())));
+    Some(match ran {
+        None => format!("{} {unit} planned at {} px", int(planned as u64), t.imgsz),
+        Some(n) if n < planned => {
+            format!("{} of {} {unit} at {} px", int(n as u64), int(planned as u64), t.imgsz)
+        }
+        Some(_) => format!("{} {unit} at {} px", int(planned as u64), t.imgsz),
+    })
+}
+
 /// Which epoch a run model's weights are from (docs/API.md, Models): `<run>-best` the run's best
-/// epoch, `<run>-last` its last finished one; when they are the same epoch, each says so. None
-/// without the run, or when the server didn't say which epoch was best.
-pub(super) fn weights_epoch(m: &Model, run: Option<&Run>) -> Option<String> {
+/// epoch, `<run>-last` its last finished one ("last finished epoch, 2 of 50" for a run that ended
+/// before its planned end; `done` is [`finished_epochs`]); when they are the same epoch, each says
+/// so. None without the run, or when the server didn't say which epoch was best.
+pub(super) fn weights_epoch(m: &Model, run: Option<&Run>, done: Option<u32>) -> Option<String> {
     let run = run.filter(|r| m.run_id.as_deref() == Some(r.id.as_str()))?;
-    let done = run.status == RunStatus::Completed;
     let best = run.best.as_ref().map(|b| b.epoch);
     if m.id.ends_with("-last") {
-        if !done {
-            return Some("last finished epoch".into());
-        }
-        let same = if best == Some(run.epochs) { ", same weights as best" } else { "" };
-        return Some(format!("last epoch, {} of {}{same}", run.epochs, run.epochs));
+        let Some(done) = done else { return Some("last finished epoch".into()) };
+        let same = if best == Some(done) { ", same weights as best" } else { "" };
+        let which = if done >= run.epochs { "last epoch" } else { "last finished epoch" };
+        return Some(format!("{which}, {done} of {}{same}", run.epochs));
     }
     let best = best?;
-    let same = if done && best == run.epochs { ", same weights as last" } else { "" };
+    let same = if done == Some(best) { ", same weights as last" } else { "" };
     Some(format!("best epoch {best} of {}{same}", run.epochs))
 }
 
@@ -101,6 +132,21 @@ impl FoloApp {
             self.load_throughput(cx);
         }
         let run = m.run_id.as_ref().and_then(|r| self.store.run(r)).cloned();
+        // How many epochs its run finished: a run that ended (completed, stopped) says it; any
+        // other one's recorded history does (fetched for it).
+        let done = run.as_ref().and_then(|r| {
+            let ended = matches!(r.status, RunStatus::Completed | RunStatus::Stopped);
+            if !ended {
+                self.ensure_run_data(&r.id, cx);
+            }
+            let top = self
+                .store
+                .run_data
+                .get(&r.id)
+                .and_then(|l| l.ready())
+                .map(|d| d.metrics.epochs.iter().map(|e| e.epoch).max().unwrap_or(0));
+            finished_epochs(r.status, r.epoch, top)
+        });
         let mut facts: Vec<(&str, AnyElement)> = Vec::new();
         let mut fact = |k: &'static str, v: AnyElement| facts.push((k, v));
         fact("Architecture", value(&t, m.arch.as_str()).into_any_element());
@@ -138,21 +184,11 @@ impl FoloApp {
                 "Trained in",
                 value(&t, if w.amp { "mixed precision (f16)" } else { "f32" }).into_any_element(),
             );
-            fact(
-                "Trained for",
-                value(
-                    &t,
-                    format!(
-                        "{} {} at {} px",
-                        int(w.epochs as u64),
-                        if w.epochs == 1 { "epoch" } else { "epochs" },
-                        w.imgsz
-                    ),
-                )
-                .into_any_element(),
-            );
+            if let Some(s) = trained_for(m, run.as_ref(), done) {
+                fact("Trained for", value(&t, s).into_any_element());
+            }
         }
-        if let Some(w) = weights_epoch(m, run.as_ref()) {
+        if let Some(w) = weights_epoch(m, run.as_ref(), done) {
             fact("Weights from", value(&t, w).into_any_element());
         }
         if let Some(s) = model_storage(m) {
@@ -299,31 +335,120 @@ impl FoloApp {
 
 #[cfg(test)]
 mod tests {
-    use super::weights_epoch;
-    use crate::api::{Backend, RunStatus, mock::MockBackend};
+    use super::{finished_epochs, trained_for, weights_epoch};
+    use crate::api::{Backend, Model, Run, RunStatus, mock::MockBackend};
 
-    #[test]
-    fn says_which_epoch_the_weights_are_from() {
+    /// Studio's fixtures (web/src/routes/model/weightsEpoch.test.ts): run `run_a` planned for
+    /// `epochs`, best at `best`; its best and last models.
+    fn fixtures(best: Option<u32>, epochs: u32) -> (Run, Model, Model) {
         let api = MockBackend::new(4200, true);
         let mut run = api.runs().unwrap().into_iter().find(|r| r.id == "run_52e8").unwrap();
         let mut m =
             api.models().unwrap().into_iter().find(|m| m.run_id.as_deref() == Some("run_52e8")).unwrap();
-        m.id = "m_52e8-best".into();
-        run.status = RunStatus::Completed;
-        run.epochs = 5;
-        run.best.as_mut().unwrap().epoch = 1;
-        assert_eq!(weights_epoch(&m, Some(&run)).as_deref(), Some("best epoch 1 of 5"));
-        run.best.as_mut().unwrap().epoch = 5;
-        assert_eq!(weights_epoch(&m, Some(&run)).as_deref(), Some("best epoch 5 of 5, same weights as last"));
-        m.id = "m_52e8-last".into();
+        run.id = "run_a".into();
+        run.epochs = epochs;
+        match best {
+            Some(b) => run.best.as_mut().unwrap().epoch = b,
+            None => run.best = None,
+        }
+        m.run_id = Some("run_a".into());
+        m.id = "m_a".into();
+        m.trained_with = Some(folo_api::TrainedWith { amp: false, imgsz: 320, epochs });
+        let mut last = m.clone();
+        last.id = "m_a-last".into();
+        (run, m, last)
+    }
+
+    fn we(m: &Model, run: Option<&Run>, done: Option<u32>) -> Option<String> {
+        weights_epoch(m, run, done)
+    }
+
+    #[test]
+    fn names_the_epoch_the_weights_are_from_and_the_same_weights_when_best_is_last() {
+        let (r, best, last) = fixtures(Some(1), 5);
+        assert_eq!(we(&best, Some(&r), Some(5)).as_deref(), Some("best epoch 1 of 5"));
+        assert_eq!(we(&last, Some(&r), Some(5)).as_deref(), Some("last epoch, 5 of 5"));
+        let (r, best, last) = fixtures(Some(5), 5);
+        assert_eq!(we(&best, Some(&r), Some(5)).as_deref(), Some("best epoch 5 of 5, same weights as last"));
+        assert_eq!(we(&last, Some(&r), Some(5)).as_deref(), Some("last epoch, 5 of 5, same weights as best"));
+    }
+
+    /// s4-models-1: a run stopped after epoch 1 of 50 said only "last finished epoch"; a completed
+    /// run that stopped early (patience) is not at its planned end either.
+    #[test]
+    fn numbers_the_last_finished_epoch_of_a_run_that_ended_early() {
+        let (r, best, last) = fixtures(Some(1), 50);
         assert_eq!(
-            weights_epoch(&m, Some(&run)).as_deref(),
-            Some("last epoch, 5 of 5, same weights as best")
+            we(&last, Some(&r), Some(1)).as_deref(),
+            Some("last finished epoch, 1 of 50, same weights as best")
         );
-        run.status = RunStatus::Stopped;
-        assert_eq!(weights_epoch(&m, Some(&run)).as_deref(), Some("last finished epoch"));
-        assert_eq!(weights_epoch(&m, None), None);
-        m.run_id = Some("run_other".into());
-        assert_eq!(weights_epoch(&m, Some(&run)), None);
+        assert_eq!(we(&last, Some(&r), Some(2)).as_deref(), Some("last finished epoch, 2 of 50"));
+        assert_eq!(we(&best, Some(&r), Some(2)).as_deref(), Some("best epoch 1 of 50"));
+        let (r, best, last) = fixtures(Some(1), 200);
+        assert_eq!(we(&last, Some(&r), Some(101)).as_deref(), Some("last finished epoch, 101 of 200"));
+        assert_eq!(we(&best, Some(&r), Some(101)).as_deref(), Some("best epoch 1 of 200"));
+    }
+
+    #[test]
+    fn says_nothing_it_does_not_know() {
+        let (r, best, _) = fixtures(Some(1), 5);
+        assert_eq!(we(&best, None, Some(5)), None);
+        let mut other = r.clone();
+        other.id = "run_b".into();
+        assert_eq!(we(&best, Some(&other), Some(5)), None);
+        let (r, best, last) = fixtures(None, 50);
+        assert_eq!(we(&best, Some(&r), Some(5)), None);
+        assert_eq!(we(&last, Some(&r), None).as_deref(), Some("last finished epoch"));
+        let (r, best, _) = fixtures(Some(5), 5);
+        assert_eq!(we(&best, Some(&r), None).as_deref(), Some("best epoch 5 of 5"));
+    }
+
+    #[test]
+    fn a_completed_or_stopped_runs_epoch_counts_over_a_history_that_lags_it() {
+        use RunStatus::*;
+        assert_eq!(finished_epochs(Stopped, 3, Some(2)), Some(3));
+        assert_eq!(finished_epochs(Stopped, 3, None), Some(3));
+        assert_eq!(finished_epochs(Completed, 101, Some(101)), Some(101));
+        assert_eq!(finished_epochs(Stopped, 0, Some(0)), None);
+    }
+
+    #[test]
+    fn any_other_run_counts_its_history_when_its_epoch_is_not_past_it() {
+        use RunStatus::*;
+        assert_eq!(finished_epochs(Failed, 2, Some(2)), Some(2));
+        assert_eq!(finished_epochs(Queued, 3, Some(3)), Some(3));
+        assert_eq!(finished_epochs(Running, 2, Some(2)), Some(2));
+        assert_eq!(finished_epochs(Failed, 3, Some(2)), None);
+        assert_eq!(finished_epochs(Queued, 3, Some(2)), None);
+        assert_eq!(finished_epochs(Running, 3, Some(2)), None);
+        assert_eq!(finished_epochs(Failed, 2, None), None);
+        assert_eq!(finished_epochs(Queued, 0, Some(0)), None);
+    }
+
+    /// s4-models-1: "Trained for 50 epochs" for a run stopped after one; `trained_with.epochs` is
+    /// the planned count.
+    #[test]
+    fn trained_for_says_how_many_of_the_planned_epochs_ran() {
+        let (r, m, _) = fixtures(Some(1), 50);
+        assert_eq!(trained_for(&m, Some(&r), Some(1)).as_deref(), Some("1 of 50 epochs at 320 px"));
+        assert_eq!(trained_for(&m, Some(&r), Some(2)).as_deref(), Some("2 of 50 epochs at 320 px"));
+        assert_eq!(trained_for(&m, Some(&r), Some(50)).as_deref(), Some("50 epochs at 320 px"));
+        let (r, m, _) = fixtures(Some(1), 200);
+        assert_eq!(trained_for(&m, Some(&r), Some(101)).as_deref(), Some("101 of 200 epochs at 320 px"));
+        let (r, m, _) = fixtures(Some(1), 1);
+        assert_eq!(trained_for(&m, Some(&r), Some(1)).as_deref(), Some("1 epoch at 320 px"));
+    }
+
+    #[test]
+    fn trained_for_labels_the_plan_while_what_ran_is_not_known() {
+        let (r, mut m, _) = fixtures(Some(1), 50);
+        assert_eq!(trained_for(&m, Some(&r), None).as_deref(), Some("50 epochs planned at 320 px"));
+        assert_eq!(trained_for(&m, None, None).as_deref(), Some("50 epochs planned at 320 px"));
+        m.run_id = Some("run_b".into());
+        assert_eq!(trained_for(&m, Some(&r), Some(1)).as_deref(), Some("50 epochs planned at 320 px"));
+        m.run_id = None;
+        assert_eq!(trained_for(&m, None, None).as_deref(), Some("50 epochs planned at 320 px"));
+        m.trained_with = None;
+        assert_eq!(trained_for(&m, None, None), None);
     }
 }
