@@ -70,6 +70,30 @@ pub(super) fn synth_detections(
     out
 }
 
+/// Refuses a box the scoring would take as a wrong guess without a word, as the server does
+/// (`crates/folo-server/src/bench/external.rs`): a coordinate that is not a finite number, or corners
+/// the wrong way round (most often an (x, y, width, height) box sent as corners). A box of no area is a box.
+pub(super) fn check_external_boxes(predictions: &[BenchPrediction]) -> ApiResult<()> {
+    for (i, p) in predictions.iter().enumerate() {
+        for (n, d) in p.boxes.iter().enumerate() {
+            let what = format!("Record {} (image {}), box {}", i + 1, p.image, n + 1);
+            if ![d.x1, d.y1, d.x2, d.y2].iter().all(|v| v.is_finite()) {
+                return Err(ApiError::new(
+                    "invalid_body",
+                    format!("{what}: a coordinate is not a finite number"),
+                ));
+            }
+            if d.x2 < d.x1 || d.y2 < d.y1 {
+                return Err(ApiError::new(
+                    "invalid_body",
+                    format!("{what}: x2 {} or y2 {} is less than x1 {} or y1 {}", d.x2, d.y2, d.x1, d.y1),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn score_external_entry(
     b: &BenchFixture,
     eid: String,

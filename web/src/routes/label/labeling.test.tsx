@@ -323,6 +323,35 @@ describe('the dialogs while the job changes', () => {
     expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('bins-renamed');
     expect(document.querySelector<HTMLInputElement>('dialog[open] input[aria-label="Class 1"]')!.value).toBe('hex bolt');
   });
+
+  it('Edit job does not put back a class another tab renamed when only the name is changed here', async () => {
+    const job = await hub.api.labelJob('lb_7c21');
+    const saved: { name: string; classes: string[] }[] = [];
+    const props = deep<JobDialogProps>({ open: true, job, onsave: async (c) => void saved.push(c) });
+    open(JobDialog, props);
+    type(document.querySelector('input[id$="-name"]')!, 'bins-renamed');
+    // Another tab renames the first class and saves: the job here follows.
+    const renamed = ['hex bolt', ...job.classes.slice(1)];
+    props.job = { ...job, classes: renamed };
+    flushSync();
+    expect(document.querySelector<HTMLInputElement>('dialog[open] input[aria-label="Class 1"]')!.value).toBe('hex bolt');
+    expect(document.querySelector('dialog[open] .elsewhere')).toBeNull();
+    document.querySelector<HTMLFormElement>('dialog[open] form')!.requestSubmit();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(saved).toEqual([{ name: 'bins-renamed', classes: renamed }]);
+  });
+
+  it('Edit job says so when another tab saves a field edited here', async () => {
+    const job = await hub.api.labelJob('lb_7c21');
+    const props = deep<JobDialogProps>({ open: true, job, onsave: async () => {} });
+    open(JobDialog, props);
+    type(document.querySelector('input[id$="-name"]')!, 'bins-renamed');
+    props.job = { ...job, name: 'renamed-elsewhere' };
+    flushSync();
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('bins-renamed');
+    expect(document.querySelector('dialog[open] .elsewhere')?.textContent).toMatch(/Changed elsewhere while you edited/);
+  });
 });
 
 describe('the job page', () => {

@@ -16,7 +16,7 @@ import { LiveBench } from '$lib/api/liveBench';
 import { lastKnown, Now } from '$lib/api/freshness';
 import { Resource } from '$lib/api/resource';
 import type { BenchEntry, BenchLoop, BenchPlan } from '$lib/api/types';
-import { clonePlan, samePlan } from '$lib/bench/plan';
+import { clonePlan, samePlan, editedPlanError, planCondition, unreadableWeight } from '$lib/bench/plan';
 import { isEntryActive, isLoopActive, planEditable } from '$lib/bench/rules';
 import { media } from '$lib/design/tokens';
 import { ago, date, num } from '$lib/format';
@@ -102,31 +102,84 @@ export default function Benchmark() {
   // Fixed once an entry finished or is under way (failed and stopped ones graded nothing to keep comparable).
   const editable = computed(() => !!bench.get() && planEditable(live.entries));
   const dirty = computed(() => !!bench.get() && editable.get() && !samePlan(draft.get(), bench.get()!.plan));
-  // A plan from the server (the first load, a save, another tab's change) replaces the editor's unless it has edits.
+  // A plan from the server (the first load, a save, another tab's change) replaces the editor's unless it has edits;
+  // one saved elsewhere under the edits keeps them and says so (Save plan would replace it, and nothing else would tell).
   const planKey = computed(() => {
     const b = bench.get();
     return b ? `${b.id}:${JSON.stringify(b.plan)}` : '';
   });
+  // The weight fields as typed (PlanTab): one emptied keeps the draft at the last number typed, so every save checks
+  // them, the plan's Save plan and the leave dialog's alike. Another benchmark, Discard and a plan replaced from the
+  // server start afresh; a condition turned off drops its field, and one that holds no number stays so (with its error)
+  // across edits of other conditions. A number that is no longer the draft's weight (changed from outside the field) goes.
+  const typed = signal<Record<string, string>>({});
+  const saving = signal(false);
+  const elsewhere = signal(false);
+  // The plan this page's Save plan has sent and not yet heard back on: an update holding it is the page's own, any other
+  // one that comes while it saves is another tab's (told by what it holds, not by when it comes).
+  let sent: BenchPlan | null = null;
   let shownKey = '';
   effect(() => {
     const key = planKey.get();
     if (!key || key === shownKey) return;
     untrack(() => {
       const b = bench.get()!;
-      if (!shownKey.startsWith(`${b.id}:`) || !dirty.get()) draft.set(clonePlan(b.plan));
+      if (!shownKey.startsWith(`${b.id}:`) || !dirty.get()) {
+        draft.set(clonePlan(b.plan));
+        // Replaced from the server: what was typed is for a plan no longer shown.
+        typed.set({});
+        elsewhere.set(false);
+      } else if (!(sent && samePlan(b.plan, sent))) elsewhere.set(true);
       shownKey = key;
     });
   });
-  const saving = signal(false);
+  effect(() => {
+    if (!dirty.get()) untrack(() => elsewhere.set(false));
+  });
+  effect(() => {
+    void id.get();
+    untrack(() => typed.set({}));
+  });
+  effect(() => {
+    const d = draft.get();
+    untrack(() => {
+      const t = typed.get();
+      const kept = Object.entries(t).filter(([c, v]) => {
+        const w = planCondition(d, c)?.weight;
+        return w !== undefined && (unreadableWeight(v) || Number(v) === w);
+      });
+      if (kept.length !== Object.keys(t).length) typed.set(Object.fromEntries(kept));
+    });
+  });
+  const planWhy = computed(() => (editable.get() ? editedPlanError(draft.get(), typed.get(), catalog.data?.conditions) : null));
   async function savePlan(): Promise<boolean> {
     const b = bench.peek();
     if (!b) return false;
+    const why = planWhy.peek();
+    if (why) {
+      // page-level: both Save plan buttons are held while this fails; the leave dialog closes on a refused save (answer).
+      toast.error(new Error(why), 'Could not save the plan');
+      return false;
+    }
     saving.set(true);
     const benchId = b.id;
     const plan = clonePlan(draft.peek());
+    sent = plan;
     try {
-      await live.act(() => hub.api.updateBench(benchId, { plan }));
-      draft.set(plan);
+      // The answer holds the plan as the server keeps it (a weight rounded to a 32-bit float, a reason trimmed).
+      const saved = (await live.act(() => hub.api.updateBench(benchId, { plan }))).plan;
+      const now = bench.peek();
+      if (now && now.id === benchId && !samePlan(now.plan, saved)) {
+        // Another tab saved after this save landed (its event came before this answer): the server holds that plan, so
+        // the edits stay edits and the page says so, here and at every Save plan.
+        if (dirty.peek()) elsewhere.set(true);
+        // page-level: the save did land, then was replaced; Plan saved would say the wrong thing.
+        toast.info('Plan saved, then changed elsewhere', 'Another tab or window saved its plan after yours. Save plan replaces it with yours; Discard shows it.');
+        // Not saved as it stands: the leave dialog stays on the page rather than leave the edits behind.
+        return false;
+      }
+      // Shown as kept: a field rounded by the server shows the number it holds.
+      draft.set(clonePlan(saved));
       // page-level: the plan's own Save, outside any dialog.
       toast.success('Plan saved', `${plan.conditions.length} conditions. It is fixed once the first entry runs.`);
       return true;
@@ -134,12 +187,15 @@ export default function Benchmark() {
       toast.error(e, 'Could not save the plan');
       return false;
     } finally {
+      sent = null;
       saving.set(false);
     }
   }
   const discard = () => {
     const b = bench.peek();
-    if (b) draft.set(clonePlan(b.plan));
+    if (!b) return;
+    draft.set(clonePlan(b.plan));
+    typed.set({});
   };
 
   // Leaving with unsaved edits asks first, whichever way (a link, Back, the palette); a change of tab does not.
@@ -517,6 +573,9 @@ export default function Benchmark() {
                       editable={editable.get()}
                       catalog={catalog.data}
                       bind:draft={draft}
+                      bind:typed={typed}
+                      error={planWhy.get()}
+                      elsewhere={elsewhere.get()}
                       dirty={dirty.get()}
                       saving={saving.get()}
                       onsave={() => void savePlan()}
@@ -580,7 +639,11 @@ export default function Benchmark() {
               agentsError={agents.error}
               retryAgents={() => agents.refresh()}
               choice={choice}
-              onuse={(p) => draft.set(clonePlan(p))}
+              onuse={(p) => {
+                // A proposal replaces the plan: fields typed for the old one (an emptied weight) go with it.
+                typed.set({});
+                draft.set(clonePlan(p));
+              }}
             />
           ) : null}
           <NewLoopDialog
@@ -652,15 +715,26 @@ export default function Benchmark() {
           <Dialog
             open={!!leaving.get()}
             title="Save the plan?"
-            description={`${b().name}'s plan has changes you have not saved.`}
+            description={`${b().name}'s plan has changes you have not saved.${
+              elsewhere.get() ? ' It was also saved from another tab or window while you edited: Save plan replaces that with yours; Discard keeps that one.' : ''
+            }`}
             size="sm"
             onclose={() => leaving.set(null)}
             footer={() => (
               <>
                 <Button onclick={() => answer('discard')}>Discard changes</Button>
-                <Button variant="primary" loading={saving.get()} onclick={() => answer('save')}>
-                  Save plan
-                </Button>
+                {planWhy.get() ? (
+                  <p class="why" data-gate-why>
+                    {planWhy.get()}
+                  </p>
+                ) : null}
+                <Gate reason={planWhy.get() ? 'Fix the plan first' : null}>
+                  {(why) => (
+                    <Button variant="primary" loading={saving.get()} disabled={!!why()} aria-describedby={why()} onclick={() => answer('save')}>
+                      Save plan
+                    </Button>
+                  )}
+                </Gate>
               </>
             )}
           />

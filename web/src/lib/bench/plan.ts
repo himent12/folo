@@ -1,6 +1,28 @@
 // A benchmark's plan (docs/API.md, Vision benchmarks: "A plan is …"): whether one is valid, editing it a step at a time
 // in the screens' editor, and what a proposed plan changes from the current one.
 
+/** A weight field as typed holds no number (emptied, or text): the plan keeps the last number typed, which it does not show. */
+export function unreadableWeight(v: string | undefined): boolean {
+  return v !== undefined && (!v.trim() || !Number.isFinite(Number(v)));
+}
+
+/**
+ * What is wrong with a plan being edited, or null: a weight field that holds no number (`typed`, per condition, the
+ * fields as typed), else `planError`. Every save of the edits checks it (the plan's Save and the leave dialog's), so
+ * none stores a weight the field does not show.
+ */
+export function editedPlanError(
+  plan: BenchPlan,
+  typed: Readonly<Record<string, string>>,
+  catalog?: readonly Pick<BenchCondition, 'id' | 'name'>[],
+): string | null {
+  const empty = plan.conditions.find((c) => unreadableWeight(typed[c.condition]));
+  if (!empty) return planError(plan, catalog);
+  const name = catalog?.find((c) => c.id === empty.condition)?.name ?? empty.condition;
+  return `${name}: the weight is empty. ${weightError(Number.NaN)}.`;
+}
+
+
 import type { BenchCatalog, BenchCondition, BenchPlan, BenchPlanCondition } from '../api/types';
 import { MAX_SEVERITY, WEIGHT_MAX } from './rules';
 
@@ -35,16 +57,23 @@ export const planPasses = (plan: BenchPlan) => plan.conditions.reduce((a, c) => 
 /** The plan's condition for `id`, if it runs. */
 export const planCondition = (plan: BenchPlan, id: string) => plan.conditions.find((c) => c.condition === id);
 
-/** Two plans run the same conditions at the same severities and weights, with the same reasons. */
+/**
+ * Two plans run the same conditions at the same severities and weights, with the same reasons, as the server keeps
+ * them: a weight as a 32-bit float (`1.00000001` is `1`), a reason trimmed and an empty one none. So a plan the server
+ * answers with is the one sent, though it rounded or trimmed it.
+ */
 export function samePlan(a: BenchPlan, b: BenchPlan): boolean {
-  if ((a.rationale ?? null) !== (b.rationale ?? null)) return false;
+  if (kept(a.rationale) !== kept(b.rationale)) return false;
   if ((a.designed_by?.agent ?? null) !== (b.designed_by?.agent ?? null) || (a.designed_by?.model ?? null) !== (b.designed_by?.model ?? null)) return false;
   if (a.conditions.length !== b.conditions.length) return false;
   return a.conditions.every((c, i) => {
     const d = b.conditions[i];
-    return !!d && d.condition === c.condition && d.weight === c.weight && (d.why ?? null) === (c.why ?? null) && d.severities.join() === c.severities.join();
+    return !!d && d.condition === c.condition && Math.fround(d.weight) === Math.fround(c.weight) && kept(d.why) === kept(c.why) && d.severities.join() === c.severities.join();
   });
 }
+
+/** A reason as the server keeps it: trimmed, an empty one none (crates/folo-bench `check_plan`). */
+const kept = (s: string | null | undefined) => s?.trim() || null;
 
 /** The conditions in catalog order, so a plan edited a step at a time reads in the order the editor lists them. */
 function ordered(conditions: BenchPlanCondition[], catalog: readonly Pick<BenchCondition, 'id'>[]): BenchPlanCondition[] {

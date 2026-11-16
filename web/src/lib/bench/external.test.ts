@@ -52,6 +52,11 @@ describe('checkPredictions', () => {
     expect(err([{ image: '1', boxes: [{ ...box, class: 3 }] }])).toMatch(/^Record 1: box 1: "class" must be a class index from 0 to 2/);
     expect(err([{ image: '1', boxes: [{ ...box, score: 2 }] }])).toMatch(/"score" must be between 0 and 1/);
     expect(err([{ image: '1', boxes: [{ class: 0, x1: 'a' }] }])).toMatch(/must be numbers/);
+    // A coordinate the server's 32-bit floats overflow, and corners the wrong way round (x, y, w, h sent as corners).
+    expect(err([{ image: '1', boxes: [{ ...box, x2: 1e39 }] }])).toMatch(/must be numbers/);
+    expect(err([{ image: '1', boxes: [{ ...box, x1: box.x2 + 1 }] }])).toMatch(/^Record 1: box 1: "x2" or "y2" is less than "x1" or "y1".*not x, y, width, height/);
+    expect(err([{ image: '1', boxes: [{ ...box, y1: box.y2 + 1 }] }])).toMatch(/is less than/);
+    expect(err([{ image: '1', boxes: [{ ...box, x2: box.x1 }] }, clean[1]])).toBeNull();
     expect(err([{ image: '1' }])).toMatch(/"boxes" must be an array/);
     expect(err([...clean, { image: '1', boxes: [] }])).toMatch(/^Record 3: image "1" is answered twice/);
     expect(err([...clean, { image: '1', condition: 'rain', severity: 1, boxes: [] }])).toMatch(/unknown condition "rain"/);

@@ -79,8 +79,11 @@ export default function Editor(props: EditorProps) {
   });
 
   // The draft: the boxes as edited here, over the image's own (`base`). An image that changes on the server while it
-  // is not being edited (the agent relabeled it) shows its new boxes.
+  // is not being edited (the agent relabeled it) shows its new boxes; one that changes under unsaved edits (another
+  // tab saved it) keeps the edits, takes the new boxes as what Discard goes back to, and says so: Save would replace
+  // them, and nothing else would tell.
   const base = signal<Box[]>([]);
+  const saving = signal(false);
   const draft = signal<Box[]>([]);
   const selected = signal<number | null>(null);
   const hovered = signal<number | null>(null);
@@ -89,6 +92,12 @@ export default function Editor(props: EditorProps) {
   const scale = signal(0);
   let shownId: string | null = null;
   const dirty = computed(() => !sameBoxes(draft.get(), base.get()));
+  // Another tab saved this image under the edits: kept apart from the dismissible status line, so the leave dialog's
+  // Save (the editor is inert under it) says so too. It goes once the edits do, or this editor's save replaced those labels.
+  const elsewhere = signal(false);
+  effect(() => {
+    if (!dirty.get()) untrack(() => elsewhere.set(false));
+  });
   const picked = computed(() => {
     const s = selected.get();
     return s === null ? undefined : draft.get()[s];
@@ -113,12 +122,23 @@ export default function Editor(props: EditorProps) {
       note.set('');
       asked.set(null);
       status.clear();
+      elsewhere.set(false);
       untrack(forget);
-    } else if (!sameBoxes(cur.boxes, base.get()) && sameBoxes(draft.get(), base.get())) {
-      base.set(cur.boxes);
-      draft.set(cur.boxes);
-      selected.set(null);
-      untrack(forget);
+    } else if (!sameBoxes(cur.boxes, base.get())) {
+      if (sameBoxes(draft.get(), base.get())) {
+        base.set(cur.boxes);
+        draft.set(cur.boxes);
+        selected.set(null);
+        untrack(forget);
+      } else if (!saving.get()) {
+        // Not this editor's own save on its way (its answer sets `base`): someone else's.
+        base.set(cur.boxes);
+        if (!sameBoxes(draft.peek(), cur.boxes))
+          untrack(() => {
+            elsewhere.set(true);
+            status.show('info', 'Changed elsewhere while you edited', 'Its labels were saved from another tab or window. Save replaces them with yours; Discard shows them.');
+          });
+      }
     }
   });
 
@@ -181,7 +201,6 @@ export default function Editor(props: EditorProps) {
     selected.set(null);
   }
 
-  const saving = signal(false);
   // An image not labeled yet (waiting, or failed) can be saved as it is: kept as labeled by hand, its boxes or none.
   const savable = computed(() => dirty.get() || (!!img.get() && img.get()!.status !== 'labeled'));
   async function save(): Promise<boolean> {
@@ -201,6 +220,7 @@ export default function Editor(props: EditorProps) {
       props.live.put([saved], mark);
       if (shownId === id) {
         base.set(saved.boxes);
+        elsewhere.set(false);
         if (draft.peek() === sent) draft.set(saved.boxes);
         status.success('Saved', imageState(saved));
       }
@@ -620,7 +640,9 @@ export default function Editor(props: EditorProps) {
       <Dialog
         open={!!leaving.get()}
         title="Save your changes?"
-        description={`${img.get()?.file ?? 'This image'} has boxes you have not saved.`}
+        description={`${img.get()?.file ?? 'This image'} has boxes you have not saved.${
+          elsewhere.get() ? ' Its labels were also saved from another tab or window while you edited: Save replaces them with yours; Discard keeps those.' : ''
+        }`}
         size="sm"
         onclose={() => leaving.set(null)}
         footer={() => (

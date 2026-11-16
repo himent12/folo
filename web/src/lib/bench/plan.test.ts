@@ -51,6 +51,10 @@ describe('editing a plan a step at a time', () => {
     expect(samePlan(cat.default_plan, clonePlan(cat.default_plan))).toBe(true);
     expect(samePlan(cat.default_plan, setWeight(cat.default_plan, 'haze', 2))).toBe(false);
     expect(samePlan(cat.default_plan, { ...cat.default_plan, rationale: 'why' })).toBe(false);
+    // As the server keeps it: a weight as a 32-bit float, a reason trimmed.
+    expect(samePlan(setWeight(cat.default_plan, 'haze', 2.00000001), setWeight(cat.default_plan, 'haze', 2))).toBe(true);
+    expect(samePlan(setWeight(cat.default_plan, 'haze', 2.001), setWeight(cat.default_plan, 'haze', 2))).toBe(false);
+    expect(samePlan({ ...cat.default_plan, rationale: '  ' }, { ...cat.default_plan, rationale: null })).toBe(true);
   });
 });
 
