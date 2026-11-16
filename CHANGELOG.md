@@ -46,12 +46,13 @@ with regression tests ([docs/notes/DOGFOOD-4.md](docs/notes/DOGFOOD-4.md) lists 
 - **Big datasets and long sessions**: Desktop's image cache has a byte budget (the inspector held every full-size
   image it showed), failed images are retried, and tiles in view load first after a fast scroll; Studio cancels the
   thumbnails scrolled past and no longer refetches every run's metrics on each visit past 200 runs.
-- **Bad state is an error with a way out**: corrupt Studio preferences, a screen that throws and answers of the
-  wrong shape show an error instead of a blank or frozen page; one bad value in Desktop's `desktop.json` no longer
-  throws away the whole file; a damaged `datasets.json` is shown as such, not as "No datasets yet".
-- **Registering datasets**: a folder that is not a dataset is refused at once instead of after a walk of its whole
-  tree, the folder above a dataset points to it, Windows device names such as `NUL` can be dataset names, and a
-  copied run folder no longer lists its run twice.
+- **Bad state has a way out**: corrupt Studio preferences are put back to their defaults; in Studio a screen that
+  throws and answers of the wrong shape show an error instead of a blank or frozen page; one bad value in Desktop's
+  `desktop.json` no longer throws away the whole file; a damaged `datasets.json` is shown as such, not as "No
+  datasets yet".
+- **Registering datasets**: a folder that is not a dataset is refused without first walking its whole tree, and
+  without holding up dataset deletion meanwhile; the folder above a dataset points to it, Windows device names such
+  as `NUL` can be dataset names, and a copied run folder no longer lists its run twice.
 - **Desktop text fields and keys**: Shift+Home/End, Ctrl+Shift+arrows and Ctrl+Delete work, an IME message no longer
   deletes the selection, and Esc, Enter and Ctrl+Enter work in the Benchmarks forms.
 - **Studio and Desktop agree**: chart axes, ages, an unreadable dataset and the samples' starting confidence read
