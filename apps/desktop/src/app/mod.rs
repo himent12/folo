@@ -435,6 +435,9 @@ pub struct FoloApp {
     pub play_drag: Option<(folo_ui::Point<Pixels>, (f32, f32))>,
     /// Generation of the latest image load request (older completions are dropped).
     play_load_seq: u64,
+    /// The latest image load while it is on its way: `Some((dataset, image))` for a dataset's image,
+    /// `None` for a file ([`FoloApp::forget_play_dataset`] asks again for one whose files changed).
+    play_loading: Option<Option<(String, String)>>,
     /// Generation of the image on stage; predictions are tagged with it.
     play_image_gen: u64,
     /// Generation of the latest prediction request.
@@ -692,6 +695,7 @@ impl FoloApp {
             play_pan: (0., 0.),
             play_drag: None,
             play_load_seq: 0,
+            play_loading: None,
             play_image_gen: 0,
             play_pred_seq: 0,
             play_pred_pending: false,

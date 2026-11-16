@@ -331,7 +331,9 @@ impl FoloApp {
         self.issue_reads.remove(id);
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
-        let textures = self.store.images_px.forget_dataset(id);
+        let mut textures = self.store.images_px.forget_dataset(id);
+        // The Playground's image from it too: read again, its old pixels never under new boxes.
+        textures.extend(self.forget_play_dataset(id, cx));
         // Freed after this update, when no window is mid-draw (as on a server switch).
         cx.defer(move |cx| {
             for img in textures {
