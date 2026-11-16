@@ -49,4 +49,39 @@ describe('a run whose dataset was removed', () => {
     expect(target.querySelector('#chart-map-title')?.firstChild?.textContent?.trim()).toBe('Validation mAP');
     expect(target.textContent).not.toContain('Evaluation');
   });
+
+  // Stress s3-live-3: the page read the datasets once, so one removed while it was open stayed linked for good.
+  it('says so when the dataset is removed while the page is open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const api = new MockApi('normal', 0);
+      const done = (await api.runs()).find((r) => r.status === 'completed' && r.config.dataset_id === 'ds_shapes')!;
+      hub.api = api;
+      hub.mode = 'mock';
+      router.route = parse(`#/runs/${done.id}`);
+      target = document.createElement('div');
+      document.body.appendChild(target);
+      c = render(() => <Run />, target);
+      await vi.waitFor(
+        () => {
+          flushSync();
+          if (!target.querySelector('.run-meta a[href^="#/datasets/"]')) throw new Error('not loaded');
+        },
+        { timeout: 4000, interval: 10 },
+      );
+      expect(target.querySelector('.run-meta')?.textContent).not.toContain('(removed)');
+      await api.deleteDataset('ds_shapes');
+      await vi.advanceTimersByTimeAsync(5000);
+      await vi.waitFor(
+        () => {
+          flushSync();
+          if (!target.querySelector('.run-meta')?.textContent?.includes('shapes (removed)')) throw new Error('still linked');
+        },
+        { timeout: 4000, interval: 10 },
+      );
+      expect(target.querySelector('.run-meta a[href^="#/datasets/"]')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

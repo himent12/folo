@@ -139,7 +139,7 @@ Each step names the file and the function or type that does it. Paths are under 
    `events` set to `RunEntry::on_event` → `Trainer::run`.
 5. `RunEntry::on_event` (`runs/entry.rs`) updates and persists the run and sends each event on the run's broadcast
    channel.
-6. The page follows: `client.ts` `runEvents` → `openEventStream` (`web/src/lib/api/sse.ts`, an `EventSource`) →
+6. The page follows: `client.ts` `runEvents` → `openEventStream` (`web/src/lib/api/sse.ts`, `fetch` read as SSE, reopened when silent for 45 s) →
    `GET /api/runs/{id}/events` → `routes/runs.rs` `run_events` → `Runs::subscribe` (`runs/history.rs`): the run's
    `status` first, then live events. `web/src/lib/api/live.ts` keeps the open run's view current from them.
 

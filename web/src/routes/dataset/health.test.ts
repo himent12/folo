@@ -38,6 +38,14 @@ describe('findingCount', () => {
 });
 
 describe('healthChecks', () => {
+  // Stress d1-datasets review: "Small dataset (1 images)".
+  it('names one image in the singular in the small-dataset note', () => {
+    const one = healthChecks(ds({ splits: { train: 1, val: 0, test: 0 } }), st()).find((x) => x.id === 'small')!;
+    expect([one.title, one.short, one.tiny]).toEqual(['Small dataset (1 image)', 'only 1 image', '1 image']);
+    const many = healthChecks(ds({ splits: { train: 120, val: 30, test: 0 } }), st()).find((x) => x.id === 'small')!;
+    expect(many.title).toBe('Small dataset (150 images)');
+  });
+
   it('reports ok for a clean dataset', () => {
     const h = healthChecks(ds(), st());
     expect(h.map((x) => x.id)).toEqual(['ok']);

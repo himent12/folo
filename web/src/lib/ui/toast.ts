@@ -8,10 +8,61 @@ import { isOom } from '$lib/oom';
 
 export type ToastTone = 'success' | 'error' | 'info';
 
-/** An error in a sentence or two: an ApiError's message and hint, out of GPU memory in plain words (as ErrorState). */
+/** A server hint written for agents and API clients (an endpoint, an MCP tool): kept with the details, not shown. */
+export const forAgents = (hint: string) => /\b(?:GET|POST|PUT|PATCH|DELETE) \/api\/|\(MCP\)|docs\/API\.md/.test(hint);
+
+/** An endpoint after a colon, or in parentheses, at the end of a clause: "stop it first: POST /api/runs/x/stop". */
+const AGENT_TAIL = /(?::\s*(?:GET|POST|PUT|PATCH|DELETE) \/api\/\S*|\s*\([^()]*\))\s*$/;
+
+/**
+ * What a user can do of a server hint (PR #287 review): the hint less what is written for agents. Its clauses (split at
+ * ", " and "; " outside parentheses) lose an endpoint at their end ("label images first: POST /api/…/start" → "label
+ * images first"); a clause that still names one ("GET /api/runs lists them") goes. Null when nothing is left.
+ */
+export function humanHint(hint: string): string | null {
+  if (!forAgents(hint)) return hint;
+  const parts: { text: string; sep: string }[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < hint.length; i++) {
+    const c = hint[i];
+    if (c === '(') depth++;
+    else if (c === ')') depth = Math.max(0, depth - 1);
+    else if (depth === 0 && (c === ',' || c === ';') && hint[i + 1] === ' ') {
+      parts.push({ text: hint.slice(from, i), sep: hint.slice(i, i + 2) });
+      from = i + 2;
+    }
+  }
+  parts.push({ text: hint.slice(from), sep: '' });
+  const kept = parts
+    .map((p) => ({ ...p, text: (forAgents(p.text) ? p.text.replace(AGENT_TAIL, '') : p.text).trim() }))
+    .filter((p) => p.text && !forAgents(p.text));
+  const out = kept.map((p, i) => p.text + (i < kept.length - 1 ? p.sep : '')).join('');
+  return out || null;
+}
+
+/**
+ * A user's words for a server hint that has no remedy left once its endpoint goes (PR #287 re-review 1): the endpoint
+ * is the subject of the instruction ("wait until GET /api/cloud/instances shows its instances terminated").
+ */
+const PLAIN_HINTS = new Map<string, string>([['connection_in_use', 'stop its runs and wait until its instances are terminated']]);
+
+/** What a user can do of an ApiError's hint: its code's plain words when the hint names an endpoint, else `humanHint`. */
+export function userHint(err: ApiError): string | null {
+  if (!err.hint) return null;
+  return (forAgents(err.hint) && PLAIN_HINTS.get(err.code)) || humanHint(err.hint);
+}
+
+/**
+ * An error in a sentence or two: an ApiError's message and hint, out of GPU memory in plain words (as ErrorState). What
+ * of a hint is written for agents ("list_runs (MCP) or GET /api/runs …") is left out, as ErrorState leaves it (stress
+ * s2-runs-7; `humanHint`).
+ */
 export function errorDetail(err: unknown): string {
   const message = err instanceof ApiError && isOom(err) ? 'The GPU ran out of memory.' : err instanceof Error ? err.message : String(err);
-  return err instanceof ApiError ? [message, err.hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ') : message;
+  if (!(err instanceof ApiError)) return message;
+  const hint = userHint(err);
+  return [message, hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ');
 }
 
 export interface Toast {

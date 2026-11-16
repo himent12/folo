@@ -13,6 +13,7 @@ import { href } from '$lib/router';
 import Button from './Button';
 import CodeText from './CodeText';
 import { isOffline } from './offline';
+import { forAgents, userHint } from './toast';
 
 /**
  * The things a link can point at that may have been deleted since, by the server's `404 <what>_not_found` code: what
@@ -84,9 +85,6 @@ export function readOf(request: string | undefined): string | null {
   return PARTS[last] ?? `the ${last.replace(/[-_]/g, ' ')}`;
 }
 
-/** A server hint written for agents and API clients (an endpoint, an MCP tool): kept with the details, not shown. */
-const forAgents = (hint: string) => /\b(?:GET|POST|PUT|PATCH|DELETE) \/api\/|\(MCP\)|docs\/API\.md/.test(hint);
-
 export interface ErrorStateProps {
   error: unknown;
   retry?: () => void;
@@ -129,8 +127,10 @@ export default function ErrorState(props: ErrorStateProps) {
   const hint = computed(() => {
     if (offline.get()) return 'Start `folo serve`, or check the server URL.';
     if (gone.get()) return undefined;
-    const s = serverHint.get();
-    return props.hint ?? (s && !forAgents(s) ? s : undefined);
+    if (props.hint) return props.hint;
+    // What a user can do of the server's hint; what it says for agents goes to the details (below).
+    const h = props.error instanceof ApiError ? userHint(props.error) : null;
+    return h ? sentence(h) : undefined;
   });
   const code = computed(() =>
     props.error instanceof ApiError ? `${props.error.code}${props.error.status ? ` · HTTP ${props.error.status}` : ''}` : undefined,

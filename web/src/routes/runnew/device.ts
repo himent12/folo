@@ -3,6 +3,32 @@ import type { Resource } from '$lib/api/resource';
 import type { SystemInfo } from '$lib/api/types';
 import { deviceName } from '$lib/format';
 
+/**
+ * A GPU the form holds (from the tab's draft, a copied run or a pick before the list changed) that the server's device
+ * list does not name: Start waits for another device rather than letting the server refuse it (stress d2-runs; Desktop's
+ * `nr_device_gone`). Unknown until the list has loaded.
+ */
+export function missingDevice(device: string, system: SystemInfo | undefined): { device: string; gone: boolean; detail: string } | null {
+  const d = canonicalDevice(device);
+  if (!system || !d.startsWith('gpu:') || system.gpus.some((g) => `gpu:${g.ordinal}` === d)) return null;
+  return { device, gone: true, detail: '' };
+}
+
+/**
+ * A device as the form's select names it, from any spelling the trainer accepts (`resolve_device` in
+ * crates/folo-vision/src/train/config.rs): `GPU:00`, `cuda:1`, `gpu` and ` CPU ` become `gpu:0`, `gpu:1`, `gpu:0` and
+ * `cpu`; a run created over the API keeps its own spelling, and a copy of it must not read as a GPU that is gone.
+ * Anything else is kept as it is (the server says what is wrong with it).
+ */
+export function canonicalDevice(device: string): string {
+  const s = device.trim().toLowerCase();
+  if (s === 'cpu') return 'cpu';
+  if (s === 'auto' || s === '') return 'auto';
+  if (s === 'gpu' || s === 'cuda') return 'gpu:0';
+  const m = /^(?:gpu|cuda):\+?(\d+)$/.exec(s);
+  return m && Number.isSafeInteger(Number(m[1])) ? `gpu:${Number(m[1])}` : device;
+}
+
 /** A device in a sentence, named once with its value: "Auto", "GPU 1 (gpu:1)", "CPU" (values elsewhere: `gpu:1`). */
 export const devWord = (d: string) => (d === 'auto' ? 'Auto' : d === 'cpu' ? 'CPU' : `${d.replace(/^gpu:/, 'GPU ')} (${d})`);
 

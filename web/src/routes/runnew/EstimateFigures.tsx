@@ -6,7 +6,7 @@ import ChevronRight from '$icons/chevron-right';
 import TriangleAlert from '$icons/triangle-alert';
 import { bindable, computed, css, For, type Signal } from 'fw';
 import type { OomFix } from '$lib/oom';
-import { bytes, num, usdRange } from '$lib/format';
+import { bytes, count, num, usdRange } from '$lib/format';
 import { limitText, validHours } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
 import { timeRange } from '$lib/throughput';
@@ -157,7 +157,7 @@ export default function EstimateFigures(props: EstimateFiguresProps) {
                   <div>
                     <dt>Validation{props.shown.val.reference ? ', reference' : ''}</dt>
                     <dd>
-                      {num(props.shown.val.images)} images · {num(props.shown.val.rate)} img/s
+                      {count(props.shown.val.images, 'image')} · {num(props.shown.val.rate)} img/s
                     </dd>
                   </div>
                   <div>

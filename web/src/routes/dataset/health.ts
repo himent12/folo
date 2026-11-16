@@ -2,7 +2,7 @@
 
 import type { Dataset, DatasetStats, Histogram, IssueCounts, IssueKind, IssueSeverity } from '$lib/api/types';
 import { TRAINED_ON } from '$lib/evaluated';
-import { num } from '$lib/format';
+import { count, num } from '$lib/format';
 
 export type Severity = 'danger' | 'warning' | 'info' | 'ok';
 
@@ -283,9 +283,9 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
     out.push({
       id: 'small',
       severity: 'info',
-      title: `Small dataset (${int(images)} images)`,
-      short: `only ${int(images)} images`,
-      tiny: `${int(images)} images`,
+      title: `Small dataset (${count(images, 'image')})`,
+      short: `only ${count(images, 'image')}`,
+      tiny: count(images, 'image'),
       detail: 'Expect overfitting; keep augmentation on and start from pretrained weights.',
     });
   }
