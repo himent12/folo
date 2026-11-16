@@ -9,6 +9,7 @@ use super::arows::arows_kernel;
 use super::kernel::kernel;
 use super::{ARows, BiasAct, KC, MR, NR, Operand, PACK_BUDGET, PAR_FLOPS};
 use crate::cpu::elementwise::SendPtr;
+use crate::cpu::{par_chunks, par_for};
 
 thread_local! {
     static PACK_BUFS: RefCell<Vec<Vec<f32>>> = const { RefCell::new(Vec::new()) };
@@ -112,7 +113,7 @@ pub(super) fn pack_lhs_panels(
 ) {
     if parallel && pa.len() >= PACK_A_PAR_MIN {
         let per_task = PACK_A_TASK.div_ceil(panel);
-        pa.par_chunks_mut(per_task * panel).enumerate().for_each(|(t, chunk)| {
+        par_chunks(pa, per_task * panel, &|t, chunk| {
             chunk.chunks_mut(panel).enumerate().for_each(|(p, dst)| pack((t * per_task + p, dst)))
         });
     } else {
@@ -340,7 +341,7 @@ fn gemm_blocked<A: Operand, B: Operand>(
                 }
             };
             if parallel {
-                (0..tm * tn).into_par_iter().for_each(tile);
+                par_for(tm * tn, &tile);
             } else {
                 (0..tm * tn).for_each(tile);
             }

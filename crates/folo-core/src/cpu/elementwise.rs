@@ -1,11 +1,10 @@
 //! Copies, casts and elementwise kernels.
 
-use rayon::prelude::*;
-
 use super::pool_alloc::alloc_uninit;
 use super::{CHUNK, PAR_MIN};
 use crate::Layout;
 use crate::backend::{BinaryOp, UnaryOp};
+use crate::cpu::{par_chunks, par_for};
 use crate::layout::RowPlan;
 
 /// Fill `out` (contiguous, `plan.rows * plan.len` long) row by row, in parallel when large.
@@ -19,29 +18,25 @@ pub(crate) fn fill_rows<T: Send, const K: usize>(
     if len == 0 || plan.rows == 0 {
         return;
     }
-    if out.len() < PAR_MIN || plan.rows == 1 {
-        if plan.rows == 1 && out.len() >= PAR_MIN {
-            // One long row: split it into chunks with adjusted offsets.
-            let inner = plan.inner;
-            plan.for_rows(0..1, |_, offs| {
-                out.par_chunks_mut(CHUNK).enumerate().for_each(|(c, chunk)| {
-                    let o = std::array::from_fn(|k| offs[k] + c * CHUNK * inner[k]);
-                    f(chunk, o);
-                });
-            });
-            return;
-        }
-        let mut rows = out.chunks_mut(len);
-        plan.for_rows(0..plan.rows, |_, offs| f(rows.next().unwrap(), offs));
-        return;
+    // The rows from `start` on into `rows_out` (whole rows), serially. The one walk over the rows every path
+    // below shares, so each op compiles it once.
+    let run = |start: usize, rows_out: &mut [T]| {
+        let end = start + rows_out.len() / len;
+        let mut rows = rows_out.chunks_mut(len);
+        plan.for_rows(start..end, |_, offs| f(rows.next().unwrap(), offs));
+    };
+    if out.len() < PAR_MIN {
+        return run(0, out);
+    }
+    if plan.rows == 1 {
+        // One long row: split it into chunks with adjusted offsets.
+        let (base, inner) = (plan.base, plan.inner);
+        return par_chunks(out, CHUNK, &|c, chunk| {
+            f(chunk, std::array::from_fn(|k| base[k] + c * CHUNK * inner[k]));
+        });
     }
     let rows_per_task = (CHUNK / len).max(1);
-    out.par_chunks_mut(rows_per_task * len).enumerate().for_each(|(t, chunk)| {
-        let start = t * rows_per_task;
-        let end = (start + rows_per_task).min(plan.rows);
-        let mut rows = chunk.chunks_mut(len);
-        plan.for_rows(start..end, |_, offs| f(rows.next().unwrap(), offs));
-    });
+    par_chunks(out, rows_per_task * len, &|t, chunk| run(t * rows_per_task, chunk));
 }
 
 /// A contiguous copy of the elements of `src` selected by `layout`.
@@ -135,19 +130,18 @@ fn strided_update<T: Copy + Send + Sync>(
             }
         }
     };
+    // Rows `start..end`, serially: the one walk over the rows every path below shares.
+    let run = |start: usize, end: usize| plan.for_rows(start..end, |_, o| row(o, 0, len));
     if plan.rows * len < PAR_MIN {
-        plan.for_rows(0..plan.rows, |_, o| row(o, 0, len));
+        run(0, plan.rows);
     } else if plan.rows == 1 {
-        plan.for_rows(0..1, |_, o| {
-            (0..len.div_ceil(CHUNK))
-                .into_par_iter()
-                .for_each(|t| row(o, t * CHUNK, ((t + 1) * CHUNK).min(len)));
-        });
+        let o = plan.base;
+        par_for(len.div_ceil(CHUNK), &|t| row(o, t * CHUNK, ((t + 1) * CHUNK).min(len)));
     } else {
         let rows_per_task = (CHUNK / len.max(1)).max(1);
-        (0..plan.rows.div_ceil(rows_per_task)).into_par_iter().for_each(|t| {
+        par_for(plan.rows.div_ceil(rows_per_task), &|t| {
             let start = t * rows_per_task;
-            plan.for_rows(start..(start + rows_per_task).min(plan.rows), |_, o| row(o, 0, len));
+            run(start, (start + rows_per_task).min(plan.rows));
         });
     }
 }
@@ -167,16 +161,17 @@ pub(crate) fn map1(x: &[f32], lx: &Layout, f: impl Fn(f32) -> f32 + Sync) -> Vec
     let mut out = alloc_uninit(n);
     if let Some(r) = lx.contiguous_range() {
         let x = &x[r];
-        if n >= PAR_MIN {
-            out.par_chunks_mut(CHUNK).zip(x.par_chunks(CHUNK)).for_each(|(o, x)| {
-                for (o, &x) in o.iter_mut().zip(x) {
-                    *o = f(x);
-                }
-            });
-        } else {
-            for (o, &x) in out.iter_mut().zip(x) {
+        // Piece `c` of CHUNK elements (the whole output when serial).
+        let piece = |c: usize, o: &mut [f32]| {
+            let x = &x[c * CHUNK..c * CHUNK + o.len()];
+            for (o, &x) in o.iter_mut().zip(x) {
                 *o = f(x);
             }
+        };
+        if n >= PAR_MIN {
+            par_chunks(&mut out, CHUNK, &piece);
+        } else {
+            piece(0, &mut out);
         }
         return out;
     }
@@ -210,18 +205,17 @@ pub(crate) fn map2(
     let mut out = alloc_uninit(n);
     if let (Some(ra), Some(rb)) = (la.contiguous_range(), lb.contiguous_range()) {
         let (a, b) = (&a[ra], &b[rb]);
-        if n >= PAR_MIN {
-            out.par_chunks_mut(CHUNK).zip(a.par_chunks(CHUNK).zip(b.par_chunks(CHUNK))).for_each(
-                |(o, (a, b))| {
-                    for ((o, &a), &b) in o.iter_mut().zip(a).zip(b) {
-                        *o = f(a, b);
-                    }
-                },
-            );
-        } else {
-            for ((o, &a), &b) in out.iter_mut().zip(a).zip(b) {
+        // Piece `c` of CHUNK elements (the whole output when serial).
+        let piece = |c: usize, o: &mut [f32]| {
+            let r = c * CHUNK..c * CHUNK + o.len();
+            for ((o, &a), &b) in o.iter_mut().zip(&a[r.clone()]).zip(&b[r]) {
                 *o = f(a, b);
             }
+        };
+        if n >= PAR_MIN {
+            par_chunks(&mut out, CHUNK, &piece);
+        } else {
+            piece(0, &mut out);
         }
         return out;
     }

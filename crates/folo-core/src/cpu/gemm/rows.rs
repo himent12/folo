@@ -3,8 +3,6 @@
 
 use std::sync::OnceLock;
 
-use rayon::prelude::*;
-
 use super::arows::arows_kernel;
 use super::blocked::{aligned, pack_lhs_panels, plan_tiles, with_scratch};
 #[cfg(target_arch = "x86_64")]
@@ -12,6 +10,7 @@ use super::kernel::store_block_avx2;
 use super::kernel::{kernel, store_block_generic};
 use super::{ARows, BiasAct, KC, MR, NR, Operand, PACK_BUDGET, PAR_FLOPS, RegEpi};
 use crate::cpu::elementwise::SendPtr;
+use crate::cpu::par_for;
 
 /// Micro-kernel over a B read in place: `C[0..mr, 0..NR] (+)= A_panel * B` where row `p` of B is the `NR`
 /// floats at `rows[p] + j`, then the epilogue.
@@ -498,7 +497,7 @@ pub(crate) fn gemm_rows<A: Operand>(
                 }
             };
             if parallel {
-                (0..tm * tn).into_par_iter().for_each(tile);
+                par_for(tm * tn, &tile);
             } else {
                 (0..tm * tn).for_each(tile);
             }

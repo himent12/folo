@@ -9,6 +9,7 @@ use rayon::prelude::*;
 
 use super::elementwise::SendPtr;
 use super::{CHUNK, PAR_MIN};
+use crate::cpu::{par_chunks, par_for};
 use crate::{Error, Result};
 
 /// Validate and convert index values to `usize`.
@@ -133,7 +134,7 @@ pub(crate) fn gather<T: Copy + Send + Sync + Default>(
         }
     };
     if out.len() >= PAR_MIN {
-        out.par_chunks_mut(CHUNK).enumerate().for_each(f);
+        par_chunks(&mut out, CHUNK, &|i, c| f((i, c)));
     } else {
         out.chunks_mut(CHUNK).enumerate().for_each(f);
     }
@@ -162,12 +163,12 @@ pub(crate) fn scatter_add_into(
     if work < PAR_MIN {
         out.chunks_mut(d * inner).enumerate().for_each(block);
     } else if outer >= rayon::current_num_threads() {
-        out.par_chunks_mut(d * inner).enumerate().for_each(block);
+        par_chunks(out, d * inner, &|i, c| block((i, c)));
     } else if inner >= 64 {
         // Few outer blocks: split the columns. Column `k` of a block is only written by sources of column `k`.
         let base = SendPtr(out.as_mut_ptr());
         let cols = (CHUNK / di).clamp(16, inner);
-        (0..outer * inner.div_ceil(cols)).into_par_iter().for_each(|t| {
+        par_for(outer * inner.div_ceil(cols), &|t| {
             let p = &base;
             let per = inner.div_ceil(cols);
             let (o, c0) = (t / per, (t % per) * cols);
