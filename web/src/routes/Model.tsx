@@ -363,7 +363,8 @@ export default function Model() {
                     <PrCurves
                       classes={m().classes}
                       ev={ev.get()!}
-                      map50={m().metrics?.map50 ?? null}
+                      // A file's stored AP50 (imported, published) may be on another dataset than these curves.
+                      map50={m().run_id ? (m().metrics?.map50 ?? null) : null}
                       view={phone.current ? 'curves' : 'all'}
                       bind:allCurves={allCurves}
                       modeInHeader
@@ -390,7 +391,7 @@ export default function Model() {
                       <PrCurves
                         classes={m().classes}
                         ev={ev.get()!}
-                        map50={m().metrics?.map50 ?? null}
+                        map50={m().run_id ? (m().metrics?.map50 ?? null) : null}
                         view="classes"
                         bind:selected={prSelected}
                         bind:hovered={prHovered}

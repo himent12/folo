@@ -103,6 +103,30 @@ describe('BrowserEngine', () => {
     expect(w.freed).toEqual(['m1:1:cpu']);
   });
 
+  it('skips requests superseded while the detector loaded: only the latest decodes and detects', async () => {
+    const w = fakeWasm();
+    let decoded = 0;
+    const e = new BrowserEngine(async () => w.mod, async () => (decoded++, pixels()));
+    let release!: () => void;
+    const slow = new Promise<void>((r) => (release = r));
+    const download = async () => (await slow, new Uint8Array([1]).buffer);
+    // Three images picked while the weights download; each pick aborts the one before.
+    const ctrls = [new AbortController(), new AbortController(), new AbortController()];
+    const runs = ctrls.map((c) => e.predict({ ...req('m1', null), download, signal: c.signal }));
+    ctrls[0]!.abort();
+    ctrls[1]!.abort();
+    release();
+    await expect(runs[0]).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(runs[1]).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await runs[2]!).model_id).toBe('m1');
+    expect(decoded).toBe(1);
+    expect(w.loads).toEqual(['m1:1:cpu']);
+    // Aborted while decoding: no detect.
+    const late = new AbortController();
+    const e2 = new BrowserEngine(async () => w.mod, async () => (late.abort(), pixels()));
+    await expect(e2.predict({ ...req('m2', null), signal: late.signal })).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('releases a detector after a request that failed, and drops a load that failed', async () => {
     const w = fakeWasm();
     let failDecode = true;

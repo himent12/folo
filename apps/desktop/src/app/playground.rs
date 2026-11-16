@@ -301,10 +301,13 @@ impl FoloApp {
         let target = self.play_target;
         // Taken with the backend handle: a switch after this makes the load's model throwaway.
         let generation = crate::local::generation();
+        // Every prediction asked for supersedes the ones before: a local run still waiting for the
+        // predictor when a newer one comes is skipped (its answer would be dropped anyway).
+        let ticket = crate::local::Ticket::take(&self.play_line);
         self.fetch(
             cx,
             move |api| match target {
-                Some(t) => crate::local::predict(api, &req, t, generation),
+                Some(t) => crate::local::predict(api, &req, t, generation, &ticket),
                 None => api.predict(&req),
             },
             move |this, r, _| this.play_pred_answered(seq, key, r),

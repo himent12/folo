@@ -6,7 +6,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use crate::api::{Model, time};
+use crate::api::{Model, ModelEval, ModelMetrics, time};
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
 use crate::screens::{detail_header, loading_rows, page_header};
@@ -143,17 +143,14 @@ impl FoloApp {
         // evaluation reports them (`ModelEval`, so a fallback to train never reads as "val"), else,
         // until it loads or from an older server, inferred from the run's dataset (train when it has
         // no validation images, as the server falls back).
-        let head_ds = self
-            .store
-            .evals
-            .get(&m.id)
-            .and_then(|l| l.ready())
-            .and_then(|ev| ev.dataset_name.clone().zip(ev.split.map(|s| s.as_str())))
-            .or_else(|| {
-                run.as_ref()
-                    .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
-                    .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }))
-            });
+        // An imported or published file's stored numbers: no dataset named (`headline_source`).
+        let head_ds = headline_source(
+            &m,
+            self.store.evals.get(&m.id).and_then(|l| l.ready()),
+            run.as_ref()
+                .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
+                .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" })),
+        );
         // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
         // The headline names the split; this tile's narrow caption says where on the curve.
         let op_point = pr_caption(
@@ -463,5 +460,51 @@ impl FoloApp {
             .with_priority(2)
         });
         div().relative().child(trigger).children(menu).into_any_element()
+    }
+}
+
+/// The dataset and split the headline (the model's stored metrics) was measured on: the evaluation's
+/// as it reports them, else the run's dataset. None for a model no run made (an imported or published
+/// file): its stored numbers do not say what they were measured on, and this server's evaluation
+/// (picked by class match, maybe on another dataset) is not theirs (Studio's KpiSummary `fromFile`).
+pub(super) fn headline_source(
+    m: &Model,
+    ev: Option<&ModelEval>,
+    run_ds: Option<(String, &'static str)>,
+) -> Option<(String, &'static str)> {
+    m.run_id.as_ref()?;
+    ev.and_then(|ev| ev.dataset_name.clone().zip(ev.split.map(|s| s.as_str()))).or(run_ds)
+}
+
+/// The stored metrics shown among this server's evaluation (the "All classes" row and legend): a
+/// run's own only. A file's stored numbers may be on another dataset than the curves beside them.
+pub(super) fn run_metrics(m: &Model) -> Option<&ModelMetrics> {
+    m.run_id.as_ref().and(m.metrics.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{Backend, Split, mock::MockBackend};
+
+    #[test]
+    fn a_files_stored_metrics_never_take_the_evaluations_dataset() {
+        let api = MockBackend::new(4200, true);
+        let run_model = api.models().unwrap().into_iter().find(|m| m.run_id.is_some()).unwrap();
+        let file = Model { run_id: None, ..run_model.clone() };
+        let ev = ModelEval {
+            dataset_name: Some("other".into()),
+            split: Some(Split::Val),
+            ..api.model_eval(&run_model.id).unwrap()
+        };
+        let run_ds = || Some(("shapes".to_string(), "val"));
+        // A run's model: the evaluation's own provenance, else the run's dataset.
+        assert_eq!(headline_source(&run_model, Some(&ev), run_ds()), Some(("other".into(), "val")));
+        assert_eq!(headline_source(&run_model, None, run_ds()), Some(("shapes".into(), "val")));
+        assert!(run_metrics(&run_model).is_some());
+        // A file (imported, published): neither the evaluation's dataset nor its stored numbers
+        // among the curves; the headline still shows them.
+        assert_eq!(headline_source(&file, Some(&ev), None), None);
+        assert!(file.metrics.is_some() && run_metrics(&file).is_none());
     }
 }

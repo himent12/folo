@@ -86,6 +86,20 @@ describe('Model: what was evaluated', () => {
     expect(target.textContent).not.toMatch(/validation (images of|split of|metrics)/i);
   });
 
+  it("never labels an imported file's curves with the AP50 stored in the file", async () => {
+    const api = hub.api as MockApi;
+    const real = api.modelEval.bind(api);
+    // This server measured nothing on its dataset; the file says it scored well elsewhere.
+    api.modelEval = async (id: string) => {
+      const e = await real(id);
+      return { ...e, pr: e.pr.map((c) => ({ ...c, ap50: 0 })), per_class: e.per_class.map((c) => ({ ...c, map50: 0 })) };
+    };
+    await open('m_mini_n');
+    expect((await api.model('m_mini_n')).metrics!.map50).toBeGreaterThan(0);
+    const all = [...target.querySelectorAll('#pr .item')].find((i) => i.textContent?.includes('All classes'));
+    expect(all?.querySelector('.num')?.textContent).toBe(metric(0));
+  });
+
   it("keeps an older server's evaluation honest: the run's dataset, the split and the matrix's thresholds not reported", async () => {
     const api = hub.api as MockApi;
     const real = api.modelEval.bind(api);
