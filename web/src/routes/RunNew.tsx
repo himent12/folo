@@ -52,12 +52,11 @@ import AugmentSection from './runnew/AugmentSection';
 import ReviewList from './runnew/ReviewList';
 import EstimateFigures from './runnew/EstimateFigures';
 import CliCommand from './runnew/CliCommand';
+import OomNote from './runnew/OomNote';
+import StartDock from './runnew/StartDock';
 
 /** The toast of a `?from=` run that could not be loaded (Toast.key). */
 const FROM_TOAST = 'runnew-from';
-
-import OomNote from './runnew/OomNote';
-import StartDock from './runnew/StartDock';
 
 /**
  * New run follows its own URL while open (v-data-runs N1): a link that changes it (the palette's "New run on X", a

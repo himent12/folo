@@ -13,7 +13,6 @@ export function missingDevice(device: string, system: SystemInfo | undefined): {
   return { device, gone: true, detail: '' };
 }
 
-
 /** A device in a sentence, named once with its value: "Auto", "GPU 1 (gpu:1)", "CPU" (values elsewhere: `gpu:1`). */
 export const devWord = (d: string) => (d === 'auto' ? 'Auto' : d === 'cpu' ? 'CPU' : `${d.replace(/^gpu:/, 'GPU ')} (${d})`);
 
