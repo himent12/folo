@@ -128,16 +128,22 @@ impl ImageCache {
 
     /// Forget one dataset's images (its files changed: ids are positions, so an id may now be another
     /// picture); returns the decoded images to free on the GPU. A load still on its way is dropped
-    /// when it lands ([`ImageCache::finish`]).
+    /// when it lands (its attempt ends here: [`ImageCache::attempt`]), also when the image was asked
+    /// for again since; its failures are forgotten, as the picture at that id may be another.
     pub fn forget_dataset(&mut self, dataset: &str) -> Vec<Arc<RenderImage>> {
         self.order.retain(|k| k.dataset != dataset);
+        self.loading.retain(|k, _| k.dataset != dataset);
+        self.failures.retain(|k, _| k.dataset != dataset);
         let gone: Vec<ImgKey> = self.slots.keys().filter(|k| k.dataset == dataset).cloned().collect();
-        gone.into_iter()
+        let freed: Vec<Arc<RenderImage>> = gone
+            .into_iter()
             .filter_map(|k| match self.slots.remove(&k) {
                 Some(ImgSlot::Ready(img)) => Some(img),
                 _ => None,
             })
-            .collect()
+            .collect();
+        self.bytes -= freed.iter().map(|img| image_bytes(img)).sum::<usize>();
+        freed
     }
 
     /// Store a result; returns images evicted to stay within budget (free them on the GPU).
@@ -314,6 +320,33 @@ mod tests {
         // fetched again.
         assert_eq!(c.finish(k("ds", "b"), Some(img())).len(), 1);
         assert!(c.begin(&k("ds", "a")));
+    }
+
+    /// Forgetting a dataset (its files changed) ends all the cache held of it under lane d1's and
+    /// x4's model too: its pictures leave the byte budget, its loading slots their attempt (only
+    /// loading slots have one), its failures their count (a new picture at an id starts afresh).
+    #[test]
+    fn forgetting_a_dataset_ends_its_bytes_attempts_and_failures() {
+        let mut c = ImageCache::default();
+        let k = |d: &str, i: &str| ImgKey { dataset: d.into(), image: i.into(), kind: ImgKind::Thumb };
+        let (mine, other) = (render(10, 10), render(20, 20));
+        assert!(c.begin(&k("ds", "a")));
+        c.finish(k("ds", "a"), Some(mine.clone()));
+        assert!(c.begin(&k("other", "a")));
+        c.finish(k("other", "a"), Some(other.clone()));
+        assert!(c.begin(&k("ds", "b")));
+        c.finish(k("ds", "b"), None); // failed once
+        assert!(c.begin(&k("ds", "c"))); // still loading
+        assert_eq!(c.forget_dataset("ds").len(), 1);
+        assert_eq!(c.bytes, image_bytes(&other), "only the other dataset's picture is counted");
+        assert_eq!((c.attempt(&k("ds", "c")), c.loading.len()), (None, 0));
+        // The picture now at b fails: its first failure, asked again after 2 s.
+        assert!(c.begin(&k("ds", "b")));
+        c.finish(k("ds", "b"), None);
+        assert_eq!(
+            c.retry_delay(&k("ds", "b")).map(|(wait, _)| wait),
+            Some(std::time::Duration::from_secs(2))
+        );
     }
 
     #[test]

@@ -339,6 +339,10 @@ pub struct FoloApp {
     /// newer one (two Retries, two visits) is dropped, so the newer answer stands.
     pub ds_reads: HashMap<String, u64>,
     pub ds_read_seq: u64,
+    /// Each dataset's issue check on its way (a number from `issue_read_seq`): only its answer is
+    /// kept, so a check of files since changed never comes back ([`FoloApp::ensure_issues`]).
+    pub issue_reads: HashMap<String, u64>,
+    pub issue_read_seq: u64,
     pub ds_tile: f32,
     /// The grid tile under the pointer (it reveals every label, as a focused one does).
     pub ds_hover_tile: Option<String>,
@@ -630,6 +634,8 @@ impl FoloApp {
             ds_recheck: Default::default(),
             ds_reads: HashMap::new(),
             ds_read_seq: 0,
+            issue_reads: HashMap::new(),
+            issue_read_seq: 0,
             ds_tile: 168.,
             ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),

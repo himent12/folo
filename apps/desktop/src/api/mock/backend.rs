@@ -137,6 +137,8 @@ impl Backend for MockBackend {
         if warning > 0 {
             counts.by_kind.insert("box_out_of_bounds".into(), warning);
         }
+        // Counted from the files as they were when asked: a test may hold it past their change.
+        self.hold_point("issues");
         Ok(IssuePage { total: broken, issues: Vec::new(), counts })
     }
 
@@ -169,6 +171,8 @@ impl Backend for MockBackend {
     }
 
     fn image(&self, dataset_id: &str, image_id: &str, thumb: Option<u32>) -> ApiResult<ImageData> {
+        // A test may hold one image's fetch past its dataset's files changing.
+        self.hold_point(&format!("pixels {dataset_id} {image_id}"));
         let f = self.fixture(dataset_id)?;
         let index: u32 = image_id
             .strip_prefix("img_")

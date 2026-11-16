@@ -210,15 +210,24 @@ impl FoloApp {
         }
     }
 
-    /// A dataset's issue counts, once (the Broken labels tile splits its count by severity).
+    /// A dataset's issue counts, once (the Broken labels tile splits its count by severity). Only
+    /// the latest check's answer is kept: one asked for before the dataset's files changed
+    /// ([`FoloApp::forget_dataset_contents`]) counted the old files, and is dropped.
     pub fn ensure_issues(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.store.issues.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.issues.insert(id.to_string(), Load::Loading);
+            self.issue_read_seq += 1;
+            let ticket = self.issue_read_seq;
+            self.issue_reads.insert(id.to_string(), ticket);
             let (a, b) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
                 move |api| api.dataset_issues(&a).map(|p| p.counts),
                 move |this, r, _| {
+                    if this.issue_reads.get(&b) != Some(&ticket) {
+                        return;
+                    }
+                    this.issue_reads.remove(&b);
                     this.store.issues.insert(b, r.into());
                 },
             );
@@ -315,10 +324,11 @@ impl FoloApp {
 
     /// Drops what the app holds of a dataset's files (its image list and the page of it still on its
     /// way, its label issues, its decoded images, the grid's filter): read again when shown.
-    fn forget_dataset_contents(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(super) fn forget_dataset_contents(&mut self, id: &str, cx: &mut Context<Self>) {
         self.store.images.remove(id);
         self.images_more.remove(id);
         self.store.issues.remove(id);
+        self.issue_reads.remove(id);
         *self.ds_filter_cache.borrow_mut() = None;
         *self.ds_split_counts.borrow_mut() = None;
         let textures = self.store.images_px.forget_dataset(id);

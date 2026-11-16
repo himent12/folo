@@ -296,6 +296,34 @@ fn a_dataset_card_follows_its_folder_away_and_back() {
     go(&mut app, super::Route::Datasets);
     go(&mut app, super::Route::Overview);
     assert_eq!(card(&mut app).0, "Can't read");
+
+    // What the user reads on the card (review round 3): its keyboard-focus tip names the server's
+    // reason. The glyphs the Datasets list paints with the card focused, less those without, for two
+    // reasons that differ by a few words: the tip is longer by exactly those words.
+    let tip_glyphs = |app: &mut folo_ui::HeadlessApp, why: &str| -> i64 {
+        api.break_dataset(&id, "path_not_found", why);
+        go(app, super::Route::Overview);
+        go(app, super::Route::Datasets);
+        let glyphs = |app: &mut folo_ui::HeadlessApp, focused: bool| {
+            drive(app, window, |this, w, cx| {
+                this.kb = focused;
+                this.focus_key(&format!("ds-card-{id}"), w, cx);
+                cx.notify();
+            });
+            drawn_keys(app, window);
+            let scene = app.scene(window.into());
+            scene.primitives.iter().filter(|p| matches!(p, folo_ui::Primitive::MonoSprite(_))).count() as i64
+        };
+        let plain = glyphs(app, false);
+        glyphs(app, true) - plain
+    };
+    let short = "Dataset folder not found: D:/data/shapes";
+    let extra = " (moved to the recycle bin)";
+    let (tip_short, tip_long) =
+        (tip_glyphs(&mut app, short), tip_glyphs(&mut app, &format!("{short}{extra}")));
+    assert!(tip_short > short.len() as i64 / 2, "the focused card shows its tip: {tip_short} glyphs");
+    let words = extra.chars().filter(|c| !c.is_whitespace()).count() as i64;
+    assert_eq!(tip_long - tip_short, words, "the tip reads the server's reason");
 }
 
 /// Review round 2 of x1-parity-7: two reads of a dataset on their way at once (two Retries, two
@@ -396,6 +424,116 @@ fn a_dataset_read_again_with_other_contents_lists_its_images_again() {
             "its old label issues dropped"
         );
     });
+}
+
+/// Review round 3 of x1-parity-7: a dataset's issue check still on its way when its files change
+/// (the app forgets what it read of them, as a read with other contents does) answers after the
+/// check asked for since. The newer check's counts stand: the old file errors never come back.
+#[test]
+fn an_issue_check_of_files_since_changed_never_comes_back() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    // A dataset whose old files had broken labels (the mock counts them as errors).
+    let id = "ds_3b91".to_string();
+    drawn_keys(&mut app, window);
+    let errors = |app: &mut folo_ui::HeadlessApp| {
+        app.update(|cx| {
+            window
+                .update(cx, |this, _, _| this.store.issues.get(&id).and_then(|l| l.ready()).map(|c| c.error))
+                .unwrap()
+        })
+    };
+    // Check A counts the old files, and is held.
+    let old = api.hold("issues");
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                this.store.issues.remove(&id);
+                this.ensure_issues(&id, cx);
+            })
+            .unwrap()
+    });
+    app.run_until_held(1);
+    old.wait_held();
+    // The files change: what was read of them is forgotten, and check B is asked for.
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                this.forget_dataset_contents(&id, cx);
+                this.ensure_issues(&id, cx);
+            })
+            .unwrap()
+    });
+    app.run_until_held(1);
+    assert!(errors(&mut app).is_some(), "check B answered");
+    // B's answer is the repaired files': no errors.
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                let clean =
+                    crate::api::IssueCounts { error: 0, warning: 0, info: 0, by_kind: Default::default() };
+                this.store.issues.insert(id.clone(), crate::store::Load::Ready(clean));
+            })
+            .unwrap()
+    });
+    // A lands last, with the old files' errors: dropped.
+    drop(old);
+    app.run_until_idle();
+    assert_eq!(errors(&mut app), Some(0), "the old check's errors came back");
+}
+
+/// Review round 3 of x1-parity-7, on lane x4's attempts: image A is asked for, the dataset's files
+/// change (its ids are positions: `img_1` may be another picture now), the same id is asked for
+/// again (B), and A answers first. A's answer is dropped; the slot waits for B's, and B's fills it.
+#[test]
+fn a_load_from_before_a_forget_never_fills_the_slot_asked_for_again() {
+    use crate::store::{ImgKind, ImgSlot};
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    drawn_keys(&mut app, window);
+    let id = "ds_3b91".to_string();
+    let slot = |app: &mut folo_ui::HeadlessApp| {
+        app.update(|cx| {
+            window
+                .update(cx, |this, _, _| {
+                    let key = crate::store::ImgKey {
+                        dataset: id.clone(),
+                        image: "img_1".into(),
+                        kind: ImgKind::Thumb,
+                    };
+                    match this.store.images_px.get(&key) {
+                        Some(ImgSlot::Ready(_)) => "ready",
+                        Some(ImgSlot::Failed) => "failed",
+                        Some(_) => "loading",
+                        None => "none",
+                    }
+                })
+                .unwrap()
+        })
+    };
+    let ask = |app: &mut folo_ui::HeadlessApp| {
+        app.update(|cx| {
+            window
+                .update(cx, |this, _, cx| {
+                    this.forget_dataset_contents(&id, cx);
+                    assert!(this.image(&id, "img_1", ImgKind::Thumb, cx).is_none());
+                })
+                .unwrap()
+        })
+    };
+    let (a, b) = (api.hold("pixels ds_3b91 img_1"), api.hold("pixels ds_3b91 img_1"));
+    ask(&mut app);
+    app.run_until_held(1);
+    a.wait_held();
+    ask(&mut app);
+    app.run_until_held(2);
+    b.wait_held();
+    drop(a);
+    app.run_until_held(1);
+    assert_eq!(slot(&mut app), "loading", "the old picture filled the slot asked for again");
+    drop(b);
+    app.run_until_idle();
+    assert_eq!(slot(&mut app), "ready", "the new picture");
 }
 
 /// The focus keys a page draws, once what it asked for has come.
