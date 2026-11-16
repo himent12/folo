@@ -551,6 +551,7 @@ impl MockBackend {
             removed: Mutex::default(),
             holds: Default::default(),
             fail_images_from: Default::default(),
+            fail_pixels: Default::default(),
             fail_metrics: Default::default(),
             fail_events: Default::default(),
             fail_instances: Default::default(),

@@ -126,6 +126,26 @@ impl FoloApp {
         );
         None
     }
+
+    /// A benchmark image's thumbnail failed (it waits for its next automatic retry, or for a Retry
+    /// by hand once those are spent): its frame says so instead of looking as if it still loads.
+    pub fn bench_image_failed(&self, bench: &str, image: &str, condition: Option<(&str, u8)>) -> bool {
+        let (dataset, image) = bench_img_key(bench, image, condition);
+        self.store.images_px.failed(&ImgKey { dataset, image, kind: ImgKind::Thumb })
+    }
+
+    /// Retry by hand: the benchmark image's thumbnail is asked for again, its retries afresh.
+    pub fn retry_bench_image(
+        &mut self,
+        bench: &str,
+        image: &str,
+        condition: Option<(&str, u8)>,
+        cx: &mut Context<Self>,
+    ) {
+        let (dataset, image) = bench_img_key(bench, image, condition);
+        self.store.images_px.retry(&ImgKey { dataset, image, kind: ImgKind::Thumb });
+        cx.notify();
+    }
 }
 
 #[cfg(test)]

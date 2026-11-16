@@ -206,26 +206,23 @@ impl FoloApp {
 /// A painted image whose pixels failed to load, marked so over its placeholder: an image glyph and,
 /// with `words` (a tile tall enough), "Image unavailable". Without the mark it reads as loading.
 pub fn unavailable_over(t: &Theme, painted: AnyElement, words: bool) -> AnyElement {
+    div().size_full().relative().child(painted).child(unavailable_mark(t, words)).into_any_element()
+}
+
+/// The mark of [`unavailable_over`] alone, laid over its positioned parent: for a frame whose size
+/// comes from an aspect ratio, where a full-size wrapper inside it would have no height.
+pub fn unavailable_mark(t: &Theme, words: bool) -> Div {
     div()
-        .size_full()
-        .relative()
-        .child(painted)
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(4.))
-                .px(px(6.))
-                .child(icon("icons/image.svg", 16., t.text_tertiary))
-                .when(words, |d| {
-                    d.child(text(ty::XS, t.text_tertiary).text_center().child(TILE_UNAVAILABLE))
-                }),
-        )
-        .into_any_element()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(4.))
+        .px(px(6.))
+        .child(icon("icons/image.svg", 16., t.text_tertiary))
+        .when(words, |d| d.child(text(ty::XS, t.text_tertiary).text_center().child(TILE_UNAVAILABLE)))
 }
 
 /// Paint an image with boxes filling its parent.

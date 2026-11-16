@@ -72,6 +72,7 @@ impl FoloApp {
         self.play_load_seq += 1;
         let seq = self.play_load_seq;
         self.play_loading = Some(Some((d.clone(), i.clone())));
+        let thumb = ImgKey { dataset: d.clone(), image: i.clone(), kind: ImgKind::Thumb };
         self.fetch(
             cx,
             move |api| {
@@ -94,6 +95,11 @@ impl FoloApp {
                 this.play_loading = None;
                 match r {
                     Ok((image, width, height, encoded)) => {
+                        // Its pixels came (fetched past the image cache): a sample tile marked
+                        // unavailable is asked for again, as a full size loading in the cache does.
+                        if this.store.images_px.failed(&thumb) {
+                            this.store.images_px.retry(&thumb);
+                        }
                         this.set_play_image(PlayImage { name, input, encoded, image, width, height }, cx);
                     }
                     Err(e) => {

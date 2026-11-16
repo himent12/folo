@@ -1,7 +1,10 @@
 //! A benchmark's Plan tab: its conditions, each previewed on the first image.
 
 use folo_ui::prelude::FluentBuilder;
-use folo_ui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::{
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window, div, px,
+};
 
 use super::cells::num_cell;
 use super::format::{agent_name, pct, plan_intro};
@@ -23,12 +26,15 @@ impl FoloApp {
             })
     }
 
-    /// A 72 × 48 thumbnail of the benchmark's first image, unchanged or under a condition.
+    /// A 72 × 48 thumbnail of the benchmark's first image, unchanged or under a condition. One that
+    /// failed is marked so (not left looking as if it loads) and is itself a Retry: a click, Enter
+    /// or Space asks for it again.
     fn condition_thumb(
         &mut self,
         t: &Theme,
         b: &Bench,
         condition: Option<(&str, u8)>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let first =
@@ -37,17 +43,33 @@ impl FoloApp {
             div().w(px(72.)).h(px(48.)).flex_none().rounded(px(radius::SM)).overflow_hidden().bg(t.bg_inset);
         let Some(im) = first else { return frame.into_any_element() };
         let img = self.bench_image(&b.id, &im.id, condition, cx);
-        frame
-            .child(image_canvas(
-                t,
-                img,
-                (im.width as f32, im.height as f32),
-                Vec::new(),
-                Fit::Cover,
-                false,
-                false,
-            ))
-            .into_any_element()
+        let failed = img.is_none() && self.bench_image_failed(&b.id, &im.id, condition);
+        let painted =
+            image_canvas(t, img, (im.width as f32, im.height as f32), Vec::new(), Fit::Cover, false, false);
+        if !failed {
+            return frame.child(painted).into_any_element();
+        }
+        let key = match condition {
+            Some((c, s)) => format!("bench-preview-retry-{c}-{s}"),
+            None => "bench-preview-retry".to_string(),
+        };
+        let (bid, iid, cond) = (b.id.clone(), im.id.clone(), condition.map(|(c, s)| (c.to_string(), s)));
+        let el = frame
+            .id(folo_ui::SharedString::from(key.clone()))
+            .cursor_pointer()
+            .tooltip(crate::controls::tip(format!("{} · Retry", crate::screens::TILE_UNAVAILABLE), None))
+            .child(crate::screens::unavailable_over(t, painted, false));
+        self.bind(
+            el,
+            &key,
+            radius::SM,
+            window,
+            cx,
+            act(move |this, _, cx| {
+                this.retry_bench_image(&bid, &iid, cond.as_ref().map(|(c, s)| (c.as_str(), *s)), cx)
+            }),
+        )
+        .into_any_element()
     }
 
     pub(super) fn bench_plan(
@@ -165,7 +187,7 @@ impl FoloApp {
                     .into_any_element()
             };
         let mut rows = vec![{
-            let thumb = self.condition_thumb(&t, b, None, cx);
+            let thumb = self.condition_thumb(&t, b, None, window, cx);
             row(
                 thumb,
                 "Unchanged".into(),
@@ -182,7 +204,7 @@ impl FoloApp {
                 c.why.clone().or_else(|| info.as_ref().map(|i| i.description.clone())).unwrap_or_default();
             let group = info.as_ref().map_or("", |i| i.group.label());
             let shown = preview_severity(&c.severities);
-            let thumb = self.condition_thumb(&t, b, Some((&c.condition, shown)), cx);
+            let thumb = self.condition_thumb(&t, b, Some((&c.condition, shown)), window, cx);
             let sev = div().flex().gap(px(4.)).children((1..=crate::api::BENCH_SEVERITIES).map(|s| {
                 let on = c.severities.contains(&s);
                 div()

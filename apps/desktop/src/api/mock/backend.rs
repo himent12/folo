@@ -173,6 +173,7 @@ impl Backend for MockBackend {
     fn image(&self, dataset_id: &str, image_id: &str, thumb: Option<u32>) -> ApiResult<ImageData> {
         // A test may hold one image's fetch past its dataset's files changing.
         self.hold_point(&format!("pixels {dataset_id} {image_id}"));
+        self.pixels_check()?;
         let f = self.fixture(dataset_id)?;
         let index: u32 = image_id
             .strip_prefix("img_")
@@ -753,6 +754,7 @@ impl Backend for MockBackend {
         thumb: Option<u32>,
     ) -> ApiResult<ImageData> {
         self.check()?;
+        self.pixels_check()?;
         self.benches.image_pixels(id, image_id, condition, thumb, &self.datasets, &self.models)
     }
 

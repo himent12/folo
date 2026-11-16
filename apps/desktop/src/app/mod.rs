@@ -36,6 +36,8 @@ pub(crate) mod tests;
 #[cfg(test)]
 mod text_input_tests;
 mod titlebar;
+#[cfg(test)]
+mod unavailable_tests;
 
 use std::cell::RefCell;
 use std::collections::HashMap;

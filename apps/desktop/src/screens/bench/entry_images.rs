@@ -85,6 +85,30 @@ impl FoloApp {
                     ..DrawBox::new(d.class, d.x1, d.y1, d.x2, d.y2)
                 }));
                 let dims = (im.image.width as f32, im.image.height as f32);
+                // Failed, not loading: said on the frame, which is then a Retry (click, Enter, Space).
+                let failed = img.is_none() && self.bench_image_failed(&b.id, &im.image.id, None);
+                let painted = image_canvas(&t, img, dims, boxes, Fit::Contain, true, false);
+                let frame =
+                    div().w(px(152.)).h(px(152.)).rounded(px(radius::MD)).overflow_hidden().bg(t.bg_inset);
+                let frame = if failed {
+                    let key = format!("eimg-retry-{}", im.image.id);
+                    let (bid, iid) = (b.id.clone(), im.image.id.clone());
+                    let el = frame
+                        .id(SharedString::from(key.clone()))
+                        .cursor_pointer()
+                        .child(crate::screens::unavailable_over(&t, painted, true));
+                    self.bind(
+                        el,
+                        &key,
+                        radius::MD,
+                        window,
+                        cx,
+                        act(move |this, _, cx| this.retry_bench_image(&bid, &iid, None, cx)),
+                    )
+                    .into_any_element()
+                } else {
+                    frame.child(painted).into_any_element()
+                };
                 let ok = im.missed == 0 && im.wrong == 0;
                 let caption_text = if ok {
                     "all right".to_string()
@@ -103,16 +127,15 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .tooltip(crate::controls::tip(im.image.file.clone(), None))
-                    .child(
-                        div()
-                            .w(px(152.))
-                            .h(px(152.))
-                            .rounded(px(radius::MD))
-                            .overflow_hidden()
-                            .bg(t.bg_inset)
-                            .child(image_canvas(&t, img, dims, boxes, Fit::Contain, true, false)),
-                    )
+                    .tooltip(crate::controls::tip(
+                        if failed {
+                            format!("{} · {} · Retry", im.image.file, crate::screens::TILE_UNAVAILABLE)
+                        } else {
+                            im.image.file.clone()
+                        },
+                        None,
+                    ))
+                    .child(frame)
                     .child(
                         text(ty::SM, if ok { t.text_tertiary } else { t.text_secondary })
                             .tnum()
