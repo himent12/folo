@@ -125,8 +125,10 @@ come from `mainNav` and `settingsNav` in `src/lib/shell/nav.ts`. A screen sets i
   (`src/lib/api/resource.ts`). It fetches again when a reactive value it read changes, drops its data when the hub
   reconnects (`hub.epoch`), and retries or refreshes when the server answers again after an outage (`hub.back`).
   Identical reads issued in the same turn are one request (`src/lib/api/share.ts`).
-- **Live updates (SSE):** `openEventStream` (`src/lib/api/sse.ts`) wraps EventSource and reopens a stream that the
-  server ended with an error status, with exponential backoff. `LiveRun` (`live.ts`, a run's
+- **Live updates (SSE):** `openEventStream` (`src/lib/api/sse.ts`) reads the stream with `fetch` (EventSource hides
+  the server's 15 s keep-alive comments) and reopens, with exponential backoff, a stream that ended, failed, was refused
+  or passed no byte for `STREAM_SILENCE_MS` (45 s: three keep-alives missed); each reopening asks its view to read the
+  history again (`reconnect`). `LiveRun` (`live.ts`, a run's
   `GET /api/runs/{id}/events`), `LiveLabelJob` (`liveLabel.ts`) and `LiveBench` (`liveBench.ts`) subscribe before they
   fetch history and merge the two; `LiveRun` publishes new steps once per animation frame (`version`).
 - **Run list:** the shell polls it every 2 s (`src/lib/shell/RunWatch.tsx`, `runList.ts`) for the sidebar's live row

@@ -123,6 +123,46 @@ describe('New run: a device the server cannot use', () => {
     expect(target.querySelector('select#device')!.hasAttribute('aria-invalid')).toBe(false);
   });
 
+  // Stress d2-runs: a draft (or a copied run) kept a GPU the server no longer lists; only the server's refusal of the
+  // first Start said so.
+  it('stops Start before the server for a GPU from the draft that the device list lacks', async () => {
+    await open();
+    await until(() => target.querySelector('select#device option[value="gpu:1"]'));
+    pick('gpu:1');
+    expect(target.querySelector('#device-error')).toBeNull();
+    unmount(c!);
+    c = undefined;
+    (api as unknown as { state: { unplugged: boolean } }).state.unplugged = true;
+    const create = vi.spyOn(api, 'createRun');
+    await open();
+    expect(target.querySelector<HTMLSelectElement>('select#device')!.value).toBe('gpu:1');
+    const msg = await until(() => target.querySelector('#device-error'), 'the device error');
+    expect(msg.textContent).toBe('GPU 1 (gpu:1) is no longer available. Pick Auto, GPU 0 (gpu:0) or CPU.');
+    expect(target.querySelector('.dev-detail')).toBeNull();
+    expect([...target.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].every((b) => b.disabled)).toBe(true);
+    expect(target.querySelector('#start-why')?.textContent).toBe('Device: GPU 1 (gpu:1) is not available.');
+    await start();
+    expect(create).not.toHaveBeenCalled();
+    // A device the list names clears it.
+    pick('gpu:0');
+    expect(target.querySelector('#device-error')).toBeNull();
+    expect(target.querySelector('#start-why')).toBeNull();
+  });
+
+  // PR #287 review: a run created over the API keeps its own spelling of the device ("GPU:00", which the trainer reads
+  // as gpu:0); its copy is the GPU the list names, not one that is gone.
+  it('reads a copied run whose device is spelled another way the trainer accepts as the GPU the list names', async () => {
+    const run = api.run.bind(api);
+    vi.spyOn(api, 'run').mockImplementation(async (id: string) => {
+      const r = await run(id);
+      return { ...r, config: { ...r.config, device: ' GPU:00' as typeof r.config.device } };
+    });
+    await open('?from=run_a2f0');
+    await until(() => target.querySelector<HTMLSelectElement>('select#device')!.value === 'gpu:0', 'the copied device');
+    expect(target.querySelector('#device-error')).toBeNull();
+    expect(target.querySelector('#start-why')?.textContent ?? '').not.toContain('Device');
+  });
+
   it('treats a 501 for a GPU from servers before device_not_found the same way', async () => {
     await open();
     pick('gpu:0');
@@ -789,5 +829,46 @@ describe('New run with no dataset yet', () => {
       ['Add dataset', '#/datasets?add=folder'],
       ['Generate sample set', '#/datasets?add=synthetic'],
     ]);
+  });
+});
+
+// Stress s2-runs-7: `?from=` a run that does not exist toasted the server's hint for agents, and the toast outlived the link.
+describe('New run from a run that does not exist', () => {
+  it('says so in plain words, starts from the defaults, and the toast goes with the page', async () => {
+    const { toast } = await import('$lib/ui/toast');
+    vi.spyOn(api, 'run').mockRejectedValue(new ApiError(404, 'run_not_found', "run 'run_nope' does not exist", 'list_runs (MCP) or GET /api/runs lists the runs that exist'));
+    await open('?from=run_nope');
+    const t = await until(() => toast.items.find((x) => x.title === 'Run to copy not found'), 'the toast');
+    expect(t.detail).toBe('It was deleted or the link is wrong. The form starts from the defaults.');
+    expect(JSON.stringify(toast.items)).not.toContain('MCP');
+    unmount(c!);
+    c = undefined;
+    expect(toast.items.find((x) => x.title === 'Run to copy not found')).toBeUndefined();
+  });
+
+  // PR #287 review (sibling of s3-live-3): the form read the datasets once, so one removed in another window stayed
+  // picked with Start on.
+  it('notices the picked dataset removed in another window, and keeps Start off saying so', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await open();
+      const id = await until(() => target.querySelector<HTMLInputElement>('input[name="dataset"]:checked')?.value, 'a picked dataset');
+      const name = (await api.datasets()).find((d) => d.id === id)!.name;
+      expect(target.querySelector('#start-why')?.textContent ?? '').not.toContain('removed');
+      const list = api.datasets.bind(api);
+      vi.spyOn(api, 'datasets').mockImplementation(async () => (await list()).filter((d) => d.id !== id));
+      await vi.advanceTimersByTimeAsync(5000);
+      const why = await until(() => (target.querySelector('#start-why')?.textContent?.includes('removed') ? target.querySelector('#start-why') : null), 'the removal');
+      expect(why.textContent).toContain(`${name} was removed`);
+      expect([...target.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].every((b) => b.disabled)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves an agent-only hint out of any error toast', async () => {
+    const { errorDetail } = await import('$lib/ui/toast');
+    expect(errorDetail(new ApiError(404, 'model_not_found', 'No model m_x.', 'list_models (MCP) or GET /api/models lists them'))).toBe('No model m_x.');
+    expect(errorDetail(new ApiError(409, 'busy', 'a run is active', 'stop it first'))).toBe('A run is active. Stop it first.');
   });
 });

@@ -13,6 +13,7 @@ import { hub } from './index';
 import { AppendLog } from './appendLog';
 import { MAX_LOGS, mergeLogs, STREAM_GRACE_MS } from './live';
 import type { LabelImage, LabelJob, LogLine } from './types';
+import { ApiError } from './client';
 
 /** Images per request while loading (the API's cap). */
 const PAGE = 1000;
@@ -198,11 +199,46 @@ export class LiveLabelJob {
           this.#inflight.delete(flight);
         }
       };
+      // The job was deleted (in another tab, the Jobs list, an agent): the page says so ("Labeling job not found"),
+      // instead of "Reconnecting" over the last known job forever while the stream retries a 404 (stress s3-live,
+      // as LiveRun). Nothing retries after; the page's Retry starts over.
+      let unsub = (): void => {};
+      const gone = (e: unknown): boolean => {
+        if (closed || !(e instanceof ApiError && e.status === 404)) return false;
+        closed = true;
+        clearTimeout(lostTimer);
+        clearTimeout(syncTimer);
+        unsub();
+        this.job = undefined;
+        this.images = [];
+        this.logs = [];
+        this.lost = null;
+        this.connection = 'idle';
+        this.loading = false;
+        this.error = e;
+        this.#version.set((v) => v + 1);
+        return true;
+      };
+      // A dropped stream may mean the job is gone (the stream answers 404 then and reports no status): one check at a
+      // time says so; any other answer leaves the reconnect to the stream.
+      let checking = false;
+      const check = () => {
+        if (checking || closed) return;
+        checking = true;
+        api.labelJob(jobId).then(
+          () => void (checking = false),
+          (e) => {
+            checking = false;
+            gone(e);
+          },
+        );
+      };
       // Re-synchronising (on open, on reconnect) never gives up silently: a gap would stay.
       const sync = (attempt = 0) => {
         clearTimeout(syncTimer);
-        load().catch(() => {
-          if (!closed) syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
+        load().catch((e) => {
+          if (closed || gone(e)) return;
+          syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
         });
       };
       const image = (id: string, img: LabelImage | null) => {
@@ -215,12 +251,13 @@ export class LiveLabelJob {
         this.images = img ? upsertImage(this.images, img) : this.images.filter((x) => x.id !== id);
       };
 
-      const unsub = api.labelEvents(jobId, {
+      unsub = api.labelEvents(jobId, {
         connection: (s) => {
           if (closed) return;
           // Events between the first load and the stream opening would be lost: load again once it is open.
           if (s === 'open' && this.connection === 'idle') sync();
           this.connection = s;
+          if (s === 'reconnecting') check();
           if (s === 'open') {
             clearTimeout(lostTimer);
             lostTimer = undefined;
@@ -262,7 +299,7 @@ export class LiveLabelJob {
       // event comes at once): a job with no list of its images would show as empty. A later load that got through
       // (the stream's re-sync) has the list, so it wins.
       load().catch((e) => {
-        if (closed || applied > 0) return;
+        if (closed || applied > 0 || gone(e)) return;
         this.error = e;
         this.loading = false;
       });

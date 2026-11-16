@@ -8,7 +8,7 @@ import ChevronDown from '$icons/chevron-down';
 import { computed, css, For, signal } from 'fw';
 import type { Bench, BenchEntry, BenchResult } from '$lib/api/types';
 import { unitTop } from '$lib/charts/domain';
-import { atBestF1, metric, num } from '$lib/format';
+import { atBestF1, count, metric, num } from '$lib/format';
 import Panel from '$lib/ui/Panel';
 import { intervalReading, intervalText } from '../words';
 
@@ -117,7 +117,7 @@ export default function AccuracySection(props: AccuracySectionProps) {
                   {s().v === null ? (
                     // Measured on the images it ran: an entry on a part of them may miss a size the others have.
                     <span class="s-none">
-                      {props.entry.images < props.bench.images ? `None in the ${num(props.entry.images)} images it ran` : 'None in this benchmark'}
+                      {props.entry.images < props.bench.images ? `None in the ${count(props.entry.images, 'image')} it ran` : 'None in this benchmark'}
                     </span>
                   ) : (
                     <>

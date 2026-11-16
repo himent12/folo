@@ -5,7 +5,7 @@ import Play from '$icons/play';
 import Plus from '$icons/plus';
 import { computed, css, deep, effect, Key, onCleanup, signal, tick, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
-import { readDatasets } from '$lib/api/datasetReads';
+import { followedDatasets, listedName } from '$lib/api/datasetReads';
 import { Resource } from '$lib/api/resource';
 import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/api/types';
 import { modelChoices, scoreMeta } from '$lib/scoreSummary';
@@ -34,7 +34,7 @@ import { ampBlockOf } from './runnew/amp';
 import { firstError, formErrors, isInt, landOn, type Jump } from './runnew/jump';
 import { cloudCostOf, closeMosaicShown, reviewRows, roughBytes, shownEstimate } from './runnew/summary';
 import { trainConfig } from './runnew/config';
-import { deviceLabelOf, deviceMessage } from './runnew/device';
+import { deviceLabelOf, deviceMessage, missingDevice, canonicalDevice } from './runnew/device';
 import { oomChangesOf } from './runnew/retry';
 import { serverEstimate } from './runnew/serverEstimate';
 import { clearOwnDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
@@ -54,6 +54,9 @@ import EstimateFigures from './runnew/EstimateFigures';
 import CliCommand from './runnew/CliCommand';
 import OomNote from './runnew/OomNote';
 import StartDock from './runnew/StartDock';
+
+/** The toast of a `?from=` run that could not be loaded (Toast.key). */
+const FROM_TOAST = 'runnew-from';
 
 /**
  * New run follows its own URL while open (v-data-runs N1): a link that changes it (the palette's "New run on X", a
@@ -105,7 +108,7 @@ function RunNewForm() {
   const queryImgsz = !own && IMGSZ.includes(q.get('imgsz') ?? '');
   const imgsz = signal(queryImgsz ? q.get('imgsz')! : (draft?.imgsz ?? '640'));
   const imgszChosen = signal(queryImgsz || !!draft?.imgszChosen);
-  const device = signal<string>(draft?.device ?? 'auto');
+  const device = signal<string>(canonicalDevice(draft?.device ?? 'auto'));
   const optimizer = signal<Optimizer>(draft?.optimizer ?? 'auto');
   /** Mixed precision as asked for; what the run gets is `ampOn` (off where the server cannot train that way). */
   const amp = signal(draft?.amp ?? false);
@@ -136,8 +139,8 @@ function RunNewForm() {
   /** Below 960 px the dock opens the summary as a sheet, so the run can be reviewed without scrolling down. */
   const sumOpen = signal(false);
 
-  // Each read for its stats; one whose folder is missing is marked, and Start waits (lib/api/datasetReads).
-  const datasets = new Resource(readDatasets);
+  // Each read for its stats, kept current; one whose folder is missing is marked, and Start waits (lib/api/datasetReads).
+  const datasets = followedDatasets();
   const system = new Resource((s) => hub.api.system(s));
   // Run on (servers with the `cloud` feature): this machine or a cloud connection, its GPU and the time limit.
   const cloudPick = new CloudPick(() => system.data);
@@ -178,7 +181,7 @@ function RunNewForm() {
     batch.set(whole('batch', 1, 1024) ?? String(c.batch));
     imgsz.set(whole('imgsz', 64, 4096, 32) ?? String(c.imgsz)); // the trainer's limits (docs/API.md, runs)
     imgszChosen.set(true);
-    device.set(q.get('device') === 'cpu' ? 'cpu' : c.device);
+    device.set(q.get('device') === 'cpu' ? 'cpu' : canonicalDevice(c.device));
     optimizer.set(c.optimizer);
     amp.set(c.amp ?? false);
     e2e.set(c.head === 'o2o');
@@ -195,11 +198,17 @@ function RunNewForm() {
   });
   effect(() => {
     if (source.error && !untrack(() => prefilled.get())) {
-      // page-level: loading the run to copy, before any dialog opens.
-      toast.error(source.error, 'Could not load the run to copy');
+      // page-level: loading the run to copy, before any dialog opens. A run that does not exist says so in the user's
+      // words (stress s2-runs-7: the server's hint is written for agents).
+      const e = source.error;
+      if (e instanceof ApiError && e.code === 'run_not_found')
+        toast.show({ tone: 'error', title: 'Run to copy not found', detail: 'It was deleted or the link is wrong. The form starts from the defaults.', key: FROM_TOAST });
+      else toast.error(e, 'Could not load the run to copy', { key: FROM_TOAST });
       prefilled.set(true);
     }
   });
+  // The toast is about this link: it goes with the form (another link, another page).
+  effect(() => () => toast.clear(FROM_TOAST));
 
   // The first dataset until one is picked. One a draft or a link asked for that is gone is not swapped for another in
   // silence: none is picked, and the picker says which one went (by the name its runs recorded, where one has).
@@ -210,7 +219,7 @@ function RunNewForm() {
   const gone = computed(() => {
     const id = datasetId.get();
     if (!id || !datasets.data || datasets.data.some((d) => d.id === id)) return null;
-    const was = runs.data?.find((r) => r.config.dataset_id === id)?.dataset?.name;
+    const was = listedName(id) ?? runs.data?.find((r) => r.config.dataset_id === id)?.dataset?.name;
     return `${was ?? 'The dataset asked for'} was removed: pick a dataset.`;
   });
 
@@ -394,13 +403,14 @@ function RunNewForm() {
     return r && r.device === device.get() ? r : null;
   });
 
-  // Start answered `404 device_not_found` (`501 not_implemented` from servers before it): said at the Device field in
-  // one line built from the devices this machine lists now, until another device is picked. The server's own words
-  // (they name its backends) fold into the field's technical details.
+  // Start answered `404 device_not_found` (`501 not_implemented` from servers before it), or the device list lacks the
+  // GPU the form holds (from a draft or a copied run): said at the Device field in one line built from the devices this
+  // machine lists now, until another device is picked. The server's words fold into the field's technical details.
   const deviceError = signal<{ device: string; gone: boolean; detail: string } | null>(null);
   const deviceErr = computed(() => {
     const e = deviceError.get();
-    return e && e.device === device.get() ? e : null;
+    if (e && e.device === device.get()) return e;
+    return onCloud.get() ? null : missingDevice(device.get(), system.data);
   });
   const deviceMsg = computed(() => deviceMessage(deviceErr.get(), system));
 
@@ -610,6 +620,7 @@ function RunNewForm() {
         // page-level: the sheet closed when the form was sent.
         if (field) void jump(field);
         else toast.error(err, 'Could not start the run');
+        if (err instanceof ApiError && err.code === 'dataset_not_found') void datasets.refresh(); // `gone` says so
       }
     } finally {
       submitting.set(false);

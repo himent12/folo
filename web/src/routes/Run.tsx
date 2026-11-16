@@ -85,7 +85,8 @@ const sameItems = (a: MenuItem[], b: MenuItem[]) =>
 export default function Run() {
   const id = computed(() => router.route.params.id ?? '');
   const live = new LiveRun(() => id.get() || null);
-  const datasets = new Resource((s) => hub.api.datasets(s));
+  // Read again with the runs list (one tick): a dataset removed while the page is open shows as removed (stress s3-live-3).
+  const datasets = new Resource((s) => hub.api.datasets(s), { poll: 5000 });
   const run = computed(() => live.run);
   /** The run's settings: the same object while only its progress moves (a step replaces the run, not its config). */
   const config = computed(() => run.get()?.config);

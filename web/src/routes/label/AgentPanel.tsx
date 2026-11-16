@@ -13,7 +13,7 @@ import Square from '$icons/square';
 import { bindable, computed, createUniqueId, css, effect, For, Index, signal } from 'fw';
 import type { LabelAgent, LabelJob } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
-import { duration, num, sentence } from '$lib/format';
+import { count, duration, num, sentence } from '$lib/format';
 import { AGENT_NAME, INSTRUCTIONS_MAX } from '$lib/label';
 import Button from '$lib/ui/Button';
 import CodeText from '$lib/ui/CodeText';
@@ -106,7 +106,7 @@ export default function AgentPanel(props: AgentPanelProps) {
                 value={run.get()!.total ? done.get() / run.get()!.total : 0}
                 size="md"
                 tone={props.lost ? 'neutral' : 'accent'}
-                label={`${done.get()} of ${run.get()!.total} images done`}
+                label={`${done.get()} of ${count(run.get()!.total, 'image')} done`}
               />
               {waiting.get() ? (
                 <p class="p-wait num">

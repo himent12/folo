@@ -116,7 +116,7 @@ export function reviewRows(
   e2e: boolean,
 ): { key: Jump; label: string; value: string; mono?: boolean; warn?: boolean }[] {
   return [
-    { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—', warn: !!errors.dataset },
+    { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} ${dataset.splits.train === 1 ? 'image' : 'images'}` : '—', warn: !!errors.dataset },
     // An architecture is a name, in sans like a run's (design/UNIFIED.md §2); a weights path is an identifier, in mono.
     { key: 'model', label: 'Model', value: arch },
     { key: 'epochs', label: 'Epochs', value: errors.epochs ? '—' : num(epochs), warn: !!errors.epochs },

@@ -9,7 +9,7 @@
 import Check from '$icons/check';
 import { computed, css, For } from 'fw';
 import type { Bench, BenchCatalog, BenchEntry } from '$lib/api/types';
-import { num } from '$lib/format';
+import { count, num } from '$lib/format';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
 import { progressFacts, progressShare, receiving } from '../words';
@@ -121,7 +121,7 @@ export default function RunningPanel(props: RunningPanelProps) {
                         pill(
                           () => passState(null, null),
                           () => stateWord(passState(null, null)),
-                          () => `${num(props.entry.images)} images`,
+                          () => count(props.entry.images, 'image'),
                         )
                       ) : (
                         <For each={ps().severities} key={(s) => s}>

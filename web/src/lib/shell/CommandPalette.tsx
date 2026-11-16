@@ -260,7 +260,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
       group: 'Labeling jobs',
       label: x.name,
       match: x.classes,
-      hint: [x.status === 'idle' ? `${x.counts.labeled.toLocaleString('en-US')} of ${x.counts.images.toLocaleString('en-US')} images labeled` : 'Labeling', count(x.classes.length, 'class')],
+      hint: [x.status === 'idle' ? `${x.counts.labeled.toLocaleString('en-US')} of ${count(x.counts.images, 'image')} labeled` : 'Labeling', count(x.classes.length, 'class')],
       icon: Tags,
       run: go(`/datasets/label/${x.id}`),
     }));
