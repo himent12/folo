@@ -366,9 +366,9 @@ pub struct FoloApp {
     // Runs
     pub run_filter: RunFilter,
     pub chart_hover: Option<f32>,
-    /// The run chart the pointer is on (its id, "run-map", "run-loss", ...): only that chart draws
-    /// `chart_hover`'s cursor and reads its legend there. None while no pointer is on one (a cursor
-    /// stepped with the keys shows on the first chart).
+    /// The run chart the cursor is on (its id, "run-map", "run-loss", ...): the pointer's, or the
+    /// one ↑ / ↓ picked; only that chart draws `chart_hover`'s cursor and reads its legend there.
+    /// None until either picks one (a cursor stepped with ← / → then shows on the first chart).
     pub chart_hover_on: Option<&'static str>,
     /// The run charts' x axis: Some(true) fits it to the epochs trained ("So far"), Some(false)
     /// shows the planned run ("All N"); None takes the default (planned while active, else trained).
