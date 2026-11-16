@@ -110,8 +110,17 @@ impl Backend for MockBackend {
     }
 
     fn dataset(&self, id: &str) -> ApiResult<Dataset> {
-        self.check()?;
-        Ok(self.fixture(id)?.ds.clone())
+        let read = || -> ApiResult<Dataset> {
+            self.check()?;
+            if let Some((code, message)) = self.broken.lock().unwrap().get(id) {
+                return Err(ApiError::new(code, message.clone()));
+            }
+            Ok(self.fixture(id)?.ds.clone())
+        };
+        // The answer as the dataset was when asked: a test may hold it past a later read.
+        let r = read();
+        self.hold_point("dataset");
+        r
     }
 
     fn dataset_issues(&self, id: &str) -> ApiResult<IssuePage> {
@@ -128,6 +137,8 @@ impl Backend for MockBackend {
         if warning > 0 {
             counts.by_kind.insert("box_out_of_bounds".into(), warning);
         }
+        // Counted from the files as they were when asked: a test may hold it past their change.
+        self.hold_point("issues");
         Ok(IssuePage { total: broken, issues: Vec::new(), counts })
     }
 
@@ -160,6 +171,8 @@ impl Backend for MockBackend {
     }
 
     fn image(&self, dataset_id: &str, image_id: &str, thumb: Option<u32>) -> ApiResult<ImageData> {
+        // A test may hold one image's fetch past its dataset's files changing.
+        self.hold_point(&format!("pixels {dataset_id} {image_id}"));
         let f = self.fixture(dataset_id)?;
         let index: u32 = image_id
             .strip_prefix("img_")

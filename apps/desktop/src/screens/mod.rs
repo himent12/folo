@@ -25,6 +25,7 @@ use crate::ui::*;
 use crate::viz::{DrawBox, Fit, paint_image_with_boxes};
 
 pub use first_step::FirstStep;
+pub(crate) use overview::dataset_problem;
 
 /// Title, one line of context, and actions on the right.
 pub fn page_header(

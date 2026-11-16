@@ -332,6 +332,17 @@ pub struct FoloApp {
     /// load (a later load replaces it; its pages are dropped).
     pub images_more: HashMap<String, u64>,
     pub images_seq: u64,
+    /// Datasets read before, read again (in place) the next time a card or their page shows them:
+    /// a folder moved away or put back since says so ([`FoloApp::ensure_dataset`]).
+    pub ds_recheck: std::collections::HashSet<String>,
+    /// Each dataset's latest read (a number from `ds_read_seq`): an older read answering after a
+    /// newer one (two Retries, two visits) is dropped, so the newer answer stands.
+    pub ds_reads: HashMap<String, u64>,
+    pub ds_read_seq: u64,
+    /// Each dataset's issue check on its way (a number from `issue_read_seq`): only its answer is
+    /// kept, so a check of files since changed never comes back ([`FoloApp::ensure_issues`]).
+    pub issue_reads: HashMap<String, u64>,
+    pub issue_read_seq: u64,
     pub ds_tile: f32,
     /// The grid tile under the pointer (it reveals every label, as a focused one does).
     pub ds_hover_tile: Option<String>,
@@ -424,6 +435,9 @@ pub struct FoloApp {
     pub play_drag: Option<(folo_ui::Point<Pixels>, (f32, f32))>,
     /// Generation of the latest image load request (older completions are dropped).
     play_load_seq: u64,
+    /// The latest image load while it is on its way: `Some((dataset, image))` for a dataset's image,
+    /// `None` for a file ([`FoloApp::forget_play_dataset`] asks again for one whose files changed).
+    play_loading: Option<Option<(String, String)>>,
     /// Generation of the image on stage; predictions are tagged with it.
     play_image_gen: u64,
     /// Generation of the latest prediction request.
@@ -620,6 +634,11 @@ impl FoloApp {
             ds_split_counts: RefCell::new(None),
             images_more: HashMap::new(),
             images_seq: 0,
+            ds_recheck: Default::default(),
+            ds_reads: HashMap::new(),
+            ds_read_seq: 0,
+            issue_reads: HashMap::new(),
+            issue_read_seq: 0,
             ds_tile: 168.,
             ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),
@@ -634,7 +653,9 @@ impl FoloApp {
             chart_hover: None,
             run_x_fit: None,
             sample_view: SampleView::Both,
-            sample_conf: 0.3,
+            // Every prediction the server keeps for a sample (docs/API.md: score >= 0.25), the slider's
+            // floor, as Studio starts (it started at 0.3 here, so Desktop drew fewer boxes than Studio).
+            sample_conf: crate::screens::runs::SAMPLE_CONF.0,
             log_filter: LogFilter::All,
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
@@ -674,6 +695,7 @@ impl FoloApp {
             play_pan: (0., 0.),
             play_drag: None,
             play_load_seq: 0,
+            play_loading: None,
             play_image_gen: 0,
             play_pred_seq: 0,
             play_pred_pending: false,
