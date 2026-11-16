@@ -3,6 +3,17 @@ import type { Resource } from '$lib/api/resource';
 import type { SystemInfo } from '$lib/api/types';
 import { deviceName } from '$lib/format';
 
+/**
+ * A GPU the form holds (from the tab's draft, a copied run or a pick before the list changed) that the server's device
+ * list does not name: Start waits for another device rather than letting the server refuse it (stress d2-runs; Desktop's
+ * `nr_device_gone`). Unknown until the list has loaded.
+ */
+export function missingDevice(device: string, system: SystemInfo | undefined): { device: string; gone: boolean; detail: string } | null {
+  if (!system || !device.startsWith('gpu:') || system.gpus.some((g) => `gpu:${g.ordinal}` === device)) return null;
+  return { device, gone: true, detail: '' };
+}
+
+
 /** A device in a sentence, named once with its value: "Auto", "GPU 1 (gpu:1)", "CPU" (values elsewhere: `gpu:1`). */
 export const devWord = (d: string) => (d === 'auto' ? 'Auto' : d === 'cpu' ? 'CPU' : `${d.replace(/^gpu:/, 'GPU ')} (${d})`);
 

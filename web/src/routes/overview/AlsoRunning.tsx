@@ -16,7 +16,7 @@ import { Resource } from '$lib/api/resource';
 import type { Bench, BenchEntry, BenchLoop, CloudInstance, SystemInfo } from '$lib/api/types';
 import { BENCH_FEATURE } from '$lib/bench/rules';
 import { hasCloud } from '$lib/cloud';
-import { num } from '$lib/format';
+import { count, num } from '$lib/format';
 import { LABEL_FEATURE } from '$lib/label';
 import { href } from '$lib/router';
 import { loopStatus, progressFacts } from '../bench/words';
@@ -85,7 +85,7 @@ export default function AlsoRunning(props: { system: SystemInfo | undefined }) {
         id: j.id,
         kind: 'Labeling',
         name: j.name,
-        detail: j.run && !j.run.finished ? `${num(j.run.done)} of ${num(j.run.total)} images` : `${num(j.counts.labeled)} of ${num(j.counts.images)} images labeled`,
+        detail: j.run && !j.run.finished ? `${num(j.run.done)} of ${count(j.run.total, 'image')}` : `${num(j.counts.labeled)} of ${count(j.counts.images, 'image')} labeled`,
         path: `/datasets/label/${j.id}`,
       })),
     ...(benches.data ?? [])

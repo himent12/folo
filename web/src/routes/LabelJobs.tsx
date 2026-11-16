@@ -240,7 +240,7 @@ export default function LabelJobs() {
                                   <Progress
                                     value={j().counts.images ? j().counts.labeled / j().counts.images : 0}
                                     tone={filterOf(j()) === 'active' ? 'accent' : 'neutral'}
-                                    label={`${j().counts.labeled} of ${j().counts.images} images labeled`}
+                                    label={`${num(j().counts.labeled)} of ${num(j().counts.images)} ${j().counts.images === 1 ? 'image' : 'images'} labeled`}
                                   />
                                 </span>
                               </td>

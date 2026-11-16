@@ -123,6 +123,32 @@ describe('New run: a device the server cannot use', () => {
     expect(target.querySelector('select#device')!.hasAttribute('aria-invalid')).toBe(false);
   });
 
+  // Stress d2-runs: a draft (or a copied run) kept a GPU the server no longer lists; only the server's refusal of the
+  // first Start said so.
+  it('stops Start before the server for a GPU from the draft that the device list lacks', async () => {
+    await open();
+    await until(() => target.querySelector('select#device option[value="gpu:1"]'));
+    pick('gpu:1');
+    expect(target.querySelector('#device-error')).toBeNull();
+    unmount(c!);
+    c = undefined;
+    (api as unknown as { state: { unplugged: boolean } }).state.unplugged = true;
+    const create = vi.spyOn(api, 'createRun');
+    await open();
+    expect(target.querySelector<HTMLSelectElement>('select#device')!.value).toBe('gpu:1');
+    const msg = await until(() => target.querySelector('#device-error'), 'the device error');
+    expect(msg.textContent).toBe('GPU 1 (gpu:1) is no longer available. Pick Auto, GPU 0 (gpu:0) or CPU.');
+    expect(target.querySelector('.dev-detail')).toBeNull();
+    expect([...target.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].every((b) => b.disabled)).toBe(true);
+    expect(target.querySelector('#start-why')?.textContent).toBe('Device: GPU 1 (gpu:1) is not available.');
+    await start();
+    expect(create).not.toHaveBeenCalled();
+    // A device the list names clears it.
+    pick('gpu:0');
+    expect(target.querySelector('#device-error')).toBeNull();
+    expect(target.querySelector('#start-why')).toBeNull();
+  });
+
   it('treats a 501 for a GPU from servers before device_not_found the same way', async () => {
     await open();
     pick('gpu:0');
@@ -789,5 +815,26 @@ describe('New run with no dataset yet', () => {
       ['Add dataset', '#/datasets?add=folder'],
       ['Generate sample set', '#/datasets?add=synthetic'],
     ]);
+  });
+});
+
+// Stress s2-runs-7: `?from=` a run that does not exist toasted the server's hint for agents, and the toast outlived the link.
+describe('New run from a run that does not exist', () => {
+  it('says so in plain words, starts from the defaults, and the toast goes with the page', async () => {
+    const { toast } = await import('$lib/ui/toast');
+    vi.spyOn(api, 'run').mockRejectedValue(new ApiError(404, 'run_not_found', "run 'run_nope' does not exist", 'list_runs (MCP) or GET /api/runs lists the runs that exist'));
+    await open('?from=run_nope');
+    const t = await until(() => toast.items.find((x) => x.title === 'Run to copy not found'), 'the toast');
+    expect(t.detail).toBe('It was deleted or the link is wrong. The form starts from the defaults.');
+    expect(JSON.stringify(toast.items)).not.toContain('MCP');
+    unmount(c!);
+    c = undefined;
+    expect(toast.items.find((x) => x.title === 'Run to copy not found')).toBeUndefined();
+  });
+
+  it('leaves an agent-only hint out of any error toast', async () => {
+    const { errorDetail } = await import('$lib/ui/toast');
+    expect(errorDetail(new ApiError(404, 'model_not_found', 'No model m_x.', 'list_models (MCP) or GET /api/models lists them'))).toBe('No model m_x.');
+    expect(errorDetail(new ApiError(409, 'busy', 'a run is active', 'stop it first'))).toBe('A run is active. Stop it first.');
   });
 });

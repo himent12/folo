@@ -8,10 +8,18 @@ import { isOom } from '$lib/oom';
 
 export type ToastTone = 'success' | 'error' | 'info';
 
-/** An error in a sentence or two: an ApiError's message and hint, out of GPU memory in plain words (as ErrorState). */
+/** A server hint written for agents and API clients (an endpoint, an MCP tool): kept with the details, not shown. */
+export const forAgents = (hint: string) => /\b(?:GET|POST|PUT|PATCH|DELETE) \/api\/|\(MCP\)|docs\/API\.md/.test(hint);
+
+/**
+ * An error in a sentence or two: an ApiError's message and hint, out of GPU memory in plain words (as ErrorState). A hint
+ * written for agents ("list_runs (MCP) or GET /api/runs …") is left out, as ErrorState leaves it (stress s2-runs-7).
+ */
 export function errorDetail(err: unknown): string {
   const message = err instanceof ApiError && isOom(err) ? 'The GPU ran out of memory.' : err instanceof Error ? err.message : String(err);
-  return err instanceof ApiError ? [message, err.hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ') : message;
+  if (!(err instanceof ApiError)) return message;
+  const hint = err.hint && !forAgents(err.hint) ? err.hint : null;
+  return [message, hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ');
 }
 
 export interface Toast {

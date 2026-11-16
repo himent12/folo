@@ -34,7 +34,7 @@ import { ampBlockOf } from './runnew/amp';
 import { firstError, formErrors, isInt, landOn, type Jump } from './runnew/jump';
 import { cloudCostOf, closeMosaicShown, reviewRows, roughBytes, shownEstimate } from './runnew/summary';
 import { trainConfig } from './runnew/config';
-import { deviceLabelOf, deviceMessage } from './runnew/device';
+import { deviceLabelOf, deviceMessage, missingDevice } from './runnew/device';
 import { oomChangesOf } from './runnew/retry';
 import { serverEstimate } from './runnew/serverEstimate';
 import { clearOwnDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
@@ -52,6 +52,10 @@ import AugmentSection from './runnew/AugmentSection';
 import ReviewList from './runnew/ReviewList';
 import EstimateFigures from './runnew/EstimateFigures';
 import CliCommand from './runnew/CliCommand';
+
+/** The toast of a `?from=` run that could not be loaded (Toast.key). */
+const FROM_TOAST = 'runnew-from';
+
 import OomNote from './runnew/OomNote';
 import StartDock from './runnew/StartDock';
 
@@ -195,11 +199,17 @@ function RunNewForm() {
   });
   effect(() => {
     if (source.error && !untrack(() => prefilled.get())) {
-      // page-level: loading the run to copy, before any dialog opens.
-      toast.error(source.error, 'Could not load the run to copy');
+      // page-level: loading the run to copy, before any dialog opens. A run that does not exist says so in the user's
+      // words (stress s2-runs-7: the server's hint is written for agents).
+      const e = source.error;
+      if (e instanceof ApiError && e.code === 'run_not_found')
+        toast.show({ tone: 'error', title: 'Run to copy not found', detail: 'It was deleted or the link is wrong. The form starts from the defaults.', key: FROM_TOAST });
+      else toast.error(e, 'Could not load the run to copy', { key: FROM_TOAST });
       prefilled.set(true);
     }
   });
+  // The toast is about this link: it goes with the form (another link, another page).
+  effect(() => () => toast.clear(FROM_TOAST));
 
   // The first dataset until one is picked. One a draft or a link asked for that is gone is not swapped for another in
   // silence: none is picked, and the picker says which one went (by the name its runs recorded, where one has).
@@ -394,13 +404,16 @@ function RunNewForm() {
     return r && r.device === device.get() ? r : null;
   });
 
-  // Start answered `404 device_not_found` (`501 not_implemented` from servers before it): said at the Device field in
+  // Start answered `404 device_not_found` (`501 not_implemented` from servers before it), or the device list lacks the
+  // GPU the form holds: said at the Device field in
   // one line built from the devices this machine lists now, until another device is picked. The server's own words
   // (they name its backends) fold into the field's technical details.
   const deviceError = signal<{ device: string; gone: boolean; detail: string } | null>(null);
   const deviceErr = computed(() => {
     const e = deviceError.get();
-    return e && e.device === device.get() ? e : null;
+    if (e && e.device === device.get()) return e;
+    // A GPU kept from the draft or a copied run that this server does not list is caught before Start, not by it.
+    return onCloud.get() ? null : missingDevice(device.get(), system.data);
   });
   const deviceMsg = computed(() => deviceMessage(deviceErr.get(), system));
 

@@ -29,8 +29,8 @@ import type { Epoch, LogLine, Run, RunCloud, RunLogs, Step } from './types';
 export const MAX_LOGS = 2000;
 const ACTIVE = ['queued', 'running', 'stopping'];
 /**
- * How long the stream may be down before the view stops calling itself live. EventSource retries a dropped connection
- * on its own within a few seconds; a blip that short is not worth a "Last known" state.
+ * How long the stream may be down before the view stops calling itself live. The stream (./sse) reopens a dropped
+ * connection on its own within a few seconds; a blip that short is not worth a "Last known" state.
  */
 export const STREAM_GRACE_MS = 5000;
 
