@@ -34,6 +34,7 @@ import { rowNav } from '$lib/ui/rowNav';
 import { unlike, versusYolo26n } from '$lib/benchmarks';
 import { filterLabel, groupKey, groupLabel, rankKey, scoreContext, splitLabel, type ScoreContext } from '$lib/scoreSummary';
 import { loadThroughput, measuredLatency, measuredTraining } from '$lib/throughput';
+import FirstStepAction, { noDatasetsYet, refreshOnDatasetChange } from "./firstStep";
 
 type Key = 'name' | 'arch' | 'classes' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'created';
 interface Col {
@@ -87,6 +88,8 @@ export default function Models() {
   const runs = new Resource((s) => hub.api.runs(s));
   refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
+  const noDatasets = computed(() => noDatasetsYet(datasets.data));
+  refreshOnDatasetChange(datasets);
   // Where imported .folo files go, for the empty state (the server's data dir, when it says; the mock has none).
   const system = new Resource((s) => hub.api.system(s));
   const modelsDir = computed(() => (system.data?.data_dir ? `\`${system.data.data_dir}/models\`` : "the models folder of the server's data directory"));
@@ -353,13 +356,9 @@ export default function Models() {
                   <EmptyState
                     icon={Box}
                     title="No models yet"
-                    description={`A training run saves its best weights here when it finishes. To import a .folo file, copy it into ${modelsDir.get()} on the server's machine.`}
-                    // The page's only action (its header has none), so primary.
-                    actions={() => (
-                      <Button variant="primary" icon={Plus} href={href('/runs/new')}>
-                        New run
-                      </Button>
-                    )}
+                    description={`${noDatasets.get() ? 'Models come from training runs, and a run needs a dataset first.' : 'A training run saves its best weights here when it finishes.'} To import a .folo file, copy it into ${modelsDir.get()} on the server's machine.`}
+                      // The page's only action (its header has none), so primary: Add dataset while there is none.
+                      actions={() => <FirstStepAction noDatasets={noDatasets.get()} primary />}
                   />
                 </TableState>
               </tbody>

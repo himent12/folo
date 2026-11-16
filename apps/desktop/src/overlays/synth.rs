@@ -4,7 +4,10 @@ use std::rc::Rc;
 
 use folo_ui::Focusable;
 use folo_ui::prelude::FluentBuilder;
-use folo_ui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::{
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Styled,
+    Window, div, px,
+};
 
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -50,6 +53,14 @@ impl FoloApp {
                     t.line_control
                 })
                 .text_size(px(ty::BASE.size))
+                // Enter in either field generates, as Ctrl Enter does (submit_synth checks the fields).
+                .on_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
+                    if ev.keystroke.key != "enter" || ev.keystroke.modifiers.control {
+                        return;
+                    }
+                    this.submit_synth(w, cx);
+                    cx.stop_propagation();
+                }))
                 .when(ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
                 .child(input)
                 .into_any_element()

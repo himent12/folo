@@ -55,6 +55,7 @@ import { followNewDatasets } from './overview/newDatasets';
 import RunRows from './runs/RunRows';
 import { groups, leftForRun, readState, returnQuery, sortRuns, writeState, type Filter, type SortKey } from './runs/listState';
 import { exactTime, tickingNow } from './runs/when';
+import FirstStepAction, { firstStepHref, firstStepLabel, noDatasetsYet, refreshOnDatasetChange } from "./firstStep";
 
 /** Columns of the desktop table (for state rows that span it). */
 const COLS = 11;
@@ -67,6 +68,8 @@ export default function Runs() {
 
   const runs = new Resource((s) => hub.api.runs(s), { poll: 3000 });
   const datasets = new Resource((s) => hub.api.datasets(s));
+  const noDatasets = computed(() => noDatasetsYet(datasets.data));
+  refreshOnDatasetChange(datasets);
   const dsName = computed(() => new Map((datasets.data ?? []).map((d) => [d.id, d])));
   // A run on a dataset made since the list loaded (another tab, a benchmark loop): the datasets are read again, and the
   // run says the name it recorded meanwhile instead of "(removed)" (./overview/newDatasets, as Overview does).
@@ -300,9 +303,10 @@ export default function Runs() {
                 <Gate reason={offline.get() ? OFFLINE_REASON : null}>
                   {(why) => (
                     // Once Compare can run (2+ selected) it is the page's one primary and New run steps back; one
-                    // selected run leaves Compare disabled, so New run stays primary.
-                    <Button variant={comparing.get() ? 'secondary' : 'primary'} icon={Plus} disabled={!!why()} aria-describedby={why()} href={href('/runs/new')}>
-                      New run
+                    // selected run leaves Compare disabled, so New run stays primary. Past runs but no dataset left:
+                    // Add dataset (./firstStep), as the empty list's.
+                    <Button variant={comparing.get() ? 'secondary' : 'primary'} icon={Plus} disabled={!!why()} aria-describedby={why()} href={firstStepHref(noDatasets.get())}>
+                      {firstStepLabel(noDatasets.get())}
                     </Button>
                   )}
                 </Gate>
@@ -432,12 +436,14 @@ export default function Runs() {
                     <EmptyState
                       icon={Activity}
                       title="No runs yet"
-                      description="Start one to watch its loss, mAP and samples stream in live."
-                      actions={() => (
-                        <Button variant="primary" icon={Plus} href={href('/runs/new')}>
-                          New run
-                        </Button>
-                      )}
+                        // With no dataset at all the first step is adding one (as Desktop's screens/first_step.rs):
+                        // New run would only land on "Add a dataset first".
+                        description={
+                          noDatasets.get()
+                            ? 'Training needs a dataset first: add a YOLO or COCO folder, or generate a sample set.'
+                            : 'Start one to watch its loss, mAP and samples stream in live.'
+                        }
+                        actions={() => <FirstStepAction noDatasets={noDatasets.get()} primary />}
                     />
                   </TableState>
                 ) : shown.get().length === 0 ? (
