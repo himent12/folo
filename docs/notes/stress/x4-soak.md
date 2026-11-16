@@ -76,7 +76,7 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
   now has an attempt number (`ImageCache::attempt`) the fetch carries; an answer for an older attempt is
   dropped. Test: `app/image_tests.rs` `a_fetch_for_a_tile_evicted_and_drawn_again_does_not_undo_the_newer_fetch`.
 - Also (review round 1, pre-existing): an image that failed to load (server down) stayed a placeholder for
-  good. Lane d1-datasets fixes that and this branch is stacked on it, following its model: a failed image
+  good. Lane d1-datasets fixed that (PR #277, on main) and this branch follows its model: a failed image
   is asked for again by a timer after 2, 8 and 32 s, a reconnect and Retry (`retry_all`) forget failures
   (`ImageCache::forget_failed`), the inspector has a Retry. This lane's own versions of that (forget on
   reconnect, review round 2; an `ImgSlot::Unreachable` state forgotten at every `/system` answer, review
@@ -130,4 +130,5 @@ Studio in headless Chrome (playwright-core), Desktop off screen (`FOLO_UI_OFFSCR
 - Narrow window widths (1024, 800) on Runs and the big grid.
 - Re-measuring the 20k-grid fling with the fixed Desktop build: the fix is checked by its behaviour tests
   (`store/image_queue.rs`, `app/image_tests.rs`), not by a new thread-count run. The `apps/desktop` gates
-  (fmt, test, clippy, build) first ran in review round 2 (all pass).
+  (fmt, test, clippy, build) first ran in review round 2 (all pass), and again on the branch rebased onto
+  main 542d6a77 after #277 (all pass, with web check and test).
