@@ -96,4 +96,5 @@ turns 3 and 4 took that time.
 
 ## Gates
 
-See the pull request body for the gates of the pushed head.
+The branch sits on `main` e1ee6871 (after lanes d1-datasets #277 and x4-soak #281 merged; it no longer stacks on
+either). See the pull request body and its last comment for the gates of the pushed head.
