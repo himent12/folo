@@ -5,17 +5,34 @@ as a hard user would, wrote down what broke and fixed it with regression tests, 
 reports are in [stress/](stress/README.md); this note sums them up. Counts are recounted from the lanes' own
 records (`FINDINGS.md`, `REVIEWS.md`, under `D:/folo-build/stress/lanes/` on the maintainers' machine, not in git).
 
+After this report merged (#286), three follow-up lanes ran. A follow-up lane did no hunting: it took findings the
+first 16 lanes had confirmed and left open, mostly because they sat in the other app or in another lane's area
+(`SIBLING`), checked each on `main` and fixed it, with its own report and pull request:
+- [f1-studio-siblings](stress/f1-studio-siblings.md) (#287) gave Studio a silence deadline on event streams, a
+  Device error for a draft's missing GPU, an end for a labeling job deleted elsewhere and three more Studio fixes.
+- [f2-desktop-siblings](stress/f2-desktop-siblings.md) (#288) fixed seven Desktop items left open, most of them
+  siblings of Studio fixes, among them the
+  train-only note in New run, a stopped run's trained epochs and a mark on images that failed to load.
+- [f3-server-ci](stress/f3-server-ci.md) (#290) made a cloud instance lost during the weights copy a lost run, made
+  two CI-flaky server tests wait for events instead of the clock, retries a Node crash once on the self-hosted Linux
+  runners and documented what `broken_labels` counts; its fifth item was deferred (see [Still open](#still-open)).
+
+The counts, tables and lessons below are those of the first 16 lanes unless a line names a follow-up lane.
+
 ## Verdict
 **Both apps now get through most of what broke them at the start of the round: a server that starts late or dies,
-corrupt state and answers of the wrong shape, ten thousand images, hundreds of runs.** Two gaps are left in that
-ground, both in Studio: an event stream that goes silent has no deadline, and a Run page left while its run crosses an
-epoch stays in memory (about 1,700 DOM nodes per run, x4-soak). The round logged 103 findings, 9 of them blockers.
+corrupt state and answers of the wrong shape, ten thousand images, hundreds of runs.** One gap is left in that
+ground, in Studio: a Run page left while its run crosses an epoch stays in memory (about 1,700 DOM nodes per run,
+x4-soak). The other one this report named, an event stream that goes silent with no deadline, was fixed by the
+follow-up lane f1-studio-siblings (#287). The first 16 lanes logged 103 findings, 9 of them blockers.
 By each lane's own disposition, 71 were fixed in that lane, 29 deferred or left open and 3 were duplicates of another
 lane's. Some deferrals were handed to another lane, which fixed at least one (s5-label-5, a dataset named `nul`,
-by s1-datasets' `slug` in `crates/folo-server/src/util.rs`), so 29 is not a count of what is open on `main`. All
-nine blockers are fixed.
-The rest of what is left ([Still open](#still-open)) is wording, one-off edge cases, labeling agents that outlive a
-killed server (s5-label-2) and a few server-side decisions.
+by s1-datasets' `slug` in `crates/folo-server/src/util.rs`), and the follow-up lanes fixed most of the rest, so 29
+is not a count of what is open on `main`. All nine blockers of the first 16 lanes are fixed; one blocker a follow-up
+lane took on (f3-server-ci-5, which copy of a folder is loaded after a restart) is deferred as a design question.
+The rest of what is left ([Still open](#still-open)) is one-off edge cases, Studio's benchmark images without a
+failed state, labeling agents that outlive a killed server (s5-label-2), a few server-side decisions and
+load-sensitive tests.
 
 The fixes a user would notice most:
 1. **Desktop no longer runs out of memory in the image inspector** (d1-datasets-1): full images were held at their
@@ -50,7 +67,8 @@ the diffs, ordered extra reviews or rebases, and merged on green CI. The round r
 orchestrating app). A lane that found the same bug in the other app fixed its own and marked the finding `SIBLING`.
 
 ## The lanes
-Severity and status as the lane gave them; "fixed" counts a finding fixed in part (d1-datasets-5, x4-soak-3) as
+The first 16 lanes (the follow-up lanes are listed in [stress/](stress/README.md#follow-up-lanes)). Severity and
+status as the lane gave them; "fixed" counts a finding fixed in part (d1-datasets-5, x4-soak-3) as
 fixed, "deferred" includes findings left open and findings another lane fixed (s5-label-5); duplicates of another
 lane's finding are in neither. Merge order as in the PR column.
 
@@ -136,8 +154,8 @@ rejected or "not a bug"): 7 of the 128 were deferred and none rejected, the othe
 | lane | blocking | deferred | the deferred ones |
 |---|---:|---:|---|
 | x3-server | 25 | 2 | a copied run reappearing after a restart; the unbounded top-level format check |
-| d6-connection | 7 | 3 | Studio's missing silence deadline in `web/src/lib/api/sse.ts`, raised in rounds 1, 2 and 3 |
-| s3-live | 13 | 1 | a labeling job deleted elsewhere reconnects for ever (`web/src/lib/api/liveLabel.ts`) |
+| d6-connection | 7 | 3 | Studio's missing silence deadline in `web/src/lib/api/sse.ts`, raised in rounds 1, 2 and 3 (since fixed by #287) |
+| s3-live | 13 | 1 | a labeling job deleted elsewhere reconnects for ever (`web/src/lib/api/liveLabel.ts`; since fixed by #287) |
 | x1-parity | 13 | 1 | the chart axis (x1-parity-1), left to d2-runs, whose fix is on `main` |
 | the other 12 lanes | 70 | 0 | |
 
@@ -192,66 +210,118 @@ By the lead's account:
 - **Linux-only code is never compiled by the local gates on the Windows PC**: x1-parity's
   `apps/desktop/src/api/time.rs` failed clippy on Linux from its first push until its last.
 - **Load-sensitive tests cost re-runs**: `crates/folo-server/tests/cloud`, `tests/bench/external.rs`
-  `open_entries_expire_without_parts`, and a Node crash in `npm run check` on the Linux runners.
+  `open_entries_expire_without_parts`, and a Node crash in `npm run check` on the Linux runners. The follow-up lane
+  f3-server-ci (#290) made the first two wait for the event instead of the clock and retries a crashed Node step
+  once on self-hosted runners; the wave of follow-up lanes saw other load-sensitive tests fail once
+  ([Still open](#still-open)).
 - **Exporting `FOLO_UI_OFFSCREEN=1` for `cargo test` in `apps/desktop` fails** folo-ui's
   `a_cancelled_press_does_not_click`: set it per launch, not for the shell.
 - **A stopped agent leaves its build-slot lock behind**: someone has to release it by hand.
 
 ## Still open
-From the lane reports, the lead's list and `main` after #270 (`069935d6`; each code line below read there); three
-follow-up lanes (f1-studio-siblings, f2-desktop-siblings, f3-server-ci) were started on 2026-11-15 to work through
-it. Nothing here is fixed yet. Items marked "lead's account" are not in a lane report.
+From the lane reports (the first 16 lanes and the three follow-up lanes), the lead's list and `main` after #290
+(`91e6d627`; each code line below read there). The list was first written at `069935d6`; the items the follow-up
+lanes fixed are at the end of this section with the pull request that fixed each. Items marked "lead's account" are
+not in a lane report.
 
 **Studio**
-- No silence deadline on event streams: `web/src/lib/api/sse.ts:51-79` relies on `EventSource` errors and reconnect
-  alone (SIBLING of d6-connection-5, deferred in three of d6-connection's review rounds).
 - A Run page left while its run crosses an epoch stays in memory, about 1,700 DOM nodes per run of 2 epochs; the
   holder is not located (x4-soak, [x4-soak.md:104-119](stress/x4-soak.md); the heap path points at the run chart's
   `onpointermove`, `web/src/lib/charts/LineChart.tsx:335`, a mapping the lane did not verify).
-- A restored GPU 0 draft on a server without a GPU lets the first Start through (`web/src/routes/runnew/jump.ts:123`
-  gates only on `deviceErr`; SIBLING of d2-runs-2, deferred in d2-runs' review).
-- s2-runs-7: an unknown `?from=` run shows the server's agent hint and outlives the link
-  ([s2-runs.md:37](stress/s2-runs.md)).
-- s3-live-3: the Run page reads the dataset list once (`web/src/routes/Run.tsx:88`, `datasetGone` at `:103`), so a run
-  whose dataset was deleted while the page is open offers a Retry that cannot succeed
-  ([s3-live.md:84-88](stress/s3-live.md)).
+- Benchmark images have no failed state (SIBLING of f2-desktop-siblings-6, deferred in #288's review): the entry's
+  gallery and large view ignore a failed image URL (`web/src/routes/bench/entry/ImagesSection.tsx:73-76`,
+  `:117-120`), `web/src/routes/bench/entry/MatchView.tsx:99` draws its image with no error handler, and
+  `web/src/routes/bench/Preview.tsx` keeps URL errors (`:88-105`) but shows them only while it has no image
+  (`:164`). A failed image stays blank under its boxes, with no Retry
+  ([f2-desktop-siblings.md:114-118](stress/f2-desktop-siblings.md)); Desktop's Benchmarks mark it and offer Retry
+  since #288.
+- The Run and New run pages each read `GET /api/datasets` every 5 s to notice a deleted dataset; a change pushed by
+  the server would be cheaper, a design change f1-studio-siblings deferred
+  ([f1-studio-siblings.md:59-60](stress/f1-studio-siblings.md)).
 
 **Desktop**
-- No train-only note in New run (SIBLING of s2-runs-6, [s2-runs.md:87](stress/s2-runs.md);
-  `apps/desktop/src/overlays/new_run.rs`).
-- Missing datasets still counted in the Datasets header (`apps/desktop/src/screens/datasets/list.rs:21` sums every
-  dataset's images; SIBLING of s1-datasets-6, [s1-datasets.md:56](stress/s1-datasets.md)).
-- A stopped run's model says it trained its planned epochs (`apps/desktop/src/screens/models/details.rs:142-149`,
-  SIBLING of s4-models-1, [s4-models.md:84](stress/s4-models.md)).
-- A damaged PNG is called unsupported (`apps/desktop/src/app/playground.rs:105-107`, SIBLING of s4-models-2).
-- `split_label` (`apps/desktop/src/ui/format.rs:100-102`) and other "1 images" strings
-  ([d1-datasets.md:95-96](stress/d1-datasets.md)).
-- No failed state with Retry on a grid tile: a failed tile looks like a loading one
-  ([x4-soak.md:87-89](stress/x4-soak.md); Studio's is `web/src/lib/detect/DatasetImage.tsx`).
-- A scoped IPv6 literal in the server address (lead's account; `apps/desktop/src/api/http/transport.rs:96` `host_ok`
-  takes a bracketed host only when it parses as `std::net::Ipv6Addr`, which has no zone).
+- A scoped IPv6 literal in the server address (`http://[fe80::1%25eth0]:7878`) is refused: `host_ok`
+  (`apps/desktop/src/api/http/transport.rs:96-98`) takes a bracketed host only when it parses as
+  `std::net::Ipv6Addr`, which has no zone. Accepting it would not help, as ureq's resolver cannot reach such an
+  address; it needs a resolver that decodes the zone, a transport change (deferred by f2-desktop-siblings,
+  [f2-desktop-siblings.md:84-88](stress/f2-desktop-siblings.md)).
 
-**Server and tests**
+**Server**
+- f3-server-ci-5 (a blocker as the lane graded it): which copy of a folder is loaded after a restart. When a labeling
+  job, benchmark or run folder has a hand-made copy beside it (`lb_1` and `lb_1 - Copy`) and the original fails to
+  load at one start, the copy is loaded and the user's work is saved there; at the next start the original loads
+  again and wins by name, so that work is hidden (still on disk, logged as a skipped copy). `main` chooses with
+  `util::folders_by_id` and `load_first` for jobs and benchmarks, `util::one_per_id` for runs
+  (`crates/folo-server/src/util.rs:213`, `:248`, `:284`). The lead took it out of #290 after review rounds 1 to 3
+  found new holes in each attempt (a write count, then a persisted rank `.folo-chosen` written into the data folders
+  at start-up): whether and where to store the choice is a design question for the maintainers
+  ([f3-server-ci.md:94-124](stress/f3-server-ci.md)). The attempted work is on the remote branch
+  `stress/f3-copy-selection` (`9b9e9242`, no pull request; its last commit was not reviewed).
+- The cloud reaper looks for a run's `cloud.lock` under `runs/<id>` (`crates/folo-server/src/cloud/reaper.rs:116`,
+  `run_dir` at `crates/folo-server/src/cloud/mod.rs:203-205`), while a run loaded from a copy is locked in its own
+  folder (f3-server-ci, review round 3, which notes it holds on `main`;
+  [f3-server-ci.md:115-118](stress/f3-server-ci.md)).
+- A deleted run whose folder had a copy reappears after a restart (x3-server, review round 1;
+  [x3-server.md:125](stress/x3-server.md)).
 - s5-label-2: labeling agent processes outlive a killed server, so a real CLI's paid call runs on: the job object is
-  made without `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`crates/folo-server/src/label/tree.rs:102-114`). The proposed
+  made without `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`crates/folo-server/src/label/tree.rs:103-113`). The proposed
   fix is an uncompiled commit on a side branch ([s5-label.md:45-53](stress/s5-label.md)).
-- A cloud run whose instance dies during a checkpoint copy ends with the copy's error instead of
-  `cloud_instance_lost` (lead's account; seen as the flaky
-  `a_stop_that_finds_the_worker_gone_loses_the_run_instead_of_collecting`,
-  `crates/folo-server/tests/cloud/failures.rs:107`).
-- The load-sensitive suites under [CI and machine lessons](#ci-and-machine-lessons).
-- d1-datasets-3: `broken_labels` means label lines in docs/API.md and images in folo-data; the server passes it on
-  unchanged (`crates/folo-server/src/index.rs:177`, [d1-datasets.md:101](stress/d1-datasets.md)).
 - x3-server, review round 4: top-level dataset detection is still unbounded: registration calls `detect_format`
   (`crates/folo-server/src/index.rs:420`), which lists the folder and reads candidate YAMLs whole
   (`crates/folo-data/src/dataset/yolo.rs:42-57`; [x3-server.md:58-60](stress/x3-server.md)).
-- A deleted run whose folder had a copy reappears after a restart (x3-server, review round 1;
-  [x3-server.md:125](stress/x3-server.md)).
 - s2-runs-8: the mock cloud's `ended_in` says `syncing` for a run stopped while provisioning or booting
   (`crates/folo-server/src/mock/cloud.rs:227`, [s2-runs.md:39](stress/s2-runs.md)).
+
+**CI and tests**
+- Load-sensitive tests that failed once on CI during the follow-up lanes, none fixed: `folo-gpu`
+  `tests::runtime::waits_spin_then_block` (`crates/folo-gpu/src/tests/runtime.rs:367`) in rust (windows), passing on
+  a re-run (lead's account); and on #290's head `38d68552` (f3-server-ci's lane record), a vitest test in web's `check`
+  job stuck "still waiting for a sample image" (the wait in `web/src/routes/Playground.test.tsx`) and a click in
+  `qa (2/3)`.
+- A vitest worker that dies of a signal is not retried. vitest reports the dead worker in its own error summary and
+  exits 1; `tools/ci-retry.sh` never retries a step whose output shows an ordinary failure, and vitest's
+  `Errors N error` summary line is one (`failed`, `tools/ci-retry.sh:19`, checked first at `:25`), so the step fails
+  and needs a manual re-run. It happened on #287's head `a2477122` (SIGTRAP in `web/src/routes/bench/bench.test.tsx`,
+  no test failed). `tools/ci-retry-test.sh` has no case of this shape. Whether the host's CPU or that Node build
+  causes the crashes is not determined ([f3-server-ci.md:63-64](stress/f3-server-ci.md)).
+- `tools/ci-retry.sh:24` strips colours and carriage returns with escapes (`\x1b`, `\r`) that GNU sed reads and BSD
+  sed (macOS) may not. It runs only when a retry is possible (`ATTEMPTS` above 1, `:33`), which today is the
+  self-hosted Windows (Git Bash) and Linux runners; the one macOS job (`release.yml`, GitHub-hosted `macos-latest`)
+  gets `ATTEMPTS` 1. It would matter only if a macOS runner were given retries.
+
+**Fixed by the follow-up lanes** (listed above at `069935d6`)
+- Studio, no silence deadline on event streams: #287 (f1-studio-siblings-1), `STREAM_SILENCE_MS`, 45 s
+  (`web/src/lib/api/sse.ts:34`).
+- Studio, a restored GPU 0 draft on a server without a GPU let the first Start through: #287 (f1-studio-siblings-2),
+  `missingDevice` (`web/src/routes/runnew/device.ts:11`).
+- s2-runs-7, an unknown `?from=` run showing the agent hint: #287 (f1-studio-siblings-5).
+- s3-live-3, the Run page reading the dataset list once: #287 (f1-studio-siblings-4); it reads it every 5 s.
+- Desktop, no train-only note in New run: #288 (f2-desktop-siblings-1).
+- Desktop, missing datasets counted in the Datasets header: #288 (f2-desktop-siblings-2).
+- Desktop, a stopped run's model claiming its planned epochs: #288 (f2-desktop-siblings-3).
+- Desktop, a damaged PNG called unsupported: #288 (f2-desktop-siblings-4).
+- `split_label` and other "1 images" strings: #288 in Desktop (f2-desktop-siblings-5), #287 in Studio
+  (f1-studio-siblings-6).
+- Desktop, a failed grid tile looking like a loading one: #288 (f2-desktop-siblings-6). The dataset grid, Playground
+  and run samples mark it "Image unavailable" and Retry stays in the inspector, one Enter away; a failed Benchmarks
+  image is a Retry itself.
+- A cloud run whose instance dies during the copy ending with the copy's error: #290 (f3-server-ci-1). A failed
+  weights copy asks the provider, and an instance gone or stopped ends the run `cloud_instance_lost`; test
+  `an_instance_lost_while_its_weights_are_collected_loses_the_run` (`crates/folo-server/tests/cloud/failures.rs:133`).
+- The load-sensitive suites of [CI and machine lessons](#ci-and-machine-lessons): #290 (f3-server-ci-2, -3). The
+  cloud harness waits while a run still moves, `open_entries_expire_without_parts` sets the sweeper's clock, and the
+  Node crash is mitigated, not fixed: retried once on self-hosted runners.
+- d1-datasets-3, what `broken_labels` counts: #290 (f3-server-ci-4). docs/API.md and `folo-api` say labels that
+  cannot be read; both apps say "N broken labels".
+
+The follow-up lanes also fixed two deferrals not listed here: s3-live's labeling job deleted elsewhere
+(f1-studio-siblings-3, #287) and the retry pill for an address that is not one (the deferred half of
+d4-bench-settings-4, f2-desktop-siblings-7, #288).
 
 ## Not tested
 - **Training on the GPU**: it was busy with another long run; lanes trained tiny runs on the CPU.
 - **Real cloud providers**: the mock only, no keys.
 - **macOS.**
 - **Anything needing the user's screen**: Desktop ran off screen, Studio in headless Chrome.
+- **The follow-up lanes' Studio and Desktop fixes in a running app**: f1-studio-siblings tested with vitest (fake
+  timers, mocked fetch), f2-desktop-siblings with Desktop's behaviour and unit tests; neither ran the app.
