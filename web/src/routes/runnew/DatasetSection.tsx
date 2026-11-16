@@ -1,6 +1,7 @@
 /** New run, section 1: the dataset, as cards from 768 px up and as a compact select with a one-line summary on phones. */
 import Check from '$icons/check';
 import CircleAlert from '$icons/circle-alert';
+import Info from '$icons/info';
 import { bindable, css, For, Index } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import Badge from '$lib/ui/Badge';
@@ -13,6 +14,7 @@ import Skeleton from '$lib/ui/Skeleton';
 import Meta from '$lib/ui/Meta';
 import { balanced } from '$lib/ui/balancedGrid';
 import type { FormErrors } from './jump';
+import { noValNote } from './valSplit';
 
 
 export interface DatasetSectionProps {
@@ -24,6 +26,8 @@ export interface DatasetSectionProps {
 
 export default function DatasetSection(props: DatasetSectionProps) {
   const datasetId = bindable(props, 'datasetId');
+  /** The train-only note for the dataset picked (none while the picker shows an error for it). */
+  const note = () => (!props.errors.dataset && props.dataset && !props.dataset.problem ? noValNote(props.dataset) : null);
 
   return (
     <Panel title="1 · Dataset" id="sec-data">
@@ -40,6 +44,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
               label="Dataset"
               bind:value={datasetId}
               invalid={!!props.errors.dataset}
+              describedby={note() ? 'dataset-note' : undefined}
               options={props.datasets.data!.map((d) => ({ value: d.id, label: d.problem ? `${d.name} (${PROBLEM_LABEL[d.problem]})` : d.name }))}
             />
             {props.dataset && !props.dataset.problem ? (
@@ -58,7 +63,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
             role="radiogroup"
             aria-label="Dataset"
             aria-invalid={props.errors.dataset ? 'true' : undefined}
-            aria-describedby={props.errors.dataset ? 'dataset-error' : undefined}
+            aria-describedby={props.errors.dataset ? 'dataset-error' : note() ? 'dataset-note' : undefined}
             use:balanced={{ n: props.datasets.data!.length, min: 184, gap: 8 }}
           >
             <For each={props.datasets.data!} key={(d) => d.id}>
@@ -111,6 +116,16 @@ export default function DatasetSection(props: DatasetSectionProps) {
               </span>
             </p>
           ) : null}
+            {/* A train-only dataset trains, but its scores are on the training images (runnew/valSplit). The region
+                stays in the page so a picked dataset's note is announced; both pickers are described by it. */}
+            <div aria-live="polite">
+              {note() ? (
+              <p class="ds-note" id="dataset-note">
+                  <Info size={14} strokeWidth={1.75} aria-hidden="true" />
+                  <span>{note()}</span>
+              </p>
+            ) : null}
+          </div>
         </>
       )}
     </Panel>
@@ -130,6 +145,21 @@ css`
     color: var(--danger-text);
   }
   .ds-error > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  /* A train-only dataset's note: the error line's geometry in secondary ink (it informs, Start stays on). */
+  .ds-note {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-1);
+    margin-top: var(--space-2);
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .ds-note > :global(svg) {
     flex-shrink: 0;
     margin-top: 1px;
   }

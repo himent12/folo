@@ -46,11 +46,29 @@ export default function Menu(props: MenuProps) {
   const active = signal(0);
   const phone = new MediaQuery(media.phone, false);
   /** `fixed`: where the list sits, under the trigger's right edge. */
-  const at = signal<{ top: number; right: number } | null>(null);
+  const at = signal<{ top: number; right: number; max: number | null } | null>(null);
 
   function place() {
     const r = root.get()?.getBoundingClientRect();
-    if (r) at.set({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+    if (!r) return;
+    // Under the button; above it when the list (measured once shown) would cross the window's bottom edge and fits
+    // above: a row near the bottom would otherwise put its last items, Delete among them, out of reach (the page may not
+    // scroll, and scrolling the page closes a placed list). Where it fits on neither side (a short window), it takes
+    // the side with more room, capped at the window's edge, and scrolls inside itself.
+    const el = list.get();
+    // Its whole height (border included), not the capped one.
+    const h = el ? el.scrollHeight + el.offsetHeight - el.clientHeight : 0;
+    const below = r.bottom + 6;
+    const roomBelow = window.innerHeight - 8 - below;
+    const roomAbove = r.top - 6 - 8;
+    let top = below;
+    let max: number | null = null;
+    if (h > roomBelow) {
+      if (h <= roomAbove) top = r.top - 6 - h;
+      else if (roomAbove > roomBelow) (top = 8), (max = Math.max(roomAbove, 44));
+      else max = Math.max(roomBelow, 44);
+    }
+    at.set({ top, right: Math.max(8, window.innerWidth - r.right), max });
   }
 
   const entries = () => [...(list.get()?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
@@ -60,6 +78,8 @@ export default function Menu(props: MenuProps) {
     active.set(where === 'first' ? 0 : shown.get().length - 1);
     open.set(true);
     await tick();
+    // Placed again now that the list has a height: above the button where it does not fit below.
+    if (p.fixed) place();
     const all = entries();
     (where === 'first' ? all[0] : all.at(-1))?.focus();
   }
@@ -195,6 +215,7 @@ export default function Menu(props: MenuProps) {
             ref={list}
             style:top={p.fixed && at.get() ? `${at.get()!.top}px` : undefined}
             style:right={p.fixed && at.get() ? `${at.get()!.right}px` : undefined}
+            style:max-height={p.fixed && at.get()?.max != null ? `${at.get()!.max}px` : undefined}
             onkeydown={onkeydown}
             onfocusin={onfocusin}
           >
@@ -233,8 +254,11 @@ css`
     display: grid;
     animation: in var(--dur-fast) var(--ease-out);
   }
+  /* Capped by place() in a window too short for it: the rest scrolls inside the list (which keeps it open). */
   .list.fixed {
     position: fixed;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
   [role='menuitem'] {
     display: flex;

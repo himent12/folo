@@ -175,3 +175,53 @@ describe('Menu on a phone', () => {
     viewport(width);
   });
 });
+
+describe('Menu placed on the viewport (fixed)', () => {
+  /** Opens a fixed menu whose button sits at `top`..`top + 36` of the window and whose list is `h` px high. */
+  async function openAt(top: number, h = 120) {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const r = { top, bottom: top + 36, left: 900, right: 936, width: 36, height: 36, x: 900, y: top };
+      return { ...r, toJSON: () => r } as DOMRect;
+    });
+    // The list's whole height, uncapped (no border in this DOM, so the three agree).
+    const heights = (['offsetHeight', 'scrollHeight', 'clientHeight'] as const).map((k) =>
+      vi.spyOn(HTMLElement.prototype, k, 'get').mockImplementation(function (this: HTMLElement) {
+        return this.getAttribute('role') === 'menu' ? h : 0;
+      }),
+    );
+    const items = [{ label: 'Open model', href: '#/m' }, { label: 'Try in Playground', href: '#/p' }, { label: 'Delete run', danger: true, onclick: () => {} }];
+    const c = mount(Menu, { target, props: { label: 'Actions for r', items, fixed: true } });
+    target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click();
+    flushSync();
+    await tick();
+    flushSync();
+    const { top: placed, maxHeight } = target.querySelector<HTMLElement>('[role="menu"]')!.style;
+    unmount(c);
+    target.remove();
+    rect.mockRestore();
+    for (const s of heights) s.mockRestore();
+    return { top: placed, max: maxHeight };
+  }
+
+  it('opens under its button where the list fits there', async () => {
+    expect(await openAt(100)).toEqual({ top: `${100 + 36 + 6}px`, max: '' });
+  });
+
+  it('opens above its button near the window bottom, so its last item (Delete) stays reachable', async () => {
+    // Runs list round s2-runs-5: the last row's list ran below the window and the page could not scroll to it.
+    const top = window.innerHeight - 40;
+    expect(await openAt(top)).toEqual({ top: `${top - 6 - 120}px`, max: '' });
+  });
+
+  it('fits on neither side of a short window: takes the larger one, capped at the edge, and scrolls inside', async () => {
+    // Review of s2-runs-5: a list taller than the room above and below its button still ran off the window.
+    const tall = window.innerHeight;
+    // More room below the button: under it, as high as the window leaves.
+    expect(await openAt(100, tall)).toEqual({ top: `${100 + 36 + 6}px`, max: `${window.innerHeight - 8 - (100 + 36 + 6)}px` });
+    // More room above: from the window's top edge down to the button.
+    const low = window.innerHeight - 140;
+    expect(await openAt(low, tall)).toEqual({ top: '8px', max: `${low - 6 - 8}px` });
+  });
+});

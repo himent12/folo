@@ -110,11 +110,26 @@ export function readDraft(server: string, store: () => Storage = () => sessionSt
   return null;
 }
 
-export function saveDraft(d: Draft, store: () => Storage = () => sessionStorage) {
+/** Keeps `d` for the tab; returns it as stored, so the form can later clear only its own draft (`clearOwnDraft`). */
+export function saveDraft(d: Draft, store: () => Storage = () => sessionStorage): string {
+  const raw = JSON.stringify(d);
   try {
-    store().setItem(KEY, JSON.stringify(d));
+    store().setItem(KEY, raw);
   } catch {
     // Storage full or off: the form still works, it is just not kept.
+  }
+  return raw;
+}
+
+/**
+ * Clears the tab's draft only while it is still `raw`, the one a form wrote: a start answered after the user left and
+ * opened New run again must not take the newer form's edits with it (one draft per tab).
+ */
+export function clearOwnDraft(raw: string, store: () => Storage = () => sessionStorage) {
+  try {
+    if (store().getItem(KEY) === raw) store().removeItem(KEY);
+  } catch {
+    // As below.
   }
 }
 

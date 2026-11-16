@@ -3,7 +3,7 @@
 import Images from '$icons/images';
 import Play from '$icons/play';
 import Plus from '$icons/plus';
-import { computed, css, deep, effect, Key, signal, tick, untrack } from 'fw';
+import { computed, css, deep, effect, Key, onCleanup, signal, tick, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { readDatasets } from '$lib/api/datasetReads';
 import { Resource } from '$lib/api/resource';
@@ -37,8 +37,8 @@ import { trainConfig } from './runnew/config';
 import { deviceLabelOf, deviceMessage } from './runnew/device';
 import { oomChangesOf } from './runnew/retry';
 import { serverEstimate } from './runnew/serverEstimate';
-import { clearDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
-import { MAX_RUN_NAME, nameHint, runName, uniqueName } from './runnew/name';
+import { clearOwnDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
+import { clipName, MAX_RUN_NAME, nameHint, runName, uniqueName } from './runnew/name';
 import WhyLine from './runnew/WhyLine';
 import { START_KEYS, startKeys } from './runnew/startKeys';
 import { aheadLine, aheadOf, startedToast } from './runnew/queue';
@@ -216,6 +216,13 @@ function RunNewForm() {
 
   // The draft follows every edit, once the form holds what the link asked for; a start clears it (below).
   let started = false;
+  // Gone (the user went elsewhere while Start was answered, or the link changed): the start then reports by its toast
+  // and leaves the user where they went.
+  let mounted = true;
+  onCleanup(() => (mounted = false));
+  // The draft as this form last wrote it: a start clears only that one, never a newer form's (a start answered after
+  // the user left and opened New run again).
+  let mine: string | null = null;
   effect(() => {
     const d: Draft = {
       server: hub.server,
@@ -241,7 +248,7 @@ function RunNewForm() {
       augOpen: augOpen.get(),
       cloud: cloudPick.draft,
     };
-    if (prefilled.get() && !started) saveDraft(d);
+    if (prefilled.get() && !started) mine = saveDraft(d);
   });
 
   const dataset = computed(() => datasets.data?.find((d) => d.id === datasetId.get()));
@@ -291,7 +298,7 @@ function RunNewForm() {
   // name typed over it that is taken gets a warning under the field (runnew/name).
   effect(() => {
     // The dataset's part gives way first, so a long dataset name keeps the size (and a few numbers) in the limit.
-    const ds = runName(dataset.get()?.name ?? '').slice(0, MAX_RUN_NAME - 4) || 'run';
+    const ds = clipName(runName(dataset.get()?.name ?? ''), MAX_RUN_NAME - 4) || 'run';
     const auto = uniqueName(`${ds}-${arch.get().replace('folo-', '')}`, taken.get());
     if (!untrack(() => nameEdited.get())) name.set(auto);
   });
@@ -561,16 +568,23 @@ function RunNewForm() {
     sumOpen.set(false);
     submitting.set(true);
     const before = ahead.get();
+    // Where the user asked to be when Start was pressed: the URL's route, not the one on display (App keeps that on
+    // the form while the next screen's chunk loads, so the form stays mounted and `route` still says run-new).
+    const here = router.location;
+    const stayed = () => {
+      const now = router.location;
+      return mounted && now.path === here.path && now.query.toString() === here.query.toString();
+    };
     try {
       const run = await hub.api.createRun(config.get());
       started = true;
-      clearDraft();
+      if (mine !== null) clearOwnDraft(mine);
       const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
       // page-level: the sheet is closed (above).
       const t = startedToast(run, before);
       // Keyed by the run's place in the queue: a later "Removed … from the queue" takes its place (run/queueActions).
       toast.success(t.title, `${t.place ? `${t.place} · ` : ''}${run.epochs} epochs of ${run.config.arch} on ${dataset.get()?.name}${where}.`, undefined, { key: queueToastKey(run.id) });
-      router.go(`/runs/${run.id}`);
+      if (stayed()) router.go(`/runs/${run.id}`);
     } catch (err) {
       if (err instanceof ApiError && (err.code === 'device_not_found' || (err.code === 'not_implemented' && device.get().startsWith('gpu:')))) {
         deviceError.set({

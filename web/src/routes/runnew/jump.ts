@@ -3,7 +3,7 @@ import type { Arch, Augment, Dataset, Model } from '$lib/api/types';
 import type { ListedDataset } from '../datasets/problem';
 import type { CloudPick } from './cloudPick';
 import { devWord } from './device';
-import { MAX_RUN_NAME, runName } from './name';
+import { MAX_RUN_NAME, nameLength, runName } from './name';
 import { num } from '$lib/format';
 
 /** A review row's or a form error's way back to its control (RunNew's `jump`). */
@@ -107,13 +107,14 @@ export function formErrors(
     // Other characters become dashes (runnew/name), so only an empty or a long name is wrong.
     name: !name.trim()
       ? 'Give the run a name.'
-      : !n
-        ? 'Use letters or digits.'
-        : n.length > MAX_RUN_NAME
-          ? `At most ${MAX_RUN_NAME} characters (this one has ${n.length}).`
+    : !n
+          ? 'Use letters or digits.'
+        : nameLength(n) > MAX_RUN_NAME
+          ? `At most ${MAX_RUN_NAME} characters (this one has ${nameLength(n)}).`
           : null,
     epochs: !isInt(epochs, 1, 10000) ? 'A whole number from 1 to 10,000.' : null,
-    lr0: !(typeof lr0 === 'number' && lr0 > 0 && lr0 < 10) ? 'Greater than 0 and below 10.' : null,
+    // As the server reads it, a 32-bit float: 1e-46 is 0 there and 9.999999999 is 10, both refused.
+    lr0: !(typeof lr0 === 'number' && Math.fround(lr0) > 0 && Math.fround(lr0) < 10) ? 'Greater than 0 and below 10.' : null,
     seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
     dataset: datasetError(dataset, gone),
