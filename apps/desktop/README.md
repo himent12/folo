@@ -17,7 +17,8 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 
 | Path | What it holds |
 | --- | --- |
-| `src/main.rs` | arguments (`USAGE` is `--help`), the bundled fonts (`design/fonts`), the data source, the window, key bindings |
+| `src/lib.rs` | `run`, the app: arguments (`USAGE` is `--help`), the bundled fonts (`design/fonts`), the data source, the window, key bindings |
+| `src/main.rs` | the `folo-desktop` binary: `fn main` calls `folo_desktop::run`, and the `bench-alloc` allocator |
 | `src/app/` | `FoloApp`, the root view: `Route` and navigation, title bar, sidebar, routing a route to its page (`page.rs`), fetching and the live event pump (`data.rs`), finding or starting a server (`connection.rs`), actions and key bindings (`mod.rs`, `render.rs`), the forms' state; most of the app's behaviour tests (`tests.rs`, `*_tests.rs`) |
 | `src/screens/` | one folder per page, each `impl FoloApp` methods that return it: `overview/`, `datasets/` (the index, a dataset's images and statistics), `runs/` (the list, the live training dashboard), `models/` (the list, a model's evaluation and export), `bench/` (Benchmarks: the list, a benchmark's leaderboard, plan and loops, an entry), `playground/`, `settings/` (connection, throughput, cloud, appearance, shortcuts); `first_step.rs` is what an empty Runs or Models page asks for |
 | `src/overlays/` | what sits above the page: the command palette, the New run and Generate synthetic dialogs, the confirmations, the cloud dialogs, the image inspector, toasts |
@@ -88,7 +89,7 @@ Each recipe names an existing example to copy.
   `Route::parse` (`src/app/mod.rs`); a folder under `src/screens/` declared in `screens/mod.rs`, whose
   `impl FoloApp` method returns the page; its arm in `FoloApp::page` (`src/app/page.rs`). The compiler lists every
   other exhaustive `match` on `Route` or `Section`. Then the sidebar's `nav` list (`src/app/sidebar.rs`), the
-  palette's (`palette_items` in `src/overlays/palette.rs`), `USAGE` in `src/main.rs`, and a scenario in
+  palette's (`palette_items` in `src/overlays/palette.rs`), `USAGE` in `src/lib.rs`, and a scenario in
   `src/scenario.rs` (`ALL` and `apply`). Example: Benchmarks (`Route::Benches`, `screens/bench/`).
 - **An API call.** Check the endpoint in docs/API.md and its types in `crates/folo-api`. `src/api/types.rs`
   re-exports those types by name, so a new type goes into one of its `pub use folo_api::{…}` lists. Add the method
