@@ -27,9 +27,10 @@ x4-soak). The other one this report named, an event stream that goes silent with
 follow-up lane f1-studio-siblings (#287). The first 16 lanes logged 103 findings, 9 of them blockers.
 By each lane's own disposition, 71 were fixed in that lane, 29 deferred or left open and 3 were duplicates of another
 lane's. Some deferrals were handed to another lane, which fixed at least one (s5-label-5, a dataset named `nul`,
-by s1-datasets' `slug` in `crates/folo-server/src/util.rs`), and the follow-up lanes fixed most of the rest, so 29
-is not a count of what is open on `main`. All nine blockers of the first 16 lanes are fixed; one blocker a follow-up
-lane took on (f3-server-ci-5, which copy of a folder is loaded after a restart) is deferred as a design question.
+by s1-datasets' `slug` in `crates/folo-server/src/util.rs`), and the follow-up lanes fixed more previously open
+items, so 29 is not a count of what is open on `main`. All nine blockers of the first 16 lanes are fixed; one
+blocker a follow-up lane took on (f3-server-ci-5, which copy of a folder is loaded after a restart) is deferred as a
+design question.
 The rest of what is left ([Still open](#still-open)) is one-off edge cases, Studio's benchmark images without a
 failed state, labeling agents that outlive a killed server (s5-label-2), a few server-side decisions and
 load-sensitive tests.
@@ -302,9 +303,9 @@ not in a lane report.
 - Desktop, a damaged PNG called unsupported: #288 (f2-desktop-siblings-4).
 - `split_label` and other "1 images" strings: #288 in Desktop (f2-desktop-siblings-5), #287 in Studio
   (f1-studio-siblings-6).
-- Desktop, a failed grid tile looking like a loading one: #288 (f2-desktop-siblings-6). The dataset grid, Playground
-  and run samples mark it "Image unavailable" and Retry stays in the inspector, one Enter away; a failed Benchmarks
-  image is a Retry itself.
+- Desktop, a failed grid tile looking like a loading one: #288 (f2-desktop-siblings-6). The dataset grid and run
+  samples mark it "Image unavailable", Playground's small samples with an image glyph only; Retry stays in the
+  inspector (or the opened image), one Enter away; a failed Benchmarks image is a Retry itself.
 - A cloud run whose instance dies during the copy ending with the copy's error: #290 (f3-server-ci-1). A failed
   weights copy asks the provider, and an instance gone or stopped ends the run `cloud_instance_lost`; test
   `an_instance_lost_while_its_weights_are_collected_loses_the_run` (`crates/folo-server/tests/cloud/failures.rs:133`).
