@@ -11,7 +11,7 @@ at the root with a regression test that fails without the fix, or documented.
 | f3-server-ci-2b | `tests/bench/external.rs` `open_entries_expire_without_parts` raced a 300 ms open timeout against the wall clock | annoying (CI) | fixed |
 | f3-server-ci-3 | `npm run check` / `npm run qa` killed by SIGTRAP / SIGILL (V8 "Fatal error in , line 0") on the self-hosted Linux runners | annoying (CI) | mitigated: retried once on a crash signal |
 | f3-server-ci-4 (d1-datasets-3) | `broken_labels` documented as label lines in `folo-api`, counted per broken label file (YOLO) or entry (COCO) by both producers; apps say "broken label files" | annoying | fixed (docs, wording "N broken labels") |
-| f3-server-ci-5 (x3-server) | After a restart loaded a labeling job's backup copy because the original did not load, the next restart loads the original again, hiding the work saved to the copy | blocker (work hidden) | fixed for labeling jobs; benchmarks and runs deferred |
+| f3-server-ci-5 (x3-server) | After a restart loaded a labeling job's backup copy because the original did not load, the next restart loads the original again, hiding the work saved to the copy | blocker (work hidden) | fixed for labeling jobs, benchmarks and runs (review round 2) |
 
 ## f3-server-ci-1: a gone instance is a lost one, whichever request notices
 
@@ -79,7 +79,9 @@ version of this PR said "images with broken labels", wrong for COCO's dropped en
 Tests: `tests/issues.rs` `real_broken_labels_count_the_images_left_out_not_the_lines`, a YOLO dataset with two broken
 files holding four broken lines: `broken_labels` 2, two images fewer, four errors in `/issues`; and
 `real_coco_broken_labels_count_the_entries_dropped`, a COCO dataset with a malformed category and an annotation
-without `image_id`: `broken_labels` 2, no image left out.
+without `image_id`: `broken_labels` 2, no image left out; then two annotations with a bad `bbox` on one image
+(review round 2: the COCO loader keeps one reason per image, so they count once): `broken_labels` 3, one image fewer.
+The contract says so: for COCO one per image left out for annotations that cannot be read, however many it has.
 
 ## f3-server-ci-5 (x3-server): the copy written last is loaded
 
@@ -95,14 +97,22 @@ next restart, as its count went on from its own. `Job::load` now takes the group
 (`util::most_saves`, given to the loader by `load_first`) and counts on from there, so the first save to a loaded
 backup outranks every copy; a backup loaded but never saved to leaves the original first, as it holds the newer work.
 
-Test: `label/job.rs` `the_copy_written_last_is_loaded_after_the_original_failed_once`: the original saved to 10, the
-backup at 2; loaded once without a save the original stays first; loaded and saved once the backup wins.
+Review round 2: an original whose `job.json` could not be read at all has no id, so `most_saves` never saw it, and
+once it read again its higher count won; benchmarks and runs (sibling, `runs/registry.rs`) had no count at all. All
+three stores now persist which copy was loaded: `util::choose` writes a rank (`.folo-chosen`, atomically) into the
+folder about to be loaded, above the ranks of the other copies of its id and of every folder whose record has no
+readable id (`Folders::unknown`; a run's unreadable `run.json` likewise), and `folders_by_id` / `one_per_id` take the
+highest rank first, before `saves` and the name order. A store without copies or unreadable records writes nothing;
+a folder that cannot take the rank gives way to the next copy. So the copy loaded last stays the record: also a
+backup loaded once and never saved to stays first (the original's newer work, not shown in that session either,
+stays in its folder, logged as a skipped copy).
 
-Deferred: benchmarks, and runs (sibling, `runs/registry.rs` prefers the original once it reads again). `bench.json`
-is written once; a benchmark's work lives in its `entries/` and `loops/` files, so a count in `bench.json` would not
-move, and a run's `run.json` has no count either. Fixing them needs a per-record write counter written with every
-piece of work, or a marker written when a copy is loaded in place of its original that the selection reads first:
-a design decision for those stores, beyond this lane's labeling-job fix.
+Tests (each fails with `choose` disabled): `label/job.rs` `the_copy_written_last_is_loaded_after_the_original_failed_once`
+(the original saved to 10 beside a backup at 2 fails to load once, the backup is edited and stays; then the original
+chosen and saved to 16, its `job.json` made unparsable, the backup edited, the original restored: the backup stays);
+`util.rs` `the_copy_loaded_in_place_of_an_unreadable_original_stays_loaded`; `runs/tests.rs`
+`the_copy_loaded_in_place_of_an_unreadable_run_stays_the_run`; `tests/bench/restarts.rs`
+`a_damaged_benchmark_record_does_not_hide_its_backup` (now ends with the original intact again).
 
 ## Gates
 

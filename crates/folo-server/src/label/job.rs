@@ -577,8 +577,9 @@ mod tests {
         let restart = |fails: Option<&Path>| {
             let groups = crate::util::folders_by_id(&root, "job.json", Job::readable);
             crate::util::load_first("labeling job", groups, |dir, copies| match fails {
-                Some(f) if f == dir => Err("cannot write the recovery back"),
-                _ => Ok(Job::load(dir.to_path_buf(), crate::util::most_saves(copies, "job.json")).unwrap()),
+                Some(f) if f == dir => Err("cannot write the recovery back".to_string()),
+                _ => Job::load(dir.to_path_buf(), crate::util::most_saves(copies, "job.json"))
+                    .map_err(|e| e.body.message),
             })
         };
         // Equal copies: the folder named after the id.
@@ -590,19 +591,40 @@ mod tests {
         }
         drop(job);
         assert_eq!(restart(None)[0].dir, original);
-        // The original does not load once and the backup saves nothing: the original is first again after.
-        assert_eq!(restart(Some(&original))[0].dir, copy);
-        assert_eq!(restart(None)[0].dir, original);
         // The original does not load once: the older backup is loaded and the work goes on in it.
         let loaded = restart(Some(&original)).remove(0);
         assert_eq!(loaded.dir, copy);
         loaded.lock().file.name = "renamed in the copy".into();
         loaded.save(&loaded.lock()).unwrap();
-        // The next restart, where the original loads again, keeps the copy's work.
+        drop(loaded);
+        // The next restarts, where the original loads again, keep the copy's work.
+        for _ in 0..2 {
+            let again = restart(None).remove(0);
+            assert_eq!(
+                (again.dir.as_path(), again.lock().file.name.as_str()),
+                (copy.as_path(), "renamed in the copy")
+            );
+        }
+        // The same when the original's job.json could not be read at all (no id to group it by): the copy loaded
+        // in its place stays the job once it reads again (f3-server-ci review round 2).
+        std::fs::write(copy.join(crate::util::CHOSEN), "0").unwrap();
+        std::fs::write(original.join(crate::util::CHOSEN), "7").unwrap();
+        let job = restart(None).remove(0);
+        assert_eq!(job.dir, original, "the original was chosen last");
+        // ... and is saved more often than the copy after it.
+        for _ in 0..5 {
+            job.save(&job.lock()).unwrap();
+        }
+        drop(job);
+        let bytes = std::fs::read(original.join("job.json")).unwrap();
+        std::fs::write(original.join("job.json"), "{").unwrap();
+        let loaded = restart(None).remove(0);
+        assert_eq!(loaded.dir, copy, "the original does not read");
+        loaded.lock().file.name = "renamed again".into();
+        loaded.save(&loaded.lock()).unwrap();
+        drop(loaded);
+        std::fs::write(original.join("job.json"), bytes).unwrap();
         let again = restart(None).remove(0);
-        assert_eq!(
-            (again.dir.as_path(), again.lock().file.name.as_str()),
-            (copy.as_path(), "renamed in the copy")
-        );
+        assert_eq!((again.dir.as_path(), again.lock().file.name.as_str()), (copy.as_path(), "renamed again"));
     }
 }

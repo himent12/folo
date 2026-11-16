@@ -208,11 +208,52 @@ pub fn claim_dir(parent: &Path, base: &str) -> std::io::Result<PathBuf> {
 }
 
 /// One record per id, of records loaded from folders as `(folder, id, record)`. A copy of a folder (a backup made
-/// beside it) has its original's id: the record from the folder named after its id is kept (else the first by folder
-/// name), and the copies are logged as `what` and skipped, not listed twice under one id (x3-server-9).
-pub fn one_per_id<T>(what: &str, mut loaded: Vec<(PathBuf, String, T)>) -> Vec<(PathBuf, T)> {
-    loaded.sort_by_cached_key(|(dir, id, _)| copy_order(dir, id));
-    first_per_id(what, loaded)
+/// beside it) has its original's id: the record from the folder [`choose`] ranked highest is kept, else the one from
+/// the folder named after its id, else the first by folder name, and the copies are logged as `what` and skipped, not
+/// listed twice under one id (x3-server-9). `unknown`: the folders whose record could not be read, which may be copies
+/// of any id. A folder [`choose`] cannot mark gives way to the next copy (f3-server-ci review round 2).
+pub fn one_per_id<T>(
+    what: &str,
+    mut loaded: Vec<(PathBuf, String, T)>,
+    unknown: &[PathBuf],
+) -> Vec<(PathBuf, T)> {
+    loaded.sort_by_cached_key(|(dir, id, _)| (std::cmp::Reverse(chosen_rank(dir)), copy_order(dir, id)));
+    let mut at = std::collections::HashMap::new();
+    let mut groups: Vec<(String, Vec<(PathBuf, T)>)> = Vec::new();
+    for (dir, id, record) in loaded {
+        let i = *at.entry(id.clone()).or_insert_with(|| {
+            groups.push((id, Vec::new()));
+            groups.len() - 1
+        });
+        groups[i].1.push((dir, record));
+    }
+    let mut out = Vec::new();
+    for (id, group) in groups {
+        let dirs: Vec<PathBuf> =
+            group.iter().map(|(d, _)| d.clone()).chain(unknown.iter().cloned()).collect();
+        let mut kept: Option<PathBuf> = None;
+        for (dir, record) in group {
+            if let Some(first) = &kept {
+                tracing::warn!(
+                    "skipping {}: {what} {id} is loaded from {} already",
+                    dir.display(),
+                    first.display()
+                );
+                continue;
+            }
+            match choose(&dir, &dirs) {
+                Ok(()) => {
+                    kept = Some(dir.clone());
+                    out.push((dir, record));
+                }
+                Err(e) => tracing::warn!(
+                    "skipping {what} {}: cannot mark it as the copy loaded: {e}",
+                    dir.display()
+                ),
+            }
+        }
+    }
+    out
 }
 
 /// The order copies of one id are taken in: the folder named after the id first, then by folder name.
@@ -220,36 +261,39 @@ fn copy_order(dir: &Path, id: &str) -> (bool, PathBuf) {
     (dir.file_name() != Some(std::ffi::OsStr::new(id)), dir.to_path_buf())
 }
 
-/// The first record of each id in `sorted`; the later ones are logged as `what` and skipped.
-fn first_per_id<T>(what: &str, sorted: Vec<(PathBuf, String, T)>) -> Vec<(PathBuf, T)> {
-    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
-    let mut out = Vec::new();
-    for (dir, id, record) in sorted {
-        if let Some(first) = seen.get(&id) {
-            tracing::warn!(
-                "skipping {}: {what} {id} is loaded from {} already",
-                dir.display(),
-                first.display()
-            );
-            continue;
+/// The file in a record's folder that ranks it among the copies of its record (see [`choose`]).
+pub const CHOSEN: &str = ".folo-chosen";
+
+/// The rank [`choose`] gave the folder `dir`, 0 without one.
+pub fn chosen_rank(dir: &Path) -> u64 {
+    std::fs::read_to_string(dir.join(CHOSEN)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+}
+
+/// Makes `dir`, the copy of a record about to be loaded, the one the next start takes first: when `others` (the other
+/// copies of its id, and the folders whose record could not be read, which may be copies of it) hold one ranked as
+/// high, it gets the rank above them all ([`CHOSEN`], written atomically). The work saved to a copy loaded because
+/// the original did not load (it was damaged, unreadable or could not write its recovery back) is not shadowed by the
+/// original at the next start, also when the original reads again (f3-server-ci review round 2). A record without
+/// copies or unreadable neighbours writes nothing.
+pub fn choose(dir: &Path, others: &[PathBuf]) -> std::io::Result<()> {
+    match others.iter().filter(|o| o.as_path() != dir).map(|o| chosen_rank(o)).max() {
+        Some(top) if chosen_rank(dir) <= top => {
+            crate::index::write_atomic(&dir.join(CHOSEN), format!("{}\n", top + 1).as_bytes())
         }
-        seen.insert(id, dir.clone());
-        out.push((dir, record));
+        _ => Ok(()),
     }
-    out
 }
 
 /// The folders under `root` holding the JSON record `file`, grouped by id, in the order to try loading them, picked
 /// before anything loads them, so the recovery a load does (closing what a previous process left active, written
 /// back) never rewrites a backup (review round 2). `readable` says, without writing anything, whether a record's
 /// bytes are one its loader takes (it parses, its version is known): in each group the readable records come first,
-/// so a damaged original does not hide an intact backup (review round 3), the record written most often first (a
-/// record's `saves`, 0 without one), so once a restart loaded a copy because the original did not load, the work
-/// saved to the copy is not shadowed by the original at the next restart, then in [`one_per_id`]'s order;
-/// [`load_first`] loads the first of a group that loads (review round 4). A folder whose id cannot be read is a
-/// group of its own. A copy loaded in place of one written more often counts its saves on from the group's
-/// [`most_saves`], so its first save outranks every copy at the next restart (f3-server-ci review round 1).
-pub fn folders_by_id(root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) -> Vec<Vec<PathBuf>> {
+/// so a damaged original does not hide an intact backup (review round 3), then the copy [`choose`] ranked highest (the
+/// one loaded last time a copy had to be picked), then the record written most often (a record's `saves`, 0 without
+/// one), then in [`one_per_id`]'s order; [`load_first`] loads the first of a group that loads (review round 4). A
+/// folder whose id cannot be read is a group of its own and is listed in [`Folders::unknown`]. A copy loaded in place
+/// of one written more often counts its saves on from the group's [`most_saves`] (f3-server-ci review round 1).
+pub fn folders_by_id(root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) -> Folders {
     let mut found: Vec<(PathBuf, String, bool, u64)> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -266,7 +310,11 @@ pub fn folders_by_id(root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) 
             (dir, id, ok, saves)
         })
         .collect();
-    found.sort_by_cached_key(|(dir, id, ok, saves)| (!*ok, std::cmp::Reverse(*saves), copy_order(dir, id)));
+    found.sort_by_cached_key(|(dir, id, ok, saves)| {
+        (!*ok, std::cmp::Reverse(chosen_rank(dir)), std::cmp::Reverse(*saves), copy_order(dir, id))
+    });
+    let unknown =
+        found.iter().filter(|(_, id, _, _)| id.starts_with('\0')).map(|(d, ..)| d.clone()).collect();
     let (mut at, mut groups) = (std::collections::HashMap::new(), Vec::<Vec<PathBuf>>::new());
     for (dir, id, _, _) in found {
         let i = *at.entry(id).or_insert_with(|| {
@@ -275,7 +323,16 @@ pub fn folders_by_id(root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) 
         });
         groups[i].push(dir);
     }
-    groups
+    Folders { groups, unknown }
+}
+
+/// What [`folders_by_id`] found.
+pub struct Folders {
+    /// The folders of each id, in the order to try loading them.
+    pub groups: Vec<Vec<PathBuf>>,
+    /// The folders whose record has no id that can be read (each also a group of its own, so its loader logs it):
+    /// one may be a copy of any id, so [`choose`] ranks the copy it loads above them.
+    pub unknown: Vec<PathBuf>,
 }
 
 /// The id and write count a record of [`folders_by_id`] starts with.
@@ -300,14 +357,16 @@ pub fn most_saves(dirs: &[PathBuf], file: &str) -> u64 {
 
 /// Of each group of [`folders_by_id`], the record of the first folder `load` loads (given the folder and its whole
 /// group); why one does not is logged as `what`. A record that reads but does not load, such as one whose recovery
-/// cannot be written back to a folder the server may not write, gives way to the next copy (review round 4). The
-/// copies after the loaded one are logged and left alone.
+/// cannot be written back to a folder the server may not write, gives way to the next copy (review round 4), and so
+/// does one [`choose`] cannot mark before it is loaded (f3-server-ci review round 2). The copies after the loaded one
+/// are logged and left alone.
 pub fn load_first<T, E: std::fmt::Display>(
     what: &str,
-    groups: Vec<Vec<PathBuf>>,
+    folders: Folders,
     mut load: impl FnMut(&Path, &[PathBuf]) -> std::result::Result<T, E>,
 ) -> Vec<T> {
     let mut out = Vec::new();
+    let Folders { groups, unknown } = folders;
     for dirs in groups {
         let mut loaded: Option<&PathBuf> = None;
         for dir in &dirs {
@@ -318,6 +377,16 @@ pub fn load_first<T, E: std::fmt::Display>(
                     first.display()
                 );
                 continue;
+            }
+            if !unknown.contains(dir) {
+                let others: Vec<PathBuf> = dirs.iter().chain(&unknown).cloned().collect();
+                if let Err(e) = choose(dir, &others) {
+                    tracing::warn!(
+                        "skipping {what} {}: cannot mark it as the copy loaded: {e}",
+                        dir.display()
+                    );
+                    continue;
+                }
             }
             match load(dir, &dirs) {
                 Ok(record) => {
@@ -357,8 +426,8 @@ mod tests {
         std::fs::create_dir_all(root.join("empty")).unwrap();
         let readable =
             |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).is_ok_and(|v| v["version"] == 1);
-        let mut groups = folders_by_id(&root, "job.json", readable);
-        groups.sort();
+        let mut folders = folders_by_id(&root, "job.json", readable);
+        folders.groups.sort();
         let names = |dirs: &[&str]| dirs.iter().map(|d| root.join(d)).collect::<Vec<_>>();
         let want = [
             names(&["broken"]),
@@ -366,28 +435,86 @@ mod tests {
             names(&["lj_2 - Copy", "lj_2"]),
             names(&["lj_3", "lj_3 - Copy"]),
         ];
-        assert_eq!(groups, want, "the readable records first, the original before its copies");
+        assert_eq!(folders.groups, want, "the readable records first, the original before its copies");
+        assert_eq!(folders.unknown, names(&["broken"]));
         // lj_1 reads but does not load (as when its recovery cannot be written back): its copy is loaded instead.
-        let loaded = load_first("labeling job", groups, |dir, _| {
+        let load = |dir: &Path, _: &[PathBuf]| {
             let name = dir.file_name().unwrap().to_string_lossy().into_owned();
             let fails = name == "lj_1" || name == "broken" || name.starts_with("lj_3");
             if fails { Err("cannot load") } else { Ok(name) }
-        });
-        assert_eq!(loaded, ["lj_1 - Copy", "lj_2 - Copy"]);
+        };
+        assert_eq!(load_first("labeling job", folders, load), ["lj_1 - Copy", "lj_2 - Copy"]);
+        // The copy loaded is the one the next start tries first, also when the original would load then.
+        let mut again = folders_by_id(&root, "job.json", readable).groups;
+        again.sort();
+        assert_eq!(again[1], names(&["lj_1 - Copy", "lj_1"]));
+        assert_eq!(
+            load_first("labeling job", folders_by_id(&root, "job.json", readable), |d, _| load(d, &[])).len(),
+            2
+        );
+    }
+
+    /// A copy loaded because the original's record could not be read at all (no id to group it by) stays the one
+    /// loaded once the original reads again, so the work saved to it is not shadowed; a record without copies or
+    /// unreadable neighbours gets no rank written (f3-server-ci review round 2).
+    #[test]
+    fn the_copy_loaded_in_place_of_an_unreadable_original_stays_loaded() {
+        let t = folo_test_support::TestDir::new("util-chosen");
+        let root = t.join("bench");
+        for (dir, id) in [("b_1", "b_1"), ("b_1 - Copy", "b_1"), ("b_2", "b_2")] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("bench.json"), format!(r#"{{"id":"{id}"}}"#)).unwrap();
+        }
+        let readable = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).is_ok();
+        let start = || {
+            let mut loaded =
+                load_first("benchmark", folders_by_id(&root, "bench.json", readable), |dir, _| {
+                    let bytes = std::fs::read(dir.join("bench.json")).map_err(|e| e.to_string())?;
+                    serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())?;
+                    Ok::<_, String>(dir.file_name().unwrap().to_string_lossy().into_owned())
+                });
+            loaded.sort();
+            loaded
+        };
+        assert_eq!(start(), ["b_1", "b_2"]);
+        assert!(!root.join("b_2").join(CHOSEN).exists(), "nothing to choose between: nothing written");
+        let original = std::fs::read(root.join("b_1/bench.json")).unwrap();
+        std::fs::write(root.join("b_1/bench.json"), "{").unwrap();
+        assert_eq!(start(), ["b_1 - Copy", "b_2"], "the original does not read: its copy is loaded");
+        std::fs::write(root.join("b_1/bench.json"), &original).unwrap();
+        for _ in 0..2 {
+            assert_eq!(start(), ["b_1 - Copy", "b_2"], "the original reads again: the copy stays");
+        }
     }
 
     #[test]
     fn copies_of_a_folder_load_once() {
-        let p = |s: &str| PathBuf::from("/data/label").join(s);
-        let loaded = vec![
-            (p("lj_1 - Copy"), "lj_1".to_string(), 1),
-            (p("lj_2"), "lj_2".to_string(), 2),
-            (p("lj_1"), "lj_1".to_string(), 3),
-            (p("backup-b"), "lj_9".to_string(), 4),
-            (p("backup-a"), "lj_9".to_string(), 5),
-        ];
-        let kept: Vec<i32> = one_per_id("job", loaded).into_iter().map(|(_, r)| r).collect();
-        assert_eq!(kept, [3, 2, 5], "the folder named after the id, else the first by name");
+        let t = folo_test_support::TestDir::new("util-one-per-id");
+        let p = |s: &str| {
+            std::fs::create_dir_all(t.join(s)).unwrap();
+            t.join(s)
+        };
+        let loaded = || {
+            vec![
+                (p("lj_1 - Copy"), "lj_1".to_string(), 1),
+                (p("lj_2"), "lj_2".to_string(), 2),
+                (p("lj_1"), "lj_1".to_string(), 3),
+                (p("backup-b"), "lj_9".to_string(), 4),
+                (p("backup-a"), "lj_9".to_string(), 5),
+            ]
+        };
+        let kept = |unknown: &[PathBuf]| -> Vec<i32> {
+            let mut r: Vec<i32> = one_per_id("job", loaded(), unknown).into_iter().map(|(_, r)| r).collect();
+            r.sort();
+            r
+        };
+        assert_eq!(kept(&[]), [2, 3, 5], "the folder named after the id, else the first by name");
+        assert!(!t.join("lj_2").join(CHOSEN).exists(), "a run without copies is not marked");
+        // A copy chosen once (its original did not read) stays chosen.
+        std::fs::write(t.join("lj_1 - Copy").join(CHOSEN), "9\n").unwrap();
+        assert_eq!(kept(&[p("unreadable")]), [1, 2, 5]);
+        assert_eq!(chosen_rank(&t.join("lj_1 - Copy")), 9, "already above its copies: not rewritten");
+        assert_eq!(chosen_rank(&t.join("lj_2")), 1, "ranked above the unreadable folder");
     }
 
     #[test]

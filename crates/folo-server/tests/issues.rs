@@ -144,9 +144,11 @@ async fn real_broken_labels_count_the_images_left_out_not_the_lines() {
     );
 }
 
-/// In a COCO dataset `stats.broken_labels` also counts the entries of an annotation file that cannot be read and are
-/// dropped while every image is kept (docs/API.md): a malformed category and an annotation without `image_id` are two
-/// broken labels and no image left out (f3-server-ci review round 1).
+/// In a COCO dataset `stats.broken_labels` counts one per image left out for annotations that cannot be read, however
+/// many it has, and the entries of an annotation file that cannot be read and are dropped while the other images are
+/// kept (docs/API.md): a malformed category and an annotation without `image_id` are two broken labels and no image
+/// left out (f3-server-ci review round 1); two annotations with a bad `bbox` on one image add one more, and that image
+/// is left out (review round 2).
 #[tokio::test]
 async fn real_coco_broken_labels_count_the_entries_dropped() {
     let t = TestDir::new("issues-broken-coco");
@@ -167,6 +169,21 @@ async fn real_coco_broken_labels_count_the_entries_dropped() {
     let ds: Dataset = ok(&app, post_json("/api/datasets", body)).await;
     assert_eq!(ds.stats.clone().unwrap().broken_labels, 2, "a category and an annotation dropped");
     assert_eq!(ds.splits.train + ds.splits.val + ds.splits.test, clean, "no image left out");
+
+    let image = json["images"][0]["id"].clone();
+    let category = json["annotations"][0]["category_id"].clone();
+    for (n, bbox) in [json!([1, 1, -4, 4]), json!("4 4")].into_iter().enumerate() {
+        let bad = json!({ "id": 999_000 + n, "image_id": image, "category_id": category, "bbox": bbox, "area": 16,
+                          "iscrowd": 0 });
+        json["annotations"].as_array_mut().unwrap().push(bad);
+    }
+    std::fs::write(&file, json.to_string()).unwrap();
+    let copy = t.join("coco2");
+    std::fs::rename(&coco, &copy).unwrap();
+    let body = json!({ "path": copy.to_str().unwrap(), "format": "coco" });
+    let ds: Dataset = ok(&app, post_json("/api/datasets", body)).await;
+    assert_eq!(ds.stats.clone().unwrap().broken_labels, 3, "one image for its two bad annotations, not two");
+    assert_eq!(ds.splits.train + ds.splits.val + ds.splits.test, clean - 1, "that image is left out");
 }
 
 #[tokio::test]
