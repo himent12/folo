@@ -36,6 +36,29 @@ one.
 ### Since the first build
 
 
+#### Stress round of Studio and Desktop
+Sixteen agents used one area each of Studio, FOLO Desktop and the server as a hard user would and fixed what broke,
+with regression tests ([docs/notes/DOGFOOD-4.md](docs/notes/DOGFOOD-4.md) lists the pull requests).
+- **Desktop and the server it talks to**: Desktop opened before `folo serve` catches up once it answers on every
+  screen; a run's event stream that goes silent ends instead of freezing the run page; a `FOLO_TOKEN` in the
+  environment no longer locks Desktop out of the server it starts; pages and images that failed while the server
+  was away load again once it is back, in Studio too.
+- **Big datasets and long sessions**: Desktop's image cache has a byte budget (the inspector held every full-size
+  image it showed), failed images are retried, and tiles in view load first after a fast scroll; Studio cancels the
+  thumbnails scrolled past and no longer refetches every run's metrics on each visit past 200 runs.
+- **Bad state has a way out**: corrupt Studio preferences are put back to their defaults; in Studio a screen that
+  throws and answers of the wrong shape show an error instead of a blank or frozen page; one bad value in Desktop's
+  `desktop.json` no longer throws away the whole file; a damaged `datasets.json` is shown as such, not as "No
+  datasets yet".
+- **Registering datasets**: a folder that is not a dataset is refused without first walking its whole tree, and
+  without holding up dataset deletion meanwhile; the folder above a dataset points to it, Windows device names such
+  as `NUL` can be dataset names, and a copied run folder no longer lists its run twice.
+- **Desktop text fields and keys**: Shift+Home/End, Ctrl+Shift+arrows and Ctrl+Delete work, an IME message no longer
+  deletes the selection, and Esc, Enter and Ctrl+Enter work in the Benchmarks forms.
+- **Studio and Desktop agree**: chart axes, ages, an unreadable dataset and the samples' starting confidence read
+  the same in both apps; with no dataset yet, Studio's empty pages and Desktop's New run lead to Add dataset; Studio
+  says how many epochs an early-ended run's model trained.
+
 #### Usability pass
 Testers used Studio, FOLO Desktop and the server as people would and wrote down what got in the way; these are the
 fixes.
