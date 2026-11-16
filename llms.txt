@@ -4,7 +4,7 @@
 > `folo` CLI (every command supports `--json`, with stable exit codes), an HTTP + SSE API (`folo serve`), an MCP
 > server for agents (`folo mcp`), the FOLO Studio web app, the FOLO Desktop native app, and in-browser inference
 > (wasm + WebGPU). Status: v0.1, early. COCO-pretrained weights are published and download over HTTPS (`folo weights
-> pull folo-s-coco`, folo-s, val2017 AP 0.416; `folo weights pull folo-n-coco-v3`, folo-n, AP 0.340). Binaries for
+> pull folo-s-coco`, folo-s, val2017 AP 0.416; `folo weights pull folo-n-coco-v4`, folo-n, AP 0.356). Binaries for
 > Windows and Linux are in the GitHub release (README, Install); anywhere else, build from source.
 
 Fastest path for an agent:
