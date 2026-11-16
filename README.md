@@ -311,6 +311,7 @@ What works today (v0.1):
   | name | model | val2017 AP / AP50 | training |
   |---|---|---|---|
   | `folo-s-coco` | folo-s | 0.416 / 0.580 | 56 epochs |
+  | `folo-n-coco-v4` | folo-n | 0.356 / 0.509 | 64 epochs, the second half distilled from `folo-s-coco` |
   | `folo-n-coco-v3` | folo-n | 0.340 / 0.487 | v2 annealed for 16 more epochs, 78 in all |
   | `folo-n-coco-v2` | folo-n | 0.317 / 0.458 | epoch 62 of a 300-epoch run that is paused |
   | `folo-n-coco` | folo-n | 0.314 / 0.455 | 50 epochs |

@@ -14,9 +14,15 @@ like-for-like comparison, and how much of the gap each accounts for is not known
 `folo-n-coco-v2` (release `weights-v2`). It is paused and can be resumed from its checkpoint
 ([v2](#v2-a-300-epoch-schedule-paused-at-epoch-62)).
 
-**v3: AP 0.340 / AP50 0.487**, the best folo-n weights: v2's weights annealed for 16 more epochs (78 in all; the
-learning rate decayed to 1%, mosaic off for the last 8), published as `folo-n-coco-v3` (release `weights-v4`):
+**v3: AP 0.340 / AP50 0.487**: v2's weights annealed for 16 more epochs (78 in all; the learning rate decayed to
+1%, mosaic off for the last 8), published as `folo-n-coco-v3` (release `weights-v4`):
 `folo weights pull folo-n-coco-v3` ([v3](#v3-v2-annealed-for-16-epochs)).
+
+**v4: AP 0.356 / AP50 0.509**, the best folo-n weights: a new 64-epoch run from random init (`auto` rule 5, MuSGD),
+its second half (epochs 33–64) distilled from the frozen `folo-s-coco` below, published as `folo-n-coco-v4`
+(release `weights-v5`): `folo weights pull folo-n-coco-v4`
+([v4](#v4-64-epochs-the-second-half-distilled-from-folo-s)). It is a **distilled** model; the teacher was itself
+trained from scratch on COCO train2017, so no data beyond COCO train2017 is anywhere in the chain.
 
 **folo-s: AP 0.416 / AP50 0.580** after 56 epochs from scratch on one rented RTX PRO 4000 Blackwell (9.5 h of epochs,
 about $5.60 for the pod), published as `folo-s-coco` (release `weights-v3`): `folo weights pull folo-s-coco`. That is 0.05–0.06 AP
@@ -442,6 +448,105 @@ folo predict --model folo-n-coco-v3-f16 --half <images>
 
 Without `folo`: `gh release download weights-v4 --repo himent12/folo --pattern 'folo-n-coco-v3*' --pattern
 SHA256SUMS`, then `sha256sum -c --ignore-missing SHA256SUMS`.
+
+## v4: 64 epochs, the second half distilled from folo-s
+
+Hill-climb 4 (lane coco; notebook [docs/notes/hill/r4-distill.md](../../docs/notes/hill/r4-distill.md), "Full
+scale") trained two folo-n models on full COCO with today's defaults, one seed each, and kept the better:
+
+- **Control**: folo-n from random init on COCO train2017, 64 epochs, 640 px, `auto` (rule 5: MuSGD), AMP, seed 0.
+  val2017 AP 0.351 (0.3507). Not published.
+- **Fork**: the control's epoch-32 checkpoint continued to epoch 64 with the frozen `folo-s-coco` as teacher (dense
+  output distillation, `folo train --teacher`, [docs/MODEL.md](../../docs/MODEL.md) §8.9: class gain 0.5, DFL gain
+  1.5, temperature 4). Same weights, optimizer, EMA, schedule and batches as the control at epoch 32. val2017
+  **AP 0.356 (0.3559)**, published as `folo-n-coco-v4` (release `weights-v5`).
+
+```sh
+# control: 64 epochs from random init
+folo train --data datasets/coco --format coco --model folo-n --imgsz 640 --batch 16 --epochs 64 --amp \
+  --patience 1000 --workers 16 --device gpu:0 --seed 0 --project runs-coco --name n-r5-ctl
+# fork: a copy of the control's run folder taken when weights/last.folo is the epoch-32 checkpoint, resumed with
+# the teacher (folo weights pull folo-s-coco first)
+folo train --resume runs-coco/n-r5-kd-e32/weights/last.folo --teacher folo-s-coco \
+  --data datasets/coco --format coco --workers 16 --device gpu:0
+```
+
+**What the runs resolved to** (`config.json`): MuSGD (muon 0.2, sgd 1.0, class-head lr × 3), lr0 0.01 decaying
+linearly to `lr0 · lrf` (lrf 0.01), momentum 0.937, weight decay 5e-4, 3 warmup epochs, batch 16 × accumulate 4
+(nominal 64), 1849 optimizer steps per epoch, EMA, mosaic 1.0 closed for the last 10 epochs, the default
+augmentation, AMP, seed 0. The fork's `distill` block: teacher `folo-s-coco`, class gain 0.5, DFL gain 1.5,
+temperature 4. Both ran on one RTX 4080 SUPER shared with other jobs, so their epoch times are not a cost number;
+the teacher's forward pass makes a distilled epoch dearer (about 2.7× per epoch in the notebook's proxy, under load).
+
+The trainer's own validation (mAP50-95, EMA weights) after each epoch, from the runs' `metrics.jsonl`:
+
+| epoch | control | fork | fork − control |
+|---:|---:|---:|---:|
+| 32 | 0.3141 | 0.3141 | 0 (same checkpoint) |
+| 40 | 0.3250 | 0.3275 | +0.0025 |
+| 48 | 0.3334 | 0.3371 | +0.0036 |
+| 56 | 0.3409 | 0.3454 | +0.0045 |
+| **64** (last, best) | 0.3470 | **0.3523** | +0.0053 |
+
+### Evaluate (v4)
+
+```sh
+folo val --model folo-n-coco-v4 --data datasets/coco --coco --device gpu:0
+folo val --model folo-n-coco-v4-f16 --data datasets/coco --coco --half --device gpu:0
+```
+
+The published files, 640 px, the MODEL.md §9.3 validation settings, 5000 images:
+
+| | AP | AP50 | AP75 | AP_S | AP_M | AP_L | AR1 | AR10 | AR100 | AR_S | AR_M | AR_L |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **v4 f32** (`folo-n-coco-v4`) | **0.356** | **0.509** | 0.384 | 0.171 | 0.388 | 0.513 | 0.307 | 0.510 | 0.566 | 0.330 | 0.624 | 0.761 |
+| v4 f16 (`--half`, `folo-n-coco-v4-f16`) | 0.356 | 0.509 | 0.384 | 0.171 | 0.388 | 0.513 | 0.307 | 0.510 | 0.566 | 0.331 | 0.623 | 0.761 |
+| control (not published) | 0.351 | 0.500 | 0.376 | 0.167 | 0.382 | 0.504 | | | 0.567 | | | |
+| v3 f32 (`folo-n-coco-v3`) | 0.340 | 0.487 | 0.367 | 0.163 | 0.368 | 0.494 | 0.301 | 0.507 | 0.565 | 0.331 | 0.618 | 0.762 |
+
+pycocotools' own `COCOeval` on the same detections (`--save-json`) gives f32 AP 0.355943, AP50 0.508672, AP75
+0.384170: all 12 numbers agree with FOLO's, with a largest difference of 2.8e-16 for f32 (844,894 detections at
+`conf > 0.001`, lane coco's count) and 4.4e-16 for f16 (844,854). f16 is within 0.001 of f32 on every stat, inside MODEL.md §9.1's 0.002 bound.
+
+A paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1000 resamples): v4 − v3 **+0.0164 AP**
+[+0.0129, +0.0197], v4 − control +0.0052 [+0.0032, +0.0075] (the teacher's share). It covers the sampling of the
+evaluation images, not the training seed: each side is one run, and the seed-to-seed spread at full scale is not
+measured. With DFL evidence fusion (docs/MODEL.md §9.4, `--fusion dfl --iou 0.65 --max-det 1000`) the f32 file gives
+AP 0.359 (0.3594); that is a different post-process, not the §9.3 protocol of the table. The gap to YOLO11n (0.395)
+and YOLO26n (0.409) is now 0.039–0.053 AP; data, schedule, recipe and architecture still differ.
+
+Not measured: a run with the teacher from epoch 1; another teacher or distillation setting at full scale; a second
+seed. The teacher was trained on train2017, the student's training set; val2017 is unseen by both.
+
+### Publish (v4)
+
+```sh
+mkdir -p out/weights-v5
+folo export --model runs-coco/n-r5-kd-e32/weights/last.folo --format weights \
+  --output out/weights-v5/folo-n-coco-v4.folo
+folo export --model out/weights-v5/folo-n-coco-v4.folo --format folo-f16 \
+  --output out/weights-v5/folo-n-coco-v4-f16.folo
+cd out/weights-v5 && sha256sum folo-n-coco-v4.folo folo-n-coco-v4-f16.folo > SHA256SUMS
+gh release create weights-v5 --latest=false --target main --repo himent12/folo \
+  --title "FOLO pretrained weights v5 (folo-n v4)" --notes-file notes.md \
+  folo-n-coco-v4.folo folo-n-coco-v4-f16.folo SHA256SUMS
+```
+
+| asset | what | bytes | SHA-256 |
+|---|---|---:|---|
+| `folo-n-coco-v4.folo` | folo-n, 80 classes, EMA weights of the fork's epoch 64, unfused f32: fine-tune or predict | 10,601,456 | `d3896e3ced0c739a3c8167c18bf5efdac1f96d8de69e8962341e2596e8f0b229` |
+| `folo-n-coco-v4-f16.folo` | the same, BatchNorm fused, f16: inference only | 5,251,088 | `8090ccabc8b997b14035d24419de958e4e1a8df646b2f56582e0279a5b7dd28c` |
+
+`weights-v5` was published on 2026-11-16 (UTC) with `--latest=false`, like the other weights releases. It pulls and
+verifies as the others do:
+
+```sh
+folo weights pull folo-n-coco-v4          # → ~/.folo/weights/folo-n-coco-v4.folo, sha256 verified
+folo weights pull folo-n-coco-v4-f16
+folo predict --model folo-n-coco-v4-f16 --half <images>
+```
+
+FINETUNE_NOTE
 
 ## folo-s: 56 epochs on a rented GPU
 
