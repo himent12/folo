@@ -144,6 +144,31 @@ async fn real_broken_labels_count_the_images_left_out_not_the_lines() {
     );
 }
 
+/// In a COCO dataset `stats.broken_labels` also counts the entries of an annotation file that cannot be read and are
+/// dropped while every image is kept (docs/API.md): a malformed category and an annotation without `image_id` are two
+/// broken labels and no image left out (f3-server-ci review round 1).
+#[tokio::test]
+async fn real_coco_broken_labels_count_the_entries_dropped() {
+    let t = TestDir::new("issues-broken-coco");
+    let (home, yolo, coco) = (t.join("home"), t.join("shapes"), t.join("coco"));
+    write_shapes(&yolo);
+    let loaded = folo_data::open(&yolo).unwrap();
+    let clean = loaded.split_sizes().iter().sum::<usize>() as u64;
+    folo_data::convert::convert(&loaded, &coco, folo_data::Format::Coco).unwrap();
+    let file = coco.join("annotations/instances_train.json");
+    let mut json: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    json["categories"].as_array_mut().unwrap().push(json!({}));
+    let no_image = json!({ "id": 999_999, "category_id": 0, "bbox": [1, 1, 4, 4], "area": 16, "iscrowd": 0 });
+    json["annotations"].as_array_mut().unwrap().push(no_image);
+    std::fs::write(&file, json.to_string()).unwrap();
+    let store = RealStore::open(home).recheck_every(Duration::ZERO);
+    let app = Server::new(Arc::new(store), Options::default()).router();
+    let body = json!({ "path": coco.to_str().unwrap(), "format": "coco" });
+    let ds: Dataset = ok(&app, post_json("/api/datasets", body)).await;
+    assert_eq!(ds.stats.clone().unwrap().broken_labels, 2, "a category and an annotation dropped");
+    assert_eq!(ds.splits.train + ds.splits.val + ds.splits.test, clean, "no image left out");
+}
+
 #[tokio::test]
 async fn real_issues_are_cached_and_refreshed() {
     let t = TestDir::new("issues-real");

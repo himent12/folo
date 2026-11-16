@@ -255,7 +255,9 @@ impl LoadReport {
         self.issues.iter().filter(|i| i.kind == kind).count()
     }
 
-    /// Images skipped because of a broken label.
+    /// Broken labels ([`IssueKind::BrokenLabel`] issues): a YOLO label file or COCO annotation that cannot be read,
+    /// whose image is skipped, and for COCO also a category, image or annotation entry or a whole annotation file
+    /// that cannot be read, dropped without skipping the other images. Not a count of images.
     pub fn broken_labels(&self) -> usize {
         self.count(IssueKind::BrokenLabel)
     }

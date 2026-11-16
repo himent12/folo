@@ -5,6 +5,9 @@
 import type { CloudAvailability, CloudInstanceStatus, CloudOffer, CloudPhase, CloudProvider, Run, RunCloud, SystemInfo, TransferProgress } from './api/types';
 import { bytes, deviceName, hoursText, pct, pricePerHour, usd } from './format';
 
+/** The `Run.error_code`s of a collection that failed (docs/CLOUD.md): a copy that failed, or the instance gone while it copied. Any other failure in `collecting` is the worker's. */
+const COLLECT_FAILURES: readonly string[] = ['cloud_sync_failed', 'cloud_instance_lost'];
+
 /**
  * Whether the server has cloud compute (`/api/system`'s `cloud` feature): without it no cloud control renders and no
  * request carries `compute`.
@@ -95,8 +98,8 @@ export type PhaseRun = Pick<Run, 'status' | 'error_code'>;
  * phase the run ended in (`ended_in`): the phases before it are done, it is failed for a failed run (not done for one
  * stopped before training), and the phases after it were never reached, so a run whose upload failed does not read as
  * trained. A run that failed on the worker still has its weights collected (it ends in `collecting`): its training
- * failed, not the collection, which fails only as `cloud_sync_failed`. A server from before `ended_in` says nothing,
- * and then every phase is done, as it said before.
+ * failed, not the collection, which fails only as `cloud_sync_failed` or `cloud_instance_lost`. A server from before
+ * `ended_in` says nothing, and then every phase is done, as it said before.
  * `unconfirmed`: the instance's termination is not confirmed yet (the run stops waiting after a minute), so releasing
  * is still under way.
  */
@@ -104,7 +107,7 @@ export function phaseStates(cloud: RunCloud, run: PhaseRun | undefined, provisio
   const shown = provisions ? PHASES : PHASES.filter((p) => p !== 'provisioning' && p !== 'releasing');
   const at = phaseIndex(cloud.phase);
   if (cloud.phase !== 'released') return shown.map((p) => ({ phase: p, state: PHASES.indexOf(p) < at ? 'done' : PHASES.indexOf(p) === at ? 'now' : 'next' }));
-  const collected = cloud.ended_in === 'collecting' && run?.status === 'failed' && run.error_code !== 'cloud_sync_failed';
+  const collected = cloud.ended_in === 'collecting' && run?.status === 'failed' && !COLLECT_FAILURES.includes(run.error_code ?? '');
   const ended = collected ? PHASES.indexOf('training') : cloud.ended_in ? phaseIndex(cloud.ended_in) : -1;
   const releasing = PHASES.indexOf('releasing');
   const endState = (): PhaseState =>

@@ -731,10 +731,11 @@ pub fn phase_states(c: &RunCloud, r: &Run, unconfirmed: bool) -> Vec<(CloudPhase
             .collect();
     }
     let failed = r.status == RunStatus::Failed;
-    // Ended while collecting but not by the copy back: training is what failed, the copy is done.
+    // Ended while collecting but not by the copy back (a copy that failed, or the instance gone
+    // while it copied, docs/CLOUD.md): training is what failed, the copy is done.
     let collected = c.ended_in == Some(CloudPhase::Collecting)
         && failed
-        && r.error_code.as_deref() != Some("cloud_sync_failed");
+        && !matches!(r.error_code.as_deref(), Some("cloud_sync_failed" | "cloud_instance_lost"));
     let ended = if collected { Some(CloudPhase::Training) } else { c.ended_in };
     let end_state = if failed {
         PhaseState::Failed

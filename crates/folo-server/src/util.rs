@@ -247,14 +247,9 @@ fn first_per_id<T>(what: &str, sorted: Vec<(PathBuf, String, T)>) -> Vec<(PathBu
 /// record's `saves`, 0 without one), so once a restart loaded a copy because the original did not load, the work
 /// saved to the copy is not shadowed by the original at the next restart, then in [`one_per_id`]'s order;
 /// [`load_first`] loads the first of a group that loads (review round 4). A folder whose id cannot be read is a
-/// group of its own.
+/// group of its own. A copy loaded in place of one written more often counts its saves on from the group's
+/// [`most_saves`], so its first save outranks every copy at the next restart (f3-server-ci review round 1).
 pub fn folders_by_id(root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) -> Vec<Vec<PathBuf>> {
-    #[derive(serde::Deserialize)]
-    struct Head {
-        id: String,
-        #[serde(default)]
-        saves: u64,
-    }
     let mut found: Vec<(PathBuf, String, bool, u64)> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -283,14 +278,34 @@ pub fn folders_by_id(root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) 
     groups
 }
 
-/// Of each group of [`folders_by_id`], the record of the first folder `load` loads; why one does not is logged as
-/// `what`. A record that reads but does not load, such as one whose recovery cannot be written back to a folder the
-/// server may not write, gives way to the next copy (review round 4). The copies after the loaded one are logged
-/// and left alone.
+/// The id and write count a record of [`folders_by_id`] starts with.
+#[derive(serde::Deserialize)]
+struct Head {
+    id: String,
+    #[serde(default)]
+    saves: u64,
+}
+
+/// The most `saves` of the records `file` in `dirs` (a group of [`folders_by_id`]), 0 without any: where the write
+/// count of the copy that is loaded goes on from, so whatever it saves next outranks every copy of the group, also one
+/// that was written more often but did not load this time.
+pub fn most_saves(dirs: &[PathBuf], file: &str) -> u64 {
+    dirs.iter()
+        .filter_map(|dir| std::fs::read(dir.join(file)).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Head>(&bytes).ok())
+        .map(|h| h.saves)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Of each group of [`folders_by_id`], the record of the first folder `load` loads (given the folder and its whole
+/// group); why one does not is logged as `what`. A record that reads but does not load, such as one whose recovery
+/// cannot be written back to a folder the server may not write, gives way to the next copy (review round 4). The
+/// copies after the loaded one are logged and left alone.
 pub fn load_first<T, E: std::fmt::Display>(
     what: &str,
     groups: Vec<Vec<PathBuf>>,
-    mut load: impl FnMut(&Path) -> std::result::Result<T, E>,
+    mut load: impl FnMut(&Path, &[PathBuf]) -> std::result::Result<T, E>,
 ) -> Vec<T> {
     let mut out = Vec::new();
     for dirs in groups {
@@ -304,7 +319,7 @@ pub fn load_first<T, E: std::fmt::Display>(
                 );
                 continue;
             }
-            match load(dir) {
+            match load(dir, &dirs) {
                 Ok(record) => {
                     out.push(record);
                     loaded = Some(dir);
@@ -353,7 +368,7 @@ mod tests {
         ];
         assert_eq!(groups, want, "the readable records first, the original before its copies");
         // lj_1 reads but does not load (as when its recovery cannot be written back): its copy is loaded instead.
-        let loaded = load_first("labeling job", groups, |dir| {
+        let loaded = load_first("labeling job", groups, |dir, _| {
             let name = dir.file_name().unwrap().to_string_lossy().into_owned();
             let fails = name == "lj_1" || name == "broken" || name.starts_with("lj_3");
             if fails { Err("cannot load") } else { Ok(name) }

@@ -112,7 +112,7 @@ impl Benches {
         // closes the entries and loops left active and writes them back), and its files are left alone.
         // A copy that reads but does not load (its recovery cannot be written back) gives way to the next.
         let folders = crate::util::folders_by_id(&root, "bench.json", Slot::readable);
-        let mut benches: Vec<Arc<Slot>> = crate::util::load_first("benchmark", folders, |dir| {
+        let mut benches: Vec<Arc<Slot>> = crate::util::load_first("benchmark", folders, |dir, _| {
             Slot::load(dir.to_path_buf()).map(|slot| {
                 let _ = std::fs::remove_dir_all(dir.join("tmp"));
                 Arc::new(slot)
