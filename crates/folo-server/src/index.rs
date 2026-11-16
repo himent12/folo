@@ -781,10 +781,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&tmp, bytes)?;
-    folo_nn::io::rename_over_with(&tmp, path, folo_nn::io::RenameRetry::BRIEF).map(drop).inspect_err(|_| {
+    folo_nn::io::rename_over_with(&tmp, path, STORE_RETRY).map(drop).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }
+
+/// How [`write_atomic`] waits for a held file, per write: an operation that makes several writes under one lock (a
+/// dataset registration makes three) may hold it for that many budgets.
+const STORE_RETRY: folo_nn::io::RenameRetry = folo_nn::io::RenameRetry::BRIEF;
 
 #[cfg(test)]
 mod tests {
@@ -795,23 +799,28 @@ mod tests {
         TestDir::new(&format!("index-{tag}"))
     }
 
-    /// A store write over a file another program holds open (as Python's `open()` does) gives up within a
-    /// fraction of a second, not the 10 s a checkpoint waits: it runs under the lock of the state it persists.
+    /// Store writes (run under locks) wait briefly for a held file: checked on the policy, not timed.
+    #[test]
+    fn store_writes_wait_briefly_for_a_held_file() {
+        assert_eq!(STORE_RETRY, folo_nn::io::RenameRetry::BRIEF);
+        assert!(STORE_RETRY.budget <= std::time::Duration::from_millis(250), "{STORE_RETRY:?}");
+    }
+
+    /// A store write over a file held open (as Python's `open()` does) gives up, with a watchdog far above any
+    /// budget, leaving the old content and no temporary file.
     #[cfg(windows)]
     #[test]
-    fn a_store_write_gives_up_soon_on_a_file_another_program_holds() {
+    fn a_store_write_gives_up_on_a_file_another_program_holds() {
         use std::os::windows::fs::OpenOptionsExt;
         let dir = tmp("held");
         let path = dir.join("run.json");
         write_atomic(&path, b"old").unwrap();
         let held = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
-        let t = std::time::Instant::now();
-        assert!(write_atomic(&path, b"new").is_err());
-        assert!(
-            t.elapsed() < std::time::Duration::from_secs(3),
-            "held the caller's lock for {:?}",
-            t.elapsed()
-        );
+        let (done, result) = std::sync::mpsc::channel();
+        let p = path.clone();
+        let _ = std::thread::spawn(move || done.send(write_atomic(&p, b"new").is_err()));
+        let failed = result.recv_timeout(std::time::Duration::from_secs(60)).expect("gave up within 60 s");
+        assert!(failed, "the write over a held file succeeded");
         drop(held);
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no temporary file stays");

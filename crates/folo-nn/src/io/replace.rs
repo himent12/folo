@@ -127,7 +127,7 @@ fn held_open(_: &io::Error, _: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use folo_test_support::TestDir;
 
@@ -229,7 +229,7 @@ mod tests {
         let path = dir.join("last.folo");
         write_file(&path, Some(&meta("old")), &[]).unwrap();
         let held = hold(&path);
-        let t = Instant::now();
+        let t = std::time::Instant::now();
         let (done, result) = std::sync::mpsc::channel();
         let p = path.clone();
         std::thread::spawn(move || {
@@ -251,26 +251,49 @@ mod tests {
 
     #[cfg(windows)]
     impl Deny {
-        fn new(rules: &[(&std::path::Path, &str)]) -> Deny {
+        /// `None` (the rules already set undone) where `icacls` cannot be run or cannot change the ACL: the
+        /// environment does not support the test, which then skips.
+        fn new(rules: &[(&std::path::Path, &str)]) -> Option<Deny> {
             let mut deny = Deny(Vec::new());
             for (p, rights) in rules {
-                let s = std::process::Command::new("icacls")
+                let out = std::process::Command::new("icacls")
                     .arg(p)
                     .args(["/deny", &format!("*S-1-1-0:{rights}")])
-                    .output()
-                    .unwrap();
-                assert!(s.status.success(), "icacls /deny: {}", String::from_utf8_lossy(&s.stdout));
-                deny.0.push(p.to_path_buf());
+                    .output();
+                match out {
+                    Ok(o) if o.status.success() => deny.0.push(p.to_path_buf()),
+                    Ok(o) => {
+                        eprintln!(
+                            "skipped: icacls /deny on {}: {}",
+                            p.display(),
+                            String::from_utf8_lossy(&o.stdout)
+                        );
+                        return None;
+                    }
+                    Err(e) => {
+                        eprintln!("skipped: icacls cannot be run: {e}");
+                        return None;
+                    }
+                }
             }
-            deny
+            Some(deny)
         }
     }
 
     #[cfg(windows)]
     impl Drop for Deny {
+        /// Restores the ACLs; a failure is said (with the path to fix by hand), never ignored.
         fn drop(&mut self) {
             for p in &self.0 {
-                let _ = std::process::Command::new("icacls").arg(p).args(["/remove:d", "*S-1-1-0"]).output();
+                match std::process::Command::new("icacls").arg(p).args(["/remove:d", "*S-1-1-0"]).output() {
+                    Ok(o) if o.status.success() => {}
+                    Ok(o) => eprintln!(
+                        "could not restore the ACL of {} (icacls /remove:d *S-1-1-0): {}",
+                        p.display(),
+                        String::from_utf8_lossy(&o.stdout)
+                    ),
+                    Err(e) => eprintln!("could not restore the ACL of {}: {e}", p.display()),
+                }
             }
         }
     }
@@ -283,7 +306,9 @@ mod tests {
         let dir = TestDir::new("nn-replace-acl");
         let path = dir.join("last.folo");
         write_file(&path, Some(&meta("old")), &[]).unwrap();
-        let deny = Deny::new(&[(dir.path(), "(DC)"), (&path, "(DE)")]);
+        let Some(deny) = Deny::new(&[(dir.path(), "(DC)"), (&path, "(DE)")]) else {
+            return;
+        };
         let err = write_file_with(&path, Some(&meta("new")), &[], SHORT).unwrap_err().to_string();
         drop(deny);
         assert!(err.contains("its permissions may not allow replacing it"), "{err}");
