@@ -29,3 +29,20 @@ with the status the lane gave them; "deferred" includes findings left open and f
 d1-datasets-5 and x4-soak-3 were fixed in part and count as fixed; d3-models-2 counts as deferred. s1-datasets-7 is
 in the lane's `FINDINGS.md`, not in its report's table. s5-label-2 is polish in the lane's `FINDINGS.md`, annoying in
 its report's table; the count follows `FINDINGS.md`.
+
+## Follow-up lanes
+
+After the round's summary merged (#286), three follow-up lanes ran (2026-11-15 and 16). A follow-up lane did no
+hunting: it took findings the lanes above had confirmed and left open, mostly siblings in the other app or another
+lane's area, checked each on `main` and fixed it, with one report and one pull request. Items as each report's table
+lists them; what is still open is in [DOGFOOD-4](../DOGFOOD-4.md#still-open).
+
+| lane | what it fixed | PR | items | fixed | deferred |
+|---|---|---|---:|---:|---:|
+| [f1-studio-siblings](f1-studio-siblings.md) | Studio: a silence deadline on event streams, a draft's missing GPU caught before Start, a labeling job deleted elsewhere ends, the Run page notices a deleted dataset, no agent hints in toasts, "1 images" | #287 | 6 | 6 | 0 |
+| [f2-desktop-siblings](f2-desktop-siblings.md) | Desktop: the train-only note in New run, gone datasets out of the header total, a stopped run's trained epochs, a damaged image called damaged, "1 images", a mark on failed images, no retry pill for a non-address | #288 | 7 | 7 (2 in part) | 0 |
+| [f3-server-ci](f3-server-ci.md) | Server and CI: an instance lost during the weights copy is a lost run, two flaky server tests wait for events, a Node crash retried once, what `broken_labels` counts | #290 | 6 | 5 (1 mitigated) | 1 |
+
+f2-desktop-siblings-6 and -7 were fixed in part: Studio's benchmark images and a scoped IPv6 address were deferred.
+f3-server-ci's table splits its item 2 in two (2a, 2b); its item 3 is mitigated (a retry), not fixed; its item 5
+(which copy of a folder is loaded after a restart) was taken out of #290 by the lead and deferred.
