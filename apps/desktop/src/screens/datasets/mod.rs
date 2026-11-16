@@ -6,3 +6,5 @@ mod images;
 mod list;
 mod stats;
 mod strip;
+
+pub(crate) use images::file_name;

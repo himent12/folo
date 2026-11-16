@@ -136,25 +136,29 @@ impl FoloApp {
             }),
         );
         let (total, of) = match self.ds_split {
-            Some(Split::Train) => (ds.splits.train as usize, "train images"),
-            Some(Split::Val) => (ds.splits.val as usize, "val images"),
-            Some(Split::Test) => (ds.splits.test as usize, "test images"),
-            None => (total, "images"),
+            Some(Split::Train) => (ds.splits.train as usize, "train image"),
+            Some(Split::Val) => (ds.splits.val as usize, "val image"),
+            Some(Split::Test) => (ds.splits.test as usize, "test image"),
+            None => (total, "image"),
         };
+        // "1 image", "2 val images": the noun follows the count it closes.
+        let of = |n: usize| if n == 1 { of.to_string() } else { format!("{of}s") };
         let loading = self.store.images.get(&id).is_none_or(|l| l.is_loading());
         // A large list arrives a page at a time: the grid shows what came, and the count says
         // how much of it is in (never "0 images" or a split's partial count as if final).
         let more = self.images_pending(&id);
         let count_label = if loading {
             let total = if self.ds_split.is_none() { ds.splits.total() } else { total as u64 };
-            format!("Loading {} {of}…", int(total))
+            format!("Loading {} {}…", int(total), of(total as usize))
         } else if more {
             let loaded = self.store.images.get(&id).and_then(|l| l.ready()).map_or(0, |v| v.len());
-            format!("Loading… {} of {} images", int(loaded as u64), int(ds.splits.total()))
+            let all = ds.splits.total();
+            let noun = if all == 1 { "image" } else { "images" };
+            format!("Loading… {} of {} {noun}", int(loaded as u64), int(all))
         } else if count == total {
-            format!("{} {of}", int(total as u64))
+            format!("{} {}", int(total as u64), of(total))
         } else {
-            format!("{} of {} {of}", int(count as u64), int(total as u64))
+            format!("{} of {} {}", int(count as u64), int(total as u64), of(total))
         };
         // One toolbar over the grid: what is shown (the split, the class, the count) on the left,
         // how it is drawn (Boxes, the size, Fit / Fill) on the right.
@@ -313,7 +317,7 @@ impl FoloApp {
                             // The strip keeps two; the tile's tip lists every class it holds.
                             let all = format!(
                                 "{} · {}",
-                                meta.id,
+                                file_name(&meta.file),
                                 if named.is_empty() { "no boxes".into() } else { named.join(" · ") }
                             );
                             (if parts.is_empty() { "no boxes".to_string() } else { parts.join(" · ") }, all)
@@ -383,10 +387,15 @@ impl FoloApp {
                                             ))
                                             .when(!focused, |d| d.invisible())
                                             .group_hover(SharedString::from(key.clone()), |s| s.visible())
+                                            .gap(px(8.))
+                                            // The file's name, as Studio's grid shows it (a real
+                                            // server's ids are list positions, "6", not names).
                                             .child(
                                                 text(ty::SM, folo_ui::white())
                                                     .font_family(crate::theme::MONO)
-                                                    .child(meta.id.clone()),
+                                                    .min_w_0()
+                                                    .ellipsis()
+                                                    .child(file_name(&meta.file).to_string()),
                                             )
                                             .child(
                                                 text(ty::SM, folo_ui::hsla(0., 0., 1., 0.75))
@@ -478,5 +487,22 @@ impl FoloApp {
     pub(crate) fn grid_cols(&self) -> usize {
         let width = f32::from(self.grid_width.get());
         (((width + GAP) / (self.ds_tile + GAP)).floor() as usize).max(1)
+    }
+}
+
+/// An image's file name without its folders ("images/train/000001.jpg" -> "000001.jpg"), as Studio's
+/// grid names a tile; either slash, since a server on Windows may answer with backslashes.
+pub(crate) fn file_name(file: &str) -> &str {
+    file.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(file)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_tile_is_named_by_its_file_not_its_id() {
+        assert_eq!(super::file_name("images/train/000000014007.jpg"), "000000014007.jpg");
+        assert_eq!(super::file_name(r"images\val\a b.png"), "a b.png");
+        assert_eq!(super::file_name("one.jpg"), "one.jpg");
+        assert_eq!(super::file_name(""), "");
     }
 }

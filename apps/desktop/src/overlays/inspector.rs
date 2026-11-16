@@ -138,6 +138,41 @@ impl FoloApp {
                 (None, _) => (name, "Not one of this run's samples: labels only".to_string()),
             }
         });
+        // An image that would not load (its automatic retries may be spent) says so, with a Retry
+        // that asks for it again (Tab reaches it; Enter or Space presses it). A full-size one shown
+        // whose thumbnail failed after it loaded says so too: the grid would stay blank.
+        let full_failed = self.image_failed(&ds_id, &meta.id, ImgKind::Full);
+        let thumb_failed = img.is_some() && self.image_failed(&ds_id, &meta.id, ImgKind::Thumb);
+        let unavailable = (full_failed || thumb_failed).then(|| {
+            let (ds, id) = (ds_id.clone(), meta.id.clone());
+            let retry = self.button(
+                "insp-retry-image",
+                "Retry",
+                crate::controls::Btn::Secondary,
+                Some("icons/refresh-cw.svg"),
+                window,
+                cx,
+                act(move |this, _, cx| this.retry_failed_image(&ds, &id, cx)),
+            );
+            div().absolute().bottom(px(40.)).left_0().right_0().flex().justify_center().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(radius::MD))
+                    .bg(t.bg_overlay)
+                    .child(text(ty::SM, t.text_secondary).child(if !full_failed {
+                        "Thumbnail unavailable: the grid can't show it"
+                    } else if img.is_some() {
+                        "Full-size image unavailable: showing the thumbnail"
+                    } else {
+                        "Image unavailable"
+                    }))
+                    .child(retry),
+            )
+        });
         let bounds_cell = self.insp_view.clone();
         // A pan pushed past the edge is stored clamped, so reversing it responds at once.
         if let (Some(b), Some(i)) = (bounds_cell.get(), self.inspector.as_mut()) {
@@ -254,7 +289,8 @@ impl FoloApp {
                     },
                 )
                 .size_full(),
-            );
+            )
+            .children(unavailable);
         // By class, then largest first, like the PR legend; indices stay the image's.
         let mut box_order: Vec<(usize, &crate::api::BBox)> = meta.boxes.iter().enumerate().collect();
         box_order.sort_by(|(_, a), (_, b)| {

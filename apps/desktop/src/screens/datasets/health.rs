@@ -168,7 +168,7 @@ pub fn health_checks(d: &Dataset, s: &DatasetStats, counts: Option<&IssueCounts>
     if images > 0 && images < 200 {
         push(
             Severity::Info,
-            format!("only {} images", int(images)),
+            format!("only {}", n_of(images, "image", "images")),
             "Expect overfitting; keep augmentation on and start from pretrained weights.",
         );
     }
@@ -342,5 +342,20 @@ mod tests {
         let mut five = clean.clone();
         five.class_counts = vec![500, 100];
         assert!(!health_checks(&d, &five, None).iter().any(|f| f.short.contains("imbalance")));
+    }
+
+    #[test]
+    fn a_small_dataset_is_counted_in_the_singular_at_one() {
+        let api = MockBackend::new(4200, true);
+        let mut d = api.dataset("ds_3b91").unwrap();
+        let s = d.stats.clone().unwrap();
+        let small = |d: &Dataset| {
+            health_checks(d, &s, None).into_iter().map(|f| f.short).find(|s| s.starts_with("only "))
+        };
+        for (train, val, said) in [(1, 0, Some("only 1 image")), (1, 1, Some("only 2 images")), (0, 0, None)]
+        {
+            (d.splits.train, d.splits.val, d.splits.test) = (train, val, 0);
+            assert_eq!(small(&d).as_deref(), said, "{train} + {val}");
+        }
     }
 }

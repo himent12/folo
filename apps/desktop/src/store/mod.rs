@@ -10,7 +10,9 @@ use std::sync::Arc;
 use crate::api::*;
 
 pub use best::better_model;
-pub use images::{ImageCache, ImgKey, ImgKind, ImgSlot, decode_upright, to_render_image};
+pub use images::{
+    ImageCache, ImgKey, ImgKind, ImgSlot, decode_upright, to_render_image, to_render_image_within,
+};
 pub use live::{Derived, RunData};
 
 /// A value fetched from the backend.

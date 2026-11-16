@@ -171,6 +171,8 @@ impl FoloApp {
         // A request still out now that fails later (`fetch`) failed while it was away too.
         self.reconnects += 1;
         self.forget_unreachable_loads();
+        // Images that failed while it was away are asked for again (they would stay blank for good).
+        self.store.images_px.forget_failed();
         // Back: read the lists now (the server may have restarted on another data dir).
         self.refresh_lists(cx);
         cx.notify();

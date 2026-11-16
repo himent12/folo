@@ -44,7 +44,12 @@ impl FoloApp {
     pub fn play_dataset_image(&mut self, dataset: &str, image_id: &str, cx: &mut Context<Self>) {
         let input = PredictInput::Dataset { dataset_id: dataset.to_string(), image_id: image_id.to_string() };
         let (d, i) = (dataset.to_string(), image_id.to_string());
-        let name: SharedString = format!("{} / {}", self.store.dataset_name(dataset), image_id).into();
+        // Named by its file, as the dataset grid names it; by its id while the list isn't loaded.
+        let file = self.store.images.get(dataset).and_then(|l| l.ready()).and_then(|list| {
+            list.iter().find(|m| m.id == image_id).map(|m| crate::screens::datasets::file_name(&m.file))
+        });
+        let shown = file.filter(|f| !f.is_empty()).unwrap_or(image_id);
+        let name: SharedString = format!("{} / {}", self.store.dataset_name(dataset), shown).into();
         self.play_load_seq += 1;
         let seq = self.play_load_seq;
         self.fetch(
