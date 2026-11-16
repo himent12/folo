@@ -536,6 +536,29 @@ fn a_load_from_before_a_forget_never_fills_the_slot_asked_for_again() {
     assert_eq!(slot(&mut app), "ready", "the new picture");
 }
 
+/// Lane d6's reconnect sweep (`forget_unreachable_loads`) and this lane's recheck on navigation
+/// (`ds_recheck`) together: a dataset whose read failed while the server was away, shown on a page
+/// with cards meanwhile, is read once when shown after the reconnect, not by both.
+#[test]
+fn a_dataset_that_failed_while_away_is_read_once_after_the_reconnect() {
+    let (mut app, window) = open_with(Arc::new(MockBackend::new(4200, true)));
+    drawn_keys(&mut app, window);
+    let id = "ds_3b91".to_string();
+    drive(&mut app, window, |this, _, cx| {
+        let away = crate::api::ApiError::new("server_unreachable", "Could not reach folo serve");
+        this.store.dataset.insert(id.clone(), crate::store::Load::Failed(away));
+        this.ds_recheck.insert(id.clone());
+        this.reconnected(cx);
+        let before = this.ds_read_seq;
+        this.ensure_dataset(&id, cx);
+        assert_eq!(this.ds_read_seq, before + 1, "one read, not the recheck's and a fresh one's");
+        assert!(!this.ds_recheck.contains(&id));
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset.get(&id).is_some_and(|l| l.ready().is_some()), "read, and in");
+    });
+}
+
 /// The focus keys a page draws, once what it asked for has come.
 fn drawn_keys(app: &mut folo_ui::HeadlessApp, window: folo_ui::WindowHandle<super::FoloApp>) -> Vec<String> {
     app.frame(window.into());
