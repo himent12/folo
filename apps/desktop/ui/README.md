@@ -61,8 +61,9 @@ dirty, at most once per display refresh; while nothing changes there is no timer
 Two things keep a frame cheap without changing a pixel (`DESIGN.md`, Frames). The layout tree keeps what the
 previous frame computed (`window/layout_tree.rs`): a subtree whose nodes, styles and texts are unchanged answers
 the same layout requests from last frame's records instead of running taffy again, so the result is exactly a
-fresh layout's. And an element that only animates its opacity (`with_opacity_animation`: the breathing status
-dot, fades, shimmers) is painted once inside an opacity group (`opacity.rs`, `window/paint_animation.rs`); at
+fresh layout's. Within a frame, a node's cached final layout is not reused once the node has been measured
+again since it was stored: taffy's block algorithm lays a block's children out at the width it measures with.
+And an element that only animates its opacity (`with_opacity_animation`: the breathing status dot, fades, shimmers) is painted once inside an opacity group (`opacity.rs`, `window/paint_animation.rs`); at
 each refresh the window re-fades that group's primitives in the scene and repaints only their tiles, with no
 render, layout or paint.
 

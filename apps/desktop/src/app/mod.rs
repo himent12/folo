@@ -28,6 +28,8 @@ mod playground_tests;
 mod preferences;
 mod render;
 #[cfg(test)]
+mod run_charts_tests;
+#[cfg(test)]
 mod run_page_tests;
 mod sidebar;
 mod start_from;
@@ -364,6 +366,10 @@ pub struct FoloApp {
     // Runs
     pub run_filter: RunFilter,
     pub chart_hover: Option<f32>,
+    /// The run chart the cursor is on (its id, "run-map", "run-loss", ...): the pointer's, or the
+    /// one ↑ / ↓ picked; only that chart draws `chart_hover`'s cursor and reads its legend there.
+    /// None until either picks one (a cursor stepped with ← / → then shows on the first chart).
+    pub chart_hover_on: Option<&'static str>,
     /// The run charts' x axis: Some(true) fits it to the epochs trained ("So far"), Some(false)
     /// shows the planned run ("All N"); None takes the default (planned while active, else trained).
     pub run_x_fit: Option<bool>,
@@ -653,6 +659,7 @@ impl FoloApp {
             hist_hover: HashMap::new(),
             run_filter: RunFilter::All,
             chart_hover: None,
+            chart_hover_on: None,
             run_x_fit: None,
             sample_view: SampleView::Both,
             // Every prediction the server keeps for a sample (docs/API.md: score >= 0.25), the slider's

@@ -23,7 +23,7 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 | `src/overlays/` | what sits above the page: the command palette, the New run and Generate synthetic dialogs, the confirmations, the cloud dialogs, the image inspector, toasts |
 | `src/controls/` | focusable controls, each an `impl FoloApp` method taking a stable key: buttons, segmented, tabs, chips and switches, slider, select, tooltip, scroll |
 | `src/ui/` | the app's stateless pieces: type, surfaces, badges and status, metrics, legends, number and text formatting, motion |
-| `src/charts/` | canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram |
+| `src/charts/` | canvas charts: line (raw + smoothed, area, markers, hover cursor), sparkline, histogram |
 | `src/viz.rs` | images with detection boxes and label chips (the box spec of design/README.md) |
 | `src/store/` | client state: fetched values (`Load<T>`), live run data from the SSE events, the decoded-image cache, the "best model" rule |
 | `src/api/` | the `Backend` trait (`mod.rs`) and the wire types (`types.rs`, from `crates/folo-api`); `http/`, the client of `folo serve` (transport, SSE streams, images, inference, and `server.rs`, which starts a local `folo serve`); `mock/` and `mock_bench/`, the built-in demo |

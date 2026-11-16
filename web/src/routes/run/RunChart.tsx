@@ -2,11 +2,11 @@
  * One of a run's four charts (design/UNIFIED.md §3, §4 Run): Validation mAP, Training loss, Precision / Recall and
  * Learning rate (or, picked in its header, the throughput over the whole run), each a panel whose header holds the
  * title, the qualifier (what x is, what the values are) and the chart's controls, then the legend as the readout and
- * the plot in its inset well. They share one x axis and one
- * cursor (./runModel): hovering or arrowing through one reads every one, and "So far / All N", in the first chart's
- * header while the run trains, fits all of them.
+ * the plot in its inset well. They share one x axis (./runModel), and "So far / All N", in the first chart's header
+ * while the run trains, fits all of them; each has its own cursor: hovering or arrowing through one reads that chart
+ * only, the others keep their latest values.
  */
-import { computed, css, For, MediaQuery } from 'fw';
+import { computed, css, For, MediaQuery, signal } from 'fw';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';
 import LineChart from '$lib/charts/LineChart';
 import LossOptions from '$lib/charts/LossOptions';
@@ -38,6 +38,8 @@ const epochTitle = (x: number) => `Epoch ${x.toFixed(x % 1 === 0 ? 0 : 1)}`;
 
 export default function RunChart(props: RunChartProps) {
   const m = props.model;
+  /** This chart's cursor (data x, epochs): the pointer or the arrows on this chart move it, no other chart's. */
+  const cursor = signal<number | null>(null);
   const kind = props.kind;
   const height = () => props.height;
   const unit = kind === 'map' || kind === 'pr';
@@ -155,7 +157,7 @@ export default function RunChart(props: RunChartProps) {
             height={height()}
             xDomain={m.xDomain.get()}
             xInteger
-            bind:cursor={m.cursor}
+            bind:cursor={cursor}
             band
             future={m.future.get() && kind === 'map' ? m.future.get() : m.future.get() ? { x: m.future.get()!.x } : undefined}
             yDomain={fit.get()?.domain}

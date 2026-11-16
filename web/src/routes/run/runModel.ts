@@ -3,7 +3,7 @@
  * series in the series hues (mAP50-95 sky with the page's one area fill, mAP50 amber dashed, precision magenta, recall
  * teal dashed, the learning rate neutral, the loss terms in their README hues), their fitted y domains, the one x axis
  * the charts share (the planned run while it trains, its future shaded with the ETA over the boundary; "So far" fits
- * every chart to the epochs trained) and the one cursor they share.
+ * every chart to the epochs trained). Each chart keeps its own cursor (run/RunChart).
  *
  * Streaming cost: the points come from the run's append logs through ./metricSeries, so a new step maps and smooths
  * that step alone, the per-epoch series change only when an epoch finishes (not on every step), and the loss y extent
@@ -106,8 +106,6 @@ export class RunModel {
   readonly scale = signal<Scale>('log');
   /** "So far / All N" in the first chart's header, for every chart of the page. While a run trains: the plan. */
   readonly horizon = signal<'observed' | 'full'>('full');
-  /** The one cursor of the page's charts (data x, epochs): hovering one reads every one. */
-  readonly cursor = signal<number | null>(null);
 
   constructor(src: RunSource) {
     this.run = () => src.run!;

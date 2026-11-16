@@ -183,7 +183,8 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(12.))
-            .h(px(32.))
+            .h(px(HEAD))
+            .flex_none()
             .px(px(16.))
             .border_b_1()
             .border_color(t.line_subtle)
@@ -258,15 +259,20 @@ impl FoloApp {
             }))
             .overflow_y_scroll()
             .track_scroll(&scroll)
-            // Beside the samples the list takes their height (its own adds none to the row);
-            // stacked it stops at 360 px.
+            // Beside the samples the list takes the rest of the body's height (below). Stacked it
+            // stops at 360 px.
             .when(beside, |d| d.flex_1().flex_basis(px(0.)).min_h(px(0.)))
             .when(!beside, |d| d.max_h(px(360.)))
             .children(rows.iter().map(row));
+        // The body (header and list) beside the samples takes their height, but never less than
+        // the header and the list's first `BESIDE_ROWS` rows: beside a short samples panel (no
+        // images yet) the row grows so every class of a small dataset shows whole, not one row and
+        // a sliver. On the body, not the list: the body's zero-basis flex would otherwise let it
+        // shrink below the list, and the panel clips what overflows it.
         div()
             .relative()
             .flex_1()
-            .min_h(px(0.))
+            .min_h(px(if beside { beside_min_h(rows.len()) } else { 0. }))
             .flex()
             .flex_col()
             .child(head)
@@ -278,6 +284,18 @@ impl FoloApp {
 
 /// A class row's height.
 const ROW: f32 = 32.;
+
+/// The column header's height.
+const HEAD: f32 = 32.;
+
+/// The rows the list shows at least beside the samples; more scroll inside it.
+const BESIDE_ROWS: usize = 8;
+
+/// The least height of the list's body (column header and rows) beside the samples, px: the header
+/// and the rows up to `BESIDE_ROWS`, whole.
+fn beside_min_h(rows: usize) -> f32 {
+    HEAD + rows.min(BESIDE_ROWS) as f32 * ROW
+}
 
 #[cfg(test)]
 mod tests {
@@ -333,6 +351,15 @@ mod tests {
         };
         assert_eq!(e, last);
         assert!(!rows.is_empty());
+    }
+
+    #[test]
+    fn beside_the_samples_a_small_datasets_classes_all_show_whole() {
+        // Three classes: three whole rows, however short the samples panel beside them.
+        assert_eq!(beside_min_h(3), HEAD + 3. * ROW);
+        assert_eq!(beside_min_h(0), HEAD);
+        // Eighty: the first eight, the rest scroll.
+        assert_eq!(beside_min_h(80), HEAD + BESIDE_ROWS as f32 * ROW);
     }
 
     #[test]

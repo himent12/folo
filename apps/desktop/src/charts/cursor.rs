@@ -22,7 +22,7 @@ pub(super) fn cursor_value(spec: &LineChart, x: f32) -> String {
 }
 
 /// Index of the point nearest to `x` in a sorted series.
-/// The value a legend shows: at the shared cursor when there is one, else the latest point.
+/// The value a legend shows: at its chart's cursor when there is one, else the latest point.
 pub fn value_at(points: &[(f32, f32)], hover: Option<f32>, x0: f32, x1: f32) -> Option<f32> {
     match hover {
         Some(f) => nearest(points, x0 + (x1 - x0) * f).map(|i| points[i].1),
