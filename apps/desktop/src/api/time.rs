@@ -113,23 +113,37 @@ fn local_offset_at(t: i64) -> i64 {
 }
 
 #[cfg(not(windows))]
+// `TimeT` and `c_long` are `i64` on 64-bit targets and `i32` on 32-bit ones, where the two
+// conversions below are needed.
+#[allow(clippy::useless_conversion, clippy::unnecessary_fallible_conversions)]
 fn local_offset_at(t: i64) -> i64 {
+    use std::ffi::{c_char, c_int, c_long};
+    // `time_t` is a `long` on glibc, macOS and the BSDs (32-bit or 64-bit); 32-bit musl made it
+    // 64-bit in 1.2, the musl Rust ships.
+    #[cfg(not(all(target_env = "musl", target_pointer_width = "32")))]
+    type TimeT = c_long;
+    #[cfg(all(target_env = "musl", target_pointer_width = "32"))]
+    type TimeT = i64;
     // `struct tm` as glibc, musl and the BSDs (macOS) lay it out: nine ints, then the offset east of
     // UTC in seconds and the zone's name. std links the C library, so `localtime_r` needs no crate.
     #[repr(C)]
     #[allow(dead_code)] // C fills the other fields; only the offset is read here.
     struct Tm {
-        fields: [std::ffi::c_int; 9],
-        gmtoff: std::ffi::c_long,
-        zone: *const std::ffi::c_char,
+        fields: [c_int; 9],
+        gmtoff: c_long,
+        zone: *const c_char,
     }
     unsafe extern "C" {
-        fn localtime_r(t: *const i64, out: *mut Tm) -> *mut Tm;
+        fn localtime_r(t: *const TimeT, out: *mut Tm) -> *mut Tm;
     }
+    // A moment a 32-bit `time_t` cannot hold (after 2038) reads in UTC.
+    let Some(tt) = TimeT::try_from(t).ok() else {
+        return 0;
+    };
     let mut tm = Tm { fields: [0; 9], gmtoff: 0, zone: std::ptr::null() };
-    // SAFETY: both pointers are to live values of the layouts above (`time_t` is 64-bit on every
-    // target the app builds for); only the result's nullness is read.
-    if unsafe { localtime_r(&t, &mut tm) }.is_null() {
+    // SAFETY: both pointers are to live values of the C layouts above; only the result's nullness
+    // is read.
+    if unsafe { localtime_r(&tt, &mut tm) }.is_null() {
         return 0;
     }
     i64::from(tm.gmtoff)
