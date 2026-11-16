@@ -117,9 +117,10 @@ own first.
 
 ## Gates
 
-All passed locally: root `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo test -p folo-server -p folo-api`; apps/desktop fmt, clippy and `cargo test --workspace`; web `npm run check`,
-`npm test`, `npm run build`; `bash tools/file-size.sh`. While the apps/desktop gates built: 20 of 20 runs of
+All passed locally on the branch without item 5 (edec3ee8): root `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p folo-server -p folo-data -p folo-api`;
+apps/desktop fmt, clippy and `cargo test --workspace`; web `npm run check`, `npm test` (221 files, 1865 tests),
+`npm run build`; `bash tools/file-size.sh`. Loops from the test binaries just built: 20 of 20 runs of
 `open_entries_expire_without_parts`, 20 of 20 of `an_instance_lost_while_its_weights_are_collected_loses_the_run`
-(four at a time), 3 of 3 of the whole cloud suite. `f3-server-ci-4`'s test also passes on main: it pins the contract
-the producers already kept. The `web.yml` change is only exercised by CI.
+(four at a time), and the whole cloud suite (26 tests) once. `f3-server-ci-4`'s tests also pass on main: they pin the
+contract the producers already kept. The `web.yml` change is only exercised by CI.
