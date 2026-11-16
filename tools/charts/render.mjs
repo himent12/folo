@@ -110,7 +110,7 @@ const figures = {
         title: 'Accuracy: FOLO against YOLO26',
         subtitle: 'AP@[.5:.95], pycocotools',
         desc:
-          'Grouped bars of AP on one scale. On COCO val2017, FOLO trained from scratch is behind the published YOLO26 models. Fine-tuned on four small datasets, folo-n and yolo26n are level on three and yolo26n is ahead on one. ' +
+          'Grouped bars of AP on one scale. On COCO val2017, FOLO trained on COCO alone is behind the published YOLO26 models. Fine-tuned on four small datasets, folo-n and yolo26n are level on three and yolo26n is ahead on one. ' +
           [...data.accuracy.coco.rows, ...data.accuracy.finetune.rows].map((r) => `${r.label}: ${r.text[0]} against ${r.text[1]}.`).join(' '),
         sharedScale: true,
         series: [
@@ -132,7 +132,7 @@ const figures = {
           },
         ],
         footer: [
-          'COCO: FOLO trained from scratch for 56 to 62 epochs. The YOLO26 numbers are the published ones, from models pretrained on Objects365 and trained for far longer.',
+          'COCO: FOLO trained on COCO alone from random weights, 56 and 64 epochs (folo-n: the second half distilled from folo-s). The YOLO26 numbers are the published ones, from models pretrained on Objects365 and trained for far longer.',
           'Fine-tuning: each from its own COCO weights, at its defaults, 100 epochs; the differences are of the unrounded means. "level": inside the spread of the seeds, or on a set both saturate (signatures). Details: docs/BENCHMARKS.md, Accuracy.',
         ],
       },

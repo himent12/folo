@@ -75,6 +75,19 @@ pub const PUBLISHED: &[Published] = &[
         asset: "folo-n-coco-v3-f16.folo",
         about: "folo-n-coco-v3 fused and cast to f16 (folo export): inference only",
     },
+    Published {
+        name: "folo-n-coco-v4",
+        release: "weights-v5",
+        asset: "folo-n-coco-v4.folo",
+        about: "folo-n from scratch on COCO train2017, 64 epochs, the second half distilled from folo-s-coco, \
+                val2017 AP 0.356 (EMA weights, f32, unfused: fine-tune or predict); examples/coco",
+    },
+    Published {
+        name: "folo-n-coco-v4-f16",
+        release: "weights-v5",
+        asset: "folo-n-coco-v4-f16.folo",
+        about: "folo-n-coco-v4 fused and cast to f16 (folo export): inference only",
+    },
 ];
 
 /// The published weights called `name`.
@@ -134,6 +147,14 @@ mod tests {
             find("folo-n-coco-v3-f16").map(|p| (p.release, p.asset)),
             Some(("weights-v4", "folo-n-coco-v3-f16.folo"))
         );
-        assert!(names().ends_with("folo-s-coco, folo-s-coco-f16, folo-n-coco-v3, folo-n-coco-v3-f16"));
+        assert_eq!(
+            find("folo-n-coco-v4").map(|p| (p.release, p.asset)),
+            Some(("weights-v5", "folo-n-coco-v4.folo"))
+        );
+        assert_eq!(
+            find("folo-n-coco-v4-f16").map(|p| (p.release, p.asset)),
+            Some(("weights-v5", "folo-n-coco-v4-f16.folo"))
+        );
+        assert!(names().ends_with("folo-n-coco-v3, folo-n-coco-v3-f16, folo-n-coco-v4, folo-n-coco-v4-f16"));
     }
 }

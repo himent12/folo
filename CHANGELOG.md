@@ -21,7 +21,7 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
 | Training step peak memory allocated, f32 / AMP | **3467** / **2022 MiB** | 4517 / 2646 MiB |
 | CPU forward, batch 1 | **12.7 ms** | 22.8 ms |
 | CPU end to end, batch 1 | **13.6 ms** | 24.8 ms |
-| COCO val2017 AP, from scratch (`folo-n-coco-v3`, 78 epochs) | 0.340 | 0.409 (Objects365 + 245 COCO epochs) |
+| COCO val2017 AP, from scratch on COCO alone (`folo-n-coco-v4`, 64 epochs, the second half distilled from folo-s) | 0.356 | 0.409 (Objects365 + 245 COCO epochs) |
 
 The end-to-end rows are on trained weights (the published `folo-n-coco`, 50 epochs) since the third optimisation
 round: random weights pass no candidate, so candidate-first prediction would skip the box branch. The CPU row's 13.1
@@ -127,8 +127,14 @@ fixes.
   checkpoint.
 - **folo-n COCO weights v3**: `folo-n-coco-v3` and `folo-n-coco-v3-f16` (release `weights-v4`), `folo-n-coco-v2`
   annealed for 16 more epochs (SGD, learning rate decayed linearly to 1%, mosaic off for the last 8), 78 epochs in
-  all: val2017 **AP 0.340 / AP50 0.487** (pycocotools-exact; f16 0.339), the best folo-n weights
+  all: val2017 **AP 0.340 / AP50 0.487** (pycocotools-exact; f16 0.339), the best folo-n weights at that publication
   ([examples/coco](examples/coco/README.md#v3-v2-annealed-for-16-epochs)). `folo weights pull folo-n-coco-v3`.
+- **folo-n COCO weights v4**: `folo-n-coco-v4` and `folo-n-coco-v4-f16` (release `weights-v5`), folo-n from random
+  init on COCO train2017 for 64 epochs (`auto` rule 5, MuSGD, AMP), epochs 33–64 distilled from the frozen
+  `folo-s-coco` (`folo train --teacher`): val2017 **AP 0.356 / AP50 0.509** (pycocotools-exact), +0.016 over v3 by a
+  paired bootstrap, the best folo-n weights. One seed; no data beyond COCO train2017 in student or teacher
+  ([examples/coco](examples/coco/README.md#v4-64-epochs-the-second-half-distilled-from-folo-s)).
+  `folo weights pull folo-n-coco-v4`.
 - **Fine-tuning benchmark** (`bench/finetune/`, docs/BENCHMARKS.md, Fine-tuning on small datasets): FOLO's COCO
   weights against Ultralytics' YOLO26 of the same size on four small public datasets, three seeds each, both trained
   on the same rented GPU type and scored by one pycocotools scorer. folo-n is level with YOLO26n on three of them
@@ -141,8 +147,8 @@ fixes.
   timeout, a server error or a cut download is the new `download_failed`, without a fallback. The checksum and
   `.folo` checks are unchanged: nothing is installed unless both pass. `--json` adds `via` (`https`, `gh`, `null`).
 - `FOLO_WEIGHTS_BASE_URL` downloads from a mirror (`<base>/<tag>/<file>`), `FOLO_GH` names the GitHub CLI program.
-- The QUICKSTART has the two-command path to a first fine-tune (`folo weights pull folo-n-coco-v3`, then
-  `folo train --weights folo-n-coco-v3`); `train` still never downloads by itself, and its hint says what to run.
+- The QUICKSTART has the two-command path to a first fine-tune (`folo weights pull folo-n-coco-v4`, then
+  `folo train --weights folo-n-coco-v4`); `train` still never downloads by itself, and its hint says what to run.
 
 #### Vision benchmarks
 - Make a benchmark from your own labeled images and run **any vision model** on it: a FOLO model, Claude Code or
