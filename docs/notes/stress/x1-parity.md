@@ -84,6 +84,10 @@ turns 3 and 4 took that time.
   `an_issue_check_of_files_since_changed_never_comes_back`); the card test reads the rendered focus tip (its glyphs
   grow by the words added to the server's reason). With lane d6's reconnect sweep, a dataset that failed while
   the server was away is read once after the reconnect (`a_dataset_that_failed_while_away_is_read_once_after_the_reconnect`).
+  After review round 4: the Playground's image of a dataset whose files changed is dropped with its predictions
+  and read again under its id (a load of it still out is asked for again), so its pixels and the server's boxes
+  are one picture (`a_playground_image_of_a_dataset_whose_files_changed_is_read_again`); a server switch drops the
+  read and check tickets left on the old server (`reads_left_on_the_old_server_leave_no_tickets_behind`).
 - **x1-parity-1** (review round 2): fixed on main by d2-runs (PR #282, `charts::axis::label_pow`); this lane's
   identical copy dropped out in the rebase.
 - **x1-parity-8**: `apps/desktop/src/app/mod.rs` starts `sample_conf` at the slider's floor `SAMPLE_CONF.0` (0.25,
