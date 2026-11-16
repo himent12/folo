@@ -18,6 +18,67 @@ use crate::theme::{theme, ty};
 use crate::ui::*;
 
 impl FoloApp {
+    /// A registered dataset its server can't read (folder moved away, images deleted): what is
+    /// wrong in the server's words and the ways on: read it again once the folder is back, remove
+    /// it from FOLO (its files stay), or the list. Not the connection panel: the server answered.
+    fn dataset_problem_panel(
+        &mut self,
+        id: &str,
+        label: &'static str,
+        e: &crate::api::ApiError,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let again = id.to_string();
+        let retry = self.button(
+            "ds-problem-retry",
+            "Retry",
+            Btn::Primary,
+            Some("icons/refresh-cw.svg"),
+            window,
+            cx,
+            act(move |this, _, cx| {
+                this.ds_recheck.insert(again.clone());
+                cx.notify();
+            }),
+        );
+        let target = crate::app::DeleteTarget::Dataset(id.to_string());
+        let remove = self.button(
+            "ds-problem-delete",
+            "Remove from FOLO",
+            Btn::Secondary,
+            Some("icons/trash-2.svg"),
+            window,
+            cx,
+            act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
+        );
+        let all = self.button(
+            "ds-problem-all",
+            "All datasets",
+            Btn::Secondary,
+            None,
+            window,
+            cx,
+            act(|this, w, cx| this.navigate(crate::app::Route::Datasets, w, cx)),
+        );
+        let hint = e.hint.clone().unwrap_or_else(|| {
+            "Put the folder back (or fix it) and retry, or remove the dataset from FOLO.".to_string()
+        });
+        panel(&t)
+            .child(
+                empty_state(
+                    &t,
+                    "icons/circle-alert.svg",
+                    label,
+                    &format!("{} {hint}", e.message),
+                    Tone::Warning,
+                )
+                .child(div().flex().gap(px(8.)).child(all).child(remove).child(retry)),
+            )
+            .into_any_element()
+    }
+
     /// Images of the open dataset after the split and class filters.
     /// Indices (into the dataset's image list) that pass the split and class filters. Cached
     /// until the dataset, its image list or a filter changes, so scrolling never rescans it.
@@ -108,6 +169,8 @@ impl FoloApp {
                             .child(all),
                         )
                         .into_any_element()
+                } else if let Some(label) = crate::screens::dataset_problem(&e) {
+                    self.dataset_problem_panel(id, label, &e, window, cx)
                 } else {
                     self.error_panel(&e, "ds-detail-retry", window, cx)
                 };

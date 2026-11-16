@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, atBestF1, bytes, sizeParts, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
+import { ago, atBestF1, date, bytes, sizeParts, compact, conf, count, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, sentence, timeOfDay, usd, usdRange } from './format';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
@@ -62,6 +62,15 @@ describe('format', () => {
     expect(ago('2026-11-08T12:30:00Z', now)).toBe('2h ago');
     expect(ago('2026-11-07T10:00:00Z', now)).toBe('yesterday');
     expect(ago('2026-11-03T14:30:00Z', now)).toBe('5d ago');
+  });
+
+  // x1-parity-2: a unit that rounds up reads as the next one, as in Desktop's time.rs.
+  it('never says 60m, 24h or 14d ago', () => {
+    const now = Date.parse('2026-11-15T12:00:00Z');
+    expect(ago('2026-11-15T11:00:20Z', now)).toBe('1h ago');
+    expect(ago('2026-11-14T12:15:00Z', now)).toBe('yesterday');
+    expect(ago('2026-11-01T23:00:00Z', now)).toBe(date('2026-11-01T23:00:00Z'));
+    expect(ago('2026-11-09T14:00:00Z', now)).toBe('6d ago');
   });
 });
 

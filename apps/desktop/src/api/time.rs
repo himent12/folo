@@ -85,8 +85,7 @@ pub fn local_deadline(t: i64, now: i64) -> String {
     format!("{:02}:{:02}", s / 3600, s / 60 % 60)
 }
 
-/// Seconds east of UTC at `t` (Windows: the zone's rules for that date, daylight saving included;
-/// UTC elsewhere).
+/// Seconds east of UTC at `t`: the machine zone's rules for that date, daylight saving included.
 #[cfg(windows)]
 fn local_offset_at(t: i64) -> i64 {
     use windows_sys::Win32::Foundation::SYSTEMTIME;
@@ -114,25 +113,76 @@ fn local_offset_at(t: i64) -> i64 {
 }
 
 #[cfg(not(windows))]
-fn local_offset_at(_t: i64) -> i64 {
-    0
+// `TimeT` and `c_long` are `i64` on 64-bit targets and `i32` on 32-bit ones, where the two
+// conversions below are needed.
+#[allow(clippy::useless_conversion, clippy::unnecessary_fallible_conversions)]
+fn local_offset_at(t: i64) -> i64 {
+    use std::ffi::{c_char, c_int, c_long};
+    // `time_t` is a `long` on glibc, macOS and the BSDs (32-bit or 64-bit); 32-bit musl made it
+    // 64-bit in 1.2, the musl Rust ships.
+    #[cfg(not(all(target_env = "musl", target_pointer_width = "32")))]
+    type TimeT = c_long;
+    #[cfg(all(target_env = "musl", target_pointer_width = "32"))]
+    type TimeT = i64;
+    // `struct tm` as glibc, musl and the BSDs (macOS) lay it out: nine ints, then the offset east of
+    // UTC in seconds and the zone's name. std links the C library, so `localtime_r` needs no crate.
+    #[repr(C)]
+    #[allow(dead_code)] // C fills the other fields; only the offset is read here.
+    struct Tm {
+        fields: [c_int; 9],
+        gmtoff: c_long,
+        zone: *const c_char,
+    }
+    unsafe extern "C" {
+        fn localtime_r(t: *const TimeT, out: *mut Tm) -> *mut Tm;
+    }
+    // A moment a 32-bit `time_t` cannot hold (after 2038) reads in UTC.
+    let Some(tt) = TimeT::try_from(t).ok() else {
+        return 0;
+    };
+    let mut tm = Tm { fields: [0; 9], gmtoff: 0, zone: std::ptr::null() };
+    // SAFETY: both pointers are to live values of the C layouts above; only the result's nullness
+    // is read.
+    if unsafe { localtime_r(&tt, &mut tm) }.is_null() {
+        return 0;
+    }
+    i64::from(tm.gmtoff)
 }
 
-/// "just now", "4 min ago", "3 h ago", "2 d ago", or a date for older times.
+/// "just now", "4 min ago", "3 h ago", "yesterday", "5 d ago", or a local date for older times.
+/// The same numbers as Studio's `ago` (web/src/lib/format.ts): minutes, hours and days are rounded
+/// (5.9 days is "6 d ago" in both apps), a unit that rounds up to the next one reads as the next
+/// one (59 min 40 s is "1 h ago", not "60 min ago"), and days run up to two weeks.
 pub fn ago(then: i64, now: i64) -> String {
     let d = (now - then).max(0);
-    match d {
-        0..45 => "just now".into(),
-        45..3600 => format!("{} min ago", (d + 30) / 60),
-        3600..86_400 => format!("{} h ago", d / 3600),
-        86_400..604_800 => format!("{} d ago", d / 86_400),
-        _ => {
-            let (y, m, dd) = civil_from_days(then.div_euclid(86_400));
-            const MONTHS: [&str; 12] =
-                ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            format!("{} {dd}, {y}", MONTHS[(m - 1) as usize])
-        }
+    if d < 45 {
+        return "just now".into();
     }
+    let min = ((d + 30) / 60).max(1);
+    if min < 60 {
+        return format!("{min} min ago");
+    }
+    let h = (d + 1800) / 3600;
+    if h < 24 {
+        return format!("{h} h ago");
+    }
+    if d < 2 * 86_400 {
+        return "yesterday".into();
+    }
+    let days = (d + 43_200) / 86_400;
+    if days < 14 {
+        return format!("{days} d ago");
+    }
+    // The calendar date where the user is, as Studio shows it (a UTC date is a day off in the evening).
+    calendar_date(then, local_offset_at(then))
+}
+
+/// "Nov 1, 2026": the date of `t` in a zone `offset` seconds east of UTC.
+fn calendar_date(t: i64, offset: i64) -> String {
+    let (y, m, dd) = civil_from_days((t + offset).div_euclid(86_400));
+    const MONTHS: [&str; 12] =
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    format!("{} {dd}, {y}", MONTHS[(m - 1) as usize])
 }
 
 /// [`ago`] for a moment shown beside a running clock (a live run's "started …" next to its elapsed
@@ -185,6 +235,47 @@ mod tests {
         assert_eq!(ago(0, 7200), "2 h ago");
         assert_eq!(duration(1840.0), "30m 40s");
         assert_eq!(duration(12_000.0), "3h 20m");
+    }
+
+    /// x1-parity-2: the same moment reads with the same number in Desktop and Studio.
+    #[test]
+    fn ages_round_like_studio() {
+        let h = 3600;
+        let day = 86_400;
+        let now = parse("2026-11-15T12:00:00Z").unwrap();
+        // 5.9 days: Studio "6d ago", Desktop said "5 d ago".
+        assert_eq!(ago(now - (5 * day + 22 * h), now), "6 d ago");
+        // 1 h 40 min: Studio "2h ago", Desktop said "1 h ago".
+        assert_eq!(ago(now - (h + 40 * 60), now), "2 h ago");
+        // A unit that rounds up reads as the next one.
+        assert_eq!(ago(now - (59 * 60 + 40), now), "1 h ago");
+        assert_eq!(ago(now - (23 * h + 45 * 60), now), "yesterday");
+        assert_eq!(ago(now - 30 * h, now), "yesterday");
+        assert_eq!(ago(now - 2 * day, now), "2 d ago");
+        // Days up to two weeks, as Studio; then a date.
+        assert_eq!(ago(now - 10 * day, now), "10 d ago");
+        let old = ago(now - (13 * day + 13 * h), now);
+        assert!(old.starts_with("Nov ") && old.ends_with(", 2026"), "{old}");
+    }
+
+    #[test]
+    fn an_old_date_is_the_local_calendar_date() {
+        let h = 3600;
+        // Late on Nov 1 in UTC is Nov 2 in Tokyo (UTC+9); early on Nov 2 in UTC is Nov 1 in
+        // California (UTC-8), the reviewer's case; the same moments in UTC keep their UTC date.
+        let late = parse("2026-11-01T23:30:00Z").unwrap();
+        let early = parse("2026-11-02T04:00:00Z").unwrap();
+        assert_eq!(calendar_date(late, 9 * h), "Nov 2, 2026");
+        assert_eq!(calendar_date(late, 0), "Nov 1, 2026");
+        assert_eq!(calendar_date(early, -8 * h), "Nov 1, 2026");
+        assert_eq!(calendar_date(early, 0), "Nov 2, 2026");
+        // Across a year: New Year's Eve in New York is already Jan 1 in UTC.
+        assert_eq!(calendar_date(parse("2027-01-01T02:00:00Z").unwrap(), -5 * h), "Dec 31, 2026");
+        // `ago` shows the date in the machine's zone, whatever the platform (Windows and the C
+        // library each have their own lookup): a half-hour zone or a whole one, never a day off.
+        let off = local_offset_at(early);
+        assert!(off % 900 == 0 && off.abs() <= 14 * h, "{off}");
+        assert_eq!(ago(early, early + 30 * 86_400), calendar_date(early, off));
     }
 
     #[test]

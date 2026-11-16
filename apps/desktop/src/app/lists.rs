@@ -184,6 +184,7 @@ impl FoloApp {
         self.store.dataset.remove(id);
         self.store.images.remove(id);
         self.store.issues.remove(id);
+        self.issue_reads.remove(id);
         self.store.evals.remove(id);
         self.store.run_data.remove(id);
         self.store.samples.remove(id);

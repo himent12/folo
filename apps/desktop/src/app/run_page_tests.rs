@@ -325,3 +325,14 @@ fn an_earlier_epochs_samples_landing_after_leaving_the_page_are_dropped() {
         );
     });
 }
+
+#[test]
+fn validation_samples_start_at_every_prediction_the_server_keeps() {
+    // x1-parity-8: Studio starts the Min confidence slider at 0.25 (the server keeps predictions >= 0.25);
+    // Desktop started at 0.3 and drew fewer boxes on the same sample.
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.sample_conf, crate::screens::runs::SAMPLE_CONF.0);
+        assert_eq!(this.sample_conf, 0.25);
+    });
+}

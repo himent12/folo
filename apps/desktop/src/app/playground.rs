@@ -52,6 +52,7 @@ impl FoloApp {
         let name: SharedString = format!("{} / {}", self.store.dataset_name(dataset), shown).into();
         self.play_load_seq += 1;
         let seq = self.play_load_seq;
+        self.play_loading = Some(Some((d.clone(), i.clone())));
         self.fetch(
             cx,
             move |api| {
@@ -71,6 +72,7 @@ impl FoloApp {
                 if seq != this.play_load_seq {
                     return;
                 }
+                this.play_loading = None;
                 match r {
                     Ok((image, width, height, encoded)) => {
                         this.set_play_image(PlayImage { name, input, encoded, image, width, height }, cx);
@@ -94,6 +96,7 @@ impl FoloApp {
         let n2 = name.to_string();
         self.play_load_seq += 1;
         let seq = self.play_load_seq;
+        self.play_loading = Some(None);
         self.fetch(
             cx,
             move |_| {
@@ -109,6 +112,7 @@ impl FoloApp {
                 if seq != this.play_load_seq {
                     return;
                 }
+                this.play_loading = None;
                 match r {
                     Ok((bytes, image, width, height)) => {
                         let input = PredictInput::File { name: name.to_string(), bytes };
@@ -144,6 +148,44 @@ impl FoloApp {
         self.play_zoom = 1.0;
         self.play_pan = (0., 0.);
         self.run_predict(cx);
+    }
+
+    /// Dataset `dataset`'s files changed ([`FoloApp::forget_dataset_contents`]): its image ids are
+    /// positions, so the id of the Playground's image may name another picture now, and the server
+    /// predicts on the file the id names. The old pixels and every prediction for them are dropped
+    /// (the texture is returned to free) and the image is read again under its id, so what is shown
+    /// and what is predicted are one picture. A load of one of its images still on its way is asked
+    /// for again too (its answer may be the old picture); a newer pick from elsewhere is left alone.
+    pub(super) fn forget_play_dataset(
+        &mut self,
+        dataset: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<folo_ui::RenderImage>> {
+        let shown = self.play_image.as_ref().and_then(|p| match &p.input {
+            PredictInput::Dataset { dataset_id, image_id } if dataset_id == dataset => Some(image_id.clone()),
+            _ => None,
+        });
+        let dropped = if shown.is_some() {
+            self.play_image_gen += 1;
+            self.play_pred_seq += 1;
+            self.play_pred = Load::Idle;
+            self.play_pred_pending = false;
+            self.play_pred_dim = false;
+            self.play_pred_for = None;
+            self.play_hover = None;
+            self.play_image.take().map(|p| p.image)
+        } else {
+            None
+        };
+        let again = match &self.play_loading {
+            Some(Some((d, i))) if d == dataset => Some(i.clone()),
+            Some(_) => None,
+            None => shown,
+        };
+        if let Some(image) = again {
+            self.play_dataset_image(dataset, &image, cx);
+        }
+        dropped
     }
 
     /// Choose where Playground runs the model, and rerun it there.
