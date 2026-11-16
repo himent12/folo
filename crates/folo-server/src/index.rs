@@ -765,7 +765,9 @@ pub fn read_image_with(
 }
 
 /// Writes `bytes` to a unique temporary file next to `path`, then renames it over `path`, so readers never see a
-/// partial file (concurrent writers of the same content are harmless).
+/// partial file (concurrent writers of the same content are harmless). A `path` another program holds open is
+/// waited for only [briefly](folo_nn::io::RenameRetry::BRIEF): the store's files are written under the locks of
+/// the state they persist (a run's `run.json` under its run's), which a long wait would stall.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
@@ -779,7 +781,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&tmp, bytes)?;
-    folo_nn::io::rename_over(&tmp, path).inspect_err(|_| {
+    folo_nn::io::rename_over_with(&tmp, path, folo_nn::io::RenameRetry::BRIEF).map(drop).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }
@@ -791,6 +793,28 @@ mod tests {
 
     fn tmp(tag: &str) -> TestDir {
         TestDir::new(&format!("index-{tag}"))
+    }
+
+    /// A store write over a file another program holds open (as Python's `open()` does) gives up within a
+    /// fraction of a second, not the 10 s a checkpoint waits: it runs under the lock of the state it persists.
+    #[cfg(windows)]
+    #[test]
+    fn a_store_write_gives_up_soon_on_a_file_another_program_holds() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tmp("held");
+        let path = dir.join("run.json");
+        write_atomic(&path, b"old").unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
+        let t = std::time::Instant::now();
+        assert!(write_atomic(&path, b"new").is_err());
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(3),
+            "held the caller's lock for {:?}",
+            t.elapsed()
+        );
+        drop(held);
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no temporary file stays");
     }
 
     #[test]

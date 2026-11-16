@@ -259,3 +259,40 @@ fn a_lost_launch_that_the_provider_lists_late_is_still_terminated() {
     });
     assert_eq!((cloud.live(), i.error), (0, None));
 }
+
+/// The final copy of `last.folo` waits for a program that has the local one open (as a script reading it does)
+/// rather than failing the run's sync: it is staged first, then renamed over with the retry. The reader lets go
+/// only once the staged file is there, so a copy that renames straight over the held file fails this every time.
+#[cfg(windows)]
+#[test]
+fn the_final_copy_waits_for_a_program_reading_the_local_checkpoint() {
+    use std::os::windows::fs::OpenOptionsExt;
+    no_gpu();
+    let t = TestDir::new("cloud-held");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    cloud.hold(Call::Launch);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 1)).unwrap();
+    let weights = t.join("home").join("runs").join(&run.id).join("weights");
+    std::fs::create_dir_all(&weights).unwrap();
+    let last = weights.join("last.folo");
+    std::fs::write(&last, b"held").unwrap();
+    // Shares reading and writing, not deleting: what Python's `open()` does.
+    let held = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&last).unwrap();
+    cloud.release(Call::Launch);
+    until("the final copy to be staged", || {
+        let r = run_of(&store, &run.id);
+        assert!(
+            r.status.is_active(),
+            "ended before the final copy was staged: {:?}",
+            log_of(&store, &run.id)
+        );
+        weights.join(".last.folo.final.download").is_file().then_some(())
+    });
+    drop(held);
+    let done = finished(&store, &run.id);
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store, &run.id));
+    assert_ne!(std::fs::read(&last).unwrap(), b"held", "the worker's checkpoint replaced the held file");
+}

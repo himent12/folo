@@ -236,8 +236,17 @@ impl Exec {
         };
         let stop = || self.core.halt.is_on();
         let mut ctl = Control { progress: &mut progress, stop: &stop, backoff: transfer::FIRST_BACKOFF };
-        match transfer::download(client, &path, &weights.join(file), &mut ctl) {
-            Ok(_) => {}
+        // Fetched into a staging file nothing else opens, then renamed over the local file with the retry (as
+        // `reap_copy` does): a program reading the local `last.folo` at this moment must not fail the run's sync.
+        // A process killed meanwhile leaves a `.download` that `transfer::remove_partial` clears.
+        let (staged, dest) = (weights.join(format!(".{file}.final.download")), weights.join(file));
+        let placed = transfer::download(client, &path, &staged, &mut ctl).and_then(|_| {
+            folo_nn::io::rename_over(&staged, &dest).map_err(TransferError::Io).inspect_err(|_| {
+                let _ = std::fs::remove_file(&staged);
+            })
+        });
+        match placed {
+            Ok(()) => {}
             Err(TransferError::Failed(e)) if e.code() == "model_not_found" => return Ok(false),
             Err(e) => return Err(e),
         }
