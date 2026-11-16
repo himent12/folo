@@ -53,8 +53,9 @@ the same AP per epoch, and fine-tuned on four small datasets folo-n and yolo26n 
 |---|---|
 | [Machine](#machine), [Reproduce](#reproduce), [Method](#method) | How the incumbent was measured, and what its numbers say |
 | [FOLO targets](#folo-targets) | The table of record: every headline row, folo-n and folo-s against the incumbent's best |
-| [Hill-climb 3](#hill-climb-3-2026-11-13), [Hill-climb 2](#hill-climb-2-2026-11-12), [Hill-climb](#hill-climb-2026-11-09) | The three optimisation rounds: before and after, where each gain came from, what was tried and lost |
-| [Accuracy](#accuracy) | COCO, the equal-budget comparison, fine-tuning on small datasets |
+| [Hill-climb 4](#hill-climb-4-2026-11-15-accuracy) | The accuracy round: distillation from folo-s, the first full COCO folo-n under today's defaults (not published) |
+| [Hill-climb 3](#hill-climb-3-2026-11-13), [Hill-climb 2](#hill-climb-2-2026-11-12), [Hill-climb](#hill-climb-2026-11-09) | The three engine rounds: before and after, where each gain came from, what was tried and lost |
+| [Accuracy](#accuracy) | COCO (the published weights, and hill-climb 4's two unpublished folo-n runs), the equal-budget comparison, fine-tuning on small datasets |
 | [FOLO on the GPU](#folo-on-the-gpu), [NMS-free head](#nms-free-head-o2o), [FOLO on the CPU](#folo-on-the-cpu) | The measurement log of the work that built each path. Older numbers are kept with their dates; the current ones are in FOLO targets |
 | [Next optimisations](#next-optimisations) | What is known to be left |
 | [Results](#results) | Generated tables of every incumbent configuration |
@@ -263,6 +264,71 @@ launch-bound there.
 
 Note on f32: PyTorch's default fp32 lets cuDNN use TF32 for convolutions. A strict-f32 FOLO kernel should be compared
 against the `fp32-strict` rows. The default-fp32 rows are what users actually get from the incumbent.
+
+## Hill-climb 4 (2026-11-15): accuracy
+
+The fourth round worked on accuracy only; nothing in it moves a speed row. A frozen teacher (`folo-s-coco`) runs on
+the same augmented batch as the folo-n student, and two terms pull the student's raw head outputs towards the
+teacher's: a KL to its class probabilities (no temperature, no per-anchor weight) and a KL to its DFL box
+distributions at temperature T, weighted per anchor by the teacher's confidence. It is opt-in (`folo train --teacher`, #279, [docs/MODEL.md](MODEL.md) §8.9): without it
+training is bit-identical to before, and inference, export and `.folo` files do not change; the configuration (class
+gain 0.5, DFL gain 1.5, T 4) was chosen on a proxy and then run once on full COCO
+([notes/hill/r4-distill.md](notes/hill/r4-distill.md), which has the commands and the log of every number below).
+
+**Proxy P1** (20,000 train2017 / 2,000 val2017 images at 320 px, folo-n from scratch, 20 epochs, 3 seeds per arm;
+COCO AP of `best.folo` on the 2,000 proxy val images):
+
+| arm | AP mean | AP min-max | AP50 | AP75 |
+|---|---:|---:|---:|---:|
+| teacher (`t4`, chosen) | 0.1550 | 0.1538-0.1565 | 0.248 | 0.161 |
+| matching control, no teacher (`cls1`, the same total class gain 1.0) | 0.1281 | 0.1267-0.1296 | 0.213 | 0.131 |
+| defaults (`ctl`) | 0.1247 | 0.1238-0.1255 | 0.204 | 0.130 |
+
+**Full COCO** (val2017, 5000 images, 640 px, `folo val --coco`, one read each; pycocotools on the same detections
+gives the same numbers). The control is folo-n from scratch for 64 epochs under today's defaults (`auto` rule 5,
+MuSGD, AMP, seed 0); the fork is the control's epoch-32 checkpoint continued to epoch 64 with the teacher. Up to
+epoch 32 the two are one run, and the fork's first four batches of epoch 33 give the control's losses to every
+printed digit:
+
+| model | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
+|---|---:|---:|---:|---:|---:|---:|
+| control, epoch 64 (not published) | 0.3507 | 0.4996 | 0.3762 | 0.1672 | 0.3816 | 0.5043 |
+| **fork, teacher over epochs 33-64** (not published) | **0.3559** | 0.5087 | 0.3842 | 0.1711 | 0.3880 | 0.5128 |
+| `folo-n-coco-v3` (published; reproduces 0.340) | 0.3396 | 0.4874 | 0.3671 | 0.1629 | 0.3678 | 0.4943 |
+| `folo-s-coco`, the teacher (reproduces 0.416) | 0.4162 | 0.5798 | 0.4519 | 0.2289 | 0.4594 | 0.5845 |
+
+Paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1000 resamples):
+
+| difference | AP | 95% interval |
+|---|---:|---|
+| **fork - control: the distillation recipe** | **+0.0052** | [+0.0032, +0.0075] |
+| control - v3 | +0.0112 | [+0.0075, +0.0148] |
+| fork - v3 | +0.0164 | [+0.0129, +0.0197] |
+
+The recipe's gain is about a sixth of the proxy's against its defaults (+0.030; +0.027 against the matching control
+`cls1`) and 8% of the control's gap to the teacher; it shows in every AP column.
+
+**What is not shown.** One training seed per side: the intervals cover the sampling of the evaluation images, not
+the training seed. The fork had the teacher on epochs 33-64 only; a whole run with it from epoch 1 is not measured.
+Fork - control measures the whole recipe: the fork's supervised class gain stays 0.5 and the teacher's class term adds
+0.5, a total of 1.0 ([docs/MODEL.md](MODEL.md) §8.9), and full scale has no control at the same total class gain
+(the proxy's `cls1`). Control - v3 compares two recipes that differ in optimizer, schedule length and starting point
+(v3 is SGD: v2's 62 epochs from scratch, then 16 annealing epochs from v2's weights, 78 in all); it is not an
+ablation. The teacher was trained on train2017, the student's training set.
+The teacher's training cost is not measured cleanly (below). Nothing is published: the new weights are local files,
+and the downloadable folo-n is still v3 at 0.340.
+
+**Tried and lost** (proxy, seed 0): a mirrored-view consensus teacher (the teacher also run on the batch mirrored
+along W, both views averaged) gave 0.1533 against 0.1536 for one view, below its +0.003 bar, and was removed; a
+blended class target (`loss.cls_gain=0.25` + `distill.cls_gain=0.25`, the total class gain kept at 0.5) gave 0.1478,
++0.022 over its fair control but −0.006 against the teacher at total class gain 1.0 (0.1536).
+
+**What it cost.** On the proxy, under the shared load of the full-COCO control, an epoch took 38.5 s with the teacher
+against 14.1 s without (528 against 1,898 img/s): about 2.7 times per epoch, not profiled. On full COCO the fork's
+epochs 33-64 took 19,519 s of completed-epoch wall time (about 5.4 h, without the interrupted partial epochs) and
+the control's 11,211 s (about 3.1 h), on different days and each
+next to other lanes' jobs, CI runners and at times a game: that is not a cost ratio (in epochs 55-64 the fork's median
+epoch was shorter than the control's). No unloaded A/B was taken.
 
 ## Hill-climb 3 (2026-11-13)
 
@@ -923,6 +989,8 @@ the trainer's own mAP50-95 was still rising at its last epoch (0.3355, +0.0004).
 | folo-n v2, f16 (`--half`) | 2.6 M | the same weights | 0.317 | 0.458 | 0.343 | 0.153 | 0.344 | 0.453 |
 | **folo-n v3, f32** (`folo-n-coco-v3`) | 2.6 M | **v2 + 16 annealing epochs** (78 in all), SGD, AMP | **0.340** | 0.487 | 0.367 | 0.163 | 0.368 | 0.494 |
 | folo-n v3, f16 (`--half`, `folo-n-coco-v3-f16`) | 2.6 M | the same weights, fused f16 file | 0.339 | 0.487 | 0.367 | 0.163 | 0.367 | 0.494 |
+| folo-n control, f32 (**NOT PUBLISHED**, hill-climb 4) | 2.6 M | 64 epochs from scratch, `auto` rule 5 (MuSGD), AMP, seed 0 | 0.3507 | 0.4996 | 0.3762 | 0.1672 | 0.3816 | 0.5043 |
+| folo-n fork, f32 (**NOT PUBLISHED**, hill-climb 4) | 2.6 M | the control's epoch 32, then epochs 33-64 with the folo-s teacher (`--teacher`) | 0.3559 | 0.5087 | 0.3842 | 0.1711 | 0.3880 | 0.5128 |
 | YOLO11n (Ultralytics, published) | 2.6 M | Ultralytics recipe (not given on its model page) | 0.395 | | | | | |
 | YOLO26n (Ultralytics, published) | 2.4 M | 150 epochs Objects365-v1, then 245 epochs COCO, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.409 (e2e 0.401) | | | | | |
 
@@ -966,6 +1034,13 @@ reads a little lower than the pycocotools-exact AP of the tables):
 The speed rows above should be read with these gaps in mind. **The folo-n 0.314 / 0.317 are unchanged by the
 first two hill-climbs**: both checkpoints were trained with SGD before them; v3's 16 epochs used SGD as well (the
 original run's optimizer). folo-s is the first full-scale run with the hill-climb's trainer (the `auto` rule, MuSGD).
+
+**Hill-climb 4 (2026-11-15), not published.** The two rows marked NOT PUBLISHED are the first folo-n trained under
+the current defaults (the control: from scratch, 64 epochs, `auto` rule 5, MuSGD, AMP, seed 0) and the first
+distilled one (the fork: the control's epoch-32 checkpoint continued to epoch 64 with the frozen `folo-s-coco` as
+teacher, `folo train --teacher`). The teacher adds +0.0052 AP [+0.0032, +0.0075] over the control
+([Hill-climb 4](#hill-climb-4-2026-11-15-accuracy)). Their weights are local files only: the downloadable folo-n is
+still `folo-n-coco-v3` (0.340), which stays the number in the Summary and the charts until weights are published.
 
 **Box fusion, an option** (hill-climb 3, #257; docs/MODEL.md §9.4): `--fusion dfl --iou 0.65 --max-det 1000` on
 `folo val` and `folo predict` moves the four edges of each box NMS keeps to a weighted mean over the candidates of its
@@ -1642,8 +1717,10 @@ none of the numbered items and adds the list after them):
    the 80 px convs (26 on a plain GEMM of the same size, 31 on a 4096³ GEMM) and the f32 forward is still about 80%
    GEMM; register blocking or 128×64 / 64×128 f32 tiles with `BK` 16, tuned on conv shapes
    ([notes/hill/r2-gpu-gemm.md](notes/hill/r2-gpu-gemm.md)).
-3. **Accuracy at full scale**: a full COCO run under `auto` rule 5 (the folo-s COCO run used rule 3: momentum 0.9, no
-   bias warmup, step weights 0.2 / 1.0), then `loss.cls_gain` by class count (+4.5% on the 80-class proxy, −0.006 on
+3. **Accuracy at full scale**: the full COCO run under `auto` rule 5 is done (folo-n 0.3507, and 0.3559 with the
+   folo-s teacher over its second half; [Hill-climb 4](#hill-climb-4-2026-11-15-accuracy), not published). Open: a
+   whole distilled run with the teacher from epoch 1, a second seed per side, the teacher's training cost without
+   other load, publishing the weights; then `loss.cls_gain` by class count (+4.5% on the 80-class proxy, −0.006 on
    BCCD), `o2o_attached_epochs` with three seeds, an EMA time constant for short fine-tunes; BCCD is level with
    yolo26n (0.625 vs 0.626), likely limited by the pretrained weights it started from (v2, COCO AP 0.317 vs 0.409;
    v3's 0.340 has not been fine-tuned) ([notes/hill/r2-learn.md](notes/hill/r2-learn.md)). Post-hoc box

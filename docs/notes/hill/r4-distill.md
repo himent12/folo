@@ -185,42 +185,101 @@ the design predicted does not show at this distance from the teacher.
   teacher has seen every proxy training image with its labels, and the student is far from converged (proxy val
   AP 0.125 against the teacher's 0.322 at the same 320 px). A full-scale student (folo-n-coco-v3: 0.340 against
   folo-s's 0.416 on val2017) is much closer to its teacher; on the frozen models the counsel swaps measured +0.031
-  (scores) and +0.016 (boxes), which do not bound what training can give. The full-scale test (the COCO control's twin with `--teacher`) is pending.
-- No COCO val2017 number: val2017 is read once per final configuration, and no final configuration has been
-  trained at full scale.
+  (scores) and +0.016 (boxes), which do not bound what training can give. At full scale ("Full scale") the
+  teacher gave +0.0052 AP, a fifth of the proxy's gain.
+- The full-scale result has one seed per side: it rests on the paired bootstrap over val2017 images, which covers
+  the sampling of the evaluation images, not the training seed; the full-scale seed noise is not measured.
+- The full-scale fork had the teacher for the second half of the schedule only (epochs 33-64 of 64); a whole run
+  with the teacher from epoch 1 is not measured.
+- The teacher (folo-s-coco) was trained on all of train2017, the student's training set at full scale too: it has
+  seen every training image with its labels. val2017 is unseen by both.
+- Nothing is published: the full-scale weights stay local (`D:/folo-data/runs-hill4/weights/`), and `--teacher`
+  was not tuned at full scale (the proxy's configuration, one teacher).
 - The single-seed arms (`kc`, `kdl`, `flip`, `t4`, `blend`) differ from `kd-s0` by less than the gaps that matter
   only where stated; the seed noise of P1 is about 0.002 AP (the `ctl` and `cls1` ranges).
 - Speed is measured with the full-COCO control training on the same GPU (lane `base`'s run, hours long); the
   teacher's cost alone, unloaded, is not measured.
 
-## Leftovers: the full-scale test (proposed, not run)
+## Full scale
 
-Smaller leftovers: `kd` (T = 1) has one seed, so T = 4 over T = 1 is not shown beyond seed 0; doubled gains
-(the optional arm) were not tried; the cost split between the teacher forward and the loss path is not profiled; no
-unloaded speed A/B.
+**On full COCO the distillation recipe adds +0.0052 AP** (val2017, paired bootstrap over images, 95% [+0.0032,
++0.0075]) when it trains the second half of a 64-epoch folo-n run. This is the whole recipe against the defaults:
+the fork's total class gain is 1.0 (supervised 0.5 plus the teacher's 0.5) against the control's 0.5, and unlike
+the proxy (`cls1`) full scale has no control at the same total class gain.
 
-The control is lane `base`'s full-COCO run `D:/folo-data/runs-hill4/coco/n-r5-ctl` (folo-n from scratch, 640 px,
-64 epochs, batch 16 x accumulate 4, AMP, seed 0, origin/main 1436ad68). Two forms of its distillation twin:
+The control is the full-COCO run `D:/folo-data/runs-hill4/coco/n-r5-ctl`: folo-n from scratch on train2017,
+`auto` rule 5 (MuSGD), 64 epochs, 640 px, batch 16 x accumulate 4, AMP, EMA, seed 0, origin/main 1436ad68. The fork
+`D:/folo-data/runs-hill4/coco/n-r5-kd-e32` is the control's epoch-32 checkpoint (the proposal's fork, taken at the
+half of the schedule instead of epoch 48) continued for epochs 33-64 with `--teacher D:/folo-data/runs-hill4/teachers/folo-s-coco.folo`
+(class gain 0.5, DFL gain 1.5, T 4, as the run log `coco/logs/n-r5-kd-e32.out` and the fork's `config.json`
+record). The binary is recorded as built from branch `vision/distill` 18008617 (`bin/folo-kd.txt`, sha256
+58a814ea...); its `--version` prints the previous commit fb99dd5892cb, a stale version string not checked by a
+rebuild:
+```
+folo train --resume D:/folo-data/runs-hill4/coco/n-r5-kd-e32/weights/last.folo \
+  --teacher D:/folo-data/runs-hill4/teachers/folo-s-coco.folo --data D:/folo-data/coco --format coco \
+  --workers 16 --device gpu:0
+```
+The control continuing past epoch 32 is its exact twin: the same weights, optimizer, EMA, schedule and loss scale
+at epoch 32, and the same batches afterwards (they depend on seed and epoch only). Checked: batches 1-4 of epoch
+33, before the first optimizer step, give the control's losses to every printed digit; from batch 5 they differ by
+the teacher's gradient. The fork was interrupted three times (two Ctrl+C deaths of its console, one reboot) and
+resumed each time from its last epoch, redoing the interrupted epoch from its start. Both runs ended at 64 epochs
+with exit 0; in both `best.folo` is `last.folo` (epoch 64).
 
-- **(A) the fork.** A watcher copies the control's epoch-48 checkpoint to `D:/folo-data/runs-hill4/coco/n-r5-ctl-e48/`.
-  Copy that folder (the copy is the fork, the snapshot stays untouched) and resume it with the teacher for the last
-  16 epochs (the close-mosaic phase starts at epoch 55):
-  ```
-  folo train --resume <copy>/weights/last.folo --teacher D:/folo-data/runs-hill4/teachers/folo-s-coco.folo \
-    --data D:/folo-data/coco --workers 16 --device gpu:0
-  ```
-  The control continuing past epoch 48 without a teacher is its exact twin (same weights, same batches), so the
-  difference is distillation over the last quarter of the schedule only; how it relates to a whole run is untested.
-  It is available a few hours after the control ends.
-- **(B) a whole run.** The control's command with `--teacher ... --name n-r5-kd`: the same seed and batches from
-  epoch 1, the clean comparison, about four times the wall time of (A).
+**val2017** (5000 images, 640 px, `folo val --coco --save-json` of each run's epoch-64 EMA weights exported with
+`folo export --format weights`, one read each, one binary; pycocotools on the same detections gives the same
+numbers):
 
-Cost projection. The proxy's teacher forward took an epoch from 14 s to 38 s (1,898 to 528 img/s at epoch end,
-`off-s0` against `kd-s0`, both with the COCO control on the same GPU, so the ratio is uncertain); the folo-s
-forward at 640 px costs about as much per pixel. The control runs about 270 s per epoch alone, so a distillation
-epoch at full scale is projected at 540-730 s alone (2-2.7x): (A) 16 epochs in about 2.5-3.5 h, (B) 64 epochs in
-about 10-13 h, each with the GPU to itself. Both read COCO val2017 once at the end (`folo val --coco` of
-`best.folo`, against the control's same read).
+| model | AP | AP50 | AP75 | AP_S | AP_M | AP_L | AR100 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| control, epoch 64 | 0.3507 | 0.4996 | 0.3762 | 0.1672 | 0.3816 | 0.5043 | 0.5670 |
+| **fork (teacher from epoch 33), epoch 64** | **0.3559** | **0.5087** | **0.3842** | 0.1711 | 0.3880 | 0.5128 | 0.5662 |
+| folo-n-coco-v3 (published; protocol check) | 0.3396 | 0.4874 | 0.3671 | 0.1629 | 0.3678 | 0.4943 | 0.5649 |
+| folo-s-coco (the teacher; protocol check) | 0.4162 | 0.5798 | 0.4519 | 0.2289 | 0.4594 | 0.5845 | 0.6164 |
+
+The two published files reproduce their published 0.340 and 0.416, so the protocol is the published one.
+
+Paired bootstrap over the 5000 images (hill-climb 3's `bench/fusion/bootstrap.py`, 1000 resamples, seed 0, AP):
+
+| difference | AP | 95% interval |
+|---|---:|---|
+| **fork - control: the teacher over epochs 33-64** | **+0.0052** | [+0.0032, +0.0075] |
+| control - v3: the rule-5 recipe at 64 epochs against v3's SGD at 78 | +0.0112 | [+0.0075, +0.0148] |
+| fork - v3 | +0.0164 | [+0.0129, +0.0197] |
+
+No resample gave a difference of zero or less in any of the three. The gain is in every AP column (AP50 +0.009,
+AP75 +0.008, AP_S +0.004, AP_M +0.006, AP_L +0.009); AR100 is unchanged (-0.0008). It is 8% of the control's gap
+to the teacher (0.0655), far below the proxy's +0.027 against its matching control: as expected, the proxy
+flattered distillation.
+
+**Curves** (internal mAP50-95 of the EMA weights, from each run's `metrics.jsonl`):
+
+| epoch | 32 | 36 | 40 | 44 | 48 | 52 | 56 | 59 | 60 | 61 | 62 | 63 | 64 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| control | 0.3141 | 0.3196 | 0.3250 | 0.3297 | 0.3334 | 0.3370 | 0.3409 | 0.3431 | 0.3439 | 0.3449 | 0.3457 | 0.3463 | 0.3470 |
+| fork | 0.3141 | 0.3217 | 0.3275 | 0.3322 | 0.3371 | 0.3411 | 0.3454 | 0.3484 | 0.3492 | 0.3501 | 0.3513 | 0.3519 | 0.3523 |
+| fork - control | 0 | +0.0021 | +0.0025 | +0.0025 | +0.0036 | +0.0041 | +0.0045 | +0.0053 | +0.0053 | +0.0052 | +0.0056 | +0.0055 | +0.0053 |
+
+The fork leads from its first epoch (+0.0010 at 33); the lead grows to about epoch 58 and then holds at +0.005,
+so a longer teacher phase may add more, but the flat end does not promise it. The distillation terms (the epoch's
+mean over 7393 batches) fall steadily from class 0.519 / DFL 0.577 at epoch 33 to 0.363 / 0.382 at 54, jump to
+0.407 / 0.461 at 55 when mosaic turns off (close_mosaic 10), and fall again to 0.326 / 0.379 at 64. Every term
+and every batch was finite in both runs. Mixed precision skipped 23 optimizer steps in the control's epochs 33-64
+and 25 in the fork's (at most 2 in an epoch); the fork's loss scale settled one halving lower.
+
+Wall time is not a cost number here: the two halves did not run at the same time (the control's epochs 33-64 on
+the evening of 2026-11-14, the fork's the next day), and each shared the GPU with other lanes' jobs, CI runners and
+at times a game, in unknown shares. Epochs 33-64 took 11,211 s in the control (median 246 s) and 19,519 s in the
+fork (median 616 s), without the fork's interrupted partial epochs; in epochs 55-64 the fork's median (401 s) was
+below the control's (434 s), which only load explains. The proxy's 2.7x per epoch under load stays the only ratio.
+
+Logs: `D:/folo-data/runs-hill4/coco/eval/` (val logs, detections, the scripts), `coco/logs/final-*.log`; weights
+(not published) in `D:/folo-data/runs-hill4/weights/` with a README and SHA256SUMS. Leftovers: a whole run with
+the teacher from epoch 1 (the clean comparison; its full-scale overhead is not measured); a full-scale control at
+total class gain 1.0; more seeds per side; `kd` (T = 1)
+has one proxy seed, so T = 4 over T = 1 is not shown beyond seed 0; doubled gains were not tried; the cost split
+between the teacher forward and the loss path is not profiled; no unloaded speed A/B.
 
 ## Cost
 
