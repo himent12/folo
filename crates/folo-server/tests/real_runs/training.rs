@@ -431,6 +431,28 @@ async fn train_evaluate_predict_and_reload() {
         err(&app, get(&format!("/api/models/{model_id}/eval")), StatusCode::BAD_REQUEST, "invalid_dataset")
             .await;
     assert!(e.message.contains("same order"), "{}", e.message);
+    std::fs::write(&yaml, &text).unwrap();
+
+    // The dataset's folder moved away: `/eval` says so (registered or not), never "pass the dataset root".
+    let eval_uri = format!("/api/models/{model_id}/eval");
+    let (tiny_dir, moved) = (home.join("datasets/tiny"), home.join("datasets/tiny-moved"));
+    std::fs::rename(&tiny_dir, &moved).unwrap();
+    let e = err(&app, get(&eval_uri), StatusCode::NOT_FOUND, "path_not_found").await;
+    assert!(e.message.starts_with("the folder of dataset 'tiny' is gone"), "{}", e.message);
+    assert!(e.hint.unwrap().contains("move the folder back"));
+    let (status, _) = send(&app, delete(&format!("/api/datasets/{}", ds.id))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let e = err(&app, get(&eval_uri), StatusCode::NOT_FOUND, "path_not_found").await;
+    assert!(
+        e.message.starts_with("the folder of dataset 'tiny' this model trained on is gone"),
+        "{}",
+        e.message
+    );
+    assert!(!e.hint.as_deref().unwrap().contains("dataset root"), "{:?}", e.hint);
+    // Back in place: evaluated on the path it trained on.
+    std::fs::rename(&moved, &tiny_dir).unwrap();
+    let again: ModelEval = ok(&app, get(&eval_uri)).await;
+    assert_eq!(again.images, eval.images);
 }
 
 /// A `multipart/form-data` predict request.

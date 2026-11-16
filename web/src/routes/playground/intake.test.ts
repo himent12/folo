@@ -45,6 +45,15 @@ describe('takeImage', () => {
     });
     expect(await takeImage(new Blob(['text'], { type: 'text/plain' }), 'notes.txt')).toEqual({ error: 'notes.txt is not an image. Use a JPEG, PNG, BMP or WebP file.' });
   });
+
+  // s4-models-2: a JPEG cut short was told "Use a JPEG ... file".
+  it('calls a file of a readable format that does not decode damaged, not the wrong format', async () => {
+    vi.stubGlobal('createImageBitmap', async () => {
+      throw new Error('truncated');
+    });
+    const cut = new Blob([bytes(0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46)], { type: 'image/jpeg' });
+    expect(await takeImage(cut, 'truncated-half.jpg')).toEqual({ error: 'truncated-half.jpg could not be decoded: the file may be truncated or damaged.' });
+  });
 });
 
 describe('droppedImages', () => {

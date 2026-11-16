@@ -39,8 +39,8 @@ import Callout from './run/Callout';
 import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
 import { media } from '$lib/design/tokens';
 import KpiSummary from './model/KpiSummary';
-import DetailsList from './model/DetailsList';
-import { weightsEpoch } from './model/weightsEpoch';
+import DetailsList, { type ModelContext } from './model/DetailsList';
+import { finishedEpochs, weightsEpoch } from './model/weightsEpoch';
 import ConfusionPanel from './model/ConfusionPanel';
 
 export default function Model() {
@@ -67,15 +67,20 @@ export default function Model() {
       { id: 'model-copy-id', label: 'Copy model id', match: [m.id], icon: Copy, run: () => void copyText(m.id, 'model id') },
     ];
   });
-  const context = new Resource<{ run: Run | null; dataset: Dataset | null; parent: ModelT | null }>(async (s) => {
+  // `epochs`: how many the run finished (model/weightsEpoch `finishedEpochs`); null while not known.
+  const context = new Resource<ModelContext>(async (s) => {
     const rid = runId.get();
-    if (!rid) return { run: null, dataset: null, parent: null };
+    if (!rid) return { run: null, dataset: null, parent: null, epochs: null };
     const run = await hub.api.run(rid, s).catch(() => null);
+    // Every epoch and (with `every` at the run's step count) next to no steps.
+    const epochs = run ? await hub.api.runMetrics(rid, s, Math.max(1, run.step)).then((h) => finishedEpochs(run, h.epochs), () => finishedEpochs(run, null)) : null;
     const dataset = run ? await hub.api.dataset(run.config.dataset_id, s).catch(() => null) : null;
     const from = origin(run?.config.weights);
     const parent = from.kind === 'model' ? await hub.api.model(from.id, s).catch(() => null) : null;
-    return { run, dataset, parent };
+    return { run, dataset, parent, epochs };
   });
+  // A run resumed elsewhere that ends changes the models: the run and its epochs are read again with them.
+  refreshOnModelsChange(context);
   const lineage = computed(() => {
     const c = context.data;
     return c?.run ? origin(c.run.config.weights, c.parent ? [c.parent] : []) : null;
@@ -87,6 +92,16 @@ export default function Model() {
   const tp = new Resource((s) => loadThroughput(hub.api, s));
   /** No registered dataset has this model's classes (an imported file): nothing to evaluate on, and no retry helps. */
   const unevaluable = computed(() => evaluation.error instanceof ApiError && evaluation.error.code === 'no_matching_dataset');
+  /**
+   * The dataset's folder is gone (`404 path_not_found`, "the folder of dataset '…' is gone", docs/API.md): the way back,
+   * in this page's terms; the server's hint names endpoints, so ErrorState keeps it with the details.
+   */
+  const evalHint = computed(() => {
+    const e = evaluation.error;
+    return e instanceof ApiError && e.code === 'path_not_found' && /\bis gone\b/.test(e.message)
+      ? 'Move the dataset’s folder back where it was, then Retry.'
+      : undefined;
+  });
   const notEvaluated = () => (
     <EmptyState
       title="Not evaluated"
@@ -190,6 +205,7 @@ export default function Model() {
 
   const m = () => model.data!;
   const run = () => context.data?.run;
+  const done = () => context.data?.epochs ?? null;
   const head = () => m().head ?? 'o2m';
 
   // Where the weights started: the run's `weights`, a model (linked), an imported file, or nothing.
@@ -214,7 +230,7 @@ export default function Model() {
               {run()?.name ?? m().run_id}
             </a>
           </span>
-          {weightsEpoch(m(), run()) ? <span>{weightsEpoch(m(), run())}</span> : null}
+          {weightsEpoch(m(), run(), done()) ? <span>{weightsEpoch(m(), run(), done())}</span> : null}
           {lineageNote()}
         </>
       ) : m().source === 'published' ? (
@@ -375,7 +391,7 @@ export default function Model() {
                   ) : unevaluable.get() ? (
                     notEvaluated()
                   ) : evaluation.error ? (
-                    <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
+                    <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" hint={evalHint.get()} />
                   ) : (
                     <div class="sk">
                       <Skeleton h="24px" w="200px" />
@@ -401,7 +417,7 @@ export default function Model() {
                       notEvaluated()
                     ) : evaluation.error ? (
                       // The failure is said in the section the reader is on: the curves are another section here.
-                      <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
+                      <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" hint={evalHint.get()} />
                     ) : (
                       <div class="sk">
                         {[0, 1, 2, 3, 4, 5].map(() => (

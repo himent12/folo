@@ -127,10 +127,13 @@ fn connections_offers_and_instances_from_the_command_line() {
     let (code, none, _) = cloud(&home, &["instances"], &[], "");
     assert_eq!((code, none.len()), (0, 0));
     assert_eq!(failure(&home, &["terminate", "ci_none"], 3), "instance_not_found");
+    // Ended an hour ago, after an hour: within the week the ledger keeps an ended record whatever today's date, and
+    // both times count from the same whole second, so the hour is exact and costs exactly its price.
+    let now = unix_secs();
     let record = json!({ "id": "ci_0001", "connection_id": id, "provider": "runpod", "provider_ref": "pod1",
                          "name": "folo-run_1-abcd", "run_id": "run_1",
                          "offer": { "id": "o", "gpu": "RTX 4090", "price_per_hour": 0.69 },
-                         "status": "terminated", "created": "2026-11-09T00:00:00Z", "ended": "2026-11-09T01:00:00Z" });
+                         "status": "terminated", "created": rfc3339(now - 7200), "ended": rfc3339(now - 3600) });
     std::fs::create_dir_all(home.join("cloud").join("instances")).unwrap();
     std::fs::write(home.join("cloud").join("instances").join("ci_0001.json"), record.to_string()).unwrap();
     let (_, listed, _) = cloud(&home, &["instances"], &[], "");
@@ -144,6 +147,26 @@ fn connections_offers_and_instances_from_the_command_line() {
     let human = folo_cmd().args(["cloud", "connections", "--data-dir"]).arg(&home).output().unwrap();
     let shown = String::from_utf8(human.stdout).unwrap();
     assert!(shown.starts_with("ID ") && shown.contains("box") && !shown.contains(TOKEN), "{shown}");
+}
+
+/// Whole seconds since the Unix epoch now.
+fn unix_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// Unix seconds as the ledger writes times (`YYYY-MM-DDTHH:MM:SSZ`, UTC).
+fn rfc3339(secs: i64) -> String {
+    let (days, tod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", tod / 3600, (tod / 60) % 60, tod % 60)
 }
 
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
