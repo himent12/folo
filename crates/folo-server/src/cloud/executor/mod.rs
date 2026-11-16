@@ -102,7 +102,8 @@ pub(crate) fn spawn(core: Arc<Core>, job: Job, lock: RunLock, mode: Mode) -> std
 /// Ends an active cloud run a previous process left that this one cannot follow (`why`: its connection is gone):
 /// `stopped`, with a warning that its instance may still run.
 pub(crate) fn abandon(core: &Core, entry: &Arc<RunEntry>, why: &str) -> Result<()> {
-    let dir = core.run_dir(entry.id());
+    let dir = entry.dir().to_path_buf();
+    core.follow_dir(entry.id(), &dir);
     let lock = files::try_lock_run(&dir)
         .map_err(|e| {
             crate::error::Error::io(format!("locking {}: {e}", files::run_lock_path(&dir).display()))

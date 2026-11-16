@@ -29,6 +29,8 @@ impl Runs {
             for d in dirs {
                 let path = d.join("run.json");
                 if !path.is_file() {
+                    // It may be a copy whose run.json is moved aside for now (f3-server-ci review round 3).
+                    unknown.push(d);
                     continue;
                 }
                 match std::fs::read(&path)

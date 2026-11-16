@@ -81,10 +81,12 @@ out through `Store::labeler` and `Store::benches`; the mock has neither.
   an id already loaded: the folder named after the id is the run). Labeling jobs (`label/`) and benchmarks (`bench/`)
   skip copies the same way, picked by the id in `job.json` / `bench.json` before anything loads them
   (`util::folders_by_id`): a copy whose record the loader takes wins over an original it refuses. When there is a
-  choice (copies of the id, or a record that cannot be read at all), the folder loaded gets a rank in `.folo-chosen`
-  above the others' (`util::choose`), and the highest rank goes first at the next start in all three stores: a copy
-  loaded in place of an original that did not load stays the record once the original reads again, so the work saved
-  to it is not hidden. A file in place of
+  choice (copies of the id, a record that cannot be read at all, or a folder without its record), the folder loaded
+  gets a rank in `.folo-chosen` above the others' once it loaded (`util::choose`: the time of the choice, or one above
+  the highest rank read), and the highest rank goes first at the next start in all three stores: a copy loaded in place
+  of an original that did not load stays the record once the original reads again, so the work saved to it is not
+  hidden. A folder that cannot take the rank is loaded all the same. A cloud run loaded from a copy is followed, locked
+  and reaped by that folder (`cloud::Core::follow_dir`). A file in place of
   `runs/`, `label/`, `bench/`, `datasets/`, `models/` or `uploads/` would be read as an empty folder: `folo serve`
   refuses to start instead, naming it (`RealStore::check_layout`).
 - The trainer's event sink is `RunEntry::on_event` (`runs/entry.rs`): it updates the run, persists what matters and

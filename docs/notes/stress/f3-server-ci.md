@@ -114,6 +114,20 @@ chosen and saved to 16, its `job.json` made unparsable, the backup edited, the o
 `the_copy_loaded_in_place_of_an_unreadable_run_stays_the_run`; `tests/bench/restarts.rs`
 `a_damaged_benchmark_record_does_not_hide_its_backup` (now ends with the original intact again).
 
+Review round 3 (re-review 2): (a) a rank that could not be read counted as 0, so a backup ranked 1 lost to an original
+ranked 7 once that read again: a rank is now the time of the choice (nanoseconds) when higher than the ranks read, so it
+outranks one written at an earlier choice, readable or not (unless the clock went back). (b) The rank was written before
+the load, so a start where every copy failed (recovery not written back) promoted a stale original: `load_first` marks
+a folder only after it loaded. (c) A folder without its record (moved aside) was not a neighbour, so a lone backup got
+no rank: folders without the record are `Folders::unknown` too (`runs/registry.rs` likewise). (d) A folder that could
+not take its rank was skipped, so one damaged record anywhere hid healthy records in read-only folders: the record now
+loads all the same (a folder that takes no writes saves no work to shadow). (e) Cloud: the reaper and `abandon` looked
+for `cloud.lock` in `runs/<id>` while a run loaded from a copy locks its own folder, so the reaper terminated a followed
+instance (also on main whenever a copy was loaded): `Cloud::start` and `abandon` note the run's folder
+(`Core::follow_dir`) and `Core::run_dir` answers it. Test: `util.rs`
+`the_copy_loaded_stays_chosen_whatever_hid_the_original` (a, b, c, d; the unreadable marker is a folder in its place).
+(e) has no test of its own: a cloud test with a copied run folder needs the harness to resume from a copy.
+
 ## Gates
 
 All passed locally: root `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
