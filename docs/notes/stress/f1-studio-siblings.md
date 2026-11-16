@@ -16,12 +16,34 @@ re-checked on main before fixing; none had been fixed by another lane (s5-label 
 | f1-studio-siblings-5 | s2-runs-7 | polish | `#/runs/new?from=<unknown run>` toasted the server's agent hint ("list_runs (MCP) or GET /api/runs ...") and the toast outlived the link. `errorDetail` leaves agent hints out (`forAgents`, now in `toast.ts`, shared with `ErrorState`); a `run_not_found` says "Run to copy not found"; the toast is keyed and cleared when the form goes. | `web/src/lib/ui/toast.ts`, `web/src/lib/ui/ErrorState.tsx`, `web/src/routes/RunNew.tsx` | `web/src/routes/RunNew.test.tsx` |
 | f1-studio-siblings-6 | d1-datasets review | polish | "1 images" in dataset health; the same plural slip in the New run summary, Overview's also-running card, the Label jobs list and the command palette. | `web/src/routes/dataset/health.ts`, `runnew/summary.ts`, `overview/AlsoRunning.tsx`, `LabelJobs.tsx`, `lib/shell/CommandPalette.tsx` | `web/src/routes/dataset/health.test.ts` |
 
+## Review round 1 (PR #287)
+
+- f1-2 compared the device as a string, so a run created over the API with `gpu:00` (or `GPU:0`, `cuda:0`, `gpu`,
+  all read by the trainer as GPU 0) was called gone on copy. `canonicalDevice` (`runnew/device.ts`) now names every
+  spelling `resolve_device` accepts as the select does; the copy, the draft and `missingDevice` use it
+  (`runnew/device.test.ts`, `RunNew.test.tsx`).
+- f1-5 dropped a whole hint that named an endpoint, remedy and all ("label images first: POST /api/…/start, or draw
+  boxes by hand"). `humanHint` (`lib/ui/toast.ts`) keeps the clauses a user can act on and drops the endpoints; toasts,
+  dialog feedback (`errorDetail`) and `ErrorState` use it; the full hint stays in ErrorState's details
+  (`lib/ui/toast.test.ts`).
+- SIBLING of f1-4 on New run: the form read the datasets once, so one removed in another window stayed picked with
+  Start on. It now polls the list alone every 5 s (the request the Run page polls) and reads every dataset's stats
+  again only when the list changed, and again on a `dataset_not_found` from Start; the picker names the removed dataset
+  and Start stays off (`RunNew.test.tsx`).
+- f1-6 left "1 images" in the Label jobs footer and in six more Studio strings (labeling agent progress, the New run
+  estimate's validation row, the loop dialog's job options, a bench entry's running pill, accuracy and self-label
+  captions): all use `count` now (`label/labeling.test.tsx`). The same slip in Desktop (`apps/desktop/src/ui/format.rs:102`,
+  `screens/models/confusion.rs:344`, `screens/bench/page.rs:57`, `screens/bench/entry.rs:81`,
+  `screens/bench/entry_images.rs:134`) is SIBLING, deferred: outside this Studio lane.
+- f1-3's tests now fail on main: the 404 closes the stream before the page goes, late events are ignored, and a 404 on
+  the history load of a `reload` ends the job without the re-sync retrying.
+
 ## Notes and what stays open
 - The deadline (45 s) follows the server's keep-alive interval (15 s, docs/API.md) and Desktop's choice in PR #273. A
   server or proxy that strips SSE comments and sends no events for 45 s gets its stream reopened every 45 s: harmless
   (the view re-reads its history) but visible as a short "reconnecting".
 - `fetch` streams send the page's cookies like EventSource did (same origin); no auth header was involved before or after.
-- The Run page's datasets poll costs one `GET /api/datasets` per 5 s per open Run page; a server-pushed datasets
+- The datasets poll costs one `GET /api/datasets` per 5 s per open Run or New run page; a server-pushed datasets
   change would be better but is a design change (deferred).
 - Not run: the app against a live server, a real stalling proxy. The behaviour is covered by fake-timer tests only.
 

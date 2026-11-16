@@ -9,8 +9,24 @@ import { deviceName } from '$lib/format';
  * `nr_device_gone`). Unknown until the list has loaded.
  */
 export function missingDevice(device: string, system: SystemInfo | undefined): { device: string; gone: boolean; detail: string } | null {
-  if (!system || !device.startsWith('gpu:') || system.gpus.some((g) => `gpu:${g.ordinal}` === device)) return null;
+  const d = canonicalDevice(device);
+  if (!system || !d.startsWith('gpu:') || system.gpus.some((g) => `gpu:${g.ordinal}` === d)) return null;
   return { device, gone: true, detail: '' };
+}
+
+/**
+ * A device as the form's select names it, from any spelling the trainer accepts (`resolve_device` in
+ * crates/folo-vision/src/train/config.rs): `GPU:00`, `cuda:1`, `gpu` and ` CPU ` become `gpu:0`, `gpu:1`, `gpu:0` and
+ * `cpu`; a run created over the API keeps its own spelling, and a copy of it must not read as a GPU that is gone.
+ * Anything else is kept as it is (the server says what is wrong with it).
+ */
+export function canonicalDevice(device: string): string {
+  const s = device.trim().toLowerCase();
+  if (s === 'cpu') return 'cpu';
+  if (s === 'auto' || s === '') return 'auto';
+  if (s === 'gpu' || s === 'cuda') return 'gpu:0';
+  const m = /^(?:gpu|cuda):\+?(\d+)$/.exec(s);
+  return m && Number.isSafeInteger(Number(m[1])) ? `gpu:${Number(m[1])}` : device;
 }
 
 /** A device in a sentence, named once with its value: "Auto", "GPU 1 (gpu:1)", "CPU" (values elsewhere: `gpu:1`). */

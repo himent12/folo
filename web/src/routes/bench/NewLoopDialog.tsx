@@ -21,7 +21,7 @@ import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { Arch, Bench, BenchEntry, BenchLoop, BenchSelfLabeling, Dataset, LabelJob, Model, Split, StartBenchLoop } from '$lib/api/types';
 import { GENERATIONS_MAX } from '$lib/bench/rules';
-import { conf, num } from '$lib/format';
+import { conf, count, num } from '$lib/format';
 import { FROM_SCRATCH } from '$lib/lineage';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -374,7 +374,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     const d = dataset.get();
     return (['train', 'val', 'test'] as const).map((s) => ({ value: s, label: SPLIT_WORD[s], meta: d ? num(d.splits[s]) : undefined }));
   });
-  const jobOptions = computed(() => (props.jobs ?? []).map((j) => ({ value: j.id, label: `${j.name} · ${num(j.counts.images)} images`, short: j.name })));
+  const jobOptions = computed(() => (props.jobs ?? []).map((j) => ({ value: j.id, label: `${j.name} · ${count(j.counts.images, 'image')}`, short: j.name })));
   const teacherHint = computed(() => {
     const t = teacher.get();
     return t && eligible(t)

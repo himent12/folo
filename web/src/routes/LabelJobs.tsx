@@ -8,7 +8,7 @@ import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { LabelJob } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
-import { ago, num } from '$lib/format';
+import { ago, count as counted, num } from '$lib/format';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
@@ -240,7 +240,7 @@ export default function LabelJobs() {
                                   <Progress
                                     value={j().counts.images ? j().counts.labeled / j().counts.images : 0}
                                     tone={filterOf(j()) === 'active' ? 'accent' : 'neutral'}
-                                    label={`${num(j().counts.labeled)} of ${num(j().counts.images)} ${j().counts.images === 1 ? 'image' : 'images'} labeled`}
+                                    label={`${num(j().counts.labeled)} of ${counted(j().counts.images, 'image')} labeled`}
                                   />
                                 </span>
                               </td>
@@ -321,7 +321,7 @@ export default function LabelJobs() {
                     {shown.get().length < jobs.data!.length ? `${shown.get().length} of ${jobs.data!.length}` : shown.get().length}{' '}
                     {jobs.data!.length === 1 ? 'job' : 'jobs'}
                   </span>
-                  <span>{num(totals.get().images)} images</span>
+                  <span>{counted(totals.get().images, 'image')}</span>
                   <span>{num(totals.get().labeled)} labeled</span>
                 </Meta>
               </p>

@@ -13,7 +13,7 @@ import { href } from '$lib/router';
 import Button from './Button';
 import CodeText from './CodeText';
 import { isOffline } from './offline';
-import { forAgents } from './toast';
+import { forAgents, humanHint } from './toast';
 
 /**
  * The things a link can point at that may have been deleted since, by the server's `404 <what>_not_found` code: what
@@ -127,8 +127,10 @@ export default function ErrorState(props: ErrorStateProps) {
   const hint = computed(() => {
     if (offline.get()) return 'Start `folo serve`, or check the server URL.';
     if (gone.get()) return undefined;
-    const s = serverHint.get();
-    return props.hint ?? (s && !forAgents(s) ? s : undefined);
+    if (props.hint) return props.hint;
+    // What a user can do of the server's hint; what it says for agents goes to the details (below).
+    const h = props.error instanceof ApiError && props.error.hint ? humanHint(props.error.hint) : null;
+    return h ? sentence(h) : undefined;
   });
   const code = computed(() =>
     props.error instanceof ApiError ? `${props.error.code}${props.error.status ? ` · HTTP ${props.error.status}` : ''}` : undefined,

@@ -330,7 +330,19 @@ describe('LiveLabelJob ordering', () => {
     stop();
   });
 
-  it('shows a job deleted before the page opened as gone, without retrying', async () => {
+  /** The stream's unsubscribe, as a spy: the job's end closes it, not the page going away. */
+  function spyClose() {
+    const closes = vi.fn();
+    const events = hub.api.labelEvents;
+    hub.api.labelEvents = (id, h) => {
+      events(id, h);
+      return closes;
+    };
+    return closes;
+  }
+
+  it('shows a job deleted before the page opened as gone, closes its stream and ignores what comes late', async () => {
+    const closes = spyClose();
     const gone = new ApiError(404, 'label_job_not_found', 'No labeling job with id lb_1.');
     const asked = vi.fn(() => Promise.reject(gone));
     hub.api.labelJob = asked;
@@ -338,9 +350,43 @@ describe('LiveLabelJob ordering', () => {
     page.resolve({ total: 0, images: [] });
     await vi.advanceTimersByTimeAsync(0);
     expect(live.error).toBe(gone);
+    // Closed by the 404 itself, before the page goes (main left the stream retrying under the error).
+    expect(closes).toHaveBeenCalledOnce();
+    expect(live.connection).toBe('idle');
     handlers.connection?.('reconnecting');
+    handlers.job?.(job('running'));
+    handlers.image?.(img('9'));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(live.job).toBeUndefined();
+    expect(live.images).toEqual([]);
+    expect(live.connection).toBe('idle');
+    expect(live.lost).toBeNull();
+    expect(asked).toHaveBeenCalledOnce();
+    stop();
+  });
+
+  it('notices a job deleted elsewhere when the stream asks for a reload and the history answers 404', async () => {
+    const closes = spyClose();
+    const { live, stop } = mount();
+    page.resolve({ total: 1, images: [img('1')] });
+    await vi.advanceTimersByTimeAsync(0);
+    handlers.connection?.('open');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.job?.id).toBe('lb_1');
+    const gone = new ApiError(404, 'label_job_not_found', 'No labeling job with id lb_1.');
+    const asked = vi.fn(() => Promise.reject(gone));
+    hub.api.labelJob = asked;
+    handlers.reload?.({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.error).toBe(gone);
+    expect(live.job).toBeUndefined();
+    expect(live.images).toEqual([]);
+    expect(closes).toHaveBeenCalledOnce();
+    // No re-sync retries a gone job (the sync's backoff would ask again within 15 s).
+    handlers.job?.(job('running'));
     await vi.advanceTimersByTimeAsync(60_000);
     expect(asked).toHaveBeenCalledOnce();
+    expect(live.job).toBeUndefined();
     stop();
   });
 });

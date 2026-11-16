@@ -12,7 +12,7 @@ import type { BenchEntry, BenchResult } from '$lib/api/types';
 import { TARGET_PRECISION } from '$lib/bench/rules';
 import XYChart from '$lib/charts/XYChart';
 import { media } from '$lib/design/tokens';
-import { conf, num, pct } from '$lib/format';
+import { conf, count, num, pct } from '$lib/format';
 import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
 import { labelCurves, labelPointAt } from '../charts';
@@ -160,7 +160,7 @@ export default function SelfLabelSection(props: SelfLabelSectionProps) {
                 )}
               </For>
               <p class="one-cap">
-                The mark on the first bar is the 90% a label set to train on needs. {labelsText(one.get()!.labels)} on {num(props.entry.images)} images
+                The mark on the first bar is the 90% a label set to train on needs. {labelsText(one.get()!.labels)} on {count(props.entry.images, 'image')}
                 {one.get()!.labels < MIN_LABELS ? <>: too few to rest a label set on (it takes at least {MIN_LABELS})</> : null}.
               </p>
             </div>

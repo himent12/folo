@@ -149,6 +149,20 @@ describe('New run: a device the server cannot use', () => {
     expect(target.querySelector('#start-why')).toBeNull();
   });
 
+  // PR #287 review: a run created over the API keeps its own spelling of the device ("GPU:00", which the trainer reads
+  // as gpu:0); its copy is the GPU the list names, not one that is gone.
+  it('reads a copied run whose device is spelled another way the trainer accepts as the GPU the list names', async () => {
+    const run = api.run.bind(api);
+    vi.spyOn(api, 'run').mockImplementation(async (id: string) => {
+      const r = await run(id);
+      return { ...r, config: { ...r.config, device: ' GPU:00' as typeof r.config.device } };
+    });
+    await open('?from=run_a2f0');
+    await until(() => target.querySelector<HTMLSelectElement>('select#device')!.value === 'gpu:0', 'the copied device');
+    expect(target.querySelector('#device-error')).toBeNull();
+    expect(target.querySelector('#start-why')?.textContent ?? '').not.toContain('Device');
+  });
+
   it('treats a 501 for a GPU from servers before device_not_found the same way', async () => {
     await open();
     pick('gpu:0');
@@ -830,6 +844,26 @@ describe('New run from a run that does not exist', () => {
     unmount(c!);
     c = undefined;
     expect(toast.items.find((x) => x.title === 'Run to copy not found')).toBeUndefined();
+  });
+
+  // PR #287 review (sibling of s3-live-3): the form read the datasets once, so one removed in another window stayed
+  // picked with Start on.
+  it('notices the picked dataset removed in another window, and keeps Start off saying so', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await open();
+      const id = await until(() => target.querySelector<HTMLInputElement>('input[name="dataset"]:checked')?.value, 'a picked dataset');
+      const name = (await api.datasets()).find((d) => d.id === id)!.name;
+      expect(target.querySelector('#start-why')?.textContent ?? '').not.toContain('removed');
+      const list = api.datasets.bind(api);
+      vi.spyOn(api, 'datasets').mockImplementation(async () => (await list()).filter((d) => d.id !== id));
+      await vi.advanceTimersByTimeAsync(5000);
+      const why = await until(() => (target.querySelector('#start-why')?.textContent?.includes('removed') ? target.querySelector('#start-why') : null), 'the removal');
+      expect(why.textContent).toContain(`${name} was removed`);
+      expect([...target.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].every((b) => b.disabled)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('leaves an agent-only hint out of any error toast', async () => {

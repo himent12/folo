@@ -488,6 +488,27 @@ describe('the job list', () => {
       expect(text()).toMatch(/No labeling jobs yet/);
     });
   });
+
+  // Stress d1-datasets / PR #287 review: one image was "1 images" in the row's progress label and the list's footer.
+  it('counts one image as one image, in the row and under the list', async () => {
+    const api = hub.api as MockApi;
+    const list = api.labelJobs.bind(api);
+    vi.spyOn(api, 'labelJobs').mockImplementation(async () => {
+      const [j] = await list();
+      return [{ ...j!, counts: { ...j!.counts, images: 1, labeled: 1, pending: 0, failed: 0 } }];
+    });
+    router.route = parse('#/datasets/label');
+    open(LabelJobs, {});
+    const foot = await vi.waitFor(() => {
+      flushSync();
+      const f = document.querySelector('.list-foot');
+      if (!f) throw new Error('no footer yet');
+      return f;
+    });
+    expect(foot.textContent).toContain('1 image');
+    expect(foot.textContent).not.toContain('1 images');
+    expect(document.querySelector('tr[data-row] [role="progressbar"]')?.getAttribute('aria-label')).toBe('1 of 1 image labeled');
+  });
 });
 
 describe('the job list: the palette’s New labeling job', () => {
