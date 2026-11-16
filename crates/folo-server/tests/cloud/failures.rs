@@ -17,6 +17,7 @@ use super::harness::{
     Call, Fault, SECRET, TestCloud, cloud_run, connect, dataset, epochs, fast, finished, log_of, logged,
     no_gpu, offer, phase, plane, run_of, steps, until,
 };
+use super::lost_instances::{rfc3339, unix_now};
 
 #[test]
 fn a_connection_removed_while_a_run_starts_has_nothing_launched_on_it() {
@@ -250,10 +251,13 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
         worker_base_url: "http://x".into(),
     };
     cloud.launch(&values, &spec("folo-run_gone-a1b2")).unwrap();
+    // Written an hour ago, not on a fixed date: past the time a provider may take to list an instance (so the one
+    // that created nothing ends at once), well within the week an ended record is kept (so it is still listed).
+    let created = rfc3339(unix_now() - 3600.0);
     let record = |id: &str, name: &str| {
         let i = json!({ "id": id, "connection_id": conn.id, "provider": "test", "provider_ref": null, "name": name,
                         "run_id": "run_gone", "offer": offer("cpu@test", CloudAvailability::High),
-                        "status": "launching", "created": "2026-11-09T00:00:00Z" });
+                        "status": "launching", "created": created });
         std::fs::write(home.join("cloud").join("instances").join(format!("{id}.json")), i.to_string())
             .unwrap();
     };

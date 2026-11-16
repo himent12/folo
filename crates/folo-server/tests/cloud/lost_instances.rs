@@ -14,7 +14,7 @@ use serde_json::json;
 use super::harness::{Call, SECRET, TestCloud, connect, fast, no_gpu, offer, plane, until};
 
 /// Unix seconds as the ledger writes times (`YYYY-MM-DDTHH:MM:SSZ`).
-fn rfc3339(secs: f64) -> String {
+pub(super) fn rfc3339(secs: f64) -> String {
     let secs = secs.floor() as i64;
     let (days, tod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // Howard Hinnant's civil_from_days.
@@ -29,7 +29,7 @@ fn rfc3339(secs: f64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", tod / 3600, (tod / 60) % 60, tod % 60)
 }
 
-fn unix_now() -> f64 {
+pub(super) fn unix_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
 }
 
