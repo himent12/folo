@@ -183,6 +183,8 @@ impl FoloApp {
         let (start_select, start_hint) = (self.start_from_select(window, cx), self.nr_start_hint());
         let weights_gone = self.nr_weights_gone();
         let no_train = self.dataset_blocked();
+        // Not over a removed dataset's own line.
+        let no_val = self.dataset_val_note().filter(|_| !ds_gone);
         let batch_labels: Vec<String> = BATCHES.iter().map(|b| b.to_string()).collect();
         let batch_refs: Vec<&str> = batch_labels.iter().map(String::as_str).collect();
         let batch_seg = seg(self, "nr-batch", &batch_refs, batch, window, cx, |f, i| f.batch = i);
@@ -456,6 +458,17 @@ impl FoloApp {
                                 )
                             })
                             .when_some(no_train, |d, why| d.child(text(ty::SM, t.danger_text).child(why)))
+                            // It informs; Start stays on (Studio's note in secondary ink).
+                            .when_some(no_val, |d, note| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_start()
+                                        .gap(px(6.))
+                                        .child(div().pt(px(3.)).child(icon("icons/info.svg", 14., t.text_tertiary)))
+                                        .child(text(ty::SM, t.text_secondary).flex_1().min_w_0().whitespace_normal().child(note)),
+                                )
+                            })
                     }),
                 ),
             )
@@ -560,7 +573,9 @@ impl FoloApp {
                                 epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
                             ))
                             .child(text(ty::SM, t.text_tertiary).child(match ds.as_ref() {
-                                Some(d) => format!("One epoch = one pass over {} training images", int(d.splits.train)),
+                                Some(d) => {
+                    format!("One epoch = one pass over {}", counted(d.splits.train, "training image", "training images"))
+                }
                                 None => "One epoch = one pass over the training images".to_string(),
                             })),
                     )

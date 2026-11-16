@@ -11,6 +11,7 @@ pub mod settings;
 
 use std::sync::Arc;
 
+use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
     AnyElement, Context, Div, FontWeight, IntoElement, ParentElement, RenderImage, SharedString, Styled,
     Window, canvas, div, px,
@@ -26,6 +27,9 @@ use crate::viz::{DrawBox, Fit, paint_image_with_boxes};
 
 pub use first_step::FirstStep;
 pub(crate) use overview::dataset_problem;
+
+/// What a dataset tile whose image failed says (Studio's words).
+pub const TILE_UNAVAILABLE: &str = "Image unavailable";
 
 /// Title, one line of context, and actions on the right.
 pub fn page_header(
@@ -103,9 +107,24 @@ impl FoloApp {
         } else {
             Vec::new()
         };
+        let unavailable = img.is_none() && self.thumb_unavailable(dataset, &meta.id);
         // Class names on the boxes (14 px chips in small views; none on boxes under 20 px), so a
         // class never has to be matched by colour alone.
-        image_canvas(&t, img, dims, draw, fit, labels, reveal)
+        let painted = image_canvas(&t, img, dims, draw, fit, labels, reveal);
+        if !unavailable {
+            return painted;
+        }
+        // Failed, not loading (d1-datasets, x4-soak): said on the tile, as Studio's DatasetImage
+        // does. Its Retry is the inspector's, a press of the tile (Enter or a click) away; the tile
+        // itself is one focus stop that opens it, so no second control is nested in it.
+        unavailable_over(&t, painted, true)
+    }
+
+    /// A dataset tile's thumbnail failed (it waits for its next automatic retry, or for a Retry by
+    /// hand once those are spent): the tile says "Image unavailable" instead of looking as if it
+    /// still loads.
+    pub(crate) fn thumb_unavailable(&self, dataset: &str, image: &str) -> bool {
+        self.image_failed(dataset, image, ImgKind::Thumb)
     }
 
     /// A centred error panel with retry.
@@ -182,6 +201,31 @@ impl FoloApp {
         self.clear_bench();
         cx.notify();
     }
+}
+
+/// A painted image whose pixels failed to load, marked so over its placeholder: an image glyph and,
+/// with `words` (a tile tall enough), "Image unavailable". Without the mark it reads as loading.
+pub fn unavailable_over(t: &Theme, painted: AnyElement, words: bool) -> AnyElement {
+    div()
+        .size_full()
+        .relative()
+        .child(painted)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(4.))
+                .px(px(6.))
+                .child(icon("icons/image.svg", 16., t.text_tertiary))
+                .when(words, |d| {
+                    d.child(text(ty::XS, t.text_tertiary).text_center().child(TILE_UNAVAILABLE))
+                }),
+        )
+        .into_any_element()
 }
 
 /// Paint an image with boxes filling its parent.

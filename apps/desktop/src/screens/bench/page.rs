@@ -54,10 +54,10 @@ impl FoloApp {
                 d.child(status_badge_of(&t, StatusKind::Running, "Running", format!("bench-hdr-{}", b.id)))
             });
         let subtitle = format!(
-            "{} · {} images · {} boxes · {} · created {created}",
+            "{} · {} · {} · {} · created {created}",
             source_line(&b),
-            int(b.images),
-            int(b.boxes),
+            counted(b.images, "image", "images"),
+            counted(b.boxes, "box", "boxes"),
             plural(b.plan.conditions.len(), "condition"),
         );
         let confirming = self.bench.confirm_delete.as_ref().is_some_and(|(x, i)| *x == b.id && i.is_none());

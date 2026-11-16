@@ -130,7 +130,10 @@ impl FoloApp {
                 format!("{} images: a seeded sample of 500 is copied and frozen with their boxes.", int(n))
             }
             Some((SourcePick::Job { .. }, n)) => {
-                format!("{} labeled images of the job, copied and frozen with their boxes.", int(n))
+                format!(
+                    "{} of the job, copied and frozen with their boxes.",
+                    counted(n, "labeled image", "labeled images")
+                )
             }
             Some((_, 0)) => "This split has no images: pick another.".to_string(),
             Some((_, n)) => format!("{}, copied and frozen with their boxes.", counted(n, "image", "images")),

@@ -559,6 +559,8 @@ impl FoloApp {
                 .unwrap_or_default();
             for m in &samples {
                 let img = self.image(&ds_id, &m.id, ImgKind::Thumb, cx);
+                // Failed, not loading: marked (a 48 px thumb has room for the glyph only).
+                let failed = img.is_none() && self.thumb_unavailable(&ds_id, &m.id);
                 let key = format!("play-sample-{}", m.id);
                 let (d, i) = (ds_id.clone(), m.id.clone());
                 // The image clips inside; the control itself doesn't, so its focus ring shows whole.
@@ -574,15 +576,22 @@ impl FoloApp {
                     .hover(|s| s.border_color(t.line_strong))
                     .active(|s| s.border_color(t.text_tertiary))
                     .child(div().size_full().rounded(px(radius::SM)).overflow_hidden().bg(t.bg_inset).child(
-                        image_canvas(
-                            &t,
-                            img,
-                            (m.width as f32, m.height as f32),
-                            Vec::new(),
-                            Fit::Cover,
-                            false,
-                            false,
-                        ),
+                        {
+                            let painted = image_canvas(
+                                &t,
+                                img,
+                                (m.width as f32, m.height as f32),
+                                Vec::new(),
+                                Fit::Cover,
+                                false,
+                                false,
+                            );
+                            if failed {
+                                crate::screens::unavailable_over(&t, painted, false)
+                            } else {
+                                painted
+                            }
+                        },
                     ));
                 thumbs.push(
                     self.bind(

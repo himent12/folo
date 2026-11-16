@@ -92,6 +92,13 @@ fn a_local_address_that_is_not_one_is_kept_and_starts_nothing() {
             assert_eq!(this.connected_url.as_deref(), Some(typed));
             assert!(this.store.api.health().unwrap_err().is_bad_address(), "{typed:?}");
         });
+        // d4-bench-settings-4: the "Can't reach folo serve, retrying…" pill went up for it, though
+        // nothing is sent and no retry can help; the sidebar says "Not a server address".
+        drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+        drive(&mut app, window, move |this, _, _| {
+            assert!(this.store.unreachable() && this.store.bad_address(), "{typed:?}");
+            assert!(!this.lost_banner_shown(), "no retrying pill for {typed:?}");
+        });
     }
 }
 
@@ -268,6 +275,7 @@ fn a_server_that_never_answered_was_not_lost() {
     drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
     drive(&mut app, window, |this, _, _| {
         assert!(this.store.unreachable());
+        assert!(this.lost_banner_shown(), "a server that is down is retried, and the pill says so");
         assert!(!this.reached, "a new server starts as not reached");
     });
 }
@@ -723,10 +731,14 @@ fn a_thumbnail_past_its_retries_loads_again_once_the_inspector_loads_its_full_si
     };
     let im = "img_03417";
     exhaust(&mut app, im);
+    // d1-datasets, x4-soak: its grid tile says "Image unavailable" instead of looking as if it
+    // still loads (the inspector it opens has the Retry).
+    assert!(drive(&mut app, window, |this, _, _| this.thumb_unavailable(ds, im)));
     // The images answer again; the inspector opens on it and its full size loads.
     show(&mut app, im, ImgKind::Full);
     // So the thumbnail is asked for again by the grid's next draw, and shows.
     assert_eq!(slot(&mut app, im, ImgKind::Thumb), "none");
+    assert!(!drive(&mut app, window, |this, _, _| this.thumb_unavailable(ds, im)), "loading again");
     show(&mut app, im, ImgKind::Thumb);
     // A thumbnail that fails after its full size loaded: the inspector offers Retry for it.
     let im = "img_00001";

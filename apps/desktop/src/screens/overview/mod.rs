@@ -7,4 +7,6 @@ mod live;
 mod page;
 mod tables;
 
+#[cfg(test)]
+pub(crate) use datasets::card_facts;
 pub(crate) use datasets::dataset_problem;

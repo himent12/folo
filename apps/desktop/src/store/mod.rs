@@ -198,6 +198,11 @@ impl Store {
         matches!(&self.health, Load::Failed(e) if e.code == "server_unreachable")
     }
 
+    /// The address is not one at all ([`ApiError::is_bad_address`]): nothing was sent.
+    pub fn bad_address(&self) -> bool {
+        matches!(&self.health, Load::Failed(e) if e.is_bad_address())
+    }
+
     /// What the periodic `/system` refresh says about the connection (`err`: its error, if any).
     /// `health`, which the status line shows, is fetched once per connection; without this a server
     /// that went away mid-session still read "Connected". Unreachable marks it down; the first answer

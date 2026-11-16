@@ -25,6 +25,25 @@ fn upright_render(bytes: &[u8]) -> Option<(Arc<folo_ui::RenderImage>, u32, u32)>
     Some((image, w, h))
 }
 
+/// True when `head` (a file's first bytes) starts a JPEG, PNG, BMP or WebP file, the formats the
+/// engine reads (Studio's `serverReads`, web/src/routes/playground/intake.ts).
+fn engine_reads(head: &[u8]) -> bool {
+    let at = |i: usize, b: &[u8]| head.get(i..i + b.len()) == Some(b);
+    at(0, &[0xff, 0xd8, 0xff]) || at(0, b"\x89PNG") || at(0, b"BM") || (at(0, b"RIFF") && at(8, b"WEBP"))
+}
+
+/// Why a picked or dropped file did not decode, in Studio's words: one that starts as a format the
+/// engine reads is damaged (cut short, a broken download), for which "Use a PNG file" would be
+/// wrong (s4-models-2); anything else is not an image FOLO reads.
+fn undecodable(name: &str, bytes: &[u8]) -> ApiError {
+    if engine_reads(bytes) {
+        return ApiError::new("decode_failed", format!("{name} could not be decoded"))
+            .with_hint("The file may be truncated or damaged.");
+    }
+    ApiError::new("unsupported_image", format!("{name} is not an image FOLO can read"))
+        .with_hint(format!("Use a {IMAGE_FORMATS} file."))
+}
+
 impl PlayImage {
     /// What a prediction of this image sends: a dataset image by its id to the server (which reads
     /// it from disk), but its bytes, already here, to a local run, so that needs no server.
@@ -102,10 +121,7 @@ impl FoloApp {
             move |_| {
                 let bytes = std::fs::read(&path)
                     .map_err(|e| ApiError::new("read_failed", format!("Could not read {n2}: {e}")))?;
-                let (render, w, h) = upright_render(&bytes).ok_or_else(|| {
-                    ApiError::new("unsupported_image", format!("{n2} is not an image FOLO can read"))
-                        .with_hint(format!("Use a {IMAGE_FORMATS} file."))
-                })?;
+                let (render, w, h) = upright_render(&bytes).ok_or_else(|| undecodable(&n2, &bytes))?;
                 Ok((Arc::new(bytes), render, w, h))
             },
             move |this, r, cx| {
@@ -430,5 +446,31 @@ impl FoloApp {
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{undecodable, upright_render};
+
+    /// s4-models-2: a PNG cut short was called an unsupported format ("Use a JPEG, PNG, BMP or WebP
+    /// file."). A file that starts as one the engine reads is damaged; only anything else is not an
+    /// image FOLO reads.
+    #[test]
+    fn a_damaged_png_is_called_damaged_not_an_unsupported_format() {
+        let mut cut = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        cut.extend([0u8; 5]);
+        assert!(upright_render(&cut).is_none(), "the cut PNG does not decode");
+        let e = undecodable("cut.png", &cut);
+        assert_eq!(e.message, "cut.png could not be decoded");
+        assert_eq!(e.hint.as_deref(), Some("The file may be truncated or damaged."));
+        for head in [&b"\xff\xd8\xff\xe0"[..], b"BM\0\0", b"RIFF\0\0\0\0WEBPVP8 "] {
+            assert_eq!(undecodable("x", head).code, "decode_failed", "{head:?}");
+        }
+        for other in [&b"GIF89a"[..], b"hello", b"", b"RIFF\0\0\0\0WAVE"] {
+            let e = undecodable("notes.txt", other);
+            assert_eq!(e.message, "notes.txt is not an image FOLO can read");
+            assert_eq!(e.hint.as_deref(), Some("Use a JPEG, PNG, BMP or WebP file."));
+        }
     }
 }

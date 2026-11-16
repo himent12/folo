@@ -171,15 +171,7 @@ impl FoloApp {
                         d.name.clone(),
                         // Counts that never need cutting; the class names are the card's tip (hover
                         // and keyboard focus), in full.
-                        format!(
-                            "{} · {}",
-                            counted(d.splits.total(), "image", "images"),
-                            if d.classes.len() == 1 {
-                                "1 class".to_string()
-                            } else {
-                                format!("{} classes", d.classes.len())
-                            }
-                        ),
+                        card_facts(d, self.dataset_unreadable(&d.id)),
                     ))
                     .child(badge(&t, badge_label, badge_tone)),
             )
@@ -204,6 +196,12 @@ impl FoloApp {
             Some((label, why)) => (label, Tone::Warning, Some(why)),
             None => (d.format.label(), Tone::Neutral, None),
         }
+    }
+
+    /// The server can't read this listed dataset itself now (its folder gone, its images deleted):
+    /// its counts are the last known ones, from when it was registered or last read (s1-datasets-6).
+    pub(crate) fn dataset_unreadable(&self, id: &str) -> bool {
+        self.store.dataset.get(id).and_then(|l| l.error()).is_some_and(|e| dataset_problem(e).is_some())
     }
 
     /// A panel header's quiet link to where it leads ("All runs →"): secondary ink with the arrow
@@ -255,6 +253,17 @@ impl FoloApp {
     ) -> AnyElement {
         self.quiet_link(key, label, window, cx, act(move |this, w, cx| this.navigate(route.clone(), w, cx)))
     }
+}
+
+/// A card's counts, "24 images · 3 classes"; "24 images (last known) · 3 classes" for a dataset its
+/// server can't read now, whose count is only what it had (Studio's `cardFacts`).
+pub(crate) fn card_facts(d: &crate::api::Dataset, last_known: bool) -> String {
+    format!(
+        "{}{} · {}",
+        counted(d.splits.total(), "image", "images"),
+        if last_known { " (last known)" } else { "" },
+        counted(d.classes.len() as u64, "class", "classes")
+    )
 }
 
 /// What a failed read of a listed dataset means for its card, in Studio's words

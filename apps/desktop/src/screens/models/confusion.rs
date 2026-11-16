@@ -341,7 +341,7 @@ impl FoloApp {
             .child(div().pt(px(4.)).child(text(ty::SM, t.text_tertiary).tnum().child(match &eval_ds {
                 Some((d, split)) => format!("{}{cm_rule}", split_label(d, split, Some(ev.images as u64))),
                 // Unknown dataset: the split isn't known either.
-                None => format!("Evaluation · {} images{cm_rule}", int(ev.images as u64)),
+                None => format!("Evaluation · {}{cm_rule}", counted(ev.images as u64, "image", "images")),
             })))
             // Evaluated on another split than validation: the server's sentence says why.
             .when_some(ev.split_fallback.as_ref(), |d, f| {
