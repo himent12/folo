@@ -12,7 +12,8 @@ use crate::theme::{radius, theme};
 /// Which shared chart cursor a chart group drives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cursor {
-    /// The linked cursor of the run dashboard and the Overview hero.
+    /// The run dashboard's cursor (on the chart it reads, `FoloApp::chart_hover_on`) and the Overview
+    /// hero's.
     Run,
     /// The PR curve on a model page.
     Pr,
@@ -26,7 +27,7 @@ impl FoloApp {
         }
     }
 
-    /// Make a group of charts one Tab stop: ←/→ step the shared cursor by `step` (a fraction of the
+    /// Make a group of charts one Tab stop: ←/→ step the group's cursor by `step` (a fraction of the
     /// x range), Shift steps ×10, Home/End jump, Esc clears; Page Up/Down pass on and page the page. The readouts follow the cursor. `end` is
     /// where recorded data stops (a live run's latest epoch): the cursor starts there and never
     /// steps past it into the epochs still to come.

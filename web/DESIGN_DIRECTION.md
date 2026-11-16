@@ -107,7 +107,7 @@ The screens are competent everywhere and memorable nowhere. Each weak area trace
 
 ## 4. What a 9 looks like here
 
-1. **Vercel Analytics / Observability**: KPI tabs switching one large chart, legend as readout, cursor without a floating box → Compare; the legend as readout and the shared cursor → Run detail and the Overview live panel.
+1. **Vercel Analytics / Observability**: KPI tabs switching one large chart, legend as readout, cursor without a floating box → Compare; the legend as readout and the cursor → Run detail (on the chart being read) and the Overview live panel.
 2. **Linear issue list**: 36 px single-line rows, muted meta columns, checkboxes on hover, group headers → Runs, Models (grouped by dataset).
 3. **Linear issue view**: main column + sticky properties rail → New run (Run and Model detail took Desktop's full-width rows and Details panel, design/UNIFIED.md §4).
 4. **Vercel deployment page**: status dot + one meta line; failure as a one-line callout, not a big tinted card → run banners, error states.
