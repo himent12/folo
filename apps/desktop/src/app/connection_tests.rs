@@ -64,6 +64,37 @@ fn another_machines_address_is_kept_and_no_local_server_takes_its_place() {
     });
 }
 
+static BAD_STARTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Review round 3: this machine's address with a port that can't be used started (or found) the
+/// local server and wrote its address over the typed one, so Settings never said what was wrong.
+#[test]
+fn a_local_address_that_is_not_one_is_kept_and_starts_nothing() {
+    for typed in ["http://127.0.0.1:99999", "localhost:abc", "http://[::1]:0"] {
+        let (mut app, window) = open();
+        drive(&mut app, window, move |this, _, cx| {
+            assert!(this.spawn_server, "the default: start a local server when nothing answers");
+            this.connector = Connector {
+                probe: |_| false,
+                start: |t| {
+                    BAD_STARTS.fetch_add(1, Ordering::SeqCst);
+                    found_local(t)
+                },
+                backend: |u| Arc::new(crate::api::http::HttpBackend::new(u)),
+            };
+            this.server_url.update(cx, |i, cx| i.set_text(typed, cx));
+            this.switch_source(ServerMode::Local, cx);
+        });
+        drive(&mut app, window, move |this, _, cx| {
+            assert_eq!(BAD_STARTS.load(Ordering::SeqCst), 0, "no local server for {typed:?}");
+            assert_eq!(this.server_url.read(cx).text(), typed);
+            assert_eq!(this.local_url, None);
+            assert_eq!(this.connected_url.as_deref(), Some(typed));
+            assert!(this.store.api.health().unwrap_err().is_bad_address(), "{typed:?}");
+        });
+    }
+}
+
 /// The local server stops answering (the window that started it closed, or it crashed): the 2 s
 /// refresh sees it, and the app finds or starts one again instead of retrying a dead port.
 fn lose_the_server(local: Option<&str>) -> (folo_ui::HeadlessApp, folo_ui::WindowHandle<super::FoloApp>) {

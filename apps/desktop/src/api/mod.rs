@@ -16,6 +16,9 @@ use std::sync::mpsc::Receiver;
 
 pub use types::*;
 
+/// How an address that names no HTTP server ends its error ([`ApiError::is_bad_address`]).
+pub const NOT_AN_ADDRESS: &str = "is not a server address";
+
 /// A failed call, shaped like the API's error body.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApiError {
@@ -32,6 +35,12 @@ impl ApiError {
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
+    }
+
+    /// The address typed in Settings names no HTTP server ("abc def is not a server address"):
+    /// nothing was sent, so no server is down.
+    pub fn is_bad_address(&self) -> bool {
+        self.code == "server_unreachable" && self.message.ends_with(NOT_AN_ADDRESS)
     }
 }
 

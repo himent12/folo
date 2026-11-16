@@ -35,10 +35,7 @@ impl FoloApp {
             "Close",
             window,
             cx,
-            act(|this, _, cx| {
-                this.bench.design = None;
-                cx.notify();
-            }),
+            act(|this, w, cx| this.close_bench_form(crate::bench::BenchForm::Design, w, cx)),
         );
         let title = if proposal.is_some() { "Proposed plan" } else { "Design the plan with an agent" };
         let header = panel_header(&t, title).child(close);
@@ -143,10 +140,7 @@ impl FoloApp {
                 None,
                 window,
                 cx,
-                act(|this, _, cx| {
-                    this.bench.design = None;
-                    cx.notify();
-                }),
+                act(|this, w, cx| this.close_bench_form(crate::bench::BenchForm::Design, w, cx)),
             );
             body = body.child(div().flex().gap(px(8.)).child(use_btn).child(discard));
         } else {
@@ -242,6 +236,9 @@ impl FoloApp {
                     .child(icon("icons/circle-alert.svg", 14., t.danger_text))
                     .child(text(ty::SM, t.danger_text).child(e.message)),
             );
+            if let Some(h) = e.hint {
+                body = body.child(text(ty::SM, t.text_tertiary).child(h));
+            }
         }
         panel(&t).child(header).child(body).into_any_element()
     }

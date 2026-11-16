@@ -249,6 +249,8 @@ impl FoloApp {
             self.close_synth(window, cx);
         } else if self.inspector.is_some() {
             self.close_inspector(window, cx);
+        } else if self.dismiss_bench_form(window, cx) {
+            // A Benchmarks form (or a delete's second click) closed; the page stays.
         } else if let Some(p) = self.parent_route() {
             self.navigate(p, window, cx);
         }

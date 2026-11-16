@@ -4,7 +4,7 @@ use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::cells::num_cell;
-use super::format::{agent_name, pct};
+use super::format::{agent_name, pct, plan_intro};
 use crate::api::{Bench, BenchEntryStatus, Label};
 use crate::app::{FoloApp, act};
 use crate::bench::preview_severity;
@@ -103,17 +103,13 @@ impl FoloApp {
             .gap(px(4.))
             .border_b_1()
             .border_color(t.line_subtle);
-        intro = intro.child(
-            text(ty::SM, t.text_secondary).child(match &who {
-                Some(w) => {
-                    format!("{w}. Each condition changes every image the same way for every contestant.")
-                }
-                None => {
-                    "The default plan. Each condition changes every image the same way for every contestant."
-                        .to_string()
-                }
-            }),
-        );
+        // Studio's words: the default plan only when it is the catalog's.
+        let default_len = catalog.as_ref().map(|c| c.default_plan.conditions.len());
+        intro = intro.child(text(ty::SM, t.text_secondary).child(plan_intro(
+            who.as_deref(),
+            &b.plan,
+            default_len,
+        )));
         if let Some(r) = &b.plan.rationale {
             intro = intro.child(text(ty::SM, t.text_tertiary).child(r.clone()));
         }

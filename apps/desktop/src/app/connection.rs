@@ -435,8 +435,11 @@ impl FoloApp {
             ServerMode::Local => {
                 let url = self.server_url.read(cx).text().to_string();
                 // Only this machine's server can be started here: a typo in another machine's address
-                // must say so, not land on the local data.
-                let spawn = self.spawn_server && crate::api::http::is_loopback(&url);
+                // must say so, not land on the local data. Nor can an address that isn't one
+                // ("http://127.0.0.1:99999"): it stays as typed and Settings says what is wrong.
+                let spawn = self.spawn_server
+                    && crate::api::http::address_ok(&url)
+                    && crate::api::http::is_loopback(&url);
                 self.autoconnect(url, spawn, Reason::Typed, cx);
             }
         }
