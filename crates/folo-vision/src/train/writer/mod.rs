@@ -111,7 +111,7 @@ fn write_atomic(path: &Path, fill: impl FnOnce(&mut std::fs::File) -> std::io::R
     #[cfg_attr(target_arch = "wasm32", allow(clippy::drop_non_drop))]
     let written = fill(&mut f).and_then(|_| f.sync_all()).and_then(|_| {
         drop(f);
-        std::fs::rename(&tmp, path)
+        folo_nn::io::rename_over(&tmp, path)
     });
     written.map_err(|err| {
         let _ = std::fs::remove_file(&tmp);

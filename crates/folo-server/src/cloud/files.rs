@@ -25,7 +25,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let written = options.open(&tmp).and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()));
-    written.and_then(|()| std::fs::rename(&tmp, path)).inspect_err(|_| {
+    written.and_then(|()| folo_nn::io::rename_over(&tmp, path)).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }

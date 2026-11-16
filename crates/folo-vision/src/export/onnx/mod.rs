@@ -168,7 +168,7 @@ impl OnnxExport {
             .expect("some temporary name is free")?;
         // `write_closed` takes the file and closes it before the rename, which Windows needs.
         let done = write_closed(f, &self.bytes);
-        if let Err(e) = done.and_then(|()| std::fs::rename(&tmp, path)) {
+        if let Err(e) = done.and_then(|()| folo_nn::io::rename_over(&tmp, path)) {
             let _ = std::fs::remove_file(&tmp);
             return Err(Error::io(path, e));
         }

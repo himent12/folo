@@ -143,7 +143,7 @@ impl Exec {
         };
         // This thread, which holds the run, is the only one that writes `weights/last.folo`.
         let placed = fetched.and_then(|()| {
-            std::fs::rename(&copying.staged, self.dir.join("weights").join("last.folo"))
+            folo_nn::io::rename_over(&copying.staged, &self.dir.join("weights").join("last.folo"))
                 .map_err(TransferError::Io)
         });
         match placed {
