@@ -28,4 +28,11 @@ describe('humanHint (PR #287 review)', () => {
     const e = new ApiError(400, 'invalid_dataset', "labeling job 'lb_1' has no labeled image yet", 'label images first: POST /api/label/jobs/lb_1/start, or draw boxes by hand');
     expect(errorDetail(e)).toBe("Labeling job 'lb_1' has no labeled image yet. Label images first, or draw boxes by hand.");
   });
+
+  // PR #287 re-review 1: Settings → Cloud, disconnecting a connection in use lost the whole remedy.
+  it('keeps the remedy of a hint whose endpoint is the subject of its instruction', () => {
+    const hint = 'stop its runs and wait until GET /api/cloud/instances shows its instances terminated'; // cloud/mod.rs in_use
+    const e = new ApiError(409, 'connection_in_use', "connection 'c1' has active run(s) r1", hint);
+    expect(errorDetail(e)).toBe("Connection 'c1' has active run(s) r1. Stop its runs and wait until its instances are terminated.");
+  });
 });

@@ -13,7 +13,7 @@ import { href } from '$lib/router';
 import Button from './Button';
 import CodeText from './CodeText';
 import { isOffline } from './offline';
-import { forAgents, humanHint } from './toast';
+import { forAgents, userHint } from './toast';
 
 /**
  * The things a link can point at that may have been deleted since, by the server's `404 <what>_not_found` code: what
@@ -129,7 +129,7 @@ export default function ErrorState(props: ErrorStateProps) {
     if (gone.get()) return undefined;
     if (props.hint) return props.hint;
     // What a user can do of the server's hint; what it says for agents goes to the details (below).
-    const h = props.error instanceof ApiError && props.error.hint ? humanHint(props.error.hint) : null;
+    const h = props.error instanceof ApiError ? userHint(props.error) : null;
     return h ? sentence(h) : undefined;
   });
   const code = computed(() =>

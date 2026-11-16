@@ -47,15 +47,21 @@ export async function readDatasets(s: AbortSignal): Promise<ListedDataset[]> {
 /**
  * The datasets with their stats, kept current while a form shows them (PR #287 review, sibling of stress s3-live-3): the
  * list alone is polled (the Run page's request, shared) and every dataset read again only when the list changed, so one
- * removed or added in another window shows without a stats read of each dataset every few seconds.
+ * removed or added in another window shows without a stats read of each dataset every few seconds. Each list answer is
+ * looked at once (re-review 1): a stats read that fails is tried again at the next answer, not as soon as it failed, and
+ * stats read newer than the list (Start's `dataset_not_found`) wait for it instead of being read again and again.
  */
 export function followedDatasets(every = 5000): Resource<ListedDataset[]> {
   const datasets = new Resource(readDatasets);
   const listed = new Resource((s) => hub.api.datasets(s), { poll: every });
+  let handled: number | null = null;
   effect(() => {
+    const at = listed.updated;
     const now = listed.data;
+    if (at === null || !now || at === handled) return;
     const shown = datasets.data;
-    if (!now || !shown || datasets.loading || datasets.refreshing) return;
+    if (!shown || datasets.loading || datasets.refreshing) return;
+    handled = at;
     const ids = (l: readonly { id: string }[]) => l.map((d) => d.id).sort().join('\n');
     if (ids(now) !== ids(shown)) void untrack(() => datasets.refresh());
   });

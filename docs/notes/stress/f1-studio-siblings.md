@@ -38,6 +38,19 @@ re-checked on main before fixing; none had been fixed by another lane (s5-label 
 - f1-3's tests now fail on main: the 404 closes the stream before the page goes, late events are ignored, and a 404 on
   the history load of a `reload` ends the job without the re-sync retrying.
 
+## Re-review 1 (PR #287)
+
+- The New run datasets follow (`followedDatasets`, `lib/api/datasetReads.ts`) re-read the stats whenever the shown
+  ids differed from the polled list and nothing was in flight. A failed re-read kept the old ids and cleared
+  `refreshing`, so it started again at once, without bound (and while the tab was hidden); stats read ahead of the list
+  (Start's `dataset_not_found`) were read again and again until the next poll. Each list answer is now looked at once:
+  a failed re-read is tried again at the next poll, stats newer than the list wait for it
+  (`lib/api/datasetReads.test.ts`: 303 list requests in 3 s and 45 extra stats reads before, 3 polls and none after).
+- Disconnecting a cloud connection in use lost the whole remedy of its hint ("stop its runs and wait until
+  GET /api/cloud/instances shows its instances terminated": the endpoint is the subject). `userHint` (`lib/ui/toast.ts`)
+  gives such a code plain words ("stop its runs and wait until its instances are terminated"); toasts, dialog feedback
+  and `ErrorState` use it (`lib/ui/toast.test.ts`). It is the only server hint of that shape today.
+
 ## Notes and what stays open
 - The deadline (45 s) follows the server's keep-alive interval (15 s, docs/API.md) and Desktop's choice in PR #273. A
   server or proxy that strips SSE comments and sends no events for 45 s gets its stream reopened every 45 s: harmless
@@ -48,5 +61,5 @@ re-checked on main before fixing; none had been fixed by another lane (s5-label 
 - Not run: the app against a live server, a real stalling proxy. The behaviour is covered by fake-timer tests only.
 
 ## Gates
-`npm run check`, `npm test` (221 files, 1875 tests), `npm run build` in `web/`: pass. `bash tools/file-size.sh`: pass.
+`npm run check`, `npm test` (224 files, 1888 tests at re-review 1), `npm run build` in `web/`: pass. `bash tools/file-size.sh`: pass.
 No Rust was touched.

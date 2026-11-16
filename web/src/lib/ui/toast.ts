@@ -42,6 +42,18 @@ export function humanHint(hint: string): string | null {
 }
 
 /**
+ * A user's words for a server hint that has no remedy left once its endpoint goes (PR #287 re-review 1): the endpoint
+ * is the subject of the instruction ("wait until GET /api/cloud/instances shows its instances terminated").
+ */
+const PLAIN_HINTS = new Map<string, string>([['connection_in_use', 'stop its runs and wait until its instances are terminated']]);
+
+/** What a user can do of an ApiError's hint: its code's plain words when the hint names an endpoint, else `humanHint`. */
+export function userHint(err: ApiError): string | null {
+  if (!err.hint) return null;
+  return (forAgents(err.hint) && PLAIN_HINTS.get(err.code)) || humanHint(err.hint);
+}
+
+/**
  * An error in a sentence or two: an ApiError's message and hint, out of GPU memory in plain words (as ErrorState). What
  * of a hint is written for agents ("list_runs (MCP) or GET /api/runs …") is left out, as ErrorState leaves it (stress
  * s2-runs-7; `humanHint`).
@@ -49,7 +61,7 @@ export function humanHint(hint: string): string | null {
 export function errorDetail(err: unknown): string {
   const message = err instanceof ApiError && isOom(err) ? 'The GPU ran out of memory.' : err instanceof Error ? err.message : String(err);
   if (!(err instanceof ApiError)) return message;
-  const hint = err.hint ? humanHint(err.hint) : null;
+  const hint = userHint(err);
   return [message, hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ');
 }
 
