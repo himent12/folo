@@ -49,6 +49,12 @@ fn a_cloud_run_that_failed_uploading_did_not_train() {
         // The copy back failed: collecting is where.
         c.ended_in = Some(CloudPhase::Collecting);
         assert_eq!(marks(&c, &r), [Done, Done, Done, Done, Failed, Done, Done]);
+        // The instance went away while its weights were copied: the collection failed, not training.
+        r.error_code = Some("cloud_instance_lost".into());
+        assert_eq!(marks(&c, &r), [Done, Done, Done, Done, Failed, Done, Done]);
+        // Training failed on the worker, its weights were collected: training failed.
+        r.error_code = Some("oom".into());
+        assert_eq!(marks(&c, &r), [Done, Done, Done, Failed, Done, Done, Done]);
         // Stopped while it booted: booting skipped, the rest never reached.
         c.ended_in = Some(CloudPhase::Booting);
         (r.status, r.error_code) = (RunStatus::Stopped, None);

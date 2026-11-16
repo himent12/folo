@@ -115,6 +115,8 @@ describe('the Cloud panel’s phases', () => {
     // Training failed on the worker (out of memory), its weights were collected: training failed, not the collection.
     expect(marks(phaseStates(ended('collecting'), run('failed', 'oom'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed training']);
     expect(marks(phaseStates(ended('collecting'), run('failed', 'cloud_sync_failed'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed collecting']);
+    // The instance went away while its weights were copied: the collection failed, training did not.
+    expect(marks(phaseStates(ended('collecting'), run('failed', 'cloud_instance_lost'), true)).filter((m) => !m.startsWith('done'))).toEqual(['failed collecting']);
     // Stopped before it trained: the phase it was stopped in did not finish. Stopped while training: it trained.
     expect(marks(phaseStates(ended('booting'), run('stopped'), true)).filter((m) => !m.startsWith('done'))).toEqual(['skipped booting', 'skipped syncing', 'skipped training', 'skipped collecting']);
     expect(marks(phaseStates(ended('training'), run('stopped'), true)).filter((m) => !m.startsWith('done'))).toEqual(['skipped collecting']);

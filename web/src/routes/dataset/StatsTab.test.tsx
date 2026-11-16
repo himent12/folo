@@ -64,7 +64,7 @@ describe('Dataset stats: health findings', () => {
     const labels = [...target.querySelectorAll('.kpis .k-label')].map((e) => e.textContent);
     expect(labels).toEqual(['Images', 'Boxes', 'Boxes per image', 'Classes']);
     const strip = target.querySelector('.kpis')!.textContent!;
-    // Health says "42 empty images (0.8%)" and "3 broken label files"; the strip says neither.
+    // Health says "42 empty images (0.8%)" and "3 broken labels"; the strip says neither.
     expect(strip).not.toMatch(/\b42\b|0\.8%|broken/);
     // Health lists neither: the zero tiles stay.
     unmount(c);

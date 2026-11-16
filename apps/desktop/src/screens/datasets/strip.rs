@@ -69,17 +69,29 @@ impl FoloApp {
         panel(&t)
             .flex()
             .child(
-                div().flex_none().w(px(if narrow_strip { 244. } else { 300. })).px(px(16.)).py(px(pad)).child(
-                    // The split bar on the strip's first detail line (where the others' captions
-                    // sit), its legend on the second: the same grid as every tile beside it.
-                    stat(
-                        &t,
-                        "Images",
-                        int(ds.splits.total()),
-                        "",
-                        Some(div().flex().flex_col().gap(px(6.)).child(detail_line(split_bar)).child(legend)),
+                div()
+                    .flex_none()
+                    .w(px(if narrow_strip { 244. } else { 300. }))
+                    .px(px(16.))
+                    .py(px(pad))
+                    .child(
+                        // The split bar on the strip's first detail line (where the others' captions
+                        // sit), its legend on the second: the same grid as every tile beside it.
+                        stat(
+                            &t,
+                            "Images",
+                            int(ds.splits.total()),
+                            "",
+                            Some(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(6.))
+                                    .child(detail_line(split_bar))
+                                    .child(legend),
+                            ),
+                        ),
                     ),
-                ),
             )
             .child(vline(&t))
             .child(tile(stat(
@@ -108,7 +120,9 @@ impl FoloApp {
                     .min_w_0()
                     .px(px(16.))
                     .py(px(pad))
-                    .when(empty > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active)))
+                    .when(empty > 0, |d| {
+                        d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active))
+                    })
                     .when(on, |d| d.bg(t.bg_selected))
                     .child(stat(
                         &t,
@@ -159,13 +173,10 @@ impl FoloApp {
                     .min_w_0()
                     .px(px(16.))
                     .py(px(pad))
-                    .when(broken > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active)))
                     .when(broken > 0, |d| {
-                        d.tooltip(crate::controls::tip(
-                            "These label files couldn't be read, so their images are skipped. Click to copy the terminal command that lists them.",
-                            None,
-                        ))
+                        d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active))
                     })
+                    .when(broken > 0, |d| d.tooltip(crate::controls::tip(broken_tip(), None)))
                     .child(if broken > 0 {
                         // Actionable: a warning, not one more inventory count.
                         div()
@@ -188,7 +199,11 @@ impl FoloApp {
                             .child(metric(&t, broken.to_string(), "", step, ty::SM))
                             // Split by severity when the server reports it, then the copy action.
                             .when_some(
-                                self.store.issues.get(&ds.id).and_then(|l| l.ready()).filter(|c| c.error + c.warning > 0),
+                                self.store
+                                    .issues
+                                    .get(&ds.id)
+                                    .and_then(|l| l.ready())
+                                    .filter(|c| c.error + c.warning > 0),
                                 |d, c| d.child(severity_detail(&t, c)),
                             )
                             // The action, named (the tile copies `folo dataset check`).
@@ -215,7 +230,7 @@ impl FoloApp {
                             this.toast(
                                 Tone::Neutral,
                                 "Copied the check command",
-                                Some(format!("Run `{cmd}` in a terminal to list the broken label files.").into()),
+                                Some(format!("Run `{cmd}` in a terminal to list the broken labels.").into()),
                                 cx,
                             );
                         }),
@@ -227,6 +242,11 @@ impl FoloApp {
             })
             .into_any_element()
     }
+}
+
+/// The Broken labels tile's tooltip: the health finding's words for what the count is, then the tile's action.
+fn broken_tip() -> String {
+    format!("{} Click to copy the terminal command that lists them.", super::health::BROKEN_LABELS_DETAIL)
 }
 
 /// Under the broken-label count: the check command to copy, or that every label is valid.
@@ -266,4 +286,17 @@ fn copy_cmd(t: &crate::theme::Theme, label: &'static str) -> folo_ui::Div {
         .min_w_0()
         .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(label))
         .child(div().flex_none().child(icon("icons/copy.svg", 12., t.text_secondary)))
+}
+
+#[cfg(test)]
+mod tests {
+    /// `stats.broken_labels` counts labels, and a bad COCO category or annotation leaves no image out
+    /// (docs/API.md): the tile's tooltip says what the health finding says, not "label files ... images skipped".
+    #[test]
+    fn the_broken_labels_tip_counts_labels_as_the_health_finding_does() {
+        let tip = super::broken_tip();
+        assert!(tip.starts_with(super::super::health::BROKEN_LABELS_DETAIL), "{tip}");
+        assert!(tip.ends_with("Click to copy the terminal command that lists them."), "{tip}");
+        assert!(!tip.contains("label files") && !tip.contains("images are skipped"), "{tip}");
+    }
 }

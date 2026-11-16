@@ -77,7 +77,7 @@ The running processes. `┄` lines are not cargo dependencies: they are HTTP, SS
 | `site/` | the docs website, generated from `docs/*.md`, `README.md` and `examples/*/README.md` | [site/README.md](../site/README.md) |
 | `examples/` | the shapes and COCO walkthroughs, and `bench_external.py` (any model on a FOLO benchmark) | [examples/README.md](../examples/README.md) |
 | `bench/` | measurement scripts outside cargo: incumbent baselines, fine-tuning comparisons, ONNX parity | [bench/README.md](../bench/README.md), [BENCHMARKS.md](BENCHMARKS.md) |
-| `tools/` | CI and development helpers: `file-size.sh`, `test-tmp.sh`, `ci-retry.sh`, `bench-ab.ps1`, `boat.py`, `charts/` | [tools/README.md](../tools/README.md) |
+| `tools/` | CI and development helpers: `file-size.sh`, `test-tmp.sh`, `ci-retry.sh` (+ `ci-retry-test.sh`), `bench-ab.ps1`, `boat.py`, `charts/` | [tools/README.md](../tools/README.md) |
 | `scripts/` | `build-wasm.sh` / `.ps1` (folo-wasm into `web/public/folo-wasm/`), `install.sh` / `.ps1` (the CLI from a release) | [scripts/README.md](../scripts/README.md) |
 | `.github/` | CI workflows (`ci`, `web`, `wasm`, `desktop`, `site`, `release`), issue and PR templates | [CI.md](CI.md), [RELEASE.md](RELEASE.md) |
 | `Cargo.toml`, `.cargo/`, `rust-toolchain.toml`, `rustfmt.toml` | the workspace and its build settings | [AGENTS.md](../AGENTS.md) |

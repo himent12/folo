@@ -98,9 +98,19 @@ pub(super) struct Gates {
     pub(super) cut_after_weights: AtomicBool,
     /// The worker is cut off (set by `cut_after_weights`; cleared, it answers again).
     pub(super) cut: AtomicBool,
+    /// Requests for weights wait while set, and then find the instance as it is by then (gone, or not).
+    pub(super) weights: AtomicBool,
+    /// Requests for weights that waited at `weights` so far.
+    pub(super) weights_held: AtomicU32,
 }
 
-async fn gone(State(gone): State<Arc<AtomicBool>>, req: Request, next: Next) -> Response {
+async fn gone(State((gone, g)): State<(Arc<AtomicBool>, Arc<Gates>)>, req: Request, next: Next) -> Response {
+    if req.uri().path().ends_with("/weights") && g.weights.load(Ordering::SeqCst) {
+        g.weights_held.fetch_add(1, Ordering::SeqCst);
+        while g.weights.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     if gone.load(Ordering::SeqCst) {
         return (StatusCode::BAD_GATEWAY, "proxy: the instance is gone").into_response();
     }
@@ -391,7 +401,7 @@ impl Provider for TestCloud {
         let router = Server::new(store.clone(), options)
             .router()
             .layer(axum::middleware::from_fn_with_state(self.gates.clone(), gate))
-            .layer(axum::middleware::from_fn_with_state(gone_flag.clone(), gone));
+            .layer(axum::middleware::from_fn_with_state((gone_flag.clone(), self.gates.clone()), gone));
         let live = Live::start(router);
         let instance = Instance {
             name: spec.name.clone(),
@@ -511,9 +521,27 @@ pub(super) fn run_of(store: &RealStore, id: &str) -> Run {
     store.get_run(id).unwrap()
 }
 
-/// Waits until run `id` ended (its final status is published after the release).
+/// Waits until run `id` ended (its final status is published after the release). A run that moves (its status,
+/// step, epoch, queue place, phase, transfer, checkpoint copy or log) is waited for however long a loaded runner
+/// takes: only one that stands still for [`TIMEOUT`] is a hang. (A fixed bound on the whole run failed eight
+/// tests of one job on a busy runner, each of a run that was still training.)
 pub(super) fn finished(store: &RealStore, id: &str) -> Run {
-    until(&format!("{id} to end"), || Some(run_of(store, id)).filter(|r| !r.status.is_active()))
+    let mut seen = None;
+    let mut since = Instant::now();
+    loop {
+        let r = run_of(store, id);
+        if !r.status.is_active() {
+            return r;
+        }
+        let logged = store.run_logs(id, &LogsQuery::last(1)).unwrap().total;
+        let cloud = r.cloud.as_ref().map(|c| (c.phase, c.progress, c.synced.clone()));
+        let now = Some((r.status, r.step, r.epoch, r.queue_position, cloud, logged));
+        if now != seen {
+            (seen, since) = (now, Instant::now());
+        }
+        assert!(since.elapsed() < TIMEOUT, "timed out waiting for {id} to end: it stood still as {seen:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 pub(super) fn phase(r: &Run) -> CloudPhase {

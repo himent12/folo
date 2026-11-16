@@ -133,8 +133,12 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   when a dataset already has that name; `format` defaults to `auto`. Datasets are read with folo-data, exactly as for training (formats and detection rules:
   `docs/DATA.md`): YOLO from `data.yaml` (`path`, `train`, `val`, `test`, `names`; a YAML with only `names` uses the
   folder layout) or `images/{train,val,test}` + `labels/…`; COCO from `annotations/instances_*.json` (Roboflow
-  layouts too). Corrupt or missing images and images with broken labels are left out (`stats.broken_labels` counts
-  the latter; `folo dataset check` lists them all). Without `names` / `nc`, classes are named `class0..` up to the
+  layouts too). Corrupt or missing images and images with broken labels are left out. `stats.broken_labels` counts
+  the labels that cannot be read, not images: one per YOLO label file with a broken line, however many it has (its
+  image is left out); for COCO one per image left out because annotations of it cannot be read (a bad `bbox` or
+  category), however many it has, and one per category,
+  image or annotation entry that cannot be read and per annotation file that is not COCO JSON (dropped, the other
+  images kept). `/issues` and `folo dataset check` list every broken line and entry. Without `names` / `nc`, classes are named `class0..` up to the
   largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset; the folder above
   a dataset says "'<path>' is not a dataset folder, but '<path>/<sub>' inside it holds a dataset" (looked for one and
   two levels down), with a hint to register that one; a folder with images but no labels says "'<path>' has N images

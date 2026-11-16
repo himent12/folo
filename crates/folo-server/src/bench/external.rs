@@ -542,9 +542,9 @@ fn span(d: Duration) -> String {
     }
 }
 
-/// Fails every open entry of `slot` that got no part for `timeout` ("no predictions arrived for …"): what it held
-/// is dropped, and the benchmark (its `active`) is sent when that changed.
-pub(super) fn expire(slot: &Slot, timeout: Duration) {
+/// Fails every open entry of `slot` that got no part for `timeout` by `now` ("no predictions arrived for …"):
+/// what it held is dropped, and the benchmark (its `active`) is sent when that changed.
+pub(super) fn expire(slot: &Slot, timeout: Duration, now: Instant) {
     let mut state = slot.lock();
     if state.deleted {
         return;
@@ -558,7 +558,7 @@ pub(super) fn expire(slot: &Slot, timeout: Duration) {
         .filter_map(|e| {
             {
                 let mut f = lock(e.open.as_ref()?);
-                if f.closed || f.last_part.elapsed() < timeout {
+                if f.closed || now.saturating_duration_since(f.last_part) < timeout {
                     return None;
                 }
                 f.closed = true;

@@ -52,7 +52,7 @@ impl StatsBuilder {
         s.boxes_per_image_hist.counts[bin(&BOXES_PER_IMAGE_EDGES, n as f64)] += 1;
     }
 
-    /// Counts label lines that could not be used.
+    /// Counts labels left out because they cannot be read (`broken_labels`: one per broken label file, not per line).
     pub fn add_broken(&mut self, n: u64) {
         self.stats.broken_labels += n;
     }

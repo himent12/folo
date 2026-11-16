@@ -107,6 +107,85 @@ fn write_shapes(dir: &Path) {
     folo_data::synthetic::write_yolo(&cfg, dir, folo_data::ImageFormat::Png).unwrap();
 }
 
+/// `stats.broken_labels` counts images left out for a broken label (docs/API.md), one per broken label file however
+/// many broken lines it has, while `/issues` lists every broken line: a dataset where files, lines and kept images
+/// all differ (d1-datasets-3).
+#[tokio::test]
+async fn real_broken_labels_count_the_images_left_out_not_the_lines() {
+    let t = TestDir::new("issues-broken-count");
+    let (home, data) = (t.join("home"), t.join("shapes"));
+    write_shapes(&data);
+    let clean = folo_data::open(&data).unwrap().split_sizes().iter().sum::<usize>() as u64;
+    // Three broken lines (a class out of range, too few values, a box outside the image) beside a good one, and a
+    // second file with one broken line.
+    let three = "0 0.5 0.5 0.2 0.2\n42 0.5 0.5 0.1 0.1\n0 0.5 0.5\n0 1.5 1.5 0.2 0.2\n";
+    std::fs::write(data.join("labels/train/000001.txt"), three).unwrap();
+    std::fs::write(data.join("labels/train/000002.txt"), "42 0.5 0.5 0.1 0.1\n").unwrap();
+    let store = RealStore::open(home).recheck_every(Duration::ZERO);
+    let app = Server::new(Arc::new(store), Options::default()).router();
+    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data.to_str().unwrap() }))).await;
+    let stats = ds.stats.clone().unwrap();
+    assert_eq!(stats.broken_labels, 2, "two broken label files");
+    assert_eq!(ds.splits.train + ds.splits.val + ds.splits.test, clean - 2, "their two images are left out");
+    let errors: IssuePage =
+        ok(&app, get(&format!("/api/datasets/{}/issues?severity=error&limit=1000", ds.id))).await;
+    let mut lines: Vec<(&str, Option<u32>)> =
+        errors.issues.iter().map(|i| (i.file.as_str(), i.line)).collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        [
+            ("labels/train/000001.txt", Some(2)),
+            ("labels/train/000001.txt", Some(3)),
+            ("labels/train/000001.txt", Some(4)),
+            ("labels/train/000002.txt", Some(1)),
+        ],
+        "every broken line"
+    );
+}
+
+/// In a COCO dataset `stats.broken_labels` counts one per image left out for annotations that cannot be read, however
+/// many it has, and the entries of an annotation file that cannot be read and are dropped while the other images are
+/// kept (docs/API.md): a malformed category and an annotation without `image_id` are two broken labels and no image
+/// left out (f3-server-ci review round 1); two annotations with a bad `bbox` on one image add one more, and that image
+/// is left out (review round 2).
+#[tokio::test]
+async fn real_coco_broken_labels_count_the_entries_dropped() {
+    let t = TestDir::new("issues-broken-coco");
+    let (home, yolo, coco) = (t.join("home"), t.join("shapes"), t.join("coco"));
+    write_shapes(&yolo);
+    let loaded = folo_data::open(&yolo).unwrap();
+    let clean = loaded.split_sizes().iter().sum::<usize>() as u64;
+    folo_data::convert::convert(&loaded, &coco, folo_data::Format::Coco).unwrap();
+    let file = coco.join("annotations/instances_train.json");
+    let mut json: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    json["categories"].as_array_mut().unwrap().push(json!({}));
+    let no_image = json!({ "id": 999_999, "category_id": 0, "bbox": [1, 1, 4, 4], "area": 16, "iscrowd": 0 });
+    json["annotations"].as_array_mut().unwrap().push(no_image);
+    std::fs::write(&file, json.to_string()).unwrap();
+    let store = RealStore::open(home).recheck_every(Duration::ZERO);
+    let app = Server::new(Arc::new(store), Options::default()).router();
+    let body = json!({ "path": coco.to_str().unwrap(), "format": "coco" });
+    let ds: Dataset = ok(&app, post_json("/api/datasets", body)).await;
+    assert_eq!(ds.stats.clone().unwrap().broken_labels, 2, "a category and an annotation dropped");
+    assert_eq!(ds.splits.train + ds.splits.val + ds.splits.test, clean, "no image left out");
+
+    let image = json["images"][0]["id"].clone();
+    let category = json["annotations"][0]["category_id"].clone();
+    for (n, bbox) in [json!([1, 1, -4, 4]), json!("4 4")].into_iter().enumerate() {
+        let bad = json!({ "id": 999_000 + n, "image_id": image, "category_id": category, "bbox": bbox, "area": 16,
+                          "iscrowd": 0 });
+        json["annotations"].as_array_mut().unwrap().push(bad);
+    }
+    std::fs::write(&file, json.to_string()).unwrap();
+    let copy = t.join("coco2");
+    std::fs::rename(&coco, &copy).unwrap();
+    let body = json!({ "path": copy.to_str().unwrap(), "format": "coco" });
+    let ds: Dataset = ok(&app, post_json("/api/datasets", body)).await;
+    assert_eq!(ds.stats.clone().unwrap().broken_labels, 3, "one image for its two bad annotations, not two");
+    assert_eq!(ds.splits.train + ds.splits.val + ds.splits.test, clean - 1, "that image is left out");
+}
+
 #[tokio::test]
 async fn real_issues_are_cached_and_refreshed() {
     let t = TestDir::new("issues-real");

@@ -9,8 +9,8 @@ use folo_test_support::TestDir;
 use serde_json::{Value, json};
 
 use super::harness::{
-    Events, Step, TIMEOUT, axis, bench, dataset, delete, ended, err, external, fixture, fixture_with, get,
-    ok, open_entry, page, parts, post, put, send, small_plan, truth_predictions,
+    Events, Step, axis, bench, dataset, delete, ended, err, external, fixture, fixture_with, get, ok,
+    open_entry, page, parts, post, put, send, small_plan, truth_predictions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -413,7 +413,9 @@ async fn open_external_entries_are_filled_in_parts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn open_entries_expire_without_parts() {
     let t = TestDir::new("bench-expire");
-    let f = fixture_with(&t.join("home"), |s| s.bench_open_timeout(Duration::from_millis(300)));
+    // The sweeper's own looks never expire anything here: the test looks for it, at the times it names.
+    let timeout = Duration::from_secs(3600);
+    let f = fixture_with(&t.join("home"), |s| s.bench_open_timeout(timeout));
     let app = &f.app;
     let ds = dataset(app, "shapes", 10).await;
     let b = bench(
@@ -425,32 +427,28 @@ async fn open_entries_expire_without_parts() {
     let all = truth_predictions(&page(app, &b.id, "").await.images, None, 0.9);
     let mut events = Events::open(app, &b.id).await;
     assert_eq!(events.next().await.0, "bench");
-    // Parts keep an entry open: every image's, then one every 50 ms until the other entry, which gets none, has
-    // expired. (A part sent again as it was counts as a part: a client that retries is alive.)
+    // Parts keep an entry open: `kept` takes every image's, then (after `left` was opened, at `opened` at the
+    // latest) one sent again as it was, which counts as a part (a client that retries is alive). `left` gets none.
+    // Looked for as at `opened` + the timeout, `left` has had none for all of it and `kept` not: no clock is raced.
     let kept: BenchEntry = ok(app, post(&entries, open_entry("kept", vec![]))).await;
-    let left: BenchEntry = ok(app, post(&entries, open_entry("left", vec![]))).await;
     ok::<BenchEntry>(app, post(&format!("{entries}/{}/predictions", kept.id), parts(&all))).await;
-    let t0 = std::time::Instant::now();
-    let mut i = 0;
-    let l = loop {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let r = &all[i % all.len()];
-        i += 1;
-        ok::<BenchEntry>(
-            app,
-            post(&format!("{entries}/{}/predictions", kept.id), parts(std::slice::from_ref(r))),
-        )
-        .await;
-        let l: BenchEntry = ok(app, get(&format!("{entries}/{}", left.id))).await;
-        if !l.status.is_active() {
-            break l;
-        }
-        assert!(t0.elapsed() < TIMEOUT, "{l:?}");
-    };
+    let left: BenchEntry = ok(app, post(&entries, open_entry("left", vec![]))).await;
+    let opened = std::time::Instant::now();
+    // Its next part is taken strictly after `opened`, whatever the clock's resolution.
+    while std::time::Instant::now() <= opened {
+        std::thread::yield_now();
+    }
+    ok::<BenchEntry>(app, post(&format!("{entries}/{}/predictions", kept.id), parts(&all[..1]))).await;
+    // Not before its time (a look at `opened` finds both younger than the timeout)...
+    f.store.expire_bench_entries_at(opened);
+    let l: BenchEntry = ok(app, get(&format!("{entries}/{}", left.id))).await;
+    assert!(l.status.is_active(), "{l:?}");
+    f.store.expire_bench_entries_at(opened + timeout);
+    let l: BenchEntry = ok(app, get(&format!("{entries}/{}", left.id))).await;
     // ... failed, with what it held dropped, and the benchmark idle again.
     assert_eq!(
         (l.status, l.error.as_deref()),
-        (BenchEntryStatus::Failed, Some("no predictions arrived for 300 ms"))
+        (BenchEntryStatus::Failed, Some("no predictions arrived for 60 minutes"))
     );
     assert!(l.hint.is_some() && l.finished.is_some());
     err(

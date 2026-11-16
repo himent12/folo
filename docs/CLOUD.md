@@ -99,8 +99,10 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
 - **Failure.** Anything that fails after an instance exists still releases it (also a bug: the release runs
   while the panic unwinds). A worker that stops answering for 10 minutes while the provider says the instance is
   gone (for `remote`: while it does not answer at all) fails the run with `cloud_instance_lost`, and so does an
-  instance terminated by hand; the checkpoints copied so far stay, so it can be resumed. A launch request that
-  fails as `cloud_unavailable` may have gone through: the instance is looked up by its name, and one that exists is
+  instance terminated by hand; the checkpoints copied so far stay, so it can be resumed. So does a copy of the final
+  weights that fails while the provider says the instance is gone (or stopped): whichever request noticed it, a
+  gone instance is a lost one; `cloud_sync_failed` is a copy that failed from an instance that is still there. A
+  launch request that fails as `cloud_unavailable` may have gone through: the instance is looked up by its name, and one that exists is
   used. One that is not listed may only be listed later: the run fails, and the reaper keeps looking for its
   instance by its name (*Instances are never left behind*). A failure code is in `Run.error_code`:
   `cloud_auth_failed`, `cloud_refused` (no capacity, no balance),

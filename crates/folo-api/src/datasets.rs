@@ -96,7 +96,12 @@ pub struct DatasetStats {
     pub boxes: u64,
     /// Images with no boxes.
     pub empty_images: u64,
-    /// Label lines that could not be parsed or are out of range.
+    /// Labels left out because they cannot be read. For YOLO one per label file with a line that cannot be parsed or
+    /// is out of range, however many such lines it has, and its image is left out. For COCO one per image left out
+    /// because annotations of it cannot be read (a bad `bbox` or category), however many it has, and one per
+    /// category, image or annotation entry that cannot be read and per annotation file that is not COCO JSON (the
+    /// entry or file is dropped, the other images are kept). Not a count of images. Each broken line or entry is an
+    /// error in `/issues`.
     pub broken_labels: u64,
     /// Boxes per class, indexed like `classes`.
     pub class_counts: Vec<u64>,
