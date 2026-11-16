@@ -76,7 +76,13 @@ out through `Store::labeler` and `Store::benches`; the mock has neither.
   started by `Runs::ensure_worker`) that trains one run at a time with folo-vision's `Trainer` (`runs/train.rs`,
   `execute` and `build`).
 - Each run folder holds `run.json` (the API `Run` plus what the server needs to restart it), `log.jsonl`, and what the
-  trainer writes: `config.json`, `metrics.jsonl`, `weights/{last,best}.folo` and `samples/epoch_NNN.json`.
+  trainer writes: `config.json`, `metrics.jsonl`, `weights/{last,best}.folo` and `samples/epoch_NNN.json`. At start a
+  folder whose `run.json` cannot be read is skipped with a warning, and so is a copy of a run folder (a `run.json` with
+  an id already loaded: the folder named after the id is the run). Labeling jobs (`label/`) and benchmarks (`bench/`)
+  skip copies the same way, picked by the id in `job.json` / `bench.json` before anything loads them
+  (`util::folders_by_id`): a copy whose record the loader takes wins over an original it refuses. A file in place of
+  `runs/`, `label/`, `bench/`, `datasets/`, `models/` or `uploads/` would be read as an empty folder: `folo serve`
+  refuses to start instead, naming it (`RealStore::check_layout`).
 - The trainer's event sink is `RunEntry::on_event` (`runs/entry.rs`): it updates the run, persists what matters and
   forwards each event to SSE subscribers through a per-run broadcast channel (`Runs::subscribe`, `runs/history.rs`).
 - `RunEntry::execute` is the one claim-execute-publish path, shared by local and cloud runs.

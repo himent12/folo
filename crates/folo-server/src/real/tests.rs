@@ -434,3 +434,66 @@ fn the_object_registrys_tombstones_are_saved_before_its_list() {
     assert_eq!(list.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), [c.id.as_str()]);
     assert_eq!(register(&store, Path::new(&b.path)).id, b.id);
 }
+
+/// A run's damaged checkpoint is said once per version of the file, not on every models listing (x3-server-8: the
+/// listings that spammed the log were of run checkpoints; review round 2).
+#[test]
+fn a_damaged_run_checkpoint_is_warned_about_once() {
+    use std::sync::Mutex;
+    let t = TestDir::new("real-damaged-checkpoint");
+    let store = RealStore::open(t.join("home"));
+    let ds = synthetic(&store, "ckpt");
+    let id = run_on(&store, &ds.id, "ckpt");
+    let entry = store.runs.entries().into_iter().find(|e| e.id() == id).unwrap();
+    let weights = entry.dir().join("weights");
+    std::fs::create_dir_all(&weights).unwrap();
+    let path = weights.join("best.folo");
+    std::fs::write(&path, b"not weights").unwrap();
+    // Ended with weights (stopped while queued), so the listings read its checkpoint.
+    let run = store.stop_run(&id).unwrap();
+    assert!(run.model_id.is_some(), "{run:?}");
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = Captured::default();
+    let sink = log.clone();
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
+    let warnings = || {
+        let text = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+        text.lines().filter(|l| l.contains("skipping") && l.contains("best.folo")).count()
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        for _ in 0..3 {
+            assert!(store.list_models().unwrap().iter().all(|m| m.run_id.as_deref() != Some(id.as_str())));
+        }
+        assert_eq!(warnings(), 1, "three listings say it once");
+        std::fs::write(&path, b"still not weights").unwrap();
+        store.list_models().unwrap();
+        store.list_models().unwrap();
+        assert_eq!(warnings(), 2, "a changed file is said again, once");
+    });
+    store.shutdown();
+}
+
+/// A file where the data dir keeps a folder is said, naming it, instead of a store that lists no runs (review round 1).
+#[test]
+fn a_file_in_place_of_a_store_folder_is_said() {
+    let t = TestDir::new("real-layout");
+    assert_eq!(RealStore::check_layout(&t.join("fresh")), Ok(()), "a data dir not made yet");
+    for name in ["runs", "label", "bench"] {
+        let home = t.join(name);
+        std::fs::create_dir_all(home.join("models")).unwrap();
+        assert_eq!(RealStore::check_layout(&home), Ok(()));
+        std::fs::write(home.join(name), b"junk").unwrap();
+        let e = RealStore::check_layout(&home).unwrap_err();
+        assert!(e.contains(&format!("keeps the folder {name}/")), "{e}");
+    }
+}

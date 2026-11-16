@@ -65,7 +65,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
 pub use folo_api as api;
@@ -245,6 +245,12 @@ async fn guard_host(State(allowed): State<Arc<[String]>>, req: Request, next: Ne
     .into_response()
 }
 
+/// The span of a request: its method and path, without headers or the query string, so a token a client sends
+/// (`Authorization`, or a `?token=` the server never accepts) never reaches the log (x3-server-2).
+fn request_span(req: &Request) -> tracing::Span {
+    tracing::info_span!("request", method = %req.method(), uri = req.uri().path(), version = ?req.version())
+}
+
 /// CORS only hides responses; a browser still *sends* "simple" cross-origin POSTs (form posts) without a
 /// preflight. So with [`Cors::Loopback`], state-changing requests whose `Origin` is neither loopback nor this
 /// server itself are refused before they reach a handler. Requests without `Origin` (curl, agents, the desktop
@@ -408,8 +414,7 @@ impl Server {
         }
         let router = router.layer(axum::middleware::from_fn(log_request)).layer(
             TraceLayer::new_for_http()
-                // Without headers (the default), so a token never reaches the log.
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO).include_headers(false))
+                .make_span_with(request_span)
                 .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
         );
         Server { router, shutdown, store, token }

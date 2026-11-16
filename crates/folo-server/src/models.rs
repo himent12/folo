@@ -246,6 +246,8 @@ pub struct Models {
     published_dir: Option<PathBuf>,
     meta: Mutex<HashMap<PathBuf, (FileKey, Arc<FileMeta>)>>,
     evals: Mutex<HashMap<String, (String, ModelEval)>>,
+    /// The weights files listed as skipped (unreadable), each with the version that was: warned about once.
+    skipped: Mutex<HashMap<PathBuf, FileKey>>,
     /// Held while a derived weights file (f16, ONNX) is written, so concurrent first requests export once.
     derived: Mutex<()>,
 }
@@ -258,8 +260,21 @@ impl Models {
             published_dir: None,
             meta: Mutex::default(),
             evals: Mutex::default(),
+            skipped: Mutex::default(),
             derived: Mutex::default(),
         }
+    }
+
+    /// Says in the log that the weights file at `path` is not listed, why, and only once per version of the file:
+    /// the models are listed again on every `GET /api/models`, which both apps poll (x3-server-8). Returns whether
+    /// it was said now.
+    pub fn warn_skipped(&self, path: &Path, err: &Error) -> bool {
+        let Ok(key) = FileKey::of(path) else { return false };
+        if self.skipped.lock().unwrap().insert(path.to_path_buf(), key.clone()).as_ref() == Some(&key) {
+            return false;
+        }
+        tracing::warn!("skipping {}: {err}", path.display());
+        true
     }
 
     /// Lists the published weights downloaded into `dir` (the `folo weights` cache, [`folo_api::weights::cache_dir`])
@@ -291,7 +306,9 @@ impl Models {
                     model.about = Some(p.about.to_string());
                     out.push(ModelRef::new(model, path, None));
                 }
-                Err(e) => tracing::warn!("skipping {}: {e}", path.display()),
+                Err(e) => {
+                    self.warn_skipped(&path, &e);
+                }
             }
         }
         out
@@ -417,7 +434,9 @@ impl Models {
                     let model = model_of(file_model_id(&path), name, &meta, None, meta.metrics);
                     out.push(ModelRef::new(model, path, None));
                 }
-                Err(e) => tracing::warn!("skipping {}: {e}", path.display()),
+                Err(e) => {
+                    self.warn_skipped(&path, &e);
+                }
             }
         }
         out
@@ -784,5 +803,45 @@ mod tests {
             assert!(file.ends_with("-f16.folo") && file.len() <= 255, "{file}");
             assert!(!file.contains(['<', '>', '?', '"', '|', '*', '\t']), "{file}");
         }
+    }
+
+    /// A damaged weights file is said once per version of the file, not on every listing (x3-server-8).
+    #[test]
+    fn a_damaged_weights_file_is_warned_about_once() {
+        let dir = folo_test_support::TestDir::new("models-skipped");
+        let models = Models::new(dir.join("home"));
+        std::fs::create_dir_all(models.models_dir()).unwrap();
+        let path = models.models_dir().join("broken.folo");
+        std::fs::write(&path, b"not weights").unwrap();
+        // What the listings log, caught on this thread.
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Captured::default();
+        let sink = log.clone();
+        let subscriber =
+            tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
+        let warnings = || String::from_utf8_lossy(&log.0.lock().unwrap()).matches("skipping").count();
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..3 {
+                assert!(models.scan().is_empty());
+            }
+            assert_eq!(warnings(), 1, "three listings say it once");
+            // Another version of the file (another size) is said again.
+            std::fs::write(&path, b"still not weights").unwrap();
+            assert!(models.scan().is_empty());
+            assert!(models.scan().is_empty());
+            assert_eq!(warnings(), 2, "a changed file is said again, once");
+        });
+        let err = models.meta(&path).unwrap_err();
+        assert!(!models.warn_skipped(dir.join("gone.folo").as_path(), &err), "a missing file is not said");
     }
 }

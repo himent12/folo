@@ -170,6 +170,9 @@ impl Store for RealStore {
     }
 
     fn list_datasets(&self) -> Result<Vec<Dataset>> {
+        // A registry that could not be read at start loaded no dataset: that is an error to show (with how to fix
+        // it), not "no datasets yet" (x3-server-7).
+        self.registry_loaded()?;
         let list = self.entries.read().unwrap().clone();
         Ok(list
             .iter()
@@ -213,6 +216,8 @@ impl Store for RealStore {
             small_fraction: 0.05,
             ..Default::default()
         };
+        // Registration would refuse it (a registry not loaded at start): said before anything is generated.
+        self.registry_loaded()?;
         let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
         let t0 = Instant::now();
         if let Err(e) = folo_data::synthetic::write_yolo(&cfg, &dir, folo_data::ImageFormat::Jpeg(90)) {
@@ -221,7 +226,12 @@ impl Store for RealStore {
         }
         tracing::info!(path = %dir.display(), images = cfg.images, secs = t0.elapsed().as_secs_f32(), "generated");
         let path = dir.to_string_lossy().into_owned();
-        self.register(Naming::Unique(req.name.trim().to_string()), path, DatasetFormat::Yolo)
+        // A registration that fails writes nothing to the registry: the generated folder would be nobody's.
+        self.register(Naming::Unique(req.name.trim().to_string()), path, DatasetFormat::Yolo).inspect_err(
+            |_| {
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
     }
 
     fn get_dataset(&self, id: &str) -> Result<Dataset> {

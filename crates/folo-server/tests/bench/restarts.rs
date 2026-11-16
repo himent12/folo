@@ -207,6 +207,38 @@ async fn benchmarks_and_loops_keep_their_order_after_a_restart() {
     assert_eq!(list.loops.iter().map(|l| l.id.clone()).collect::<Vec<_>>(), loops);
 }
 
+/// A benchmark whose own `bench.json` its loader refuses (a version this server does not read, or only its id left)
+/// does not hide an intact copy of its folder: the copy is loaded (review round 3).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_benchmark_record_does_not_hide_its_backup() {
+    let t = TestDir::new("bench-copy-damaged");
+    let home = t.join("home");
+    let b = {
+        let f = fixture(&home);
+        let ds = dataset(&f.app, "shapes", 10).await;
+        let src = json!({ "kind": "dataset", "dataset_id": ds.id });
+        let b = bench(&f.app, json!({ "name": "b", "source": src, "plan": small_plan() })).await;
+        f.store.shutdown();
+        b
+    };
+    let dir = home.join("bench").join(&b.id);
+    let saved: Value = serde_json::from_slice(&std::fs::read(dir.join("bench.json")).unwrap()).unwrap();
+    let copy = home.join("bench").join(format!("{} - Copy", b.id));
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("bench.json"), saved.to_string()).unwrap();
+    let mut newer = saved.clone();
+    newer["version"] = json!(999);
+    for damaged in [newer, json!({ "id": b.id })] {
+        std::fs::write(dir.join("bench.json"), damaged.to_string()).unwrap();
+        let f = fixture(&home);
+        let list: BenchList = ok(&f.app, get("/api/bench/benchmarks")).await;
+        assert_eq!(list.benchmarks.len(), 1, "the copy is loaded: {damaged}");
+        let got: Bench = ok(&f.app, get(&format!("/api/bench/benchmarks/{}", b.id))).await;
+        assert_eq!(got.name, "b");
+        f.store.shutdown();
+    }
+}
+
 #[test]
 fn shutdown_returns_with_an_idle_worker() {
     // The worker waits for entries; shutdown must wake it however their timing falls.

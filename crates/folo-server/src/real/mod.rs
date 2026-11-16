@@ -40,8 +40,8 @@ mod store;
 mod training;
 mod uploads;
 
-use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -164,6 +164,9 @@ impl Entry {
 pub struct RealStore {
     data_dir: PathBuf,
     entries: RwLock<Vec<Arc<Entry>>>,
+    /// Set when `datasets.json` could not be read at start, so `entries` lacks what it lists
+    /// ([`RealStore::registry_loaded`]).
+    registry_unread: AtomicBool,
     /// Held shared while a dataset is registered and while a run is created or resumed, exclusively while a dataset
     /// is unregistered (so a run being admitted is in the run registry before tombstones are pruned) and while
     /// `DELETE /api/datasets/{id}?files=true` checks that nothing reads the folder and deletes it.
@@ -183,6 +186,26 @@ pub struct RealStore {
 }
 
 impl RealStore {
+    /// Checks that the folders the store keeps under `data_dir` (runs, labeling jobs, benchmarks, ...) are folders it
+    /// can read where they exist. [`RealStore::open`] lists a folder it cannot read as empty, so a file in place of
+    /// `runs/` would show "no runs" with nothing said; `folo serve` refuses to start with this message instead.
+    pub fn check_layout(data_dir: &Path) -> std::result::Result<(), String> {
+        for name in ["runs", "label", "bench", "datasets", "models", "uploads"] {
+            let p = data_dir.join(name);
+            let Ok(meta) = std::fs::metadata(&p) else { continue };
+            if !meta.is_dir() {
+                return Err(format!(
+                    "{} is a file, where the data dir keeps the folder {name}/: move the file away and start again",
+                    p.display()
+                ));
+            }
+            if let Err(e) = std::fs::read_dir(&p) {
+                return Err(format!("cannot read the folder {}: {e}", p.display()));
+            }
+        }
+        Ok(())
+    }
+
     /// Opens the store rooted at `data_dir`. Registered datasets are listed right away and indexed on a background
     /// thread (from the cache when it is fresh). Datasets whose folder is gone are kept out of the list (and
     /// logged) but stay in the registry file. Cloud runs a previous process left are picked up
@@ -199,8 +222,13 @@ impl RealStore {
         providers: Vec<Arc<dyn folo_cloud::Provider>>,
         tuning: cloud::Tuning,
     ) -> RealStore {
+        let registry_unread = AtomicBool::new(false);
         let regs = read_registry(&data_dir).map(|f| f.datasets).unwrap_or_else(|e| {
-            tracing::error!("{e}; registering and unregistering datasets is disabled until it is fixed");
+            tracing::error!(
+                "{e}; listing, registering and unregistering datasets is disabled until it is fixed and folo serve \
+                 started again"
+            );
+            registry_unread.store(true, Ordering::SeqCst);
             Vec::new()
         });
         // A dataset whose folder is gone stays listed (indexing fails with `path_not_found`), so clients can say so
@@ -244,6 +272,7 @@ impl RealStore {
         RealStore {
             data_dir,
             entries: RwLock::new(entries),
+            registry_unread,
             files: RwLock::new(()),
             recheck_every: RECHECK_EVERY,
             runs,

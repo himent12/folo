@@ -191,33 +191,233 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
                 "pass the dataset root: the folder holding data.yaml, images/ + labels/, or annotations/",
             )
         }
-        // The message already says what a dataset folder holds; images there without labels are said as that.
-        DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => match images_under(Path::new(path)) {
-            0 => Error::new(StatusCode::BAD_REQUEST, "unknown_format", m),
-            n => {
-                let (path, s) = (folo_data::paths::shown(path), if n == 1 { "" } else { "s" });
-                let message = format!("'{path}' has {n} image{s} but no labels");
-                Error::new(StatusCode::BAD_REQUEST, "unknown_format", message).hint(
-                    "label them first (FOLO Studio: Datasets, Label images), or add YOLO labels/ or a COCO \
-                     annotations/ JSON",
+        // The message already says what a dataset folder holds. A dataset one or two folders down (the folder above
+        // it was picked, or an archive wraps it in a folder) is named; images there without labels are said as that.
+        DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => {
+            if let Some(below) = dataset_below(Path::new(path), DIAGNOSE_ENTRIES) {
+                let (shown, below) = (folo_data::paths::shown(path), folo_data::paths::shown(below));
+                return Error::new(
+                    StatusCode::BAD_REQUEST,
+                    "unknown_format",
+                    format!("'{shown}' is not a dataset folder, but '{below}' inside it holds a dataset"),
                 )
+                .hint(format!(
+                    "register '{below}': the folder holding data.yaml, images/ + labels/, or annotations/"
+                ));
             }
-        },
+            match images_under(Path::new(path), DIAGNOSE_ENTRIES) {
+                0 => Error::new(StatusCode::BAD_REQUEST, "unknown_format", m),
+                n => {
+                    let (path, s) = (folo_data::paths::shown(path), if n == 1 { "" } else { "s" });
+                    let message = format!("'{path}' has {n} image{s} but no labels");
+                    Error::new(StatusCode::BAD_REQUEST, "unknown_format", message).hint(
+                        "label them first (FOLO Studio: Datasets, Label images), or add YOLO labels/ or a COCO \
+                         annotations/ JSON",
+                    )
+                }
+            }
+        }
         DataError::Format(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", m),
         DataError::Config(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_body", m),
         e => Error::internal(e.to_string()),
     }
 }
 
-/// Image files under `dir` (a few levels deep, counted up to 10,000), for a folder that is not a dataset.
-fn images_under(dir: &Path) -> usize {
+/// Entries the diagnostics of a folder that is not a dataset look at, at most ([`dataset_below`], [`images_under`]):
+/// they only phrase an error, so a drive or a system folder is never walked to say it is not one (x3-server-1).
+pub(crate) const DIAGNOSE_ENTRIES: usize = 20_000;
+
+/// The first folder one or two levels below `dir` (in name order, at most 64 folders a level, `budget` folder entries
+/// read in all, also those [`looks_like_dataset`] reads) where a dataset is found, for a folder that is not a dataset
+/// itself.
+pub(crate) fn dataset_below(dir: &Path, mut budget: usize) -> Option<PathBuf> {
+    fn folders(dir: &Path, budget: &mut usize) -> Vec<PathBuf> {
+        // A folder the read guard refuses (`folo mcp --confine`) is not listed.
+        if folo_data::guard::check(dir).is_err() {
+            return Vec::new();
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+        let mut dirs = Vec::new();
+        for e in entries {
+            if *budget == 0 || dirs.len() == 64 {
+                break;
+            }
+            *budget -= 1;
+            if let Ok(e) = e
+                && e.path().is_dir()
+            {
+                dirs.push(e.path());
+            }
+        }
+        dirs.sort();
+        dirs
+    }
+    let first = folders(dir, &mut budget);
+    if let Some(d) = first.iter().find(|d| looks_like_dataset(d, &mut budget)) {
+        return Some(d.clone());
+    }
+    for d in &first {
+        if let Some(found) = folders(d, &mut budget).into_iter().find(|d| looks_like_dataset(d, &mut budget))
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Whether `dir` holds what [`folo_data::detect_format`] finds a dataset by, looked at within `budget` (one entry
+/// per path checked or folder entry read, a YAML read up to 64 KiB): `detect_format` reads every entry of the
+/// folder and its `annotations/`, which a folder of millions of files makes unbounded (x3-server-1, review round 2).
+/// It only phrases an error, so a dataset whose YAML is beyond the budget is missed, never walked to.
+fn looks_like_dataset(dir: &Path, budget: &mut usize) -> bool {
+    let mut charge = |n: usize| -> bool {
+        let ok = *budget >= n;
+        *budget = budget.saturating_sub(n);
+        ok
+    };
+    // A folder the read guard refuses (`folo mcp --confine`) is not looked into (review round 3).
+    if folo_data::guard::check(dir).is_err() {
+        return false;
+    }
+    // The names detection takes without reading the folder: a YAML, YOLO folders, a Roboflow COCO file.
+    let named = ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"].map(|n| dir.join(n));
+    let splits = ["train", "valid", "val", "test"];
+    if !charge(named.len() + 2 + 2 * splits.len()) {
+        return false;
+    }
+    if named.iter().any(|p| p.is_file())
+        || (dir.join("images").is_dir() && dir.join("labels").is_dir())
+        || splits.iter().any(|s| dir.join(s).join("images").is_dir())
+        || splits.iter().any(|s| dir.join(s).join("_annotations.coco.json").is_file())
+    {
+        return true;
+    }
+    let ext = |p: &Path, want: &[&str]| {
+        p.extension().and_then(|e| e.to_str()).is_some_and(|e| want.iter().any(|w| e.eq_ignore_ascii_case(w)))
+    };
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    // COCO: a JSON in `annotations/` (not captions or keypoints), or one named like COCO annotations at the root.
+    let annotations = dir.join("annotations");
+    let listed =
+        folo_data::guard::check(&annotations).ok().and_then(|()| std::fs::read_dir(&annotations).ok());
+    for e in listed.into_iter().flatten() {
+        if !charge(1) {
+            return false;
+        }
+        let Ok(e) = e else { continue };
+        let (p, n) = (e.path(), name(&e.path()));
+        if ext(&p, &["json"])
+            && !n.starts_with("captions")
+            && !n.starts_with("person_keypoints")
+            && p.is_file()
+        {
+            return true;
+        }
+    }
+    for e in std::fs::read_dir(dir).into_iter().flatten() {
+        if !charge(1) {
+            return false;
+        }
+        let Ok(e) = e else { continue };
+        let (p, n) = (e.path(), name(&e.path()));
+        let coco = ext(&p, &["json"])
+            && (n.contains("coco") || n.starts_with("instances") || n.contains("annotations"));
+        // YOLO: any YAML with a `train` key.
+        if (coco && p.is_file()) || (ext(&p, &["yaml", "yml"]) && yaml_has_train(&p)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the YAML `p` has a `train:` line in its first 64 KiB. Only a regular file the read guard allows is
+/// opened (`folo mcp --confine`: a link to a file outside is not read), and on Unix without waiting for a writer, so
+/// a FIFO named `*.yaml`, also one swapped in after the check, never holds registration up (review round 3).
+fn yaml_has_train(p: &Path) -> bool {
+    use std::io::Read;
+    let regular = |m: std::io::Result<std::fs::Metadata>| m.is_ok_and(|m| m.is_file());
+    if !regular(std::fs::metadata(p)) || folo_data::guard::check(p).is_err() {
+        return false;
+    }
+    let Ok(file) = open_without_waiting(p) else { return false };
+    let mut head = String::new();
+    regular(file.metadata())
+        && file.take(64 << 10).read_to_string(&mut head).is_ok()
+        && head.lines().any(|l| l.trim_start_matches('\u{feff}').starts_with("train:"))
+}
+
+/// `O_NONBLOCK` of this Unix target (std does not name it and the server takes no `libc` dependency for one flag):
+/// None on a target whose value is not known here, where the probe opens nothing rather than a file that may wait
+/// (review round 4).
+#[cfg(unix)]
+const O_NONBLOCK: Option<i32> = if cfg!(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)) {
+    Some(0x4)
+} else if cfg!(any(target_os = "solaris", target_os = "illumos")) {
+    Some(0x80)
+} else if cfg!(any(target_os = "linux", target_os = "android")) {
+    if cfg!(any(
+        target_arch = "mips",
+        target_arch = "mips64",
+        target_arch = "mips32r6",
+        target_arch = "mips64r6"
+    )) {
+        Some(0x80)
+    } else if cfg!(any(target_arch = "sparc", target_arch = "sparc64")) {
+        Some(0x4000)
+    } else {
+        Some(0o4000)
+    }
+} else {
+    None
+};
+
+/// Opens `p` to read; on Unix with `O_NONBLOCK`, which a regular file ignores and which opens a FIFO (one swapped
+/// in after a check) at once instead of waiting for a writer. On a Unix target whose `O_NONBLOCK` is not known it
+/// opens nothing (`Unsupported`): the probe then reads no YAML, which only makes its error say less.
+fn open_without_waiting(p: &Path) -> std::io::Result<std::fs::File> {
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let Some(flag) = O_NONBLOCK else {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "O_NONBLOCK is not known here"));
+        };
+        open.custom_flags(flag);
+    }
+    open.open(p)
+}
+
+/// Image files under `dir` (a few levels deep) among the first `budget` entries walked, for a folder that is not a
+/// dataset.
+fn images_under(dir: &Path, budget: usize) -> usize {
     walkdir::WalkDir::new(dir)
         .max_depth(4)
         .into_iter()
+        .take(budget)
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file() && folo_data::is_image_path(e.path()))
-        .take(10_000)
         .count()
+}
+
+/// Says that `path` is not there (`404 path_not_found`) or not a dataset (`400 unknown_format`) without walking it.
+/// [`Index::build`] checks it first; registration checks it before it takes the file lease, so a folder that is not
+/// a dataset never holds up a dataset deletion.
+pub fn preflight(path: &str, format: DatasetFormat) -> Result<()> {
+    let p = absolute(Path::new(path));
+    if !p.exists() {
+        return Err(data_error(
+            folo_data::DataError::Io { path: p.clone(), source: std::io::ErrorKind::NotFound.into() },
+            path,
+        ));
+    }
+    folo_data::detect_format(&p, data_format(format)).map(|_| ()).map_err(|e| data_error(e, path))
 }
 
 /// The path of a dataset to register, as sent: surrounding whitespace and one pair of matching quotes removed
@@ -340,12 +540,9 @@ impl Index {
     pub fn build(path: &str, format: DatasetFormat, exclude: &[PathBuf]) -> Result<Index> {
         let excluded: Vec<PathBuf> = exclude.iter().map(|x| absolute(x)).collect();
         let p = absolute(Path::new(path));
-        if !p.exists() {
-            return Err(data_error(
-                folo_data::DataError::Io { path: p.clone(), source: std::io::ErrorKind::NotFound.into() },
-                path,
-            ));
-        }
+        // A folder that is not a dataset is said as that before anything walks it: the fingerprint below stats every
+        // file under `base`, which takes minutes for a drive or a system folder.
+        preflight(path, format)?;
         let base = if p.is_file() { p.parent().unwrap_or(&p).to_path_buf() } else { p.clone() };
         let opts = folo_data::OpenOptions { format: data_format(format), verify_images: true };
         // Fingerprint the folders *before* reading them, so a file changed while folo-data reads makes the next
@@ -611,6 +808,77 @@ mod tests {
         assert_eq!(default_name(&bccd.join("loose.json"), free), "loose");
         let taken = |n: &str| ["bccd", "bccd-2"].contains(&n.to_lowercase().as_str());
         assert_eq!(default_name(&bccd, taken), "bccd-3");
+    }
+
+    /// The diagnostics of a folder that is not a dataset stop after their budget of entries, whatever they find
+    /// (x3-server-1: they used to count up to 10,000 *images*, so a wide tree without images was walked whole).
+    #[test]
+    fn diagnostics_of_a_non_dataset_read_a_bounded_number_of_entries() {
+        let dir = tmp("diagnose");
+        for i in 0..40 {
+            std::fs::create_dir_all(dir.join(format!("sub{i:02}"))).unwrap();
+            std::fs::write(dir.join(format!("{i:02}.jpg")), b"x").unwrap();
+        }
+        std::fs::create_dir_all(dir.join("sub39/set/images")).unwrap();
+        std::fs::write(dir.join("sub39/set/data.yaml"), "names: [x]\n").unwrap();
+        assert_eq!(images_under(&dir, 1000), 40);
+        // The folder itself is the first entry walked: at most 9 of the 40 images are seen.
+        assert!(images_under(&dir, 10) < 10, "the walk stops after 10 entries");
+        assert!(dataset_below(&dir, 1000).is_some());
+        assert_eq!(dataset_below(&dir, 10), None, "the folder search stops after 10 entries");
+    }
+
+    /// Looking for a dataset in a folder below counts what it reads there too: a folder of many files before the
+    /// dataset uses the budget up, where `detect_format` read it whole (review round 2).
+    #[test]
+    fn looking_inside_a_folder_below_counts_against_the_budget() {
+        let dir = tmp("diagnose-inside");
+        std::fs::create_dir_all(dir.join("a-junk")).unwrap();
+        for i in 0..3000 {
+            std::fs::write(dir.join(format!("a-junk/{i:04}.txt")), b"").unwrap();
+        }
+        let set = dir.join("b-set");
+        std::fs::create_dir_all(set.join("images")).unwrap();
+        std::fs::write(set.join("coco128.yaml"), "path: .\ntrain: images\nnames: [x]\n").unwrap();
+        assert_eq!(dataset_below(&dir, DIAGNOSE_ENTRIES), Some(set.clone()), "a YAML with a train key");
+        assert_eq!(dataset_below(&dir, 1000), None, "the 3000 files of a-junk use 1000 entries up");
+        let mut budget = 1000;
+        assert!(!looks_like_dataset(&dir.join("a-junk"), &mut budget));
+        assert_eq!(budget, 0, "it stopped at the budget");
+        // What detection finds without reading the folder, and COCO.
+        std::fs::remove_file(set.join("coco128.yaml")).unwrap();
+        std::fs::create_dir_all(set.join("labels")).unwrap();
+        assert!(looks_like_dataset(&set, &mut 100), "images/ + labels/");
+        let coco = dir.join("c-coco/annotations");
+        std::fs::create_dir_all(&coco).unwrap();
+        std::fs::write(coco.join("captions_val.json"), "{}").unwrap();
+        assert!(!looks_like_dataset(coco.parent().unwrap(), &mut 100), "captions only");
+        std::fs::write(coco.join("instances_val.json"), "{}").unwrap();
+        assert!(looks_like_dataset(coco.parent().unwrap(), &mut 100));
+    }
+
+    /// A FIFO named like a YAML, with no writer, is not opened by the probe of a folder below, and opening one
+    /// (swapped in after the check) does not wait for a writer: registering its parent answers (review round 3).
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_like_a_yaml_never_holds_the_diagnostics_up() {
+        let dir = tmp("diagnose-fifo");
+        std::fs::create_dir_all(dir.join("child")).unwrap();
+        let fifo = dir.join("child/probe.yaml");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status().expect("mkfifo runs");
+        assert!(made.success(), "mkfifo {}", fifo.display());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (root, pipe) = (dir.to_path_buf(), fifo.clone());
+        std::thread::spawn(move || {
+            let below = dataset_below(&root, DIAGNOSE_ENTRIES);
+            let opened = open_without_waiting(&pipe).is_ok();
+            let _ = tx.send((below, yaml_has_train(&pipe), opened));
+        });
+        let (below, train, opened) =
+            rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the FIFO held the probe up");
+        assert_eq!((below, train), (None, false));
+        // Where O_NONBLOCK is not known nothing is opened, so nothing waits either (review round 4).
+        assert_eq!(opened, O_NONBLOCK.is_some(), "opened without waiting for a writer");
     }
 
     #[test]

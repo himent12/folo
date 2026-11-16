@@ -207,9 +207,167 @@ pub fn claim_dir(parent: &Path, base: &str) -> std::io::Result<PathBuf> {
     }
 }
 
+/// One record per id, of records loaded from folders as `(folder, id, record)`. A copy of a folder (a backup made
+/// beside it) has its original's id: the record from the folder named after its id is kept (else the first by folder
+/// name), and the copies are logged as `what` and skipped, not listed twice under one id (x3-server-9).
+pub fn one_per_id<T>(what: &str, mut loaded: Vec<(PathBuf, String, T)>) -> Vec<(PathBuf, T)> {
+    loaded.sort_by_cached_key(|(dir, id, _)| copy_order(dir, id));
+    first_per_id(what, loaded)
+}
+
+/// The order copies of one id are taken in: the folder named after the id first, then by folder name.
+fn copy_order(dir: &Path, id: &str) -> (bool, PathBuf) {
+    (dir.file_name() != Some(std::ffi::OsStr::new(id)), dir.to_path_buf())
+}
+
+/// The first record of each id in `sorted`; the later ones are logged as `what` and skipped.
+fn first_per_id<T>(what: &str, sorted: Vec<(PathBuf, String, T)>) -> Vec<(PathBuf, T)> {
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for (dir, id, record) in sorted {
+        if let Some(first) = seen.get(&id) {
+            tracing::warn!(
+                "skipping {}: {what} {id} is loaded from {} already",
+                dir.display(),
+                first.display()
+            );
+            continue;
+        }
+        seen.insert(id, dir.clone());
+        out.push((dir, record));
+    }
+    out
+}
+
+/// The folders under `root` holding the JSON record `file`, grouped by id, in the order to try loading them, picked
+/// before anything loads them, so the recovery a load does (closing what a previous process left active, written
+/// back) never rewrites a backup (review round 2). `readable` says, without writing anything, whether a record's
+/// bytes are one its loader takes (it parses, its version is known): in each group the readable records come first,
+/// in [`one_per_id`]'s order, so a damaged original does not hide an intact backup (review round 3); [`load_first`]
+/// loads the first of a group that loads (review round 4). A folder whose id cannot be read is a group of its own.
+pub fn folders_by_id(root: &Path, file: &str, readable: impl Fn(&[u8]) -> bool) -> Vec<Vec<PathBuf>> {
+    #[derive(serde::Deserialize)]
+    struct Head {
+        id: String,
+    }
+    let mut found: Vec<(PathBuf, String, bool)> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|dir| dir.join(file).is_file())
+        .map(|dir| {
+            let bytes = std::fs::read(dir.join(file)).ok();
+            let head = bytes.as_deref().and_then(|b| serde_json::from_slice::<Head>(b).ok());
+            // No id: a key no id has (ids have no NUL), so it is kept and its loader logs it.
+            let id = head.map_or_else(|| format!("\0{}", dir.display()), |h| h.id);
+            let ok = bytes.as_deref().is_some_and(&readable);
+            (dir, id, ok)
+        })
+        .collect();
+    found.sort_by_cached_key(|(dir, id, ok)| (!*ok, copy_order(dir, id)));
+    let (mut at, mut groups) = (std::collections::HashMap::new(), Vec::<Vec<PathBuf>>::new());
+    for (dir, id, _) in found {
+        let i = *at.entry(id).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[i].push(dir);
+    }
+    groups
+}
+
+/// Of each group of [`folders_by_id`], the record of the first folder `load` loads; why one does not is logged as
+/// `what`. A record that reads but does not load, such as one whose recovery cannot be written back to a folder the
+/// server may not write, gives way to the next copy (review round 4). The copies after the loaded one are logged
+/// and left alone.
+pub fn load_first<T, E: std::fmt::Display>(
+    what: &str,
+    groups: Vec<Vec<PathBuf>>,
+    mut load: impl FnMut(&Path) -> std::result::Result<T, E>,
+) -> Vec<T> {
+    let mut out = Vec::new();
+    for dirs in groups {
+        let mut loaded: Option<&PathBuf> = None;
+        for dir in &dirs {
+            if let Some(first) = loaded {
+                tracing::warn!(
+                    "skipping {}: {what} is loaded from {} already",
+                    dir.display(),
+                    first.display()
+                );
+                continue;
+            }
+            match load(dir) {
+                Ok(record) => {
+                    out.push(record);
+                    loaded = Some(dir);
+                }
+                Err(err) => tracing::warn!("skipping {what} {}: {err}", dir.display()),
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Copies are told apart by the id in their record, before any is loaded; a readable record goes before the
+    /// original's damaged one (review round 3); a record without an id is a group of its own. The first copy of a
+    /// group that loads is kept: one that reads but does not load gives way to the next (review round 4).
+    #[test]
+    fn folders_are_picked_by_id_before_loading() {
+        let t = folo_test_support::TestDir::new("util-folders-by-id");
+        let root = t.join("label");
+        for (dir, body) in [
+            ("lj_1", r#"{"id":"lj_1","version":1}"#),
+            ("lj_1 - Copy", r#"{"id":"lj_1","version":1}"#),
+            ("lj_2", r#"{"id":"lj_2","version":999}"#),
+            ("lj_2 - Copy", r#"{"id":"lj_2","version":1}"#),
+            ("lj_3", r#"{"id":"lj_3"}"#),
+            ("lj_3 - Copy", r#"{"id":"lj_3"}"#),
+            ("broken", "{"),
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("job.json"), body).unwrap();
+        }
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        let readable =
+            |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).is_ok_and(|v| v["version"] == 1);
+        let mut groups = folders_by_id(&root, "job.json", readable);
+        groups.sort();
+        let names = |dirs: &[&str]| dirs.iter().map(|d| root.join(d)).collect::<Vec<_>>();
+        let want = [
+            names(&["broken"]),
+            names(&["lj_1", "lj_1 - Copy"]),
+            names(&["lj_2 - Copy", "lj_2"]),
+            names(&["lj_3", "lj_3 - Copy"]),
+        ];
+        assert_eq!(groups, want, "the readable records first, the original before its copies");
+        // lj_1 reads but does not load (as when its recovery cannot be written back): its copy is loaded instead.
+        let loaded = load_first("labeling job", groups, |dir| {
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+            let fails = name == "lj_1" || name == "broken" || name.starts_with("lj_3");
+            if fails { Err("cannot load") } else { Ok(name) }
+        });
+        assert_eq!(loaded, ["lj_1 - Copy", "lj_2 - Copy"]);
+    }
+
+    #[test]
+    fn copies_of_a_folder_load_once() {
+        let p = |s: &str| PathBuf::from("/data/label").join(s);
+        let loaded = vec![
+            (p("lj_1 - Copy"), "lj_1".to_string(), 1),
+            (p("lj_2"), "lj_2".to_string(), 2),
+            (p("lj_1"), "lj_1".to_string(), 3),
+            (p("backup-b"), "lj_9".to_string(), 4),
+            (p("backup-a"), "lj_9".to_string(), 5),
+        ];
+        let kept: Vec<i32> = one_per_id("job", loaded).into_iter().map(|(_, r)| r).collect();
+        assert_eq!(kept, [3, 2, 5], "the folder named after the id, else the first by name");
+    }
 
     #[test]
     fn millisecond_times_round_trip_and_sort_as_time() {

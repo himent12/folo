@@ -363,3 +363,123 @@ async fn a_run_cut_short_by_a_restart_is_closed_as_stopped() {
     let logs: RunLogs = ok(&f.app, get(&format!("{uri}/logs"))).await;
     assert!(logs.lines.last().unwrap().message.starts_with("the server stopped during the agent run"));
 }
+
+/// A copy of a job folder made while its run was unfinished is skipped before loading: the restart closes the
+/// job's run, never the backup's, whose files stay byte for byte (review round 2).
+#[tokio::test]
+async fn a_copied_job_folder_is_left_as_it_is() {
+    let t = TestDir::new("label-copy");
+    let home = t.join("home");
+    let f = fixture(&home, vec![Step::Hold]);
+    let job = job_with_images(&f.app, 2).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    ok::<LabelJob>(&f.app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    let dir = home.join("label").join(&job.id);
+    let saved = std::fs::read(dir.join("job.json")).unwrap();
+    f.store.shutdown();
+    drop(f);
+    let copy = home.join("label").join(format!("{} - Copy", job.id));
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(dir.join("job.json"), &saved).unwrap();
+    std::fs::write(copy.join("job.json"), &saved).unwrap();
+    let names = |d: &std::path::Path| {
+        let mut v: Vec<_> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        v.sort();
+        v
+    };
+    let before = names(&copy);
+
+    let f = fixture(&home, vec![]);
+    let list: LabelJobList = ok(&f.app, get("/api/label/jobs")).await;
+    assert_eq!(list.jobs.len(), 1, "one job of its id");
+    let job: LabelJob = ok(&f.app, get(&uri)).await;
+    assert_eq!(job.run.unwrap().outcome, Some(LabelOutcome::Stopped), "the job's own run is closed");
+    assert_eq!(std::fs::read(copy.join("job.json")).unwrap(), saved, "the backup is not rewritten");
+    assert_eq!(names(&copy), before, "and nothing is added to it");
+}
+
+/// A job whose own `job.json` its loader refuses (a version this server does not read, or only its id left) does
+/// not hide an intact copy of its folder: the copy is loaded (review round 3).
+#[tokio::test]
+async fn a_damaged_job_record_does_not_hide_its_backup() {
+    let t = TestDir::new("label-copy-damaged");
+    let home = t.join("home");
+    let f = fixture(&home, vec![]);
+    let job = job_with_images(&f.app, 2).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    f.store.shutdown();
+    drop(f);
+    let dir = home.join("label").join(&job.id);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("job.json")).unwrap()).unwrap();
+    let copy = home.join("label").join(format!("{} - Copy", job.id));
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("job.json"), saved.to_string()).unwrap();
+    let mut newer = saved.clone();
+    newer["version"] = json!(999);
+    for damaged in [newer, json!({ "id": job.id })] {
+        std::fs::write(dir.join("job.json"), damaged.to_string()).unwrap();
+        let f = fixture(&home, vec![]);
+        let list: LabelJobList = ok(&f.app, get("/api/label/jobs")).await;
+        assert_eq!(list.jobs.len(), 1, "the copy is loaded: {damaged}");
+        let got: LabelJob = ok(&f.app, get(&uri)).await;
+        assert_eq!(got.name, job.name);
+        f.store.shutdown();
+    }
+}
+
+/// Makes the `job.json` in `dir` one the server cannot replace (`on`), or replaceable again; says whether it is
+/// (a root user on Unix writes anyway).
+fn unwritable(dir: &std::path::Path, on: bool) -> bool {
+    #[cfg(windows)]
+    {
+        let p = dir.join("job.json");
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_readonly(on);
+        std::fs::set_permissions(&p, perms).unwrap();
+        true
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(if on { 0o555 } else { 0o755 }))
+            .unwrap();
+        let probe = dir.join(".probe");
+        let blocked = std::fs::write(&probe, b"").is_err();
+        let _ = std::fs::remove_file(&probe);
+        blocked
+    }
+}
+
+/// A job whose own `job.json` reads but whose recovery (closing the run a crash left active) cannot be written back
+/// does not hide an intact copy of its folder: the copy is loaded, the original left as it was (review round 4).
+#[tokio::test]
+async fn a_job_whose_recovery_cannot_be_written_does_not_hide_its_backup() {
+    let t = TestDir::new("label-copy-unwritable");
+    let home = t.join("home");
+    let f = fixture(&home, vec![Step::Hold]);
+    let job = job_with_images(&f.app, 2).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    ok::<LabelJob>(&f.app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    let dir = home.join("label").join(&job.id);
+    let saved = std::fs::read(dir.join("job.json")).unwrap();
+    f.store.shutdown();
+    drop(f);
+    let copy = home.join("label").join(format!("{} - Copy", job.id));
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(dir.join("job.json"), &saved).unwrap();
+    std::fs::write(copy.join("job.json"), &saved).unwrap();
+    let blocked = unwritable(&dir, true);
+
+    let f = fixture(&home, vec![]);
+    let list: LabelJobList = ok(&f.app, get("/api/label/jobs")).await;
+    let got: LabelJob = ok(&f.app, get(&uri)).await;
+    f.store.shutdown();
+    let original = std::fs::read(dir.join("job.json")).unwrap();
+    unwritable(&dir, false);
+    assert_eq!(list.jobs.len(), 1, "the job is listed (from its copy)");
+    assert_eq!(got.run.unwrap().outcome, Some(LabelOutcome::Stopped), "the copy's run is closed");
+    if blocked {
+        assert_eq!(original, saved, "the original, which cannot be written, is left as it was");
+    }
+}

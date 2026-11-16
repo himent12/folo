@@ -8,6 +8,7 @@ use folo_ui::{
 
 use crate::api::{Label, SplitsExt};
 use crate::app::{FoloApp, Route, act};
+use crate::controls::Btn;
 use crate::screens::cell2;
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
@@ -19,12 +20,29 @@ impl FoloApp {
         let datasets = self.store.datasets.ready().cloned().unwrap_or_default();
         let cards: Vec<AnyElement> =
             datasets.iter().take(3).map(|d| self.dataset_card(d, window, cx)).collect();
+        // A list that failed says why, with Retry: not skeletons for good (a damaged registry on the
+        // server answers 500 with how to fix it).
+        let failed = self.store.datasets.error().cloned().map(|e| {
+            let retry = self.button(
+                "ov-ds-retry",
+                "Retry",
+                Btn::Primary,
+                Some("icons/refresh-cw.svg"),
+                window,
+                cx,
+                act(|this, _, cx| this.retry_all(cx)),
+            );
+            let hint = e.hint.clone().unwrap_or_else(|| format!("Error code {}", e.code));
+            empty_state(&t, "icons/circle-alert.svg", &e.message, &hint, Tone::Danger).child(retry)
+        });
         panel(&t)
             .flex()
             .flex_col()
             .child(panel_header(&t, "Datasets").child(all))
             .map(|d| {
-                if cards.is_empty() && self.store.datasets.ready().is_some() {
+                if let Some(failed) = failed {
+                    d.child(failed)
+                } else if cards.is_empty() && self.store.datasets.ready().is_some() {
                     d.child(empty_state(
                         &t,
                         "icons/images.svg",

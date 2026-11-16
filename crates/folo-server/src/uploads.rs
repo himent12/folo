@@ -692,6 +692,11 @@ fn unpack(pipe: &Arc<Pipe>, root: &Path) -> Result<()> {
         }
         let rel = entry_path(&entry)?;
         let path = root.join(&rel);
+        if let Some(clash) = file_folder_clash(root, &rel, kind.is_dir()) {
+            return Err(invalid(format!(
+                "{clash} is both a file and a folder in the archive; rename one and pack again"
+            )));
+        }
         if kind.is_dir() {
             std::fs::create_dir_all(&path).map_err(|e| io_error("creating", &path, e))?;
         } else if kind.is_file() || kind.is_contiguous() {
@@ -744,6 +749,25 @@ fn entry_path(entry: &tar::Entry<impl Read>) -> Result<PathBuf> {
         }
     }
     Ok(rel)
+}
+
+/// The name of what an entry at `rel` (a folder when `dir`) collides with in `root`: an earlier file where it or one
+/// of its parent folders goes, or an earlier folder where a file goes. Without this check the unpacking fails with an
+/// operating system error (`500 io_error`) instead of refusing the archive.
+fn file_folder_clash(root: &Path, rel: &Path, dir: bool) -> Option<String> {
+    let mut at = root.to_path_buf();
+    let parts: Vec<_> = rel.components().collect();
+    for (i, c) in parts.iter().enumerate() {
+        at.push(c);
+        let last = i + 1 == parts.len();
+        let Ok(meta) = std::fs::symlink_metadata(&at) else { return None };
+        let wants_dir = !last || dir;
+        if wants_dir != meta.is_dir() {
+            let name: PathBuf = parts[..=i].iter().collect();
+            return Some(folo_api::json::path(&name));
+        }
+    }
+    None
 }
 
 /// `rel` as Windows compares names: each component without trailing dots and spaces, in lower case.

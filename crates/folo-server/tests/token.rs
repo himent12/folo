@@ -96,6 +96,8 @@ async fn api_requests_need_the_token_and_it_is_never_logged() {
     unauthorized(&app, create_run(None)).await;
     unauthorized(&app, create_run(Some("Bearer nope"))).await;
     unauthorized(&app, get("/api/no-such-route", None)).await;
+    // A token in the query string is not accepted, and not logged with the request's URL either (x3-server-2).
+    unauthorized(&app, get(&format!("/api/runs?token={SECRET}"), None)).await;
     let mut post_health = get("/api/health", None);
     *post_health.method_mut() = axum::http::Method::POST;
     unauthorized(&app, post_health).await;

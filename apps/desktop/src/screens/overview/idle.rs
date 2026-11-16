@@ -113,16 +113,23 @@ impl FoloApp {
                 .into_any_element();
         }
         let has_ds = self.store.datasets.ready().is_some_and(|d| !d.is_empty());
+        // A datasets list that failed (a damaged registry on the server, say) is not "No datasets
+        // yet" with Add dataset: the datasets strip below says why, with Retry.
+        let ds_failed = self.store.datasets.error().is_some();
         let (title, body) = if has_ds {
             ("Nothing is training", "Start a run to watch loss, mAP and throughput update live here.")
+        } else if ds_failed {
+            ("Nothing is training", "The datasets didn't load: the Datasets panel below says why.")
         } else {
             (
                 "No datasets yet",
                 "Register a YOLO or COCO folder, or generate a synthetic shapes dataset to try FOLO end to end.",
             )
         };
-        let action = if has_ds {
-            self.button(
+        let action = if ds_failed {
+            None
+        } else if has_ds {
+            Some(self.button(
                 "ov-empty-new",
                 "New run",
                 Btn::Primary,
@@ -130,9 +137,9 @@ impl FoloApp {
                 window,
                 cx,
                 act(|this, w, cx| this.open_new_run(None, w, cx)),
-            )
+            ))
         } else {
-            self.button(
+            Some(self.button(
                 "ov-empty-ds",
                 "Add dataset",
                 Btn::Primary,
@@ -145,7 +152,7 @@ impl FoloApp {
                     this.navigate(Route::Datasets, w, cx);
                     this.add_dataset_folder(cx);
                 }),
-            )
+            ))
         };
         panel(&t)
             .flex_1()
@@ -155,12 +162,12 @@ impl FoloApp {
             .child(
                 empty_state(
                     &t,
-                    if has_ds { "icons/activity.svg" } else { "icons/images.svg" },
+                    if has_ds || ds_failed { "icons/activity.svg" } else { "icons/images.svg" },
                     title,
                     body,
                     Tone::Neutral,
                 )
-                .child(action),
+                .when_some(action, |d, a| d.child(a)),
             )
             .into_any_element()
     }

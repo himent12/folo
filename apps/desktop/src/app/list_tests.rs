@@ -352,3 +352,21 @@ fn a_runs_history_answering_after_it_was_deleted_elsewhere_stays_gone() {
         assert!(!this.store.run_data.contains_key("run_52e8"), "the late answer does not bring it back");
     });
 }
+
+/// A datasets list that failed (a damaged registry: the server answers 500 with how to fix it) is
+/// said on Overview with Retry, not as skeletons for good or "No datasets yet" (x3-server review).
+#[test]
+fn a_failed_datasets_list_is_said_on_overview() {
+    let (mut app, window) = super::tests::open();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Overview, w, cx);
+        let e = crate::api::ApiError::new("internal", "D:/data/datasets.json is malformed");
+        this.store.datasets = crate::store::Load::Failed(e);
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let drawn = this.focus.borrow();
+        assert!(drawn.contains_key("ov-ds-retry"), "the datasets strip says it, with Retry");
+        assert!(!drawn.contains_key("ov-empty-ds"), "not Add dataset under No datasets yet");
+    });
+}

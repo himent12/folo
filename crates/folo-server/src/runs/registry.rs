@@ -22,17 +22,20 @@ impl Runs {
     pub fn open(dir: PathBuf, throughput: Arc<Throughput>) -> Arc<Runs> {
         let mut list = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
-            for d in rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()) {
+            let mut dirs: Vec<PathBuf> =
+                rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+            dirs.sort();
+            let mut files = Vec::new();
+            for d in dirs {
                 let path = d.join("run.json");
                 let Ok(bytes) = std::fs::read(&path) else { continue };
-                let file: RunFile = match serde_json::from_slice(&bytes) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::warn!("skipping {}: {e}", path.display());
-                        continue;
-                    }
-                };
-                let mut file = file;
+                match serde_json::from_slice::<RunFile>(&bytes) {
+                    Ok(f) => files.push((d, f.run.id.clone(), f)),
+                    Err(e) => tracing::warn!("skipping {}: {e}", path.display()),
+                }
+            }
+            // A copy of a run folder (a backup made next to it) is not a second run of its id (x3-server-9).
+            for (d, mut file) in crate::util::one_per_id("run", files) {
                 // Runs from before `Run.resolved` (or its `close_mosaic`): the trainer's config.json has the same
                 // numbers.
                 if file.run.resolved.as_ref().is_none_or(|r| r.close_mosaic.is_none()) {

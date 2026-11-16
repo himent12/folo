@@ -119,7 +119,12 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   from servers older than the field.
 
 ## Datasets
-- `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
+- `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`). When `datasets.json` could not be
+  read at start (malformed, unreadable), no dataset loaded and the list answers `500 internal` "… datasets.json is
+  malformed …" with a hint, not an empty list; once the file is fixed, `500 internal` "… lists N datasets this server
+  did not load when it started" with the hint to restart `folo serve`, until a restart loads them. Registering
+  (`POST /api/datasets`, uploads, sample sets) and unregistering answer the same errors meanwhile, so nothing is
+  listed without the datasets the file has; a file fixed to list no dataset lifts them.
 - `POST /api/datasets` body `{ "name"?, "path", "format": "auto|yolo|coco" }` → `201 Dataset` with `stats`.
   Registers a dataset on disk: a folder, a `data.yaml` or a COCO instances `.json`. `path` must be absolute
   (surrounding whitespace and one pair of quotes, as Windows' "Copy as path" adds, are ignored; a relative path is
@@ -130,8 +135,14 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   folder layout) or `images/{train,val,test}` + `labels/…`; COCO from `annotations/instances_*.json` (Roboflow
   layouts too). Corrupt or missing images and images with broken labels are left out (`stats.broken_labels` counts
   the latter; `folo dataset check` lists them all). Without `names` / `nc`, classes are named `class0..` up to the
-  largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset; a folder with images
-  but no labels says "'<path>' has N images but no labels", with a hint to label them),
+  largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset; the folder above
+  a dataset says "'<path>' is not a dataset folder, but '<path>/<sub>' inside it holds a dataset" (looked for one and
+  two levels down), with a hint to register that one; a folder with images but no labels says "'<path>' has N images
+  but no labels", with a hint to label them; a folder that is not a dataset is said so without walking it: these
+  hints look at 20,000 entries at most, also inside the folders they look for a dataset in (there by the names
+  detection uses: a `data.yaml`, a YAML with a `train:` line read to 64 KiB, `images/` + `labels/`, an
+  `annotations/` JSON; only regular files are read, and nothing the `folo mcp --confine` read guard refuses), and
+  nothing waits for them),
   `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes). The
   request returns once the dataset is indexed (every image header is read, in parallel). Registering a path that
   is already registered (the same folder by its canonical path, whatever the spelling, with `format` `auto` or
@@ -1255,7 +1266,9 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   A dataset's archive is whole once its end-of-archive marker has arrived: completing it earlier (inside a file,
   or between files) is `409 upload_conflict`, and the session stays open for the rest. Content that is not usable
   drops the session with its files: `422 invalid_upload` / `invalid_weights`, or what registering the dataset
-  answers (`400 unknown_format` / `invalid_dataset`).
+  answers (`400 unknown_format` / `invalid_dataset`). An archive that wraps the dataset in a folder (a zip of the
+  dataset folder) says "the archive is not a dataset at its top, but its folder '<sub>' holds one", with a hint to
+  pack that folder's contents at the archive's top level and upload again.
 - `DELETE /api/uploads/{id}` → `204` (drops the session and what it received).
 
 ```jsonc
