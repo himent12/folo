@@ -124,8 +124,8 @@ fixes.
   timeout, a server error or a cut download is the new `download_failed`, without a fallback. The checksum and
   `.folo` checks are unchanged: nothing is installed unless both pass. `--json` adds `via` (`https`, `gh`, `null`).
 - `FOLO_WEIGHTS_BASE_URL` downloads from a mirror (`<base>/<tag>/<file>`), `FOLO_GH` names the GitHub CLI program.
-- The QUICKSTART has the two-command path to a first fine-tune (`folo weights pull folo-n-coco-v3`, then
-  `folo train --weights folo-n-coco-v3`); `train` still never downloads by itself, and its hint says what to run.
+- The QUICKSTART has the two-command path to a first fine-tune (`folo weights pull folo-n-coco-v4`, then
+  `folo train --weights folo-n-coco-v4`); `train` still never downloads by itself, and its hint says what to run.
 
 #### Vision benchmarks
 - Make a benchmark from your own labeled images and run **any vision model** on it: a FOLO model, Claude Code or

@@ -279,8 +279,8 @@ A command that takes a published name that is not downloaded (`train --weights`,
 `export`) does not download it: it stops at once with `weights_not_found` (exit 3) and the hint
 ``run `folo weights pull NAME`, then this command again``, so a run never starts on a download it did not ask for. A
 first fine-tune is two commands ([QUICKSTART](QUICKSTART.md#fine-tune-from-pretrained-weights)):
-`folo weights pull folo-n-coco-v3`, then `folo train --data <dataset> --weights folo-n-coco-v3`. Without `folo`,
-`gh release download weights-v4 --repo himent12/folo --pattern 'folo-n-coco-v3*' --pattern SHA256SUMS` (or the
+`folo weights pull folo-n-coco-v4`, then `folo train --data <dataset> --weights folo-n-coco-v4`. Without `folo`,
+`gh release download weights-v5 --repo himent12/folo --pattern 'folo-n-coco-v4*' --pattern SHA256SUMS` (or the
 release URLs) then `sha256sum -c --ignore-missing SHA256SUMS` does the same by hand.
 
 ## Cloud

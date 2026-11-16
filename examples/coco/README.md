@@ -543,10 +543,23 @@ verifies as the others do:
 ```sh
 folo weights pull folo-n-coco-v4          # → ~/.folo/weights/folo-n-coco-v4.folo, sha256 verified
 folo weights pull folo-n-coco-v4-f16
+folo train --data <your dataset> --weights folo-n-coco-v4 ...
 folo predict --model folo-n-coco-v4-f16 --half <images>
 ```
 
-FINETUNE_NOTE
+**Fine-tuning from v4.** A distilled model had not been fine-tuned before, so v4 was checked as a starting point
+against v3 with hill-climb 2's protocol (bench/finetune/README.md: folo-n, 640 px, batch 16, 100 epochs, f32,
+defaults; `folo val --save-json` of `best.folo` on each set's evaluation split, scored by pycocotools), seeds 0 and 1,
+`main` 069935d6:
+
+| dataset | v3 s0 | v3 s1 | v3 mean | v4 s0 | v4 s1 | v4 mean | v4 − v3 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| BCCD | 0.6012 | 0.6209 | 0.6110 | 0.6390 | 0.6267 | 0.6329 | +0.0218 |
+| signature | 0.9894 | 0.9871 | 0.9883 | 0.9880 | 0.9908 | 0.9894 | +0.0012 |
+| medical pills | 0.8064 | 0.8050 | 0.8057 | 0.8066 | 0.8055 | 0.8061 | +0.0003 |
+
+The bar was that v4's mean is not more than 0.010 AP below v3's on any of the three; it is not below on any, so v4 is
+the recommended start for fine-tuning. Two seeds on three small test sets cannot show a gain, and none is claimed.
 
 ## folo-s: 56 epochs on a rented GPU
 
