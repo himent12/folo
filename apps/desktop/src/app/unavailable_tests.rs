@@ -175,9 +175,62 @@ fn a_failed_bench_preview_is_marked_and_is_a_retry() {
     api.fail_pixels(false);
     app.advance_clock(Duration::from_secs(3600));
     assert!(drive(&mut app, window, |this, _, _| this.bench_image_failed(&bench, &image, None)), "it waits");
-    drive(&mut app, window, |this, _, cx| this.retry_bench_image(&bench, &image, None, cx));
+
+    // By keyboard (review round 2): the focused Retry's ring shows whole, not clipped by the
+    // image's frame; Enter loads it; Tab then goes on to the next preview's Retry, not back to
+    // the first control on the page.
+    app.update(super::bind_keys);
+    drive(&mut app, window, |this, w, cx| {
+        this.kb = true;
+        this.focus_key("bench-preview-retry", w, cx);
+        cx.notify();
+    });
+    marks(&mut app, window);
+    let focus = drive(&mut app, window, |_, _, cx| crate::theme::theme(cx).focus);
+    let rings: Vec<folo_ui::Quad> = app
+        .scene(window.into())
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            // (2 px: the severity chips' 1 px accent edges share the colour.)
+            Primitive::Quad(q)
+                if q.border_color == focus && q.border_widths.top >= folo_ui::ScaledPixels::from(2.) =>
+            {
+                Some(q.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    // A border paints as one quad per edge, each clipped to its strip: together they cover the
+    // ring's whole box unless something around the control clips it.
+    let ring = rings.first().expect("the focused Retry paints its ring").bounds;
+    assert!(rings.iter().all(|r| r.bounds == ring), "one ring: {rings:?}");
+    let shown = rings.iter().skip(1).fold(rings[0].clip, |u, r| u.union(&r.clip));
+    assert_eq!(shown, ring, "the ring shows whole, not clipped by the image's frame");
+    press(&mut app, window, "enter");
     marks(&mut app, window);
     assert!(!drive(&mut app, window, |this, _, _| this.bench_image_failed(&bench, &image, None)), "loaded");
+    press(&mut app, window, "tab");
+    let focused = drive(&mut app, window, |this, w, _| {
+        this.focus.borrow().iter().find(|(_, fh)| fh.is_focused(w)).map(|(k, _)| k.to_string())
+    });
+    assert!(
+        focused.as_deref().is_some_and(|k| k.starts_with("bench-preview-retry-")),
+        "Tab goes on to the next failed preview: {focused:?}"
+    );
+}
+
+/// One press of `key`: down, then up, a frame drawn after each.
+fn press(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, key: &str) {
+    use folo_ui::{KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput};
+    let keystroke = Keystroke::parse(key).unwrap();
+    let down = KeyDownEvent { keystroke: keystroke.clone(), is_held: false };
+    app.simulate_input(window.into(), PlatformInput::KeyDown(down));
+    app.run_until_idle();
+    app.frame(window.into());
+    app.simulate_input(window.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+    app.run_until_idle();
+    app.frame(window.into());
 }
 
 #[test]

@@ -39,26 +39,31 @@ impl FoloApp {
     ) -> AnyElement {
         let first =
             self.bench.previews.get(&b.id).and_then(|l| l.ready()).and_then(|p| p.images.first()).cloned();
-        let frame =
-            div().w(px(72.)).h(px(48.)).flex_none().rounded(px(radius::SM)).overflow_hidden().bg(t.bg_inset);
+        // The image clips inside; the control itself doesn't, so its focus ring shows whole.
+        let frame = div().w(px(72.)).h(px(48.)).flex_none().rounded(px(radius::SM)).bg(t.bg_inset);
         let Some(im) = first else { return frame.into_any_element() };
         let img = self.bench_image(&b.id, &im.id, condition, cx);
         let failed = img.is_none() && self.bench_image_failed(&b.id, &im.id, condition);
         let painted =
             image_canvas(t, img, (im.width as f32, im.height as f32), Vec::new(), Fit::Cover, false, false);
-        if !failed {
-            return frame.child(painted).into_any_element();
-        }
+        let painted = if failed { crate::screens::unavailable_over(t, painted, false) } else { painted };
+        let frame = frame.child(div().size_full().rounded(px(radius::SM)).overflow_hidden().child(painted));
         let key = match condition {
             Some((c, s)) => format!("bench-preview-retry-{c}-{s}"),
             None => "bench-preview-retry".to_string(),
         };
+        if !failed {
+            return match self.passing_stop(&key, false, cx) {
+                Some(fh) => frame.track_focus(&fh).into_any_element(),
+                None => frame.into_any_element(),
+            };
+        }
+        self.passing_stop(&key, true, cx);
         let (bid, iid, cond) = (b.id.clone(), im.id.clone(), condition.map(|(c, s)| (c.to_string(), s)));
         let el = frame
             .id(folo_ui::SharedString::from(key.clone()))
             .cursor_pointer()
-            .tooltip(crate::controls::tip(format!("{} · Retry", crate::screens::TILE_UNAVAILABLE), None))
-            .child(crate::screens::unavailable_over(t, painted, false));
+            .tooltip(crate::controls::tip(format!("{} · Retry", crate::screens::TILE_UNAVAILABLE), None));
         self.bind(
             el,
             &key,

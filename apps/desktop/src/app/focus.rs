@@ -22,6 +22,17 @@ impl FoloApp {
         self.focus.borrow_mut().entry(key).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone()
     }
 
+    /// The handle of a control that comes and goes, as a failed image's Retry: a Tab stop while it
+    /// is `shown`. Gone, one it had stays for the caller to track as no stop, so focus left on it
+    /// (Enter retried and the Retry went) keeps its place in Tab order instead of starting over.
+    pub fn passing_stop(&self, key: &str, shown: bool, cx: &mut Context<Self>) -> Option<FocusHandle> {
+        if !shown && !self.focus.borrow().contains_key(key) {
+            return None;
+        }
+        // The flag lives in the handle's shared entry, so `bind`'s clone reads it back.
+        Some(self.fh(key.to_string(), cx).tab_stop(shown))
+    }
+
     /// Names the keys of the focused control in the strip under the page (see `key_hint`).
     pub fn hint_keys(&self, keys: impl Into<SharedString>) {
         *self.key_hint.borrow_mut() = Some(keys.into());
