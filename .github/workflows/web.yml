@@ -7,6 +7,7 @@ on:
       - web/**
       - design/**
       - tools/ci-retry.sh
+      - tools/ci-retry-test.sh
       - .github/workflows/web.yml
   push:
     branches: [main]
@@ -31,7 +32,11 @@ jobs:
       - run: npm ci
       # Node on the self-hosted Linux runners (WSL on the unstable host, docs/CI.md) now and then dies of SIGTRAP or
       # SIGILL ("# Fatal error in , line 0 / unreachable code", exit 133 / 132). tools/ci-retry.sh retries such a
-      # step once there, only on a crash signal: a type error or a failing test is never retried.
+      # step once there, only on a crash signal: a type error or a failing test is never retried, whatever its
+      # output prints (tools/ci-retry-test.sh holds the cases and runs first).
+      - name: ci-retry cases
+        shell: bash
+        run: bash ../tools/ci-retry-test.sh
       - name: check
         shell: bash
         env:

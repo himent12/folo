@@ -8,7 +8,8 @@ helpers in `apps/desktop/tools/`.
 |---|---|---|
 | [`file-size.sh`](file-size.sh) | fails when a tracked source file (`.rs`, `.ts`, `.py`, `.wgsl`, `.sh`, ...; not `web/framework/vendor`) has 1000 lines or more, and lists those files | `site.yml`, step "file sizes", on every pull request; AGENTS.md and CONTRIBUTING.md ask for it before a PR |
 | [`test-tmp.sh`](test-tmp.sh) | runs a test command with `FOLO_TEST_TMP`, `TMPDIR`, `TMP` and `TEMP` pointed at one fresh folder, then fails if the run left a `folo-*` entry there | `ci.yml`, job `rust`, step "test"; `desktop.yml`, the "test" steps of both jobs ([docs/CI.md, Test temp dirs](../docs/CI.md#test-temp-dirs)) |
-| [`ci-retry.sh`](ci-retry.sh) | runs a command up to `ATTEMPTS` times (default 1), retrying only when the output shows a Windows crash code (access violation, illegal instruction, stack-buffer overrun) or the process died of SIGILL, SIGTRAP, SIGBUS or SIGSEGV | `ci.yml` (clippy, test), `desktop.yml` (job `desktop`), `web.yml` (check, test, qa), `release.yml` (the "build" steps of `cli` and `desktop`); `ATTEMPTS` is 2 only on self-hosted runners ([docs/CI.md, Unstable self-hosted Windows host](../docs/CI.md#unstable-self-hosted-windows-host)) |
+| [`ci-retry.sh`](ci-retry.sh) | runs a command up to `ATTEMPTS` times (default 1), retrying only when the process crashed: it died of SIGILL, SIGTRAP, SIGBUS or SIGSEGV, or a whole line of its output is cargo's Windows crash line (access violation, illegal instruction, stack-buffer overrun), npm's `npm error signal SIG...` or V8's `# Fatal error in` banner; never when the output also shows a failing test, a compile or type error or a QA problem | `ci.yml` (clippy, test), `desktop.yml` (job `desktop`), `web.yml` (check, test, qa), `release.yml` (the "build" steps of `cli` and `desktop`); `ATTEMPTS` is 2 only on self-hosted runners ([docs/CI.md, Unstable self-hosted Windows host](../docs/CI.md#unstable-self-hosted-windows-host)) |
+| [`ci-retry-test.sh`](ci-retry-test.sh) | the cases of `ci-retry.sh`: crashes retried once, failing commands that print crash words never | `web.yml`, job `check`, step "ci-retry cases" |
 | [`charts/`](charts/README.md) | draws the SVG charts of the README and docs from `charts/data.json` | `site.yml`, step "charts" (`--check`); by hand after changing a number |
 | [`bench-ab.ps1`](bench-ab.ps1) | Windows: runs benchmark binaries alternately, round by round, at a process priority and CPU affinity, and reports the CPU time the rest of the machine used during each run and the run's peak working set | by hand, for the CPU sections of the hill-climbs in [docs/BENCHMARKS.md](../docs/BENCHMARKS.md) ([docs/notes/hill/cpu.md](../docs/notes/hill/cpu.md) has the protocol) |
 | [`boat.py`](boat.py) | a client for boat.dev CPU sandboxes, as a Python module and a small CLI (`ls`, `run`, `stop`, `rm`) | by hand, by the maintainers ([docs/notes/BOAT.md](../docs/notes/BOAT.md)) |
@@ -23,6 +24,7 @@ bash tools/file-size.sh 800                  # the same with another limit, to s
 bash tools/test-tmp.sh cargo test --workspace
 TEST_TMP=/path/to/scratch bash tools/test-tmp.sh cargo test -p folo-cli   # the fresh folder under TEST_TMP
 ATTEMPTS=2 bash tools/ci-retry.sh cargo test --workspace
+bash tools/ci-retry-test.sh                  # the retry cases
 node tools/charts/render.mjs                 # see charts/README.md
 ```
 

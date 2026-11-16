@@ -158,16 +158,20 @@ The maintainers' self-hosted Windows machine (an i7-14700KF) occasionally crashe
 parallel load (`STATUS_ACCESS_VIOLATION` 0xc0000005, `STATUS_ILLEGAL_INSTRUCTION` 0xc000001d,
 `STATUS_STACK_BUFFER_OVERRUN` 0xc0000409), a pattern consistent with the Intel 13th/14th-gen instability issue. The
 Windows steps in `ci.yml`, `desktop.yml` and `release.yml` (its Windows `cargo build` steps) therefore run through
-`tools/ci-retry.sh`, which on self-hosted runners retries a step once **only when its output shows one of those crash
-codes**, and logs a warning. Compile errors and failing (including flaky) tests are never retried, and on hosted
-runners nothing is.
+`tools/ci-retry.sh`, which on self-hosted runners retries a step once **only when cargo's own line shows one of those
+crash codes** (`process didn't exit successfully: ... (exit code: 0xc0000005, ...`), and logs a warning. Compile
+errors and failing (including flaky) tests are never retried, also when they come with a crash line or print one, and
+on hosted runners nothing is.
 
 The self-hosted Linux runners (the WSL VMs on the same machine) show the same thing in Node: `npm run check` died
 three times in one evening on unrelated heads with V8's `# Fatal error in , line 0` / `unreachable code` banner and
 `Trace/breakpoint trap` (exit 133), and a layout-QA shard once with `Illegal instruction` (exit 132), with Node
 v22 from `actions/setup-node`. So `web.yml` runs `npm run check`, `npm test` and `npm run qa` through the same
 script, which also counts as a crash a process killed by SIGILL, SIGTRAP, SIGBUS or SIGSEGV (exit 132 / 133 / 135 /
-139, npm's `signal SIG...` line, or V8's banner); a type error, a failing test or a QA finding exits 1 and is not
-retried. Not determined: whether the Node crashes come from the CPU (as the rustc ones appear to) or from that Node
+139, npm's whole `npm error signal SIG...` line, or V8's `# Fatal error in` banner at the start of a line). The
+crash words inside a line (a test's message) do not count, and a step whose output shows an ordinary failure (vitest's
+`Tests  N failed` summary, a `FAIL` line, `error TS...`, `test result: FAILED`, `error[E...]`, `due to N previous
+errors`, the QA's `N problem(s):`) is never retried, crash or not, so a failing or flaky test cannot be retried into a
+pass. `tools/ci-retry-test.sh` holds these cases and runs first in `web.yml`'s `check` job. Not determined: whether the Node crashes come from the CPU (as the rustc ones appear to) or from that Node
 build; a crash that repeats on the retry, or one seen on hosted runners, points at Node and should be reported
 there.

@@ -52,10 +52,15 @@ training failed).
 The crashes (exit 133 "Trace/breakpoint trap" with V8's `# Fatal error in , line 0 / unreachable code`, once exit
 132 in a QA shard) came on unrelated heads in one evening, on the WSL runners of the host whose CPU already crashes
 rustc (docs/CI.md, Unstable self-hosted Windows host). `tools/ci-retry.sh` now also counts as a crash a process
-killed by SIGILL, SIGTRAP, SIGBUS or SIGSEGV (exit 132 / 133 / 135 / 139, npm's `signal SIG...` line, V8's banner),
-and `web.yml` runs `npm run check`, `npm test` and `npm run qa` through it with two attempts on self-hosted runners
-only. A type error, a failing test or a QA finding exits 1 and is never retried. Checked by hand: a `kill -TRAP` and
-a `kill -SEGV` are retried once, `exit 1` is not. Not determined: whether the CPU or that Node build is at fault
+killed by SIGILL, SIGTRAP, SIGBUS or SIGSEGV (exit 132 / 133 / 135 / 139, npm's whole `npm error signal SIG...`
+line, V8's `# Fatal error in` banner at the start of a line), and `web.yml` runs `npm run check`, `npm test` and
+`npm run qa` through it with two attempts on self-hosted runners only. Review round 4 found that a failing test which
+merely printed `signal SIGSEGV` was retried and could pass the second time; the crash words now count only as whole
+lines, and a step whose output shows an ordinary failure (vitest's summary, `FAIL`, `error TS`, `test result: FAILED`,
+`error[E...]`, the QA's `N problem(s):`) is never retried, crash or not. The same anchoring now applies to the Windows
+crash codes, which main matched anywhere in the output (cargo's `process didn't exit successfully: ... (exit code:
+0xc0000005` line). `tools/ci-retry-test.sh` holds 20 cases (10 of them fail against the previous script) and runs
+first in `web.yml`'s `check` job. Not determined: whether the CPU or that Node build is at fault
 (nothing to run on the runners from here); a crash that repeats on the retry would point at Node.
 
 ## f3-server-ci-4 (d1-datasets-3): what `broken_labels` counts
@@ -74,7 +79,10 @@ need a new issue kind through folo-data's report and scan cache, so the contract
 that cannot be read, not images (docs/API.md, `folo-api` `DatasetStats::broken_labels`, folo-data
 `LoadReport::broken_labels`). Desktop (`screens/datasets/health.rs`, `strip.rs`) and Studio
 (`routes/dataset/health.ts`) say "N broken labels" (before: "N broken label files", wrong for COCO; the first
-version of this PR said "images with broken labels", wrong for COCO's dropped entries).
+version of this PR said "images with broken labels", wrong for COCO's dropped entries). Review round 4: the Desktop
+stat strip's Broken labels tooltip still said "These label files couldn't be read, so their images are skipped"; it
+now opens with the health finding's words (`health::BROKEN_LABELS_DETAIL`, one constant for both), test
+`strip::tests::the_broken_labels_tip_counts_labels_as_the_health_finding_does`.
 
 Tests: `tests/issues.rs` `real_broken_labels_count_the_images_left_out_not_the_lines`, a YOLO dataset with two broken
 files holding four broken lines: `broken_labels` 2, two images fewer, four errors in `/issues`; and
@@ -124,3 +132,7 @@ apps/desktop fmt, clippy and `cargo test --workspace`; web `npm run check`, `npm
 `open_entries_expire_without_parts`, 20 of 20 of `an_instance_lost_while_its_weights_are_collected_loses_the_run`
 (four at a time), and the whole cloud suite (26 tests) once. `f3-server-ci-4`'s tests also pass on main: they pin the
 contract the producers already kept. The `web.yml` change is only exercised by CI.
+
+Review round 4 (ci-retry.sh, the strip tooltip): `bash tools/ci-retry-test.sh` (20 of 20; 10 fail with the previous
+script), `bash tools/file-size.sh`, root `cargo fmt --all -- --check`, apps/desktop fmt, clippy and
+`cargo test --workspace` (new strip test included). No server, web or engine code changed in that round.

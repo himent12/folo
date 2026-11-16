@@ -58,6 +58,10 @@ fn share(x: f64) -> String {
     if x < 0.1 { format!("{:.1}%", x * 100.) } else { format!("{:.0}%", x * 100.) }
 }
 
+/// What `stats.broken_labels` counts and costs (docs/API.md): labels, not files or images; a broken YOLO label file
+/// leaves out its image, a bad COCO entry need not. The broken-labels finding and the stat strip's tile both say it.
+pub const BROKEN_LABELS_DETAIL: &str = "These labels could not be parsed, so training leaves them out (a broken label file leaves out its whole image). Fix or delete them.";
+
 fn n_of(n: u64, one: &str, many: &str) -> String {
     format!("{} {}", int(n), if n == 1 { one } else { many })
 }
@@ -69,11 +73,7 @@ pub fn health_checks(d: &Dataset, s: &DatasetStats, counts: Option<&IssueCounts>
     let images = d.splits.total();
     let mut push = |severity, short: String, detail| out.push(Finding { severity, short, detail });
     if s.broken_labels > 0 {
-        push(
-            Severity::Danger,
-            n_of(s.broken_labels, "broken label", "broken labels"),
-            "These labels could not be parsed, so training leaves them out (a broken label file leaves out its whole image). Fix or delete them.",
-        );
+        push(Severity::Danger, n_of(s.broken_labels, "broken label", "broken labels"), BROKEN_LABELS_DETAIL);
         let kind = |k: &str| counts.and_then(|c| c.by_kind.get(k).copied()).unwrap_or(0);
         let other = kind("corrupt_image") + kind("missing_image");
         if other > 0 {
