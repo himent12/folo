@@ -37,6 +37,10 @@ export async function takeImage(file: Blob, name: string): Promise<Taken> {
   try {
     bmp = await createImageBitmap(file);
   } catch {
+    // A file that starts as a format the server reads but does not decode is damaged (cut short, a broken
+    // download): "Use a JPEG" would be wrong for a JPEG (s4-models-2).
+    const head = new Uint8Array(await file.slice(0, 12).arrayBuffer().catch(() => new ArrayBuffer(0)));
+    if (serverReads(head)) return { error: `${name} could not be decoded: the file may be truncated or damaged.` };
     return { error: `${name} could not be opened as an image. Use a ${FORMATS} file.` };
   }
   try {

@@ -117,6 +117,72 @@ describe('Model: what was evaluated', () => {
   });
 });
 
+// s4-models-1 (and its reviews): "Trained for" says the epochs the run finished, never the planned count: a completed
+// or stopped run's checkpoint-backed `Run.epoch`, else its history where `Run.epoch` agrees; unknown, it says the plan.
+describe('Model: how long it trained', () => {
+  /** m_fast_n's run as `status` at `epoch`, with a history of `epochs` validated epochs (rejected when null). */
+  function runAt(status: 'stopped' | 'failed', epoch: number, epochs: number | null) {
+    const api = hub.api as MockApi;
+    const run = api.run.bind(api);
+    api.run = async (id: string) => ({ ...(await run(id)), status, epoch });
+    const real = api.runMetrics.bind(api);
+    api.runMetrics = async (id, s, every) => {
+      if (epochs === null) throw new ApiError(500, 'internal', 'boom');
+      const h = await real(id, s, every);
+      return { ...h, epochs: h.epochs.slice(0, epochs) };
+    };
+  }
+
+  // Re-review 1: a crash after epoch 3's `last.folo`, before its history line; the server's `Run.epoch` follows the
+  // checkpoint (runs/history.rs reconcile), the history stays at 2.
+  it('says how many of the planned epochs a stopped run finished, from its checkpoint-backed epoch over a lagging history', async () => {
+    const tw = (await hub.api.model('m_fast_n')).trained_with!;
+    runAt('stopped', 3, 2);
+    await open('m_fast_n');
+    const shown = await until(() => text('#model-trained-for dd').includes(' of ') && text('#model-trained-for dd'), 'the epochs trained');
+    expect(shown).toBe(`3 of ${tw.epochs.toLocaleString('en-US')} epochs at ${tw.imgsz} px`);
+  });
+
+  it('labels the plan as planned when a failed run’s history does not load, or its epoch is past the history', async () => {
+    const tw = (await hub.api.model('m_fast_n')).trained_with!;
+    const planned = `${tw.epochs.toLocaleString('en-US')} epochs planned at ${tw.imgsz} px`;
+    runAt('failed', 2, null);
+    await open('m_fast_n');
+    await until(() => text('#pr-title').includes('fasteners'), "the run's dataset");
+    expect(text('#model-trained-for dd')).toBe(planned);
+    unmount(c!);
+    hub.api = new MockApi('normal', 0);
+    runAt('failed', 3, 2);
+    await open('m_fast_n');
+    await until(() => text('#pr-title').includes('fasteners'), "the run's dataset");
+    expect(text('#model-trained-for dd')).toBe(planned);
+  });
+});
+
+// Re-review 1 (rev_user 4): the folder of the model's dataset is gone; the server's hint names endpoints and goes with
+// the details, so the page says the way back itself.
+describe('Model: evaluation when the dataset folder is gone', () => {
+  it('shows how to recover, with Retry', async () => {
+    const api = hub.api as MockApi;
+    api.modelEval = () =>
+      Promise.reject(
+        new ApiError(
+          404,
+          'path_not_found',
+          "the folder of dataset 'fasteners' this model trained on is gone: 'D:/data/fasteners' does not exist",
+          'move the folder back (the model page evaluates it again), or validate it on another registered dataset with POST /api/val',
+          'GET /api/models/m_fast_n/eval',
+        ),
+      );
+    router.route = parse('#/models/m_fast_n');
+    c = mount(Model, { target });
+    const box = await until(() => [...target.querySelectorAll('#pr *')].find((n) => n.textContent?.includes('Retry')) && target.querySelector('#pr'), 'the error');
+    const shown = box.textContent?.replace(/\s+/g, ' ') ?? '';
+    expect(shown).toContain('is gone');
+    expect(shown).toContain('Move the dataset’s folder back where it was, then Retry.');
+  });
+});
+
 describe('Model on a phone: the work before the summary', () => {
   const width = window.innerWidth;
   const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
