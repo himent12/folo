@@ -9,8 +9,11 @@ records (`FINDINGS.md`, `REVIEWS.md`, under `D:/folo-build/stress/lanes/` on the
 **Both apps now get through most of what broke them at the start of the round: a server that starts late or dies,
 corrupt state and answers of the wrong shape, ten thousand images, hundreds of runs.** Two gaps are left in that
 ground, both in Studio: an event stream that goes silent has no deadline, and a Run page left while its run crosses an
-epoch stays in memory (about 1,700 DOM nodes per run, x4-soak). The round logged 103 findings, 9 of them blockers;
-71 are fixed on `main`, 29 are deferred or open and 3 were duplicates of another lane's. All nine blockers are fixed.
+epoch stays in memory (about 1,700 DOM nodes per run, x4-soak). The round logged 103 findings, 9 of them blockers.
+By each lane's own disposition, 71 were fixed in that lane, 29 deferred or left open and 3 were duplicates of another
+lane's. Some deferrals were handed to another lane, which fixed at least one (s5-label-5, a dataset named `nul`,
+by s1-datasets' `slug` in `crates/folo-server/src/util.rs`), so 29 is not a count of what is open on `main`. All
+nine blockers are fixed.
 The rest of what is left ([Still open](#still-open)) is wording, one-off edge cases, labeling agents that outlive a
 killed server (s5-label-2) and a few server-side decisions.
 
@@ -47,8 +50,9 @@ the diffs, ordered extra reviews or rebases, and merged on green CI. The round r
 orchestrating app). A lane that found the same bug in the other app fixed its own and marked the finding `SIBLING`.
 
 ## The lanes
-Severity as the lane gave it; "fixed" counts a finding fixed in part (d1-datasets-5, x4-soak-3) as fixed, "deferred"
-includes findings left open; duplicates of another lane's finding are in neither. Merge order as in the PR column.
+Severity and status as the lane gave them; "fixed" counts a finding fixed in part (d1-datasets-5, x4-soak-3) as
+fixed, "deferred" includes findings left open and findings another lane fixed (s5-label-5); duplicates of another
+lane's finding are in neither. Merge order as in the PR column.
 
 | lane | surface | PR | blocker | annoying | polish | fixed | deferred | dup |
 |---|---|---|---:|---:|---:|---:|---:|---:|
@@ -147,9 +151,11 @@ Review fixes that brought their own regression, caught by the next round:
   without waiting, and round 4 found that applied to Apple and Linux only. In parallel, the deduplication of copied
   labeling and benchmark folders modified a backup before choosing it (round 2), then hid an intact backup behind an
   invalid canonical record (round 3), then behind one that parsed but could not load (round 4).
-- **d6-connection.** Round 1 made reconnect clear failures already on screen; round 2 found a request that failed
-  only after the server was back stayed failed; round 3 found a body cut off mid-transfer read as a bad response,
-  which no sweep clears.
+- **s5-label, round 3.** The round-2 fix told the Benchmark page's own plan save from another tab's by comparing
+  plans exactly; the server keeps weights as `f32`, so a weight such as `1.00000001` came back as `1`, a save in one
+  tab was announced as "Plan saved, then changed elsewhere" and Save plan in the leave dialog never left the page.
+  The fix compares weights as the server stores them and reconciles against the save's answer
+  (`web/src/lib/bench/plan.ts`).
 - **d2-runs, round 2.** The fix that disables GPU 0 on a server without a GPU leaked that answer to the next server
   connected (`apps/desktop/src/app/new_run.rs`); round 3 confirmed the cache is cleared on a server switch.
 - **s3-live, round 2.** Run compare's round-1 fix tagged each metrics answer with the runs it was read at; when a

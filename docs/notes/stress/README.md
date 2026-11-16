@@ -2,8 +2,9 @@
 
 One report per lane of the stress round of FOLO Studio and FOLO Desktop (2026-11-14 and 15). Each lane used one area
 as a hard user would, fixed what it found with regression tests and merged one pull request. The round's summary is
-[DOGFOOD-4](../DOGFOOD-4.md). Findings are counted from each lane's `FINDINGS.md` (blocker / annoying / polish);
-"deferred" includes findings left open, duplicates of another lane's finding are in neither column.
+[DOGFOOD-4](../DOGFOOD-4.md). Findings are counted from each lane's `FINDINGS.md` (blocker / annoying / polish),
+with the status the lane gave them; "deferred" includes findings left open and findings another lane fixed
+(s5-label-5, by s1-datasets), duplicates of another lane's finding are in neither column.
 
 | lane | what it covered | PR | blocker / annoying / polish | fixed | deferred |
 |---|---|---|---|---:|---:|
