@@ -28,6 +28,8 @@ mod playground_tests;
 mod preferences;
 mod render;
 #[cfg(test)]
+mod run_charts_tests;
+#[cfg(test)]
 mod run_page_tests;
 mod sidebar;
 mod start_from;

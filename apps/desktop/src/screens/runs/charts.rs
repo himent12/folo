@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
@@ -14,8 +14,11 @@ use crate::charts::{End, HoverFn, LineChart, Marker, Series, line_chart};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
-/// The run chart a cursor stepped with the keys shows on while no pointer is on a chart.
-const FIRST_CHART: &str = "run-map";
+/// The run charts in reading order: ↑ / ↓ move the keys' cursor through them.
+const CHARTS: [&str; 4] = ["run-map", "run-loss", "run-pr", "run-lr"];
+
+/// The run chart a cursor stepped with the keys shows on until ↑ / ↓ pick another.
+const FIRST_CHART: &str = CHARTS[0];
 
 /// The loss lines' smoothing: Studio's default (`DEFAULT_SMOOTHING`, the same debiased EMA), so the
 /// two front ends show the same smoothed loss.
@@ -483,11 +486,23 @@ impl FoloApp {
                 0.6,
                 0.4,
             ));
-        // One Tab stop for the linked charts: arrows walk the epochs.
+        // One Tab stop for the charts: ← / → walk the epochs on one chart, ↑ / ↓ take the cursor
+        // to the chart before or after it (the first press shows it at the latest point).
         // Recorded data ends at the latest step or epoch; the rest of the x range is the schedule.
         let recorded = d.loss[3].last().map_or(0., |p| p.0).max(d.map50_95.last().map_or(0., |p| p.0));
         let end = (recorded / total.max(1.0)).clamp(0., 1.);
-        self.chart_group(
+        let grid = grid.on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
+            let by = match ev.keystroke.key.as_str() {
+                "up" => -1,
+                "down" => 1,
+                _ => return,
+            };
+            this.chart_hover_on = Some(step_chart(this.chart_hover_on, by));
+            this.chart_hover = Some(this.chart_hover.map_or(end, |c| c.min(end)));
+            cx.stop_propagation();
+            cx.notify();
+        }));
+        let charts = self.chart_group(
             "run-charts",
             1.0 / total.max(1.0),
             end,
@@ -495,15 +510,27 @@ impl FoloApp {
             grid,
             window,
             cx,
-        )
+        );
+        if self.ring(&self.fh("run-charts", cx), window) {
+            self.hint_keys(
+                "← → inspect · ↑ ↓ another chart · Shift ×10 · Home / End · PgUp / PgDn scroll the page · Esc clears",
+            );
+        }
+        charts
     }
 }
 
 /// The cursor chart `id` draws: the cursor (`cursor`, a fraction of the x range) when `on` is this
-/// chart, or when no pointer is on a chart (`on` None, a cursor stepped with the keys) and this is
-/// the first chart; else none.
+/// chart (the pointer's, or the one ↑ / ↓ picked), or when `on` is None (a cursor stepped with
+/// ← / → only) and this is the first chart; else none.
 fn cursor_on(cursor: Option<f32>, on: Option<&'static str>, id: &str) -> Option<f32> {
     cursor.filter(|_| on.unwrap_or(FIRST_CHART) == id)
+}
+
+/// The chart `by` places from `on` (None: the first) in [`CHARTS`], held at either end.
+fn step_chart(on: Option<&'static str>, by: isize) -> &'static str {
+    let at = on.and_then(|on| CHARTS.iter().position(|c| *c == on)).unwrap_or(0) as isize;
+    CHARTS[(at + by).clamp(0, CHARTS.len() as isize - 1) as usize]
 }
 
 /// The cursor and the chart it is on after chart `id` reports the pointer at `f` (None: off its
@@ -607,6 +634,17 @@ mod tests {
         // A cursor stepped with the keys (no pointer on a chart) shows on the first chart.
         assert_eq!(cursor_on(Some(0.5), None, "run-map"), Some(0.5));
         assert_eq!(cursor_on(Some(0.5), None, "run-lr"), None);
+    }
+
+    #[test]
+    fn up_and_down_take_the_keys_cursor_through_the_charts_in_reading_order() {
+        use super::step_chart;
+        assert_eq!(step_chart(None, 1), "run-loss");
+        assert_eq!(step_chart(Some("run-loss"), 1), "run-pr");
+        assert_eq!(step_chart(Some("run-pr"), 1), "run-lr");
+        assert_eq!(step_chart(Some("run-lr"), 1), "run-lr", "held at the last");
+        assert_eq!(step_chart(Some("run-lr"), -1), "run-pr");
+        assert_eq!(step_chart(None, -1), "run-map", "held at the first");
     }
 
     #[test]
