@@ -104,7 +104,7 @@ fixes.
   checkpoint.
 - **folo-n COCO weights v3**: `folo-n-coco-v3` and `folo-n-coco-v3-f16` (release `weights-v4`), `folo-n-coco-v2`
   annealed for 16 more epochs (SGD, learning rate decayed linearly to 1%, mosaic off for the last 8), 78 epochs in
-  all: val2017 **AP 0.340 / AP50 0.487** (pycocotools-exact; f16 0.339), the best folo-n weights
+  all: val2017 **AP 0.340 / AP50 0.487** (pycocotools-exact; f16 0.339), the best folo-n weights at that publication
   ([examples/coco](examples/coco/README.md#v3-v2-annealed-for-16-epochs)). `folo weights pull folo-n-coco-v3`.
 - **folo-n COCO weights v4**: `folo-n-coco-v4` and `folo-n-coco-v4-f16` (release `weights-v5`), folo-n from random
   init on COCO train2017 for 64 epochs (`auto` rule 5, MuSGD, AMP), epochs 33–64 distilled from the frozen

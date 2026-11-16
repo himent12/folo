@@ -980,7 +980,10 @@ the trainer's own mAP50-95 was still rising at its last epoch (0.3355, +0.0004).
 `folo-s-coco` (hill-climb 4), published as `folo-n-coco-v4` (release `weights-v5`). folo-s was trained from scratch for
 **56 epochs** with AMP on one rented RTX PRO 4000 Blackwell (9.5 h of epochs, about $5.60 for the pod), published as
 `folo-s-coco` (release `weights-v3`). Measured again on 2026-11-13 with `main`'s `folo val`
-([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md), Accuracy): every published file reads the AP below.
+([notes/hill/r3-fold-in.md](notes/hill/r3-fold-in.md), Accuracy): every file published before hill-climb 4 (folo-n
+v1–v3, folo-s) reads the AP below. The hill-climb 4 rows come from its notebook
+([notes/hill/r4-distill.md](notes/hill/r4-distill.md), Full scale); v4's two files were measured again at their
+publication on 2026-11-16 ([examples/coco, Evaluate (v4)](../examples/coco/README.md#evaluate-v4)).
 
 *Nano*
 
@@ -1062,7 +1065,9 @@ above is without it. On the published weights (one deterministic run each, `main
 | `folo-n-coco-v4` | 0.3559 / 0.5087 / 0.3842 | **0.3594** / 0.5140 / 0.3864 | +0.0035 |
 | `folo-s-coco` | 0.4162 / 0.5798 / 0.4519 | **0.4186** / 0.5840 / 0.4537 | +0.0025 |
 
-Every cell matches lane fusion's own ([notes/hill/r3-fusion.md](notes/hill/r3-fusion.md), Headline) to four digits.
+The v1–v3 and folo-s cells match lane fusion's own ([notes/hill/r3-fusion.md](notes/hill/r3-fusion.md), Headline)
+to four digits; the v4 row was measured at its publication on 2026-11-16
+([examples/coco, Evaluate (v4)](../examples/coco/README.md#evaluate-v4)).
 From its paired bootstrap (not run again here; every interval above zero except the NMS change on folo-s): the NMS
 settings alone give +0.0000 to +0.0009, the DFL weights +0.0003 to +0.0010 over plain score-weighted voting, and
 the rest is voting. What it costs: `folo val` took 4–9 s
@@ -1729,7 +1734,9 @@ none of the numbered items and adds the list after them):
    without other load; then `loss.cls_gain` by class count (+4.5% on the 80-class proxy, −0.006 on
    BCCD), `o2o_attached_epochs` with three seeds, an EMA time constant for short fine-tunes; BCCD is level with
    yolo26n (0.625 vs 0.626), likely limited by the pretrained weights it started from (v2, COCO AP 0.317 vs 0.409;
-   v3's 0.340 has not been fine-tuned) ([notes/hill/r2-learn.md](notes/hill/r2-learn.md)). Post-hoc box
+   that benchmark's numbers stay v2's; a separate two-seed v3/v4 starting-point check is in
+   [examples/coco, Publish (v4)](../examples/coco/README.md#publish-v4))
+   ([notes/hill/r2-learn.md](notes/hill/r2-learn.md)). Post-hoc box
    refinement is not the way (Hill-climb 3, Tried and lost): the next accuracy step has to change training
    (distillation from folo-s, a longer schedule; v3's landing still gained 0.0004 in its last epoch), judged first on
    the top boxes' edge error by object size ([notes/hill/r3-refine.md](notes/hill/r3-refine.md)).
