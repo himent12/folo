@@ -50,6 +50,7 @@ fn close(got: &Tensor, want: &Tensor, atol: f32, rtol: f32, what: &str) {
     }
 }
 
+mod guard;
 mod muon;
 
 /// Two Conv-BN-SiLU blocks and a plain conv head: every kind of tensor a detector has.

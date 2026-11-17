@@ -213,6 +213,11 @@ pub trait Optimizer: Send {
     /// Number of completed `step()` calls (`optim.__step`).
     fn step_count(&self) -> u64;
 
+    /// Takes back the step counter's last increment: the step was encoded under a step guard
+    /// (`folo_core::StepGuard`) whose flag turned out not finite, so the device left every parameter and state
+    /// buffer as it was (docs/MODEL.md §8.8).
+    fn unstep(&mut self);
+
     /// The state tensors as `(<param name>.<state>, tensor)`: `momentum_buffer` (SGD with momentum > 0),
     /// `exp_avg` and `exp_avg_sq` (AdamW). Complete: every parameter of every group that uses a state has it.
     fn state_tensors(&self) -> Result<Vec<(String, Tensor)>>;

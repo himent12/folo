@@ -51,6 +51,7 @@ pub mod cpu;
 mod device;
 mod dtype;
 mod error;
+mod guard;
 mod layout;
 mod ops;
 pub mod rng;
@@ -67,6 +68,7 @@ pub use backend::{
 pub use device::Device;
 pub use dtype::{DType, Element};
 pub use error::{Error, Result};
+pub use guard::{StepGuard, step_guard_allows};
 pub use half::f16;
 pub use layout::Layout;
 pub use ops::BatchNormTrain;

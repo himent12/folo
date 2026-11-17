@@ -89,6 +89,12 @@ impl<M: Module> ModelEma<M> {
         &self.module
     }
 
+    /// Takes back the last [`ModelEma::update`]'s count: it ran under a step guard (`folo_core::StepGuard`) whose
+    /// flag turned out not finite, so the device left the average as it was.
+    pub fn unstep_update(&mut self) {
+        self.updates = self.updates.saturating_sub(1);
+    }
+
     /// Updates so far (`ema.__updates`).
     pub fn updates(&self) -> u64 {
         self.updates
@@ -119,6 +125,12 @@ impl<M: Module> ModelEma<M> {
                 self.updates += 1;
                 return Ok(());
             }
+        }
+        // Tensor ops (under a step guard, only if it lets the step through; the count moves either way, as the
+        // guarded kernels' callers expect: they take it back with `unstep_update`).
+        if !folo_core::step_guard_allows()? {
+            self.updates += 1;
+            return Ok(());
         }
         self.zip(source, |e, m| {
             if e.device().is_cpu() && e.is_contiguous() && m.device().is_cpu() {

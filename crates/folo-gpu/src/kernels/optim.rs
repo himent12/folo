@@ -1,5 +1,6 @@
 //! Fused in-place optimizer updates (SGD, AdamW, and `p = a·p + b·g` for EMAs): one dispatch per parameter
-//! instead of the ten-odd elementwise ops and copies of the tensor-op formulation.
+//! instead of the ten-odd elementwise ops and copies of the tensor-op formulation. While the context has a step
+//! guard ([`GpuContext::set_step_guard`]), the updates bind it last and change nothing when it is not finite.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -16,6 +17,21 @@ static OPTIM: KernelDef = KernelDef {
     storage: &[Access::ReadWrite, Access::Read, Access::ReadWrite, Access::ReadWrite],
     source: Source::Static(include_str!("../shaders/optim.wgsl")),
 };
+
+/// [`OPTIM`] under a step guard: the guard bound fifth, every invocation returning first when it says skip.
+static OPTIM_GUARDED: KernelDef = KernelDef {
+    name: "optim_guarded",
+    storage: &[Access::ReadWrite, Access::Read, Access::ReadWrite, Access::ReadWrite, Access::Read],
+    source: Source::Generated(gen_optim_guarded),
+};
+
+fn gen_optim_guarded(_: &Spec) -> String {
+    let src = include_str!("../shaders/optim.wgsl");
+    let head = "if (i >= pu(0u)) { return; }";
+    assert!(src.contains(head), "optim.wgsl: the bounds check moved");
+    let body = src.replace(head, &format!("{head} if (skip_step()) {{ return; }}"));
+    format!("@group(0) @binding(5) var<storage, read> SKIP: array<f32>;\n{}{body}", crate::context::SKIP_FN)
+}
 
 static UNSCALE: KernelDef = KernelDef {
     name: "unscale_check",
@@ -59,13 +75,21 @@ pub fn unscale_check(
 pub const MANY: usize = 16;
 
 /// The multi-tensor kernels' binding layouts: per tensor `PARAM` (read-write), `G` (read) and `NS` state buffers
-/// (read-write) for the updates (`kind` = `NS` = 0..=2), or one read-write `X` per tensor and the flag last for the
-/// unscale (`kind` 3). `j` tensors. Built once per layout and kept for the process (at most `4 · MANY`).
+/// (read-write) for the updates (`kind` = `NS` = 0..=2; `kind` 8..=10 the same under a step guard, bound last),
+/// or one read-write `X` per tensor and the flag last for the unscale (`kind` 3). `j` tensors. Built once per
+/// layout and kept for the process (at most `7 · MANY`).
 fn many_def(kind: u32, j: usize) -> &'static KernelDef {
     static DEFS: OnceLock<Mutex<HashMap<(u32, usize), &'static KernelDef>>> = OnceLock::new();
     let mut defs = DEFS.get_or_init(Default::default).lock().expect("many defs lock");
     defs.entry((kind, j)).or_insert_with(|| {
-        let storage: Vec<Access> = if kind == 3 {
+        let storage: Vec<Access> = if kind >= 8 {
+            (0..j)
+                .flat_map(|_| {
+                    [Access::ReadWrite, Access::Read].into_iter().chain((8..kind).map(|_| Access::ReadWrite))
+                })
+                .chain([Access::Read])
+                .collect()
+        } else if kind == 3 {
             vec![Access::ReadWrite; j + 1]
         } else if kind >= 4 {
             // 4: abs-max partials (X read, PART), 5: scaled-square partials (X read, H, PART), 6: two-factor scale
@@ -83,7 +107,9 @@ fn many_def(kind: u32, j: usize) -> &'static KernelDef {
                 })
                 .collect()
         };
-        let (name, source) = if kind == 3 {
+        let (name, source) = if kind >= 8 {
+            ("optim_many_guarded", Source::Generated(gen_optim_many))
+        } else if kind == 3 {
             ("unscale_check_many", Source::Generated(gen_unscale_many))
         } else if kind == 6 {
             ("scale_many", Source::Generated(gen_scale_many))
@@ -106,6 +132,7 @@ pub(crate) fn many_def_for(name: &str, spec: &Spec) -> Option<&'static KernelDef
     }
     let kind = match name {
         "optim_many" => Some(spec.get_u32("NS", 3)).filter(|&ns| ns <= 2)?,
+        "optim_many_guarded" => Some(spec.get_u32("NS", 3)).filter(|&ns| ns <= 2)? + 8,
         "unscale_check_many" => 3,
         "norm_partials_many" => 4 + spec.get_u32("OP", 0).min(1),
         "scale_many" => 6,
@@ -154,6 +181,7 @@ fn many_prologue(s: &mut String, j: usize) {
 
 fn gen_optim_many(spec: &Spec) -> String {
     let (j, ns, mode) = (spec.get_u32("J", 1) as usize, spec.get_u32("NS", 0), spec.get_u32("MODE", 0));
+    let guard = spec.get_u32("GUARD", 0) == 1;
     let mut s = String::new();
     let mut b = 1;
     for t in 0..j {
@@ -165,7 +193,17 @@ fn gen_optim_many(spec: &Spec) -> String {
             b += 1;
         }
     }
-    many_prologue(&mut s, j);
+    if guard {
+        let _ = writeln!(s, "@group(0) @binding({b}) var<storage, read> SKIP: array<f32>;");
+        s.push_str(crate::context::SKIP_FN);
+    }
+    let mut pro = String::new();
+    many_prologue(&mut pro, j);
+    if guard {
+        // No barriers in these kernels: every invocation may return before the switch.
+        pro = pro.replace("  var j = 0u;\n", "  if (skip_step()) { return; }\n  var j = 0u;\n");
+    }
+    s.push_str(&pro);
     // The update of `shaders/optim.wgsl`, op for op.
     let body = match mode {
         0 => {
@@ -254,7 +292,9 @@ pub fn optimizer_step_many(ctx: &GpuContext, u: &OptimUpdate, items: &[ManyItem<
         return Err(crate::error::shape_err("optimizer_step_many: tensors with different state buffers"));
     }
     let per = 2 + ns;
-    let j_max = MANY.min(ctx.caps().max_storage_buffers as usize / per);
+    let guard = ctx.step_guard();
+    let j_max = MANY
+        .min((ctx.caps().max_storage_buffers as usize).saturating_sub(usize::from(guard.is_some())) / per);
     if j_max < 2 {
         for it in items {
             optimizer_step(ctx, u, it.p, it.g, it.s0, it.s1, it.n)?;
@@ -274,13 +314,17 @@ pub fn optimizer_step_many(ctx: &GpuContext, u: &OptimUpdate, items: &[ManyItem<
     }
     let live: Vec<&ManyItem<'_>> = items.iter().filter(|it| it.n > 0).collect();
     for chunk in live.chunks(j_max) {
-        let spec = Spec::new()
+        let mut spec = Spec::new()
             .u32("MODE", mode)
             .bool("FLAG", flag)
             .bool("NESTEROV", nesterov)
             .u32("J", chunk.len() as u32)
             .u32("NS", ns as u32);
-        let k = ctx.kernel(many_def(ns as u32, chunk.len()), spec)?;
+        if guard.is_some() {
+            spec = spec.u32("GUARD", 1);
+        }
+        let kind = ns as u32 + if guard.is_some() { 8 } else { 0 };
+        let k = ctx.kernel(many_def(kind, chunk.len()), spec)?;
         let ns_: Vec<usize> = chunk.iter().map(|it| it.n).collect();
         let (p, groups) = many_params(base.clone(), &ns_)?;
         let mut bufs: Vec<&wgpu::Buffer> = Vec::with_capacity(chunk.len() * per);
@@ -290,6 +334,7 @@ pub fn optimizer_step_many(ctx: &GpuContext, u: &OptimUpdate, items: &[ManyItem<
             bufs.extend(it.s0);
             bufs.extend(it.s1);
         }
+        bufs.extend(guard.as_ref());
         ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
     }
     Ok(())
@@ -616,11 +661,19 @@ pub fn optimizer_step(
         }
         OptimUpdate::Axpby { a, b } => (3, false, false, Params::new().uz(n)?.f(a).f(b)),
     };
-    let k =
-        ctx.kernel(&OPTIM, Spec::new().u32("MODE", mode).bool("FLAG", flag).bool("NESTEROV", nesterov))?;
+    let spec = Spec::new().u32("MODE", mode).bool("FLAG", flag).bool("NESTEROV", nesterov);
     let (d0, d1) = (s0.unwrap_or(ctx.dummy()), s1.unwrap_or(ctx.dummy()));
-    ctx.dispatch(&k, &[p, g, d0, d1], &p_, ctx.grid_1d(n as u64, 256)?)
+    match ctx.step_guard() {
+        Some(skip) => {
+            let k = ctx.kernel(&OPTIM_GUARDED, spec)?;
+            ctx.dispatch(&k, &[p, g, d0, d1, &skip], &p_, ctx.grid_1d(n as u64, 256)?)
+        }
+        None => {
+            let k = ctx.kernel(&OPTIM, spec)?;
+            ctx.dispatch(&k, &[p, g, d0, d1], &p_, ctx.grid_1d(n as u64, 256)?)
+        }
+    }
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&OPTIM, &UNSCALE];
+pub(crate) static DEFS: &[&KernelDef] = &[&OPTIM, &OPTIM_GUARDED, &UNSCALE];

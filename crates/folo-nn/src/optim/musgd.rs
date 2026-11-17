@@ -149,6 +149,10 @@ impl MuSgd {
             if muon_fused(&ps, &bs, &gr, mu, g.nesterov, lr)? {
                 continue;
             }
+            // Tensor ops (under a step guard, only if it lets the step through).
+            if !folo_core::step_guard_allows()? {
+                continue;
+            }
             // u = μ · m + (1 − μ) · g (Nesterov), else m.
             let us = if g.nesterov {
                 let us = gs.iter().map(|x| x.mul_scalar(1.0 - mu)).collect::<folo_core::Result<Vec<_>>>()?;
@@ -192,6 +196,10 @@ fn axpby_many(ps: &[&Tensor], gs: &[&Tensor], a: f32, b: f32) -> Result<()> {
     if ps.iter().any(|p| !p.device().is_cpu())
         && Tensor::optimizer_step_many_(ps, gs, &none, &OptimStep::Axpby { a, b })?
     {
+        return Ok(());
+    }
+    // Tensor ops (under a step guard, only if it lets the step through).
+    if !folo_core::step_guard_allows()? {
         return Ok(());
     }
     for (p, g) in ps.iter().zip(gs) {
@@ -319,6 +327,10 @@ impl Optimizer for MuSgd {
 
     fn step_count(&self) -> u64 {
         self.sgd.step_count()
+    }
+
+    fn unstep(&mut self) {
+        self.sgd.unstep();
     }
 
     fn contract(&self) -> OptimContract {

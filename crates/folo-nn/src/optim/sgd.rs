@@ -99,7 +99,10 @@ fn update(
             return Ok(());
         }
     }
-    // Any device: the same arithmetic, op by op.
+    // Any device: the same arithmetic, op by op (under a step guard, only if it lets the step through).
+    if !folo_core::step_guard_allows()? {
+        return Ok(());
+    }
     let mut d = if wd != 0.0 { g.add(&p.mul_scalar(wd)?)? } else { g };
     if let Some(b) = buf
         && mu != 0.0
@@ -161,6 +164,10 @@ impl Optimizer for Sgd {
 
     fn step_count(&self) -> u64 {
         self.step
+    }
+
+    fn unstep(&mut self) {
+        self.step = self.step.saturating_sub(1);
     }
 
     fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {

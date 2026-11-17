@@ -12,7 +12,7 @@ and FOLO Desktop (`apps/desktop`) for local inference.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | Crate doc, module map and re-exports. |
-| `src/context/` | `GpuContext`: `device.rs` (adapter selection, device creation), `memory.rs` (allocation, uploads), `batch.rs` (the open command batch; `kernel` and `dispatch`), `binds.rs` (bind-group cache), `readback.rs`, `wait.rs` (`sync`, device loss), `plan.rs` (frozen dispatch lists, forward plans), `precompile.rs`, `trace.rs`. |
+| `src/context/` | `GpuContext`: `device.rs` (adapter selection, device creation), `memory.rs` (allocation, uploads), `batch.rs` (the open command batch; `kernel` and `dispatch`), `binds.rs` (bind-group cache), `readback.rs`, `wait.rs` (`sync`, device loss), `plan.rs` (frozen dispatch lists, forward plans), `precompile.rs`, `trace.rs`, `guard.rs` (the optimizer step guard). |
 | `src/pool.rs` | The size-class buffer pool (`GpuBuffer`, `PoolStats`). |
 | `src/pipeline.rs` | `KernelDef`, `Spec` (specialisation constants), `Params` (the per-dispatch uniform block), the WGSL `PRELUDE`, `render` and pipeline compilation. |
 | `src/pipeline_cache.rs` | Compiled pipelines kept on disk between processes. |

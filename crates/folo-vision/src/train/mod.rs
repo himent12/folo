@@ -257,6 +257,13 @@ pub struct Trainer {
     /// The next epoch's batches, started when the previous epoch took its last batch, so that the loader works
     /// while validation and the checkpoints run (the epoch it belongs to, and its source).
     prefetched: Option<(u32, BatchSource)>,
+    /// A window's optimizer step encoded under a step guard, its outcome not read yet ([`Trainer::resolve_step`]).
+    pending_step: Option<epoch::PendingStep>,
+    /// Guard the mixed-precision steps on the device and read their flag a batch late where the device can
+    /// (`true`); `false` reads it before each step (tests compare the two).
+    defer_steps: bool,
+    /// Steps encoded under a step guard so far (test support).
+    guarded_steps: u64,
     /// The last epoch's files being written on the writer thread, and its epoch event (`train/writer/`).
     pending_write: Option<writer::PendingWrite>,
     /// [`TrainOptions::after_epoch`].
@@ -341,6 +348,19 @@ impl Trainer {
     /// The loss scaler of a mixed-precision run (`amp`): the current scale and the steps skipped so far.
     pub fn loss_scaler(&self) -> Option<&GradScaler> {
         self.scaler.as_ref()
+    }
+
+    /// Test support: `false` reads every mixed-precision step's overflow flag before the step instead of guarding
+    /// the step on the device and reading the flag a batch late (docs/MODEL.md §8.8); the two end bit-identical.
+    #[doc(hidden)]
+    pub fn set_deferred_steps(&mut self, on: bool) {
+        self.defer_steps = on;
+    }
+
+    /// Test support: the optimizer steps encoded under a step guard so far (taken or skipped).
+    #[doc(hidden)]
+    pub fn guarded_steps(&self) -> u64 {
+        self.guarded_steps
     }
 
     /// The flag [`TrainOptions::stop`] that stops this run.

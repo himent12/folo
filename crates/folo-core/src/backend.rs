@@ -673,6 +673,18 @@ pub trait Backend: Send + Sync + 'static {
         unsupported!(self, "muon_step_many")
     }
 
+    /// The optimizer step guard (mixed precision without a host round trip; folo-nn's trainer): with `Some(flag)`,
+    /// one `F32` element, the optimizer updates that follow ([`Backend::optimizer_step`],
+    /// [`Backend::optimizer_step_many`] and the parameter update of [`Backend::muon_step_many`]) leave every
+    /// storage they would write unchanged when the flag is not finite, until `None` clears it. The flag's value is
+    /// taken in order with the work submitted before, so a later write to it does not move the guard. The guard is
+    /// the calling thread's: updates other threads encode on the device are not guarded. Reached through
+    /// [`crate::StepGuard`].
+    /// `Error::NotSupported` where the backend has none (the caller then reads the flag first).
+    fn set_step_guard(&self, flag: Option<View<'_>>) -> Result<()> {
+        unsupported!(self, "set_step_guard")
+    }
+
     // ----- Detector pre- and post-processing (optional; callers fall back to host code) -----
 
     /// Letterbox `U8` RGB images (`images[i]` is `[H_i, W_i, 3]`) onto one `[B, 3, OH, OW]` canvas of `dtype`

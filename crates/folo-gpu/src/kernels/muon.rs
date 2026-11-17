@@ -142,7 +142,11 @@ fn partition(shapes: &[(usize, usize)], max_bytes: u64) -> Option<Vec<Range<usiz
 
 /// The whole update of one group of [`partition`], all in its own workspace.
 fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bindings: usize) -> Result<()> {
-    let (j_gather, j_apply) = (MANY.min((bindings - 3) / 2), MANY.min(bindings - 2));
+    // Under a step guard (`GpuContext::set_step_guard`) the parameter update binds it last and skips when it says
+    // so; the momenta are not written here, and the workspaces are scratch.
+    let guard = ctx.step_guard();
+    let (j_gather, j_apply) =
+        (MANY.min((bindings - 3) / 2), MANY.min(bindings - 2 - usize::from(guard.is_some())).max(1));
     // The table: per matrix (oriented rows r, cols c, transposed, element offset, offset in the r×r scratch,
     // first workgroup of the elementwise passes, first tile of the r×r products, first tile of the update),
     // then each matrix's scale.
@@ -212,10 +216,12 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
     }
     // 4. `p = p · 1 + (X · scale) · (−lr)`, read back in each parameter's own layout.
     for (ci, chunk) in items.chunks(j_apply).enumerate() {
-        let k = ctx.kernel(many_def("muon_apply", chunk.len()), Spec::new().u32("J", chunk.len() as u32))?;
+        let name = if guard.is_some() { "muon_apply_guarded" } else { "muon_apply" };
+        let k = ctx.kernel(many_def(name, chunk.len()), Spec::new().u32("J", chunk.len() as u32))?;
         let (p, groups) = chunk_params(Params::new().uz(ci * j_apply)?.f(-s.lr).uz(count)?, chunk)?;
         let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|it| it.p).collect();
         bufs.extend([cur, tbuf.raw()]);
+        bufs.extend(guard.as_ref());
         ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
     }
     Ok(())
@@ -258,7 +264,8 @@ const ORIENT: &str = "fn oriented(e: u32, r: u32, c: u32, trans: bool) -> u32 {\
      \x20 return e;\n}\n";
 
 /// The multi-tensor kernels' binding layouts, by name and matrix count, kept for the process: `muon_gather`
-/// (`G`, `M` per matrix, then `X`, `PART`, `TBL`), `muon_apply` (`P` per matrix, then `X`, `TBL`).
+/// (`G`, `M` per matrix, then `X`, `PART`, `TBL`), `muon_apply` (`P` per matrix, then `X`, `TBL`) and
+/// `muon_apply_guarded` (the same and the step guard).
 fn many_def(name: &'static str, j: usize) -> &'static KernelDef {
     static DEFS: OnceLock<Mutex<HashMap<(&'static str, usize), &'static KernelDef>>> = OnceLock::new();
     let mut defs = DEFS.get_or_init(Default::default).lock().expect("muon defs lock");
@@ -270,10 +277,17 @@ fn many_def(name: &'static str, j: usize) -> &'static KernelDef {
                 Access::Read,
             ]);
             (s.collect(), gen_gather)
-        } else {
+        } else if name == "muon_apply" {
             (
                 std::iter::repeat_n(Access::ReadWrite, j).chain([Access::Read, Access::Read]).collect(),
                 gen_apply,
+            )
+        } else {
+            (
+                std::iter::repeat_n(Access::ReadWrite, j)
+                    .chain([Access::Read, Access::Read, Access::Read])
+                    .collect(),
+                gen_apply_guarded,
             )
         };
         let storage = Box::leak(storage.into_boxed_slice());
@@ -285,7 +299,7 @@ fn many_def(name: &'static str, j: usize) -> &'static KernelDef {
 /// [`many_def`] its call site picked, read back from `J`. `None` for other names and for a `J` no call site sets.
 pub(crate) fn many_def_for(name: &str, spec: &Spec) -> Option<&'static KernelDef> {
     let j = spec.get_u32("J", 0) as usize;
-    let name = ["muon_gather", "muon_apply"].into_iter().find(|n| *n == name)?;
+    let name = ["muon_gather", "muon_apply", "muon_apply_guarded"].into_iter().find(|n| *n == name)?;
     (1..=MANY).contains(&j).then(|| many_def(name, j))
 }
 
@@ -344,7 +358,15 @@ fn gen_gather(spec: &Spec) -> String {
     s
 }
 
+fn gen_apply_guarded(spec: &Spec) -> String {
+    gen_apply_with(spec, true)
+}
+
 fn gen_apply(spec: &Spec) -> String {
+    gen_apply_with(spec, false)
+}
+
+fn gen_apply_with(spec: &Spec, guard: bool) -> String {
     let j = spec.get_u32("J", 1) as usize;
     let mut s = String::new();
     for t in 0..j {
@@ -352,8 +374,15 @@ fn gen_apply(spec: &Spec) -> String {
     }
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> X: array<f32>;", j + 1);
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> TBL: array<u32>;", j + 2);
+    if guard {
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> SKIP: array<f32>;", j + 3);
+        s.push_str(crate::context::SKIP_FN);
+    }
     s.push_str(ORIENT);
     many_prologue(&mut s, j);
+    if guard {
+        s.push_str("  if (skip_step()) { return; }\n");
+    }
     // `O = X · scale` (the tensor ops multiply only when the scale is not 1), then the axpby `p · 1 + O · (−lr)`.
     let _ = writeln!(
         s,

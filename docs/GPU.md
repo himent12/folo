@@ -705,6 +705,13 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   (`Tensor::optimizer_step_many_`, `Tensor::unscale_check_many_`), which folo-nn's SGD, AdamW, EMA, gradient
   accumulation and loss scaler use on the GPU: a folo-n step's 255 parameters take 16 dispatches per pass instead
   of 255 (the AMP step's copy + unscale + SGD phase was 766 dispatches).
+- **Step guard** (`Backend::set_step_guard`, `src/context/guard.rs`): `GpuContext::set_step_guard` copies the
+  flag (one f32, in order with the work before it) into a 4-byte buffer, and while it is set `optimizer_step`,
+  `optimizer_step_many` and Muon's apply use their guarded variants (`optim_guarded`, `optim_many_guarded`,
+  `muon_apply_guarded`: the same arithmetic after `if (skip_step()) { return; }`, the flag's exponent bits all set
+  meaning skip). The guard is the calling thread's (a thread-local per context), so a training or test stepping on
+  another thread is not guarded by it. The variants are separate kernels so the unguarded ones stay as they were;
+  a `_many` dispatch with the guard binds one tensor fewer when the binding limit is reached.
 - **Half precision** (`Backend::computes_f16`, true with `shader-f16` unless `FOLO_GPU_NO_F16` is set): the forward
   ops folo-core lets `F16` through (elementwise and `where`, reductions, softmax, matmul, conv2d and the fused
   conv, max / average / adaptive pooling, upsampling, the letterbox output and `detect_candidates`) take f16

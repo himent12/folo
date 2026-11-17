@@ -213,6 +213,10 @@ implements all four:
 - Everything downstream runs in the dtype it receives; the fused train-mode BatchNorm takes f16 data with f32
   parameters and statistics.
 - `Tensor::unscale_check_` (a `Backend::unscale_check` hook) is the loss scaler's fused unscale and overflow flag.
+- `StepGuard::new(&flag)` (a `Backend::set_step_guard` hook; `src/guard.rs`) makes the optimizer updates that follow
+  on that device (`optimizer_step`, the `*_many` updates, Muon's parameter update) change nothing when the one-element
+  f32 `flag` is not finite, until the guard drops: mixed precision steps without waiting for the overflow check.
+  `Ok(None)` where the backend has none; updates outside those kernels ask `step_guard_allows()` first.
 
 ## RNG
 Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests. `Rng::ALGO`
@@ -247,8 +251,9 @@ This is the contract for folo-gpu and any other device.
   ordinary ops (or report "not available" so folo-nn uses its own path). `batch_norm_act` and `optimizer_step` write
   into `&mut Storage` arguments (running statistics, parameters, optimizer state) that folo-core has write-locked,
   checked to be contiguous and distinct. The trait has further optional hooks with the same `NotSupported` default
-  (`conv2d_act_at`, `conv2d_act_sites`, the multi-tensor `*_many` updates, `unscale_check`, `detect_class_sites`,
-  `detect_decode_sites`); each one's doc comment in `backend.rs` names the `Tensor` method that reaches it.
+  (`conv2d_act_at`, `conv2d_act_sites`, the multi-tensor `*_many` updates, `unscale_check`, `set_step_guard`,
+  `detect_class_sites`, `detect_decode_sites`); each one's doc comment in `backend.rs` names the `Tensor` method (or
+  type) that reaches it.
 - **Synchronisation.** `synchronize` (default no-op) waits for queued device work and reports asynchronous errors;
   `folo_core::backend::synchronize(device)` calls it. Backends may queue work lazily: only `download` (`to_vec`,
   `to_device(Cpu)`, `item`) and `synchronize` have to wait.

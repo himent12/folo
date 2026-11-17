@@ -16,6 +16,7 @@ API.
 | `src/ops/` | Every tensor op, as `Tensor` methods: `elementwise.rs`, `reduce.rs`, `nn.rs` (matmul, conv, pooling, upsampling), `view.rs`, `copy.rs`, `inplace.rs`, `overload.rs` (`+ - * /`), `fused.rs`, `muon.rs`, `vision.rs`. `ops/mod.rs` lists them. |
 | `src/autograd.rs` | Grad mode (`no_grad`, `is_grad_enabled`), `Grads`, and the backward walk over the recorded graph. |
 | `src/autocast.rs` | Mixed precision for the forward pass (`autocast`, like `torch.autocast`). |
+| `src/guard.rs` | `StepGuard` and `step_guard_allows`: optimizer updates the device skips when a flag is not finite (mixed precision without a readback before the step). |
 | `src/backend.rs` | The `Backend` trait (memory methods required; compute, fused and detector methods optional), `View`, the op descriptions (`UnaryOp`, `BinaryOp`, `ReduceOp`, `Conv2dParams`, `Pool2dParams`, ...) and the registry (`register_backend`, `backend`). |
 | `src/cpu/` | `CpuBackend` and its kernels: `elementwise.rs`, `reduce.rs`, `index.rs`, `pool.rs`, `pool_alloc.rs` (buffer cache), `gemm/` (the GEMM), `conv/` (conv2d forward and gradients). `cpu/mod.rs` lists them. |
 | `src/storage.rs` | `Storage`, `CpuStorage`, `DeviceStorage`: the raw element buffers behind tensors. |

@@ -105,6 +105,10 @@ fn update(p: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, c: &Coef) -> Result<()
             return Ok(());
         }
     }
+    // Tensor ops (under a step guard, only if it lets the step through).
+    if !folo_core::step_guard_allows()? {
+        return Ok(());
+    }
     if let Some(d) = c.decay {
         p.mul_scalar_assign(d)?;
     }
@@ -187,6 +191,10 @@ impl Optimizer for AdamW {
 
     fn step_count(&self) -> u64 {
         self.step
+    }
+
+    fn unstep(&mut self) {
+        self.step = self.step.saturating_sub(1);
     }
 
     fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {

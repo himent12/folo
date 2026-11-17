@@ -911,7 +911,13 @@ Opt-in (`amp = true`, `folo train --amp`; default `false`), as `torch.autocast` 
 - **At the end of a window**, before clipping: the gradients are unscaled (`· 1 / S`; with clipping on, the factor is
   folded into the clip factor) and checked: if any is not finite, the window takes **no optimizer step** (as a window
   of non-finite batches, §8.3: `t`, `optim.__step`, `sched.__step` and `ema.__updates` unchanged) and the step is
-  counted and logged. The check is done on the GPU; the step waits for one flag.
+  counted and logged. The check is done on the GPU. With clipping on (the default), the host does not wait for it:
+  the window's optimizer and EMA updates are encoded under a **step guard** (folo-core's `StepGuard`) on the
+  clipping norm, which is finite exactly when every gradient is, and the guarded kernels leave every parameter,
+  optimizer state and EMA value unchanged when it is not. The flag is read back with the next batch's loss, before
+  that batch's backward: then the scale moves and, for a skipped step, the optimizer's and the EMA's counters are
+  taken back, so a run ends bit-identical to one that read the flag before each step (resume included). Without
+  clipping, or on a backend without a guard, the step waits for the flag as before.
 - **Dynamic loss scaling**: `S = 2^16` at the start; a skipped step multiplies it by 0.5, and 2000 finite steps in a
   row multiply it by 2 (PyTorch's defaults). `S` stays in `[2^-126, 2^126]`, where it and `1 / S` are normal f32
   values (the loss is scaled and the gradients unscaled in f32): a growth or backoff past the range leaves it. The

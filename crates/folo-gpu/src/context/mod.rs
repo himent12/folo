@@ -15,12 +15,15 @@
 mod batch;
 pub(crate) mod binds;
 mod device;
+mod guard;
 mod memory;
 mod plan;
 mod precompile;
 mod readback;
 mod trace;
 mod wait;
+
+pub(crate) use guard::SKIP_FN;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

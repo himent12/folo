@@ -176,6 +176,18 @@ impl GradAccumulator {
         Ok(true)
     }
 
+    /// [`GradAccumulator::unscale_clip`] without the readback, for gradients on a device with clipping on
+    /// (`max_norm > 0`): unscales and clips them there and returns the device scalar that is finite exactly when
+    /// every gradient is, to guard the step with (`folo_core::StepGuard`) and read later. `None`, having done
+    /// nothing, otherwise (the CPU, or no clipping): use [`GradAccumulator::unscale_clip`]. With no gradients it
+    /// returns a finite scalar.
+    pub fn unscale_clip_deferred(&mut self, inv_scale: f32, max_norm: f64) -> Result<Option<Tensor>> {
+        if !(self.on_device() && max_norm > 0.0) {
+            return Ok(None);
+        }
+        Ok(Some(self.clip_grad_norm_device(max_norm, inv_scale)?))
+    }
+
     fn on_device(&self) -> bool {
         self.slots.iter().any(|s| s.valid && !s.param.device().is_cpu())
     }

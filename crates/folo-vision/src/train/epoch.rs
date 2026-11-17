@@ -49,8 +49,6 @@ impl Trainer {
                 (Some(c), Some(st)) => feed::staged_tensor(c, self.device, &st, batch.shape)?,
                 _ => batch_tensor(&mut batch, self.device, folo_core::DType::F32)?,
             };
-            let lr = self.sched.lr_at(self.sched.step(), &self.opt.groups()[decay]);
-
             let snapshot = RunningStats::capture(&self.model)?;
             // Distillation (§8.9): the frozen teacher sees the same batch, without autograd, before the student's
             // forward, so its activations are gone before the student's graph is built.
@@ -88,6 +86,11 @@ impl Trainer {
             let kd = kd.map(|kd| [kd.cls, kd.dfl]);
             let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
             let finite = loss.is_finite() && kd_finite && RunningStats::all_finite(&self.model)?;
+            // The previous window's guarded step (§8.8): its flag was computed long before this batch's loss, which
+            // was just read back, so this read does not wait. The loss scale the backward below uses, the schedule
+            // and the skip counters are then those of a step settled at once.
+            self.resolve_step()?;
+            let lr = self.sched.lr_at(self.sched.step(), &self.opt.groups()[decay]);
             let items = loss.items;
             if finite {
                 if let Some(v) = kd {
@@ -164,9 +167,11 @@ impl Trainer {
             }
             k += 1;
             if self.stopping() {
+                self.resolve_step()?;
                 return Ok(None);
             }
         }
+        self.resolve_step()?;
         drop(source);
         // Start the next epoch now: its first batches are ready when validation and the checkpoints are done.
         // The batches are the same whenever an epoch starts (§8.3: everything is seeded by the epoch). Not after
@@ -223,41 +228,96 @@ impl Trainer {
 
     /// §8.3's end-of-window step: schedule, clip, optimizer, EMA, `t += 1`. With mixed precision (§8.8) the
     /// gradients are unscaled before clipping, and a window whose gradients are not all finite skips the step
-    /// (`t`, the optimizer and the EMA unchanged) and backs the loss scale off: one readback of a single flag.
-    /// `(e, k)` name the window's last batch in the log.
+    /// (`t`, the optimizer and the EMA unchanged) and backs the loss scale off. On a GPU with clipping on, the
+    /// device decides: the step is encoded under a step guard on the clipping norm (finite exactly when every
+    /// gradient is), and the flag is read with the next batch's loss ([`Trainer::resolve_step`]) instead of the
+    /// host waiting here for the backward to finish. Elsewhere it is read back at once. `(e, k)` name the
+    /// window's last batch in the log.
     fn optimizer_step(&mut self, e: u32, k: usize) -> Result<()> {
         self.sched.apply(self.opt.as_mut());
-        if let Some(scaler) = &mut self.scaler {
-            let finite = self.acc.unscale_clip(scaler.inv_scale(), self.cfg.clip_grad_norm)?;
-            let scale = scaler.scale();
-            if scaler.update(!finite) == ScaleUpdate::BackedOff {
-                let (streak, now) = (scaler.skip_streak() as usize, scaler.scale());
-                self.emitter.log(
-                    LogLevel::Info,
-                    format!(
-                        "epoch {} batch {}: gradient overflow at loss scale {scale}; optimizer step skipped, loss \
-                         scale {now} ({} skipped in the run)",
-                        e + 1,
-                        k + 1,
-                        scaler.skipped_steps()
-                    ),
-                );
-                if streak >= MAX_AMP_SKIPS {
-                    return Err(Error::Failed(format!(
-                        "{MAX_AMP_SKIPS} consecutive optimizer steps had non-finite gradients at every loss scale \
-                         down to {now} (epoch {}, batch {}); train without amp, lower lr0 or check the data",
-                        e + 1,
-                        k + 1
-                    )));
-                }
+        let Some((inv_scale, scale)) = self.scaler.as_ref().map(|s| (s.inv_scale(), s.scale())) else {
+            if self.cfg.clip_grad_norm > 0.0 {
+                self.acc.clip_grad_norm(self.cfg.clip_grad_norm)?;
+            }
+            self.take_step()?;
+            self.sched.advance();
+            return Ok(());
+        };
+        let clip = self.cfg.clip_grad_norm;
+        if self.defer_steps
+            && let Some(flag) = self.acc.unscale_clip_deferred(inv_scale, clip)?
+        {
+            if let Some(guard) = folo_core::StepGuard::new(&flag)? {
+                self.take_step()?;
+                drop(guard);
+                self.guarded_steps += 1;
+                self.pending_step = Some(PendingStep { flag, scale, e, k });
                 return Ok(());
             }
-        } else if self.cfg.clip_grad_norm > 0.0 {
-            self.acc.clip_grad_norm(self.cfg.clip_grad_norm)?;
+            let finite = flag.item::<f32>()?.is_finite();
+            if finite {
+                self.take_step()?;
+            }
+            return self.settle_step(finite, scale, e, k, false);
         }
+        let finite = self.acc.unscale_clip(inv_scale, clip)?;
+        if finite {
+            self.take_step()?;
+        }
+        self.settle_step(finite, scale, e, k, false)
+    }
+
+    /// The optimizer and the EMA of a window's step.
+    fn take_step(&mut self) -> Result<()> {
         self.opt.step(&self.acc)?;
         if let Some(ema) = &mut self.ema {
             ema.update(&self.model)?;
+        }
+        Ok(())
+    }
+
+    /// Settles the guarded step [`Trainer::optimizer_step`] left pending, if there is one: reads its flag and
+    /// finishes it as [`Trainer::settle_step`]. Called before anything reads what a step changes (the next
+    /// batch's loss scale, the schedule, the next window, the epoch's end, a stop).
+    pub(super) fn resolve_step(&mut self) -> Result<()> {
+        let Some(p) = self.pending_step.take() else { return Ok(()) };
+        let finite = p.flag.item::<f32>()?.is_finite();
+        self.settle_step(finite, p.scale, p.e, p.k, true)
+    }
+
+    /// The loss scaler's side of a window's step at loss scale `scale`, the gradients `finite` or not: a step
+    /// taken advances the schedule (`t += 1`); one skipped backs the scale off, logs it and fails the run after
+    /// [`MAX_AMP_SKIPS`] in a row. `encoded`: the optimizer and EMA updates were encoded under a step guard, which
+    /// left their tensors unchanged when the gradients were not finite, so only their counters are taken back.
+    fn settle_step(&mut self, finite: bool, scale: f64, e: u32, k: usize, encoded: bool) -> Result<()> {
+        let scaler = self.scaler.as_mut().expect("a loss scaler with mixed precision");
+        if scaler.update(!finite) == ScaleUpdate::BackedOff {
+            if encoded {
+                self.opt.unstep();
+                if let Some(ema) = &mut self.ema {
+                    ema.unstep_update();
+                }
+            }
+            let (streak, now) = (scaler.skip_streak() as usize, scaler.scale());
+            self.emitter.log(
+                LogLevel::Info,
+                format!(
+                    "epoch {} batch {}: gradient overflow at loss scale {scale}; optimizer step skipped, loss \
+                     scale {now} ({} skipped in the run)",
+                    e + 1,
+                    k + 1,
+                    scaler.skipped_steps()
+                ),
+            );
+            if streak >= MAX_AMP_SKIPS {
+                return Err(Error::Failed(format!(
+                    "{MAX_AMP_SKIPS} consecutive optimizer steps had non-finite gradients at every loss scale \
+                     down to {now} (epoch {}, batch {}); train without amp, lower lr0 or check the data",
+                    e + 1,
+                    k + 1
+                )));
+            }
+            return Ok(());
         }
         self.sched.advance();
         Ok(())
@@ -273,6 +333,15 @@ impl Trainer {
         let a = &self.cfg.augment;
         usize::from(!(a.mosaic > 0.0 && a.mosaic_active(e, self.cfg.epochs)))
     }
+}
+
+/// A window's optimizer step encoded under a step guard (§8.8), settled by [`Trainer::resolve_step`]: the flag
+/// (finite exactly when the step was taken), the loss scale its gradients had, and the window's last batch.
+pub(super) struct PendingStep {
+    flag: folo_core::Tensor,
+    scale: f64,
+    e: u32,
+    k: usize,
 }
 
 fn loss_json(i: &LossItems) -> folo_api::Loss {

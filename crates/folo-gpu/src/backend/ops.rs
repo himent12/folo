@@ -780,6 +780,15 @@ impl Backend for GpuBackend {
         optim::scale_many(&self.ctx, &bufs, d1.raw(), d2.raw()).core()
     }
 
+    fn set_step_guard(&self, flag: Option<View<'_>>) -> Result<()> {
+        let Some(v) = flag else { return self.ctx.set_step_guard(None).core() };
+        if v.layout.numel() != 1 || v.storage.dtype() != CoreDType::F32 {
+            return Err(core_err(crate::error::GpuError::Shape("step guard: one F32 element".into())));
+        }
+        let buf = self.storage_buf(v.storage)?;
+        self.ctx.set_step_guard(Some((buf, 4 * v.layout.offset() as u64))).core()
+    }
+
     fn muon_step_many(&self, items: &mut [MuonItem<'_>], s: &MuonSettings) -> Result<()> {
         let _p = profile::scope(|| "muon_many".to_string());
         let dense = items
