@@ -502,7 +502,10 @@ fn amp_run_resumes_bit_exactly_with_its_loss_scaler() {
 /// step are covered: skipped (the counters taken back) and taken.
 #[test]
 fn deferred_steps_end_bit_identical_to_synchronous_ones() {
-    let (_, _g) = gpu_tc!();
+    let (dev, _g) = gpu_tc!();
+    // A GPU with fewer than five storage buffers per stage has no step guard: the trainer reads the flag at once.
+    let one = Tensor::from_vec(vec![1.0f32], [1]).unwrap().to_device(dev).unwrap();
+    let has_guard = folo_core::StepGuard::new(&one).unwrap().is_some();
     let root = TestDir::new("amp-deferred");
     for optimizer in [OptimizerChoice::Sgd, OptimizerChoice::Adamw, OptimizerChoice::Musgd] {
         let cfg = TrainConfig { optimizer, epochs: 4, ..amp_config() };
@@ -515,7 +518,7 @@ fn deferred_steps_end_bit_identical_to_synchronous_ones() {
             // Both outcomes of a guarded step: at least one skipped, at least one of the 8 windows taken.
             assert!(s.skipped_steps() >= 1 && s.skipped_steps() < 8, "{optimizer:?}: {s:?}");
             // 16 images, batch 4, nbs 8: two windows per epoch.
-            assert_eq!(t.guarded_steps(), if deferred { 8 } else { 0 }, "{optimizer:?}");
+            assert_eq!(t.guarded_steps(), if deferred && has_guard { 8 } else { 0 }, "{optimizer:?}");
             let path = root.join(format!("{optimizer:?}-{deferred}.folo"));
             t.save_checkpoint(&path).unwrap();
             ends.push((tensors(&path), s));

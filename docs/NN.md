@@ -76,7 +76,7 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   device with clipping on without the readback and returns that norm as a device scalar: the trainer guards the step
   on it (`folo_core::StepGuard`, MODEL.md §8.8) and reads it a batch later.
 - Step guard: under a `folo_core::StepGuard` the device's SGD, AdamW, MuSGD and EMA kernels skip themselves when
-  the flag is not finite; their tensor-op fallbacks ask `folo_core::step_guard_allows()` (a readback) first. The
+  the flag is not finite; their tensor-op fallbacks ask `folo_core::step_guard_allows(device)` (a readback) first. The
   counters still move, and `Optimizer::unstep()` / `ModelEma::unstep_update()` take them back for a skipped step.
 - Recipe helpers: `accumulate_steps(nbs, batch)`, `effective_weight_decay`, `auto_optimizer` (§8.2 `auto`).
 - `Optimizer::contract()` / `apply_contract()` / `state_tensors()` / `load_state()` are the `folo.optim` contract

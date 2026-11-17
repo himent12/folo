@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::sync::{Arc, Weak};
 
 use super::GpuContext;
-use crate::error::Result;
+use crate::error::{GpuError, Result};
 use crate::pool::GpuBuffer;
 
 thread_local! {
@@ -28,9 +28,13 @@ impl GpuContext {
     /// a buffer of the guard's own, so the caller may drop or reuse `flag`), or clears it (`None`). While it is
     /// set, every update of `kernels::optim` (single and multi-tensor) and Muon's parameter update leave their
     /// buffers unchanged when the scalar is not finite. The guard belongs to the calling thread: only the updates
-    /// this thread encodes are guarded.
+    /// this thread encodes are guarded. [`GpuError::Unsupported`] on a device with fewer than five storage
+    /// buffers per shader stage (the guarded single-tensor update binds five), where nothing is set.
     pub fn set_step_guard(&self, flag: Option<(&wgpu::Buffer, u64)>) -> Result<()> {
         let guard = match flag {
+            Some(_) if self.caps().max_storage_buffers < 5 => {
+                return Err(GpuError::Unsupported("five storage buffers per shader stage (the step guard)"));
+            }
             Some((buf, offset)) => {
                 let g = self.alloc(4)?;
                 self.copy(buf, offset, g.raw(), 0, 4);

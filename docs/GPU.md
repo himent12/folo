@@ -711,7 +711,9 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   `muon_apply_guarded`: the same arithmetic after `if (skip_step()) { return; }`, the flag's exponent bits all set
   meaning skip). The guard is the calling thread's (a thread-local per context), so a training or test stepping on
   another thread is not guarded by it. The variants are separate kernels so the unguarded ones stay as they were;
-  a `_many` dispatch with the guard binds one tensor fewer when the binding limit is reached.
+  a `_many` dispatch with the guard binds one tensor fewer when the binding limit is reached. A device with fewer
+  than five storage buffers per stage refuses a guard (`GpuError::Unsupported`; the single-tensor guarded update
+  binds five), and folo-core's `StepGuard` then reports none.
 - **Half precision** (`Backend::computes_f16`, true with `shader-f16` unless `FOLO_GPU_NO_F16` is set): the forward
   ops folo-core lets `F16` through (elementwise and `where`, reductions, softmax, matmul, conv2d and the fused
   conv, max / average / adaptive pooling, upsampling, the letterbox output and `detect_candidates`) take f16

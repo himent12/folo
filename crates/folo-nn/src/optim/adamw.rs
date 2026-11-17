@@ -106,7 +106,7 @@ fn update(p: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, c: &Coef) -> Result<()
         }
     }
     // Tensor ops (under a step guard, only if it lets the step through).
-    if !folo_core::step_guard_allows()? {
+    if !folo_core::step_guard_allows(p.device())? {
         return Ok(());
     }
     if let Some(d) = c.decay {

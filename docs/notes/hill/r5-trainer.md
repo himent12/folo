@@ -51,11 +51,11 @@ Same arms, 3 alternated rounds (`logs/win-mini1/`, s = synchronous, d = deferred
 | 2 | 116.1 ms | 111.7 ms | −4.4 ms | +14.2 / +5.0 ms | 537 / 568 | 100%, 1.3 / 99%, 1.1 cores |
 | 3 | 114.3 ms | 110.1 ms | −4.2 ms | +13.2 / +4.0 ms | 555 / 496 | 96%, 1.3 / 90%, 1.1 cores |
 
-Positions 1-3 of each window take 74.8 ms (sync, median of rounds 2-3) against 80.1 ms (deferred): the deferred
+Positions 1-3 of each window take 75.0 ms (sync, rounds 2-3) against 79.8 ms (deferred): the deferred
 window keeps the GPU fed, so its window-end step is 9-10 ms shorter, but the next batch no longer starts on an idle
 GPU and is ~5 ms slower. Per whole window the prototype saves 4.2-4.4 ms in the two quiet rounds (round 1 had
 Defender on 5.5 cores during the sync arm). **Against the 5 ms gate this is a miss by the cycle measure** (median
-4.4 ms) and a pass by the window-end measure I first used (9.2-10.1 ms); I went on with the implementation on the
+4.4 ms) and a pass by the window-end measure I first used (9.2-9.9 ms); I went on with the implementation on the
 window-end number, and found the error in review (below). The full implementation measures better than the
 prototype (it also drops the second submission of the window end): see the A/B.
 
@@ -78,8 +78,8 @@ prototype (it also drops the second submission of the window end): see the A/B.
   of an epoch settles before the checkpoint, so `folo.amp`, `optim.__step` and `ema.__updates` are those of the
   synchronous path and a resume is bit-exact.
 - **Fallbacks** that are not guarded kernels (tensor-op paths: a device without the multi-tensor kernels) ask
-  `step_guard_allows()` (a readback) first. CPU training, AMP without clipping (`clip_grad_norm = 0`) and the f32
-  path are unchanged.
+  `step_guard_allows(device)` (a readback) first. CPU training, AMP without clipping (`clip_grad_norm = 0`) and the
+  f32 path are unchanged.
 - **Review fixes** (round 1, Sol 6.2 and Opus 5.5): a stop the settle raises (the 50th skip) restores the batch
   snapshot and returns before that batch's backward, as the synchronous path stopped before its forward; a loader
   error settles the pending step before it returns; SGD's `unstep` drops the momentum buffers a skipped first step
@@ -88,16 +88,26 @@ prototype (it also drops the second submission of the window end): see the A/B.
   fewer than 5 storage bindings per stage reports no guard and keeps the synchronous path; a stale guard of a
   dropped context is keyed by a `Weak`, not an address. A skipped step still bumps the parameter versions (the
   kernel ran); that only costs a cache refill and is documented in CORE.md.
+- **Review fixes** (round 2): every failure between receiving a batch and settling the previous window's step (the
+  batch's input, forward and loss, the checkpoint writer's poll) settles that step first, so its own failure (the
+  50th skip) is the one reported and a stop it raises ends the epoch as a stop (`Trainer::fail_after_settling`);
+  the guard takes one snapshot of the flag, which the device's guard and the fallbacks' check both read; the
+  fallbacks' check covers the guard's device only; a guard's drop clears the backend that set it, not whichever
+  one the device maps to by then; `GpuContext::set_step_guard` itself refuses a device with fewer than five storage
+  bindings; the guard tests skip on such a device. Kept: a run that fails on the 50th skip in a row has reported
+  one more `Step` event (the window's last batch, whose loss was computed) than a synchronous run.
 
 ### Tests
 
 - `crates/folo-nn/tests/gpu/guard.rs`: SGD, AdamW and MuSGD with an EMA on the GPU, under a guard on NaN, +inf and
   -inf, leave every model tensor, optimizer state and EMA value bit-identical; under a finite flag the step is the
   unguarded step bit for bit. The guarded kernels are in the kernel registry.
-- `guard_rules`: one F32 element, one guard per thread, `step_guard_allows`, and an update another thread encodes
-  meanwhile on the same device still runs. `per_parameter_fallback_stays_guarded`: a group the multi-tensor update
-  declines (a transposed parameter beside a 90,000-element one, above the parallel threshold) still skips under a
-  NaN guard, for SGD and AdamW (it fails when the per-parameter path runs on worker threads).
+- `guard_rules`: one F32 element, one guard per thread, `step_guard_allows` (for the guard's device only), a write
+  to the flag after the guard started moves neither the device's decision nor the fallbacks', and an update another
+  thread encodes meanwhile on the same device still runs.
+- `per_parameter_fallback_stays_guarded`: a group the multi-tensor update declines (a transposed parameter beside a
+  90,000-element one, above the parallel threshold) still skips under a NaN guard, for SGD and AdamW (it fails when
+  the per-parameter path runs on worker threads).
 - `crates/folo-vision/tests/gpu_amp.rs` `deferred_steps_end_bit_identical_to_synchronous_ones`: 4-epoch AMP runs
   with SGD, AdamW and MuSGD, deferred against synchronous (`Trainer::set_deferred_steps(false)`): every checkpoint
   tensor and the loss scaler equal. The initial scale overflows the first windows; the test asserts that at least
@@ -139,12 +149,17 @@ Method. Other lanes' builds and tests ran beside every set; the load is per arm.
 | mini4 | b4 main | 464 | 130.8 ms | +20.3 ms | 69% | 100%, 0.4, 5.6 cores |
 | mini4 | n4 new | 521 | 119.2 ms | +3.5 ms | 82% | 100%, 0.5, 6.2 cores |
 
-Without the three bracketed arms: **mean img/s median 568 (range 481-586, 7 arms) against 459 (382-520, 10
-arms), +24%; cycle median 110.1 ms (108.1-119.2) against 121 ms (110.5-148.5), −9%.** Every pair's cycle favours
-the branch except mini4's starved n2, by −0.6 to −38.4 ms per window. The gain grows with the CPU load, likely
-because `main`'s host thread waits for the GPU at every window end and then has to be scheduled again before it encodes anything, and with the
-CPU at 100% that costs more (mini4's base cycle 123-149 ms against 110-116 ms in the quieter mini2). In the
-quietest set (mini2, CPU 50-91%) the saving is −1.1 / −7.9 / −5.2 ms per window, +10% to +25% img/s.
+**Result.** Cycle median **110.1 ms (108.1-119.2) against 120.8 ms (110.5-148.5): −9% per window, about +10%
+throughput.** Mean img/s with the same stall rule for every arm (steps longer than 0.3 s dropped: both binaries
+have them, from the environment, e.g. mini2 b1 7 gaps / 6.9 s and n1 4 gaps / 3.5 s): **568 (521-586, 7 arms)
+against 501 (390-556, 10 arms), +13%.** The raw means (459 against 568, +24%) leave more stall time in the `main`
+arms and overstate the gain. The three bracketed arms are excluded from img/s only; their cycles are unaffected
+and keep the cycle median at 110.1 ms. Every pair's cycle favours the branch (−1.1 to −38.4 ms per window without
+the bracketed arms) except mini4's starved n2. The gain grows with the CPU load, likely because `main`'s host
+thread waits for the GPU at every window end and then has to be scheduled again before it encodes anything, and
+with the CPU at 100% that costs more (mini4's base cycle 123-149 ms against 114-116 ms in the quieter mini2). In
+the quietest set (mini2, CPU 50-91%) the saving is −1.1 / −7.9 / −5.2 ms per window and the stall-free img/s
+change −1% / +16% / +13% (the first pair is a tie).
 
 Excluded arms: `mini3` n1 and n2 were the first two launches of a freshly built binary. The arms are killed by
 PID, so the run never writes its kernel list, and new pipelines compiled on demand: gaps of 6.5 s (n1) and 15-16 s
@@ -166,3 +181,57 @@ Load: CPU 57-100%, Defender 1.2-4.6 cores. With mosaic on, the window is a small
 loader sets; with `--mosaic 0` the pairs are +1.8 / −2.5 / +0.3 ms: a tie. The one GPU-bound pair (`--mosaic 0`
 round 2, 85-89% GPU) gave +5.7% img/s. The brief's targets for this lane (+20% with mosaic at 16 workers, +8%
 GPU-bound) are the sum of items 1 and 2; this item alone moves the GPU-bound case only.
+
+## Item 1: mosaic window (branch `train/mosaic-window`, no PR)
+
+Each image is decoded about once per epoch: a mosaic's partners come from the K samples before it in the epoch's
+order, through a window cache keyed by position (`folo-data/src/window.rs`). Batches do not depend on the worker
+count (tested). The code, its tests and DATA.md's "Mosaic window" section are on the branch (d111ff99, 5644cff3); it
+is opt-in (`mosaic_window = 0` default).
+
+**Gate (b), proxy P1 seed 0** (r4-distill.md protocol: mini320, folo-n, 320 px, 20 epochs, batch 64, AMP, 10
+workers, `folo val --coco`): control (`main` cf65f7a5) 0.1255, the same as hill-climb 4's control (no drift); K = 512
+**0.1232** (below the control range 0.1238-0.1255: fail); K = 2048 **0.1274** (above the range: pass).
+
+**Gate (a), `benches/pipeline.rs` on COCO train2017, 16 workers**, alternated arms, one process per arm, each its
+own epoch:
+
+| run | batches per arm | load | K = 0 img/s | K img/s | ratio per pair |
+|---|---|---|---|---|---|
+| `loader-ab1`, K = 512 | 600 | other lanes' builds | 658.9 / 631.0 / 650.5 | 978.5 / 1008.0 / 1047.6 | 1.49 / 1.60 / 1.61 |
+| `loader-ab2`, K = 512 (cold arms) | 2000 | heavy | 413.5 / 283.4 / 341.7 | 846.7 / 812.4 / 821.4 | 2.05 / 2.87 / 2.40 |
+| `loader-ab-k2048b` | 2000 | heavy, CPU 73-98% | 288.1 / 373.2 / 350.2 | 594.4 / 867.8 / 459.8 | 2.06 / 2.33 / 1.31 |
+| `loader-ab-k2048c` | 2000 | heavy | 248.5 / 358.5 / 400.9 | 652.4 / 494.3 / 655.8 | 2.63 / 1.38 / 1.64 |
+| `loader-ab-k2048-full` | whole epoch | CPU 80-95% incl. the bench | 247.8 / 417.4 / 583.5 | 639.0 / 652.8 / 812.9 | 2.58 / 1.56 / 1.39 |
+
+The ratio depends on the load (K = 0 decodes about 4 images per sample, so it suffers more when other processes
+take the cores) and on the bench length (a measured epoch starts with the partners of its first K samples, which
+wrap around to the end of the order and are decoded on top: about 20% more decodes in 2000 batches at K = 2048,
+about 5% over a whole epoch). The non-decode part of a mosaic sample (the canvas 2.5 ms, the affine warp 3.1 ms,
+HSV 1.1 ms, flips; about 8 ms of 16 ms per sample at K = 512) bounds the ratio on a quiet machine.
+
+**Verdict: gate (a) fails.** The whole-epoch bench is the one that matches training; its ratio falls as the machine
+quietens (K = 0 at 248 → 417 → 584 img/s, ratio 2.58 → 1.56 → 1.39), median 1.56x. The window reaches 1.8x only when
+other processes take the cores K = 0 needs for its extra decodes. With (b) passing at K = 2048 but (a) failing, item
+1 stays opt-in on its branch and gets no PR. It remains useful as an opt-in for runs where the loader competes for
+the CPU (16 workers beside other work), which the lead may want to ship separately.
+
+## Item 3: `train/amp-step` rebased (0b74e5f7, branch `train/amp-step-r5`, not shipped)
+
+Rebased on `main` cf65f7a5 (conflicts in `storage.rs`, `kernels/mod.rs`, ARCHITECTURE.md; clippy clean). A/B
+`amp-mini2` (mini320 at 640, `--mosaic 0 --workers 12`, new first, 130 s arms; an earlier set `amp-mini` overlapped a
+loader bench of mine and is discarded):
+
+| arm | mean img/s | cycle | window-end extra | load: CPU total, Defender, folo |
+|---|---|---|---|---|
+| n4 amp-step | 501 | 111.8 ms | +15.5 ms | 72%, 1.3, 7.3 cores |
+| b4 main | 574 | 110.9 ms | +15.5 ms | 80%, 0.4, 6.6 cores |
+| n5 amp-step | 573 | 110.8 ms | +15.7 ms | 77%, 0.3, 6.8 cores |
+| b5 main | 475 | 115.8 ms | +14.5 ms | 72%, 1.0, 6.3 cores |
+| n6 amp-step | 435 | 112.2 ms | +15.1 ms | 81%, 0.6, 6.5 cores |
+| b6 main | 409 | 120.0 ms | +15.2 ms | 98%, 1.8, 5.4 cores |
+
+Cycle median 111.8 against 115.8 ms (−3.5%), but `main`'s cycle drifted up with the load (110.9 → 120.0 ms as the
+CPU went from 80% to 98%) and the first pair is a tie (+0.9 ms); mean img/s pairs −13% / +21% / +6%. Row 10 (full
+COCO folo-n AMP, `logs/amp-row10/`): epoch-2 median step 289.7 → 294.2 img/s (+1.6%). Not resolved outside ±3%: not
+shipped. A quiet-machine re-measure could settle whether the ~3% is real.

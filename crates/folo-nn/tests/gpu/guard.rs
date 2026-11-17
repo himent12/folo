@@ -45,6 +45,17 @@ fn snapshot((net, opt, ema): &Setup) -> Vec<(String, Vec<u32>)> {
     v
 }
 
+/// Whether `dev` has a step guard (a GPU with fewer than five storage buffers per stage has none; the trainer then
+/// reads the flag back, and these tests have nothing to check).
+fn has_guard(dev: Device) -> bool {
+    let one = Tensor::from_vec(vec![1.0f32], [1]).unwrap().to_device(dev).unwrap();
+    let guard = StepGuard::new(&one).unwrap();
+    if guard.is_none() {
+        eprintln!("skipped: this GPU has no step guard");
+    }
+    guard.is_some()
+}
+
 /// One step with `grads` under a guard on `flag`.
 fn guarded_step(s: &mut Setup, grads: &folo_core::Grads, flag: f32, dev: Device) {
     let f = Tensor::from_vec(vec![flag], [1]).unwrap().to_device(dev).unwrap();
@@ -57,6 +68,9 @@ fn guarded_step(s: &mut Setup, grads: &folo_core::Grads, flag: f32, dev: Device)
 #[test]
 fn guarded_steps_skip_exactly_and_otherwise_match() {
     let dev = gpu!();
+    if !has_guard(dev) {
+        return;
+    }
     let x = Tensor::rand_uniform([2, 3, 16, 16], -1.0, 1.0, &mut Rng::seed(4)).to_device(dev).unwrap();
     for kind in [OptimKind::Sgd, OptimKind::AdamW, OptimKind::MuSgd] {
         let what = kind.as_str();
@@ -96,13 +110,30 @@ fn guarded_steps_skip_exactly_and_otherwise_match() {
 #[test]
 fn guard_rules() {
     let dev = gpu!();
-    assert!(folo_core::step_guard_allows().unwrap());
+    assert!(folo_core::step_guard_allows(dev).unwrap());
     let two = Tensor::zeros_with([2], folo_core::DType::F32, dev).unwrap();
     assert!(StepGuard::new(&two).is_err());
     let nan = Tensor::from_vec(vec![f32::NAN], [1]).unwrap().to_device(dev).unwrap();
-    let g = StepGuard::new(&nan).unwrap().expect("a guard");
+    let Some(g) = StepGuard::new(&nan).unwrap() else {
+        return eprintln!("skipped: this GPU has no step guard");
+    };
     assert!(StepGuard::new(&nan).is_err(), "one guard per thread");
-    assert!(!folo_core::step_guard_allows().unwrap(), "a fallback under a skipping guard does nothing");
+    assert!(!folo_core::step_guard_allows(dev).unwrap(), "a fallback under a skipping guard does nothing");
+    assert!(
+        folo_core::step_guard_allows(folo_core::Device::Cpu).unwrap(),
+        "the guard covers its own device only"
+    );
+    // The guard holds the flag's value as of its start: a later write to the flag moves neither the device's
+    // decision nor the fallbacks'.
+    nan.copy_from(&Tensor::full_with([1], 1.0, folo_core::DType::F32, dev).unwrap()).unwrap();
+    assert!(!folo_core::step_guard_allows(dev).unwrap(), "the fallback check after a write to the flag");
+    let p = Tensor::zeros_with([300], folo_core::DType::F32, dev).unwrap();
+    let ones = Tensor::full_with([300], 1.0, folo_core::DType::F32, dev).unwrap();
+    assert!(p.optimizer_step_(&ones, &[], &folo_core::backend::OptimStep::Axpby { a: 1.0, b: 2.0 }).unwrap());
+    assert!(
+        p.to_vec::<f32>().unwrap().iter().all(|&v| v == 0.0),
+        "the device's guard after a write to the flag"
+    );
     // The guard is this thread's: an update another thread encodes meanwhile on the same device still runs.
     let moved = std::thread::spawn(move || {
         let p = Tensor::zeros_with([300], folo_core::DType::F32, dev).unwrap();
@@ -116,7 +147,7 @@ fn guard_rules() {
     .unwrap();
     assert!(moved.iter().all(|&v| v == 4.0), "{:?}", &moved[..4]);
     drop(g);
-    assert!(folo_core::step_guard_allows().unwrap());
+    assert!(folo_core::step_guard_allows(dev).unwrap());
     // The CPU has none: the caller reads the flag itself.
     assert!(StepGuard::new(&Tensor::from_vec(vec![1.0f32], [1]).unwrap()).unwrap().is_none());
 }
@@ -135,6 +166,9 @@ impl GradSource for ByShape {
 #[test]
 fn per_parameter_fallback_stays_guarded() {
     let dev = gpu!();
+    if !has_guard(dev) {
+        return;
+    }
     let mut rng = Rng::seed(7);
     let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
     let one = |dims: [usize; 2]| Tensor::full_with(dims, 1.0, folo_core::DType::F32, dev).unwrap();

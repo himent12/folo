@@ -41,59 +41,37 @@ impl Trainer {
         let phase = self.mosaic_phase(e);
         let mut batch_start = Instant::now();
         for item in source.by_ref() {
+            // Any failure before the previous window's guarded step settles (below) lets it settle first, as it
+            // did at its window (§8.8).
             let (mut batch, staged) = match item {
                 Ok(v) => v,
-                Err(err) => {
-                    // A pending step settles first: its failure (the 50th skip) is the one the run reports, as it
-                    // was at its window, before this batch was asked for.
-                    self.resolve_step()?;
-                    return Err(err);
-                }
+                Err(err) => return self.fail_after_settling(err),
             };
             let received = Instant::now();
             let n = batch.len();
-            let targets = targets_from_normalized(&batch.targets, n, s, s)?;
-            let x = match (&ctx, staged) {
-                (Some(c), Some(st)) => feed::staged_tensor(c, self.device, &st, batch.shape)?,
-                _ => batch_tensor(&mut batch, self.device, folo_core::DType::F32)?,
+            let prepared = (|| -> Result<_> {
+                let targets = targets_from_normalized(&batch.targets, n, s, s)?;
+                let x = match (&ctx, staged) {
+                    (Some(c), Some(st)) => feed::staged_tensor(c, self.device, &st, batch.shape)?,
+                    _ => batch_tensor(&mut batch, self.device, folo_core::DType::F32)?,
+                };
+                Ok((targets, x))
+            })();
+            let (targets, x) = match prepared {
+                Ok(v) => v,
+                Err(err) => return self.fail_after_settling(err),
             };
-            let snapshot = RunningStats::capture(&self.model)?;
-            // Distillation (§8.9): the frozen teacher sees the same batch, without autograd, before the student's
-            // forward, so its activations are gone before the student's graph is built.
-            let kd_targets = match &self.teacher {
-                Some(t) => Some(t.targets(&x)?),
-                None => None,
+            let snapshot = match RunningStats::capture(&self.model) {
+                Ok(v) => v,
+                Err(err) => return self.fail_after_settling(err.into()),
             };
-            let out = {
-                let _amp = self.scaler.is_some().then(folo_core::autocast);
-                self.model.forward(&x)?
-            };
-            drop(x);
-            // Mixed precision: the loss (assigner, BCE, CIoU + DFL) runs in f32 on f32 copies of the f16 head.
-            let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
-            let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
-            let mut loss = detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg)?;
-            // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
-            let kd = match (kd_targets, &self.cfg.distill) {
-                (Some(t), Some(d)) => Some(distill_loss(&box_raw, &cls_raw, &t, loss.target_score_sum, d)?),
-                _ => None,
-            };
-            drop((box_raw, cls_raw));
-            // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
-            let o2o = match &out.o2o {
-                Some((b, c)) => {
-                    let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
-                    let cfg = LossConfig { tal: crate::assign::TalConfig::o2o(), ..self.loss_cfg };
-                    Some(detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &cfg)?)
+            let (out, loss, kd, finite) = match self.forward_batch(x, &targets, n, e) {
+                Ok(v) => v,
+                Err(err) => {
+                    snapshot.restore()?;
+                    return self.fail_after_settling(err);
                 }
-                None => None,
             };
-            let w_m = o2m_weight(e, self.cfg.epochs);
-            // `w_m · (L_o2m + L_distill) + (1 − w_m) · L_o2o`; the reported terms stay unweighted by `w_m` (§8.9).
-            loss = step_loss(loss, kd.as_ref(), o2o.as_ref().map(|o| (o, w_m)), n)?;
-            let kd = kd.map(|kd| [kd.cls, kd.dfl]);
-            let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
-            let finite = loss.is_finite() && kd_finite && RunningStats::all_finite(&self.model)?;
             // The previous window's guarded step (§8.8): its flag was computed long before this batch's loss, which
             // was just read back, so this read does not wait. The loss scale the backward below uses, the schedule
             // and the skip counters are then those of a step settled at once. Where that step's outcome ends the
@@ -170,7 +148,9 @@ impl Trainer {
             clock.step[phase] += received.elapsed().as_secs_f64();
             batch_start = Instant::now();
             // The previous epoch's event, once its files are written.
-            self.poll_write()?;
+            if let Err(err) = self.poll_write() {
+                return self.fail_after_settling(err);
+            }
             if finite {
                 let elapsed = epoch_start.elapsed().as_secs_f64().max(1e-9);
                 let step = folo_api::Step {
@@ -237,6 +217,66 @@ impl Trainer {
         let f = finite_batches as f64;
         let (b, c, d) = ((sum[0] / f) as f32, (sum[1] / f) as f32, (sum[2] / f) as f32);
         Ok(Some(folo_api::Loss { box_: b, cls: c, dfl: d, total: b + c + d }))
+    }
+
+    /// A batch's forward and loss (§8.3, §8.9, MODEL.md §6.6) on the input `x` with `targets` (`n` images) in
+    /// epoch `e`: the head's outputs, the loss, the reported distillation terms and whether all of it (and the
+    /// BatchNorm statistics) is finite.
+    fn forward_batch(
+        &self,
+        x: folo_core::Tensor,
+        targets: &[crate::loss::ImageTargets],
+        n: usize,
+        e: u32,
+    ) -> Result<(crate::model::HeadOutput, crate::loss::LossOutput, Option<[f32; 2]>, bool)> {
+        // Distillation (§8.9): the frozen teacher sees the same batch, without autograd, before the student's
+        // forward, so its activations are gone before the student's graph is built.
+        let kd_targets = match &self.teacher {
+            Some(t) => Some(t.targets(&x)?),
+            None => None,
+        };
+        let out = {
+            let _amp = self.scaler.is_some().then(folo_core::autocast);
+            self.model.forward(&x)?
+        };
+        drop(x);
+        // Mixed precision: the loss (assigner, BCE, CIoU + DFL) runs in f32 on f32 copies of the f16 head.
+        let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
+        let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
+        let loss = detection_loss(&box_raw, &cls_raw, &out.anchors, targets, &self.loss_cfg)?;
+        // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
+        let kd = match (kd_targets, &self.cfg.distill) {
+            (Some(t), Some(d)) => Some(distill_loss(&box_raw, &cls_raw, &t, loss.target_score_sum, d)?),
+            _ => None,
+        };
+        drop((box_raw, cls_raw));
+        // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
+        let o2o = match &out.o2o {
+            Some((b, c)) => {
+                let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
+                let cfg = LossConfig { tal: crate::assign::TalConfig::o2o(), ..self.loss_cfg };
+                Some(detection_loss(&box_raw, &cls_raw, &out.anchors, targets, &cfg)?)
+            }
+            None => None,
+        };
+        let w_m = o2m_weight(e, self.cfg.epochs);
+        // `w_m · (L_o2m + L_distill) + (1 − w_m) · L_o2o`; the reported terms stay unweighted by `w_m` (§8.9).
+        let loss = step_loss(loss, kd.as_ref(), o2o.as_ref().map(|o| (o, w_m)), n)?;
+        let kd = kd.map(|kd| [kd.cls, kd.dfl]);
+        let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
+        let finite = loss.is_finite() && kd_finite && RunningStats::all_finite(&self.model)?;
+        Ok((out, loss, kd, finite))
+    }
+
+    /// Fails the epoch with `err`, raised while a guarded step may be pending (§8.8): the step settles first, as it
+    /// did at its window under a synchronous step, so its own failure (the 50th skip in a row) is the one
+    /// reported, and a stop its settling raises (an event sink that stops on the overflow log) ends the epoch as a
+    /// stop.
+    fn fail_after_settling(&mut self, err: Error) -> Result<Option<folo_api::Loss>> {
+        if self.resolve_step()? && self.stopping() {
+            return Ok(None);
+        }
+        Err(err)
     }
 
     /// Starts epoch `e` of the loader. On a folo-gpu device the loader delivers u8 pixels and a feeder thread

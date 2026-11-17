@@ -218,8 +218,11 @@ implements all four:
   nothing when the one-element f32 `flag` (its value when the guard was set) is not finite, until the guard drops:
   mixed precision steps without waiting for the overflow check. The guard is the thread's (`StepGuard` is not
   `Send`; folo-nn keeps a guarded step's per-parameter updates on that thread, `step_guard_active()`). `Ok(None)`
-  where the backend has none (or binds fewer than 5 storage buffers); updates outside those kernels ask
-  `step_guard_allows()` first. A skipped update still counts as a write of its tensors (their versions move).
+  where the backend has none (or binds fewer than 5 storage buffers). The guard takes one snapshot of the flag,
+  which the device binds and `step_guard_allows(device)` reads, so a later write to `flag` moves neither; updates
+  outside those kernels on the guard's device ask `step_guard_allows(device)` first (other devices are not
+  guarded). Its drop clears the backend that set it. A skipped update still counts as a write of its tensors
+  (their versions move).
 
 ## RNG
 Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests. `Rng::ALGO`

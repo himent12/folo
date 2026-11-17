@@ -150,7 +150,7 @@ impl MuSgd {
                 continue;
             }
             // Tensor ops (under a step guard, only if it lets the step through).
-            if !folo_core::step_guard_allows()? {
+            if !folo_core::step_guard_allows(ps[0].device())? {
                 continue;
             }
             // u = μ · m + (1 − μ) · g (Nesterov), else m.
@@ -199,7 +199,7 @@ fn axpby_many(ps: &[&Tensor], gs: &[&Tensor], a: f32, b: f32) -> Result<()> {
         return Ok(());
     }
     // Tensor ops (under a step guard, only if it lets the step through).
-    if !folo_core::step_guard_allows()? {
+    if !ps.first().map_or(Ok(true), |p| folo_core::step_guard_allows(p.device()))? {
         return Ok(());
     }
     for (p, g) in ps.iter().zip(gs) {

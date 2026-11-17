@@ -105,7 +105,7 @@ fn update(
         }
     }
     // Any device: the same arithmetic, op by op (under a step guard, only if it lets the step through).
-    if !folo_core::step_guard_allows()? {
+    if !folo_core::step_guard_allows(p.device())? {
         return Ok(());
     }
     let mut d = if wd != 0.0 { g.add(&p.mul_scalar(wd)?)? } else { g };
