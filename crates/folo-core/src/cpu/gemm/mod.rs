@@ -83,7 +83,7 @@ impl<'a> ARows<'a> {
     /// # Panics
     /// If `data` is too short for `m` rows of `k` elements, or that extent overflows `usize` (the packing path
     /// would fail its slice bounds check there too): the kernels read these rows through raw pointers.
-    pub(super) fn of<A: Operand>(a: &'a A, m: usize, k: usize) -> Option<Self> {
+    pub(super) fn of(a: &'a dyn Operand, m: usize, k: usize) -> Option<Self> {
         let (data, offset, so) = a.rows_in_place()?;
         if (m.div_ceil(MR) * MR).checked_mul(k).is_none_or(|v| v > PACK_BUDGET) {
             // Larger than one packed super-block: packing is a small part of such a GEMM, and done in parallel.

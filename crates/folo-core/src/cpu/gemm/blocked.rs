@@ -127,14 +127,17 @@ pub(super) fn pack_lhs_panels(
 /// The result does not depend on `threads`: every element of C is computed by one task in a fixed K order, and
 /// the K split (see [`k_split_parts`]) is a function of the shape only.
 ///
+/// The operands are trait objects, not type parameters: the driver is then compiled once instead of once per
+/// pair of operand types, and the calls through them each pack a whole panel or block.
+///
 /// [`gemm`]: super::gemm
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn gemm_ex<A: Operand, B: Operand>(
+pub(crate) fn gemm_ex(
     m: usize,
     n: usize,
     k: usize,
-    a: &A,
-    b: &B,
+    a: &dyn Operand,
+    b: &dyn Operand,
     c: &mut [f32],
     ldc: usize,
     accumulate: bool,
@@ -226,12 +229,12 @@ pub(super) fn aligned(buf: &mut [f32], len: usize) -> &mut [f32] {
 /// L1). For conv2d this expands the implicit im2col operand one small block at a time, while it is in cache,
 /// instead of materialising the whole unfolded matrix first.
 #[allow(clippy::too_many_arguments)]
-fn gemm_blocked<A: Operand, B: Operand>(
+fn gemm_blocked(
     m: usize,
     n: usize,
     krange: std::ops::Range<usize>,
-    a: &A,
-    b: &B,
+    a: &dyn Operand,
+    b: &dyn Operand,
     c: &mut [f32],
     ldc: usize,
     accumulate: bool,
