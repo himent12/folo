@@ -1,0 +1,88 @@
+{
+  "$comment": "Shared cases for the custom theme format (design/THEMES.md, Custom themes), so every validator (design/contrast.mjs, Studio, Desktop) agrees. `invalid`: each `theme` must be refused with `error` (`path: message`; the path, before the first ': ', is the part every validator must match). `valid`: each must be accepted; `expect` gives the resolved base, the trimmed name, and token paths of the resolved palette with their expected values (as written in the file, or the base's). `node design/contrast.mjs` replays them on every run (so `npm run check` in web/ does), and `node --test design/contrast.test.mjs` tests them with the rest of the theme half.",
+  "invalid": [
+    { "what": "not an object", "theme": ["dark"], "error": "(file): must be a JSON object" },
+    { "what": "unknown top-level key", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "colour": {} }, "error": "colour: unknown key" },
+    { "what": "folo_theme missing", "theme": { "id": "x", "name": "X", "mode": "dark" }, "error": "folo_theme: required" },
+    { "what": "folo_theme another version", "theme": { "folo_theme": 2, "id": "x", "name": "X", "mode": "dark" }, "error": "folo_theme: must be 1" },
+    { "what": "folo_theme a string", "theme": { "folo_theme": "1", "id": "x", "name": "X", "mode": "dark" }, "error": "folo_theme: must be 1" },
+    { "what": "id missing", "theme": { "folo_theme": 1, "name": "X", "mode": "dark" }, "error": "id: required" },
+    { "what": "id with capitals", "theme": { "folo_theme": 1, "id": "Night", "name": "X", "mode": "dark" }, "error": "id: must be 1 to 40 characters of a-z, 0-9 and -" },
+    { "what": "id with a space", "theme": { "folo_theme": 1, "id": "night shift", "name": "X", "mode": "dark" }, "error": "id: must be 1 to 40 characters of a-z, 0-9 and -" },
+    { "what": "id empty", "theme": { "folo_theme": 1, "id": "", "name": "X", "mode": "dark" }, "error": "id: must be 1 to 40 characters of a-z, 0-9 and -" },
+    { "what": "id 41 characters", "theme": { "folo_theme": 1, "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "name": "X", "mode": "dark" }, "error": "id: must be 1 to 40 characters of a-z, 0-9 and -" },
+    { "what": "id a number", "theme": { "folo_theme": 1, "id": 7, "name": "X", "mode": "dark" }, "error": "id: must be 1 to 40 characters of a-z, 0-9 and -" },
+    { "what": "id of a built-in theme", "theme": { "folo_theme": 1, "id": "midnight", "name": "X", "mode": "dark" }, "error": "id: \"midnight\" is a built-in theme" },
+    { "what": "name missing", "theme": { "folo_theme": 1, "id": "x", "mode": "dark" }, "error": "name: required" },
+    { "what": "name only spaces", "theme": { "folo_theme": 1, "id": "x", "name": "   ", "mode": "dark" }, "error": "name: must be 1 to 40 characters" },
+    { "what": "name 41 characters", "theme": { "folo_theme": 1, "id": "x", "name": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mode": "dark" }, "error": "name: must be 1 to 40 characters" },
+    { "what": "name a number", "theme": { "folo_theme": 1, "id": "x", "name": 5, "mode": "dark" }, "error": "name: must be 1 to 40 characters" },
+    { "what": "description 121 characters", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "description": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "error": "description: must be at most 120 characters" },
+    { "what": "description not a string", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "description": true }, "error": "description: must be at most 120 characters" },
+    { "what": "mode missing", "theme": { "folo_theme": 1, "id": "x", "name": "X" }, "error": "mode: required" },
+    { "what": "mode capitalised", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "Dark" }, "error": "mode: must be \"dark\" or \"light\"" },
+    { "what": "mode system", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "system" }, "error": "mode: must be \"dark\" or \"light\"" },
+    { "what": "base unknown", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "base": "nope" }, "error": "base: not a built-in theme" },
+    { "what": "base a custom theme", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "base": "night-shift" }, "error": "base: not a built-in theme" },
+    { "what": "base of the other mode", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "base": "paper" }, "error": "base: \"paper\" is a light theme, not dark" },
+    { "what": "color not an object", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": "#000000" }, "error": "color: must be an object" },
+    { "what": "unknown token", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "bg": { "ap": "#000000" } } }, "error": "color.bg.ap: not a colour token" },
+    { "what": "unknown group", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "light", "color": { "background": { "app": "#FFFFFF" } } }, "error": "color.background: not a colour token" },
+    { "what": "a group given a colour", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "bg": "#000000" } }, "error": "color.bg: must be an object of colour tokens" },
+    { "what": "a colour given a group", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "focus": { "solid": "#C5F82A" } } }, "error": "color.focus: not a #RRGGBB or #RRGGBBAA colour" },
+    { "what": "colour too short", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "bg": { "app": "#00000" } } }, "error": "color.bg.app: not a #RRGGBB or #RRGGBBAA colour" },
+    { "what": "colour as #RGB", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "text": { "primary": "#FFF" } } }, "error": "color.text.primary: not a #RRGGBB or #RRGGBBAA colour" },
+    { "what": "colour as a CSS function", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "bg": { "app": "rgb(0, 0, 0)" } } }, "error": "color.bg.app: not a #RRGGBB or #RRGGBBAA colour" },
+    { "what": "colour a number", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "bg": { "app": 0 } } }, "error": "color.bg.app: not a #RRGGBB or #RRGGBBAA colour" },
+    { "what": "series too short", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "chart": { "series": ["#5CC8FF", "#F2C14E", "#E879F9", "#2DD4BF", "#A78BFA"] } } }, "error": "color.chart.series: must be a list of 6 colours" },
+    { "what": "series a colour", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "chart": { "series": "#5CC8FF" } } }, "error": "color.chart.series: must be a list of 6 colours" },
+    { "what": "series by index", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "chart": { "series": { "0": "#5CC8FF" } } } }, "error": "color.chart.series: must be a list of 6 colours" },
+    { "what": "series entry bad", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "light", "color": { "chart": { "text": ["#066EA7", "#945B00", "purple", "#087568", "#6F52CF", "#AC4C07"] } } }, "error": "color.chart.text.2: not a #RRGGBB or #RRGGBBAA colour" },
+    { "what": "area_opacity above 1", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "chart": { "area_opacity": 1.5 } } }, "error": "color.chart.area_opacity: must be a number from 0 to 1" },
+    { "what": "area_opacity negative", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "chart": { "area_opacity": -0.1 } } }, "error": "color.chart.area_opacity: must be a number from 0 to 1" },
+    { "what": "area_opacity a string", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "chart": { "area_opacity": "0.1" } } }, "error": "color.chart.area_opacity: must be a number from 0 to 1" },
+    { "what": "first error wins (unknown key before color)", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "colors": {}, "color": { "bg": { "ap": "#000000" } } }, "error": "colors: unknown key" }
+  ],
+  "valid": [
+    {
+      "what": "minimal dark: base defaults to the mode's default",
+      "theme": { "folo_theme": 1, "id": "a", "name": "A", "mode": "dark" },
+      "expect": { "base": "dark", "name": "A", "color": { "bg.app": "#08090B", "chart.area_opacity": 0.14 } }
+    },
+    {
+      "what": "minimal light, name trimmed",
+      "theme": { "folo_theme": 1, "id": "b-2", "name": "  Bee  ", "mode": "light" },
+      "expect": { "base": "light", "name": "Bee", "color": { "bg.panel": "#FFFFFF" } }
+    },
+    {
+      "what": "overrides merge over a built-in base; arrays replace whole; lower case and #RRGGBBAA",
+      "theme": {
+        "folo_theme": 1,
+        "id": "c",
+        "name": "C",
+        "mode": "dark",
+        "base": "midnight",
+        "color": { "bg": { "app": "#0b0d12", "hover": "#FFFFFF0A" }, "chart": { "series": ["#000001", "#000002", "#000003", "#000004", "#000005", "#000006"], "area_opacity": 0 } }
+      },
+      "expect": { "base": "midnight", "name": "C", "color": { "bg.app": "#0b0d12", "bg.hover": "#FFFFFF0A", "bg.panel": "#0F1424", "chart.series.5": "#000006", "chart.fill.0": "#5CC8FF", "chart.area_opacity": 0 } }
+    },
+    {
+      "what": "$ keys are comments, at the top and inside color",
+      "theme": { "$comment": "hi", "folo_theme": 1, "id": "d", "name": "D", "mode": "light", "base": "paper", "description": "", "color": { "$note": 1, "bg": { "$why": ["x"], "app": "#F6F1E7" } } },
+      "expect": { "base": "paper", "name": "D", "color": { "bg.app": "#F6F1E7", "bg.panel": "#FFFCF6" } }
+    },
+    {
+      "what": "40-character id and name, 120-character description, area_opacity 1",
+      "theme": {
+        "folo_theme": 1,
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "mode": "light",
+        "base": "contrast-light",
+        "description": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "color": { "chart": { "area_opacity": 1 } }
+      },
+      "expect": { "base": "contrast-light", "name": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "color": { "text.primary": "#000000", "chart.area_opacity": 1 } }
+    }
+  ]
+}

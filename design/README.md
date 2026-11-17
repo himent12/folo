@@ -18,10 +18,15 @@ files) and the shared look (`UNIFIED.md`). How the tokens reach each consumer:
 - Docs site: `site/scripts/tokens.ts` turns `tokens.json` into CSS variables with the same names as Studio's, and
   `@font-face` rules, each time the site is generated (`npm run dev`, `build` or `check` in `site/`).
 - Contrast: `node design/contrast.mjs` measures every colour pairing documented under Colour below (WCAG 2: text
-  4.5:1, non-text marks 3:1), in both themes, with tints and overlays composited over each surface, and that colours
-  documented as told apart stay apart under colour-vision deficiency (OKLab ΔE ≥ 7, ×100, under normal vision and
-  simulated protan / deutan / tritan: adjacent chart series, the loss components). `npm run check` (CI's web job)
-  runs it, so a token change that breaks a pairing fails CI. Add a rule there when you document a new pairing here.
+  4.5:1, non-text marks 3:1), in every theme (`THEMES.md`: each built-in theme and each example in `themes/`), with
+  tints and overlays composited over each surface, and that colours documented as told apart stay apart under
+  colour-vision deficiency (OKLab ΔE ≥ 7, ×100, under normal vision and simulated protan / deutan / tritan: adjacent
+  chart series, the loss components). It also checks elevation by lightness and, for the high contrast themes, their
+  stricter floors (text 7:1, marks 4.5:1, panel edges 3:1 on the app). `node design/contrast.mjs --theme <file>`
+  validates one custom theme file and checks it the same way. The custom format's cases (`theme-cases.json`, which
+  the apps' validators share) are replayed on every run, and `node --test design/contrast.test.mjs` tests the theme
+  half. `npm run check` (CI's web job) runs it, so a token change that breaks a pairing fails CI. Add a rule there
+  when you document a new pairing here.
 
 Related: [web/README.md](../web/README.md) (Studio; Common changes has "Add or change a token"),
 [apps/desktop/README.md](../apps/desktop/README.md) (Design tokens), [site/README.md](../site/README.md), the
@@ -33,7 +38,8 @@ charts, images) is the star; chrome stays quiet, neutral and thin. Colour is spe
 live state and the primary action; status colours for status; the class palette for classes; nothing decorative.
 
 ## Format rules (so any language can read the file)
-- Colours: `#RRGGBB` or `#RRGGBBAA` strings, both themes complete. No CSS functions.
+- Colours: `#RRGGBB` or `#RRGGBBAA` strings, both base palettes (`color.dark`, `color.light`) complete; a theme's
+  overrides use the same paths. No CSS functions.
 - Sizes: plain numbers in px. Tracking: em (multiply by the font size). Durations: ms.
 - Easing: cubic-bezier control points `[x1, y1, x2, y2]`.
 - Keys starting with `$` are comments; skip them.
@@ -88,8 +94,12 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
 `bg.hover` / `bg.active` are translucent overlays that work on any surface.
 
 ## Colour
+Colours come per theme (`THEMES.md`): `color.dark` and `color.light` are the default Dark and Light, and each named
+theme (Midnight, Dim, Paper, the high contrast pair, a user's own file) shifts shades over its mode's base. The roles
+and rules below hold in every theme, measured by `contrast.mjs`; the hex values quoted here are the defaults'.
+
 - Text: `text.primary` for content, `text.secondary` for supporting text, `text.tertiary` for labels, captions and
-  metadata. All three meet WCAG AA (4.5:1) on every surface in both themes; `text.disabled` is for disabled controls
+  metadata. All three meet WCAG AA (4.5:1) on every surface in every theme; `text.disabled` is for disabled controls
   only.
 - **Accent "signal" lime** (`accent.solid` #C5F82A): the focus-confirm green of a viewfinder. Used for the primary
   button, focus rings, the live/running state and the selected detection. On a chart lime marks only the live end
@@ -119,7 +129,7 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   themes with the `chart.swatch_edge` hairline, as class swatches do, so a light theme's amber run never reads brown. Text in a series' hue (direct end labels, JSON tokens) uses `chart.text`, held to 4.5:1 on every surface in both themes (in dark it is the series hue itself; in light a darker step of it): `chart.series` is a 3:1 mark, too pale for 12 px text in light (sky 3.55:1 on white). A dashed or dotted series also draws in `chart.text`, 2 px in light, since a pattern carries less ink than a line. Grid lines `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (11 px, `type.xs`
   Geist, tabular; decimals follow the tick step: "0 2 4 6", "0 0.2 0.4"; tiny values share one power of ten shown
   once, "× 10⁻³"), hover cursor `chart.cursor`. Context curves (many thin lines of one kind under an emphasised one, e.g. every
-  class under the mean PR curve) are 1 px `chart.context`, ≥ 3:1 on the panel in both themes and never faded with
+  class under the mean PR curve) are 1 px `chart.context`, ≥ 3:1 on the panel in every theme and never faded with
   opacity; the emphasised line carries weight and ink, highlighted entities their hue. Area fills under a line use the series colour at `area_opacity`. Loss
   components: total = `text.primary` (thicker), box = series 1 (amber), cls = series 4 (violet, dashed), dfl =
   series 3 (teal, dotted), everywhere a loss is drawn: the three stay apart under every colour-vision type (orange,
