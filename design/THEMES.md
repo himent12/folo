@@ -67,8 +67,9 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
 
 - `folo_theme`: the format version, `1`: any JSON number equal to 1 (`1`, `1.0`, `1e0`; JSON.parse can't tell them
   apart); a string is an error. Required.
-- `id`: `[a-z0-9-]`, 1–40 characters, not a built-in id, and not `system` (reserved: Desktop's `--theme system` is
-  the mode). A custom theme with the id of one already installed replaces it: in Studio the later import wins; in
+- `id`: `[a-z0-9][a-z0-9-]{0,39}`: 1–40 characters of a-z, 0-9 and `-`, starting with a letter or digit (so
+  Desktop's `--theme <id>` never reads as a flag: `--help` and `-x` are not ids); not a built-in id, and not
+  `system` (reserved: Desktop's `--theme system` is the mode). A custom theme with the id of one already installed replaces it: in Studio the later import wins; in
   Desktop, of two files in the folder with one id, the later file name (in name order) wins. Required.
 - `name`: 1–40 characters after trimming. Required. `description`: optional, at most 120 characters after trimming.
   Both are stored trimmed. Lengths count Unicode code points (an emoji is one), and trimming removes Unicode white
@@ -104,7 +105,11 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
   while parsing that `JSON.parse` would accept, and they are not valid JSON in every reader: nesting deeper than 127
   arrays and objects (the top-level object counted; 128 is refused); a lone surrogate escape (`\uD800` without its
   pair, or a pair in the wrong order) in any string, keys and comments included, even in a member a later duplicate
-  replaces; and a number outside a double's range (`1e400`; one too small, `1e-400`, reads as 0). The JS readers
+  replaces; and a number outside a double's range (`1e400`; one too small, `1e-400`, reads as 0). Every reader
+  rounds a decimal number to the nearest double (Desktop builds serde_json with `float_roundtrip`, as `Number()`
+  rounds), so numbers read alike to the last bit, at the range's edge too: `1.7976931348623158e308` is the largest
+  double and `1.7976931348623159e308` is out of range; `folo_theme: 1.00000000000000011` is 1 and
+  `0.99999999999999994` is not; `area_opacity: 1.0000000000000001110223` is 1. The JS readers
   find them with one shared scan of the text before `JSON.parse` (`design/json-scan.mjs`, iterative, so no depth
   overflows it). `(file): not valid JSON` is followed by each parser's own detail in parentheses (serde_json's line
   and column, V8's message, or the scan's `nested too deep`, `a lone surrogate in a string`, `a number out of
@@ -153,11 +158,16 @@ Settings → Appearance holds four rows (`UNIFIED.md` §4, Settings):
 3. **Light theme**: the same for light themes.
 4. **Custom themes**: as above, per app.
 
-Picking a theme applies it at once: choosing a dark theme while the mode is Light switches the mode to Dark (and the
-other way round); with System, the mode stays System and the choice applies whenever that mode is in effect.
+Picking a different theme in a slot's select applies it at once: choosing a dark theme while the mode is Light
+switches the mode to Dark (and the other way round); with System, the mode stays System and the choice applies
+whenever that mode is in effect. Re-picking the theme a select already shows (its slot's theme, or the default it
+shows for a stored id that names no theme) changes nothing, in both apps and by every input (pointer, Enter, Space):
+the mode stays, and so does the stored id. To use the other mode's theme, switch the mode (the Theme row, the top
+bar's button, Ctrl Shift L) or use its palette command.
 
-The command palette has one command per theme, "Theme: Midnight" and so on (custom themes too), with the same
-effect, besides the existing toggle. They are offered for a query only ("theme", "midnight", "light theme"), never in
+The command palette has one command per theme, "Theme: Midnight" and so on (custom themes too), besides the existing
+toggle. A command names a theme, not a slot, so it always applies its theme: it fills the slot and switches an
+explicit mode to the theme's, also when the slot has that theme already. They are offered for a query only ("theme", "midnight", "light theme"), never in
 the empty palette, so seven or more commands don't crowd it. The top bar's theme button (Studio) and Ctrl Shift L
 (Desktop, and Studio where it has it) keep switching the mode, not the theme. On Desktop, Ctrl Shift L under System
 leaves System for the explicit opposite of the mode shown (System showing dark: Light).

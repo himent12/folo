@@ -371,8 +371,9 @@ As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
 
 - **Choosing.** Settings › Appearance: Theme (Dark / Light / System; with System its description says what the OS is
   now), Dark theme and Light theme (selects: built-ins in order, then custom themes by name), Custom themes, Reduce
-  motion (`src/screens/settings/appearance.rs`). Picking a theme of the other mode switches to that mode, except with
-  System. The palette has "Theme: <name>" for every theme, offered for a query only (type "theme"); Ctrl Shift L and "Switch to light / dark
+  motion (`src/screens/settings/appearance.rs`). Picking a different theme of the other mode switches to that mode,
+  except with System; re-picking the theme a select shows does nothing (every select calls back only for a new
+  option, by pointer as by Enter and Space: `src/controls/select.rs`). The palette has "Theme: <name>" for every theme, offered for a query only (type "theme"); Ctrl Shift L and "Switch to light / dark
   theme" switch the mode only, to an explicit Dark or Light. The rules are `ThemePrefs` and `Catalog` in
   `src/theme/catalog.rs`; `FoloApp::apply_theme` (`src/app/preferences.rs`) sets the `Theme` global.
 - **System** follows the OS appearance live: folo-ui's `Window::on_appearance_changed` (Win32 `WM_SETTINGCHANGE`
@@ -384,7 +385,8 @@ As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
   thread), in file name order (a later file with the same id replaces an earlier one), each at most 1 MiB (the read
   stops one byte past it; an unreadable one is `(file): couldn't read (…)`, as in Studio). `src/theme/custom.rs`
   (`parse_bytes`: one byte order mark stripped, strict UTF-8, JSON; serde_json's own refusals, such as nesting past
-  127 levels, are what `design/json-scan.mjs` makes the JS readers refuse too)
+  127 levels, are what `design/json-scan.mjs` makes the JS readers refuse too; serde_json's `float_roundtrip`
+  feature rounds numbers as JavaScript does, so the range limit and every value agree)
   validates them with the messages of `design/theme-cases.json`, which its tests replay through the folder reader
   (`catalog::read_theme`), so Studio, `design/contrast.mjs` and Desktop agree. Under the Custom themes row, as Studio lists its imports, come the themes
   loaded (name; mode · based on its base · file name) and then each file that failed with its first error; the

@@ -27,7 +27,7 @@ files) and the shared look (`UNIFIED.md`). How the tokens reach each consumer:
   the apps' validators share) are replayed on every run, and `node --test design/contrast.test.mjs` tests the theme
   half. `json-scan.mjs` is the JSON check both JS readers (this one and Studio's) run before `JSON.parse`, so they
   refuse what Desktop's serde_json refuses while parsing (nesting past 127 levels, lone surrogate escapes, numbers
-  out of a double's range); its types for Studio are `json-scan.d.mts`. `npm run check` (CI's web job) runs it, so a token change that breaks a pairing fails CI. Add a rule there
+  out of a double's range, with the correctly rounded limit Desktop's `float_roundtrip` gives); its types for Studio are `json-scan.d.mts`. `npm run check` (CI's web job) runs it, so a token change that breaks a pairing fails CI. Add a rule there
   when you document a new pairing here.
 
 Related: [web/README.md](../web/README.md) (Studio; Common changes has "Add or change a token"),
