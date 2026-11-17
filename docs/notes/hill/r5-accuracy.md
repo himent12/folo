@@ -49,7 +49,7 @@ logits, `rank_min` 8, `ε` 1e-4), per class over groups of 16 consecutive val im
   else 0.5. **γ = 0.5** (the default) by both readings.
 - (c) Kill if the mean ρ is 0.97 or more. It is 0.53: **far from learned**, the term has something to teach. The
   failure mode "fewer than 20 classes used per batch" does not apply on val (42 per 16 images; training batches are
-  mosaics of 4 images each, so more).
+  mosaics of 4 images each, so probably more: the rank arms' epoch lines report the training count).
 
 **Not shown by step 0.** `rswap16` is +0.0056 only: ranking each class within 16 images and keeping the student's
 own per-group values loses most of the pool, because AP ranks a class over all 5000 images and the student's

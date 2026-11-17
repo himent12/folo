@@ -9,7 +9,6 @@ use folo_nn::{GradScaler, Module, RunningStats, ScaleUpdate};
 use super::feed;
 use super::{BatchSource, MAX_AMP_SKIPS, MAX_NONFINITE_BATCHES, Trainer};
 use crate::error::{Error, Result};
-use crate::loss::distill::class_gradient_norms;
 use crate::loss::{
     LossConfig, LossItems, detection_loss, distill_loss, o2m_weight, step_loss, targets_from_normalized,
 };
@@ -28,8 +27,6 @@ impl Trainer {
         // The reported distillation terms `[cls, dfl, rank, rank classes]` of each finite batch (§8.9).
         let mut kd_items: Vec<[f32; 4]> = Vec::new();
         let rank_on = self.cfg.distill.as_ref().is_some_and(|d| d.rank_on());
-        // §8.9's gradient probe: the class-logit gradient norms of the first `FOLO_DISTILL_PROBE` batches.
-        let probe = std::env::var("FOLO_DISTILL_PROBE").ok().and_then(|v| v.trim().parse::<usize>().ok());
         let (mut finite_batches, mut window_finite) = (0usize, false);
         let (epoch_start, mut epoch_images) = (Instant::now(), 0usize);
         let skipped_before = self.scaler.as_ref().map_or(0, GradScaler::skipped_steps);
@@ -76,22 +73,6 @@ impl Trainer {
                 (Some(t), Some(d)) => Some(distill_loss(&box_raw, &cls_raw, t, loss.target_score_sum, d)?),
                 _ => None,
             };
-            if let (Some(t), Some(d)) = (&kd_targets, &self.cfg.distill)
-                && probe.is_some_and(|p| k < p)
-            {
-                let [s, c, r] =
-                    class_gradient_norms(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg, t, d)?;
-                self.emitter.log(
-                    LogLevel::Info,
-                    format!(
-                        "epoch {} batch {}: class gradient norms supervised {s:.6} distillation {c:.6} rank {r:.6} \
-                         (rank / supervised {:.4})",
-                        e + 1,
-                        k + 1,
-                        r / s
-                    ),
-                );
-            }
             drop(kd_targets);
             drop((box_raw, cls_raw));
             // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.

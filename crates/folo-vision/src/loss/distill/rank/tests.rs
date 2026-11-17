@@ -234,26 +234,37 @@ fn invariant_to_per_class_increasing_linear_maps() {
     assert_eq!(b * nc * a, x.len());
 }
 
-/// Above the floor, a class's gradient sums to 0 and is orthogonal to `x' − mx`: the term moves neither a class's
-/// mean logit nor its spread.
+/// With no logit under the floor, a class's gradient sums to 0 (the mean logit does not move) and its product with
+/// `x' − mx` is `−(W_c / Σ W) · rho_c · eps / (vx + eps)` (the spread moves only by the `eps` share).
 #[test]
-fn moves_neither_mean_nor_spread() {
+fn moves_the_mean_not_and_the_spread_only_by_eps() {
     let dims = [2, 3, 40];
     let [b, nc, a] = dims;
+    // Every logit above the floor and every element a candidate (p >= 0.047 > tau), so every class is used.
     let y = uniform(9, dims, -3.0, 4.0);
     let x = uniform(10, dims, -3.0, 2.0);
     let c = cfg(1.0, 0.5, 8);
     let (_, g, _) = implementation(&x, &y, dims, &c);
     let w: Vec<f64> =
         x.iter().zip(&y).map(|(&x, &y)| sigmoid(x as f64).max(sigmoid(y as f64)).sqrt()).collect();
+    let w_all: f64 = w.iter().sum();
+    let eps = RANK_EPS as f64;
     for k in 0..nc {
         let cells: Vec<usize> = (0..b).flat_map(|i| (0..a).map(move |j| (i * nc + k) * a + j)).collect();
         let ws: f64 = cells.iter().map(|&i| w[i]).sum();
-        let mx = cells.iter().map(|&i| w[i] * x[i] as f64).sum::<f64>() / ws;
+        let mean = |v: &[f32]| cells.iter().map(|&i| w[i] * v[i] as f64).sum::<f64>() / ws;
+        let (mx, my) = (mean(&x), mean(&y));
+        let moment = |f: &dyn Fn(usize) -> f64| cells.iter().map(|&i| w[i] * f(i)).sum::<f64>() / ws;
+        let vx = moment(&|i| (x[i] as f64 - mx).powi(2));
+        let vy = moment(&|i| (y[i] as f64 - my).powi(2));
+        let cxy = moment(&|i| (x[i] as f64 - mx) * (y[i] as f64 - my));
+        let rho = cxy / ((vx + eps).sqrt() * (vy + eps).sqrt());
+        let want_dot = -(ws / w_all) * rho * eps / (vx + eps);
         let sum: f64 = cells.iter().map(|&i| g[i] as f64).sum();
         let dot: f64 = cells.iter().map(|&i| g[i] as f64 * (x[i] as f64 - mx)).sum();
         let norm: f64 = cells.iter().map(|&i| (g[i] as f64).abs()).sum();
-        assert!(norm > 1e-2 && sum.abs() < 1e-6 && dot.abs() < 1e-5, "class {k}: {sum} {dot} {norm}");
+        assert!(norm > 1e-2 && sum.abs() < 1e-6, "class {k}: {sum} {norm}");
+        assert!(want_dot.abs() > 1e-7 && (dot - want_dot).abs() < 1e-7, "class {k}: {dot} vs {want_dot}");
     }
 }
 
@@ -287,6 +298,32 @@ fn a_class_under_rank_min_contributes_nothing() {
     let (_, g5, n5) = implementation(&x, &y, dims, &cfg(1.0, 0.5, 5));
     assert_eq!(n5, 3.0);
     assert!(g5[a..a + 5].iter().any(|v| v.abs() > 1e-4));
+}
+
+/// A class whose teacher does not vary (`vy <= eps`: every teacher logit under the floor, so `y' = l`) is not used,
+/// even with many student candidates: no gradient, not counted, and the term equals that of the batch without it
+/// (counting it would add `W · 1` with no gradient and dilute the other classes').
+#[test]
+fn a_class_whose_teacher_does_not_vary_is_not_used() {
+    let dims = [2, 3, 30];
+    let [b, nc, a] = dims;
+    let (mut x, mut y) = batch(13, dims);
+    for i in 0..b {
+        for j in 0..a {
+            let k = (i * nc + 1) * a + j;
+            // The student fires on all 60 elements, in varied order; the teacher is far below the floor.
+            (x[k], y[k]) = (((j * 7) % 11) as f32 * 0.3 - 1.0, -9.0 - j as f32 * 0.01);
+        }
+    }
+    let c = cfg(1.0, 0.5, 8);
+    let (l, g, n) = implementation(&x, &y, dims, &c);
+    assert_eq!(n, 2.0);
+    for i in 0..b {
+        assert!(g[(i * nc + 1) * a..(i * nc + 2) * a].iter().all(|v| *v == 0.0));
+    }
+    let drop = |v: &[f32]| -> Vec<f32> { (0..v.len()).filter(|i| (i / a) % nc != 1).map(|i| v[i]).collect() };
+    let (l2, _, n2) = implementation(&drop(&x), &drop(&y), [b, nc - 1, a], &c);
+    assert!(n2 == 2.0 && (l - l2).abs() < 1e-6 * l2.max(1e-3), "{l} vs {l2}");
 }
 
 /// No class used (every class under `rank_min`): the term is 0 with a zero gradient, not NaN.

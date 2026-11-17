@@ -3,14 +3,15 @@
 //!
 //! A teacher of the student's `nc`, `reg_max` and strides has the same anchors, so its raw outputs align with the
 //! student's element by element. [`TeacherView::new`] turns one teacher forward into probabilities,
-//! [`DistillTargets::new`] builds the constants of the loss, and [`distill_loss`] the differentiable term:
+//! [`DistillTargets::for_config`] builds the constants of the loss (those of [`DistillTargets::new`] when the rank
+//! term is off), and [`distill_loss`] the differentiable term:
 //!
 //! - `L_kc = (1 / N) · Σ_{b,c,a} [softplus(x) − x · p~ − H(p~)]`, the Bernoulli KL from the teacher's `p~` to
 //!   the student's `sigmoid(x)` (`H(p~)` is the teacher's entropy, a constant: the gradient is that of the BCE
 //!   against `p~`);
 //! - `L_kd = (T² / N) · Σ_{b,a} q_a · (1/4) Σ_side KL(s~ ‖ softmax(z / T))` with `q_a = max_c p~`;
-//! - optionally (`rank_gain > 0`) the class-wise rank term `L_rank` of `rank.rs`: per class, one minus the weighted
-//!   Pearson correlation of the student's and the teacher's class logits over the batch's candidates;
+//! - optionally (`rank_gain > 0`) the class-wise rank term `L_rank` of `rank/mod.rs`: per class, one minus the
+//!   weighted Pearson correlation of the student's and the teacher's class logits over the batch's candidates;
 //! - the term is `B · (cls_gain · L_kc + dfl_gain · L_kd + rank_gain · L_rank)`, `N = max(Σ T, 1)` the supervised
 //!   one-to-many loss's normaliser.
 //!
@@ -46,7 +47,7 @@ pub struct DistillConfig {
     /// `T`, the temperature of the DFL softmaxes (`> 0`); the class term has none. Starts at 4, which beat 1 on
     /// the proxy (docs/notes/hill/r4-distill.md).
     pub temperature: f32,
-    /// `lambda_r`, the weight of the class-wise rank term `L_rank` (`rank.rs`); 0 (the default) turns it off and
+    /// `lambda_r`, the weight of the class-wise rank term `L_rank` (`rank/mod.rs`); 0 (the default) turns it off and
     /// leaves the term exactly the two-term one.
     pub rank_gain: f32,
     /// `tau`, the candidate floor of the rank term, in `(0, 1)`: an element counts when the student's or the
@@ -200,7 +201,7 @@ pub struct DistillLoss {
     pub dfl: f32,
     /// `rank_gain · L_rank`, without `B`; 0 when the rank term is off.
     pub rank: f32,
-    /// The classes the rank term used in this batch (`rank.rs`); 0 when it is off.
+    /// The classes the rank term used in this batch (`rank/mod.rs`); 0 when it is off.
     pub rank_classes: f32,
 }
 

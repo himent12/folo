@@ -1,7 +1,7 @@
 //! A diagnostic of the rank term's weight (docs/MODEL.md §8.9, "Gradient probe"): the L2 norms of the gradients
 //! that the supervised loss, the class distillation term and the rank term each put on the student's class logits
-//! of one batch. The trainer logs them for the first `FOLO_DISTILL_PROBE` batches of each epoch; `rank_gain` is set
-//! from their ratio.
+//! of one batch; `rank_gain` is set from their ratio. Not called by the trainer: the probe that set the default ran a
+//! build (c08fbc7c) whose epoch loop logged them for the first batches of an epoch.
 
 use folo_core::{Result, Tensor};
 

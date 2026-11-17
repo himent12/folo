@@ -971,8 +971,8 @@ L_kd = (T² / N) · Σ_{b,a} q_a · (1/4) Σ_side Σ_i s~_i · (ln s~_i − log_
 L    = B · (7.5 L_box + 0.5 L_cls + 1.5 L_dfl + λc · L_kc + λd · L_kd)
 ```
 With the rank term on (`rank_gain > 0`) `L` gains `B · λr · L_rank`, the **class-wise rank term**. COCO AP reads
-each class's scores by their order only, so per class the student's logits over the batch's candidates should be an
-increasing linear function of the teacher's; one weighted Pearson correlation per class, which leaves each class's
+each class's scores mostly by their order (only the per-image detection caps compare classes), so per class the
+student's logits over the batch's candidates should be an increasing linear function of the teacher's; one weighted Pearson correlation per class, which leaves each class's
 shift and scale to the supervised loss. With `p = sigmoid(x)` (detached), per element `i = (b, c, a)` the constants
 `w_i = max(p_i, p~_i)^γ` if `max(p_i, p~_i) > τ`, else 0, `y'_i = max(y_i, l)` (`y = cls_raw_T`), and the
 student's `x'_i = max(x_i, l)`; per class `c` over every `(b, a)` of the batch:
@@ -984,8 +984,11 @@ L_rank = Σ_used W_c · (1 − ρ_c) / Σ_used W_c                            (0
 dL/dx_i = −B · λr · (w_i / Σ_used W) · [ (y'_i − my) / (sx · sy) − ρ_c · (x'_i − mx) / sx² ]   where x_i >= l, else 0
 ```
 (`sx = sqrt(vx + ε)`, `sy = sqrt(vy + ε)`). Detaching the means leaves the gradient exact (`Σ w (x' − mx) = 0`).
-Above the floor a class's gradient sums to 0 and is orthogonal to `x' − mx`: the term moves neither a class's mean
-logit nor its spread, and a student logit under the floor gets no gradient from it (`L_kc` raises those). The
+For a class with no student logit under the floor, the gradient sums to 0, so the term does not move the class's mean
+logit, and its product with `x' − mx` is `−B · λr · (W_c / Σ_used W) · ρ_c · ε / (vx + ε)`: the spread is left alone
+up to the share `ε / (vx + ε)`, which pushes it up and matters only for a class whose logits sit within about
+`sqrt(ε) = 0.01` of their mean. A student logit under the floor gets no gradient from the term (`L_kc` raises those),
+so in a class with some of them the other logits' gradient need not sum to 0. The
 weighted sums are row sums over `a` per `(b, c)`, then sums over `b` per class, in a fixed order. The term reads
 the student's one-to-many class logits and the teacher's (kept as `y'` in the targets only when it is on); it needs no
 second forward and no parameter. For an `o2o` student it sits inside the one-to-many loss with `L_kc`.
@@ -1009,14 +1012,14 @@ branch. For an `o2m` student `L` is the line above.
 the number of classes it used, are read back once per batch; the epoch logs one line, `epoch E: distillation cls …
 dfl … over n batches (first quarter …, last quarter …)`, the means over its finite batches and over their first and
 last quarter (with the rank term: `cls … dfl … rank …` and `, rank classes … per batch` at the end); for an `o2o`
-student they are not weighted by `w_m`.
+student they are not weighted by `w_m`. `LossItems`, the `step` and `epoch` events and the API's loss object do not
+change. A batch whose distillation terms are not finite is a non-finite batch (§8.3).
 
-**Gradient probe** (a diagnostic, to set `λr`): with the environment variable `FOLO_DISTILL_PROBE=k`, the first `k`
-batches of every epoch of a distillation run also log `epoch E batch K: class gradient norms supervised … distillation
-… rank … (rank / supervised …)`, the L2 norms of the gradients that the supervised loss, `B · λc · L_kc` and
-`B · λr · L_rank` each put on the student's class logits (an `o2m` student; a second supervised loss and three backward
-passes per probed batch; training is unchanged). `LossItems`, the `step` and `epoch` events and the API's
-loss object do not change. A batch whose distillation terms are not finite is a non-finite batch (§8.3).
+**Gradient probe** (a diagnostic, to set `λr`): `folo_vision::loss::distill::class_gradient_norms` gives, for one
+batch, the L2 norms of the gradients that the supervised loss, `B · λc · L_kc` and `B · λr · L_rank` each put on the
+student's class logits (an `o2m` student; a second supervised loss and three backward passes). The trainer does not
+call it; the `λr` of 0.8 that hill 5's gate used came from its median ratio over the first 100 batches of a COCO
+fork (docs/notes/hill/r5-accuracy.md).
 
 **Mixed precision.** The teacher runs in f16 (its own fused f16 weights, f16 input; no autocast needed) and its
 outputs are cast to f32 before the sigmoid and softmax; the targets and the term are f32, computed outside autocast

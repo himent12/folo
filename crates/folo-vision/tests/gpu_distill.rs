@@ -112,7 +112,8 @@ fn term_and_gradients_match_the_cpu() {
 }
 
 /// The rank term (`distill.rank_gain`) on the GPU: its value within a relative 1e-5 of the CPU's, its classes used
-/// equal, the gradient as above; at gamma 0.5 and 1, and under autocast. 16 images of 80 classes, as a COCO batch.
+/// equal, its gradient (the class and DFL terms off, so it is compared alone) as above; at gamma 0.5 and 1, and
+/// under autocast. 16 images of 80 classes, as a COCO batch.
 #[test]
 fn rank_term_matches_the_cpu() {
     let (dev, _) = gpu!();
@@ -124,7 +125,14 @@ fn rank_term_matches_the_cpu() {
         let on = |t: &Tensor| t.to_device(dev).unwrap();
         let (z, x) = (on(&sb).detach().requires_grad_(), on(&sc).detach().requires_grad_());
         let _a = amp.then(folo_core::autocast);
-        let cfg = DistillConfig { rank_gain: 2.0, rank_power: power, ..DistillConfig::new("t") };
+        // The other terms off, so the gradient compared is the rank term's alone.
+        let cfg = DistillConfig {
+            cls_gain: 0.0,
+            dfl_gain: 0.0,
+            rank_gain: 2.0,
+            rank_power: power,
+            ..DistillConfig::new("t")
+        };
         let t =
             DistillTargets::for_config(&TeacherView::new(&on(&tb), &on(&tc), R, 4.0).unwrap(), &cfg).unwrap();
         let out = distill_loss(&z, &x, &t, 3.5, &cfg).unwrap();

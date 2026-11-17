@@ -1,7 +1,7 @@
 //! Class-wise rank distillation (docs/MODEL.md §8.9, `distill.rank_gain`): per class, the student's class logits
 //! over the batch's candidates should be an increasing linear function of the teacher's. COCO AP reads each class's
-//! scores by their order only, so the term asks for the teacher's order and leaves each class's shift and scale to
-//! the supervised loss.
+//! scores mostly by their order (only the per-image detection caps compare classes), so the term asks for the
+//! teacher's order and leaves each class's shift and scale to the supervised loss.
 //!
 //! With `x` the student's logits, `y` the teacher's, `p = sigmoid(x)` (detached), `p~ = sigmoid(y)`, the floor
 //! `l = logit(tau)`, per element `i = (b, c, a)` the constants
@@ -17,8 +17,11 @@
 //! `L_rank = Σ_used W_c · (1 − rho_c) / Σ_used W_c` (0 when no class is used),
 //!
 //! with the gradient `dL/dx_i = −(w_i / Σ_used W) · [(y'_i − my) / (sx · sy) − rho_c · (x'_i − mx) / sx²]` where
-//! `x_i >= l`, else 0. Above the floor the gradient of a class sums to 0 and is orthogonal to `x' − mx`: the term
-//! moves neither a class's mean logit nor its spread.
+//! `x_i >= l`, else 0. For a class with no student logit under the floor, the gradient sums to 0 (the term does not
+//! move the class's mean logit) and its product with `x' − mx` is `−(W_c / Σ_used W) · rho_c · eps / (vx + eps)`:
+//! the spread is left alone up to the share `eps / (vx + eps)`, which pushes it up (for `rho_c > 0`) and matters only
+//! for a class whose logits sit within about `sqrt(eps) = 0.01` of their mean. A floored logit gets no gradient, so a
+//! class with some of them can see its other logits' gradient sum move off 0.
 //!
 //! Every sum is a row sum over `a` per `(b, c)` and then a sum over `b` per class, both in a fixed order, so the
 //! term is bit-reproducible on the CPU and made only of tensor ops every backend has.
