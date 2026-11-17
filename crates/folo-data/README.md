@@ -21,6 +21,7 @@ the determinism rules.
 | `src/augment/` | `mod.rs` (`AugmentConfig`), `geometry.rs` (affine, flips), `hsv.rs`, `mosaic.rs` (mosaic and mixup), `pipeline.rs` (`TrainTransform`, the training transform) |
 | `src/loader.rs` | `DataLoader`: worker threads, batches identical for a seed and epoch whatever the worker count |
 | `src/ram_cache.rs` | `--cache ram`: decoded, resized training images kept in memory |
+| `src/window.rs` | The mosaic window (`augment.mosaic_window`): partners from the previous K positions of the epoch, each image decoded once into a shared cache |
 | `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds) |
 | `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem |
 | `src/convert.rs` | `folo dataset convert`: writes an opened dataset as YOLO or COCO |

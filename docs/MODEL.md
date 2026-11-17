@@ -849,7 +849,10 @@ applies the same map to the boxes as to the pixels.
 Training pipeline per sample, in order:
 
 1. **Mosaic** (probability `mosaic = 1.0`). Take this image and 3 others drawn uniformly with replacement from the
-   training set, all resized as above. Canvas `2s × 2s`, gray. Centre `xc, yc = floor(U[s/2, 3s/2))`, drawn
+   training set, all resized as above. With `mosaic_window = K > 0` (opt-in, default 0) the 3 others (and the
+   mixup partner) are drawn uniformly with replacement from the `K` samples just before this one in the epoch's
+   order instead (wrapping around to the end of the order), so the loader decodes each image about once per
+   epoch (docs/DATA.md, Mosaic window). Canvas `2s × 2s`, gray. Centre `xc, yc = floor(U[s/2, 3s/2))`, drawn
    independently. Image `i` of size `h × w` goes to the canvas region `a` and is cut from the source region `b`:
    ```
    i=0 top-left:     a = (max(xc−w,0), max(yc−h,0), xc, yc)            b = (w−(a.x2−a.x1), h−(a.y2−a.y1), w, h)

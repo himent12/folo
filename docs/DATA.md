@@ -174,12 +174,32 @@ keeps one, as the YOLO reader drops duplicate label lines.
 | `scale` | 0.5 | random scale `1 ± scale` |
 | `translate` | 0.1 | random translation, fraction of the output size |
 | `degrees` / `shear` | 0.0 / 0.0 | rotation and shear ranges in degrees |
+| `mosaic_window` | 0 | where mosaic and mixup partners come from: 0 the whole training set, `K` (at most 8192) the `K` samples before this one in the epoch's order (Mosaic window, below) |
 | `close_mosaic` | 10 | mosaic and mixup are off for the last N epochs, at most half of the run (`min(N, floor(epochs / 2))`; needs `LoaderConfig::epochs`) |
 | `min_box_px`, `min_area_ratio`, `max_aspect` | 2, 0.1, 100 | boxes narrower than 2 px, keeping < 10 % of their area, or thinner than 1:100 after a geometric op are dropped |
 
 `TrainTransform` runs, per sample: mosaic (4 images resized to long side `s`) or letterbox to `s x s` → random affine
 (centre, rotate + scale, shear, translate) to `s x s` → mixup → HSV (integer hexcone HSV with LUTs) → flips. With
 `augment: None` (validation) it only letterboxes and records the geometry.
+
+### Mosaic window
+With the default `mosaic_window = 0` a mosaic decodes 4 images (and mixup a mosaic more), each drawn uniformly
+from the whole training set: an epoch decodes every image about 4 times. With `mosaic_window = K` the partners of
+the sample at position `p` of the epoch's order are drawn from positions `p − 1 − r` (`r` uniform in
+`0..min(K, n − 1)`, wrapping around to the end of the order), from the same per-position RNG as before, so batches
+still do not depend on the worker count. The loader keeps the samples it decoded in a window cache keyed by
+position (`src/window.rs`), resized to long side `imgsz` as the RAM cache keeps them, and drops those more than `K`
+behind the oldest sample in flight: every image is decoded about once per epoch (plus the partners of the first `K`
+samples, which wrap around), at the price of about `K` decoded images in memory (about 0.9 MB each at 640).
+Batches with and without `--cache ram` are the same. The order is reshuffled every epoch, so over a run every pair
+of images can still meet; within an epoch a sample's partners are its neighbours in the order.
+
+Measured on COCO train2017 (`benches/pipeline.rs --mosaic-window K`, 16 workers, 600 batches, alternated, other
+lanes' builds on the machine): K = 0 631-659 img/s, K = 512 979-1048 img/s (1.55x). The rest of a mosaic sample
+(the mosaic canvas, the affine warp, HSV, the flips: about 8 ms of the 16 ms a sample takes a worker with K = 512)
+is not touched. It changes what a run trains on, so it is opt-in: on the mini320 proxy (docs/notes/hill/r5-trainer.md)
+K = 512 reached AP 0.1232 with seed 0, against 0.1255 for the default with the same seed (0.1238-0.1255 over three
+seeds).
 
 ## DataLoader and determinism
 - `LoaderConfig { batch_size, imgsz, workers, shuffle, drop_last, seed, augment, epochs, prefetch_batches,
