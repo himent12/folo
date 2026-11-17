@@ -14,9 +14,18 @@ repository = "https://github.com/himent12/folo"
 description = "FOLO Desktop: the native front end for FOLO"
 publish = false
 
+# The app is a library (src/lib.rs) and a thin binary (src/main.rs) so cargo pipelines it: the library's front end
+# starts on its dependencies' metadata, not after their code generation. The library has no doc examples and the
+# binary no tests (the unit tests are the library's), so neither builds an extra test target.
+[lib]
+path = "src/lib.rs"
+doctest = false
+
 [[bin]]
 name = "folo-desktop"
 path = "src/main.rs"
+test = false
+doc = false
 
 [features]
 # Counts allocations for `--bench-frames` (folo-ui's frame bench); off in every shipped build.

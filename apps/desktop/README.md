@@ -17,7 +17,8 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 
 | Path | What it holds |
 | --- | --- |
-| `src/main.rs` | arguments (`USAGE` is `--help`), the bundled fonts (`design/fonts`), the data source, the window, key bindings |
+| `src/lib.rs` | `run`, the app: arguments (`USAGE` is `--help`), the bundled fonts (`design/fonts`), the data source, the window, key bindings |
+| `src/main.rs` | the `folo-desktop` binary: `fn main` calls `folo_desktop::run`, and the `bench-alloc` allocator |
 | `src/app/` | `FoloApp`, the root view: `Route` and navigation, title bar, sidebar, routing a route to its page (`page.rs`), fetching and the live event pump (`data.rs`), finding or starting a server (`connection.rs`), actions and key bindings (`mod.rs`, `render.rs`), the forms' state; most of the app's behaviour tests (`tests.rs`, `*_tests.rs`) |
 | `src/screens/` | one folder per page, each `impl FoloApp` methods that return it: `overview/`, `datasets/` (the index, a dataset's images and statistics), `runs/` (the list, the live training dashboard), `models/` (the list, a model's evaluation and export), `bench/` (Benchmarks: the list, a benchmark's leaderboard, plan and loops, an entry), `playground/`, `settings/` (connection, throughput, cloud, appearance, shortcuts); `first_step.rs` is what an empty Runs or Models page asks for |
 | `src/overlays/` | what sits above the page: the command palette, the New run and Generate synthetic dialogs, the confirmations, the cloud dialogs, the image inspector, toasts |
@@ -52,6 +53,17 @@ their CI (below) runs only when something they depend on changes. From `crates/`
 `folo-vision` (local inference, plus the engine's image decoding and its automatic optimizer choice, which New run
 shows); `folo-test-support` and `folo-cloud` (the real providers, which the demo's list must match) are
 dev-dependencies. The app does not link folo-server: it starts the `folo` binary instead.
+
+Two things keep the app's build short. It is a library (`src/lib.rs`, the whole app) and a thin `folo-desktop`
+binary (`src/main.rs`): cargo starts compiling a library once its dependencies' metadata exists, a binary only after
+their code is built, so the app's front end and code generation overlap folo-ui's and folo-vision's. And the HTTP
+client parses every JSON body from bytes (`json` in `src/api/http/transport.rs`): ureq's `read_json` compiles two
+serde parsers of every response type, which were most of the client's machine code; decode bodies through `json`,
+not `read_json` or `serde_json::from_str`. Measured on the dev PC, A/B, medians: a release build from an empty
+target dir 122 s before, 93 s after (173 s and 143 s while other builds ran); a release rebuild after one screen file
+changes 62 s, 42 s; a dev rebuild 4 to 7 s either way. Moving the API layer (`src/api`, `src/synth.rs`) into a crate
+of its own gained about 3 s more on that release rebuild and nothing on a clean build, and made a clean
+`cargo test --workspace` 15 to 25% slower (the crate's tests are one more test binary), so the app stays one crate.
 
 Run every command from `apps/desktop`. A bare `cargo test` there builds only the app, so pass `--workspace`:
 
@@ -99,7 +111,7 @@ Each recipe names an existing example to copy.
   `Route::parse` (`src/app/mod.rs`); a folder under `src/screens/` declared in `screens/mod.rs`, whose
   `impl FoloApp` method returns the page; its arm in `FoloApp::page` (`src/app/page.rs`). The compiler lists every
   other exhaustive `match` on `Route` or `Section`. Then the sidebar's `nav` list (`src/app/sidebar.rs`), the
-  palette's (`palette_items` in `src/overlays/palette.rs`), `USAGE` in `src/main.rs`, and a scenario in
+  palette's (`palette_items` in `src/overlays/palette.rs`), `USAGE` in `src/lib.rs`, and a scenario in
   `src/scenario.rs` (`ALL` and `apply`). Example: Benchmarks (`Route::Benches`, `screens/bench/`).
 - **An API call.** Check the endpoint in docs/API.md and its types in `crates/folo-api`. `src/api/types.rs`
   re-exports those types by name, so a new type goes into one of its `pub use folo_api::{…}` lists. Add the method
