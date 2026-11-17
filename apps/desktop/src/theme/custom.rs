@@ -68,7 +68,9 @@ pub fn parse_value(v: &Value) -> Result<CustomTheme, String> {
         Some(v) => v.as_str().filter(|id| ThemeId::new(id).is_some()),
     };
     let Some(id) = id else {
-        return Err("id: must be 1 to 40 characters of a-z, 0-9 and -".into());
+        return Err(
+            "id: must be 1 to 40 characters of a-z, 0-9 and -, starting with a letter or digit".into()
+        );
     };
     if THEMES.iter().any(|b| b.id == id) {
         return Err(format!("id: \"{id}\" is a built-in theme"));
@@ -339,12 +341,29 @@ mod tests {
         assert_eq!(deepest, 127, "levels accepted, the top-level object counted");
         assert!(parse(&nested(127)).unwrap_err().starts_with("(file): not valid JSON ("));
         let head = r#"{"folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "#;
-        for n in ["1e400", "-1e400", "1E309", &format!("1{}", "0".repeat(400))] {
+        // The range limit is the correctly rounded one (`float_roundtrip`), as in JavaScript: the
+        // largest double's neighbours above it round to Infinity, those below it to the double.
+        for n in ["1e400", "-1e400", "1E309", &format!("1{}", "0".repeat(400)), "1.7976931348623159e308"] {
             let e = parse(&format!(r#"{head}"$c": {n}}}"#)).unwrap_err();
             assert!(e.starts_with("(file): not valid JSON ("), "{n}: {e}");
         }
-        for n in ["1e-400", "0e999", "1.7976931348623157e308"] {
+        for n in
+            ["1e-400", "0e999", "1.7976931348623157e308", "1.7976931348623158e308", "17976931348623158e292"]
+        {
             assert!(parse(&format!(r#"{head}"$c": {n}}}"#)).is_ok(), "{n}");
+        }
+        // Every decimal reads as the nearest double, as Rust's own (correctly rounded) parser
+        // gives it: the folo_theme and area_opacity checks see the value JavaScript sees.
+        for n in [
+            "0.99999999999999994",
+            "0.99999999999999997",
+            "1.00000000000000011",
+            "1.0000000000000001110223",
+            "0.1",
+            "1.7976931348623158e308",
+        ] {
+            let v: serde_json::Value = serde_json::from_str(n).unwrap();
+            assert_eq!(v.as_f64(), Some(n.parse::<f64>().unwrap()), "{n}");
         }
         let hidden = r#"{"name": "\uD800", "folo_theme": 1, "id": "demo", "name": "Demo", "mode": "dark"}"#;
         assert!(parse(hidden).unwrap_err().starts_with("(file): not valid JSON ("));

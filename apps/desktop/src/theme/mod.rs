@@ -86,10 +86,12 @@ pub struct ThemeId {
 impl ThemeId {
     pub const MAX: usize = 40;
 
-    /// `None` unless `id` is a well-formed theme id.
+    /// `None` unless `id` is a well-formed theme id: 1 to 40 of a-z, 0-9 and -, starting with a letter or digit
+    /// (so `--theme <id>` can never read as a flag).
     pub fn new(id: &str) -> Option<Self> {
         let ok = !id.is_empty()
             && id.len() <= Self::MAX
+            && !id.starts_with('-')
             && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
         ok.then(|| {
             let mut bytes = [0; Self::MAX];

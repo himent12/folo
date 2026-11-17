@@ -173,8 +173,11 @@ impl FoloApp {
                             .then(|| "None available now: launching would be refused".into())
                     })
                     .collect();
-                let picked =
-                    offer.as_ref().and_then(|o| shown.iter().position(|x| x.id == o.id)).unwrap_or(0);
+                // None chosen (or not listed now): no option is, so the first one can be picked.
+                let picked = offer
+                    .as_ref()
+                    .and_then(|o| shown.iter().position(|x| x.id == o.id))
+                    .unwrap_or(shown.len());
                 let ids: Vec<String> = shown.iter().map(|o| o.id.clone()).collect();
                 self.select_with(
                     "nr-gpu",

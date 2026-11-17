@@ -216,8 +216,9 @@ fn resolve_themes(
         assert!(
             !id.is_empty()
                 && id.len() <= 40
-                && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-            "{at}: a theme id is 1 to 40 of a-z, 0-9 and -"
+                && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                && !id.starts_with('-'),
+            "{at}: a theme id is 1 to 40 of a-z, 0-9 and -, starting with a letter or digit"
         );
         let obj = v.as_object().unwrap_or_else(|| panic!("{at}: a theme is an object"));
         for k in obj.keys() {

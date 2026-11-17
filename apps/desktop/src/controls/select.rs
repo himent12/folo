@@ -303,7 +303,12 @@ impl FoloApp {
                                             .hover(|s| s.bg(t.bg_hover))
                                             .active(|s| s.bg(t.bg_active))
                                             .on_click(cx.listener(move |this, _, window, cx| {
-                                                f(this, i, window, cx);
+                                                // As Enter and Space: the option already chosen
+                                                // only closes the menu (nothing changes, so
+                                                // nothing is called).
+                                                if i != selected {
+                                                    f(this, i, window, cx);
+                                                }
                                                 this.menu_open = None;
                                                 cx.notify();
                                             }))
