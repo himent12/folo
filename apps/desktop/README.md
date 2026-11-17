@@ -64,6 +64,17 @@ cargo run -- --scenario overview --shot overview.png            # a headless scr
 cargo build --profile dist                                      # the shipped build (thin LTO, one codegen unit)
 ```
 
+Build speed. On Windows every build links with rust-lld, which ships with the toolchain (`linker` in the root
+`.cargo/config.toml`), and the dev profile keeps line tables only (file and line in backtraces, nothing for a
+debugger). Against link.exe and full debug info, on the dev PC (i7-14700KF, other agents building, medians): a clean
+`cargo build` takes about 2 min 45 s instead of 3 min 55 s, `cargo build` after an edit of the app 3.4 s instead of
+7 s, and `cargo test --workspace --no-run` 3 min 17 s instead of 7 min 8 s from clean, 5 s instead of 14 s after an
+edit of the app. `--release` and `dist` spend their time in codegen and thin LTO, so the linker barely shows there
+(release after an edit of the app 44 s instead of 49 s; `dist` the same). Cargo runs at most 8 jobs (`jobs = 8` in
+the root `.cargo/config.toml`, because several builds share that machine). On an otherwise idle machine,
+`$env:CARGO_BUILD_JOBS=28` (or `cargo build -j 28`) gives cargo every core: a clean `--release` build took 1 min 49 s
+instead of 2 min 8 s, a small gain because the app crate cannot start until every dependency is built.
+
 Cargo features of the app: `bench-alloc` counts allocations for `--bench-frames`; `winit` and `portable-text` turn
 on folo-ui's features of the same names, so that on Windows the app runs on the Linux / macOS backend
 (`--features winit,portable-text`, then `FOLO_UI_PLATFORM=winit`). folo-ui's own features and tests are in
@@ -180,7 +191,7 @@ or Stop and close).
 
 The app icon (taskbar, Alt-Tab, Explorer) is `assets/folo.ico`, the logo of `design/logo-icon.svg` drawn with the
 tokens by `tools/make-icon.ps1` (run it again when either changes, and commit the .ico). folo-ui loads icon resource
-1 from the executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to link.exe, so the
+1 from the executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to the linker, so the
 build needs no resource compiler or extra crate (MSVC targets only).
 
 ## Tools

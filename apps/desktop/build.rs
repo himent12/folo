@@ -49,7 +49,8 @@ fn main() {
 
     // The Windows app icon (taskbar, Alt-Tab, Explorer): folo-ui loads icon resource 1 from the
     // executable. And the application manifest (RT_MANIFEST 1: DPI awareness, Common Controls 6).
-    // link.exe takes a compiled resource file as an input, so both become a .res here, in plain Rust:
+    // The linker (rust-lld, the root .cargo/config.toml, or link.exe) takes a compiled resource file
+    // as an input, so both become a .res here, in plain Rust:
     // no resource compiler or extra crate needed.
     let ico = manifest.join("assets/folo.ico");
     let app_manifest = manifest.join("assets/folo-desktop.manifest");

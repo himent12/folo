@@ -66,14 +66,17 @@ all = { level = "warn", priority = -1 }
 
 [profile.dev]
 opt-level = 1
+# File and line in backtraces, nothing for a debugger (as the root workspace): full debug info made a clean dev build
+# about 40% longer and a relink of the app or a test binary about twice as long (README, Workspace, build, test).
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
 
 # `release` keeps cargo's defaults (no LTO, 16 codegen units) for development (`cargo run --release`). The shipped
 # binary is `dist` (.github/workflows/release.yml: `cargo build --profile dist`, output in `target/dist/`). On the dev
-# PC (i7-14700KF, 32 GB, other builds running), from an empty target dir: `release` 3 min 12 s, a 33.9 MB exe;
-# `dist` 4 min 10 s, 30.2 MB.
+# PC (i7-14700KF, 32 GB, otherwise idle), from an empty target dir: `release` 2 min 1 s, a 36.4 MB exe; `dist`
+# 3 min 39 s, 33.3 MB (with other builds running, 4 min 10 s). rust-lld or link.exe makes no difference to either.
 [profile.dist]
 inherits = "release"
 lto = "thin"
