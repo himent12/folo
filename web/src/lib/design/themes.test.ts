@@ -2,29 +2,47 @@
 // design/contrast.mjs and Desktop, so the three validators refuse the same files with the same words.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { checkCustomTheme, compareCodePoints, cssVarsOf, customTheme, findTheme, importThemes, parseThemeFile, readStoredThemes, resolveTheme, themesFor, type CustomThemeFile } from './themes';
+import { checkCustomTheme, compareCodePoints, cssVarsOf, customTheme, findTheme, importThemes, parseThemeFile, readStoredThemes, readThemeFile, resolveTheme, themesFor, type CustomThemeFile, type ParsedFile } from './themes';
 import { colorVars, themeIds, themes } from './tokens';
 
 const design = new URL('../../../../design/', import.meta.url);
+type Case = { what: string; theme?: unknown; text?: string; hex?: string };
 const cases = JSON.parse(readFileSync(new URL('theme-cases.json', design), 'utf8')) as {
-  invalid: { what: string; theme?: unknown; text?: string; error: string }[];
-  valid: { what: string; theme?: unknown; text?: string; expect: { base: string; name: string; description?: string; color: Record<string, unknown> } }[];
+  invalid: (Case & { error: string })[];
+  valid: (Case & { expect: { base: string; name: string; description?: string; color: Record<string, unknown> } })[];
 };
-/** A case checked as Studio reads it: its raw `text` as an imported file's, or its parsed `theme` as a stored entry. */
-const check = (c: { theme?: unknown; text?: string }) => (c.text !== undefined ? parseThemeFile(c.text) : checkCustomTheme(c.theme));
+/** A case's file bytes: its `hex`, or its raw `text` as UTF-8; none for a parsed `theme`. */
+const bytesOf = (c: Case) => (c.hex !== undefined ? Uint8Array.from(c.hex.match(/../g)!.map((h) => parseInt(h, 16))) : c.text !== undefined ? new TextEncoder().encode(c.text) : undefined);
+/**
+ * A case checked as Studio reads it: a file's bytes through the import's own reader (a picked File, `readThemeFile`),
+ * or its parsed `theme` as a stored entry.
+ */
+async function check(c: Case): Promise<{ ok: true; theme: CustomThemeFile } | { ok: false; error: string }> {
+  const bytes = bytesOf(c);
+  if (!bytes) return checkCustomTheme(c.theme);
+  const { file: _, ...r } = await readThemeFile(new File([bytes], 'case.json', { type: 'application/json' }));
+  return r;
+}
+/** The case's error: exact, but `(file): not valid JSON` takes any parser's detail after it (theme-cases.json). */
+const sameError = (got: string, want: string) => got === want || (want === '(file): not valid JSON' && got.startsWith(`${want} (`));
 const at = (o: unknown, path: string) => path.split('.').reduce<unknown>((v, k) => (v as Record<string, unknown> | undefined)?.[k], o);
 const file = (over: Partial<CustomThemeFile> = {}): CustomThemeFile => ({ folo_theme: 1, id: 'night', name: 'Night', mode: 'dark', ...over });
 
 describe('custom theme files (design/theme-cases.json)', () => {
-  it('refuses every invalid case with its exact path and message', () => {
+  it('refuses every invalid case with its exact path and message', async () => {
     expect(cases.invalid.length).toBeGreaterThan(30);
     expect([...cases.invalid, ...cases.valid].filter((c) => c.text !== undefined).length, 'the raw cases').toBeGreaterThanOrEqual(8);
-    for (const c of cases.invalid) expect(check(c), c.what).toEqual({ ok: false, error: c.error });
+    expect([...cases.invalid, ...cases.valid].filter((c) => c.hex !== undefined).length, 'the byte cases').toBeGreaterThanOrEqual(10);
+    for (const c of cases.invalid) {
+      const r = await check(c);
+      expect(r.ok, c.what).toBe(false);
+      if (!r.ok && !sameError(r.error, c.error)) expect(r.error, c.what).toBe(c.error);
+    }
   });
 
-  it('accepts every valid case and resolves it on its base', () => {
+  it('accepts every valid case and resolves it on its base', async () => {
     for (const c of cases.valid) {
-      const r = check(c);
+      const r = await check(c);
       if (!r.ok) throw new Error(`${c.what}: ${r.error}`);
       const t = customTheme(r.theme);
       expect(t.base, c.what).toBe(c.expect.base);
@@ -40,6 +58,14 @@ describe('custom theme files (design/theme-cases.json)', () => {
     expect(!bad.ok && bad.error).toMatch(/^\(file\): not valid JSON \(/);
     const r = parseThemeFile(JSON.stringify({ $comment: 'x', folo_theme: 1, id: 'a', name: ' A ', mode: 'dark', color: { $n: 1, bg: { $w: 2, app: '#000000' } } }));
     expect(r).toEqual({ ok: true, theme: { folo_theme: 1, id: 'a', name: 'A', mode: 'dark', color: { bg: { app: '#000000' } } } });
+  });
+
+  it('refuses a file over 1 MiB by its size, unread, and takes one of exactly 1 MiB', async () => {
+    const big = new File(['{}'.padEnd((1 << 20) + 1, ' ')], 'big.json');
+    big.arrayBuffer = () => Promise.reject(new Error('a refused file was read'));
+    expect(await readThemeFile(big)).toEqual({ file: 'big.json', ok: false, error: '(file): larger than 1 MB; not a theme' });
+    const text = JSON.stringify(file({ id: 'edge' }));
+    expect(await readThemeFile(new File([text.padEnd(1 << 20, ' ')], 'edge.json'))).toMatchObject({ file: 'edge.json', ok: true, theme: { id: 'edge' } });
   });
 });
 
@@ -105,11 +131,12 @@ describe('resolution', () => {
 
 describe('importing', () => {
   it('installs, replaces by id in place, and says why a file was refused', () => {
+    const parsed = (name: string, v: unknown): ParsedFile => ({ file: name, ...parseThemeFile(JSON.stringify(v)) });
     const { themes: out, results } = importThemes([file({ id: 'a', name: 'A' }), file({ id: 'b', name: 'B' })], [
-      { name: 'a2.json', text: JSON.stringify(file({ id: 'a', name: 'A two' })) },
-      { name: 'c.json', text: JSON.stringify(file({ id: 'c', name: 'C' })) },
-      { name: 'typo.json', text: JSON.stringify({ ...file({ id: 'd' }), color: { bg: { ap: '#000000' } } }) },
-      { name: 'c-again.json', text: JSON.stringify(file({ id: 'c', name: 'C again' })) },
+      parsed('a2.json', file({ id: 'a', name: 'A two' })),
+      parsed('c.json', file({ id: 'c', name: 'C' })),
+      parsed('typo.json', { ...file({ id: 'd' }), color: { bg: { ap: '#000000' } } }),
+      parsed('c-again.json', file({ id: 'c', name: 'C again' })),
     ]);
     expect(out.map((t) => `${t.id}:${t.name}`)).toEqual(['a:A two', 'b:B', 'c:C again']);
     expect(results).toEqual([

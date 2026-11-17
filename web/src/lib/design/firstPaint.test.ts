@@ -117,12 +117,15 @@ describe('the first-paint script', () => {
     });
   }
 
-  // Every shared format case, stored as the active theme: the script applies exactly the entries the app accepts.
-  const entries = [...cases.invalid.map((c) => ({ ...c, valid: false })), ...cases.valid.map((c) => ({ ...c, valid: true }))].map((c) => ({
-    what: c.what,
-    valid: c.valid,
-    entry: (c.text !== undefined ? JSON.parse(c.text.replace(/^﻿/, '')) : c.theme) as Record<string, unknown>,
-  }));
+  // Every shared format case, stored as the active theme: the script applies exactly the entries the app accepts. The
+  // byte cases (`hex`) test the file reader (encoding), which a stored entry never meets: they are left out.
+  const entries = [...cases.invalid.map((c) => ({ ...c, valid: false })), ...cases.valid.map((c) => ({ ...c, valid: true }))]
+    .filter((c) => (c as { hex?: string }).hex === undefined)
+    .map((c) => ({
+      what: c.what,
+      valid: c.valid,
+      entry: (c.text !== undefined ? JSON.parse(c.text.replace(/^\uFEFF/, '')) : c.theme) as Record<string, unknown>,
+    }));
   it('has the shared format cases to replay', () => expect(entries.length).toBeGreaterThan(50));
   for (const { what, valid, entry } of entries) {
     it(`applies a stored entry only when the app would (${valid ? 'valid' : 'invalid'}: ${what})`, () => {

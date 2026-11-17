@@ -2,7 +2,8 @@
 // says (every error names its token path), a theme resolved to its palette and to what <html> needs to show it
 // (`data-theme-id` and, for a custom theme, its overrides as inline custom properties), and each mode's list. Pure:
 // prefs.ts keeps the choice and the installed files, App.tsx applies the result, index.html's first-paint script does
-// the same before any of this has loaded (its rules are tested against these, firstPaint.test.ts).
+// the same before any of this has loaded (its rules are tested against these, firstPaint.test.ts). `readThemeFile` is
+// the one impure part: it reads a picked File (Blob API only).
 
 import { colorVars, themeIds, themes as builtins, type BuiltinTheme, type Palette, type ThemeId } from './tokens';
 
@@ -44,8 +45,15 @@ const NAME_MAX = 40;
 const DESCRIPTION_MAX = 120;
 /** Not a custom theme id: Desktop's `--theme system` means the mode. */
 export const RESERVED_ID = 'system';
-/** The largest theme file Studio reads (Desktop refuses the same): a theme is a few kB. */
+/** The largest theme file, 1 MiB (1 048 576 bytes): every reader refuses a larger one (a theme is a few kB). */
 export const THEME_FILE_MAX = 1 << 20;
+/** The errors of a file that can't be a theme, the same in every reader (design/THEMES.md, Custom themes). */
+export const TOO_LARGE = '(file): larger than 1 MB; not a theme';
+export const NOT_UTF8 = '(file): not UTF-8 text';
+/** Strict UTF-8: invalid bytes are an error, not U+FFFD; a byte order mark is left for `parseThemeBytes` to strip once. */
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+/** A lone surrogate (a `\uD800` escape with no pair): in u mode only an unpaired one is a code point of category Cs. */
+const LONE_SURROGATE = /\p{Cs}/u;
 
 /** Trims Unicode white space (the White_Space property, as Rust's `str::trim`; not String.prototype.trim's set). */
 const trim = (s: string) => s.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
@@ -176,18 +184,62 @@ function check(raw: unknown): CustomThemeFile {
   return out;
 }
 
+/** True when a string anywhere in a parsed JSON value, an object key included, holds a lone surrogate. */
+function hasLoneSurrogate(v: unknown): boolean {
+  if (typeof v === 'string') return LONE_SURROGATE.test(v);
+  if (Array.isArray(v)) return v.some(hasLoneSurrogate);
+  if (isObj(v)) return Object.entries(v).some(([k, x]) => LONE_SURROGATE.test(k) || hasLoneSurrogate(x));
+  return false;
+}
+
 /**
- * Parses and checks a file's text; a file that is not JSON says so. One leading byte order mark is skipped (Blob.text()
- * drops it already; a test or another reader may not), as every validator does.
+ * Parses and checks a file's text (decoded, its byte order mark gone: a U+FEFF still at the start is not JSON); a file
+ * that is not JSON says so. A lone surrogate escape in any string, a key too, is not JSON either: serde_json (Desktop)
+ * refuses it while parsing, where JSON.parse would accept it.
  */
 export function parseThemeFile(text: string): { ok: true; theme: CustomThemeFile } | { ok: false; error: string } {
   let raw: unknown;
   try {
-    raw = JSON.parse(text.replace(/^﻿/, ''));
+    raw = JSON.parse(text);
   } catch (e) {
     return { ok: false, error: `(file): not valid JSON (${(e as Error).message})` };
   }
+  if (hasLoneSurrogate(raw)) return { ok: false, error: '(file): not valid JSON (a lone surrogate in a string)' };
   return checkCustomTheme(raw);
+}
+
+/**
+ * A theme file's bytes, checked as every reader does (design/THEMES.md): exactly one leading UTF-8 byte order mark
+ * (EF BB BF) is stripped, the rest decoded strictly as UTF-8 (`(file): not UTF-8 text` otherwise), then parsed.
+ */
+export function parseThemeBytes(bytes: Uint8Array): { ok: true; theme: CustomThemeFile } | { ok: false; error: string } {
+  const body = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? bytes.subarray(3) : bytes;
+  let text: string;
+  try {
+    text = utf8.decode(body);
+  } catch {
+    return { ok: false, error: NOT_UTF8 };
+  }
+  return parseThemeFile(text);
+}
+
+/** A file picked for import, read and checked: its result alone (the file's bytes and text are not kept). */
+export type ParsedFile = { file: string; ok: true; theme: CustomThemeFile } | { file: string; ok: false; error: string };
+
+/**
+ * Reads one picked file and checks it (`parseThemeBytes`). One over THEME_FILE_MAX is refused by its size, unread, and
+ * the limit holds on what is read too (a file that grew after it was picked).
+ */
+export async function readThemeFile(f: File): Promise<ParsedFile> {
+  if (f.size > THEME_FILE_MAX) return { file: f.name, ok: false, error: TOO_LARGE };
+  let bytes: Uint8Array;
+  try {
+    bytes = new Uint8Array(await f.arrayBuffer());
+  } catch (e) {
+    return { file: f.name, ok: false, error: `(file): couldn't read (${(e as Error).message})` };
+  }
+  if (bytes.length > THEME_FILE_MAX) return { file: f.name, ok: false, error: TOO_LARGE };
+  return { file: f.name, ...parseThemeBytes(bytes) };
 }
 
 /** Every leaf of a (partial) palette as [token path, value], arrays by index (`chart.series.0`). */
@@ -251,10 +303,12 @@ export function themesFor(mode: Mode, customs: readonly CustomThemeFile[]): read
   return themeCatalog(customs)[mode];
 }
 
-/** Every theme resolved once: each mode's list (as `themesFor` orders it) and every theme by id. */
+/** Every theme resolved once: each mode's list (as `themesFor` orders it), the custom ones and every theme by id. */
 export interface ThemeCatalog {
   readonly dark: readonly Theme[];
   readonly light: readonly Theme[];
+  /** The custom themes of both modes in the lists' order (by name): Settings lists the installed ones so, as Desktop. */
+  readonly custom: readonly Theme[];
   readonly byId: ReadonlyMap<string, Theme>;
 }
 
@@ -268,32 +322,32 @@ export function themeCatalog(customs: readonly CustomThemeFile[]): ThemeCatalog 
   const mine = customs.map((f) => ({ t: customTheme(f), key: f.name.toLowerCase() }));
   mine.sort((a, b) => compareCodePoints(a.key, b.key) || compareCodePoints(a.t.id, b.t.id));
   for (const { t } of mine) if (!byId.has(t.id)) byId.set(t.id, t);
-  const list = (mode: Mode) => [...themeIds.filter((id) => builtins[id].mode === mode).map((id) => byId.get(id)!), ...mine.filter(({ t }) => t.mode === mode).map(({ t }) => t)];
-  return { dark: list('dark'), light: list('light'), byId };
+  const custom = mine.map(({ t }) => t).filter((t) => byId.get(t.id) === t);
+  const list = (mode: Mode) => [...themeIds.filter((id) => builtins[id].mode === mode).map((id) => byId.get(id)!), ...custom.filter((t) => t.mode === mode)];
+  return { dark: list('dark'), light: list('light'), custom, byId };
 }
 
 /** What an import did with one file. */
 export type ImportResult = { file: string; ok: true; id: string; name: string; replaced: boolean } | { file: string; ok: false; error: string };
 
 /**
- * Adds the files that pass the check to `installed` (a theme whose id is installed already replaces it, in place) and
- * says per file what happened. Files are read in order, so of two with one id the later wins. `accepted`: the files
- * that passed, in order (installing them one by one over `installed` gives `themes`).
+ * Adds the files that passed the check (`readThemeFile`) to `installed` (a theme whose id is installed already
+ * replaces it, in place) and says per file what happened. Files go in order, so of two with one id the later wins.
+ * `accepted`: the files that passed, in order (installing them one by one over `installed` gives `themes`).
  */
 export function importThemes(
   installed: readonly CustomThemeFile[],
-  files: readonly { name: string; text: string }[],
+  files: readonly ParsedFile[],
 ): { themes: CustomThemeFile[]; accepted: CustomThemeFile[]; results: ImportResult[] } {
   const themes = [...installed];
   const accepted: CustomThemeFile[] = [];
-  const results: ImportResult[] = files.map((f) => {
-    const r = parseThemeFile(f.text);
-    if (!r.ok) return { file: f.name, ok: false, error: r.error };
+  const results: ImportResult[] = files.map((r) => {
+    if (!r.ok) return r;
     accepted.push(r.theme);
     const at = themes.findIndex((t) => t.id === r.theme.id);
     if (at >= 0) themes[at] = r.theme;
     else themes.push(r.theme);
-    return { file: f.name, ok: true, id: r.theme.id, name: r.theme.name, replaced: at >= 0 };
+    return { file: r.file, ok: true, id: r.theme.id, name: r.theme.name, replaced: at >= 0 };
   });
   return { themes, accepted, results };
 }

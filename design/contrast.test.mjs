@@ -7,30 +7,52 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { builtIns, builtInPalette, validateTheme, validateCase, checkTheme } from './contrast.mjs';
+import { builtIns, builtInPalette, validateTheme, validateCase, checkTheme, caseBytes, readThemeFile, sameError, THEME_FILE_MAX } from './contrast.mjs';
 
 const read = (name) => JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'));
 const tokens = read('./tokens.json');
 const cases = read('./theme-cases.json');
 const at = (palette, path) => path.split('.').reduce((v, k) => v?.[k], palette);
 
+/**
+ * Every case through the CLI's own file reader (`readThemeFile`, as `--theme` reads a file): its bytes written to a
+ * file, or its parsed `theme` validated as is.
+ */
+function readCases(list, fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'folo-cases-'));
+  try {
+    for (const c of list) {
+      const bytes = caseBytes(c);
+      let r;
+      if (bytes) {
+        const file = join(dir, 'case.json');
+        writeFileSync(file, bytes);
+        r = readThemeFile(file);
+      } else r = validateCase(c);
+      fn(c, r);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 test('every invalid case is refused with its path and message', () => {
   assert.ok(cases.invalid.filter((c) => c.text !== undefined).length >= 5, 'the raw cases (file text) are there');
-  for (const c of cases.invalid) {
-    assert.equal(validateCase(c).error, c.error, c.what);
-  }
+  assert.ok([...cases.invalid, ...cases.valid].filter((c) => c.hex !== undefined).length >= 10, 'the byte cases are there');
+  readCases(cases.invalid, (c, r) => {
+    if (!sameError(r.error, c.error)) assert.equal(r.error, c.error, c.what);
+  });
 });
 
 test('every valid case resolves on its base', () => {
-  for (const c of cases.valid) {
+  readCases(cases.valid, (c, r) => {
     const { what, expect } = c;
-    const r = validateCase(c);
     assert.equal(r.error, undefined, `${what}: ${r.error}`);
     assert.equal(r.theme.base, expect.base, what);
     assert.equal(r.theme.name, expect.name, what);
     if (expect.description !== undefined) assert.equal(r.theme.description, expect.description, what);
     for (const [path, value] of Object.entries(expect.color)) assert.equal(at(r.theme.palette, path), value, `${what}: ${path}`);
-  }
+  });
 });
 
 test('built-ins: listing order, the defaults have no overrides, every palette is complete', () => {
@@ -77,7 +99,7 @@ test('--theme: exit 0 on a passing file, 1 with the path on an invalid or failin
   try {
     const run = (theme) => {
       const file = join(dir, 't.json');
-      writeFileSync(file, typeof theme === 'string' ? theme : JSON.stringify(theme));
+      writeFileSync(file, typeof theme === 'string' || Buffer.isBuffer(theme) ? theme : JSON.stringify(theme));
       return spawnSync(process.execPath, [script, '--theme', file], { encoding: 'utf8' });
     };
     const ok = run({ folo_theme: 1, id: 'ok', name: 'Ok', mode: 'light', base: 'paper' });
@@ -87,8 +109,17 @@ test('--theme: exit 0 on a passing file, 1 with the path on an invalid or failin
     assert.equal(typo.status, 1);
     assert.match(typo.stderr, /t\.json: color\.bg\.ap: not a colour token/);
     // A byte order mark (PowerShell 5.1's Set-Content -Encoding utf8 writes one) is skipped.
-    const bom = run(`﻿${JSON.stringify({ folo_theme: 1, id: 'bom', name: 'Bom', mode: 'dark' })}`);
+    const bom = run(`\uFEFF${JSON.stringify({ folo_theme: 1, id: 'bom', name: 'Bom', mode: 'dark' })}`);
     assert.equal(bom.status, 0, bom.stderr);
+    // Exactly 1 MiB is read; one byte more is refused by its size, as in both apps.
+    const edge = JSON.stringify({ folo_theme: 1, id: 'edge', name: 'Edge', mode: 'dark' });
+    assert.equal(run(edge.padEnd(THEME_FILE_MAX, ' ')).status, 0);
+    const big = run(edge.padEnd(THEME_FILE_MAX + 1, ' '));
+    assert.equal(big.status, 1);
+    assert.match(big.stderr, /t\.json: \(file\): larger than 1 MB; not a theme/);
+    // Two byte order marks: only one is stripped. Windows-1252 (PowerShell 5.1's Set-Content default) is not UTF-8.
+    assert.match(run(`\uFEFF\uFEFF${edge}`).stderr, /\(file\): not valid JSON/);
+    assert.match(run(Buffer.from(edge.replace('Edge', 'Caf\u00e9'), 'latin1')).stderr, /\(file\): not UTF-8 text/);
     const broken = run('{ "folo_theme": 1, ');
     assert.equal(broken.status, 1);
     assert.match(broken.stderr, /\(file\): not valid JSON/);

@@ -11,7 +11,7 @@
 // Translucent colours (tints, overlays, lines) are measured composited over each surface they sit on. Run by
 // `npm run check` in web/.
 
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -313,29 +313,73 @@ const isHighContrast = (id) => id.startsWith('contrast-');
 // ---------------------------------------------------------------------------------------------------------------
 // Command line.
 
-/** A theme file's text, validated: one leading byte order mark is skipped (PowerShell 5.1 writes one), as Studio and Desktop do. */
+/** The largest theme file, 1 MiB (1 048 576 bytes), as Studio and Desktop: a larger one is refused by its size, unread. */
+export const THEME_FILE_MAX = 1 << 20;
+/** Strict UTF-8: invalid bytes are an error, not U+FFFD; the byte order mark is stripped (once) before decoding. */
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+/** A lone surrogate (a `\uD800` escape with no pair): in u mode only an unpaired one is a code point of category Cs. */
+const LONE_SURROGATE = /\p{Cs}/u;
+const hasLoneSurrogate = (v) =>
+  typeof v === 'string'
+    ? LONE_SURROGATE.test(v)
+    : Array.isArray(v)
+      ? v.some(hasLoneSurrogate)
+      : isObject(v) && Object.entries(v).some(([k, x]) => LONE_SURROGATE.test(k) || hasLoneSurrogate(x));
+
+/**
+ * A theme file's text (decoded, its byte order mark gone: a U+FEFF still at the start is not JSON), validated. A lone
+ * surrogate escape in any string, a key too, is not JSON either: Desktop's serde_json refuses it while parsing.
+ */
 export function parseThemeText(text) {
   let json;
   try {
-    json = JSON.parse(text.replace(/^﻿/, ''));
+    json = JSON.parse(text);
   } catch (e) {
     return { error: `(file): not valid JSON (${e.message})` };
   }
+  if (hasLoneSurrogate(json)) return { error: '(file): not valid JSON (a lone surrogate in a string)' };
   return validateTheme(json);
 }
 
-function readThemeFile(file) {
+/**
+ * A theme file's bytes, validated as Studio and Desktop read them (design/THEMES.md): exactly one leading UTF-8 byte
+ * order mark (EF BB BF, which PowerShell 5.1 writes) is stripped, the rest decoded strictly as UTF-8, then parsed.
+ */
+export function parseThemeBytes(bytes) {
+  const body = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? bytes.subarray(3) : bytes;
   let text;
   try {
-    text = readFileSync(file, 'utf8');
-  } catch (e) {
-    return { error: `(file): ${e.code === 'ENOENT' ? 'not found' : `couldn't read (${e.message})`}` };
+    text = utf8.decode(body);
+  } catch {
+    return { error: '(file): not UTF-8 text' };
   }
   return parseThemeText(text);
 }
 
-/** A case of theme-cases.json validated: its raw `text` through the file reader, or its parsed `theme`. */
-export const validateCase = (c) => (c.text !== undefined ? parseThemeText(c.text) : validateTheme(c.theme));
+/** Reads one theme file and validates it: one over THEME_FILE_MAX is refused by its size, unread. */
+export function readThemeFile(file) {
+  let bytes;
+  try {
+    if (statSync(file).size > THEME_FILE_MAX) return { error: '(file): larger than 1 MB; not a theme' };
+    bytes = readFileSync(file);
+  } catch (e) {
+    return { error: `(file): ${e.code === 'ENOENT' ? 'not found' : `couldn't read (${e.message})`}` };
+  }
+  if (bytes.length > THEME_FILE_MAX) return { error: '(file): larger than 1 MB; not a theme' };
+  return parseThemeBytes(bytes);
+}
+
+/** A case's file bytes (theme-cases.json): its `hex`, or its raw `text` as UTF-8; undefined for a parsed `theme`. */
+export const caseBytes = (c) => (c.hex !== undefined ? Buffer.from(c.hex, 'hex') : c.text !== undefined ? Buffer.from(c.text, 'utf8') : undefined);
+
+/** A case of theme-cases.json validated: its bytes through the file reader's own parse, or its parsed `theme`. */
+export function validateCase(c) {
+  const bytes = caseBytes(c);
+  return bytes ? parseThemeBytes(bytes) : validateTheme(c.theme);
+}
+
+/** An invalid case's error matched: exactly, but `(file): not valid JSON` takes any parser's detail after it. */
+export const sameError = (got, want) => got === want || (want === '(file): not valid JSON' && typeof got === 'string' && got.startsWith(`${want} (`));
 
 function main(argv) {
   const all = argv.includes('--all');
@@ -371,7 +415,7 @@ function main(argv) {
     for (const c of cases.invalid) {
       const { what, error } = c;
       const got = validateCase(c).error;
-      if (got !== error) {
+      if (!sameError(got, error)) {
         console.error(`contrast: theme-cases.json, invalid "${what}": expected ${JSON.stringify(error)}, got ${JSON.stringify(got)}`);
         invalid++;
       }

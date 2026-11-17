@@ -814,6 +814,8 @@ const shotJobs = [];
 try {
   for (const scene of scenes) {
     const themes = (scene.themes ?? ['dark', 'light']).filter((m) => !themeMode || m === themeMode);
+    // --theme of the other mode leaves a scene made for one mode nothing to shoot (a dark-only scene under Paper).
+    if (!themes.length) continue;
     const viewports = scene.viewports ?? ['desktop', 'mobile'];
     if (!qa) {
       for (const theme of themes) {

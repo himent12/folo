@@ -2,7 +2,7 @@
 
 import { computed, signal, type Signal } from 'fw';
 import type { LabelAgentId } from './api/types';
-import { defaultThemeId, importThemes, readStoredThemes, themeCatalog, type CustomThemeFile, type ImportResult, type Mode, type Theme } from './design/themes';
+import { defaultThemeId, importThemes, readStoredThemes, themeCatalog, type CustomThemeFile, type ImportResult, type Mode, type ParsedFile, type Theme } from './design/themes';
 
 export type ThemePref = 'dark' | 'light' | 'system';
 export type Units = 'metric' | 'binary';
@@ -115,6 +115,11 @@ export class PrefsStore {
   });
   #customThemes = signal<CustomThemeFile[]>([]);
   /**
+   * The custom themes as last read from storage or written to it: what #themesPending replays over while storage can't
+   * be read (blocked, or `localStorage` null), so a change made then still shows, and is not lost to the next one.
+   */
+  #themesKnown: CustomThemeFile[] = [];
+  /**
    * Changes to the custom themes made in this tab whose write failed (storage full or refused), oldest first. They stay
    * over what is read from storage (another tab's change, the next import or removal here) until a write succeeds, as
    * #dirty does for preferences: else the next operation would read the stale stored list and drop them.
@@ -138,7 +143,7 @@ export class PrefsStore {
       sidebarCollapsed: signal(p.sidebarCollapsed),
       labelAgent: signal(p.labelAgent),
     };
-    if (typeof localStorage !== 'undefined') this.#customThemes.set(storedThemes() ?? []);
+    if (typeof localStorage !== 'undefined') this.#customThemes.set(this.#current());
     if (typeof window === 'undefined') return;
     const mq = matchMedia('(prefers-color-scheme: dark)');
     this.#systemDark.set(mq.matches);
@@ -148,10 +153,7 @@ export class PrefsStore {
     // reconnect would swap the data under its open pages; its own saves no longer put the old address back (#save).
     window.addEventListener('storage', (e) => {
       // Custom themes installed or removed in another tab: this one lists and shows the same.
-      if (e.key === null || e.key === THEMES_KEY) {
-        const t = storedThemes();
-        if (t) this.#customThemes.set(this.#current());
-      }
+      if (e.key === null || e.key === THEMES_KEY) this.#customThemes.set(this.#current());
       if (e.key !== null && e.key !== KEY && e.key !== 'folo.theme') return;
       const p = stored();
       if (!p) return;
@@ -199,19 +201,19 @@ export class PrefsStore {
     return this.#catalog.get()[mode];
   }
 
-  /** The theme `id` (either mode, built-in or custom), resolved, or undefined. */
-  themeById(id: string): Theme | undefined {
-    return this.#catalog.get().byId.get(id);
-  }
-
   /** True while a change to the custom themes is not saved (the browser refused the write): it lasts for this tab. */
   get themesUnsaved(): boolean {
     return this.#themesUnsaved.get();
   }
 
-  /** The custom themes installed in this browser, as stored. */
+  /** The custom themes installed in this browser, as stored (in the order installed). */
   get customThemes(): readonly CustomThemeFile[] {
     return this.#customThemes.get();
+  }
+
+  /** The installed custom themes resolved, in the order every list shows them (by name), as Settings lists them. */
+  get installedThemes(): readonly Theme[] {
+    return this.#catalog.get().custom;
   }
 
   /**
@@ -230,8 +232,8 @@ export class PrefsStore {
     return true;
   }
 
-  /** Installs theme files (their names and text): each one that passes the check, replacing one with its id. */
-  installThemes(files: readonly { name: string; text: string }[]): ImportResult[] {
+  /** Installs the files that passed the check (`readThemeFile`), each replacing one with its id, and says per file what happened. */
+  installThemes(files: readonly ParsedFile[]): ImportResult[] {
     const { accepted, results } = importThemes(this.#current(), files);
     if (accepted.length) this.#changeThemes({ put: accepted });
     return results;
@@ -242,10 +244,14 @@ export class PrefsStore {
     this.#changeThemes({ remove: id });
   }
 
-  /** What is stored now with this tab's unsaved changes over it (or this tab's list, when storage can't be read). */
+  /**
+   * What is stored now with this tab's unsaved changes over it. When storage can't be read, the list last known
+   * (#themesKnown) stands in for it; when a read works again, the pending changes go over what it reads.
+   */
   #current(): CustomThemeFile[] {
     const stored = storedThemes();
-    return stored ? this.#themesPending.reduce(applyChange, stored) : this.#customThemes.peek();
+    if (stored) this.#themesKnown = stored;
+    return this.#themesPending.reduce(applyChange, this.#themesKnown);
   }
 
   /**
@@ -258,6 +264,7 @@ export class PrefsStore {
     this.#customThemes.set(themes);
     try {
       localStorage.setItem(THEMES_KEY, JSON.stringify(themes));
+      this.#themesKnown = themes;
       this.#themesPending = [];
       this.#themesUnsaved.set(false);
     } catch {

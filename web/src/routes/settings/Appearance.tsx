@@ -10,7 +10,7 @@ import Moon from '$icons/moon';
 import Sun from '$icons/sun';
 import Upload from '$icons/upload';
 import { computed, css, effect, For, signal } from 'fw';
-import { THEME_FILE_MAX, type ImportResult, type Mode, type Theme } from '$lib/design/themes';
+import { readThemeFile, type ImportResult, type Mode, type ParsedFile, type Theme } from '$lib/design/themes';
 import { themes as builtins } from '$lib/design/tokens';
 import { prefs, type ThemePref } from '$lib/prefs';
 import Button from '$lib/ui/Button';
@@ -45,28 +45,30 @@ function themeFacts(t: Theme): string[] {
   return [t.mode === 'dark' ? 'Dark' : 'Light', ...(t.base !== t.mode ? [`based on ${builtins[t.base].name}`] : [])];
 }
 
-/** What a picked file is: its text, or why it isn't read (larger than a theme can be: refused by size, unread). */
-type Picked = { name: string; text: string } | { name: string; error: string };
-
 /**
- * Reads picked files one at a time (a large pick never holds them all at once), refusing one over THEME_FILE_MAX by its
- * size before reading it, as Desktop does.
+ * Reads picked files one at a time, in the order picked, and checks each as soon as it is read (`readThemeFile`: one
+ * over 1 MiB is refused by its size, unread): only its result is kept, so a large pick never holds more than one
+ * file's bytes and text, and the next file is not read before the last one's result is out.
  */
-export async function readPicked(files: readonly File[]): Promise<Picked[]> {
-  const out: Picked[] = [];
-  for (const f of files) {
-    if (f.size > THEME_FILE_MAX) out.push({ name: f.name, error: '(file): larger than 1 MB; not a theme' });
-    else out.push({ name: f.name, text: await f.text().catch(() => '') });
-  }
-  return out;
+export async function* readPicked(files: readonly File[]): AsyncGenerator<ParsedFile> {
+  for (const f of files) yield await readThemeFile(f);
 }
 
-/** Installs the readable files and says per file, in the order picked, what happened. */
-export function installPicked(picked: readonly Picked[]): ImportResult[] {
-  const readable = picked.filter((p): p is { name: string; text: string } => 'text' in p);
-  const installed = readable.length ? prefs.installThemes(readable) : [];
-  let next = 0;
-  return picked.map((p) => ('text' in p ? installed[next++]! : { file: p.name, ok: false, error: p.error }));
+/** The pick being imported: the next one waits for it. */
+let importing: Promise<unknown> = Promise.resolve();
+
+/**
+ * Imports one pick of files and says per file, in the order picked, what happened. Picks go one after another in the
+ * order made (a second pick waits until the first is installed), so of two picks with one id the later wins.
+ */
+export function importPicked(files: readonly File[]): Promise<ImportResult[]> {
+  const run = importing.then(async () => {
+    const parsed: ParsedFile[] = [];
+    for await (const r of readPicked(files)) parsed.push(r);
+    return prefs.installThemes(parsed);
+  });
+  importing = run.catch(() => undefined);
+  return run;
 }
 
 export default function Appearance() {
@@ -80,7 +82,7 @@ export default function Appearance() {
     const files = [...(input?.files ?? [])];
     if (input) input.value = '';
     if (!files.length) return;
-    results.set(installPicked(await readPicked(files)));
+    results.set(await importPicked(files));
   }
 
   const slot = (m: Mode) => {
@@ -106,8 +108,8 @@ export default function Appearance() {
     );
   };
 
-  // Read from the resolved catalog by id: no list is rebuilt or searched per row.
-  const custom = computed(() => prefs.customThemes.map((f) => prefs.themeById(f.id)).filter((t): t is Theme => !!t?.custom));
+  // The resolved catalog's custom themes, in its order (by name, as Desktop lists them): nothing is rebuilt per row.
+  const custom = computed(() => prefs.installedThemes);
 
   return (
     <Panel title="Appearance" meta="saved in this browser" id="appearance" divided pad="none">

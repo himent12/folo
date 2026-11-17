@@ -2,9 +2,11 @@
 // Themes in the preferences (design/THEMES.md): each mode's slot, the mode/slot rule of Choosing a theme, the custom
 // themes store (`folo.themes`) across tabs, and what is stored.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CustomThemeFile } from './design/themes';
+import { parseThemeFile, type CustomThemeFile, type ParsedFile } from './design/themes';
 import { PrefsStore, sanitize, THEMES_KEY } from './prefs';
 
+/** A picked file as read and checked (readThemeFile does this to a File). */
+const file = (name: string, text: string): ParsedFile => ({ file: name, ...parseThemeFile(text) });
 const prefsOf = () => JSON.parse(localStorage.getItem('folo.prefs')!) as Record<string, unknown>;
 const night: CustomThemeFile = { folo_theme: 1, id: 'night', name: 'Night', mode: 'dark', base: 'midnight', color: { bg: { app: '#0B0D12' } } };
 /** The browser's storage itself (another tab writes it directly, even while this tab's writes are refused). */
@@ -48,7 +50,7 @@ describe('theme preferences', () => {
     const p = new PrefsStore();
     expect([p.darkTheme, p.activeTheme.id, p.slotTheme('dark').id]).toEqual(['gone', 'dark', 'dark']);
     // Installing a theme with that id brings it back.
-    p.installThemes([{ name: 'gone.json', text: JSON.stringify({ ...night, id: 'gone' }) }]);
+    p.installThemes([file('gone.json', JSON.stringify({ ...night, id: 'gone' }))]);
     expect(p.activeTheme).toMatchObject({ id: 'gone', custom: true });
   });
 
@@ -71,8 +73,8 @@ describe('theme preferences', () => {
   it('installs, stores, removes custom themes; a mode that used a removed one shows its default', () => {
     const p = new PrefsStore();
     const r = p.installThemes([
-      { name: 'night.json', text: JSON.stringify(night) },
-      { name: 'bad.json', text: '{' },
+      file('night.json', JSON.stringify(night)),
+      file('bad.json', '{'),
     ]);
     expect(r.map((x) => x.ok)).toEqual([true, false]);
     expect(JSON.parse(localStorage.getItem(THEMES_KEY)!)).toEqual([night]);
@@ -91,7 +93,7 @@ describe('theme preferences', () => {
     expect(p.activeTheme.id).toBe('night');
     // Installing here keeps what the other tab installed.
     const q = new PrefsStore();
-    q.installThemes([{ name: 'b.json', text: JSON.stringify({ ...night, id: 'b', name: 'B' }) }]);
+    q.installThemes([file('b.json', JSON.stringify({ ...night, id: 'b', name: 'B' }))]);
     fromOtherTab(THEMES_KEY, localStorage.getItem(THEMES_KEY)!);
     expect(p.customThemes.map((t) => t.id)).toEqual(['night', 'b']);
     localStorage.clear();
@@ -100,7 +102,7 @@ describe('theme preferences', () => {
   });
 
   describe('when the browser refuses to write folo.themes (storage full), reads still working', () => {
-    const theme = (id: string) => ({ name: `${id}.json`, text: JSON.stringify({ ...night, id, name: id.toUpperCase() }) });
+    const theme = (id: string) => file(`${id}.json`, JSON.stringify({ ...night, id, name: id.toUpperCase() }));
     let refuse = true;
     beforeEach(() => {
       refuse = true;
@@ -146,14 +148,80 @@ describe('theme preferences', () => {
     });
   });
 
+  describe("when storage can't be read or written (blocked, or localStorage null)", () => {
+    const theme = (id: string, name = id.toUpperCase()) => file(`${id}.json`, JSON.stringify({ ...night, id, name }));
+    const ids = (p: PrefsStore) => p.customThemes.map((t) => t.id);
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('localStorage null: an import installs for this tab, usable in the selects and removable', () => {
+      vi.stubGlobal('localStorage', null);
+      const p = new PrefsStore();
+      expect(p.installThemes([theme('aaa')])).toEqual([{ file: 'aaa.json', ok: true, id: 'aaa', name: 'AAA', replaced: false }]);
+      expect([ids(p), p.themesUnsaved]).toEqual([['aaa'], true]);
+      expect(p.themesFor('dark').map((t) => t.id)).toContain('aaa');
+      expect(p.useTheme('aaa')).toBe(true);
+      expect(p.activeTheme.id).toBe('aaa');
+      expect(p.installThemes([theme('bbb')])[0]).toMatchObject({ ok: true, replaced: false });
+      expect(p.installThemes([theme('aaa', 'Again')])[0]).toMatchObject({ ok: true, replaced: true });
+      expect(ids(p)).toEqual(['aaa', 'bbb']);
+      p.removeTheme('aaa');
+      expect([ids(p), p.activeTheme.id]).toEqual([['bbb'], 'dark']);
+    });
+
+    it('reads and writes both throwing: the same, then reconciled over what storage holds once it is back', () => {
+      realStorage.setItem(THEMES_KEY, JSON.stringify([{ ...night, id: 'old', name: 'Old' }]));
+      let blocked = false;
+      const fail = () => {
+        if (blocked) throw new DOMException('blocked', 'SecurityError');
+      };
+      vi.stubGlobal('localStorage', {
+        getItem: (k: string) => (fail(), realStorage.getItem(k)),
+        setItem: (k: string, v: string) => (fail(), realStorage.setItem(k, v)),
+        removeItem: (k: string) => (fail(), realStorage.removeItem(k)),
+        clear: () => realStorage.clear(),
+        key: (i: number) => realStorage.key(i),
+        get length() {
+          return realStorage.length;
+        },
+      });
+      const p = new PrefsStore();
+      expect(ids(p)).toEqual(['old']);
+      blocked = true;
+      p.installThemes([theme('a'), theme('b')]);
+      p.removeTheme('old');
+      expect([ids(p), p.themesUnsaved]).toEqual([['a', 'b'], true]);
+      p.removeTheme('a');
+      expect(ids(p)).toEqual(['b']);
+      expect(p.useTheme('b')).toBe(true);
+      // A storage event while blocked changes nothing.
+      window.dispatchEvent(new StorageEvent('storage', { key: THEMES_KEY }));
+      expect(ids(p)).toEqual(['b']);
+      // Storage comes back holding another tab's change: the pending ones go over it, and the next write saves them.
+      blocked = false;
+      realStorage.setItem(THEMES_KEY, JSON.stringify([{ ...night, id: 'old', name: 'Old' }, { ...night, id: 'other', name: 'Other' }]));
+      window.dispatchEvent(new StorageEvent('storage', { key: THEMES_KEY }));
+      expect([ids(p), p.themesUnsaved]).toEqual([['other', 'b'], true]);
+      p.installThemes([theme('c')]);
+      expect([ids(p), p.themesUnsaved]).toEqual([['other', 'b', 'c'], false]);
+      expect((JSON.parse(realStorage.getItem(THEMES_KEY)!) as { id: string }[]).map((t) => t.id)).toEqual(['other', 'b', 'c']);
+    });
+  });
+
+  it('lists the installed themes in the catalog order (by name), not the order installed', () => {
+    const p = new PrefsStore();
+    p.installThemes([file('z.json', JSON.stringify({ ...night, id: 'zulu', name: 'Zulu' })), file('a.json', JSON.stringify({ ...night, id: 'amber', name: 'Amber', mode: 'light', base: 'paper' }))]);
+    expect(p.customThemes.map((t) => t.id)).toEqual(['zulu', 'amber']);
+    expect(p.installedThemes.map((t) => t.id)).toEqual(['amber', 'zulu']);
+  });
+
   it('resolves each theme once: the lists and lookups are one catalog until the themes change', () => {
     const p = new PrefsStore();
-    p.installThemes([{ name: 'n.json', text: JSON.stringify(night) }]);
+    p.installThemes([file('n.json', JSON.stringify(night))]);
     const list = p.themesFor('dark');
     expect(p.themesFor('dark')).toBe(list);
-    expect(p.themeById('night')).toBe(list.at(-1));
-    expect(p.slotTheme('dark')).toBe(p.themeById('dark'));
-    p.installThemes([{ name: 'm.json', text: JSON.stringify({ ...night, id: 'm', name: 'M' }) }]);
+    expect(p.installedThemes[0]).toBe(list.at(-1));
+    expect(p.slotTheme('dark')).toBe(list[0]);
+    p.installThemes([file('m.json', JSON.stringify({ ...night, id: 'm', name: 'M' }))]);
     expect(p.themesFor('dark')).not.toBe(list);
   });
 

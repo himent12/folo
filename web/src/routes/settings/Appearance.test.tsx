@@ -7,10 +7,12 @@ import { prefs } from '$lib/prefs';
 import { rank } from '$lib/shell/commands';
 import { themeCommands } from '$lib/shell/themeCommands';
 import { render } from '../../../framework/testing';
-import { THEME_FILE_MAX } from '$lib/design/themes';
-import Appearance, { installPicked, readPicked, resultText } from './Appearance';
+import { parseThemeFile, THEME_FILE_MAX, type ParsedFile } from '$lib/design/themes';
+import Appearance, { importPicked, readPicked, resultText } from './Appearance';
 
 const night = { folo_theme: 1, id: 'night', name: 'Night', mode: 'dark', base: 'midnight' };
+/** A picked file as read and checked. */
+const parsed = (name: string, v: unknown): ParsedFile => ({ file: name, ...parseThemeFile(JSON.stringify(v)) });
 let target: HTMLElement;
 let view: { unmount(): void } | undefined;
 
@@ -79,7 +81,7 @@ describe('Settings › Appearance', () => {
   });
 
   it('shows the default as selected while the stored id names no theme', () => {
-    prefs.installThemes([{ name: 'n.json', text: JSON.stringify(night) }]);
+    prefs.installThemes([parsed('n.json', night)]);
     prefs.useTheme('night');
     show();
     expect(select('dark').value).toBe('night');
@@ -113,6 +115,13 @@ describe('Settings › Appearance', () => {
     expect(prefs.customThemes).toEqual([]);
     expect(target.querySelector('#appearance .themes')).toBeNull();
   });
+
+  it('lists the installed themes by name, as the selects and Desktop do, not in the order imported', async () => {
+    show();
+    await importFiles([['zulu.json', JSON.stringify({ ...night, id: 'zulu', name: 'Zulu' })]]);
+    await importFiles([['amber.json', JSON.stringify({ ...night, id: 'amber', name: 'Amber', mode: 'light', base: 'paper' })]]);
+    expect([...target.querySelectorAll('#appearance .themes .t-name')].map((n) => n.textContent)).toEqual(['Amber', 'Zulu']);
+  });
 });
 
 /** A localStorage whose writes of `key` throw while `refuse()` (storage full); reads and other keys go through. */
@@ -133,25 +142,50 @@ function refusing(real: Storage, key: string, refuse: () => boolean): Storage {
 }
 
 describe('importing large picks and failed saves', () => {
-  it('refuses a file over 1 MB by its size, unread, and reads the rest one at a time in order', async () => {
-    let reading = 0;
-    let most = 0;
-    const file = (name: string, size: number, text: string) =>
-      ({
-        name,
-        size,
-        text: async () => {
-          if (size > THEME_FILE_MAX) throw new Error('a refused file was read');
-          most = Math.max(most, ++reading);
-          await Promise.resolve();
-          reading--;
-          return text;
-        },
-      }) as unknown as File;
-    const picked = await readPicked([file('a.json', 10, JSON.stringify(night)), file('huge.json', THEME_FILE_MAX + 1, ''), file('b.json', 10, '{')]);
-    expect(most).toBe(1);
-    expect(installPicked(picked).map(resultText)).toEqual(['Installed Night (a.json)', 'huge.json: larger than 1 MB; not a theme', expect.stringMatching(/^b\.json: not valid JSON/)]);
-    await expect(readPicked([file('edge.json', THEME_FILE_MAX, '{}')])).resolves.toEqual([{ name: 'edge.json', text: '{}' }]);
+  /** What the stub files below did, in order: "read <name>" when a read starts. */
+  let log: string[] = [];
+  beforeEach(() => {
+    log = [];
+  });
+  /** A picked file whose read is logged (and waits for `gate`, when given); one over the limit must never be read. */
+  const file = (name: string, size: number, text: string, gate?: Promise<void>) =>
+    ({
+      name,
+      size,
+      arrayBuffer: async () => {
+        if (size > THEME_FILE_MAX) throw new Error('a refused file was read');
+        log.push(`read ${name}`);
+        await gate;
+        return new TextEncoder().encode(text).buffer;
+      },
+    }) as unknown as File;
+
+  it('refuses a file over 1 MB by its size, unread, and checks each file before the next is read', async () => {
+    const files = readPicked([file('a.json', 10, JSON.stringify(night)), file('huge.json', THEME_FILE_MAX + 1, ''), file('b.json', 10, '{')]);
+    // File 1 is read and checked (its result is out, its text gone) before file 2 is read.
+    expect((await files.next()).value).toMatchObject({ file: 'a.json', ok: true, theme: { id: 'night' } });
+    expect(log).toEqual(['read a.json']);
+    expect((await files.next()).value).toEqual({ file: 'huge.json', ok: false, error: '(file): larger than 1 MB; not a theme' });
+    expect(log).toEqual(['read a.json']);
+    expect((await files.next()).value).toMatchObject({ file: 'b.json', ok: false });
+    expect([log, (await files.next()).done]).toEqual([['read a.json', 'read b.json'], true]);
+    const results = await importPicked([file('a.json', 10, JSON.stringify(night)), file('huge.json', THEME_FILE_MAX + 1, ''), file('b.json', 10, '{')]);
+    expect(results.map(resultText)).toEqual(['Installed Night (a.json)', 'huge.json: larger than 1 MB; not a theme', expect.stringMatching(/^b\.json: not valid JSON/)]);
+    expect((await importPicked([file('edge.json', THEME_FILE_MAX, JSON.stringify(night).padEnd(THEME_FILE_MAX, ' '))]))[0]).toMatchObject({ ok: true, replaced: true });
+  });
+
+  it('imports picks in the order made: a second pick waits for the first, so the later one wins', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const one = importPicked([file('first.json', 10, JSON.stringify({ ...night, name: 'First' }), gate)]);
+    const two = importPicked([file('second.json', 10, JSON.stringify({ ...night, name: 'Second' }))]);
+    await new Promise((r) => setTimeout(r, 10));
+    // The first pick is still reading: the second is not read, and nothing is installed.
+    expect([log, prefs.customThemes.length]).toEqual([['read first.json'], 0]);
+    release();
+    expect((await one).map(resultText)).toEqual(['Installed First (first.json)']);
+    expect((await two).map(resultText)).toEqual(['Replaced Second (second.json)']);
+    expect(prefs.customThemes.map((t) => t.name)).toEqual(['Second']);
   });
 
   it("says when the browser couldn't save the custom themes, and stops once a save works", async () => {
@@ -174,7 +208,7 @@ describe('importing large picks and failed saves', () => {
 
 describe('the palette\'s theme commands', () => {
   it('offers one per theme for a query, custom ones too, and applies the mode/slot rule', () => {
-    prefs.installThemes([{ name: 'n.json', text: JSON.stringify(night) }]);
+    prefs.installThemes([parsed('n.json', night)]);
     const items = themeCommands();
     expect(items.map((i) => i.label)).toEqual([
       'Theme: Dark',
