@@ -11,9 +11,10 @@
 // Translucent colours (tints, overlays, lines) are measured composited over each surface they sit on. Run by
 // `npm run check` in web/.
 
-import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { jsonProblem } from './json-scan.mjs';
 
 const tokens = JSON.parse(readFileSync(new URL('./tokens.json', import.meta.url), 'utf8'));
 const TEXT = 4.5;
@@ -315,29 +316,25 @@ const isHighContrast = (id) => id.startsWith('contrast-');
 
 /** The largest theme file, 1 MiB (1 048 576 bytes), as Studio and Desktop: a larger one is refused by its size, unread. */
 export const THEME_FILE_MAX = 1 << 20;
+const TOO_LARGE = '(file): larger than 1 MB; not a theme';
 /** Strict UTF-8: invalid bytes are an error, not U+FFFD; the byte order mark is stripped (once) before decoding. */
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-/** A lone surrogate (a `\uD800` escape with no pair): in u mode only an unpaired one is a code point of category Cs. */
-const LONE_SURROGATE = /\p{Cs}/u;
-const hasLoneSurrogate = (v) =>
-  typeof v === 'string'
-    ? LONE_SURROGATE.test(v)
-    : Array.isArray(v)
-      ? v.some(hasLoneSurrogate)
-      : isObject(v) && Object.entries(v).some(([k, x]) => LONE_SURROGATE.test(k) || hasLoneSurrogate(x));
 
 /**
- * A theme file's text (decoded, its byte order mark gone: a U+FEFF still at the start is not JSON), validated. A lone
- * surrogate escape in any string, a key too, is not JSON either: Desktop's serde_json refuses it while parsing.
+ * A theme file's text (decoded, its byte order mark gone: a U+FEFF still at the start is not JSON), validated. JSON
+ * Desktop's serde_json refuses while parsing is not JSON here either (json-scan.mjs, checked first, as Studio does):
+ * nesting past its limit, a lone surrogate escape in any string (a key too, or a member a later duplicate replaces), a
+ * number out of a double's range. Duplicate members are otherwise allowed, the last one winning, as in serde_json.
  */
 export function parseThemeText(text) {
+  const problem = jsonProblem(text);
+  if (problem) return { error: `(file): not valid JSON (${problem})` };
   let json;
   try {
     json = JSON.parse(text);
   } catch (e) {
     return { error: `(file): not valid JSON (${e.message})` };
   }
-  if (hasLoneSurrogate(json)) return { error: '(file): not valid JSON (a lone surrogate in a string)' };
   return validateTheme(json);
 }
 
@@ -356,17 +353,41 @@ export function parseThemeBytes(bytes) {
   return parseThemeText(text);
 }
 
-/** Reads one theme file and validates it: one over THEME_FILE_MAX is refused by its size, unread. */
+/** Reads at most `max` bytes of the open file `fd` (fewer at its end). */
+export function readAtMost(fd, max) {
+  const buf = Buffer.alloc(max);
+  let got = 0;
+  while (got < max) {
+    const n = readSync(fd, buf, got, max - got, null);
+    if (n === 0) break;
+    got += n;
+  }
+  return buf.subarray(0, got);
+}
+
+/**
+ * Reads one theme file and validates it, as Desktop reads one: a file over THEME_FILE_MAX by its size (of the open
+ * file) is refused unread, and the read itself stops one byte past the limit, so a file that grew or was replaced
+ * since costs no more. It never throws: anything that does while the file is checked is its error.
+ */
 export function readThemeFile(file) {
   let bytes;
+  let fd;
   try {
-    if (statSync(file).size > THEME_FILE_MAX) return { error: '(file): larger than 1 MB; not a theme' };
-    bytes = readFileSync(file);
+    fd = openSync(file, 'r');
+    if (fstatSync(fd).size > THEME_FILE_MAX) return { error: TOO_LARGE };
+    bytes = readAtMost(fd, THEME_FILE_MAX + 1);
   } catch (e) {
     return { error: `(file): ${e.code === 'ENOENT' ? 'not found' : `couldn't read (${e.message})`}` };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
-  if (bytes.length > THEME_FILE_MAX) return { error: '(file): larger than 1 MB; not a theme' };
-  return parseThemeBytes(bytes);
+  if (bytes.length > THEME_FILE_MAX) return { error: TOO_LARGE };
+  try {
+    return parseThemeBytes(bytes);
+  } catch (e) {
+    return { error: `(file): couldn't check (${e instanceof Error ? e.message : String(e)})` };
+  }
 }
 
 /** A case's file bytes (theme-cases.json): its `hex`, or its raw `text` as UTF-8; undefined for a parsed `theme`. */

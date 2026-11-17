@@ -132,7 +132,9 @@ export class PrefsStore {
   #active = computed<Theme>(() => this.slotTheme(this.#resolved.get()));
 
   constructor() {
-    const p = typeof localStorage === 'undefined' ? { ...defaults } : load();
+    // No `typeof localStorage` probe: on an opaque origin (a sandboxed frame) merely touching the global throws, and
+    // load() and #current() already read it inside a try (no storage, null storage, a throwing getter: the defaults).
+    const p = load();
     this.#rest = p;
     this.#p = {
       theme: signal(p.theme),
@@ -143,7 +145,7 @@ export class PrefsStore {
       sidebarCollapsed: signal(p.sidebarCollapsed),
       labelAgent: signal(p.labelAgent),
     };
-    if (typeof localStorage !== 'undefined') this.#customThemes.set(this.#current());
+    this.#customThemes.set(this.#current());
     if (typeof window === 'undefined') return;
     const mq = matchMedia('(prefers-color-scheme: dark)');
     this.#systemDark.set(mq.matches);

@@ -18,9 +18,17 @@
         // the number tokens.
         const T = {"dark":["dark","midnight","dim","contrast-dark"],"light":["light","paper","contrast-light"],"color":{"bg":{"app":"--bg-app","panel":"--bg-panel","raised":"--bg-raised","overlay":"--bg-overlay","inset":"--bg-inset","hover":"--bg-hover","active":"--bg-active","selected":"--bg-selected","scrim":"--bg-scrim"},"line":{"subtle":"--line-subtle","default":"--line-default","strong":"--line-strong","control":"--line-control"},"text":{"primary":"--text-primary","secondary":"--text-secondary","tertiary":"--text-tertiary","disabled":"--text-disabled","inverse":"--text-inverse"},"accent":{"solid":"--accent-solid","solid_hover":"--accent-solid-hover","on":"--accent-on","text":"--accent-text","line":"--accent-line","muted":"--accent-muted"},"success":{"solid":"--success-solid","text":"--success-text","muted":"--success-muted"},"warning":{"solid":"--warning-solid","text":"--warning-text","muted":"--warning-muted"},"danger":{"solid":"--danger-solid","text":"--danger-text","muted":"--danger-muted","fill":"--danger-fill","fill_hover":"--danger-fill-hover"},"info":{"solid":"--info-solid","text":"--info-text","muted":"--info-muted"},"window":{"close":"--window-close","close_text":"--window-close-text"},"focus":"--focus","chart":{"series":["--chart-1","--chart-2","--chart-3","--chart-4","--chart-5","--chart-6"],"fill":["--chart-fill-1","--chart-fill-2","--chart-fill-3","--chart-fill-4","--chart-fill-5","--chart-fill-6"],"text":["--chart-text-1","--chart-text-2","--chart-text-3","--chart-text-4","--chart-text-5","--chart-text-6"],"grid":"--chart-grid","axis":"--chart-axis","label":"--chart-label","cursor":"--chart-cursor","swatch_edge":"--chart-swatch-edge","context":"--chart-context","area_opacity":"--chart-area-opacity"}},"number":["--chart-area-opacity"]};
         const root = document.documentElement;
+        // Every storage access guarded: on an opaque origin even touching `localStorage` throws.
+        const raw = (k) => {
+          try {
+            return localStorage.getItem(k);
+          } catch {
+            return null;
+          }
+        };
         const read = (k) => {
           try {
-            return JSON.parse(localStorage.getItem(k));
+            return JSON.parse(raw(k));
           } catch {
             return null;
           }
@@ -32,7 +40,7 @@
         // The mode as prefs.ts reads it: a valid legacy folo.theme, else folo.prefs' theme, else dark.
         const prefs = isObj(read('folo.prefs')) ? read('folo.prefs') : {};
         const modes = ['dark', 'light', 'system'];
-        const legacy = localStorage.getItem('folo.theme');
+        const legacy = raw('folo.theme');
         const pref = modes.includes(legacy) ? legacy : modes.includes(prefs.theme) ? prefs.theme : 'dark';
         const mode = (pref === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : pref === 'dark') ? 'dark' : 'light';
         // A custom theme file as themes.ts checks it (design/THEMES.md, Custom themes); true when it passes.

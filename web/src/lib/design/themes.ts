@@ -5,6 +5,9 @@
 // the same before any of this has loaded (its rules are tested against these, firstPaint.test.ts). `readThemeFile` is
 // the one impure part: it reads a picked File (Blob API only).
 
+// The JSON Desktop's serde_json refuses and JSON.parse accepts (depth, lone surrogate escapes, numbers out of range),
+// shared with design/contrast.mjs so the two JS readers can't drift.
+import { jsonProblem } from '../../../../design/json-scan.mjs';
 import { colorVars, themeIds, themes as builtins, type BuiltinTheme, type Palette, type ThemeId } from './tokens';
 
 export type Mode = 'dark' | 'light';
@@ -52,8 +55,6 @@ export const TOO_LARGE = '(file): larger than 1 MB; not a theme';
 export const NOT_UTF8 = '(file): not UTF-8 text';
 /** Strict UTF-8: invalid bytes are an error, not U+FFFD; a byte order mark is left for `parseThemeBytes` to strip once. */
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-/** A lone surrogate (a `\uD800` escape with no pair): in u mode only an unpaired one is a code point of category Cs. */
-const LONE_SURROGATE = /\p{Cs}/u;
 
 /** Trims Unicode white space (the White_Space property, as Rust's `str::trim`; not String.prototype.trim's set). */
 const trim = (s: string) => s.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
@@ -184,27 +185,22 @@ function check(raw: unknown): CustomThemeFile {
   return out;
 }
 
-/** True when a string anywhere in a parsed JSON value, an object key included, holds a lone surrogate. */
-function hasLoneSurrogate(v: unknown): boolean {
-  if (typeof v === 'string') return LONE_SURROGATE.test(v);
-  if (Array.isArray(v)) return v.some(hasLoneSurrogate);
-  if (isObj(v)) return Object.entries(v).some(([k, x]) => LONE_SURROGATE.test(k) || hasLoneSurrogate(x));
-  return false;
-}
-
 /**
  * Parses and checks a file's text (decoded, its byte order mark gone: a U+FEFF still at the start is not JSON); a file
- * that is not JSON says so. A lone surrogate escape in any string, a key too, is not JSON either: serde_json (Desktop)
- * refuses it while parsing, where JSON.parse would accept it.
+ * that is not JSON says so. So does one Desktop's serde_json refuses while parsing where JSON.parse would accept it
+ * (design/json-scan.mjs, checked first): nesting past serde_json's limit, a lone surrogate escape in any string (a key
+ * too, or a member a later duplicate replaces), a number out of a double's range. Duplicate members are otherwise
+ * allowed, the last one winning, as in serde_json.
  */
 export function parseThemeFile(text: string): { ok: true; theme: CustomThemeFile } | { ok: false; error: string } {
+  const problem = jsonProblem(text);
+  if (problem) return { ok: false, error: `(file): not valid JSON (${problem})` };
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch (e) {
     return { ok: false, error: `(file): not valid JSON (${(e as Error).message})` };
   }
-  if (hasLoneSurrogate(raw)) return { ok: false, error: '(file): not valid JSON (a lone surrogate in a string)' };
   return checkCustomTheme(raw);
 }
 
@@ -228,19 +224,28 @@ export type ParsedFile = { file: string; ok: true; theme: CustomThemeFile } | { 
 
 /**
  * Reads one picked file and checks it (`parseThemeBytes`). One over THEME_FILE_MAX is refused by its size, unread, and
- * the limit holds on what is read too (a file that grew after it was picked).
+ * the limit holds on what is read too (a file that grew after it was picked). It never rejects: anything that throws
+ * while one file is read or checked is that file's error, so the rest of a pick still goes ahead.
  */
 export async function readThemeFile(f: File): Promise<ParsedFile> {
-  if (f.size > THEME_FILE_MAX) return { file: f.name, ok: false, error: TOO_LARGE };
+  const file = f.name;
   let bytes: Uint8Array;
   try {
+    if (f.size > THEME_FILE_MAX) return { file, ok: false, error: TOO_LARGE };
     bytes = new Uint8Array(await f.arrayBuffer());
   } catch (e) {
-    return { file: f.name, ok: false, error: `(file): couldn't read (${(e as Error).message})` };
+    return { file, ok: false, error: `(file): couldn't read (${messageOf(e)})` };
   }
-  if (bytes.length > THEME_FILE_MAX) return { file: f.name, ok: false, error: TOO_LARGE };
-  return { file: f.name, ...parseThemeBytes(bytes) };
+  if (bytes.length > THEME_FILE_MAX) return { file, ok: false, error: TOO_LARGE };
+  try {
+    return { file, ...parseThemeBytes(bytes) };
+  } catch (e) {
+    return { file, ok: false, error: `(file): couldn't check (${messageOf(e)})` };
+  }
 }
+
+/** What a thrown value says (an Error's message; anything else as text). */
+const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Every leaf of a (partial) palette as [token path, value], arrays by index (`chart.series.0`). */
 function leaves(color: Record<string, unknown>, prefix = ''): [string, unknown][] {

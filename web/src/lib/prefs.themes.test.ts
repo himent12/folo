@@ -168,6 +168,38 @@ describe('theme preferences', () => {
       expect([ids(p), p.activeTheme.id]).toEqual([['bbb'], 'dark']);
     });
 
+    it('localStorage itself throwing (an opaque origin): Studio starts, and an import lasts for the tab', async () => {
+      const own = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+      Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        get() {
+          throw new DOMException('denied', 'SecurityError');
+        },
+      });
+      try {
+        expect(() => typeof localStorage).toThrow('denied');
+        // Startup: the modules that read storage as they load, loaded afresh under the throwing getter.
+        vi.resetModules();
+        const { prefs } = await import('./prefs');
+        const { keyPrefs } = await import('./ui/keyPrefs');
+        expect([prefs.theme, prefs.darkTheme, prefs.customThemes, keyPrefs.singleKeys]).toEqual(['dark', 'dark', [], true]);
+        // A session-only import: installed, chosen, shown; saving any preference fails quietly.
+        expect(prefs.installThemes([theme('aaa')])).toEqual([{ file: 'aaa.json', ok: true, id: 'aaa', name: 'AAA', replaced: false }]);
+        expect([prefs.customThemes.map((t) => t.id), prefs.themesUnsaved]).toEqual([['aaa'], true]);
+        expect(prefs.useTheme('aaa')).toBe(true);
+        expect(prefs.activeTheme.id).toBe('aaa');
+        prefs.theme = 'light';
+        expect(prefs.resolvedTheme).toBe('light');
+        window.dispatchEvent(new StorageEvent('storage', { key: THEMES_KEY }));
+        expect(prefs.customThemes.map((t) => t.id)).toEqual(['aaa']);
+      } finally {
+        if (own) Object.defineProperty(globalThis, 'localStorage', own);
+        else delete (globalThis as { localStorage?: Storage }).localStorage;
+        vi.resetModules();
+      }
+      expect(localStorage.getItem(THEMES_KEY)).toBeNull();
+    });
+
     it('reads and writes both throwing: the same, then reconciled over what storage holds once it is back', () => {
       realStorage.setItem(THEMES_KEY, JSON.stringify([{ ...night, id: 'old', name: 'Old' }]));
       let blocked = false;

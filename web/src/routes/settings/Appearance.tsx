@@ -48,7 +48,8 @@ function themeFacts(t: Theme): string[] {
 /**
  * Reads picked files one at a time, in the order picked, and checks each as soon as it is read (`readThemeFile`: one
  * over 1 MiB is refused by its size, unread): only its result is kept, so a large pick never holds more than one
- * file's bytes and text, and the next file is not read before the last one's result is out.
+ * file's bytes and text, and the next file is not read before the last one's result is out. Anything that goes wrong
+ * with one file (unreadable, not JSON, nested too deep) is that file's result; the rest of the pick goes on.
  */
 export async function* readPicked(files: readonly File[]): AsyncGenerator<ParsedFile> {
   for (const f of files) yield await readThemeFile(f);
@@ -82,7 +83,13 @@ export default function Appearance() {
     const files = [...(input?.files ?? [])];
     if (input) input.value = '';
     if (!files.length) return;
-    results.set(await importPicked(files));
+    try {
+      results.set(await importPicked(files));
+    } catch (e) {
+      // Each file's own problem is its result already (readThemeFile never rejects); this is the install itself.
+      const why = e instanceof Error ? e.message : String(e);
+      results.set(files.map((f) => ({ file: f.name, ok: false, error: `(file): couldn't import (${why})` })));
+    }
   }
 
   const slot = (m: Mode) => {

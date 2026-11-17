@@ -7,7 +7,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { builtIns, builtInPalette, validateTheme, validateCase, checkTheme, caseBytes, readThemeFile, sameError, THEME_FILE_MAX } from './contrast.mjs';
+import { existsSync, openSync, closeSync } from 'node:fs';
+import { builtIns, builtInPalette, validateTheme, validateCase, checkTheme, caseBytes, readThemeFile, readAtMost, sameError, THEME_FILE_MAX } from './contrast.mjs';
+import { jsonProblem, JSON_MAX_DEPTH } from './json-scan.mjs';
 
 const read = (name) => JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'));
 const tokens = read('./tokens.json');
@@ -129,4 +131,75 @@ test('--theme: exit 0 on a passing file, 1 with the path on an invalid or failin
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('json-scan: the JSON serde_json refuses and JSON.parse accepts, without recursion', () => {
+  const header = '{"folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "$c": ';
+  const nest = (n, open = '[', close = ']') => `${header}${open.repeat(n)}${close.repeat(n)}}`;
+  // The top-level object counts: JSON_MAX_DEPTH - 1 arrays inside it is the limit, one more is past it.
+  assert.equal(JSON_MAX_DEPTH, 127);
+  assert.equal(jsonProblem(nest(JSON_MAX_DEPTH - 1)), undefined);
+  assert.equal(jsonProblem(nest(JSON_MAX_DEPTH)), 'nested too deep');
+  assert.equal(jsonProblem(`${header}${'{"a":'.repeat(JSON_MAX_DEPTH - 2)}[]${'}'.repeat(JSON_MAX_DEPTH - 2)}}`), undefined);
+  assert.equal(jsonProblem(`${header}${'{"a":'.repeat(JSON_MAX_DEPTH - 1)}[]${'}'.repeat(JSON_MAX_DEPTH - 1)}}`), 'nested too deep');
+  // Brackets inside strings are not nesting; siblings don't add up.
+  assert.equal(jsonProblem(`${header}"${'['.repeat(500)}"}`), undefined);
+  assert.equal(jsonProblem(`${header}[${'[],'.repeat(500)}[]]}`), undefined);
+  // About 1 MiB of nesting: refused, no stack overflow.
+  assert.equal(jsonProblem(nest(500_000)), 'nested too deep');
+  // Surrogate escapes, checked on the raw text (a duplicate member can't hide one); keys and values alike.
+  const lone = 'a lone surrogate in a string';
+  // The escapes as the file holds them (String.raw: a backslash, then u and four hex digits).
+  for (const s of [String.raw`\uD800`, String.raw`\uDC00`, String.raw`\uDE00\uD83D`, String.raw`\uD83D\uD83D`, String.raw`\uD83Dx`, String.raw`\uD83D\n`, String.raw`A\uD800`]) {
+    assert.equal(jsonProblem(`{"name": "${s}", "name": "ok"}`), lone, s);
+    assert.equal(jsonProblem(`{"${s}": 1}`), lone, `key ${s}`);
+  }
+  assert.equal(jsonProblem(String.raw`{"name": "😀 😀 \"x\" A"}`), undefined, 'escaped pairs, either case');
+  assert.equal(jsonProblem(String.raw`{"name": "\\uD800"}`), undefined, 'an escaped backslash, then text');
+  assert.equal(jsonProblem('{"name": "\uD800"}'), lone, 'a raw lone surrogate (text that never was UTF-8)');
+  assert.equal(jsonProblem('{"name": "😀"}'), undefined, 'a raw pair');
+  // Numbers out of a double's range (JSON.parse reads Infinity); tiny ones read as 0 in both.
+  for (const n of ['1e400', '-1e400', '1E309', `1${'0'.repeat(400)}`, '-2.5e+500']) assert.equal(jsonProblem(`{"a": ${n}}`), 'a number out of range', n);
+  for (const n of ['1e-400', '1.7976931348623157e308', '-0', '0e999', '123456789012345678901234567890']) assert.equal(jsonProblem(`{"a": [${n}]}`), undefined, n);
+  // Not JSON at all: left to JSON.parse.
+  assert.equal(jsonProblem(String.raw`{"a": "\uZZZZ"}`), undefined);
+  assert.equal(jsonProblem('{"a": "open'), undefined);
+});
+
+test('readThemeFile: a deeply nested file is an error naming the file, not a crash', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'folo-deep-'));
+  try {
+    const file = join(dir, 'deep.json');
+    const n = 500_000;
+    writeFileSync(file, `{"folo_theme": 1, "id": "deep", "name": "Deep", "mode": "dark", "$c": ${'['.repeat(n)}${']'.repeat(n)}}`);
+    assert.deepEqual(readThemeFile(file), { error: '(file): not valid JSON (nested too deep)' });
+    const script = fileURLToPath(new URL('./contrast.mjs', import.meta.url));
+    const r = spawnSync(process.execPath, [script, '--theme', file], { encoding: 'utf8' });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /deep\.json: \(file\): not valid JSON \(nested too deep\)\n$/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('readThemeFile: the read itself stops one byte past the limit', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'folo-cap-'));
+  try {
+    const file = join(dir, 'f.bin');
+    writeFileSync(file, Buffer.alloc(100, 0x20));
+    const fd = openSync(file, 'r');
+    try {
+      assert.equal(readAtMost(fd, 10).length, 10);
+      assert.equal(readAtMost(fd, 1000).length, 90);
+    } finally {
+      closeSync(fd);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A file whose size says 0 but whose read never ends (Linux's /dev/zero): the size check passes, the capped read refuses.
+test('readThemeFile: a file that reads past its stated size is refused at the limit', { skip: !existsSync('/dev/zero') && 'no /dev/zero here' }, () => {
+  assert.deepEqual(readThemeFile('/dev/zero'), { error: '(file): larger than 1 MB; not a theme' });
 });

@@ -188,6 +188,38 @@ describe('importing large picks and failed saves', () => {
     expect(prefs.customThemes.map((t) => t.name)).toEqual(['Second']);
   });
 
+  it('keeps one bad file to its own result: a pick of valid, deeply nested, unreadable, valid installs both valid ones', async () => {
+    const n = 400_000;
+    const deep = `{"folo_theme": 1, "id": "deep", "name": "Deep", "mode": "dark", "$c": ${'['.repeat(n)}${']'.repeat(n)}}`;
+    // Even its size can't be had (a file gone since it was picked).
+    const gone = {
+      name: 'gone.json',
+      get size(): number {
+        throw new Error('gone');
+      },
+      arrayBuffer: () => Promise.reject(new Error('never read')),
+    } as unknown as File;
+    const dusk = { ...night, id: 'dusk', name: 'Dusk' };
+    const results = await importPicked([file('a.json', 10, JSON.stringify(night)), file('deep.json', deep.length, deep), gone, file('b.json', 10, JSON.stringify(dusk))]);
+    expect(results.map(resultText)).toEqual(['Installed Night (a.json)', 'deep.json: not valid JSON (nested too deep)', "gone.json: couldn't read (gone)", 'Installed Dusk (b.json)']);
+    expect(prefs.customThemes.map((t) => t.id)).toEqual(['night', 'dusk']);
+  });
+
+  it('says per file when installing a pick fails, and the next pick still works', async () => {
+    const spy = vi.spyOn(prefs, 'installThemes').mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+    try {
+      show();
+      await importFiles([['night.json', JSON.stringify(night)]]);
+      expect(target.querySelector('#appearance .result')?.textContent).toBe("night.json: couldn't import (boom)");
+      await importFiles([['dusk.json', JSON.stringify({ ...night, id: 'dusk', name: 'Dusk' })]]);
+      expect(target.querySelector('#appearance .result')?.textContent).toBe('Installed Dusk (dusk.json)');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("says when the browser couldn't save the custom themes, and stops once a save works", async () => {
     let refuse = true;
     vi.stubGlobal('localStorage', refusing(localStorage, 'folo.themes', () => refuse));

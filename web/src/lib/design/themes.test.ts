@@ -67,6 +67,18 @@ describe('custom theme files (design/theme-cases.json)', () => {
     const text = JSON.stringify(file({ id: 'edge' }));
     expect(await readThemeFile(new File([text.padEnd(1 << 20, ' ')], 'edge.json'))).toMatchObject({ file: 'edge.json', ok: true, theme: { id: 'edge' } });
   });
+
+  it('refuses a file nested about 1 MiB deep as not JSON, without overflowing the stack (the scan is iterative)', async () => {
+    const n = (1 << 19) - 100;
+    const deep = `{"folo_theme": 1, "id": "deep", "name": "Deep", "mode": "dark", "$c": ${'['.repeat(n)}${']'.repeat(n)}}`;
+    expect(deep.length).toBeLessThanOrEqual(1 << 20);
+    expect(await readThemeFile(new File([deep], 'deep.json'))).toEqual({ file: 'deep.json', ok: false, error: '(file): not valid JSON (nested too deep)' });
+  });
+
+  it("turns anything thrown while one file is read into that file's error", async () => {
+    const throwing = (what: string) => ({ name: `${what}.json`, size: 10, arrayBuffer: () => Promise.reject(new Error(what)) }) as unknown as File;
+    expect(await readThemeFile(throwing('denied'))).toEqual({ file: 'denied.json', ok: false, error: "(file): couldn't read (denied)" });
+  });
 });
 
 describe('resolution', () => {
