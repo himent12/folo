@@ -105,15 +105,15 @@ fn err(msg: impl Into<String>) -> Error {
     Error::InvalidArgument { op: "folo_gpu::detect", msg: msg.into() }
 }
 
-fn gpu(e: crate::GpuError) -> Error {
+pub(crate) fn gpu(e: crate::GpuError) -> Error {
     Error::Backend { backend: BACKEND_NAME, msg: e.to_string() }
 }
 
 /// A tensor with its elements dense from byte 0 and its buffer.
-type DenseInput = (Tensor, wgpu::Buffer);
+pub(crate) type DenseInput = (Tensor, wgpu::Buffer);
 
 /// A tensor with its elements dense from byte 0 (a copy when needed) and its buffer.
-fn dense(t: &Tensor) -> Result<DenseInput> {
+pub(crate) fn dense(t: &Tensor) -> Result<DenseInput> {
     let t = t.detach();
     let t = if dense_buffer(&t).is_some() {
         t
@@ -127,13 +127,13 @@ fn dense(t: &Tensor) -> Result<DenseInput> {
     Ok((t, b))
 }
 
-struct Buffers {
-    ctx: GpuContext,
-    device: Device,
+pub(crate) struct Buffers {
+    pub(crate) ctx: GpuContext,
+    pub(crate) device: Device,
 }
 
 impl Buffers {
-    fn alloc(&self, dtype: DType, shape: &[usize], zero: bool) -> Result<(Tensor, wgpu::Buffer)> {
+    pub(crate) fn alloc(&self, dtype: DType, shape: &[usize], zero: bool) -> Result<(Tensor, wgpu::Buffer)> {
         let n: usize = shape.iter().product();
         let bytes = (n * dtype.size_in_bytes()).max(4) as u64;
         let buf: GpuBuffer = self.ctx.alloc(bytes).map_err(gpu)?;

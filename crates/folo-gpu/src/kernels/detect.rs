@@ -52,7 +52,7 @@ pub const MAX_TOPK: usize = 64;
 const BCE_CHUNK: usize = 1024;
 
 /// `4 / π²` as the CPU CIoU computes it in f32.
-fn v_k() -> f32 {
+pub(crate) fn v_k() -> f32 {
     4.0 / (std::f32::consts::PI * std::f32::consts::PI)
 }
 

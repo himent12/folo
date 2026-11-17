@@ -16,6 +16,7 @@
 //! sums of `terms.rs`, so the term is reproducible bit for bit on the CPU and composed only of tensor ops that every
 //! backend has (softplus, log-softmax along a dim, elementwise arithmetic, row sums).
 
+mod fused;
 #[cfg(test)]
 mod tests;
 
@@ -24,6 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use super::invalid;
 use super::terms::sum_fixed_order;
+
+pub use fused::{distill_loss_fused, fused_supported};
 
 /// `TrainConfig.distill` (docs/MODEL.md §8.9): the teacher and the weights of the two distillation terms.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

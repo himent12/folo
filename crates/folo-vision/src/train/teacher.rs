@@ -1,6 +1,7 @@
 //! The frozen teacher of a distillation run (`TrainConfig.distill`, docs/MODEL.md §8.9): loaded once when the
 //! trainer is built, fused, in eval mode on the trainer's device (`F16` on a GPU under mixed precision, else `F32`),
-//! and run under `no_grad` on each training batch to build the [`DistillTargets`] of that batch.
+//! and run under `no_grad` on each training batch: its raw outputs feed the fused distillation kernel on a GPU, the
+//! [`DistillTargets`] of that batch elsewhere.
 
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,10 @@ use folo_nn::Module;
 use folo_nn::io::ModelFile;
 
 use crate::error::{Error, Result};
-use crate::loss::distill::{DistillConfig, DistillTargets, TeacherView};
+use crate::loss::distill::{
+    DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss, distill_loss_fused,
+    fused_supported,
+};
 use crate::model::{FoloModel, HeadMode};
 
 /// The file `distill.teacher` names: a `.folo` file, or the cached file of a published name (`folo weights pull`).
@@ -127,11 +131,41 @@ impl Teacher {
         Ok((Teacher { model, dtype, cfg: cfg.clone() }, logs))
     }
 
-    /// The targets of the batch `x` (`[B, 3, H, W]`, the student's input), without autograd: one teacher forward.
-    pub(super) fn targets(&self, x: &Tensor) -> Result<DistillTargets> {
+    /// The teacher's side of the batch `x` (`[B, 3, H, W]`, the student's input), without autograd: one teacher
+    /// forward, kept raw where the fused kernel runs ([`fused_supported`]), else turned into [`DistillTargets`].
+    pub(super) fn batch(&self, x: &Tensor) -> Result<TeacherBatch> {
         let _g = no_grad();
         let out = self.model.forward_head(&x.to_dtype(self.dtype)?, HeadMode::O2m)?;
+        if fused_supported(&out.cls_raw, out.reg_max) {
+            return Ok(TeacherBatch::Raw { box_raw: out.box_raw, cls_raw: out.cls_raw });
+        }
         let view = TeacherView::new(&out.box_raw, &out.cls_raw, out.reg_max, self.cfg.temperature)?;
-        Ok(DistillTargets::new(&view)?)
+        Ok(TeacherBatch::Targets(DistillTargets::new(&view)?))
+    }
+}
+
+/// One batch's teacher outputs, as [`Teacher::batch`] gives them.
+pub(super) enum TeacherBatch {
+    /// The raw head outputs (`F16` under mixed precision), for [`distill_loss_fused`].
+    Raw { box_raw: Tensor, cls_raw: Tensor },
+    /// The constants of [`distill_loss`].
+    Targets(DistillTargets),
+}
+
+impl TeacherBatch {
+    /// The distillation term of the student's f32 one-to-many outputs against this batch (docs/MODEL.md §8.9).
+    pub(super) fn loss(
+        &self,
+        box_raw: &Tensor,
+        cls_raw: &Tensor,
+        target_score_sum: f32,
+        cfg: &DistillConfig,
+    ) -> Result<DistillLoss> {
+        Ok(match self {
+            TeacherBatch::Raw { box_raw: tb, cls_raw: tc } => {
+                distill_loss_fused(box_raw, cls_raw, tb, tc, target_score_sum, cfg)?
+            }
+            TeacherBatch::Targets(t) => distill_loss(box_raw, cls_raw, t, target_score_sum, cfg)?,
+        })
     }
 }

@@ -45,6 +45,7 @@
 pub mod backend;
 pub mod context;
 pub mod detect;
+pub mod distill;
 pub mod dtype;
 pub mod error;
 mod kernel_list;

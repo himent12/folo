@@ -986,8 +986,30 @@ its finite batches and over their first and last quarter; for an `o2o` student t
 loss object do not change. A batch whose distillation terms are not finite is a non-finite batch (§8.3).
 
 **Mixed precision.** The teacher runs in f16 (its own fused f16 weights, f16 input; no autocast needed) and its
-outputs are cast to f32 before the sigmoid and softmax; the targets and the term are f32, computed outside autocast
-on the f32 copies of the student's head (§8.8).
+outputs are read as f32 (exactly) before the sigmoid and softmax; the term is f32, computed outside autocast on the
+f32 copies of the student's head (§8.8).
+
+**On a GPU** the class and DFL terms are one fused folo-gpu op (`folo_gpu::distill`, `loss/distill/fused.rs`): two
+kernels read the student's and the teacher's raw heads (the class kernel the class heads; the DFL kernel the box
+heads and, for `q`, the teacher's class head), form the elements above and reduce them in a fixed order, a third
+combines the partial sums, and the backward is two kernels writing the closed-form gradients; no teacher
+probability tensor is formed.
+`H(p~)` and `ln s~` come from the teacher's logits (`p~ · softplus(−y) + (1 − p~) · softplus(y)`, log-sum-exp
+with the bins' maximum subtracted before dividing by `T`), not from logarithms of rounded probabilities, so a GPU
+run agrees with the tensor path to float rounding, not bit for bit (`tests/gpu_distill.rs` checks values and
+gradients to 1e-5 relative; the measured differences are under 1e-6). For teacher box logits near 2^24 with
+`T` ≠ 1 the tensor path's own rounding of `z / T` dominates and the fused value is the closer one (the test compares
+with the same logits without the offset). The term is non-finite (NaN, so the trainer skips the batch) for the same
+inputs as the tensor path's: a student logit, or a student box logit over `T`, that is not finite, a NaN teacher
+logit, a teacher box logit over `T` of +inf, or a side whose teacher box logits over `T` are all −inf; a teacher
+class logit of ±inf or a box logit over `T` of −inf gives the limit (`p~` 0 or 1, `s~` 0). The student's
+log-softmax subtracts its maximum after dividing by `T`, as the tensor path, so it overflows where the tensor path
+does; a term whose value itself comes near f32's largest value can still overflow in one path's sums and not the
+other's. f16 teacher outputs are decoded bit by bit (infinities included on every backend). Shapes the kernels do
+not take (`reg_max` outside 2-32, more than about 10^9 elements) run the tensor path. The CPU runs the tensor path above.
+
+A class-wise rank distillation term (the student's class ranking against the teacher's) was tried in hill-climb 5
+and lost: +0.0002 COCO AP, inside its kill bar (docs/notes/hill/r5-accuracy.md).
 
 ## 9. Inference
 
