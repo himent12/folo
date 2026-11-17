@@ -149,7 +149,7 @@ impl Int8<'_> {
         let (oh, ow) = qc.out_hw(h, w);
         let res = res.map(|r| (r.view(), r.grid));
         q8::conv(&views, n, h, w, &qc, res, out);
-        Ok([n, qc.o, oh, ow])
+        Ok([n, qc.out_channels(), oh, ow])
     }
 }
 

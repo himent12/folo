@@ -14,21 +14,23 @@ use super::{C4, Grid, SLACK, recycle, words};
 
 /// A conv's weights, quantised and packed for the int8 kernel: symmetric s8 per output channel after each
 /// input channel's activation scale is folded into its column, plus the zero-point correction and the `f32`
-/// bias of the epilogue.
+/// bias of the epilogue. Its geometry is fixed by [`QConv::new`] (the packed weights depend on it).
 #[derive(Debug, Clone)]
 pub struct QConv {
     /// Output channels (a multiple of 4).
-    pub o: usize,
+    pub(super) o: usize,
     /// Input channels (a multiple of 4).
-    pub c: usize,
+    pub(super) c: usize,
     /// Kernel size `k × k`.
-    pub k: usize,
+    pub(super) k: usize,
     /// Stride.
-    pub stride: usize,
+    pub(super) stride: usize,
     /// Zero padding on each side.
-    pub pad: usize,
+    pub(super) pad: usize,
     /// SiLU in the epilogue (else identity).
-    pub silu: bool,
+    pub(super) silu: bool,
+    /// The zero point of each input channel, which `corr` and the padding assume.
+    zeros: Vec<u8>,
     /// K steps: `c / 4 · k · k`.
     ks: usize,
     /// `[o / 4][ks][MR]` words of four s8 weights (input channels `4g..4g+4` of tap `(ky, kx)`, step
@@ -40,6 +42,10 @@ pub struct QConv {
     scale: Vec<f32>,
     bias: Vec<f32>,
 }
+
+/// Longest reduction (`c · k²`) of a [`QConv`]: `|Σ q · x|` and `|Σ q · zero|` are each at most
+/// `127 · 255 · K`, so their difference stays inside `i32` for `K ≤ 2¹⁵`.
+pub const MAX_REDUCTION: usize = 1 << 15;
 
 /// Symmetric per-output-channel s8 weights of `w` (`[o, K]` row-major): `w[r, k] ≈ scale[r] · q[r, k]`, `q` in
 /// `-127..=127` (`round(w / scale)`, ties away from zero). Returns `(q, scale)`.
@@ -61,7 +67,7 @@ pub fn quantize_weights(w: &[f32], o: usize) -> (Vec<i8>, Vec<f32>) {
 
 impl QConv {
     /// Quantise and pack the `[o, c, k, k]` weights `w` with `bias` for inputs whose channel `i` is on grid
-    /// `grids[i]`. `o` and `c` must be multiples of 4.
+    /// `grids[i]`. `o` and `c` must be multiples of 4, and `c · k²` at most [`MAX_REDUCTION`] (the `i32` sums).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         w: &[f32],
@@ -76,6 +82,7 @@ impl QConv {
         assert_eq!(w.len(), o * c * k * k, "QConv: weight length");
         assert_eq!(grids.len(), c, "QConv: one grid per input channel");
         assert_eq!(bias.len(), o, "QConv: bias length");
+        assert!(c * k * k <= MAX_REDUCTION, "QConv: c · k² = {} is over {MAX_REDUCTION}", c * k * k);
         let taps = k * k;
         let folded: Vec<f32> = w.iter().enumerate().map(|(i, &v)| v * grids[(i / taps) % c].scale).collect();
         let (q, scale) = quantize_weights(&folded, o);
@@ -92,7 +99,13 @@ impl QConv {
                 }
             }
         }
-        QConv { o, c, k, stride, pad, silu, ks, a, corr, scale, bias: bias.to_vec() }
+        let zeros = grids.iter().map(|g| g.zero).collect();
+        QConv { o, c, k, stride, pad, silu, zeros, ks, a, corr, scale, bias: bias.to_vec() }
+    }
+
+    /// Output channels.
+    pub fn out_channels(&self) -> usize {
+        self.o
     }
 
     /// Output size of an `h × w` input.
@@ -286,8 +299,15 @@ pub fn conv(
     out: QOut<'_>,
 ) {
     assert_eq!(xs.iter().map(|x| x.c).sum::<usize>(), cv.c, "q8::conv: input channels");
+    let mut ch = 0;
     for x in xs {
         x.check(n, h * w);
+        // The correction and the padding use the zero points the weights were packed with.
+        assert!(
+            cv.zeros[ch..ch + x.c].iter().all(|&z| z == x.zero),
+            "q8::conv: input zero point differs from the weights'"
+        );
+        ch += x.c;
     }
     let (oh, ow) = cv.out_hw(h, w);
     let ohw = oh * ow;

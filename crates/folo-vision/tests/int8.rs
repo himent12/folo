@@ -114,3 +114,39 @@ fn calibration_rides_in_the_metadata_and_only_fits_its_weights() {
     assert!(e.contains("other weights"), "{e}");
     other.set_int8(Some(Calibration { weights: None, ..cal })).unwrap();
 }
+
+#[test]
+fn calibration_needs_images() {
+    let m = model(11);
+    let e = quant::calibrate(&m, std::iter::empty::<folo_nn::Result<Tensor>>, Method::MinMax)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("at least one image"), "{e}");
+}
+
+#[test]
+fn reloading_weights_repacks_and_an_explicit_precision_turns_int8_off() {
+    use folo_nn::Module;
+    let (mut m, other) = (model(13), model(15));
+    let x = input(1, 64, 64, 16);
+    let cal = Calibration { weights: None, ..calibrated(&m, &x) };
+    m.set_int8(Some(cal.clone())).unwrap();
+    let _g = no_grad();
+    m.forward(&x).unwrap(); // packs the int8 convs of these weights
+    // Load `other`'s weights in place: the forward must use them, not the convs packed before.
+    let mut bytes = Vec::new();
+    let tensors = other.named_tensors().into_iter().map(|t| (t.name, t.tensor)).collect();
+    folo_nn::io::write_export(&mut bytes, &other.metadata().unwrap(), tensors, folo_nn::io::FloatDType::F32)
+        .unwrap();
+    let file = folo_nn::io::ModelFile::from_bytes(bytes).unwrap();
+    m.load(&file, folo_nn::io::LoadOptions::strict(folo_nn::io::Purpose::Inference)).unwrap();
+    let mut fresh = other;
+    fresh.set_int8(Some(cal)).unwrap();
+    let (a, b) = (m.forward(&x).unwrap().box_raw, fresh.forward(&x).unwrap().box_raw);
+    let (a, b) = (a.to_vec::<f32>().unwrap(), b.to_vec::<f32>().unwrap());
+    assert!(a.iter().zip(&b).all(|(u, v)| u.to_bits() == v.to_bits()), "stale int8 convs after load");
+    // Predictor::with_precision runs the whole model at that precision.
+    let cfg = folo_vision::PredictConfig::default();
+    let p = folo_vision::Predictor::with_precision(m, cfg, folo_vision::Precision::F32).unwrap();
+    assert!(p.model().int8().is_none());
+}

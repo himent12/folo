@@ -283,12 +283,26 @@ where
     I: Iterator<Item = Result<Tensor>>,
 {
     let mut c = Calibrator::new();
+    let mut seen = [0usize; 2];
     for x in batches() {
-        c.observe(model, &x?)?;
+        let x = x?;
+        seen[0] += x.dims()[0];
+        c.observe(model, &x)?;
+    }
+    if seen[0] == 0 {
+        return Err(folo_nn::Error::Invalid("int8 calibration needs at least one image".into()));
     }
     c.next_pass();
     for x in batches() {
-        c.observe(model, &x?)?;
+        let x = x?;
+        seen[1] += x.dims()[0];
+        c.observe(model, &x)?;
+    }
+    if seen[1] != seen[0] {
+        return Err(folo_nn::Error::Invalid(format!(
+            "int8 calibration: the second pass saw {} images, the first {}",
+            seen[1], seen[0]
+        )));
     }
     let mut cal = c.finish(method);
     cal.weights = Some(super::fingerprint(model)?);

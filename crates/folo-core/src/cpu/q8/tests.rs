@@ -374,3 +374,23 @@ fn grid_round_trips_and_pools_are_exact() {
         }
     }
 }
+
+#[test]
+#[should_panic(expected = "zero point")]
+fn conv_refuses_inputs_on_other_zero_points() {
+    // Packed for zero points [1, 2, 3, 4]: one C4 part cannot carry them (its padding and correction use one).
+    let grids: Vec<Grid> = (1..=4).map(|z| Grid { scale: 0.05, zero: z }).collect();
+    let cv = QConv::new(&[0.1; 4 * 4 * 9], &[0.0; 4], (4, 4, 3), 1, 1, false, &grids);
+    let x = codes(&mut Rng::seed(1), 9);
+    let mut out = alloc(1, 4, 9);
+    let view = C4 { data: &x, offset: 0, img_stride: 9, c: 4, zero: 1 };
+    conv(&[view], 1, 3, 3, &cv, None, QOut::U8 { data: &mut out, grid: Grid { scale: 0.1, zero: 0 } });
+}
+
+#[test]
+#[should_panic(expected = "c · k²")]
+fn qconv_refuses_reductions_that_overflow_i32() {
+    let c = 4 * 1024;
+    let grids = vec![Grid { scale: 1.0, zero: 255 }; c];
+    QConv::new(&vec![1.0; 4 * c * 9], &[0.0; 4], (4, c, 3), 1, 1, false, &grids);
+}

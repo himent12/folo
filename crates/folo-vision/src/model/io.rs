@@ -112,6 +112,10 @@ impl FoloModel {
         if opts.classes.is_none() {
             opts.classes = Some(self.classes.clone());
         }
+        // Packed int8 convs were made from the old tensors; the calibration stays (FoloModel::set_int8).
+        if let Some(p) = &self.int8 {
+            p.clear();
+        }
         file.load(self, &opts)
     }
 

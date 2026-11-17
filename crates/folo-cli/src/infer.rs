@@ -87,7 +87,7 @@ fn open_model(
 /// [`open_model`] with `--precision int8`: on the CPU (`auto` picks it; a GPU is a usage error), in f32 with the
 /// int8 plan of the calibration `folo quantize` stored in the file.
 fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Result<FoloModel, CliError> {
-    if !matches!(device, "auto" | "cpu") {
+    if !matches!(device.trim().to_ascii_lowercase().as_str(), "auto" | "" | "cpu") {
         return Err(CliError::new(
             ExitCode::Usage,
             "usage",
