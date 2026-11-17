@@ -39,10 +39,12 @@ the fused `f32` `conv2d_act` in the same process, 3 alternated rounds; median ms
 | s4 (v5: task plan by input size) | 28 | 18–23 | 0.752 → 0.428, **1.76×** | 0.618 → 0.293, **2.11×** | 14.44 → 8.42, 1.71× |
 | s4, identity | 28 | 17 | 2.05× | 1.84× | 1.90× |
 | s4, one thread | 1 | 12–16 | 1.73× | 1.95× | 1×1 group 1.99×, 3×3 s1 group 2.40× |
-S5_SPEED_ROWS
+| **s5 (final head 7d1d3fdf)** | 28 | 3–4 | 0.324 → 0.178, **1.81×** | 0.450 → 0.237, **1.90×** | 10.93 → 8.28, 1.32× |
+| s5, identity | 28 | 7–13 | 2.21× | 2.37× | 1.86× |
+| s5, one thread | 1 | 10–13 | 1.68× | 1.91× | 1×1 group 1.77×, 3×3 s1 group 1.71× |
 Logs: `logs/session-s3/`, `logs/session-s4/`, `logs/session-s5/` (`q8-*.txt`).
 
-**The 3×3 gate (≥ 1.5×) passes; the 1×1 gate (≥ 2× on 48 → 64 at 160²) does not** (1.59–1.76× with SiLU). That
+**The 3×3 gate (≥ 1.5×) passes; the 1×1 gate (≥ 2× on 48 → 64 at 160²) does not** (1.59–1.81× with SiLU). That
 conv has K = 48, so each 4 × 24 tile does 12 VNNI steps and then an epilogue on 96 outputs: dequantise, SiLU, then
 requantise. With the identity it reaches 2.05–2.42×; the SiLU's `exp` polynomial and its divide are what is left.
 Making the epilogue cheaper without breaking the bit-exact scalar/AVX2 agreement (no `rcpps`, whose bits differ
@@ -58,7 +60,40 @@ tasks write whole planes; otherwise by pixel chunks. In the paired run (load 20�
 re-reads a 1.2 MB input), hence the size switch.
 
 ## End to end (rows 8 and 7)
-TBD
+Row 8 is the 640 × 640 end-to-end CPU latency at batch 1 (docs/BENCHMARKS.md), and row 7 is a 1280 × 720 image
+letterboxed to 640 × 384. Both use trained weights, 16 val2017 images and 28 threads. The int8 side runs the
+`folo quantize` weights. Session `s5` used the final head's binaries (`bin/*-v5.exe`); the pre-review ones are
+`bin/*-v5-prereview.exe`. The machine was quiet (3–4 busy cores) for `s5`'s per-conv part only; another lane's
+work brought it to 10–22 busy cores for the rest.
+
+**A/B against the base binary** (`bin/base-cpu_e2e.exe` at cf65f7a5, f32, against the new binary in int8; 4 rounds
+of 200 calls, order flipped every other round; median of the round medians, range of rounds):
+
+| row | base f32 | int8 | change | load (busy cores) |
+|---|---|---|---|---|
+| 8: 640 × 640 | 14.91 ms (14.24–17.07) | **12.74 ms** (10.69–15.23) | −15% | 10–22 |
+| 7: 1280 × 720 | 12.19 ms (11.62–12.94) | **9.97 ms** (8.20–14.76) | −18% | 10–22 |
+
+**In-process alternation** (`int8_e2e`, 4 rounds × 100 calls a side, the same weights file in f32 and int8):
+
+| model, row | f32 | int8 | ratio | load |
+|---|---|---|---|---|
+| folo-n, 8 | 19.01 ms (14.11–22.28) | 15.00 (10.72–18.23) | 1.27× | 11–12 |
+| folo-n, 7 | 15.65 (14.94–16.85) | 12.00 (10.98–18.13) | 1.30× | 11–12 |
+| folo-s, 8 | 39.25 (39.06–40.36) | **21.56** (21.14–22.27) | **1.82×** | 22 |
+| folo-s, 7 | 23.63 (22.14–31.91) | **12.78** (12.17–14.50) | **1.85×** | 22 |
+
+**`f32` rows unchanged** (new binary's `cpu_e2e` against the base binary, 2 rounds each, load 10–20): row 8 14.12 /
+14.66 ms new against 14.39 / 16.04 base, and row 7 12.28 / 11.49 against 11.74 / 12.41. A tie.
+
+**The folo-n target (row 8 ≤ 10 ms in int8) is not met.** The int8 row 8 median is 12.74 ms under load, and its
+best round was 10.69 ms at 13 busy cores. Most of folo-n's int8 time is outside the int8 convs:
+- the `f32` stem (3 ms of the 13.7 ms walk in `logs/prof-1.txt`);
+- the `f32` attention and head;
+- the quantise and dequantise boundaries;
+- folo-n's many small 1×1 convs, which at 28 threads are no faster in int8 (see "Negative results").
+
+folo-s, whose convs are wider, gains 1.8×.
 
 ## val2017 (final config, read once)
 The shipped flow: `folo quantize` (512 random train2017 images, seed 0, percentile 99.99%, 62 ranges; folo-n
@@ -74,7 +109,7 @@ the CPU, all 5 000 val2017 images, batch 8 (`scripts/val_dump.sh`), B0 pycocotoo
 Both are within the brief's 0.004. The `f32` CPU numbers match the published 0.356 and 0.416.
 
 ## Negative results
-- **The 1×1 speed gate (2× on 48 → 64 at 160²) failed**: 1.59–1.76× with SiLU, 2.05–2.42× with identity. With
+- **The 1×1 speed gate (2× on 48 → 64 at 160²) failed**: 1.59–1.81× with SiLU, 2.05–2.42× with identity. With
   K = 48 the epilogue dominates. The SiLU (`exp` polynomial and a divide) is what is left. `rcpps` would be
   cheaper, but its bits differ between CPU vendors, which would break the scalar = AVX2 guarantee.
 - **The first task plan** (halve pixel blocks until two tasks per thread) made int8 *slower* on 28 threads than on
@@ -91,13 +126,18 @@ Both are within the brief's 0.004. The `f32` CPU numbers match the published 0.3
   `orchestrator-final` held it. Lesson: never `TaskStop` a lock waiter without killing its process tree. `s2`, `s4`
   and the scaling runs ran at 15–28 busy cores out of 28 (other lanes' builds, which do not take the lock). Their
   A/B rounds are unusable (the base binary alone read 15.9–33.8 ms for row 8). Only `s3`'s per-conv part, and
-  `S5_NOTE`, had a quiet start.
+  `s5`'s per-conv part, had a quiet start.
 - **folo-s's int8 val2017 dump took longer than its `f32` one** (213 s against 188 s at batch 8, both under load).
   It is not a speed measurement, but a hint that folo-s's wider convs gain less: see "End to end".
 
 ## Leftovers
 - **A cheaper SiLU in the epilogue** that keeps scalar = AVX2 bit for bit, for example a polynomial
   `1 / (1 + e)` with an exactly specified Newton step. This is the remaining 1×1 gap.
+- **The folo-n row 8 target (≤ 10 ms)** needs more than int8 convs:
+  - an int8 (or cheaper) stem;
+  - fewer quantise and dequantise boundaries around attention;
+  - keeping a conv in `f32` when int8 is slower for its shape (the plan could time both once).
+  The brief's 13.0–13.6 → 10 ms assumed the walk was conv-bound, which folo-n's is not; folo-s's is.
 - **Small 1×1 convs at many threads**: run them on fewer threads (a budget like `gemm_ex`'s), or fuse the
   pointwise convs of a block.
 - **Proposal 2 (exact fusions) was not done.**
