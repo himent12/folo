@@ -88,4 +88,38 @@ with that load (round 1 sync and round 3 deferred lost the loader for stretches)
 
 ### A/B (full COCO)
 
-Pending.
+`folo-base.exe` (main cf65f7a5) against `folo-sync.exe` (this branch), `scripts/ab-sync.sh`: 130 s arms of
+`coco-arms.sh` with `--workers 16`, alternated, 3 rounds per setting inside one GPU-lock hold each, steps 301+ of
+epoch 1.
+
+**Mosaic on** (`logs/sync-mosaic/`):
+
+| arm | mean img/s | non-window median | window-end median (extra) | GPU util | load: CPU total, Defender, folo |
+|---|---|---|---|---|---|
+| b1 main | 212 | 50.6 ms | 67.9 ms (+17.3) | 40% | 80%, 3.1, 7.0 cores |
+| n1 new | 239 | 51.8 ms | 58.2 ms (+6.4) | 46% | 92%, 4.0, 7.4 cores |
+| b2 main | 252 | 50.4 ms | 68.2 ms (+17.8) | 48% | 96%, 4.4, 7.7 cores |
+| n2 new | 353 | 42.0 ms | 50.7 ms (+8.7) | 59% | 99%, 4.6, 10.2 cores |
+| b3 main | 433 | 29.0 ms | 43.5 ms (+14.5) | 75% | 99%, 1.2, 12.5 cores |
+| n3 new | 351 | 29.0 ms | 34.5 ms (+5.5) | 68% | 67%, 1.9, 11.0 cores |
+
+With mosaic on, full COCO at 16 workers is loader-bound on this machine, and the mean img/s does not resolve the
+change: every arm reads the same seed-0 order, so later arms find more of it in the page cache (the base arms rise
+212 → 252 → 433), and other lanes' builds held the CPU at 80-99%. The window-end step is the robust measure: it is
+9.0-10.9 ms shorter per window (round by round: −10.9, −9.1, −9.0 ms), the same saving as the gate prototype.
+
+**Mosaic off** (`--mosaic 0`, `logs/sync-nomosaic/`):
+
+| arm | mean img/s | non-window median | window-end median (extra) | GPU util | load: CPU total, Defender, folo |
+|---|---|---|---|---|---|
+| b1 main | 230 | 27.4 ms | 40.9 ms (+13.5) | 9% | 57%, 1.3, 3.4 cores |
+| n1 new | 327 | 28.9 ms | 35.0 ms (+6.1) | 59% | 81%, 1.4, 5.4 cores |
+| b2 main | 491 | 27.3 ms | 39.9 ms (+12.6) | 85% | 99%, 2.4, 7.4 cores |
+| n2 new | 519 | 28.2 ms | 32.8 ms (+4.6) | 89% | 100%, 3.0, 7.8 cores |
+| b3 main | 378 | 34.2 ms | 47.2 ms (+13.1) | 63% | 100%, 3.3, 5.7 cores |
+| n3 new | 363 | 34.6 ms | 46.4 ms (+11.7) | 64% | 100%, 2.9, 5.3 cores |
+
+Not GPU-bound either: full COCO's large JPEGs still starved the GPU for stretches (b1's median utilisation 9%)
+while other lanes held the CPU at 100%. The one GPU-bound pair (round 2, 85-89%) gave +5.7% img/s and a window
+7.3 ms shorter; round 3, with the CPU saturated, kept most of the stall (−1.4 ms). The clean GPU-bound comparison
+is the mini320 one below.
