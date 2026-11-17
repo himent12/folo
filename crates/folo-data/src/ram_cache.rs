@@ -110,8 +110,8 @@ fn available_memory() -> u64 {
 }
 
 /// The memory the system has available, in bytes (0 when it can't say), as sysinfo's `available_memory` gives it.
-/// Windows and Linux read it themselves so the crate does not build sysinfo (and the second `windows` crate it
-/// brings) there: Windows' `GlobalMemoryStatusEx` `ullAvailPhys`, Linux's `/proc/meminfo` ([`meminfo_available`]).
+/// Windows and Linux read it themselves so the crate (and FOLO Desktop) does not build sysinfo there: Windows'
+/// `GlobalMemoryStatusEx` `ullAvailPhys`, Linux's `/proc/meminfo` ([`meminfo_available`]).
 #[cfg(windows)]
 fn host_available() -> u64 {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};

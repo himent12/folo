@@ -23,7 +23,7 @@ thiserror.workspace = true
 walkdir.workspace = true
 
 # Available memory for `--cache ram` (src/ram_cache.rs): Windows and Linux ask the system themselves, which keeps
-# sysinfo and the second `windows` crate it brings (0.61; wgpu and FOLO Desktop use 0.62) out of their builds.
+# sysinfo (with ntapi, winapi and its ~15 `windows` features, a crate wgpu waits for) out of FOLO Desktop's build.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_SystemInformation"] }
 
