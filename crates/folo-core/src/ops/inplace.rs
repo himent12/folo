@@ -48,12 +48,12 @@ impl Tensor {
     }
 
     /// `self += src` through the backend's in-place [`crate::backend::Backend::add_into`] (one pass, no
-    /// temporary), for a float `src` of this tensor's shape, dtype and device in another storage. `Ok(false)` where
-    /// another guard holds `self`'s storage right now (nothing touched) or the backend has no such kernel or declines
-    /// this layout (values unchanged, the version bumped: both callers then write `self` out of place anyway, or
-    /// replace an accumulator nothing else sees). `self` must be writable in place (not a broadcast view;
-    /// [`Tensor::check_inplace`] or, in autograd's fan-in, an exclusive dense accumulator).
+    /// temporary), for a float `src` of this tensor's shape, dtype and device in another storage. `Ok(false)`, values
+    /// unchanged, where the backend has no such kernel or declines this layout. Autograd's fan-in only: `self` is an
+    /// exclusive accumulator (`Tensor::is_exclusive`: no other handle, view or graph shares its storage), so no
+    /// other thread can hold or read its lock or check its version, and a decline leaves nothing anyone sees.
     pub(crate) fn add_into_(&self, src: &Tensor) -> Result<bool> {
+        debug_assert!(self.is_exclusive(), "add_into_ on a shared tensor");
         if src.shape() != self.shape() || src.dtype() != self.dtype() || self.same_storage(src) {
             return Err(Error::invalid_arg(
                 "add_into",
@@ -62,14 +62,10 @@ impl Tensor {
         }
         self.check_same_device(src, "add_into")?;
         let b = self.backend()?;
-        let dc = self.cell();
-        // The source is read first, as every in-place op does, and the destination is only tried: this never waits
-        // while it holds a lock, so it cannot close a cycle with opposing additions (`a += b`, `b += a`) or with
-        // other ops' read-then-write (`a.copy_from(&b)`). A busy destination goes out of place, like a decline.
+        // Source read, then destination write, as every in-place op takes them; the exclusive destination's lock is
+        // never held by anyone else, so the write does not wait.
         let sr = src.cell().read();
-        // The version is bumped as the lock is taken, before the data changes (as `write` does): a `backward` that
-        // checks it while the addition runs sees the modification.
-        let Some(mut dst) = dc.try_write() else { return Ok(false) };
+        let mut dst = self.cell().write();
         let r = b.add_into(&mut dst, self.layout(), View::new(&sr, src.layout()));
         drop((dst, sr));
         match r {
@@ -85,13 +81,6 @@ impl Tensor {
         other.check_f32(name)?;
         self.check_same_device(other, name)?;
         let other = if self.same_storage(other) { other.copy_contiguous()? } else { other.clone() };
-        if op == BinaryOp::Add
-            && other.shape() == self.shape()
-            && !self.device().is_cpu()
-            && self.add_into_(&other)?
-        {
-            return Ok(());
-        }
         let lo = other.layout().broadcast_to(self.shape(), name)?;
         if self.device().is_cpu() {
             let sr = other.cell().read();
@@ -215,28 +204,6 @@ mod tests {
             assert_eq!(p.to_vec::<f32>().unwrap(), vec![0.; 6]);
             assert!(Tensor::ones([3]).broadcast_to([2, 3]).unwrap().fill_assign(1.0).is_err());
         }
-    }
-
-    /// `add_into_` on a destination another guard holds returns `Ok(false)` at once, touching nothing, instead of
-    /// waiting for the lock (which, with the source's read held, could close a cycle with another thread's
-    /// read-then-write). The 30 s timeout is only the watchdog of a regression that blocks.
-    #[test]
-    fn add_into_does_not_wait_on_a_held_destination() {
-        let dst = Tensor::ones([8]);
-        let src = Tensor::full([8], 2.0);
-        let v0 = dst.storage_version();
-        let held = dst.cell().read();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (d, s) = (dst.clone(), src.clone());
-        let worker = std::thread::spawn(move || {
-            let _ = tx.send(d.add_into_(&s).map_err(|e| e.to_string()));
-        });
-        let got = rx.recv_timeout(std::time::Duration::from_secs(30));
-        drop(held);
-        worker.join().unwrap();
-        assert_eq!(got.expect("add_into_ waited for the held destination"), Ok(false));
-        assert_eq!(dst.storage_version(), v0, "version");
-        assert_eq!(dst.to_vec::<f32>().unwrap(), vec![1.0; 8]);
     }
 
     #[test]

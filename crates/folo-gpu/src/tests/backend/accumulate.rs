@@ -19,16 +19,17 @@ fn in_place_adds() -> u64 {
     ADD_INTO_DONE.with(|n| n.get())
 }
 
-/// `dst_view += src_view` on the GPU leaves exactly the CPU's bits in the whole destination storage (the
-/// elements outside the view untouched), for dense (`vec4` and scalar) and strided views of either side.
+/// The in-place kernel (`ew::add_into`) leaves exactly the CPU's bits in the whole destination buffer, the elements
+/// outside the view untouched: dense views (`vec4` and scalar, also at an offset: the linear kernel) and strided ones
+/// on either side, f32 and f16 (the sum in f32, rounded to f16 once, as the CPU's `(a as f32 + b as f32) as f16`).
 #[test]
-fn add_assign_in_place_matches_cpu() {
-    let dev = dev!();
+fn add_into_kernel_matches_cpu() {
+    let Some(ctx) = crate::tests::ctx() else { return };
     type View = fn(&Tensor) -> Tensor;
     let cases: Vec<(&str, Vec<usize>, View, View)> = vec![
         ("dense vec4", vec![1024], |t| t.clone(), |t| t.clone()),
         ("dense odd", vec![1027], |t| t.clone(), |t| t.clone()),
-        // Dense at an offset in their storages: the linear kernel, vec4 (offset 256) and scalar (offset 7).
+        // Dense at an offset in their buffers: the linear kernel, vec4 (offset 256) and scalar (offset 7).
         (
             "dense vec4 at an offset",
             vec![4, 256],
@@ -41,7 +42,7 @@ fn add_assign_in_place_matches_cpu() {
             |t| t.narrow(0, 1, 2).unwrap(),
             |t| t.narrow(0, 1, 2).unwrap(),
         ),
-        // A channel slice of NCHW (a fan-in into one part of a concatenation) from a dense gradient.
+        // A channel slice of NCHW from another channel slice.
         ("channel slice", vec![2, 5, 3, 4], |t| t.narrow(1, 1, 3).unwrap(), |t| t.narrow(1, 0, 3).unwrap()),
         // A strided destination from a transposed source.
         (
@@ -57,15 +58,35 @@ fn add_assign_in_place_matches_cpu() {
             |t| t.narrow(0, 1, 1).unwrap().broadcast_to([3, 8]).unwrap(),
         ),
     ];
-    for (i, (what, shape, dst_view, src_view)) in cases.into_iter().enumerate() {
-        let base = randn(&shape, 10 + i as u64);
-        let src = randn(&shape, 20 + i as u64);
-        let (bc, bg) = (base.clone(), base.to_device(dev).unwrap());
-        let (sc, sg) = (src.clone(), src.to_device(dev).unwrap());
-        let _g = no_grad();
-        dst_view(&bc).add_assign(&src_view(&sc)).unwrap();
-        dst_view(&bg).add_assign(&src_view(&sg)).unwrap();
-        assert_same(&bg, &bc, what);
+    let strided = |t: &Tensor| crate::kernels::strided::Strided {
+        offset: t.layout().offset(),
+        dims: t.layout().dims().to_vec(),
+        strides: t.layout().strides().to_vec(),
+    };
+    for (dtype, gdt) in [(DType::F32, crate::DType::F32), (DType::F16, crate::DType::F16)] {
+        if dtype == DType::F16 && !ctx.caps().shader_f16 {
+            continue;
+        }
+        for (i, (what, shape, dst_view, src_view)) in cases.iter().enumerate() {
+            // Values representable in `dtype`, so the CPU and the GPU start from the same bits.
+            let round = |t: Tensor| t.to_dtype(dtype).unwrap().to_dtype(DType::F32).unwrap();
+            let (base, src) = (round(randn(shape, 10 + i as u64)), round(randn(shape, 20 + i as u64)));
+            let want = {
+                let _g = no_grad();
+                // A copy: `clone` would share (and so change) `base`'s storage.
+                let b = Tensor::from_vec(base.to_vec::<f32>().unwrap(), base.shape().clone()).unwrap();
+                dst_view(&b).add_assign(&src_view(&src)).unwrap();
+                b.to_dtype(dtype).unwrap().to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap()
+            };
+            let bg = super::super::coop::upload(&ctx, &base.to_vec::<f32>().unwrap(), gdt);
+            let sg = super::super::coop::upload(&ctx, &src.to_vec::<f32>().unwrap(), gdt);
+            let (dv, sv) = (strided(&dst_view(&base)), strided(&src_view(&src)));
+            let x = crate::kernels::ew::EwInput { buf: sg.raw(), view: &sv };
+            crate::kernels::ew::add_into(&ctx, &dv.dims, x, bg.raw(), &dv, gdt).unwrap();
+            let got = bg.to_vec().unwrap();
+            let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&got), bits(&want), "{what} {dtype}");
+        }
     }
 }
 
@@ -153,7 +174,7 @@ fn cat_case(dev: folo_core::Device, [h, w]: [usize; 2], seed: u64) {
     let parts = [randn(&[2, 3, h, w], seed), randn(&[2, 1, h, w], seed + 1), randn(&[2, 4, h, w], seed + 2)];
     let want = Tensor::cat(&parts, 1).unwrap();
     let gparts: Vec<Tensor> = parts.iter().map(|p| p.to_device(dev).unwrap()).collect();
-    for dtype in [DType::F32, DType::F16] {
+    for dtype in float_dtypes(dev) {
         for _ in 0..3 {
             // Same size class as the result: the pool hands this buffer back to the concatenation.
             drop(Tensor::full_with(want.shape().clone(), f64::NAN, dtype, dev).unwrap());
@@ -162,58 +183,4 @@ fn cat_case(dev: folo_core::Device, [h, w]: [usize; 2], seed: u64) {
             assert_same(&got, &want.to_dtype(dtype).unwrap(), &format!("cat {dtype} {h}x{w}"));
         }
     }
-}
-
-/// Runs `jobs` on their own threads and waits for all of them: a panic fails the test as itself, a hang after 60 s
-/// as `what`.
-fn finish_all(what: &str, jobs: Vec<Box<dyn FnOnce() + Send>>) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let n = jobs.len();
-    let handles: Vec<_> = jobs
-        .into_iter()
-        .map(|job| {
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                job();
-                let _ = tx.send(());
-            })
-        })
-        .collect();
-    drop(tx);
-    for _ in 0..n {
-        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
-            Ok(()) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("{what}: deadlocked"),
-            // A worker panicked before it sent: joining re-raises its panic.
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-    for h in handles {
-        if let Err(e) = h.join() {
-            std::panic::resume_unwind(e);
-        }
-    }
-}
-
-/// Opposing in-place additions on two threads (`a += b` and `b += a`), started together, both finish.
-#[test]
-fn opposing_in_place_additions_do_not_deadlock() {
-    let dev = dev!();
-    let a = Tensor::ones([256]).to_device(dev).unwrap();
-    let b = Tensor::ones([256]).to_device(dev).unwrap();
-    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let jobs: Vec<Box<dyn FnOnce() + Send>> = [(a.clone(), b.clone()), (b.clone(), a.clone())]
-        .into_iter()
-        .map(|(dst, src)| {
-            let start = start.clone();
-            Box::new(move || {
-                let _g = no_grad();
-                start.wait();
-                for _ in 0..300 {
-                    dst.add_assign(&src).unwrap();
-                }
-            }) as Box<dyn FnOnce() + Send>
-        })
-        .collect();
-    finish_all("opposing additions", jobs);
 }

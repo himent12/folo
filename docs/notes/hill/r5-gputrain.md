@@ -62,25 +62,25 @@ Two changes, both bit-identical to main:
   (`zeros_with`) still clears, as it must.
 - Gradient fan-in (`autograd::accumulate`) on the GPU was `acc = acc + g` out of place plus a copy back. New
   `Backend::add_into(dst, layout, src)`, a strided elementwise `dst[i] += src[i]` (`ew::add_into`, KIND 5 of the
-  elementwise generator), used by `accumulate` for any float dtype off the CPU and by `add_assign` there. The GPU
-  declines (`NotSupported`) other dtypes and destinations that overlap themselves or share the source's buffer, and
-  the caller then adds out of place. The source is read-locked first (as in every in-place op) and the destination
-  only *tried* (`StorageCell::try_write`): a busy destination also goes out of place, so the addition never waits
-  for the destination while it holds the source and cannot deadlock against opposing additions or `copy_from`'s
-  read-then-write (a first fix took the two locks in address order, which still crossed `copy_from`). As with
-  `StorageCell::write`, the version is bumped as the lock is taken, before the data changes, so a `backward()` that
-  checks it during the addition sees the modification (a decline after that bump is harmless: both callers then
-  write the destination out of place, or replace an accumulator nothing else sees).
+  elementwise generator), used by `accumulate` for any float dtype off the CPU, on its exclusive accumulator only
+  (`Tensor::is_exclusive`: no other handle, view or graph shares the storage, so no other thread can hold its lock or
+  check its version). The GPU declines (`NotSupported`) other dtypes and destinations that overlap themselves or share
+  the source's buffer, and `accumulate` then adds out of place. Locks as every in-place op takes them: the source's
+  read, then the destination's `write` (version bumped first). Review history: a first version also routed the GPU
+  `add_assign` through it; on shared tensors that raised lock-order (against `copy_from`) and version-timing questions
+  over three rounds, and training never calls GPU `add_assign` (SGD and gradient accumulation use the fused optimizer
+  kernels), so `add_assign` is main's again.
 
-Tests (`crates/folo-gpu/src/tests/backend/accumulate.rs`): in-place add bitwise against the CPU over dense (also at an
-offset, vec4 and scalar), odd, channel-slice, transposed and broadcast sources; fan-in gradients against the CPU in F32
-and F16 (vec4 and odd shapes), and bit for bit against the GPU's own out-of-place add, each asserting that the fan-in
-ran the in-place kernel (a per-thread count of the backend's successful `add_into` calls, test builds only); `cat` into
-a recycled buffer that was filled with NaN (whole-word and half-word f16 runs); opposing additions on two threads; and
-in folo-core (`ops/inplace.rs`), `add_into_` on a destination whose read guard is held returns `Ok(false)` at once,
-values and version untouched (a blocking write fails it at its 30 s watchdog). Mutation checks: making KIND 5 a copy (`Y
-= X0`) fails two of them, one extra rounding (`· 1.0000001`) fails the bit-for-bit one, a GPU `add_into` that always
-declines fails both fan-in tests.
+Tests (`crates/folo-gpu/src/tests/backend/accumulate.rs`): the kernel bit for bit against the CPU (f32 and f16, the
+whole destination buffer) over dense views (vec4 and scalar, also at an offset), channel slices, a transposed and a
+broadcast source; fan-in gradients against the CPU in F32 and F16 (vec4 and odd shapes), and bit for bit against the
+GPU's own out-of-place add, each asserting that the fan-in ran the in-place kernel (a per-thread count of the backend's
+successful `add_into` calls, test builds only); `cat` into a recycled buffer that was filled with NaN (whole-word and
+half-word f16 runs). F16 cases are skipped where the device does not compute in f16. Mutation checks: KIND 5 as a copy
+(`Y = X0`) and a linear destination that ignores its offset fail the kernel test, one extra rounding (`· 1.0000001`)
+fails the bit-for-bit fan-in test, a GPU `add_into` that always declines fails both fan-in tests. The `cat` test assumes
+the pool hands the NaN buffer back; another test taking it in between would let it pass without a dirty buffer (never
+fail a correct build).
 
 A/B (`ab-glue1`, 5 rounds, base = main cf65f7a5, PR side = the WIP commit 8aad6628, which differs from the PR only
 in the precompile bounds and the review fixes, none of which touch a steady-state step; cpu 69–100 %, rounds 3–5
