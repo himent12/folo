@@ -170,8 +170,9 @@ resolved palette, `themeIds` and `colorVars` into `tokens.ts`, and fails naming 
 `npm run check` (`design/contrast.mjs` holds every theme to its mode's pairings). `npm run tokens` also rewrites the
 data line (`const T = …`) of `index.html`'s first-paint script: the built-in ids and every colour token's custom
 property, which it checks a stored custom theme against (`npm run check` fails while it is stale). The rules of a
-custom theme file are `checkCustomTheme` in `src/lib/design/themes.ts`, held to `design/theme-cases.json` (the same
-cases `contrast.mjs` and Desktop replay) by `themes.test.ts`; the first-paint script repeats them, and
+custom theme file are `checkCustomTheme` in `src/lib/design/themes.ts`, and a picked file's bytes go through
+`readThemeFile` (size, one byte order mark, strict UTF-8, JSON), both held to `design/theme-cases.json` (the same
+cases `contrast.mjs` and Desktop replay) by `themes.test.ts`; the first-paint script repeats the entry rules, and
 `firstPaint.test.ts` holds it to the app on every one of those cases; change them together. Settings › Appearance is
 `src/routes/settings/Appearance.tsx`, the palette's "Theme: …" commands `src/lib/shell/themeCommands.ts`. Colours reach
 components only as CSS variables, so a theme repaints everything; canvas or SVG code that needs a colour as a value

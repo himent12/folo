@@ -381,10 +381,10 @@ As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
   `HeadlessApp::set_system_appearance`, delivered through the same callback (`app/theme_tests.rs`). On Windows the frame DWM draws follows the mode shown (`Window::set_frame_appearance`),
   not the OS.
 - **Custom themes** are every `*.json` in `<FOLO_HOME or ~/.folo>/themes/`, read at start and on Reload (off the UI
-  thread), in file name order (a later file with the same id replaces an earlier one), each at most 1 MB (the read
-  stops there). `src/theme/custom.rs`
-  validates them with the messages of `design/theme-cases.json`, which its tests replay, so Studio,
-  `design/contrast.mjs` and Desktop agree. Under the Custom themes row, as Studio lists its imports, come the themes
+  thread), in file name order (a later file with the same id replaces an earlier one), each at most 1 MiB (the read
+  stops one byte past it). `src/theme/custom.rs` (`parse_bytes`: one byte order mark stripped, strict UTF-8, JSON)
+  validates them with the messages of `design/theme-cases.json`, which its tests replay through the folder reader
+  (`catalog::read_theme`), so Studio, `design/contrast.mjs` and Desktop agree. Under the Custom themes row, as Studio lists its imports, come the themes
   loaded (name; mode · based on its base · file name) and then each file that failed with its first error; the
   folder shows in the platform's form (`catalog::display_path`). There is no Remove: deleting the file and Reload
   does it. The app never opens a file picker or Explorer for them.

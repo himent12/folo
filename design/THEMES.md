@@ -79,20 +79,30 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
 - `color`: optional; any subset of the colour tokens, with the same paths as `color.dark` in `tokens.json`, one
   level per object: `{"bg": {"app": …}}`, never a dotted key (`{"bg.app": …}` is `color.bg.app: not a colour token`).
   Colours are `#RRGGBB` or `#RRGGBBAA` (either case). Arrays (`chart.series`, `chart.fill`, `chart.text`) replace
-  whole and must have the base's length (6). `chart.area_opacity` is a number from 0 to 1: the opacity of chart area
-  fills (Desktop draws it as is; Studio scales its own area opacities by it relative to the mode's default, so the
-  defaults look as before and 0 removes the fills in both).
+  whole and must have the base's length (6). `chart.area_opacity` is a number from 0 to 1 that scales chart area
+  fills; 0 removes them in both apps, and the built-in values look as before. Desktop multiplies it by each chart's
+  own factor (the line chart's fill alpha is 1.6 × it, the sparkline's 1.4 ×, at most 1). Studio scales its own fill
+  opacities (0.08 for the line chart's gradient top, 0.12 for the sparkline) by it relative to the mode's default
+  (`--chart-area-opacity-default`, 0.14 dark, 0.12 light).
 - Anything else is an error, so a typo never fails silently: an unknown key or token path, a wrong type, a bad
   colour, a base of the other mode. A file with an error is not installed, and the app says which file and why
   (the first error is enough; give the token path, e.g. `color.bg.ap: not a colour token`). Keys starting with `$`
   are comments and are ignored, as in `tokens.json`.
-- A file is UTF-8 JSON of at most 1 MB (both apps refuse a larger one unread: `(file): larger than 1 MB; not a
-  theme`); one leading byte order mark (U+FEFF, which PowerShell 5.1 and some editors write) is skipped.
+- A file is UTF-8 JSON of at most 1 MiB (1 048 576 bytes); a larger one is `(file): larger than 1 MB; not a theme`.
+  Studio and `contrast.mjs` refuse it by its size, unread; Desktop reads at most the limit + 1 byte of it and refuses
+  it then.
+- Every reader treats a file's bytes alike: exactly one leading UTF-8 byte order mark (EF BB BF, which PowerShell 5.1
+  and some editors write) is stripped, then the rest is decoded strictly as UTF-8: invalid bytes (Windows-1252 from
+  PowerShell 5.1's `Set-Content`, UTF-16 from its `>`) are `(file): not UTF-8 text`, never replaced. A second byte
+  order mark is a U+FEFF before the JSON, which is not valid JSON. So is a lone surrogate escape (`\uD800` without
+  its pair) in any string, keys included: Desktop's serde_json refuses it while parsing, and the JS readers check
+  for it right after `JSON.parse`. `(file): not valid JSON` is followed by each parser's own detail in parentheses.
 - `design/theme-cases.json` is the shared conformance table: invalid files with their exact first error, and valid
-  ones with their resolved result, each either parsed (`theme`) or as the file's raw text (`text`: number spellings,
-  a byte order mark and dotted keys survive only that way). `contrast.mjs` and both apps' tests replay it, raw cases
-  through each one's own file reader, so the three validators agree; a change to the format changes that file
-  first.
+  ones with their resolved result, each parsed (`theme`), as the file's raw text (`text`: number spellings and dotted
+  keys survive only that way) or as the file's bytes in hex (`hex`: byte order marks, invalid UTF-8, surrogate
+  escapes). `contrast.mjs` and both apps' tests replay it, `text` and `hex` cases through each one's own file reader
+  (a temporary file for the CLI and Desktop, a `File` for Studio), so the three validators agree; a change to the
+  format changes that file first.
 - The apps do not refuse a custom theme for low contrast (it is the user's choice), but `node design/contrast.mjs
   --theme <file>` checks one against the same rules as the built-ins, so theme authors can.
 
@@ -101,13 +111,16 @@ stay valid examples.
 
 Where custom themes live:
 - **Studio**: Settings → Appearance → Custom themes → *Import theme…* reads a `.json` file (a file input; several
-  at once is fine; they are read one at a time, and one over 1 MB is refused by its size, unread). Imported themes are
-  stored in `localStorage` under `folo.themes` (an array of the validated files, stored without their `$` comments
-  and with the name and description trimmed) and listed under the row (name; mode · based on its base · id), each
-  with *Remove*. Another tab of the same Studio follows changes (the `storage` event), as preferences already do.
-  When the browser refuses the write (storage full or blocked), the change stays in this tab, over what other tabs
-  store, until a write succeeds, and the row says so ("Couldn't save to this browser's storage; your custom themes
-  last until you close this tab.").
+  at once is fine). The files of a pick are read one at a time and each is checked as soon as it is read, keeping
+  only its result (one over 1 MiB is refused by its size, unread); picks are imported in the order made, a second
+  waiting for the first. Imported themes are stored in `localStorage` under `folo.themes` (an array of the validated
+  files, stored without their `$` comments and with the name and description trimmed) and listed under the row by
+  name, as the selects order them (name; mode · based on its base · id), each with *Remove*. Another tab of the same
+  Studio follows changes (the `storage` event), as preferences already do. When the browser refuses the write
+  (storage full or blocked), the change stays in this tab, over what other tabs store, until a write succeeds, and
+  the row says so ("Couldn't save to this browser's storage; your custom themes last until you close this tab.").
+  When storage can't even be read (blocked, or `localStorage` null), changes go over the list last read or written,
+  so an import still installs for the tab; once a read works again, they go over what it reads.
 - **Desktop**: every `*.json` in `<FOLO_HOME or ~/.folo>/themes/` is read at start and again on *Reload* in
   Settings → Appearance → Custom themes. The row shows that folder (mono, in the platform's form) and, under the row, the
   themes it loaded (name; mode · based on its base · file name, as Studio lists them) and then the files that failed,
