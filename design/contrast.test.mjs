@@ -159,8 +159,9 @@ test('json-scan: the JSON serde_json refuses and JSON.parse accepts, without rec
   assert.equal(jsonProblem('{"name": "\uD800"}'), lone, 'a raw lone surrogate (text that never was UTF-8)');
   assert.equal(jsonProblem('{"name": "😀"}'), undefined, 'a raw pair');
   // Numbers out of a double's range (JSON.parse reads Infinity); tiny ones read as 0 in both.
-  for (const n of ['1e400', '-1e400', '1E309', `1${'0'.repeat(400)}`, '-2.5e+500']) assert.equal(jsonProblem(`{"a": ${n}}`), 'a number out of range', n);
-  for (const n of ['1e-400', '1.7976931348623157e308', '-0', '0e999', '123456789012345678901234567890']) assert.equal(jsonProblem(`{"a": [${n}]}`), undefined, n);
+  // The limit is the correctly rounded one: just above the largest double is Infinity, just below rounds to it.
+  for (const n of ['1e400', '-1e400', '1E309', `1${'0'.repeat(400)}`, '-2.5e+500', '1.7976931348623159e308']) assert.equal(jsonProblem(`{"a": ${n}}`), 'a number out of range', n);
+  for (const n of ['1e-400', '1.7976931348623157e308', '1.7976931348623158e308', '17976931348623158e292', '-0', '0e999', '123456789012345678901234567890']) assert.equal(jsonProblem(`{"a": [${n}]}`), undefined, n);
   // Not JSON at all: left to JSON.parse.
   assert.equal(jsonProblem(String.raw`{"a": "\uZZZZ"}`), undefined);
   assert.equal(jsonProblem('{"a": "open'), undefined);

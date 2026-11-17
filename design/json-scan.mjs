@@ -4,7 +4,9 @@
 // - nesting deeper than serde_json's limit (JSON_MAX_DEPTH arrays and objects, the top-level value counted);
 // - a lone surrogate escape (`\uD800` without its pair) in any string, keys included, checked on the raw escapes, so a
 //   later duplicate member can't hide one (JSON.parse keeps only the last value of a repeated key);
-// - a number outside a double's range (`1e400`), which JSON.parse reads as Infinity.
+// - a number outside a double's range (`1e400`), which JSON.parse reads as Infinity. Both sides round decimals
+//   correctly (Desktop builds serde_json with `float_roundtrip`), so the limit and every value agree to the last bit:
+//   `1.7976931348623158e308` is the largest double, `1.7976931348623159e308` is out of range.
 // One pass over the characters with a depth counter, no recursion: a deeply nested file can't overflow the stack.
 // Everything else (syntax) is JSON.parse's to report.
 

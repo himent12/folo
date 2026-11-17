@@ -92,7 +92,7 @@ export function builtinThemes(tokens) {
   for (const [id, th] of Object.entries(tokens.themes)) {
     if (isMeta(id)) continue;
     const where = `themes.${id}`;
-    if (!/^[a-z0-9-]{1,40}$/.test(id)) throw new Error(`${where}: an id is 1-40 of a-z, 0-9 and -`);
+    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(id)) throw new Error(`${where}: an id is 1-40 of a-z, 0-9 and -, starting with a letter or digit`);
     if (id === 'system') throw new Error(`${where}: "system" is reserved (Desktop's --theme system is the mode)`);
     if (!isObj(th)) throw new Error(`${where}: expected an object`);
     const t = /** @type {Record<string, unknown>} */ (th);

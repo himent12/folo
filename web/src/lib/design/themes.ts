@@ -42,7 +42,7 @@ export interface Theme {
 /** The format version this Studio reads. */
 export const THEME_FORMAT = 1;
 const HEX = /^#(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
-const ID = /^[a-z0-9-]{1,40}$/;
+const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const KEYS = ['folo_theme', 'id', 'name', 'mode', 'base', 'description', 'color'];
 const NAME_MAX = 40;
 const DESCRIPTION_MAX = 120;
@@ -159,7 +159,7 @@ function check(raw: unknown): CustomThemeFile {
   // Any JSON number equal to 1: JSON.parse reads 1.0 and 1e0 as 1.
   if (need('folo_theme') !== THEME_FORMAT) throw new Error(`folo_theme: must be ${THEME_FORMAT}`);
   const id = need('id');
-  if (typeof id !== 'string' || !ID.test(id)) throw new Error('id: must be 1 to 40 characters of a-z, 0-9 and -');
+  if (typeof id !== 'string' || !ID.test(id)) throw new Error('id: must be 1 to 40 characters of a-z, 0-9 and -, starting with a letter or digit');
   if (isBuiltinId(id)) throw new Error(`id: "${id}" is a built-in theme`);
   if (id === RESERVED_ID) throw new Error(`id: "${RESERVED_ID}" is reserved`);
   const name = need('name');

@@ -100,6 +100,11 @@ export default function Appearance() {
     const options = computed(() =>
       prefs.themesFor(m).map((t) => ({ value: t.id, label: t.name, title: t.description || undefined, group: t.custom ? 'Custom' : undefined })),
     );
+    // A different theme applies (and switches an explicit mode to this slot's); the one the slot shows does nothing, as
+    // the select itself fires no change for it (design/THEMES.md, Choosing a theme) and as Desktop's select does.
+    const pick = (v: string) => {
+      if (v !== prefs.slotTheme(m).id) prefs.useTheme(v);
+    };
     return (
       <Row
         name={SLOT[m].name}
@@ -108,7 +113,7 @@ export default function Appearance() {
         descId={`${id}-desc`}
         control={
           <span class="pick">
-            <Select id={id} bind:value={value} options={options.get()} describedby={`${id}-desc`} onchange={(v) => prefs.useTheme(v)} />
+            <Select id={id} bind:value={value} options={options.get()} describedby={`${id}-desc`} onchange={pick} />
           </span>
         }
       />

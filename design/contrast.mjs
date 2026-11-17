@@ -104,8 +104,8 @@ export function validateTheme(json) {
   // Any JSON number equal to 1: JSON.parse reads 1.0 and 1e0 as 1.
   if (json.folo_theme !== 1) return fail('folo_theme: must be 1');
   if (!('id' in json)) return fail('id: required');
-  if (typeof json.id !== 'string' || !/^[a-z0-9-]{1,40}$/.test(json.id)) {
-    return fail('id: must be 1 to 40 characters of a-z, 0-9 and -');
+  if (typeof json.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(json.id)) {
+    return fail('id: must be 1 to 40 characters of a-z, 0-9 and -, starting with a letter or digit');
   }
   if (builtInById.has(json.id)) return fail(`id: "${json.id}" is a built-in theme`);
   if (json.id === RESERVED_ID) return fail(`id: "${RESERVED_ID}" is reserved`);

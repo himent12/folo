@@ -80,6 +80,33 @@ describe('Settings › Appearance', () => {
     expect([prefs.theme, prefs.darkTheme]).toEqual(['system', 'dim']);
   });
 
+  it('re-picking the theme a slot shows does nothing; another one applies (the select fires change on a new value only)', () => {
+    show();
+    // A browser fires change only when the value changes: choosing Light in the Light select under Dark fires nothing.
+    const fired = vi.fn();
+    select('light').addEventListener('change', fired);
+    const s = select('light');
+    s.querySelector<HTMLOptionElement>('option[value="light"]')!.selected = true;
+    flush();
+    expect(fired).not.toHaveBeenCalled();
+    s.removeEventListener('change', fired);
+    expect([prefs.theme, prefs.lightTheme, prefs.activeTheme.id]).toEqual(['dark', 'light', 'dark']);
+    // And when a change for it arrives anyway (the same value dispatched), the slot's theme still changes nothing.
+    choose('light', 'light');
+    expect([prefs.theme, prefs.lightTheme, prefs.activeTheme.id]).toEqual(['dark', 'light', 'dark']);
+    // The default a slot shows for a stored id that names no theme counts as its theme: re-picking it keeps the id.
+    prefs.installThemes([parsed('n.json', night)]);
+    prefs.useTheme('night');
+    prefs.removeTheme('night');
+    prefs.theme = 'light';
+    flush();
+    choose('dark', 'dark');
+    expect([prefs.theme, prefs.darkTheme, prefs.activeTheme.id]).toEqual(['light', 'night', 'light']);
+    // A different theme in the slot applies it and switches the explicit mode to the slot's.
+    choose('dark', 'midnight');
+    expect([prefs.theme, prefs.darkTheme, prefs.activeTheme.id]).toEqual(['dark', 'midnight', 'midnight']);
+  });
+
   it('shows the default as selected while the stored id names no theme', () => {
     prefs.installThemes([parsed('n.json', night)]);
     prefs.useTheme('night');
