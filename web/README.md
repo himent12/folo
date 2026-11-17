@@ -171,7 +171,8 @@ resolved palette, `themeIds` and `colorVars` into `tokens.ts`, and fails naming 
 data line (`const T = …`) of `index.html`'s first-paint script: the built-in ids and every colour token's custom
 property, which it checks a stored custom theme against (`npm run check` fails while it is stale). The rules of a
 custom theme file are `checkCustomTheme` in `src/lib/design/themes.ts`, and a picked file's bytes go through
-`readThemeFile` (size, one byte order mark, strict UTF-8, JSON), both held to `design/theme-cases.json` (the same
+`readThemeFile` (size, one byte order mark, strict UTF-8, `design/json-scan.mjs`'s check of what Desktop's JSON
+parser refuses, JSON; it never rejects, so one bad file can't stop a pick), both held to `design/theme-cases.json` (the same
 cases `contrast.mjs` and Desktop replay) by `themes.test.ts`; the first-paint script repeats the entry rules, and
 `firstPaint.test.ts` holds it to the app on every one of those cases; change them together. Settings › Appearance is
 `src/routes/settings/Appearance.tsx`, the palette's "Theme: …" commands `src/lib/shell/themeCommands.ts`. Colours reach

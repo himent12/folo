@@ -382,7 +382,9 @@ As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
   not the OS.
 - **Custom themes** are every `*.json` in `<FOLO_HOME or ~/.folo>/themes/`, read at start and on Reload (off the UI
   thread), in file name order (a later file with the same id replaces an earlier one), each at most 1 MiB (the read
-  stops one byte past it). `src/theme/custom.rs` (`parse_bytes`: one byte order mark stripped, strict UTF-8, JSON)
+  stops one byte past it; an unreadable one is `(file): couldn't read (…)`, as in Studio). `src/theme/custom.rs`
+  (`parse_bytes`: one byte order mark stripped, strict UTF-8, JSON; serde_json's own refusals, such as nesting past
+  127 levels, are what `design/json-scan.mjs` makes the JS readers refuse too)
   validates them with the messages of `design/theme-cases.json`, which its tests replay through the folder reader
   (`catalog::read_theme`), so Studio, `design/contrast.mjs` and Desktop agree. Under the Custom themes row, as Studio lists its imports, come the themes
   loaded (name; mode · based on its base · file name) and then each file that failed with its first error; the

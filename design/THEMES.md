@@ -87,16 +87,29 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
 - Anything else is an error, so a typo never fails silently: an unknown key or token path, a wrong type, a bad
   colour, a base of the other mode. A file with an error is not installed, and the app says which file and why
   (the first error is enough; give the token path, e.g. `color.bg.ap: not a colour token`). Keys starting with `$`
-  are comments and are ignored, as in `tokens.json`.
+  are comments and are ignored, as in `tokens.json`. When several keys are wrong, which one a reader names first may
+  differ (JavaScript lists an object's integer-like keys, such as `"0"`, before the others; Desktop keeps the file's
+  order), but every reader refuses the file.
+- A key may appear twice in one object (JSON allows it): the last value wins in every reader, as in serde_json. The
+  earlier value is still parsed, so it can still make the file not JSON (below).
 - A file is UTF-8 JSON of at most 1 MiB (1 048 576 bytes); a larger one is `(file): larger than 1 MB; not a theme`.
-  Studio and `contrast.mjs` refuse it by its size, unread; Desktop reads at most the limit + 1 byte of it and refuses
-  it then.
+  Studio refuses it by the picked file's size, unread, and checks the length it read again. `contrast.mjs` refuses
+  it by the size of the file it opened, unread, and its read stops one byte past the limit, as Desktop's does (Desktop
+  reads at most the limit + 1 byte and refuses it then), so a file that grew or was replaced since costs no more. A
+  file that can't be read is `(file): couldn't read (…)`, with the system's reason, in every reader.
 - Every reader treats a file's bytes alike: exactly one leading UTF-8 byte order mark (EF BB BF, which PowerShell 5.1
   and some editors write) is stripped, then the rest is decoded strictly as UTF-8: invalid bytes (Windows-1252 from
   PowerShell 5.1's `Set-Content`, UTF-16 from its `>`) are `(file): not UTF-8 text`, never replaced. A second byte
-  order mark is a U+FEFF before the JSON, which is not valid JSON. So is a lone surrogate escape (`\uD800` without
-  its pair) in any string, keys included: Desktop's serde_json refuses it while parsing, and the JS readers check
-  for it right after `JSON.parse`. `(file): not valid JSON` is followed by each parser's own detail in parentheses.
+  order mark is a U+FEFF before the JSON, which is not valid JSON. Desktop's serde_json refuses three more things
+  while parsing that `JSON.parse` would accept, and they are not valid JSON in every reader: nesting deeper than 127
+  arrays and objects (the top-level object counted; 128 is refused); a lone surrogate escape (`\uD800` without its
+  pair, or a pair in the wrong order) in any string, keys and comments included, even in a member a later duplicate
+  replaces; and a number outside a double's range (`1e400`; one too small, `1e-400`, reads as 0). The JS readers
+  find them with one shared scan of the text before `JSON.parse` (`design/json-scan.mjs`, iterative, so no depth
+  overflows it). `(file): not valid JSON` is followed by each parser's own detail in parentheses (serde_json's line
+  and column, V8's message, or the scan's `nested too deep`, `a lone surrogate in a string`, `a number out of
+  range`). In Studio, anything that goes wrong with one file of a pick is that file's result; the others still
+  import.
 - `design/theme-cases.json` is the shared conformance table: invalid files with their exact first error, and valid
   ones with their resolved result, each parsed (`theme`), as the file's raw text (`text`: number spellings and dotted
   keys survive only that way) or as the file's bytes in hex (`hex`: byte order marks, invalid UTF-8, surrogate
@@ -119,7 +132,8 @@ Where custom themes live:
   Studio follows changes (the `storage` event), as preferences already do. When the browser refuses the write
   (storage full or blocked), the change stays in this tab, over what other tabs store, until a write succeeds, and
   the row says so ("Couldn't save to this browser's storage; your custom themes last until you close this tab.").
-  When storage can't even be read (blocked, or `localStorage` null), changes go over the list last read or written,
+  When storage can't even be read (blocked, `localStorage` null, or touching `localStorage` at all throws, as on a
+  sandboxed page's opaque origin: Studio still starts), changes go over the list last read or written,
   so an import still installs for the tab; once a read works again, they go over what it reads.
 - **Desktop**: every `*.json` in `<FOLO_HOME or ~/.folo>/themes/` is read at start and again on *Reload* in
   Settings → Appearance → Custom themes. The row shows that folder (mono, in the platform's form) and, under the row, the
