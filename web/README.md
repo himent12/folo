@@ -167,10 +167,12 @@ scale. A test is `<Name>.test.tsx` beside it, starting with `// @vitest-environm
 and overrides over that mode's base; the first of each mode is its default and has none). Edit it there, run `npm run
 tokens` (it writes one `:root[data-theme-id="<id>"]` block per non-default theme into `tokens.css` and every theme's
 resolved palette, `themeIds` and `colorVars` into `tokens.ts`, and fails naming the path of a malformed theme), and
-`npm run check` (`design/contrast.mjs` holds every theme to its mode's pairings). A new theme id also goes into
-`BUILTIN` in `index.html`'s first-paint script (`src/lib/design/firstPaint.test.ts` fails until it does). The rules of
-a custom theme file are `checkCustomTheme` in `src/lib/design/themes.ts`, held to `design/theme-cases.json` (the same
-cases `contrast.mjs` and Desktop replay) by `themes.test.ts`; change the three together. Settings › Appearance is
+`npm run check` (`design/contrast.mjs` holds every theme to its mode's pairings). `npm run tokens` also rewrites the
+data line (`const T = …`) of `index.html`'s first-paint script: the built-in ids and every colour token's custom
+property, which it checks a stored custom theme against (`npm run check` fails while it is stale). The rules of a
+custom theme file are `checkCustomTheme` in `src/lib/design/themes.ts`, held to `design/theme-cases.json` (the same
+cases `contrast.mjs` and Desktop replay) by `themes.test.ts`; the first-paint script repeats them, and
+`firstPaint.test.ts` holds it to the app on every one of those cases; change them together. Settings › Appearance is
 `src/routes/settings/Appearance.tsx`, the palette's "Theme: …" commands `src/lib/shell/themeCommands.ts`. Colours reach
 components only as CSS variables, so a theme repaints everything; canvas or SVG code that needs a colour as a value
 reads `prefs.activeTheme.color`, never `color.dark` / `color.light` by mode. `node scripts/shoot.mjs --theme <id>`

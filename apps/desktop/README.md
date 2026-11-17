@@ -376,11 +376,13 @@ As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
   theme" switch the mode only, to an explicit Dark or Light. The rules are `ThemePrefs` and `Catalog` in
   `src/theme/catalog.rs`; `FoloApp::apply_theme` (`src/app/preferences.rs`) sets the `Theme` global.
 - **System** follows the OS appearance live: folo-ui's `Window::on_appearance_changed` (Win32 `WM_SETTINGCHANGE`
-  "ImmersiveColorSet"; winit's theme-changed event); the headless platform reports dark, fixed, so `--shot` with
-  System shows the dark theme. On Windows the frame DWM draws follows the mode shown (`Window::set_frame_appearance`),
+  "ImmersiveColorSet"; winit's theme-changed event), registered by `app::follow_system_appearance`; the headless
+  platform reports dark, so `--shot` with System shows the dark theme, and a test turns it with
+  `HeadlessApp::set_system_appearance`, delivered through the same callback (`app/theme_tests.rs`). On Windows the frame DWM draws follows the mode shown (`Window::set_frame_appearance`),
   not the OS.
 - **Custom themes** are every `*.json` in `<FOLO_HOME or ~/.folo>/themes/`, read at start and on Reload (off the UI
-  thread), in file name order (a later file with the same id replaces an earlier one). `src/theme/custom.rs`
+  thread), in file name order (a later file with the same id replaces an earlier one), each at most 1 MB (the read
+  stops there). `src/theme/custom.rs`
   validates them with the messages of `design/theme-cases.json`, which its tests replay, so Studio,
   `design/contrast.mjs` and Desktop agree. Under the Custom themes row, as Studio lists its imports, come the themes
   loaded (name; mode · based on its base · file name) and then each file that failed with its first error; the

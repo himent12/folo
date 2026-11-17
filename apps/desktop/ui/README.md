@@ -151,12 +151,15 @@ The winit backend's shared code (events, keys, the custom caption, presenting) a
 The app follows the system's light / dark appearance through four calls (FOLO Desktop's System theme mode, and its
 window frame in the mode it shows):
 
-- `App::window_appearance()`: the system's appearance now (the headless platform: dark).
+- `App::window_appearance()`: the system's appearance now (the headless platform: dark, until a test calls
+  `HeadlessApp::set_system_appearance`).
 - `Window::appearance()`: the same, as that window sees it.
 - `Window::on_appearance_changed(cx, f)`: `f` runs after the system's appearance changes (Win32: `WM_SETTINGCHANGE`
-  "ImmersiveColorSet"; winit: its theme-changed event; never headless); the window is redrawn either way.
+  "ImmersiveColorSet"; winit: its theme-changed event; headless: `HeadlessApp::set_system_appearance`, through the
+  same platform callback); the window is redrawn either way.
 - `Window::set_frame_appearance(Some(appearance) | None)`: draws the system frame (DWM's caption and border on
-  Windows) dark or light whatever the system says, or following it again; a no-op on winit and headless.
+  Windows) dark or light whatever the system says, or following it again; a no-op on winit, recorded headless
+  (`HeadlessPlatform::frame_appearances`).
 
 ## Developer switches
 

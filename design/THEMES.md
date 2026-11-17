@@ -65,24 +65,34 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
 }
 ```
 
-- `folo_theme`: the format version, `1`. Required.
-- `id`: `[a-z0-9-]`, 1–40 characters, not a built-in id. A custom theme with the id of one already installed replaces
-  it: in Studio the later import wins; in Desktop, of two files in the folder with one id, the later file name (in
-  name order) wins. Required.
-- `name`: 1–40 characters after trimming. Required. `description`: optional, at most 120 characters.
+- `folo_theme`: the format version, `1`: any JSON number equal to 1 (`1`, `1.0`, `1e0`; JSON.parse can't tell them
+  apart); a string is an error. Required.
+- `id`: `[a-z0-9-]`, 1–40 characters, not a built-in id, and not `system` (reserved: Desktop's `--theme system` is
+  the mode). A custom theme with the id of one already installed replaces it: in Studio the later import wins; in
+  Desktop, of two files in the folder with one id, the later file name (in name order) wins. Required.
+- `name`: 1–40 characters after trimming. Required. `description`: optional, at most 120 characters after trimming.
+  Both are stored trimmed. Lengths count Unicode code points (an emoji is one), and trimming removes Unicode white
+  space (the White_Space property) at both ends: the same in every validator.
 - `mode`: `"dark"` or `"light"`. Required.
 - `base`: optional, a **built-in** theme id of the same mode; default: the mode's default (`dark` or `light`). The
   palette is the base theme's resolved palette with `color` merged over it.
-- `color`: optional; any subset of the colour tokens, with the same paths as `color.dark` in `tokens.json`. Colours
-  are `#RRGGBB` or `#RRGGBBAA` (either case). Arrays (`chart.series`, `chart.fill`, `chart.text`) replace whole and
-  must have the base's length (6). `chart.area_opacity` is a number from 0 to 1.
+- `color`: optional; any subset of the colour tokens, with the same paths as `color.dark` in `tokens.json`, one
+  level per object: `{"bg": {"app": …}}`, never a dotted key (`{"bg.app": …}` is `color.bg.app: not a colour token`).
+  Colours are `#RRGGBB` or `#RRGGBBAA` (either case). Arrays (`chart.series`, `chart.fill`, `chart.text`) replace
+  whole and must have the base's length (6). `chart.area_opacity` is a number from 0 to 1: the opacity of chart area
+  fills (Desktop draws it as is; Studio scales its own area opacities by it relative to the mode's default, so the
+  defaults look as before and 0 removes the fills in both).
 - Anything else is an error, so a typo never fails silently: an unknown key or token path, a wrong type, a bad
   colour, a base of the other mode. A file with an error is not installed, and the app says which file and why
   (the first error is enough; give the token path, e.g. `color.bg.ap: not a colour token`). Keys starting with `$`
   are comments and are ignored, as in `tokens.json`.
+- A file is UTF-8 JSON of at most 1 MB (both apps refuse a larger one unread: `(file): larger than 1 MB; not a
+  theme`); one leading byte order mark (U+FEFF, which PowerShell 5.1 and some editors write) is skipped.
 - `design/theme-cases.json` is the shared conformance table: invalid files with their exact first error, and valid
-  ones with their resolved result. `contrast.mjs` and both apps' tests replay it, so the three validators agree;
-  a change to the format changes that file first.
+  ones with their resolved result, each either parsed (`theme`) or as the file's raw text (`text`: number spellings,
+  a byte order mark and dotted keys survive only that way). `contrast.mjs` and both apps' tests replay it, raw cases
+  through each one's own file reader, so the three validators agree; a change to the format changes that file
+  first.
 - The apps do not refuse a custom theme for low contrast (it is the user's choice), but `node design/contrast.mjs
   --theme <file>` checks one against the same rules as the built-ins, so theme authors can.
 
@@ -91,10 +101,13 @@ stay valid examples.
 
 Where custom themes live:
 - **Studio**: Settings → Appearance → Custom themes → *Import theme…* reads a `.json` file (a file input; several
-  at once is fine). Imported themes are stored in `localStorage` under `folo.themes` (an array of the validated
-  files, stored without their `$` comments and with the name trimmed) and listed under the row (name; mode · based
-  on its base · id), each with *Remove*. Another tab of the same Studio follows changes (the `storage`
-  event), as preferences already do.
+  at once is fine; they are read one at a time, and one over 1 MB is refused by its size, unread). Imported themes are
+  stored in `localStorage` under `folo.themes` (an array of the validated files, stored without their `$` comments
+  and with the name and description trimmed) and listed under the row (name; mode · based on its base · id), each
+  with *Remove*. Another tab of the same Studio follows changes (the `storage` event), as preferences already do.
+  When the browser refuses the write (storage full or blocked), the change stays in this tab, over what other tabs
+  store, until a write succeeds, and the row says so ("Couldn't save to this browser's storage; your custom themes
+  last until you close this tab.").
 - **Desktop**: every `*.json` in `<FOLO_HOME or ~/.folo>/themes/` is read at start and again on *Reload* in
   Settings → Appearance → Custom themes. The row shows that folder (mono, in the platform's form) and, under the row, the
   themes it loaded (name; mode · based on its base · file name, as Studio lists them) and then the files that failed,
@@ -107,7 +120,8 @@ Settings → Appearance holds four rows (`UNIFIED.md` §4, Settings):
 
 1. **Theme**: a Dark / Light / System segmented control, as before (Desktop gains System). With System, its
    description says what it follows now ("Follows your operating system, currently dark.").
-2. **Dark theme**: a select of every dark theme, built-ins in the order above, then custom themes by name.
+2. **Dark theme**: a select of every dark theme, built-ins in the order above, then custom themes by name: by the
+   lower-cased name, then by id, both compared by code point (no locale collation, so both apps list them alike).
    Description: "Used when the theme is Dark, or System while your system is dark."
 3. **Light theme**: the same for light themes.
 4. **Custom themes**: as above, per app.
@@ -128,7 +142,10 @@ and the stored id stays, so installing that theme again brings it back. Selects 
 
 - Studio: `folo.prefs` gains `darkTheme` and `lightTheme` (theme ids; default `"dark"` / `"light"`); `theme` stays
   the mode preference (`"dark" | "light" | "system"`). `index.html`'s first-paint script applies the resolved theme
-  (custom themes included) so there is no flash of the default.
+  (custom themes included) so there is no flash of the default, accepting exactly what the app does: the mode from a
+  valid legacy `folo.theme`, else `folo.prefs`' `theme`, else dark; a stored custom theme only when the whole entry
+  passes the check, setting only colour token properties. Its data (the built-in ids, each colour token's custom
+  property) is generated by `npm run tokens`, and `npm run check` fails when it is stale.
 - Desktop: `desktop.json` keeps `theme` as the mode (`"dark" | "light" | "system"`, the old file's values read the
   same) and gains `dark_theme` and `light_theme`. `--theme` on the command line takes a mode or a theme id
   (`--theme midnight` means mode Dark with Midnight), for screenshots and tests.
@@ -145,7 +162,8 @@ and the stored id stays, so installing that theme again brings it back. Selects 
   mode, description, constructor), plus `Colors::set(&mut self, path: &str, value) -> bool` for custom overrides by
   token path (`bg.app`, `chart.series.0`). `Theme` keeps `mode` (so `is_dark()` and the mode's shadows work) and
   gains `id`. System mode follows the OS appearance live (Win32: `WM_SETTINGCHANGE` "ImmersiveColorSet";
-  winit: its theme-changed event); the headless platform reports dark. The window frame (DWM's caption and border
+  winit: its theme-changed event); the headless platform reports dark until a test changes it
+  (`HeadlessApp::set_system_appearance`, delivered through the same window callback). The window frame (DWM's caption and border
   on Windows) follows the mode shown, not the OS: a Light theme draws a light frame on a dark system.
 
 ## Checks
@@ -155,4 +173,8 @@ and the stored id stays, so installing that theme again brings it back. Selects 
   prints its result without failing on others. `npm run check` runs it, as before.
 - Both apps test: parsing (every error case above names its path), resolution (base + overrides, unknown stored id →
   default), the mode/slot rules of *Choosing a theme*, and persistence.
-- The default themes stay pixel-identical: shots of the default Dark and Light before and after this change match.
+- The default themes stay pixel-identical: shots of the default Dark and Light before and after this change match
+  on every channel, except the Settings page, where the Appearance panel itself changed (its new rows) and what
+  follows it moved down. Above that panel, Studio's Settings matches too; Desktop's has the same colours, but its
+  content sits up to 2 device pixels lower (at scale 1.5), because folo-ui's layout of that page depends on the
+  height of what follows (the same build moves it alike with the panel left out).

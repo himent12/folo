@@ -250,7 +250,8 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
 
 - `Platform`: run loop, quit, displays, open_window, clipboard, prompt_for_paths / prompt_for_new_path,
   open_url, reveal_path, cursor style, dispatcher, text system, activate, window_appearance (the system's light /
-  dark appearance; the headless platform reports dark).
+  dark appearance; the headless platform reports dark until a test changes it with `set_appearance`, which runs each
+  window's `on_appearance_changed` callback).
 - `PlatformWindow`: bounds, window_bounds, content_size, scale_factor, display, mouse_position, modifiers,
   is_maximized / is_fullscreen / is_active, minimize, zoom, toggle_fullscreen, activate, set_title,
   set / take input handler, update_ime_position, the `on_*` callbacks GPUI has (request_frame, input, resize,
