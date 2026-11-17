@@ -48,7 +48,9 @@ tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 http-body-util = "0.1"
-sysinfo = "0.37"
+# Only `System` (CPU, memory, OS): the other modules (disks, networks, components, users, GPUs) add Windows API
+# features to build.
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 clap = { version = "4", features = ["derive", "env", "string"] }
 # No GL backend: FOLO targets Vulkan / DX12 / Metal natively and WebGPU in the browser.
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "metal", "webgpu", "wgsl"] }
