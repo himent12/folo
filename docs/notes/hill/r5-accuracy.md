@@ -57,3 +57,25 @@ per-group score sets are themselves mis-ordered across groups. The term works pe
 thousands of batches with the supervised loss holding each class's calibration, so `rswap16` is not a bound on what
 training gives, only a reminder that the term teaches within-batch order and relies on consistency across batches.
 The dumps are v3 at inference on val, not the e32 / e48 students on augmented training batches.
+
+## Setting `rank_gain` (the gradient probe)
+
+The counsel's rule: over the first 100 fork batches, log the L2 norm of the class-logit gradient of the rank term
+and of the supervised loss; if their ratio is outside 0.3-1.0, rescale `λr` once and record it as the default.
+`FOLO_DISTILL_PROBE=100` on a throwaway copy of hill 4's control at epoch 32, resumed with `--teacher folo-s-coco
+--set distill.rank_gain=2.0`, the first 100 batches of epoch 33, inside one GPU lock hold (script
+`D:/folo-data/runs-hill5/accuracy/bin/probe.sh`, norms `logs/probe-g2.0.norms.txt`, summary
+`logs/probe-g2.0.stats.txt`; binary `folo-rank-c08fbc7c.exe`):
+
+| class-logit gradient, L2, per batch (B and gains included) | median over 100 batches |
+|---|---:|
+| supervised (BCE at gain 0.5) | 0.1697 |
+| class distillation `L_kc` (gain 0.5) | 0.1294 |
+| rank term at `λr` 2.0 | 0.2142 |
+| rank / supervised | **1.27** (min 1.08, max 1.56) |
+
+1.27 is outside 0.3-1.0. The counsel meant 2.0 as "half the supervised class gradient", so the rescale aims at a
+ratio of 0.5: `λr = 2.0 · 0.5 / 1.27 = 0.79`, rounded to **0.8** (the term is linear in `λr`, so the ratio becomes
+0.51). The fork arms use `--set distill.rank_gain=0.8`. (A literal reading, `λr` = 0.5, would give a ratio of 0.32,
+inside the band at its lower edge; not run.) `rank_gain` stays 0 (off) in `DistillConfig::default`: whether 0.8
+becomes the value `--teacher` starts with depends on the gate.
