@@ -167,7 +167,8 @@ impl Default for Catalog {
     }
 }
 
-/// A theme file larger than this is refused unread (a theme is a few kB).
+/// A theme file larger than this is refused, read no further (a theme is a few kB; Studio refuses
+/// the same size).
 const MAX_FILE: u64 = 1 << 20;
 
 /// `path` as the platform writes it, one separator throughout: a `FOLO_HOME` of `D:/x` joined with
@@ -223,7 +224,8 @@ impl Catalog {
                 file,
             });
         }
-        extra.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
+        // By lower-cased name, then id, both by code point (design/THEMES.md; Studio's themeCatalog).
+        extra.sort_by_cached_key(|e| (e.name.to_lowercase(), e.id.clone()));
         c.entries.extend(extra);
         c
     }
@@ -314,12 +316,17 @@ impl Catalog {
     }
 }
 
+/// Reads and parses one theme file, at most [`MAX_FILE`] bytes of it: the limit holds at the read
+/// itself (a file that grew, or was replaced, after the folder was listed still costs no more).
 fn read_theme(path: &Path) -> Result<CustomTheme, String> {
-    let len = std::fs::metadata(path).map_err(|e| format!("couldn't read: {e}"))?.len();
-    if len > MAX_FILE {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| format!("couldn't read: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE + 1).read_to_end(&mut bytes).map_err(|e| format!("couldn't read: {e}"))?;
+    if bytes.len() as u64 > MAX_FILE {
         return Err("(file): larger than 1 MB; not a theme".into());
     }
-    let text = std::fs::read_to_string(path).map_err(|e| format!("couldn't read: {e}"))?;
+    let text = String::from_utf8(bytes).map_err(|_| "(file): not UTF-8 text".to_string())?;
     custom::parse(&text)
 }
 
@@ -438,6 +445,47 @@ mod tests {
         let c = Catalog::load(&folder);
         assert_eq!(c.facts(c.get("n").unwrap()), ["Dark", "based on Midnight"]);
         assert_eq!(c.custom().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["alpha", "n", "zeta"]);
+    }
+
+    /// The same names as Studio's test (web/src/lib/design/themes.test.ts): code point order of the
+    /// lower-cased names, ties by id; no locale collation.
+    #[test]
+    fn custom_themes_sort_by_code_point_as_in_studio() {
+        let names = ["😀 Smile", "\u{FF21}pple", "éclair", "Ember", "apple", "Same", "same"];
+        let themes = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| custom::parse(&custom(&format!("t{}", names.len() - i), name, "dark")).unwrap())
+            .collect();
+        let c = Catalog::with_custom(themes);
+        let listed: Vec<&str> = c.custom().map(|e| e.name.as_str()).collect();
+        assert_eq!(listed, ["apple", "Ember", "same", "Same", "éclair", "\u{FF21}pple", "😀 Smile"]);
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_skipped_and_large_or_reserved_files_are_refused() {
+        let dir = TestDir::new("desktop-themes-edge");
+        let folder = dir.path().join("themes");
+        std::fs::create_dir_all(&folder).unwrap();
+        // PowerShell 5.1's `Set-Content -Encoding utf8` writes a byte order mark.
+        std::fs::write(folder.join("bom.json"), format!("\u{feff}{}", custom("bom", "Bom", "dark"))).unwrap();
+        // Valid JSON padded past the limit: refused by size, not parsed.
+        let big = format!("{}{}", custom("big", "Big", "dark"), " ".repeat(MAX_FILE as usize));
+        std::fs::write(folder.join("big.json"), big).unwrap();
+        std::fs::write(folder.join("system.json"), custom("system", "System", "dark")).unwrap();
+        let c = Catalog::load(&folder);
+        assert_eq!(c.custom().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["bom"]);
+        assert_eq!(
+            c.failed,
+            [
+                Failed { file: "big.json".into(), error: "(file): larger than 1 MB; not a theme".into() },
+                Failed { file: "system.json".into(), error: "id: \"system\" is reserved".into() },
+            ]
+        );
+        // So `--theme system` always means the mode.
+        let mut p = ThemePrefs::default();
+        assert!(p.apply_arg("system", &c));
+        assert_eq!(p.mode, ModePref::System);
     }
 
     #[test]

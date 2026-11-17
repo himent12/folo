@@ -322,13 +322,7 @@ pub fn run() {
                             );
                         }
                         let this = cx.weak_entity();
-                        window.on_appearance_changed(cx, {
-                            let this = this.clone();
-                            move |window, cx| {
-                                let dark = app::is_dark(window.appearance());
-                                this.update(cx, |app, cx| app.system_appearance_changed(dark, cx)).ok();
-                            }
-                        });
+                        app::follow_system_appearance(window, this.clone(), cx);
                         window.on_window_should_close(cx, move |window, cx| {
                             this.update(cx, |app, cx| app.should_close(window, cx)).unwrap_or(true)
                         });

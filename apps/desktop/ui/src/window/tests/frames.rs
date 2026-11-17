@@ -216,3 +216,36 @@ fn frame_cost_of_a_mid_sized_tree() {
         wall,
     );
 }
+
+/// A system appearance change reaches the handler `on_appearance_changed` registered through the
+/// platform's callback (the path Win32's `WM_SETTINGCHANGE` and winit's theme event take), with the
+/// window seeing the new appearance and redrawn; the handler stays registered for the next change,
+/// and a handler that sets the frame's appearance reaches the platform window.
+#[test]
+fn a_system_appearance_change_reaches_the_window_handler() {
+    use crate::WindowAppearance;
+    let (mut app, window) =
+        open(size(px(200.), px(100.)), 1.0, |_, _| div().size_full().bg(color(1)).into_any_element());
+    let seen: Rc<RefCell<Vec<WindowAppearance>>> = Rc::default();
+    with_window(&mut app, window, |window, cx| {
+        assert_eq!(window.appearance(), WindowAppearance::Dark, "the headless system starts dark");
+        let seen = seen.clone();
+        window.on_appearance_changed(cx, move |window, _| {
+            let appearance = window.appearance();
+            seen.borrow_mut().push(appearance);
+            window.set_frame_appearance(Some(appearance));
+        });
+    });
+    app.frame(window);
+    assert!(!app.is_dirty(window));
+    app.set_system_appearance(WindowAppearance::Light);
+    assert_eq!(*seen.borrow(), [WindowAppearance::Light]);
+    assert!(app.is_dirty(window), "the window redraws in the new appearance");
+    assert_eq!(app.platform().frame_appearances(), [Some(WindowAppearance::Light)]);
+    assert_eq!(app.read(|cx| cx.window_appearance()), WindowAppearance::Light);
+    // No change, no call; the next change reaches the same handler.
+    app.set_system_appearance(WindowAppearance::Light);
+    app.set_system_appearance(WindowAppearance::Dark);
+    assert_eq!(*seen.borrow(), [WindowAppearance::Light, WindowAppearance::Dark]);
+    assert_eq!(app.platform().frame_appearances(), [Some(WindowAppearance::Dark)]);
+}

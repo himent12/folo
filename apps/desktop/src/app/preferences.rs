@@ -1,7 +1,7 @@
 //! The colour theme (design/THEMES.md: the mode, each mode's theme, custom themes), and the window
 //! state remembered between launches.
 
-use folo_ui::{App, Context, Window, WindowAppearance};
+use folo_ui::{App, Context, WeakEntity, Window, WindowAppearance};
 
 use crate::theme::{Catalog, Mode, ModePref};
 
@@ -10,6 +10,15 @@ use super::FoloApp;
 /// Whether an OS appearance is dark.
 pub fn is_dark(a: WindowAppearance) -> bool {
     matches!(a, WindowAppearance::Dark | WindowAppearance::VibrantDark)
+}
+
+/// Registers `window`'s handler for the OS appearance: from then on System follows it, through
+/// folo-ui's delivery (Win32 `WM_SETTINGCHANGE`, winit's theme event, a headless test's change).
+pub fn follow_system_appearance(window: &mut Window, this: WeakEntity<FoloApp>, cx: &App) {
+    window.on_appearance_changed(cx, move |window, cx| {
+        let dark = is_dark(window.appearance());
+        this.update(cx, |app, cx| app.system_appearance_changed(dark, cx)).ok();
+    });
 }
 
 impl FoloApp {

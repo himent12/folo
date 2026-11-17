@@ -2,10 +2,10 @@
 //! the mode / slot rules, System following the OS, custom themes and Reload, the palette's commands.
 
 use folo_test_support::TestDir;
-use folo_ui::{HeadlessApp, WindowHandle};
+use folo_ui::{HeadlessApp, WindowAppearance, WindowHandle};
 
 use super::tests::{drive, open};
-use super::{FoloApp, Route};
+use super::{FoloApp, Route, follow_system_appearance};
 use crate::theme::{Catalog, Mode, ModePref, theme};
 
 /// A valid custom theme file.
@@ -130,4 +130,31 @@ fn reload_reads_the_folder_again_and_a_removed_theme_falls_back_to_the_default()
     app.run_until_idle();
     assert_eq!(shown(&mut app, window).0, "dark");
     assert_eq!(drive(&mut app, window, |this, _, _| this.theme_prefs.dark.clone()), "night-shift");
+}
+
+/// System follows the OS through folo-ui's delivery: an appearance change at the platform reaches
+/// the handler the app registers at start (`follow_system_appearance`), and the window frame then
+/// takes the mode shown.
+#[test]
+fn system_follows_an_os_change_delivered_through_the_window() {
+    let dir = TestDir::new("desktop-theme-system");
+    let (mut app, window) = on_settings(&dir.path().join("themes"));
+    drive(&mut app, window, |this, w, cx| {
+        follow_system_appearance(w, cx.weak_entity(), cx);
+        this.theme_prefs.light = "paper".into();
+        this.set_mode(ModePref::System, cx);
+    });
+    assert_eq!(shown(&mut app, window), ("dark".into(), Mode::Dark, ModePref::System));
+    app.set_system_appearance(WindowAppearance::Light);
+    assert_eq!(shown(&mut app, window), ("paper".into(), Mode::Light, ModePref::System));
+    app.frame(window.into());
+    assert_eq!(app.platform().frame_appearances(), [Some(WindowAppearance::Light)], "the frame follows");
+    app.set_system_appearance(WindowAppearance::Dark);
+    assert_eq!(shown(&mut app, window), ("dark".into(), Mode::Dark, ModePref::System));
+    app.frame(window.into());
+    assert_eq!(app.platform().frame_appearances(), [Some(WindowAppearance::Dark)]);
+    // An explicit mode ignores the OS.
+    drive(&mut app, window, |this, _, cx| this.set_mode(ModePref::Dark, cx));
+    app.set_system_appearance(WindowAppearance::Light);
+    assert_eq!(shown(&mut app, window).1, Mode::Dark);
 }

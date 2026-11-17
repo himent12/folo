@@ -66,7 +66,7 @@ pub use forms::{
     retry_batch, synth_errors,
 };
 pub use playground::{IMAGE_FORMATS, PLAY_CONF_FLOOR};
-pub use preferences::is_dark;
+pub use preferences::{follow_system_appearance, is_dark};
 pub use sidebar::logo;
 
 actions!(

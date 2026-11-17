@@ -23,14 +23,19 @@ pub struct CustomTheme {
     pub colors: Colors,
 }
 
+/// Not a custom theme id: `--theme system` means the mode (design/THEMES.md, Custom themes).
+pub const RESERVED_ID: &str = "system";
+
 /// The keys of a theme file besides `$` comments.
 const KEYS: [&str; 7] = ["folo_theme", "id", "name", "mode", "base", "description", "color"];
 
 /// Parses and validates one theme file. The error is the first problem found, as `path: what`; the
 /// messages and their order are the ones `design/theme-cases.json` holds for every validator
 /// (`design/contrast.mjs`, Studio, this one): unknown top-level keys, `folo_theme`, `id`, `name`,
-/// `description`, `mode`, `base`, then `color` depth first in file order.
+/// `description`, `mode`, `base`, then `color` depth first in file order. One leading UTF-8 byte
+/// order mark is skipped (PowerShell 5.1 and some editors write one), as every validator does.
 pub fn parse(text: &str) -> Result<CustomTheme, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let v: Value = serde_json::from_str(text)
         .map_err(|e| format!("(file): not valid JSON (line {}, column {})", e.line(), e.column()))?;
     parse_value(&v)
@@ -44,7 +49,8 @@ pub fn parse_value(v: &Value) -> Result<CustomTheme, String> {
     }
     match root.get("folo_theme") {
         None => return Err("folo_theme: required".into()),
-        Some(v) if v.as_u64() == Some(1) => {}
+        // Any JSON number equal to 1 (`1`, `1.0`, `1e0`): JSON.parse can't tell them apart either.
+        Some(v) if v.as_f64() == Some(1.0) => {}
         Some(_) => return Err("folo_theme: must be 1".into()),
     }
     let id = match root.get("id") {
@@ -57,8 +63,13 @@ pub fn parse_value(v: &Value) -> Result<CustomTheme, String> {
     if THEMES.iter().any(|b| b.id == id) {
         return Err(format!("id: \"{id}\" is a built-in theme"));
     }
+    if id == RESERVED_ID {
+        return Err(format!("id: \"{RESERVED_ID}\" is reserved"));
+    }
     let name = match root.get("name") {
         None => return Err("name: required".into()),
+        // Lengths count code points after trimming Unicode white space (`str::trim`), as in the JS
+        // validators (`[...s].length` after their White_Space trim).
         Some(v) => v.as_str().map(str::trim).filter(|n| !n.is_empty() && n.chars().count() <= 40),
     };
     let Some(name) = name else {
@@ -66,7 +77,7 @@ pub fn parse_value(v: &Value) -> Result<CustomTheme, String> {
     };
     let description = match root.get("description") {
         None => "",
-        Some(v) => match v.as_str().filter(|d| d.chars().count() <= 120) {
+        Some(v) => match v.as_str().map(str::trim).filter(|d| d.chars().count() <= 120) {
             Some(d) => d,
             None => return Err("description: must be at most 120 characters".into()),
         },
@@ -108,7 +119,8 @@ pub fn parse_value(v: &Value) -> Result<CustomTheme, String> {
     })
 }
 
-/// Sets every token of `group` (at `prefix`, `""` for `color` itself) on `colors`.
+/// Sets every token of `group` (at `prefix`, `""` for `color` itself) on `colors`, one level of the
+/// palette at a time: a key holding a `.` (`"bg.app"`) is no token, as in the JS validators.
 fn merge(group: &Map<String, Value>, prefix: &str, colors: &mut Colors) -> Result<(), String> {
     for (k, v) in group {
         if k.starts_with('$') {
@@ -116,6 +128,9 @@ fn merge(group: &Map<String, Value>, prefix: &str, colors: &mut Colors) -> Resul
         }
         let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
         let at = format!("color.{path}");
+        if k.contains('.') {
+            return Err(format!("{at}: not a colour token"));
+        }
         match TOKENS.iter().find(|(p, _)| *p == path).map(|(_, kind)| *kind) {
             Some(TokenKind::Color) => {
                 colors.set(&path, colour(v).ok_or_else(|| not_colour(&at))?);
@@ -229,17 +244,30 @@ mod tests {
         let invalid = cases["invalid"].as_array().unwrap();
         let valid = cases["valid"].as_array().unwrap();
         assert!(invalid.len() >= 40 && valid.len() >= 5, "the cases file lost its cases");
+        // A case holds the parsed `theme`, or the file's raw `text` (number spellings, a byte order
+        // mark, dotted keys: what only parsing the file itself shows).
+        let check = |case: &Value| match case.get("text") {
+            Some(text) => parse(text.as_str().unwrap()),
+            None => parse_value(&case["theme"]),
+        };
+        assert!(
+            invalid.iter().chain(valid).filter(|c| c.get("text").is_some()).count() >= 8,
+            "the cases file lost its raw cases"
+        );
         for case in invalid {
             let what = case["what"].as_str().unwrap();
-            let got = parse_value(&case["theme"]).expect_err(what);
+            let got = check(case).expect_err(what);
             assert_eq!(got, case["error"].as_str().unwrap(), "{what}");
         }
         for case in valid {
             let what = case["what"].as_str().unwrap();
-            let t = parse_value(&case["theme"]).unwrap_or_else(|e| panic!("{what}: {e}"));
+            let t = check(case).unwrap_or_else(|e| panic!("{what}: {e}"));
             let expect = &case["expect"];
             assert_eq!(t.base, expect["base"].as_str().unwrap(), "{what}");
             assert_eq!(t.name, expect["name"].as_str().unwrap(), "{what}");
+            if let Some(d) = expect.get("description") {
+                assert_eq!(t.description, d.as_str().unwrap(), "{what}");
+            }
             // Each expected token, set on a copy of the resolved palette: unchanged means it matched.
             for (token, want) in expect["color"].as_object().unwrap() {
                 let mut c = t.colors;
