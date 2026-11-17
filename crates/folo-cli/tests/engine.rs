@@ -404,6 +404,30 @@ fn quantize_then_int8_val_and_predict() {
     let (code, lines, _) =
         folo(&["quantize", "--json", "--model", s(&best), "--data", s(data), "--output", s(&out)]);
     assert_eq!((code, lines[0]["error"]["code"].as_str()), (1, Some("output_exists")));
+    // So is an --imgsz the model cannot take (and --method mse runs).
+    let (code, lines, _) =
+        folo(&["quantize", "--json", "--model", s(&best), "--data", s(data), "--imgsz", "100"]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (2, Some("usage")));
+    let mse = out.with_file_name("mse-int8.folo");
+    let (code, lines, stderr) = folo(&[
+        "quantize",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(data),
+        "--images",
+        "2",
+        "--method",
+        "mse",
+        "--output",
+        s(&mse),
+    ]);
+    assert_eq!(
+        (code, lines[0]["method"].as_str(), lines[0]["tail"].as_f64()),
+        (0, Some("mse"), None),
+        "{stderr}"
+    );
 
     let (code, lines, stderr) =
         folo(&["val", "--json", "--model", s(&out), "--data", s(data), "--precision", "int8"]);

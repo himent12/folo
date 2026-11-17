@@ -340,3 +340,38 @@ pub fn calibrate_sample(
     };
     Ok((calibrate(model, batches, method)?, n))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(v: &[f32]) -> Stats {
+        let mut s = Stats::default();
+        s.add(v, 0);
+        s.add(v, 1);
+        s
+    }
+
+    #[test]
+    fn ranges_have_their_known_answers() {
+        // 0..20480 step 1: about 10 values a bin.
+        let v: Vec<f32> = (0..20480).map(|i| i as f32).collect();
+        let s = stats(&v);
+        assert_eq!(s.range(Method::MinMax), [0.0, 20479.0]);
+        assert_eq!(s.range(Method::Percentile { p: 0.0 }), [0.0, 20479.0]);
+        // 1% off each end, to a bin (~10 wide).
+        let [lo, hi] = s.range(Method::Percentile { p: 0.01 });
+        assert!((lo - 204.8).abs() < 12.0 && (hi - (20479.0 - 204.8)).abs() < 12.0, "[{lo}, {hi}]");
+        // Uniform: clipping costs more than rounding, so MSE keeps (about) the whole range.
+        let [lo, hi] = s.range(Method::Mse);
+        assert!(lo == 0.0 && hi > 20479.0 * 0.98, "[{lo}, {hi}]");
+        // A million values in [0, 100) and one at 10 000: MSE trades the outlier's clipping, (10⁴ − h)², against
+        // the rounding of the rest, 10⁶ · (h / 255)² / 12, which is least at h ≈ 4 383; min/max keeps 10 000.
+        let mut v: Vec<f32> = (0..1_000_000).map(|i| (i % 100) as f32).collect();
+        v.push(10_000.0);
+        let s = stats(&v);
+        assert_eq!(s.range(Method::MinMax), [0.0, 10_000.0]);
+        let [lo, hi] = s.range(Method::Mse);
+        assert!(lo == 0.0 && (3_900.0..4_900.0).contains(&hi), "[{lo}, {hi}]");
+    }
+}

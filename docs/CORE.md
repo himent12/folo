@@ -154,15 +154,17 @@ these kernels:
   `4g + t`), each with an affine grid (`Grid { scale, zero }`). A channel slice on a multiple of 4 is a view (an
   offset), so split and concatenation copy nothing. Buffers come from the buffer cache (`q8::alloc`, `q8::recycle`)
   with 64 words of slack after the data.
-- **Conv.** `q8::conv` takes the input parts of a concatenation (each with its zero point), an optional residual
-  and a `QConv` (s8 weights packed `[O/4][C/4·k·k][4]`, four to a word, the zero-point corrections, per-channel scales and biases)
-  and writes u8 C4 codes or `f32` NCHW. A micro-kernel computes 4 output channels × 24 output pixels in i32: AVX-VNNI
-  `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has `avxvnni` (and AVX2, FMA), detected at
-  run time, else portable scalar code with the same sums (`FOLO_Q8_SCALAR=1` forces it). 1×1 stride-1 convs read
+- **Conv.** `q8::conv` takes the input parts of a concatenation (each with its zero point, which must be the one
+  the weights were packed with), an optional residual and a `QConv` (s8 weights packed `[O/4][C/4·k·k][4]`, four
+  to a word, the zero-point corrections, per-channel scales and biases; `C·k·k` at most `MAX_REDUCTION` = 2¹⁵ so
+  the i32 sums cannot overflow) and writes u8 C4 codes or `f32` NCHW. A micro-kernel computes 4 output channels ×
+  24 output pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
+  `avxvnni` (and AVX2, FMA), detected at run time, else portable scalar code with the same sums. 1×1 stride-1 convs read
   the input planes in place; other convs read a padded, phase-split copy of each image's rows (padding with the
   zero point) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
   FMA, SiLU, the residual as one FMA, requantise) is the same `f32` operations in the scalar and AVX2 code, so
-  results are bit-identical across kernels and thread counts. Its SiLU (`q8::silu_q8`) is `x / (1 + e^{−x})` with
+  results are bit-identical across kernels and thread counts; the AVX2 form runs on any CPU with AVX2 and FMA
+  (`FOLO_Q8_SCALAR=1` turns off both vector paths). Its SiLU (`q8::silu_q8`) is `x / (1 + e^{−x})` with
   `silu8`'s `exp` polynomial, one power-of-two scale and no blend (within 2e-6 of SiLU); the AVX2 requantise packs
   four channels' codes with saturating `packs` / `packus` and one byte shuffle into C4 words. Work is split into
   (image, pixel block, channel block) tasks: about three per thread, none under 2²⁰ multiply-adds. An image whose
@@ -172,10 +174,11 @@ these kernels:
 - **Others.** `quantize` / `dequantize` between `f32` NCHW and C4 codes, separable max pooling on codes (`max` of
   bytes; exact since the grid is monotonic), nearest 2× upsampling.
 
-Tests (`cpu/q8/tests.rs`) check every conv shape class against an i64 reference at 1, 3 and 8 threads (with the real task size and with one-MAC tasks, which take every split), the
-task plan's bounds, VNNI
-against the scalar kernel, the SiLU against SiLU in `f64` and its scalar form against its AVX2 form bit for bit, and
-the pools. `cargo bench -p folo-core --bench
+Tests (`cpu/q8/tests.rs`) check convs against an i64 reference at 1, 3 and 8 threads, with the real task size and
+with one-MAC tasks (every split): 3×3 stride 1 and 2, 1×1, several input parts on different grids, residuals, `f32`
+outputs, two images, and offset views with a longer image stride. They also check the task plan's bounds, the
+refusals (zero points, long reductions), VNNI against the scalar kernel, the SiLU against SiLU in `f64` and its
+scalar form against its AVX2 form bit for bit, quantise round trips and the pools. `cargo bench -p folo-core --bench
 q8_infer` times each folo-n conv in int8 against the fused `f32` `conv2d_act`.
 
 ### The buffer cache

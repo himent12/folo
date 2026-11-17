@@ -33,6 +33,20 @@ struct Case {
     silu: bool,
     res: bool,
     f32_out: bool,
+    /// Words of other data before each image of the inputs and the residual (views with an offset and a longer
+    /// image stride, as `narrow` makes them).
+    gap: usize,
+}
+
+/// `dense` (`n` images of `per_img` words) with `gap` other words before each image and [`SLACK`] after.
+fn spread(rng: &mut Rng, dense: &[u32], n: usize, per_img: usize, gap: usize) -> Vec<u32> {
+    let mut v = Vec::new();
+    for img in 0..n {
+        v.extend((0..gap).map(|_| rng.next_u64() as u32));
+        v.extend_from_slice(&dense[img * per_img..(img + 1) * per_img]);
+    }
+    v.extend((0..SLACK).map(|_| rng.next_u64() as u32));
+    v
 }
 
 /// The reference: the conv sum per output in i64 from the codes, then the epilogue written out.
@@ -136,15 +150,25 @@ fn run_case(c: &Case, seed: u64) {
         xs.iter().zip(&c.parts).flat_map(|((_, g), &pc)| std::iter::repeat_n(*g, pc)).collect();
     let cv = QConv::new(&wt, &bias, (c.o, cin, c.k), c.s, c.pad, c.silu, &grids);
     let (want_q, want_f) = reference(c, &xs, &wt, &bias, res.as_ref(), out_grid);
+    let gap = c.gap;
+    let xs_v: Vec<Vec<u32>> =
+        xs.iter().zip(&c.parts).map(|((d, _), &pc)| spread(&mut rng, d, c.n, pc / 4 * hw, gap)).collect();
+    let res_v = res.as_ref().map(|(d, _)| spread(&mut rng, d, c.n, c.o / 4 * ohw, gap));
     for threads in [1, 3, 8] {
-        let views: Vec<C4> = xs
+        let views: Vec<C4> = xs_v
             .iter()
-            .zip(&c.parts)
-            .map(|((d, g), &pc)| C4 { data: d, offset: 0, img_stride: pc / 4 * hw, c: pc, zero: g.zero })
+            .zip(xs.iter().zip(&c.parts))
+            .map(|(d, ((_, g), &pc))| C4 {
+                data: d,
+                offset: gap,
+                img_stride: pc / 4 * hw + gap,
+                c: pc,
+                zero: g.zero,
+            })
             .collect();
-        let rv = res
-            .as_ref()
-            .map(|(d, g)| (C4 { data: d, offset: 0, img_stride: c.o / 4 * ohw, c: c.o, zero: g.zero }, *g));
+        let rv = res.as_ref().zip(res_v.as_ref()).map(|((_, g), d)| {
+            (C4 { data: d, offset: gap, img_stride: c.o / 4 * ohw + gap, c: c.o, zero: g.zero }, *g)
+        });
         if c.f32_out {
             let mut got = vec![0f32; c.n * c.o * ohw];
             pool(threads).install(|| conv(&views, c.n, c.h, c.w, &cv, rv, QOut::F32 { data: &mut got }));
@@ -175,6 +199,7 @@ fn conv_matches_the_integer_reference() {
         silu: true,
         res: false,
         f32_out: false,
+        gap: 0,
     };
     let cases = [
         // 3×3 stride 1 with a residual, odd sizes (ragged tiles and dropped columns).
@@ -193,6 +218,10 @@ fn conv_matches_the_integer_reference() {
             w: 13,
             ..base.clone()
         },
+        // 1×1 over two images of offset, strided views (two parts, a residual): what `narrow` hands the conv.
+        Case { n: 2, k: 1, pad: 0, parts: vec![8, 4], o: 8, res: true, gap: 37, h: 6, w: 11, ..base.clone() },
+        // And a 3×3 with them.
+        Case { n: 2, res: true, gap: 5, ..base.clone() },
         // 1×1 with an f32 output (qkv).
         Case { k: 1, pad: 0, parts: vec![16], o: 8, silu: false, f32_out: true, ..base.clone() },
         // A long K (more than one task's worth of steps) and a stride-2 3×3 with f32 out.
@@ -224,7 +253,7 @@ fn plan_covers_the_conv_in_few_big_tasks() {
     for ((n, chunks, og, unit, threads), input) in
         cases.into_iter().flat_map(|c| [(c, 1 << 10), (c, 1 << 30)])
     {
-        let (cb, ob) = plan(n, chunks, og, unit, input, threads);
+        let (cb, ob) = plan(n, chunks, og, unit, input, (threads, TASK_MACS));
         assert!((1..=chunks).contains(&cb) && (1..=og).contains(&ob));
         let tasks = n * chunks.div_ceil(cb) * og.div_ceil(ob);
         let macs = n * chunks * og * unit;
@@ -393,4 +422,27 @@ fn qconv_refuses_reductions_that_overflow_i32() {
     let c = 4 * 1024;
     let grids = vec![Grid { scale: 1.0, zero: 255 }; c];
     QConv::new(&vec![1.0; 4 * c * 9], &[0.0; 4], (4, c, 3), 1, 1, false, &grids);
+}
+
+#[test]
+fn quantize_round_trips_planes_over_one_block() {
+    // Planes longer than quantize's parallel block (4096 values), so the blocks after the first are used.
+    let g = Grid::from_range(-1.0, 3.0);
+    let (n, c, hw) = (2, 8, 4096 + 1500);
+    let mut rng = Rng::seed(9);
+    let x: Vec<f32> = (0..n * c * hw).map(|_| rng.uniform(-1.5, 3.5)).collect();
+    let mut q = alloc(n, c, hw);
+    quantize(&x, n, c, hw, g, &mut q);
+    for img in 0..n {
+        for ch in 0..c {
+            for p in (0..hw).step_by(7) {
+                let want = g.quantize(x[(img * c + ch) * hw + p]);
+                assert_eq!(
+                    byte_of(&q[img * c / 4 * hw..], ch / 4, hw, p, ch % 4),
+                    want,
+                    "({img}, {ch}, {p})"
+                );
+            }
+        }
+    }
 }

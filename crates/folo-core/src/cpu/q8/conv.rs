@@ -257,8 +257,9 @@ fn task_macs() -> usize {
 const SPLIT_CHANNELS_MAX: usize = 384 << 10;
 
 /// Task blocks `(chunks, channel groups)` per task for `n` images of `chunks` pixel chunks and `og` channel groups,
-/// `unit` MACs each (one chunk of one group), the image's input taking `input` bytes: about three tasks per thread
-/// so work stealing evens out fast and slow cores, but no task under [`TASK_MACS`].
+/// `unit` MACs each (one chunk of one group), the image's input taking `input` bytes, on `threads` threads: about
+/// three tasks per thread so work stealing evens out fast and slow cores, but no task under `min_macs` (the conv
+/// passes [`TASK_MACS`]).
 ///
 /// A small input (up to [`SPLIT_CHANNELS_MAX`], which stays in a core's L2) is split by channel groups first:
 /// every task reads the whole input but writes whole output planes, where pixel blocks of a few chunks would share
@@ -270,10 +271,10 @@ pub(super) fn plan(
     og: usize,
     unit: usize,
     input: usize,
-    threads: usize,
+    (threads, min_macs): (usize, usize),
 ) -> (usize, usize) {
     let macs = n * chunks * og * unit;
-    let want = if threads > 1 { (3 * threads).min(macs / task_macs()).max(1) } else { 1 };
+    let want = if threads > 1 { (3 * threads).min(macs / min_macs.max(1)).max(1) } else { 1 };
     let per_img = want.div_ceil(n);
     if input <= SPLIT_CHANNELS_MAX {
         let og_blk = og.div_ceil(per_img.min(og));
@@ -332,8 +333,14 @@ pub fn conv(
     };
     let rows: Vec<Rows> = (0..n).map(|i| image_rows(xs, i, h, w, cv)).collect();
     let chunks = rows[0].n.div_ceil(NR);
-    let (ch_blk, og_blk) =
-        plan(n, chunks, og, MR * NR * cv.ks * 4, cv.c * rows[0].n, rayon::current_num_threads());
+    let (ch_blk, og_blk) = plan(
+        n,
+        chunks,
+        og,
+        MR * NR * cv.ks * 4,
+        cv.c * rows[0].n,
+        (rayon::current_num_threads(), task_macs()),
+    );
     let (cbs, obs) = (chunks.div_ceil(ch_blk), og.div_ceil(og_blk));
     let kern = kernel();
     let res = res.map(|(r, g)| (r, (g.scale, g.zero as i32)));

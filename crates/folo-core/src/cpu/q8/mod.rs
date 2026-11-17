@@ -1,4 +1,4 @@
-//! int8 inference on the CPU (docs/MODEL.md §9.6, docs/CORE.md "int8 kernels"): u8 activations on an affine grid,
+//! int8 inference on the CPU (docs/MODEL.md §9.6, docs/CORE.md "int8 convs"): u8 activations on an affine grid,
 //! s8 weights, exact i32 accumulation with AVX-VNNI (`vpdpbusd`) where the CPU has it and a portable kernel
 //! with the same integers where it does not.
 //!

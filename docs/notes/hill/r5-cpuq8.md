@@ -24,7 +24,7 @@ The design is docs/MODEL.md §9.6, and the kernels are in docs/CORE.md under "in
 
 Logs: `logs/boot-gate-n.log`, `logs/boot-gate-n-int8.log`, and `logs/score-{1,2,3}.log`. The gate was ΔAP ≥ −0.004 with the
 interval above −0.006, so it is a **go**. The default method is the 99.99% percentile: MSE scored the same within
-noise (−0.0001) and costs a second histogram walk per boundary. The int8 kernels and the fake-quant reference
+noise (−0.0001) and adds a search of about 512 × 512 candidate ranges per boundary over the same histogram. The int8 kernels and the fake-quant reference
 agree to −0.0005: the integer sums are exact where the reference rounds in `f32`.
 
 ## Speed gate (per-conv, `q8_infer`)
@@ -74,7 +74,38 @@ the CPU, all 5 000 val2017 images, batch 8 (`scripts/val_dump.sh`), B0 pycocotoo
 Both are within the brief's 0.004. The `f32` CPU numbers match the published 0.356 and 0.416.
 
 ## Negative results
-TBD
+- **The 1×1 speed gate (2× on 48 → 64 at 160²) failed**: 1.59–1.76× with SiLU, 2.05–2.42× with identity. With
+  K = 48 the epilogue dominates. The SiLU (`exp` polynomial and a divide) is what is left. `rcpps` would be
+  cheaper, but its bits differ between CPU vendors, which would break the scalar = AVX2 guarantee.
+- **The first task plan** (halve pixel blocks until two tasks per thread) made int8 *slower* on 28 threads than on
+  4–8 for 1×1 convs at 20²–40². The tasks were 1–2 µs, and pixel blocks of one or two chunks share cache lines
+  across neighbouring tasks on every output plane. Splitting by channel groups at 160² was worse still (each task
+  re-reads a 1.2 MB input): see "Speed gate".
+- **Tiny 1×1 convs** (64 → 64 at 40², 128 → 64 / 128 → 128 at 20²: 2–7 M MACs) are still no faster than `f32` on
+  28 threads in `q8_infer`, even with the identity (0.6–0.96×). On one thread they are 1.0–1.5× faster. Under
+  load, the calls are about as long as waking the pool's sleeping workers. In a forward pass the workers are
+  warm.
+- **Timing sessions on a shared machine.** `s1` (08:57–09:09) is void. A `TaskStop` on a queued bench left an
+  orphaned `lock.sh acquire` that took the cpu lock as `cpuq8`. `s1` then joined it as "already held", and after
+  the orphan released it the session kept running benches without the lock (about 08:59–09:09) while
+  `orchestrator-final` held it. Lesson: never `TaskStop` a lock waiter without killing its process tree. `s2`, `s4`
+  and the scaling runs ran at 15–28 busy cores out of 28 (other lanes' builds, which do not take the lock). Their
+  A/B rounds are unusable (the base binary alone read 15.9–33.8 ms for row 8). Only `s3`'s per-conv part, and
+  `S5_NOTE`, had a quiet start.
+- **folo-s's int8 val2017 dump took longer than its `f32` one** (213 s against 188 s at batch 8, both under load).
+  It is not a speed measurement, but a hint that folo-s's wider convs gain less: see "End to end".
 
 ## Leftovers
-TBD
+- **A cheaper SiLU in the epilogue** that keeps scalar = AVX2 bit for bit, for example a polynomial
+  `1 / (1 + e)` with an exactly specified Newton step. This is the remaining 1×1 gap.
+- **Small 1×1 convs at many threads**: run them on fewer threads (a budget like `gemm_ex`'s), or fuse the
+  pointwise convs of a block.
+- **Proposal 2 (exact fusions) was not done.**
+- **The stem, attention (`qkv` → `proj`) and the head stay `f32`.** The stem was 3 ms of a 13.7 ms int8 walk in
+  the quiet profile (`logs/prof-1.txt`).
+- **Published int8 weights.** `folo quantize` output for folo-n-coco-v4 and folo-s-coco exists only under
+  `weights/` in the run dir. Publishing them (`folo weights`) and a BENCHMARKS.md row are for the lead.
+- **From review:**
+  - `FakeQuant` fake-quantises the weights of a conv the int8 plan runs in `f32` (one `int8_able` refuses); no
+    folo-n/s conv hits it.
+  - `QParam` and `q8::Grid` are the same thing under two names.

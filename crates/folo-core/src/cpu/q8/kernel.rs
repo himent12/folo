@@ -4,7 +4,8 @@
 //! (`vpdpbusd`) and a portable one, chosen at run time; both give the same integers.
 //!
 //! The epilogue turns a finished tile into outputs: [`Epi::apply`] (portable) and its AVX2 twin, bit for bit the
-//! same (the SiLU is [`silu_q8`], whose scalar and vector forms run the same operations).
+//! same (the SiLU is [`silu_q8`], whose scalar and vector forms run the same operations). The twin runs on any CPU
+//! with AVX2 and FMA, VNNI or not; `FOLO_Q8_SCALAR` turns off both vector paths.
 
 use std::sync::OnceLock;
 
@@ -30,14 +31,27 @@ pub(crate) fn kernel() -> QKernel {
 pub fn uses_vnni() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            uses_avx2() && std::is_x86_feature_detected!("avxvnni")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    })
+}
+
+/// True when the epilogue runs its AVX2 + FMA form (unless `FOLO_Q8_SCALAR` is set).
+pub(crate) fn uses_avx2() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
         if std::env::var_os("FOLO_Q8_SCALAR").is_some() {
             return false;
         }
         #[cfg(target_arch = "x86_64")]
         {
-            std::is_x86_feature_detected!("avx2")
-                && std::is_x86_feature_detected!("fma")
-                && std::is_x86_feature_detected!("avxvnni")
+            std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -262,8 +276,8 @@ impl Epi<'_> {
     /// [`Epi::apply`] for all `NR` columns, vectorised when the CPU has AVX2 and FMA; the same bits.
     pub(crate) fn apply_full(&self, acc: &Tile, res: &[u32; NR], q: &mut [u32; NR], f: &mut [[f32; NR]; MR]) {
         #[cfg(target_arch = "x86_64")]
-        if uses_vnni() {
-            // SAFETY: AVX2 and FMA were detected (uses_vnni checks them).
+        if uses_avx2() {
+            // SAFETY: AVX2 and FMA were detected.
             return unsafe { self.apply_avx2(acc, res, q, f) };
         }
         self.apply(acc, NR, res, q, f)

@@ -1156,8 +1156,9 @@ GPU forwards, training, export and the `f32` default are unchanged.
 
 FOLO's implementation: folo-core's `cpu::q8` kernels (docs/CORE.md, int8 convs) under folo-vision's
 `model::quant` (the graph walk is shared by calibration, the int8 executor and a fake-quant reference that runs the
-same grids in `f32`). On COCO train-dev (5 000 train2017 images held out of calibration) folo-n-coco-v4 loses
-0.0015 AP (95% interval −0.0030 to −0.0001, paired bootstrap): docs/notes/hill/r5-cpuq8.md.
+same grids in `f32`). On COCO val2017, with `folo quantize`'s defaults against the same weights in `f32` on the CPU
+(paired bootstrap, 95% intervals), folo-n-coco-v4 loses 0.0019 AP (0.3559 → 0.3541, −0.0028 to −0.0010) and
+folo-s-coco 0.0025 (0.4162 → 0.4137, −0.0039 to −0.0014): docs/notes/hill/r5-cpuq8.md.
 
 ## 10. Verification plan
 
