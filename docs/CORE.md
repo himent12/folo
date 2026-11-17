@@ -165,12 +165,15 @@ these kernels:
   results are bit-identical across kernels and thread counts. Its SiLU (`q8::silu_q8`) is `x / (1 + e^{−x})` with
   `silu8`'s `exp` polynomial, one power-of-two scale and no blend (within 2e-6 of SiLU); the AVX2 requantise packs
   four channels' codes with saturating `packs` / `packus` and one byte shuffle into C4 words. Work is split into
-  (image, pixel block, channel block) tasks of about 2²⁰ multiply-adds, smaller (pixel blocks first, then channel
-  blocks) when there would be fewer than two per thread.
+  (image, pixel block, channel block) tasks: about three per thread, none under 2²⁰ multiply-adds. An image whose
+  input fits in 384 KiB (a core's L2) is split by channel blocks first, so tasks write whole output planes; pixel
+  blocks of a few 24-column chunks would share cache lines with their neighbours on every plane. Bigger inputs
+  are split by pixel blocks first, so each task reads its own part once.
 - **Others.** `quantize` / `dequantize` between `f32` NCHW and C4 codes, separable max pooling on codes (`max` of
   bytes; exact since the grid is monotonic), nearest 2× upsampling.
 
-Tests (`cpu/q8/tests.rs`) check every conv shape class against an i64 reference at 1, 3 and 8 threads, VNNI
+Tests (`cpu/q8/tests.rs`) check every conv shape class against an i64 reference at 1, 3 and 8 threads (with the real task size and with one-MAC tasks, which take every split), the
+task plan's bounds, VNNI
 against the scalar kernel, the SiLU against SiLU in `f64` and its scalar form against its AVX2 form bit for bit, and
 the pools. `cargo bench -p folo-core --bench
 q8_infer` times each folo-n conv in int8 against the fused `f32` `conv2d_act`.
