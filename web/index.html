@@ -6,12 +6,42 @@
     <meta name="color-scheme" content="dark light" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>FOLO Studio</title>
-    <script>
-      // Apply the saved theme before first paint so there is no flash.
+    <script id="first-paint">
+      // Apply the saved theme before first paint so there is no flash (design/THEMES.md): the mode, then that mode's
+      // theme. A built-in theme is its block in tokens.css (data-theme-id); a custom one is its base's block with its
+      // own colours inline. The app applies the same once it runs (src/lib/design/applyTheme.ts); firstPaint.test.ts
+      // holds the two, and BUILTIN against tokens.json, to the same answers.
       try {
+        const BUILTIN = { dark: ['dark', 'midnight', 'dim', 'contrast-dark'], light: ['light', 'paper', 'contrast-light'] };
+        const root = document.documentElement;
         const t = localStorage.getItem('folo.theme') ?? 'dark';
         const dark = t === 'system' ? matchMedia('(prefers-color-scheme: dark)').matches : t !== 'light';
-        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        const mode = dark ? 'dark' : 'light';
+        root.dataset.theme = mode;
+        root.dataset.themeId = mode;
+        const read = (k) => {
+          try {
+            return JSON.parse(localStorage.getItem(k));
+          } catch {
+            return null;
+          }
+        };
+        const id = (read('folo.prefs') || {})[mode + 'Theme'];
+        const custom = (Array.isArray(read('folo.themes')) ? read('folo.themes') : []).find((c) => c && c.id === id && c.mode === mode);
+        if (BUILTIN[mode].includes(id)) root.dataset.themeId = id;
+        else if (custom) {
+          root.dataset.themeId = BUILTIN[mode].includes(custom.base) ? custom.base : mode;
+          const set = (v, path) => {
+            if (Array.isArray(v)) v.forEach((x, i) => set(x, path + '.' + i));
+            else if (v && typeof v === 'object') for (const k in v) k[0] !== '$' && set(v[k], path ? path + '.' + k : k);
+            else if (typeof v === 'number' || /^#([0-9a-f]{6}|[0-9a-f]{8})$/i.test(v)) {
+              const m = /^chart\.(series|fill|text)\.(\d+)$/.exec(path);
+              const name = m ? '--chart-' + (m[1] === 'series' ? '' : m[1] + '-') + (+m[2] + 1) : '--' + path.replace(/[_.]/g, '-');
+              root.style.setProperty(name, String(v).toLowerCase());
+            }
+          };
+          set(custom.color || {}, '');
+        }
       } catch {}
     </script>
   </head>
