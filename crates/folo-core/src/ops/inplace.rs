@@ -63,10 +63,14 @@ impl Tensor {
         self.check_same_device(src, "add_into")?;
         let b = self.backend()?;
         // Source read, then destination write, as every in-place op takes them; the exclusive destination's lock is
-        // never held by anyone else, so the write does not wait.
+        // never held by anyone else, so the write does not wait. Versioned only once the backend wrote: a decline
+        // leaves the version to the out-of-place fallback, as on a backend without the hook.
         let sr = src.cell().read();
-        let mut dst = self.cell().write();
+        let mut dst = self.cell().write_unversioned();
         let r = b.add_into(&mut dst, self.layout(), View::new(&sr, src.layout()));
+        if r.is_ok() {
+            self.cell().mark_modified();
+        }
         drop((dst, sr));
         match r {
             Ok(()) => Ok(true),

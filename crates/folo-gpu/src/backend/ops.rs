@@ -180,9 +180,11 @@ impl Backend for GpuBackend {
         if dtype != src.storage.dtype() {
             return Err(Error::DTypeMismatch { op: "add_into", expected: dtype, got: src.storage.dtype() });
         }
-        // What the kernel does not take is declined, and the caller adds out of place.
+        // What the kernel does not take is declined, and the caller adds out of place (which also reports a dtype
+        // the device cannot compute in as before).
         let decline = Error::NotSupported { op: "add_into", backend: BACKEND_NAME };
-        if !matches!(dtype, CoreDType::F32 | CoreDType::F16) || !dst_layout.is_non_overlapping() {
+        let f16_ok = dtype != CoreDType::F16 || self.ctx.caps().shader_f16;
+        if !matches!(dtype, CoreDType::F32 | CoreDType::F16) || !f16_ok || !dst_layout.is_non_overlapping() {
             return Err(decline);
         }
         if !dst_layout.fits(dst.len()) {

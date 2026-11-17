@@ -105,3 +105,80 @@ fully loaded and the slowest for AMP):
   walks 400k columns). A batched GEMM per image and K chunk (partials not reduced in the timing) beats the current
   kernel on tensor cores (256→64 @80: 292 → 81 µs; 48→64 @160: 358 → 270; 192→128 @40: 71 → 40) but barely in f32
   (except 384→128 @40: 278 → 123). Possible tensor-core saving about 0.4 ms per step, before the reduction it needs.
+
+Decision: neither is built. The brief's rule is to skip an item whose gate fails, and both named gates fail: the
+sub-pixel gradient misses its 450 µs bar on the gate shape (594), and the plain `A·Bᵀ` GEMM with a K-chunk floor
+is the slow form above. What they would be worth instead is a leftover (below): the sub-pixel form about 0.7 ms of
+the six stride-2 input gradients on tensor cores, the batched-chunk weight gradient about 0.4 ms before its
+reduction, together about 4 % of an AMP step if nothing else moved.
+
+## Proposal 2: BatchNorm statistics in the tensor-core conv epilogue (built, not shipped)
+
+Branch `gpu/bn-epilogue` (pushed for reference, no PR; stacked on this PR's commits). A train-mode `ConvBnAct` off
+the CPU runs its bias-free conv through a new `Backend::conv2d_bn_stats` hook. On tensor cores (mixed precision,
+unsplit `K`) the coop GEMM's epilogue folds each lane's 8 f32 results per fragment row into a Welford partial
+(exact mean and `M2` of the 8, then Chan's merge), merges the lanes of a row through `Cs`, and writes one
+`(count, mean, M2)` per (channel, image, column tile) in the layout `bn_finalize` already merges. The BatchNorm then
+skips its `bn_stats` pass (`norm::batch_norm_forward_partials`); a `BnStats` handle is used only while it still
+describes the input (same storage and version, dims, dense from offset 0). Statistics come from the unrounded f32
+results, so AMP training changes in summation order (not inference). Tests: the partials against f64 statistics
+of the written output over six shapes (masked columns, rows past `M`, several column tiles, pointwise and
+windowed, strided); stale statistics ignored; f32 and split-K convs produce none. Mutations (no column mask, one
+lane of the pair, `fits` always true) fail them.
+
+Sub-gate (`bn-gate2-f16-*.txt`, `bn-gate2-f32-1.txt`: throwaway `bn_gate` bench over the 26 conv shapes of a folo-n
+forward with their multiplicities, batch 16; the bench source is kept as `logs/bn_gate.rs`):
+
+| path | epilogue cost / `bn_stats` pass it replaces | conv + BatchNorm per forward |
+|---|---|---|
+| f16, tensor cores | 39 % (gate: under 50 %, passes) | 4120 → 3850 µs (−270, twice: 4125 → 3844) |
+| f32, regular kernels | 67 % (fails) | 8087 → 8060 µs (tie) |
+
+So only the tensor-core path was kept; the regular-kernel epilogue (also built) is archived as
+`logs/bn-stats-regular-and-coop.diff`.
+
+A/B, AMP, against this PR's binary (`glue1`) so only the statistics differ:
+
+| log | rounds | glue1 img/s | bn1 img/s | fastest step | load |
+|---|---|---|---|---|---|
+| `ab-bn2` | 5 | 605 (494–625) | 588 (452–598) | 25.18 → 25.01 ms | cpu 5–62 % |
+| `ab-bn3` | 9 | 580 (566–624) | 612 (593–619) | 25.21 → 25.03 ms | cpu 6–100 % (round 1 under one of my builds) |
+| pooled | 14 | 598 | 601.5 (+0.6 %) | −0.7 % | |
+
+(`ab-bn1`, bn1 against main, 5 rounds, cpu 34–100 %: AMP 548 → 568, f32 363 → 372, i.e. both PRs together.) The
+medians swing ±5 % between runs (`glue1` is bimodal, 566–580 or 604–624 per round); the fastest step moves −0.7 %
+in both, which is the sub-gate's 270 µs of a 26 ms step. **A tie: not shipped.** A summation-order change to AMP
+training, and the proxy-P1 pair it needs (about 17 GPU minutes), are not worth a 1 % that the A/B cannot resolve;
+the proxy pair was therefore not run.
+
+Where the ceiling's 8 % went: `profile-base-amp.txt` (main, AMP, `FOLO_GPU_PROFILE=1`, GPU time per step) has
+`bn_stats` 1.43 ms, `bn_apply` 1.00, `bn_finalize` 0.57 in the forward and `bn_bwd_reduce` 2.17, `bn_bwd_dx` 1.37,
+`bn_bwd_finalize` 0.49 in the backward. The gate removed `bn_stats` and `bn_bwd_dx` outright; the epilogue keeps 39 %
+of the statistics' cost, and the merge stays in `bn_finalize`.
+
+**BN backward `dx` inside the weight-gradient GEMM: skipped.** The proposal's form computes `dx` in the weight
+gradient's `A` prologue from `dy` and `z` and lets column tile 0 store it for the input gradient. Each weight-gradient
+GEMM with more than one column tile then reads two tensors per element where it read one, so the saving is the
+`bn_bwd_dx` pass minus that extra traffic: about a third to two thirds of 1.37 ms, 0.45–0.9 ms or 1.7–3.4 % of an
+AMP step, at or under the tie band, for a `ConvBnAct` that would have to become one custom op with a hand-written
+backward (today the conv and the BatchNorm are separate autograd nodes). With 2a measured at about 1 % the two
+together would not reach the brief's targets either.
+
+## Results against the targets
+
+Row 9 targets: AMP 599 → ≥ 700, f32 369 → ≥ 420. Shipped: PR #294 only, a tie on both (f32 +2.4 %, AMP +1.9 %,
+fastest step −2 % / −3 %). Not reached. The gates say why: the glue that proposal 1 removes is worth 0 % in AMP at
+its ceiling, BatchNorm statistics in the epilogue keep 39 % of their cost, and the step's GPU time is dominated by
+the coop GEMMs (backward input and weight gradients 12.7 ms of 22.5 in the profile).
+
+## Leftovers, by expected gain
+
+1. Sub-pixel stride-2 input gradient on tensor cores (about 0.7 ms per AMP step, 2.6 %; `gate3-bwd.txt`), despite
+   the named gate.
+2. Batched-chunk 1×1 weight gradient on tensor cores (about 0.4 ms before its reduction, 1.5 %).
+3. BatchNorm statistics in the epilogue (`gpu/bn-epilogue`, about 1 %), worth shipping only together with 2b or
+   item 1, with the proxy-P1 pair the brief asks for.
+4. BN backward `dx` in the weight-gradient GEMM (0.45–0.9 ms), after `ConvBnAct` becomes one autograd op.
+5. Tests: `cat_overwrites_a_recycled_buffer` does not prove the pool handed back the NaN buffer nor that no clear
+   ran (a restored clear passes it). A `U8` `cat` of a length that is not a multiple of 4 keeps the previous
+   tenant's spare bytes in its last word (the tensor reads the same; only a raw buffer read sees them).
