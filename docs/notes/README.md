@@ -34,6 +34,8 @@ down their method, commands, A/B tables and what did not work. BENCHMARKS has th
 
 Round 4 (2026-11-14): [Dense output distillation from a frozen teacher, on the proxy](hill/r4-distill.md).
 
+Round 5 (2026-11-17): [Class-wise rank distillation (killed at its gate) and the fused distillation kernel](hill/r5-accuracy.md).
+
 ## Design review logs
 
 The two apps were refined in rounds too: screenshots of every screen, two independent design reviews against a fixed
