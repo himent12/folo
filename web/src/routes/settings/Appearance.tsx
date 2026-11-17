@@ -33,9 +33,10 @@ const SLOT: Record<Mode, { name: string; desc: string }> = {
   light: { name: 'Light theme', desc: 'Used when the theme is Light, or System while your system is light.' },
 };
 
-/** What an import said about one file, as one line. */
+/** What an import said about one file, as one line: "night.json: color.bg.ap: not a colour token". */
 export function resultText(r: ImportResult): string {
-  return r.ok ? `${r.replaced ? 'Replaced' : 'Installed'} ${r.name} (${r.file})` : `${r.file}: ${r.error}`;
+  // A whole-file error's path is "(file)": the file's own name says that better.
+  return r.ok ? `${r.replaced ? 'Replaced' : 'Installed'} ${r.name} (${r.file})` : `${r.file}: ${r.error.replace(/^\(file\): /, '')}`;
 }
 
 /** "Dark · based on Midnight": what a custom theme is, for its line in the list (its id follows). */
@@ -98,7 +99,7 @@ export default function Appearance() {
         desc={<>Theme files (.json) you import, kept in this browser.</>}
         control={
           <>
-            <input ref={input} class="file" type="file" accept=".json,application/json" multiple hidden onchange={() => void imported()} />
+            <input ref={(e) => (input = e)} type="file" accept=".json,application/json" multiple hidden onchange={() => void imported()} />
             <Button icon={Upload} onclick={() => input?.click()}>
               Import theme…
             </Button>
@@ -182,7 +183,8 @@ css`
   }
   .result > :global(svg) {
     flex-shrink: 0;
-    margin-top: 3px;
+    /* The 14 px mark centred on the first 16 px line. */
+    margin-top: 1px;
     color: var(--success-solid);
   }
   .result.bad {

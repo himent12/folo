@@ -4,16 +4,13 @@ import ChevronRight from '$icons/chevron-right';
 import CircleCheck from '$icons/circle-check';
 import CircleMinus from '$icons/circle-minus';
 import CircleSlash from '$icons/circle-slash';
-import Monitor from '$icons/monitor';
-import Moon from '$icons/moon';
-import Sun from '$icons/sun';
 import { computed, css, Dynamic, effect, For, Index, onCleanup, signal } from 'fw';
 import pkg from '../../package.json';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import { isApple } from '$lib/keys';
 import { bytes } from '$lib/format';
-import { prefs, type ThemePref, type Units } from '$lib/prefs';
+import { prefs, type Units } from '$lib/prefs';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
 import { returnedToPosition } from '$lib/shell/entryMemory';
@@ -40,6 +37,7 @@ import { hasCloud } from '$lib/cloud';
 import { href, router } from '$lib/router';
 import { SCROLL_KEYS, sectionAt } from './settings/spy';
 import ConnectionPanel from './settings/ConnectionPanel';
+import Appearance from './settings/Appearance';
 
 const capMarks: Record<CapState, IconType> = { on: CircleCheck, off: CircleMinus, none: CircleSlash };
 /** "Ctrl K" or "⌘ K": the one this platform uses. */
@@ -47,13 +45,7 @@ const paletteKeys = isApple ? '⌘ K' : 'Ctrl K';
 /** A note in parts, identifiers (in backticks) set as code. */
 const parts = (t: string) => t.split('`').map((text, i) => ({ text, code: i % 2 === 1 }));
 
-// ---- appearance / units ----
-/** Theme is one row's segmented control (design/UNIFIED.md §4: the preview cards went). */
-const themes: { value: ThemePref; label: string; icon: IconType }[] = [
-  { value: 'dark', label: 'Dark', icon: Moon },
-  { value: 'light', label: 'Light', icon: Sun },
-  { value: 'system', label: 'System', icon: Monitor },
-];
+// ---- units ----
 const sample = 5_600_000_000;
 /** How long a section opened from the URL is held at the top while the page above it loads. */
 const HOLD_MS = 3000;
@@ -240,9 +232,6 @@ export default function Settings() {
   const units = signal<Units>(prefs.units);
   // Changed in another tab too (prefs follows the storage event): the control shows what the sizes use.
   effect(() => units.set(prefs.units));
-  // The theme too, cycled from the top bar or the palette while the page is open.
-  const theme = signal<ThemePref>(prefs.theme);
-  effect(() => theme.set(prefs.theme));
 
   /** A section link in the strip (below 1024 px). */
   const link = (s: () => { id: string; label: string }) => (
@@ -283,13 +272,7 @@ export default function Settings() {
 
         {cloud.get() ? <Cloud /> : null}
 
-        <Panel title="Appearance" meta="saved in this browser" id="appearance" divided pad="none">
-          <Row
-            name="Theme"
-            desc={prefs.theme === 'system' ? <>Follows your operating system, currently {prefs.resolvedTheme}.</> : 'Cycle themes from the top bar or the command palette.'}
-            control={<Segmented label="Theme" bind:value={theme} onchange={(v) => (prefs.theme = v)} options={themes} />}
-          />
-        </Panel>
+        <Appearance />
 
         <Panel title="Units" meta="saved in this browser" id="units" divided pad="none">
           <Row

@@ -68,8 +68,10 @@ export function builtinTheme(id: ThemeId): Theme {
  * base, of its shape; arrays replace whole and keep the base's length. Throws `<path>: <why>`.
  */
 function merge(base: Record<string, unknown>, over: unknown, path: string): Record<string, unknown> {
-  if (!isObj(over)) throw new Error(`${path}: expected an object of colour tokens`);
+  if (!isObj(over)) throw new Error(path === 'color' ? 'color: must be an object' : `${path}: must be an object of colour tokens`);
   const out: Record<string, unknown> = { ...base };
+  const notColour = (at: string) => new Error(`${at}: not a #RRGGBB or #RRGGBBAA colour`);
+  // Depth first in the file's order: the first error is the first a reader of the file meets.
   for (const [k, v] of Object.entries(over)) {
     if (isMeta(k)) continue;
     const at = `${path}.${k}`;
@@ -77,16 +79,16 @@ function merge(base: Record<string, unknown>, over: unknown, path: string): Reco
     const b = base[k];
     if (isObj(b)) out[k] = merge(b, v, at);
     else if (Array.isArray(b)) {
-      if (!Array.isArray(v) || v.length !== b.length) throw new Error(`${at}: expected an array of ${b.length} colours`);
+      if (!Array.isArray(v) || v.length !== b.length) throw new Error(`${at}: must be a list of ${b.length} colours`);
       v.forEach((x, i) => {
-        if (typeof x !== 'string' || !HEX.test(x)) throw new Error(`${at}[${i}]: not a colour (#RRGGBB or #RRGGBBAA)`);
+        if (typeof x !== 'string' || !HEX.test(x)) throw notColour(`${at}.${i}`);
       });
       out[k] = [...v];
     } else if (typeof b === 'number') {
-      if (typeof v !== 'number' || !(v >= 0 && v <= 1)) throw new Error(`${at}: expected a number from 0 to 1`);
+      if (typeof v !== 'number' || !(v >= 0 && v <= 1)) throw new Error(`${at}: must be a number from 0 to 1`);
       out[k] = v;
     } else {
-      if (typeof v !== 'string' || !HEX.test(v)) throw new Error(`${at}: not a colour (#RRGGBB or #RRGGBBAA)`);
+      if (typeof v !== 'string' || !HEX.test(v)) throw notColour(at);
       out[k] = v;
     }
   }
@@ -112,31 +114,33 @@ export function checkCustomTheme(raw: unknown): { ok: true; theme: CustomThemeFi
   }
 }
 
+/**
+ * The checks in the order every validator runs them (design/theme-cases.json, which design/contrast.mjs and Desktop
+ * replay too): unknown top-level keys, then folo_theme, id, name, description, mode, base, then `color` depth first.
+ */
 function check(raw: unknown): CustomThemeFile {
-  if (!isObj(raw)) throw new Error('expected a theme object ({ "folo_theme": 1, ... })');
+  if (!isObj(raw)) throw new Error('(file): must be a JSON object');
   for (const k of Object.keys(raw)) if (!isMeta(k) && !KEYS.includes(k)) throw new Error(`${k}: unknown key`);
   const need = (k: string) => {
     if (raw[k] === undefined) throw new Error(`${k}: required`);
     return raw[k];
   };
-  const format = need('folo_theme');
-  if (format !== THEME_FORMAT) throw new Error(`folo_theme: expected ${THEME_FORMAT}, got ${JSON.stringify(format)}`);
+  if (need('folo_theme') !== THEME_FORMAT) throw new Error(`folo_theme: must be ${THEME_FORMAT}`);
   const id = need('id');
-  if (typeof id !== 'string' || !ID.test(id)) throw new Error('id: expected 1-40 characters of a-z, 0-9 and -');
+  if (typeof id !== 'string' || !ID.test(id)) throw new Error('id: must be 1 to 40 characters of a-z, 0-9 and -');
   if (isBuiltinId(id)) throw new Error(`id: "${id}" is a built-in theme`);
   const name = need('name');
-  if (typeof name !== 'string') throw new Error('name: expected a string');
-  const trimmed = name.trim();
-  if (!trimmed || trimmed.length > NAME_MAX) throw new Error(`name: expected 1-${NAME_MAX} characters`);
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (!trimmed || trimmed.length > NAME_MAX) throw new Error(`name: must be 1 to ${NAME_MAX} characters`);
   const description = raw.description;
-  if (description !== undefined && typeof description !== 'string') throw new Error('description: expected a string');
-  if (typeof description === 'string' && description.length > DESCRIPTION_MAX) throw new Error(`description: at most ${DESCRIPTION_MAX} characters`);
+  if (description !== undefined && (typeof description !== 'string' || description.length > DESCRIPTION_MAX))
+    throw new Error(`description: must be at most ${DESCRIPTION_MAX} characters`);
   const mode = need('mode');
-  if (mode !== 'dark' && mode !== 'light') throw new Error('mode: expected "dark" or "light"');
+  if (mode !== 'dark' && mode !== 'light') throw new Error('mode: must be "dark" or "light"');
   const base = raw.base;
   if (base !== undefined) {
-    if (typeof base !== 'string' || !isBuiltinId(base)) throw new Error(`base: ${JSON.stringify(base)} is not a built-in theme`);
-    if (builtins[base].mode !== mode) throw new Error(`base: "${base}" is a ${builtins[base].mode} theme, this one is ${mode}`);
+    if (typeof base !== 'string' || !isBuiltinId(base)) throw new Error('base: not a built-in theme');
+    if (builtins[base].mode !== mode) throw new Error(`base: "${base}" is a ${builtins[base].mode} theme, not ${mode}`);
   }
   const color = raw.color;
   if (color !== undefined) merge(builtins[(base as ThemeId | undefined) ?? defaultThemeId(mode)].color as unknown as Record<string, unknown>, color, 'color');
@@ -152,8 +156,8 @@ export function parseThemeFile(text: string): { ok: true; theme: CustomThemeFile
   let raw: unknown;
   try {
     raw = JSON.parse(text);
-  } catch {
-    return { ok: false, error: 'not a JSON file' };
+  } catch (e) {
+    return { ok: false, error: `(file): not valid JSON (${(e as Error).message})` };
   }
   return checkCustomTheme(raw);
 }

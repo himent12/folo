@@ -36,6 +36,7 @@ import { mainNav, settingsNav } from './nav';
 import { pageCommandList, recentIds, rememberRecent } from './pageCommands';
 import { touchOnly as isTouchOnly } from './shortcuts';
 import { sidebar } from './sidebarState';
+import { themeCommands } from './themeCommands';
 
 interface Item {
   id: string;
@@ -196,6 +197,9 @@ export default function CommandPalette(props: CommandPaletteProps) {
         icon: SunMoon,
         run: () => prefs.cycleTheme(),
       },
+      // One per theme, custom ones too (design/THEMES.md, Choosing a theme): for a query only ("theme", "midnight"),
+      // so seven or more never crowd the open palette. Picking one switches the mode under Dark or Light, not System.
+      ...themeCommands(),
       // Touch-only devices have no keys to look up, and a phone or tablet held in the hand no sidebar to fold.
       ...(touchOnly
         ? []

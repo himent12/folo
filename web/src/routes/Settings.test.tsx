@@ -285,7 +285,7 @@ describe('Settings', () => {
     expect(radios().map((r) => r.textContent?.trim())).toEqual(['Dark', 'Light', 'System']);
     expect(radios().map((r) => r.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false']);
     expect(target.querySelector('#appearance .s-name')?.textContent).toBe('Theme');
-    expect(target.querySelector('#appearance')?.textContent).toContain('Cycle themes from the top bar or the command palette.');
+    expect(target.querySelector('#appearance')?.textContent).toContain('Dark or light. The top bar and the command palette switch it too.');
     radios()[2]!.click();
     flushSync();
     expect(prefs.theme).toBe('system');
