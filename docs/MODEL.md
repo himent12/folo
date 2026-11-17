@@ -986,9 +986,9 @@ dL/dx_i = −B · λr · (w_i / Σ_used W) · [ (y'_i − my) / (sx · sy) − �
 (`sx = sqrt(vx + ε)`, `sy = sqrt(vy + ε)`). Detaching the means leaves the gradient exact (`Σ w (x' − mx) = 0`).
 For a class with no student logit under the floor, the gradient sums to 0, so the term does not move the class's mean
 logit, and its product with `x' − mx` is `−B · λr · (W_c / Σ_used W) · ρ_c · ε / (vx + ε)`: the spread is left alone
-up to the share `ε / (vx + ε)`, which pushes it up and matters only for a class whose logits sit within about
-`sqrt(ε) = 0.01` of their mean. A student logit under the floor gets no gradient from the term (`L_kc` raises those),
-so in a class with some of them the other logits' gradient need not sum to 0. The
+up to the share `ε / (vx + ε)`, which pushes it up for `ρ_c > 0` (down for `ρ_c < 0`) and matters only for a
+class whose logits sit within about `sqrt(ε) = 0.01` of their mean. A student logit under the floor gets no gradient
+from the term (`L_kc` raises those), so in a class with some of them the other logits' gradient need not sum to 0. The
 weighted sums are row sums over `a` per `(b, c)`, then sums over `b` per class, in a fixed order. The term reads
 the student's one-to-many class logits and the teacher's (kept as `y'` in the targets only when it is on); it needs no
 second forward and no parameter. For an `o2o` student it sits inside the one-to-many loss with `L_kc`.

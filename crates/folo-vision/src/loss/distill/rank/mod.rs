@@ -19,8 +19,8 @@
 //! with the gradient `dL/dx_i = −(w_i / Σ_used W) · [(y'_i − my) / (sx · sy) − rho_c · (x'_i − mx) / sx²]` where
 //! `x_i >= l`, else 0. For a class with no student logit under the floor, the gradient sums to 0 (the term does not
 //! move the class's mean logit) and its product with `x' − mx` is `−(W_c / Σ_used W) · rho_c · eps / (vx + eps)`:
-//! the spread is left alone up to the share `eps / (vx + eps)`, which pushes it up (for `rho_c > 0`) and matters only
-//! for a class whose logits sit within about `sqrt(eps) = 0.01` of their mean. A floored logit gets no gradient, so a
+//! the spread is left alone up to the share `eps / (vx + eps)`, which pushes it up for `rho_c > 0` (down for
+//! `rho_c < 0`) and matters only for a class whose logits sit within about `sqrt(eps) = 0.01` of their mean. A floored logit gets no gradient, so a
 //! class with some of them can see its other logits' gradient sum move off 0.
 //!
 //! Every sum is a row sum over `a` per `(b, c)` and then a sum over `b` per class, both in a fixed order, so the
