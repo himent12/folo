@@ -30,7 +30,7 @@ inference numerics. Three proposals, run in the order 1, 3, 2, each behind a cei
 ## Ceiling gates
 
 Every row compares sides of the same gate binary (toggles off against on); the load is the range of the CPU
-samples in `loads.log` (the GPU also read 51–89 % busy before some runs: other lanes).
+samples in `loads.log` (the GPU also read 49–89 % busy before some runs: other lanes).
 
 | gate | toggles | f32 img/s | AMP img/s | rounds | load | log |
 |---|---|---|---|---|---|---|
@@ -56,35 +56,38 @@ runs diverged and gave no number: hence `nostep` from `ab-gate2` on.)
 
 Two changes, both bit-identical to main:
 
-- `Tensor::uninit_with` (whose one caller is `Tensor::cat`) asked the backend for a zero-filled buffer
-  (`full(.., 0.0)`), so every GPU `cat` paid a `clear` it then overwrote. New `Backend::empty` (default:
-  `full(.., 0.0)`, so the CPU keeps its zeros); the GPU backend returns a pooled buffer as is. Zeros-then-scatter
-  (`zeros_with`) still clears, as it must.
-- Gradient fan-in (`autograd::accumulate`) on the GPU was `acc = acc + g` out of place plus a copy back. New
-  `Backend::add_into(dst, layout, src)`, a strided elementwise `dst[i] += src[i]` (`ew::add_into`, KIND 5 of the
-  elementwise generator), used by `accumulate` for any float dtype off the CPU, on its exclusive accumulator only
-  (`Tensor::is_exclusive`: no other handle, view or graph shares the storage, so no other thread can hold its lock or
-  check its version). The GPU declines (`NotSupported`) other dtypes and destinations that overlap themselves or share
-  the source's buffer, and `accumulate` then adds out of place. Locks as every in-place op takes them: the source's
-  read, then the destination's `write` (version bumped first). Review history: a first version also routed the GPU
-  `add_assign` through it; on shared tensors that raised lock-order (against `copy_from`) and version-timing questions
-  over three rounds, and training never calls GPU `add_assign` (SGD and gradient accumulation use the fused optimizer
-  kernels), so `add_assign` is main's again.
+- `Tensor::uninit_with` (whose one caller is `Tensor::cat`) asked the backend for a zero-filled buffer (`full(..,
+  0.0)`), so every GPU `cat` paid a `clear` it then overwrote. New `Backend::empty` (default: `full(.., 0.0)`, so the
+  CPU keeps its zeros); the GPU backend returns a pooled buffer as is (except where the length ends inside a 32-bit
+  word, still cleared so the spare bytes stay zero). Zeros-then-scatter (`zeros_with`) still clears, as it must.
+- Gradient fan-in (`autograd::accumulate`) on the GPU was, for an exclusive F32 accumulator, `acc + g` out of place plus
+  a copy back, and for F16 one out-of-place add. New `Backend::add_into(dst, layout, src)`, a strided elementwise
+  `dst[i] += src[i]` (`ew::add_into`, KIND 5 of the elementwise generator), used by `accumulate` for any float dtype off
+  the CPU, on its exclusive accumulator only (and not one that itself requires grad) (`Tensor::is_exclusive`: no other
+  handle, view or graph shares the storage, so no other thread can hold its lock or check its version). The GPU declines
+  (`NotSupported`) other dtypes and destinations that overlap themselves or share the source's buffer, and `accumulate`
+  then adds out of place. Locks as every in-place op takes them: the source's read, then the destination's write, the
+  version bumped once the backend has written (a decline leaves it to the fallback). Review history: a first version
+  also routed the GPU `add_assign` through it; on shared tensors that raised lock-order (against `copy_from`) and
+  version-timing questions over three rounds, and training never calls GPU `add_assign` (SGD and gradient accumulation
+  use the fused optimizer kernels), so `add_assign` is main's again.
 
 Tests (`crates/folo-gpu/src/tests/backend/accumulate.rs`): the kernel bit for bit against the CPU (f32 and f16, the
 whole destination buffer) over dense views (vec4 and scalar, also at an offset), channel slices, a transposed and a
 broadcast source; fan-in gradients against the CPU in F32 and F16 (vec4 and odd shapes), and bit for bit against the
 GPU's own out-of-place add, each asserting that the fan-in ran the in-place kernel (a per-thread count of the backend's
-successful `add_into` calls, test builds only); `cat` into a recycled buffer that was filled with NaN (whole-word and
-half-word f16 runs). F16 cases are skipped where the device does not compute in f16. Mutation checks: KIND 5 as a copy
-(`Y = X0`) and a linear destination that ignores its offset fail the kernel test, one extra rounding (`· 1.0000001`)
-fails the bit-for-bit fan-in test, a GPU `add_into` that always declines fails both fan-in tests. The `cat` test assumes
-the pool hands the NaN buffer back; another test taking it in between would let it pass without a dirty buffer (never
-fail a correct build).
+successful `add_into` calls, test builds only); `cat` into a NaN-filled buffer (whole-word and half-word f16 runs). F16
+cases are skipped where the device does not compute in f16. Mutation checks: KIND 5 as a copy (`Y = X0`) and a linear
+destination that ignores its offset fail the kernel test, one extra rounding (`· 1.0000001`) fails the bit-for-bit
+fan-in test, a GPU `add_into` that always declines fails both fan-in tests, a GPU `cat` that skips its one-channel part
+fails the `cat` test. The `cat` test runs with `poison_uninit` on (every result buffer NaN-filled), so it does not
+depend on which recycled buffer the pool hands out; it does not detect a restored clear (a leftover).
 
-A/B (`ab-glue1`, 5 rounds, base = main cf65f7a5, PR side = the WIP commit 8aad6628, which differs from the PR only
-in the precompile bounds and the review fixes, none of which touch a steady-state step; cpu 69–100 %, rounds 3–5
-fully loaded and the slowest for AMP):
+A/B (`ab-glue1`, 5 rounds, base = main cf65f7a5, PR side = the WIP commit 8aad6628, which differs from the PR in
+the precompile bounds and the review fixes; it also sent GPU `add_assign` through `add_into`, which a training step
+never calls, so none of that touches a steady-state step. CPU 69–100 %: base ran at 96–100 % in rounds 3–5 and
+had its two slowest AMP rounds there (545, 537); the PR side ran at 100 % in rounds 3–4 and at 69 % in round 5, and
+its rounds 4–5 were its fastest (592, 593), so the load fell more on base's side):
 
 | | base | PR | change |
 |---|---|---|---|
@@ -121,7 +124,8 @@ unsplit `K`) the coop GEMM's epilogue folds each lane's 8 f32 results per fragme
 `(count, mean, M2)` per (channel, image, column tile) in the layout `bn_finalize` already merges. The BatchNorm then
 skips its `bn_stats` pass (`norm::batch_norm_forward_partials`); a `BnStats` handle is used only while it still
 describes the input (same storage and version, dims, dense from offset 0). Statistics come from the unrounded f32
-results, so AMP training changes in summation order (not inference). Tests: the partials against f64 statistics
+results (before the f16 storage rounding the separate pass saw) and in another order, so AMP training numerics
+change (not inference). Tests: the partials against f64 statistics
 of the written output over six shapes (masked columns, rows past `M`, several column tiles, pointwise and
 windowed, strided); stale statistics ignored; f32 and split-K convs produce none. Mutations (no column mask, one
 lane of the pair, `fits` always true) fail them.
@@ -131,11 +135,12 @@ forward with their multiplicities, batch 16; the bench source is kept as `logs/b
 
 | path | epilogue cost / `bn_stats` pass it replaces | conv + BatchNorm per forward |
 |---|---|---|
-| f16, tensor cores | 39 % (gate: under 50 %, passes) | 4120 → 3850 µs (−270, twice: 4125 → 3844) |
+| f16, tensor cores | 38 % (gate: under 50 %, passes) | 4120 → 3850 µs (−270, twice: 4125 → 3844) |
 | f32, regular kernels | 67 % (fails) | 8087 → 8060 µs (tie) |
 
-So only the tensor-core path was kept; the regular-kernel epilogue (also built) is archived as
-`logs/bn-stats-regular-and-coop.diff`.
+(The ratio is the sum over the shapes, weighted by their count per forward, of the `epilogue` column over the `stats
+pass` column of the bench's second table: 38.4 % and 38.3 % in the two f16 runs, 67 % in f32.) So only the tensor-core
+path was kept; the regular-kernel epilogue (also built) is archived as `logs/bn-stats-regular-and-coop.diff`.
 
 A/B, AMP, against this PR's binary (`glue1`) so only the statistics differ:
 
@@ -153,7 +158,7 @@ the proxy pair was therefore not run.
 
 Where the ceiling's 8 % went: `profile-base-amp.txt` (main, AMP, `FOLO_GPU_PROFILE=1`, GPU time per step) has
 `bn_stats` 1.43 ms, `bn_apply` 1.00, `bn_finalize` 0.57 in the forward and `bn_bwd_reduce` 2.17, `bn_bwd_dx` 1.37,
-`bn_bwd_finalize` 0.49 in the backward. The gate removed `bn_stats` and `bn_bwd_dx` outright; the epilogue keeps 39 %
+`bn_bwd_finalize` 0.49 in the backward. The gate removed `bn_stats` and `bn_bwd_dx` outright; the epilogue keeps 38 %
 of the statistics' cost, and the merge stays in `bn_finalize`.
 
 **BN backward `dx` inside the weight-gradient GEMM: skipped.** The proposal's form computes `dx` in the weight
@@ -168,7 +173,7 @@ together would not reach the brief's targets either.
 
 Row 9 targets: AMP 599 → ≥ 700, f32 369 → ≥ 420. Shipped: PR #294 only, a tie on both (f32 +2.4 %, AMP +1.9 %,
 fastest step −2 % / −3 %). Not reached. The gates say why: the glue that proposal 1 removes is worth 0 % in AMP at
-its ceiling, BatchNorm statistics in the epilogue keep 39 % of their cost, and the step's GPU time is dominated by
+its ceiling, BatchNorm statistics in the epilogue keep 38 % of their cost, and the step's GPU time is dominated by
 the coop GEMMs (backward input and weight gradients 12.7 ms of 22.5 in the profile).
 
 ## Leftovers, by expected gain
@@ -179,6 +184,6 @@ the coop GEMMs (backward input and weight gradients 12.7 ms of 22.5 in the profi
 3. BatchNorm statistics in the epilogue (`gpu/bn-epilogue`, about 1 %), worth shipping only together with 2b or
    item 1, with the proxy-P1 pair the brief asks for.
 4. BN backward `dx` in the weight-gradient GEMM (0.45–0.9 ms), after `ConvBnAct` becomes one autograd op.
-5. Tests: `cat_overwrites_a_recycled_buffer` does not prove the pool handed back the NaN buffer nor that no clear
-   ran (a restored clear passes it). A `U8` `cat` of a length that is not a multiple of 4 keeps the previous
-   tenant's spare bytes in its last word (the tensor reads the same; only a raw buffer read sees them).
+5. Tests: `cat_overwrites_a_recycled_buffer` does not detect a restored clear (it checks the values only); nothing
+   tests the declines for a self-overlapping destination or for f16 without `shader-f16`. `ew::add_into` repeats
+   about 25 lines of `elementwise`'s parameter and coalescing code, which a shared helper could remove.

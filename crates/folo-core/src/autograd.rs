@@ -163,7 +163,8 @@ fn topo_order(root: &Tensor) -> Vec<Tensor> {
 fn accumulate(acc: Tensor, g: &Tensor) -> Result<Tensor> {
     let dense = acc.is_contiguous() && acc.cell().read().len() == acc.numel();
     if acc.is_exclusive() && dense && !acc.same_storage(g) {
-        if !acc.device().is_cpu() && acc.dtype() == g.dtype() && acc.add_into_(g)? {
+        // Not into a gradient that itself records (a custom backward's): the out-of-place sum drops the flag.
+        if !acc.device().is_cpu() && !acc.requires_grad() && acc.dtype() == g.dtype() && acc.add_into_(g)? {
             return Ok(acc);
         }
         if acc.dtype() == crate::DType::F32 {

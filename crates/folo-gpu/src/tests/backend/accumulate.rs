@@ -159,11 +159,14 @@ fn fan_in_is_bit_identical_to_the_out_of_place_add() {
     }
 }
 
-/// `Tensor::cat` writes into a buffer that is not cleared first: every element of a recycled, NaN-filled one
-/// is overwritten.
+/// `Tensor::cat` writes into a buffer that is not cleared first: every element of a NaN-filled one is overwritten.
+/// `poison_uninit` fills every result buffer the backend allocates with NaN, so the test does not depend on which
+/// recycled buffer the pool hands out (other threads share the pool). It stays on: the other tests of this crate
+/// write every element of their results, and an element they did not would show up as NaN, which is a bug anyway.
 #[test]
 fn cat_overwrites_a_recycled_buffer() {
     let dev = dev!();
+    crate::poison_uninit(true);
     // Even runs (whole words at f16) and odd ones (`[.., 5, 3]`: f16 halves written into words of the dirty buffer).
     for (hw, seed) in [([5, 4], 3), ([5, 3], 13)] {
         cat_case(dev, hw, seed);
@@ -175,12 +178,8 @@ fn cat_case(dev: folo_core::Device, [h, w]: [usize; 2], seed: u64) {
     let want = Tensor::cat(&parts, 1).unwrap();
     let gparts: Vec<Tensor> = parts.iter().map(|p| p.to_device(dev).unwrap()).collect();
     for dtype in float_dtypes(dev) {
-        for _ in 0..3 {
-            // Same size class as the result: the pool hands this buffer back to the concatenation.
-            drop(Tensor::full_with(want.shape().clone(), f64::NAN, dtype, dev).unwrap());
-            let p: Vec<Tensor> = gparts.iter().map(|p| p.to_dtype(dtype).unwrap()).collect();
-            let got = Tensor::cat(&p, 1).unwrap();
-            assert_same(&got, &want.to_dtype(dtype).unwrap(), &format!("cat {dtype} {h}x{w}"));
-        }
+        let p: Vec<Tensor> = gparts.iter().map(|p| p.to_dtype(dtype).unwrap()).collect();
+        let got = Tensor::cat(&p, 1).unwrap();
+        assert_same(&got, &want.to_dtype(dtype).unwrap(), &format!("cat {dtype} {h}x{w}"));
     }
 }

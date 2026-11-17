@@ -84,8 +84,12 @@ impl Backend for GpuBackend {
         Ok(self.wrap(dtype, len, buf))
     }
 
-    fn empty(&self, _device: Device, dtype: CoreDType, len: usize) -> Result<Storage> {
-        // A pooled buffer as it comes (no clear): the caller writes every element.
+    fn empty(&self, device: Device, dtype: CoreDType, len: usize) -> Result<Storage> {
+        // A pooled buffer as it comes (no clear): the caller writes every element. A length that ends inside a
+        // 32-bit word is still cleared, so the word's spare bytes read as zeros as before (a raw buffer read).
+        if !(len * dtype.size_in_bytes()).is_multiple_of(4) {
+            return self.full(device, dtype, len, 0.0);
+        }
         let buf = self.alloc(dtype, len)?;
         Ok(self.wrap(dtype, len, buf))
     }
