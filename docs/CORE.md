@@ -147,6 +147,31 @@ these kernels:
   (`cpu::silu` / `cpu::silu_backward` are the shared formulas).
 - Its per-plane loops run as AVX2 when the CPU has it (the same loops compiled under `target_feature`, bit for bit).
 
+### int8 convs
+`cpu::q8` holds the kernels of int8 inference (docs/MODEL.md §9.6 has the arithmetic; folo-vision's
+`model::quant` drives them). They work on raw buffers, not `Tensor`s:
+- **Layout.** Activations are u8 codes in C4 words, `[N][C/4][H][W]` `u32` (byte `t` of a word is channel
+  `4g + t`), each with an affine grid (`Grid { scale, zero }`). A channel slice on a multiple of 4 is a view (an
+  offset), so split and concatenation copy nothing. Buffers come from the buffer cache (`q8::alloc`, `q8::recycle`)
+  with 64 words of slack after the data.
+- **Conv.** `q8::conv` takes the input parts of a concatenation (each with its zero point), an optional residual
+  and a `QConv` (s8 weights packed `[O/4][C/4·k·k][4]`, four to a word, the zero-point corrections, per-channel scales and biases)
+  and writes u8 C4 codes or `f32` NCHW. A micro-kernel computes 4 output channels × 24 output pixels in i32: AVX-VNNI
+  `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has `avxvnni` (and AVX2, FMA), detected at
+  run time, else portable scalar code with the same sums (`FOLO_Q8_SCALAR=1` forces it). 1×1 stride-1 convs read
+  the input planes in place; other convs read a padded, phase-split copy of each image's rows (padding with the
+  zero point) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias`,
+  SiLU, residual, requantise) is the same `f32` operations in the scalar and AVX2 code (SiLU is `silu8`, ported to
+  scalar bit for bit), so results are bit-identical across kernels and thread counts. Work is split into
+  (image, pixel block, channel block) tasks of about 2²⁰ multiply-adds, more when there would be fewer than two per
+  thread.
+- **Others.** `quantize` / `dequantize` between `f32` NCHW and C4 codes, separable max pooling on codes (`max` of
+  bytes; exact since the grid is monotonic), nearest 2× upsampling.
+
+Tests (`cpu/q8/tests.rs`) check every conv shape class against an i64 reference at 1, 3 and 8 threads, VNNI
+against the scalar kernel, the scalar SiLU against `silu8`, and the pools. `cargo bench -p folo-core --bench
+q8_infer` times each folo-n conv in int8 against the fused `f32` `conv2d_act`.
+
 ### The buffer cache
 `f32` buffers from 16 KiB are recycled through a size-keyed cache (`cpu/pool_alloc.rs`;
 `cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one to custom ops) so training and inference

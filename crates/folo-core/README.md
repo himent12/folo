@@ -17,7 +17,7 @@ API.
 | `src/autograd.rs` | Grad mode (`no_grad`, `is_grad_enabled`), `Grads`, and the backward walk over the recorded graph. |
 | `src/autocast.rs` | Mixed precision for the forward pass (`autocast`, like `torch.autocast`). |
 | `src/backend.rs` | The `Backend` trait (memory methods required; compute, fused and detector methods optional), `View`, the op descriptions (`UnaryOp`, `BinaryOp`, `ReduceOp`, `Conv2dParams`, `Pool2dParams`, ...) and the registry (`register_backend`, `backend`). |
-| `src/cpu/` | `CpuBackend` and its kernels: `elementwise.rs`, `reduce.rs`, `index.rs`, `pool.rs`, `pool_alloc.rs` (buffer cache), `gemm/` (the GEMM), `conv/` (conv2d forward and gradients). `cpu/mod.rs` lists them. |
+| `src/cpu/` | `CpuBackend` and its kernels: `elementwise.rs`, `reduce.rs`, `index.rs`, `pool.rs`, `pool_alloc.rs` (buffer cache), `gemm/` (the GEMM), `conv/` (conv2d forward and gradients), `q8/` (int8 inference convs, pools and quantisation on u8 C4 buffers, docs/CORE.md "int8 convs"; tests in `q8/tests.rs`). `cpu/mod.rs` lists them. |
 | `src/storage.rs` | `Storage`, `CpuStorage`, `DeviceStorage`: the raw element buffers behind tensors. |
 | `src/layout.rs` | `Layout` (shape, strides, offset) and the row iterator CPU kernels walk strided data with. |
 | `src/shape.rs` | `Shape`, dimension arguments and broadcasting rules. |
@@ -30,7 +30,7 @@ API.
 | `tests/autograd.rs` | Autograd semantics (leaves, repeated backward, `no_grad`, version checks) and the backend registry contract. |
 | `tests/custom_op.rs` | `Tensor::custom_op` used the way a downstream crate would. |
 | `tests/in_pool.rs` | `cpu::in_pool`: grad mode and autocast travel with the closure. |
-| `benches/` | `gemm.rs`, `conv.rs`, `conv_infer.rs`, `conv_wgrad.rs`, `index.rs` (plain `harness = false` binaries). |
+| `benches/` | `gemm.rs`, `conv.rs`, `conv_infer.rs`, `q8_infer.rs` (int8 against `f32` per folo-n conv), `conv_wgrad.rs`, `index.rs` (plain `harness = false` binaries). |
 
 The split to keep in mind: an op's public surface, argument checks and autograd recording are in `src/ops/`; the
 computation is a `Backend` method, declared in `src/backend.rs` and implemented for the CPU in `src/cpu/mod.rs`, which

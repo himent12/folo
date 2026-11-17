@@ -38,6 +38,8 @@ pub enum Command {
     Predict(PredictArgs),
     /// Export weights to another format.
     Export(ExportArgs),
+    /// Calibrate int8 inference on sample images and write the weights with the calibration (docs/MODEL.md §9.6).
+    Quantize(QuantizeArgs),
     /// Benchmark inference or training speed.
     Bench(BenchArgs),
     /// Inspect and generate datasets.
@@ -339,6 +341,67 @@ pub enum SplitArg {
     Test,
 }
 
+/// Precision of `val` and `predict`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PrecisionArg {
+    /// f32 weights and activations.
+    F32,
+    /// f16 on a GPU with shader-f16 (--half).
+    F16,
+    /// int8 backbone and neck on the CPU (`folo quantize` first).
+    Int8,
+}
+
+/// How `folo quantize` picks each range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum QuantMethodArg {
+    /// The `--tail` and `1 - --tail` quantiles of the calibration values.
+    Percentile,
+    /// The minimum and maximum.
+    Minmax,
+    /// The range of least expected squared error (rounding inside, clipping outside).
+    Mse,
+}
+
+/// `folo quantize`.
+#[derive(Debug, Args)]
+pub struct QuantizeArgs {
+    /// Weights (.folo, or a published name) to calibrate.
+    #[arg(long)]
+    pub model: PathBuf,
+    /// Dataset whose images calibrate the ranges: a folder (YOLO or COCO) or a data.yaml.
+    #[arg(long)]
+    pub data: String,
+    /// Split the images come from.
+    #[arg(long, value_enum, default_value_t = SplitArg::Train)]
+    pub split: SplitArg,
+    /// Calibration images, drawn at random (by --seed) from the split; all of them when it has fewer.
+    #[arg(long, default_value_t = 512)]
+    pub images: usize,
+    /// Seed of the draw.
+    #[arg(long, default_value_t = 0)]
+    pub seed: u64,
+    /// How each range is picked.
+    #[arg(long, value_enum, default_value_t = QuantMethodArg::Percentile)]
+    pub method: QuantMethodArg,
+    /// With --method percentile: the mass cut from each tail.
+    #[arg(long, default_value_t = 1e-4)]
+    pub tail: f64,
+    /// Square input size of the calibration images [default: the model's training size].
+    #[arg(long)]
+    pub imgsz: Option<u32>,
+    /// Batch size.
+    #[arg(long, default_value_t = 8)]
+    pub batch: u32,
+    /// Data loader worker threads [default: min(cores, 16)].
+    #[arg(long)]
+    pub workers: Option<usize>,
+    /// Output file: fused f32 weights with the calibration [default: `<name>-int8.folo` next to the input, with
+    /// `-2`, `-3`, ... when taken].
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
 /// `folo val`.
 #[derive(Debug, Args)]
 pub struct ValArgs {
@@ -385,6 +448,10 @@ pub struct ValArgs {
     /// note anywhere else.
     #[arg(long)]
     pub half: bool,
+    /// Precision: f32, f16 (the same as --half) or int8 (the backbone and neck on the CPU's int8 kernels, with the
+    /// calibration `folo quantize` stored in the weights; CPU only) [default: f32].
+    #[arg(long, value_enum, conflicts_with = "half")]
+    pub precision: Option<PrecisionArg>,
     /// With --half, run the f16 convolutions and matrix products on the GPU's tensor cores (wgpu's experimental
     /// cooperative matrices; the same as FOLO_GPU_TENSOR_CORES=1). Falls back to the regular kernels, with a note,
     /// where they are not available.
@@ -442,6 +509,10 @@ pub struct PredictArgs {
     /// note anywhere else.
     #[arg(long)]
     pub half: bool,
+    /// Precision: f32, f16 (the same as --half) or int8 (the backbone and neck on the CPU's int8 kernels, with the
+    /// calibration `folo quantize` stored in the weights; CPU only) [default: f32].
+    #[arg(long, value_enum, conflicts_with = "half")]
+    pub precision: Option<PrecisionArg>,
     /// With --half, run the f16 convolutions and matrix products on the GPU's tensor cores (wgpu's experimental
     /// cooperative matrices; the same as FOLO_GPU_TENSOR_CORES=1). Falls back to the regular kernels, with a note,
     /// where they are not available.

@@ -1123,6 +1123,42 @@ softmax moments per candidate; on a GPU the dense path's moment ops (`HeadOutput
 candidates' columns, which compute each column on its own, so the same bits. With forward plans on (§9.1), the
 GPU path from the input to the records and moments is one recorded plan; the readbacks follow the replay.
 
+### 9.6 int8 inference (opt-in, CPU)
+Post-training quantisation of the backbone and neck (layers 0–22); the head (§6) stays `f32`. Opt-in:
+`folo quantize` calibrates a fused `f32` model and stores the ranges with the weights (`folo.quant`,
+docs/FORMAT.md), and `folo val` / `folo predict --precision int8` (or `FoloModel::set_int8`) run it on the CPU.
+GPU forwards, training, export and the `f32` default are unchanged.
+
+- **Boundaries.** An activation is quantised where a layer writes it: each conv's output after its activation (and
+  after the residual add of a bottleneck, PSA `proj` and `ffn2`, which the conv's epilogue does), the stem's output,
+  and the input of each attention `proj` (`o + pe(v)`). Each boundary has one affine u8 grid
+  `x ≈ scale · (q − zero)`, `q ∈ [0, 255]`, from its calibrated range `[lo, hi]` widened to hold 0:
+  `scale = (hi − lo) / 255`, `zero = round(−lo / scale)` clamped to `[0, 255]`. Concatenation, split
+  (channel slices), max pooling and nearest upsampling keep their input's grid (exact on codes). The attention's
+  `qkv` conv writes `f32`; the attention products, softmax and the depthwise `pe` run in `f32`. P3, P4 and P5
+  are dequantised for the head.
+- **Weights.** Per output channel, symmetric s8: the input grids' scales are folded into the weight columns
+  first (`w'[o, c, ·] = w[o, c, ·] · scale(c)`), then `s_o = max|w'[o]| / 127` and
+  `q = round(w' / s_o)` (ties away from zero), clamped to `±127`. A conv over a concatenation folds each part's
+  scale into its columns. The input zero points become one constant per output channel,
+  `corr[o] = Σ q[o, c, ky, kx] · zero(c)`, and zero padding uses each part's zero point, so it is exact.
+- **Conv.** `acc[o] = Σ q · u` in i32 (u8 × s8; exact: no product or partial sum saturates), then
+  `y = (acc − corr) · s_o + bias`, SiLU, the residual `+ scale_r · (u_r − zero_r)` if any, and the output code
+  `clamp(round_half_even(clamp(y / scale_out, −512, 512)) + zero_out, 0, 255)` (multiplying by the `f32`
+  reciprocal of `scale_out`). Every step is `f32` arithmetic in a fixed order, so the result does not depend on
+  the CPU, the kernel or the thread count.
+- **Calibration.** The `f32` model runs on sample images (default: 512 training images, letterboxed as for
+  validation) twice: the first pass records each boundary's minimum and maximum, the second a 2048-bin histogram
+  between them. The range is then the `p`, `1 − p` quantiles (default, `p = 10⁻⁴`), the minimum and maximum, or
+  the histogram-edge range of least expected squared error (rounding `Δ²/12` inside, clipping outside).
+- **Mixed precision.** A conv named in `f32_convs`, or one the int8 kernel does not take (grouped, dilated,
+  channels not a multiple of 4), dequantises its inputs, runs in `f32` and quantises its output.
+
+FOLO's implementation: folo-core's `cpu::q8` kernels (docs/CORE.md, int8 convs) under folo-vision's
+`model::quant` (the graph walk is shared by calibration, the int8 executor and a fake-quant reference that runs the
+same grids in `f32`). On COCO train-dev (5 000 train2017 images held out of calibration) folo-n-coco-v4 loses
+0.0015 AP (95% interval −0.0030 to −0.0001, paired bootstrap): docs/notes/hill/r5-cpuq8.md.
+
 ## 10. Verification plan
 
 ### 10.1 Block unit tests (folo-nn / folo-vision)

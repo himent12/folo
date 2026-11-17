@@ -10,6 +10,7 @@
 //! - `train`: `folo train` and `folo stop` (folder: config, progress, resume, stop).
 //! - `infer`: `folo val`, `folo predict` and `folo export`; `coco` (`val --coco` / `--save-json`) and `draw`
 //!   (`predict --save` images) serve it.
+//! - `quantize`: `folo quantize` (int8 calibration stored with the weights).
 //! - `dataset`: `folo dataset check | stats | synth | convert`.
 //! - `weights`: `folo weights list | pull` and published-name resolution (folder: download).
 //! - `cloud`: `folo cloud ...` through `folo_server::cloud`.
@@ -29,6 +30,7 @@ mod engine;
 mod infer;
 mod mcp;
 mod output;
+mod quantize;
 mod serve;
 mod serve_lock;
 mod train;
@@ -124,6 +126,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
         Command::Val(args) => infer::val(args, out),
         Command::Predict(args) => infer::predict(args, out),
         Command::Export(args) => infer::export(args, out),
+        Command::Quantize(args) => quantize::quantize(args, out),
         Command::Bench(_) => Err(not_implemented("bench", "the engine")),
         Command::Dataset(cmd) => dataset::run(cmd, out),
         Command::Weights(cmd) => weights::run(cmd, out),
@@ -230,8 +233,8 @@ mod tests {
         let names: Vec<&str> =
             d["commands"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
         for want in [
-            "serve", "describe", "doctor", "train", "stop", "val", "predict", "export", "bench", "dataset",
-            "mcp",
+            "serve", "describe", "doctor", "train", "stop", "val", "predict", "export", "quantize", "bench",
+            "dataset", "mcp",
         ] {
             assert!(names.contains(&want), "{want} missing from {names:?}");
         }

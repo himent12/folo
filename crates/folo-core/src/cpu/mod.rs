@@ -32,6 +32,7 @@ pub mod gemm;
 mod index;
 mod pool;
 mod pool_alloc;
+pub mod q8;
 pub(crate) mod reduce;
 #[cfg(test)]
 mod sites_tests;
