@@ -176,7 +176,9 @@ CPU results are bitwise identical from run to run and for every rayon thread cou
 - `loss.backward()` returns `Grads` (keyed by tensor id, leaves only) via a topological sort; graphs are retained, so
   backward can run twice. Graph teardown is iterative (deep graphs do not overflow the stack).
 - A thread-local `no_grad()` guard disables recording.
-- Fan-in gradients are summed in place when the running sum is a fresh tensor nothing else holds.
+- Fan-in gradients are summed in place when the running sum is a fresh tensor nothing else holds: through the
+  backend's `add_into` (one pass, any float dtype; the GPU's strided in-place add) where it has one, else
+  `add_assign` (`F32`).
 - `testing::grad_check` compares autograd against central finite differences (f64 loss accumulation); every
   differentiable op has a check in `crates/folo-core/tests/grad.rs`.
 

@@ -158,12 +158,18 @@ fn topo_order(root: &Tensor) -> Vec<Tensor> {
 }
 
 /// `acc + g`, in place when nothing else can observe `acc` (a fresh, contiguous gradient that no node saved and
-/// no other gradient shares), which saves an allocation and a pass over memory per fan-in.
+/// no other gradient shares), which saves an allocation and a pass over memory per fan-in: through the backend's
+/// in-place add (any float dtype; one pass on the GPU), else `add_assign` (`F32`). Same rounding either way.
 fn accumulate(acc: Tensor, g: &Tensor) -> Result<Tensor> {
     let dense = acc.is_contiguous() && acc.cell().read().len() == acc.numel();
-    if acc.is_exclusive() && dense && acc.dtype() == crate::DType::F32 && !acc.same_storage(g) {
-        acc.add_assign(g)?;
-        return Ok(acc);
+    if acc.is_exclusive() && dense && !acc.same_storage(g) {
+        if !acc.device().is_cpu() && acc.dtype() == g.dtype() && acc.add_into_(g)? {
+            return Ok(acc);
+        }
+        if acc.dtype() == crate::DType::F32 {
+            acc.add_assign(g)?;
+            return Ok(acc);
+        }
     }
     acc.add(g)
 }

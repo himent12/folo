@@ -326,6 +326,12 @@ pub trait Backend: Send + Sync + 'static {
 
     /// A contiguous buffer of `len` elements of `dtype`, every element set to `value`.
     fn full(&self, device: Device, dtype: DType, len: usize, value: f64) -> Result<Storage>;
+    /// A contiguous buffer of `len` elements of `dtype` whose contents are unspecified: the caller writes every
+    /// element before anything reads it. The default is [`Backend::full`] with zeros; a backend that recycles
+    /// buffers (the GPU's pool) hands one out without clearing it.
+    fn empty(&self, device: Device, dtype: DType, len: usize) -> Result<Storage> {
+        self.full(device, dtype, len, 0.0)
+    }
     /// Copy host data to `device`.
     fn upload(&self, device: Device, data: &CpuStorage) -> Result<Storage>;
     /// Copy the elements of `src` (in logical row-major order) to host memory.
@@ -338,6 +344,13 @@ pub trait Backend: Send + Sync + 'static {
     fn cast(&self, src: View<'_>, dtype: DType) -> Result<Storage>;
 
     // ----- Compute (optional; default NotSupported) -----
+
+    /// `dst[dst_layout] += src` elementwise, in place: `dst_layout` has `src`'s shape and does not overlap itself,
+    /// `dst` and `src` are different storages of one float dtype, and each element is rounded once (as
+    /// [`Backend::binary`]'s add). Autograd accumulates a fan-in gradient with it.
+    fn add_into(&self, dst: &mut Storage, dst_layout: &Layout, src: View<'_>) -> Result<()> {
+        unsupported!(self, "add_into")
+    }
 
     /// `op(x)` elementwise.
     fn unary(&self, op: UnaryOp, x: View<'_>) -> Result<Storage> {

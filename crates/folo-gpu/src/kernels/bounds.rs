@@ -47,7 +47,9 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
             };
             cfg.valid() && cat_fits(spec) && (1..=cfg.bk).contains(&spec.get_u32("WG_RUN", 8))
         }
-        "ew1" | "ew2" | "ew3" => rank && (1..=4).contains(&u("KIND", 1)),
+        // KIND 5 (`add_into`, `Y += X0`) is the one-input kernel's alone.
+        "ew1" => rank && (1..=5).contains(&u("KIND", 1)),
+        "ew2" | "ew3" => rank && (1..=4).contains(&u("KIND", 1)),
         "binary" | "permute" => rank,
         "move" => rank && eb_fits(spec) && u("MODE", 0) <= 2,
         "scatter" => rank && eb_fits(spec),
@@ -132,6 +134,8 @@ mod tests {
             ),
             ("coop_gemm", Spec::new().u32("BK", 65536)),
             ("ew1", Spec::new().u32("RANK", 9)),
+            ("ew1", Spec::new().u32("KIND", 6)),
+            ("ew2", Spec::new().u32("KIND", 5)),
             ("move", Spec::new().u32("EB", 0)),
             ("scatter", Spec::new().u32("RANK", 65536)),
             ("tal_topk", Spec::new().u32("K", 65)),

@@ -38,6 +38,8 @@ pub enum EwOp {
         /// The condition is a `u8` tensor.
         cond_u8: bool,
     },
+    /// `out[view] += x`, in place ([`add_into`]); input `[x]`.
+    AddInto,
 }
 
 /// One input operand: a buffer read through a strided view of the output's shape.
@@ -250,10 +252,11 @@ const POW_SCALAR: &str = "fn powv(x: f32, y: f32) -> f32 { return pow1(x, y); }\
 const POW_VEC: &str = "fn powv(x: vec4<f32>, y: vec4<f32>) -> vec4<f32> {\n\
     \x20 return vec4<f32>(pow1(x.x, y.x), pow1(x.y, y.y), pow1(x.z, y.z), pow1(x.w, y.w));\n}\n";
 
-/// Spec: KIND (1 unary, 2 unary backward, 3 binary, 4 where), OP, RANK (0 = linear), VEC4, COND_U8, and the
-/// f16 switch (value storage `S` is f16 / `vec4<f16>`, the arithmetic type `V` stays f32 / `vec4<f32>`).
+/// Spec: KIND (1 unary, 2 unary backward, 3 binary, 4 where, 5 add into), OP, RANK (0 = linear), VEC4, COND_U8,
+/// and the f16 switch (value storage `S` is f16 / `vec4<f16>`, the arithmetic type `V` stays f32 / `vec4<f32>`).
 /// Params: 0 = output units, 2 = a, 3 = b, 4.. dims, 12.. / 20.. / 28.. strides of inputs 0 / 1 / 2,
-/// 36 / 37 / 38 = input offsets (in units), 62 = NaN, 63 = +inf.
+/// 36 / 37 / 38 = input offsets (in units), 62 = NaN, 63 = +inf. KIND 5 reads and writes `Y` through the
+/// strides and offset of slot 1 (the destination view) instead of the dense index.
 fn gen_ew(spec: &Spec) -> String {
     let kind = spec.get_u32("KIND", 1);
     let rank = spec.get_u32("RANK", 0);
@@ -261,10 +264,12 @@ fn gen_ew(spec: &Spec) -> String {
     let cond_u8 = spec.get_bool("COND_U8");
     let half = spec.is_f16();
     let nin = match kind {
-        1 => 1,
+        1 | 5 => 1,
         2 | 3 => 2,
         _ => 3,
     };
+    // Strided views walked: the inputs, plus the destination for KIND 5.
+    let nview = if kind == 5 { 2 } else { nin };
     let mut s = String::new();
     if vec {
         s.push_str("alias V = vec4<f32>;\nalias UV = vec4<u32>;\nalias BV = vec4<bool>;\n");
@@ -300,7 +305,7 @@ fn gen_ew(spec: &Spec) -> String {
          \x20 if (i >= pu(0u)) { return; }\n\
          \x20 let a = pf(2u); let b = pf(3u);\n",
     );
-    for k in 0..nin {
+    for k in 0..nview {
         if rank == 0 {
             let _ = writeln!(s, "  let o{k} = pu({}u) + i;", 36 + k);
         } else {
@@ -316,7 +321,7 @@ fn gen_ew(spec: &Spec) -> String {
             } else {
                 let _ = writeln!(s, "  {{ let dim = pu({}u); let c = rem % dim; rem = rem / dim;", 4 + k);
             }
-            for j in 0..nin {
+            for j in 0..nview {
                 let _ = writeln!(s, "    o{j} += c * pu({}u);", 12 + 8 * j + k);
             }
             s.push_str("  }\n");
@@ -326,6 +331,7 @@ fn gen_ew(spec: &Spec) -> String {
         1 => s.push_str("  Y[i] = S(un(V(X0[o0]), a, b));\n"),
         2 => s.push_str("  Y[i] = S(unb(V(X0[o0]), V(X1[o1]), a, b));\n"),
         3 => s.push_str("  Y[i] = S(bin(V(X0[o0]), V(X1[o1])));\n"),
+        5 => s.push_str("  Y[o1] = S(V(Y[o1]) + V(X0[o0]));\n"),
         _ => {
             if cond_u8 {
                 s.push_str("  let c = ((X0[o0 >> 2u] >> ((o0 & 3u) * 8u)) & 0xffu) != 0u;\n");
@@ -375,6 +381,7 @@ pub fn elementwise(
         }
         EwOp::Binary(o) => (3, binary_code(o)?, 0.0, 0.0, 2, false),
         EwOp::Where { cond_u8 } => (4, 0, 0.0, 0.0, 3, cond_u8),
+        EwOp::AddInto => return Err(shape_err("elementwise: AddInto goes through ew::add_into")),
     };
     if inputs.len() != nin {
         return Err(shape_err(format!("elementwise: {op:?} takes {nin} inputs, got {}", inputs.len())));
@@ -441,6 +448,64 @@ pub fn elementwise(
     let mut bufs: Vec<&wgpu::Buffer> = inputs.iter().map(|i| i.buf).collect();
     bufs.push(out);
     ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(units as u64, 256)?)
+}
+
+/// `dst[dst_view] += x[x_view]` over `dims`, in place, both stored as `dtype` (f32 or f16; the sum is f32 and
+/// rounded once, as [`EwOp::Binary`]'s add). `dst_view` must not overlap itself and `x` must be another buffer
+/// (a buffer bound twice in one dispatch is a wgpu validation error).
+pub fn add_into(
+    ctx: &GpuContext,
+    dims: &[usize],
+    x: EwInput<'_>,
+    dst: &wgpu::Buffer,
+    dst_view: &Strided,
+    dtype: DType,
+) -> Result<()> {
+    check_dtype(ctx, dtype, "add_into")?;
+    let n = shape_numel(dims)?;
+    for (v, what) in [(x.view, "input"), (dst_view, "destination")] {
+        if v.dims != dims {
+            return Err(shape_err(format!("add_into: {what} has dims {:?}, want {dims:?}", v.dims)));
+        }
+    }
+    super::check_buf(x.buf, x.view.extent()?, dtype, "add_into input")?;
+    super::check_buf(dst, dst_view.extent()?, dtype, "add_into destination")?;
+    if n == 0 {
+        return Ok(());
+    }
+    let strides = [x.view.strides.as_slice(), dst_view.strides.as_slice()];
+    let (cd, cs) = coalesce(dims, &strides);
+    let linear = cd.len() <= 1 && cs.iter().all(|s| s.first().is_none_or(|&v| v == 1));
+    let offsets = [x.view.offset, dst_view.offset];
+    let vec = linear && n.is_multiple_of(4) && offsets.iter().all(|o| o.is_multiple_of(4));
+    if !linear && cd.len() > MAX_RANK {
+        return Err(shape_err(format!("add_into: rank {} after coalescing exceeds {MAX_RANK}", cd.len())));
+    }
+    let q = if vec { 4 } else { 1 };
+    let units = n / q;
+    let spec = Spec::new()
+        .u32("KIND", 5)
+        .u32("OP", 0)
+        .u32("RANK", if linear { 0 } else { cd.len() as u32 })
+        .bool("VEC4", vec)
+        .bool("COND_U8", false)
+        .f16(dtype == DType::F16);
+    let k = ctx.kernel(&EW1, spec)?;
+    let mut p = Params::new().uz(units)?.u(0).f(0.0).f(0.0).at(4);
+    for i in 0..MAX_RANK {
+        p = p.uz(if linear { 1 } else { cd.get(i).copied().unwrap_or(1) })?;
+    }
+    for j in 0..3 {
+        for i in 0..MAX_RANK {
+            let v = if linear { 0 } else { cs.get(j).and_then(|s| s.get(i)).copied().unwrap_or(0) };
+            p = p.uz(v)?;
+        }
+    }
+    for j in 0..3 {
+        p = p.uz(offsets.get(j).copied().unwrap_or(0) / q)?;
+    }
+    let p = p.at(62).f(f32::NAN).f(f32::INFINITY);
+    ctx.dispatch(&k, &[x.buf, dst], &p, ctx.grid_1d(units as u64, 256)?)
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).

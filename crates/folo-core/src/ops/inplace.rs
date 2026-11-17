@@ -47,12 +47,46 @@ impl Tensor {
         self.copy_from(&v)
     }
 
+    /// `self += src` through the backend's in-place [`crate::backend::Backend::add_into`] (one pass, no
+    /// temporary), for a float `src` of this tensor's shape, dtype and device in another storage. `Ok(false)`,
+    /// touching nothing, where the backend has no such kernel. The caller has checked [`Tensor::check_inplace`].
+    pub(crate) fn add_into_(&self, src: &Tensor) -> Result<bool> {
+        if src.shape() != self.shape() || src.dtype() != self.dtype() || self.same_storage(src) {
+            return Err(Error::invalid_arg(
+                "add_into",
+                "needs a source of the same shape and dtype in another storage",
+            ));
+        }
+        self.check_same_device(src, "add_into")?;
+        let b = self.backend()?;
+        let r = {
+            // Unversioned until the backend has written: a `NotSupported` leaves graphs that saved `self` intact.
+            let mut dst = self.cell().write_unversioned();
+            src.with_view(|v| b.add_into(&mut dst, self.layout(), v))
+        };
+        match r {
+            Ok(()) => {
+                self.cell().mark_modified();
+                Ok(true)
+            }
+            Err(Error::NotSupported { .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     fn binary_assign(&self, op: BinaryOp, other: &Tensor, name: &'static str) -> Result<()> {
         self.check_inplace(name)?;
         self.check_f32(name)?;
         other.check_f32(name)?;
         self.check_same_device(other, name)?;
         let other = if self.same_storage(other) { other.copy_contiguous()? } else { other.clone() };
+        if op == BinaryOp::Add
+            && other.shape() == self.shape()
+            && !self.device().is_cpu()
+            && self.add_into_(&other)?
+        {
+            return Ok(());
+        }
         let lo = other.layout().broadcast_to(self.shape(), name)?;
         if self.device().is_cpu() {
             let sr = other.cell().read();

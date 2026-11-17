@@ -15,7 +15,7 @@ use super::storage::Dense;
 use super::{BACKEND_NAME, GpuBackend, core_err};
 use crate::error::GpuError;
 use crate::kernels::conv;
-use crate::kernels::ew::EwOp;
+use crate::kernels::ew::{self, EwInput, EwOp};
 use crate::kernels::gemm_cat::{CAT_STORAGE_BUFFERS, MAX_CAT_PARTS};
 use crate::kernels::layout;
 use crate::kernels::muon;
@@ -75,6 +75,12 @@ impl Backend for GpuBackend {
         };
         let words = (elem(dtype).buffer_bytes(len).core()? / 4) as usize;
         strided::fill_words(&self.ctx, buf.raw(), words, p0, p1).core()?;
+        Ok(self.wrap(dtype, len, buf))
+    }
+
+    fn empty(&self, _device: Device, dtype: CoreDType, len: usize) -> Result<Storage> {
+        // A pooled buffer as it comes (no clear): the caller writes every element.
+        let buf = self.alloc(dtype, len)?;
         Ok(self.wrap(dtype, len, buf))
     }
 
@@ -154,6 +160,43 @@ impl Backend for GpuBackend {
             &strided_of(dst_layout),
         )
         .core()
+    }
+
+    fn add_into(&self, dst: &mut Storage, dst_layout: &Layout, src: View<'_>) -> Result<()> {
+        if dst_layout.shape() != src.shape() {
+            return Err(Error::ShapeMismatch {
+                op: "add_into",
+                lhs: dst_layout.shape().clone(),
+                rhs: src.shape().clone(),
+            });
+        }
+        let dtype = dst.dtype();
+        if dtype != src.storage.dtype() {
+            return Err(Error::DTypeMismatch { op: "add_into", expected: dtype, got: src.storage.dtype() });
+        }
+        if !matches!(dtype, CoreDType::F32 | CoreDType::F16) {
+            return Err(Error::UnsupportedDType { op: "add_into", dtype });
+        }
+        if !dst_layout.fits(dst.len()) || !dst_layout.is_non_overlapping() {
+            return Err(Error::InvalidShape {
+                op: "add_into",
+                shape: dst_layout.shape().clone(),
+                msg: "destination layout reaches outside its storage or overlaps itself".into(),
+            });
+        }
+        self.check_fits(&src, "add_into")?;
+        let _p = profile::scope(|| format!("add_into {:?}", src.shape().dims()));
+        let db = self.buf(&View::new(dst, dst_layout))?;
+        let sb = self.buf(&src)?;
+        if std::ptr::eq(db, sb) {
+            return Err(Error::InvalidArgument {
+                op: "add_into",
+                msg: "source and destination share a buffer".into(),
+            });
+        }
+        let sv = strided_of(src.layout);
+        let x = EwInput { buf: sb, view: &sv };
+        ew::add_into(&self.ctx, src.shape().dims(), x, db, &strided_of(dst_layout), kdt(dtype)).core()
     }
 
     fn cast(&self, src: View<'_>, dtype: CoreDType) -> Result<Storage> {

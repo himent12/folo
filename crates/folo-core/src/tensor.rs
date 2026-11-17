@@ -143,15 +143,16 @@ impl Tensor {
         Self::full_with(shape, 0.0, dtype, device)
     }
 
-    /// A tensor whose contents are unspecified (zeros, or stale data from the CPU buffer cache), for ops that
-    /// write every element before anything reads it.
+    /// A tensor whose contents are unspecified (zeros, stale data from the CPU buffer cache, or a recycled device
+    /// buffer, [`crate::backend::Backend::empty`]), for ops that write every element before anything reads it.
     pub(crate) fn uninit_with(shape: impl Into<Shape>, dtype: DType, device: Device) -> Result<Tensor> {
         let shape = shape.into();
         if device.is_cpu() && dtype == DType::F32 {
             let data = crate::cpu::alloc_uninit(shape.numel());
             return Ok(Self::make(Storage::Cpu(CpuStorage::F32(data)), shape));
         }
-        Self::zeros_with(shape, dtype, device)
+        let s = backend::backend(device)?.empty(device, dtype, shape.numel())?;
+        Ok(Self::make(s, shape))
     }
 
     /// Zeros with this tensor's shape, dtype and device.
