@@ -84,8 +84,8 @@ opt-level = 2
 
 # `release` keeps cargo's defaults (no LTO, 16 codegen units) for development (`cargo run --release`). The shipped
 # binary is `dist` (.github/workflows/release.yml: `cargo build --profile dist`, output in `target/dist/`). On the dev
-# PC (i7-14700KF, 32 GB), from an empty target dir: `release` about 1 min 33 s, a 36.4 MB exe; `dist` 3 min 39 s,
-# 33.3 MB, measured before the library split and the engine changes, which shorten it too. rust-lld or link.exe
+# PC (i7-14700KF, 32 GB), from an empty target dir: `release` about 1 min 33 s (after the library split, before the
+# engine changes), a 36.4 MB exe; `dist` 3 min 39 s, 33.3 MB (before both, which shorten it too). rust-lld or link.exe
 # makes no difference to either (README, Build speed).
 [profile.dist]
 inherits = "release"
