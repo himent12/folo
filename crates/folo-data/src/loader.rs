@@ -4,14 +4,17 @@
 //! RNG stream `(seed, epoch, position)`. Worker threads claim positions from a shared counter, decode and augment,
 //! and send results to a collator thread that restores the order and builds [`Batch`]es. The output is therefore
 //! identical for any number of workers. In-flight work is bounded by a window of positions plus a bounded batch
-//! channel; dropping the epoch iterator stops and joins all threads.
+//! channel; dropping the epoch iterator stops and joins all threads. With a mosaic window
+//! ([`AugmentConfig::mosaic_window`], `crate::window`) the partners come from the previous positions of the order
+//! and the samples they need are kept decoded; this too is independent of the worker count.
 
-use crate::augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
+use crate::augment::{AugmentConfig, Fetched, TrainTransform, Transformed, resize_long_side};
 use crate::dataset::{Dataset, Issue, IssueKind};
 use crate::error::{DataError, Result};
 use crate::par;
 use crate::ram_cache::{CacheMode, RamCache};
 use crate::rng::Rng;
+use crate::window::{WindowCache, partner};
 use crossbeam_channel::{Receiver, bounded, unbounded};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -184,23 +187,53 @@ impl Shared {
         Err(last.unwrap_or(DataError::OutOfRange { index: i, len: n }))
     }
 
-    /// Transforms the sample at epoch position `pos`. A panic (a bug in a dataset or transform) becomes an error
-    /// for that batch instead of silently ending the epoch.
+    /// The mosaic window of an epoch with `transform` (0: partners drawn from the whole dataset).
+    fn window(&self, transform: &TrainTransform) -> usize {
+        match (&self.cfg.augment, transform.mosaic) {
+            (Some(a), true) => a.mosaic_window as usize,
+            _ => 0,
+        }
+    }
+
+    /// Transforms the sample at epoch position `pos` of `order`. With a mosaic window of `k > 0` samples
+    /// (`crate::window`), the partners are positions before `pos`, kept in `cache` when there is one (none with
+    /// the RAM cache, which keeps every image already). A panic (a bug in a dataset or transform) becomes an
+    /// error for that batch instead of silently ending the epoch.
     fn produce(
         &self,
         transform: &TrainTransform,
         epoch: u32,
         pos: usize,
-        index: usize,
+        order: &[usize],
+        cache: Option<&WindowCache>,
     ) -> Result<Transformed> {
         let mut rng = Rng::derive(&[self.cfg.seed, epoch as u64, pos as u64]);
-        let run = || transform.apply(index, self.ds.len(), &|i| self.fetch(i), &mut rng);
+        let k = self.window(transform);
+        let s = self.cfg.imgsz;
+        // Positions up to `pos` go through the cache; a partner that wrapped around past `pos` is loaded directly.
+        let at = |q: usize| match cache {
+            Some(c) if q <= pos => c.get(q, || {
+                self.fetch(order[q]).map(|f| Fetched { sample: resize_long_side(f.sample, s), ..f })
+            }),
+            _ => self.fetch(order[q]),
+        };
+        let run = || {
+            if k == 0 {
+                transform.apply(order[pos], self.ds.len(), &|i| self.fetch(i), &mut rng)
+            } else {
+                transform.apply_with(pos, &|r: &mut Rng| partner(pos, order.len(), k, r), &at, &mut rng)
+            }
+        };
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|p| {
             let msg = p
                 .downcast_ref::<&str>()
                 .map(|s| s.to_string())
                 .or_else(|| p.downcast_ref::<String>().cloned());
-            Err(DataError::Format(format!("panic while loading sample {index}: {}", msg.unwrap_or_default())))
+            Err(DataError::Format(format!(
+                "panic while loading sample {}: {}",
+                order[pos],
+                msg.unwrap_or_default()
+            )))
         })
     }
 }
@@ -286,15 +319,24 @@ impl DataLoader {
         };
         let order = Arc::new(self.order(epoch));
         let num_batches = order.len().div_ceil(cfg.batch_size);
+        let window = self.shared.window(&transform);
+        let cache = (window > 0 && self.shared.ram.is_none()).then(|| Arc::new(WindowCache::default()));
         let mut it = EpochIter {
             started: Instant::now(),
             images: 0,
             batches: 0,
             num_batches,
-            inner: Inner::Sync { shared: self.shared.clone(), transform, order: order.clone(), epoch },
+            inner: Inner::Sync {
+                shared: self.shared.clone(),
+                transform,
+                order: order.clone(),
+                epoch,
+                cache: cache.clone(),
+                window,
+            },
         };
         if cfg.workers > 0 {
-            it.inner = spawn(self.shared.clone(), transform, order, epoch, num_batches);
+            it.inner = spawn(self.shared.clone(), transform, order, epoch, num_batches, cache, window);
         }
         it
     }
@@ -340,7 +382,14 @@ impl Gate {
 }
 
 enum Inner {
-    Sync { shared: Arc<Shared>, transform: TrainTransform, order: Arc<Vec<usize>>, epoch: u32 },
+    Sync {
+        shared: Arc<Shared>,
+        transform: TrainTransform,
+        order: Arc<Vec<usize>>,
+        epoch: u32,
+        cache: Option<Arc<WindowCache>>,
+        window: usize,
+    },
     Threads { rx: Option<Receiver<Result<Batch>>>, gate: Arc<Gate>, threads: Vec<JoinHandle<()>> },
 }
 
@@ -350,6 +399,8 @@ fn spawn(
     order: Arc<Vec<usize>>,
     epoch: u32,
     num_batches: usize,
+    cache: Option<Arc<WindowCache>>,
+    window_k: usize,
 ) -> Inner {
     let cfg = &shared.cfg;
     let total = order.len();
@@ -364,12 +415,13 @@ fn spawn(
     let mut threads = Vec::with_capacity(cfg.workers + 1);
     for w in 0..cfg.workers {
         let (shared, order, gate, tx) = (shared.clone(), order.clone(), gate.clone(), sample_tx.clone());
+        let cache = cache.clone();
         let handle = std::thread::Builder::new()
             .name(format!("folo-data-{w}"))
             .spawn(move || {
                 par::serial(|| {
                     while let Some(pos) = gate.claim(total, window) {
-                        let out = shared.produce(&transform, epoch, pos, order[pos]);
+                        let out = shared.produce(&transform, epoch, pos, &order, cache.as_deref());
                         if tx.send((pos, out)).is_err() {
                             break;
                         }
@@ -382,6 +434,7 @@ fn spawn(
     drop(sample_tx);
     let collator = {
         let (shared, gate) = (shared.clone(), gate.clone());
+        let cache = cache.clone();
         std::thread::Builder::new()
             .name("folo-data-collate".into())
             .spawn(move || {
@@ -406,6 +459,10 @@ fn spawn(
                         collate(items, &shared.cfg)
                     };
                     gate.advance(hi);
+                    // Every sample still in flight is at `hi` or later and reaches back at most `window_k`.
+                    if let Some(c) = &cache {
+                        c.evict_below(hi.saturating_sub(window_k));
+                    }
                     if batch_tx.send(batch).is_err() {
                         return;
                     }
@@ -508,10 +565,14 @@ impl Iterator for EpochIter {
             return None;
         }
         let batch = match &mut self.inner {
-            Inner::Sync { shared, transform, order, epoch } => {
+            Inner::Sync { shared, transform, order, epoch, cache, window } => {
                 let bs = shared.cfg.batch_size;
                 let (lo, hi) = (self.batches * bs, ((self.batches + 1) * bs).min(order.len()));
-                let items = (lo..hi).map(|p| shared.produce(transform, *epoch, p, order[p])).collect();
+                if let Some(c) = cache {
+                    c.evict_below(lo.saturating_sub(*window));
+                }
+                let items =
+                    (lo..hi).map(|p| shared.produce(transform, *epoch, p, order, cache.as_deref())).collect();
                 collate(items, &shared.cfg)
             }
             Inner::Threads { rx, .. } => match rx.as_ref()?.recv() {

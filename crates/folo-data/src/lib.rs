@@ -72,6 +72,7 @@ mod rng;
 mod stats;
 pub mod synthetic;
 pub mod warp;
+mod window;
 
 pub use augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
 pub use bbox::BBox;

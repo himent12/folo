@@ -11,6 +11,10 @@
 //! - `--no-stages` / `--no-val`: skip the single-thread stage table / the validation loader table.
 //! - `--cache ram`: the training loader with `CacheMode::Ram` (its warm-up epoch is a whole epoch, which fills
 //!   the cache; the measured epochs then read from it).
+//! - `--mosaic-window K`: the training loader with `AugmentConfig::mosaic_window = K` (default 0: partners from the
+//!   whole dataset).
+//! - `--epoch E`: the first measured epoch (default 1; the warm-up is epoch 0). Arms of an A/B on a large dataset
+//!   take different epochs, so neither reads files the other has just brought into the page cache.
 //!
 //! Prints single-thread stage timings (decode, resize, letterbox, mosaic, affine, HSV, flip, collate) and
 //! end-to-end `DataLoader` images/s for the full training transform (decode + mosaic + affine + HSV + flip +
@@ -50,6 +54,8 @@ struct Args {
     stages: bool,
     val: bool,
     cache: CacheMode,
+    mosaic_window: u32,
+    epoch: u32,
 }
 
 fn parse_args() -> Args {
@@ -77,6 +83,8 @@ fn parse_args() -> Args {
         stages: !flag("--no-stages"),
         val: !flag("--no-val"),
         cache: if value("--cache").as_deref() == Some("ram") { CacheMode::Ram } else { CacheMode::None },
+        mosaic_window: value("--mosaic-window").and_then(|v| v.parse().ok()).unwrap_or(0),
+        epoch: value("--epoch").and_then(|v| v.parse().ok()).unwrap_or(1),
     }
 }
 
@@ -181,8 +189,8 @@ fn main() -> folo_data::Result<()> {
 
     println!(
         "DataLoader, full train transform (decode + mosaic + affine + HSV + flip + collate to u8), batch 16, \
-         median of {} epochs\n",
-        args.rounds
+         mosaic window {}, median of {} epochs from epoch {}\n",
+        args.mosaic_window, args.rounds, args.epoch
     );
     println!("| workers | img/s   | range           |");
     println!("|---------|---------|-----------------|");
@@ -196,6 +204,7 @@ fn main() -> folo_data::Result<()> {
                 seed: 0,
                 u8_images: true,
                 cache: args.cache,
+                augment: Some(AugmentConfig { mosaic_window: args.mosaic_window, ..AugmentConfig::default() }),
                 ..LoaderConfig::default()
             },
         )?;
@@ -204,7 +213,7 @@ fn main() -> folo_data::Result<()> {
         epoch_rate(&loader, 0, warm)?;
         let mut rates = Vec::new();
         for e in 0..args.rounds {
-            rates.push(epoch_rate(&loader, 1 + e as u32, args.batches)?);
+            rates.push(epoch_rate(&loader, args.epoch + e as u32, args.batches)?);
         }
         let med = median(&mut rates);
         println!("| {workers:>7} | {med:>7.1} | {:>6.1} - {:>6.1} |", rates[0], rates[rates.len() - 1]);

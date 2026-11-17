@@ -51,6 +51,13 @@ pub struct AugmentConfig {
     /// Turn mosaic (and mixup) off for the last `close_mosaic` epochs (default 10), at most half of the run
     /// ([`AugmentConfig::close_mosaic_epochs`]).
     pub close_mosaic: u32,
+    /// Where the loader draws mosaic and mixup partners from (docs/DATA.md, Mosaic window): `0` uniformly from the
+    /// whole dataset (every partner a fresh decode), `K > 0` uniformly from the `K` samples just before this one
+    /// in the epoch's order, which the loader keeps decoded, so each image is decoded about once per epoch. The
+    /// first `K` samples of an epoch wrap around to its last ones. Default 0; configs written before the key
+    /// read 0 too.
+    #[serde(default = "legacy_mosaic_window")]
+    pub mosaic_window: u32,
     /// Drop boxes narrower or shorter than this many output pixels (default 2.0).
     pub min_box_px: f32,
     /// Drop boxes that kept less than this fraction of their area after clipping (default 0.1).
@@ -77,12 +84,22 @@ impl Default for AugmentConfig {
             degrees: 0.0,
             shear: 0.0,
             close_mosaic: 10,
+            mosaic_window: 0,
             min_box_px: 2.0,
             min_area_ratio: 0.1,
             max_aspect: 100.0,
             close_mosaic_fixed: None,
         }
     }
+}
+
+/// The largest [`AugmentConfig::mosaic_window`]: the loader keeps about this many images decoded (about 0.9 MB each
+/// at 640 px).
+pub const MAX_MOSAIC_WINDOW: u32 = 8192;
+
+/// [`AugmentConfig::mosaic_window`] of a config written before the key: the uniform draw it trained with.
+fn legacy_mosaic_window() -> u32 {
+    0
 }
 
 impl AugmentConfig {
@@ -155,6 +172,12 @@ impl AugmentConfig {
         }
         if !(self.scale.is_finite() && (0.0..1.0).contains(&self.scale)) {
             return Err(format!("augment.scale must be in [0, 1), got {}", self.scale));
+        }
+        if self.mosaic_window > MAX_MOSAIC_WINDOW {
+            return Err(format!(
+                "augment.mosaic_window must be at most {MAX_MOSAIC_WINDOW} samples, got {}",
+                self.mosaic_window
+            ));
         }
         if self.max_aspect.is_nan() || self.max_aspect <= 1.0 {
             return Err(format!("augment.max_aspect must be > 1, got {}", self.max_aspect));

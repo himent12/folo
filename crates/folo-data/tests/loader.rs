@@ -288,3 +288,45 @@ fn ram_cache_refuses_what_does_not_fit() {
     let e = DataLoader::new(ds, c).err().expect("refused");
     assert!(e.to_string().contains("--cache ram needs"), "{e}");
 }
+
+fn window_cfg(workers: usize, k: u32) -> LoaderConfig {
+    let mut c = cfg(workers);
+    c.augment = c.augment.map(|a| AugmentConfig { mosaic_window: k, ..a });
+    c
+}
+
+/// With a mosaic window the batches are the same for any worker count (the partners depend on the position
+/// only), and differ from the uniform draw's.
+#[test]
+fn mosaic_window_is_deterministic_for_any_worker_count() {
+    let ds = rect_dataset(41);
+    let reference = collect(&DataLoader::new(ds.clone(), window_cfg(0, 5)).unwrap(), 1);
+    for workers in [1, 3, 6] {
+        let loader = DataLoader::new(ds.clone(), window_cfg(workers, 5)).unwrap();
+        assert_eq!(collect(&loader, 1), reference, "{workers} workers");
+    }
+    assert_ne!(collect(&DataLoader::new(ds.clone(), window_cfg(2, 0)).unwrap(), 1), reference);
+    // The RAM cache gives the same batches.
+    let ram = DataLoader::new(ds, LoaderConfig { cache: CacheMode::Ram, ..window_cfg(3, 5) }).unwrap();
+    assert_eq!(collect(&ram, 1), reference);
+}
+
+/// A mosaic window decodes each image about once per epoch: the primaries, plus the partners of the first `K`
+/// samples that wrap around to the end of the order (at most 3 each, and 4 more for a mixup), against about 4
+/// (with mixup more) loads per sample when the partners are drawn from the whole dataset. Without mosaic nothing
+/// changes.
+#[test]
+fn mosaic_window_decodes_each_image_about_once() {
+    let n = 96;
+    for workers in [0, 4] {
+        let ds = Arc::new(Counting { inner: rect_dataset(n), gets: AtomicUsize::new(0) });
+        let loader = DataLoader::new(ds.clone(), window_cfg(workers, 4)).unwrap();
+        collect(&loader, 0);
+        let gets = ds.gets.swap(0, Ordering::SeqCst);
+        assert!((n..=n + 7 * 4).contains(&gets), "{workers} workers: {gets} loads for {n} samples");
+        let uniform = DataLoader::new(ds.clone(), window_cfg(workers, 0)).unwrap();
+        collect(&uniform, 0);
+        let gets = ds.gets.swap(0, Ordering::SeqCst);
+        assert!(gets >= 4 * n, "uniform partners: {gets} loads");
+    }
+}

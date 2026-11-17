@@ -85,22 +85,35 @@ impl TrainTransform {
         self.apply(index, ds.len(), &|i| ds.get(i).map(|s| Fetched::decoded(i, s)), rng)
     }
 
-    /// Produces the transformed sample for dataset `index`. `fetch(i)` loads sample `i` of a dataset with `len`
-    /// samples, with the index it actually loaded (the loader passes a fetch that substitutes unreadable images
-    /// deterministically) and its decoded size; the sample may come resized to long side `imgsz` (the loader's
-    /// RAM cache), which gives the same result.
+    /// Produces the transformed sample for dataset `index`, its mosaic and mixup partners drawn uniformly from the
+    /// dataset. `fetch(i)` loads sample `i` of a dataset with `len` samples, with the index it actually loaded (the
+    /// loader passes a fetch that substitutes unreadable images deterministically) and its decoded size; the sample
+    /// may come resized to long side `imgsz` (the loader's RAM cache), which gives the same result.
     pub fn apply<F>(&self, index: usize, len: usize, fetch: &F, rng: &mut Rng) -> Result<Transformed>
     where
         F: Fn(usize) -> Result<Fetched>,
     {
+        self.apply_with(index, &|r: &mut Rng| r.below(len), fetch, rng)
+    }
+
+    /// [`TrainTransform::apply`] with the partners chosen by `pick`. Samples are named by ids the transform only
+    /// passes on: the primary is `primary`, each mosaic or mixup partner is `pick(rng)` (one draw per partner, in
+    /// the order of [`TrainTransform::apply`]), and `fetch(id)` loads one. [`TrainTransform::apply`] uses dataset
+    /// indices and a uniform draw; the loader's mosaic window ([`AugmentConfig::mosaic_window`]) uses positions in
+    /// the epoch's order and a draw from the previous ones.
+    pub fn apply_with<P, F>(&self, primary: usize, pick: &P, fetch: &F, rng: &mut Rng) -> Result<Transformed>
+    where
+        P: Fn(&mut Rng) -> usize,
+        F: Fn(usize) -> Result<Fetched>,
+    {
         let Some(cfg) = &self.augment else {
-            let f = fetch(index)?;
+            let f = fetch(primary)?;
             let (sample, letterbox) = letterbox_fetched(&f, self.imgsz);
             return Ok(Transformed { index: f.index, sample, orig_size: f.orig_size, letterbox });
         };
-        let mut out = self.one(cfg, index, len, fetch, rng)?;
+        let mut out = self.one(cfg, primary, pick, fetch, rng)?;
         if self.mosaic && rng.chance(cfg.mixup) {
-            let other = self.one(cfg, rng.below(len), len, fetch, rng)?;
+            let other = self.one(cfg, pick(rng), pick, fetch, rng)?;
             mixup(&mut out.sample, &other.sample, rng);
         }
         random_hsv(&mut out.sample.image, cfg.hsv, rng);
@@ -113,20 +126,14 @@ impl TrainTransform {
         Ok(out)
     }
 
-    fn one<F>(
-        &self,
-        cfg: &AugmentConfig,
-        index: usize,
-        len: usize,
-        fetch: &F,
-        rng: &mut Rng,
-    ) -> Result<Transformed>
+    fn one<P, F>(&self, cfg: &AugmentConfig, index: usize, pick: &P, fetch: &F, rng: &mut Rng) -> Result<Transformed>
     where
+        P: Fn(&mut Rng) -> usize,
         F: Fn(usize) -> Result<Fetched>,
     {
         let s = self.imgsz;
         if self.mosaic && rng.chance(cfg.mosaic) {
-            let ids = [index, rng.below(len), rng.below(len), rng.below(len)];
+            let ids = [index, pick(rng), pick(rng), pick(rng)];
             let mut parts = Vec::with_capacity(4);
             let (mut primary, mut orig_size) = (index, [0, 0]);
             for (k, &i) in ids.iter().enumerate() {
