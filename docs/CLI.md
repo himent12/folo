@@ -20,7 +20,7 @@ reproducible builds.
 
 `--release` (thin LTO, one codegen unit) is what releases and benchmark numbers use, and it takes minutes to build,
 also after a small edit. For iterating on the CLI or the server, `cargo build --profile fast -p folo-cli` (the
-`fast` profile in the root `Cargo.toml`: no LTO, 16 codegen units, incremental) builds `target/fast/folo` in about
+`fast` profile in the root `Cargo.toml`: no cross-crate LTO, 16 codegen units, incremental) builds `target/fast/folo` in about
 half the time from clean and in seconds after an edit, with CPU inference speed within noise of `--release`.
 
 ### The embedded Studio (`embed-web`)

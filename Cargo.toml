@@ -116,10 +116,10 @@ debug = "line-tables-only"
 inherits = "release"
 
 # Opt-in, for iterating on the CLI or the server locally: `cargo build --profile fast -p folo-cli` (output in
-# `target/fast/`). The same optimisation level as `release` without thin LTO and with 16 codegen units and
-# incremental builds. On the dev PC: 2 min 12 s from an empty target dir instead of 4 min 2 s, 2.7 s after an edit of
-# folo-cli instead of 1 min 48 s, a 44 MB exe instead of 41 MB, and folo-n CPU forward / predict within 1.5% of
-# `release`. Benchmark numbers and shipped binaries keep coming from `release` / `bench`.
+# `target/fast/`). The same optimisation level as `release`, without cross-crate LTO (`lto = false` keeps only thin LTO
+# inside each crate), with 16 codegen units and incremental builds. On the dev PC: 2 min 12 s from an empty target dir
+# instead of 4 min 2 s, 2.7 s after an edit of folo-cli instead of 1 min 48 s, a 44 MB exe instead of 41 MB, and
+# folo-n CPU forward / predict within 1.5% of `release`. Benchmarks and shipped binaries keep using `release` / `bench`.
 [profile.fast]
 inherits = "release"
 lto = false
