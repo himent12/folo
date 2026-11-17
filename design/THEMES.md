@@ -25,8 +25,9 @@ Listed in this order everywhere (Settings, the command palette); the first of ea
 | `contrast-light` | High contrast light | light | White surfaces, black text, edges and controls that stand out (AAA text). |
 
 Rules every theme keeps (checked by `contrast.mjs`, see below):
-- **Elevation by lightness** holds: `bg.inset` < `bg.app` < `bg.panel` ≤ `bg.raised` ≤ `bg.overlay` in dark themes
-  (inset darkest), and the light-mode order (`bg.panel` white-most, `bg.app` and `bg.inset` greyer) in light ones.
+- **Elevation by lightness** holds, by relative luminance: `bg.inset` < `bg.app` < `bg.panel` ≤ `bg.raised` ≤
+  `bg.overlay` in dark themes; `bg.inset` < `bg.app` ≤ `bg.raised` ≤ `bg.panel` and `bg.raised` ≤ `bg.overlay` ≤
+  `bg.panel` in light ones (panels white-most).
 - **The accent stays the signal lime** in every built-in theme: it means focus, live state and the primary action,
   and the chart series exclude it. A theme may tune `accent.text`, `accent.line`, `accent.muted`, `bg.selected` and
   `focus` (the shades that must hold contrast on its surfaces), not the hue.
@@ -36,7 +37,10 @@ Rules every theme keeps (checked by `contrast.mjs`, see below):
   shift shades for contrast on its plot surfaces.
 - Every pairing in `design/README.md` → Colour holds on every surface of every theme. High contrast themes hold
   stricter floors: text (primary, secondary, tertiary, status text) ≥ 7:1, `line.control` and other non-text marks
-  ≥ 4.5:1, and `line.default` (panel edges) ≥ 3:1 against `bg.app`.
+  ≥ 4.5:1, and `line.default` (panel edges) ≥ 3:1 against `bg.app`. A custom theme whose base is a `contrast-*`
+  theme is checked as a high contrast theme too. One exception: `accent.on` on `accent.line` holds 3:1, not 4.5:1
+  (in High contrast light the olive mark cannot be dark enough for white surfaces and light enough for a near-black
+  label at once); text on an `accent.line` fill in a light theme uses `text.inverse` instead.
 - The class palette (detection boxes on photos) is not part of a theme.
 
 ## Custom themes
@@ -73,6 +77,9 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
   colour, a base of the other mode. A file with an error is not installed, and the app says which file and why
   (the first error is enough; give the token path, e.g. `color.bg.ap: not a colour token`). Keys starting with `$`
   are comments and are ignored, as in `tokens.json`.
+- `design/theme-cases.json` is the shared conformance table: invalid files with their exact first error, and valid
+  ones with their resolved result. `contrast.mjs` and both apps' tests replay it, so the three validators agree;
+  a change to the format changes that file first.
 - The apps do not refuse a custom theme for low contrast (it is the user's choice), but `node design/contrast.mjs
   --theme <file>` checks one against the same rules as the built-ins, so theme authors can.
 
