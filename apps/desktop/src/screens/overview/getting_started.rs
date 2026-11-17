@@ -67,7 +67,7 @@ impl FoloApp {
                         .justify_center()
                         .bg(if active { t.accent_fill() } else { t.bg_active })
                         .child(
-                            text(ty::SM, if active { t.accent_on } else { t.text_tertiary })
+                            text(ty::SM, if active { t.on_accent_fill() } else { t.text_tertiary })
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(n.to_string()),
                         ),

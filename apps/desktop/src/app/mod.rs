@@ -37,6 +37,8 @@ mod start_from;
 pub(crate) mod tests;
 #[cfg(test)]
 mod text_input_tests;
+#[cfg(test)]
+mod theme_tests;
 mod titlebar;
 #[cfg(test)]
 mod unavailable_tests;
@@ -64,6 +66,7 @@ pub use forms::{
     retry_batch, synth_errors,
 };
 pub use playground::{IMAGE_FORMATS, PLAY_CONF_FLOOR};
+pub use preferences::is_dark;
 pub use sidebar::logo;
 
 actions!(
@@ -296,7 +299,18 @@ pub struct FoloApp {
     pub store: Store,
     pub route: Route,
     pub history: Vec<Route>,
+    /// The mode shown now (the theme's; with System, the OS's).
     pub mode: Mode,
+    /// The user's theme choice: the mode (Dark, Light, System) and each mode's theme.
+    pub theme_prefs: crate::theme::ThemePrefs,
+    /// The themes to pick from: built-in, then custom (`<FOLO_HOME or ~/.folo>/themes`).
+    pub themes: crate::theme::Catalog,
+    /// Whether the OS appearance is dark now (System follows it).
+    pub system_dark: bool,
+    /// The custom themes folder is being read again (Reload).
+    pub themes_loading: bool,
+    /// The mode the window's system frame was last set to.
+    frame_mode: Option<Mode>,
     pub frozen: bool,
     /// Keep every fetch pending (loading-state screenshots).
     pub hold_loading: bool,
@@ -619,6 +633,11 @@ impl FoloApp {
             route: Route::Overview,
             history: Vec::new(),
             mode: theme(cx).mode,
+            theme_prefs: crate::theme::ThemePrefs::default(),
+            themes: crate::theme::Catalog::builtin(),
+            system_dark: preferences::is_dark(window.appearance()),
+            themes_loading: false,
+            frame_mode: None,
             frozen,
             hold_loading: false,
             state_path: None,

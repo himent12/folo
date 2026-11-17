@@ -206,6 +206,10 @@ pub trait PlatformWindow: 'static {
     fn on_close(&self, callback: Box<dyn FnOnce()>);
     /// Called when the system appearance changes.
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
+    /// Draws the window's own frame (what the system draws of it: on Windows, DWM's caption and
+    /// border) dark or light whatever the system's appearance is, or following it again (`None`), so
+    /// the frame matches the app's own theme. Backends without such a frame ignore it.
+    fn set_frame_appearance(&self, _appearance: Option<WindowAppearance>) {}
 
     /// Shows `frame` (the whole client area, device pixels). Only the `damage` rectangles changed since
     /// the previous call; the backend copies just those (all of `frame` after a resize or expose).

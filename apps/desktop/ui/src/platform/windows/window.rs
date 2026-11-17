@@ -49,6 +49,9 @@ pub(crate) struct WindowState {
     pub(crate) fullscreen_restore_bounds: Bounds<Pixels>,
     pub(crate) border_offset: WindowBorderOffset,
     pub(crate) appearance: WindowAppearance,
+    /// The frame's appearance when the app picked one (`set_frame_appearance`), else it follows
+    /// `appearance`.
+    pub(crate) frame_appearance: Option<WindowAppearance>,
     pub(crate) scale_factor: f32,
     pub(crate) callbacks: Callbacks,
     pub(crate) input_handler: Option<Box<dyn PlatformInputHandler>>,
@@ -610,6 +613,7 @@ fn new_inner(context: &CreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<
         fullscreen_restore_bounds: Bounds { origin, size: logical_size },
         border_offset: WindowBorderOffset::default(),
         appearance: context.appearance,
+        frame_appearance: None,
         scale_factor,
         callbacks: Callbacks::default(),
         input_handler: None,

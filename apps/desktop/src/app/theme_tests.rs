@@ -1,0 +1,133 @@
+//! Themes in the running app (design/THEMES.md): Settings › Appearance's rows, picking a theme with
+//! the mode / slot rules, System following the OS, custom themes and Reload, the palette's commands.
+
+use folo_test_support::TestDir;
+use folo_ui::{HeadlessApp, WindowHandle};
+
+use super::tests::{drive, open};
+use super::{FoloApp, Route};
+use crate::theme::{Catalog, Mode, ModePref, theme};
+
+/// A valid custom theme file.
+fn night(id: &str, name: &str) -> String {
+    format!(
+        r##"{{"folo_theme": 1, "id": "{id}", "name": "{name}", "mode": "dark", "base": "midnight",
+            "color": {{"bg": {{"app": "#0B0D12"}}}}}}"##
+    )
+}
+
+/// The app with custom themes read from `folder` (as at start), on Settings.
+fn on_settings(folder: &std::path::Path) -> (HeadlessApp, WindowHandle<FoloApp>) {
+    let (mut app, window) = open();
+    let folder = folder.to_path_buf();
+    drive(&mut app, window, move |this, w, cx| {
+        this.themes = Catalog::load(&folder);
+        this.apply_theme(cx);
+        this.navigate(Route::Settings, w, cx);
+    });
+    (app, window)
+}
+
+/// The id, mode and colours shown now, and the choice.
+fn shown(app: &mut HeadlessApp, window: WindowHandle<FoloApp>) -> (String, Mode, ModePref) {
+    drive(app, window, |this, _, cx| {
+        let t = theme(cx);
+        assert_eq!(t.mode, this.mode, "the app's mode is the theme's");
+        (t.id.as_str().to_string(), t.mode, this.theme_prefs.mode)
+    })
+}
+
+/// The focus keys drawn in a fresh frame.
+fn drawn_keys(app: &mut HeadlessApp, window: WindowHandle<FoloApp>) -> Vec<String> {
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(app, window, |this, _, _| this.focus.borrow().keys().map(|k| k.to_string()).collect())
+}
+
+#[test]
+fn settings_shows_the_four_rows_and_the_failed_files() {
+    let dir = TestDir::new("desktop-theme-settings");
+    let folder = dir.path().join("themes");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("night.json"), night("night-shift", "Night shift")).unwrap();
+    std::fs::write(folder.join("typo.json"), r#"{"folo_theme": 1, "id": "t", "name": "T", "mode": "dim"}"#)
+        .unwrap();
+    let (mut app, window) = on_settings(&folder);
+    let keys = drawn_keys(&mut app, window);
+    for key in ["set-theme", "set-dark-theme", "set-light-theme", "set-themes-reload", "set-motion"] {
+        assert!(keys.iter().any(|k| k == key), "{key} not drawn: {keys:?}");
+    }
+    let (count, failed, dark_names) = drive(&mut app, window, |this, _, _| {
+        let names: Vec<String> = this.themes.of_mode(Mode::Dark).map(|e| e.name.clone()).collect();
+        (this.themes.custom_count(), this.themes.failed.clone(), names)
+    });
+    assert_eq!(count, 1);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        (failed[0].file.as_str(), failed[0].error.as_str()),
+        ("typo.json", "mode: must be \"dark\" or \"light\"")
+    );
+    assert_eq!(dark_names, ["Dark", "Midnight", "Dim", "High contrast dark", "Night shift"]);
+}
+
+#[test]
+fn picking_a_theme_follows_the_mode_and_slot_rules() {
+    let dir = TestDir::new("desktop-theme-pick");
+    let (mut app, window) = on_settings(&dir.path().join("themes"));
+    assert_eq!(shown(&mut app, window), ("dark".into(), Mode::Dark, ModePref::Dark));
+    // A light theme while Dark: switches to Light with it.
+    drive(&mut app, window, |this, _, cx| this.pick_theme("paper", cx));
+    assert_eq!(shown(&mut app, window), ("paper".into(), Mode::Light, ModePref::Light));
+    drive(&mut app, window, |this, _, cx| this.pick_theme("midnight", cx));
+    assert_eq!(shown(&mut app, window), ("midnight".into(), Mode::Dark, ModePref::Dark));
+    // System: the headless OS is dark; the dark slot shows, and a light pick only fills its slot.
+    drive(&mut app, window, |this, _, cx| this.set_mode(ModePref::System, cx));
+    assert_eq!(shown(&mut app, window), ("midnight".into(), Mode::Dark, ModePref::System));
+    drive(&mut app, window, |this, _, cx| this.pick_theme("contrast-light", cx));
+    assert_eq!(shown(&mut app, window), ("midnight".into(), Mode::Dark, ModePref::System));
+    // The OS turns light: System follows at once; back to dark, too.
+    drive(&mut app, window, |this, _, cx| this.system_appearance_changed(false, cx));
+    assert_eq!(shown(&mut app, window), ("contrast-light".into(), Mode::Light, ModePref::System));
+    drive(&mut app, window, |this, _, cx| this.system_appearance_changed(true, cx));
+    assert_eq!(shown(&mut app, window).0, "midnight");
+    // Ctrl Shift L: the other mode, explicit, each with its theme.
+    drive(&mut app, window, |this, _, cx| this.toggle_theme(cx));
+    assert_eq!(shown(&mut app, window), ("contrast-light".into(), Mode::Light, ModePref::Light));
+    drive(&mut app, window, |this, _, cx| this.toggle_theme(cx));
+    assert_eq!(shown(&mut app, window), ("midnight".into(), Mode::Dark, ModePref::Dark));
+    // Explicit modes ignore the OS.
+    drive(&mut app, window, |this, _, cx| this.system_appearance_changed(false, cx));
+    assert_eq!(shown(&mut app, window).1, Mode::Dark);
+    // An unknown id picks nothing.
+    drive(&mut app, window, |this, _, cx| this.pick_theme("nope", cx));
+    assert_eq!(shown(&mut app, window).0, "midnight");
+    // Each frame draws without trouble in the theme it shows.
+    assert!(drawn_keys(&mut app, window).iter().any(|k| k == "set-dark-theme"));
+}
+
+#[test]
+fn reload_reads_the_folder_again_and_a_removed_theme_falls_back_to_the_default() {
+    let dir = TestDir::new("desktop-theme-reload");
+    let folder = dir.path().join("themes");
+    std::fs::create_dir_all(&folder).unwrap();
+    let (mut app, window) = on_settings(&folder);
+    assert_eq!(drive(&mut app, window, |this, _, _| this.themes.custom_count()), 0);
+    std::fs::write(folder.join("night.json"), night("night-shift", "Night shift")).unwrap();
+    drive(&mut app, window, |this, _, cx| this.reload_themes(cx));
+    app.run_until_idle();
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| (this.themes.custom_count(), this.themes_loading)),
+        (1, false)
+    );
+    drive(&mut app, window, |this, _, cx| this.pick_theme("night-shift", cx));
+    let bg = drive(&mut app, window, |_, _, cx| theme(cx).bg_app);
+    assert_eq!(bg, crate::theme::rgba32(0x0B0D12FF), "the custom colours show");
+    assert_eq!(shown(&mut app, window).0, "night-shift");
+    // Removed: the default shows, and the stored id stays for when it comes back.
+    std::fs::remove_file(folder.join("night.json")).unwrap();
+    drive(&mut app, window, |this, _, cx| this.reload_themes(cx));
+    app.run_until_idle();
+    assert_eq!(shown(&mut app, window).0, "dark");
+    assert_eq!(drive(&mut app, window, |this, _, _| this.theme_prefs.dark.clone()), "night-shift");
+}

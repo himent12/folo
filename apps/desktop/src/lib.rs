@@ -1,7 +1,7 @@
 //! FOLO Desktop: the native front end for FOLO, on folo-ui (`ui/`).
 //!
 //! `folo-desktop [--server URL | --mock] [--open SCREEN] [--scenario NAME] [--width W --height H]
-//! [--theme dark|light]`; `--help` and `--version` print and exit (see [`USAGE`]).
+//! [--theme MODE|THEME]`; `--help` and `--version` print and exit (see [`USAGE`]).
 //!
 //! Scenarios put the app into a fixed, deterministic state (frozen mock clock, a screen, an
 //! overlay, a hover) for screenshots; see `scenario.rs` and `tools/shoot-all.ps1`.
@@ -51,7 +51,7 @@ use folo_ui::{
 };
 
 use crate::api::mock::MockBackend;
-use crate::theme::{Mode, Theme};
+use crate::theme::{Catalog, ThemePrefs};
 
 mod icons {
     include!(concat!(env!("OUT_DIR"), "/icons.rs"));
@@ -95,7 +95,9 @@ Options:
   --open SCREEN         Start on a screen: overview, datasets, dataset:ID, runs, run:ID, models,
                         model:ID, benchmarks, bench:ID, bench-entry:ID/ENTRY, playground,
                         settings, or new-run (the dialog)
-  --theme dark|light    Colour theme [default: the last one, else dark]
+  --theme MODE|THEME    The mode (dark, light or system), or a theme: dark, midnight, dim,
+                        contrast-dark, light, paper, contrast-light, or a custom theme's id
+                        (midnight: mode dark with Midnight) [default: the last one, else dark]
   --width W             Window width in px [default: the last size, else 1280]
   --height H            Window height in px [default: the last size, else 800]
   --scenario NAME       A fixed, deterministic state for screenshots (implies demo data)
@@ -143,9 +145,10 @@ const VALUE_FLAGS: &[&str] = &[
 const BARE_FLAGS: &[&str] = &["--mock", "--list-scenarios", "-h", "--help", "-V", "--version"];
 
 /// What is wrong with `args` (without the program name) that the app would otherwise pass over in
-/// silence: an unknown option, an option missing its value, a theme other than dark or light, a
-/// scenario whose screen is not one of `scenario::ALL`'s. One stderr line each; the app still opens.
-fn arg_warnings<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+/// silence: an unknown option, an option missing its value, a theme that is no mode and no theme of
+/// `themes`, a scenario whose screen is not one of `scenario::ALL`'s. One stderr line each; the app
+/// still opens.
+fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -153,8 +156,10 @@ fn arg_warnings<S: AsRef<str>>(args: &[S]) -> Vec<String> {
         if VALUE_FLAGS.contains(&a) {
             match args.get(i + 1).map(AsRef::as_ref) {
                 Some(v) if !v.starts_with("--") => {
-                    if a == "--theme" && !matches!(v, "dark" | "light") {
-                        out.push(format!("--theme {v}: not dark or light; using the last theme, else dark"));
+                    if a == "--theme" && !ThemePrefs::default().apply_arg(v, themes) {
+                        out.push(format!(
+                            "--theme {v}: not dark, light, system or a theme's id; using the last theme, else dark"
+                        ));
                     }
                     let screen = v.split('+').next().unwrap_or("").trim();
                     if a == "--scenario" && !scenario::ALL.iter().any(|s| s.split('+').next() == Some(screen))
@@ -174,14 +179,15 @@ fn arg_warnings<S: AsRef<str>>(args: &[S]) -> Vec<String> {
     out
 }
 
-/// The theme to open in: `--theme` when it is dark or light, else the last launch's, else dark (a bad
-/// `--theme x` used to win over the remembered light theme, open dark and remember dark).
-fn launch_mode(cli: Option<&str>, saved: Option<&str>) -> Mode {
-    let valid = |t: &&str| matches!(*t, "dark" | "light");
-    match cli.filter(valid).or(saved.filter(valid)) {
-        Some("light") => Mode::Light,
-        _ => Mode::Dark,
+/// The theme choice to open with: the last launch's (else Dark with the default themes), changed by
+/// `--theme` when that is a mode or a theme of `themes` (a bad `--theme x` used to win over the
+/// remembered light theme, open dark and remember dark).
+fn launch_prefs(cli: Option<&str>, saved: &window_state::State, themes: &Catalog) -> ThemePrefs {
+    let mut prefs = saved.theme_prefs();
+    if let Some(arg) = cli {
+        prefs.apply_arg(arg, themes);
     }
+    prefs
 }
 
 fn arg(name: &str) -> Option<String> {
@@ -203,7 +209,9 @@ pub fn run() {
         }
         return;
     }
-    for warning in arg_warnings(&args) {
+    // Custom themes are read before the arguments: `--theme` may name one.
+    let themes = Catalog::load(&theme::catalog::custom_folder());
+    for warning in arg_warnings(&args, &themes) {
         eprintln!("folo-desktop: {warning}");
     }
     let scenario = arg("--scenario");
@@ -214,7 +222,7 @@ pub fn run() {
         window_state::remembers(scenario.is_some(), arg("--width").is_some() || arg("--height").is_some());
     let state_path = remember.then(window_state::path);
     let saved = state_path.as_deref().map(window_state::load).unwrap_or_default();
-    let mode = launch_mode(arg("--theme").as_deref(), saved.theme.as_deref());
+    let mut prefs = launch_prefs(arg("--theme").as_deref(), &saved, &themes);
     let spec = scenario.as_deref().map(scenario::Spec::parse);
     // Data source: `--server URL` connects to a running folo serve; `--mock` uses the built-in demo
     // data; by default the app finds or starts a server (see `FoloApp::autoconnect`).
@@ -228,8 +236,11 @@ pub fn run() {
         cx.text_system()
             .add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect())
             .expect("bundled fonts load");
-        let mode = spec.as_ref().and_then(|s| s.mode).unwrap_or(mode);
-        cx.set_global(Theme::new(mode));
+        if let Some(mode) = spec.as_ref().and_then(|s| s.mode) {
+            prefs.mode = mode.into();
+        }
+        let system_dark = app::is_dark(cx.window_appearance());
+        cx.set_global(themes.resolve(&prefs, system_dark));
         app::bind_keys(cx);
         input::bind_keys(cx);
 
@@ -286,6 +297,9 @@ pub fn run() {
                         let mut app = app::FoloApp::new(api, frozen, window, cx);
                         app.state_path = state_path.clone();
                         app.server_mode = server_mode;
+                        app.themes = themes.clone();
+                        app.theme_prefs = prefs.clone();
+                        app.apply_theme(cx);
                         app.spawn_server = spawn_server;
                         if let Some(calm) = saved.reduce_motion {
                             app.reduce_motion = calm;
@@ -308,6 +322,13 @@ pub fn run() {
                             );
                         }
                         let this = cx.weak_entity();
+                        window.on_appearance_changed(cx, {
+                            let this = this.clone();
+                            move |window, cx| {
+                                let dark = app::is_dark(window.appearance());
+                                this.update(cx, |app, cx| app.system_appearance_changed(dark, cx)).ok();
+                            }
+                        });
                         window.on_window_should_close(cx, move |window, cx| {
                             this.update(cx, |app, cx| app.should_close(window, cx)).unwrap_or(true)
                         });
@@ -430,7 +451,12 @@ mod tests {
     /// app's own options are quiet (stress d5-window-input-5).
     #[test]
     fn bad_arguments_are_named_not_ignored() {
+        let themes = Catalog::builtin();
+        let arg_warnings = |args: &[&str]| arg_warnings(args, &themes);
         assert!(arg_warnings(&["--mock", "--open", "runs", "--theme", "light", "--width", "900"]).is_empty());
+        for theme in ["system", "midnight", "contrast-light"] {
+            assert!(arg_warnings(&["--theme", theme]).is_empty(), "{theme}");
+        }
         assert!(
             arg_warnings(&["--scenario", "overview+light", "--shot", "a.png", "--scale", "2"]).is_empty()
         );
@@ -440,13 +466,26 @@ mod tests {
             assert_eq!(w.len(), 1, "{args:?}: {w:?}");
             w[0].clone()
         };
-        assert!(one(&["--theme", "x"]).contains("not dark or light"));
+        assert!(one(&["--theme", "x"]).contains("not dark, light, system or a theme's id"));
         // ...and what that line promises happens: the last theme, else dark.
-        assert_eq!(launch_mode(Some("x"), Some("light")), Mode::Light);
-        assert_eq!(launch_mode(Some("x"), None), Mode::Dark);
-        assert_eq!(launch_mode(Some("dark"), Some("light")), Mode::Dark);
-        assert_eq!(launch_mode(None, Some("light")), Mode::Light);
-        assert_eq!(launch_mode(Some("light"), Some("bogus")), Mode::Light);
+        use crate::theme::ModePref;
+        let saved = |mode: Option<&str>| window_state::State {
+            theme: mode.map(Into::into),
+            light_theme: Some("paper".into()),
+            ..Default::default()
+        };
+        let launch = |cli: Option<&str>, mode: Option<&str>| launch_prefs(cli, &saved(mode), &themes);
+        assert_eq!(launch(Some("x"), Some("light")).mode, ModePref::Light);
+        assert_eq!(launch(Some("x"), None).mode, ModePref::Dark);
+        assert_eq!(launch(Some("dark"), Some("light")).mode, ModePref::Dark);
+        assert_eq!(launch(None, Some("light")).mode, ModePref::Light);
+        assert_eq!(launch(Some("light"), Some("bogus")).mode, ModePref::Light);
+        assert_eq!(launch(None, Some("system")).mode, ModePref::System);
+        // A theme id: its mode, with it in that mode's slot; the other slot stays as saved.
+        let p = launch(Some("midnight"), Some("light"));
+        assert_eq!((p.mode, p.dark.as_str(), p.light.as_str()), (ModePref::Dark, "midnight", "paper"));
+        let p = launch(Some("contrast-light"), Some("system"));
+        assert_eq!((p.mode, p.light.as_str()), (ModePref::Light, "contrast-light"));
         assert!(one(&["--scenario", "nope-not-real", "--shot", "a.png"]).contains("no such scenario"));
         assert!(one(&["--sever", "http://127.0.0.1:1"]).contains("unknown option"));
         assert!(one(&["--mock", "--server"]).contains("missing its value"));

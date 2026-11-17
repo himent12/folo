@@ -560,9 +560,15 @@ impl WindowInner {
             return;
         }
         let appearance = system_appearance();
-        if std::mem::replace(&mut self.state.borrow_mut().appearance, appearance) != appearance {
+        let (old, frame) = {
+            let mut state = self.state.borrow_mut();
+            (std::mem::replace(&mut state.appearance, appearance), state.frame_appearance)
+        };
+        if old != appearance {
+            // The frame follows the system unless the app picked its appearance; the app's
+            // callback may pick it anew (`set_frame_appearance`), so set the frame first.
+            configure_dwm_dark_mode(hwnd, frame.unwrap_or(appearance));
             self.with_callback(|c| &mut c.appearance_changed, |f| f());
-            configure_dwm_dark_mode(hwnd, appearance);
         }
     }
 }

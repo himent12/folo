@@ -65,7 +65,8 @@ folo-test-support = { path = "../../crates/folo-test-support" }
 folo-cloud = { path = "../../crates/folo-cloud" }
 
 [build-dependencies]
-serde_json = "1"
+# `preserve_order`: the themes are listed in tokens.json's order (no new crate: the app's serde_json has it already).
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
