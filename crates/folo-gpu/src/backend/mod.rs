@@ -38,6 +38,8 @@
 mod convert;
 mod encode;
 mod ops;
+#[cfg(test)]
+pub(crate) use ops::ADD_INTO_DONE;
 mod plan;
 mod sites;
 mod storage;

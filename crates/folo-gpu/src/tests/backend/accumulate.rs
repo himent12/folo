@@ -4,6 +4,20 @@
 use folo_core::{DType, Tensor, no_grad};
 
 use super::fixtures::{assert_close_t, assert_same, dev, randn};
+use crate::backend::ADD_INTO_DONE;
+
+/// F32, and F16 where the device computes in it.
+fn float_dtypes(dev: folo_core::Device) -> Vec<DType> {
+    [DType::F32, DType::F16]
+        .into_iter()
+        .filter(|&d| d == DType::F32 || folo_core::backend::computes_f16(dev))
+        .collect()
+}
+
+/// In-place additions the GPU backend ran on this thread so far.
+fn in_place_adds() -> u64 {
+    ADD_INTO_DONE.with(|n| n.get())
+}
 
 /// `dst_view += src_view` on the GPU leaves exactly the CPU's bits in the whole destination storage (the
 /// elements outside the view untouched), for dense (`vec4` and scalar) and strided views of either side.
@@ -83,9 +97,11 @@ fn fan_in_case(dev: folo_core::Device, shape: &[usize; 4]) {
     let xc = x.detach().requires_grad_();
     let gc = f(&xc, &w, DType::F32).backward().unwrap();
     let want = gc.get(&xc).unwrap();
-    for dtype in [DType::F32, DType::F16] {
+    for dtype in float_dtypes(dev) {
         let xg = x.detach().to_device(dev).unwrap().requires_grad_();
+        let n0 = in_place_adds();
         let gg = f(&xg, &w.to_device(dev).unwrap(), dtype).backward().unwrap();
+        assert!(in_place_adds() > n0, "{dtype}: the fan-in did not add in place");
         let got =
             gg.get(&xg).unwrap_or_else(|| panic!("{dtype}: no gradient for x: {gg:?}, x {:?}", xg.shape()));
         assert!(got.device().is_gpu());
@@ -102,13 +118,15 @@ fn fan_in_case(dev: folo_core::Device, shape: &[usize; 4]) {
 fn fan_in_is_bit_identical_to_the_out_of_place_add() {
     let dev = dev!();
     for (i, shape) in [[2, 4, 6, 6], [2, 3, 5, 7]].into_iter().enumerate() {
-        for dtype in [DType::F32, DType::F16] {
+        for dtype in float_dtypes(dev) {
             let on = |t: Tensor| t.to_device(dev).unwrap().to_dtype(dtype).unwrap();
             let (w1, w2) = (on(randn(&shape, 40 + i as u64)), on(randn(&shape, 50 + i as u64)));
             let x = on(randn(&shape, 60 + i as u64)).requires_grad_();
             let loss =
                 x.mul(&w1).unwrap().sum_all().unwrap().add(&x.mul(&w2).unwrap().sum_all().unwrap()).unwrap();
+            let n0 = in_place_adds();
             let g = loss.backward().unwrap();
+            assert_eq!(in_place_adds() - n0, 1, "{dtype} {shape:?}: one fan-in, added in place");
             let got = g.get(&x).unwrap();
             let want = {
                 let _g = no_grad();
@@ -198,46 +216,4 @@ fn opposing_in_place_additions_do_not_deadlock() {
         })
         .collect();
     finish_all("opposing additions", jobs);
-}
-
-/// `b += a` while another thread holds a read of `b` and then writes `a` (`b.with_view(|_| a.copy_from(..))`, the
-/// read-then-write order of the other in-place ops): the addition must not hold `a` while it waits for `b`. The
-/// holder gives the addition 300 ms to take its locks before it writes `a`; both address orders of `a` and `b`.
-#[test]
-fn in_place_addition_does_not_wait_on_a_held_destination() {
-    let dev = dev!();
-    // One pair for both passes, so the swap really flips which of `a`, `b` sits at the lower address.
-    let (x, y) = (Tensor::ones([256]).to_device(dev).unwrap(), Tensor::ones([256]).to_device(dev).unwrap());
-    for swap in [false, true] {
-        let (a, b) = if swap { (y.clone(), x.clone()) } else { (x.clone(), y.clone()) };
-        {
-            let _g = no_grad();
-            a.fill_assign(1.0).unwrap();
-            b.fill_assign(1.0).unwrap();
-        }
-        let c = Tensor::full([256], 5.0).to_device(dev).unwrap();
-        let (held_tx, held_rx) = std::sync::mpsc::channel();
-        let (ha, hb) = (a.clone(), b.clone());
-        let (aa, ab) = (a.clone(), b.clone());
-        let jobs: Vec<Box<dyn FnOnce() + Send>> = vec![
-            Box::new(move || {
-                let _g = no_grad();
-                hb.with_view(|_| {
-                    held_tx.send(()).unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    ha.copy_from(&c).unwrap();
-                });
-            }),
-            Box::new(move || {
-                let _g = no_grad();
-                held_rx.recv().unwrap();
-                ab.add_assign(&aa).unwrap();
-            }),
-        ];
-        finish_all(&format!("addition against a held destination (swap {swap})"), jobs);
-        let (av, bv) = (a.to_vec::<f32>().unwrap(), b.to_vec::<f32>().unwrap());
-        assert_eq!(av, vec![5.0; 256], "a = c");
-        // `b += a` ran before or after `a = c`, never in between.
-        assert!(bv == vec![2.0; 256] || bv == vec![6.0; 256], "b = {:?}", &bv[..4]);
-    }
 }

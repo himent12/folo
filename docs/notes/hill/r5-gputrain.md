@@ -65,20 +65,22 @@ Two changes, both bit-identical to main:
   elementwise generator), used by `accumulate` for any float dtype off the CPU and by `add_assign` there. The GPU
   declines (`NotSupported`) other dtypes and destinations that overlap themselves or share the source's buffer, and
   the caller then adds out of place. The source is read-locked first (as in every in-place op) and the destination
-  only *tried* (`StorageCell::try_write_unversioned`): a busy destination also goes out of place, so the addition
-  never waits while it holds a lock and cannot deadlock against opposing additions or `copy_from`'s read-then-write
-  (a first fix took the two locks in address order, which still crossed `copy_from`). The version is bumped before
-  the write lock is released.
+  only *tried* (`StorageCell::try_write`): a busy destination also goes out of place, so the addition never waits
+  for the destination while it holds the source and cannot deadlock against opposing additions or `copy_from`'s
+  read-then-write (a first fix took the two locks in address order, which still crossed `copy_from`). As with
+  `StorageCell::write`, the version is bumped as the lock is taken, before the data changes, so a `backward()` that
+  checks it during the addition sees the modification (a decline after that bump is harmless: both callers then
+  write the destination out of place, or replace an accumulator nothing else sees).
 
 Tests (`crates/folo-gpu/src/tests/backend/accumulate.rs`): in-place add bitwise against the CPU over dense (also at an
 offset, vec4 and scalar), odd, channel-slice, transposed and broadcast sources; fan-in gradients against the CPU in F32
-and F16 (vec4 and odd shapes), and bit for bit against the GPU's own out-of-place add; `cat` into a recycled buffer that
-was filled with NaN (whole-word and half-word f16 runs); opposing additions on two threads; an addition whose
-destination another thread holds while it writes the source (the address-ordered lock fails it, deadlocked, in both
-address orders). Mutation checks: making KIND 5 a copy (`Y = X0`) fails two of them, one extra rounding (`· 1.0000001`)
-fails the bit-for-bit one. The held-destination test leaves the addition 300 ms to reach its locks; a thread descheduled
-that long would let a regression pass (never fail a correct build), and a deterministic version needs a test hook in
-folo-core's lock path, not added.
+and F16 (vec4 and odd shapes), and bit for bit against the GPU's own out-of-place add, each asserting that the fan-in
+ran the in-place kernel (a per-thread count of the backend's successful `add_into` calls, test builds only); `cat` into
+a recycled buffer that was filled with NaN (whole-word and half-word f16 runs); opposing additions on two threads; and
+in folo-core (`ops/inplace.rs`), `add_into_` on a destination whose read guard is held returns `Ok(false)` at once,
+values and version untouched (a blocking write fails it at its 30 s watchdog). Mutation checks: making KIND 5 a copy (`Y
+= X0`) fails two of them, one extra rounding (`· 1.0000001`) fails the bit-for-bit one, a GPU `add_into` that always
+declines fails both fan-in tests.
 
 A/B (`ab-glue1`, 5 rounds, base = main cf65f7a5, PR side = the WIP commit 8aad6628, which differs from the PR only
 in the precompile bounds and the review fixes, none of which touch a steady-state step; cpu 69–100 %, rounds 3–5

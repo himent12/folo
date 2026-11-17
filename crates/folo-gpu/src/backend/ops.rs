@@ -27,6 +27,12 @@ use crate::kernels::strided::{self, Indices};
 use crate::kernels::vision::{self, LetterboxDesc};
 use crate::profile;
 
+#[cfg(test)]
+thread_local! {
+    /// In-place additions [`GpuBackend::add_into`] ran on this thread (tests check the fan-in took that path).
+    pub(crate) static ADD_INTO_DONE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl GpuBackend {
     /// `f` on an f32 copy of an f16 `x`, its result cast back to f16 (ops without an f16 kernel); `f(x)` for
     /// anything else.
@@ -195,7 +201,10 @@ impl Backend for GpuBackend {
         }
         let sv = strided_of(src.layout);
         let x = EwInput { buf: sb, view: &sv };
-        ew::add_into(&self.ctx, src.shape().dims(), x, db, &strided_of(dst_layout), kdt(dtype)).core()
+        ew::add_into(&self.ctx, src.shape().dims(), x, db, &strided_of(dst_layout), kdt(dtype)).core()?;
+        #[cfg(test)]
+        ADD_INTO_DONE.with(|n| n.set(n.get() + 1));
+        Ok(())
     }
 
     fn cast(&self, src: View<'_>, dtype: CoreDType) -> Result<Storage> {
