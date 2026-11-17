@@ -54,6 +54,17 @@ their CI (below) runs only when something they depend on changes. From `crates/`
 shows); `folo-test-support` and `folo-cloud` (the real providers, which the demo's list must match) are
 dev-dependencies. The app does not link folo-server: it starts the `folo` binary instead.
 
+Two things keep the app's build short. It is a library (`src/lib.rs`, the whole app) and a thin `folo-desktop`
+binary (`src/main.rs`): cargo starts compiling a library once its dependencies' metadata exists, a binary only after
+their code is built, so the app's front end and code generation overlap folo-ui's and folo-vision's. And the HTTP
+client parses every JSON body from bytes (`json` in `src/api/http/transport.rs`): ureq's `read_json` compiles two
+serde parsers of every response type, which were most of the client's machine code; decode bodies through `json`,
+not `read_json` or `serde_json::from_str`. Measured on the dev PC, A/B, medians: a release build from an empty
+target dir 122 s before, 93 s after (173 s and 143 s while other builds ran); a release rebuild after one screen file
+changes 62 s, 42 s; a dev rebuild 4 to 7 s either way. Moving the API layer (`src/api`, `src/synth.rs`) into a crate
+of its own gained about 3 s more on that release rebuild and nothing on a clean build, and made a clean
+`cargo test --workspace` 15 to 25% slower (the crate's tests are one more test binary), so the app stays one crate.
+
 Run every command from `apps/desktop`. A bare `cargo test` there builds only the app, so pass `--workspace`:
 
 ```powershell
