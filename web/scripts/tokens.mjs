@@ -4,6 +4,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { builtinThemes, cssVar, leaves } from './themes.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -13,6 +14,8 @@ const cssPath = resolve(outDir, 'tokens.css');
 const tsPath = resolve(outDir, 'tokens.ts');
 
 const t = JSON.parse(readFileSync(resolve(designDir, 'tokens.json'), 'utf8'));
+/** The built-in themes, resolved (base palette + overrides); throws on a malformed one. */
+const themes = builtinThemes(t);
 const HEX = /^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
 
 const isMeta = (k) => k.startsWith('$');
@@ -33,29 +36,13 @@ function shadow(layers, where) {
     .join(', ');
 }
 
+/** A palette's custom properties, in its key order (scripts/themes.mjs, cssVar). */
+function colorVars(color, where) {
+  return leaves(color).map(([path, v]) => [cssVar(path), typeof v === 'number' ? String(v) : css(v, `${where}.${path}`)]);
+}
+
 function themeVars(name) {
-  const c = t.color[name];
-  const out = [];
-  for (const [group, val] of Object.entries(c)) {
-    if (isMeta(group)) continue;
-    if (typeof val === 'string') {
-      out.push([`--${kebab(group)}`, css(val, `color.${name}.${group}`)]);
-      continue;
-    }
-    for (const [k, v] of Object.entries(val)) {
-      if (isMeta(k)) continue;
-      const where = `color.${name}.${group}.${k}`;
-      if (group === 'chart' && k === 'series') {
-        v.forEach((s, i) => out.push([`--chart-${i + 1}`, css(s, `${where}[${i}]`)]));
-      } else if (group === 'chart' && (k === 'fill' || k === 'text')) {
-        v.forEach((s, i) => out.push([`--chart-${k}-${i + 1}`, css(s, `${where}[${i}]`)]));
-      } else if (typeof v === 'number') {
-        out.push([`--${kebab(group)}-${kebab(k)}`, String(v)]);
-      } else {
-        out.push([`--${kebab(group)}-${kebab(k)}`, css(v, where)]);
-      }
-    }
-  }
+  const out = colorVars(t.color[name], `color.${name}`);
   for (const [k, layers] of Object.entries(t.shadow[name])) {
     if (isMeta(k)) continue;
     out.push([`--shadow-${k}`, shadow(layers, `shadow.${name}.${k}`)]);
@@ -124,27 +111,19 @@ function buildCss() {
     block(':root', staticVars()),
     block(':root,\n:root[data-theme="dark"]', [['color-scheme', 'dark'], ...dark]),
     block(':root[data-theme="light"]', [['color-scheme', 'light'], ...light]),
+    // Each non-default theme's whole palette, after the mode blocks so it wins: `data-theme` stays the mode (its
+    // shadows and every [data-theme='light'] rule), `data-theme-id` names the theme (design/THEMES.md).
+    ...themes.filter((th) => th.id !== th.mode).map((th) => block(`:root[data-theme-id="${th.id}"]`, colorVars(th.color, `themes.${th.id}.color`))),
     `@media (prefers-reduced-motion: reduce) {\n  :root {\n${reduced.map(([k, v]) => `    ${k}: ${v};`).join('\n')}\n  }\n}\n`,
   ].join('\n');
 }
 
 function buildTs() {
-  const theme = (name) => {
-    const c = t.color[name];
-    return {
-      series: c.chart.series.map((s) => hex(s, 'series')),
-      grid: hex(c.chart.grid, 'grid'),
-      axis: hex(c.chart.axis, 'axis'),
-      label: hex(c.chart.label, 'label'),
-      areaOpacity: c.chart.area_opacity,
-    };
-  };
   const data = {
     classPalette: t.classes.palette.map((c) => hex(c, 'palette')),
     classChipText: hex(t.classes.chip_text, 'chip_text'),
     classHalo: hex(t.classes.halo, 'halo'),
     classFillOpacity: t.classes.fill_opacity,
-    chart: { dark: theme('dark'), light: theme('light') },
     duration: t.motion.duration,
     easing: t.motion.easing,
     size: Object.fromEntries(Object.entries(t.size).filter(([k]) => !isMeta(k))),
@@ -173,9 +152,70 @@ export function classColor(i: number): string {
   const n = classPalette.length;
   return classPalette[((i % n) + n) % n] ?? classPalette[0];
 }
-`;
+
+${themesTs()}`;
 }
 
+/** The palette's TypeScript shape, from the dark base (both bases have the same keys; contrast.mjs checks that). */
+function paletteType(color, indent = '  ') {
+  const lines = [];
+  for (const [k, v] of Object.entries(color)) {
+    if (isMeta(k)) continue;
+    if (Array.isArray(v)) lines.push(`${indent}readonly ${k}: readonly string[];`);
+    else if (v !== null && typeof v === 'object') lines.push(`${indent}readonly ${k}: {\n${paletteType(v, `${indent}  `)}\n${indent}};`);
+    else lines.push(`${indent}readonly ${k}: ${typeof v === 'number' ? 'number' : 'string'};`);
+  }
+  return lines.join('\n');
+}
+
+/** A palette as TS, one line per group, so seven palettes stay a short read. */
+function paletteTs(color, indent) {
+  const lines = Object.entries(color).map(([k, v]) => `${indent}  ${k}: ${JSON.stringify(v)},`);
+  return `{\n${lines.join('\n')}\n${indent}}`;
+}
+
+/** tokens.ts's themes: the palette type, the ids in order, every built-in theme resolved, and the token -> CSS table. */
+function themesTs() {
+  const ids = themes.map((th) => th.id);
+  const entries = themes
+    .map(
+      (th) =>
+        `  ${JSON.stringify(th.id)}: {\n    id: ${JSON.stringify(th.id)},\n    name: ${JSON.stringify(th.name)},\n    mode: ${JSON.stringify(th.mode)},\n` +
+        `    description: ${JSON.stringify(th.description)},\n    color: ${paletteTs(th.color, '    ')},\n  },`,
+    )
+    .join('\n');
+  const vars = leaves(t.color.dark)
+    .map(([path]) => `  [${JSON.stringify(path)}, ${JSON.stringify(cssVar(path))}],`)
+    .join('\n');
+  return `/** A theme's colours: the shape of \`color.dark\` in tokens.json (design/THEMES.md). */
+export interface Palette {
+${paletteType(t.color.dark)}
+}
+
+/** The built-in themes' ids, in the order Settings and the palette list them; the first of each mode is its default. */
+export const themeIds = ${JSON.stringify(ids)} as const;
+export type ThemeId = (typeof themeIds)[number];
+
+export interface BuiltinTheme {
+  readonly id: ThemeId;
+  readonly name: string;
+  readonly mode: 'dark' | 'light';
+  readonly description: string;
+  /** The resolved palette: the mode's base with the theme's overrides. */
+  readonly color: Palette;
+}
+
+/** Every built-in theme, resolved. */
+export const themes: Readonly<Record<ThemeId, BuiltinTheme>> = {
+${entries}
+};
+
+/** Every colour token path (arrays by index) and its CSS custom property, in tokens.css's order. */
+export const colorVars: readonly (readonly [string, string])[] = [
+${vars}
+];
+`;
+}
 const files = [
   [cssPath, buildCss()],
   [tsPath, buildTs()],

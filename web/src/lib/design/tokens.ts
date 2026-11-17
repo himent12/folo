@@ -25,37 +25,6 @@ export const classHalo = "#000000A6" as const;
 
 export const classFillOpacity = 0.12 as const;
 
-export const chart = {
-  "dark": {
-    "series": [
-      "#5CC8FF",
-      "#F2C14E",
-      "#E879F9",
-      "#2DD4BF",
-      "#A78BFA",
-      "#FB923C"
-    ],
-    "grid": "#FFFFFF0F",
-    "axis": "#FFFFFF24",
-    "label": "#80868F",
-    "areaOpacity": 0.14
-  },
-  "light": {
-    "series": [
-      "#0A8FD6",
-      "#AD6C00",
-      "#C026D3",
-      "#0B8A7B",
-      "#7C5CE6",
-      "#D9620B"
-    ],
-    "grid": "#0A0E140F",
-    "axis": "#0A0E1429",
-    "label": "#646B75",
-    "areaOpacity": 0.12
-  }
-} as const;
-
 export const duration = {
   "instant": 80,
   "fast": 120,
@@ -137,3 +106,298 @@ export function classColor(i: number): string {
   const n = classPalette.length;
   return classPalette[((i % n) + n) % n] ?? classPalette[0];
 }
+
+/** A theme's colours: the shape of `color.dark` in tokens.json (design/THEMES.md). */
+export interface Palette {
+  readonly bg: {
+    readonly app: string;
+    readonly panel: string;
+    readonly raised: string;
+    readonly overlay: string;
+    readonly inset: string;
+    readonly hover: string;
+    readonly active: string;
+    readonly selected: string;
+    readonly scrim: string;
+  };
+  readonly line: {
+    readonly subtle: string;
+    readonly default: string;
+    readonly strong: string;
+    readonly control: string;
+  };
+  readonly text: {
+    readonly primary: string;
+    readonly secondary: string;
+    readonly tertiary: string;
+    readonly disabled: string;
+    readonly inverse: string;
+  };
+  readonly accent: {
+    readonly solid: string;
+    readonly solid_hover: string;
+    readonly on: string;
+    readonly text: string;
+    readonly line: string;
+    readonly muted: string;
+  };
+  readonly success: {
+    readonly solid: string;
+    readonly text: string;
+    readonly muted: string;
+  };
+  readonly warning: {
+    readonly solid: string;
+    readonly text: string;
+    readonly muted: string;
+  };
+  readonly danger: {
+    readonly solid: string;
+    readonly text: string;
+    readonly muted: string;
+    readonly fill: string;
+    readonly fill_hover: string;
+  };
+  readonly info: {
+    readonly solid: string;
+    readonly text: string;
+    readonly muted: string;
+  };
+  readonly window: {
+    readonly close: string;
+    readonly close_text: string;
+  };
+  readonly focus: string;
+  readonly chart: {
+    readonly series: readonly string[];
+    readonly fill: readonly string[];
+    readonly text: readonly string[];
+    readonly grid: string;
+    readonly axis: string;
+    readonly label: string;
+    readonly cursor: string;
+    readonly swatch_edge: string;
+    readonly context: string;
+    readonly area_opacity: number;
+  };
+}
+
+/** The built-in themes' ids, in the order Settings and the palette list them; the first of each mode is its default. */
+export const themeIds = ["dark","midnight","dim","contrast-dark","light","paper","contrast-light"] as const;
+export type ThemeId = (typeof themeIds)[number];
+
+export interface BuiltinTheme {
+  readonly id: ThemeId;
+  readonly name: string;
+  readonly mode: 'dark' | 'light';
+  readonly description: string;
+  /** The resolved palette: the mode's base with the theme's overrides. */
+  readonly color: Palette;
+}
+
+/** Every built-in theme, resolved. */
+export const themes: Readonly<Record<ThemeId, BuiltinTheme>> = {
+  "dark": {
+    id: "dark",
+    name: "Dark",
+    mode: "dark",
+    description: "FOLO's own dark: near-black neutrals.",
+    color: {
+      bg: {"app":"#08090B","panel":"#0E1013","raised":"#14171B","overlay":"#181B20","inset":"#050607","hover":"#FFFFFF0A","active":"#FFFFFF12","selected":"#C5F82A14","scrim":"#000000A6"},
+      line: {"subtle":"#FFFFFF0D","default":"#FFFFFF17","strong":"#FFFFFF29","control":"#FFFFFF59"},
+      text: {"primary":"#EDEFF2","secondary":"#A1A7B0","tertiary":"#80868F","disabled":"#484D55","inverse":"#0A0B0D"},
+      accent: {"solid":"#C5F82A","solid_hover":"#D3FB5A","on":"#0B0E03","text":"#C5F82A","line":"#C5F82A","muted":"#C5F82A1F"},
+      success: {"solid":"#34D399","text":"#4ADEA8","muted":"#34D3991F"},
+      warning: {"solid":"#FFB547","text":"#FFC266","muted":"#FFB5471F"},
+      danger: {"solid":"#FF5C5C","text":"#FF7A7A","muted":"#FF5C5C1F","fill":"#FF5C5C","fill_hover":"#FF7A7A"},
+      info: {"solid":"#5BA8FF","text":"#7DB9FF","muted":"#5BA8FF1F"},
+      window: {"close":"#C42B1C","close_text":"#FFFFFF"},
+      focus: "#C5F82A",
+      chart: {"series":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"fill":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"text":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"grid":"#FFFFFF0F","axis":"#FFFFFF24","label":"#80868F","cursor":"#FFFFFF4D","swatch_edge":"#FFFFFF1F","context":"#646A73","area_opacity":0.14},
+    },
+  },
+  "midnight": {
+    id: "midnight",
+    name: "Midnight",
+    mode: "dark",
+    description: "Deep blue-black surfaces with cool greys.",
+    color: {
+      bg: {"app":"#0A0E1A","panel":"#0F1424","raised":"#151B2D","overlay":"#1B2236","inset":"#05070F","hover":"#C9D6FF0B","active":"#C9D6FF14","selected":"#C5F82A14","scrim":"#02040AB3"},
+      line: {"subtle":"#A9BCFF12","default":"#A9BCFF1F","strong":"#A9BCFF33","control":"#B4C6FF7D"},
+      text: {"primary":"#E8EDF6","secondary":"#9DA8BB","tertiary":"#8590A3","disabled":"#434C5E","inverse":"#0A0E1A"},
+      accent: {"solid":"#C5F82A","solid_hover":"#D3FB5A","on":"#0B0E03","text":"#C5F82A","line":"#C5F82A","muted":"#C5F82A1F"},
+      success: {"solid":"#34D399","text":"#4ADEA8","muted":"#34D3991F"},
+      warning: {"solid":"#FFB547","text":"#FFC266","muted":"#FFB5471F"},
+      danger: {"solid":"#FF5C5C","text":"#FF7A7A","muted":"#FF5C5C1F","fill":"#FF5C5C","fill_hover":"#FF7A7A"},
+      info: {"solid":"#5BA8FF","text":"#7DB9FF","muted":"#5BA8FF1F"},
+      window: {"close":"#C42B1C","close_text":"#FFFFFF"},
+      focus: "#C5F82A",
+      chart: {"series":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"fill":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"text":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"grid":"#A9BCFF12","axis":"#A9BCFF29","label":"#8590A3","cursor":"#C9D6FF4D","swatch_edge":"#C9D6FF1F","context":"#5E6A80","area_opacity":0.14},
+    },
+  },
+  "dim": {
+    id: "dim",
+    name: "Dim",
+    mode: "dark",
+    description: "Lifted charcoal surfaces, softer for long sessions.",
+    color: {
+      bg: {"app":"#1E2023","panel":"#25282C","raised":"#2C2F34","overlay":"#303439","inset":"#17181B","hover":"#FFFFFF0D","active":"#FFFFFF17","selected":"#C5F82A1A","scrim":"#000000A6"},
+      line: {"subtle":"#FFFFFF0F","default":"#FFFFFF1C","strong":"#FFFFFF30","control":"#FFFFFF6B"},
+      text: {"primary":"#E2E5E9","secondary":"#B4B9C1","tertiary":"#9BA1A9","disabled":"#575C64","inverse":"#1E2023"},
+      accent: {"solid":"#C5F82A","solid_hover":"#D3FB5A","on":"#0B0E03","text":"#C5F82A","line":"#C5F82A","muted":"#C5F82A1F"},
+      success: {"solid":"#34D399","text":"#4ADEA8","muted":"#34D3991F"},
+      warning: {"solid":"#FFB547","text":"#FFC266","muted":"#FFB5471F"},
+      danger: {"solid":"#FF5C5C","text":"#FF8A8A","muted":"#FF5C5C1F","fill":"#FF5C5C","fill_hover":"#FF7A7A"},
+      info: {"solid":"#5BA8FF","text":"#7DB9FF","muted":"#5BA8FF1F"},
+      window: {"close":"#C42B1C","close_text":"#FFFFFF"},
+      focus: "#C5F82A",
+      chart: {"series":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"fill":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"text":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"grid":"#FFFFFF12","axis":"#FFFFFF29","label":"#9BA1A9","cursor":"#FFFFFF59","swatch_edge":"#FFFFFF26","context":"#767C85","area_opacity":0.14},
+    },
+  },
+  "contrast-dark": {
+    id: "contrast-dark",
+    name: "High contrast dark",
+    mode: "dark",
+    description: "Black surfaces, white text, strong edges.",
+    color: {
+      bg: {"app":"#050505","panel":"#0B0B0B","raised":"#131313","overlay":"#181818","inset":"#000000","hover":"#FFFFFF14","active":"#FFFFFF21","selected":"#C5F82A26","scrim":"#000000CC"},
+      line: {"subtle":"#FFFFFF2E","default":"#FFFFFF6B","strong":"#FFFFFF99","control":"#FFFFFFA6"},
+      text: {"primary":"#FFFFFF","secondary":"#DADADA","tertiary":"#BDBDBD","disabled":"#707070","inverse":"#000000"},
+      accent: {"solid":"#C5F82A","solid_hover":"#D3FB5A","on":"#0B0E03","text":"#C5F82A","line":"#C5F82A","muted":"#C5F82A33"},
+      success: {"solid":"#34D399","text":"#4ADEA8","muted":"#34D3991F"},
+      warning: {"solid":"#FFB547","text":"#FFC266","muted":"#FFB5471F"},
+      danger: {"solid":"#FF5C5C","text":"#FF9C9C","muted":"#FF5C5C1F","fill":"#FF7A7A","fill_hover":"#FF9C9C"},
+      info: {"solid":"#5BA8FF","text":"#94C6FF","muted":"#5BA8FF1F"},
+      window: {"close":"#C42B1C","close_text":"#FFFFFF"},
+      focus: "#C5F82A",
+      chart: {"series":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"fill":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"text":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#B8A2FF","#FB923C"],"grid":"#FFFFFF24","axis":"#FFFFFF66","label":"#BDBDBD","cursor":"#FFFFFF99","swatch_edge":"#FFFFFF4D","context":"#7A7A7A","area_opacity":0.14},
+    },
+  },
+  "light": {
+    id: "light",
+    name: "Light",
+    mode: "light",
+    description: "FOLO's own light: white panels on light grey.",
+    color: {
+      bg: {"app":"#F4F5F7","panel":"#FFFFFF","raised":"#F8F9FA","overlay":"#FFFFFF","inset":"#ECEEF1","hover":"#0A0E140A","active":"#0A0E1412","selected":"#7AA80014","scrim":"#0A0E1466"},
+      line: {"subtle":"#0A0E1410","default":"#0A0E141C","strong":"#0A0E1430","control":"#0A0E1474"},
+      text: {"primary":"#0C0E12","secondary":"#4F5661","tertiary":"#646B75","disabled":"#B3B8BF","inverse":"#FFFFFF"},
+      accent: {"solid":"#BEF01E","solid_hover":"#B0E50A","on":"#0B0E03","text":"#4A7500","line":"#679400","muted":"#86B80024"},
+      success: {"solid":"#0F9B6B","text":"#0A724F","muted":"#0F9B6B1A"},
+      warning: {"solid":"#BD7800","text":"#8C5800","muted":"#BD78001F"},
+      danger: {"solid":"#E0383E","text":"#BB282E","muted":"#E0383E1A","fill":"#D52F36","fill_hover":"#BE222B"},
+      info: {"solid":"#1F7FE0","text":"#1664B5","muted":"#1F7FE01A"},
+      window: {"close":"#C42B1C","close_text":"#FFFFFF"},
+      focus: "#679400",
+      chart: {"series":["#0A8FD6","#AD6C00","#C026D3","#0B8A7B","#7C5CE6","#D9620B"],"fill":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"text":["#066EA7","#945B00","#AE21BF","#087568","#6F52CF","#AC4C07"],"grid":"#0A0E140F","axis":"#0A0E1429","label":"#646B75","cursor":"#0A0E1440","swatch_edge":"#0A0E1438","context":"#80868F","area_opacity":0.12},
+    },
+  },
+  "paper": {
+    id: "paper",
+    name: "Paper",
+    mode: "light",
+    description: "Warm off-white surfaces with warm greys.",
+    color: {
+      bg: {"app":"#F6F1E7","panel":"#FFFCF6","raised":"#FAF7F0","overlay":"#FFFCF6","inset":"#F1EBDF","hover":"#3A2A140A","active":"#3A2A1412","selected":"#7AA80014","scrim":"#2A1F1066"},
+      line: {"subtle":"#3A2A1412","default":"#3A2A141F","strong":"#3A2A1433","control":"#3A2A148A"},
+      text: {"primary":"#1C1812","secondary":"#574F44","tertiary":"#6B6357","disabled":"#B8B0A3","inverse":"#FFFCF6"},
+      accent: {"solid":"#BEF01E","solid_hover":"#B0E50A","on":"#0B0E03","text":"#4A7500","line":"#679400","muted":"#86B80024"},
+      success: {"solid":"#0D9365","text":"#0A724F","muted":"#0F9B6B1A"},
+      warning: {"solid":"#BD7800","text":"#855300","muted":"#BD78001F"},
+      danger: {"solid":"#E0383E","text":"#B32429","muted":"#E0383E1A","fill":"#D52F36","fill_hover":"#BE222B"},
+      info: {"solid":"#1F7FE0","text":"#135EAC","muted":"#1F7FE01A"},
+      window: {"close":"#C42B1C","close_text":"#FFFFFF"},
+      focus: "#679400",
+      chart: {"series":["#0989CE","#AD6C00","#C026D3","#0B8A7B","#7C5CE6","#D9620B"],"fill":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"text":["#066EA7","#945B00","#AE21BF","#087568","#6F52CF","#AC4C07"],"grid":"#3A2A140F","axis":"#3A2A142B","label":"#6B6357","cursor":"#3A2A1440","swatch_edge":"#3A2A1438","context":"#857D70","area_opacity":0.12},
+    },
+  },
+  "contrast-light": {
+    id: "contrast-light",
+    name: "High contrast light",
+    mode: "light",
+    description: "White surfaces, black text, strong edges.",
+    color: {
+      bg: {"app":"#F4F4F4","panel":"#FFFFFF","raised":"#FAFAFA","overlay":"#FFFFFF","inset":"#EDEDED","hover":"#0000000D","active":"#00000017","selected":"#7AA80026","scrim":"#00000080"},
+      line: {"subtle":"#00000029","default":"#00000073","strong":"#00000099","control":"#000000A3"},
+      text: {"primary":"#000000","secondary":"#262626","tertiary":"#3D3D3D","disabled":"#8F8F8F","inverse":"#FFFFFF"},
+      accent: {"solid":"#BEF01E","solid_hover":"#B0E50A","on":"#0B0E03","text":"#2F4D00","line":"#4A7500","muted":"#4A750029"},
+      success: {"solid":"#08754F","text":"#034B32","muted":"#08754F1F"},
+      warning: {"solid":"#8F5D00","text":"#603C00","muted":"#8F5D001F"},
+      danger: {"solid":"#C4161C","text":"#860D13","muted":"#C4161C1A","fill":"#AD1319","fill_hover":"#940F14"},
+      info: {"solid":"#1460C2","text":"#0A4288","muted":"#1460C21A"},
+      window: {"close":"#C42B1C","close_text":"#FFFFFF"},
+      focus: "#3D6100",
+      chart: {"series":["#006FA8","#8A5600","#A3179F","#00756A","#6644D4","#B34A00"],"fill":["#5CC8FF","#F2C14E","#E879F9","#2DD4BF","#A78BFA","#FB923C"],"text":["#004F78","#663F00","#83108C","#00554C","#5032B0","#823500"],"grid":"#00000017","axis":"#00000059","label":"#3D3D3D","cursor":"#00000066","swatch_edge":"#00000059","context":"#6B6B6B","area_opacity":0.12},
+    },
+  },
+};
+
+/** Every colour token path (arrays by index) and its CSS custom property, in tokens.css's order. */
+export const colorVars: readonly (readonly [string, string])[] = [
+  ["bg.app", "--bg-app"],
+  ["bg.panel", "--bg-panel"],
+  ["bg.raised", "--bg-raised"],
+  ["bg.overlay", "--bg-overlay"],
+  ["bg.inset", "--bg-inset"],
+  ["bg.hover", "--bg-hover"],
+  ["bg.active", "--bg-active"],
+  ["bg.selected", "--bg-selected"],
+  ["bg.scrim", "--bg-scrim"],
+  ["line.subtle", "--line-subtle"],
+  ["line.default", "--line-default"],
+  ["line.strong", "--line-strong"],
+  ["line.control", "--line-control"],
+  ["text.primary", "--text-primary"],
+  ["text.secondary", "--text-secondary"],
+  ["text.tertiary", "--text-tertiary"],
+  ["text.disabled", "--text-disabled"],
+  ["text.inverse", "--text-inverse"],
+  ["accent.solid", "--accent-solid"],
+  ["accent.solid_hover", "--accent-solid-hover"],
+  ["accent.on", "--accent-on"],
+  ["accent.text", "--accent-text"],
+  ["accent.line", "--accent-line"],
+  ["accent.muted", "--accent-muted"],
+  ["success.solid", "--success-solid"],
+  ["success.text", "--success-text"],
+  ["success.muted", "--success-muted"],
+  ["warning.solid", "--warning-solid"],
+  ["warning.text", "--warning-text"],
+  ["warning.muted", "--warning-muted"],
+  ["danger.solid", "--danger-solid"],
+  ["danger.text", "--danger-text"],
+  ["danger.muted", "--danger-muted"],
+  ["danger.fill", "--danger-fill"],
+  ["danger.fill_hover", "--danger-fill-hover"],
+  ["info.solid", "--info-solid"],
+  ["info.text", "--info-text"],
+  ["info.muted", "--info-muted"],
+  ["window.close", "--window-close"],
+  ["window.close_text", "--window-close-text"],
+  ["focus", "--focus"],
+  ["chart.series.0", "--chart-1"],
+  ["chart.series.1", "--chart-2"],
+  ["chart.series.2", "--chart-3"],
+  ["chart.series.3", "--chart-4"],
+  ["chart.series.4", "--chart-5"],
+  ["chart.series.5", "--chart-6"],
+  ["chart.fill.0", "--chart-fill-1"],
+  ["chart.fill.1", "--chart-fill-2"],
+  ["chart.fill.2", "--chart-fill-3"],
+  ["chart.fill.3", "--chart-fill-4"],
+  ["chart.fill.4", "--chart-fill-5"],
+  ["chart.fill.5", "--chart-fill-6"],
+  ["chart.text.0", "--chart-text-1"],
+  ["chart.text.1", "--chart-text-2"],
+  ["chart.text.2", "--chart-text-3"],
+  ["chart.text.3", "--chart-text-4"],
+  ["chart.text.4", "--chart-text-5"],
+  ["chart.text.5", "--chart-text-6"],
+  ["chart.grid", "--chart-grid"],
+  ["chart.axis", "--chart-axis"],
+  ["chart.label", "--chart-label"],
+  ["chart.cursor", "--chart-cursor"],
+  ["chart.swatch_edge", "--chart-swatch-edge"],
+  ["chart.context", "--chart-context"],
+  ["chart.area_opacity", "--chart-area-opacity"],
+];

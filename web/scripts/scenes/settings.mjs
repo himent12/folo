@@ -1,6 +1,12 @@
 // Settings: Connection, System (tensor cores, GPU pool, throughput, the driver report) and Cloud.
 
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { until } from './drive.mjs';
+
+/** design/ (the example custom themes). */
+const designDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design');
 
 /** @typedef {import('../scenes.mjs').Scene} Scene */
 
@@ -40,6 +46,25 @@ export const settingsScenes = [
         },
       }),
   ),
+  {
+    // Settings › Appearance with custom themes (design/THEMES.md): the example Night shift imported through the file
+    // input beside a file with a typo, each one's result said, the installed list with Remove, and Night shift chosen as
+    // the dark theme, so the page shows a custom theme's colours over its base.
+    name: 'settings-appearance-custom',
+    path: '/settings?section=appearance',
+    themes: ['dark'],
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#appearance');
+      await page.locator('#appearance input[type="file"]').setInputFiles([
+        { name: 'night-shift.json', mimeType: 'application/json', buffer: readFileSync(resolve(designDir, 'themes', 'night-shift.json')) },
+        { name: 'typo.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ folo_theme: 1, id: 'typo', name: 'Typo', mode: 'dark', color: { bg: { ap: '#000000' } } })) },
+      ]);
+      await until(page, '#appearance ul.themes li');
+      await page.locator('#appearance-dark').selectOption('night-shift');
+      await page.mouse.move(0, 0);
+    },
+  },
   {
     // Server PR #140 (`gpu_pool`): FOLO's GPU memory in Settings › System: in use, cached and the peak, in the one size
     // format, the device beside it (the whole page: the panel sits near the bottom).
