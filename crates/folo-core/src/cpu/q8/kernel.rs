@@ -43,20 +43,13 @@ pub fn uses_vnni() -> bool {
 }
 
 /// True when the epilogue runs its AVX2 + FMA form (unless `FOLO_Q8_SCALAR` is set).
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn uses_avx2() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| {
-        if std::env::var_os("FOLO_Q8_SCALAR").is_some() {
-            return false;
-        }
-        #[cfg(target_arch = "x86_64")]
-        {
-            std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            false
-        }
+        std::env::var_os("FOLO_Q8_SCALAR").is_none()
+            && std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("fma")
     })
 }
 

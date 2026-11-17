@@ -46,6 +46,10 @@ pub struct QConv {
 /// Longest reduction (`c · k²`) of a [`QConv`]: `|Σ q · x|` and `|Σ q · zero|` are each at most
 /// `127 · 255 · K`, so their difference stays inside `i32` for `K ≤ 2¹⁵`.
 pub const MAX_REDUCTION: usize = 1 << 15;
+/// Largest stride of a [`QConv`] (its padded copy has `stride²` phases).
+pub const MAX_STRIDE: usize = 64;
+/// Largest padding of a [`QConv`].
+pub const MAX_PAD: usize = 1 << 12;
 
 /// Symmetric per-output-channel s8 weights of `w` (`[o, K]` row-major): `w[r, k] ≈ scale[r] · q[r, k]`, `q` in
 /// `-127..=127` (`round(w / scale)`, ties away from zero). Returns `(q, scale)`.
@@ -79,7 +83,10 @@ impl QConv {
         grids: &[Grid],
     ) -> QConv {
         assert!(o % 4 == 0 && c % 4 == 0, "QConv: channels {o} → {c} must be multiples of 4");
-        assert!(k >= 1 && stride >= 1, "QConv: kernel {k}, stride {stride}");
+        assert!(
+            k >= 1 && (1..=MAX_STRIDE).contains(&stride) && pad <= MAX_PAD,
+            "QConv: kernel {k}, stride {stride} (1..={MAX_STRIDE}), padding {pad} (at most {MAX_PAD})"
+        );
         let red = k.checked_mul(k).and_then(|t| t.checked_mul(c));
         assert!(red.is_some_and(|r| r <= MAX_REDUCTION), "QConv: c · k² = {red:?} is over {MAX_REDUCTION}");
         assert_eq!(Some(w.len()), red.and_then(|r| r.checked_mul(o)), "QConv: weight length");
@@ -280,7 +287,7 @@ pub(super) fn plan(
     input: usize,
     (threads, min_macs): (usize, usize),
 ) -> (usize, usize) {
-    let macs = n * chunks * og * unit;
+    let macs = n.saturating_mul(chunks).saturating_mul(og).saturating_mul(unit);
     let want = if threads > 1 { (3 * threads).min(macs / min_macs.max(1)).max(1) } else { 1 };
     let per_img = want.div_ceil(n);
     if input <= SPLIT_CHANNELS_MAX {

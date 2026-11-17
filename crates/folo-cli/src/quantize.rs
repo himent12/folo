@@ -68,7 +68,7 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     let sizes = (imgsz, args.batch as usize, workers);
     let done = quant::calibrate_sample(&model, part, args.images, args.seed, sizes, method)
         .map_err(nn_error)
-        .and_then(|(cal, n)| write(&file, &model, &cal, &output).map(|()| (cal, n)));
+        .and_then(|(cal, n)| write(&file, &model, &cal, imgsz, &output).map(|()| (cal, n)));
     let (cal, n) = match done {
         Ok(d) => d,
         Err(e) => {
@@ -108,10 +108,13 @@ fn write(
     file: &ModelFile,
     model: &FoloModel,
     cal: &Calibration,
+    imgsz: u32,
     output: &std::path::Path,
 ) -> Result<(), CliError> {
     let mut meta = file.metadata().clone();
     meta.fused = true;
+    // The file's default inference size is the one its ranges were measured at.
+    meta.imgsz = imgsz;
     cal.store(&mut meta).map_err(nn_error)?;
     let tensors = model.named_tensors().into_iter().map(|t| (t.name, t.tensor)).collect();
     export_tensors(output, &meta, tensors, FloatDType::F32).map_err(nn_error)?;

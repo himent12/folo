@@ -52,13 +52,18 @@ pub struct Calibration {
 }
 
 impl Calibration {
-    /// The grid of boundary `name`.
+    /// The grid of boundary `name`: its range must be finite with `lo <= hi`.
     pub fn param(&self, name: &str) -> Result<QParam> {
         let [lo, hi] = self.ranges.get(name).copied().ok_or_else(|| {
             folo_nn::Error::Invalid(format!(
                 "int8 calibration has no range for `{name}`: re-run `folo quantize`"
             ))
         })?;
+        if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
+            return Err(folo_nn::Error::Invalid(format!(
+                "int8 calibration range of `{name}` is [{lo}, {hi}]: re-run `folo quantize`"
+            )));
+        }
         Ok(QParam::from_range(lo, hi))
     }
 
@@ -173,6 +178,8 @@ pub struct Calibrator {
     pass: u8,
     /// Images observed in each pass.
     images: [usize; 2],
+    /// An observation failed part way (its statistics are partial): the calibration is refused.
+    failed: bool,
 }
 
 impl Calibrator {
@@ -184,10 +191,13 @@ impl Calibrator {
     /// Run the `f32` model on `x` (`[B, 3, H, W]`, `f32`, on the CPU) and record every boundary.
     pub fn observe(&mut self, model: &FoloModel, x: &Tensor) -> Result<()> {
         let _g = folo_core::no_grad();
-        self.images[self.pass as usize] += x.dims()[0];
         let mut e = Observe { cal: self };
-        folo_core::cpu::in_pool(|| walk::features(model, &mut e, x))?;
-        Ok(())
+        let r = folo_core::cpu::in_pool(|| walk::features(model, &mut e, x));
+        match r {
+            Ok(_) => self.images[self.pass as usize] += x.dims()[0],
+            Err(_) => self.failed = true,
+        }
+        r.map(|_| ())
     }
 
     /// Start the histogram pass.
@@ -195,9 +205,13 @@ impl Calibrator {
         self.pass = 1;
     }
 
-    /// The ranges by `method`. Refused unless both passes observed the same images, at least one.
+    /// The ranges by `method`. Refused unless both passes observed the same images, at least one, and no
+    /// observation failed.
     pub fn finish(&self, method: Method) -> Result<Calibration> {
         let [a, b] = self.images;
+        if self.failed {
+            return Err(folo_nn::Error::Invalid("int8 calibration: an observation failed".into()));
+        }
         if a == 0 || self.pass != 1 || a != b {
             return Err(folo_nn::Error::Invalid(format!(
                 "int8 calibration needs two passes over the same images, at least one (saw {a}, then {b})"

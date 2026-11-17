@@ -22,14 +22,26 @@ pub struct Int8Plan {
 }
 
 /// What a conv's packed weights were made from: the weight and bias tensors' identities and storage versions (a
-/// load, an in-place write or a replaced tensor changes one of them), the geometry and the activation.
-type Stamp = ([Option<(folo_core::TensorId, u64)>; 2], [usize; 5], Activation);
+/// load, an in-place write or a replaced tensor changes one of them), the geometry, the activation, and the input
+/// parts' channels and grids (scale bits, zero point). Weights written while a forward packs them are not
+/// supported (the version is bumped before the write lands).
+#[derive(PartialEq)]
+struct Stamp {
+    tensors: [Option<(folo_core::TensorId, u64)>; 2],
+    geometry: [usize; 5],
+    act: Activation,
+    parts: Vec<(usize, u32, u8)>,
+}
 
-fn stamp(conv: &ConvBnAct) -> Stamp {
+fn stamp(conv: &ConvBnAct, parts: &[&QAct]) -> Stamp {
     let s = |t: &Tensor| (t.id(), t.storage_version());
     let c = conv.conv.config();
-    let geometry = [c.in_channels, c.out_channels, c.kernel, c.stride, c.padding];
-    ([Some(s(&conv.conv.weight)), conv.conv.bias.as_ref().map(s)], geometry, conv.act)
+    Stamp {
+        tensors: [Some(s(&conv.conv.weight)), conv.conv.bias.as_ref().map(s)],
+        geometry: [c.in_channels, c.out_channels, c.kernel, c.stride, c.padding],
+        act: conv.act,
+        parts: parts.iter().map(|a| (a.dims[1], a.grid.scale.to_bits(), a.grid.zero)).collect(),
+    }
 }
 
 impl Int8Plan {
@@ -119,7 +131,7 @@ struct Int8<'a> {
 
 impl Int8<'_> {
     fn qconv(&self, name: &str, conv: &ConvBnAct, parts: &[&QAct]) -> Result<Arc<QConv>> {
-        let st = stamp(conv);
+        let st = stamp(conv, parts);
         if let Some((s, c)) = self.plan.convs.lock().unwrap_or_else(|e| e.into_inner()).get(name)
             && *s == st
         {

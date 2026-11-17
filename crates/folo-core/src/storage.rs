@@ -343,12 +343,10 @@ impl StorageCell {
         self.data.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Write access; bumps the version and drops the derived values. The version is bumped once the lock is held,
-    /// so a reader that sees the new version reads the new data (a cache keyed by version never keeps old data
-    /// under it).
+    /// Write access; bumps the version and drops the derived values.
     pub fn write(&self) -> RwLockWriteGuard<'_, Storage> {
-        let g = self.data.write().unwrap_or_else(|e| e.into_inner());
         self.version.fetch_add(1, Ordering::Relaxed);
+        let g = self.data.write().unwrap_or_else(|e| e.into_inner());
         self.derived.clear();
         g
     }

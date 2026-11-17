@@ -82,12 +82,16 @@ fn calibration_round_trips_and_names_its_gaps() {
     let mut cal = calibrated(&m, &x);
     let json = serde_json::to_string(&cal).unwrap();
     assert_eq!(serde_json::from_str::<Calibration>(&json).unwrap(), cal);
-    cal.ranges.remove("neck.out4.cv1");
+    // A missing or unusable range is refused when the plan is set, naming the boundary.
     let mut m = m;
-    m.set_int8(Some(cal)).unwrap();
-    let _g = no_grad();
-    let e = m.forward(&x).err().expect("a missing range fails").to_string();
+    let mut reversed = cal.clone();
+    reversed.ranges.insert("backbone.down2".into(), [1.0, -1.0]);
+    let e = m.set_int8(Some(reversed)).unwrap_err().to_string();
+    assert!(e.contains("backbone.down2"), "{e}");
+    cal.ranges.remove("neck.out4.cv1");
+    let e = m.set_int8(Some(cal)).unwrap_err().to_string();
     assert!(e.contains("neck.out4.cv1"), "{e}");
+    assert!(m.int8().is_none());
     // Only a fused f32 model takes a plan.
     let unfused = FoloModel::with_rng(ModelConfig::new("n", 4).unwrap(), &mut Rng::seed(5)).unwrap();
     let mut unfused = unfused;
@@ -131,6 +135,13 @@ fn calibration_needs_two_passes_over_the_same_images() {
     c.next_pass();
     c.observe(&m, &x).unwrap();
     c.observe(&m, &x).unwrap();
+    assert!(c.finish(Method::MinMax).is_err());
+    // A failed observation (one channel instead of three) spoils the calibration.
+    let mut c = quant::calib::Calibrator::new();
+    let bad = Tensor::zeros([1, 1, 64, 64]);
+    assert!(c.observe(&m, &bad).is_err());
+    c.next_pass();
+    assert!(c.observe(&m, &bad).is_err());
     assert!(c.finish(Method::MinMax).is_err());
 }
 

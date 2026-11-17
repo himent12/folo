@@ -461,6 +461,15 @@ impl FoloModel {
                 "the int8 calibration was measured on other weights: run `folo quantize` on these".into(),
             ));
         }
+        if let Some(c) = &cal
+            && self.device().is_cpu()
+        {
+            // Every boundary the graph reads must have a usable range: one small f32 pass of the fake-quant
+            // reference names the first gap (on the CPU, where the plan runs).
+            let x = folo_core::Tensor::zeros([1, 3, 64, 64]);
+            let _g = folo_core::no_grad();
+            quant::FakeQuant::new(c).features(self, &x).map_err(|e| Error::Invalid(e.to_string()))?;
+        }
         self.int8 = cal.map(|c| Arc::new(quant::Int8Plan::new(c)));
         Ok(())
     }
