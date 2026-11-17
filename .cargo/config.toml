@@ -8,3 +8,10 @@ folo = "run --release -p folo-cli --"
 # A RUSTFLAGS environment variable replaces this, so scripts/build-wasm.sh and CI pass the flag explicitly too.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
+
+# Windows links with LLVM's lld (rust-lld ships with every Rust toolchain; rustc finds it in its own sysroot) instead
+# of link.exe: much faster, above all for the debug info of dev and test builds. MSVC's libraries are still found
+# through the Visual Studio install, as for link.exe. Linux x86_64 links with lld by default (Rust 1.90).
+# Numbers: apps/desktop/README.md, Workspace, build, test.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
