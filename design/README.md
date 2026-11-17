@@ -3,7 +3,8 @@
 One design language for **FOLO Studio** (`web/`) and **FOLO Desktop** (`apps/desktop/`). `tokens.json` is the single
 source of truth; both apps generate their theme from it and never hard-code a colour, size or duration. This file
 is the reference for tokens, type and colour; `UNIFIED.md` is the one look both apps are built against, screen by
-screen (shell, page parts, charts, every screen).
+screen (shell, page parts, charts, every screen). `THEMES.md` is the theme system: the named
+themes of each mode, custom theme files, and how each app picks and applies one.
 
 The folder is the source of truth for the tokens (`tokens.json`), the fonts (`fonts/`), the logo (the `logo*.svg`
 files) and the shared look (`UNIFIED.md`). How the tokens reach each consumer:

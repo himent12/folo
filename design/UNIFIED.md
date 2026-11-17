@@ -205,8 +205,10 @@ Studio (its model picker sat in the page header, and the detections table under 
 long).* Studio's phone layout keeps its bottom sheet.
 
 **Settings.** One column of at most 880 px, centred with its header. Each section a panel; each setting a row at
-least 56 high: its name and one line of description on the left, its control or its fact on the right. Theme is
-a row with a Dark / Light / System segmented control. Measured throughput is a table (Device, Architecture,
+least 56 high: its name and one line of description on the left, its control or its fact on the right.
+Appearance has four rows (`THEMES.md`, Choosing a theme): Theme (a Dark / Light / System segmented control), Dark
+theme and Light theme (selects of that mode's themes), Custom themes (Studio imports files, Desktop reads a folder).
+Measured throughput is a table (Device, Architecture,
 Image size, Batch, Precision, the figure, its range where measured, Source, Updated) with Training / Inference
 in the panel's header.
 *From Desktop → Studio* (its section rail, theme preview cards and two-line throughput lists go).
