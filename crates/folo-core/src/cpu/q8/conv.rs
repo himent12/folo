@@ -51,6 +51,16 @@ pub const MAX_STRIDE: usize = 64;
 /// Largest padding of a [`QConv`].
 pub const MAX_PAD: usize = 1 << 12;
 
+/// Output size of a `k × k` conv with `stride` and `pad` over an `h × w` input, or `None` when the kernel does not
+/// fit the padded input, the stride is 0 or the sizes overflow.
+pub fn out_size(h: usize, w: usize, k: usize, stride: usize, pad: usize) -> Option<(usize, usize)> {
+    let side = |v: usize| {
+        let p = pad.checked_mul(2).and_then(|p| v.checked_add(p))?;
+        (k >= 1 && stride >= 1 && p >= k).then(|| (p - k) / stride + 1)
+    };
+    Some((side(h)?, side(w)?))
+}
+
 /// Symmetric per-output-channel s8 weights of `w` (`[o, K]` row-major): `w[r, k] ≈ scale[r] · q[r, k]`, `q` in
 /// `-127..=127` (`round(w / scale)`, ties away from zero). Returns `(q, scale)`.
 pub fn quantize_weights(w: &[f32], o: usize) -> (Vec<i8>, Vec<f32>) {
@@ -82,14 +92,13 @@ impl QConv {
         silu: bool,
         grids: &[Grid],
     ) -> QConv {
-        assert!(o % 4 == 0 && c % 4 == 0, "QConv: channels {o} → {c} must be multiples of 4");
         assert!(
-            k >= 1 && (1..=MAX_STRIDE).contains(&stride) && pad <= MAX_PAD,
-            "QConv: kernel {k}, stride {stride} (1..={MAX_STRIDE}), padding {pad} (at most {MAX_PAD})"
+            QConv::supports((o, c, k), stride, pad),
+            "QConv: {o} → {c} channels (multiples of 4), kernel {k}, stride {stride} (1..={MAX_STRIDE}), padding \
+             {pad} (at most {MAX_PAD}), c · k² at most {MAX_REDUCTION}"
         );
-        let red = k.checked_mul(k).and_then(|t| t.checked_mul(c));
-        assert!(red.is_some_and(|r| r <= MAX_REDUCTION), "QConv: c · k² = {red:?} is over {MAX_REDUCTION}");
-        assert_eq!(Some(w.len()), red.and_then(|r| r.checked_mul(o)), "QConv: weight length");
+        let red = c * k * k;
+        assert_eq!(Some(w.len()), red.checked_mul(o), "QConv: weight length");
         assert_eq!(grids.len(), c, "QConv: one grid per input channel");
         assert_eq!(bias.len(), o, "QConv: bias length");
         let taps = k * k;
@@ -112,6 +121,17 @@ impl QConv {
         QConv { o, c, k, stride, pad, silu, zeros, ks, a, corr, scale, bias: bias.to_vec() }
     }
 
+    /// Whether [`QConv::new`] takes this geometry: `o` and `c` multiples of 4, `k ≥ 1`, `c · k²` at most
+    /// [`MAX_REDUCTION`], stride in `1..=`[`MAX_STRIDE`] and padding at most [`MAX_PAD`].
+    pub fn supports((o, c, k): (usize, usize, usize), stride: usize, pad: usize) -> bool {
+        o.is_multiple_of(4)
+            && c.is_multiple_of(4)
+            && k >= 1
+            && (1..=MAX_STRIDE).contains(&stride)
+            && pad <= MAX_PAD
+            && k.checked_mul(k).and_then(|t| t.checked_mul(c)).is_some_and(|r| r <= MAX_REDUCTION)
+    }
+
     /// Output channels.
     pub fn out_channels(&self) -> usize {
         self.o
@@ -120,11 +140,8 @@ impl QConv {
     /// Output size of an `h × w` input. Panics when the kernel does not fit the padded input or the sizes
     /// overflow.
     pub fn out_hw(&self, h: usize, w: usize) -> (usize, usize) {
-        let padded =
-            |v: usize| self.pad.checked_mul(2).and_then(|p| v.checked_add(p)).expect("QConv: size overflows");
-        let (ph, pw) = (padded(h), padded(w));
-        assert!(ph >= self.k && pw >= self.k, "QConv: {h}×{w} input under a {}×{} kernel", self.k, self.k);
-        ((ph - self.k) / self.stride + 1, (pw - self.k) / self.stride + 1)
+        out_size(h, w, self.k, self.stride, self.pad)
+            .unwrap_or_else(|| panic!("QConv: {h}×{w} input under a {0}×{0} kernel", self.k))
     }
 
     fn pointwise(&self) -> bool {

@@ -95,6 +95,12 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
         )
         .hint("pass --device cpu (or auto)"));
     }
+    if !folo_vision::model::quant::uses_vnni() {
+        eprintln!(
+            "note: --precision int8: this CPU has no AVX-VNNI (AVX-512 VNNI is not used), so the int8 kernels take \
+             their portable path, several times slower than f32"
+        );
+    }
     if tensor_cores {
         eprintln!("note: --tensor-cores only affects f16 inference (--half on a GPU); running without them");
     }

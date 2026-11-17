@@ -466,3 +466,82 @@ fn views_whose_extent_wraps_are_refused() {
     let view = C4 { data: &data, offset: 128, img_stride: usize::MAX - 127, c: 4, zero: 0 };
     view.check(2, 64);
 }
+
+#[test]
+fn supports_and_out_size_name_the_kernels_limits() {
+    assert!(QConv::supports((4, 4, 3), 1, 1));
+    assert!(QConv::supports((8, 4, 1), MAX_STRIDE, MAX_PAD));
+    assert!(!QConv::supports((6, 4, 1), 1, 0), "output channels not a multiple of 4");
+    assert!(!QConv::supports((4, 4, 0), 1, 0), "no kernel");
+    assert!(!QConv::supports((4, 4, 1), 0, 0), "stride 0");
+    assert!(!QConv::supports((4, 4, 1), MAX_STRIDE + 1, 0), "stride past the limit");
+    assert!(!QConv::supports((4, 4, 1), 1, MAX_PAD + 1), "padding past the limit");
+    assert!(!QConv::supports((4, 4 * 1024, 3), 1, 1), "c · k² past the limit");
+    assert!(!QConv::supports((4, 4, usize::MAX), 1, 0), "k² overflows");
+    assert_eq!(out_size(80, 80, 3, 1, 1), Some((80, 80)));
+    assert_eq!(out_size(80, 81, 3, 2, 1), Some((40, 41)));
+    assert_eq!(out_size(2, 2, 1, 65, 32), Some((2, 2)));
+    assert_eq!(out_size(1, 2, 3, 1, 0), None, "kernel larger than the input");
+    assert_eq!(out_size(4, 4, 1, 0, 0), None, "stride 0");
+    assert_eq!(out_size(usize::MAX, 4, 1, 1, 1), None, "padded size overflows");
+}
+
+#[test]
+fn quantize_weights_has_its_known_answers() {
+    // Row max 127: scale 1 exactly, so the codes are the values rounded, ties away from zero.
+    let row = [127.0, -127.0, 2.5, -2.5, 0.5, -0.5, 1.49, 0.0];
+    let (q, s) = quantize_weights(&row, 1);
+    assert_eq!(s, [1.0]);
+    assert_eq!(q, [127, -127, 3, -3, 1, -1, 1, 0]);
+    // Whatever the row's largest magnitude, it maps to ±127 (the clamp holds when `m / 127` rounds), and a row
+    // of zeros gets scale 1.
+    for m in [1.0f32, 0.1, 3.3, 1e-20, 1e30, f32::MAX] {
+        let (q, s) = quantize_weights(&[m, -m, m / 2.0, 0.0], 1);
+        assert_eq!((q[0], q[1]), (127, -127), "max {m}");
+        assert!((q[2] - 64).abs() <= 1, "max {m}: half is {}", q[2]);
+        assert_eq!(s[0], m / 127.0);
+    }
+    let (q, s) = quantize_weights(&[0.0; 8], 2);
+    assert_eq!((q, s), (vec![0; 8], vec![1.0, 1.0]));
+}
+
+#[test]
+fn epilogue_rounds_exact_ties_to_even_on_both_paths() {
+    use super::kernel::{Epi, Out};
+    // acc − corr = 2j + 1 − 24 (odd) and scale ½: every y · inv is an exact tie, j − 11.5.
+    let (corr, scale, bias) = ([24; MR], [0.5; MR], [0.0; MR]);
+    let mut acc: Tile = [[0; NR]; MR];
+    for row in acc.iter_mut() {
+        for (j, a) in row.iter_mut().enumerate() {
+            *a = 2 * j as i32 + 1;
+        }
+    }
+    let zero = 128;
+    let epi = Epi {
+        corr: &corr,
+        scale: &scale,
+        bias: &bias,
+        silu: false,
+        res: None,
+        out: Out::U8 { inv: 1.0, zero },
+    };
+    let want: Vec<u32> = (0..NR)
+        .map(|j| {
+            let n = 2 * j as i32 + 1 - 24;
+            let lo = n.div_euclid(2);
+            let v = if lo % 2 == 0 { lo } else { lo + 1 };
+            u32::from_le_bytes([(v + zero) as u8; 4])
+        })
+        .collect();
+    let (res, mut f) = ([0u32; NR], [[0f32; NR]; MR]);
+    let mut q = [0u32; NR];
+    epi.apply(&acc, NR, &res, &mut q, &mut f);
+    assert_eq!(q.to_vec(), want, "portable epilogue");
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+        let mut q = [0u32; NR];
+        // SAFETY: AVX2 and FMA were detected.
+        unsafe { epi.apply_avx2(&acc, &res, &mut q, &mut f) };
+        assert_eq!(q.to_vec(), want, "AVX2 epilogue");
+    }
+}

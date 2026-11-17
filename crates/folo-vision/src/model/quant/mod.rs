@@ -17,11 +17,34 @@ pub use fake::FakeQuant;
 /// An affine u8 grid (folo-core's [`folo_core::cpu::q8::Grid`]): `x ≈ scale · (q − zero)`.
 pub use folo_core::cpu::q8::Grid as QParam;
 pub use folo_core::cpu::q8::quantize_weights;
+/// Whether the int8 convs run on AVX-VNNI here (else a portable kernel, several times slower than `f32`).
+pub use folo_core::cpu::q8::uses_vnni;
 
 use folo_nn::io::Metadata;
-use folo_nn::{Error, Module, Result};
+use folo_nn::{Activation, ConvBnAct, Error, Module, Result};
 
 use crate::model::FoloModel;
+
+/// The output size of `conv` on an `h × w` input when it runs on the int8 kernel; `None` when it runs in `f32`
+/// (the int8 executor dequantises its inputs, and the fake-quant reference keeps its `f32` weights). A conv runs
+/// in int8 when it is fused, dense and undilated, with SiLU or no activation, its geometry is one
+/// [`folo_core::cpu::q8::QConv::supports`], and its kernel fits the padded input.
+pub(crate) fn int8_able(conv: &ConvBnAct, h: usize, w: usize) -> Option<(usize, usize)> {
+    let cfg = conv.conv.config();
+    let fits = conv.bn.is_none()
+        && cfg.groups == 1
+        && cfg.dilation == 1
+        && matches!(conv.act, Activation::Silu | Activation::Identity)
+        && folo_core::cpu::q8::QConv::supports(
+            (cfg.out_channels, cfg.in_channels, cfg.kernel),
+            cfg.stride,
+            cfg.padding,
+        );
+    if !fits {
+        return None;
+    }
+    folo_core::cpu::q8::out_size(h, w, cfg.kernel, cfg.stride, cfg.padding)
+}
 
 /// The `.folo` metadata key that holds a model's [`Calibration`] (JSON), written by `folo quantize`.
 pub const META_KEY: &str = "folo.quant";

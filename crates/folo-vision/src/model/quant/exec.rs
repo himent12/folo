@@ -1,63 +1,35 @@
 //! The int8 executor (docs/MODEL.md §9.6): the quantised graph ([`walk`]) on folo-core's int8 kernels
 //! ([`folo_core::cpu::q8`]). Activations are u8 C4 buffers from the CPU buffer cache; each conv's packed weights
-//! are built on its first call and kept in the [`Int8Plan`] while its weight and bias tensors hold the same data.
+//! are built on its first call and kept with its weight tensor ([`Tensor::derived_f32`]) until that is written.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use folo_core::Tensor;
 use folo_core::cpu::q8::{self, C4, Grid, QConv, QOut};
 use folo_nn::{Activation, ConvBnAct, Error, Result};
 
-use super::Calibration;
 use super::calib::conv_f32;
 use super::walk::{self, Exec};
+use super::{Calibration, int8_able};
 use crate::model::FoloModel;
 
-/// A calibrated model's int8 plan: its calibration and the packed weights of every int8 conv, built on first
-/// use (the graph is fixed, so a conv's input grids are too) and built again when the conv's tensors change.
+/// A calibrated model's int8 plan. A conv's packed weights are kept with its weight tensor
+/// ([`Tensor::derived_f32`]) under a key of everything else they are made from (the bias's bits, the geometry,
+/// the activation, and the input parts' channels and grids): a write to the weights drops them, even one that
+/// overlaps a forward, and the next forward packs them again.
 pub struct Int8Plan {
     cal: Calibration,
-    convs: Mutex<HashMap<String, (Stamp, Arc<QConv>)>>,
-}
-
-/// What a conv's packed weights were made from: the weight and bias tensors' identities and storage versions (a
-/// load, an in-place write or a replaced tensor changes one of them), the geometry, the activation, and the input
-/// parts' channels and grids (scale bits, zero point). Weights written while a forward packs them are not
-/// supported (the version is bumped before the write lands).
-#[derive(PartialEq)]
-struct Stamp {
-    tensors: [Option<(folo_core::TensorId, u64)>; 2],
-    geometry: [usize; 5],
-    act: Activation,
-    parts: Vec<(usize, u32, u8)>,
-}
-
-fn stamp(conv: &ConvBnAct, parts: &[&QAct]) -> Stamp {
-    let s = |t: &Tensor| (t.id(), t.storage_version());
-    let c = conv.conv.config();
-    Stamp {
-        tensors: [Some(s(&conv.conv.weight)), conv.conv.bias.as_ref().map(s)],
-        geometry: [c.in_channels, c.out_channels, c.kernel, c.stride, c.padding],
-        act: conv.act,
-        parts: parts.iter().map(|a| (a.dims[1], a.grid.scale.to_bits(), a.grid.zero)).collect(),
-    }
 }
 
 impl Int8Plan {
     /// The plan of `cal`.
     pub fn new(cal: Calibration) -> Self {
-        Int8Plan { cal, convs: Mutex::new(HashMap::new()) }
+        Int8Plan { cal }
     }
 
     /// The calibration.
     pub fn calibration(&self) -> &Calibration {
         &self.cal
-    }
-
-    /// Forget the packed weights (after the model's weights changed).
-    pub fn clear(&self) {
-        self.convs.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -112,48 +84,33 @@ impl QAct {
     }
 }
 
-/// Whether `conv` runs on the int8 kernel: fused, dense, square, stride and padding uniform, SiLU or identity,
-/// channels in multiples of 4.
-fn int8_able(conv: &ConvBnAct) -> bool {
-    let cfg = conv.conv.config();
-    conv.bn.is_none()
-        && cfg.groups == 1
-        && cfg.dilation == 1
-        && cfg.in_channels.is_multiple_of(4)
-        && cfg.out_channels.is_multiple_of(4)
-        && matches!(conv.act, Activation::Silu | Activation::Identity)
-}
-
 /// The int8 executor of one forward.
 struct Int8<'a> {
     plan: &'a Int8Plan,
 }
 
 impl Int8<'_> {
-    fn qconv(&self, name: &str, conv: &ConvBnAct, parts: &[&QAct]) -> Result<Arc<QConv>> {
-        let st = stamp(conv, parts);
-        if let Some((s, c)) = self.plan.convs.lock().unwrap_or_else(|e| e.into_inner()).get(name)
-            && *s == st
-        {
-            return Ok(c.clone());
-        }
+    /// `conv`'s packed weights for inputs `parts`: kept with the weight tensor, keyed by the rest.
+    fn qconv(&self, conv: &ConvBnAct, parts: &[&QAct]) -> Result<Arc<QConv>> {
+        use std::hash::{Hash, Hasher};
         let cfg = conv.conv.config();
-        let w = conv.conv.weight.to_vec::<f32>()?;
         let bias = match &conv.conv.bias {
             Some(b) => b.to_vec::<f32>()?,
             None => vec![0.0; cfg.out_channels],
         };
-        let grids: Vec<Grid> = parts.iter().flat_map(|a| std::iter::repeat_n(a.grid, a.dims[1])).collect();
-        let qc = Arc::new(QConv::new(
-            &w,
-            &bias,
-            (cfg.out_channels, cfg.in_channels, cfg.kernel),
-            cfg.stride,
-            cfg.padding,
-            conv.act == Activation::Silu,
-            &grids,
-        ));
-        self.plan.convs.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), (st, qc.clone()));
+        let geometry = [cfg.in_channels, cfg.out_channels, cfg.kernel, cfg.stride, cfg.padding];
+        let silu = conv.act == Activation::Silu;
+        let inputs: Vec<(usize, u32, u8)> =
+            parts.iter().map(|a| (a.dims[1], a.grid.scale.to_bits(), a.grid.zero)).collect();
+        let bias_bits: Vec<u32> = bias.iter().map(|b| b.to_bits()).collect();
+        let mut h = std::hash::DefaultHasher::new();
+        ("folo-vision int8 QConv", geometry, silu, &inputs, &bias_bits).hash(&mut h);
+        let qc = conv.conv.weight.derived_f32(h.finish(), |w| {
+            let grids: Vec<Grid> =
+                parts.iter().flat_map(|a| std::iter::repeat_n(a.grid, a.dims[1])).collect();
+            let shape = (cfg.out_channels, cfg.in_channels, cfg.kernel);
+            QConv::new(w, &bias, shape, cfg.stride, cfg.padding, silu, &grids)
+        })?;
         Ok(qc)
     }
 
@@ -166,11 +123,11 @@ impl Int8<'_> {
         res: Option<&QAct>,
         out: QOut<'_>,
     ) -> Result<[usize; 4]> {
-        let qc = self.qconv(name, conv, parts)?;
         let [n, _, h, w] = parts[0].dims;
         if parts.iter().any(|a| a.dims[0] != n || a.dims[2] != h || a.dims[3] != w) {
             return Err(Error::Invalid(format!("int8 {name}: parts of different shapes")));
         }
+        let qc = self.qconv(conv, parts)?;
         let views: Vec<C4> = parts.iter().map(|a| a.view()).collect();
         let (oh, ow) = qc.out_hw(h, w);
         let res = res.map(|r| (r.view(), r.grid));
@@ -189,31 +146,27 @@ impl Exec for Int8<'_> {
 
     fn conv(&mut self, name: &str, conv: &ConvBnAct, parts: &[&QAct], res: Option<&QAct>) -> Result<QAct> {
         let grid = self.plan.cal.param(name)?;
-        if self.plan.cal.is_f32(name) || !int8_able(conv) {
+        let [n, _, h, w] = parts[0].dims;
+        let (Some((oh, ow)), false) = (int8_able(conv, h, w), self.plan.cal.is_f32(name)) else {
             let ts = parts.iter().map(|a| a.to_f32()).collect::<Result<Vec<_>>>()?;
             let r = res.map(QAct::to_f32).transpose()?;
             let y = conv_f32(conv, &ts.iter().collect::<Vec<_>>(), r.as_ref())?;
             return QAct::from_f32(&y, grid);
-        }
-        let [n, _, h, w] = parts[0].dims;
-        let cfg = conv.conv.config();
-        let (k, s, pd) = (cfg.kernel, cfg.stride, cfg.padding);
-        let (oh, ow) = ((h + 2 * pd - k) / s + 1, (w + 2 * pd - k) / s + 1);
-        let mut out = q8::alloc(n, cfg.out_channels, oh * ow);
+        };
+        let mut out = q8::alloc(n, conv.conv.config().out_channels, oh * ow);
         let dims = self.run(name, conv, parts, res, QOut::U8 { data: &mut out, grid })?;
         Ok(QAct::new(out, dims, grid))
     }
 
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &QAct) -> Result<Tensor> {
-        if self.plan.cal.is_f32(name) || !int8_able(conv) {
-            return conv_f32(conv, &[&x.to_f32()?], None);
-        }
         let [n, _, h, w] = x.dims;
+        let (Some((oh, ow)), false) = (int8_able(conv, h, w), self.plan.cal.is_f32(name)) else {
+            return conv_f32(conv, &[&x.to_f32()?], None);
+        };
         let o = conv.conv.config().out_channels;
-        // Every element of the output is written (a stride-1 conv's output is no larger than its input).
-        let mut out = folo_core::cpu::take_buffer(n * o * h * w);
+        // Every element of the output is written.
+        let mut out = folo_core::cpu::take_buffer(n * o * oh * ow);
         let dims = self.run(name, conv, &[x], None, QOut::F32 { data: &mut out })?;
-        out.truncate(dims.iter().product());
         Ok(Tensor::from_vec(out, dims.to_vec())?)
     }
 

@@ -1152,7 +1152,13 @@ GPU forwards, training, export and the `f32` default are unchanged.
   between them. The range is then the `p`, `1 − p` quantiles (default, `p = 10⁻⁴`), the minimum and maximum, or
   the histogram-edge range of least expected squared error (rounding `Δ²/12` inside, clipping outside).
 - **Mixed precision.** A conv named in `f32_convs`, or one the int8 kernel does not take (grouped, dilated,
-  channels not a multiple of 4), dequantises its inputs, runs in `f32` and quantises its output.
+  channels not a multiple of 4, a reduction `c · k²` over 2¹⁵, stride over 64, padding over 4096, or a kernel
+  larger than its padded input), dequantises its inputs, runs in `f32` and quantises its output. The fake-quant
+  reference keeps such a conv's `f32` weights too.
+- **CPU.** The fast kernel needs AVX-VNNI (`vpdpbusd` on 256-bit registers, with AVX2 and FMA). Without it, AVX-512
+  VNNI CPUs included (that form is not used), the int8 convs run a portable kernel with the same integers that is
+  several times slower than the `f32` path: one folo-n row-8 run in review took 66.3 ms against 17.0 ms in `f32`.
+  `folo val` / `folo predict --precision int8` print a `note:` on stderr then.
 
 FOLO's implementation: folo-core's `cpu::q8` kernels (docs/CORE.md, int8 convs) under folo-vision's
 `model::quant` (the graph walk is shared by calibration, the int8 executor and a fake-quant reference that runs the

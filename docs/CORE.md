@@ -84,7 +84,9 @@ dimensions, or made contiguous once.
   (`cpu/conv/winograd.rs`): 16 multiplies per 2x2 output tile and channel pair instead of 36.
 - The weights are transformed once per weight tensor and kept with its storage until the storage is next written
   (`View::derived`: every write lock clears it; a view whose `storage` field was pointed elsewhere neither uses nor
-  fills it).
+  fills it). `Tensor::derived_f32` offers the same store outside the backend (folo-vision's int8 plan keeps its
+  packed convs there): unlike a check of the storage version, which a write bumps before it waits for the lock, a
+  value made under the read lock never outlives the data it was made from.
 - The tiles are cut into blocks; a block transforms its input patches, runs 16 small GEMMs through the row-pointer
   micro-kernel and transforms the results into its output tiles while they are in L2. An image with too few blocks
   for the pool runs in two passes: the input transforms split by input channels, then the GEMMs and output transforms
@@ -157,7 +159,9 @@ these kernels:
 - **Conv.** `q8::conv` takes the input parts of a concatenation (each with its zero point, which must be the one
   the weights were packed with), an optional residual and a `QConv` (s8 weights packed `[O/4][C/4·k·k][4]`, four
   to a word, the zero-point corrections, per-channel scales and biases; `C·k·k` at most `MAX_REDUCTION` = 2¹⁵ so
-  the i32 sums cannot overflow) and writes u8 C4 codes or `f32` NCHW. A micro-kernel computes 4 output channels ×
+  the i32 sums cannot overflow, stride at most `MAX_STRIDE` = 64, padding at most `MAX_PAD` = 4096:
+  `QConv::supports` names these limits, and `q8::out_size` says whether a kernel fits an input) and writes u8 C4
+  codes or `f32` NCHW. A micro-kernel computes 4 output channels ×
   24 output pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
   `avxvnni` (and AVX2, FMA), detected at run time, else portable scalar code with the same sums. 1×1 stride-1 convs read
   the input planes in place; other convs read a padded, phase-split copy of each image's rows (padding with the
@@ -177,8 +181,10 @@ these kernels:
 Tests (`cpu/q8/tests.rs`) check convs against an i64 reference at 1, 3 and 8 threads, with the real task size and
 with one-MAC tasks (every split): 3×3 stride 1 and 2, 1×1, several input parts on different grids, residuals, `f32`
 outputs, two images, and offset views with a longer image stride. They also check the task plan's bounds, the
-refusals (zero points, long reductions), VNNI against the scalar kernel, the SiLU against SiLU in `f64` and its
-scalar form against its AVX2 form bit for bit, quantise round trips and the pools. `cargo bench -p folo-core --bench
+refusals (zero points, long reductions, wrapping views, kernels larger than the input), `supports` and `out_size`,
+VNNI against the scalar kernel, the SiLU against SiLU in `f64` and its scalar form against its AVX2 form bit for
+bit, the epilogue's exact ties (to even, on both paths), `quantize_weights`' known answers (ties away from zero,
+±127 at the row maximum), quantise round trips and the pools. `cargo bench -p folo-core --bench
 q8_infer` times each folo-n conv in int8 against the fused `f32` `conv2d_act`.
 
 ### The buffer cache

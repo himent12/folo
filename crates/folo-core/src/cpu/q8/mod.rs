@@ -20,7 +20,7 @@ mod tests;
 
 use rayon::prelude::*;
 
-pub use conv::{MAX_PAD, MAX_REDUCTION, MAX_STRIDE, QConv, QOut, conv, quantize_weights};
+pub use conv::{MAX_PAD, MAX_REDUCTION, MAX_STRIDE, QConv, QOut, conv, out_size, quantize_weights};
 pub use kernel::{silu_q8, uses_vnni};
 
 /// Words of readable slack after an activation's last plane.
@@ -36,7 +36,9 @@ pub struct Grid {
 }
 
 impl Grid {
-    /// The grid spanning `[lo, hi]`, widened to hold 0 (a degenerate range gets a tiny step).
+    /// The grid spanning `[lo, hi]`, widened to hold 0 (a degenerate range gets a tiny step). The step is not
+    /// finite when the range is not, or is wider than `f32::MAX`: callers check it (folo-vision's
+    /// `Calibration::param` refuses such ranges).
     pub fn from_range(lo: f32, hi: f32) -> Grid {
         let (lo, hi) = (lo.min(0.0), hi.max(0.0));
         let scale = ((hi - lo) / 255.0).max(1e-8);

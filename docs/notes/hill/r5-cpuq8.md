@@ -1,8 +1,17 @@
 # Hill-climb 5, lane `cpuq8`: int8 inference on the CPU
 
 Brief: `D:/folo-build/hill5/briefs/cpuq8.md` (post-training int8 for the backbone and neck: an AP gate, a kernel
-speed gate, then an opt-in path). Logs, binaries, calibrations, dumps and scripts: `D:/folo-data/runs-hill5/cpuq8/`
-(`logs/`, `bin/`, `cal/`, `dumps/`, `records/`, `scripts/`); every path below is relative to it.
+speed gate, then an opt-in path). Logs, binaries, calibrations, records and scripts: `D:/folo-data/runs-hill5/cpuq8/`
+(`logs/`, `bin/`, `cal/`, `records/`, `scripts/`, `weights/`); every path below is relative to it. The candidate
+dumps behind the AP numbers (`dumps/`, 5.8 GB) were deleted when D: filled up; the scored records (`records/`) and
+the bootstrap logs are kept. The dump and calibration programs were uncommitted examples, copied to
+`scripts/q8_dump.rs` and `scripts/q8_calib.rs` (build them as `crates/folo-vision/examples/`).
+
+Binaries (`bin/`, by build time): `*-v1` (23:26–08:14, first kernels), `*-v2` (08:56), `*-v3` (10:19, epilogue v3),
+`q8_infer-v4*` (10:56–11:07, task-plan variants), `*-v5-prereview` (the `s4` binaries, 06da9806's code, copied at 14:37) and `*-v5` (14:37, head
+7d1d3fdf, timed in `s5`; the last review round after it changes no folo-n or folo-s conv's arithmetic). `q8_prof-{1,2,3}` (09:34–09:46) made
+`logs/prof-{1,2,3}.txt`. The val2017 dumps (`logs/val-dumps.txt`, 12:29) were made by `scripts/q8_dump.rs` built
+at 06da9806 (epilogue v3, task plan); the review fixes after it do not change the arithmetic.
 
 The design is docs/MODEL.md §9.6, and the kernels are in docs/CORE.md under "int8 convs".
 
@@ -93,7 +102,14 @@ best round was 10.69 ms at 13 busy cores. Most of folo-n's int8 time is outside 
 - the quantise and dequantise boundaries;
 - folo-n's many small 1×1 convs, which at 28 threads are no faster in int8 (see "Negative results").
 
-folo-s, whose convs are wider, gains 1.8×.
+The 3×3 stride-1 convs are not all faster either. In `s5`'s quiet per-conv run (`logs/session-s5/q8-28-silu.txt`)
+three of them were slower in int8 at 28 threads: 32 → 32 at 40² (0.41×, 4 calls), 64 → 64 at 20² (0.89×, 9 calls)
+and 64 → 32 at 40² (0.81×, 2 calls). Each takes 0.06–0.16 ms, about as long as waking the pool. In `s4`, under
+load, the same convs were 1.29–2.02× faster, so their ratio at this size is mostly noise around 1×.
+
+folo-s, whose convs are wider, gained 1.82× in row 8. That is one in-process run at 22 busy cores out of 28, with no
+A/B against the base binary, and the in-process `f32` side looks handicapped: folo-n's in-process ratio is 1.27×,
+against 1.17× in the A/B (14.91 / 12.74 ms). Treat 1.82× as an upper estimate until a quiet A/B.
 
 ## val2017 (final config, read once)
 The shipped flow: `folo quantize` (512 random train2017 images, seed 0, percentile 99.99%, 62 ranges; folo-n
@@ -128,7 +144,8 @@ Both are within the brief's 0.004. The `f32` CPU numbers match the published 0.3
   A/B rounds are unusable (the base binary alone read 15.9–33.8 ms for row 8). Only `s3`'s per-conv part, and
   `s5`'s per-conv part, had a quiet start.
 - **folo-s's int8 val2017 dump took longer than its `f32` one** (213 s against 188 s at batch 8, both under load).
-  It is not a speed measurement, but a hint that folo-s's wider convs gain less: see "End to end".
+  It is not a speed measurement: the dump includes decoding and post-processing, both runs were under changing
+  load, and the in-process row 8 run (1.82×, see "End to end") points the other way.
 
 ## Leftovers
 - **A cheaper SiLU in the epilogue** that keeps scalar = AVX2 bit for bit, for example a polynomial
@@ -146,6 +163,7 @@ Both are within the brief's 0.004. The `f32` CPU numbers match the published 0.3
 - **Published int8 weights.** `folo quantize` output for folo-n-coco-v4 and folo-s-coco exists only under
   `weights/` in the run dir. Publishing them (`folo weights`) and a BENCHMARKS.md row are for the lead.
 - **From review:**
-  - `FakeQuant` fake-quantises the weights of a conv the int8 plan runs in `f32` (one `int8_able` refuses); no
-    folo-n/s conv hits it.
   - `QParam` and `q8::Grid` are the same thing under two names.
+  - The kernel uses only AVX-VNNI. AVX-512 VNNI CPUs (with AVX-512 VL the same `vpdpbusd` exists on 256-bit
+    registers) take the portable path, several times slower than `f32`; a second kernel built for
+    `avx512vnni,avx512vl` would cover them, but this machine cannot test it.

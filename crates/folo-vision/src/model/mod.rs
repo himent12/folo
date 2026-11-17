@@ -448,11 +448,15 @@ impl FoloModel {
 
     /// Run the backbone and neck (layers 0–22) in int8 on the CPU with the ranges of `cal` (docs/MODEL.md §9.6),
     /// or in `f32` again with `None`. Needs a fused `f32` model, the one `cal` was measured on when it records
-    /// its [`quant::fingerprint`]; the head stays `f32`. Applies to eval-mode CPU
-    /// forwards and candidate-first prediction; GPU forwards and training are unchanged.
+    /// its [`quant::fingerprint`], on the CPU (where every range is checked); the head stays `f32`. Applies to
+    /// eval-mode CPU forwards and candidate-first prediction; GPU forwards (after a move) and training are
+    /// unchanged.
     pub fn set_int8(&mut self, cal: Option<quant::Calibration>) -> Result<()> {
         if cal.is_some() && (!self.fused || self.dtype() != folo_core::DType::F32) {
             return Err(Error::Invalid("int8 needs a fused F32 model (FoloModel::fuse)".into()));
+        }
+        if cal.is_some() && !self.device().is_cpu() {
+            return Err(Error::Invalid("int8 runs on the CPU: move the model there first".into()));
         }
         if let Some(want) = cal.as_ref().and_then(|c| c.weights.as_deref())
             && want != quant::fingerprint(self)?
@@ -461,11 +465,9 @@ impl FoloModel {
                 "the int8 calibration was measured on other weights: run `folo quantize` on these".into(),
             ));
         }
-        if let Some(c) = &cal
-            && self.device().is_cpu()
-        {
+        if let Some(c) = &cal {
             // Every boundary the graph reads must have a usable range: one small f32 pass of the fake-quant
-            // reference names the first gap (on the CPU, where the plan runs).
+            // reference names the first gap.
             let x = folo_core::Tensor::zeros([1, 3, 64, 64]);
             let _g = folo_core::no_grad();
             quant::FakeQuant::new(c).features(self, &x).map_err(|e| Error::Invalid(e.to_string()))?;
@@ -694,9 +696,7 @@ impl FoloModel {
     /// # }
     /// ```
     pub fn to_device(&mut self, device: Device) -> Result<()> {
-        if let Some(p) = &self.int8 {
-            p.clear();
-        }
+        // The move writes every weight, which drops the int8 plan's packed weights (kept with them).
         Module::to_device(self, device)
     }
 }

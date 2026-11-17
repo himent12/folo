@@ -52,19 +52,21 @@ pub struct Calibration {
 }
 
 impl Calibration {
-    /// The grid of boundary `name`: its range must be finite with `lo <= hi`.
+    /// The grid of boundary `name`: its range must be finite with `lo <= hi`, and its width too (so the grid's
+    /// step and its inverse are finite; a zero-width range gets a tiny step).
     pub fn param(&self, name: &str) -> Result<QParam> {
         let [lo, hi] = self.ranges.get(name).copied().ok_or_else(|| {
             folo_nn::Error::Invalid(format!(
                 "int8 calibration has no range for `{name}`: re-run `folo quantize`"
             ))
         })?;
-        if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
-            return Err(folo_nn::Error::Invalid(format!(
+        let g = (lo.is_finite() && hi.is_finite() && lo <= hi).then(|| QParam::from_range(lo, hi));
+        match g {
+            Some(g) if g.scale.is_finite() && g.inv().is_finite() => Ok(g),
+            _ => Err(folo_nn::Error::Invalid(format!(
                 "int8 calibration range of `{name}` is [{lo}, {hi}]: re-run `folo quantize`"
-            )));
+            ))),
         }
-        Ok(QParam::from_range(lo, hi))
     }
 
     /// Whether conv `name` keeps `f32` weights.

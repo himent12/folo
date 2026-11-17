@@ -88,6 +88,14 @@ fn calibration_round_trips_and_names_its_gaps() {
     reversed.ranges.insert("backbone.down2".into(), [1.0, -1.0]);
     let e = m.set_int8(Some(reversed)).unwrap_err().to_string();
     assert!(e.contains("backbone.down2"), "{e}");
+    // Finite ends whose width is not (an infinite step) are refused too.
+    let mut wide = cal.clone();
+    wide.ranges.insert("backbone.stage2.cv1".into(), [-f32::MAX, f32::MAX]);
+    let e = m.set_int8(Some(wide)).unwrap_err().to_string();
+    assert!(e.contains("backbone.stage2.cv1"), "{e}");
+    let mut flat = cal.clone();
+    flat.ranges.insert("backbone.stage2.cv1".into(), [0.0, 0.0]);
+    assert!(flat.param("backbone.stage2.cv1").unwrap().inv().is_finite());
     cal.ranges.remove("neck.out4.cv1");
     let e = m.set_int8(Some(cal)).unwrap_err().to_string();
     assert!(e.contains("neck.out4.cv1"), "{e}");
@@ -136,13 +144,15 @@ fn calibration_needs_two_passes_over_the_same_images() {
     c.observe(&m, &x).unwrap();
     c.observe(&m, &x).unwrap();
     assert!(c.finish(Method::MinMax).is_err());
-    // A failed observation (one channel instead of three) spoils the calibration.
+    // An observation that fails part way spoils the calibration, though both passes saw the same image: at
+    // 40 × 40 the backbone records its boundaries, then the neck's concatenation (5 × 5 against 6 × 6) fails.
     let mut c = quant::calib::Calibrator::new();
-    let bad = Tensor::zeros([1, 1, 64, 64]);
-    assert!(c.observe(&m, &bad).is_err());
+    c.observe(&m, &x).unwrap();
+    assert!(c.observe(&m, &input(1, 40, 40, 13)).is_err());
     c.next_pass();
-    assert!(c.observe(&m, &bad).is_err());
-    assert!(c.finish(Method::MinMax).is_err());
+    c.observe(&m, &x).unwrap();
+    let e = c.finish(Method::MinMax).unwrap_err().to_string();
+    assert!(e.contains("observation failed"), "{e}");
 }
 
 #[test]
@@ -155,9 +165,11 @@ fn a_changed_activation_repacks_its_conv() {
     m.forward(&x).unwrap(); // packs every conv with its SiLU
     m.backbone.down2.act = folo_nn::Activation::Identity;
     let a = m.forward(&x).unwrap().box_raw.to_vec::<f32>().unwrap();
-    // A fresh plan on the same model: what the changed graph gives.
-    m.set_int8(Some(Calibration { weights: None, ..cal })).unwrap();
-    let b = m.forward(&x).unwrap().box_raw.to_vec::<f32>().unwrap();
+    // The same weights in another model (nothing packed yet), changed before its first forward.
+    let mut fresh = model(17);
+    fresh.backbone.down2.act = folo_nn::Activation::Identity;
+    fresh.set_int8(Some(Calibration { weights: None, ..cal })).unwrap();
+    let b = fresh.forward(&x).unwrap().box_raw.to_vec::<f32>().unwrap();
     assert!(
         a.iter().zip(&b).all(|(u, v)| u.to_bits() == v.to_bits()),
         "stale epilogue after an activation change"
@@ -189,4 +201,24 @@ fn reloading_weights_repacks_and_an_explicit_precision_turns_int8_off() {
     let cfg = folo_vision::PredictConfig::default();
     let p = folo_vision::Predictor::with_precision(m, cfg, folo_vision::Precision::F32).unwrap();
     assert!(p.model().int8().is_none());
+}
+
+#[test]
+fn convs_the_kernel_does_not_take_run_in_f32() {
+    // A `qkv` whose stride (65) is past the int8 kernel's limit but whose output still fits the graph (2 × 2 at
+    // 64 × 64): both executors keep it `f32`, and the forward runs.
+    let mut m = model(19);
+    let attn = &mut m.backbone.psa.blocks.items_mut()[0].attn;
+    let c = *attn.qkv.conv.config();
+    let cfg = folo_nn::Conv2dConfig::new(c.in_channels, c.out_channels, 1).stride(65).padding(32);
+    let conv = folo_nn::Conv2d::new(cfg, &mut Rng::seed(20));
+    attn.qkv = folo_nn::ConvBnAct { conv, bn: None, act: folo_nn::Activation::Identity };
+    let x = input(1, 64, 64, 21);
+    let cal = Calibration { weights: None, ..calibrated(&m, &x) };
+    m.set_int8(Some(cal.clone())).unwrap();
+    let _g = no_grad();
+    let want = FakeQuant::new(&cal).features(&m, &x).unwrap();
+    let got = folo_core::cpu::in_pool(|| quant::exec::features(&m, &Int8Plan::new(cal), &x)).unwrap();
+    assert_eq!(want[2].dims(), got[2].dims());
+    m.forward(&x).unwrap();
 }

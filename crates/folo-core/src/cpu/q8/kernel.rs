@@ -281,7 +281,13 @@ impl Epi<'_> {
     /// saturation (the clamp to `[0, 255]`), and each 128-bit lane's 4 × 4 bytes are transposed into C4 words.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
-    unsafe fn apply_avx2(&self, acc: &Tile, res: &[u32; NR], q: &mut [u32; NR], f: &mut [[f32; NR]; MR]) {
+    pub(super) unsafe fn apply_avx2(
+        &self,
+        acc: &Tile,
+        res: &[u32; NR],
+        q: &mut [u32; NR],
+        f: &mut [[f32; NR]; MR],
+    ) {
         use std::arch::x86_64::*;
         // SAFETY: every pointer is to a local array of the right length.
         unsafe {

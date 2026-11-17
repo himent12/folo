@@ -8,7 +8,7 @@ use folo_core::Tensor;
 use folo_nn::{ConvBnAct, Forward, Result};
 
 use super::walk::{self, Exec};
-use super::{Calibration, QParam, quantize_weights};
+use super::{Calibration, QParam, int8_able, quantize_weights};
 use crate::model::FoloModel;
 
 /// A fake-quantised activation: its values (on the grid) and the grid.
@@ -62,24 +62,24 @@ impl<'a> FakeQuant<'a> {
         folo_core::cpu::in_pool(|| walk::features(model, self, x))
     }
 
-    fn weight(&mut self, name: &str, conv: &ConvBnAct, parts: &[QParam], sizes: &[usize]) -> Result<Tensor> {
-        if self.cal.is_f32(name) {
+    /// The conv's weights on their s8 grid, or its `f32` weights when it stays `f32` in the int8 plan.
+    fn weight(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq]) -> Result<Tensor> {
+        let d = parts[0].t.dims();
+        if self.cal.is_f32(name) || int8_able(conv, d[2], d[3]).is_none() {
             return Ok(conv.conv.weight.clone());
         }
         if let Some(w) = self.weights.get(name) {
             return Ok(w.clone());
         }
         let scales: Vec<f32> =
-            parts.iter().zip(sizes).flat_map(|(q, &n)| std::iter::repeat_n(q.scale, n)).collect();
+            parts.iter().flat_map(|p| std::iter::repeat_n(p.q.scale, p.t.dims()[1])).collect();
         let w = fake_weights(&conv.conv.weight, &scales)?;
         self.weights.insert(name.to_string(), w.clone());
         Ok(w)
     }
 
     fn run(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq]) -> Result<Tensor> {
-        let qs: Vec<QParam> = parts.iter().map(|p| p.q).collect();
-        let sizes: Vec<usize> = parts.iter().map(|p| p.t.dims()[1]).collect();
-        let w = self.weight(name, conv, &qs, &sizes)?;
+        let w = self.weight(name, conv, parts)?;
         let ts: Vec<&Tensor> = parts.iter().map(|p| &p.t).collect();
         let p = conv.conv.config().params();
         Ok(Tensor::conv2d_act_cat(&ts, &w, conv.conv.bias.as_ref(), &p, conv.act.unary_op())?)
