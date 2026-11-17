@@ -619,6 +619,18 @@ pub fn auto_optimizer_rule(
 /// Above this many parameter elements in one step, parameters are updated in parallel.
 const PAR_THRESHOLD: usize = 1 << 16;
 
+/// Whether a tensor-op update of `ts` may run under this thread's step guard ([`folo_core::step_guard_allows`]).
+/// The guard covers one device, so a fallback that would update tensors on more than one device under a guard is
+/// refused (the trainer keeps a model on one device).
+pub(crate) fn guard_allows(ts: &[&Tensor]) -> Result<bool> {
+    let Some(first) = ts.first() else { return Ok(true) };
+    let d = first.device();
+    if folo_core::step_guard_active() && ts.iter().any(|t| t.device() != d) {
+        return Err(Error::Invalid("an optimizer update across devices under a step guard".into()));
+    }
+    Ok(folo_core::step_guard_allows(d)?)
+}
+
 /// Run `f` for every `(group index, param index)`, in parallel when the step is large. `f` runs under
 /// `no_grad` on whichever thread executes it. Under a step guard (`folo_core::StepGuard`, which belongs to this
 /// thread) it runs on this thread, so that the device updates it encodes are guarded too.

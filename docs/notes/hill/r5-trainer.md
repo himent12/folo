@@ -96,6 +96,11 @@ prototype (it also drops the second submission of the window end): see the A/B.
   one the device maps to by then; `GpuContext::set_step_guard` itself refuses a device with fewer than five storage
   bindings; the guard tests skip on such a device. Kept: a run that fails on the 50th skip in a row has reported
   one more `Step` event (the window's last batch, whose loss was computed) than a synchronous run.
+- **Review fixes** (round 3, the last): a checkpoint writer's failure settles the pending step and is still the
+  one reported, even where settling raises a stop; a failed BatchNorm restore no longer skips settling or masks
+  the step's own error; the MuSGD and EMA tensor-op fallbacks refuse tensors on more than one device under a guard
+  (`optim::guard_allows`). Kept and documented (CORE.md): two device ordinals sharing one GPU context are told
+  apart by ordinal in the fallbacks' check but not in the kernels' guard (the trainer uses one device).
 
 ### Tests
 

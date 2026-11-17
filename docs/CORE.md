@@ -221,7 +221,8 @@ implements all four:
   where the backend has none (or binds fewer than 5 storage buffers). The guard takes one snapshot of the flag,
   which the device binds and `step_guard_allows(device)` reads, so a later write to `flag` moves neither; updates
   outside those kernels on the guard's device ask `step_guard_allows(device)` first (other devices are not
-  guarded). Its drop clears the backend that set it. A skipped update still counts as a write of its tensors
+  guarded; folo-nn refuses a fallback across devices under a guard, and two ordinals sharing one GPU context are
+  told apart by ordinal here but not by the kernels). Its drop clears the backend that set it. A skipped update still counts as a write of its tensors
   (their versions move).
 
 ## RNG

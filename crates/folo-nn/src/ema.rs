@@ -128,7 +128,7 @@ impl<M: Module> ModelEma<M> {
         }
         // Tensor ops (under a step guard, only if it lets the step through; the count moves either way, as the
         // guarded kernels' callers expect: they take it back with `unstep_update`).
-        if !mine.first().map_or(Ok(true), |(_, t)| folo_core::step_guard_allows(t.device()))? {
+        if !crate::optim::guard_allows(&mine.iter().map(|(_, t)| t).collect::<Vec<_>>())? {
             self.updates += 1;
             return Ok(());
         }

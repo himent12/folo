@@ -82,7 +82,9 @@ pub fn step_guard_active() -> bool {
 /// Whether an optimizer update on `device` outside the guarded kernels may run: `true` without a guard on this
 /// thread for that device (the guard covers its own device only, as the guarded kernels do), else whether the
 /// guard's flag is finite (a host readback, so only for rare fallbacks). A fallback that gets `false` skips its
-/// update, as the guarded kernels do.
+/// update, as the guarded kernels do. Devices are told apart by ordinal: a backend registered under two ordinals
+/// that share one GPU context guards the kernels of both but the fallbacks of the guard's own only, so the trainer
+/// (one device per run) never does that.
 pub fn step_guard_allows(device: Device) -> Result<bool> {
     let flag = FLAG.with(|f| f.borrow().clone());
     match flag {

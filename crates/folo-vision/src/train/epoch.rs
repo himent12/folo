@@ -45,7 +45,7 @@ impl Trainer {
             // did at its window (§8.8).
             let (mut batch, staged) = match item {
                 Ok(v) => v,
-                Err(err) => return self.fail_after_settling(err),
+                Err(err) => return self.fail_after_settling(err, None),
             };
             let received = Instant::now();
             let n = batch.len();
@@ -59,18 +59,15 @@ impl Trainer {
             })();
             let (targets, x) = match prepared {
                 Ok(v) => v,
-                Err(err) => return self.fail_after_settling(err),
+                Err(err) => return self.fail_after_settling(err, None),
             };
             let snapshot = match RunningStats::capture(&self.model) {
                 Ok(v) => v,
-                Err(err) => return self.fail_after_settling(err.into()),
+                Err(err) => return self.fail_after_settling(err.into(), None),
             };
             let (out, loss, kd, finite) = match self.forward_batch(x, &targets, n, e) {
                 Ok(v) => v,
-                Err(err) => {
-                    snapshot.restore()?;
-                    return self.fail_after_settling(err);
-                }
+                Err(err) => return self.fail_after_settling(err, Some(&snapshot)),
             };
             // The previous window's guarded step (§8.8): its flag was computed long before this batch's loss, which
             // was just read back, so this read does not wait. The loss scale the backward below uses, the schedule
@@ -84,7 +81,8 @@ impl Trainer {
                 }
                 Ok(_) => {}
                 Err(err) => {
-                    snapshot.restore()?;
+                    // The run fails with the step's error; a failure to take the forward back too is secondary.
+                    let _ = snapshot.restore();
                     return Err(err);
                 }
             }
@@ -148,8 +146,11 @@ impl Trainer {
             clock.step[phase] += received.elapsed().as_secs_f64();
             batch_start = Instant::now();
             // The previous epoch's event, once its files are written.
+            // A writer's failure is reported even where settling the pending step raises a stop: a synchronous
+            // step would have settled at its window, and the failure would still have come here.
             if let Err(err) = self.poll_write() {
-                return self.fail_after_settling(err);
+                self.resolve_step()?;
+                return Err(err);
             }
             if finite {
                 let elapsed = epoch_start.elapsed().as_secs_f64().max(1e-9);
@@ -268,12 +269,20 @@ impl Trainer {
         Ok((out, loss, kd, finite))
     }
 
-    /// Fails the epoch with `err`, raised while a guarded step may be pending (§8.8): the step settles first, as it
-    /// did at its window under a synchronous step, so its own failure (the 50th skip in a row) is the one
-    /// reported, and a stop its settling raises (an event sink that stops on the overflow log) ends the epoch as a
-    /// stop.
-    fn fail_after_settling(&mut self, err: Error) -> Result<Option<folo_api::Loss>> {
-        if self.resolve_step()? && self.stopping() {
+    /// Fails the epoch with `err`, raised by a batch while a guarded step may be pending (§8.8): the step settles
+    /// first, as it did at its window under a synchronous step, so its own failure (the 50th skip in a row) is the
+    /// one reported, and a stop its settling raises (an event sink that stops on the overflow log) ends the epoch
+    /// as a stop. `restore`: the BatchNorm statistics from before the batch's forward, put back first; settling
+    /// runs whether or not that succeeds, and its error comes before the restore's.
+    fn fail_after_settling(
+        &mut self,
+        err: Error,
+        restore: Option<&RunningStats>,
+    ) -> Result<Option<folo_api::Loss>> {
+        let restored = restore.map_or(Ok(()), RunningStats::restore);
+        let stopped = self.resolve_step()? && self.stopping();
+        restored?;
+        if stopped {
             return Ok(None);
         }
         Err(err)
