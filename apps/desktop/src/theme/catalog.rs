@@ -321,9 +321,9 @@ impl Catalog {
 /// listed still costs no more).
 pub(super) fn read_theme(path: &Path) -> Result<CustomTheme, String> {
     use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|e| format!("couldn't read: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("(file): couldn't read ({e})"))?;
     let mut bytes = Vec::new();
-    file.take(MAX_FILE + 1).read_to_end(&mut bytes).map_err(|e| format!("couldn't read: {e}"))?;
+    file.take(MAX_FILE + 1).read_to_end(&mut bytes).map_err(|e| format!("(file): couldn't read ({e})"))?;
     if bytes.len() as u64 > MAX_FILE {
         return Err("(file): larger than 1 MB; not a theme".into());
     }
@@ -491,6 +491,15 @@ mod tests {
         let mut p = ThemePrefs::default();
         assert!(p.apply_arg("system", &c));
         assert_eq!(p.mode, ModePref::System);
+    }
+
+    /// A file that can't be read says so as the JS readers do: `(file): couldn't read (…)`. A folder
+    /// stands in for it (Windows refuses to open one, Linux to read one).
+    #[test]
+    fn an_unreadable_file_says_so_as_the_js_readers_do() {
+        let dir = TestDir::new("desktop-theme-unreadable");
+        let e = read_theme(dir.path()).unwrap_err();
+        assert!(e.starts_with("(file): couldn't read (") && e.ends_with(')'), "{e}");
     }
 
     #[test]

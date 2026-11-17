@@ -323,6 +323,35 @@ mod tests {
         assert_eq!(parse("[1]").unwrap_err(), "(file): must be a JSON object");
     }
 
+    /// The JSON serde_json refuses while parsing, which the JS readers match before `JSON.parse`
+    /// (design/json-scan.mjs, `JSON_MAX_DEPTH` = 127): the deepest nesting accepted, found by
+    /// trying every depth, counting the top-level object; numbers out of a double's range; and a
+    /// lone surrogate escape a later duplicate member would replace. Duplicates otherwise pass,
+    /// the last one winning.
+    #[test]
+    fn serde_json_refuses_what_the_js_readers_scan_for() {
+        let nested = |arrays: usize| {
+            let open = "[".repeat(arrays);
+            let close = "]".repeat(arrays);
+            format!(r#"{{"folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "$c": {open}{close}}}"#)
+        };
+        let deepest = (1..400).take_while(|&n| parse(&nested(n)).is_ok()).last().unwrap() + 1;
+        assert_eq!(deepest, 127, "levels accepted, the top-level object counted");
+        assert!(parse(&nested(127)).unwrap_err().starts_with("(file): not valid JSON ("));
+        let head = r#"{"folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "#;
+        for n in ["1e400", "-1e400", "1E309", &format!("1{}", "0".repeat(400))] {
+            let e = parse(&format!(r#"{head}"$c": {n}}}"#)).unwrap_err();
+            assert!(e.starts_with("(file): not valid JSON ("), "{n}: {e}");
+        }
+        for n in ["1e-400", "0e999", "1.7976931348623157e308"] {
+            assert!(parse(&format!(r#"{head}"$c": {n}}}"#)).is_ok(), "{n}");
+        }
+        let hidden = r#"{"name": "\uD800", "folo_theme": 1, "id": "demo", "name": "Demo", "mode": "dark"}"#;
+        assert!(parse(hidden).unwrap_err().starts_with("(file): not valid JSON ("));
+        let twice = r#"{"folo_theme": 1, "id": "x", "name": "First", "name": "Second", "mode": "dark"}"#;
+        assert_eq!(parse(twice).unwrap().name, "Second");
+    }
+
     #[test]
     fn comments_are_ignored_everywhere() {
         let t = parse(
