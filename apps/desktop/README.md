@@ -3,7 +3,8 @@
 The native FOLO app, built in Rust on [folo-ui](ui/README.md), its own UI framework (GPUI's API, rendered on the
 CPU; the UI uses no GPU). Same screens and design language as FOLO Studio ([web/](../../web/README.md)): Overview,
 Datasets, Runs (with a live training dashboard), Models, Benchmarks, Playground and Settings, plus a command palette,
-keyboard navigation, toasts, and dark and light themes.
+keyboard navigation, toasts, and the theme system of [design/THEMES.md](../../design/THEMES.md) (Dark, Light or
+System, a theme per mode, custom themes).
 
 It holds no data of its own: everything comes from a `folo serve` over [docs/API.md](../../docs/API.md) (Data,
 below), or from the built-in demo. The repository's [README](../../README.md) says what FOLO is;
@@ -32,8 +33,8 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 | `src/cloud.rs` | cloud compute: the state and rules Settings › Cloud, New run and a cloud run's page share |
 | `src/local.rs` | Playground's local inference: folo-vision's predictor in this process, on folo-gpu or the CPU |
 | `src/input.rs` | the single-line text input (IME, selection, clipboard) and its key bindings |
-| `src/theme.rs` | the active theme over the generated token tables: the mode, colour helpers, the class palette |
-| `src/window_state.rs` | the window and theme remembered in `desktop.json`, and where a saved window reopens |
+| `src/theme/` | the active theme over the generated token tables: the mode, colour helpers, the class palette (`mod.rs`); the themes to pick from and the mode / slot rules (`catalog.rs`); custom theme files (`custom.rs`) |
+| `src/window_state.rs` | the window and theme choice remembered in `desktop.json`, and where a saved window reopens |
 | `src/scenario.rs` | `--scenario` states for screenshots (`ALL` is the review set) |
 | `src/synth.rs` | procedural "shapes" scenes behind the demo's images |
 | `build.rs` | generates the token tables from `design/tokens.json` (Design tokens, below), embeds `assets/icons/*.svg`, and on MSVC links `assets/folo.ico` and `assets/folo-desktop.manifest` into the executable |
@@ -144,19 +145,19 @@ Each recipe names an existing example to copy.
 cargo run                                          # connects to or starts folo serve (real store, bare)
 cargo run -- --server http://127.0.0.1:7878        # a specific server
 cargo run -- --mock                                # built-in demo data
-cargo run -- --theme light
+cargo run -- --theme light                         # a mode (dark, light, system) or a theme id (midnight)
 cargo run -- --scenario run-live+hover             # a fixed, deterministic state (see below)
 cargo run -- --help                                # every option (`--version`: the version); prints and exits
 ```
 
-An unknown option, an option missing its value, a `--theme` other than dark or light and an unknown
-`--scenario` each print one `folo-desktop: …` line on stderr; the app still opens (a bad `--theme` opens in the
-remembered theme, else dark).
+An unknown option, an option missing its value, a `--theme` that is no mode and no installed theme's id, and an
+unknown `--scenario` each print one `folo-desktop: …` line on stderr; the app still opens (a bad `--theme` opens in
+the remembered theme, else dark).
 
 Build output goes to `target\` unless `CARGO_TARGET_DIR` names another folder; the tools below look there too.
 
 Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1–5` screens · `Ctrl 6` benchmarks · `Ctrl ,` settings ·
-`Ctrl Shift L` theme · `F11` full screen · `Alt ←` back · `Esc` close (a dialog, an inline form, a delete waiting
+`Ctrl Shift L` dark / light mode · `F11` full screen · `Alt ←` back · `Esc` close (a dialog, an inline form, a delete waiting
 for its second click) or go up · `Ctrl Enter` submit the open dialog or form · `Tab` / arrows move focus ·
 `F6` next region. Text fields: `Home` / `End`, `Ctrl ←/→` word, `Ctrl Backspace` / `Ctrl Delete` delete a word,
 `Shift` with any of these moves select, `Ctrl A` all.
@@ -194,8 +195,8 @@ dismisses. The caption buttons' width and Close's hover colours are tokens (`lay
 `F11` (or Toggle full screen in the palette) toggles full screen. There the window has no caption areas, so the
 three buttons are plain buttons: Minimize, Restore (leaves full screen) and Close.
 
-The window opens as it was closed: its restored size and place, maximized or full screen, the theme and Reduce
-motion when it was set against the OS's own setting (`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file). It is read field by
+The window opens as it was closed: its restored size and place, maximized or full screen, the theme choice (the
+mode and each mode's theme; Themes, below) and Reduce motion when it was set against the OS's own setting (`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file). It is read field by
 field: one value this build can't read (a wrong type, a window mode from a newer build) is dropped alone.
 It reopens on the display it was on (the display's UUID, derived from its device name as GPUI did, so a file
 written by an older build still matches; kept with the place: each display's bounds are in its own logical pixels,
@@ -352,10 +353,46 @@ instance's own cost so far. `src/cloud.rs` holds the state and the rules those s
 
 ## Design tokens
 
-`build.rs` reads `../../design/tokens.json`, the source of truth shared with Studio, and generates `Colors` (both
-themes), the type scale, spacing, radii, sizes, motion and shadow tables. Never hard-code a colour or size in the app;
-add a token instead. folo-ui has no letter-spacing (GPUI had none either, and the design was tuned without it), so
-`tracking` values are not applied.
+`build.rs` reads `../../design/tokens.json`, the source of truth shared with Studio, and generates `Colors`, the type
+scale, spacing, radii, sizes, motion and shadow tables. Never hard-code a colour or size in the app; add a token
+instead. folo-ui has no letter-spacing (GPUI had none either, and the design was tuned without it), so `tracking`
+values are not applied.
+
+For colours it resolves every built-in theme of `themes` (its mode's base palette, `color.dark` or `color.light`, with
+its `color` merged over it key by key, arrays whole) into one constructor each (`theme_midnight()`, …), the `THEMES`
+table (id, name, mode, description, constructor, in tokens.json's order), `TOKENS` (every colour token's path and
+kind) and `Colors::set` / `Colors::set_number` by token path (`bg.app`, `chart.series.0`, `chart.area_opacity`) for
+custom themes. A malformed theme (an unknown path, a wrong type or length, a mode's default that isn't first or has
+overrides) fails the build with its path.
+
+## Themes
+
+As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
+
+- **Choosing.** Settings › Appearance: Theme (Dark / Light / System; with System its description says what the OS is
+  now), Dark theme and Light theme (selects: built-ins in order, then custom themes by name), Custom themes, Reduce
+  motion (`src/screens/settings/appearance.rs`). Picking a theme of the other mode switches to that mode, except with
+  System. The palette has "Theme: <name>" for every theme (type "theme"); Ctrl Shift L and "Switch to light / dark
+  theme" switch the mode only, to an explicit Dark or Light. The rules are `ThemePrefs` and `Catalog` in
+  `src/theme/catalog.rs`; `FoloApp::apply_theme` (`src/app/preferences.rs`) sets the `Theme` global.
+- **System** follows the OS appearance live: folo-ui's `Window::on_appearance_changed` (Win32 `WM_SETTINGCHANGE`
+  "ImmersiveColorSet"; winit's theme-changed event); the headless platform reports dark, fixed, so `--shot` with
+  System shows the dark theme. On Windows the frame DWM draws follows the mode shown (`Window::set_frame_appearance`),
+  not the OS.
+- **Custom themes** are every `*.json` in `<FOLO_HOME or ~/.folo>/themes/`, read at start and on Reload (off the UI
+  thread), in file name order (a later file with the same id replaces an earlier one). `src/theme/custom.rs`
+  validates them with the messages of `design/theme-cases.json`, which its tests replay, so Studio,
+  `design/contrast.mjs` and Desktop agree; a file that fails is listed under Custom themes with its first error. The
+  app never opens a file picker or Explorer for them.
+- **Stored** in `desktop.json`: `theme` is the mode (`dark`, `light`, `system`; older files read the same),
+  `dark_theme` and `light_theme` the ids. An id no theme has (a removed custom theme) shows the mode's default and
+  stays stored, so installing the theme again brings it back.
+- **`--theme`** takes a mode or a theme id, custom ones too (`--theme midnight`: mode Dark with Midnight).
+  `--scenario …+light` / `+dark` still force the mode, so `--scenario overview --theme paper` and
+  `--scenario overview+light --theme paper` both shoot Paper.
+- `Theme` keeps `mode` (`is_dark()`, the mode's shadows, the few mode rules such as the olive `accent_fill` in light)
+  and gains `id`. Text on `accent_fill` is `Theme::on_accent_fill` (white in High contrast light, where `accent.on`
+  holds only 3.56:1 on its darker olive).
 
 ## Screenshots and the design hill-climb
 
@@ -365,6 +402,7 @@ with `+` (`dataset+light`, `overview+empty`). `folo-desktop --list-scenarios` pr
 ```powershell
 tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (109 PNGs in <W>x<H> folders; a few seconds on a release build)
 tools\shoot.ps1 -Scenario palette -Out shots\palette.png -Width 960 -Height 620
+tools\shoot.ps1 -Scenario settings+bottom -Out shots\appearance.png -ExtraArgs "--theme midnight"   # any theme
 tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://127.0.0.1:7878 --open run:run_9d9d"   # real data
 ```
 

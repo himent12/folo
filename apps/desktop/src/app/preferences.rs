@@ -1,21 +1,87 @@
-//! The colour theme, and the window state remembered between launches.
+//! The colour theme (design/THEMES.md: the mode, each mode's theme, custom themes), and the window
+//! state remembered between launches.
 
-use folo_ui::{App, Context, Window};
+use folo_ui::{App, Context, Window, WindowAppearance};
 
-use crate::theme::{Mode, Theme};
+use crate::theme::{Catalog, Mode, ModePref};
 
 use super::FoloApp;
 
+/// Whether an OS appearance is dark.
+pub fn is_dark(a: WindowAppearance) -> bool {
+    matches!(a, WindowAppearance::Dark | WindowAppearance::VibrantDark)
+}
+
 impl FoloApp {
-    pub fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
-        self.mode = mode;
-        cx.set_global(Theme::new(mode));
+    /// Shows the theme the choice resolves to now (the OS appearance decides System's mode).
+    pub fn apply_theme(&mut self, cx: &mut Context<Self>) {
+        let t = self.themes.resolve(&self.theme_prefs, self.system_dark);
+        self.mode = t.mode;
+        cx.set_global(t);
         cx.refresh_windows();
     }
 
+    /// Settings › Theme: Dark, Light or System.
+    pub fn set_mode(&mut self, mode: ModePref, cx: &mut Context<Self>) {
+        self.theme_prefs.mode = mode;
+        self.apply_theme(cx);
+    }
+
+    /// Ctrl Shift L and the palette's switch: the other mode than the one shown (System becomes that
+    /// explicit mode).
     pub fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        let next = if self.mode == Mode::Dark { Mode::Light } else { Mode::Dark };
-        self.set_mode(next, cx);
+        self.theme_prefs.toggle(self.system_dark);
+        self.apply_theme(cx);
+    }
+
+    /// Settings › Dark theme / Light theme and the palette's "Theme: …": theme `id` becomes its mode's
+    /// theme, and the mode switches to it unless it is System.
+    pub fn pick_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(mode) = self.themes.get(id).map(|e| e.mode) {
+            self.theme_prefs.pick(mode, id);
+            self.apply_theme(cx);
+        }
+    }
+
+    /// The OS switched between dark and light: System follows it at once.
+    pub fn system_appearance_changed(&mut self, dark: bool, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.system_dark, dark) != dark && self.theme_prefs.mode == ModePref::System
+        {
+            self.apply_theme(cx);
+        }
+    }
+
+    /// Settings › Custom themes › Reload: reads the themes folder again, off the UI thread, then shows
+    /// the (maybe changed) theme.
+    pub fn reload_themes(&mut self, cx: &mut Context<Self>) {
+        if self.themes_loading {
+            return;
+        }
+        let folder = self.themes.folder.clone().unwrap_or_else(crate::theme::catalog::custom_folder);
+        self.themes_loading = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let catalog = cx.background_executor().spawn(async move { Catalog::load(&folder) }).await;
+            this.update(cx, |this, cx| {
+                this.themes = catalog;
+                this.themes_loading = false;
+                this.apply_theme(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Draws the window's system frame (DWM's caption and border on Windows) in the mode shown, once
+    /// per change (from render).
+    pub(crate) fn sync_frame_appearance(&mut self, window: &Window) {
+        if self.frame_mode != Some(self.mode) {
+            self.frame_mode = Some(self.mode);
+            window.set_frame_appearance(Some(match self.mode {
+                Mode::Dark => WindowAppearance::Dark,
+                Mode::Light => WindowAppearance::Light,
+            }));
+        }
     }
 
     /// The window is asked to close (its Close button, Alt F4, full screen's Close). Closing stops the
@@ -117,7 +183,7 @@ impl FoloApp {
             folo_ui::WindowBounds::Fullscreen(b) => (b, WindowMode::Fullscreen),
         };
         let mode = crate::window_state::closing_mode(mode, self.shown_mode);
-        let state = State {
+        let mut state = State {
             window: Some(Placement {
                 x: b.origin.x.into(),
                 y: b.origin.y.into(),
@@ -126,12 +192,15 @@ impl FoloApp {
                 mode,
                 display: window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string()),
             }),
-            theme: Some(if self.mode == Mode::Light { "light" } else { "dark" }.into()),
+            theme: None,
+            dark_theme: None,
+            light_theme: None,
             spawn_server: Some(self.spawn_server),
             // Kept only when picked against the OS setting, so an untouched one keeps following it.
             reduce_motion: (self.reduce_motion != crate::ui::os_prefers_reduced_motion())
                 .then_some(self.reduce_motion),
         };
+        state.set_theme_prefs(&self.theme_prefs);
         if let Err(e) = crate::window_state::save(path, &state) {
             eprintln!("folo-desktop: couldn't remember the window in {}: {e}", path.display());
         }

@@ -245,6 +245,15 @@ impl PlatformWindow for WindowsWindow {
         self.0.state.borrow_mut().callbacks.appearance_changed = Some(callback);
     }
 
+    fn set_frame_appearance(&self, appearance: Option<WindowAppearance>) {
+        let frame = {
+            let mut state = self.0.state.borrow_mut();
+            state.frame_appearance = appearance;
+            appearance.unwrap_or(state.appearance)
+        };
+        configure_dwm_dark_mode(self.0.hwnd, frame);
+    }
+
     fn present(&mut self, frame: &Framebuffer, damage: &[Bounds<DevicePixels>]) {
         self.0.present(frame, damage);
     }
