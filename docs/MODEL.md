@@ -936,9 +936,9 @@ and the HTTP API do not change: the teacher exists only in the trainer.
 | key | default | notes |
 |---|---|---|
 | `teacher` | (required) | a `.folo` file or a published name (`folo weights pull`); same `nc`, `reg_max` and strides as the student |
-| `cls_gain` | 0.5 | `λc`, finite, `>= 0` |
-| `dfl_gain` | 1.5 | `λd`, finite, `>= 0` |
-| `temperature` | 4.0 | `T`, finite, `> 0` (DFL term only; 4 beat 1 on the proxy, docs/notes/hill/r4-distill.md) |
+| `cls_gain` | 0.5 | `λc`, 0 to 1e6 |
+| `dfl_gain` | 1.5 | `λd`, 0 to 1e6 |
+| `temperature` | 4.0 | `T`, 0.05 to 100 (DFL term only; 4 beat 1 on the proxy, docs/notes/hill/r4-distill.md) |
 
 **Teacher.** Loaded once when the trainer is built (a new run and a resume alike; a missing file fails the run with
 an error naming `distill.teacher`; a resume may also turn distillation on or change it, `ResumeOverrides::distill`,

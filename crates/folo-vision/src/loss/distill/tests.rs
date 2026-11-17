@@ -228,9 +228,20 @@ fn config_is_validated() {
         DistillConfig { temperature: f32::NAN, ..DistillConfig::new("t") },
         DistillConfig { cls_gain: -0.1, ..DistillConfig::new("t") },
         DistillConfig { dfl_gain: f32::INFINITY, ..DistillConfig::new("t") },
+        DistillConfig { cls_gain: 1.1e6, ..DistillConfig::new("t") },
+        DistillConfig { dfl_gain: 3e38, ..DistillConfig::new("t") },
+        DistillConfig { temperature: 0.049, ..DistillConfig::new("t") },
+        DistillConfig { temperature: 100.5, ..DistillConfig::new("t") },
     ];
     for c in bad {
         assert!(c.validate().is_err(), "{c:?}");
+    }
+    let edges = [
+        DistillConfig { cls_gain: 0.0, dfl_gain: 1e6, temperature: 0.05, ..DistillConfig::new("t") },
+        DistillConfig { cls_gain: 1e6, dfl_gain: 0.0, temperature: 100.0, ..DistillConfig::new("t") },
+    ];
+    for c in edges {
+        assert!(c.validate().is_ok(), "{c:?}");
     }
     let c: DistillConfig = serde_json::from_str(r#"{"teacher":"t.folo"}"#).unwrap();
     assert_eq!((c.cls_gain, c.dfl_gain, c.temperature), (0.5, 1.5, 4.0));

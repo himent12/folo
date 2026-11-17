@@ -372,22 +372,43 @@ fn fused_term_follows_the_tensor_path_at_the_edge_of_f32() {
     }
 }
 
-/// The backward's scales: `B · cls_gain` overflows f32 for 4 images at `cls_gain` 1e38 while `B · cls_gain / N`
-/// and the term do not (student class logits 0, the teacher's 1); the gradients stay finite and equal the tensor
-/// path's (which divides first).
+/// The backward's scales, outside the gains `DistillConfig::validate` accepts (the op itself takes any): `B · gain`
+/// overflows f32 for 4 images at a gain of 1e38 while `B · gain / N` (`· T / 4` for DFL) and the term do not; the
+/// gradients stay finite and equal the tensor path's (which divides first). Class: student class logits 0, the
+/// teacher's 1. DFL at `T` 1: the teacher's box logits the student's plus N(0, 0.5), so the term stays small.
 #[test]
 fn fused_backward_scales_do_not_overflow_before_dividing() {
     let (dev, _) = gpu!();
     let (b, nc, a) = (4, 1, 8);
-    let (sb, _) = raw(71, b, nc, a);
-    let (tb, _) = raw(72, b, nc, a);
-    let sc = Tensor::from_vec(vec![0.0f32; b * nc * a], [b, nc, a]).unwrap();
-    let tc = Tensor::from_vec(vec![1.0f32; b * nc * a], [b, nc, a]).unwrap();
-    let cfg = DistillConfig { cls_gain: 1e38, ..DistillConfig::new("t") };
-    let want = term(dev, false, [&sb, &sc], [&tb, &tc], &cfg);
-    let got = term(dev, true, [&sb, &sc], [&tb, &tc], &cfg);
-    assert!(want.0.iter().all(|v| v.is_finite()) && !want.1.is_empty(), "tensor path {:?}", want.0);
-    same_term(&got, &want, 1e-5, "cls_gain 1e38");
+    let (sb, sc) = raw(71, b, nc, a);
+    let (tb, tc) = raw(72, b, nc, a);
+    let zeros = Tensor::from_vec(vec![0.0f32; b * nc * a], [b, nc, a]).unwrap();
+    let ones = Tensor::from_vec(vec![1.0f32; b * nc * a], [b, nc, a]).unwrap();
+    let near = sb.add(&tb.mul_scalar(0.25).unwrap()).unwrap();
+    let cases = [
+        (
+            "cls_gain 1e38",
+            DistillConfig { cls_gain: 1e38, ..DistillConfig::new("t") },
+            [&sb, &zeros],
+            [&tb, &ones],
+        ),
+        (
+            "dfl_gain 1e38",
+            DistillConfig { dfl_gain: 1e38, temperature: 1.0, ..DistillConfig::new("t") },
+            [&sb, &sc],
+            [&near, &tc],
+        ),
+    ];
+    for (what, cfg, s, t) in cases {
+        let want = term(dev, false, s, t, &cfg);
+        let got = term(dev, true, s, t, &cfg);
+        assert!(
+            want.0.iter().all(|v| v.is_finite()) && !want.1.is_empty(),
+            "{what}: tensor path {:?}",
+            want.0
+        );
+        same_term(&got, &want, 1e-5, what);
+    }
 }
 
 /// The backward: the gradients scale with the upstream gradient (f32 or f16: −2.5 times those of a backward from
