@@ -15,12 +15,12 @@ server and the engine), [framework/README.md](framework/README.md) (fw), [design
 ```sh
 npm ci
 npm run dev       # http://localhost:5173, proxies /api to FOLO_API (default http://127.0.0.1:7878)
-npm run check     # generated tokens are fresh, contrast, icons vendored, tsc (app, framework, scripts), spacing lint
+npm run check     # generated tokens are fresh, contrast (and its tests), icons vendored, tsc (app, framework, scripts), spacing lint
 npm test          # vitest (logic, components, the framework, the scripts' own tests)
 npm run build     # -> dist/, served by `folo serve`; fails if a built stylesheet lost an unprefixed declaration
 npm run preview   # serves dist/ (vite preview)
 npm run tokens    # regenerates src/lib/design/tokens.css and tokens.ts from ../design/tokens.json
-npm run shoot r1  # screenshots of every screen/state -> shots/r1/ (uses the installed Chrome)
+npm run shoot r1  # screenshots of every screen/state -> shots/r1/ (uses the installed Chrome); -- --theme paper: one theme
 npm run qa        # the shoot's layout checks on the production build at tablet/phone sizes, no shots; fails on any (CI)
 FOLO_API=http://127.0.0.1:7979 npm run smoke   # every route against a running `folo serve`, reports errors
 npm run live-smoke -- <out dir>                # a short training run through New run, watched (usage: its header)
@@ -60,7 +60,7 @@ start `folo serve`, or open `http://localhost:5173/?mock=1`.
 
 | Path | What it holds |
 |---|---|
-| `index.html` | The page: applies the saved theme before first paint, loads `src/main.tsx` |
+| `index.html` | The page: applies the saved mode and theme (custom ones included) before first paint, loads `src/main.tsx` |
 | `src/main.tsx` | Entry: loads the tokens and base CSS, renders `App` into `#app` |
 | `src/firstScreen.ts` | Starts fetching the first screen's chunk before the rest of the app has run |
 | `src/App.tsx` | The shell (sidebar, top bar, tab bar, palette, shortcuts, toasts, run watch) and the current screen |
@@ -75,11 +75,11 @@ start `folo serve`, or open `http://localhost:5173/?mock=1`.
 | `src/lib/detect/` | Images with detection boxes (`DetectionView`, `DatasetImage`), label chips, NMS run in the browser (the Playground filters the server's candidates with it) |
 | `src/lib/inference/` | `browser.ts`: FOLO models in this browser through folo-wasm, on WebGPU or the wasm CPU |
 | `src/lib/bench/` | Vision benchmarks' rules and score functions, shared by the screens and the mock |
-| `src/lib/design/` | `tokens.css` and `tokens.ts` (generated from `design/tokens.json`, never edited by hand), `base.css`, `classInk.ts` |
-| `src/lib/*.ts` | Shared rules and wording: `format.ts`, `prefs.ts` (preferences in localStorage), `keys.ts`, `trainCli.ts`, `throughput.ts`, `cloud.ts`, `label.ts`, ... |
+| `src/lib/design/` | `tokens.css` and `tokens.ts` (generated from `design/tokens.json`, never edited by hand: every built-in theme's palette too), `themes.ts` (custom theme files checked, themes resolved and listed), `applyTheme.ts` (a theme onto `<html>`), `base.css`, `classInk.ts` |
+| `src/lib/*.ts` | Shared rules and wording: `format.ts`, `prefs.ts` (preferences in localStorage: the mode, each mode's theme, the custom themes in `folo.themes`), `keys.ts`, `trainCli.ts`, `throughput.ts`, `cloud.ts`, `label.ts`, ... |
 | `framework/` | fw, the UI framework: [framework/README.md](framework/README.md) |
 | `public/` | Copied as is into `dist/`: `favicon.svg`, and `folo-wasm/` once `scripts/build-wasm.sh` has built it |
-| `scripts/` | `tokens.mjs`, `lint-spacing.mjs`, `builtCss.mjs` (the build's CSS check), `shoot.mjs` with `scenes.mjs` and `scenes/` (screenshots and QA), `parity.mjs`, `perf.mjs`, `entries.mjs`, `png.mjs`, the smoke tests |
+| `scripts/` | `tokens.mjs` with `themes.mjs` (the built-in themes resolved), `lint-spacing.mjs`, `builtCss.mjs` (the build's CSS check), `shoot.mjs` with `scenes.mjs` and `scenes/` (screenshots and QA), `parity.mjs`, `perf.mjs`, `entries.mjs`, `png.mjs`, the smoke tests |
 | `shots/`, `dist/` | Output of `npm run shoot` and `npm run build`; git-ignored |
 | `notes/` | The design review record: the rubric each round was scored against, and the log of the rounds |
 | `DESIGN_DIRECTION.md` | The design rules Studio's code follows |
@@ -162,6 +162,19 @@ default-exported function and one `css\`...\`` block of scoped styles that uses 
 lists more. `scripts/lint-spacing.mjs` (in `npm run check`) rejects px values off the grid and font sizes off the
 scale. A test is `<Name>.test.tsx` beside it, starting with `// @vitest-environment happy-dom` and using `render` and
 `flush` from `framework/testing.ts` (as `src/lib/ui/Segmented.test.tsx`).
+
+**Add or change a theme.** The built-in themes are `themes` in `design/tokens.json` (`design/THEMES.md`: a mode
+and overrides over that mode's base; the first of each mode is its default and has none). Edit it there, run `npm run
+tokens` (it writes one `:root[data-theme-id="<id>"]` block per non-default theme into `tokens.css` and every theme's
+resolved palette, `themeIds` and `colorVars` into `tokens.ts`, and fails naming the path of a malformed theme), and
+`npm run check` (`design/contrast.mjs` holds every theme to its mode's pairings). A new theme id also goes into
+`BUILTIN` in `index.html`'s first-paint script (`src/lib/design/firstPaint.test.ts` fails until it does). The rules of
+a custom theme file are `checkCustomTheme` in `src/lib/design/themes.ts`, held to `design/theme-cases.json` (the same
+cases `contrast.mjs` and Desktop replay) by `themes.test.ts`; change the three together. Settings › Appearance is
+`src/routes/settings/Appearance.tsx`, the palette's "Theme: …" commands `src/lib/shell/themeCommands.ts`. Colours reach
+components only as CSS variables, so a theme repaints everything; canvas or SVG code that needs a colour as a value
+reads `prefs.activeTheme.color`, never `color.dark` / `color.light` by mode. `node scripts/shoot.mjs --theme <id>`
+shoots a theme (`settings-appearance-custom` imports the example `design/themes/night-shift.json`).
 
 **Add or change a token.** Edit `design/tokens.json` (format rules in `design/README.md`), run `npm run tokens`, and use
 the new CSS variable in a `css` block, or import it from `$lib/design/tokens` in canvas or SVG code. `npm run check`
