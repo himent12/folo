@@ -620,7 +620,8 @@ pub fn auto_optimizer_rule(
 const PAR_THRESHOLD: usize = 1 << 16;
 
 /// Run `f` for every `(group index, param index)`, in parallel when the step is large. `f` runs under
-/// `no_grad` on whichever thread executes it.
+/// `no_grad` on whichever thread executes it. Under a step guard (`folo_core::StepGuard`, which belongs to this
+/// thread) it runs on this thread, so that the device updates it encodes are guarded too.
 fn for_each_param<F>(groups: &[ParamGroup], f: F) -> Result<()>
 where
     F: Fn(usize, usize) -> Result<()> + Sync,
@@ -633,7 +634,11 @@ where
         let _g = folo_core::no_grad();
         f(gi, pi)
     };
-    if total >= PAR_THRESHOLD { items.par_iter().try_for_each(run) } else { items.iter().try_for_each(run) }
+    if total >= PAR_THRESHOLD && !folo_core::step_guard_active() {
+        items.par_iter().try_for_each(run)
+    } else {
+        items.iter().try_for_each(run)
+    }
 }
 
 /// The multi-tensor device path of an optimizer step: per group with parameters off the CPU, every parameter that

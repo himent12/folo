@@ -782,6 +782,10 @@ impl Backend for GpuBackend {
 
     fn set_step_guard(&self, flag: Option<View<'_>>) -> Result<()> {
         let Some(v) = flag else { return self.ctx.set_step_guard(None).core() };
+        // The single-tensor guarded update binds five storage buffers (the plain one four).
+        if self.ctx.caps().max_storage_buffers < 5 {
+            return Err(Error::NotSupported { op: "set_step_guard", backend: BACKEND_NAME });
+        }
         if v.layout.numel() != 1 || v.storage.dtype() != CoreDType::F32 {
             return Err(core_err(crate::error::GpuError::Shape("step guard: one F32 element".into())));
         }

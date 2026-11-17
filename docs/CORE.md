@@ -213,10 +213,13 @@ implements all four:
 - Everything downstream runs in the dtype it receives; the fused train-mode BatchNorm takes f16 data with f32
   parameters and statistics.
 - `Tensor::unscale_check_` (a `Backend::unscale_check` hook) is the loss scaler's fused unscale and overflow flag.
-- `StepGuard::new(&flag)` (a `Backend::set_step_guard` hook; `src/guard.rs`) makes the optimizer updates that follow
-  on that device (`optimizer_step`, the `*_many` updates, Muon's parameter update) change nothing when the one-element
-  f32 `flag` is not finite, until the guard drops: mixed precision steps without waiting for the overflow check.
-  `Ok(None)` where the backend has none; updates outside those kernels ask `step_guard_allows()` first.
+- `StepGuard::new(&flag)` (a `Backend::set_step_guard` hook; `src/guard.rs`) makes the optimizer updates that the
+  calling thread encodes next on that device (`optimizer_step`, the `*_many` updates, Muon's parameter update) change
+  nothing when the one-element f32 `flag` (its value when the guard was set) is not finite, until the guard drops:
+  mixed precision steps without waiting for the overflow check. The guard is the thread's (`StepGuard` is not
+  `Send`; folo-nn keeps a guarded step's per-parameter updates on that thread, `step_guard_active()`). `Ok(None)`
+  where the backend has none (or binds fewer than 5 storage buffers); updates outside those kernels ask
+  `step_guard_allows()` first. A skipped update still counts as a write of its tensors (their versions move).
 
 ## RNG
 Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests. `Rng::ALGO`

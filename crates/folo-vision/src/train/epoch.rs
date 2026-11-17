@@ -41,7 +41,15 @@ impl Trainer {
         let phase = self.mosaic_phase(e);
         let mut batch_start = Instant::now();
         for item in source.by_ref() {
-            let (mut batch, staged) = item?;
+            let (mut batch, staged) = match item {
+                Ok(v) => v,
+                Err(err) => {
+                    // A pending step settles first: its failure (the 50th skip) is the one the run reports, as it
+                    // was at its window, before this batch was asked for.
+                    self.resolve_step()?;
+                    return Err(err);
+                }
+            };
             let received = Instant::now();
             let n = batch.len();
             let targets = targets_from_normalized(&batch.targets, n, s, s)?;
@@ -88,8 +96,20 @@ impl Trainer {
             let finite = loss.is_finite() && kd_finite && RunningStats::all_finite(&self.model)?;
             // The previous window's guarded step (§8.8): its flag was computed long before this batch's loss, which
             // was just read back, so this read does not wait. The loss scale the backward below uses, the schedule
-            // and the skip counters are then those of a step settled at once.
-            self.resolve_step()?;
+            // and the skip counters are then those of a step settled at once. Where that step's outcome ends the
+            // run (the 50th skip) or stops it (an event sink that stops on the overflow log), it ends where a
+            // synchronous step would have: before this batch, whose forward is taken back.
+            match self.resolve_step() {
+                Ok(true) if self.stopping() => {
+                    snapshot.restore()?;
+                    return Ok(None);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    snapshot.restore()?;
+                    return Err(err);
+                }
+            }
             let lr = self.sched.lr_at(self.sched.step(), &self.opt.groups()[decay]);
             let items = loss.items;
             if finite {
@@ -171,7 +191,10 @@ impl Trainer {
                 return Ok(None);
             }
         }
-        self.resolve_step()?;
+        // The last window's step; a stop it triggers ends the run inside the epoch, as at any other window.
+        if self.resolve_step()? && self.stopping() {
+            return Ok(None);
+        }
         drop(source);
         // Start the next epoch now: its first batches are ready when validation and the checkpoints are done.
         // The batches are the same whenever an epoch starts (§8.3: everything is seeded by the epoch). Not after
@@ -279,10 +302,12 @@ impl Trainer {
     /// Settles the guarded step [`Trainer::optimizer_step`] left pending, if there is one: reads its flag and
     /// finishes it as [`Trainer::settle_step`]. Called before anything reads what a step changes (the next
     /// batch's loss scale, the schedule, the next window, the epoch's end, a stop).
-    pub(super) fn resolve_step(&mut self) -> Result<()> {
-        let Some(p) = self.pending_step.take() else { return Ok(()) };
+    /// Returns whether there was one.
+    pub(super) fn resolve_step(&mut self) -> Result<bool> {
+        let Some(p) = self.pending_step.take() else { return Ok(false) };
         let finite = p.flag.item::<f32>()?.is_finite();
-        self.settle_step(finite, p.scale, p.e, p.k, true)
+        self.settle_step(finite, p.scale, p.e, p.k, true)?;
+        Ok(true)
     }
 
     /// The loss scaler's side of a window's step at loss scale `scale`, the gradients `finite` or not: a step

@@ -5,16 +5,17 @@
 //! NaN, so a skipped step leaves every parameter and state buffer as it was. The host reads the scalar later.
 
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use super::GpuContext;
 use crate::error::Result;
 use crate::pool::GpuBuffer;
 
 thread_local! {
-    /// This thread's step guards, by context (the address of its shared state). Per thread, so that two trainings
-    /// (or tests) stepping on one device at once do not guard each other's updates.
-    static GUARDS: RefCell<Vec<(usize, GpuBuffer)>> = const { RefCell::new(Vec::new()) };
+    /// This thread's step guards, by context (a weak reference to its shared state, so that a guard left set on a
+    /// context that is gone never matches a new one). Per thread, so that two trainings (or tests) stepping on one
+    /// device at once do not guard each other's updates.
+    static GUARDS: RefCell<Vec<(Weak<super::Inner>, GpuBuffer)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The guard's WGSL test, for a kernel that declares the guard binding as `SKIP: array<f32>`: whether the step is
@@ -37,22 +38,22 @@ impl GpuContext {
             }
             None => None,
         };
-        let key = self.guard_key();
         GUARDS.with(|gs| {
             let mut gs = gs.borrow_mut();
-            gs.retain(|(k, _)| *k != key);
-            gs.extend(guard.map(|g| (key, g)));
+            // This context's old guard, and any of a context that is gone.
+            gs.retain(|(k, _)| k.strong_count() > 0 && !self.is(k));
+            gs.extend(guard.map(|g| (Arc::downgrade(&self.inner), g)));
         });
         Ok(())
     }
 
     /// The buffer of this thread's step guard on this context, while one is set ([`GpuContext::set_step_guard`]).
     pub(crate) fn step_guard(&self) -> Option<wgpu::Buffer> {
-        let key = self.guard_key();
-        GUARDS.with(|gs| gs.borrow().iter().find(|(k, _)| *k == key).map(|(_, g)| g.raw().clone()))
+        GUARDS.with(|gs| gs.borrow().iter().find(|(k, _)| self.is(k)).map(|(_, g)| g.raw().clone()))
     }
 
-    fn guard_key(&self) -> usize {
-        Arc::as_ptr(&self.inner) as usize
+    /// Whether `k` refers to this context (a live one: a dead context's address may be reused).
+    fn is(&self, k: &Weak<super::Inner>) -> bool {
+        k.strong_count() > 0 && std::ptr::eq(k.as_ptr(), Arc::as_ptr(&self.inner))
     }
 }

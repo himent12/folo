@@ -28,6 +28,11 @@ impl Trainer {
     /// The complete training state as [`Trainer::save_checkpoint`] writes it, with every tensor on the host: what
     /// the checkpoint writer thread is handed (`train/writer/`). Only at an epoch boundary.
     pub(super) fn checkpoint_snapshot(&self) -> Result<FileContents> {
+        if self.pending_step.is_some() {
+            return Err(Error::Failed(
+                "a checkpoint was asked for while an optimizer step was unsettled".into(),
+            ));
+        }
         if !self.at_boundary {
             return Err(Error::Config(format!(
                 "a checkpoint can only be written at an epoch boundary; this run stopped inside epoch {}",

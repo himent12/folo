@@ -15,8 +15,11 @@ cf65f7a5, built in a detached worktree (`D:/folo-wt/hill5-trainer-base`, binary
 - **COCO arms.** `scripts/coco-arms.sh <tag> <secs> <arm>...`: `folo train --data D:/folo-data/coco --model folo-n
   --imgsz 640 --batch 16 --amp --seed 0` killed by PID after `<secs>`, with nvidia-smi and typeperf beside it.
   `scripts/ana.py <dir> [skip]` reads each arm's `metrics.jsonl` step events (per-step wall `t_k = 16 k /
-  imgs_per_s_k` from consecutive events) and prints the mean img/s over steps > skip, the median non-window step
-  and the median window-end step (every 4th batch at batch 16, nbs 64).
+  imgs_per_s_k` from consecutive events) and prints the mean img/s over steps > skip, the median non-window step,
+  the median window-end step (every 4th batch at batch 16, nbs 64) and the **cycle**: the sum of the four
+  per-position step medians, i.e. the typical time of one whole window. The cycle is the measure of the window
+  change; the window-end step alone overstates it, because on `main` the batch after a synchronous window end starts
+  on an idle GPU and is fast (position 1 is ~20 ms on `main`, ~26 ms deferred).
 - **Prototype.** Branch `train/window-proto` (not for a PR): `FOLO_PROTO_TIMING=1` prints per-phase host times of
   the batch loop; `FOLO_PROTO_DEFER=1` encodes the step without reading the overflow flag first and reads it with
   the next batch's loss (from batch 300 on, at a fixed loss scale `FOLO_PROTO_SCALE=1024`, so that no step
@@ -42,15 +45,19 @@ host encodes the optimizer, the EMA and the next batch's forward.
 
 Same arms, 3 alternated rounds (`logs/win-mini1/`, s = synchronous, d = deferred, steps 301-1250 of the epoch):
 
-| round | window-end extra, sync | window-end extra, deferred | mean img/s sync | mean img/s deferred |
-|---|---|---|---|---|
-| 1 | +14.0 ms | +4.1 ms | 411 | 549 |
-| 2 | +14.2 ms | +5.0 ms | 537 | 568 |
-| 3 | +13.2 ms | +4.0 ms | 555 | 496 |
+| round | cycle sync | cycle deferred | saving | window-end extra sync / deferred | mean img/s sync / deferred | load: CPU, Defender (sync / deferred) |
+|---|---|---|---|---|---|---|
+| 1 | 131.6 ms | 112.8 ms | −18.8 ms | +14.0 / +4.1 ms | 411 / 549 | 90%, 5.5 / 99%, 2.5 cores |
+| 2 | 116.1 ms | 111.7 ms | −4.4 ms | +14.2 / +5.0 ms | 537 / 568 | 100%, 1.3 / 99%, 1.1 cores |
+| 3 | 114.3 ms | 110.1 ms | −4.2 ms | +13.2 / +4.0 ms | 555 / 496 | 96%, 1.3 / 90%, 1.1 cores |
 
-"Window-end extra" is the median window-end step less the median other step. Deferring saves 9.2-10.1 ms per window
-(gate: 5 ms): **go**. Load: CPU 90-100% busy (other lanes building), Defender 1-5.5 cores; the mean img/s swing
-with that load (round 1 sync and round 3 deferred lost the loader for stretches), the window-end delta does not.
+Positions 1-3 of each window take 74.8 ms (sync, median of rounds 2-3) against 80.1 ms (deferred): the deferred
+window keeps the GPU fed, so its window-end step is 9-10 ms shorter, but the next batch no longer starts on an idle
+GPU and is ~5 ms slower. Per whole window the prototype saves 4.2-4.4 ms in the two quiet rounds (round 1 had
+Defender on 5.5 cores during the sync arm). **Against the 5 ms gate this is a miss by the cycle measure** (median
+4.4 ms) and a pass by the window-end measure I first used (9.2-10.1 ms); I went on with the implementation on the
+window-end number, and found the error in review (below). The full implementation measures better than the
+prototype (it also drops the second submission of the window end): see the A/B.
 
 ### Design
 
@@ -73,53 +80,89 @@ with that load (round 1 sync and round 3 deferred lost the loader for stretches)
 - **Fallbacks** that are not guarded kernels (tensor-op paths: a device without the multi-tensor kernels) ask
   `step_guard_allows()` (a readback) first. CPU training, AMP without clipping (`clip_grad_norm = 0`) and the f32
   path are unchanged.
+- **Review fixes** (round 1, Sol 6.2 and Opus 5.5): a stop the settle raises (the 50th skip) restores the batch
+  snapshot and returns before that batch's backward, as the synchronous path stopped before its forward; a loader
+  error settles the pending step before it returns; SGD's `unstep` drops the momentum buffers a skipped first step
+  allocated; the per-parameter fallback runs on the guarded thread (the guard is a thread-local, rayon workers do
+  not see it); `StepGuard` is not `Send`; the guard binds its own copy of the flag in every path; a device with
+  fewer than 5 storage bindings per stage reports no guard and keeps the synchronous path; a stale guard of a
+  dropped context is keyed by a `Weak`, not an address. A skipped step still bumps the parameter versions (the
+  kernel ran); that only costs a cache refill and is documented in CORE.md.
 
 ### Tests
 
 - `crates/folo-nn/tests/gpu/guard.rs`: SGD, AdamW and MuSGD with an EMA on the GPU, under a guard on NaN, +inf and
   -inf, leave every model tensor, optimizer state and EMA value bit-identical; under a finite flag the step is the
   unguarded step bit for bit. The guarded kernels are in the kernel registry.
-- `crates/folo-vision/tests/gpu_amp.rs` `deferred_steps_end_bit_identical_to_synchronous_ones`: 2-epoch AMP runs
+- `guard_rules`: one F32 element, one guard per thread, `step_guard_allows`, and an update another thread encodes
+  meanwhile on the same device still runs. `per_parameter_fallback_stays_guarded`: a group the multi-tensor update
+  declines (a transposed parameter beside a 90,000-element one, above the parallel threshold) still skips under a
+  NaN guard, for SGD and AdamW (it fails when the per-parameter path runs on worker threads).
+- `crates/folo-vision/tests/gpu_amp.rs` `deferred_steps_end_bit_identical_to_synchronous_ones`: 4-epoch AMP runs
   with SGD, AdamW and MuSGD, deferred against synchronous (`Trainer::set_deferred_steps(false)`): every checkpoint
-  tensor and the loss scaler equal. The initial scale overflows the first windows, so skipped and taken guarded
-  steps both occur (asserted). A mutation that drops `unstep` fails it (at the deferred run's checkpoint write).
+  tensor and the loss scaler equal. The initial scale overflows the first windows; the test asserts that at least
+  one step is skipped and at least one taken (with 2 epochs every window skipped, which a review caught), and that
+  all 8 windows went through the guard. A mutation that drops `unstep` fails it.
 - `amp_run_resumes_bit_exactly_with_its_loss_scaler` (existing, now on the deferred path): resume, an injected
   overflow epoch and the 50-skip rule across a resume.
 
-### A/B (full COCO)
+### A/B
 
-`folo-base.exe` (main cf65f7a5) against `folo-sync.exe` (this branch), `scripts/ab-sync.sh`: 130 s arms of
-`coco-arms.sh` with `--workers 16`, alternated, 3 rounds per setting inside one GPU-lock hold each, steps 301+ of
-epoch 1.
+`folo-base.exe` (main cf65f7a5) against this branch, `scripts/coco-arms.sh`: 130 s arms of folo-n AMP at 640,
+batch 16, seed 0, alternated inside one GPU-lock hold each, steps 301-1250 of epoch 1. "cycle" is defined under
+Method. Other lanes' builds and tests ran beside every set; the load is per arm.
 
-**Mosaic on** (`logs/sync-mosaic/`):
+**GPU-bound: mini320 at 640, `--mosaic 0 --workers 12`.** The measure that resolves the change. Three sets:
+`sync-mini2` (the branch before the review fixes, `folo-sync.exe`, base first), `sync-mini3` (after the fixes,
+`folo-sync2.exe`, new first) and `sync-mini4` (`folo-sync2.exe`, one discarded warm-up arm, base first).
 
-| arm | mean img/s | non-window median | window-end median (extra) | GPU util | load: CPU total, Defender, folo |
+| set | arm | mean img/s | cycle | window-end extra | GPU util | load: CPU total, Defender, folo |
+|---|---|---|---|---|---|---|
+| mini2 | b1 main | 438 | 113.6 ms | +14.6 ms | 89% | 80%, 1.0, 6.0 cores |
+| mini2 | n1 new | 481 | 112.5 ms | +5.0 ms | 88% | 91%, 0.6, 6.2 cores |
+| mini2 | b2 main | 469 | 116.0 ms | +15.4 ms | 91% | 80%, 0.5, 6.1 cores |
+| mini2 | n2 new | 586 | 108.1 ms | +2.8 ms | 93% | 81%, 0.6, 7.0 cores |
+| mini2 | b3 main | 482 | 113.6 ms | +14.9 ms | 90% | 50%, 0.8, 5.2 cores |
+| mini2 | n3 new | 583 | 108.4 ms | +2.0 ms | 96% | 69%, 0.5, 7.2 cores |
+| mini3 | n1 new | (303) | 111.0 ms | +2.9 ms | 2% | cold pipeline cache, see below |
+| mini3 | b1 main | 382 | 127.7 ms | +21.2 ms | 88% | 79%, 0.6, 5.3 cores |
+| mini3 | n2 new | (185) | 109.9 ms | +3.0 ms | 54% | cold pipeline cache, see below |
+| mini3 | b2 main | 455 | 110.5 ms | +15.2 ms | 87% | 78%, 0.5, 6.4 cores |
+| mini3 | n3 new | 537 | 112.3 ms | +4.0 ms | 92% | 89%, 0.4, 6.7 cores |
+| mini3 | b3 main | 520 | 119.0 ms | +15.1 ms | 84% | 92%, 0.3, 6.6 cores |
+| mini4 | b1 main | 496 | 122.6 ms | +14.8 ms | 90% | 83%, 0.5, 6.2 cores |
+| mini4 | n1 new | 573 | 109.9 ms | +2.6 ms | 85% | 100%, 1.2, 6.7 cores |
+| mini4 | b2 main | 436 | 134.6 ms | +24.6 ms | 69% | 100%, 0.9, 5.2 cores |
+| mini4 | n2 new | (235) | (238.8 ms) | +8.8 ms | 35% | 100%, 1.0, **2.8** cores: CPU-starved |
+| mini4 | b3 main | 390 | 148.5 ms | +20.9 ms | 64% | 100%, 0.5, 5.1 cores |
+| mini4 | n3 new | 568 | 110.1 ms | +2.7 ms | 80% | 100%, 0.8, 6.1 cores |
+| mini4 | b4 main | 464 | 130.8 ms | +20.3 ms | 69% | 100%, 0.4, 5.6 cores |
+| mini4 | n4 new | 521 | 119.2 ms | +3.5 ms | 82% | 100%, 0.5, 6.2 cores |
+
+Without the three bracketed arms: **mean img/s median 568 (range 481-586, 7 arms) against 459 (382-520, 10
+arms), +24%; cycle median 110.1 ms (108.1-119.2) against 121 ms (110.5-148.5), −9%.** Every pair's cycle favours
+the branch except mini4's starved n2, by −0.6 to −38.4 ms per window. The gain grows with the CPU load, likely
+because `main`'s host thread waits for the GPU at every window end and then has to be scheduled again before it encodes anything, and with the
+CPU at 100% that costs more (mini4's base cycle 123-149 ms against 110-116 ms in the quieter mini2). In the
+quietest set (mini2, CPU 50-91%) the saving is −1.1 / −7.9 / −5.2 ms per window, +10% to +25% img/s.
+
+Excluded arms: `mini3` n1 and n2 were the first two launches of a freshly built binary. The arms are killed by
+PID, so the run never writes its kernel list, and new pipelines compiled on demand: gaps of 6.5 s (n1) and 15-16 s
+(n2, three of them) with the GPU at 0%, `folo` at exactly one core and the machine at 12-20% CPU. Their cycle
+medians are unaffected and are shown. `mini4` n2 lost the loader to other lanes (folo 2.8 cores at 100% CPU, GPU
+35%). `mini4` therefore began with a discarded warm-up arm of the new binary (w0: 527 img/s, cycle 116.6 ms, no
+gap over 300 ms). Logs: `logs/sync-mini2/`, `logs/sync-mini3/`, `logs/sync-mini4/`.
+
+**Full COCO, 16 workers** (`folo-sync.exe`, before the review fixes; `logs/sync-mosaic/`, `logs/sync-nomosaic/`).
+Full COCO's large JPEGs make these runs loader-bound on this machine, and every arm reads the same seed-0 order, so
+later arms find more of it in the page cache: mean img/s does not resolve the change.
+
+| setting | cycle main (b1 / b2 / b3) | cycle new (n1 / n2 / n3) | mean img/s main | mean img/s new | GPU util |
 |---|---|---|---|---|---|
-| b1 main | 212 | 50.6 ms | 67.9 ms (+17.3) | 40% | 80%, 3.1, 7.0 cores |
-| n1 new | 239 | 51.8 ms | 58.2 ms (+6.4) | 46% | 92%, 4.0, 7.4 cores |
-| b2 main | 252 | 50.4 ms | 68.2 ms (+17.8) | 48% | 96%, 4.4, 7.7 cores |
-| n2 new | 353 | 42.0 ms | 50.7 ms (+8.7) | 59% | 99%, 4.6, 10.2 cores |
-| b3 main | 433 | 29.0 ms | 43.5 ms (+14.5) | 75% | 99%, 1.2, 12.5 cores |
-| n3 new | 351 | 29.0 ms | 34.5 ms (+5.5) | 68% | 67%, 1.9, 11.0 cores |
+| mosaic on | 219.2 / 219.5 / 130.1 ms | 213.0 / 176.6 / 121.6 ms | 212 / 252 / 433 | 239 / 353 / 351 | 40-75% |
+| `--mosaic 0` | 120.1 / 119.8 / 150.0 ms | 121.9 / 117.3 / 150.3 ms | 230 / 491 / 378 | 327 / 519 / 363 | 9-89% |
 
-With mosaic on, full COCO at 16 workers is loader-bound on this machine, and the mean img/s does not resolve the
-change: every arm reads the same seed-0 order, so later arms find more of it in the page cache (the base arms rise
-212 → 252 → 433), and other lanes' builds held the CPU at 80-99%. The window-end step is the robust measure: it is
-9.0-10.9 ms shorter per window (round by round: −10.9, −9.1, −9.0 ms), the same saving as the gate prototype.
-
-**Mosaic off** (`--mosaic 0`, `logs/sync-nomosaic/`):
-
-| arm | mean img/s | non-window median | window-end median (extra) | GPU util | load: CPU total, Defender, folo |
-|---|---|---|---|---|---|
-| b1 main | 230 | 27.4 ms | 40.9 ms (+13.5) | 9% | 57%, 1.3, 3.4 cores |
-| n1 new | 327 | 28.9 ms | 35.0 ms (+6.1) | 59% | 81%, 1.4, 5.4 cores |
-| b2 main | 491 | 27.3 ms | 39.9 ms (+12.6) | 85% | 99%, 2.4, 7.4 cores |
-| n2 new | 519 | 28.2 ms | 32.8 ms (+4.6) | 89% | 100%, 3.0, 7.8 cores |
-| b3 main | 378 | 34.2 ms | 47.2 ms (+13.1) | 63% | 100%, 3.3, 5.7 cores |
-| n3 new | 363 | 34.6 ms | 46.4 ms (+11.7) | 64% | 100%, 2.9, 5.3 cores |
-
-Not GPU-bound either: full COCO's large JPEGs still starved the GPU for stretches (b1's median utilisation 9%)
-while other lanes held the CPU at 100%. The one GPU-bound pair (round 2, 85-89%) gave +5.7% img/s and a window
-7.3 ms shorter; round 3, with the CPU saturated, kept most of the stall (−1.4 ms). The clean GPU-bound comparison
-is the mini320 one below.
+Load: CPU 57-100%, Defender 1.2-4.6 cores. With mosaic on, the window is a small part of a 120-220 ms cycle the
+loader sets; with `--mosaic 0` the pairs are +1.8 / −2.5 / +0.3 ms: a tie. The one GPU-bound pair (`--mosaic 0`
+round 2, 85-89% GPU) gave +5.7% img/s. The brief's targets for this lane (+20% with mosaic at 16 workers, +8%
+GPU-bound) are the sum of items 1 and 2; this item alone moves the GPU-bound case only.

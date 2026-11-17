@@ -3,20 +3,24 @@
 //! itself, so the trainer does not wait for a readback before encoding the step.
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
 
 use crate::backend::View;
 use crate::{Device, Error, Result, Tensor};
 
 thread_local! {
-    /// The flag of this thread's live guard.
+    /// A copy of the flag of this thread's live guard, taken when the guard was set (as the device's own copy is).
     static FLAG: RefCell<Option<Tensor>> = const { RefCell::new(None) };
 }
 
 /// A step guard while it lives (see [`crate::backend::Backend::set_step_guard`]): the device's optimizer updates
 /// change nothing when the flag is not finite. Dropping it clears the guard. Updates that do not go through the
-/// guarded kernels (a tensor-op fallback) must ask [`step_guard_allows`] first.
+/// guarded kernels (a tensor-op fallback) must ask [`step_guard_allows`] first. The guard belongs to the thread that
+/// set it (updates other threads encode are not guarded), so it cannot be sent to another thread.
 pub struct StepGuard {
     device: Device,
+    /// Not `Send`: dropping it on another thread would clear that thread's guard instead.
+    _thread: PhantomData<*const ()>,
 }
 
 impl StepGuard {
@@ -43,8 +47,16 @@ impl StepGuard {
         };
         match r {
             Ok(()) => {
-                FLAG.with(|f| *f.borrow_mut() = Some(flag.clone()));
-                Ok(Some(StepGuard { device: flag.device() }))
+                let guard = StepGuard { device: flag.device(), _thread: PhantomData };
+                // The value as of now, as the device took it: a later write to `flag` moves neither.
+                let copy = {
+                    let _g = crate::no_grad();
+                    let c = Tensor::zeros_with(flag.shape(), crate::DType::F32, flag.device())?;
+                    c.copy_from(flag)?;
+                    c
+                };
+                FLAG.with(|f| *f.borrow_mut() = Some(copy));
+                Ok(Some(guard))
             }
             Err(Error::NotSupported { .. }) => Ok(None),
             Err(e) => Err(e),
@@ -59,6 +71,12 @@ impl Drop for StepGuard {
             let _ = b.set_step_guard(None);
         }
     }
+}
+
+/// Whether a step guard is set on this thread (a caller that would hand updates to other threads keeps them on
+/// this one instead: the guard does not reach them).
+pub fn step_guard_active() -> bool {
+    FLAG.with(|f| f.borrow().is_some())
 }
 
 /// Whether an optimizer update outside the guarded kernels may run: `true` without a guard on this thread, else

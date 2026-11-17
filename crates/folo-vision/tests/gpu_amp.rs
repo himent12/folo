@@ -498,22 +498,24 @@ fn amp_run_resumes_bit_exactly_with_its_loss_scaler() {
 /// with the next batch's loss) ends a run in exactly the state of the synchronous one (the flag read before the
 /// step), for SGD, AdamW and MuSGD: every checkpoint tensor (model, optimizer state, EMA and its count, schedule
 /// step) bit for bit, and the loss scaler (scale, growth count, skips). The first windows overflow at the initial
-/// scale 2^16, so both outcomes of a guarded step are covered: skipped (the counters taken back) and taken.
+/// scale 2^16 (here the first 4 of the 8: 4 epochs, as 2 would skip every window), so both outcomes of a guarded
+/// step are covered: skipped (the counters taken back) and taken.
 #[test]
 fn deferred_steps_end_bit_identical_to_synchronous_ones() {
     let (_, _g) = gpu_tc!();
     let root = TestDir::new("amp-deferred");
     for optimizer in [OptimizerChoice::Sgd, OptimizerChoice::Adamw, OptimizerChoice::Musgd] {
-        let cfg = TrainConfig { optimizer, ..amp_config() };
+        let cfg = TrainConfig { optimizer, epochs: 4, ..amp_config() };
         let mut ends = Vec::new();
         for deferred in [true, false] {
             let mut t = Trainer::new(cfg.clone(), data(), TrainOptions::default()).unwrap();
             t.set_deferred_steps(deferred);
-            assert_eq!(t.run().unwrap().epochs_completed, 2);
+            assert_eq!(t.run().unwrap().epochs_completed, 4);
             let s = t.loss_scaler().unwrap().clone();
+            // Both outcomes of a guarded step: at least one skipped, at least one of the 8 windows taken.
             assert!(s.skipped_steps() >= 1 && s.skipped_steps() < 8, "{optimizer:?}: {s:?}");
             // 16 images, batch 4, nbs 8: two windows per epoch.
-            assert_eq!(t.guarded_steps(), if deferred { 4 } else { 0 }, "{optimizer:?}");
+            assert_eq!(t.guarded_steps(), if deferred { 8 } else { 0 }, "{optimizer:?}");
             let path = root.join(format!("{optimizer:?}-{deferred}.folo"));
             t.save_checkpoint(&path).unwrap();
             ends.push((tensors(&path), s));

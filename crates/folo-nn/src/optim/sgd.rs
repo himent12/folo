@@ -22,27 +22,32 @@ pub struct Sgd {
     groups: Vec<ParamGroup>,
     bufs: Vec<Vec<Option<Tensor>>>,
     step: u64,
+    /// The momentum buffers the last step allocated (warmup momentum on a momentum-free group), dropped again by
+    /// [`Optimizer::unstep`] so that a skipped guarded step leaves the state as it was.
+    fresh: Vec<(usize, usize)>,
 }
 
 impl Sgd {
     /// An optimizer over `groups` (no parameter in two groups; all `F32`).
     pub fn new(groups: Vec<ParamGroup>) -> Result<Self> {
         validate_groups(&groups)?;
-        let mut s =
-            Sgd { bufs: groups.iter().map(|g| vec![None; g.params.len()]).collect(), groups, step: 0 };
+        let bufs = groups.iter().map(|g| vec![None; g.params.len()]).collect();
+        let mut s = Sgd { bufs, groups, step: 0, fresh: Vec::new() };
         s.ensure_buffers(|g| g.base_momentum > 0.0)?;
+        s.fresh.clear();
         Ok(s)
     }
 
     /// Allocate zero momentum buffers for every parameter of the groups selected by `want`.
     fn ensure_buffers(&mut self, want: impl Fn(&ParamGroup) -> bool) -> Result<()> {
-        for (g, bufs) in self.groups.iter().zip(&mut self.bufs) {
+        for (gi, (g, bufs)) in self.groups.iter().zip(&mut self.bufs).enumerate() {
             if !want(g) {
                 continue;
             }
-            for ((_, p), b) in g.params.iter().zip(bufs.iter_mut()) {
+            for (pi, ((_, p), b)) in g.params.iter().zip(bufs.iter_mut()).enumerate() {
                 if b.is_none() {
                     *b = Some(Tensor::zeros_with(p.shape(), DType::F32, p.device())?);
+                    self.fresh.push((gi, pi));
                 }
             }
         }
@@ -130,6 +135,7 @@ impl Optimizer for Sgd {
 
     fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
         // Warmup can give a momentum-free group a non-zero momentum: give it buffers first.
+        self.fresh.clear();
         self.ensure_buffers(|g| g.momentum > 0.0)?;
         let (groups, bufs) = (&self.groups, &self.bufs);
         let sgd = |gi: usize| {
@@ -168,6 +174,9 @@ impl Optimizer for Sgd {
 
     fn unstep(&mut self) {
         self.step = self.step.saturating_sub(1);
+        for (gi, pi) in self.fresh.drain(..) {
+            self.bufs[gi][pi] = None;
+        }
     }
 
     fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {

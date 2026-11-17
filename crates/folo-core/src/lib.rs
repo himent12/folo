@@ -68,7 +68,7 @@ pub use backend::{
 pub use device::Device;
 pub use dtype::{DType, Element};
 pub use error::{Error, Result};
-pub use guard::{StepGuard, step_guard_allows};
+pub use guard::{StepGuard, step_guard_active, step_guard_allows};
 pub use half::f16;
 pub use layout::Layout;
 pub use ops::BatchNormTrain;

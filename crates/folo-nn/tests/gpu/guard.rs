@@ -120,3 +120,43 @@ fn guard_rules() {
     // The CPU has none: the caller reads the flag itself.
     assert!(StepGuard::new(&Tensor::from_vec(vec![1.0f32], [1]).unwrap()).unwrap().is_none());
 }
+
+/// Gradients by parameter shape (the test's parameters all differ in shape).
+struct ByShape(Vec<Tensor>);
+
+impl GradSource for ByShape {
+    fn grad(&self, param: &Tensor) -> Option<&Tensor> {
+        self.0.iter().find(|g| g.shape() == param.shape())
+    }
+}
+
+/// A group the multi-tensor update declines (a transposed parameter) takes the per-parameter path, which runs on
+/// worker threads for a large step: under a guard it stays on the guarded thread, so a skip still writes nothing.
+#[test]
+fn per_parameter_fallback_stays_guarded() {
+    let dev = gpu!();
+    let mut rng = Rng::seed(7);
+    let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    let one = |dims: [usize; 2]| Tensor::full_with(dims, 1.0, folo_core::DType::F32, dev).unwrap();
+    for kind in [OptimKind::Sgd, OptimKind::AdamW] {
+        // 90,000 elements: above the threshold for updating parameters in parallel.
+        let big = Tensor::randn([300, 300], 0.0, 1.0, &mut rng).to_device(dev).unwrap();
+        let small = Tensor::randn([8, 4], 0.0, 1.0, &mut rng).to_device(dev).unwrap().t().unwrap();
+        let params = vec![("big".to_string(), big.clone()), ("small".to_string(), small.clone())];
+        let groups = vec![ParamGroup::new("decay", params).lr(0.1)];
+        let mut opt: Box<dyn Optimizer> = match kind {
+            OptimKind::Sgd => Box::new(Sgd::new(groups).unwrap()),
+            _ => Box::new(AdamW::new(groups).unwrap()),
+        };
+        let grads = ByShape(vec![one([300, 300]), one([4, 8])]);
+        let before = (bits(&big), bits(&small));
+        let flag = Tensor::from_vec(vec![f32::NAN], [1]).unwrap().to_device(dev).unwrap();
+        let guard = StepGuard::new(&flag).unwrap().expect("a guard");
+        opt.step(&grads).unwrap();
+        drop(guard);
+        assert!(bits(&big) == before.0, "{kind:?}: the large parameter moved under a skipping guard");
+        assert!(bits(&small) == before.1, "{kind:?}: the transposed parameter moved under a skipping guard");
+        opt.step(&grads).unwrap();
+        assert!(bits(&big) != before.0 && bits(&small) != before.1, "{kind:?}: a plain step moves both");
+    }
+}
