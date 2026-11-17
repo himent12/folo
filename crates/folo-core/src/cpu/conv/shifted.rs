@@ -1,10 +1,9 @@
 //! [`ShiftedRows`]: a conv input zero-padded and split into its stride phases once, so every `(channel, ky, kx)`
 //! row of the GEMM is a contiguous run read in place (the forward's B, the weight gradient's A).
 
-use rayon::prelude::*;
-
 use super::ConvGeom;
 use crate::cpu::gemm::{ColumnMap, NR};
+use crate::cpu::par_chunks;
 
 /// The shifted-rows form of one image's (one group's) conv input, the B operand of [`gemm_rows`]: the input,
 /// zero-padded and split into its `sy x sx` stride phases (`T[ci][a][b][i][j] = x_pad[sy·i + a][sx·j + b]`),
@@ -134,7 +133,7 @@ impl ShiftedRows {
         // A copy this size takes tens of microseconds: in parallel only when it is large, a few channels a task.
         if parallel && body.len() >= SHIFTED_PAR_MIN {
             let per_task = SHIFTED_TASK.div_ceil(per_ci);
-            body.par_chunks_mut(per_task * per_ci).enumerate().for_each(|(t, chunk)| {
+            par_chunks(body, per_task * per_ci, &|t, chunk| {
                 chunk.chunks_mut(per_ci).enumerate().for_each(|(c, dst)| fill((t * per_task + c, dst)))
             });
         } else {

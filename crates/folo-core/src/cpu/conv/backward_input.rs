@@ -1,12 +1,11 @@
 //! The input gradient: at stride 1 the forward conv of the output gradient with the flipped, channel-swapped
 //! kernel (no col2im); pointwise convs as `Wᵀ · gy`; strided convs through an unfolded gradient and col2im.
 
-use rayon::prelude::*;
-
 use super::depthwise::depthwise_backward_input;
 use super::{ConvGeom, conv2d_forward, for_each_image};
 use crate::backend::Conv2dParams;
 use crate::cpu::gemm::{Strided, gemm_ex};
+use crate::cpu::par_chunks;
 
 /// True if [`conv2d_backward_input`] takes the transposed-convolution path: stride 1 and padding within the
 /// kernel's reach (`p <= d (k - 1)`) on both axes, not depthwise.
@@ -69,7 +68,7 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
         }
     };
     if flipped.len() >= crate::cpu::PAR_MIN {
-        flipped.par_chunks_mut(8 * og * khw).enumerate().for_each(block);
+        par_chunks(&mut flipped, 8 * og * khw, &|i, c| block((i, c)));
     } else {
         flipped.chunks_mut(8 * og * khw).enumerate().for_each(block);
     }
@@ -140,7 +139,7 @@ fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, parallel: bool) {
         }
     };
     if parallel {
-        gx.par_chunks_mut(hw).enumerate().for_each(plane);
+        par_chunks(gx, hw, &|i, c| plane((i, c)));
     } else {
         gx.chunks_mut(hw).enumerate().for_each(plane);
     }

@@ -162,7 +162,7 @@ pub fn probe_size(path: &Path) -> Result<(u32, u32)> {
     let orientation = read_jpeg_exif_orientation(&mut reader).unwrap_or(1);
     std::io::Seek::rewind(&mut reader).map_err(|e| DataError::io(path, e))?;
     let file = reader.into_inner();
-    let (w, h) = image::ImageReader::new(BufReader::new(file))
+    let (w, h) = header_reader(BufReader::new(file))
         .with_guessed_format()
         .map_err(|e| DataError::io(path, e))?
         .into_dimensions()
@@ -171,6 +171,19 @@ pub fn probe_size(path: &Path) -> Result<(u32, u32)> {
         return Err(DataError::image(path, "image has zero size"));
     }
     Ok(if orientation >= 5 { (h, w) } else { (w, h) })
+}
+
+/// A buffered, seekable byte source `image` can read a header from.
+pub(crate) trait HeaderSource: std::io::BufRead + std::io::Seek {}
+impl<T: std::io::BufRead + std::io::Seek> HeaderSource for T {}
+
+/// `image`'s reader over `src`, behind one reader type for files and memory alike. `image` compiles its decoders
+/// once for every reader type it is handed (a second one was a tenth of this crate's code to optimise); a header
+/// is a handful of reads, so the indirection costs nothing measurable.
+pub(crate) fn header_reader<'a>(
+    src: impl HeaderSource + 'a,
+) -> image::ImageReader<Box<dyn HeaderSource + 'a>> {
+    image::ImageReader::new(Box::new(src))
 }
 
 /// Streams the JPEG markers before the first scan (seeking over payloads) and returns the EXIF orientation, if any.

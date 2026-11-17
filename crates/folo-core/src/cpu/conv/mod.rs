@@ -25,6 +25,7 @@ use rayon::prelude::*;
 
 use super::gemm::{BiasAct, RowPtrs, Strided, gemm_ex, gemm_rows};
 use crate::backend::Conv2dParams;
+use crate::cpu::par_chunks;
 use depthwise::depthwise_forward;
 use im2col::{Im2Col, PlaneRows};
 use shifted::{ShiftedRows, shifted_scratch};
@@ -160,7 +161,7 @@ fn for_each_image(
         f(0, out, threads);
     } else if lanes == n {
         let share = threads.div_ceil(n).max(1);
-        out.par_chunks_mut(per_image).enumerate().for_each(|(img, o)| f(img, o, share));
+        par_chunks(out, per_image, &|img, o| f(img, o, share));
     } else {
         let share = threads.div_ceil(lanes).max(1);
         let mut work: Vec<Vec<(usize, &mut [f32])>> = (0..lanes).map(|_| Vec::new()).collect();

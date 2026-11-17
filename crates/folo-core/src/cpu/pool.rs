@@ -4,6 +4,7 @@ use rayon::prelude::*;
 
 use super::{alloc_uninit, alloc_zeroed};
 use crate::backend::Pool2dParams;
+use crate::cpu::par_chunks;
 
 /// `(planes, h, w)` of an NCHW tensor.
 pub(crate) type Planes = (usize, usize, usize);
@@ -175,7 +176,7 @@ pub(crate) fn max_pool2d_backward(g: &[f32], idx: &[i64], (np, h, w): Planes, oh
     if gx.is_empty() {
         return gx;
     }
-    gx.par_chunks_mut(h * w).enumerate().for_each(|(pl, gp)| {
+    par_chunks(&mut gx, h * w, &|pl, gp| {
         let gs = &g[pl * ohw..(pl + 1) * ohw];
         let is = &idx[pl * ohw..(pl + 1) * ohw];
         for (&v, &i) in gs.iter().zip(is) {
@@ -194,7 +195,7 @@ pub(crate) fn avg_pool2d(x: &[f32], (np, h, w): Planes, p: &Pool2dParams, [oh, o
     let [sh, sw] = p.stride;
     let [ph, pw] = p.padding;
     let inv = 1.0 / (kh * kw) as f32;
-    out.par_chunks_mut(oh * ow).enumerate().for_each(|(pl, o)| {
+    par_chunks(&mut out, oh * ow, &|pl, o| {
         let xp = &x[pl * h * w..(pl + 1) * h * w];
         for oy in 0..oh {
             let y0 = (oy * sh) as isize - ph as isize;
@@ -229,7 +230,7 @@ pub(crate) fn avg_pool2d_backward(
     let [sh, sw] = p.stride;
     let [ph, pw] = p.padding;
     let inv = 1.0 / (kh * kw) as f32;
-    gx.par_chunks_mut(h * w).enumerate().for_each(|(pl, gp)| {
+    par_chunks(&mut gx, h * w, &|pl, gp| {
         let gs = &g[pl * oh * ow..(pl + 1) * oh * ow];
         for oy in 0..oh {
             let y0 = (oy * sh) as isize - ph as isize;
@@ -259,7 +260,7 @@ pub(crate) fn adaptive_avg_pool2d(x: &[f32], (np, h, w): Planes, [oh, ow]: [usiz
     if out.is_empty() || h * w == 0 {
         return out;
     }
-    out.par_chunks_mut(oh * ow).enumerate().for_each(|(pl, o)| {
+    par_chunks(&mut out, oh * ow, &|pl, o| {
         let xp = &x[pl * h * w..(pl + 1) * h * w];
         for oy in 0..oh {
             let ys = adaptive_range(oy, h, oh);
@@ -281,7 +282,7 @@ pub(crate) fn adaptive_avg_pool2d_backward(g: &[f32], (np, h, w): Planes, [oh, o
     if gx.is_empty() {
         return gx;
     }
-    gx.par_chunks_mut(h * w).enumerate().for_each(|(pl, gp)| {
+    par_chunks(&mut gx, h * w, &|pl, gp| {
         let gs = &g[pl * oh * ow..(pl + 1) * oh * ow];
         for oy in 0..oh {
             let ys = adaptive_range(oy, h, oh);
@@ -305,7 +306,7 @@ pub(crate) fn upsample_nearest2d(x: &[f32], (np, h, w): Planes, [sh, sw]: [usize
     if out.is_empty() || h * w == 0 {
         return out;
     }
-    out.par_chunks_mut(oh * ow).enumerate().for_each(|(pl, o)| {
+    par_chunks(&mut out, oh * ow, &|pl, o| {
         let xp = &x[pl * h * w..(pl + 1) * h * w];
         for y in 0..h {
             let src = &xp[y * w..(y + 1) * w];
@@ -328,7 +329,7 @@ pub(crate) fn upsample_nearest2d_backward(g: &[f32], (np, h, w): Planes, [sh, sw
     if gx.is_empty() {
         return gx;
     }
-    gx.par_chunks_mut(h * w).enumerate().for_each(|(pl, gp)| {
+    par_chunks(&mut gx, h * w, &|pl, gp| {
         let gs = &g[pl * oh * ow..(pl + 1) * oh * ow];
         for oy in 0..oh {
             let row = &gs[oy * ow..(oy + 1) * ow];

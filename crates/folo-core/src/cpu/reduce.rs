@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use super::elementwise::fast_exp;
 use super::{CHUNK, PAR_MIN};
 use crate::backend::ReduceOp;
+use crate::cpu::par_chunks;
 
 /// Sum with 16 independent accumulators: vectorises and loses less precision than a serial sum.
 #[inline]
@@ -178,7 +179,7 @@ pub(crate) fn reduce_arg(max: bool, x: &[f32], (outer, d, inner): (usize, usize,
         }
     };
     if outer * d * inner >= PAR_MIN {
-        out.par_chunks_mut(inner.max(1)).enumerate().for_each(row);
+        par_chunks(&mut out, inner.max(1), &|i, c| row((i, c)));
     } else {
         out.chunks_mut(inner.max(1)).enumerate().for_each(row);
     }
@@ -249,7 +250,7 @@ pub(crate) fn softmax(x: &[f32], (outer, d, inner): (usize, usize, usize), log: 
         }
     };
     if x.len() >= PAR_MIN && outer > 1 {
-        out.par_chunks_mut(d * inner).enumerate().for_each(block);
+        par_chunks(&mut out, d * inner, &|i, c| block((i, c)));
     } else {
         out.chunks_mut(d * inner).enumerate().for_each(block);
     }

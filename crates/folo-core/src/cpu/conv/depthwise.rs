@@ -1,13 +1,12 @@
 //! Depthwise convs (groups = channels): a direct kernel per output plane, with AVX2 at stride 1 (the plane
 //! copied once with its padding, every output vector its taps' FMAs in registers), and their gradients.
 
-use rayon::prelude::*;
-
 use super::{ChannelEpilogue, ConvGeom, ConvInput, valid_cols};
 #[cfg(target_arch = "x86_64")]
 use crate::backend::UnaryOp;
 #[cfg(target_arch = "x86_64")]
 use crate::cpu::gemm::BiasAct;
+use crate::cpu::par_chunks;
 
 /// Dot product with independent accumulators so it vectorises.
 #[inline]
@@ -95,7 +94,7 @@ pub(super) fn depthwise_forward(
     let fast = avx2 && g.p.stride == [1, 1];
     let total = g.n * g.o;
     let per_task = DW_TASK_OUTPUTS.div_ceil(ohw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
-    out.par_chunks_mut(per_task * ohw).enumerate().for_each(|(t, ops)| {
+    par_chunks(out, per_task * ohw, &|t, ops| {
         #[cfg(target_arch = "x86_64")]
         let mut pad = Vec::new();
         for (p, op) in ops.chunks_mut(ohw).enumerate() {
@@ -241,7 +240,7 @@ pub(super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
-    gx.par_chunks_mut(hw).enumerate().for_each(|(plane, gxp)| {
+    par_chunks(gx, hw, &|plane, gxp| {
         let (img, ic) = (plane / g.c, plane % g.c);
         for oc in ic * mult..(ic + 1) * mult {
             let gp = &gy[(img * g.o + oc) * ohw..][..ohw];
@@ -285,7 +284,7 @@ pub(super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
-    gw.par_chunks_mut(khw).enumerate().for_each(|(oc, gk)| {
+    par_chunks(gw, khw, &|oc, gk| {
         let ic = oc / mult;
         for img in 0..g.n {
             let xp = &x[(img * g.c + ic) * hw..][..hw];

@@ -45,6 +45,12 @@ rng.rs, testing.rs               Rng, grad_check
 Contiguous fast paths run with rayon above ~32K elements; strided inputs are walked row by row after merging
 dimensions, or made contiguous once.
 
+Kernels fan out through `cpu::par_chunks` / `cpu::par_for`, which take the per-task work as a `&dyn Fn`, rather than
+through rayon's iterators with their own closure: rayon's splitting and joining is then compiled once instead of once
+per op and kernel (the elementwise maps alone are instantiated for every unary and binary op), which halved this
+crate's code to optimise and its release build time, for one indirect call per task of thousands of elements. The
+GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new kernels on these helpers.
+
 ### GEMM
 - A BLIS-style GEMM (`cpu::gemm`, packed panels, 6x16 AVX2/FMA micro-kernel chosen at runtime, tile- or K-split
   parallelism) backs `matmul` and conv2d.

@@ -9,6 +9,7 @@ use super::arows::arows_kernel;
 use super::kernel::kernel;
 use super::{ARows, BiasAct, KC, MR, NR, Operand, PACK_BUDGET, PAR_FLOPS};
 use crate::cpu::elementwise::SendPtr;
+use crate::cpu::{par_chunks, par_for};
 
 thread_local! {
     static PACK_BUFS: RefCell<Vec<Vec<f32>>> = const { RefCell::new(Vec::new()) };
@@ -112,7 +113,7 @@ pub(super) fn pack_lhs_panels(
 ) {
     if parallel && pa.len() >= PACK_A_PAR_MIN {
         let per_task = PACK_A_TASK.div_ceil(panel);
-        pa.par_chunks_mut(per_task * panel).enumerate().for_each(|(t, chunk)| {
+        par_chunks(pa, per_task * panel, &|t, chunk| {
             chunk.chunks_mut(panel).enumerate().for_each(|(p, dst)| pack((t * per_task + p, dst)))
         });
     } else {
@@ -126,14 +127,17 @@ pub(super) fn pack_lhs_panels(
 /// The result does not depend on `threads`: every element of C is computed by one task in a fixed K order, and
 /// the K split (see [`k_split_parts`]) is a function of the shape only.
 ///
+/// The operands are trait objects, not type parameters: the driver is then compiled once instead of once per
+/// pair of operand types, and the calls through them each pack a whole panel or block.
+///
 /// [`gemm`]: super::gemm
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn gemm_ex<A: Operand, B: Operand>(
+pub(crate) fn gemm_ex(
     m: usize,
     n: usize,
     k: usize,
-    a: &A,
-    b: &B,
+    a: &dyn Operand,
+    b: &dyn Operand,
     c: &mut [f32],
     ldc: usize,
     accumulate: bool,
@@ -225,12 +229,12 @@ pub(super) fn aligned(buf: &mut [f32], len: usize) -> &mut [f32] {
 /// L1). For conv2d this expands the implicit im2col operand one small block at a time, while it is in cache,
 /// instead of materialising the whole unfolded matrix first.
 #[allow(clippy::too_many_arguments)]
-fn gemm_blocked<A: Operand, B: Operand>(
+fn gemm_blocked(
     m: usize,
     n: usize,
     krange: std::ops::Range<usize>,
-    a: &A,
-    b: &B,
+    a: &dyn Operand,
+    b: &dyn Operand,
     c: &mut [f32],
     ldc: usize,
     accumulate: bool,
@@ -340,7 +344,7 @@ fn gemm_blocked<A: Operand, B: Operand>(
                 }
             };
             if parallel {
-                (0..tm * tn).into_par_iter().for_each(tile);
+                par_for(tm * tn, &tile);
             } else {
                 (0..tm * tn).for_each(tile);
             }
