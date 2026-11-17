@@ -18,7 +18,7 @@ own review loop; the orchestrator merges.
    benchmark numbers / follow-ups.
 5. **Review loop** (at most 4 rounds):
    - Start a reviewer with the T3 `delegate_task` tool (call `orchestrator_capabilities` once first):
-     `target = { providerInstanceId: "codex", model: "gpt-6.1-sol", options: { reasoningEffort: "high", serviceTier: "priority" } }`,
+     `target = { providerInstanceId: "codex", model: "gpt-6.2-sol", options: { reasoningEffort: "high", serviceTier: "priority" } }`,
      `role: "review"`, `isolation: "shared"`, `mode: "wait"`, `timeoutMs: 1800000`. Its task: the PR number and URL,
      the absolute path of your checkout, the branch, "review the diff against origin/main for correctness bugs,
      soundness (unsafe), numerical errors, missing tests, API problems and performance traps; do not edit files;
@@ -38,6 +38,6 @@ own review loop; the orchestrator merges.
 
 ## UI threads
 `web/` (Studio) and `apps/desktop/` (Desktop) each have a long-running top-level thread that hill-climbs its UI:
-build → screenshot every screen and state → two independent design reviews (Claude Opus 5.5 and GPT-6.1 Sol) that
+build → screenshot every screen and state → two independent design reviews (Claude Opus 5.5 and GPT-6.2 Sol) that
 score a fixed rubric 1–10 → fix → repeat until **both reviewers give ≥ 9 on every rubric line**. Each round lands as a
 PR through the same review loop above.
