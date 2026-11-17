@@ -17,7 +17,8 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 
 | Path | What it holds |
 | --- | --- |
-| `src/main.rs` | arguments (`USAGE` is `--help`), the bundled fonts (`design/fonts`), the data source, the window, key bindings |
+| `src/lib.rs` | `run`, the app: arguments (`USAGE` is `--help`), the bundled fonts (`design/fonts`), the data source, the window, key bindings |
+| `src/main.rs` | the `folo-desktop` binary: `fn main` calls `folo_desktop::run`, and the `bench-alloc` allocator |
 | `src/app/` | `FoloApp`, the root view: `Route` and navigation, title bar, sidebar, routing a route to its page (`page.rs`), fetching and the live event pump (`data.rs`), finding or starting a server (`connection.rs`), actions and key bindings (`mod.rs`, `render.rs`), the forms' state; most of the app's behaviour tests (`tests.rs`, `*_tests.rs`) |
 | `src/screens/` | one folder per page, each `impl FoloApp` methods that return it: `overview/`, `datasets/` (the index, a dataset's images and statistics), `runs/` (the list, the live training dashboard), `models/` (the list, a model's evaluation and export), `bench/` (Benchmarks: the list, a benchmark's leaderboard, plan and loops, an entry), `playground/`, `settings/` (connection, throughput, cloud, appearance, shortcuts); `first_step.rs` is what an empty Runs or Models page asks for |
 | `src/overlays/` | what sits above the page: the command palette, the New run and Generate synthetic dialogs, the confirmations, the cloud dialogs, the image inspector, toasts |
@@ -64,6 +65,34 @@ cargo run -- --scenario overview --shot overview.png            # a headless scr
 cargo build --profile dist                                      # the shipped build (thin LTO, one codegen unit)
 ```
 
+Build speed. What keeps the app's build short, each measured A/B on the dev PC (i7-14700KF, `jobs = 8`, medians;
+other builds were running, so take the clean-build numbers as rough):
+
+- The app is a library (`src/lib.rs`, the whole app) and a thin `folo-desktop` binary (`src/main.rs`). Cargo starts
+  compiling a library once its dependencies' metadata exists, a binary only after their code is built, so the app's
+  front end and code generation overlap folo-ui's and folo-vision's.
+- The HTTP client parses every JSON body from bytes (`json` in `src/api/http/transport.rs`): ureq's `read_json` compiles
+  two serde parsers per response type, which were most of the client's machine code. Decode bodies through `json`, not
+  `read_json` or `serde_json::from_str`. Both changes together: a release build from an empty target dir 122 s before,
+  93 s after (a quiet machine); a release rebuild after one screen file changes 62 s, 42 s. Moving the API layer
+  (`src/api`, `src/synth.rs`) into a crate of its own gained about 3 s more on that rebuild, nothing on a clean build,
+  and made a clean `cargo test --workspace` 15 to 25% slower (one more test binary), so the app stays one crate.
+- On Windows every build links with rust-lld, which ships with the toolchain (`linker` in the root
+  `.cargo/config.toml`), and the dev profile keeps line tables only (file and line in backtraces, nothing for a
+  debugger). Against link.exe and full debug info: a clean `cargo build` about 2 min 45 s instead of 3 min 55 s,
+  `cargo build` after an edit of the app 3.4 s instead of 7 s, `cargo test --workspace --no-run` 3 min 17 s instead
+  of 7 min 8 s from clean and 5 s instead of 14 s after an edit. `--release` and `dist` spend their time in code
+  generation and thin LTO, so the linker barely shows there.
+- The engine crates compile rayon's parallel drivers once instead of once per kernel (`cpu::par_chunks` /
+  `cpu::par_for`, docs/CORE.md): folo-core in a clean release build of the app about 35 to 46 s instead of 70 to
+  82 s, and a rebuild after an edit of folo-core 13% shorter. folo-data reads available memory itself on Windows and
+  Linux, so the app no longer builds sysinfo and a second `windows` crate there (19 fewer compile units, 6% less CPU).
+
+Cargo runs at most 8 jobs (`jobs = 8` in the root `.cargo/config.toml`, because several builds share that machine).
+On an otherwise idle machine, `$env:CARGO_BUILD_JOBS=28` (or `cargo build -j 28`) gives cargo every core: a clean
+`--release` build took 1 min 49 s instead of 2 min 8 s (measured before the library split). The gain is small because
+the longest chain (wgpu, then folo-ui and the engine, then the app) runs one crate at a time.
+
 Cargo features of the app: `bench-alloc` counts allocations for `--bench-frames`; `winit` and `portable-text` turn
 on folo-ui's features of the same names, so that on Windows the app runs on the Linux / macOS backend
 (`--features winit,portable-text`, then `FOLO_UI_PLATFORM=winit`). folo-ui's own features and tests are in
@@ -88,7 +117,7 @@ Each recipe names an existing example to copy.
   `Route::parse` (`src/app/mod.rs`); a folder under `src/screens/` declared in `screens/mod.rs`, whose
   `impl FoloApp` method returns the page; its arm in `FoloApp::page` (`src/app/page.rs`). The compiler lists every
   other exhaustive `match` on `Route` or `Section`. Then the sidebar's `nav` list (`src/app/sidebar.rs`), the
-  palette's (`palette_items` in `src/overlays/palette.rs`), `USAGE` in `src/main.rs`, and a scenario in
+  palette's (`palette_items` in `src/overlays/palette.rs`), `USAGE` in `src/lib.rs`, and a scenario in
   `src/scenario.rs` (`ALL` and `apply`). Example: Benchmarks (`Route::Benches`, `screens/bench/`).
 - **An API call.** Check the endpoint in docs/API.md and its types in `crates/folo-api`. `src/api/types.rs`
   re-exports those types by name, so a new type goes into one of its `pub use folo_api::{…}` lists. Add the method
@@ -180,7 +209,7 @@ or Stop and close).
 
 The app icon (taskbar, Alt-Tab, Explorer) is `assets/folo.ico`, the logo of `design/logo-icon.svg` drawn with the
 tokens by `tools/make-icon.ps1` (run it again when either changes, and commit the .ico). folo-ui loads icon resource
-1 from the executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to link.exe, so the
+1 from the executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to the linker, so the
 build needs no resource compiler or extra crate (MSVC targets only).
 
 ## Tools

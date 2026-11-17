@@ -233,8 +233,8 @@ pub(crate) struct RowPlan<const K: usize> {
     outer: DimVec,
     /// Per operand, stride of each outer dim.
     outer_strides: [DimVec; K],
-    /// Base offsets.
-    base: [usize; K],
+    /// Base offsets: where the first row starts in each operand.
+    pub base: [usize; K],
     /// Length of a row.
     pub len: usize,
     /// Per operand, stride along a row.
@@ -287,16 +287,13 @@ impl<const K: usize> RowPlan<K> {
         RowPlan { outer: dims, outer_strides: st, base, len, inner, rows }
     }
 
-    /// Calls `f(row, offsets)` for rows in `range`, where `offsets[k]` is where row `row` starts in operand `k`.
-    #[inline]
-    pub fn for_rows(&self, range: std::ops::Range<usize>, mut f: impl FnMut(usize, [usize; K])) {
-        if range.is_empty() {
-            return;
-        }
+    /// The multi-index of row `row` over the outer dimensions and where it starts in each operand. Out of line
+    /// and not generic over the callback of [`RowPlan::for_rows`] (once per walk, not per row), so each op that
+    /// walks rows compiles only the per-row loop.
+    fn row_start(&self, row: usize) -> (DimVec, [usize; K]) {
         let nd = self.outer.len();
-        // Decode the starting multi-index.
         let mut idx: DimVec = DimVec::from_elem(0, nd);
-        let mut rem = range.start;
+        let mut rem = row;
         let mut offs = self.base;
         for d in (0..nd).rev() {
             let i = rem % self.outer[d];
@@ -306,6 +303,17 @@ impl<const K: usize> RowPlan<K> {
                 *o += i * self.outer_strides[k][d];
             }
         }
+        (idx, offs)
+    }
+
+    /// Calls `f(row, offsets)` for rows in `range`, where `offsets[k]` is where row `row` starts in operand `k`.
+    #[inline]
+    pub fn for_rows(&self, range: std::ops::Range<usize>, mut f: impl FnMut(usize, [usize; K])) {
+        if range.is_empty() {
+            return;
+        }
+        let nd = self.outer.len();
+        let (mut idx, mut offs) = self.row_start(range.start);
         for row in range {
             f(row, offs);
             // Odometer increment.

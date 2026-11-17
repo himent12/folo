@@ -47,7 +47,10 @@ bare `cargo test` there builds only the app.
   manual acceptance run (docs/MODEL.md §10.4, the overfit test), not for slow ones.
 - **The dev profile** (root `Cargo.toml`) builds folo-core, folo-nn, folo-data and folo-vision at `opt-level = 3`
   like the dependencies, because tests train and predict with them, and keeps only line tables as debug info
-  (file and line in backtraces): less to generate and to link into each of the test binaries.
+  (file and line in backtraces): less to generate and to link into each of the test binaries. FOLO Desktop's dev
+  profile does the same. On Windows, every build links with rust-lld, which ships with the toolchain (`linker` in
+  `.cargo/config.toml`), instead of link.exe; it needs no extra install on a runner (apps/desktop/README.md has
+  the numbers).
 - **A new job needs a reason to run on every pull request.** Give a new part of the repo its own workflow with a
   `paths` filter, as above. If a Rust test starts reading a file under `web/`, `site/`, `design/` or
   `apps/desktop/`, add that file to `ci.yml`'s `paths`.

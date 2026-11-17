@@ -14,9 +14,18 @@ repository = "https://github.com/himent12/folo"
 description = "FOLO Desktop: the native front end for FOLO"
 publish = false
 
+# The app is a library (src/lib.rs) and a thin binary (src/main.rs) so cargo pipelines it: the library's front end
+# starts on its dependencies' metadata, not after their code generation. The library has no doc examples and the
+# binary no tests (the unit tests are the library's), so neither builds an extra test target.
+[lib]
+path = "src/lib.rs"
+doctest = false
+
 [[bin]]
 name = "folo-desktop"
 path = "src/main.rs"
+test = false
+doc = false
 
 [features]
 # Counts allocations for `--bench-frames` (folo-ui's frame bench); off in every shipped build.
@@ -66,14 +75,18 @@ all = { level = "warn", priority = -1 }
 
 [profile.dev]
 opt-level = 1
+# File and line in backtraces, nothing for a debugger (as the root workspace): full debug info made a clean dev build
+# about 40% longer and a relink of the app or a test binary about twice as long (README, Workspace, build, test).
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
 
 # `release` keeps cargo's defaults (no LTO, 16 codegen units) for development (`cargo run --release`). The shipped
 # binary is `dist` (.github/workflows/release.yml: `cargo build --profile dist`, output in `target/dist/`). On the dev
-# PC (i7-14700KF, 32 GB, other builds running), from an empty target dir: `release` 3 min 12 s, a 33.9 MB exe;
-# `dist` 4 min 10 s, 30.2 MB.
+# PC (i7-14700KF, 32 GB), from an empty target dir: `release` about 1 min 33 s (after the library split, before the
+# engine changes), a 36.4 MB exe; `dist` 3 min 39 s, 33.3 MB (before both, which shorten it too). rust-lld or link.exe
+# makes no difference to either (README, Build speed).
 [profile.dist]
 inherits = "release"
 lto = "thin"

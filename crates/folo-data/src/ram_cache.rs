@@ -98,9 +98,7 @@ pub fn ram_cache_bytes(ds: &dyn Dataset, imgsz: u32) -> u64 {
 /// Memory this process can still take, in bytes: what the system has available, and on Linux no more than the
 /// tightest memory limit of its cgroups ([`cgroup_free`]: a container, a systemd scope, any ancestor).
 fn available_memory() -> u64 {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    let host = sys.available_memory();
+    let host = host_available();
     #[cfg(target_os = "linux")]
     let host =
         match (std::fs::read_to_string("/proc/self/cgroup"), std::fs::read_to_string("/proc/self/mountinfo"))
@@ -109,6 +107,56 @@ fn available_memory() -> u64 {
             _ => host,
         };
     host
+}
+
+/// The memory the system has available, in bytes (0 when it can't say), as sysinfo's `available_memory` gives it.
+/// Windows and Linux read it themselves so the crate (and FOLO Desktop) does not build sysinfo there: Windows'
+/// `GlobalMemoryStatusEx` `ullAvailPhys`, Linux's `/proc/meminfo` ([`meminfo_available`]).
+#[cfg(windows)]
+fn host_available() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: MEMORYSTATUSEX is plain integers, for which all zeroes is a valid value.
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: `status` is a writable MEMORYSTATUSEX whose `dwLength` is set, as the call requires.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return 0;
+    }
+    status.ullAvailPhys
+}
+
+#[cfg(target_os = "linux")]
+fn host_available() -> u64 {
+    std::fs::read_to_string("/proc/meminfo").map_or(0, |text| meminfo_available(&text))
+}
+
+/// Elsewhere (macOS and the rest) sysinfo's figure.
+#[cfg(not(any(windows, target_os = "linux")))]
+fn host_available() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.available_memory()
+}
+
+/// Available bytes from `/proc/meminfo`'s text: `MemAvailable`, or on kernels before 3.14, which lack it,
+/// `MemFree + Buffers + Cached + SReclaimable - Shmem` (sysinfo's rule). Values are KiB though written "kB".
+#[cfg(any(target_os = "linux", test))]
+fn meminfo_available(meminfo: &str) -> u64 {
+    let field = |key: &str| {
+        meminfo.lines().find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            (k == key).then(|| v.trim_start().split(' ').next()?.parse::<u64>().ok())?
+        })
+    };
+    if let Some(kib) = field("MemAvailable") {
+        return kib.saturating_mul(1024);
+    }
+    let kib = |key| field(key).unwrap_or(0).saturating_mul(1024);
+    kib("MemFree")
+        .saturating_add(kib("Buffers"))
+        .saturating_add(kib("Cached"))
+        .saturating_add(kib("SReclaimable"))
+        .saturating_sub(kib("Shmem"))
 }
 
 /// A mounted cgroup hierarchy that limits memory: cgroup v2, or v1 with the `memory` controller (alone or
@@ -374,6 +422,24 @@ mod tests {
         assert_eq!(unescape(r"/sys/fs/cgroup/a\040b"), "/sys/fs/cgroup/a b");
         assert_eq!(unescape(r"x\134y\011"), "x\u{5c}y\t");
         assert_eq!(unescape(r"\400\777\08\12"), r"\400\777\08\12");
+    }
+
+    /// `MemAvailable` when the kernel writes it, else the pre-3.14 estimate; KiB to bytes; nothing readable is 0.
+    #[test]
+    fn reads_meminfo() {
+        let new = "MemTotal:       32000000 kB\nMemFree:          100 kB\nMemAvailable:   2000000 kB\nCached: 5 kB\n";
+        assert_eq!(meminfo_available(new), 2_000_000 * 1024);
+        let old = "MemFree: 100 kB\nBuffers: 20 kB\nCached: 300 kB\nShmem: 50 kB\nSReclaimable: 30 kB\n";
+        assert_eq!(meminfo_available(old), (100 + 20 + 300 + 30 - 50) * 1024);
+        assert_eq!(meminfo_available("MemAvailable: x kB\nMemFree: 7 kB\n"), 7 * 1024);
+        assert_eq!(meminfo_available(""), 0);
+    }
+
+    /// The host figure is there on the platforms the crate reads it on itself.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn host_has_memory_available() {
+        assert!(host_available() > 0);
     }
 
     #[test]

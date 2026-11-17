@@ -14,6 +14,17 @@ use super::HttpBackend;
 /// fails such a request before a lookup or a connect.
 pub(super) const NOT_SENT: &str = "folo-not-sent";
 
+/// The most of a body [`json`] reads unless told otherwise: ureq's own default.
+pub(super) const BODY_LIMIT: u64 = 10 << 20;
+
+/// A JSON body as `T`: read whole (at most `limit` bytes), then parsed from the bytes. ureq's `read_json` would
+/// compile two parsers of every response type, one over a slice and one over the socket, and parsing a slice is
+/// the faster one; those copies were most of the HTTP client's machine code (and build time).
+pub(super) fn json<T: DeserializeOwned>(body: &mut ureq::Body, limit: u64) -> Result<T, ureq::Error> {
+    let bytes = body.with_config().limit(limit).read_to_vec()?;
+    serde_json::from_slice(&bytes).map_err(ureq::Error::Json)
+}
+
 pub(super) fn agent(timeout: Option<Duration>) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -159,7 +170,7 @@ impl HttpBackend {
     ) -> ApiResult<T> {
         let status = resp.status().as_u16();
         if status >= 400 {
-            let body: Option<folo_api::ErrorBody> = resp.body_mut().read_json().ok();
+            let body: Option<folo_api::ErrorBody> = json(resp.body_mut(), BODY_LIMIT).ok();
             return Err(match body {
                 // `folo serve --token`: the server's words are for an HTTP client that can send one.
                 Some(b) if b.error.code == "unauthorized" => needs_token(),
@@ -173,12 +184,10 @@ impl HttpBackend {
             });
         }
         if status == 204 {
-            return serde_json::from_str("null").map_err(|e| ApiError::new("bad_response", e.to_string()));
+            // Parsed from bytes, as every body is: one parser of `T`, not a second over a `&str`.
+            return serde_json::from_slice(b"null").map_err(|e| ApiError::new("bad_response", e.to_string()));
         }
-        resp.body_mut()
-            .with_config()
-            .limit(256 << 20)
-            .read_json()
+        json(resp.body_mut(), 256 << 20)
             .map_err(|e| self.body_failed(e, "Unexpected response from folo serve: "))
     }
 
@@ -187,11 +196,6 @@ impl HttpBackend {
     /// as a request that got no answer is, so reconnecting asks for it again; a body that arrived
     /// whole but isn't what was asked for (not JSON, the wrong shape, too big) is a bad response.
     pub(super) fn body_failed(&self, e: ureq::Error, what: &str) -> ApiError {
-        // JSON read straight off the socket carries the socket's error inside serde's.
-        let e = match e {
-            ureq::Error::Json(j) if j.is_io() => ureq::Error::from(std::io::Error::from(j)),
-            e => e,
-        };
         match e {
             ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed => {
                 self.unreachable(&e)

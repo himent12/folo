@@ -1,10 +1,9 @@
 //! The direct forward conv for few input channels (the 3-channel stem): per output row the taps are gathered
 //! into L1 and every output channel is that many FMAs per pixel, bit for bit the GEMM path's result.
 
-use rayon::prelude::*;
-
 use super::{ChannelEpilogue, ConvGeom, ConvInput, valid_cols};
 use crate::cpu::elementwise::SendPtr;
+use crate::cpu::par_for;
 
 /// Input channels up to which a (non-pointwise, ungrouped) forward conv runs [`small_c_forward`] instead of
 /// the shifted-rows GEMM: the stem's 3-channel image input, whose GEMM has a K of only 27 and whose
@@ -77,7 +76,7 @@ pub(super) fn small_c_forward(
     };
     let tasks = rows.div_ceil(band);
     if 2 * g.n * g.o * ohw * k >= SMALL_C_PAR_FLOPS {
-        (0..tasks).into_par_iter().for_each(task);
+        par_for(tasks, &task);
     } else {
         (0..tasks).for_each(task);
     }

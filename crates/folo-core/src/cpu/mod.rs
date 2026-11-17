@@ -103,6 +103,21 @@ pub(crate) const PAR_MIN: usize = 1 << 15;
 /// Elements per parallel task for streaming kernels.
 pub(crate) const CHUNK: usize = 1 << 13;
 
+/// `f(i, piece)` for every `chunk`-long piece `i` of `out` (the last may be shorter), in parallel.
+///
+/// Deliberately not generic over `f`: rayon's splitting and joining is compiled once per element type, not once
+/// per op and kernel that fans out (the elementwise maps are instantiated for every unary and binary op), which kept
+/// this crate's build several times longer. The price is one indirect call per task of thousands of elements;
+/// the work inside `f` is still compiled for its op.
+pub(crate) fn par_chunks<T: Send>(out: &mut [T], chunk: usize, f: &(dyn Fn(usize, &mut [T]) + Sync)) {
+    out.par_chunks_mut(chunk).enumerate().for_each(|(i, piece)| f(i, piece));
+}
+
+/// `f(t)` for every `t < n`, in parallel; not generic over `f`, as [`par_chunks`].
+pub(crate) fn par_for(n: usize, f: &(dyn Fn(usize) + Sync)) {
+    (0..n).into_par_iter().for_each(f);
+}
+
 /// The CPU backend. Stateless; obtain it through [`crate::backend::backend`]`(Device::Cpu)`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CpuBackend;
@@ -366,7 +381,7 @@ impl Backend for CpuBackend {
         let threads = rayon::current_num_threads();
         if batch > 1 {
             let share = (threads / batch).max(1);
-            out.par_chunks_mut(m * n).enumerate().for_each(|x| one(x, share));
+            par_chunks(&mut out, m * n, &|i, c| one((i, c), share));
         } else {
             one((0, &mut out), threads);
         }

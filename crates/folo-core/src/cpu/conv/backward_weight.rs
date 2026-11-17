@@ -10,6 +10,7 @@ use super::shifted::{ShiftedRows, shifted_scratch};
 use super::{ConvGeom, image_lanes};
 use crate::cpu::elementwise::SendPtr;
 use crate::cpu::gemm::{ColumnMap, KC, MR, NR, Operand, gemm, gemm_arows};
+use crate::cpu::{par_chunks, par_for};
 
 /// B operand of the weight-gradient GEMM: element `(kidx, t)` with `t = img * ohw + s` is `col_img[kidx][s]`.
 struct Im2ColT<'a> {
@@ -334,7 +335,7 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
             }
         };
         if 2 * m * n * k >= crate::cpu::gemm::PAR_FLOPS && tiles * active > 1 {
-            (0..tiles * active).into_par_iter().for_each(task);
+            par_for(tiles * active, &task);
         } else {
             (0..tiles * active).for_each(task);
         }
@@ -355,7 +356,7 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
         }
     };
     if parts * m * n >= crate::cpu::PAR_MIN {
-        sum.par_chunks_mut(n).enumerate().for_each(add);
+        par_chunks(sum, n, &|i, c| add((i, c)));
     } else {
         sum.chunks_mut(n).enumerate().for_each(add);
     }
@@ -366,7 +367,7 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
         }
     };
     if m * n >= crate::cpu::PAR_MIN {
-        gw.par_chunks_mut(m).enumerate().for_each(transpose);
+        par_chunks(gw, m, &|i, c| transpose((i, c)));
     } else {
         gw.chunks_mut(m).enumerate().for_each(transpose);
     }

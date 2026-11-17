@@ -24,11 +24,10 @@
 //! patches into `V` (`16 x C x tb`), runs the 16 GEMMs into `M` (`16 x O x tb`) and transforms `M` into its
 //! output tiles, then bias and activation, while `V` and `M` stay in L2.
 
-use rayon::prelude::*;
-
 use super::{ChannelEpilogue, ConvGeom, ConvInput, for_each_image};
 use crate::cpu::elementwise::SendPtr;
 use crate::cpu::gemm::{MR, NR, gemm_rows_serial, with_scratch};
+use crate::cpu::par_for;
 
 /// Tiles a segment of one tile row is processed in at most (stack buffers).
 const SEG: usize = 64;
@@ -248,7 +247,7 @@ fn winograd_run(
             let mut vall = crate::cpu::alloc_uninit(blocks * vlen);
             let vptr = SendPtr(vall.as_mut_ptr());
             let vptr = &vptr;
-            (0..blocks * cparts).into_par_iter().for_each(|q| {
+            par_for(blocks * cparts, &|q| {
                 let (b, part) = (q / cparts, q % cparts);
                 let (t0, t1) = span(b);
                 let (ci0, ci1) = (part * cstep, ((part + 1) * cstep).min(c));
@@ -257,7 +256,7 @@ fn winograd_run(
                 unsafe { input_transform(&planes[ci0..ci1], ci0, g, ts, t0, t1, tb, vptr.0.add(b * vlen)) };
             });
             let vall_ref = &vall;
-            (0..blocks * oparts).into_par_iter().for_each(|q| {
+            par_for(blocks * oparts, &|q| {
                 let (b, part) = (q / oparts, q % oparts);
                 let (t0, t1) = span(b);
                 let (o0, o1) = (part * ostep, ((part + 1) * ostep).min(o));
@@ -281,7 +280,7 @@ fn winograd_run(
             });
         };
         if threads > 1 && blocks > 1 {
-            (0..blocks).into_par_iter().for_each(run);
+            par_for(blocks, &run);
         } else {
             (0..blocks).for_each(run);
         }

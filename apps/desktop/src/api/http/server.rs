@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::api::*;
 
-use super::transport::agent;
+use super::transport::{BODY_LIMIT, agent, json};
 
 /// A local `folo serve` started by the app; stopped when dropped.
 pub struct ServerProcess {
@@ -34,7 +34,7 @@ pub fn runs_now(url: &str) -> Option<Vec<Run>> {
         .build()
         .into();
     let mut r = agent.get(&runs).call().ok().filter(|r| r.status().is_success())?;
-    r.body_mut().with_config().limit(64 << 20).read_json::<folo_api::RunList>().ok().map(|l| l.runs)
+    json::<folo_api::RunList>(r.body_mut(), 64 << 20).ok().map(|l| l.runs)
 }
 
 impl Drop for ServerProcess {
@@ -111,7 +111,7 @@ pub fn probe(url: &str) -> bool {
         .ok()
         .filter(|r| r.status().is_success())
         // A FOLO server's health, not any web server that answers 200 (a dev server's index page).
-        .is_some_and(|mut r| r.body_mut().read_json::<Health>().is_ok())
+        .is_some_and(|mut r| json::<Health>(r.body_mut(), BODY_LIMIT).is_ok())
 }
 
 /// Make the OS stop `child` when this process exits, even if it is killed (no Drop runs then).
@@ -214,7 +214,7 @@ fn serves(url: &str, dir: &str, budget: Duration) -> bool {
         .call()
         .ok()
         .filter(|r| r.status().is_success())
-        .and_then(|mut r| r.body_mut().read_json::<SystemResponse>().ok());
+        .and_then(|mut r| json::<SystemResponse>(r.body_mut(), BODY_LIMIT).ok());
     system.and_then(|s| s.data_dir).is_some_and(|d| same(&d, dir))
 }
 
