@@ -54,17 +54,6 @@ their CI (below) runs only when something they depend on changes. From `crates/`
 shows); `folo-test-support` and `folo-cloud` (the real providers, which the demo's list must match) are
 dev-dependencies. The app does not link folo-server: it starts the `folo` binary instead.
 
-Two things keep the app's build short. It is a library (`src/lib.rs`, the whole app) and a thin `folo-desktop`
-binary (`src/main.rs`): cargo starts compiling a library once its dependencies' metadata exists, a binary only after
-their code is built, so the app's front end and code generation overlap folo-ui's and folo-vision's. And the HTTP
-client parses every JSON body from bytes (`json` in `src/api/http/transport.rs`): ureq's `read_json` compiles two
-serde parsers of every response type, which were most of the client's machine code; decode bodies through `json`,
-not `read_json` or `serde_json::from_str`. Measured on the dev PC, A/B, medians: a release build from an empty
-target dir 122 s before, 93 s after (173 s and 143 s while other builds ran); a release rebuild after one screen file
-changes 62 s, 42 s; a dev rebuild 4 to 7 s either way. Moving the API layer (`src/api`, `src/synth.rs`) into a crate
-of its own gained about 3 s more on that release rebuild and nothing on a clean build, and made a clean
-`cargo test --workspace` 15 to 25% slower (the crate's tests are one more test binary), so the app stays one crate.
-
 Run every command from `apps/desktop`. A bare `cargo test` there builds only the app, so pass `--workspace`:
 
 ```powershell
@@ -76,16 +65,34 @@ cargo run -- --scenario overview --shot overview.png            # a headless scr
 cargo build --profile dist                                      # the shipped build (thin LTO, one codegen unit)
 ```
 
-Build speed. On Windows every build links with rust-lld, which ships with the toolchain (`linker` in the root
-`.cargo/config.toml`), and the dev profile keeps line tables only (file and line in backtraces, nothing for a
-debugger). Against link.exe and full debug info, on the dev PC (i7-14700KF, other agents building, medians): a clean
-`cargo build` takes about 2 min 45 s instead of 3 min 55 s, `cargo build` after an edit of the app 3.4 s instead of
-7 s, and `cargo test --workspace --no-run` 3 min 17 s instead of 7 min 8 s from clean, 5 s instead of 14 s after an
-edit of the app. `--release` and `dist` spend their time in codegen and thin LTO, so the linker barely shows there
-(release after an edit of the app 44 s instead of 49 s; `dist` the same). Cargo runs at most 8 jobs (`jobs = 8` in
-the root `.cargo/config.toml`, because several builds share that machine). On an otherwise idle machine,
-`$env:CARGO_BUILD_JOBS=28` (or `cargo build -j 28`) gives cargo every core: a clean `--release` build took 1 min 49 s
-instead of 2 min 8 s, a small gain because the app crate cannot start until every dependency is built.
+Build speed. What keeps the app's build short, each measured A/B on the dev PC (i7-14700KF, `jobs = 8`, medians;
+other builds were running, so take the clean-build numbers as rough):
+
+- The app is a library (`src/lib.rs`, the whole app) and a thin `folo-desktop` binary (`src/main.rs`). Cargo starts
+  compiling a library once its dependencies' metadata exists, a binary only after their code is built, so the app's
+  front end and code generation overlap folo-ui's and folo-vision's.
+- The HTTP client parses every JSON body from bytes (`json` in `src/api/http/transport.rs`): ureq's `read_json`
+  compiles two serde parsers per response type, which were most of the client's machine code. Decode bodies through
+  `json`, not `read_json` or `serde_json::from_str`. With the library split: a release build from an empty target
+  dir 122 s before, 93 s after; a release rebuild after one screen file changes 62 s, 42 s. Moving the API layer
+  (`src/api`, `src/synth.rs`) into a crate of its own gained about 3 s more on that rebuild, nothing on a clean
+  build, and made a clean `cargo test --workspace` 15 to 25% slower (one more test binary), so the app stays one
+  crate.
+- On Windows every build links with rust-lld, which ships with the toolchain (`linker` in the root
+  `.cargo/config.toml`), and the dev profile keeps line tables only (file and line in backtraces, nothing for a
+  debugger). Against link.exe and full debug info: a clean `cargo build` about 2 min 45 s instead of 3 min 55 s,
+  `cargo build` after an edit of the app 3.4 s instead of 7 s, `cargo test --workspace --no-run` 3 min 17 s instead
+  of 7 min 8 s from clean and 5 s instead of 14 s after an edit. `--release` and `dist` spend their time in code
+  generation and thin LTO, so the linker barely shows there.
+- The engine crates compile rayon's parallel drivers once instead of once per kernel (`cpu::par_chunks` /
+  `cpu::par_for`, docs/CORE.md): folo-core in a clean release build of the app about 35 to 46 s instead of 70 to
+  82 s, and a rebuild after an edit of folo-core 13% shorter. folo-data reads available memory itself on Windows and
+  Linux, so the app no longer builds sysinfo and a second `windows` crate (19 fewer compile units, 6% less CPU).
+
+Cargo runs at most 8 jobs (`jobs = 8` in the root `.cargo/config.toml`, because several builds share that machine).
+On an otherwise idle machine, `$env:CARGO_BUILD_JOBS=28` (or `cargo build -j 28`) gives cargo every core: a clean
+`--release` build took 1 min 49 s instead of 2 min 8 s (measured before the library split). The gain is small because
+the longest chain (wgpu, then folo-ui and the engine, then the app) runs one crate at a time.
 
 Cargo features of the app: `bench-alloc` counts allocations for `--bench-frames`; `winit` and `portable-text` turn
 on folo-ui's features of the same names, so that on Windows the app runs on the Linux / macOS backend
