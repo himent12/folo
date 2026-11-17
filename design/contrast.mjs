@@ -83,6 +83,12 @@ function validateColor(color, base, path) {
 }
 
 const HEADER = ['folo_theme', 'id', 'name', 'mode', 'base', 'description', 'color'];
+/** Not a custom theme id: Desktop's `--theme system` means the mode. */
+const RESERVED_ID = 'system';
+/** Trims Unicode white space (the White_Space property, as Rust's `str::trim`; not String.prototype.trim's set). */
+const trim = (s) => s.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+/** Length in code points, as Rust's `chars().count()` (not UTF-16 units). */
+const length = (s) => [...s].length;
 
 /**
  * Validates a parsed custom theme file (THEMES.md, Custom themes). Returns { error } with the first error as
@@ -94,17 +100,19 @@ export function validateTheme(json) {
   if (!isObject(json)) return fail('(file): must be a JSON object');
   for (const k of Object.keys(json)) if (!isComment(k) && !HEADER.includes(k)) return fail(`${k}: unknown key`);
   if (!('folo_theme' in json)) return fail('folo_theme: required');
+  // Any JSON number equal to 1: JSON.parse reads 1.0 and 1e0 as 1.
   if (json.folo_theme !== 1) return fail('folo_theme: must be 1');
   if (!('id' in json)) return fail('id: required');
   if (typeof json.id !== 'string' || !/^[a-z0-9-]{1,40}$/.test(json.id)) {
     return fail('id: must be 1 to 40 characters of a-z, 0-9 and -');
   }
   if (builtInById.has(json.id)) return fail(`id: "${json.id}" is a built-in theme`);
+  if (json.id === RESERVED_ID) return fail(`id: "${RESERVED_ID}" is reserved`);
   if (!('name' in json)) return fail('name: required');
-  if (typeof json.name !== 'string' || json.name.trim().length < 1 || json.name.trim().length > 40) {
-    return fail('name: must be 1 to 40 characters');
-  }
-  if ('description' in json && (typeof json.description !== 'string' || json.description.length > 120)) {
+  const name = typeof json.name === 'string' ? trim(json.name) : '';
+  if (length(name) < 1 || length(name) > 40) return fail('name: must be 1 to 40 characters');
+  const description = typeof json.description === 'string' ? trim(json.description) : undefined;
+  if ('description' in json && (description === undefined || length(description) > 120)) {
     return fail('description: must be at most 120 characters');
   }
   if (!('mode' in json)) return fail('mode: required');
@@ -124,10 +132,10 @@ export function validateTheme(json) {
   return {
     theme: {
       id: json.id,
-      name: json.name.trim(),
+      name,
       mode: json.mode,
       base,
-      description: json.description,
+      description,
       palette: merge(basePalette, json.color),
     },
   };
@@ -305,15 +313,29 @@ const isHighContrast = (id) => id.startsWith('contrast-');
 // ---------------------------------------------------------------------------------------------------------------
 // Command line.
 
-function readThemeFile(file) {
+/** A theme file's text, validated: one leading byte order mark is skipped (PowerShell 5.1 writes one), as Studio and Desktop do. */
+export function parseThemeText(text) {
   let json;
   try {
-    json = JSON.parse(readFileSync(file, 'utf8'));
+    json = JSON.parse(text.replace(/^﻿/, ''));
   } catch (e) {
-    return { error: `(file): ${e.code === 'ENOENT' ? 'not found' : `not valid JSON (${e.message})`}` };
+    return { error: `(file): not valid JSON (${e.message})` };
   }
   return validateTheme(json);
 }
+
+function readThemeFile(file) {
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (e) {
+    return { error: `(file): ${e.code === 'ENOENT' ? 'not found' : `couldn't read (${e.message})`}` };
+  }
+  return parseThemeText(text);
+}
+
+/** A case of theme-cases.json validated: its raw `text` through the file reader, or its parsed `theme`. */
+export const validateCase = (c) => (c.text !== undefined ? parseThemeText(c.text) : validateTheme(c.theme));
 
 function main(argv) {
   const all = argv.includes('--all');
@@ -346,15 +368,17 @@ function main(argv) {
     // The shared format cases (theme-cases.json): the validator still refuses and accepts what the other apps' do.
     const cases = JSON.parse(readFileSync(new URL('./theme-cases.json', import.meta.url), 'utf8'));
     replayed = cases.invalid.length + cases.valid.length;
-    for (const { what, theme, error } of cases.invalid) {
-      const got = validateTheme(theme).error;
+    for (const c of cases.invalid) {
+      const { what, error } = c;
+      const got = validateCase(c).error;
       if (got !== error) {
         console.error(`contrast: theme-cases.json, invalid "${what}": expected ${JSON.stringify(error)}, got ${JSON.stringify(got)}`);
         invalid++;
       }
     }
-    for (const { what, theme } of cases.valid) {
-      const got = validateTheme(theme).error;
+    for (const c of cases.valid) {
+      const { what } = c;
+      const got = validateCase(c).error;
       if (got) {
         console.error(`contrast: theme-cases.json, valid "${what}": refused with ${JSON.stringify(got)}`);
         invalid++;

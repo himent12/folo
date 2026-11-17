@@ -69,7 +69,8 @@ css`
     stroke-linecap: round;
   }
   .a {
-    opacity: 0.12;
+    /* The theme's chart.area_opacity, relative to its mode's default: the default themes draw 0.12 as before. */
+    opacity: calc(var(--chart-area-opacity) / var(--chart-area-opacity-default) * 0.12);
   }
   .none {
     stroke: var(--line-default);

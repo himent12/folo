@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { builtIns, builtInPalette, validateTheme, checkTheme } from './contrast.mjs';
+import { builtIns, builtInPalette, validateTheme, validateCase, checkTheme } from './contrast.mjs';
 
 const read = (name) => JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'));
 const tokens = read('./tokens.json');
@@ -15,17 +15,20 @@ const cases = read('./theme-cases.json');
 const at = (palette, path) => path.split('.').reduce((v, k) => v?.[k], palette);
 
 test('every invalid case is refused with its path and message', () => {
-  for (const { what, theme, error } of cases.invalid) {
-    assert.equal(validateTheme(theme).error, error, what);
+  assert.ok(cases.invalid.filter((c) => c.text !== undefined).length >= 5, 'the raw cases (file text) are there');
+  for (const c of cases.invalid) {
+    assert.equal(validateCase(c).error, c.error, c.what);
   }
 });
 
 test('every valid case resolves on its base', () => {
-  for (const { what, theme, expect } of cases.valid) {
-    const r = validateTheme(theme);
+  for (const c of cases.valid) {
+    const { what, expect } = c;
+    const r = validateCase(c);
     assert.equal(r.error, undefined, `${what}: ${r.error}`);
     assert.equal(r.theme.base, expect.base, what);
     assert.equal(r.theme.name, expect.name, what);
+    if (expect.description !== undefined) assert.equal(r.theme.description, expect.description, what);
     for (const [path, value] of Object.entries(expect.color)) assert.equal(at(r.theme.palette, path), value, `${what}: ${path}`);
   }
 });
@@ -83,6 +86,9 @@ test('--theme: exit 0 on a passing file, 1 with the path on an invalid or failin
     const typo = run({ folo_theme: 1, id: 'typo', name: 'Typo', mode: 'dark', color: { bg: { ap: '#000000' } } });
     assert.equal(typo.status, 1);
     assert.match(typo.stderr, /t\.json: color\.bg\.ap: not a colour token/);
+    // A byte order mark (PowerShell 5.1's Set-Content -Encoding utf8 writes one) is skipped.
+    const bom = run(`﻿${JSON.stringify({ folo_theme: 1, id: 'bom', name: 'Bom', mode: 'dark' })}`);
+    assert.equal(bom.status, 0, bom.stderr);
     const broken = run('{ "folo_theme": 1, ');
     assert.equal(broken.status, 1);
     assert.match(broken.stderr, /\(file\): not valid JSON/);

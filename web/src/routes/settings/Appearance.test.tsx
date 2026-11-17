@@ -7,7 +7,8 @@ import { prefs } from '$lib/prefs';
 import { rank } from '$lib/shell/commands';
 import { themeCommands } from '$lib/shell/themeCommands';
 import { render } from '../../../framework/testing';
-import Appearance from './Appearance';
+import { THEME_FILE_MAX } from '$lib/design/themes';
+import Appearance, { installPicked, readPicked, resultText } from './Appearance';
 
 const night = { folo_theme: 1, id: 'night', name: 'Night', mode: 'dark', base: 'midnight' };
 let target: HTMLElement;
@@ -111,6 +112,63 @@ describe('Settings › Appearance', () => {
     flush();
     expect(prefs.customThemes).toEqual([]);
     expect(target.querySelector('#appearance .themes')).toBeNull();
+  });
+});
+
+/** A localStorage whose writes of `key` throw while `refuse()` (storage full); reads and other keys go through. */
+function refusing(real: Storage, key: string, refuse: () => boolean): Storage {
+  return {
+    getItem: (k: string) => real.getItem(k),
+    setItem: (k: string, v: string) => {
+      if (refuse() && k === key) throw new DOMException('full', 'QuotaExceededError');
+      real.setItem(k, v);
+    },
+    removeItem: (k: string) => real.removeItem(k),
+    clear: () => real.clear(),
+    key: (i: number) => real.key(i),
+    get length() {
+      return real.length;
+    },
+  };
+}
+
+describe('importing large picks and failed saves', () => {
+  it('refuses a file over 1 MB by its size, unread, and reads the rest one at a time in order', async () => {
+    let reading = 0;
+    let most = 0;
+    const file = (name: string, size: number, text: string) =>
+      ({
+        name,
+        size,
+        text: async () => {
+          if (size > THEME_FILE_MAX) throw new Error('a refused file was read');
+          most = Math.max(most, ++reading);
+          await Promise.resolve();
+          reading--;
+          return text;
+        },
+      }) as unknown as File;
+    const picked = await readPicked([file('a.json', 10, JSON.stringify(night)), file('huge.json', THEME_FILE_MAX + 1, ''), file('b.json', 10, '{')]);
+    expect(most).toBe(1);
+    expect(installPicked(picked).map(resultText)).toEqual(['Installed Night (a.json)', 'huge.json: larger than 1 MB; not a theme', expect.stringMatching(/^b\.json: not valid JSON/)]);
+    await expect(readPicked([file('edge.json', THEME_FILE_MAX, '{}')])).resolves.toEqual([{ name: 'edge.json', text: '{}' }]);
+  });
+
+  it("says when the browser couldn't save the custom themes, and stops once a save works", async () => {
+    let refuse = true;
+    vi.stubGlobal('localStorage', refusing(localStorage, 'folo.themes', () => refuse));
+    try {
+      show();
+      expect(target.querySelector('#appearance .unsaved')).toBeNull();
+      await importFiles([['night.json', JSON.stringify(night)]]);
+      expect(target.querySelector('#appearance .unsaved')?.textContent).toBe("Couldn't save to this browser's storage; your custom themes last until you close this tab.");
+      expect(target.querySelector('#appearance .themes .t-name')?.textContent).toBe('Night');
+      refuse = false;
+      await importFiles([['dusk.json', JSON.stringify({ ...night, id: 'dusk', name: 'Dusk' })]]);
+      expect(target.querySelector('#appearance .unsaved')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

@@ -42,6 +42,28 @@ const ID = /^[a-z0-9-]{1,40}$/;
 const KEYS = ['folo_theme', 'id', 'name', 'mode', 'base', 'description', 'color'];
 const NAME_MAX = 40;
 const DESCRIPTION_MAX = 120;
+/** Not a custom theme id: Desktop's `--theme system` means the mode. */
+export const RESERVED_ID = 'system';
+/** The largest theme file Studio reads (Desktop refuses the same): a theme is a few kB. */
+export const THEME_FILE_MAX = 1 << 20;
+
+/** Trims Unicode white space (the White_Space property, as Rust's `str::trim`; not String.prototype.trim's set). */
+const trim = (s: string) => s.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+/** Length in code points, as Rust's `chars().count()` (not UTF-16 units). */
+const length = (s: string) => [...s].length;
+
+/** Orders two strings by code point (as Rust compares strings), not by UTF-16 unit or locale. */
+export function compareCodePoints(a: string, b: string): number {
+  const x = a[Symbol.iterator]();
+  const y = b[Symbol.iterator]();
+  for (;;) {
+    const p = x.next();
+    const q = y.next();
+    if (p.done || q.done) return (p.done ? 0 : 1) - (q.done ? 0 : 1);
+    const d = p.value.codePointAt(0)! - q.value.codePointAt(0)!;
+    if (d) return d;
+  }
+}
 
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isMeta = (k: string) => k.startsWith('$');
@@ -125,15 +147,18 @@ function check(raw: unknown): CustomThemeFile {
     if (raw[k] === undefined) throw new Error(`${k}: required`);
     return raw[k];
   };
+  // Any JSON number equal to 1: JSON.parse reads 1.0 and 1e0 as 1.
   if (need('folo_theme') !== THEME_FORMAT) throw new Error(`folo_theme: must be ${THEME_FORMAT}`);
   const id = need('id');
   if (typeof id !== 'string' || !ID.test(id)) throw new Error('id: must be 1 to 40 characters of a-z, 0-9 and -');
   if (isBuiltinId(id)) throw new Error(`id: "${id}" is a built-in theme`);
+  if (id === RESERVED_ID) throw new Error(`id: "${RESERVED_ID}" is reserved`);
   const name = need('name');
-  const trimmed = typeof name === 'string' ? name.trim() : '';
-  if (!trimmed || trimmed.length > NAME_MAX) throw new Error(`name: must be 1 to ${NAME_MAX} characters`);
-  const description = raw.description;
-  if (description !== undefined && (typeof description !== 'string' || description.length > DESCRIPTION_MAX))
+  const trimmed = typeof name === 'string' ? trim(name) : '';
+  if (!trimmed || length(trimmed) > NAME_MAX) throw new Error(`name: must be 1 to ${NAME_MAX} characters`);
+  const rawDescription = raw.description;
+  const description = typeof rawDescription === 'string' ? trim(rawDescription) : undefined;
+  if (rawDescription !== undefined && (description === undefined || length(description) > DESCRIPTION_MAX))
     throw new Error(`description: must be at most ${DESCRIPTION_MAX} characters`);
   const mode = need('mode');
   if (mode !== 'dark' && mode !== 'light') throw new Error('mode: must be "dark" or "light"');
@@ -151,11 +176,14 @@ function check(raw: unknown): CustomThemeFile {
   return out;
 }
 
-/** Parses and checks a file's text; a file that is not JSON says so. */
+/**
+ * Parses and checks a file's text; a file that is not JSON says so. One leading byte order mark is skipped (Blob.text()
+ * drops it already; a test or another reader may not), as every validator does.
+ */
 export function parseThemeFile(text: string): { ok: true; theme: CustomThemeFile } | { ok: false; error: string } {
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(text.replace(/^﻿/, ''));
   } catch (e) {
     return { ok: false, error: `(file): not valid JSON (${(e as Error).message})` };
   }
@@ -218,14 +246,30 @@ export function findTheme(id: string, customs: readonly CustomThemeFile[]): Them
   return c ? customTheme(c) : undefined;
 }
 
-/** The themes of `mode`: the built-ins in their order, then the custom ones by name. */
-export function themesFor(mode: Mode, customs: readonly CustomThemeFile[]): Theme[] {
-  const own = themeIds.filter((id) => builtins[id].mode === mode).map(builtinTheme);
-  const mine = customs
-    .filter((t) => t.mode === mode)
-    .map(customTheme)
-    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  return [...own, ...mine];
+/** The themes of `mode`: the built-ins in their order, then the custom ones by name (`themeCatalog`). */
+export function themesFor(mode: Mode, customs: readonly CustomThemeFile[]): readonly Theme[] {
+  return themeCatalog(customs)[mode];
+}
+
+/** Every theme resolved once: each mode's list (as `themesFor` orders it) and every theme by id. */
+export interface ThemeCatalog {
+  readonly dark: readonly Theme[];
+  readonly light: readonly Theme[];
+  readonly byId: ReadonlyMap<string, Theme>;
+}
+
+/**
+ * The catalog of the built-ins and `customs`, each resolved once. Custom themes follow the built-ins of their mode in
+ * the order of every list (design/THEMES.md, and Desktop's): by lower-cased name, then by id, both by code point (no
+ * locale collation, so the two apps list them alike).
+ */
+export function themeCatalog(customs: readonly CustomThemeFile[]): ThemeCatalog {
+  const byId = new Map<string, Theme>(themeIds.map((id) => [id, builtinTheme(id)]));
+  const mine = customs.map((f) => ({ t: customTheme(f), key: f.name.toLowerCase() }));
+  mine.sort((a, b) => compareCodePoints(a.key, b.key) || compareCodePoints(a.t.id, b.t.id));
+  for (const { t } of mine) if (!byId.has(t.id)) byId.set(t.id, t);
+  const list = (mode: Mode) => [...themeIds.filter((id) => builtins[id].mode === mode).map((id) => byId.get(id)!), ...mine.filter(({ t }) => t.mode === mode).map(({ t }) => t)];
+  return { dark: list('dark'), light: list('light'), byId };
 }
 
 /** What an import did with one file. */
@@ -233,19 +277,25 @@ export type ImportResult = { file: string; ok: true; id: string; name: string; r
 
 /**
  * Adds the files that pass the check to `installed` (a theme whose id is installed already replaces it, in place) and
- * says per file what happened. Files are read in order, so of two with one id the later wins.
+ * says per file what happened. Files are read in order, so of two with one id the later wins. `accepted`: the files
+ * that passed, in order (installing them one by one over `installed` gives `themes`).
  */
-export function importThemes(installed: readonly CustomThemeFile[], files: readonly { name: string; text: string }[]): { themes: CustomThemeFile[]; results: ImportResult[] } {
+export function importThemes(
+  installed: readonly CustomThemeFile[],
+  files: readonly { name: string; text: string }[],
+): { themes: CustomThemeFile[]; accepted: CustomThemeFile[]; results: ImportResult[] } {
   const themes = [...installed];
+  const accepted: CustomThemeFile[] = [];
   const results: ImportResult[] = files.map((f) => {
     const r = parseThemeFile(f.text);
     if (!r.ok) return { file: f.name, ok: false, error: r.error };
+    accepted.push(r.theme);
     const at = themes.findIndex((t) => t.id === r.theme.id);
     if (at >= 0) themes[at] = r.theme;
     else themes.push(r.theme);
     return { file: f.name, ok: true, id: r.theme.id, name: r.theme.name, replaced: at >= 0 };
   });
-  return { themes, results };
+  return { themes, accepted, results };
 }
 
 /** The stored list (`folo.themes`) with every entry that no longer passes the check left out (a hand edit). */

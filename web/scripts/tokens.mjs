@@ -1,4 +1,5 @@
-// Generates web/src/lib/design/tokens.css and tokens.ts from design/tokens.json.
+// Generates web/src/lib/design/tokens.css and tokens.ts from design/tokens.json, and the data line (`const T = ...;`)
+// of index.html's first-paint script.
 //   node scripts/tokens.mjs          write the files
 //   node scripts/tokens.mjs --check  exit 1 if the committed files are stale
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -12,6 +13,7 @@ const designDir = resolve(root, '..', 'design');
 const outDir = resolve(root, 'src', 'lib', 'design');
 const cssPath = resolve(outDir, 'tokens.css');
 const tsPath = resolve(outDir, 'tokens.ts');
+const indexPath = resolve(root, 'index.html');
 
 const t = JSON.parse(readFileSync(resolve(designDir, 'tokens.json'), 'utf8'));
 /** The built-in themes, resolved (base palette + overrides); throws on a malformed one. */
@@ -43,6 +45,11 @@ function colorVars(color, where) {
 
 function themeVars(name) {
   const out = colorVars(t.color[name], `color.${name}`);
+  // The mode's default area opacity: a theme's chart.area_opacity scales the charts' area fills relative to it
+  // (LineChart, Sparkline), so the default themes draw them exactly as before. Not a colour token: no theme sets it.
+  const area = t.color[name].chart?.area_opacity;
+  if (typeof area !== 'number' || !(area > 0)) throw new Error(`color.${name}.chart.area_opacity: expected a number above 0`);
+  out.push(['--chart-area-opacity-default', String(area)]);
   for (const [k, layers] of Object.entries(t.shadow[name])) {
     if (isMeta(k)) continue;
     out.push([`--shadow-${k}`, shadow(layers, `shadow.${name}.${k}`)]);
@@ -216,9 +223,44 @@ ${vars}
 ];
 `;
 }
+/**
+ * What index.html's first-paint script needs to check a stored custom theme as src/lib/design/themes.ts does and set
+ * only colour token properties: the built-in ids of each mode, the palette's shape with every colour token as its CSS
+ * custom property (a list token: one per entry), and the number tokens' properties.
+ */
+function firstPaintData() {
+  /** @type {string[]} */
+  const number = [];
+  /** @returns {Record<string, unknown>} */
+  const shape = (/** @type {Record<string, unknown>} */ color, /** @type {string} */ prefix) =>
+    Object.fromEntries(
+      Object.entries(color)
+        .filter(([k]) => !isMeta(k))
+        .map(([k, v]) => {
+          const path = prefix ? `${prefix}.${k}` : k;
+          if (Array.isArray(v)) return [k, v.map((_, i) => cssVar(`${path}.${i}`))];
+          if (v !== null && typeof v === 'object') return [k, shape(/** @type {Record<string, unknown>} */ (v), path)];
+          if (typeof v === 'number') number.push(cssVar(path));
+          return [k, cssVar(path)];
+        }),
+    );
+  const color = shape(t.color.dark, '');
+  const ids = (/** @type {string} */ mode) => themes.filter((th) => th.mode === mode).map((th) => th.id);
+  return { dark: ids('dark'), light: ids('light'), color, number };
+}
+
+/** index.html with its first-paint data line regenerated. */
+function buildIndex() {
+  const html = readFileSync(indexPath, 'utf8');
+  const line = /(<script id="first-paint">[\s\S]*?\n[ \t]*const T = )[^\n]*;\n/;
+  if (!line.test(html)) throw new Error('index.html: the first-paint script has no `const T = ...;` line');
+  return html.replace(line, (_, head) => `${head}${JSON.stringify(firstPaintData())};\n`);
+}
+
 const files = [
   [cssPath, buildCss()],
   [tsPath, buildTs()],
+  [indexPath, buildIndex()],
 ];
 
 if (process.argv.includes('--check')) {

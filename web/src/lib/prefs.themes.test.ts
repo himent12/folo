@@ -1,16 +1,35 @@
 // @vitest-environment happy-dom
 // Themes in the preferences (design/THEMES.md): each mode's slot, the mode/slot rule of Choosing a theme, the custom
 // themes store (`folo.themes`) across tabs, and what is stored.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CustomThemeFile } from './design/themes';
 import { PrefsStore, sanitize, THEMES_KEY } from './prefs';
 
 const prefsOf = () => JSON.parse(localStorage.getItem('folo.prefs')!) as Record<string, unknown>;
 const night: CustomThemeFile = { folo_theme: 1, id: 'night', name: 'Night', mode: 'dark', base: 'midnight', color: { bg: { app: '#0B0D12' } } };
+/** The browser's storage itself (another tab writes it directly, even while this tab's writes are refused). */
+const realStorage = localStorage;
 const fromOtherTab = (key: string, value: string) => {
-  localStorage.setItem(key, value);
+  realStorage.setItem(key, value);
   window.dispatchEvent(new StorageEvent('storage', { key, newValue: value }));
 };
+
+/** A localStorage whose writes of `key` throw while `refuse()` (storage full); reads and other keys go through. */
+function refusing(real: Storage, key: string, refuse: () => boolean): Storage {
+  return {
+    getItem: (k: string) => real.getItem(k),
+    setItem: (k: string, v: string) => {
+      if (refuse() && k === key) throw new DOMException('full', 'QuotaExceededError');
+      real.setItem(k, v);
+    },
+    removeItem: (k: string) => real.removeItem(k),
+    clear: () => real.clear(),
+    key: (i: number) => real.key(i),
+    get length() {
+      return real.length;
+    },
+  };
+}
 
 describe('theme preferences', () => {
   beforeEach(() => localStorage.clear());
@@ -78,6 +97,64 @@ describe('theme preferences', () => {
     localStorage.clear();
     window.dispatchEvent(new StorageEvent('storage', { key: null }));
     expect([p.customThemes.length, p.activeTheme.id]).toEqual([0, 'dark']);
+  });
+
+  describe('when the browser refuses to write folo.themes (storage full), reads still working', () => {
+    const theme = (id: string) => ({ name: `${id}.json`, text: JSON.stringify({ ...night, id, name: id.toUpperCase() }) });
+    let refuse = true;
+    beforeEach(() => {
+      refuse = true;
+      vi.stubGlobal('localStorage', refusing(realStorage, THEMES_KEY, () => refuse));
+    });
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('keeps an unsaved import over the stored list: import A, select A, import B keeps both', () => {
+      const p = new PrefsStore();
+      expect(p.installThemes([theme('a')])[0]).toMatchObject({ ok: true, replaced: false });
+      expect(p.themesUnsaved).toBe(true);
+      expect(localStorage.getItem(THEMES_KEY)).toBeNull();
+      expect(p.useTheme('a')).toBe(true);
+      expect(p.installThemes([theme('b')])[0]).toMatchObject({ ok: true, replaced: false });
+      expect(p.customThemes.map((t) => t.id)).toEqual(['a', 'b']);
+      expect(p.activeTheme.id).toBe('a');
+      // Replacing an unsaved theme says Replaced: the overlay is what is installed.
+      expect(p.installThemes([theme('a')])[0]).toMatchObject({ ok: true, replaced: true });
+      // Another tab's change keeps this tab's unsaved ones over it.
+      fromOtherTab(THEMES_KEY, JSON.stringify([{ ...night, id: 'c', name: 'C' }]));
+      expect(p.customThemes.map((t) => t.id)).toEqual(['c', 'a', 'b']);
+      // The next write that works saves everything, and the note goes.
+      refuse = false;
+      p.removeTheme('c');
+      expect(p.themesUnsaved).toBe(false);
+      expect((JSON.parse(localStorage.getItem(THEMES_KEY)!) as { id: string }[]).map((t) => t.id)).toEqual(['a', 'b']);
+    });
+
+    it('a failed removal is not undone by the next operation', () => {
+      refuse = false;
+      const p = new PrefsStore();
+      p.installThemes([theme('a'), theme('b')]);
+      refuse = true;
+      p.removeTheme('a');
+      expect([p.customThemes.map((t) => t.id), p.themesUnsaved]).toEqual([['b'], true]);
+      // Still stored: the write failed.
+      expect((JSON.parse(localStorage.getItem(THEMES_KEY)!) as { id: string }[]).map((t) => t.id)).toEqual(['a', 'b']);
+      p.installThemes([theme('c')]);
+      expect(p.customThemes.map((t) => t.id)).toEqual(['b', 'c']);
+      fromOtherTab('folo.prefs', JSON.stringify({ theme: 'dark' }));
+      window.dispatchEvent(new StorageEvent('storage', { key: THEMES_KEY }));
+      expect(p.customThemes.map((t) => t.id)).toEqual(['b', 'c']);
+    });
+  });
+
+  it('resolves each theme once: the lists and lookups are one catalog until the themes change', () => {
+    const p = new PrefsStore();
+    p.installThemes([{ name: 'n.json', text: JSON.stringify(night) }]);
+    const list = p.themesFor('dark');
+    expect(p.themesFor('dark')).toBe(list);
+    expect(p.themeById('night')).toBe(list.at(-1));
+    expect(p.slotTheme('dark')).toBe(p.themeById('dark'));
+    p.installThemes([{ name: 'm.json', text: JSON.stringify({ ...night, id: 'm', name: 'M' }) }]);
+    expect(p.themesFor('dark')).not.toBe(list);
   });
 
   it('ignores a stored list that is not JSON or holds broken entries', () => {

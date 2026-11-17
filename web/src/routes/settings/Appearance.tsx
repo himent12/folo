@@ -10,7 +10,8 @@ import Moon from '$icons/moon';
 import Sun from '$icons/sun';
 import Upload from '$icons/upload';
 import { computed, css, effect, For, signal } from 'fw';
-import type { ImportResult, Mode, Theme } from '$lib/design/themes';
+import { THEME_FILE_MAX, type ImportResult, type Mode, type Theme } from '$lib/design/themes';
+import { themes as builtins } from '$lib/design/tokens';
 import { prefs, type ThemePref } from '$lib/prefs';
 import Button from '$lib/ui/Button';
 import Ident from '$lib/ui/Ident';
@@ -41,8 +42,31 @@ export function resultText(r: ImportResult): string {
 
 /** "Dark · based on Midnight": what a custom theme is, for its line in the list (its id follows). */
 function themeFacts(t: Theme): string[] {
-  const base = prefs.themesFor(t.mode).find((x) => x.id === t.base && !x.custom);
-  return [t.mode === 'dark' ? 'Dark' : 'Light', ...(base && base.id !== t.mode ? [`based on ${base.name}`] : [])];
+  return [t.mode === 'dark' ? 'Dark' : 'Light', ...(t.base !== t.mode ? [`based on ${builtins[t.base].name}`] : [])];
+}
+
+/** What a picked file is: its text, or why it isn't read (larger than a theme can be: refused by size, unread). */
+type Picked = { name: string; text: string } | { name: string; error: string };
+
+/**
+ * Reads picked files one at a time (a large pick never holds them all at once), refusing one over THEME_FILE_MAX by its
+ * size before reading it, as Desktop does.
+ */
+export async function readPicked(files: readonly File[]): Promise<Picked[]> {
+  const out: Picked[] = [];
+  for (const f of files) {
+    if (f.size > THEME_FILE_MAX) out.push({ name: f.name, error: '(file): larger than 1 MB; not a theme' });
+    else out.push({ name: f.name, text: await f.text().catch(() => '') });
+  }
+  return out;
+}
+
+/** Installs the readable files and says per file, in the order picked, what happened. */
+export function installPicked(picked: readonly Picked[]): ImportResult[] {
+  const readable = picked.filter((p): p is { name: string; text: string } => 'text' in p);
+  const installed = readable.length ? prefs.installThemes(readable) : [];
+  let next = 0;
+  return picked.map((p) => ('text' in p ? installed[next++]! : { file: p.name, ok: false, error: p.error }));
 }
 
 export default function Appearance() {
@@ -56,8 +80,7 @@ export default function Appearance() {
     const files = [...(input?.files ?? [])];
     if (input) input.value = '';
     if (!files.length) return;
-    const read = await Promise.all(files.map(async (f) => ({ name: f.name, text: await f.text().catch(() => '') })));
-    results.set(prefs.installThemes(read));
+    results.set(installPicked(await readPicked(files)));
   }
 
   const slot = (m: Mode) => {
@@ -83,7 +106,8 @@ export default function Appearance() {
     );
   };
 
-  const custom = computed(() => prefs.customThemes.map((f) => prefs.themesFor(f.mode).find((t) => t.custom && t.id === f.id)!).filter(Boolean));
+  // Read from the resolved catalog by id: no list is rebuilt or searched per row.
+  const custom = computed(() => prefs.customThemes.map((f) => prefs.themeById(f.id)).filter((t): t is Theme => !!t?.custom));
 
   return (
     <Panel title="Appearance" meta="saved in this browser" id="appearance" divided pad="none">
@@ -106,8 +130,13 @@ export default function Appearance() {
           </>
         }
         below={
-          results.get().length || custom.get().length ? (
+          results.get().length || custom.get().length || prefs.themesUnsaved ? (
             <div class="custom">
+              {prefs.themesUnsaved ? (
+                <p class="unsaved" role="status">
+                  Couldn't save to this browser's storage; your custom themes last until you close this tab.
+                </p>
+              ) : null}
               {results.get().length ? (
                 <ul class="results" aria-label="Import results" role="status">
                   <For each={results.get()} key={(r) => `${r.file}\u0000${resultText(r)}`}>
@@ -168,6 +197,11 @@ css`
     display: grid;
     gap: var(--space-2);
     padding-bottom: var(--space-2);
+  }
+  .unsaved {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
   }
   .results {
     display: grid;

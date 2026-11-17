@@ -1,5 +1,5 @@
 {
-  "$comment": "Shared cases for the custom theme format (design/THEMES.md, Custom themes), so every validator (design/contrast.mjs, Studio, Desktop) agrees. `invalid`: each `theme` must be refused with `error` (`path: message`; the path, before the first ': ', is the part every validator must match). `valid`: each must be accepted; `expect` gives the resolved base, the trimmed name, and token paths of the resolved palette with their expected values (as written in the file, or the base's). `node design/contrast.mjs` replays them on every run (so `npm run check` in web/ does), and `node --test design/contrast.test.mjs` tests them with the rest of the theme half.",
+  "$comment": "Shared cases for the custom theme format (design/THEMES.md, Custom themes), so every validator (design/contrast.mjs, Studio, Desktop) agrees. A case holds the file either parsed (`theme`) or as its raw text (`text`, parsed by each validator's own file reader: number spellings such as 1.0, a byte order mark and dotted keys survive only that way). `invalid`: each must be refused with exactly `error` (`path: message`). `valid`: each must be accepted; `expect` gives the resolved base, the trimmed name (and description, when given), and token paths of the resolved palette with their expected values (as written in the file, or the base's). `node design/contrast.mjs` replays them on every run (so `npm run check` in web/ does), and `node --test design/contrast.test.mjs` tests them with the rest of the theme half.",
   "invalid": [
     { "what": "not an object", "theme": ["dark"], "error": "(file): must be a JSON object" },
     { "what": "unknown top-level key", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "colour": {} }, "error": "colour: unknown key" },
@@ -41,7 +41,15 @@
     { "what": "area_opacity above 1", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "chart": { "area_opacity": 1.5 } } }, "error": "color.chart.area_opacity: must be a number from 0 to 1" },
     { "what": "area_opacity negative", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "chart": { "area_opacity": -0.1 } } }, "error": "color.chart.area_opacity: must be a number from 0 to 1" },
     { "what": "area_opacity a string", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "color": { "chart": { "area_opacity": "0.1" } } }, "error": "color.chart.area_opacity: must be a number from 0 to 1" },
-    { "what": "first error wins (unknown key before color)", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "colors": {}, "color": { "bg": { "ap": "#000000" } } }, "error": "colors: unknown key" }
+    { "what": "first error wins (unknown key before color)", "theme": { "folo_theme": 1, "id": "x", "name": "X", "mode": "dark", "colors": {}, "color": { "bg": { "ap": "#000000" } } }, "error": "colors: unknown key" },
+    { "what": "id system is reserved (--theme system is the mode)", "theme": {"folo_theme": 1, "id": "system", "name": "X", "mode": "dark"}, "error": "id: \"system\" is reserved" },
+    { "what": "raw: a dotted key under color", "text": "{\"folo_theme\": 1, \"id\": \"x\", \"name\": \"X\", \"mode\": \"dark\", \"color\": {\"bg.app\": \"#000000\"}}", "error": "color.bg.app: not a colour token" },
+    { "what": "raw: a dotted key naming a list", "text": "{\"folo_theme\": 1, \"id\": \"x\", \"name\": \"X\", \"mode\": \"dark\", \"color\": {\"chart.series\": [\"#000001\", \"#000002\", \"#000003\", \"#000004\", \"#000005\", \"#000006\"]}}", "error": "color.chart.series: not a colour token" },
+    { "what": "raw: a dotted key inside a group", "text": "{\"folo_theme\": 1, \"id\": \"x\", \"name\": \"X\", \"mode\": \"dark\", \"color\": {\"chart\": {\"series.0\": \"#000000\"}}}", "error": "color.chart.series.0: not a colour token" },
+    { "what": "raw: folo_theme 1.5", "text": "{\"folo_theme\": 1.5, \"id\": \"x\", \"name\": \"X\", \"mode\": \"dark\"}", "error": "folo_theme: must be 1" },
+    { "what": "raw: name 41 code points (astral, 82 UTF-16 units)", "text": "{\"folo_theme\": 1, \"id\": \"x\", \"name\": \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\", \"mode\": \"dark\"}", "error": "name: must be 1 to 40 characters" },
+    { "what": "raw: name only Unicode white space", "text": "{\"folo_theme\": 1, \"id\": \"x\", \"name\": \"\u3000\u00a0\u2003\", \"mode\": \"dark\"}", "error": "name: must be 1 to 40 characters" },
+    { "what": "raw: description 121 code points (astral)", "text": "{\"folo_theme\": 1, \"id\": \"x\", \"name\": \"X\", \"mode\": \"dark\", \"description\": \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\"}", "error": "description: must be at most 120 characters" }
   ],
   "valid": [
     {
@@ -83,6 +91,12 @@
         "color": { "chart": { "area_opacity": 1 } }
       },
       "expect": { "base": "contrast-light", "name": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "color": { "text.primary": "#000000", "chart.area_opacity": 1 } }
-    }
+    },
+    {"what": "raw: folo_theme 1.0", "text": "{\"folo_theme\": 1.0, \"id\": \"x\", \"name\": \"A\", \"mode\": \"dark\"}", "expect": {"base": "dark", "name": "A", "color": {"bg.app": "#08090B"}}},
+    {"what": "raw: folo_theme 1e0", "text": "{\"folo_theme\": 1e0, \"id\": \"x\", \"name\": \"A\", \"mode\": \"light\"}", "expect": {"base": "light", "name": "A", "color": {"bg.panel": "#FFFFFF"}}},
+    {"what": "raw: folo_theme 10e-1", "text": "{\"folo_theme\": 10e-1, \"id\": \"x\", \"name\": \"A\", \"mode\": \"dark\"}", "expect": {"base": "dark", "name": "A", "color": {"bg.app": "#08090B"}}},
+    {"what": "raw: a UTF-8 byte order mark before the JSON", "text": "\ufeff{\"folo_theme\": 1, \"id\": \"x\", \"name\": \"Bom\", \"mode\": \"dark\", \"color\": {\"bg\": {\"app\": \"#0A0B0C\"}}}", "expect": {"base": "dark", "name": "Bom", "color": {"bg.app": "#0A0B0C"}}},
+    {"what": "raw: 40 code points of name, 120 of description (astral)", "text": "{\"folo_theme\": 1, \"id\": \"x\", \"name\": \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\", \"mode\": \"dark\", \"description\": \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\"}", "expect": {"base": "dark", "name": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀", "description": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀", "color": {}}},
+    {"what": "raw: name and description trimmed of Unicode white space", "text": "{\"folo_theme\": 1, \"id\": \"x\", \"name\": \"\u3000 Bee\u00a0\u2003\", \"mode\": \"dark\", \"description\": \"\u0085 Hi \u2028\"}", "expect": {"base": "dark", "name": "Bee", "description": "Hi", "color": {}}}
   ]
 }

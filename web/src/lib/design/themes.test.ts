@@ -2,30 +2,34 @@
 // design/contrast.mjs and Desktop, so the three validators refuse the same files with the same words.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { checkCustomTheme, cssVarsOf, customTheme, findTheme, importThemes, parseThemeFile, readStoredThemes, resolveTheme, themesFor, type CustomThemeFile } from './themes';
+import { checkCustomTheme, compareCodePoints, cssVarsOf, customTheme, findTheme, importThemes, parseThemeFile, readStoredThemes, resolveTheme, themesFor, type CustomThemeFile } from './themes';
 import { colorVars, themeIds, themes } from './tokens';
 
 const design = new URL('../../../../design/', import.meta.url);
 const cases = JSON.parse(readFileSync(new URL('theme-cases.json', design), 'utf8')) as {
-  invalid: { what: string; theme: unknown; error: string }[];
-  valid: { what: string; theme: unknown; expect: { base: string; name: string; color: Record<string, unknown> } }[];
+  invalid: { what: string; theme?: unknown; text?: string; error: string }[];
+  valid: { what: string; theme?: unknown; text?: string; expect: { base: string; name: string; description?: string; color: Record<string, unknown> } }[];
 };
+/** A case checked as Studio reads it: its raw `text` as an imported file's, or its parsed `theme` as a stored entry. */
+const check = (c: { theme?: unknown; text?: string }) => (c.text !== undefined ? parseThemeFile(c.text) : checkCustomTheme(c.theme));
 const at = (o: unknown, path: string) => path.split('.').reduce<unknown>((v, k) => (v as Record<string, unknown> | undefined)?.[k], o);
 const file = (over: Partial<CustomThemeFile> = {}): CustomThemeFile => ({ folo_theme: 1, id: 'night', name: 'Night', mode: 'dark', ...over });
 
 describe('custom theme files (design/theme-cases.json)', () => {
   it('refuses every invalid case with its exact path and message', () => {
     expect(cases.invalid.length).toBeGreaterThan(30);
-    for (const c of cases.invalid) expect(checkCustomTheme(c.theme), c.what).toEqual({ ok: false, error: c.error });
+    expect([...cases.invalid, ...cases.valid].filter((c) => c.text !== undefined).length, 'the raw cases').toBeGreaterThanOrEqual(8);
+    for (const c of cases.invalid) expect(check(c), c.what).toEqual({ ok: false, error: c.error });
   });
 
   it('accepts every valid case and resolves it on its base', () => {
     for (const c of cases.valid) {
-      const r = checkCustomTheme(c.theme);
+      const r = check(c);
       if (!r.ok) throw new Error(`${c.what}: ${r.error}`);
       const t = customTheme(r.theme);
       expect(t.base, c.what).toBe(c.expect.base);
       expect(t.name, c.what).toBe(c.expect.name);
+      if (c.expect.description !== undefined) expect(t.description, c.what).toBe(c.expect.description);
       for (const [path, v] of Object.entries(c.expect.color)) expect(at(t.color, path), `${c.what}: ${path}`).toBe(v);
     }
   });
@@ -45,6 +49,17 @@ describe('resolution', () => {
     expect(themesFor('dark', customs).map((t) => t.id)).toEqual([...themeIds.filter((id) => themes[id].mode === 'dark'), 'aa', 'zz']);
     expect(themesFor('light', customs).map((t) => t.id)).toEqual(['light', 'paper', 'contrast-light', 'pl']);
     expect(themeIds[0]).toBe('dark');
+  });
+
+  it('orders custom themes by lower-cased name, then id, by code point (as Desktop does; no locale collation)', () => {
+    // The same list as Desktop's catalog test (apps/desktop/src/theme/catalog.rs).
+    const names = ['😀 Smile', 'Ａpple', 'éclair', 'Ember', 'apple', 'Same', 'same'];
+    const customs = names.map((name, i) => file({ id: `t${names.length - i}`, name }));
+    // a (U+61) < e < s (two "same": by id, t1 then t2) < é (U+E9) < fullwidth a (U+FF41) < 😀 (U+1F600).
+    expect(themesFor('dark', customs).slice(4).map((t) => t.name)).toEqual(['apple', 'Ember', 'same', 'Same', 'éclair', 'Ａpple', '😀 Smile']);
+    // By code point, not by UTF-16 unit: U+FFFF is before U+1F600, whose first unit (U+D83D) is lower.
+    expect(compareCodePoints('￿', '😀')).toBeLessThan(0);
+    expect('￿' < '😀').toBe(false);
   });
 
   it("shows the mode's default for an id that names no theme of that mode", () => {

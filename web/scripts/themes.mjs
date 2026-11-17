@@ -1,8 +1,8 @@
 // The built-in colour themes of design/tokens.json (design/THEMES.md), resolved for scripts/tokens.mjs: each theme is
 // its mode's base palette (color.dark or color.light) with the theme's `color` merged over it key by key, arrays
 // replaced whole. Anything malformed throws with the token path, so `npm run tokens` fails loudly instead of writing
-// a palette with a hole in it. Also the one rule that names a colour token's CSS custom property, which Studio's
-// runtime (src/lib/design/themes.ts) and index.html's first-paint script repeat for custom themes.
+// a palette with a hole in it. Also the one rule that names a colour token's CSS custom property: tokens.mjs writes it
+// into tokens.ts (colorVars, which Studio's runtime reads) and into index.html's first-paint data.
 
 const HEX = /^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
 export const MODES = /** @type {const} */ (['dark', 'light']);
@@ -93,6 +93,7 @@ export function builtinThemes(tokens) {
     if (isMeta(id)) continue;
     const where = `themes.${id}`;
     if (!/^[a-z0-9-]{1,40}$/.test(id)) throw new Error(`${where}: an id is 1-40 of a-z, 0-9 and -`);
+    if (id === 'system') throw new Error(`${where}: "system" is reserved (Desktop's --theme system is the mode)`);
     if (!isObj(th)) throw new Error(`${where}: expected an object`);
     const t = /** @type {Record<string, unknown>} */ (th);
     for (const k of Object.keys(t)) if (!isMeta(k) && !['name', 'mode', 'description', 'color'].includes(k)) throw new Error(`${where}.${k}: unknown key`);

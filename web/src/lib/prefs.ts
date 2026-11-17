@@ -2,7 +2,7 @@
 
 import { computed, signal, type Signal } from 'fw';
 import type { LabelAgentId } from './api/types';
-import { findTheme, importThemes, readStoredThemes, resolveTheme, themesFor, type CustomThemeFile, type ImportResult, type Mode, type Theme } from './design/themes';
+import { defaultThemeId, importThemes, readStoredThemes, themeCatalog, type CustomThemeFile, type ImportResult, type Mode, type Theme } from './design/themes';
 
 export type ThemePref = 'dark' | 'light' | 'system';
 export type Units = 'metric' | 'binary';
@@ -86,6 +86,21 @@ function storedThemes(): CustomThemeFile[] | null {
   }
 }
 
+/** A change to the installed custom themes: themes installed (each replacing one with its id), or one removed. */
+type ThemesChange = { put: CustomThemeFile[] } | { remove: string };
+
+/** `themes` with `change` made to it. */
+function applyChange(themes: readonly CustomThemeFile[], change: ThemesChange): CustomThemeFile[] {
+  if ('remove' in change) return themes.filter((t) => t.id !== change.remove);
+  const out = [...themes];
+  for (const t of change.put) {
+    const at = out.findIndex((x) => x.id === t.id);
+    if (at >= 0) out[at] = t;
+    else out.push(t);
+  }
+  return out;
+}
+
 /** Exported for tests; the app uses `prefs`. */
 export class PrefsStore {
   #p: { [K in keyof Prefs]: Signal<Prefs[K]> };
@@ -99,6 +114,15 @@ export class PrefsStore {
     return t === 'system' ? (this.#systemDark.get() ? 'dark' : 'light') : t;
   });
   #customThemes = signal<CustomThemeFile[]>([]);
+  /**
+   * Changes to the custom themes made in this tab whose write failed (storage full or refused), oldest first. They stay
+   * over what is read from storage (another tab's change, the next import or removal here) until a write succeeds, as
+   * #dirty does for preferences: else the next operation would read the stale stored list and drop them.
+   */
+  #themesPending: ThemesChange[] = [];
+  #themesUnsaved = signal(false);
+  /** Every theme resolved once, each mode's list and every theme by id (Settings and the palette read it). */
+  #catalog = computed(() => themeCatalog(this.#customThemes.get()));
   /** The theme on screen: the resolved mode's choice. */
   #active = computed<Theme>(() => this.slotTheme(this.#resolved.get()));
 
@@ -126,7 +150,7 @@ export class PrefsStore {
       // Custom themes installed or removed in another tab: this one lists and shows the same.
       if (e.key === null || e.key === THEMES_KEY) {
         const t = storedThemes();
-        if (t) this.#customThemes.set(t);
+        if (t) this.#customThemes.set(this.#current());
       }
       if (e.key !== null && e.key !== KEY && e.key !== 'folo.theme') return;
       const p = stored();
@@ -165,12 +189,24 @@ export class PrefsStore {
 
   /** The theme a mode shows: its stored choice, or the mode's default when that names no theme of the mode. */
   slotTheme(mode: Mode): Theme {
-    return resolveTheme(this.#p[mode === 'dark' ? 'darkTheme' : 'lightTheme'].get(), mode, this.#customThemes.get());
+    const { byId } = this.#catalog.get();
+    const t = byId.get(this.#p[mode === 'dark' ? 'darkTheme' : 'lightTheme'].get());
+    return t && t.mode === mode ? t : byId.get(defaultThemeId(mode))!;
   }
 
   /** The themes of a mode, as Settings and the palette list them: built-ins in order, then custom ones by name. */
-  themesFor(mode: Mode): Theme[] {
-    return themesFor(mode, this.#customThemes.get());
+  themesFor(mode: Mode): readonly Theme[] {
+    return this.#catalog.get()[mode];
+  }
+
+  /** The theme `id` (either mode, built-in or custom), resolved, or undefined. */
+  themeById(id: string): Theme | undefined {
+    return this.#catalog.get().byId.get(id);
+  }
+
+  /** True while a change to the custom themes is not saved (the browser refused the write): it lasts for this tab. */
+  get themesUnsaved(): boolean {
+    return this.#themesUnsaved.get();
   }
 
   /** The custom themes installed in this browser, as stored. */
@@ -184,7 +220,7 @@ export class PrefsStore {
    * when no theme has that id.
    */
   useTheme(id: string): boolean {
-    const t = findTheme(id, this.#customThemes.peek());
+    const t = this.#catalog.peek().byId.get(id);
     if (!t) return false;
     const slot = t.mode === 'dark' ? 'darkTheme' : 'lightTheme';
     this.#p[slot].set(t.id);
@@ -196,23 +232,37 @@ export class PrefsStore {
 
   /** Installs theme files (their names and text): each one that passes the check, replacing one with its id. */
   installThemes(files: readonly { name: string; text: string }[]): ImportResult[] {
-    // Over what is stored now, so themes another tab installed since are kept.
-    const { themes, results } = importThemes(storedThemes() ?? this.#customThemes.peek(), files);
-    this.#writeThemes(themes);
+    const { accepted, results } = importThemes(this.#current(), files);
+    if (accepted.length) this.#changeThemes({ put: accepted });
     return results;
   }
 
   /** Removes the custom theme `id`. A mode that used it shows its default; its stored choice stays. */
   removeTheme(id: string) {
-    this.#writeThemes((storedThemes() ?? this.#customThemes.peek()).filter((t) => t.id !== id));
+    this.#changeThemes({ remove: id });
   }
 
-  #writeThemes(themes: CustomThemeFile[]) {
+  /** What is stored now with this tab's unsaved changes over it (or this tab's list, when storage can't be read). */
+  #current(): CustomThemeFile[] {
+    const stored = storedThemes();
+    return stored ? this.#themesPending.reduce(applyChange, stored) : this.#customThemes.peek();
+  }
+
+  /**
+   * Makes `change` over what is stored now (so themes another tab installed since are kept) with this tab's unsaved
+   * changes over that, and writes the result. A failed write keeps the change pending (#themesPending) and says so.
+   */
+  #changeThemes(change: ThemesChange) {
+    this.#themesPending.push(change);
+    const themes = this.#current();
     this.#customThemes.set(themes);
     try {
       localStorage.setItem(THEMES_KEY, JSON.stringify(themes));
+      this.#themesPending = [];
+      this.#themesUnsaved.set(false);
     } catch {
-      /* storage may be unavailable or full: the themes then last for the session */
+      // Storage may be unavailable or full: the change lasts for this tab, and the next write tries again.
+      this.#themesUnsaved.set(true);
     }
   }
 

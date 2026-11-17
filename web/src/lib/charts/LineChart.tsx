@@ -657,7 +657,7 @@ export default function LineChart(props: LineChartProps) {
                         <>
                           {q().a ? (
                             <linearGradient id={`${uid}-${q().s.id}`} x1="0" x2="0" y1="0" y2="1">
-                              <stop offset="0" style:stop-color={q().s.color} stop-opacity="0.08" />
+                              <stop offset="0" class="area-top" style:stop-color={q().s.color} />
                               <stop offset="1" style:stop-color={q().s.color} stop-opacity="0" />
                             </linearGradient>
                           ) : null}
@@ -851,6 +851,10 @@ css`
   }
   .area {
     stroke: none;
+  }
+  /* The theme's chart.area_opacity, relative to its mode's default: the default themes draw 0.08 as before. */
+  .area-top {
+    stop-opacity: calc(var(--chart-area-opacity) / var(--chart-area-opacity-default) * 0.08);
   }
   .cursor {
     stroke: var(--chart-cursor);
