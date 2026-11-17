@@ -700,7 +700,12 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   batch stride instead of gathering it first (depthwise convs still take dense inputs); `conv2d_act_cat` (see
   Concatenations read in place, above) is the 1×1 conv over a concatenation without writing it;
   `batch_norm_act` / `batch_norm_act_backward` are the BatchNorm kernels above (`Tensor::batch_norm_act_train`,
-  recorded by folo-nn's `BatchNorm2d` as one custom op); `optimizer_step` is the update kernel
+  recorded by folo-nn's `BatchNorm2d` as one custom op); `conv2d_bn_stats` runs a train-mode `ConvBnAct`'s conv on
+  tensor cores (mixed precision, unsplit `K`) with its output's BatchNorm statistics folded into the GEMM epilogue
+  (`kernels::conv::bn_stats`: per-row Welford partials of the f32 results in the layout `bn_finalize` merges, before
+  the f16 rounding), and `batch_norm_act` with those partials (`norm::batch_norm_forward_partials`) skips its
+  statistics pass, one full read of the conv output; f32 and the regular kernels keep the separate pass (the epilogue
+  cost two thirds of the pass there, `docs/notes/hill/r5-gputrain.md`); `optimizer_step` is the update kernel
   (`Tensor::optimizer_step_`) and `optimizer_step_many` / `unscale_check_many` its multi-tensor form
   (`Tensor::optimizer_step_many_`, `Tensor::unscale_check_many_`), which folo-nn's SGD, AdamW, EMA, gradient
   accumulation and loss scaler use on the GPU: a folo-n step's 255 parameters take 16 dispatches per pass instead

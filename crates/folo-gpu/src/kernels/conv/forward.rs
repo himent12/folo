@@ -2,6 +2,7 @@
 //! the implicit GEMM (`CONV_MODE` 1) for everything else, split along `K` when it has few output tiles
 //! ([`super::split`]).
 
+use super::bn_stats::BnPartials;
 use super::depthwise::{DEPTHWISE, DW_VX};
 use super::{Conv2dDesc, conv_spec, split};
 use crate::context::GpuContext;
@@ -88,7 +89,25 @@ pub fn conv2d_with_plan(
     plan: ConvPlan,
 ) -> Result<(usize, usize)> {
     let dense = ConvInput { offset: 0, n_stride: d.c_in * d.h * d.w };
-    conv2d_at(ctx, d, (x, dense), weight, bias, y, plan)
+    conv2d_at(ctx, d, (x, dense), weight, bias, y, plan, false).map(|r| r.0)
+}
+
+/// The bias-free, activation-free [`conv2d`] in front of a train-mode BatchNorm (`d.act` must be the identity), plus
+/// the BatchNorm's statistics of `y` from the conv's epilogue ([`BnPartials`], see [`super::bn_stats`]) where the
+/// kernel the conv takes computes them (an unsplit tensor-core conv), else `None` (the BatchNorm then reads `y`). The input is at an offset in
+/// `x` as in [`conv2d_input`]; `plan` as in [`conv2d_with_plan`].
+pub fn conv2d_bn_stats(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    x: (&wgpu::Buffer, ConvInput),
+    weight: &wgpu::Buffer,
+    y: &wgpu::Buffer,
+    plan: ConvPlan,
+) -> Result<Option<BnPartials>> {
+    if d.act != UnaryOp::Identity {
+        return Err(shape_err("conv2d_bn_stats: the conv in front of a BatchNorm has no activation"));
+    }
+    conv2d_at(ctx, d, x, weight, None, y, plan, true).map(|r| r.1)
 }
 
 /// [`conv2d_with_config`] on an input read from `x` as `at` says (a channel slice read in place). Depthwise convs
@@ -102,10 +121,12 @@ pub fn conv2d_input(
     y: &wgpu::Buffer,
     cfg: Option<TileConfig>,
 ) -> Result<(usize, usize)> {
-    conv2d_at(ctx, d, (x, at), weight, bias, y, ConvPlan { tiles: cfg, splits: None })
+    conv2d_at(ctx, d, (x, at), weight, bias, y, ConvPlan { tiles: cfg, splits: None }, false).map(|r| r.0)
 }
 
-/// The forward conv on an input at `at` in `x`, run as `plan` says.
+/// The forward conv on an input at `at` in `x`, run as `plan` says; with `stats`, also the BatchNorm statistics
+/// of `y` where the kernel computes them.
+#[allow(clippy::too_many_arguments)]
 fn conv2d_at(
     ctx: &GpuContext,
     d: &Conv2dDesc,
@@ -114,13 +135,16 @@ fn conv2d_at(
     bias: Option<&wgpu::Buffer>,
     y: &wgpu::Buffer,
     plan: ConvPlan,
-) -> Result<(usize, usize)> {
+    stats: bool,
+) -> Result<((usize, usize), Option<BnPartials>)> {
     let cfg = plan.tiles;
     check_dtype(ctx, d.dtype, "conv2d")?;
     let (oh, ow) = d.check_input_buffers((x, at.offset, at.n_stride), weight, bias, y)?;
     if d.n * d.c_out * oh * ow == 0 {
-        return Ok((oh, ow));
+        return Ok(((oh, ow), None));
     }
+    // Statistics come from the tensor-core epilogue: one group, no bias or activation in front of them.
+    let stats = stats && d.groups == 1 && bias.is_none() && d.act == UnaryOp::Identity;
     let dense = at.offset == 0 && (d.n <= 1 || at.n_stride == d.c_in * d.h * d.w);
 
     if d.is_depthwise() {
@@ -147,7 +171,7 @@ fn conv2d_at(
             .f(d.act.alpha())
             .uz(qw)?;
         ctx.dispatch(&k, &[x, weight, bias.unwrap_or(ctx.dummy()), y], &p, ctx.grid_1d(total as u64, 256)?)?;
-        return Ok((oh, ow));
+        return Ok(((oh, ow), None));
     }
 
     let (kh, kw) = d.win.kernel;
@@ -160,20 +184,32 @@ fn conv2d_at(
     // Tensor cores for f16 when the context has them on (an explicit tile config means the regular kernels).
     if cfg.is_none() && d.dtype == DType::F16 && ctx.tensor_cores() {
         let bias_buf = bias.unwrap_or(ctx.dummy());
+        let mut part = None;
+        let slot = if stats { Some(&mut part) } else { None };
         let done = if d.is_pointwise() {
-            coop::encode_gemm(ctx, &g, DType::F16, weight, x, bias_buf, y, coop::conv_config(ctx, g.m, g.n))?
+            let cfg = coop::conv_config(ctx, g.m, g.n);
+            coop::encode_gemm_stats(ctx, &g, DType::F16, (weight, x, bias_buf, y), cfg, slot)?
         } else {
-            coop::encode_conv(ctx, d, &g, DType::F16, x, weight, bias_buf, y, None, plan.splits)?
+            coop::encode_conv_stats(
+                ctx,
+                d,
+                &g,
+                DType::F16,
+                (x, weight, bias_buf, y),
+                None,
+                plan.splits,
+                slot,
+            )?
         };
         if done {
-            return Ok((oh, ow));
+            return Ok(((oh, ow), part));
         }
     }
 
     if d.is_pointwise() {
         let cfg = cfg.unwrap_or_else(|| gemm::pick_config_conv(ctx, &g));
         gemm::gemm_with_config(ctx, &g, weight, x, bias, y, cfg)?;
-        return Ok((oh, ow));
+        return Ok(((oh, ow), None));
     }
 
     // Implicit GEMM, split along K when it has few output tiles: every chunk then writes an f32 partial slab of
@@ -204,19 +240,19 @@ fn conv2d_at(
         .u32("CONV_MODE", 1)
         .bool("SPLIT", splits > 1)
         .bool("OUT_F32", splits > 1 && d.dtype == DType::F16);
-    let kernel = ctx.kernel(&GEMM, conv_spec(spec, d))?;
     let p = gemm_params(&g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
     let groups = [gx as u32, gy as u32, u32::try_from(batch * splits).unwrap_or(u32::MAX)];
+    let kernel = ctx.kernel(&GEMM, conv_spec(spec, d))?;
     if splits == 1 {
         ctx.dispatch(&kernel, &[weight, x, bias.unwrap_or(ctx.dummy()), y], &p, groups)?;
-        return Ok((oh, ow));
+        return Ok(((oh, ow), None));
     }
     let part = ctx.alloc(DType::F32.bytes(prod(&[splits, out_elems])?))?;
     let p = p.uz(splits)?.uz(chunk)?.uz(out_elems)?;
     ctx.dispatch(&kernel, &[weight, x, ctx.dummy(), part.raw()], &p, groups)?;
     let f = split::Finish { splits, out_elems, plane: hw_out, channels: d.c_out, act: d.act, out: d.dtype };
     split::finish(ctx, &f, part.raw(), bias, y)?;
-    Ok((oh, ow))
+    Ok(((oh, ow), None))
 }
 
 /// `y = act(conv2d(cat(parts, 1), weight) + bias)` for a 1×1, stride-1, unpadded, ungrouped conv, reading the

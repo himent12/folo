@@ -4,12 +4,13 @@
 #[cfg(doc)]
 use super::matmul::gemm;
 use super::matmul::{base_spec, build, build_def, check_io, encode_gemm};
-use super::shader::COOP_SITES;
+use super::shader::{COOP_SITES, COOP_STATS};
 use super::{CoopConfig, conv_config, pick_config, pick_config_conv, resolve};
 use crate::DType;
 use crate::UnaryOp;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
+use crate::kernels::conv::bn_stats::{self, StatsSlot};
 use crate::kernels::conv::{Conv2dDesc, split};
 use crate::kernels::gemm::{GemmBias, GemmDesc, gemm_params};
 use crate::pipeline::Spec;
@@ -69,6 +70,22 @@ pub(crate) fn encode_conv(
     cfg: Option<CoopConfig>,
     want_splits: Option<usize>,
 ) -> Result<bool> {
+    encode_conv_stats(ctx, d, g, out, (x, weight, bias, y), cfg, want_splits, None)
+}
+
+/// [`encode_conv`], with `stats` (and no bias or activation) also the BatchNorm statistics of each output channel
+/// (`crate::kernels::conv::bn_stats`) when the conv runs unsplit (`stats` is left `None` when it splits `K`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_conv_stats(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    g: &GemmDesc,
+    out: DType,
+    (x, weight, bias, y): (&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer),
+    cfg: Option<CoopConfig>,
+    want_splits: Option<usize>,
+    stats: StatsSlot<'_>,
+) -> Result<bool> {
     let (oh, ow) = d.output()?;
     let Some(cfg) = resolve(ctx, cfg, || pick_config_conv(g.m, g.n))? else { return Ok(false) };
     // Split K when the conv has few output tiles (as the regular kernels do; `crate::kernels::conv::split`):
@@ -95,6 +112,18 @@ pub(crate) fn encode_conv(
         .u32("CONV_MODE", 1)
         .bool("SPLIT", splits > 1);
     spec = with_window(spec, d);
+    if splits == 1
+        && let Some(slot) = stats
+    {
+        let tiles = g.n.div_ceil(cfg.bn as usize);
+        let part = bn_stats::alloc(ctx, g.m, batch, tiles)?;
+        let Some(kernel) = build_def(ctx, &COOP_STATS, spec.bool("STATS", true)) else { return Ok(false) };
+        let p =
+            gemm_params(&g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?.at(34).uz(part.chunks)?.uz(tiles)?;
+        ctx.dispatch(&kernel, &[weight, x, bias, y, part.buf.raw()], &p, grid(&g, cfg, batch)?)?;
+        *slot = Some(part);
+        return Ok(true);
+    }
     let Some(kernel) = build(ctx, spec) else { return Ok(false) };
     let p = gemm_params(&g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
     let groups = grid(&g, cfg, batch * splits)?;

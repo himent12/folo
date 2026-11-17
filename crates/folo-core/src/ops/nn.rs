@@ -1,5 +1,6 @@
 //! Matrix products, convolution, pooling and upsampling.
 
+use super::fused::BnStats;
 use super::grads;
 use crate::autocast::casts;
 use crate::backend::{Conv2dParams, Pool2dParams, View};
@@ -135,19 +136,47 @@ impl Tensor {
     /// [`Tensor::conv2d`] with per-axis parameters. Under [`crate::autocast`] (on a device that computes in
     /// `F16`) the conv runs in `F16` against the `F32` weight and bias (see the [`crate::autocast`] module docs).
     pub fn conv2d_with(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Tensor> {
+        Ok(self.conv2d_rec(weight, bias, p, false)?.0)
+    }
+
+    /// The bias-free [`Tensor::conv2d_with`] in front of a train-mode BatchNorm, recorded the same way, plus the
+    /// BatchNorm's statistics of the result where the backend gathers them in the conv's epilogue
+    /// ([`crate::backend::Backend::conv2d_bn_stats`]); hand them to [`Tensor::batch_norm_act_train_stats`], which
+    /// then skips its statistics pass. `None` where the backend (or the kernel the conv takes) has none.
+    pub fn conv2d_bn_stats(&self, weight: &Tensor, p: &Conv2dParams) -> Result<(Tensor, Option<BnStats>)> {
+        let (out, part) = self.conv2d_rec(weight, None, p, true)?;
+        let stats = match part {
+            Some(s) => {
+                let n = s.len();
+                let partials = Tensor::wrap(s, Shape::new(&[n]), "conv2d_bn_stats")?;
+                Some(BnStats { partials, of: out.detach(), version: out.storage_version() })
+            }
+            None => None,
+        };
+        Ok((out, stats))
+    }
+
+    /// The recorded conv; with `stats`, through the backend's [`crate::backend::Backend::conv2d_bn_stats`] (no bias).
+    fn conv2d_rec(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        p: &Conv2dParams,
+        stats: bool,
+    ) -> Result<(Tensor, Option<Storage>)> {
         const OP: &str = "conv2d";
         if casts(self) || casts(weight) {
-            return self.conv2d_autocast(weight, bias, p);
+            return self.conv2d_autocast(weight, bias, p, stats);
         }
         let shape = self.check_conv2d(weight, bias, p)?;
-        let s = self.conv2d_kernel(weight, bias, p)?;
+        let (s, part) = self.conv2d_kernel_stats(weight, bias, p, stats)?;
         let out = Tensor::wrap(s, shape, OP)?;
         let (x, wt, has_bias, p) = (self.clone(), weight.clone(), bias.is_some(), *p);
         let mut inputs = vec![self, weight];
         if let Some(b) = bias {
             inputs.push(b);
         }
-        Ok(out.track(OP, &inputs, move |g| {
+        let out = out.track(OP, &inputs, move |g| {
             // Both kernels read the gradient densely; materialise a broadcast/strided one once.
             let g = &g.contiguous()?;
             let backend = g.backend()?;
@@ -172,14 +201,21 @@ impl Tensor {
                 gs.push(Some(g.sum([0, 2, 3], false)?));
             }
             Ok(gs)
-        }))
+        });
+        Ok((out, part))
     }
 
     /// The autocast conv: the input cast to `F16` (a recorded cast), `F16` copies of the weight and bias, an `F16`
     /// result, recorded against the weight and bias themselves. Backward: the input gradient in `F16`, the weight
     /// gradient written straight to the weight's dtype (`F32` master weights: f32 accumulation, no `F16` rounding
     /// or overflow in between), the bias gradient summed in `F32`.
-    fn conv2d_autocast(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Tensor> {
+    fn conv2d_autocast(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        p: &Conv2dParams,
+        stats: bool,
+    ) -> Result<(Tensor, Option<Storage>)> {
         const OP: &str = "conv2d";
         let x = self.to_dtype(DType::F16)?;
         let (w16, b16) = {
@@ -187,7 +223,7 @@ impl Tensor {
             (weight.to_dtype(DType::F16)?, bias.map(|b| b.to_dtype(DType::F16)).transpose()?)
         };
         let shape = x.check_conv2d(&w16, b16.as_ref(), p)?;
-        let s = x.conv2d_kernel(&w16, b16.as_ref(), p)?;
+        let (s, part) = x.conv2d_kernel_stats(&w16, b16.as_ref(), p, stats)?;
         let out = Tensor::wrap(s, shape, OP)?;
         let (wt, bias_dtype, p) = (weight.clone(), bias.map(Tensor::dtype), *p);
         let mut inputs = vec![&x, weight];
@@ -195,7 +231,7 @@ impl Tensor {
             inputs.push(b);
         }
         let xs = x.clone();
-        Ok(out.track(OP, &inputs, move |g| {
+        let out = out.track(OP, &inputs, move |g| {
             let g = &g.contiguous()?;
             let backend = g.backend()?;
             let gx = if xs.requires_grad() {
@@ -219,7 +255,25 @@ impl Tensor {
                 gs.push(Some(g.to_dtype(DType::F32)?.sum([0, 2, 3], false)?.to_dtype(bd)?));
             }
             Ok(gs)
-        }))
+        });
+        Ok((out, part))
+    }
+
+    /// [`Tensor::conv2d_kernel`], or with `stats` (and no bias) the backend's conv with BatchNorm statistics.
+    fn conv2d_kernel_stats(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        p: &Conv2dParams,
+        stats: bool,
+    ) -> Result<(Storage, Option<Storage>)> {
+        if !stats || bias.is_some() {
+            return Ok((self.conv2d_kernel(weight, bias, p)?, None));
+        }
+        let backend = self.backend()?;
+        super::with_views([self, weight], [self.layout(), weight.layout()], |[x, wv]| {
+            backend.conv2d_bn_stats(x, wv, p)
+        })
     }
 
     fn check_pool(&self, op: &'static str, p: &Pool2dParams) -> Result<[usize; 2]> {

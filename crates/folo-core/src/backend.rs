@@ -386,6 +386,18 @@ pub trait Backend: Send + Sync + 'static {
     fn conv2d(&self, x: View<'_>, w: View<'_>, bias: Option<View<'_>>, p: &Conv2dParams) -> Result<Storage> {
         unsupported!(self, "conv2d")
     }
+    /// [`Backend::conv2d`] without a bias, in front of a train-mode BatchNorm: also returns the BatchNorm's
+    /// statistics of the output where the backend gathers them while it writes it (Welford partials, `[C, chunks,
+    /// 3]` f32 as `(count, mean, M2)`), for [`Backend::batch_norm_act`]'s `stats`. The default is the plain conv
+    /// and no statistics.
+    fn conv2d_bn_stats(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        p: &Conv2dParams,
+    ) -> Result<(Storage, Option<Storage>)> {
+        Ok((self.conv2d(x, w, None, p)?, None))
+    }
     /// Gradient of conv2d with respect to its input (of shape `input_shape`).
     fn conv2d_backward_input(
         &self,
@@ -589,13 +601,16 @@ pub trait Backend: Send + Sync + 'static {
     /// With `running`, also updates the running statistics in place:
     /// `mean ← (1 − m) · mean + m · batch_mean`, `var ← (1 − m) · var + m · batch_var · n / (n − 1)`. Their
     /// storages hold `[C]` contiguously from element 0. `x` may be `F16` on a backend that computes in it (`y` is
-    /// then `F16`); `weight`, `bias`, the statistics and the running statistics are always `F32`. Reached through
-    /// `Tensor::batch_norm_act_train`.
+    /// then `F16`); `weight`, `bias`, the statistics and the running statistics are always `F32`. `stats`, if
+    /// given, are `x`'s statistics from this backend's [`Backend::conv2d_bn_stats`], which it may use instead of
+    /// reading `x` for them. Reached through `Tensor::batch_norm_act_train`.
+    #[allow(clippy::too_many_arguments)]
     fn batch_norm_act(
         &self,
         x: View<'_>,
         weight: View<'_>,
         bias: View<'_>,
+        stats: Option<View<'_>>,
         eps: f32,
         act: Option<UnaryOp>,
         running: Option<RunningUpdate<'_>>,

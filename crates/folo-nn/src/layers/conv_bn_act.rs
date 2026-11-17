@@ -130,7 +130,9 @@ impl Module for ConvBnAct {
 impl Forward for ConvBnAct {
     /// - Fused (no BatchNorm): `act(conv2d(x) + bias)` through [`Tensor::conv2d_act`], one kernel with bias and
     ///   activation in the epilogue on the GPU when nothing is recorded.
-    /// - Training: the conv, then [`BatchNorm2d::forward_act`] (BatchNorm + activation fused on the GPU).
+    /// - Training: the conv, then [`BatchNorm2d::forward_act`] (BatchNorm + activation fused on the GPU). Off the
+    ///   CPU a bias-free conv also hands the BatchNorm the statistics its kernel gathered
+    ///   ([`Tensor::conv2d_bn_stats`]), so the BatchNorm does not read the conv output for them.
     /// - Evaluation on a device other than the CPU, or on the CPU when nothing is recorded: the BatchNorm is
     ///   folded into the conv weights on the fly (`W · k`, `β − mean · k`, small per-channel ops,
     ///   differentiable) and the conv runs fused as above (the CPU applies bias + activation as its GEMM
@@ -141,6 +143,10 @@ impl Forward for ConvBnAct {
         let act = self.act.unary_op();
         match &self.bn {
             None => Ok(x.conv2d_act(&self.conv.weight, self.conv.bias.as_ref(), &p, act)?),
+            Some(bn) if bn.is_training() && self.conv.bias.is_none() && !x.device().is_cpu() => {
+                let (z, stats) = x.conv2d_bn_stats(&self.conv.weight, &p)?;
+                bn.forward_act_stats(&z, self.act, stats.as_ref())
+            }
             Some(bn) if bn.is_training() => bn.forward_act(&self.conv.forward(x)?, self.act),
             Some(bn) if !x.device().is_cpu() || !is_grad_enabled() => {
                 let (w, b) = self.folded_eval(bn)?;

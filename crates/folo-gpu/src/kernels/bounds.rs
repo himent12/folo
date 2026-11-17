@@ -37,7 +37,7 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
             };
             cfg.valid() && cat_fits(spec) && (1..=cfg.bk).contains(&spec.get_u32("WG_RUN", cfg.bk.min(16)))
         }
-        "coop_gemm" | "coop_gemm_cat" => {
+        "coop_gemm" | "coop_gemm_cat" | "coop_gemm_stats" => {
             let cfg = super::coop::CoopConfig {
                 bm: spec.get_u32("BM", 128),
                 bn: spec.get_u32("BN", 128),

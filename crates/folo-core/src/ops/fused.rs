@@ -19,6 +19,29 @@ pub struct BatchNormTrain {
     pub invstd: Tensor,
 }
 
+/// The BatchNorm statistics a conv gathered while writing its output ([`Tensor::conv2d_bn_stats`]), for the
+/// train-mode BatchNorm of that output ([`Tensor::batch_norm_act_train_stats`]). Opaque: backend-specific partials,
+/// valid only for the tensor they were computed for as long as its storage is not modified.
+#[derive(Debug, Clone)]
+pub struct BnStats {
+    /// The partials, a flat `F32` tensor in the backend's layout.
+    pub(crate) partials: Tensor,
+    /// The conv output they describe (detached), and its storage version then.
+    pub(crate) of: Tensor,
+    pub(crate) version: u64,
+}
+
+impl BnStats {
+    /// True if these are the statistics of `x` as it is now: the same storage, unmodified, the same dense layout.
+    fn fits(&self, x: &Tensor) -> bool {
+        x.same_storage(&self.of)
+            && x.storage_version() == self.version
+            && x.dims() == self.of.dims()
+            && x.is_contiguous()
+            && x.layout().offset() == 0
+    }
+}
+
 fn unsupported(e: &Error) -> bool {
     matches!(e, Error::NotSupported { .. })
 }
@@ -268,6 +291,22 @@ impl Tensor {
         act: Option<UnaryOp>,
         running: Option<(&Tensor, &Tensor, f64)>,
     ) -> Result<Option<BatchNormTrain>> {
+        self.batch_norm_act_train_stats(weight, bias, eps, act, running, None)
+    }
+
+    /// [`Tensor::batch_norm_act_train`] of a conv output with the statistics the conv gathered
+    /// ([`Tensor::conv2d_bn_stats`]): the backend may skip its own pass over `self` for them. Statistics that do
+    /// not belong to `self` as it is now (another tensor, or `self` modified since) are ignored. The result is the
+    /// same up to the summation order of the mean and variance.
+    pub fn batch_norm_act_train_stats(
+        &self,
+        weight: &Tensor,
+        bias: &Tensor,
+        eps: f64,
+        act: Option<UnaryOp>,
+        running: Option<(&Tensor, &Tensor, f64)>,
+        stats: Option<&BnStats>,
+    ) -> Result<Option<BatchNormTrain>> {
         const OP: &str = "batch_norm_act_train";
         let (n, c, h, w) =
             self.dims4().map_err(|_| Error::invalid_shape(OP, self.shape(), "input must be NCHW"))?;
@@ -293,9 +332,14 @@ impl Tensor {
             }
         }
         let b = self.backend()?;
-        let r = with_views([self, weight, bias], [self.layout(), weight.layout(), bias.layout()], |v| {
+        let mut ts = vec![self, weight, bias];
+        if let Some(s) = stats.filter(|s| s.fits(self)) {
+            ts.push(&s.partials);
+        }
+        let r = with_views_dyn(&ts, |v| {
+            let part = v.get(3).copied();
             let Some((rm, rv, momentum)) = running else {
-                return b.batch_norm_act(v[0], v[1], v[2], eps as f32, act, None);
+                return b.batch_norm_act(v[0], v[1], v[2], part, eps as f32, act, None);
             };
             for t in [rm, rv] {
                 if t.layout().contiguous_range() != Some(0..c) {
@@ -312,7 +356,7 @@ impl Tensor {
             // fallback leaves graphs that saved the running statistics intact.
             let (mut gm, mut gv) = (rm.cell().write_unversioned(), rv.cell().write_unversioned());
             let up = RunningUpdate { mean: &mut gm, var: &mut gv, momentum: momentum as f32 };
-            let r = b.batch_norm_act(v[0], v[1], v[2], eps as f32, act, Some(up));
+            let r = b.batch_norm_act(v[0], v[1], v[2], part, eps as f32, act, Some(up));
             if !matches!(&r, Err(e) if unsupported(e)) {
                 rm.cell().mark_modified();
                 rv.cell().mark_modified();

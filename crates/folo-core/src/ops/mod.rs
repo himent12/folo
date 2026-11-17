@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-pub use fused::BatchNormTrain;
+pub use fused::{BatchNormTrain, BnStats};
 
 use crate::backend::View;
 use crate::storage::StorageCell;

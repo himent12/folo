@@ -30,6 +30,7 @@
 //! at listed output pixels ([`conv2d_sites`]); `input_grad.rs` and `weight_grad.rs` the gradients;
 //! `depthwise.rs` the WGSL generators of the direct depthwise kernels (from `shaders/depthwise.wgsl`).
 
+pub(crate) mod bn_stats;
 mod depthwise;
 mod forward;
 mod input_grad;
@@ -37,8 +38,10 @@ mod sites;
 pub(crate) mod split;
 mod weight_grad;
 
+pub use bn_stats::BnPartials;
 pub use forward::{
-    ConvInput, ConvPart, ConvPlan, conv2d, conv2d_cat, conv2d_input, conv2d_with_config, conv2d_with_plan,
+    ConvInput, ConvPart, ConvPlan, conv2d, conv2d_bn_stats, conv2d_cat, conv2d_input, conv2d_with_config,
+    conv2d_with_plan,
 };
 pub use input_grad::conv2d_backward_input;
 pub(crate) use input_grad::{PHASE_PIXEL, Phase};

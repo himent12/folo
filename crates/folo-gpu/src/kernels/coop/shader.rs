@@ -1,6 +1,7 @@
 //! The WGSL generator of the tensor-core GEMM / implicit-GEMM conv kernel ([`COOP`]): tile-load plans, the
 //! double-buffered K loop on cooperative matrices and the fragment-by-fragment epilogue.
 
+use crate::kernels::conv::bn_stats;
 use std::fmt::Write as _;
 
 use super::{CoopConfig, FRAG, PAD, SUBGROUPS, THREADS};
@@ -67,6 +68,8 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let bias = spec.get_u32("BIAS_KIND", 0);
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`crate::kernels::gemm_cat`).
     let cat = spec.get_u32("CAT", 1);
+    // `STATS`: BatchNorm statistics of the result per row (plain GEMM or forward conv; `crate::kernels::conv::bn_stats`).
+    let stats = spec.get_bool("STATS") && (mode == 0 || mode == 1) && !split && !sites && cat == 1;
     let ct = if spec.get_bool("OUT_F16") { "f16" } else { "f32" };
     let (a_len, b_len) = (bm * sa, bk * sb);
 
@@ -94,6 +97,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     }
     if sites {
         s.push_str(crate::kernels::conv::SITES_BINDING);
+    }
+    if stats {
+        s.push_str("@group(0) @binding(5) var<storage, read_write> PART: array<f32>;\n");
     }
     for b in 0..2 {
         let _ = writeln!(s, "var<workgroup> As{b}: array<f16, {a_len}>;");
@@ -468,6 +474,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
          \x20 let er = (lane & 31u) >> 1u; let ec = (lane & 1u) * 8u;\n",
     );
     let _ = writeln!(s, "  let cbase = sg * {FRAG}u;");
+    if stats {
+        s.push_str("  var sn = 0.0; var sm = 0.0; var sq = 0.0;\n");
+    }
     for i in 0..fm {
         for j in 0..fnn {
             let _ = writeln!(s, "  coopStoreT(acc{i}_{j}, &Cs[cbase], 16u);");
@@ -485,6 +494,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20   var v0 = vec4<f32>(Cs[e], Cs[e + 1u], Cs[e + 2u], Cs[e + 3u]) * alpha;\n\
                  \x20   var v1 = vec4<f32>(Cs[e + 4u], Cs[e + 5u], Cs[e + 6u], Cs[e + 7u]) * alpha;\n",
             );
+            if stats {
+                s.push_str(&bn_stats::coop_fragment(check));
+            }
             if check {
                 s.push_str("    if (row < M) {\n");
             } else {
@@ -537,6 +549,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             }
             s.push_str("    }\n  }\n  workgroupBarrier();\n");
         }
+        if stats {
+            s.push_str(&bn_stats::coop_merge(cfg.wgm, wgn, fm, i));
+        }
     }
     s.push_str("}\n");
     s
@@ -550,6 +565,14 @@ pub(crate) static COOP: KernelDef = KernelDef {
 
 /// [`COOP`] with `B` in up to [`crate::kernels::gemm_cat::MAX_CAT_PARTS`] buffers (`CAT`).
 /// [`COOP`] as the forward conv at listed output pixels (`CONV_MODE` 1 with `SITES`; binding 5 is the list).
+/// [`COOP`] with BatchNorm statistics of `C` (`STATS`; binding 5 is the partials,
+/// `crate::kernels::conv::bn_stats`).
+pub(crate) static COOP_STATS: KernelDef = KernelDef {
+    name: "coop_gemm_stats",
+    storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::ReadWrite],
+    source: Source::Generated(gen_coop),
+};
+
 pub(crate) static COOP_SITES: KernelDef = KernelDef {
     name: "coop_gemm_sites",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],

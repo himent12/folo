@@ -199,6 +199,43 @@ pub fn batch_norm_forward(
     mean: &wgpu::Buffer,
     invstd: &wgpu::Buffer,
 ) -> Result<()> {
+    forward(ctx, d, None, x, w, b, eps, running, y, mean, invstd)
+}
+
+/// [`batch_norm_forward`] with the statistics of `x` already gathered as Welford partials, `(buffer, chunks)` with
+/// `[C, chunks, 3]` f32 in the buffer (the conv in front of it computed them in its epilogue,
+/// [`crate::kernels::conv::conv2d_bn_stats`]): the statistics pass is skipped.
+#[allow(clippy::too_many_arguments)]
+pub fn batch_norm_forward_partials(
+    ctx: &GpuContext,
+    d: &BnDesc,
+    partials: (&wgpu::Buffer, usize),
+    x: &wgpu::Buffer,
+    w: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    eps: f32,
+    running: Option<BnRunning<'_>>,
+    y: &wgpu::Buffer,
+    mean: &wgpu::Buffer,
+    invstd: &wgpu::Buffer,
+) -> Result<()> {
+    forward(ctx, d, Some(partials), x, w, b, eps, running, y, mean, invstd)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward(
+    ctx: &GpuContext,
+    d: &BnDesc,
+    partials: Option<(&wgpu::Buffer, usize)>,
+    x: &wgpu::Buffer,
+    w: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    eps: f32,
+    running: Option<BnRunning<'_>>,
+    y: &wgpu::Buffer,
+    mean: &wgpu::Buffer,
+    invstd: &wgpu::Buffer,
+) -> Result<()> {
     let (total, m) = d.check(ctx)?;
     check_buf(x, total, d.dtype, "batch_norm input")?;
     check_buf(y, total, d.dtype, "batch_norm output")?;
@@ -209,20 +246,30 @@ pub fn batch_norm_forward(
         check_buf(r.mean, d.c, DType::F32, "running_mean")?;
         check_buf(r.var, d.c, DType::F32, "running_var")?;
     }
-    let (chunks, len) = plan(m, d.c);
-    let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 3])?))?;
-    let coef = ctx.alloc(DType::F32.bytes(4 * d.c))?;
-
     let half = d.dtype == DType::F16;
-    let k = ctx.kernel(&STATS, Spec::new().u32("ACT", 0).f16(half))?;
-    ctx.dispatch(&k, &[x, part.raw()], &d.walk_params(m, chunks, len)?, [chunks as u32, d.c as u32, 1])?;
+    let coef = ctx.alloc(DType::F32.bytes(4 * d.c))?;
+    let own;
+    let (part, chunks) = match partials {
+        Some((buf, chunks)) => {
+            check_buf(buf, prod(&[d.c, chunks, 3])?, DType::F32, "batch_norm partials")?;
+            (buf, chunks)
+        }
+        None => {
+            let (chunks, len) = plan(m, d.c);
+            own = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 3])?))?;
+            let k = ctx.kernel(&STATS, Spec::new().u32("ACT", 0).f16(half))?;
+            let p = d.walk_params(m, chunks, len)?;
+            ctx.dispatch(&k, &[x, own.raw()], &p, [chunks as u32, d.c as u32, 1])?;
+            (own.raw(), chunks)
+        }
+    };
 
     let k = ctx.kernel(&FINALIZE, Spec::new().u32("ACT", 0).bool("RUNNING", running.is_some()))?;
     let mom = running.as_ref().map_or(0.0, |r| r.momentum);
     let unbias = if m > 1 { m as f64 / (m as f64 - 1.0) } else { 1.0 };
     let p = Params::new().uz(d.c)?.uz(chunks)?.f(eps).f(1.0 - mom).f(mom).f(mom * unbias as f32);
     let (rm, rv) = running.as_ref().map_or((ctx.dummy(), ctx.dummy()), |r| (r.mean, r.var));
-    ctx.dispatch(&k, &[part.raw(), w, b, mean, invstd, coef.raw(), rm, rv], &p, [d.c as u32, 1, 1])?;
+    ctx.dispatch(&k, &[part, w, b, mean, invstd, coef.raw(), rm, rv], &p, [d.c as u32, 1, 1])?;
 
     let (vec, units) = d.elementwise(total);
     let k = ctx.kernel(&APPLY, Spec::new().u32("ACT", d.act.code()).bool("VEC4", vec).f16(half))?;

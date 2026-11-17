@@ -9,6 +9,7 @@ pub(crate) mod backend;
 mod backend_net;
 mod binds;
 mod conv;
+mod conv_bn_stats;
 mod coop;
 mod coop_conv;
 mod elementwise;

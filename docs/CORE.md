@@ -196,6 +196,11 @@ through a graph that saved the old values fails with `Error::ModifiedInPlace` in
   `Tensor::batch_norm_act_train` / `batch_norm_act_train_backward` (train-mode BatchNorm + activation, running update
   in place) and `Tensor::optimizer_step_` (in-place SGD / AdamW / EMA update) call optional `Backend` hooks. folo-gpu
   implements them, the CPU backend implements `conv2d_act` and `conv2d_act_cat`, other backends fall back.
+- `Tensor::conv2d_bn_stats` is a recorded bias-free conv that may also return the BatchNorm statistics of its output
+  (`BnStats`: per-channel partials from the backend's `conv2d_bn_stats` hook, which defaults to a plain conv and no
+  statistics). `Tensor::batch_norm_act_train_stats` hands them to `batch_norm_act` (its `stats` argument), which then
+  skips its own statistics pass; they are used only while they still describe the input (same storage and version,
+  same dims, dense from offset 0), else ignored.
 
 ## Detector pre- and post-processing hooks
 `ops/vision.rs` holds four hooks that return `Ok(None)` without a kernel, so callers keep their host code; folo-gpu
@@ -245,7 +250,8 @@ This is the contract for folo-gpu and any other device.
   gather (each input element visits only the windows that cover it) instead of a scatter with float atomics; the CPU
   backend ignores it.
 - **Fused hooks** (`conv2d_act`, `conv2d_act_cat`, `batch_norm_act`, `batch_norm_act_backward`, `optimizer_step`,
-  `letterbox_rgb8`, `detect_candidates`) default to `NotSupported`; folo-core's fused entry points then compose
+  `letterbox_rgb8`, `detect_candidates`) default to `NotSupported` (`conv2d_bn_stats` to a plain `conv2d` and no
+  statistics); folo-core's fused entry points then compose
   ordinary ops (or report "not available" so folo-nn uses its own path). `batch_norm_act` and `optimizer_step` write
   into `&mut Storage` arguments (running statistics, parameters, optimizer state) that folo-core has write-locked,
   checked to be contiguous and distinct. The trait has further optional hooks with the same `NotSupported` default

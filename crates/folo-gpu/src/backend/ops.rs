@@ -319,6 +319,32 @@ impl Backend for GpuBackend {
         self.conv2d_act(x, w, bias, p, None)
     }
 
+    fn conv2d_bn_stats(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        p: &Conv2dParams,
+    ) -> Result<(Storage, Option<Storage>)> {
+        let dtype = x.storage.dtype();
+        let d = self.conv_desc(x.shape(), w.shape(), p, dtype);
+        // The statistics come from the GEMM kernels reading the input in place (as `conv2d_act` does); anything
+        // else is the plain conv, and the BatchNorm gathers its own.
+        let at = conv_input(&x).filter(|_| !d.is_depthwise() && d.n * d.groups <= 65535);
+        let Some(at) = at else {
+            return Ok((self.conv2d_act(x, w, None, p, None)?, None));
+        };
+        let _p = profile::scope(|| format!("conv+stats {}", conv_label(&d)));
+        let (oh, ow) = d.output().core()?;
+        let len = d.n * d.c_out * oh * ow;
+        let out = self.alloc(dtype, len)?;
+        let wd = self.dense(&w)?;
+        let plan = conv::ConvPlan::default();
+        let part =
+            conv::conv2d_bn_stats(&self.ctx, &d, (self.buf(&x)?, at), wd.raw(), out.raw(), plan).core()?;
+        let part = part.map(|pt| self.wrap(CoreDType::F32, d.c_out * pt.chunks * 3, pt.buf));
+        Ok((self.wrap(dtype, len, out), part))
+    }
+
     fn conv2d_backward_input(
         &self,
         grad: View<'_>,
@@ -668,6 +694,7 @@ impl Backend for GpuBackend {
         x: View<'_>,
         weight: View<'_>,
         bias: View<'_>,
+        stats: Option<View<'_>>,
         eps: f32,
         act: Option<UnaryOp>,
         running: Option<RunningUpdate<'_>>,
@@ -687,18 +714,39 @@ impl Backend for GpuBackend {
             }),
             None => None,
         };
-        norm::batch_norm_forward(
-            &self.ctx,
-            &d,
-            xd.raw(),
-            wd.raw(),
-            bd.raw(),
-            eps,
-            run,
-            y.raw(),
-            mean.raw(),
-            invstd.raw(),
-        )
+        // Statistics from the conv's epilogue: the whole of a storage this backend made, `[C, chunks, 3]` f32.
+        let part = match &stats {
+            Some(s)
+                if s.storage.dtype() == CoreDType::F32
+                    && s.layout.offset() == 0
+                    && s.layout.is_contiguous()
+                    && s.layout.numel() == s.storage.len()
+                    && d.c > 0
+                    && s.layout.numel() % (3 * d.c) == 0 =>
+            {
+                Some((self.buf(s)?, s.layout.numel() / (3 * d.c)))
+            }
+            _ => None,
+        };
+        let (y_, m_, i_) = (y.raw(), mean.raw(), invstd.raw());
+        match part {
+            Some(pt) => norm::batch_norm_forward_partials(
+                &self.ctx,
+                &d,
+                pt,
+                xd.raw(),
+                wd.raw(),
+                bd.raw(),
+                eps,
+                run,
+                y_,
+                m_,
+                i_,
+            ),
+            None => {
+                norm::batch_norm_forward(&self.ctx, &d, xd.raw(), wd.raw(), bd.raw(), eps, run, y_, m_, i_)
+            }
+        }
         .core()?;
         Ok((
             self.wrap(dtype, len, y),

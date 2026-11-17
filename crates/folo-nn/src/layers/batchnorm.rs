@@ -1,6 +1,6 @@
 //! 2-D batch normalisation, and the running-statistics guard for non-finite batches.
 
-use folo_core::{DType, Tensor, UnaryOp, no_grad};
+use folo_core::{BnStats, DType, Tensor, UnaryOp, no_grad};
 use rayon::prelude::*;
 
 use super::simple::Activation;
@@ -134,14 +134,20 @@ impl BatchNorm2d {
     /// are one kernel set, recorded as one [`Tensor::custom_op`] whose hand-written backward also runs fused.
     /// Everywhere else it is the BatchNorm forward followed by `act`.
     pub fn forward_act(&self, x: &Tensor, act: Activation) -> Result<Tensor> {
+        self.forward_act_stats(x, act, None)
+    }
+
+    /// [`BatchNorm2d::forward_act`] of a conv output with the statistics the conv gathered
+    /// ([`Tensor::conv2d_bn_stats`]), which the fused training kernels use instead of reading `x` for them.
+    pub fn forward_act_stats(&self, x: &Tensor, act: Activation, stats: Option<&BnStats>) -> Result<Tensor> {
         if self.mode.is_training() && !x.device().is_cpu() {
             let (_, n) = self.check_input(x)?;
             check_train_count(n, x)?;
-            if let Some(y) = self.train_fused(x, act.unary_op())? {
+            if let Some(y) = self.train_fused(x, act.unary_op(), stats)? {
                 return Ok(y);
             }
             if act.unary_op().is_some()
-                && let Some(y) = self.train_fused(x, None)?
+                && let Some(y) = self.train_fused(x, None, stats)?
             {
                 return act.forward(&y);
             }
@@ -151,9 +157,16 @@ impl BatchNorm2d {
     }
 
     /// The fused device kernels, or `None` when the backend lacks them (or this activation).
-    fn train_fused(&self, x: &Tensor, act: Option<UnaryOp>) -> Result<Option<Tensor>> {
+    fn train_fused(
+        &self,
+        x: &Tensor,
+        act: Option<UnaryOp>,
+        stats: Option<&BnStats>,
+    ) -> Result<Option<Tensor>> {
         let running = Some((&self.running_mean, &self.running_var, self.momentum));
-        let Some(out) = x.batch_norm_act_train(&self.weight, &self.bias, self.eps, act, running)? else {
+        let Some(out) =
+            x.batch_norm_act_train_stats(&self.weight, &self.bias, self.eps, act, running, stats)?
+        else {
             return Ok(None);
         };
         let (xd, w, b) = (x.detach(), self.weight.detach(), self.bias.detach());

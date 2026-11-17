@@ -69,7 +69,7 @@ pub use dtype::{DType, Element};
 pub use error::{Error, Result};
 pub use half::f16;
 pub use layout::Layout;
-pub use ops::BatchNormTrain;
+pub use ops::{BatchNormTrain, BnStats};
 pub use shape::{AllDims, Dim, DimVec, Dims, Shape, ShapeSpec};
 pub use storage::{CpuStorage, DeviceStorage, Storage};
 pub use tensor::{Tensor, TensorId};

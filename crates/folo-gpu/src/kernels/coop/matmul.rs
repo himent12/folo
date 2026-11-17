@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
-use super::shader::COOP;
+use super::shader::{COOP, COOP_STATS};
 use super::{CoopConfig, pick_config, resolve};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::check_buf;
+use crate::kernels::conv::bn_stats::{self, StatsSlot};
 use crate::kernels::gemm::{BatchStrides, GemmBias, GemmDesc, gemm_params};
 use crate::pipeline::{Kernel, KernelDef, Spec};
 
@@ -141,6 +142,19 @@ pub(crate) fn encode_gemm(
     c: &wgpu::Buffer,
     cfg: Option<CoopConfig>,
 ) -> Result<bool> {
+    encode_gemm_stats(ctx, d, out, (a, b, bias, c), cfg, None)
+}
+
+/// [`encode_gemm`], with `stats` also the BatchNorm statistics of each row of `C` over its columns (the forward
+/// pointwise conv, one image per batch entry, no bias or activation; `crate::kernels::conv::bn_stats`).
+pub(crate) fn encode_gemm_stats(
+    ctx: &GpuContext,
+    d: &GemmDesc,
+    out: DType,
+    (a, b, bias, c): (&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer),
+    cfg: Option<CoopConfig>,
+    stats: StatsSlot<'_>,
+) -> Result<bool> {
     let batch = d.batch.0.saturating_mul(d.batch.1);
     let Some(cfg) = resolve(ctx, cfg, || pick_config(d.m, d.n, batch))? else { return Ok(false) };
     let vec_a = d.lda.is_multiple_of(4)
@@ -161,7 +175,14 @@ pub(crate) fn encode_gemm(
         .bool("TRANS_B", d.trans_b)
         .bool("CHECK", check)
         .u32("CONV_MODE", 0);
-    let Some(k) = build(ctx, spec) else { return Ok(false) };
+    let tiles = d.n.div_ceil(cfg.bn as usize);
+    let part = match &stats {
+        Some(_) => Some(bn_stats::alloc(ctx, d.m, batch, tiles)?),
+        None => None,
+    };
+    let spec = if part.is_some() { spec.bool("STATS", true) } else { spec };
+    let def = if part.is_some() { &COOP_STATS } else { &COOP };
+    let Some(k) = build_def(ctx, def, spec) else { return Ok(false) };
     let groups = [
         u32::try_from(d.n.div_ceil(cfg.bn as usize))
             .map_err(|_| GpuError::Limit("gemm N too large".into()))?,
@@ -169,7 +190,14 @@ pub(crate) fn encode_gemm(
             .map_err(|_| GpuError::Limit("gemm M too large".into()))?,
         u32::try_from(batch).map_err(|_| GpuError::Limit("gemm batch too large".into()))?,
     ];
-    ctx.dispatch(&k, &[a, b, bias, c], &gemm_params(d)?, groups)?;
+    match (part, stats) {
+        (Some(pt), Some(slot)) => {
+            let p = gemm_params(d)?.at(34).uz(pt.chunks)?.uz(tiles)?;
+            ctx.dispatch(&k, &[a, b, bias, c, pt.buf.raw()], &p, groups)?;
+            *slot = Some(pt);
+        }
+        _ => ctx.dispatch(&k, &[a, b, bias, c], &gemm_params(d)?, groups)?,
+    }
     Ok(true)
 }
 
