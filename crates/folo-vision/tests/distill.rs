@@ -78,6 +78,13 @@ fn weights_hash(t: &Trainer) -> u64 {
 const NO_TEACHER_HASHES: &[(&str, u64)] =
     &[("x86_64-windows-msvc", 0x1851_7ce4_1137_dca4), ("x86_64-linux-gnu", 0x13d4_6148_e25d_2926)];
 
+/// The weights hash of one epoch of [`micro`] with the teacher `teacher_file(dir, 2, 7)` at the starting values,
+/// `(o2m student, o2o student)`, by target, derived on origin/main at cf65f7a5 (before the rank term existed) on that
+/// target with AVX2 + FMA. Windows only: no Linux reference was derived (see [`NO_TEACHER_HASHES`] on why they
+/// differ).
+const TEACHER_HASHES: &[(&str, u64, u64)] =
+    &[("x86_64-windows-msvc", 0xe374_56b8_a359_13ec, 0x7eb5_b1b4_0a73_d35a)];
+
 /// This build's `arch-os-env`, the key of [`NO_TEACHER_HASHES`].
 fn target() -> String {
     let env = if cfg!(target_env = "msvc") {
@@ -362,7 +369,66 @@ fn stored_configs_with_and_without_distill_load() {
     let v = serde_json::to_value(&with).unwrap();
     assert_eq!(
         v["distill"],
-        serde_json::json!({ "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 4.0 })
+        serde_json::json!({
+            "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 4.0, "rank_gain": 0.0,
+            "rank_floor": 0.005f32, "rank_power": 0.5, "rank_min": 8
+        })
     );
-    assert_eq!(serde_json::from_value::<TrainConfig>(v).unwrap(), with);
+    assert_eq!(serde_json::from_value::<TrainConfig>(v.clone()).unwrap(), with);
+    // A distillation config from before the rank term loads with it off.
+    let mut before = v;
+    for k in ["rank_gain", "rank_floor", "rank_power", "rank_min"] {
+        before["distill"].as_object_mut().unwrap().remove(k);
+    }
+    assert_eq!(serde_json::from_value::<TrainConfig>(before).unwrap(), with);
+}
+
+/// A teacher run with the rank term off trains as before the rank term existed: on a target of [`TEACHER_HASHES`]
+/// with AVX2 + FMA the weights hash to origin/main's, for an `o2m` and an `o2o` student; and the rank term's other
+/// keys change nothing while `rank_gain` is 0.
+#[test]
+fn a_teacher_run_without_the_rank_term_is_unchanged() {
+    let dir = TestDir::new("distill-rank-off");
+    let teacher = teacher_file(&dir, 2, 7);
+    let (a, _) = train(with_teacher(micro(1), &teacher));
+    let o2o = with_teacher(TrainConfig { head: folo_vision::model::HeadMode::O2o, ..micro(1) }, &teacher);
+    let (o, _) = train(o2o);
+    let odd = DistillConfig { rank_floor: 0.3, rank_power: 2.0, rank_min: 3, ..DistillConfig::new(&teacher) };
+    let (b, _) = train(TrainConfig { distill: Some(odd), ..micro(1) });
+    assert_eq!(a, b, "rank keys without rank_gain change nothing");
+    let target = target();
+    match TEACHER_HASHES.iter().find(|(k, ..)| *k == target).filter(|_| avx2_fma()) {
+        Some(&(_, want, want_o2o)) => assert_eq!(
+            (a, o),
+            (want, want_o2o),
+            "{a:#018x} {o:#018x} on {target}: a teacher run without the rank term no longer trains as origin/main \
+             did; on another platform or libm version, the same micro run on origin/main tells whether this is a \
+             regression"
+        ),
+        None => eprintln!(
+            "note: teacher weights hashes {a:#018x} {o:#018x} not compared: no reference for {target}"
+        ),
+    }
+}
+
+/// The rank term (`distill.rank_gain`, §8.9) changes the weights, deterministically, and the epoch's line reports
+/// it with the classes it used.
+#[test]
+fn the_rank_term_trains_deterministically() {
+    let dir = TestDir::new("distill-rank");
+    let teacher = teacher_file(&dir, 2, 7);
+    let plain = with_teacher(micro(1), &teacher);
+    let rank = TrainConfig {
+        distill: Some(DistillConfig { rank_gain: 2.0, rank_min: 2, ..DistillConfig::new(&teacher) }),
+        ..micro(1)
+    };
+    let (p, _) = train(plain);
+    let (a, log) = train(rank.clone());
+    assert_eq!(a, train(rank).0, "deterministic");
+    assert_ne!(a, p, "the rank term changes the weights");
+    assert!(log.iter().any(|l| l.contains("distilling from") && l.contains("rank_gain 2")), "{log:?}");
+    let line = log.iter().find(|l| l.starts_with("epoch 1: distillation cls")).expect("the epoch's terms");
+    let classes: f32 =
+        line.split("rank classes ").nth(1).and_then(|s| s.split(' ').next()?.parse().ok()).unwrap();
+    assert!(line.contains(" rank ") && classes > 0.0, "{line}");
 }

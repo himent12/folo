@@ -242,10 +242,16 @@ pub fn with_distill(mut cmd: CliCommand, distill: Option<folo_vision::DistillCon
         ("cls_gain", d.cls_gain, start.cls_gain),
         ("dfl_gain", d.dfl_gain, start.dfl_gain),
         ("temperature", d.temperature, start.temperature),
+        ("rank_gain", d.rank_gain, start.rank_gain),
+        ("rank_floor", d.rank_floor, start.rank_floor),
+        ("rank_power", d.rank_power, start.rank_power),
     ] {
         if v != s {
             set(k, v.to_string());
         }
+    }
+    if d.rank_min != start.rank_min {
+        set("rank_min", d.rank_min.to_string());
     }
     cmd.cli = shell_join(&cmd.argv);
     cmd
@@ -408,6 +414,18 @@ mod tests {
         assert_eq!(
             cmd.cli,
             "folo train --data D:/coco --format coco --teacher folo-s-coco --set distill.temperature=2"
+        );
+        // The rank term's settings too (docs/MODEL.md §8.9).
+        let distill = serde_json::json!({
+            "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 4.0, "rank_gain": 2.0,
+            "rank_floor": 0.005, "rank_power": 1.0, "rank_min": 12
+        });
+        write(serde_json::json!({ "train": { "distill": distill } }));
+        let cmd = with_distill(base(), recorded_distill(&dir));
+        assert_eq!(
+            cmd.cli,
+            "folo train --data D:/coco --format coco --teacher folo-s-coco --set distill.rank_gain=2 --set \
+             distill.rank_power=1 --set distill.rank_min=12"
         );
     }
 

@@ -9,6 +9,7 @@ use folo_nn::{GradScaler, Module, RunningStats, ScaleUpdate};
 use super::feed;
 use super::{BatchSource, MAX_AMP_SKIPS, MAX_NONFINITE_BATCHES, Trainer};
 use crate::error::{Error, Result};
+use crate::loss::distill::class_gradient_norms;
 use crate::loss::{
     LossConfig, LossItems, detection_loss, distill_loss, o2m_weight, step_loss, targets_from_normalized,
 };
@@ -24,8 +25,11 @@ impl Trainer {
         let (nb, acc_n) = (self.nb, self.accumulate);
         let decay = self.opt.groups().iter().position(|g| g.name == "decay").unwrap_or(0);
         let mut sum = [0f64; 3];
-        // The reported distillation terms `[cls, dfl]` of each finite batch (§8.9).
-        let mut kd_items: Vec<[f32; 2]> = Vec::new();
+        // The reported distillation terms `[cls, dfl, rank, rank classes]` of each finite batch (§8.9).
+        let mut kd_items: Vec<[f32; 4]> = Vec::new();
+        let rank_on = self.cfg.distill.as_ref().is_some_and(|d| d.rank_on());
+        // §8.9's gradient probe: the class-logit gradient norms of the first `FOLO_DISTILL_PROBE` batches.
+        let probe = std::env::var("FOLO_DISTILL_PROBE").ok().and_then(|v| v.trim().parse::<usize>().ok());
         let (mut finite_batches, mut window_finite) = (0usize, false);
         let (epoch_start, mut epoch_images) = (Instant::now(), 0usize);
         let skipped_before = self.scaler.as_ref().map_or(0, GradScaler::skipped_steps);
@@ -68,10 +72,27 @@ impl Trainer {
             let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
             let mut loss = detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg)?;
             // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
-            let kd = match (kd_targets, &self.cfg.distill) {
-                (Some(t), Some(d)) => Some(distill_loss(&box_raw, &cls_raw, &t, loss.target_score_sum, d)?),
+            let kd = match (&kd_targets, &self.cfg.distill) {
+                (Some(t), Some(d)) => Some(distill_loss(&box_raw, &cls_raw, t, loss.target_score_sum, d)?),
                 _ => None,
             };
+            if let (Some(t), Some(d)) = (&kd_targets, &self.cfg.distill)
+                && probe.is_some_and(|p| k < p)
+            {
+                let [s, c, r] =
+                    class_gradient_norms(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg, t, d)?;
+                self.emitter.log(
+                    LogLevel::Info,
+                    format!(
+                        "epoch {} batch {}: class gradient norms supervised {s:.6} distillation {c:.6} rank {r:.6} \
+                         (rank / supervised {:.4})",
+                        e + 1,
+                        k + 1,
+                        r / s
+                    ),
+                );
+            }
+            drop(kd_targets);
             drop((box_raw, cls_raw));
             // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
             let o2o = match &out.o2o {
@@ -85,7 +106,7 @@ impl Trainer {
             let w_m = o2m_weight(e, self.cfg.epochs);
             // `w_m · (L_o2m + L_distill) + (1 − w_m) · L_o2o`; the reported terms stay unweighted by `w_m` (§8.9).
             loss = step_loss(loss, kd.as_ref(), o2o.as_ref().map(|o| (o, w_m)), n)?;
-            let kd = kd.map(|kd| [kd.cls, kd.dfl]);
+            let kd = kd.map(|kd| [kd.cls, kd.dfl, kd.rank, kd.rank_classes]);
             let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
             let finite = loss.is_finite() && kd_finite && RunningStats::all_finite(&self.model)?;
             let items = loss.items;
@@ -114,7 +135,9 @@ impl Trainer {
                 snapshot.restore()?;
                 self.consecutive_bad += 1;
                 let consecutive_bad = self.consecutive_bad;
-                let kd_note = kd.map_or(String::new(), |[c, d]| format!(" (distillation cls {c}, dfl {d})"));
+                let kd_note = kd.map_or(String::new(), |[c, d, r, _]| {
+                    format!(" (distillation cls {c}, dfl {d}, rank {r})")
+                });
                 self.emitter.log(
                     LogLevel::Warn,
                     format!(
@@ -204,7 +227,7 @@ impl Trainer {
             );
         }
         if !kd_items.is_empty() {
-            self.emitter.log(LogLevel::Info, distill_line(e, &kd_items));
+            self.emitter.log(LogLevel::Info, distill_line(e, &kd_items, rank_on));
         }
         let f = finite_batches as f64;
         let (b, c, d) = ((sum[0] / f) as f32, (sum[1] / f) as f32, (sum[2] / f) as f32);
@@ -279,18 +302,26 @@ fn loss_json(i: &LossItems) -> folo_api::Loss {
     folo_api::Loss { box_: i.box_, cls: i.cls, dfl: i.dfl, total: i.total() }
 }
 
-/// The epoch's distillation log line (docs/MODEL.md §8.9): the mean reported terms (`cls_gain · L_kc` and
-/// `dfl_gain · L_kd`, without `B`) over its finite batches, and over its first and last quarter of them, so a log
-/// shows whether they fall within the epoch.
-pub(super) fn distill_line(e: u32, items: &[[f32; 2]]) -> String {
-    let mean = |s: &[[f32; 2]]| {
+/// The epoch's distillation log line (docs/MODEL.md §8.9): the mean reported terms (`cls_gain · L_kc`,
+/// `dfl_gain · L_kd` and, with the rank term on, `rank_gain · L_rank`, without `B`) over its finite batches, and
+/// over its first and last quarter of them, so a log shows whether they fall within the epoch; with the rank term,
+/// also the mean number of classes it used per batch.
+pub(super) fn distill_line(e: u32, items: &[[f32; 4]], rank: bool) -> String {
+    let mean = |s: &[[f32; 4]]| {
         let n = s.len().max(1) as f64;
-        let sum = s.iter().fold([0f64; 2], |a, v| [a[0] + v[0] as f64, a[1] + v[1] as f64]);
-        format!("cls {:.5} dfl {:.5}", sum[0] / n, sum[1] / n)
+        let sum = s.iter().fold([0f64; 4], |a, v| std::array::from_fn(|i| a[i] + v[i] as f64));
+        let rank = if rank { format!(" rank {:.5}", sum[2] / n) } else { String::new() };
+        format!("cls {:.5} dfl {:.5}{rank}", sum[0] / n, sum[1] / n)
     };
     let q = items.len().div_ceil(4);
+    let classes = if rank {
+        let n = items.len().max(1) as f64;
+        format!(", rank classes {:.1} per batch", items.iter().map(|v| v[3] as f64).sum::<f64>() / n)
+    } else {
+        String::new()
+    };
     format!(
-        "epoch {}: distillation {} over {} batches (first quarter {}, last quarter {})",
+        "epoch {}: distillation {} over {} batches (first quarter {}, last quarter {}){classes}",
         e + 1,
         mean(items),
         items.len(),

@@ -105,12 +105,20 @@ impl Teacher {
         let mut logs = vec![(
             folo_api::LogLevel::Info,
             format!(
-                "distilling from {shown} ({}, {} parameters, {dtype}): cls_gain {}, dfl_gain {}, temperature {}",
+                "distilling from {shown} ({}, {} parameters, {dtype}): cls_gain {}, dfl_gain {}, temperature {}{}",
                 model.arch(),
                 model.num_parameters(),
                 cfg.cls_gain,
                 cfg.dfl_gain,
-                cfg.temperature
+                cfg.temperature,
+                if cfg.rank_on() {
+                    format!(
+                        ", rank_gain {}, rank_floor {}, rank_power {}, rank_min {}",
+                        cfg.rank_gain, cfg.rank_floor, cfg.rank_power, cfg.rank_min
+                    )
+                } else {
+                    String::new()
+                }
             ),
         )];
         if model.classes() != student.classes() {
@@ -132,6 +140,6 @@ impl Teacher {
         let _g = no_grad();
         let out = self.model.forward_head(&x.to_dtype(self.dtype)?, HeadMode::O2m)?;
         let view = TeacherView::new(&out.box_raw, &out.cls_raw, out.reg_max, self.cfg.temperature)?;
-        Ok(DistillTargets::new(&view)?)
+        Ok(DistillTargets::for_config(&view, &self.cfg)?)
     }
 }

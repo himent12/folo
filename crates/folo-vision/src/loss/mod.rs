@@ -127,7 +127,7 @@ pub fn dual_loss(o2m: &LossOutput, o2o: &LossOutput, w_m: f32) -> Result<LossOut
 /// The loss of one training step (§8.3) of `batch` images: the one-to-many loss `o2m` plus the distillation term
 /// `kd` of §8.9, if any, and for a `head = "o2o"` model (`o2o = Some((L_o2o, w_m))`) the [`dual_loss`] of that sum
 /// and the one-to-one loss: `L = w_m · (L_o2m + L_distill) + (1 − w_m) · L_o2o`, so the teacher is weighted with the
-/// branch it teaches. `total_value` gains `batch · (kd.cls + kd.dfl)` before the weighting; the items stay the
+/// branch it teaches. `total_value` gains `batch · (kd.cls + kd.dfl + kd.rank)` before the weighting; the items stay the
 /// supervised ones. Without `o2o` it is `o2m` plus `kd`.
 pub fn step_loss(
     mut o2m: LossOutput,
@@ -137,7 +137,7 @@ pub fn step_loss(
 ) -> Result<LossOutput> {
     if let Some(kd) = kd {
         o2m.total = o2m.total.add(&kd.total)?;
-        o2m.total_value += batch as f32 * (kd.cls + kd.dfl);
+        o2m.total_value += batch as f32 * (kd.cls + kd.dfl + kd.rank);
     }
     match o2o {
         Some((o2o, w_m)) => dual_loss(&o2m, o2o, w_m),

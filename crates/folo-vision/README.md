@@ -18,7 +18,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/boxes.rs` | `Xyxy` / `Cxcywh`, letterbox mapping, IoU / GIoU / DIoU / CIoU |
 | `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs |
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
-| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `dual_loss`), `assignment.rs` (host assignment), `terms.rs` (BCE, CIoU, DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term and its tests), `tests.rs` |
+| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `dual_loss`), `assignment.rs` (host assignment), `terms.rs` (BCE, CIoU, DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term, `rank/` its class-wise rank term, `probe.rs` the gradient probe, and their tests), `tests.rs` |
 | `src/nms.rs` | Class-aware batched NMS, the full post-process, and the top-k of the `o2o` head |
 | `src/fusion.rs` | Cluster box fusion after NMS (opt-in through `NmsConfig::fusion`) |
 | `src/metrics.rs` | `Evaluator`: mAP, precision / recall / F1, PR curves, confusion matrix |
@@ -99,7 +99,7 @@ cargo test -p folo-vision --test train       # one integration test binary
 | `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs` | The evaluator against hand-computed answers and against pycocotools |
 | `lazy_head.rs` | Candidate-first prediction on the CPU, bit for bit against the dense path |
 | `train.rs` | The trainer on tiny synthetic sets: learning, checkpoints, bit-exact resume, the predictor on trained weights |
-| `distill.rs` | Distillation in the trainer: a run without a teacher pinned to its pre-distillation weights, determinism, resume with the teacher, incompatible teachers |
+| `distill.rs` | Distillation in the trainer: a run without a teacher pinned to its pre-distillation weights, a teacher run without the rank term pinned to its pre-rank weights, determinism (also with the rank term), resume with the teacher, incompatible teachers |
 | `gpu.rs`, `gpu_f16.rs`, `gpu_tensor_cores.rs`, `gpu_in_place.rs`, `gpu_plan.rs`, `gpu_lazy_head.rs`, `gpu_loss.rs`, `gpu_train.rs`, `gpu_amp.rs`, `gpu_distill.rs` | The same on the GPU against the CPU: forward, f16, tensor cores, forward plans, candidate-first, the loss, training, mixed precision, distillation |
 
 The `gpu*.rs` tests need a hardware GPU adapter and skip with a note without one (`FOLO_GPU_TEST_SOFTWARE=1` runs

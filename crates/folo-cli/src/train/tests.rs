@@ -114,9 +114,15 @@ fn teacher_flag_and_distill_keys() {
         ..TrainConfig::default()
     };
     let sets = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let c = apply_sets(with, &sets(&["distill.temperature=2", "distill.cls_gain=0.25"])).unwrap();
+    let c = apply_sets(with.clone(), &sets(&["distill.temperature=2", "distill.cls_gain=0.25"])).unwrap();
     let d = c.distill.unwrap();
     assert_eq!((d.temperature, d.cls_gain, d.dfl_gain), (2.0, 0.25, 1.5));
+    // The rank term's keys (docs/MODEL.md §8.9), off until rank_gain is set.
+    assert_eq!(with.distill.as_ref().unwrap().rank_gain, 0.0);
+    let c = apply_sets(with, &sets(&["distill.rank_gain=2", "distill.rank_power=1", "distill.rank_min=12"]))
+        .unwrap();
+    let d = c.distill.unwrap();
+    assert_eq!((d.rank_gain, d.rank_power, d.rank_min, d.rank_floor), (2.0, 1.0, 12, 0.005));
     let e = apply_sets(TrainConfig::default(), &sets(&["distill.cls_gain=1"])).unwrap_err();
     assert_eq!(e.code, "invalid_config");
 }

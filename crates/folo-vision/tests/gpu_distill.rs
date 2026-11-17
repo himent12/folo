@@ -111,6 +111,38 @@ fn term_and_gradients_match_the_cpu() {
     }
 }
 
+/// The rank term (`distill.rank_gain`) on the GPU: its value within a relative 1e-5 of the CPU's, its classes used
+/// equal, the gradient as above; at gamma 0.5 and 1, and under autocast. 16 images of 80 classes, as a COCO batch.
+#[test]
+fn rank_term_matches_the_cpu() {
+    let (dev, _) = gpu!();
+    let anchors = make_anchors(64, 64, &[8, 16, 32], 0.5);
+    let (b, nc, a) = (16, 80, anchors.len());
+    let (sb, sc) = raw(4, b, nc, a);
+    let (tb, tc) = raw(5, b, nc, a);
+    let run = |dev: Device, amp: bool, power: f32| {
+        let on = |t: &Tensor| t.to_device(dev).unwrap();
+        let (z, x) = (on(&sb).detach().requires_grad_(), on(&sc).detach().requires_grad_());
+        let _a = amp.then(folo_core::autocast);
+        let cfg = DistillConfig { rank_gain: 2.0, rank_power: power, ..DistillConfig::new("t") };
+        let t =
+            DistillTargets::for_config(&TeacherView::new(&on(&tb), &on(&tc), R, 4.0).unwrap(), &cfg).unwrap();
+        let out = distill_loss(&z, &x, &t, 3.5, &cfg).unwrap();
+        let g = out.total.backward().unwrap().get(&x).unwrap().to_vec::<f32>().unwrap();
+        (out.rank, out.rank_classes, g)
+    };
+    for power in [0.5, 1.0] {
+        let (r0, n0, g0) = run(Device::Cpu, false, power);
+        assert!(r0 > 1e-2 && n0 > 40.0, "the case has content: {r0} {n0}");
+        for amp in [false, true] {
+            let (r, n, g) = run(dev, amp, power);
+            let what = format!("gamma {power} amp {amp}");
+            assert!((r - r0).abs() <= 1e-5 * r0 && n == n0, "{what}: {r} {n} vs {r0} {n0}");
+            close(&g, &g0, &format!("{what} cls grad"));
+        }
+    }
+}
+
 /// Teacher outputs in f16 (the f16 teacher of a mixed-precision run) give the targets the CPU computes from the
 /// same f16 values.
 #[test]

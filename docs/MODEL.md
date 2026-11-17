@@ -928,8 +928,9 @@ Opt-in (`amp = true`, `folo train --amp`; default `false`), as `torch.autocast` 
   first steps of a run usually overflow at `2^16` and are skipped while the scale backs off (2–5 steps).
 
 ### 8.9 Distillation (`distill`, opt-in)
-Dense distillation from a frozen teacher: `TrainConfig.distill = { teacher, cls_gain, dfl_gain, temperature }`
-(`folo train --teacher <file or published name>`, `--set distill.<key>=<value>`). Absent (the
+Dense distillation from a frozen teacher: `TrainConfig.distill = { teacher, cls_gain, dfl_gain, temperature,
+rank_gain, rank_floor, rank_power, rank_min }` (`folo train --teacher <file or published name>`, `--set
+distill.<key>=<value>`). Absent (the
 default, and not written to `folo.train` or `config.json`), training is §8.3 exactly. Inference, export, `.folo` files
 and the HTTP API do not change: the teacher exists only in the trainer.
 
@@ -939,6 +940,10 @@ and the HTTP API do not change: the teacher exists only in the trainer.
 | `cls_gain` | 0.5 | `λc`, finite, `>= 0` |
 | `dfl_gain` | 1.5 | `λd`, finite, `>= 0` |
 | `temperature` | 4.0 | `T`, finite, `> 0` (DFL term only; 4 beat 1 on the proxy, docs/notes/hill/r4-distill.md) |
+| `rank_gain` | 0.0 | `λr`, finite, `>= 0`, the weight of the class-wise rank term below; 0 turns it off (bit-identical to the term without it) |
+| `rank_floor` | 0.005 | `τ`, in `(0, 1)`: the rank term's candidate floor (logits under `l = logit(τ) = −5.293` count as `l`) |
+| `rank_power` | 0.5 | `γ`, finite, `>= 0`: a candidate's weight `max(p, p~)^γ` (0.5 from gate step 0, docs/notes/hill/r5-accuracy.md) |
+| `rank_min` | 8 | `>= 2`: the fewest candidates a class needs in a batch to count in the rank term |
 
 **Teacher.** Loaded once when the trainer is built (a new run and a resume alike; a missing file fails the run with
 an error naming `distill.teacher`; a resume may also turn distillation on or change it, `ResumeOverrides::distill`,
@@ -965,6 +970,26 @@ L_kc = (1 / N) · Σ_{b,c,a} [ softplus(x) − x · p~ − H(p~) ],   H(p) = −
 L_kd = (T² / N) · Σ_{b,a} q_a · (1/4) Σ_side Σ_i s~_i · (ln s~_i − log_softmax(z / T)_i)
 L    = B · (7.5 L_box + 0.5 L_cls + 1.5 L_dfl + λc · L_kc + λd · L_kd)
 ```
+With the rank term on (`rank_gain > 0`) `L` gains `B · λr · L_rank`, the **class-wise rank term**. COCO AP reads
+each class's scores by their order only, so per class the student's logits over the batch's candidates should be an
+increasing linear function of the teacher's; one weighted Pearson correlation per class, which leaves each class's
+shift and scale to the supervised loss. With `p = sigmoid(x)` (detached), per element `i = (b, c, a)` the constants
+`w_i = max(p_i, p~_i)^γ` if `max(p_i, p~_i) > τ`, else 0, `y'_i = max(y_i, l)` (`y = cls_raw_T`), and the
+student's `x'_i = max(x_i, l)`; per class `c` over every `(b, a)` of the batch:
+```
+W = Σ w,  n = #(w > 0),  mx = Σ w x' / W,  my = Σ w y' / W              (means: constants)
+vx = Σ w (x' − mx)² / W,  vy = Σ w (y' − my)² / W,  cxy = Σ w (x' − mx)(y' − my) / W
+ρ_c = cxy / (sqrt(vx + ε) · sqrt(vy + ε)),  ε = 1e-4;  class c is used iff n >= rank_min and vy > ε
+L_rank = Σ_used W_c · (1 − ρ_c) / Σ_used W_c                            (0 when no class is used)
+dL/dx_i = −B · λr · (w_i / Σ_used W) · [ (y'_i − my) / (sx · sy) − ρ_c · (x'_i − mx) / sx² ]   where x_i >= l, else 0
+```
+(`sx = sqrt(vx + ε)`, `sy = sqrt(vy + ε)`). Detaching the means leaves the gradient exact (`Σ w (x' − mx) = 0`).
+Above the floor a class's gradient sums to 0 and is orthogonal to `x' − mx`: the term moves neither a class's mean
+logit nor its spread, and a student logit under the floor gets no gradient from it (`L_kc` raises those). The
+weighted sums are row sums over `a` per `(b, c)`, then sums over `b` per class, in a fixed order. The term reads
+the student's one-to-many class logits and the teacher's (kept as `y'` in the targets only when it is on); it needs no
+second forward and no parameter. For an `o2o` student it sits inside the one-to-many loss with `L_kc`.
+
 `L_kc` is the Bernoulli KL from `p~` to `sigmoid(x)`: the BCE against `p~` minus the teacher's entropy, a constant,
 so its gradient is the BCE's and it is 0 when the student equals the teacher. The gradients are
 `dL/dx = B · λc · (sigmoid(x) − p~) / N` and `dL/dz = B · λd · T · q_a · (softmax(z / T) − s~) / (4 N)`. Because the
@@ -980,9 +1005,17 @@ of the one-to-many loss: `L = w_m · (L_o2m + B · (λc · L_kc + λd · L_kd)) 
 inside `L_o2m` as above), so the teacher never outweighs the schedule that moves the emphasis to the one-to-one
 branch. For an `o2m` student `L` is the line above.
 
-**Reported.** `λc · L_kc` and `λd · L_kd` (without `B`, like §7.4's items) are read back once per batch; the epoch
-logs one line, `epoch E: distillation cls … dfl … over n batches (first quarter …, last quarter …)`, the means over
-its finite batches and over their first and last quarter; for an `o2o` student they are not weighted by `w_m`. `LossItems`, the `step` and `epoch` events and the API's
+**Reported.** `λc · L_kc` and `λd · L_kd` (without `B`, like §7.4's items), and with the rank term `λr · L_rank` and
+the number of classes it used, are read back once per batch; the epoch logs one line, `epoch E: distillation cls …
+dfl … over n batches (first quarter …, last quarter …)`, the means over its finite batches and over their first and
+last quarter (with the rank term: `cls … dfl … rank …` and `, rank classes … per batch` at the end); for an `o2o`
+student they are not weighted by `w_m`.
+
+**Gradient probe** (a diagnostic, to set `λr`): with the environment variable `FOLO_DISTILL_PROBE=k`, the first `k`
+batches of every epoch of a distillation run also log `epoch E batch K: class gradient norms supervised … distillation
+… rank … (rank / supervised …)`, the L2 norms of the gradients that the supervised loss, `B · λc · L_kc` and
+`B · λr · L_rank` each put on the student's class logits (an `o2m` student; a second supervised loss and three backward
+passes per probed batch; training is unchanged). `LossItems`, the `step` and `epoch` events and the API's
 loss object do not change. A batch whose distillation terms are not finite is a non-finite batch (§8.3).
 
 **Mixed precision.** The teacher runs in f16 (its own fused f16 weights, f16 input; no autocast needed) and its
