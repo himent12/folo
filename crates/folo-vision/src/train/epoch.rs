@@ -9,9 +9,7 @@ use folo_nn::{GradScaler, Module, RunningStats, ScaleUpdate};
 use super::feed;
 use super::{BatchSource, MAX_AMP_SKIPS, MAX_NONFINITE_BATCHES, Trainer};
 use crate::error::{Error, Result};
-use crate::loss::{
-    LossConfig, LossItems, detection_loss, distill_loss, o2m_weight, step_loss, targets_from_normalized,
-};
+use crate::loss::{LossConfig, LossItems, detection_loss, o2m_weight, step_loss, targets_from_normalized};
 use crate::val::batch_tensor;
 
 impl Trainer {
@@ -54,8 +52,8 @@ impl Trainer {
             let snapshot = RunningStats::capture(&self.model)?;
             // Distillation (§8.9): the frozen teacher sees the same batch, without autograd, before the student's
             // forward, so its activations are gone before the student's graph is built.
-            let kd_targets = match &self.teacher {
-                Some(t) => Some(t.targets(&x)?),
+            let teacher_batch = match &self.teacher {
+                Some(t) => Some(t.batch(&x)?),
                 None => None,
             };
             let out = {
@@ -68,10 +66,11 @@ impl Trainer {
             let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
             let mut loss = detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg)?;
             // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
-            let kd = match (kd_targets, &self.cfg.distill) {
-                (Some(t), Some(d)) => Some(distill_loss(&box_raw, &cls_raw, &t, loss.target_score_sum, d)?),
+            let kd = match (&teacher_batch, &self.cfg.distill) {
+                (Some(t), Some(d)) => Some(t.loss(&box_raw, &cls_raw, loss.target_score_sum, d)?),
                 _ => None,
             };
+            drop(teacher_batch);
             drop((box_raw, cls_raw));
             // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
             let o2o = match &out.o2o {

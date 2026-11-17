@@ -16,6 +16,7 @@
 //! sums of `terms.rs`, so the term is reproducible bit for bit on the CPU and composed only of tensor ops that every
 //! backend has (softplus, log-softmax along a dim, elementwise arithmetic, row sums).
 
+mod fused;
 #[cfg(test)]
 mod tests;
 
@@ -24,6 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use super::invalid;
 use super::terms::sum_fixed_order;
+
+pub use fused::{distill_loss_fused, fused_supported};
 
 /// `TrainConfig.distill` (docs/MODEL.md §8.9): the teacher and the weights of the two distillation terms.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,6 +50,12 @@ impl Default for DistillConfig {
     }
 }
 
+/// The largest `cls_gain` and `dfl_gain` [`DistillConfig::validate`] accepts.
+pub const MAX_GAIN: f32 = 1e6;
+
+/// The temperatures [`DistillConfig::validate`] accepts.
+pub const TEMPERATURE: std::ops::RangeInclusive<f32> = 0.05..=100.0;
+
 impl DistillConfig {
     /// The starting values (`cls_gain` 0.5, `dfl_gain` 1.5, `T` 4) with `teacher`.
     pub fn new(teacher: impl Into<String>) -> Self {
@@ -59,13 +68,18 @@ impl DistillConfig {
         if self.teacher.trim().is_empty() {
             return Err("distill.teacher must name a .folo weights file or published weights".into());
         }
+        // The bounds keep the GPU kernel's scales (`B · λ · T / N` and the like) far inside f32's range.
         for (name, v) in [("distill.cls_gain", self.cls_gain), ("distill.dfl_gain", self.dfl_gain)] {
-            if !(v.is_finite() && v >= 0.0) {
-                return Err(format!("{name} must be a finite number >= 0, got {v}"));
+            if !(0.0..=MAX_GAIN).contains(&v) {
+                return Err(format!("{name} must be a number from 0 to {MAX_GAIN}, got {v}"));
             }
         }
-        if !(self.temperature.is_finite() && self.temperature > 0.0) {
-            return Err(format!("distill.temperature must be a finite number > 0, got {}", self.temperature));
+        if !TEMPERATURE.contains(&self.temperature) {
+            let (lo, hi) = (TEMPERATURE.start(), TEMPERATURE.end());
+            return Err(format!(
+                "distill.temperature must be a number from {lo} to {hi}, got {}",
+                self.temperature
+            ));
         }
         Ok(())
     }

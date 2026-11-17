@@ -38,6 +38,7 @@ pub mod conv;
 pub mod coop;
 pub mod detect;
 pub mod detect_sites;
+pub mod distill;
 pub mod elementwise;
 pub mod ew;
 pub mod gemm;
@@ -80,6 +81,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         coop::DEFS,
         detect::DEFS,
         detect_sites::DEFS,
+        distill::DEFS,
         elementwise::DEFS,
         ew::DEFS,
         gemm::DEFS,

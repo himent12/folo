@@ -22,6 +22,7 @@ and FOLO Desktop (`apps/desktop`) for local inference.
 | `src/backend/` | `GpuBackend`: `ops.rs` (every `Backend` method), `encode.rs` (calls several ops share), `sites.rs` (candidate-first detection hooks), `convert.rs`, `storage.rs`, `plan.rs` (`ForwardPlans`). |
 | `src/tensor.rs` | `GpuTensor`: a standalone buffer + shape + dtype handle for kernel-level work. |
 | `src/detect.rs` | The task-aligned assigner and the detection loss on folo-core GPU tensors. |
+| `src/distill.rs` | The fused distillation term (class and DFL KL against a teacher, docs/MODEL.md §8.9) on folo-core GPU tensors. |
 | `src/profile.rs` | Per-kernel GPU timings (`FOLO_GPU_PROFILE=1`). |
 | `src/dtype.rs`, `src/error.rs` | Buffer element types; `GpuError`. |
 | `src/tests/` | The GPU tests (unit tests, compiled with `cargo test`; `kernel_list.rs`, `pool.rs` and `pipeline_cache.rs` also have unit tests of their own): `backend/` (the backend against folo-core's CPU backend, by area) and kernel-level files (`gemm.rs`, `conv.rs`, `coop.rs`, `elementwise.rs`, ...) plus runtime tests (`runtime.rs`, `pool.rs`, `binds.rs`, `plan.rs`, `precompile.rs`, `pipeline_cache.rs`). |
@@ -34,7 +35,7 @@ There is no `tests/` folder at the crate root and no `build.rs`.
 A kernel is a `KernelDef { name, storage, source }` in a `src/kernels/` module, listed in that module's `DEFS`.
 Its `source` is either `Source::Static(include_str!("../shaders/<file>.wgsl"))` or `Source::Generated(fn)`, a Rust
 function that returns WGSL for a `Spec`. Generators either concatenate files with shared snippets
-(`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl`, the `E` / `V4` / `OUT` aliases of
+(`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl`, `kd_common.wgsl`, the `E` / `V4` / `OUT` aliases of
 `kernels::vec_prelude`) or write the whole source in Rust: the GEMM and implicit-GEMM convs (`kernels/gemm.rs`,
 `kernels/conv/`), tensor cores (`kernels/coop/shader.rs`), `kernels/ew.rs`, `kernels/strided.rs`,
 `kernels/pool_grad.rs`, Muon and the multi-tensor optimizer kernels. There is no include mechanism inside WGSL.
@@ -71,6 +72,7 @@ shader file where it has one (`softmax` and `softmax.wgsl`, `tal_topk` and `tal_
 | detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` | `src/tests/sites.rs` |
 | candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl`; generated | `src/tests/sites.rs` |
 | assigner and detection loss (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss}` | `kernels::detect::*` | `tal_*.wgsl`, `det_*.wgsl`, `detect_common.wgsl` | folo-vision `tests/gpu_loss.rs` |
+| distillation term (not a `Backend` method) | `folo_gpu::distill::distill_loss` | `kernels::distill::*` | `kd_*.wgsl` (after `detect_common.wgsl`) | folo-vision `tests/gpu_distill.rs` |
 
 `GpuTensor` (`src/tensor.rs`) has kernels of its own that the backend does not use: `kernels::elementwise`
 (`unary.wgsl`, `binary.wgsl`, `bias_act.wgsl`, tested in `src/tests/elementwise.rs`) and `kernels::pooling`
