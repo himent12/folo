@@ -1,0 +1,14 @@
+{
+  "$comment": "Example custom theme (design/THEMES.md, Custom themes): Paper taken further toward old paper and brown ink. Check it with `node design/contrast.mjs --theme design/themes/sepia.json`.",
+  "folo_theme": 1,
+  "id": "sepia",
+  "name": "Sepia",
+  "mode": "light",
+  "base": "paper",
+  "description": "Paper, warmer: aged-paper surfaces and brown-black ink.",
+  "color": {
+    "bg": { "app": "#F7EFE2", "panel": "#FEF9F0", "raised": "#F9F3E8", "overlay": "#FEF9F0", "inset": "#F3EBDC" },
+    "text": { "primary": "#2A2017", "secondary": "#5C4D3C", "tertiary": "#6B5B48" },
+    "chart": { "label": "#6B5B48" }
+  }
+}
