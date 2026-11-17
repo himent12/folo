@@ -297,19 +297,15 @@ mod tests {
     }
 
     /// Status text (success, warning, danger, info, and accent text) is ≥ 4.5:1 (WCAG AA) on every
-    /// surface it sits on, in both themes: each plain surface (inset included), those under a
-    /// hover or selection, and its own tint (the muted fill of badges, banners and the Danger
-    /// button) over the surfaces tints are drawn on. Inset only carries the danger tint (error
-    /// rows of the run log). Every failing pair is reported, so a token change names what it broke.
-    /// Every built-in theme holds it on the plain surfaces; the tints (and hover / selection under
-    /// them) by the default Dark and Light: Dim's danger text and Paper's accent text fall to 4.36 to
-    /// 4.48:1 on some of those combinations, which design/contrast.mjs doesn't measure (reported for
-    /// the palettes to fix; then this can cover every theme again).
+    /// surface it sits on, in every built-in theme: each plain surface (inset included), those
+    /// under a hover or selection, and its own tint (the muted fill of badges, banners and the
+    /// Danger button) over the surfaces tints are drawn on. Inset only carries the danger tint
+    /// (error rows of the run log). Every failing pair is reported, so a token change names what it
+    /// broke. design/contrast.mjs checks the same compositions (7:1 in the high contrast themes).
     #[test]
     fn status_text_meets_aa_on_every_surface_and_tint() {
         let mut failures = Vec::new();
         for t in all_builtin() {
-            let tints = matches!(t.id.as_str(), "dark" | "light");
             let surfaces = [
                 ("app", t.bg_app),
                 ("panel", t.bg_panel),
@@ -329,7 +325,7 @@ mod tests {
             for (name, text, tint) in statuses {
                 for (where_, bg) in surfaces {
                     let mut pairs = vec![(where_.to_string(), bg)];
-                    if tints && (where_ != "inset" || name == "danger") {
+                    if where_ != "inset" || name == "danger" {
                         pairs.push((format!("{where_}+{name} tint"), over(bg, tint)));
                     }
                     for (on, fill) in pairs {
@@ -341,15 +337,7 @@ mod tests {
                 }
             }
         }
-        assert!(
-            failures.is_empty(),
-            "status text below 4.5:1:
-{}",
-            failures.join(
-                "
-"
-            )
-        );
+        assert!(failures.is_empty(), "status text below 4.5:1:\n{}", failures.join("\n"));
     }
 
     /// The step numbers on the accent fill read at 4.5:1 in every theme, and the default Light keeps

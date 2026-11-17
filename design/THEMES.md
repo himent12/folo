@@ -35,7 +35,9 @@ Rules every theme keeps (checked by `contrast.mjs`, see below):
   shades to hold contrast on its surfaces.
 - Chart series keep their fixed order and hue families (sky, amber, magenta, teal, violet, orange); a theme may
   shift shades for contrast on its plot surfaces.
-- Every pairing in `design/README.md` → Colour holds on every surface of every theme. High contrast themes hold
+- Every pairing in `design/README.md` → Colour holds on every surface of every theme; status and accent text also
+  on hovered and selected rows (`bg.hover` / `bg.selected` over `bg.panel`) and on their tint over each of those.
+  High contrast themes hold
   stricter floors: text (primary, secondary, tertiary, status text) ≥ 7:1, `line.control` and other non-text marks
   ≥ 4.5:1, and `line.default` (panel edges) ≥ 3:1 against `bg.app`. A custom theme whose base is a `contrast-*`
   theme is checked as a high contrast theme too. One exception: `accent.on` on `accent.line` holds 3:1, not 4.5:1
@@ -65,7 +67,8 @@ A custom theme is a small JSON file with the same shape as an entry of `themes`,
 
 - `folo_theme`: the format version, `1`. Required.
 - `id`: `[a-z0-9-]`, 1–40 characters, not a built-in id. A custom theme with the id of one already installed replaces
-  it. Required.
+  it: in Studio the later import wins; in Desktop, of two files in the folder with one id, the later file name (in
+  name order) wins. Required.
 - `name`: 1–40 characters after trimming. Required. `description`: optional, at most 120 characters.
 - `mode`: `"dark"` or `"light"`. Required.
 - `base`: optional, a **built-in** theme id of the same mode; default: the mode's default (`dark` or `light`). The
@@ -89,11 +92,14 @@ stay valid examples.
 Where custom themes live:
 - **Studio**: Settings → Appearance → Custom themes → *Import theme…* reads a `.json` file (a file input; several
   at once is fine). Imported themes are stored in `localStorage` under `folo.themes` (an array of the validated
-  files) and listed under the row, each with *Remove*. Another tab of the same Studio follows changes (the `storage`
+  files, stored without their `$` comments and with the name trimmed) and listed under the row (name; mode · based
+  on its base · id), each with *Remove*. Another tab of the same Studio follows changes (the `storage`
   event), as preferences already do.
 - **Desktop**: every `*.json` in `<FOLO_HOME or ~/.folo>/themes/` is read at start and again on *Reload* in
-  Settings → Appearance → Custom themes. The row shows that folder (mono) and how many themes it loaded; files that
-  failed are listed under it with their error. Desktop never opens a file picker or Explorer for this.
+  Settings → Appearance → Custom themes. The row shows that folder (mono, in the platform's form) and, under the row, the
+  themes it loaded (name; mode · based on its base · file name, as Studio lists them) and then the files that failed,
+  each with its error. There is no *Remove*: deleting the file and *Reload* removes a theme, as the row says. Desktop
+  never opens a file picker or Explorer for this.
 
 ## Choosing a theme
 
@@ -110,8 +116,10 @@ Picking a theme applies it at once: choosing a dark theme while the mode is Ligh
 other way round); with System, the mode stays System and the choice applies whenever that mode is in effect.
 
 The command palette has one command per theme, "Theme: Midnight" and so on (custom themes too), with the same
-effect, besides the existing toggle. The top bar's theme button (Studio) and Ctrl Shift L (Desktop, and Studio
-where it has it) keep switching the mode, not the theme.
+effect, besides the existing toggle. They are offered for a query only ("theme", "midnight", "light theme"), never in
+the empty palette, so seven or more commands don't crowd it. The top bar's theme button (Studio) and Ctrl Shift L
+(Desktop, and Studio where it has it) keep switching the mode, not the theme. On Desktop, Ctrl Shift L under System
+leaves System for the explicit opposite of the mode shown (System showing dark: Light).
 
 A stored theme id that no longer exists (a removed custom theme, a typo in a hand edit) shows the mode's default,
 and the stored id stays, so installing that theme again brings it back. Selects show the default as selected then.
@@ -137,7 +145,8 @@ and the stored id stays, so installing that theme again brings it back. Selects 
   mode, description, constructor), plus `Colors::set(&mut self, path: &str, value) -> bool` for custom overrides by
   token path (`bg.app`, `chart.series.0`). `Theme` keeps `mode` (so `is_dark()` and the mode's shadows work) and
   gains `id`. System mode follows the OS appearance live (Win32: `WM_SETTINGCHANGE` "ImmersiveColorSet";
-  winit: its theme-changed event); the headless platform reports dark.
+  winit: its theme-changed event); the headless platform reports dark. The window frame (DWM's caption and border
+  on Windows) follows the mode shown, not the OS: a Light theme draws a light frame on a dark system.
 
 ## Checks
 

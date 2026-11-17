@@ -1,6 +1,6 @@
 //! Settings › Appearance (design/THEMES.md, Choosing a theme): the mode (Dark / Light / System), the
-//! theme each mode uses, the custom themes folder with Reload and the files that failed, and Reduce
-//! motion.
+//! theme each mode uses, the custom themes folder with Reload, the themes it gave and the files that
+//! failed, and Reduce motion.
 
 use std::rc::Rc;
 
@@ -61,14 +61,15 @@ impl FoloApp {
             rows.push(settings_row(&t, title, help(what), select));
         }
 
-        // Custom themes: the folder (mono), how many it gave, Reload; the files that failed under it.
+        // Custom themes: the folder (mono, in the platform's form) and Reload; under the row, as Studio
+        // lists them, the themes it loaded (name; mode · base · file) and the files that failed.
         let folder = self.themes.folder.clone().unwrap_or_else(crate::theme::catalog::custom_folder);
-        let loaded = self.themes.custom_count();
         let failed = &self.themes.failed;
-        let count = match (loaded, failed.len()) {
-            (0, 0) => "None yet: put theme files (.json) in this folder, then Reload.".to_string(),
-            (n, 0) => format!("{n} {} loaded.", if n == 1 { "theme" } else { "themes" }),
-            (n, f) => format!("{n} loaded, {f} failed.", n = n),
+        let customs: Vec<_> = self.themes.custom().collect();
+        let what = if customs.is_empty() && failed.is_empty() {
+            "None yet: put theme files (.json) in this folder, then Reload."
+        } else {
+            "Theme files (.json) in this folder. To remove one, delete its file, then Reload."
         };
         let custom_help = div()
             .flex()
@@ -78,9 +79,9 @@ impl FoloApp {
                 text(ty::SM, t.text_secondary)
                     .font_family(crate::theme::MONO)
                     .text_left()
-                    .child(folder.display().to_string()),
+                    .child(crate::theme::catalog::display_path(&folder)),
             )
-            .child(text(ty::SM, t.text_tertiary).text_left().child(count))
+            .child(text(ty::SM, t.text_tertiary).text_left().child(what))
             .into_any_element();
         let reload = self
             .button(
@@ -93,33 +94,85 @@ impl FoloApp {
                 act(|this, _, cx| this.reload_themes(cx)),
             )
             .into_any_element();
-        let custom_row = settings_row(&t, "Custom themes", custom_help, reload);
-        let failures = (!failed.is_empty()).then(|| {
+        let below = !customs.is_empty() || !failed.is_empty();
+        let custom_row =
+            settings_row(&t, "Custom themes", custom_help, reload).when(below, |d| d.border_b_0());
+        let themes_list = (!customs.is_empty()).then(|| {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.))
-                .px(px(16.))
-                .py(px(10.))
-                .border_b_1()
+                .border_1()
                 .border_color(t.line_subtle)
-                .children(failed.iter().map(|f| {
+                .rounded(px(crate::theme::radius::MD))
+                .children(customs.iter().enumerate().map(|(i, e)| {
+                    let facts = self.themes.facts(e).join(" · ");
                     div()
                         .flex()
-                        .items_baseline()
-                        .gap(px(10.))
-                        .when(!f.file.is_empty(), |d| {
-                            d.child(
-                                text(ty::SM, t.text_secondary)
-                                    .flex_none()
-                                    .font_family(crate::theme::MONO)
-                                    .child(f.file.clone()),
-                            )
-                        })
-                        .child(text(ty::SM, t.danger_text).min_w_0().text_left().child(f.error.clone()))
+                        .flex_col()
+                        .justify_center()
+                        .gap(px(2.))
+                        .min_h(px(48.))
+                        .px(px(12.))
+                        .py(px(8.))
+                        .when(i > 0, |d| d.border_t_1().border_color(t.line_subtle))
+                        .child(text(ty::BASE, t.text_primary).ellipsis().child(e.name.clone()))
+                        .child(
+                            div()
+                                .flex()
+                                .items_baseline()
+                                .min_w_0()
+                                .child(
+                                    text(ty::SM, t.text_tertiary)
+                                        .flex_none()
+                                        .whitespace_nowrap()
+                                        .child(format!("{facts} · ")),
+                                )
+                                .child(
+                                    text(ty::SM, t.text_tertiary)
+                                        .min_w_0()
+                                        .font_family(crate::theme::MONO)
+                                        .ellipsis()
+                                        .child(e.file.clone()),
+                                ),
+                        )
                 }))
         });
-
+        let failed_list = (!failed.is_empty()).then(|| {
+            div().flex().flex_col().gap(px(4.)).children(failed.iter().map(|f| {
+                // A whole-file error's path is "(file)": the file's own name says that better.
+                let error = f.error.strip_prefix("(file): ").unwrap_or(&f.error).to_string();
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(div().flex_none().pt(px(1.)).child(icon(
+                        "icons/circle-alert.svg",
+                        14.,
+                        t.danger_solid,
+                    )))
+                    .when(!f.file.is_empty(), |d| {
+                        d.child(
+                            text(ty::SM, t.text_secondary)
+                                .flex_none()
+                                .font_family(crate::theme::MONO)
+                                .child(f.file.clone()),
+                        )
+                    })
+                    .child(text(ty::SM, t.danger_text).min_w_0().text_left().child(error))
+            }))
+        });
+        let below = below.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .px(px(16.))
+                .pb(px(12.))
+                .border_b_1()
+                .border_color(t.line_subtle)
+                .children(themes_list)
+                .children(failed_list)
+        });
         let motion = self.switch(
             "set-motion",
             self.reduce_motion,
@@ -138,7 +191,7 @@ impl FoloApp {
             .child(panel_header(&t, "Appearance"))
             .children(rows)
             .child(custom_row)
-            .children(failures)
+            .children(below)
             .child(settings_row(
                 &t,
                 "Reduce motion",

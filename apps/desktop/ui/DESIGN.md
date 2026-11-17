@@ -249,11 +249,14 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
 ## Platform contract
 
 - `Platform`: run loop, quit, displays, open_window, clipboard, prompt_for_paths / prompt_for_new_path,
-  open_url, reveal_path, cursor style, dispatcher, text system, activate.
+  open_url, reveal_path, cursor style, dispatcher, text system, activate, window_appearance (the system's light /
+  dark appearance; the headless platform reports dark).
 - `PlatformWindow`: bounds, window_bounds, content_size, scale_factor, display, mouse_position, modifiers,
   is_maximized / is_fullscreen / is_active, minimize, zoom, toggle_fullscreen, activate, set_title,
   set / take input handler, update_ime_position, the `on_*` callbacks GPUI has (request_frame, input, resize,
-  moved, active_status_change, should_close, close, hit_test_window_control), and
+  moved, active_status_change, should_close, close, hit_test_window_control, appearance_changed), appearance,
+  `set_frame_appearance(Option<WindowAppearance>)` (a default no-op; Win32 draws DWM's frame dark or light and keeps
+  that override across `WM_SETTINGCHANGE`), and
   `present(&mut self, frame: &Framebuffer, damage: &[Bounds<DevicePixels>])` in place of `draw(scene)`.
 - **A cancelled press.** When a button pressed in the window will never be released there (the mouse
   capture went elsewhere, the window was deactivated), the backend reports a mouse up outside the window,

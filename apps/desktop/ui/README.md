@@ -146,6 +146,18 @@ whose view renders a closure, and its first frame drawn. The app's own tests use
 The winit backend's shared code (events, keys, the custom caption, presenting) also runs on Windows through the
 `winit` feature, which is how it is exercised without a Linux or macOS desktop.
 
+## System appearance
+
+The app follows the system's light / dark appearance through four calls (FOLO Desktop's System theme mode, and its
+window frame in the mode it shows):
+
+- `App::window_appearance()`: the system's appearance now (the headless platform: dark).
+- `Window::appearance()`: the same, as that window sees it.
+- `Window::on_appearance_changed(cx, f)`: `f` runs after the system's appearance changes (Win32: `WM_SETTINGCHANGE`
+  "ImmersiveColorSet"; winit: its theme-changed event; never headless); the window is redrawn either way.
+- `Window::set_frame_appearance(Some(appearance) | None)`: draws the system frame (DWM's caption and border on
+  Windows) dark or light whatever the system says, or following it again; a no-op on winit and headless.
+
 ## Developer switches
 
 | Variable | Effect |

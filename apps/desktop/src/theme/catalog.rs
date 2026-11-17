@@ -130,6 +130,10 @@ pub struct ThemeEntry {
     pub description: String,
     pub colors: Colors,
     pub custom: bool,
+    /// A custom theme's base (a built-in id); empty for a built-in.
+    pub base: String,
+    /// The file a custom theme was read from (its name); empty for a built-in.
+    pub file: String,
 }
 
 impl ThemeEntry {
@@ -166,6 +170,12 @@ impl Default for Catalog {
 /// A theme file larger than this is refused unread (a theme is a few kB).
 const MAX_FILE: u64 = 1 << 20;
 
+/// `path` as the platform writes it, one separator throughout: a `FOLO_HOME` of `D:/x` joined with
+/// `themes` reads `D:\x\themes` on Windows, not `D:/x\themes`.
+pub fn display_path(path: &Path) -> String {
+    path.components().collect::<PathBuf>().display().to_string()
+}
+
 /// `<FOLO_HOME or ~/.folo>/themes`: where Desktop reads custom themes from.
 pub fn custom_folder() -> PathBuf {
     folo_api::weights::home_dir().join("themes")
@@ -183,16 +193,24 @@ impl Catalog {
                 description: b.description.into(),
                 colors: (b.colors)(),
                 custom: false,
+                base: String::new(),
+                file: String::new(),
             })
             .collect();
         Self { entries, folder: None, failed: Vec::new() }
     }
 
     /// The built-ins and `custom` (in load order: a later theme with an id already there replaces it).
+    #[cfg(test)]
     pub fn with_custom(custom: Vec<CustomTheme>) -> Self {
+        Self::with_files(custom.into_iter().map(|t| (String::new(), t)).collect())
+    }
+
+    /// [`Self::with_custom`] of themes read from files: `(file name, theme)`.
+    fn with_files(custom: Vec<(String, CustomTheme)>) -> Self {
         let mut c = Self::builtin();
         let mut extra: Vec<ThemeEntry> = Vec::new();
-        for t in custom {
+        for (file, t) in custom {
             extra.retain(|e| e.id != t.id);
             extra.push(ThemeEntry {
                 id: t.id,
@@ -201,6 +219,8 @@ impl Catalog {
                 description: t.description,
                 colors: t.colors,
                 custom: true,
+                base: t.base,
+                file,
             });
         }
         extra.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
@@ -224,7 +244,7 @@ impl Catalog {
                 for p in files {
                     let file = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     match read_theme(&p) {
-                        Ok(t) => themes.push(t),
+                        Ok(t) => themes.push((file, t)),
                         Err(error) => failed.push(Failed { file, error }),
                     }
                 }
@@ -234,7 +254,7 @@ impl Catalog {
                 failed.push(Failed { file: String::new(), error: format!("couldn't read the folder: {e}") })
             }
         }
-        let mut c = Self::with_custom(themes);
+        let mut c = Self::with_files(themes);
         c.folder = Some(folder.to_path_buf());
         c.failed = failed;
         c
@@ -254,8 +274,28 @@ impl Catalog {
     }
 
     /// How many custom themes are installed.
+    #[cfg(test)]
     pub fn custom_count(&self) -> usize {
-        self.entries.iter().filter(|e| e.custom).count()
+        self.custom().count()
+    }
+
+    /// The custom themes, in the order they are listed (by name).
+    pub fn custom(&self) -> impl Iterator<Item = &ThemeEntry> {
+        self.entries.iter().filter(|e| e.custom)
+    }
+
+    /// What a custom theme is, for its line under Settings › Custom themes, as Studio says it:
+    /// `["Dark", "based on Midnight"]`; the base is left out when it is the mode's default.
+    pub fn facts(&self, e: &ThemeEntry) -> Vec<String> {
+        let mode = match e.mode {
+            Mode::Dark => "Dark",
+            Mode::Light => "Light",
+        };
+        let mut facts = vec![mode.to_string()];
+        if let Some(base) = self.get(&e.base).filter(|b| !b.custom && b.id != e.mode.default_theme()) {
+            facts.push(format!("based on {}", base.name));
+        }
+        facts
     }
 
     /// The theme `prefs` shows for `mode`: its stored id when a theme of that mode has it, else the
@@ -389,5 +429,24 @@ mod tests {
             ]
         );
         assert_eq!(c.folder.as_deref(), Some(folder.as_path()));
+        // Each custom theme keeps its file (the later one when two share an id) and says what it is.
+        let files = (c.get("alpha").unwrap().file.as_str(), c.get("zeta").unwrap().file.as_str());
+        assert_eq!(files, ("c.json", "b.json"));
+        assert_eq!(c.facts(c.get("zeta").unwrap()), ["Light"], "the mode's default base goes unsaid");
+        let night = r##"{"folo_theme": 1, "id": "n", "name": "N", "mode": "dark", "base": "midnight"}"##;
+        std::fs::write(folder.join("f.json"), night).unwrap();
+        let c = Catalog::load(&folder);
+        assert_eq!(c.facts(c.get("n").unwrap()), ["Dark", "based on Midnight"]);
+        assert_eq!(c.custom().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["alpha", "n", "zeta"]);
+    }
+
+    #[test]
+    fn folders_show_in_the_platform_form() {
+        let shown = display_path(&Path::new("D:/folo-build/x").join("themes"));
+        if cfg!(windows) {
+            assert_eq!(shown, r"D:\folo-build\x\themes");
+        } else {
+            assert_eq!(shown, "D:/folo-build/x/themes");
+        }
     }
 }

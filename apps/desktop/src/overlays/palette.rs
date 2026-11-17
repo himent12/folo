@@ -219,8 +219,8 @@ impl FoloApp {
             }
         }
         // One command per theme (custom ones too), as Settings' selects pick them: the theme becomes
-        // its mode's, and the mode switches to it unless it is System. Last, so the lists above
-        // keep their place; "theme" finds them.
+        // its mode's, and the mode switches to it unless it is System. Last, and for a query only
+        // (`filtered_palette`): "theme" finds them.
         for e in self.themes.entries() {
             let id = e.id.clone();
             let dark = e.mode == crate::theme::Mode::Dark;
@@ -245,7 +245,13 @@ impl FoloApp {
 
     fn filtered_palette(&self, shown: crate::theme::ThemeId) -> Vec<PaletteItem> {
         let q = self.palette.as_ref().map(|p| p.query.trim().to_string()).unwrap_or_default();
-        rank(&q, self.palette_items(shown))
+        let mut items = self.palette_items(shown);
+        // The theme commands are offered for a query only, as in Studio (design/THEMES.md): seven or
+        // more of them would crowd the empty palette.
+        if q.is_empty() {
+            items.retain(|it| it.group != "Themes");
+        }
+        rank(&q, items)
     }
 
     pub(super) fn palette_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -587,6 +593,11 @@ mod theme_commands {
         assert!(titles.iter().any(|(t, _)| t == "Switch to light theme"), "the toggle stays: {titles:?}");
         assert!(titles.iter().any(|(t, d)| t == "Theme: Dark" && d.ends_with("· current")));
         assert!(titles.iter().any(|(t, d)| t == "Theme: Sepia" && d == "custom light theme"));
+        // The empty palette doesn't offer them (a query does, as in Studio).
+        let unqueried = drive(&mut app, window, |this, _, cx| {
+            this.filtered_palette(theme(cx).id).iter().filter(|i| i.group == "Themes").count()
+        });
+        assert_eq!(unqueried, 0);
         // Running one: Sepia's mode with it in the light slot.
         drive(&mut app, window, |this, w, cx| {
             let items = this.palette_items(theme(cx).id);

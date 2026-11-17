@@ -19,9 +19,9 @@ files) and the shared look (`UNIFIED.md`). How the tokens reach each consumer:
   `@font-face` rules, each time the site is generated (`npm run dev`, `build` or `check` in `site/`).
 - Contrast: `node design/contrast.mjs` measures every colour pairing documented under Colour below (WCAG 2: text
   4.5:1, non-text marks 3:1), in every theme (`THEMES.md`: each built-in theme and each example in `themes/`), with
-  tints and overlays composited over each surface, and that colours documented as told apart stay apart under
-  colour-vision deficiency (OKLab ΔE ≥ 7, ×100, under normal vision and simulated protan / deutan / tritan: adjacent
-  chart series, the loss components). It also checks elevation by lightness and, for the high contrast themes, their
+  tints and overlays composited (exactly, no 8-bit rounding) over each surface and over hovered and selected rows,
+  and that colours documented as told apart stay apart under colour-vision deficiency (OKLab ΔE ≥ 7, ×100, under
+  normal vision and simulated protan / deutan / tritan: adjacent chart series, the loss components). It also checks elevation by lightness and, for the high contrast themes, their
   stricter floors (text 7:1, marks 4.5:1, panel edges 3:1 on the app). `node design/contrast.mjs --theme <file>`
   validates one custom theme file and checks it the same way. The custom format's cases (`theme-cases.json`, which
   the apps' validators share) are replayed on every run, and `node --test design/contrast.test.mjs` tests the theme
@@ -115,8 +115,10 @@ and rules below hold in every theme, measured by `contrast.mjs`; the hex values 
 - Status: `success` (completed, healthy), `warning` (degraded, stopping), `danger` (failed, errors; never
   for navigation such as a link to findings), `info` (informational notices). Waiting states (queued) are neutral
   grey (`text.secondary` on `bg.active`), not a status hue. Each has `solid` (dots, icons, bars; ≥ 3:1 on every
-  surface), `text` (readable text; AA on every surface and on its own `muted`) and `muted` (tinted backgrounds for
-  badges and banners: the solid at low alpha).
+  surface), `text` (readable text; AA on every surface, on a hovered or selected row (`bg.hover` / `bg.selected`
+  over `bg.panel`), and on its own `muted` over each of those) and `muted` (tinted backgrounds for badges and
+  banners: the solid at low alpha). `accent.text` holds the same on `accent.muted` (a selected sidebar item, an accent
+  badge), except over `bg.inset`, where the accent tint is not drawn.
 - Window: `window.close` and `window.close_text` are FOLO Desktop's Close button on hover, Windows' own red and
   white in both themes (the caption buttons look like the system's).
 - Charts: `chart.series[0..5]` in this fixed order (sky, amber, magenta, teal, violet, orange), never cycled; the

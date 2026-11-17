@@ -372,7 +372,7 @@ As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
 - **Choosing.** Settings › Appearance: Theme (Dark / Light / System; with System its description says what the OS is
   now), Dark theme and Light theme (selects: built-ins in order, then custom themes by name), Custom themes, Reduce
   motion (`src/screens/settings/appearance.rs`). Picking a theme of the other mode switches to that mode, except with
-  System. The palette has "Theme: <name>" for every theme (type "theme"); Ctrl Shift L and "Switch to light / dark
+  System. The palette has "Theme: <name>" for every theme, offered for a query only (type "theme"); Ctrl Shift L and "Switch to light / dark
   theme" switch the mode only, to an explicit Dark or Light. The rules are `ThemePrefs` and `Catalog` in
   `src/theme/catalog.rs`; `FoloApp::apply_theme` (`src/app/preferences.rs`) sets the `Theme` global.
 - **System** follows the OS appearance live: folo-ui's `Window::on_appearance_changed` (Win32 `WM_SETTINGCHANGE`
@@ -382,8 +382,10 @@ As [design/THEMES.md](../../design/THEMES.md) says, with Desktop's parts:
 - **Custom themes** are every `*.json` in `<FOLO_HOME or ~/.folo>/themes/`, read at start and on Reload (off the UI
   thread), in file name order (a later file with the same id replaces an earlier one). `src/theme/custom.rs`
   validates them with the messages of `design/theme-cases.json`, which its tests replay, so Studio,
-  `design/contrast.mjs` and Desktop agree; a file that fails is listed under Custom themes with its first error. The
-  app never opens a file picker or Explorer for them.
+  `design/contrast.mjs` and Desktop agree. Under the Custom themes row, as Studio lists its imports, come the themes
+  loaded (name; mode · based on its base · file name) and then each file that failed with its first error; the
+  folder shows in the platform's form (`catalog::display_path`). There is no Remove: deleting the file and Reload
+  does it. The app never opens a file picker or Explorer for them.
 - **Stored** in `desktop.json`: `theme` is the mode (`dark`, `light`, `system`; older files read the same),
   `dark_theme` and `light_theme` the ids. An id no theme has (a removed custom theme) shows the mode's default and
   stays stored, so installing the theme again brings it back.

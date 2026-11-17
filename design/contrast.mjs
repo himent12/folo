@@ -142,15 +142,20 @@ const hex = (h) => {
   const n = parseInt(m[1], 16);
   return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a: m[2] ? parseInt(m[2], 16) / 255 : 1 };
 };
+const rgb = (c) => (typeof c === 'string' ? hex(c) : c);
+/**
+ * `top` composited over `under` (each a hex colour or an { r, g, b, a } from here), exactly: no rounding to 8 bits, as
+ * the apps' own contrast tests do (rounding moves a ratio by up to ~0.02).
+ */
 const over = (top, under) => {
-  const t = hex(top);
-  const u = hex(under);
-  const mix = (k) => Math.round(t[k] * t.a + u[k] * (1 - t.a));
-  return `#${[mix('r'), mix('g'), mix('b')].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  const t = rgb(top);
+  const u = rgb(under);
+  const mix = (k) => t[k] * t.a + u[k] * (1 - t.a);
+  return { r: mix('r'), g: mix('g'), b: mix('b'), a: 1 };
 };
-const luminance = (h) => {
+const luminance = (c) => {
   const lin = (v) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
-  const { r, g, b } = hex(h);
+  const { r, g, b } = rgb(c);
   return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 };
 export const contrast = (a, b) => {
@@ -187,16 +192,22 @@ const distance = (a, b, mat) => 100 * Math.hypot(...oklab(seen(a, mat)).map((v, 
 // The checks.
 
 /**
- * Every documented pairing: `fg` on each of `on` (token paths; `[tint, surface]` is a tint over a surface). `kind`
- * says which floor applies: 'text' (4.5:1, 7:1 in high contrast) or 'mark' (3:1, 4.5:1 in high contrast).
+ * Every documented pairing: `fg` on each of `on` (token paths; a list `[top, …, surface]` is layers composited over
+ * a surface, e.g. a tint over a hovered row). `kind` says which floor applies: 'text' (4.5:1, 7:1 in high contrast)
+ * or 'mark' (3:1, 4.5:1 in high contrast).
  */
 function rules(palette, hc) {
-  const tinted = (tint) => SURFACES.map((s) => [tint, s]);
+  const tinted = (tint, surfaces = SURFACES) => surfaces.map((s) => [tint, s]);
+  // A hovered or selected row (lists, tables, the sidebar) on a panel, and a tint (badge, banner) over one.
+  const ROWS = [['bg.hover', 'bg.panel'], ['bg.selected', 'bg.panel']];
+  const onTint = (tint, surfaces) => [...SURFACES, ...ROWS, ...tinted(tint, surfaces), ...ROWS.map((r) => [tint, ...r])];
   return [
     // Colour: text tones meet AA on every surface.
     ...['text.primary', 'text.secondary', 'text.tertiary'].map((fg) => ({ fg, on: SURFACES, kind: 'text' })),
-    // Accent: text in accent.text; accent.on is the label on a lime fill (and on accent.line).
-    { fg: 'accent.text', on: SURFACES, kind: 'text' },
+    // Accent: accent.text wherever status text goes (its tint is accent.muted); accent.on is the label on a lime fill
+    // (and on accent.line).
+    // The accent tint (a selected sidebar item, an accent badge) is not drawn on bg.inset.
+    { fg: 'accent.text', on: onTint('accent.muted', SURFACES.filter((s) => s !== 'bg.inset')), kind: 'text' },
     { fg: 'accent.on', on: ['accent.solid', 'accent.solid_hover'], kind: 'text' },
     // accent.on on accent.line (a step number on an olive dot in light). In a high contrast light theme accent.line
     // must be 4.5:1 on white and near-white surfaces, which leaves no shade a near-black label also reaches 4.5:1 on;
@@ -209,8 +220,9 @@ function rules(palette, hc) {
     { fg: 'line.control', on: SURFACES, kind: 'mark' },
     // High contrast: panel edges stand out against the app.
     ...(hc ? [{ fg: 'line.default', on: ['bg.app'], kind: 'mark', min: MARK }] : []),
-    // Status: text on every surface and on its own tint (badges, banners); solid dots and icons are marks.
-    ...STATUS.map((s) => ({ fg: `${s}.text`, on: [...SURFACES, ...tinted(`${s}.muted`)], kind: 'text' })),
+    // Status: text on every surface, on hovered and selected rows, and on its own tint (badges, banners) over each of
+    // them; solid dots and icons are marks.
+    ...STATUS.map((s) => ({ fg: `${s}.text`, on: onTint(`${s}.muted`), kind: 'text' })),
     ...STATUS.map((s) => ({ fg: `${s}.solid`, on: SURFACES, kind: 'mark' })),
     // The solid destructive button (ui/Button `destructive`, a dialog's confirm): its label on its fill, at rest and on
     // hover (round 24: white on danger.solid was 4.37:1 in light, and the hover mix made it worse).
@@ -260,11 +272,11 @@ export function checkTheme({ mode, palette, highContrast }) {
   };
   for (const { fg, on, min } of rules(palette, highContrast)) {
     for (const bg of on) {
-      const [tint, surface] = Array.isArray(bg) ? bg : [null, bg];
-      const ground = tint ? over(get(palette, tint), get(palette, surface)) : get(palette, surface);
+      const layers = Array.isArray(bg) ? bg : [bg];
+      const ground = layers.reduceRight((under, top) => (under ? over(get(palette, top), under) : get(palette, top)), null);
       const ink = get(palette, fg);
       const ratio = contrast(hex(ink).a < 1 ? over(ink, ground) : ink, ground);
-      const where = tint ? `${tint} over ${surface}` : surface;
+      const where = layers.join(' over ');
       record(ratio >= min, `${fg.padEnd(18)} on ${where.padEnd(30)} ${ratio.toFixed(2).padStart(5)} (min ${min})`);
     }
   }
