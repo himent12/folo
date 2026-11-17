@@ -1,6 +1,6 @@
 //! The int8 executor (docs/MODEL.md §9.6): the quantised graph ([`walk`]) on folo-core's int8 kernels
 //! ([`folo_core::cpu::q8`]). Activations are u8 C4 buffers from the CPU buffer cache; each conv's packed weights
-//! are built on its first call and kept in the [`Int8Plan`].
+//! are built on its first call and kept in the [`Int8Plan`] while its weight and bias tensors hold the same data.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,10 +15,19 @@ use super::walk::{self, Exec};
 use crate::model::FoloModel;
 
 /// A calibrated model's int8 plan: its calibration and the packed weights of every int8 conv, built on first
-/// use (the graph is fixed, so a conv's input grids are too).
+/// use (the graph is fixed, so a conv's input grids are too) and built again when the conv's tensors change.
 pub struct Int8Plan {
     cal: Calibration,
-    convs: Mutex<HashMap<String, Arc<QConv>>>,
+    convs: Mutex<HashMap<String, (Stamp, Arc<QConv>)>>,
+}
+
+/// Which data a conv's packed weights were made from: the weight and bias tensors' identities and storage versions
+/// (a load, an in-place write or a replaced tensor changes one of them).
+type Stamp = [Option<(folo_core::TensorId, u64)>; 2];
+
+fn stamp(conv: &ConvBnAct) -> Stamp {
+    let s = |t: &Tensor| (t.id(), t.storage_version());
+    [Some(s(&conv.conv.weight)), conv.conv.bias.as_ref().map(s)]
 }
 
 impl Int8Plan {
@@ -108,7 +117,10 @@ struct Int8<'a> {
 
 impl Int8<'_> {
     fn qconv(&self, name: &str, conv: &ConvBnAct, parts: &[&QAct]) -> Result<Arc<QConv>> {
-        if let Some(c) = self.plan.convs.lock().unwrap_or_else(|e| e.into_inner()).get(name) {
+        let st = stamp(conv);
+        if let Some((s, c)) = self.plan.convs.lock().unwrap_or_else(|e| e.into_inner()).get(name)
+            && *s == st
+        {
             return Ok(c.clone());
         }
         let cfg = conv.conv.config();
@@ -127,7 +139,7 @@ impl Int8<'_> {
             conv.act == Activation::Silu,
             &grids,
         ));
-        self.plan.convs.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), qc.clone());
+        self.plan.convs.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), (st, qc.clone()));
         Ok(qc)
     }
 

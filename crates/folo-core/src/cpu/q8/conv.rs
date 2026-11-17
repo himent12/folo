@@ -82,6 +82,7 @@ impl QConv {
         assert_eq!(w.len(), o * c * k * k, "QConv: weight length");
         assert_eq!(grids.len(), c, "QConv: one grid per input channel");
         assert_eq!(bias.len(), o, "QConv: bias length");
+        assert!(k >= 1 && stride >= 1, "QConv: kernel {k}, stride {stride}");
         assert!(c * k * k <= MAX_REDUCTION, "QConv: c · k² = {} is over {MAX_REDUCTION}", c * k * k);
         let taps = k * k;
         let folded: Vec<f32> = w.iter().enumerate().map(|(i, &v)| v * grids[(i / taps) % c].scale).collect();
@@ -108,8 +109,14 @@ impl QConv {
         self.o
     }
 
-    /// Output size of an `h × w` input.
+    /// Output size of an `h × w` input. Panics when the kernel does not fit the padded input.
     pub fn out_hw(&self, h: usize, w: usize) -> (usize, usize) {
+        assert!(
+            h + 2 * self.pad >= self.k && w + 2 * self.pad >= self.k,
+            "QConv: {h}×{w} input under a {}×{} kernel",
+            self.k,
+            self.k
+        );
         ((h + 2 * self.pad - self.k) / self.stride + 1, (w + 2 * self.pad - self.k) / self.stride + 1)
     }
 

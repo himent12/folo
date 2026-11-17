@@ -446,3 +446,14 @@ fn quantize_round_trips_planes_over_one_block() {
         }
     }
 }
+
+#[test]
+#[should_panic(expected = "under a 3×3 kernel")]
+fn conv_refuses_an_input_smaller_than_its_kernel() {
+    let grids = vec![Grid { scale: 0.05, zero: 3 }; 4];
+    let cv = QConv::new(&[0.1; 4 * 4 * 9], &[0.0; 4], (4, 4, 3), 1, 0, false, &grids);
+    let x = codes(&mut Rng::seed(2), 2);
+    let mut out = alloc(1, 4, 1);
+    let view = C4 { data: &x, offset: 0, img_stride: 2, c: 4, zero: 3 };
+    conv(&[view], 1, 1, 2, &cv, None, QOut::U8 { data: &mut out, grid: Grid { scale: 0.1, zero: 0 } });
+}
