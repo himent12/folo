@@ -21,13 +21,15 @@ pub struct Int8Plan {
     convs: Mutex<HashMap<String, (Stamp, Arc<QConv>)>>,
 }
 
-/// Which data a conv's packed weights were made from: the weight and bias tensors' identities and storage versions
-/// (a load, an in-place write or a replaced tensor changes one of them).
-type Stamp = [Option<(folo_core::TensorId, u64)>; 2];
+/// What a conv's packed weights were made from: the weight and bias tensors' identities and storage versions (a
+/// load, an in-place write or a replaced tensor changes one of them), the geometry and the activation.
+type Stamp = ([Option<(folo_core::TensorId, u64)>; 2], [usize; 5], Activation);
 
 fn stamp(conv: &ConvBnAct) -> Stamp {
     let s = |t: &Tensor| (t.id(), t.storage_version());
-    [Some(s(&conv.conv.weight)), conv.conv.bias.as_ref().map(s)]
+    let c = conv.conv.config();
+    let geometry = [c.in_channels, c.out_channels, c.kernel, c.stride, c.padding];
+    ([Some(s(&conv.conv.weight)), conv.conv.bias.as_ref().map(s)], geometry, conv.act)
 }
 
 impl Int8Plan {

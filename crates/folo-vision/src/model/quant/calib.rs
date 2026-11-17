@@ -171,7 +171,8 @@ impl Stats {
 pub struct Calibrator {
     stats: BTreeMap<String, Stats>,
     pass: u8,
-    images: usize,
+    /// Images observed in each pass.
+    images: [usize; 2],
 }
 
 impl Calibrator {
@@ -183,9 +184,7 @@ impl Calibrator {
     /// Run the `f32` model on `x` (`[B, 3, H, W]`, `f32`, on the CPU) and record every boundary.
     pub fn observe(&mut self, model: &FoloModel, x: &Tensor) -> Result<()> {
         let _g = folo_core::no_grad();
-        if self.pass == 0 {
-            self.images += x.dims()[0];
-        }
+        self.images[self.pass as usize] += x.dims()[0];
         let mut e = Observe { cal: self };
         folo_core::cpu::in_pool(|| walk::features(model, &mut e, x))?;
         Ok(())
@@ -196,10 +195,16 @@ impl Calibrator {
         self.pass = 1;
     }
 
-    /// The ranges by `method`.
-    pub fn finish(&self, method: Method) -> Calibration {
+    /// The ranges by `method`. Refused unless both passes observed the same images, at least one.
+    pub fn finish(&self, method: Method) -> Result<Calibration> {
+        let [a, b] = self.images;
+        if a == 0 || self.pass != 1 || a != b {
+            return Err(folo_nn::Error::Invalid(format!(
+                "int8 calibration needs two passes over the same images, at least one (saw {a}, then {b})"
+            )));
+        }
         let ranges = self.stats.iter().map(|(k, s)| (k.clone(), s.range(method))).collect();
-        Calibration { method, images: self.images, ranges, f32_convs: Vec::new(), weights: None }
+        Ok(Calibration { method, images: a, ranges, f32_convs: Vec::new(), weights: None })
     }
 
     fn record(&mut self, name: &str, t: &Tensor) -> Result<()> {
@@ -283,28 +288,14 @@ where
     I: Iterator<Item = Result<Tensor>>,
 {
     let mut c = Calibrator::new();
-    let mut seen = [0usize; 2];
     for x in batches() {
-        let x = x?;
-        seen[0] += x.dims()[0];
-        c.observe(model, &x)?;
-    }
-    if seen[0] == 0 {
-        return Err(folo_nn::Error::Invalid("int8 calibration needs at least one image".into()));
+        c.observe(model, &x?)?;
     }
     c.next_pass();
     for x in batches() {
-        let x = x?;
-        seen[1] += x.dims()[0];
-        c.observe(model, &x)?;
+        c.observe(model, &x?)?;
     }
-    if seen[1] != seen[0] {
-        return Err(folo_nn::Error::Invalid(format!(
-            "int8 calibration: the second pass saw {} images, the first {}",
-            seen[1], seen[0]
-        )));
-    }
-    let mut cal = c.finish(method);
+    let mut cal = c.finish(method)?;
     cal.weights = Some(super::fingerprint(model)?);
     Ok(cal)
 }

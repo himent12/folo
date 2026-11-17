@@ -86,8 +86,17 @@ impl C4<'_> {
     /// Panics unless `n` images of `hw` pixels and the slack are inside `data`.
     pub fn check(&self, n: usize, hw: usize) {
         assert!(self.c.is_multiple_of(4), "C4: {} channels", self.c);
-        let end = self.offset + n.saturating_sub(1) * self.img_stride + self.c / 4 * hw + SLACK;
-        assert!(self.data.len() >= end, "C4: buffer of {} words, need {end}", self.data.len());
+        let end = n
+            .saturating_sub(1)
+            .checked_mul(self.img_stride)
+            .and_then(|v| v.checked_add(self.offset))
+            .and_then(|v| (self.c / 4).checked_mul(hw).and_then(|p| v.checked_add(p)))
+            .and_then(|v| v.checked_add(SLACK));
+        assert!(
+            end.is_some_and(|e| self.data.len() >= e),
+            "C4: buffer of {} words, need {end:?} (None: overflow)",
+            self.data.len()
+        );
     }
 }
 

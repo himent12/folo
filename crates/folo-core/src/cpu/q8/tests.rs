@@ -457,3 +457,12 @@ fn conv_refuses_an_input_smaller_than_its_kernel() {
     let view = C4 { data: &x, offset: 0, img_stride: 2, c: 4, zero: 3 };
     conv(&[view], 1, 1, 2, &cv, None, QOut::U8 { data: &mut out, grid: Grid { scale: 0.1, zero: 0 } });
 }
+
+#[test]
+#[should_panic(expected = "C4: buffer")]
+fn views_whose_extent_wraps_are_refused() {
+    // Offset 128 plus a stride of usize::MAX − 127 wraps to 128: it must not pass as inside 128 + SLACK words.
+    let data = vec![0u32; 128 + SLACK];
+    let view = C4 { data: &data, offset: 128, img_stride: usize::MAX - 127, c: 4, zero: 0 };
+    view.check(2, 64);
+}

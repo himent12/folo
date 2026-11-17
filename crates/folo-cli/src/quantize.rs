@@ -37,11 +37,6 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     if args.images == 0 || args.batch == 0 {
         return Err(usage("--images and --batch must be at least 1".into()));
     }
-    if let Some(s) = args.imgsz
-        && (s == 0 || !s.is_multiple_of(32) || s > 8192)
-    {
-        return Err(usage(format!("--imgsz {s} must be a multiple of 32 in 32..=8192")));
-    }
     let path = crate::weights::resolve(&args.model)?;
     let file = ModelFile::open(&path).map_err(|e| crate::infer::weights_error("quantize", &path, e))?;
     let model = open_cpu(&file)?;
@@ -61,6 +56,10 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     }
     let n = args.images.min(part.len());
     let imgsz = args.imgsz.unwrap_or(model.imgsz());
+    if imgsz == 0 || !imgsz.is_multiple_of(32) || imgsz > 8192 {
+        let from = if args.imgsz.is_some() { "--imgsz" } else { "the weights' imgsz (pass --imgsz)" };
+        return Err(usage(format!("{from} {imgsz} must be a multiple of 32 in 32..=8192")));
+    }
     let workers = args.workers.unwrap_or_else(folo_vision::train::default_workers);
     // Claimed first, so a taken --output fails before the calibration, not after it.
     let output = claim_output("quantize", &path, args.output.clone(), "-int8", "folo")?;

@@ -116,12 +116,41 @@ fn calibration_rides_in_the_metadata_and_only_fits_its_weights() {
 }
 
 #[test]
-fn calibration_needs_images() {
+fn calibration_needs_two_passes_over_the_same_images() {
     let m = model(11);
     let e = quant::calibrate(&m, std::iter::empty::<folo_nn::Result<Tensor>>, Method::MinMax)
         .unwrap_err()
         .to_string();
-    assert!(e.contains("at least one image"), "{e}");
+    assert!(e.contains("at least one"), "{e}");
+    // The public Calibrator too: nothing observed, one pass only, or passes over different images.
+    let x = input(1, 64, 64, 12);
+    assert!(quant::calib::Calibrator::new().finish(Method::MinMax).is_err());
+    let mut c = quant::calib::Calibrator::new();
+    c.observe(&m, &x).unwrap();
+    assert!(c.finish(Method::MinMax).is_err());
+    c.next_pass();
+    c.observe(&m, &x).unwrap();
+    c.observe(&m, &x).unwrap();
+    assert!(c.finish(Method::MinMax).is_err());
+}
+
+#[test]
+fn a_changed_activation_repacks_its_conv() {
+    let mut m = model(17);
+    let x = input(1, 64, 64, 18);
+    let cal = calibrated(&m, &x);
+    m.set_int8(Some(Calibration { weights: None, ..cal.clone() })).unwrap();
+    let _g = no_grad();
+    m.forward(&x).unwrap(); // packs every conv with its SiLU
+    m.backbone.down2.act = folo_nn::Activation::Identity;
+    let a = m.forward(&x).unwrap().box_raw.to_vec::<f32>().unwrap();
+    // A fresh plan on the same model: what the changed graph gives.
+    m.set_int8(Some(Calibration { weights: None, ..cal })).unwrap();
+    let b = m.forward(&x).unwrap().box_raw.to_vec::<f32>().unwrap();
+    assert!(
+        a.iter().zip(&b).all(|(u, v)| u.to_bits() == v.to_bits()),
+        "stale epilogue after an activation change"
+    );
 }
 
 #[test]

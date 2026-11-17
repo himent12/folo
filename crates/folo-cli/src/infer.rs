@@ -99,15 +99,15 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
         eprintln!("note: --tensor-cores only affects f16 inference (--half on a GPU); running without them");
     }
     let file = ModelFile::open(path).map_err(|e| weights_error(command, path, e))?;
-    let Some(cal) = folo_vision::model::quant::Calibration::from_metadata(file.metadata())
-        .map_err(|e| weights_error(command, path, e))?
-    else {
-        return Err(CliError::new(
-            ExitCode::Runtime,
-            "invalid_weights",
-            format!("{} has no int8 calibration", folo_api::json::path(path)),
-        )
-        .hint("run `folo quantize --model <weights> --data <dataset>` and use the file it writes"));
+    // A missing, unreadable or mismatched calibration: the weights are fine, the int8 calibration is not.
+    let calibration_error = |why: String| {
+        CliError::new(ExitCode::Runtime, "invalid_weights", format!("{}: {why}", folo_api::json::path(path)))
+            .hint("run `folo quantize --model <weights> --data <dataset>` and use the file it writes")
+    };
+    let cal = match folo_vision::model::quant::Calibration::from_metadata(file.metadata()) {
+        Ok(Some(cal)) => cal,
+        Ok(None) => return Err(calibration_error("no int8 calibration".into())),
+        Err(e) => return Err(calibration_error(format!("unreadable int8 calibration ({e})"))),
     };
     let mut model = FoloModel::from_file_for_inference(
         &file,
@@ -115,7 +115,7 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
         Precision::F32.dtype(),
     )
     .map_err(|e| nn_error(command, e))?;
-    model.set_int8(Some(cal)).map_err(|e| nn_error(command, e))?;
+    model.set_int8(Some(cal)).map_err(|e| calibration_error(e.to_string()))?;
     Ok(model)
 }
 

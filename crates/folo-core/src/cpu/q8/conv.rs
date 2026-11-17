@@ -79,11 +79,12 @@ impl QConv {
         grids: &[Grid],
     ) -> QConv {
         assert!(o % 4 == 0 && c % 4 == 0, "QConv: channels {o} → {c} must be multiples of 4");
-        assert_eq!(w.len(), o * c * k * k, "QConv: weight length");
+        assert!(k >= 1 && stride >= 1, "QConv: kernel {k}, stride {stride}");
+        let red = k.checked_mul(k).and_then(|t| t.checked_mul(c));
+        assert!(red.is_some_and(|r| r <= MAX_REDUCTION), "QConv: c · k² = {red:?} is over {MAX_REDUCTION}");
+        assert_eq!(Some(w.len()), red.and_then(|r| r.checked_mul(o)), "QConv: weight length");
         assert_eq!(grids.len(), c, "QConv: one grid per input channel");
         assert_eq!(bias.len(), o, "QConv: bias length");
-        assert!(k >= 1 && stride >= 1, "QConv: kernel {k}, stride {stride}");
-        assert!(c * k * k <= MAX_REDUCTION, "QConv: c · k² = {} is over {MAX_REDUCTION}", c * k * k);
         let taps = k * k;
         let folded: Vec<f32> = w.iter().enumerate().map(|(i, &v)| v * grids[(i / taps) % c].scale).collect();
         let (q, scale) = quantize_weights(&folded, o);
@@ -109,15 +110,14 @@ impl QConv {
         self.o
     }
 
-    /// Output size of an `h × w` input. Panics when the kernel does not fit the padded input.
+    /// Output size of an `h × w` input. Panics when the kernel does not fit the padded input or the sizes
+    /// overflow.
     pub fn out_hw(&self, h: usize, w: usize) -> (usize, usize) {
-        assert!(
-            h + 2 * self.pad >= self.k && w + 2 * self.pad >= self.k,
-            "QConv: {h}×{w} input under a {}×{} kernel",
-            self.k,
-            self.k
-        );
-        ((h + 2 * self.pad - self.k) / self.stride + 1, (w + 2 * self.pad - self.k) / self.stride + 1)
+        let padded =
+            |v: usize| self.pad.checked_mul(2).and_then(|p| v.checked_add(p)).expect("QConv: size overflows");
+        let (ph, pw) = (padded(h), padded(w));
+        assert!(ph >= self.k && pw >= self.k, "QConv: {h}×{w} input under a {}×{} kernel", self.k, self.k);
+        ((ph - self.k) / self.stride + 1, (pw - self.k) / self.stride + 1)
     }
 
     fn pointwise(&self) -> bool {
@@ -309,7 +309,7 @@ pub fn conv(
     assert_eq!(xs.iter().map(|x| x.c).sum::<usize>(), cv.c, "q8::conv: input channels");
     let mut ch = 0;
     for x in xs {
-        x.check(n, h * w);
+        x.check(n, h.checked_mul(w).expect("q8::conv: h · w overflows"));
         // The correction and the padding use the zero points the weights were packed with.
         assert!(
             cv.zeros[ch..ch + x.c].iter().all(|&z| z == x.zero),
@@ -318,7 +318,14 @@ pub fn conv(
         ch += x.c;
     }
     let (oh, ow) = cv.out_hw(h, w);
-    let ohw = oh * ow;
+    // The padded copy of an image (`image_rows`) is about `c / 4 · (h + 2p + s) · (w + 2p + s)` words.
+    let side = |v: usize| v.checked_add(2 * cv.pad + cv.stride);
+    let copy = side(h).zip(side(w)).and_then(|(a, b)| a.checked_mul(b)).and_then(|v| v.checked_mul(cv.c));
+    assert!(copy.is_some(), "q8::conv: {h}×{w} overflows");
+    let ohw = oh.checked_mul(ow).expect("q8::conv: output size overflows");
+    let words = |c: usize| {
+        n.checked_mul(c).and_then(|v| v.checked_mul(ohw)).expect("q8::conv: output size overflows")
+    };
     let og = cv.o / 4;
     if let Some((r, _)) = &res {
         assert_eq!(r.c, cv.o, "q8::conv: residual channels");
@@ -326,7 +333,7 @@ pub fn conv(
     }
     let (qptr, fptr, out_kind) = match out {
         QOut::U8 { data, grid } => {
-            assert!(data.len() >= n * og * ohw, "q8::conv: output too short");
+            assert!(data.len() >= words(og), "q8::conv: output too short");
             (
                 OutPtr(data.as_mut_ptr()),
                 OutPtr(std::ptr::null_mut::<f32>()),
@@ -334,7 +341,7 @@ pub fn conv(
             )
         }
         QOut::F32 { data } => {
-            assert!(data.len() >= n * cv.o * ohw, "q8::conv: output too short");
+            assert!(data.len() >= words(cv.o), "q8::conv: output too short");
             (OutPtr(std::ptr::null_mut::<u32>()), OutPtr(data.as_mut_ptr()), Out::F32)
         }
     };
