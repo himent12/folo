@@ -364,6 +364,17 @@ impl StorageCell {
         g
     }
 
+    /// [`StorageCell::write_unversioned`] if the lock is free now, `None` (touching nothing) if another guard holds it.
+    pub fn try_write_unversioned(&self) -> Option<RwLockWriteGuard<'_, Storage>> {
+        let g = match self.data.try_write() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        self.derived.clear();
+        Some(g)
+    }
+
     /// Bump the version after a write through [`StorageCell::write_unversioned`].
     pub fn mark_modified(&self) {
         self.version.fetch_add(1, Ordering::Relaxed);

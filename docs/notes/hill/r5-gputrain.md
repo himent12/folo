@@ -64,13 +64,18 @@ Two changes, both bit-identical to main:
   `Backend::add_into(dst, layout, src)`, a strided elementwise `dst[i] += src[i]` (`ew::add_into`, KIND 5 of the
   elementwise generator), used by `accumulate` for any float dtype off the CPU and by `add_assign` there. The GPU
   declines (`NotSupported`) other dtypes and destinations that overlap themselves or share the source's buffer, and
-  the caller then adds out of place. The two storage locks are taken in address order (opposing `a += b`,
-  `b += a` cannot deadlock) and the version is bumped before the write lock is released.
+  the caller then adds out of place. The source is read-locked first (as in every in-place op) and the destination
+  only *tried* (`StorageCell::try_write_unversioned`): a busy destination also goes out of place, so the addition
+  never waits while it holds a lock and cannot deadlock against opposing additions or `copy_from`'s read-then-write
+  (a first fix took the two locks in address order, which still crossed `copy_from`). The version is bumped before
+  the write lock is released.
 
-Tests (`crates/folo-gpu/src/tests/backend/accumulate.rs`): in-place add bitwise against the CPU over dense (also at
-an offset, vec4 and scalar), odd, channel-slice, transposed and broadcast sources; fan-in gradients against the CPU
-in F32 and F16 (vec4 and odd shapes); `cat` into a recycled buffer that was filled with NaN (whole-word and half-word
-f16 runs); opposing additions on two threads. Mutation check: making KIND 5 a copy (`Y = X0`) fails two of them.
+Tests (`crates/folo-gpu/src/tests/backend/accumulate.rs`): in-place add bitwise against the CPU over dense (also at an
+offset, vec4 and scalar), odd, channel-slice, transposed and broadcast sources; fan-in gradients against the CPU in F32
+and F16 (vec4 and odd shapes); `cat` into a recycled buffer that was filled with NaN (whole-word and half-word f16
+runs); opposing additions on two threads; an addition whose destination another thread holds while it writes the source
+(the address-ordered lock fails it, deadlocked, in both address orders). Mutation check: making KIND 5 a copy (`Y = X0`)
+fails two of them.
 
 A/B (`ab-glue1`, 5 rounds, base = main cf65f7a5, PR side = the WIP commit 8aad6628, which differs from the PR only
 in the precompile bounds and the review fixes, none of which touch a steady-state step; cpu 69–100 %, rounds 3–5
