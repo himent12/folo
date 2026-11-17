@@ -95,6 +95,31 @@ fn fan_in_case(dev: folo_core::Device, shape: &[usize; 4]) {
     }
 }
 
+/// The in-place fan-in is bit-identical to the out-of-place add it replaces, at f32 and f16, through the vec4 and
+/// the scalar kernel: `x` is read by two products, so its gradient is `w1 · 1` accumulated with `w2 · 1` (exact
+/// copies of `w1` and `w2`), and must equal the GPU's own `w1 + w2` bit for bit.
+#[test]
+fn fan_in_is_bit_identical_to_the_out_of_place_add() {
+    let dev = dev!();
+    for (i, shape) in [[2, 4, 6, 6], [2, 3, 5, 7]].into_iter().enumerate() {
+        for dtype in [DType::F32, DType::F16] {
+            let on = |t: Tensor| t.to_device(dev).unwrap().to_dtype(dtype).unwrap();
+            let (w1, w2) = (on(randn(&shape, 40 + i as u64)), on(randn(&shape, 50 + i as u64)));
+            let x = on(randn(&shape, 60 + i as u64)).requires_grad_();
+            let loss =
+                x.mul(&w1).unwrap().sum_all().unwrap().add(&x.mul(&w2).unwrap().sum_all().unwrap()).unwrap();
+            let g = loss.backward().unwrap();
+            let got = g.get(&x).unwrap();
+            let want = {
+                let _g = no_grad();
+                w1.add(&w2).unwrap()
+            };
+            assert_eq!(got.dtype(), dtype);
+            assert_same(got, &want, &format!("fan-in {dtype} {shape:?}"));
+        }
+    }
+}
+
 /// `Tensor::cat` writes into a buffer that is not cleared first: every element of a recycled, NaN-filled one
 /// is overwritten.
 #[test]

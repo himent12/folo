@@ -72,10 +72,13 @@ Two changes, both bit-identical to main:
 
 Tests (`crates/folo-gpu/src/tests/backend/accumulate.rs`): in-place add bitwise against the CPU over dense (also at an
 offset, vec4 and scalar), odd, channel-slice, transposed and broadcast sources; fan-in gradients against the CPU in F32
-and F16 (vec4 and odd shapes); `cat` into a recycled buffer that was filled with NaN (whole-word and half-word f16
-runs); opposing additions on two threads; an addition whose destination another thread holds while it writes the source
-(the address-ordered lock fails it, deadlocked, in both address orders). Mutation check: making KIND 5 a copy (`Y = X0`)
-fails two of them.
+and F16 (vec4 and odd shapes), and bit for bit against the GPU's own out-of-place add; `cat` into a recycled buffer that
+was filled with NaN (whole-word and half-word f16 runs); opposing additions on two threads; an addition whose
+destination another thread holds while it writes the source (the address-ordered lock fails it, deadlocked, in both
+address orders). Mutation checks: making KIND 5 a copy (`Y = X0`) fails two of them, one extra rounding (`· 1.0000001`)
+fails the bit-for-bit one. The held-destination test leaves the addition 300 ms to reach its locks; a thread descheduled
+that long would let a regression pass (never fail a correct build), and a deterministic version needs a test hook in
+folo-core's lock path, not added.
 
 A/B (`ab-glue1`, 5 rounds, base = main cf65f7a5, PR side = the WIP commit 8aad6628, which differs from the PR only
 in the precompile bounds and the review fixes, none of which touch a steady-state step; cpu 69–100 %, rounds 3–5
