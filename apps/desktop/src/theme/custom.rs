@@ -29,16 +29,26 @@ pub const RESERVED_ID: &str = "system";
 /// The keys of a theme file besides `$` comments.
 const KEYS: [&str; 7] = ["folo_theme", "id", "name", "mode", "base", "description", "color"];
 
-/// Parses and validates one theme file. The error is the first problem found, as `path: what`; the
-/// messages and their order are the ones `design/theme-cases.json` holds for every validator
-/// (`design/contrast.mjs`, Studio, this one): unknown top-level keys, `folo_theme`, `id`, `name`,
-/// `description`, `mode`, `base`, then `color` depth first in file order. One leading UTF-8 byte
-/// order mark is skipped (PowerShell 5.1 and some editors write one), as every validator does.
-pub fn parse(text: &str) -> Result<CustomTheme, String> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+/// Parses and validates one theme file's bytes. The error is the first problem found, as `path:
+/// what`; the messages and their order are the ones `design/theme-cases.json` holds for every
+/// validator (`design/contrast.mjs`, Studio, this one): the encoding, JSON, unknown top-level keys,
+/// `folo_theme`, `id`, `name`, `description`, `mode`, `base`, then `color` depth first in file
+/// order. Exactly one leading UTF-8 byte order mark (EF BB BF, which PowerShell 5.1 and some
+/// editors write) is stripped, then the rest must be UTF-8: a second mark is a U+FEFF that is not
+/// JSON. serde_json refuses a lone surrogate escape (`\uD800`) while parsing; the JS validators
+/// refuse it the same way.
+pub fn parse_bytes(bytes: &[u8]) -> Result<CustomTheme, String> {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let text = std::str::from_utf8(bytes).map_err(|_| "(file): not UTF-8 text".to_string())?;
     let v: Value = serde_json::from_str(text)
         .map_err(|e| format!("(file): not valid JSON (line {}, column {})", e.line(), e.column()))?;
     parse_value(&v)
+}
+
+/// [`parse_bytes`] of a file's text (its UTF-8 bytes), for tests.
+#[cfg(test)]
+pub fn parse(text: &str) -> Result<CustomTheme, String> {
+    parse_bytes(text.as_bytes())
 }
 
 /// [`parse`] of a JSON value.
@@ -234,9 +244,20 @@ mod tests {
         assert_eq!(t.colors, Theme::new(Mode::Light).c);
     }
 
+    /// A case's file bytes: its `hex`, or its raw `text` as UTF-8; `None` for a parsed `theme`.
+    fn case_bytes(case: &Value) -> Option<Vec<u8>> {
+        if let Some(hex) = case.get("hex") {
+            let hex = hex.as_str().unwrap().as_bytes();
+            let digit = |c: u8| (c as char).to_digit(16).unwrap() as u8;
+            return Some(hex.chunks(2).map(|p| digit(p[0]) << 4 | digit(p[1])).collect());
+        }
+        case.get("text").map(|t| t.as_str().unwrap().as_bytes().to_vec())
+    }
+
     /// `design/theme-cases.json`, the cases every validator replays (design/contrast.mjs, Studio,
-    /// this one): each invalid file is refused with exactly its message (path first), each valid one
-    /// resolves to its base, trimmed name and token values.
+    /// this one): each invalid file is refused with exactly its message (path first; `(file): not
+    /// valid JSON` with any detail after it), each valid one resolves to its base, trimmed name and
+    /// token values. A file's bytes (`text`, `hex`) go through the folder reader itself.
     #[test]
     fn the_shared_cases_hold() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../design/theme-cases.json");
@@ -244,20 +265,34 @@ mod tests {
         let invalid = cases["invalid"].as_array().unwrap();
         let valid = cases["valid"].as_array().unwrap();
         assert!(invalid.len() >= 40 && valid.len() >= 5, "the cases file lost its cases");
-        // A case holds the parsed `theme`, or the file's raw `text` (number spellings, a byte order
-        // mark, dotted keys: what only parsing the file itself shows).
-        let check = |case: &Value| match case.get("text") {
-            Some(text) => parse(text.as_str().unwrap()),
+        // A case holds the parsed `theme`, the file's raw `text` (number spellings, dotted keys: what
+        // only parsing the file itself shows) or its bytes in `hex` (byte order marks, invalid UTF-8,
+        // surrogate escapes).
+        let dir = folo_test_support::TestDir::new("desktop-theme-cases");
+        let file = dir.path().join("case.json");
+        let check = |case: &Value| match case_bytes(case) {
+            Some(bytes) => {
+                std::fs::write(&file, bytes).unwrap();
+                super::super::catalog::read_theme(&file)
+            }
             None => parse_value(&case["theme"]),
         };
         assert!(
             invalid.iter().chain(valid).filter(|c| c.get("text").is_some()).count() >= 8,
             "the cases file lost its raw cases"
         );
+        assert!(
+            invalid.iter().chain(valid).filter(|c| c.get("hex").is_some()).count() >= 10,
+            "the cases file lost its byte cases"
+        );
+        const NOT_JSON: &str = "(file): not valid JSON";
         for case in invalid {
             let what = case["what"].as_str().unwrap();
             let got = check(case).expect_err(what);
-            assert_eq!(got, case["error"].as_str().unwrap(), "{what}");
+            let want = case["error"].as_str().unwrap();
+            if !(want == NOT_JSON && got.starts_with(&format!("{NOT_JSON} ("))) {
+                assert_eq!(got, want, "{what}");
+            }
         }
         for case in valid {
             let what = case["what"].as_str().unwrap();

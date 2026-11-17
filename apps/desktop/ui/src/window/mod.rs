@@ -308,14 +308,15 @@ impl Window {
         self.should_close_handler = Some(Box::new(f));
     }
 
-    /// The system's light / dark appearance, as this window sees it (the headless platform: dark).
+    /// The system's light / dark appearance, as this window sees it (the headless platform: dark
+    /// until a test changes it with `HeadlessApp::set_system_appearance`).
     pub fn appearance(&self) -> crate::WindowAppearance {
         self.platform_window.appearance()
     }
 
     /// Registers the handler called after the system's appearance changes (Windows:
-    /// `WM_SETTINGCHANGE` "ImmersiveColorSet"; winit: its theme-changed event; never headless). The
-    /// window is redrawn either way.
+    /// `WM_SETTINGCHANGE` "ImmersiveColorSet"; winit: its theme-changed event; headless:
+    /// `HeadlessApp::set_system_appearance`). The window is redrawn either way.
     pub fn on_appearance_changed(&mut self, _cx: &App, f: impl FnMut(&mut Window, &mut App) + 'static) {
         self.appearance_handler = Some(Box::new(f));
     }

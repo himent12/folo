@@ -167,8 +167,8 @@ impl Default for Catalog {
     }
 }
 
-/// A theme file larger than this is refused, read no further (a theme is a few kB; Studio refuses
-/// the same size).
+/// A theme file larger than this, 1 MiB (1 048 576 bytes), is refused; at most one byte more is
+/// read (a theme is a few kB; Studio and design/contrast.mjs refuse the same size).
 const MAX_FILE: u64 = 1 << 20;
 
 /// `path` as the platform writes it, one separator throughout: a `FOLO_HOME` of `D:/x` joined with
@@ -316,9 +316,10 @@ impl Catalog {
     }
 }
 
-/// Reads and parses one theme file, at most [`MAX_FILE`] bytes of it: the limit holds at the read
-/// itself (a file that grew, or was replaced, after the folder was listed still costs no more).
-fn read_theme(path: &Path) -> Result<CustomTheme, String> {
+/// Reads and parses one theme file ([`custom::parse_bytes`]), at most [`MAX_FILE`] + 1 bytes of it:
+/// the limit holds at the read itself (a file that grew, or was replaced, after the folder was
+/// listed still costs no more).
+pub(super) fn read_theme(path: &Path) -> Result<CustomTheme, String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| format!("couldn't read: {e}"))?;
     let mut bytes = Vec::new();
@@ -326,8 +327,7 @@ fn read_theme(path: &Path) -> Result<CustomTheme, String> {
     if bytes.len() as u64 > MAX_FILE {
         return Err("(file): larger than 1 MB; not a theme".into());
     }
-    let text = String::from_utf8(bytes).map_err(|_| "(file): not UTF-8 text".to_string())?;
-    custom::parse(&text)
+    custom::parse_bytes(&bytes)
 }
 
 #[cfg(test)]
@@ -472,9 +472,14 @@ mod tests {
         // Valid JSON padded past the limit: refused by size, not parsed.
         let big = format!("{}{}", custom("big", "Big", "dark"), " ".repeat(MAX_FILE as usize));
         std::fs::write(folder.join("big.json"), big).unwrap();
+        // Exactly the limit is read.
+        let mut edge = custom("edge", "Edge", "dark");
+        edge.push_str(&" ".repeat(MAX_FILE as usize - edge.len()));
+        assert_eq!(edge.len() as u64, MAX_FILE);
+        std::fs::write(folder.join("edge.json"), edge).unwrap();
         std::fs::write(folder.join("system.json"), custom("system", "System", "dark")).unwrap();
         let c = Catalog::load(&folder);
-        assert_eq!(c.custom().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["bom"]);
+        assert_eq!(c.custom().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["bom", "edge"]);
         assert_eq!(
             c.failed,
             [
