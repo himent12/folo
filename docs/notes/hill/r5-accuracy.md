@@ -79,3 +79,32 @@ ratio of 0.5: `λr = 2.0 · 0.5 / 1.27 = 0.79`, rounded to **0.8** (the term is 
 0.51). The fork arms use `--set distill.rank_gain=0.8`. (A literal reading, `λr` = 0.5, would give a ratio of 0.32,
 inside the band at its lower edge; not run.) `rank_gain` stays 0 (off) in `DistillConfig::default`: whether 0.8
 becomes the value `--teacher` starts with depends on the gate.
+
+## Gate step 1: the fork at epoch 32 (killed)
+
+Copies of hill 4's control at epoch 32 (`D:/folo-data/runs-hill4/coco/n-r5-ctl-e32`, never the original) resumed
+with `--teacher folo-s-coco` for epochs 33-36, AMP, seed 0, each arm in one GPU lock hold (script
+`D:/folo-data/runs-hill5/accuracy/bin/arm2.sh`, logs `logs/f-*-e32.{arm,train,val}.log`, `logs/step1*.log`):
+`f-t4` is hill 4's recipe; `f-rank` adds `--set distill.rank_gain=0.8` (γ = 0.5, binary `folo-rank.exe` =
+c08fbc7c; both arms ran it, `f-t4` with the term off). Exported EMA weights, `folo val --coco --save-json`,
+pycocotools, paired bootstrap over the 5000 images (`bench/fusion/bootstrap.py`, 1000 resamples, seed 0, log
+`logs/gate-step1-bootstrap.log`).
+
+| arm | COCO AP | AP50 | AP75 | internal mAP e33 | e34 | e35 | e36 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `f-t4` | 0.3249 | 0.4680 | 0.3503 | 0.31664 | 0.31825 | 0.31989 | 0.32171 |
+| `f-rank` | 0.3250 | | | 0.31678 | 0.31824 | 0.31991 | 0.32186 |
+| f-rank − f-t4 | **+0.0002** [−0.0003, +0.0009], P(≤0) 0.135 | | | +0.00014 | −0.00001 | +0.00002 | +0.00015 |
+
+- `f-t4` reproduces hill 4's logged fork (internal mAP 0.3217 at epoch 36) to 0.00001, so the arms compare with
+  hill 4's numbers too.
+- Bar: kill under +0.0005 at epoch 36 of step 1. **+0.0002: killed.** Step 2 (the fork at epoch 48) and the γ = 1
+  arm were not run. The long run goes without the term; `rank_gain` stays 0 by default.
+- The term trained: its loss `1 − ρ` fell from 0.357 (epoch 33) to 0.334 (epoch 36), i.e. the batch-weighted
+  student-teacher correlation rose from about 0.64 to 0.67, with 68.8 classes used per batch (the "fewer than 20"
+  failure mode does not apply). The class and DFL distillation losses matched the control's to within 1-2%. Raising
+  the within-batch correlation by 0.02 did not move COCO AP; step 0's `rswap16` (+0.0056 for a perfect per-group
+  order) already said that within-batch order is worth little by itself.
+- Cost: not measured cleanly. Epoch throughput under the other lanes' load was 172-245 img/s for `f-rank` and
+  105-244 for `f-t4` (whose epochs 33-34 shared the machine with a bench and a build); at epoch 36, 231 vs
+  244 img/s. Given the kill, no clean A/B was run.
