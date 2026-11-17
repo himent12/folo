@@ -222,9 +222,56 @@ fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QConv) -> Rows
     Rows { buf, rows, n: oh * wq, wq }
 }
 
-/// MACs a task aims at: big enough to amortise a rayon task, small enough for work stealing across P- and
-/// E-cores.
-const TASK_MACS: usize = 1 << 20;
+/// Smallest amount of work (MACs) worth a task of its own: below `threads` of these the pool is not filled.
+pub(super) const TASK_MACS: usize = 1 << 20;
+
+/// Tests set this to split even their small convs into many tasks (0: [`TASK_MACS`]).
+#[cfg(test)]
+pub(super) static TEST_TASK_MACS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn task_macs() -> usize {
+    #[cfg(test)]
+    {
+        let t = TEST_TASK_MACS.load(std::sync::atomic::Ordering::Relaxed);
+        if t > 0 {
+            return t;
+        }
+    }
+    TASK_MACS
+}
+
+/// Input bytes of one image up to which tasks split the output channels first (see [`plan`]).
+const SPLIT_CHANNELS_MAX: usize = 384 << 10;
+
+/// Task blocks `(chunks, channel groups)` per task for `n` images of `chunks` pixel chunks and `og` channel groups,
+/// `unit` MACs each (one chunk of one group), the image's input taking `input` bytes: about three tasks per thread
+/// so work stealing evens out fast and slow cores, but no task under [`TASK_MACS`].
+///
+/// A small input (up to [`SPLIT_CHANNELS_MAX`], which stays in a core's L2) is split by channel groups first:
+/// every task reads the whole input but writes whole output planes, where pixel blocks of a few chunks would share
+/// cache lines with their neighbours on every plane (at 20², 1×1 128 → 256 on 28 threads: 0.107 → 0.072 ms). A
+/// big one is split by pixel chunks first, so each task reads its own part of it once.
+pub(super) fn plan(
+    n: usize,
+    chunks: usize,
+    og: usize,
+    unit: usize,
+    input: usize,
+    threads: usize,
+) -> (usize, usize) {
+    let macs = n * chunks * og * unit;
+    let want = if threads > 1 { (3 * threads).min(macs / task_macs()).max(1) } else { 1 };
+    let per_img = want.div_ceil(n);
+    if input <= SPLIT_CHANNELS_MAX {
+        let og_blk = og.div_ceil(per_img.min(og));
+        let obs = og.div_ceil(og_blk);
+        (chunks.div_ceil(per_img.div_ceil(obs).min(chunks)), og_blk)
+    } else {
+        let ch_blk = chunks.div_ceil(per_img.min(chunks));
+        let cbs = chunks.div_ceil(ch_blk);
+        (ch_blk, og.div_ceil(per_img.div_ceil(cbs).min(og)))
+    }
+}
 
 /// `out = epilogue(conv(cat(xs)))` for `n` images of `h × w` (docs: [`super`]). `xs` are the input parts, in
 /// channel order; `res` is a residual on the output's shape (C4, `[n][o / 4][oh · ow]`) and grid, added after
@@ -265,19 +312,8 @@ pub fn conv(
     };
     let rows: Vec<Rows> = (0..n).map(|i| image_rows(xs, i, h, w, cv)).collect();
     let chunks = rows[0].n.div_ceil(NR);
-    let unit = (MR * NR * cv.ks * 4).max(1);
-    let per_task = (TASK_MACS / unit).max(1);
-    let mut og_blk = og.min(per_task);
-    let mut ch_blk = (per_task / og_blk).max(1).min(chunks);
-    // At least two tasks per thread where the shape allows: halve the pixel blocks, then the channel blocks.
-    let threads = rayon::current_num_threads();
-    let count = |cb: usize, obk: usize| n * chunks.div_ceil(cb) * og.div_ceil(obk);
-    while ch_blk > 1 && count(ch_blk, og_blk) < 2 * threads {
-        ch_blk = ch_blk.div_ceil(2);
-    }
-    while og_blk > 1 && count(ch_blk, og_blk) < 2 * threads {
-        og_blk = og_blk.div_ceil(2);
-    }
+    let (ch_blk, og_blk) =
+        plan(n, chunks, og, MR * NR * cv.ks * 4, cv.c * rows[0].n, rayon::current_num_threads());
     let (cbs, obs) = (chunks.div_ceil(ch_blk), og.div_ceil(og_blk));
     let kern = kernel();
     let res = res.map(|(r, g)| (r, (g.scale, g.zero as i32)));
@@ -292,15 +328,25 @@ pub fn conv(
         for chunk in cb * ch_blk..((cb + 1) * ch_blk).min(chunks) {
             let col = chunk * NR;
             let cols = NR.min(r.n - col);
-            // Output pixel of each column (None: dropped).
+            // Output pixel of each column (`usize::MAX`: dropped). Columns are `oy · wq + ox`; when `wq == ow` and
+            // the chunk is whole, they are the pixels `col..col + NR` themselves (`r.n = oh · wq`), so only
+            // `pix[0]` is read.
+            let contiguous = r.wq == ow && cols == NR;
             let mut pix = [usize::MAX; NR];
-            for (j, px) in pix.iter_mut().enumerate().take(cols) {
-                let (oy, ox) = ((col + j) / r.wq, (col + j) % r.wq);
-                if oy < oh && ox < ow {
-                    *px = oy * ow + ox;
+            if contiguous {
+                pix[0] = col;
+            } else {
+                let (mut oy, mut ox) = (col / r.wq, col % r.wq);
+                for px in pix.iter_mut().take(cols) {
+                    if oy < oh && ox < ow {
+                        *px = oy * ow + ox;
+                    }
+                    ox += 1;
+                    if ox == r.wq {
+                        (oy, ox) = (oy + 1, 0);
+                    }
                 }
             }
-            let contiguous = r.wq == ow && cols == NR;
             for g in ob * og_blk..((ob + 1) * og_blk).min(og) {
                 // SAFETY: the panel holds `ks · MR` words; every row has `col + NR` readable words (planes
                 // followed by SLACK, or the padded copy's slack).
@@ -341,6 +387,13 @@ pub fn conv(
                                 // SAFETY: (img, g, px) is this task's own output word, inside `data`.
                                 unsafe { *qptr.at(base + px) = qw[j] };
                             }
+                        }
+                    }
+                    Out::F32 if contiguous => {
+                        for (rr, row) in fv.iter().enumerate() {
+                            let at = (img * cv.o + 4 * g + rr) * ohw + pix[0];
+                            // SAFETY: the NR values at `at` are this task's own outputs, inside `data`.
+                            unsafe { std::ptr::copy_nonoverlapping(row.as_ptr(), fptr.at(at), NR) };
                         }
                     }
                     Out::F32 => {

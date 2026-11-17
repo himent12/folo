@@ -21,7 +21,7 @@ mod tests;
 use rayon::prelude::*;
 
 pub use conv::{QConv, QOut, conv, quantize_weights};
-pub use kernel::{silu_scalar, uses_vnni};
+pub use kernel::{silu_q8, uses_vnni};
 
 /// Words of readable slack after an activation's last plane.
 pub const SLACK: usize = 64;

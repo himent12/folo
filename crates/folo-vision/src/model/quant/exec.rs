@@ -75,15 +75,15 @@ impl QAct {
 
     fn from_f32(x: &Tensor, grid: Grid) -> Result<QAct> {
         let (n, c, h, w) = x.dims4()?;
-        let v = x.contiguous()?.to_vec::<f32>()?;
         let mut out = q8::alloc(n, c, h * w);
-        q8::quantize(&v, n, c, h * w, grid, &mut out);
+        x.with_f32_slice(|v| q8::quantize(v, n, c, h * w, grid, &mut out))?;
         Ok(QAct::new(out, [n, c, h, w], grid))
     }
 
     fn to_f32(&self) -> Result<Tensor> {
         let [n, c, h, w] = self.dims;
-        let mut out = vec![0f32; n * c * h * w];
+        // From the CPU buffer cache (every element is written); it goes back when the tensor drops.
+        let mut out = folo_core::cpu::take_buffer(n * c * h * w);
         q8::dequantize(self.view(), n, h * w, self.grid, &mut out);
         Ok(Tensor::from_vec(out, [n, c, h, w])?)
     }
@@ -184,7 +184,8 @@ impl Exec for Int8<'_> {
         }
         let [n, _, h, w] = x.dims;
         let o = conv.conv.config().out_channels;
-        let mut out = vec![0f32; n * o * h * w];
+        // Every element of the output is written (a stride-1 conv's output is no larger than its input).
+        let mut out = folo_core::cpu::take_buffer(n * o * h * w);
         let dims = self.run(name, conv, &[x], None, QOut::F32 { data: &mut out })?;
         out.truncate(dims.iter().product());
         Ok(Tensor::from_vec(out, dims.to_vec())?)

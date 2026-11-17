@@ -1,9 +1,11 @@
 //! The int8 kernels against a scalar integer reference: the same codes bit for bit, on every path (VNNI or
 //! portable kernel, vectorised or portable epilogue), at several thread counts.
 
+use super::conv::{TASK_MACS, TEST_TASK_MACS, plan};
 use super::kernel::{MR, NR, Tile, kernel_scalar};
 use super::*;
 use crate::rng::Rng;
+use std::sync::atomic::Ordering;
 
 fn pool(threads: usize) -> rayon::ThreadPool {
     rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap()
@@ -88,13 +90,13 @@ fn reference(
                         }
                     }
                     let p = oy * ow + ox;
-                    let mut yv = (acc - corr) as i32 as f32 * sw[o] + bias[o];
+                    let mut yv = ((acc - corr) as i32 as f32).mul_add(sw[o], bias[o]);
                     if c.silu {
-                        yv = silu_scalar(yv);
+                        yv = silu_q8(yv);
                     }
                     if let Some((r, rg)) = res {
                         let b = byte_of(&r[img * c.o / 4 * ohw..], o / 4, ohw, p, o % 4);
-                        yv += rg.scale * (b as i32 - rg.zero as i32) as f32;
+                        yv = rg.scale.mul_add((b as i32 - rg.zero as i32) as f32, yv);
                     }
                     if c.f32_out {
                         fout[(img * c.o + o) * ohw + p] = yv;
@@ -197,8 +199,41 @@ fn conv_matches_the_integer_reference() {
         Case { parts: vec![64], o: 4, h: 5, w: 6, ..base.clone() },
         Case { s: 2, f32_out: true, h: 9, w: 9, ..base.clone() },
     ];
-    for (i, c) in cases.iter().enumerate() {
-        run_case(c, 100 + i as u64);
+    // With the real task size (one task for shapes this small) and with one-MAC tasks (as many tasks as the
+    // pool allows: every split of pixel chunks and channel groups).
+    for task_macs in [0, 1] {
+        TEST_TASK_MACS.store(task_macs, Ordering::Relaxed);
+        for (i, c) in cases.iter().enumerate() {
+            run_case(c, 100 + i as u64);
+        }
+    }
+    TEST_TASK_MACS.store(0, Ordering::Relaxed);
+}
+
+#[test]
+fn plan_covers_the_conv_in_few_big_tasks() {
+    // (images, chunks, groups, MACs a chunk of a group, threads)
+    let cases = [
+        (1, 67, 32, 4608, 28),
+        (1, 17, 64, 3072, 28),
+        (1, 1067, 16, 1152, 28),
+        (2, 5, 3, 100, 8),
+        (1, 9, 40, 9216, 1),
+    ];
+    // Both orders: a small input (channel groups first) and a big one (pixel chunks first).
+    for ((n, chunks, og, unit, threads), input) in
+        cases.into_iter().flat_map(|c| [(c, 1 << 10), (c, 1 << 30)])
+    {
+        let (cb, ob) = plan(n, chunks, og, unit, input, threads);
+        assert!((1..=chunks).contains(&cb) && (1..=og).contains(&ob));
+        let tasks = n * chunks.div_ceil(cb) * og.div_ceil(ob);
+        let macs = n * chunks * og * unit;
+        assert!(tasks <= (3 * threads).max(1), "{tasks} tasks on {threads} threads");
+        // At least one task an image.
+        assert!(tasks <= n || macs / tasks >= TASK_MACS / 2, "tasks of {} MACs", macs / tasks);
+        if threads == 1 {
+            assert_eq!(tasks, 1);
+        }
     }
 }
 
@@ -236,15 +271,46 @@ fn kernels_agree() {
     }
 }
 
+#[test]
+fn silu_q8_is_silu() {
+    // Within 2e-6 of SiLU in f64 (relative, or absolute near zero), and finite at the extremes.
+    let mut rng = Rng::seed(9);
+    for _ in 0..20_000 {
+        let x = rng.uniform(-90.0, 90.0);
+        let want = x as f64 / (1.0 + (-(x as f64)).exp());
+        let got = silu_q8(x) as f64;
+        assert!((got - want).abs() <= 2e-6 * want.abs().max(1.0), "silu_q8({x}) = {got}, want {want}");
+    }
+    assert_eq!(silu_q8(f32::MAX), f32::MAX);
+    assert!(silu_q8(f32::MIN).abs() < 1e-30 && silu_q8(-200.0).abs() < 1e-30);
+    assert_eq!(silu_q8(0.0), 0.0);
+    assert!(silu_q8(f32::NAN).is_nan());
+}
+
 #[cfg(target_arch = "x86_64")]
 #[test]
-fn silu_scalar_is_silu8() {
+fn silu_q8_scalar_and_vector_agree() {
     if !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")) {
         return;
     }
-    let mut rng = Rng::seed(9);
-    let mut xs: Vec<f32> = (0..4096).map(|_| rng.uniform(-30.0, 30.0)).collect();
-    xs.extend([0.0, -0.0, 1e-30, -1e-30, 88.0, -88.0, 104.0, -104.0, -200.0, 200.0, f32::MAX, f32::MIN]);
+    let mut rng = Rng::seed(10);
+    let mut xs: Vec<f32> = (0..4096).map(|_| rng.uniform(-100.0, 100.0)).collect();
+    xs.extend([
+        0.0,
+        -0.0,
+        1e-30,
+        -1e-30,
+        86.9,
+        -86.9,
+        87.0,
+        -87.0,
+        88.0,
+        -88.0,
+        -200.0,
+        200.0,
+        f32::MAX,
+        f32::MIN,
+    ]);
     for ch in xs.chunks(8) {
         let mut v = [0f32; 8];
         v[..ch.len()].copy_from_slice(ch);
@@ -252,11 +318,11 @@ fn silu_scalar_is_silu8() {
         let got: [f32; 8] = unsafe {
             use std::arch::x86_64::*;
             let mut o = [0f32; 8];
-            _mm256_storeu_ps(o.as_mut_ptr(), crate::cpu::elementwise::silu8(_mm256_loadu_ps(v.as_ptr())));
+            _mm256_storeu_ps(o.as_mut_ptr(), super::kernel::silu_q8_avx2(_mm256_loadu_ps(v.as_ptr())));
             o
         };
         for (x, g) in v.iter().zip(got) {
-            assert_eq!(silu_scalar(*x).to_bits(), g.to_bits(), "silu({x})");
+            assert_eq!(silu_q8(*x).to_bits(), g.to_bits(), "silu_q8({x})");
         }
     }
 }

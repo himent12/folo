@@ -160,16 +160,19 @@ these kernels:
   `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has `avxvnni` (and AVX2, FMA), detected at
   run time, else portable scalar code with the same sums (`FOLO_Q8_SCALAR=1` forces it). 1×1 stride-1 convs read
   the input planes in place; other convs read a padded, phase-split copy of each image's rows (padding with the
-  zero point) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias`,
-  SiLU, residual, requantise) is the same `f32` operations in the scalar and AVX2 code (SiLU is `silu8`, ported to
-  scalar bit for bit), so results are bit-identical across kernels and thread counts. Work is split into
-  (image, pixel block, channel block) tasks of about 2²⁰ multiply-adds, more when there would be fewer than two per
-  thread.
+  zero point) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
+  FMA, SiLU, the residual as one FMA, requantise) is the same `f32` operations in the scalar and AVX2 code, so
+  results are bit-identical across kernels and thread counts. Its SiLU (`q8::silu_q8`) is `x / (1 + e^{−x})` with
+  `silu8`'s `exp` polynomial, one power-of-two scale and no blend (within 2e-6 of SiLU); the AVX2 requantise packs
+  four channels' codes with saturating `packs` / `packus` and one byte shuffle into C4 words. Work is split into
+  (image, pixel block, channel block) tasks of about 2²⁰ multiply-adds, smaller (pixel blocks first, then channel
+  blocks) when there would be fewer than two per thread.
 - **Others.** `quantize` / `dequantize` between `f32` NCHW and C4 codes, separable max pooling on codes (`max` of
   bytes; exact since the grid is monotonic), nearest 2× upsampling.
 
 Tests (`cpu/q8/tests.rs`) check every conv shape class against an i64 reference at 1, 3 and 8 threads, VNNI
-against the scalar kernel, the scalar SiLU against `silu8`, and the pools. `cargo bench -p folo-core --bench
+against the scalar kernel, the SiLU against SiLU in `f64` and its scalar form against its AVX2 form bit for bit, and
+the pools. `cargo bench -p folo-core --bench
 q8_infer` times each folo-n conv in int8 against the fused `f32` `conv2d_act`.
 
 ### The buffer cache
