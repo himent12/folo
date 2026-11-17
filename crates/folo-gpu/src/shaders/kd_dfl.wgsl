@@ -1,13 +1,14 @@
 // Distillation, DFL term (docs/MODEL.md §8.9), one thread per (image, anchor): q = max_c sigmoid(y_c) of the
 // teacher's class logits, then per side the teacher's s~ = softmax(z_T / T) and the student's softmax(z / T) over
-// the R bins. MODE 0 (forward): Σ_side Σ_r s~_r · (ln s~_r − log_softmax(z / T)_r), times q, summed per workgroup
-// of 256 anchors in a fixed tree into PART (one partial per workgroup). Both log-softmaxes stay in the max-shifted
-// domain (the teacher's (z − max z) / T − ln Σ, the maximum subtracted before dividing by T; the student's
+// the R bins. MODE 0 (forward): Σ_side Σ_r (q · s~_r) · (ln s~_r − log_softmax(z / T)_r) (each element weighted
+// before it is summed, as the tensor path), summed per workgroup of 256 anchors in a fixed tree into PART (one
+// partial per workgroup). Both log-softmaxes stay in the max-shifted domain (the teacher's (z − max z) / T − ln Σ,
+// the maximum subtracted before dividing by T, or z / T − max (z / T) where z − max z overflows; the student's
 // z / T − max (z / T) − ln Σ, as the tensor path), and logarithms are taken of the softmax sums (>= 1) only, not of
 // rounded probabilities. A teacher bin of −inf has s~ = 0 and adds nothing (the tensor path's limit). Raises
 // MISC[0] bit 0 for the inputs that make the tensor path's term non-finite: a student box value whose z or z / T
-// is not finite, a teacher box value of NaN or +inf or whose z_T / T is +inf, or a side whose teacher bins all
-// have z_T / T = −inf. MODE 1 (backward): DZ = g · S · q · (softmax(z / T) − s~), with g = GRAD[0] and
+// is not finite, a student side whose z / T − max (z / T) overflows, a teacher box value of NaN or +inf or whose
+// z_T / T is +inf, or a side whose teacher bins all have z_T / T = −inf. MODE 1 (backward): DZ = g · S · q · (softmax(z / T) − s~), with g = GRAD[0] and
 // S = B · dfl_gain · T / (4 N).
 // Params: 0 = A, 1 = NC, 2 = B·A, 3 = T, 4 = S (MODE 1).
 @group(0) @binding(1) var<storage, read> Z: array<f32>;
@@ -39,12 +40,15 @@ fn anchor(i: u32) -> f32 {
     for (var side = 0u; side < 4u; side++) {
         let base = (b * 4u + side) * R * na + a;
         // The teacher: u = (z_T − max z_T) / T, the subtraction first, so the division rounds only the small
-        // differences (not logits near 2^24). The student: v = z / T − max (z / T), the tensor path's own order, so
-        // it overflows exactly where the tensor path does. Which bins count is decided from the raw values and
-        // z / T: a teacher bin of −inf, or whose z_T / T is −inf, has s~ = 0 and adds nothing; a student bin whose
-        // z or z / T is not finite, a teacher bin of NaN or +inf, or one whose z_T / T is +inf, makes the term
-        // non-finite, as does a side whose teacher bins all have s~ = 0.
+        // differences (not logits near 2^24); where z_T − max z_T overflows (a side wider than f32's range), the
+        // tensor path's z_T / T − max (z_T / T) instead. The student: v = z / T − max (z / T), the tensor path's own
+        // order, so it overflows exactly where the tensor path does. Which bins count is decided from the raw
+        // values and z / T: a teacher bin of −inf, or whose z_T / T is −inf, has s~ = 0 and adds nothing; a student
+        // bin whose z, z / T or v is not finite (the tensor path's element is then inf or 0 · inf), a teacher bin of
+        // NaN or +inf, or one whose z_T / T is +inf, makes the term non-finite, as does a side whose teacher bins
+        // all have s~ = 0.
         var mt = -3.40282347e38;
+        var mq = -3.40282347e38;
         var ms = -3.40282347e38;
         var live = 0u;
         for (var r = 0u; r < R; r++) {
@@ -59,6 +63,7 @@ fn anchor(i: u32) -> f32 {
                 if (is_finite_f(qt)) {
                     live = live | (1u << r);
                     mt = max(mt, zt);
+                    mq = max(mq, qt);
                 }
             }
             u[r] = zt;
@@ -69,10 +74,12 @@ fn anchor(i: u32) -> f32 {
         var st = 0.0;
         var ss = 0.0;
         for (var r = 0u; r < R; r++) {
-            let d = (u[r] - mt) / temp;
+            let raw = u[r] - mt;
+            let d = select(u[r] / temp - mq, raw / temp, is_finite_f(raw));
             let fin = (live & (1u << r)) != 0u && is_finite_f(d);
             u[r] = select(0.0, d, fin);
             v[r] = v[r] - ms;
+            bad = bad || !is_finite_f(v[r]);
             et[r] = select(0.0, fexp(u[r]), fin);
             st = st + et[r];
             ss = ss + fexp(v[r]);
@@ -83,7 +90,7 @@ fn anchor(i: u32) -> f32 {
             var side_sum = 0.0;
             for (var r = 0u; r < R; r++) {
                 if (et[r] > 0.0) {
-                    side_sum = side_sum + et[r] / st * ((u[r] - lt) - (v[r] - ls));
+                    side_sum = side_sum + ((u[r] - lt) - (v[r] - ls)) * (et[r] / st * q);
                 }
             }
             acc = acc + side_sum;
@@ -95,7 +102,7 @@ fn anchor(i: u32) -> f32 {
         }
     }
     if (MODE == 0u && bad) { atomicOr(&MISC[0], 1u); }
-    return q * acc;
+    return acc;
 }
 
 @compute @workgroup_size(256)

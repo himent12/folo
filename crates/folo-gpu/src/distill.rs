@@ -148,6 +148,12 @@ impl Saved {
     }
 }
 
+/// The backward's scales `B · λc / N` and `B · λd · T / (4 N)`, rounded once from f64.
+fn backward_scales(s: &KdSettings, b: usize) -> [f32; 2] {
+    let (n, t, b) = (f64::from(s.normaliser), f64::from(s.temperature), b as f64);
+    [(b * f64::from(s.cls_gain) / n) as f32, (b * f64::from(s.dfl_gain) * t / (4.0 * n)) as f32]
+}
+
 /// The class and DFL distillation terms of docs/MODEL.md §8.9 for the student's raw one-to-many outputs `box_raw:
 /// [B, 4 · reg_max, A]` and `cls_raw: [B, nc, A]` (f32) and the teacher's raw outputs of the same shapes (both f32
 /// or both f16), all on one folo-gpu device. See [`DeviceKd`]; read `stats` for the values.
@@ -185,7 +191,8 @@ pub fn distill_loss(
         desc: d,
         inputs: [sb, sc, tb, tc],
         temp: t,
-        scales: [nb * s.cls_gain / n, nb * s.dfl_gain * t / (4.0 * n)],
+        // In f64, so `B · λ` cannot overflow before the division by `N` (the tensor path's backward divides first).
+        scales: backward_scales(s, d.b),
     });
     // The teacher's outputs are inputs too, without gradient: the backward reads them, so autograd must refuse a
     // backward after they were overwritten in place (the saved dense handles may share their storage).

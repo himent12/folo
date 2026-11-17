@@ -5,7 +5,8 @@
 //! Buffers (all dense from byte 0, `B` images, `A` anchors, `NC` classes, `R = reg_max`):
 //! - the student's `box_raw [B, 4R, A]` and `cls_raw [B, NC, A]`, f32;
 //! - the teacher's `box_raw` and `cls_raw` of the same shapes, f32 or f16 ([`KdDesc::teacher_f16`]: two values per
-//!   u32 word, read with `unpack2x16float`, so no `shader-f16` is needed);
+//!   u32 word, decoded bit by bit (`f16_bits_to_f32`), so no `shader-f16` is needed and infinities survive on every
+//!   backend);
 //! - `part_cls` and `part_dfl`: the partial sums of each term ([`KdDesc::cls_partials`], [`KdDesc::dfl_partials`]);
 //!   `misc [4]` u32 (bit 0 of word 0: an input that makes a term non-finite); `stats [4]` and `total [1]` f32 (`shaders/kd_combine.wgsl`).
 

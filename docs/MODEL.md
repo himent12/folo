@@ -995,12 +995,13 @@ heads and, for `q`, the teacher's class head), form the elements above and reduc
 combines the partial sums, and the backward is two kernels writing the closed-form gradients; no teacher
 probability tensor is formed.
 `H(p~)` and `ln s~` come from the teacher's logits (`p~ · softplus(−y) + (1 − p~) · softplus(y)`, log-sum-exp
-with the bins' maximum subtracted before dividing by `T`), not from logarithms of rounded probabilities, so a GPU
+with the bins' maximum subtracted before dividing by `T`, or after it where that subtraction overflows), not from logarithms of rounded probabilities, so a GPU
 run agrees with the tensor path to float rounding, not bit for bit (`tests/gpu_distill.rs` checks values and
 gradients to 1e-5 relative; the measured differences are under 1e-6). For teacher box logits near 2^24 with
 `T` ≠ 1 the tensor path's own rounding of `z / T` dominates and the fused value is the closer one (the test compares
 with the same logits without the offset). The term is non-finite (NaN, so the trainer skips the batch) for the same
-inputs as the tensor path's: a student logit, or a student box logit over `T`, that is not finite, a NaN teacher
+inputs as the tensor path's: a student logit, or a student box logit over `T`, that is not finite, a student side
+whose box logits over `T` span more than f32's range, a NaN teacher
 logit, a teacher box logit over `T` of +inf, or a side whose teacher box logits over `T` are all −inf; a teacher
 class logit of ±inf or a box logit over `T` of −inf gives the limit (`p~` 0 or 1, `s~` 0). The student's
 log-softmax subtracts its maximum after dividing by `T`, as the tensor path, so it overflows where the tensor path

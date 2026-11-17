@@ -133,8 +133,14 @@ of ±inf or a box bin of −inf gives the finite limit, as on the tensor path), 
 (4 cases: `z / T` overflowing at `T` 0.5, a side of −3.2e38, below the first version's −3e38 starting maximum).
 Round 3 (Sol): the student's shift now divides by `T` first, as the tensor path, so student sides spanning ±2e38
 overflow only where the tensor path does (a fifth edge case, term about 1e21); f16 teacher values are decoded bit
-by bit, since DX12's `unpack2x16float` did not carry infinities (the f16 cases failed there; all 11 tests pass on
-Vulkan and DX12). A term whose value itself comes near f32's largest value can still overflow in one path's sums
+by bit, since DX12's `unpack2x16float` did not carry infinities (the f16 cases failed there). The final review
+(Sol 6.2 and Opus, on the head rebuilt on main) found four more gaps at the edge of f32, each fixed with a test
+case that fails when its fix is reverted (`logs/mutate-r5.log`): a student side whose `z / T − max (z / T)`
+overflows was not flagged (the tensor path's element is then `0 · inf` or inf; fused gave a finite 5.9e36); `q`
+weighed the sum of the four sides instead of each element (that sum overflowed while the term was about 1e17);
+a teacher side wider than f32's range overflowed `z − max z` although `z / T` spans only 5 at `T` 8e37 (such
+bins now take the tensor path's `z / T − max (z / T)`; 2-6% off before); and the backward's `B · λ / N`
+overflowed in f32 at `λ` 1e38 (now rounded once from f64). All 11 tests pass on Vulkan and DX12. A term whose value itself comes near f32's largest value can still overflow in one path's sums
 and not the other's. A teacher output modified in place before the backward is an error; an f16
 upstream gradient works; more than 65535 image·class rows fold the grid; bad shapes, CPU tensors, mixed teacher
 dtypes and sizes that overflow `usize` are errors or rejected by `fused_supported`.
@@ -144,20 +150,20 @@ origin/main cf65f7a5 release, fused = this branch's code release (`bin/folo-fuse
 
 | | tensor path | fused | |
 |---|---:|---:|---:|
-| `kd_step` bench, one COCO batch (B 16, A 8400, f16 teacher): forward + readback + backward, median of 5 alternated rounds of 30 calls; first version / round-1 fixes / round-2 fixes / round-3 fixes (final) | 5.02 (4.99-5.24) / 5.13 (5.02-5.15) / 4.82 (4.81-4.88) / 5.67 ms (5.49-6.03) | 0.85 (0.80-0.88) / 0.98 (0.97-1.02) / 0.90 (0.88-0.93) / 1.12 ms (1.11-1.14) | 5.9x / 5.2x / 5.3x / 5.1x |
-| GPU time of one call (`FOLO_GPU_PROFILE=1`), same four | 4.49 / 4.49 / 4.45 / 4.87 ms in 53 commands | 0.65 / 0.80 / 0.76 / 0.79 ms in 7 commands | |
+| `kd_step` bench, one COCO batch (B 16, A 8400, f16 teacher): forward + readback + backward, median of 5 alternated rounds of 30 calls; first version / round-1 fixes / round-2 fixes / round-3 fixes / final-review fixes (final) | 5.02 (4.99-5.24) / 5.13 (5.02-5.15) / 4.82 (4.81-4.88) / 5.67 (5.49-6.03) / 6.84 ms (6.49-12.24) | 0.85 (0.80-0.88) / 0.98 (0.97-1.02) / 0.90 (0.88-0.93) / 1.12 (1.11-1.14) / 1.23 ms (1.12-1.63) | 5.9x / 5.2x / 5.3x / 5.1x / 5.6x |
+| GPU time of one call (`FOLO_GPU_PROFILE=1`), same five | 4.49 / 4.49 / 4.45 / 4.87 / 4.61 ms in 53 commands | 0.65 / 0.80 / 0.76 / 0.79 / 0.83 ms in 7 commands | |
 | full-COCO folo-n AMP training with the folo-s teacher, median step time after step 300, 180 s per arm, 3 alternated rounds | 43.5 / 74.4 / 74.3 ms | 41.6 / 68.9 / 65.5 ms | −4% / −7% / −12% |
 
-The kernel saves about 4 ms of GPU time per step (3.84 ms in the first version's profile, 4.07 ms in the
-final one, `logs/ab-r2/`; earlier ones in `logs/ab-r2-be97acd3/` and `logs/ab-r2-9d508d23/`; the holds' loads differ,
-the tensor path read 4.45 to 4.87 ms). End to end the machine was loaded (CPU at
+The kernel saves about 4 ms of GPU time per step (3.84 ms in the first version's profile, 3.79 ms in the
+final one, `logs/ab-r2/`; earlier ones in `logs/ab-r2-a3aa285c/`, `logs/ab-r2-be97acd3/` and `logs/ab-r2-9d508d23/`;
+the holds' loads differ, the tensor path read 4.45 to 4.87 ms; the final hold ran with the CPU at 100%). End to end the machine was loaded (CPU at
 95-100% in every arm, the other lanes' jobs; round 1 ran at 305-335 img/s, rounds 2-3 at 154-213), so the training
 rows are not a clean throughput number: the **median** step time favours the fused path in every round (by more than
 the ±3% tie band in rounds 2 and 3), but the **mean** step time (throughput) of round 1 favours base, 47.8 against
 52.5 ms (335 against 305 img/s); rounds 2 and 3 favour fused by mean as well (154 / 181 against 175 / 213 img/s).
 `bin/ab_steps.py` printed `logs/ab/ab_steps.txt`; the arms' run folders were deleted afterwards, so only that summary
 and the arms' console logs (`logs/ab/*.out`, `*.smi`, `*.cpu`) remain. The training A/B ran the first version; the
-review fixes (the maximum subtracted before dividing by `T`, the folded class grid, the finer non-finite rules) cost
-0.15 ms of GPU time per call (`kd_dfl` 0.38 -> 0.49 ms; the unchanged `kd_cls_bwd` also read 11% slower in that
-hold, so part of it is the GPU's state; `logs/ab-r2/`). A first A/B that
+review fixes (the maximum subtracted before dividing by `T`, the folded class grid, the finer non-finite rules,
+the per-element `q`) cost about 0.18 ms of GPU time per call (0.65 -> 0.83 ms; `kd_dfl` 0.38 -> 0.53 ms; the
+unchanged `kd_cls_bwd` also read 11% slower in round 2's hold, so part of it is the GPU's state). A first A/B that
 ran alongside this lane's own workspace tests was discarded (`logs/ab-noisy-tests/`).

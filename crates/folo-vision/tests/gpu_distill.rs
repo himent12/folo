@@ -301,30 +301,56 @@ fn fused_term_is_non_finite_exactly_when_the_tensor_path_is() {
     }
 }
 
-/// Box logits at the edge of f32 (one anchor's side 0, `T` 0.5 and 4): finite or not as the tensor path, and equal
-/// to it where finite. A teacher side at 2e38 overflows `z / T` for `T` = 0.5 (NaN); a teacher side of −3.2e38 is
-/// a finite side whose maximum is below −3e38 (finite); a teacher bin of −2e38 at `T` 0.5 has `z / T` = −inf and
-/// counts as `s~` = 0 (finite); student bins of 2e38 and −2e38 overflow `z − max z` but not `z / T` for `T` = 4
-/// (finite, the term about 1e21 with a teacher bin of −160 under the −2e38). Not covered: logits that make the
-/// term itself approach f32::MAX (the same student side with a teacher that weighs the −2e38 bin), where either
-/// path can overflow in its own order of operations.
+/// Box logits at the edge of f32 (one anchor, side 0 unless said): finite or not as the tensor path, and equal to it
+/// where finite.
+/// - A teacher side at 2e38 overflows `z / T` for `T` = 0.5 (NaN).
+/// - A teacher side of −3.2e38 is a finite side whose maximum is below −3e38 (finite).
+/// - A teacher bin of −2e38 at `T` 0.5 has `z / T` = −inf and counts as `s~` = 0 (finite).
+/// - Student bins of 2e38 and −2e38 overflow `z − max z` but not `z / T` for `T` = 4 (finite, the term about 1e21
+///   with a teacher bin of −160 under the −2e38). At `T` = 1 they overflow `z / T − max (z / T)`: the tensor path's
+///   element is then `0 · inf` (a teacher bin of −inf) or inf (a finite one), so the term is non-finite.
+/// - All four sides with student bins of 0 and −2e38 and teacher bins of −200 and 0, and teacher class logits of −50
+///   (`q` about 2e-22), at `T` = 1: the elements are about 1e37 before `q` and finite after it (the sum of the four
+///   unweighted sides overflows, so `q` must weigh each element before the sum).
+/// - Teacher bins of 2e38 and −2e38 at `T` = 8e37 (`dfl_gain` 1.2e-38): `z − max z` overflows while `z / T` spans
+///   only 5. Compared at 1e-3: the other anchors' bins are all about 0 there, and the two paths' different
+///   logarithms of 1/16 add up (the first version was 6% off).
+///
+/// Not covered: logits that make the term itself approach f32::MAX (the same student side with a teacher that
+/// weighs the −2e38 bin), where either path can overflow in its own order of operations.
 #[test]
 fn fused_term_follows_the_tensor_path_at_the_edge_of_f32() {
     let (dev, _) = gpu!();
     let (b, nc, a) = (1, 3, 64);
     let (sb, sc) = raw(61, b, nc, a);
     let (tb, tc) = raw(62, b, nc, a);
-    let side0 = |k: usize, f: &dyn Fn(usize) -> f32| (0..R).map(|r| (r * a + k, f(r))).collect::<Vec<_>>();
-    // (T, student box (index, value)s, teacher box (index, value)s, finite)
     type Edits = Vec<(usize, f32)>;
-    let cases: Vec<(f32, Edits, Edits, bool)> = vec![
-        (0.5, vec![], side0(5, &|_| 2e38), false),
-        (4.0, vec![], side0(5, &|_| -3.2e38), true),
-        (4.0, vec![], side0(5, &|r| if r == 0 { 0.0 } else { -3.2e38 }), true),
-        (0.5, vec![], side0(5, &|r| if r == 0 { 0.0 } else { -2e38 }), true),
-        (4.0, vec![(5, 2e38), (a + 5, -2e38)], vec![(5, 0.0), (a + 5, -160.0)], true),
+    let side0 = |k: usize, f: &dyn Fn(usize) -> f32| -> Edits { (0..R).map(|r| (r * a + k, f(r))).collect() };
+    let sides =
+        |k: usize, f: &dyn Fn(usize) -> f32| -> Edits { (0..4 * R).map(|j| (j * a + k, f(j % R))).collect() };
+    let inf = f32::INFINITY;
+    // (T, dfl_gain, student box, teacher box, teacher class (index, value)s, finite, rel)
+    type Case = (f32, f32, Edits, Edits, Edits, bool, f32);
+    let cases: Vec<Case> = vec![
+        (0.5, 1.5, vec![], side0(5, &|_| 2e38), vec![], false, 1e-5),
+        (4.0, 1.5, vec![], side0(5, &|_| -3.2e38), vec![], true, 1e-5),
+        (4.0, 1.5, vec![], side0(5, &|r| if r == 0 { 0.0 } else { -3.2e38 }), vec![], true, 1e-5),
+        (0.5, 1.5, vec![], side0(5, &|r| if r == 0 { 0.0 } else { -2e38 }), vec![], true, 1e-5),
+        (4.0, 1.5, vec![(5, 2e38), (a + 5, -2e38)], vec![(5, 0.0), (a + 5, -160.0)], vec![], true, 1e-5),
+        (1.0, 1.5, vec![(5, 2e38), (a + 5, -2e38)], vec![(5, 0.0), (a + 5, -inf)], vec![], false, 1e-5),
+        (1.0, 1.5, vec![(5, 2e38), (a + 5, -2e38)], vec![(5, 0.0), (a + 5, 0.0)], vec![], false, 1e-5),
+        (
+            1.0,
+            1.5,
+            sides(5, &|r| if r == 0 { 0.0 } else { -2e38 }),
+            sides(5, &|r| if r == 0 { -200.0 } else { 0.0 }),
+            (0..nc).map(|c| (c * a + 5, -50.0)).collect(),
+            true,
+            1e-5,
+        ),
+        (8e37, 1.2e-38, vec![], vec![(5, 2e38), (a + 5, -2e38)], vec![], true, 1e-3),
     ];
-    for (temp, s_edits, t_edits, finite) in cases {
+    for (temp, dfl_gain, s_edits, t_edits, c_edits, finite, rel) in cases {
         let edit = |t: &Tensor, e: &Edits| {
             let mut v = t.to_vec::<f32>().unwrap();
             for &(i, x) in e {
@@ -332,18 +358,36 @@ fn fused_term_follows_the_tensor_path_at_the_edge_of_f32() {
             }
             Tensor::from_vec(v, t.dims()).unwrap()
         };
-        let (sb, tb) = (edit(&sb, &s_edits), edit(&tb, &t_edits));
-        let cfg = DistillConfig { temperature: temp, ..DistillConfig::new("t") };
-        let what = format!("T {temp}, student {:?}, teacher {:?}", s_edits.first(), t_edits.first());
+        let (sb, tb, tc) = (edit(&sb, &s_edits), edit(&tb, &t_edits), edit(&tc, &c_edits));
+        let cfg = DistillConfig { temperature: temp, dfl_gain, ..DistillConfig::new("t") };
+        let what = format!("T {temp}, student {:?}, teacher {:?}", s_edits.get(1), t_edits.get(1));
         let want = term(dev, false, [&sb, &sc], [&tb, &tc], &cfg);
         let got = term(dev, true, [&sb, &sc], [&tb, &tc], &cfg);
         let is_finite = |v: &[f32; 3]| v[0].is_finite() && v[1].is_finite();
         assert_eq!(is_finite(&want.0), finite, "{what}: tensor path {:?}", want.0);
         assert_eq!(is_finite(&got.0), finite, "{what}: fused {:?}", got.0);
         if finite {
-            same_term(&got, &want, 1e-5, &what);
+            same_term(&got, &want, rel, &what);
         }
     }
+}
+
+/// The backward's scales: `B · cls_gain` overflows f32 for 4 images at `cls_gain` 1e38 while `B · cls_gain / N`
+/// and the term do not (student class logits 0, the teacher's 1); the gradients stay finite and equal the tensor
+/// path's (which divides first).
+#[test]
+fn fused_backward_scales_do_not_overflow_before_dividing() {
+    let (dev, _) = gpu!();
+    let (b, nc, a) = (4, 1, 8);
+    let (sb, _) = raw(71, b, nc, a);
+    let (tb, _) = raw(72, b, nc, a);
+    let sc = Tensor::from_vec(vec![0.0f32; b * nc * a], [b, nc, a]).unwrap();
+    let tc = Tensor::from_vec(vec![1.0f32; b * nc * a], [b, nc, a]).unwrap();
+    let cfg = DistillConfig { cls_gain: 1e38, ..DistillConfig::new("t") };
+    let want = term(dev, false, [&sb, &sc], [&tb, &tc], &cfg);
+    let got = term(dev, true, [&sb, &sc], [&tb, &tc], &cfg);
+    assert!(want.0.iter().all(|v| v.is_finite()) && !want.1.is_empty(), "tensor path {:?}", want.0);
+    same_term(&got, &want, 1e-5, "cls_gain 1e38");
 }
 
 /// The backward: the gradients scale with the upstream gradient (f32 or f16: −2.5 times those of a backward from
