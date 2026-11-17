@@ -29,38 +29,52 @@ inference numerics. Three proposals, run in the order 1, 3, 2, each behind a cei
 
 ## Ceiling gates
 
+Every row compares sides of the same gate binary (toggles off against on); the load is the range of the CPU
+samples in `loads.log` (the GPU also read 51–89 % busy before some runs: other lanes).
+
 | gate | toggles | f32 img/s | AMP img/s | rounds | load | log |
 |---|---|---|---|---|---|---|
-| 1: glue (fan-in + zero fill) | `nofanin,noclear` vs none | 376 (371–377) → 397 (391–397), +5.6 % | 588 (583–598) → 605 (559–631), +2.9 % | 3 | cpu 16–94 % | `ab-gate1` |
-| 1, AMP again | `nostep,nofanin,noclear` vs `nostep` | — | 590.5 (545–613) → 591.5 (568–626), tie | 8 | cpu 85–100 % | `ab-gate3` |
-| 2: BN in the conv | `nostep,nostats,nodx` vs `nostep` | 376 (370–378) → 407 (402–410), +8.2 % | 573 (421–581) → 620 (434–626), +8.2 % | 5 | cpu 54–80 % | `ab-gate2` |
+| 1: glue (fan-in + zero fill) | none → `nofanin,noclear` | 379 (376–383) → 397 (391–397), +4.7 % | 605 (582–612) → 605 (559–631), 0 % | 3 | cpu 5–86 % | `ab-gate1` |
+| 1 again | `nostep` → `nostep,nofanin,noclear` | 376 (370–378) → 393 (383–398), +4.5 % | 573 (421–581) → 577 (465–619), +0.7 % | 5 | cpu 53–87 % | `ab-gate2` |
+| 1, AMP only | `nostep` → `nostep,nofanin,noclear` | — | 590.5 (545–613) → 591.5 (568–626), tie | 8 | cpu 56–100 % | `ab-gate3` |
+| 2: BN in the conv | `nostep` → `nostep,nostats,nodx` | 376 (370–378) → 407 (402–410), +8.2 % | 573 (421–581) → 620 (434–626), +8.2 % | 5 | cpu 53–87 % | `ab-gate2` |
+
+(`ab-gate1` also holds main's binary as `base`, 376 / 588, and a `g2` side, `nostats,nodx` without `nostep`, whose
+runs diverged and gave no number: hence `nostep` from `ab-gate2` on.)
 
 - **Gate 1 fails for AMP.** The brief asks for ≥ 3 % on both precisions. Removing all fan-in accumulation and every
-  zero fill is worth +5.6 % in f32 but a tie in AMP over 8 rounds (the fastest step moves 3–5 %, the median does
-  not: AMP's step is bound elsewhere). So the fan-in-in-the-producer's-epilogue machinery (a hint from autograd to
-  the producing kernel to accumulate instead of write) was **not built**; only its two cheap, bit-identical parts
-  ship (below). Where fan-in happens (AMP, `fanin-log-amp.txt`, one step): the second gradient comes from a conv
-  about 32 times, a `narrow` (C2f's chunk) 16, `upsample` 4, `max_pool` 3, `matmul` 2; some accumulators are
-  non-exclusive `narrow` views out of the concat backward, so an epilogue accumulate would need a strided target.
+  zero fill is worth +4.5 to +4.7 % in f32 but nothing in AMP, in three A/Bs (the fastest step moves 2–5 %, the
+  median does not: AMP's step is bound elsewhere). So the fan-in-in-the-producer's-epilogue machinery (a hint from
+  autograd to the producing kernel to accumulate instead of write) was **not built**; only its two cheap,
+  bit-identical parts ship (below). Where fan-in happens (AMP, `fanin-log-amp.txt`: 24 identical steps of 40
+  accumulations): per step the second gradient comes from a conv 23 times, a `narrow` (C2f's chunk) 11, `max_pool`
+  3, `upsample` 2, `matmul` 1; 32 of the 40 accumulators are exclusive, 8 are not (5 `narrow`, 2 `max_pool`, 1
+  `add`), so an epilogue accumulate would also need strided, shared targets.
 - **Gate 2 passes** (+8 % on both): BatchNorm statistics and the BN backward `dx` pass are worth building.
 
 ## Proposal 1 lite: cat without the clear, in-place GPU accumulation (PR `gpu/train-glue`)
 
 Two changes, both bit-identical to main:
 
-- `Tensor::uninit_with` asked the backend for a zero-filled buffer (`full(.., 0.0)`), so every GPU `cat`,
-  `zeros`-then-scatter and kernel output that was about to be overwritten paid a `clear`. New `Backend::empty`
-  (default: `full(.., 0.0)`, so the CPU keeps its zeros); the GPU backend returns a pooled buffer as is.
+- `Tensor::uninit_with` (whose one caller is `Tensor::cat`) asked the backend for a zero-filled buffer
+  (`full(.., 0.0)`), so every GPU `cat` paid a `clear` it then overwrote. New `Backend::empty` (default:
+  `full(.., 0.0)`, so the CPU keeps its zeros); the GPU backend returns a pooled buffer as is. Zeros-then-scatter
+  (`zeros_with`) still clears, as it must.
 - Gradient fan-in (`autograd::accumulate`) on the GPU was `acc = acc + g` out of place plus a copy back. New
   `Backend::add_into(dst, layout, src)`, a strided elementwise `dst[i] += src[i]` (`ew::add_into`, KIND 5 of the
-  elementwise generator), used by `accumulate` for any float dtype off the CPU and by `add_assign` there; it refuses
-  overlapping or aliased destinations, so the out-of-place path stays the fallback.
+  elementwise generator), used by `accumulate` for any float dtype off the CPU and by `add_assign` there. The GPU
+  declines (`NotSupported`) other dtypes and destinations that overlap themselves or share the source's buffer, and
+  the caller then adds out of place. The two storage locks are taken in address order (opposing `a += b`,
+  `b += a` cannot deadlock) and the version is bumped before the write lock is released.
 
-Tests (`crates/folo-gpu/src/tests/backend/accumulate.rs`): in-place add bitwise against the CPU over dense, odd,
-channel-slice, transposed and broadcast sources; fan-in gradients against the CPU in F32 and F16; `cat` into a
-recycled buffer that was filled with NaN. Mutation check: making KIND 5 a copy (`Y = X0`) fails two of them.
+Tests (`crates/folo-gpu/src/tests/backend/accumulate.rs`): in-place add bitwise against the CPU over dense (also at
+an offset, vec4 and scalar), odd, channel-slice, transposed and broadcast sources; fan-in gradients against the CPU
+in F32 and F16 (vec4 and odd shapes); `cat` into a recycled buffer that was filled with NaN (whole-word and half-word
+f16 runs); opposing additions on two threads. Mutation check: making KIND 5 a copy (`Y = X0`) fails two of them.
 
-A/B (`ab-glue1`, 5 rounds, base = main cf65f7a5, cpu 69–73 %):
+A/B (`ab-glue1`, 5 rounds, base = main cf65f7a5, PR side = the WIP commit 8aad6628, which differs from the PR only
+in the precompile bounds and the review fixes, none of which touch a steady-state step; cpu 69–100 %, rounds 3–5
+fully loaded and the slowest for AMP):
 
 | | base | PR | change |
 |---|---|---|---|
@@ -76,8 +90,8 @@ A/B (`ab-glue1`, 5 rounds, base = main cf65f7a5, cpu 69–73 %):
 - **Stride-2 input gradient as one sub-pixel conv** (a k2 s1 conv `C_out → 4·C_in` over `dy`, then a pixel
   shuffle, against today's four phase convs). The named gate (64→64 @160 on tensor cores ≤ 450 µs) **fails**: 594
   µs against 681 µs for the phases. On tensor cores the sub-pixel form wins every shape (1.14–2.21×; the six shapes
-  sum to 2049 against 2766 µs), in f32 it wins most on 16→32 @320 (953 → 385 µs).
-- **1×1 weight gradient as a plain `A·Bᵀ` GEMM** over `K = N·H·W`: 3–50× slower without a split-K (one workgroup
+  sum to 2048 against 2766 µs), in f32 it wins most on 16→32 @320 (953 → 385 µs).
+- **1×1 weight gradient as a plain `A·Bᵀ` GEMM** over `K = N·H·W`: 2.6–62× slower without a split-K (one workgroup
   walks 400k columns). A batched GEMM per image and K chunk (partials not reduced in the timing) beats the current
   kernel on tensor cores (256→64 @80: 292 → 81 µs; 48→64 @160: 358 → 270; 192→128 @40: 71 → 40) but barely in f32
   (except 384→128 @40: 278 → 123). Possible tensor-core saving about 0.4 ms per step, before the reduction it needs.

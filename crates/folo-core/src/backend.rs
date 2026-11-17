@@ -345,9 +345,10 @@ pub trait Backend: Send + Sync + 'static {
 
     // ----- Compute (optional; default NotSupported) -----
 
-    /// `dst[dst_layout] += src` elementwise, in place: `dst_layout` has `src`'s shape and does not overlap itself,
-    /// `dst` and `src` are different storages of one float dtype, and each element is rounded once (as
-    /// [`Backend::binary`]'s add). Autograd accumulates a fan-in gradient with it.
+    /// `dst[dst_layout] += src` elementwise, in place: `dst_layout` has `src`'s shape, `dst` and `src` are different
+    /// storages of one float dtype, and each element is rounded once (as [`Backend::binary`]'s add). A backend
+    /// returns `NotSupported` for what it does not take (a dtype, a destination that overlaps itself or shares a
+    /// buffer with `src`), and the caller adds out of place. Autograd's fan-in and the GPU's `add_assign` use it.
     fn add_into(&self, dst: &mut Storage, dst_layout: &Layout, src: View<'_>) -> Result<()> {
         unsupported!(self, "add_into")
     }

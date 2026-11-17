@@ -174,14 +174,16 @@ impl Backend for GpuBackend {
         if dtype != src.storage.dtype() {
             return Err(Error::DTypeMismatch { op: "add_into", expected: dtype, got: src.storage.dtype() });
         }
-        if !matches!(dtype, CoreDType::F32 | CoreDType::F16) {
-            return Err(Error::UnsupportedDType { op: "add_into", dtype });
+        // What the kernel does not take is declined, and the caller adds out of place.
+        let decline = Error::NotSupported { op: "add_into", backend: BACKEND_NAME };
+        if !matches!(dtype, CoreDType::F32 | CoreDType::F16) || !dst_layout.is_non_overlapping() {
+            return Err(decline);
         }
-        if !dst_layout.fits(dst.len()) || !dst_layout.is_non_overlapping() {
+        if !dst_layout.fits(dst.len()) {
             return Err(Error::InvalidShape {
                 op: "add_into",
                 shape: dst_layout.shape().clone(),
-                msg: "destination layout reaches outside its storage or overlaps itself".into(),
+                msg: "destination layout reaches outside its storage".into(),
             });
         }
         self.check_fits(&src, "add_into")?;
@@ -189,10 +191,7 @@ impl Backend for GpuBackend {
         let db = self.buf(&View::new(dst, dst_layout))?;
         let sb = self.buf(&src)?;
         if std::ptr::eq(db, sb) {
-            return Err(Error::InvalidArgument {
-                op: "add_into",
-                msg: "source and destination share a buffer".into(),
-            });
+            return Err(decline);
         }
         let sv = strided_of(src.layout);
         let x = EwInput { buf: sb, view: &sv };

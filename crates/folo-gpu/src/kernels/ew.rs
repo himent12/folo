@@ -38,8 +38,6 @@ pub enum EwOp {
         /// The condition is a `u8` tensor.
         cond_u8: bool,
     },
-    /// `out[view] += x`, in place ([`add_into`]); input `[x]`.
-    AddInto,
 }
 
 /// One input operand: a buffer read through a strided view of the output's shape.
@@ -381,7 +379,6 @@ pub fn elementwise(
         }
         EwOp::Binary(o) => (3, binary_code(o)?, 0.0, 0.0, 2, false),
         EwOp::Where { cond_u8 } => (4, 0, 0.0, 0.0, 3, cond_u8),
-        EwOp::AddInto => return Err(shape_err("elementwise: AddInto goes through ew::add_into")),
     };
     if inputs.len() != nin {
         return Err(shape_err(format!("elementwise: {op:?} takes {nin} inputs, got {}", inputs.len())));

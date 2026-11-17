@@ -8,6 +8,8 @@
 //!   `backward()` with [`Error::ModifiedInPlace`] instead of silently using the new values.
 //! - The destination must not be a broadcast view.
 
+use std::sync::Arc;
+
 use crate::autograd::is_grad_enabled;
 use crate::backend::{BinaryOp, View};
 use crate::cpu::elementwise::fill_rows_inplace;
@@ -49,7 +51,9 @@ impl Tensor {
 
     /// `self += src` through the backend's in-place [`crate::backend::Backend::add_into`] (one pass, no
     /// temporary), for a float `src` of this tensor's shape, dtype and device in another storage. `Ok(false)`,
-    /// touching nothing, where the backend has no such kernel. The caller has checked [`Tensor::check_inplace`].
+    /// leaving the values and the version as they were, where the backend has no such kernel or declines this
+    /// layout. `self` must be writable in place (not a broadcast view; [`Tensor::check_inplace`] or, in autograd's
+    /// fan-in, an exclusive dense accumulator).
     pub(crate) fn add_into_(&self, src: &Tensor) -> Result<bool> {
         if src.shape() != self.shape() || src.dtype() != self.dtype() || self.same_storage(src) {
             return Err(Error::invalid_arg(
@@ -59,16 +63,27 @@ impl Tensor {
         }
         self.check_same_device(src, "add_into")?;
         let b = self.backend()?;
-        let r = {
-            // Unversioned until the backend has written: a `NotSupported` leaves graphs that saved `self` intact.
-            let mut dst = self.cell().write_unversioned();
-            src.with_view(|v| b.add_into(&mut dst, self.layout(), v))
-        };
+        let (sc, dc) = (src.cell(), self.cell());
+        // The two locks are taken in address order, so two opposing additions (`a += b`, `b += a`) cannot each
+        // hold one and wait for the other.
+        let src_first = (Arc::as_ptr(sc) as usize) < (Arc::as_ptr(dc) as usize);
+        let (sr, mut dst);
+        if src_first {
+            sr = sc.read();
+            dst = dc.write_unversioned();
+        } else {
+            dst = dc.write_unversioned();
+            sr = sc.read();
+        }
+        // Unversioned until the backend has written: a `NotSupported` leaves graphs that saved `self` intact. The
+        // bump comes before the write lock is released, so no reader sees the new values under the old version.
+        let r = b.add_into(&mut dst, self.layout(), View::new(&sr, src.layout()));
+        if r.is_ok() {
+            dc.mark_modified();
+        }
+        drop((dst, sr));
         match r {
-            Ok(()) => {
-                self.cell().mark_modified();
-                Ok(true)
-            }
+            Ok(()) => Ok(true),
             Err(Error::NotSupported { .. }) => Ok(false),
             Err(e) => Err(e),
         }
