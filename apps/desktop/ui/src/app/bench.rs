@@ -1,7 +1,8 @@
 //! `--bench-frames <n>`: the frame bench. The app runs headless (as `--shot` does, with `--width`,
 //! `--height`, `--scale`, `--text`), settles the way `--shot` settles, then draws `n` full redraws (the window
-//! marked dirty, nothing changed) and `n` animation ticks (the fake clock moved by one 240 Hz refresh, the
-//! window asked for its next frame), and prints one line per kind with the median of every phase
+//! marked dirty, nothing changed), `n` animation ticks (the fake clock moved by one 240 Hz refresh, the
+//! window asked for its next frame) and `n` scroll frames (a 40 px wheel step over the window's centre, five
+//! down then five up, each frame drawing one step), and prints one line per kind with the median of every phase
 //! (`FrameTimes`), the median allocations per frame, and the frame's primitive, element and hitbox counts
 //! and the lines shaped. Owner tag: `"runtime"`.
 //!
@@ -18,8 +19,8 @@ use std::{
 use anyhow::{Context as _, Result, anyhow};
 
 use crate::{
-    AppCell, AppContext, FrameTimes, HeadlessApp, HeadlessOptions, RequestFrameOptions, TextBackend,
-    platform::headless::HeadlessPlatform, px, size,
+    AppCell, AppContext, FrameTimes, HeadlessApp, HeadlessOptions, PlatformInput, RequestFrameOptions,
+    ScrollDelta, ScrollWheelEvent, TextBackend, platform::headless::HeadlessPlatform, point, px, size,
 };
 
 /// One refresh of the 240 Hz display the app is measured on.
@@ -122,6 +123,17 @@ pub(crate) struct Bench {
     pub(crate) heap: [Option<u64>; 2],
 }
 
+/// What a measured frame follows.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// The window marked dirty, nothing changed.
+    Full,
+    /// The fake clock moved by one refresh.
+    Tick,
+    /// The `i`th wheel step over the window's centre.
+    Scroll(usize),
+}
+
 /// One measured frame.
 struct Sample {
     /// The phases (all zero when nothing was drawn).
@@ -141,11 +153,25 @@ impl Bench {
         harness.settle_advancing(window, super::shot::SETTLE_TIME, super::shot::SETTLE_STEP);
         let shaped_before = shaped_lines(&harness, window);
 
-        let measure = |harness: &mut HeadlessApp, dirty: bool| -> Sample {
-            if dirty {
-                harness.app.update(|cx| cx.update_window(window, |_, window, _| window.refresh())).ok();
-            } else {
-                harness.advance_clock(TICK);
+        let center = point(self.options.size.width / 2., self.options.size.height / 2.);
+        let measure = |harness: &mut HeadlessApp, kind: Kind| -> Sample {
+            match kind {
+                Kind::Full => {
+                    harness.app.update(|cx| cx.update_window(window, |_, window, _| window.refresh())).ok();
+                }
+                Kind::Tick => harness.advance_clock(TICK),
+                Kind::Scroll(i) => {
+                    // Five steps down, five back up: the content stays near where it settled.
+                    let step = if (i / 5) % 2 == 0 { -40.0 } else { 40.0 };
+                    harness.simulate_input(
+                        window,
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position: center,
+                            delta: ScrollDelta::Pixels(point(px(0.), px(step))),
+                            ..Default::default()
+                        }),
+                    );
+                }
             }
             let allocations = allocations();
             let start = Instant::now();
@@ -170,12 +196,15 @@ impl Bench {
         };
         // Warm up: caches, pools, buffers at their steady size.
         for _ in 0..3 {
-            measure(&mut harness, true);
+            measure(&mut harness, Kind::Full);
         }
-        let full: Vec<Sample> = (0..self.frames).map(|_| measure(&mut harness, true)).collect();
+        let full: Vec<Sample> = (0..self.frames).map(|_| measure(&mut harness, Kind::Full)).collect();
         let shaped_full = shaped_lines(&harness, window) - shaped_before;
-        let ticks: Vec<Sample> = (0..self.frames).map(|_| measure(&mut harness, false)).collect();
+        let ticks: Vec<Sample> = (0..self.frames).map(|_| measure(&mut harness, Kind::Tick)).collect();
         let shaped_ticks = shaped_lines(&harness, window) - shaped_before - shaped_full;
+        let shaped = shaped_lines(&harness, window);
+        let scrolls: Vec<Sample> = (0..self.frames).map(|i| measure(&mut harness, Kind::Scroll(i))).collect();
+        let shaped_scrolls = shaped_lines(&harness, window) - shaped;
 
         let last = full.last().map(|s| s.times).unwrap_or_default();
         let (w, h, s) = (self.options.size.width.0, self.options.size.height.0, self.options.scale_factor);
@@ -185,6 +214,7 @@ impl Bench {
         );
         print_line("full", &full, shaped_full);
         print_line("tick", &ticks, shaped_ticks);
+        print_line("scroll", &scrolls, shaped_scrolls);
         print_memory(&harness, window, self.heap);
         Ok(())
     }
