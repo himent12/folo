@@ -65,7 +65,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 507 | `gpu_out_of_memory` | the GPU ran out of memory, or one tensor is larger than the GPU allows a buffer to be (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
-- `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
+- `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false, "features": [...] }`
+  (`features` as in `/api/system`, without its hardware probe, so a client asks here; absent from older servers)
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
   "data_dir"?: "/home/me/.folo", "features": ["export_onnx_switches", "queue_control", "weights_onnx"],
@@ -906,7 +907,9 @@ exported more than once.
   "to_review" }` (feature `label_revisions`): marks many images reviewed (or not) in one save, each as `reviewed`
   alone does in `PUT`. An image that is not there (`image_not_found`), is not `labeled`, is in an agent call
   (`label_job_active`) or whose boxes are not its `expect` revision (`label_boxes_changed`) is counted in `failed`
-  and the rest are marked. `to_review` is the job's labeled images that are not reviewed, after the change.
+  and the rest are marked. `to_review` is the job's labeled images that are not reviewed, after the change. An
+  `expect` key that is not in `image_ids` is `400 invalid_body`, before anything is marked. More than 100 marks
+  send one `reload` event instead of an `image` event each.
 - `DELETE /api/label/jobs/{id}/images/{image_id}` → `204` (an uploaded image's file is deleted too). `409
   label_job_active` while the image is in an agent call, as for `PUT`.
 
@@ -931,7 +934,8 @@ exported more than once.
   - `image` `LabelImage`: an image was added, sent to the agent (`labeling`), labeled, failed or edited;
   - `removed` `{ "id" }`: an image was deleted;
   - `reload` `{}`: more changed than the stream carries, so load the images again (sent instead of one `image`
-    event each when more than 100 images are added at once, and to a client that fell behind the stream);
+    event each when more than 100 images are added or marked at once, and to a client that fell behind the
+    stream);
   - `log` `{ "t", "level", "message" }`: the job's log (calls made, tokens used, boxes dropped, failures).
 
   The stream replays nothing: load the job's images with `GET …/images`, then apply events.
@@ -1016,7 +1020,8 @@ exported more than once.
   "usage": LabelUsage,           // every run of the job
   "dataset_id": "ds_8f2c" | null }
 // LabelRun
-{ "agent": "claude", "model": "sonnet" | null, "effort": "low|medium|high", "fast"?: true, "started": "...",
+{ "id": "lr_9f1c...", // unique per run (absent from older servers): `started` has one-second resolution
+  "agent": "claude", "model": "sonnet" | null, "effort": "low|medium|high", "fast"?: true, "started": "...",
   "finished": "..." | null, "total": 24, "done": 16, "failed": 0,   // images of this run
   "outcome": null | "completed|stopped|failed", "error": null | "...", "hint"?: "...", "usage": LabelUsage }
 // LabelUsage

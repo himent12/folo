@@ -313,7 +313,8 @@ fixes.
   `--json` (docs/CLI.md, Labeling). `GET /api/label/jobs/{id}/images` takes `reviewed` and `ids` (feature
   `label_image_filters`); `PUT /api/label/jobs/{id}/images/{image_id}` takes `expect` and
   `POST /api/label/jobs/{id}/review` marks many images in one save (feature `label_revisions`, `409
-  label_boxes_changed`).
+  label_boxes_changed`). A label run has a unique `id`, and `GET /api/health` lists the `features` without
+  `/api/system`'s hardware probe.
 
 #### Desktop
 - The window works on Windows: Minimize, Maximize and Close in the title bar, dragging and double-clicking the

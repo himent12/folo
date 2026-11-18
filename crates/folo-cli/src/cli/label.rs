@@ -241,12 +241,11 @@ pub struct LabelSetArgs {
     /// Add a box, as CLASS,X1,Y1,X2,Y2, repeatable.
     #[arg(long, value_name = "C,X1,Y1,X2,Y2")]
     pub add: Vec<String>,
-    /// The revision of the boxes the edit was made on (`folo label view` prints it); needed with --remove,
-    /// --relabel and --add, whose numbers are that revision's. Another revision now: refused.
+    /// The revision of the boxes the edit was made on (`folo label view` prints it), required: box numbers are
+    /// that revision's, and boxes the edit does not list are that revision's too. Another revision now: refused.
     #[arg(long, value_name = "REVISION")]
     pub expect: Option<String>,
-    /// The view the coordinates are in, as WxH [default: the image's 1024 px view, as `folo label view` writes
-    /// it].
+    /// The view the coordinates are in, as WxH (`folo label view` prints it); required with --box and --add.
     #[arg(long, value_name = "WxH")]
     pub size: Option<String>,
     #[command(flatten)]

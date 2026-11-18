@@ -115,8 +115,8 @@ pub async fn get(inner: &Inner, req: GetPromptRequestParams) -> Result<GetPrompt
                  y2] in pixels of the view (`size`) and the boxes' `revision`. Settle each image before the next \
                  view, or the same image comes back: right: `review_label_images` with its id and `expect` \
                  {{id: revision}}; wrong: `set_label_boxes` with `expect` set to the revision and `relabel` / \
-                 `remove` / `add` by number (or all `boxes`), in the view's pixels (this also marks it \
-                 reviewed). If the same mistake repeats, improve the instructions in a `note` and ask again with \
+                 `remove` / `add` by number (or all `boxes`), in the view's pixels with `size` set to the view's \
+                 `size` (this also marks it reviewed). If the same mistake repeats, improve the instructions in a `note` and ask again with \
                  `start_labeling` and those `image_ids` rather than fixing every image by hand.\n\
                  4. When the sample looks right, `start_labeling` with no `image_ids` (the rest), poll \
                  `label_status`, and review the same way until `to_review` is 0. More images later: \

@@ -208,7 +208,9 @@ async fn flow(s: &FoloMcp, folder: &Path) {
     assert_ne!(rev, revision(s, &job, "2").await);
     // Boxes sent back as the view shows them keep their stored pixels: the revision does not change.
     let shown = ok(s, "view_label_image", json!({ "job_id": job, "image_id": "1" })).await;
-    let same = json!({ "job_id": job, "image_id": "1", "boxes": shown["image"]["boxes"] });
+    let same = json!({
+        "job_id": job, "image_id": "1", "expect": rev, "size": shown["image"]["size"], "boxes": shown["image"]["boxes"]
+    });
     assert_eq!(ok(s, "set_label_boxes", same).await["revision"].as_str(), Some(rev.as_str()));
     let fixed =
         ok(s, "set_label_boxes", json!({ "job_id": job, "image_id": "1", "expect": rev, "remove": [2] }))
@@ -223,13 +225,26 @@ async fn flow(s: &FoloMcp, folder: &Path) {
         (json!({ "image_id": "1", "relabel": [[1, 0]], "remove": [1], "expect": rev }), "invalid_arguments"),
         (json!({ "image_id": "1", "relabel": [[1, 0], [1, 1]], "expect": rev }), "invalid_arguments"),
         (json!({ "image_id": "1", "relabel": [[1, 5]], "expect": rev }), "invalid_arguments"),
-        (json!({ "image_id": "1", "boxes": [[0, 60, 0, 50, 10]] }), "invalid_arguments"),
-        (json!({ "image_id": "1", "boxes": [[0, 0, 0, 65, 10]] }), "invalid_arguments"),
-        (json!({ "image_id": "1", "boxes": [[7, 0, 0, 50, 10]] }), "invalid_arguments"),
-        (json!({ "image_id": "1", "boxes": [], "size": [32, 30] }), "invalid_arguments"),
+        (
+            json!({ "image_id": "1", "boxes": [[0, 60, 0, 50, 10]], "size": [64, 48], "expect": rev }),
+            "invalid_arguments",
+        ),
+        (
+            json!({ "image_id": "1", "boxes": [[0, 0, 0, 65, 10]], "size": [64, 48], "expect": rev }),
+            "invalid_arguments",
+        ),
+        (
+            json!({ "image_id": "1", "boxes": [[7, 0, 0, 50, 10]], "size": [64, 48], "expect": rev }),
+            "invalid_arguments",
+        ),
+        (json!({ "image_id": "1", "boxes": [], "size": [32, 30], "expect": rev }), "invalid_arguments"),
+        // Every edit names the revision it was made on; coordinates name their view.
+        (json!({ "image_id": "1", "boxes": [] }), "invalid_arguments"),
+        (json!({ "image_id": "1", "boxes": [[0, 0, 0, 9, 9]], "expect": rev }), "invalid_arguments"),
+        (json!({ "image_id": "1", "add": [[0, 0, 0, 9, 9]], "expect": rev }), "invalid_arguments"),
         (json!({ "image_id": "1", "remove": [1], "expect": "1-00000000" }), "label_boxes_changed"),
-        (json!({ "image_id": "99", "boxes": [] }), "image_not_found"),
-        (json!({ "image_id": "1,2", "boxes": [] }), "invalid_arguments"),
+        (json!({ "image_id": "99", "boxes": [], "expect": rev }), "image_not_found"),
+        (json!({ "image_id": "1,2", "boxes": [], "expect": rev }), "invalid_arguments"),
     ] {
         let mut args = args;
         args["job_id"] = json!(job);
@@ -238,10 +253,25 @@ async fn flow(s: &FoloMcp, folder: &Path) {
     let e = call(
         s,
         "set_label_boxes",
-        json!({ "job_id": job, "image_id": "1", "add": [[0, 0, 0, 9, 9]], "expect": rev }),
+        json!({ "job_id": job, "image_id": "1", "add": [[0, 0, 0, 9, 9]], "expect": rev, "size": [64, 48] }),
     )
     .await;
-    assert_eq!(e.unwrap().0["num_boxes"], 2);
+    let rev = e.unwrap().0["revision"].as_str().unwrap().to_string();
+
+    // Two boxes that differ but look the same in a 32 x 24 view: a list naming that look once cannot say which
+    // to keep, and is refused; naming it twice keeps both as stored.
+    let two = json!({
+        "job_id": job, "image_id": "1", "expect": rev, "size": [64, 48], "add": [[0, 0, 0, 16, 12], [0, 0, 0, 15, 12]]
+    });
+    let rev = ok(s, "set_label_boxes", two).await["revision"].as_str().unwrap().to_string();
+    let mut boxes = json!([[1, 8, 2, 24, 14], [0, 0, 0, 5, 5], [0, 0, 0, 8, 6]]);
+    let one = json!({ "job_id": job, "image_id": "1", "expect": rev, "size": [32, 24], "boxes": boxes });
+    let e = call(s, "set_label_boxes", one).await.err().unwrap();
+    assert!(e.body.code == "invalid_arguments" && e.body.message.contains("`remove`"), "{e:?}");
+    boxes.as_array_mut().unwrap().push(json!([0, 0, 0, 8, 6]));
+    let both = json!({ "job_id": job, "image_id": "1", "expect": rev, "size": [32, 24], "boxes": boxes });
+    let kept = ok(s, "set_label_boxes", both).await;
+    assert_eq!((kept["revision"].as_str(), kept["num_boxes"].as_u64()), (Some(rev.as_str()), Some(4)));
 
     // "Looks right" for the rest, in one call; an unknown image, or one whose boxes are not the revision seen,
     // is reported, not fatal.
@@ -258,6 +288,9 @@ async fn flow(s: &FoloMcp, folder: &Path) {
     );
     assert_eq!(r["failed"][1]["code"], "image_not_found");
     let rev2 = revision(s, &job, "2").await;
+    // A revision for an image that is not in the list is a mistake, refused before anything is marked.
+    let stray = json!({ "job_id": job, "image_ids": ["2"], "expect": { "3": rev2 } });
+    assert_eq!(code(s, "review_label_images", stray).await, "invalid_arguments");
     let r =
         ok(s, "review_label_images", json!({ "job_id": job, "image_ids": ["2"], "expect": { "2": rev2 } }))
             .await;
@@ -319,6 +352,10 @@ async fn labeling_through_a_server() {
         let _ = stopped.await;
     }));
     let http = Arc::new(HttpStore::new(&url, None));
+    // The features come from /api/health, outside the timed flow.
+    let warm = http.clone();
+    let labels = tokio::task::spawn_blocking(move || warm.has_feature(folo_api::FEATURE_LABEL_REVISIONS));
+    assert!(labels.await.unwrap().unwrap());
     let s = FoloMcp::new(http.clone(), Some(http.clone()), options(&home.join("client"), false));
     flow(&s, &home.join("photos")).await;
     // Paths go to the server as given, so they must be its absolute paths.
@@ -367,6 +404,12 @@ async fn labeling_through_a_server() {
     ] {
         assert_eq!(code(&c, tool, args.clone()).await, "not_supported", "{tool} {args}");
     }
+    // A job without images reads nothing, so it can be made; a drive-relative path is no server path.
+    let empty = ok(&c, "create_label_job", json!({ "name": "later", "classes": ["car"] })).await;
+    assert_eq!(empty["images"], 0);
+    let drive = json!({ "name": "x", "classes": ["car"], "paths": [r"\photos"] });
+    let e = call(&s, "create_label_job", drive).await.err().unwrap();
+    assert!(e.body.code == "invalid_arguments" && e.body.message.contains("drive"), "{e:?}");
     assert_eq!(ok(&c, "label_status", json!({ "job_id": job })).await["reviewed"], 5);
     let _ = stop.send(());
     serving.await.unwrap().unwrap();
@@ -455,11 +498,56 @@ async fn confine_keeps_labeling_inside_the_data_dir() {
         ("export_label_dataset", json!({ "job_id": old })),
         ("view_label_image", json!({ "job_id": old, "image_id": "1" })),
         ("list_label_images", json!({ "job_id": old })),
-        ("set_label_boxes", json!({ "job_id": old, "image_id": "1", "boxes": [] })),
+        ("set_label_boxes", json!({ "job_id": old, "image_id": "1", "boxes": [], "expect": "0-811c9dc5" })),
         ("review_label_images", json!({ "job_id": old, "image_ids": ["1"] })),
     ] {
         assert_eq!(code(&s, tool, args).await, "path_outside_data_dir", "{tool}");
     }
+    // The check is redone when the job's files change, even to as many as before.
+    let inside = made["job_id"].as_str().unwrap().to_string();
+    ok(&s, "list_label_images", json!({ "job_id": inside })).await;
+    store.labeler().unwrap().delete_image(&inside, "1").unwrap();
+    let swap = json!({ "job_id": inside, "paths": [format!("{outside}/0.png")] });
+    assert_eq!(ok(&open, "create_label_job", swap).await["images"], 5);
+    let list = json!({ "job_id": inside });
+    assert_eq!(code(&s, "list_label_images", list).await, "path_outside_data_dir");
+    store.shutdown();
+}
+
+/// The `size` a view returns is taken back as is, a portrait image's included (rounding and the one-pixel side).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_views_size_is_taken_back() {
+    let home = TestDir::new("mcp-label-portrait");
+    let dir = home.join("tall");
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbImage::from_pixel(100, 4000, image::Rgb([90, 90, 90])).save(dir.join("tall.png")).unwrap();
+    image::RgbImage::from_pixel(5000, 3, image::Rgb([90, 90, 90])).save(dir.join("wide.png")).unwrap();
+    let store = store(home.path());
+    let s = FoloMcp::new(store.clone(), None, options(home.path(), false));
+    let made = json!({ "name": "x", "classes": ["car"], "paths": [folo_api::json::path(&dir)] });
+    let job = ok(&s, "create_label_job", made).await["job_id"].as_str().unwrap().to_string();
+    let mut tall = None;
+    for image in ["1", "2"] {
+        let v = ok(&s, "view_label_image", json!({ "job_id": job, "image_id": image, "size": 256 })).await;
+        let v = &v["image"];
+        // 100 x 4000 at 256: 6.4 rounds to 6 (a check by aspect ratio wanted 240 for the height); 5000 x 3:
+        // 0.15 is raised to one pixel.
+        let is_tall = v["file"].as_str().unwrap().contains("tall");
+        let [w, h] = if is_tall { [6, 256] } else { [256, 1] };
+        assert_eq!(v["size"], json!([w, h]));
+        let edit = json!({
+            "job_id": job, "image_id": image, "expect": v["revision"], "size": v["size"], "add": [[0, 0, 0, w, h]]
+        });
+        let saved = ok(&s, "set_label_boxes", edit).await;
+        assert_eq!(saved["boxes"], json!([[0, 0, 0, w, h]]));
+        if is_tall {
+            tall = Some((image, saved["revision"].clone()));
+        }
+    }
+    // A frame of another shape is refused.
+    let (image, rev) = tall.unwrap();
+    let off = json!({ "job_id": job, "image_id": image, "expect": rev, "size": [7, 256], "remove": [1] });
+    assert_eq!(code(&s, "set_label_boxes", off).await, "invalid_arguments");
     store.shutdown();
 }
 

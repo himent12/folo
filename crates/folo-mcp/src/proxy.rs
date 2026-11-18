@@ -69,12 +69,15 @@ impl HttpStore {
         self
     }
 
-    /// Whether the server lists `feature` in `/api/system`'s `features` (asked once per session).
+    /// Whether the server lists `feature` (asked once per session). `/api/health` answers without a hardware
+    /// probe; only a server that predates its `features` is asked `/api/system`, whose CPU sample once stalled a
+    /// labeling call for 20 s on a loaded machine.
     pub fn has_feature(&self, feature: &str) -> Result<bool, Error> {
         if let Some(f) = self.features.get() {
             return Ok(f.iter().any(|f| f == feature));
         }
-        let features = self.system()?.features;
+        let health: folo_api::Health = self.get("/health")?;
+        let features = if health.features.is_empty() { self.system()?.features } else { health.features };
         Ok(self.features.get_or_init(|| features).iter().any(|f| f == feature))
     }
 

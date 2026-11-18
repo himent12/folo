@@ -278,8 +278,8 @@ pub const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "set_label_boxes",
-        description: "Corrects an image's boxes, in pixels of the view: all of them (boxes), or relabel / remove \
-                      / add by number with expect: the view's revision. Saved as a reviewed hand edit.",
+        description: "Corrects an image's boxes, in pixels of the view (size: its size): all of them (boxes), or \
+                      relabel / remove / add by number. expect: the view's revision. Saved as a reviewed hand edit.",
         mutating: true,
         input: terse_input::<SetLabelBoxesArgs>,
         output: terse_output::<LabelImageView>,

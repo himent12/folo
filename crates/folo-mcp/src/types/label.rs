@@ -374,10 +374,10 @@ pub struct SetLabelBoxesArgs {
     pub job_id: String,
     /// Image id.
     pub image_id: String,
-    /// The `revision` the edit was made on; required with relabel / remove / add.
+    /// The `revision` the edit was made on (required).
     #[serde(default)]
     pub expect: Option<String>,
-    /// The frame of the coordinates, `[width, height]`; default: the default view's.
+    /// The `size` of the view the coordinates were read on; required with boxes or add.
     #[serde(default)]
     pub size: Option<[u32; 2]>,
     /// All the image's boxes (`[]`: none).

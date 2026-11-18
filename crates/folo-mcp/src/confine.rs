@@ -27,7 +27,7 @@ use http::StatusCode;
 use crate::errors::Error;
 use crate::paths::PathPolicy;
 
-/// A labeling job's check: its image count when checked, and the result.
+/// A labeling job's check: a hash of its image files when checked, and the result.
 type JobCheck = (u64, Result<(), Error>);
 
 /// Page size used to walk a dataset's images and issues.
@@ -58,7 +58,7 @@ pub fn map_denied(e: Error) -> Error {
 pub struct Confinement {
     policy: PathPolicy,
     cache: Arc<Mutex<HashMap<String, Result<(), Error>>>>,
-    /// Labeling job id -> (its image count when checked, the result).
+    /// Labeling job id -> (a hash of its image files when checked, the result).
     jobs: Arc<Mutex<HashMap<String, JobCheck>>>,
 }
 
@@ -90,24 +90,30 @@ impl Confinement {
     }
 
     /// `Ok` when every image of labeling job `id` is inside the data dir (always without `--confine`; through a
-    /// server, which reads them itself, too). Cached until the job has another number of images. Blocking.
+    /// server, which reads them itself, too). Cached until the job's image files change (not only their number: one
+    /// image removed and another added keeps the count). Blocking.
     pub fn label_job(&self, labels: &crate::label::Labels, id: &str) -> Result<(), Error> {
         if !self.policy.confine || labels.is_remote() {
             return Ok(());
         }
-        let images = labels.job(id)?.counts.images;
-        if let Some((n, r)) = self.jobs.lock().unwrap().get(id)
-            && *n == images
+        let files = labels.files(id)?.unwrap_or_default();
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            files.hash(&mut h);
+            h.finish()
+        };
+        if let Some((k, r)) = self.jobs.lock().unwrap().get(id)
+            && *k == key
         {
             return r.clone();
         }
-        let files = labels.files(id)?.unwrap_or_default();
         let r = self.policy.check_files(files.iter().map(PathBuf::as_path)).map_err(|mut e| {
             e.body.message =
                 format!("labeling job '{id}' has images outside the data dir: {}", e.body.message);
             e
         });
-        self.jobs.lock().unwrap().insert(id.to_string(), (images, r.clone()));
+        self.jobs.lock().unwrap().insert(id.to_string(), (key, r.clone()));
         r
     }
 

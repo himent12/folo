@@ -33,11 +33,16 @@ impl Inner {
     /// does (relative to `--data-dir`; with `--confine`, inside it). Through a server they are paths on its
     /// machine, passed on as given, so they must be absolute.
     async fn label_paths(&self, paths: Vec<String>) -> Result<Vec<String>, Error> {
+        if paths.is_empty() {
+            // Nothing is read: an empty job is fine even with --confine through a server.
+            return Ok(paths);
+        }
         if self.labels.is_remote() {
             self.confine_reads("adding images")?;
             if let Some(p) = paths.iter().find(|p| !looks_absolute(p)) {
+                let what = if p.starts_with('\\') { "has no drive letter" } else { "is relative" };
                 return Err(invalid_arguments(format!(
-                    "`{}` is relative: through `folo serve`, give the full path of the folder on the server's machine",
+                    "`{}` {what}: through `folo serve`, give the full path of the folder on the server's machine",
                     short(p, 80)
                 )));
             }
@@ -230,7 +235,7 @@ impl Inner {
         let (id, image_id, size, from) = (a.job_id, a.image_id, a.size, a.from);
         let (r, jpeg) = self.labels(move |l| l.view(&id, image_id.as_deref(), size, from)).await?;
         let text = match &r.image {
-            Some(v) => short(&crate::label::view_text(&r.job_id, v, &r.classes, r.to_review), MAX_VIEW_TEXT),
+            Some(v) => crate::label::view_text(&r.job_id, v, &r.classes, r.to_review, MAX_VIEW_TEXT),
             None => format!("{}: nothing left to review (every labeled image is reviewed)", r.job_id),
         };
         let mut o = out(&r, "")?;

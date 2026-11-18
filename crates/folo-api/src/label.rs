@@ -238,6 +238,10 @@ pub enum LabelOutcome {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LabelRun {
+    /// Unique id of this run; a waiter compares it to tell its own run from a later one. Empty from servers that
+    /// predate it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     /// The agent.
     pub agent: LabelAgentId,
     /// The model it was asked for; `null` means the CLI's default.

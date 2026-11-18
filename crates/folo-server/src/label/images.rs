@@ -322,6 +322,11 @@ impl Labeler {
         if req.image_ids.len() > MAX_REVIEW {
             return Err(invalid(format!("review at most {MAX_REVIEW} images at a time")));
         }
+        // A revision for an image not in the list (a typo'd id, the wrong list) would be silently ignored.
+        if let Some(stray) = req.expect.keys().find(|k| !req.image_ids.contains(k)) {
+            let stray: String = stray.chars().take(40).collect();
+            return Err(invalid(format!("expect names image '{stray}', which is not in image_ids")));
+        }
         let job = self.job(id)?;
         let mut state = job.live()?;
         let total = state.file.run.as_ref().map(|r| r.total);
@@ -366,8 +371,12 @@ impl Labeler {
             }
             return Err(e);
         }
-        for (image_id, _, _) in &changed {
-            job.emit(LabelEvent::Image(state.image(state.record(image_id)?)));
+        if changed.len() > BULK_IMAGES {
+            job.emit(LabelEvent::Reload);
+        } else {
+            for (image_id, _, _) in &changed {
+                job.emit(LabelEvent::Image(state.image(state.record(image_id)?)));
+            }
         }
         if !changed.is_empty() {
             job.emit_job(&state);

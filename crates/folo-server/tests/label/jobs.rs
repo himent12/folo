@@ -422,8 +422,14 @@ async fn box_edits_and_reviews_check_the_revision() {
     assert!(system["features"].as_array().unwrap().contains(&json!(FEATURE_LABEL_REVISIONS)), "{system}");
     let job = job_with_images(app, 3).await;
     let uri = format!("/api/label/jobs/{}", job.id);
-    ok::<LabelJob>(app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
+    let first: LabelJob = ok(app, post(&format!("{uri}/start"), json!({ "agent": "claude" }))).await;
     idle(app, &job.id).await;
+    // Runs started within the same second still have their own ids.
+    let again = json!({ "agent": "claude", "scope": "all" });
+    let second: LabelJob = ok(app, post(&format!("{uri}/start"), again)).await;
+    idle(app, &job.id).await;
+    let (first, second) = (first.run.unwrap().id, second.run.unwrap().id);
+    assert!(first.starts_with("lr_") && second.starts_with("lr_") && first != second, "{first} {second}");
     let all = images(app, &job.id, "").await;
     let ids: Vec<String> = all.images.iter().map(|i| i.id.clone()).collect();
     let rev = label_box_revision(&all.images[0].boxes);
@@ -453,4 +459,12 @@ async fn box_edits_and_reviews_check_the_revision() {
     assert_eq!((reviewed.total, reviewed.images[0].id.as_str()), (1, ids[0].as_str()));
     let many: Vec<String> = (0..1001).map(|i| i.to_string()).collect();
     err(app, post(&review, json!({ "image_ids": many })), StatusCode::BAD_REQUEST, "invalid_body").await;
+    // A revision for an image not in the list is refused before anything is marked.
+    let mut stray = json!({ "image_ids": [ids[1]] });
+    stray["expect"][&ids[2]] = json!(label_box_revision(&all.images[2].boxes));
+    err(app, post(&review, stray), StatusCode::BAD_REQUEST, "invalid_body").await;
+    assert_eq!(images(app, &job.id, "?reviewed=true").await.total, 1);
+    // The cheap health check lists the same features as /api/system.
+    let health: Value = ok(app, get("/api/health")).await;
+    assert_eq!(health["features"], system["features"]);
 }

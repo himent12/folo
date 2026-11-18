@@ -21,7 +21,9 @@ pub fn decorate(mut e: Error, front: Front) -> Error {
         "label_job_not_found" => {
             Some(if mcp { "list_label_jobs lists the jobs" } else { "`folo label jobs` lists the jobs" })
         }
-        "image_not_found" => Some(if mcp {
+        // Only for an id the job does not have: an image whose file is gone keeps the server's hint (put the
+        // folder back).
+        "image_not_found" if !e.body.message.contains("no longer") => Some(if mcp {
             "list_label_images lists the job's images"
         } else {
             "`folo label images JOB` lists the job's images"
@@ -106,5 +108,11 @@ mod tests {
         let hint = create_failed(made, Front::Mcp).body.hint.unwrap();
         assert!(hint.contains("job_id: \"lj_9\""), "{hint}");
         assert!(!hint.contains("  "), "{hint}");
+        let gone =
+            Error::new(StatusCode::NOT_FOUND, "image_not_found", "2 images no longer on disk, such as a.jpg")
+                .hint("put the folder back where it was");
+        assert_eq!(decorate(gone, Front::Mcp).body.hint.unwrap(), "put the folder back where it was");
+        let unknown = Error::new(StatusCode::NOT_FOUND, "image_not_found", "image 'x' does not exist");
+        assert!(decorate(unknown, Front::Mcp).body.hint.unwrap().contains("list_label_images"));
     }
 }

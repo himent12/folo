@@ -336,12 +336,13 @@ those; `export` also opens its dataset registry) and holds its lock while it run
 belongs to the process that started it, so `start` without a server **waits** for the run to end (Ctrl+C stops it,
 also while it starts; labeled images stay), while through a server it returns at once unless `--wait` is given.
 Paths are read in place, on the server's machine: an absolute path (of any OS, the server's may be another) is
-passed as given, a relative one is made absolute against the current folder.
+passed as given, a relative one is made absolute against the current folder (on Windows `\photos` is on the
+current drive).
 
 Boxes are `[class, x1, y1, x2, y2]` with the corners in **pixels of a view of the image**: the image scaled so its
 long side is 1024 (`view --size`; never upscaled), the size `view` writes and states (a 1920×1080 photo's view is
 1024×576). On the command line a box is `CLASS,X1,Y1,X2,Y2`, where `CLASS` is a class index or name. Each image's
-boxes have a revision (`view` prints it); edits by number and `review --expect` are refused with
+boxes have a revision (`view` prints it); `set` needs it (`--expect`), and `set` and `review --expect` are refused with
 `label_boxes_changed` (exit 1) when the boxes changed since, e.g. a run labeled the image again.
 
 | command | what it does |
@@ -350,12 +351,12 @@ boxes have a revision (`view` prints it); edits by number and `review --expect` 
 | `label jobs` | The jobs, newest first: `{"jobs":[{id, name, status, classes, counts, dataset_id}]}`. |
 | `label create NAME --classes A,B [--instructions TEXT] [--path P]...` | Makes a job and adds the images of each `--path` (folders searched recursively, or image files): `{job_id, images, added, skipped, skipped_first?}`. |
 | `label add JOB PATH...` | Adds images to a job (same record). |
-| `label start JOB --agent claude\|codex [--model M] [--effort low\|medium\|high] [--images ID,...\|--all] [--note TEXT] [--batch N] [--parallel N] [--wait]` | Starts an agent run on the unlabeled images (pending and failed), on `--images` (e.g. again with a `--note` about what was wrong), or on `--all`. Waiting, it prints `{"event":"started","job_id","total","model"}`, a `{"event":"progress","done","failed","total"}` record when the counts change, and `{"event":"finished", ...}` with the `status` record; a run that ends `failed` exits 1 with `label_run_failed` (the agent CLI's message and hint). When the job's run is another one by then (the run ended and someone started the next), it prints `{"event":"superseded","job_id"}` and exits 0. Not waiting: `{job_id, total, model}`. |
+| `label start JOB --agent claude\|codex [--model M] [--effort low\|medium\|high] [--images ID,...\|--all] [--note TEXT] [--batch N] [--parallel N] [--wait]` | Starts an agent run on the unlabeled images (pending and failed), on `--images` (e.g. again with a `--note` about what was wrong), or on `--all`. Waiting, it prints `{"event":"started","job_id","total","model"}`, a `{"event":"progress","done","failed","total"}` record when the counts change, and `{"event":"finished", ...}` with the `status` record; a run that ends `failed` exits 1 with `label_run_failed` (the agent CLI's message and hint). The run is followed by its id (`run.id`), and the finished record and the exit code come from the same read. When the job's run is another one by then (the run ended and someone started the next), it prints `{"event":"superseded","job_id"}` and exits 0. Not waiting: `{job_id, total, model}`. |
 | `label stop JOB` | Stops the job's run: `{job_id, status}`. |
 | `label status JOB [--log 5]` | Counts (labeled, failed, reviewed), the last run with its outcome, the tokens of every run (`calls`, `input_tokens`, ...) and the last log lines. |
 | `label images JOB [--status pending\|labeling\|labeled\|failed] [--reviewed true\|false] [--boxes] [--offset 0] [--limit 50]` | A page of the images (`{items, next_offset, total}`; `next_offset` is `null` on the last page): id, file, status, box count, `source` (`agent` / `manual`), reviewed, and with `--boxes` the view `size`, the `revision` and the boxes. `--status labeled --reviewed false` is what is left to review. |
 | `label view JOB [IMAGE] [-o FILE] [--size 1024] [--from 1]` | Writes the view of the image (default: the next to review) as a JPEG with its boxes outlined and numbered and pixel ticks on the edges (default file `<job>-<image>.jpg`), and prints its size, its revision and its boxes (300 at most, from number `--from`); the record adds `path`. |
-| `label set JOB IMAGE (--box B... \| --clear \| [--relabel N=CLASS]... [--remove N]... [--add B]... --expect REV) [--size WxH]` | Changes the boxes: all of them (`--box`, repeated; `--clear` for none; a box given as `view` lists it keeps its exact pixels), or by the numbers `view` shows, with `--expect` the revision it printed (untouched boxes keep their exact pixels). `--size` is the view the coordinates are in (default: the 1024 one). Saved as a hand edit and marked reviewed, like Studio's Save: the record is the image as `view` shows it, with its new `revision`. |
+| `label set JOB IMAGE (--box B... \| --clear \| [--relabel N=CLASS]... [--remove N]... [--add B]...) --expect REV [--size WxH]` | Changes the boxes: all of them (`--box`, repeated; `--clear` for none; a box given as `view` lists it keeps its exact pixels), or by the numbers `view` shows (untouched boxes keep their exact pixels); `--expect` is the revision `view` printed. `--size` is the view the coordinates are in, as `view` printed it, required with `--box` and `--add`. Saved as a hand edit and marked reviewed, like Studio's Save: the record is the image as `view` shows it, with its new `revision`. |
 | `label review JOB IMAGE... [--undo] [--expect IMAGE=REV]...` | Marks labeled images reviewed (their boxes are right), like Studio's "Looks right", each with `--expect` only if its boxes are still that revision: `{updated, failed?, failed_total?, to_review}`. When nothing was marked and something failed, it exits with the first failure's code. |
 | `label export JOB [--name N] [--val-fraction 0.2] [--seed 0]` | Writes the labeled images as a YOLO dataset under the data dir and registers it: `{dataset_id, name, path, train, val}`; `folo train --data PATH` trains on it. |
 
@@ -369,7 +370,7 @@ serving it.
 folo label create street --classes car,person,bicycle --path ~/photos/street
 folo label start lb_3f9a --agent claude --images 1,2,3,4,5      # a sample first
 folo label view lb_3f9a -o next.jpg                              # the next image to review, its revision
-folo label set lb_3f9a 4 --expect 2-1c9e04aa --relabel 2=person --add car,120,80,340,400
+folo label set lb_3f9a 4 --expect 2-1c9e04aa --size 1024x576 --relabel 2=person --add car,120,80,340,400
 folo label review lb_3f9a 1 2 3 5
 folo label start lb_3f9a --agent claude                          # the rest
 folo label export lb_3f9a --json

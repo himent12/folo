@@ -26,9 +26,9 @@ const MAX_IMAGE_ID: usize = 128;
 /// `set_label_boxes`: all the boxes, or edits of the current ones by their 1-based number, in pixels of a view.
 #[derive(Clone, Debug, Default)]
 pub struct BoxEdit {
-    /// The revision of the boxes the edit was made on; required with numbered edits.
+    /// The revision of the boxes the edit was made on; required.
     pub expect: Option<String>,
-    /// The frame of the coordinates; `None`: the default view's.
+    /// The frame of the coordinates (the `size` of the view they were read on); required with coordinates.
     pub size: Option<[u32; 2]>,
     /// All the boxes, replacing the image's.
     pub boxes: Option<Vec<PxBox>>,
@@ -43,6 +43,11 @@ pub struct BoxEdit {
 impl BoxEdit {
     fn edits(&self) -> bool {
         !(self.remove.is_empty() && self.relabel.is_empty() && self.add.is_empty())
+    }
+
+    /// Whether the edit has coordinates, which mean nothing without the frame they were read in.
+    fn coordinates(&self) -> bool {
+        !self.add.is_empty() || self.boxes.as_ref().is_some_and(|b| !b.is_empty())
     }
 }
 
@@ -74,12 +79,12 @@ fn check_image_id(id: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Checks `frame` (`set_label_boxes`' `size`) against a `width` × `height` image: the view sizes of that image
-/// have its shape, give or take the rounding of a side.
+/// Checks `frame` (`set_label_boxes`' `size`) against a `width` × `height` image: it must be the frame of a view
+/// of that image, i.e. what [`frame`] gives for its long side (so the `size` a view returned always passes,
+/// rounding and the one-pixel minimum side included).
 fn check_frame(f: [u32; 2], width: u32, height: u32) -> Result<(), Error> {
     let [fw, fh] = f;
-    let expected = fw as f64 * height as f64 / width.max(1) as f64;
-    if fw == 0 || fh == 0 || fw > 8192 || fh > 8192 || (fh as f64 - expected).abs() > 1.0 + fh as f64 * 0.01 {
+    if fw == 0 || fh == 0 || fw > 8192 || fh > 8192 || frame(width, height, fw.max(fh)) != f {
         let example = frame(width, height, DEFAULT_VIEW_SIZE);
         return Err(invalid_arguments(format!(
             "size [{fw}, {fh}] does not have the image's shape ({width}x{height}): give the size of the view the \
@@ -93,7 +98,13 @@ fn check_frame(f: [u32; 2], width: u32, height: u32) -> Result<(), Error> {
 impl Labels {
     /// The job with its review count and its last `log_lines` log lines (`label_status`).
     pub fn status(&self, id: &str, log_lines: usize) -> Result<LabelStatusResult, Error> {
-        let job = self.job(id)?;
+        self.status_of(self.job(id)?, log_lines)
+    }
+
+    /// [`Self::status`] of a job already read: its run and counts are those of `job`, not of a later read (a
+    /// waiter reports the run it saw end, not the one that may have started since).
+    pub fn status_of(&self, job: folo_api::LabelJob, log_lines: usize) -> Result<LabelStatusResult, Error> {
+        let id = job.id.as_str();
         let reviewed = self.count(id, Some(LabelImageStatus::Labeled), Some(true))?;
         let log = if log_lines == 0 { Vec::new() } else { self.logs(id, log_lines)? };
         Ok(LabelStatusResult {
@@ -213,15 +224,21 @@ impl Labels {
                 "give `boxes` (all of them), or edits of the current ones (`relabel`, `remove`, `add`)",
             ));
         }
-        if edit.edits() && edit.expect.is_none() {
+        let Some(expect) = edit.expect.as_deref() else {
             return Err(invalid_arguments(
-                "numbered edits need `expect`: the revision of the boxes they were read on",
+                "give `expect`: the `revision` of the boxes the edit was made on, as view_label_image showed it",
+            ));
+        };
+        if edit.coordinates() && edit.size.is_none() {
+            return Err(invalid_arguments(
+                "give `size`: the [width, height] of the view the boxes were read on, as view_label_image returned \
+                 it (coordinates of another view would be saved at the wrong scale)",
             ));
         }
         let classes = self.job(id)?.classes.len() as u32;
         let image = self.image_record(id, image_id)?;
         let now = label_box_revision(&image.boxes);
-        if let Some(expect) = edit.expect.as_deref().filter(|e| *e != now) {
+        if expect != now {
             return Err(boxes_changed(image_id, expect, &now));
         }
         let size = (image.width, image.height);
@@ -272,6 +289,23 @@ impl Labels {
                 let mut shown: HashMap<PxBox, Vec<usize>> = HashMap::new();
                 for (k, b) in image.boxes.iter().enumerate().rev() {
                     shown.entry(to_view(b, size, f)).or_default().push(k);
+                }
+                // Stored boxes that look the same in this view but differ: which ones a shorter list keeps is
+                // not known, so it is refused rather than guessed.
+                let mut sent: HashMap<&PxBox, usize> = HashMap::new();
+                all.iter().for_each(|p| *sent.entry(p).or_default() += 1);
+                for (p, ks) in &shown {
+                    let n = sent.get(p).copied().unwrap_or(0);
+                    let same = ks.iter().all(|&k| image.boxes[k] == image.boxes[ks[0]]);
+                    if n > 0 && n < ks.len() && !same {
+                        let mut numbers: Vec<usize> = ks.iter().map(|k| k + 1).collect();
+                        numbers.sort_unstable();
+                        return Err(invalid_arguments(format!(
+                            "boxes {numbers:?} all show as {p:?} in this {}x{} view but differ, and {n} of them \
+                             were sent: remove the others by number (`remove`), or send boxes of a larger view",
+                            f[0], f[1]
+                        )));
+                    }
                 }
                 let mut out = Vec::with_capacity(all.len());
                 for (i, p) in all.iter().enumerate() {
@@ -348,6 +382,15 @@ impl Labels {
         }
         for i in image_ids {
             check_image_id(i)?;
+        }
+        // A revision for an image that is not reviewed here is a mistake (a typo'd id, or the wrong list), and
+        // would be silently ignored.
+        let named: HashSet<&str> = image_ids.iter().map(String::as_str).collect();
+        if let Some(stray) = expect.keys().find(|k| !named.contains(k.as_str())) {
+            return Err(invalid_arguments(format!(
+                "expect names image '{}', which is not in image_ids",
+                crate::tools::short(stray, 40)
+            )));
         }
         let req = ReviewLabelImages { image_ids: image_ids.to_vec(), reviewed, expect: expect.clone() };
         if let Some(r) = self.review_batch(id, &req)? {

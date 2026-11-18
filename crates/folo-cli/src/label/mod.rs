@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use folo_api::{
-    LabelAgentId, LabelDatasetRequest, LabelEffort, LabelImageStatus, LabelJob, LabelOutcome, LabelScope,
-    StartLabeling,
+    LabelAgentId, LabelDatasetRequest, LabelEffort, LabelImageStatus, LabelJob, LabelOutcome, LabelRun,
+    LabelScope, StartLabeling,
 };
 use folo_mcp::label::hints::{self, Front};
 use folo_mcp::label::{BoxEdit, Labels, looks_absolute};
@@ -115,11 +115,13 @@ pub fn run(cmd: LabelCommand, out: Out) -> Result<(), CliError> {
             if r.updated == 0
                 && let Some(f) = r.failed.first()
             {
-                return Err(CliError::new(
-                    ExitCode::of(&f.code),
-                    &f.code,
-                    format!("no image was marked ({} failed): {}: {}", r.failed_total, f.id, f.message),
+                // As any other error of the code: `invalid_body` is `usage`, with the CLI's hint.
+                let mut e = folo_server::error::Error::bad_request(format!(
+                    "no image was marked ({} failed): {}: {}",
+                    r.failed_total, f.id, f.message
                 ));
+                e.body.code = f.code.clone();
+                return Err(api_error(e));
             }
         }
         LabelCommand::Export(a) => {
@@ -231,8 +233,8 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
         crate::train::watch_interrupt(stop.clone(), "stopping the labeling run (interrupt again to abort)…");
     }
     let job = s.labels.start(&a.job, req).map_err(api_error)?;
-    // The run is known by when it started: once the job's run is another, ours is over.
-    let ours = job.run.as_ref().map(|r| r.started.clone());
+    // Once the job's run is another, ours is over.
+    let ours = job.run.clone();
     let started = LabelRunStarted::from(&job);
     if !(a.wait || in_process) {
         out.record(&started);
@@ -251,7 +253,7 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
     }
     let poll = if in_process { POLL_HERE } else { POLL_SERVER };
     let mut asked_stop = false;
-    let mut last = None;
+    let mut last: Option<(u64, u64, u64)> = None;
     let job: LabelJob = loop {
         if stop.load(Ordering::Relaxed) && !asked_stop {
             asked_stop = true;
@@ -259,7 +261,7 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
             let _ = s.labels.stop(&a.job);
         }
         let job = s.labels.job(&a.job).map_err(api_error)?;
-        if job.run.as_ref().map(|r| &r.started) != ours.as_ref() {
+        if !same_run(ours.as_ref(), job.run.as_ref(), last) {
             out.record(&json!({ "event": "superseded", "job_id": job.id }));
             out.human(format!(
                 "{}: the run ended and another one started since; `folo label status {}` has the job now",
@@ -280,12 +282,14 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
         }
         std::thread::sleep(poll);
     };
-    let status = s.labels.status(&a.job, 5).map_err(api_error)?;
+    // The record and the exit code both come from the snapshot that showed the run over.
+    let run = job.run.clone();
+    let status = s.labels.status_of(job, 5).map_err(api_error)?;
     let mut record = folo_api::json::to_value(&status).unwrap_or_default();
     record["event"] = json!("finished");
     out.record(&record);
     print::status(&status, out);
-    match job.run.filter(|r| r.outcome == Some(LabelOutcome::Failed)) {
+    match run.filter(|r| r.outcome == Some(LabelOutcome::Failed)) {
         Some(run) => {
             let err = CliError::new(
                 ExitCode::Runtime,
@@ -296,6 +300,19 @@ fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
         }
         None => Ok(()),
     }
+}
+
+/// Whether `now` (the job's run in a later read) is still `ours`, the run this command started; `last` is the
+/// progress seen before. By id; a server that predates run ids gives only the start time to the second, so there
+/// the agent, model and size must match too and the progress must not go back, else it is another run.
+fn same_run(ours: Option<&LabelRun>, now: Option<&LabelRun>, last: Option<(u64, u64, u64)>) -> bool {
+    let (Some(ours), Some(now)) = (ours, now) else { return ours.is_none() && now.is_none() };
+    if !ours.id.is_empty() || !now.id.is_empty() {
+        return ours.id == now.id;
+    }
+    let went_back = last.is_some_and(|(done, failed, _)| now.done < done || now.failed < failed);
+    (&ours.started, ours.agent, &ours.model, ours.total) == (&now.started, now.agent, &now.model, now.total)
+        && !went_back
 }
 
 fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
@@ -323,7 +340,7 @@ fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
     let mut record = folo_api::json::to_value(&r).unwrap_or_default();
     record["path"] = json!(folo_api::json::path(&path));
     out.record(&record);
-    let text = folo_mcp::label::view_text(&r.job_id, image, &r.classes, r.to_review);
+    let text = folo_mcp::label::view_text(&r.job_id, image, &r.classes, r.to_review, 1 << 20);
     out.human(text.replace("view again with from: ", "add --from "));
     out.human(format!("wrote {}", folo_api::json::path(&path)));
     Ok(())
@@ -349,6 +366,17 @@ fn expect_map(flags: &[String]) -> Result<BTreeMap<String, String>, CliError> {
 
 /// `folo label set`'s flags as a [`BoxEdit`]; classes may be given by name.
 fn box_edit(labels: &Labels, a: &LabelSetArgs) -> Result<BoxEdit, CliError> {
+    if a.expect.is_none() {
+        return Err(usage(
+            "--expect REVISION is required: the revision `folo label view` printed for the boxes",
+        ));
+    }
+    if (!a.boxes.is_empty() || !a.add.is_empty()) && a.size.is_none() {
+        return Err(usage(
+            "--size WxH is required with --box and --add: the view the pixels were read on, as `folo label view` \
+             printed it",
+        ));
+    }
     let names = if a.boxes.iter().chain(&a.add).chain(&a.relabel).next().is_some() {
         labels.job(&a.job).map_err(api_error)?.classes
     } else {

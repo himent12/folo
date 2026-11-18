@@ -70,21 +70,35 @@ pub(super) fn watch_ctrl_c(stop: Arc<AtomicBool>) {
     watch_interrupt(stop, "stopping after the current batch (interrupt again to abort)…");
 }
 
-/// The first Ctrl+C (or Ctrl+Break) sets `stop` and prints `message`; a second one exits (130).
+/// The first Ctrl+C (or Ctrl+Break) sets `stop` and prints `message`; a second one exits (130). Returns once the
+/// handlers are registered (or after a second, if that stalls), so an interrupt right after the call is not lost
+/// (a handler registered later let the default one kill the process).
 pub(crate) fn watch_interrupt(stop: Arc<AtomicBool>, message: &'static str) {
+    let (ready, registered) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
         rt.block_on(async {
+            // Streams register their handler when made, not when first polled.
             #[cfg(windows)]
-            let Ok(mut brk) = tokio::signal::windows::ctrl_break() else { return };
+            let (Ok(mut int), Ok(mut brk)) =
+                (tokio::signal::windows::ctrl_c(), tokio::signal::windows::ctrl_break())
+            else {
+                return;
+            };
+            #[cfg(not(windows))]
+            let Ok(mut int) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            else {
+                return;
+            };
+            let _ = ready.send(());
             for first in [true, false] {
                 #[cfg(windows)]
                 let got = tokio::select! {
-                    r = tokio::signal::ctrl_c() => r.is_ok(),
+                    r = int.recv() => r.is_some(),
                     r = brk.recv() => r.is_some(),
                 };
                 #[cfg(not(windows))]
-                let got = tokio::signal::ctrl_c().await.is_ok();
+                let got = int.recv().await.is_some();
                 if !got {
                     return;
                 }
@@ -96,4 +110,6 @@ pub(crate) fn watch_interrupt(stop: Arc<AtomicBool>, message: &'static str) {
             }
         });
     });
+    // A failed registration drops `ready`, which ends the wait too.
+    let _ = registered.recv_timeout(std::time::Duration::from_secs(1));
 }

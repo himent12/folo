@@ -54,28 +54,54 @@ fn photos(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
-/// Runs `cmd` to its end within [`DEADLINE`] (killed and failed after it): exit code, stdout, stderr.
+/// Runs `cmd` to its end within [`DEADLINE`] (its process tree killed and the test failed after it): exit code,
+/// stdout, stderr. The pipes are read within the deadline too: a process the command started (an agent) can
+/// hold them open after the command exits.
 fn run(mut cmd: Command) -> (i32, String, String) {
     let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let mut child = ChildGuard::new(child);
     let pipe = |mut r: Box<dyn Read + Send>| {
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut s = String::new();
             let _ = r.read_to_string(&mut s);
-            s
-        })
+            let _ = tx.send(s);
+        });
+        rx
     };
     let out = pipe(Box::new(child.stdout.take().unwrap()));
     let err = pipe(Box::new(child.stderr.take().unwrap()));
     let start = Instant::now();
+    let fail = |child: &mut ChildGuard, what: &str| -> ! {
+        kill_tree(child);
+        panic!("{cmd:?} {what} after {DEADLINE:?}");
+    };
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
-        assert!(start.elapsed() < DEADLINE, "{cmd:?} still runs after {DEADLINE:?}");
+        if start.elapsed() >= DEADLINE {
+            fail(&mut child, "still runs");
+        }
         std::thread::sleep(Duration::from_millis(10));
     };
-    (status.code().unwrap_or(-1), out.join().unwrap(), err.join().unwrap())
+    let mut read =
+        |rx: mpsc::Receiver<String>| match rx.recv_timeout(DEADLINE.saturating_sub(start.elapsed())) {
+            Ok(s) => s,
+            Err(_) => fail(&mut child, "exited, but something it started still holds its output"),
+        };
+    let (out, err) = (read(out), read(err));
+    (status.code().unwrap_or(-1), out, err)
+}
+
+/// Kills `child` and every process it started.
+fn kill_tree(child: &mut ChildGuard) {
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &pid]).stdout(Stdio::null()).status();
+    }
+    let _ = child.kill();
 }
 
 struct Env {
@@ -193,14 +219,20 @@ fn label_review_and_export_in_this_process() {
     let rev = s(&view["image"]["revision"]).to_string();
 
     let edit = ["set", &job, &a, "--relabel", "1=person", "--add", "car,0,0,16,12", "--size", "32x24"];
-    assert_eq!(env.fails(&edit, 2), "usage", "numbered edits need --expect");
+    assert_eq!(env.fails(&edit, 2), "usage", "every edit needs --expect");
     let set = env.ok(&[&edit[..], &["--expect", &rev]].concat());
     assert_eq!(set["boxes"], json!([[1, 8, 2, 24, 14], [0, 0, 0, 16, 12]]));
     assert_eq!((set["reviewed"].as_bool(), s(&set["source"])), (Some(true), "manual"));
     assert_eq!(env.fails(&[&edit[..], &["--expect", &rev]].concat(), 1), "label_boxes_changed");
-    assert_eq!(env.fails(&["set", &job, &a, "--add", "car,1,2"], 2), "usage");
-    assert_eq!(env.fails(&["set", &job, &a, "--box", "truck,0,0,9,9"], 2), "usage");
-    assert_eq!(env.fails(&["set", &job, &a, "--box", "car,0,0,9,9", "--size", "9"], 2), "usage");
+    let now = s(&set["revision"]).to_string();
+    let on = ["--expect", now.as_str(), "--size", "64x48"];
+    assert_eq!(env.fails(&[&["set", &job, &a, "--add", "car,1,2"], &on[..]].concat(), 2), "usage");
+    assert_eq!(env.fails(&[&["set", &job, &a, "--box", "truck,0,0,9,9"], &on[..]].concat(), 2), "usage");
+    let bad_size = ["set", &job, &a, "--box", "car,0,0,9,9", "--expect", &now, "--size", "9"];
+    assert_eq!(env.fails(&bad_size, 2), "usage");
+    // Pixels without the view they were read on would be saved at the wrong scale.
+    let no_size = ["set", &job, &a, "--box", "car,0,0,9,9", "--expect", &now];
+    assert_eq!(env.fails(&no_size, 2), "usage");
 
     // One image marked, one not there; then nothing marked at all is a failure.
     let reviewed = env.ok(&["review", &job, &b, "nope"]);
@@ -273,7 +305,9 @@ fn label_through_a_folo_serve() {
 
     let page = env.ok(&[&["images", &job, "--limit", "1"], &srv[..]].concat());
     let a = s(&page["items"][0]["id"]).to_string();
-    let set = env.ok(&[&["set", &job, &a, "--clear"], &srv[..]].concat());
+    let boxes = env.ok(&[&["images", &job, "--limit", "1", "--boxes"], &srv[..]].concat());
+    let seen = s(&boxes["items"][0]["revision"]).to_string();
+    let set = env.ok(&[&["set", &job, &a, "--clear", "--expect", &seen], &srv[..]].concat());
     assert_eq!((set["num_boxes"].as_u64(), set["reviewed"].as_bool()), (Some(0), Some(true)));
     let rev = format!("{a}={}", s(&set["revision"]));
     let reviewed = env.ok(&[&["review", &job, &a, "--undo", "--expect", &rev], &d[..]].concat());

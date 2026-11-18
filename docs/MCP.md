@@ -170,12 +170,16 @@ calling agent check and correct the boxes itself; the `label_folder` prompt walk
 `[class, x1, y1, x2, y2]`: the class index into the job's `classes`, the corners in **pixels of a view of the
 image**: the image scaled so its long side is the view's `size` (default 1024, never upscaled), the frame vision
 models answer in when they look at it. Every result that lists boxes states that frame as `size: [width, height]`
-(a 1920×1080 photo's default view is `[1024, 576]`), and `set_label_boxes` takes boxes in the same frame. The
-server stores pixels of the original; a box sent back as a view shows it keeps its stored pixels exactly.
+(a 1920×1080 photo's default view is `[1024, 576]`), and `set_label_boxes` takes boxes with the `size` of the view
+they were read on (required with coordinates: boxes of a `size: 512` view read as 1024 ones would land at half
+scale). The server stores pixels of the original; a box sent back as a view shows it keeps its stored pixels
+exactly.
 
 Each image's boxes have a **revision** (`"<count>-<hash>"`, `label_box_revision` in folo-api), which every view and
-`list_label_images` with `include_boxes` return. Edits by box number (`relabel` / `remove` / `add`) need it as
-`expect`, and `review_label_images` takes `expect: { image_id: revision }`: when the boxes changed since (a run
+`list_label_images` with `include_boxes` return. Every `set_label_boxes` call needs it as `expect` (box numbers
+are that revision's, and a full `boxes` list replaces what that revision had, including boxes a view listed past
+its first 300), and `review_label_images` takes `expect: { image_id: revision }` (a key not in `image_ids` is
+`invalid_arguments`): when the boxes changed since (a run
 relabeled the image, someone saved it), the edit or mark is refused with `409 label_boxes_changed` instead of
 applying to other boxes. A server with the `label_revisions` feature checks it under the lock it saves under; an
 older one gets a check made just before the request (a change in between is not caught, and a review there is one
@@ -195,13 +199,13 @@ empty defaults and `null` in optional types.
 | `stop_labeling` | `{ job_id }` | `{ job_id, status }`; labeled images stay |
 | `label_status` | `{ job_id, log_lines?: 5 (max 50) }` | `{ id, name, status, classes, counts, reviewed, run: { agent, model, effort, total, done, failed, outcome }, calls, input_tokens, cached_input_tokens, output_tokens, cost_usd, dataset_id, log }` (the tokens of every run of the job; `log`: the last lines, `warn: ` / `error: ` before those levels, where a failed run's error is) |
 | `list_label_images` | `{ job_id, status?: "pending"\|"labeling"\|"labeled"\|"failed", reviewed?: boolean, include_boxes?: false }` + paging (limit up to 200) | page of `{ id, file, status, num_boxes, source: "agent"\|"manual"\|null, reviewed, error?, size?, revision?, boxes? }` in the order the images were added; `include_boxes` adds the default view's `size`, the `revision` and the `boxes` in that view |
-| `view_label_image` | `{ job_id, image_id?, size?: 1024 (256–1568), from?: 1 }` | `{ job_id, classes, to_review, image: { id, file, size, status, source, reviewed, error?, revision, num_boxes, from?, boxes } }` plus an **`image` content item** (`image/jpeg`): the view (`size`), every box outlined in its class colour with its number (1, 2, ...) in a tag, and pixel ticks on all four edges. The `text` item states the frame and the revision, lists the boxes (`2 person 120,80,340,900`) and the classes. An image with more than 300 boxes lists 300 from number `from` and says how to list the next. Without `image_id` it shows the next image to review (labeled, not reviewed); `image: null` when none is left |
-| `set_label_boxes` | `{ job_id, image_id, expect?, size?: [w, h], boxes: Box[] }` or `{ job_id, image_id, expect, size?, relabel?: [number, class][], remove?: number[], add?: Box[] }` (numbers as the view shows them) | the image as in a view of the edit's frame. `size` is the frame of the coordinates (default: the default view's); a size without the image's shape is `invalid_arguments`. Saved as a hand edit (`source: "manual"`) and **reviewed**, like Studio's Save. Boxes the edits leave alone keep their exact pixels. `boxes: []` makes it a background image. Both forms at once, numbered edits without `expect`, a number the image does not have, a box relabeled twice or relabeled and removed, a class out of range, or a box outside the frame or less than a pixel of the image is `invalid_arguments`, named by its place (`box 2`, `add 1`, `relabel 3`) |
+| `view_label_image` | `{ job_id, image_id?, size?: 1024 (256–1568), from?: 1 }` | `{ job_id, classes, to_review, image: { id, file, size, status, source, reviewed, error?, revision, num_boxes, from?, boxes } }` plus an **`image` content item** (`image/jpeg`): the view (`size`), every box outlined in its class colour with its number (1, 2, ...) in a tag, and pixel ticks on all four edges. The `text` item states the frame and the revision, lists the boxes (`2 person 120,80,340,900`; the class index instead of the name when a class name is longer than 12 characters) and the classes. An image with more than 300 boxes lists 300 from number `from` and says how to list the next; the text stays under 16,000 characters by listing fewer boxes, never by losing that line or the classes. A `from` past the last box lists none and says to start again at 1 (the boxes changed since that paging started). Without `image_id` it shows the next image to review (labeled, not reviewed); `image: null` when none is left |
+| `set_label_boxes` | `{ job_id, image_id, expect, size: [w, h], boxes: Box[] }` or `{ job_id, image_id, expect, size?, relabel?: [number, class][], remove?: number[], add?: Box[] }` (numbers as the view shows them) | the image as in a view of the edit's frame. `size` is the view's `size` as it returned it, required with `boxes` (other than `[]`) and `add`; one that is not the size of a view of the image is `invalid_arguments`. Saved as a hand edit (`source: "manual"`) and **reviewed**, like Studio's Save. Boxes the edits leave alone keep their exact pixels. `boxes: []` makes it a background image. A `boxes` list that names a box fewer times than the image has boxes looking just like it in that frame, when those differ, is `invalid_arguments` (which to keep is unknown: remove them by number, or send a larger view's boxes). Both forms at once, no `expect`, coordinates without `size`, a number the image does not have, a box relabeled twice or relabeled and removed, a class out of range, or a box outside the frame or less than a pixel of the image is `invalid_arguments`, named by its place (`box 2`, `add 1`, `relabel 3`) |
 | `review_label_images` | `{ job_id, image_ids: string[] (1–500), reviewed?: true, expect?: { id: revision } }` | `{ updated, failed?: [{ id, code, message }] (first 20), failed_total?, to_review }`: Studio's "Looks right" (the boxes stay as they are, and stay the agent's); `reviewed: false` takes the mark back. One save on a server with `label_revisions`. An image without labels cannot be marked. `to_review` is `null` when it could not be counted after the marks were saved |
 | `export_label_dataset` | `{ job_id, name?, val_fraction?: 0.2 (0–0.5), seed?: 0 }` | `{ dataset_id, name, path, train, val }`: the labeled images as a registered YOLO dataset, ready for `train` |
 
 A view of a 1920×1080 photo at the default size is a 1024×576 JPEG, which a Claude model reads as about 800 input
-tokens; `size: 512` quarters that for a quick look. The usual loop settles each image before the next view (the
+tokens; `size: 512` quarters that for a quick look (corrections then pass `size` as that view returned it). The usual loop settles each image before the next view (the
 next view shows the same image until it is): `view_label_image` (no `image_id`), then either `review_label_images`
 with that id and `expect: { id: revision }`, or `set_label_boxes` with `expect` and the fixes; again until `image`
 is `null`. Errors carry hints that name these tools (`label_job_active`: wait or `stop_labeling`;
@@ -299,11 +303,11 @@ In read-only mode, `train_on_folder` and `label_folder` are not listed.
   `resources/list` and rejected everywhere else. Labeling jobs are checked the same way: label paths outside the
   data dir are refused when they are added, and a job (made earlier without `--confine`) that has images outside it
   is left out of `list_label_jobs` and refused by every other labeling tool (`path_outside_data_dir`; results cached
-  per job until its image count changes). In proxy mode `folo serve` reads the datasets and the label images, so
+  per job until its image files change). In proxy mode `folo serve` reads the datasets and the label images, so
   `--confine` covers only the files the MCP process reads itself (`predict.image_path`, `predict_batch`); the
   labeling tools that would have the server read image files (`create_label_job` with paths, `start_labeling`,
   `view_label_image`, `export_label_dataset`) are refused there with `not_supported` (run `folo mcp --confine` on
-  the data dir itself to label confined). The checks guard
+  the data dir itself to label confined); a job without paths reads nothing and can be made there. The checks guard
   what is reachable through FOLO's tools; they do not defend against another process re-pointing links inside the
   data dir between a check and the open (FOLO never creates links).
 

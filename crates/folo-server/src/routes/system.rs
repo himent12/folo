@@ -19,7 +19,37 @@ pub(super) async fn health(State(st): State<AppState>) -> Json<Health> {
         version: env!("CARGO_PKG_VERSION").into(),
         api: API_VERSION.into(),
         mock: st.store.is_mock(),
+        features: features(&st),
     })
+}
+
+/// The features both `/api/health` and `/api/system` report. Cheap: no hardware probe, so a client that only
+/// needs to know what the server can do asks `/api/health`.
+fn features(st: &AppState) -> Vec<String> {
+    let always = [
+        folo_api::FEATURE_EXPORT_ONNX_SWITCHES,
+        folo_api::FEATURE_QUEUE_CONTROL,
+        folo_api::FEATURE_WEIGHTS_ONNX,
+        folo_api::FEATURE_THROUGHPUT,
+        folo_api::FEATURE_RUN_ESTIMATE,
+        folo_api::FEATURE_BENCHMARK,
+        folo_api::FEATURE_RUN_CLI,
+    ];
+    let labeling = st.store.labeler().is_ok();
+    let optional = [
+        (st.web_wasm, folo_api::FEATURE_WEB_WASM),
+        (labeling, folo_api::FEATURE_AGENT_LABELING),
+        (labeling, folo_api::FEATURE_LABEL_IMAGE_FILTERS),
+        (labeling, folo_api::FEATURE_LABEL_REVISIONS),
+        (st.store.benches().is_ok(), folo_api::FEATURE_VISION_BENCH),
+    ];
+    always
+        .iter()
+        .chain(st.store.features())
+        .copied()
+        .chain(optional.into_iter().filter(|(on, _)| *on).map(|(_, f)| f))
+        .map(str::to_string)
+        .collect()
 }
 
 pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
@@ -30,30 +60,7 @@ pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResp
             .await
             .map_err(|e| Error::internal(format!("task failed: {e}")))?;
     let data_dir = st.store.data_dir().map(folo_api::json::path);
-    let features: Vec<String> = [
-        folo_api::FEATURE_EXPORT_ONNX_SWITCHES,
-        folo_api::FEATURE_QUEUE_CONTROL,
-        folo_api::FEATURE_WEIGHTS_ONNX,
-        folo_api::FEATURE_THROUGHPUT,
-        folo_api::FEATURE_RUN_ESTIMATE,
-        folo_api::FEATURE_BENCHMARK,
-        folo_api::FEATURE_RUN_CLI,
-    ]
-    .iter()
-    .chain(st.store.features())
-    .map(|f| f.to_string())
-    .collect();
-    let optional = [
-        (st.web_wasm, folo_api::FEATURE_WEB_WASM),
-        (st.store.labeler().is_ok(), folo_api::FEATURE_AGENT_LABELING),
-        (st.store.labeler().is_ok(), folo_api::FEATURE_LABEL_IMAGE_FILTERS),
-        (st.store.labeler().is_ok(), folo_api::FEATURE_LABEL_REVISIONS),
-        (st.store.benches().is_ok(), folo_api::FEATURE_VISION_BENCH),
-    ];
-    let features = features
-        .into_iter()
-        .chain(optional.into_iter().filter(|(on, _)| *on).map(|(_, f)| f.to_string()))
-        .collect();
+    let features = features(&st);
     Ok(Json(SystemResponse {
         system: SystemInfo { cpu, memory, gpus: st.store.gpus() },
         data_dir,

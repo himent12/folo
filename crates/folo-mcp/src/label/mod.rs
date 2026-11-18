@@ -219,11 +219,12 @@ impl Labels {
 }
 
 /// Whether `p` is an absolute path on some machine (`/…`, `\\…`, `C:/…`, `C:\…`): a path a server takes as
-/// given, whatever the OS of the caller.
+/// given, whatever the OS of the caller. `\photos` is not: on Windows it is on the current drive, which is the
+/// caller's to know, not the server's.
 pub fn looks_absolute(p: &str) -> bool {
     let b = p.as_bytes();
     p.starts_with('/')
-        || p.starts_with('\\')
+        || p.starts_with(r"\\")
         || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\'))
 }
 
@@ -291,7 +292,7 @@ mod tests {
         for p in ["/data/x", r"\\nas\x", "C:/x", r"d:\photos"] {
             assert!(super::looks_absolute(p), "{p}");
         }
-        for p in ["photos", "./x", "C:x", ""] {
+        for p in ["photos", "./x", "C:x", r"\photos", ""] {
             assert!(!super::looks_absolute(p), "{p}");
         }
     }
